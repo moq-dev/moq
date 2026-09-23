@@ -11,7 +11,7 @@ use moq_net::{Path, PathOwned, broadcast, kio, origin, track};
 use serde::Serialize;
 use web_async::spawn;
 
-use crate::{COMPRESSED_SUFFIX, sessions_track, traffic_track};
+use crate::{Format, fb};
 
 /// Settings for a [`Producer`]. Construct with [`Config::new`] and chain
 /// the `with_*` setters (e.g.
@@ -363,8 +363,8 @@ impl Drain {
 /// One track's frame, rebuilt every drain in a buffer kept across drains.
 /// Serializes as a JSON object keyed by path, byte-identical to
 /// [`TrafficFrame`](crate::TrafficFrame) / [`SessionsFrame`](crate::SessionsFrame) once sorted.
-struct Frame<V> {
-	entries: Vec<(PathOwned, V)>,
+pub(crate) struct Frame<V> {
+	pub(crate) entries: Vec<(PathOwned, V)>,
 }
 
 impl<V> Default for Frame<V> {
@@ -379,97 +379,152 @@ impl<V: Serialize> Serialize for Frame<V> {
 	}
 }
 
-/// A plain track and its `.z` sibling, kept in lockstep. The plain side runs
-/// moq-json with deltas and compression off, which is wire-identical to
-/// writing each frame as its own single-frame group; the compressed side uses
-/// merge-patch deltas inside a shared DEFLATE window.
-struct TrackPair<V> {
+/// One track stem's flavors: the JSON track and its `.json.z` sibling, kept in
+/// lockstep for the stem's life, plus the `.fb.z` track while requested. The
+/// plain side runs moq-json with deltas and compression off, which is
+/// wire-identical to writing each frame as its own single-frame group; the
+/// `.json.z` side uses merge-patch deltas inside a shared DEFLATE window.
+struct TrackPair<V: fb::Entry> {
 	plain: moq_json::snapshot::Producer<Frame<V>>,
 	compressed: moq_json::snapshot::Producer<Frame<V>>,
-	/// This drain's entries, published and cleared by [`Self::publish`].
+	/// Created on the first `.fb.z` request and dropped once unused, so an
+	/// unrequested flavor costs nothing.
+	binary: Option<fb::Writer<V>>,
+	/// The latest drain's entries: cleared by [`Self::clear`] before each drain
+	/// collects, and kept after publishing so a newly requested `.fb.z` track
+	/// starts with the current frame.
 	frame: Frame<V>,
 }
 
-impl<V: Serialize> TrackPair<V> {
-	fn create(broadcast: &broadcast::Producer, name: &str) -> Result<Self, moq_net::Error> {
-		let plain_track = broadcast.create_track(name, None)?;
-		let compressed_track = broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), None)?;
-		Ok(Self::from_tracks(plain_track, compressed_track))
+impl<V: Serialize + fb::Entry> TrackPair<V> {
+	fn create(broadcast: &broadcast::Producer, stem: &str) -> Result<Self, moq_net::Error> {
+		Self::adopt(broadcast, stem, PendingTracks::default())
 	}
 
-	/// Build a pair from consumer requests, creating whichever flavor was not
-	/// requested. A popped request is no longer queued, so `create_track`'s
-	/// queued-request fulfillment cannot reach it; the caller collects both
-	/// flavors' popped requests and this serves each through its actual
-	/// request where one exists.
-	fn adopt(broadcast: &broadcast::Producer, name: &str, pending: PendingPair) -> Result<Self, moq_net::Error> {
-		let PendingPair { plain, compressed } = pending;
-		let plain_track = match plain {
-			Some(request) => request.accept(None),
-			None => broadcast.create_track(name, None)?,
+	/// Build a pair from consumer requests, creating whichever JSON flavor was
+	/// not requested. A popped request is no longer queued, so `create_track`'s
+	/// queued-request fulfillment cannot reach it; the caller collects every
+	/// flavor's popped request and this serves each through its actual request
+	/// where one exists.
+	fn adopt(broadcast: &broadcast::Producer, stem: &str, pending: PendingTracks) -> Result<Self, moq_net::Error> {
+		let PendingTracks {
+			plain,
+			compressed,
+			binary,
+		} = pending;
+		let track = |request: Option<track::Request>, format: Format| match request {
+			Some(request) => Ok(request.accept(None)),
+			None => broadcast.create_track(format!("{stem}{}", format.suffix()).as_str(), None),
 		};
-		let compressed_track = match compressed {
-			Some(request) => request.accept(None),
-			None => broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), None)?,
-		};
-		Ok(Self::from_tracks(plain_track, compressed_track))
-	}
+		let plain_track = track(plain, Format::Json)?;
+		let compressed_track = track(compressed, Format::CompressedJson)?;
 
-	fn from_tracks(plain_track: track::Producer, compressed_track: track::Producer) -> Self {
 		let plain_config = moq_json::snapshot::Config::default().with_delta_ratio(0);
 		let mut compressed_config = moq_json::snapshot::Config::default();
 		compressed_config.compression = moq_json::Compression::Deflate;
 
-		Self {
+		Ok(Self {
 			plain: moq_json::snapshot::Producer::new(plain_track, plain_config),
 			compressed: moq_json::snapshot::Producer::new(compressed_track, compressed_config),
+			binary: binary.map(|request| fb::Writer::new(request.accept(None))),
 			frame: Frame::default(),
-		}
+		})
 	}
 
-	/// Whether any consumer exists on either flavor.
+	/// Serve requests for a pair that already exists. Only `.fb.z` can arrive
+	/// here legitimately; a live JSON flavor is served straight off its track,
+	/// so a request for one raced its creation, and rejecting it sends the
+	/// requester's retry to the live track.
+	fn attach(&mut self, stem: &str, pending: PendingTracks) {
+		let PendingTracks {
+			plain,
+			compressed,
+			binary,
+		} = pending;
+		for request in [plain, compressed].into_iter().flatten() {
+			request.reject(moq_net::Error::NotFound);
+		}
+		let Some(request) = binary else {
+			return;
+		};
+		if self.binary.is_some() {
+			request.reject(moq_net::Error::NotFound);
+			return;
+		}
+		// Start the new track with the latest frame rather than waiting a drain.
+		let mut binary = fb::Writer::new(request.accept(None));
+		if let Err(err) = binary.publish(&self.frame.entries) {
+			tracing::debug!(?err, stem, "stats: failed to write FlatBuffers frame");
+		}
+		self.binary = Some(binary);
+	}
+
+	/// Whether any consumer exists on either JSON flavor.
 	fn is_used(&self) -> bool {
 		self.plain.is_used() || self.compressed.is_used()
 	}
 
-	/// Publish this drain's entries on both flavors (`{}` when there are none)
-	/// and clear them for the next drain; moq-json skips unchanged values.
-	fn publish(&mut self, name: &str) {
-		self.frame.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-		if let Err(err) = self.plain.update(&self.frame) {
-			tracing::debug!(?err, name, "stats: failed to write frame");
-		}
-		if let Err(err) = self.compressed.update(&self.frame) {
-			tracing::debug!(?err, name, "stats: failed to write compressed frame");
-		}
+	/// Drop the previous drain's entries before this one collects.
+	fn clear(&mut self) {
 		self.frame.entries.clear();
 	}
 
-	/// Finish both flavors, so dropping the pair is a deliberate end instead of
+	/// Publish this drain's entries on every flavor (`{}` when there are none);
+	/// each skips a frame identical to its last. A `.fb.z` track nobody reads
+	/// any more is finished and dropped, to be recreated on the next request.
+	fn publish(&mut self, stem: &str) {
+		self.frame.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+		if let Err(err) = self.plain.update(&self.frame) {
+			tracing::debug!(?err, stem, "stats: failed to write frame");
+		}
+		if let Err(err) = self.compressed.update(&self.frame) {
+			tracing::debug!(?err, stem, "stats: failed to write compressed frame");
+		}
+		if let Some(binary) = &mut self.binary {
+			if !binary.is_used() {
+				binary.finish();
+				self.binary = None;
+			} else if let Err(err) = binary.publish(&self.frame.entries) {
+				tracing::debug!(?err, stem, "stats: failed to write FlatBuffers frame");
+			}
+		}
+	}
+
+	/// Finish every flavor, so dropping the pair is a deliberate end instead of
 	/// a dropped-without-finish warning. An error means the track already
 	/// ended; there is nothing left to close.
 	fn finish(&mut self) {
 		let _ = self.plain.finish();
 		let _ = self.compressed.finish();
+		if let Some(binary) = &mut self.binary {
+			binary.finish();
+		}
 	}
 }
 
-/// Both flavors' pending requests for one plain track name, collected before
+/// Every flavor's pending request for one track stem, collected before
 /// serving so each is answered through its own request.
 #[derive(Default)]
-struct PendingPair {
+struct PendingTracks {
 	plain: Option<track::Request>,
 	compressed: Option<track::Request>,
+	binary: Option<track::Request>,
 }
 
-impl PendingPair {
-	fn reject(self, err: moq_net::Error) {
-		if let Some(request) = self.plain {
-			request.reject(err.clone());
+impl PendingTracks {
+	fn slot(&mut self, format: Format) -> &mut Option<track::Request> {
+		match format {
+			Format::Json => &mut self.plain,
+			Format::CompressedJson => &mut self.compressed,
+			Format::FlatBuffers => &mut self.binary,
 		}
-		if let Some(request) = self.compressed {
-			request.reject(err);
-		}
+	}
+
+	fn requests(&self) -> impl Iterator<Item = &track::Request> {
+		self.plain
+			.iter()
+			.chain(self.compressed.iter())
+			.chain(self.binary.iter())
 	}
 
 	/// Whether any present flavor still has a live requester. Through a relay
@@ -477,24 +532,22 @@ impl PendingPair {
 	/// this can read used for a while after the end subscriber left; that only
 	/// delays reclamation, it never strands anyone.
 	fn is_used(&self, waiter: &kio::Waiter) -> bool {
-		self.plain
-			.iter()
-			.chain(self.compressed.iter())
-			.any(|request| request.poll_unused(waiter).is_pending())
+		self.requests().any(|request| request.poll_unused(waiter).is_pending())
 	}
 }
 
 /// One frame type's live pairs and the requests parked for them; the traffic
 /// tracks and the sessions tracks each form one family.
-struct TrackFamily<V> {
+struct TrackFamily<V: fb::Entry> {
+	/// Keyed by track stem (`[<tier>/]<kind>`, the name without its suffix).
 	tracks: HashMap<String, TrackPair<V>>,
-	/// Valid-shaped requests awaiting quota, keyed by plain name and bounded by
+	/// Valid-shaped requests awaiting quota, keyed by stem and bounded by
 	/// [`MAX_PARKED_REQUESTS`] across both families. Adopted as the quota
 	/// frees, or dropped once every requester leaves.
-	parked: HashMap<String, PendingPair>,
+	parked: HashMap<String, PendingTracks>,
 }
 
-impl<V: Serialize> TrackFamily<V> {
+impl<V: Serialize + fb::Entry> TrackFamily<V> {
 	fn new() -> Self {
 		Self {
 			tracks: HashMap::new(),
@@ -502,8 +555,8 @@ impl<V: Serialize> TrackFamily<V> {
 		}
 	}
 
-	/// Add one entry to track `name`'s pending frame, creating the pair on the
-	/// track's first entry.
+	/// Add one entry to stem `name`'s pending frame, creating the pair on the
+	/// stem's first entry.
 	///
 	/// A pair created here serves any parked requests for its name: a parked
 	/// request was already popped off the broadcast queue, so `create_track`'s
@@ -541,6 +594,13 @@ impl<V: Serialize> TrackFamily<V> {
 		pair.frame.entries.push((path, value));
 	}
 
+	/// Drop every pair's previous entries before a drain collects.
+	fn clear(&mut self) {
+		for pair in self.tracks.values_mut() {
+			pair.clear();
+		}
+	}
+
 	/// Publish every pair's pending frame, an empty one when the drain had
 	/// nothing for it, so a track whose last entry closed transitions to `{}`
 	/// exactly once.
@@ -566,15 +626,12 @@ impl<V: Serialize> TrackFamily<V> {
 		});
 	}
 
-	/// Park one popped request, merging the two flavors of a plain name. Only a
-	/// NEW name while the parked buffer is `full` is rejected.
-	fn park(&mut self, plain: String, compressed: bool, request: track::Request, full: bool) {
-		match self.parked.get_mut(&plain) {
+	/// Park one popped request, merging the flavors of one stem. Only a NEW
+	/// stem while the parked buffer is `full` is rejected.
+	fn park(&mut self, stem: String, format: Format, request: track::Request, full: bool) {
+		match self.parked.get_mut(&stem) {
 			Some(pending) => {
-				let slot = match compressed {
-					true => &mut pending.compressed,
-					false => &mut pending.plain,
-				};
+				let slot = pending.slot(format);
 				// Keep the first requester for a flavor. A duplicate means
 				// the original was already popped off the broadcast queue;
 				// dropping the newcomer aborts it into a retry, which joins
@@ -585,62 +642,58 @@ impl<V: Serialize> TrackFamily<V> {
 			}
 			None if full => request.reject(moq_net::Error::NotFound),
 			None => {
-				let mut pending = PendingPair::default();
-				match compressed {
-					true => pending.compressed = Some(request),
-					false => pending.plain = Some(request),
-				}
-				self.parked.insert(plain, pending);
+				let mut pending = PendingTracks::default();
+				*pending.slot(format) = Some(request);
+				self.parked.insert(stem, pending);
 			}
 		}
 	}
 
-	/// Adopt parked requests as the quota allows; the rest stay parked for a
-	/// later drain, so a valid-shaped request is never terminally rejected
-	/// merely for arriving while the quota was full. Entries whose every
-	/// requester left are dropped instead of adopted.
+	/// Serve parked requests: a flavor of a live pair attaches to it, and a new
+	/// stem is adopted as the quota allows; the rest stay parked for a later
+	/// drain, so a valid-shaped request is never terminally rejected merely for
+	/// arriving while the quota was full. Entries whose every requester left
+	/// are dropped instead of adopted.
 	fn adopt_parked(&mut self, broadcast: &broadcast::Producer, requested: &mut HashSet<String>) {
 		let noop = kio::Waiter::noop();
 		let mut parked = std::mem::take(&mut self.parked);
-		parked.retain(|plain, pending| {
+		parked.retain(|stem, pending| {
 			if !pending.is_used(&noop) {
+				return false;
+			}
+			// The pair exists, so this costs no quota: at most one `.fb.z`
+			// track per pair.
+			if let Some(pair) = self.tracks.get_mut(stem) {
+				pair.attach(stem, std::mem::take(pending));
 				return false;
 			}
 			if requested.len() >= MAX_REQUESTED_TRACKS {
 				return true;
 			}
-			self.adopt_pair(broadcast, requested, plain.clone(), std::mem::take(pending));
+			self.adopt_pair(broadcast, requested, stem.clone(), std::mem::take(pending));
 			false
 		});
 		self.parked = parked;
 	}
 
-	/// Adopt one plain name's pending requests into a live [`TrackPair`],
-	/// publishing a zero frame so the subscription resolves immediately. The
-	/// caller owns the quota decision; this only mints the pair.
+	/// Adopt one stem's pending requests into a new [`TrackPair`], publishing
+	/// a zero frame so the subscription resolves immediately. The caller owns
+	/// the quota decision and has checked the stem is not live.
 	fn adopt_pair(
 		&mut self,
 		broadcast: &broadcast::Producer,
 		requested: &mut HashSet<String>,
-		plain: String,
-		pending: PendingPair,
+		stem: String,
+		pending: PendingTracks,
 	) {
-		// Defensive only: a request racing the pair's creation is fulfilled by
-		// `create_track` (queued) or adopted by [`Self::flush`] (parked), so it
-		// never reaches this with the pair already live. Rejecting is still
-		// safe there - the requester's retry resolves against the live track.
-		if self.tracks.contains_key(&plain) {
-			pending.reject(moq_net::Error::NotFound);
-			return;
-		}
-		match TrackPair::adopt(broadcast, &plain, pending) {
+		match TrackPair::adopt(broadcast, &stem, pending) {
 			Ok(mut pair) => {
 				// Hold the subscription open with zeros until the tier records.
-				pair.publish(&plain);
-				self.tracks.insert(plain.clone(), pair);
-				requested.insert(plain);
+				pair.publish(&stem);
+				self.tracks.insert(stem.clone(), pair);
+				requested.insert(stem);
 			}
-			Err(err) => tracing::warn!(?err, name = %plain, "stats: failed to adopt requested track"),
+			Err(err) => tracing::warn!(?err, name = %stem, "stats: failed to adopt requested track"),
 		}
 	}
 
@@ -675,7 +728,7 @@ struct GroupPublisher {
 	session_rows: Vec<usize>,
 }
 
-/// The plain track names one tier's entries land on.
+/// The track stems one tier's entries land on.
 struct TierNames {
 	publisher: String,
 	subscriber: String,
@@ -685,12 +738,15 @@ struct TierNames {
 impl TierNames {
 	fn new(tier: &Tier) -> Self {
 		Self {
-			publisher: traffic_track(tier, Role::Publisher, false),
-			subscriber: traffic_track(tier, Role::Subscriber, false),
-			sessions: sessions_track(tier, false),
+			publisher: tier.track_name(Role::Publisher.as_str()),
+			subscriber: tier.track_name(Role::Subscriber.as_str()),
+			sessions: tier.track_name(SESSIONS),
 		}
 	}
 }
+
+/// The sessions tracks' kind, the last segment of their stem.
+const SESSIONS: &str = "sessions";
 
 impl GroupPublisher {
 	fn create(origin: &origin::Producer, prefix: &Path, group: &Path, node: Option<&str>) -> Option<Self> {
@@ -710,7 +766,7 @@ impl GroupPublisher {
 		// The default tier's tracks always exist, even while idle.
 		let tier = Tier::default();
 		for role in [Role::Publisher, Role::Subscriber] {
-			let name = traffic_track(&tier, role, false);
+			let name = tier.track_name(role.as_str());
 			match TrackPair::create(&broadcast, &name) {
 				Ok(pair) => {
 					traffic.tracks.insert(name, pair);
@@ -721,7 +777,7 @@ impl GroupPublisher {
 				}
 			}
 		}
-		let name = sessions_track(&tier, false);
+		let name = tier.track_name(SESSIONS);
 		match TrackPair::create(&broadcast, &name) {
 			Ok(pair) => {
 				sessions.tracks.insert(name, pair);
@@ -762,6 +818,9 @@ impl GroupPublisher {
 			session_rows,
 			..
 		} = self;
+
+		traffic.clear();
+		sessions.clear();
 
 		for &i in traffic_rows.iter() {
 			let entry = &report.traffic[i];
@@ -832,9 +891,9 @@ impl GroupPublisher {
 		self.traffic.reclaim(&mut self.requested);
 		self.sessions.reclaim(&mut self.requested);
 
-		// Pop everything queued into the parked maps, grouping the two flavors
-		// of one plain name so the pair is built from the actual requests where
-		// present. Only names past the parked bound are rejected.
+		// Pop everything queued into the parked maps, grouping the flavors of
+		// one stem so the pair is built from the actual requests where present.
+		// Only names past the parked bound are rejected.
 		let noop = kio::Waiter::noop();
 		while let Poll::Ready(Ok(request)) = self.dynamic.poll_requested_track(&noop) {
 			let Some(shape) = requested_track_shape(request.name()) else {
@@ -843,8 +902,8 @@ impl GroupPublisher {
 			};
 			let full = self.traffic.parked.len() + self.sessions.parked.len() >= MAX_PARKED_REQUESTS;
 			match shape.sessions {
-				true => self.sessions.park(shape.plain, shape.compressed, request, full),
-				false => self.traffic.park(shape.plain, shape.compressed, request, full),
+				true => self.sessions.park(shape.stem, shape.format, request, full),
+				false => self.traffic.park(shape.stem, shape.format, request, full),
 			}
 		}
 
@@ -863,29 +922,28 @@ impl GroupPublisher {
 
 /// The parsed shape of a consumer-requested stats track name.
 struct RequestedShape {
-	/// The plain (uncompressed) track name, the pair maps' key.
-	plain: String,
-	/// Whether the requested flavor was the [`COMPRESSED_SUFFIX`] one.
-	compressed: bool,
+	/// The track name without its format suffix, the pair maps' key.
+	stem: String,
+	/// The requested flavor.
+	format: Format,
 	/// Sessions track vs traffic track, picking the frame type.
 	sessions: bool,
 }
 
 /// Classify a consumer-requested track name against the stats track shape
-/// `[<tier>/]{publisher|subscriber|sessions}.json[.z]`, or `None` for a name no
-/// tier could ever produce.
+/// `[<tier>/]{publisher|subscriber|sessions}{.json|.json.z|.fb.z}`, or `None`
+/// for a name no tier could ever produce.
 fn requested_track_shape(name: &str) -> Option<RequestedShape> {
-	let (base, compressed) = match name.strip_suffix(COMPRESSED_SUFFIX) {
-		Some(base) => (base, true),
-		None => (name, false),
-	};
-	let (tier, kind) = match base.rsplit_once('/') {
+	let (stem, format) = [Format::Json, Format::CompressedJson, Format::FlatBuffers]
+		.into_iter()
+		.find_map(|format| Some((name.strip_suffix(format.suffix())?, format)))?;
+	let (tier, kind) = match stem.rsplit_once('/') {
 		Some((tier, kind)) => (Some(tier), kind),
-		None => (None, base),
+		None => (None, stem),
 	};
 	let sessions = match kind {
-		"publisher.json" | "subscriber.json" => false,
-		"sessions.json" => true,
+		"publisher" | "subscriber" => false,
+		SESSIONS => true,
 		_ => return None,
 	};
 	// The tier label is an arbitrary path; require a clean one so a malformed
@@ -896,8 +954,8 @@ fn requested_track_shape(name: &str) -> Option<RequestedShape> {
 		return None;
 	}
 	Some(RequestedShape {
-		plain: base.to_string(),
-		compressed,
+		stem: stem.to_string(),
+		format,
 		sessions,
 	})
 }
@@ -1405,17 +1463,22 @@ mod tests {
 	#[test]
 	fn requested_track_shape_classifies() {
 		let shape = requested_track_shape("rtmp/publisher.json").expect("valid");
-		assert_eq!(shape.plain, "rtmp/publisher.json");
-		assert!(!shape.compressed);
+		assert_eq!(shape.stem, "rtmp/publisher");
+		assert_eq!(shape.format, Format::Json);
 		assert!(!shape.sessions);
 
 		let shape = requested_track_shape("region/sjc/subscriber.json.z").expect("valid");
-		assert_eq!(shape.plain, "region/sjc/subscriber.json");
-		assert!(shape.compressed);
+		assert_eq!(shape.stem, "region/sjc/subscriber");
+		assert_eq!(shape.format, Format::CompressedJson);
 		assert!(!shape.sessions);
 
 		let shape = requested_track_shape("sessions.json").expect("default tier");
-		assert_eq!(shape.plain, "sessions.json");
+		assert_eq!(shape.stem, "sessions");
+		assert!(shape.sessions);
+
+		let shape = requested_track_shape("rtmp/sessions.fb.z").expect("flatbuffers");
+		assert_eq!(shape.stem, "rtmp/sessions");
+		assert_eq!(shape.format, Format::FlatBuffers);
 		assert!(shape.sessions);
 
 		assert!(requested_track_shape("bogus.json").is_none());
@@ -1423,6 +1486,11 @@ mod tests {
 		assert!(requested_track_shape("/publisher.json").is_none());
 		assert!(requested_track_shape("rtmp//publisher.json").is_none());
 		assert!(requested_track_shape("rtmp/publisher.json.z.z").is_none());
+		assert!(
+			requested_track_shape("publisher.fb").is_none(),
+			"no uncompressed FlatBuffers flavor"
+		);
+		assert!(requested_track_shape("publisher").is_none());
 	}
 
 	/// A subscribe for a tier that has never recorded resolves with a zero
@@ -1634,47 +1702,29 @@ mod tests {
 		assert_eq!(serde_json::to_vec(&Frame::<Traffic>::default()).unwrap(), b"{}");
 	}
 
-	/// Counts this thread's allocations, so the test below measures only its
-	/// own drain while other tests run in parallel.
-	mod counting {
-		use std::alloc::{GlobalAlloc, Layout, System};
-		use std::cell::Cell;
-
-		thread_local! {
-			static ALLOCS: Cell<usize> = const { Cell::new(0) };
+	/// Encode every pair's latest frame as `.fb.z` through one kept encoder
+	/// per `(group, stem)`, returning how many frames were encoded.
+	fn encode_binary<V: Serialize + fb::Entry>(
+		family: &TrackFamily<V>,
+		encoders: &mut HashMap<String, fb::Encoder<V>>,
+	) -> usize {
+		for (stem, pair) in &family.tracks {
+			let encoder = match encoders.get_mut(stem.as_str()) {
+				Some(encoder) => encoder,
+				None => encoders.entry(stem.clone()).or_insert_with(fb::Encoder::new),
+			};
+			encoder.encode(&pair.frame.entries).expect("encode");
 		}
-
-		struct Counting;
-
-		unsafe impl GlobalAlloc for Counting {
-			unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-				let _ = ALLOCS.try_with(|n| n.set(n.get() + 1));
-				unsafe { System.alloc(layout) }
-			}
-
-			unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-				unsafe { System.dealloc(ptr, layout) }
-			}
-
-			unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-				let _ = ALLOCS.try_with(|n| n.set(n.get() + 1));
-				unsafe { System.realloc(ptr, layout, new_size) }
-			}
-		}
-
-		#[global_allocator]
-		static GLOBAL: Counting = Counting;
-
-		pub fn allocs() -> usize {
-			ALLOCS.with(Cell::get)
-		}
+		family.tracks.len()
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn steady_drain_collects_without_allocating() {
 		// Once every group, track, and buffer exists, draining the registry
 		// into the pending frames allocates nothing, however many broadcasts
-		// and tiers there are. Encoding the frames (moq-json) is out of scope.
+		// and tiers there are. Building the `.fb.z` frames from those buffers
+		// allocates at most once per frame (planus stages a vector's offsets),
+		// never per entry. Encoding the JSON flavors (moq-json) is out of scope.
 		for depth in [0, 1] {
 			for (broadcasts, tiers) in [(1, 1), (16, 1), (1, 4), (16, 4)] {
 				let registry = Registry::new(moq_net::stats::Config::new());
@@ -1700,15 +1750,33 @@ mod tests {
 				.expect("drain");
 
 				// Warm up: create the groups and tracks and grow every buffer.
+				let mut traffic_encoders: HashMap<String, HashMap<String, fb::Encoder<Traffic>>> = HashMap::new();
+				let mut session_encoders: HashMap<String, HashMap<String, fb::Encoder<Presence>>> = HashMap::new();
 				for _ in 0..3 {
 					drain.collect();
 					drain.publish();
+					for (key, group) in &drain.groups {
+						encode_binary(&group.traffic, traffic_encoders.entry(key.clone()).or_default());
+						encode_binary(&group.sessions, session_encoders.entry(key.clone()).or_default());
+					}
 				}
 
-				let before = counting::allocs();
+				let before = crate::counting::allocs();
 				drain.collect();
-				let allocs = counting::allocs() - before;
+				let allocs = crate::counting::allocs() - before;
 				drain.publish();
+
+				let before = crate::counting::allocs();
+				let mut frames = 0;
+				for (key, group) in &drain.groups {
+					frames += encode_binary(&group.traffic, traffic_encoders.get_mut(key.as_str()).expect("warm"));
+					frames += encode_binary(&group.sessions, session_encoders.get_mut(key.as_str()).expect("warm"));
+				}
+				let binary_allocs = crate::counting::allocs() - before;
+				assert!(
+					binary_allocs <= frames,
+					"{binary_allocs} allocations for {frames} .fb.z frames: depth {depth}, {broadcasts} broadcasts x {tiers} tiers"
+				);
 
 				let pending: usize = drain
 					.groups

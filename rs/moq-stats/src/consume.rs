@@ -1,19 +1,22 @@
 //! The consuming half: typed readers over one published stats broadcast.
 
-use moq_net::broadcast;
-use moq_net::stats::{Role, Tier};
+use std::collections::BTreeMap;
+use std::task::Poll;
 
-use crate::{Result, SessionsFrame, TrafficFrame, sessions_track, traffic_track};
+use moq_net::stats::{Role, Tier};
+use moq_net::{broadcast, kio, track};
+
+use crate::{Format, Result, SessionsFrame, TrafficFrame, fb, sessions_track, traffic_track};
 
 /// Configuration for a [`Consumer`]. Construct with [`Config::new`]
 /// and chain the `with_*` setters.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct Config {
-	/// Read the compressed `.json.z` tracks instead of the plain `.json` ones.
-	/// Same data for a fraction of the bytes, but requires a producer that
-	/// publishes them. Defaults to `false`.
-	pub compression: bool,
+	/// Which flavor of each track to read. Every flavor decodes to the same
+	/// frames; the compressed ones cost a fraction of the bytes. Defaults to
+	/// [`Format::Json`].
+	pub format: Format,
 }
 
 impl Config {
@@ -22,9 +25,9 @@ impl Config {
 		Self::default()
 	}
 
-	/// Read the compressed `.json.z` tracks instead of the plain `.json` ones.
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
+	/// Read the given flavor of each track.
+	pub fn with_format(mut self, format: Format) -> Self {
+		self.format = format;
 		self
 	}
 }
@@ -51,7 +54,7 @@ impl Consumer {
 	/// Subscribe to the traffic track for `(tier, role)`, awaiting the
 	/// subscription handshake.
 	pub async fn traffic(&self, tier: &Tier, role: Role) -> Result<Traffic> {
-		let name = traffic_track(tier, role, self.config.compression);
+		let name = traffic_track(tier, role, self.config.format);
 		Ok(Traffic {
 			inner: self.subscribe(&name).await?,
 		})
@@ -60,19 +63,15 @@ impl Consumer {
 	/// Subscribe to the sessions track for `tier`, awaiting the subscription
 	/// handshake.
 	pub async fn sessions(&self, tier: &Tier) -> Result<Sessions> {
-		let name = sessions_track(tier, self.config.compression);
+		let name = sessions_track(tier, self.config.format);
 		Ok(Sessions {
 			inner: self.subscribe(&name).await?,
 		})
 	}
 
-	async fn subscribe<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<moq_json::snapshot::Consumer<T>> {
+	async fn subscribe<V: Value>(&self, name: &str) -> Result<Reader<V>> {
 		let track = self.broadcast.track(name)?.subscribe(None).await?;
-		let mut config = moq_json::snapshot::consumer::Config::default();
-		if self.config.compression {
-			config.compression = moq_json::Compression::Deflate;
-		}
-		Ok(moq_json::snapshot::Consumer::new(track, config))
+		Ok(Reader::new(track, self.config.format))
 	}
 }
 
@@ -80,25 +79,57 @@ impl Consumer {
 /// intermediate frames a slow reader missed are collapsed, which is safe
 /// because the counters are cumulative.
 pub struct Traffic {
-	inner: moq_json::snapshot::Consumer<TrafficFrame>,
+	inner: Reader<moq_net::stats::Traffic>,
 }
 
 impl Traffic {
 	/// The next frame, or `None` once the track ends (the producer went away).
 	pub async fn next(&mut self) -> Result<Option<TrafficFrame>> {
-		Ok(self.inner.next().await?)
+		kio::wait(|waiter| self.inner.poll_next(waiter)).await
 	}
 }
 
 /// A typed reader over one sessions track; see [`Traffic`].
 pub struct Sessions {
-	inner: moq_json::snapshot::Consumer<SessionsFrame>,
+	inner: Reader<moq_net::stats::Presence>,
 }
 
 impl Sessions {
 	/// The next frame, or `None` once the track ends (the producer went away).
 	pub async fn next(&mut self) -> Result<Option<SessionsFrame>> {
-		Ok(self.inner.next().await?)
+		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	}
+}
+
+/// A frame value every flavor can carry: [`Traffic`](moq_net::stats::Traffic)
+/// or [`Presence`](moq_net::stats::Presence).
+pub(crate) trait Value: serde::de::DeserializeOwned + fb::Entry {}
+
+impl<V: serde::de::DeserializeOwned + fb::Entry> Value for V {}
+
+/// Reads one stats track in whichever flavor it was subscribed as, yielding
+/// the newest frame.
+pub(crate) enum Reader<V: Value> {
+	Json(moq_json::snapshot::Consumer<BTreeMap<String, V>>),
+	FlatBuffers(fb::Reader<V>),
+}
+
+impl<V: Value> Reader<V> {
+	pub fn new(track: track::Subscriber, format: Format) -> Self {
+		let mut config = moq_json::snapshot::consumer::Config::default();
+		match format {
+			Format::Json => {}
+			Format::CompressedJson => config.compression = moq_json::Compression::Deflate,
+			Format::FlatBuffers => return Self::FlatBuffers(fb::Reader::new(track)),
+		}
+		Self::Json(moq_json::snapshot::Consumer::new(track, config))
+	}
+
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<BTreeMap<String, V>>>> {
+		match self {
+			Self::Json(reader) => reader.poll_next(waiter).map_err(Into::into),
+			Self::FlatBuffers(reader) => reader.poll_next(waiter),
+		}
 	}
 }
 
@@ -201,10 +232,11 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn plain_and_compressed_round_trip() {
-		// The same drain must decode identically off the plain track and the
-		// compressed sibling, including across an update (the compressed
-		// track's delta path).
+	async fn every_format_round_trips() {
+		// The same drain must decode identically off every flavor, including
+		// across an update (the compressed tracks' shared-window path). The
+		// `.fb.z` track does not exist until requested, so its subscribe
+		// resolves on the next drain.
 		let (producer, origin) = test_producer();
 		let tier = Tier::default();
 		let mut fed = feed(&producer, tier.clone(), "acme", "foo/bar").await;
@@ -214,29 +246,43 @@ mod tests {
 
 		let broadcast = announced(&origin).await;
 		let plain = Consumer::new(broadcast.consume(), Config::new());
-		let compressed = Consumer::new(broadcast.consume(), Config::new().with_compression(true));
+		let compressed = Consumer::new(broadcast.consume(), Config::new().with_format(Format::CompressedJson));
+		let binary = Consumer::new(broadcast.consume(), Config::new().with_format(Format::FlatBuffers));
 
 		let mut plain_traffic = plain.traffic(&tier, Role::Publisher).await.expect("subscribe plain");
 		let mut z_traffic = compressed
 			.traffic(&tier, Role::Publisher)
 			.await
 			.expect("subscribe compressed");
+		let (fb_traffic, fb_sessions, _) = tokio::join!(
+			binary.traffic(&tier, Role::Publisher),
+			binary.sessions(&tier),
+			drive_tick()
+		);
+		let mut fb_traffic = fb_traffic.expect("subscribe flatbuffers");
+		let mut fb_sessions = fb_sessions.expect("subscribe flatbuffers sessions");
 
 		let plain_frame = plain_traffic.next().await.expect("read").expect("frame");
 		let z_frame = z_traffic.next().await.expect("read").expect("frame");
-		assert_eq!(plain_frame, z_frame, "both flavors carry the same data");
+		let fb_frame = fb_traffic.next().await.expect("read").expect("frame");
+		assert_eq!(plain_frame, z_frame, "both JSON flavors carry the same data");
+		assert_eq!(plain_frame, fb_frame, "FlatBuffers carries the same data");
 		assert_eq!(plain_frame.get("foo/bar").expect("entry").bytes, 42);
 
-		// A later drain updates both flavors; the compressed one rides a delta.
+		// A later drain updates every flavor inside the open windows.
 		fed.write(8).await;
 		drive_tick().await;
 		let plain_frame = plain_traffic.next().await.expect("read").expect("frame");
 		let z_frame = z_traffic.next().await.expect("read").expect("frame");
+		let fb_frame = fb_traffic.next().await.expect("read").expect("frame");
 		assert_eq!(plain_frame.get("foo/bar").expect("entry").bytes, 50);
 		assert_eq!(plain_frame, z_frame, "delta reconstructs the same frame");
+		assert_eq!(plain_frame, fb_frame, "FlatBuffers carries the update");
 
 		let mut sessions = compressed.sessions(&tier).await.expect("subscribe sessions");
 		let frame = sessions.next().await.expect("read").expect("frame");
 		assert_eq!(frame.get("acme").expect("root").active(), 1);
+		let fb_frame = fb_sessions.next().await.expect("read").expect("frame");
+		assert_eq!(frame, fb_frame, "sessions agree across flavors");
 	}
 }

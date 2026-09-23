@@ -15,7 +15,8 @@ use moq_net::stats::{Presence, Role, Tier, Traffic};
 use moq_net::track::Subscribing;
 use moq_net::{PathOwned, origin};
 
-use crate::{Result, SessionsFrame, TrafficFrame, parse_node_path, sessions_track, traffic_track};
+use crate::consume::{Reader as FrameReader, Value};
+use crate::{Format, Result, SessionsFrame, TrafficFrame, parse_node_path, sessions_track, traffic_track};
 
 /// Configuration for an [`Consumer`]. Construct with [`Config::new`] and chain
 /// the `with_*` setters.
@@ -34,10 +35,10 @@ pub struct Config {
 	/// is deeper than this are not recognized as node broadcasts and are
 	/// skipped. Must match the producer's depth.
 	pub depth: usize,
-	/// Read the compressed `.json.z` tracks instead of the plain `.json` ones.
-	/// Same data for a fraction of the bytes, but requires a producer that
-	/// publishes them. Defaults to `false`.
-	pub compression: bool,
+	/// Which flavor of each node's track to read. Every flavor decodes to the
+	/// same frames; the compressed ones cost a fraction of the bytes. Defaults
+	/// to [`Format::Json`].
+	pub format: Format,
 }
 
 impl Config {
@@ -59,9 +60,9 @@ impl Config {
 		self
 	}
 
-	/// Read the compressed `.json.z` tracks instead of the plain `.json` ones.
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
+	/// Read the given flavor of each node's track.
+	pub fn with_format(mut self, format: Format) -> Self {
+		self.format = format;
 		self
 	}
 }
@@ -71,7 +72,7 @@ impl Default for Config {
 		Self {
 			prefix: PathOwned::from(".stats"),
 			depth: 0,
-			compression: false,
+			format: Format::Json,
 		}
 	}
 }
@@ -104,7 +105,7 @@ impl Consumer {
 	/// node broadcast in the group. Nodes are subscribed lazily as they announce,
 	/// so this returns without a handshake.
 	pub fn traffic(&self, tier: &Tier, role: Role) -> TrafficConsumer {
-		let name = traffic_track(tier, role, self.config.compression);
+		let name = traffic_track(tier, role, self.config.format);
 		TrafficConsumer {
 			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
@@ -112,7 +113,7 @@ impl Consumer {
 
 	/// A merged reader over the sessions track for `tier`; see [`Self::traffic`].
 	pub fn sessions(&self, tier: &Tier) -> SessionsConsumer {
-		let name = sessions_track(tier, self.config.compression);
+		let name = sessions_track(tier, self.config.format);
 		SessionsConsumer {
 			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
@@ -148,7 +149,7 @@ impl SessionsConsumer {
 }
 
 /// A per-key counter that folds across nodes: the two wire counter types.
-trait Mergeable: serde::de::DeserializeOwned + Default + Copy + 'static {
+trait Mergeable: Value + Default {
 	/// Fold `other` into `acc`.
 	fn merge(acc: &mut Self, other: Self);
 
@@ -211,9 +212,9 @@ enum Reader<V: Mergeable> {
 	},
 	/// Awaiting the subscription handshake.
 	Subscribing(Pending<Subscribing>),
-	/// Reading frames. Boxed: the snapshot consumer dwarfs the other variants,
+	/// Reading frames. Boxed: the frame reader dwarfs the other variants,
 	/// and one lives per node in a map.
-	Active(Box<moq_json::snapshot::Consumer<BTreeMap<String, V>>>),
+	Active(Box<FrameReader<V>>),
 	/// The subscription failed or the track ended; the node no longer reads. It
 	/// lingers until it unannounces or reannounces, still contributing its last
 	/// frame when [`Mergeable::STICKY`].
@@ -260,7 +261,7 @@ struct Merged<V: Mergeable> {
 	depth: usize,
 	/// Track name subscribed on each node broadcast.
 	name: String,
-	config: moq_json::snapshot::consumer::Config,
+	format: Format,
 	/// One entry per live node broadcast, keyed by absolute announced path.
 	nodes: HashMap<PathOwned, Node<V>>,
 }
@@ -273,13 +274,7 @@ impl<V: Mergeable> Merged<V> {
 			prefix: config.prefix.clone(),
 			depth: config.depth,
 			name,
-			config: {
-				let mut json = moq_json::snapshot::consumer::Config::default();
-				if config.compression {
-					json.compression = moq_json::Compression::Deflate;
-				}
-				json
-			},
+			format: config.format,
 			nodes: HashMap::new(),
 		}
 	}
@@ -302,11 +297,11 @@ impl<V: Mergeable> Merged<V> {
 		}
 
 		// Advance each node's reader, collapsing any backlog to its latest frame.
-		let config = &self.config;
+		let format = self.format;
 		let name = self.name.as_str();
 		let origin = &self.origin;
 		for node in self.nodes.values_mut() {
-			changed |= advance(node, origin, config, name, waiter);
+			changed |= advance(node, origin, format, name, waiter);
 		}
 
 		if changed {
@@ -388,7 +383,7 @@ impl<V: Mergeable> Merged<V> {
 fn advance<V: Mergeable>(
 	node: &mut Node<V>,
 	origin: &origin::Consumer,
-	config: &moq_json::snapshot::consumer::Config,
+	format: Format,
 	name: &str,
 	waiter: &Waiter,
 ) -> bool {
@@ -423,8 +418,7 @@ fn advance<V: Mergeable>(
 			},
 			Reader::Subscribing(pending) => match pending.poll_ok(waiter) {
 				Poll::Ready(Ok(subscriber)) => {
-					node.reader =
-						Reader::Active(Box::new(moq_json::snapshot::Consumer::new(subscriber, config.clone())));
+					node.reader = Reader::Active(Box::new(FrameReader::new(subscriber, format)));
 				}
 				Poll::Ready(Err(err)) => {
 					tracing::debug!(?err, name, "stats: node subscribe failed");
@@ -603,7 +597,7 @@ mod tests {
 			let path = format!(".stats/{group}/node/{node}");
 			let source = origin.create_broadcast(path.as_str()).expect("create broadcast");
 			source.announce(origin::Route::default()).expect("announce");
-			let name = traffic_track(&Tier::default(), Role::Publisher, false);
+			let name = traffic_track(&Tier::default(), Role::Publisher, Format::Json);
 			let track = source.create_track(name, None).expect("create track");
 			let config = moq_json::snapshot::Config::default().with_delta_ratio(0);
 			Self {
