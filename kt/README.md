@@ -58,7 +58,7 @@ The `dev.moq` package is intentionally thin: Kotlin has extension functions, so 
 ## Versioning
 
 - `moqffi.version` (gradle.properties): the bindings version. CI overrides it from the `moq-ffi-v*` tag; only used for local dev otherwise.
-- `moq.version` (gradle.properties): the wrapper version, the source of truth. **Bump this by hand** to ship a new wrapper. `release-kt-lib.yml` reads it, checks whether `dev.moq:moq:<version>` is already on Maven Central, and publishes only if it isn't. Must stay `>= 0.3.0` (the line continues from the pre-split `dev.moq:moq` releases).
+- `moq.version` (gradle.properties): the wrapper version, the source of truth. **Bump this by hand** to ship a new wrapper. `release-kt-lib.yml` reads it, checks whether `dev.moq:moq:<version>` is already on Maven Central, and publishes only if it isn't. If `rs/moq-ffi` changed since its last `moq-ffi-v*` tag, it waits and publishes after the next Release Kotlin FFI run. Must stay `>= 0.3.0` (the line continues from the pre-split `dev.moq:moq` releases).
 
 ## Local development
 

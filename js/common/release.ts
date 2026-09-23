@@ -89,9 +89,27 @@ if (publishJsr) {
 	// `bun --filter` releases dependencies first.
 	const env = { ...process.env, DENO_NO_PACKAGE_JSON: "1" };
 	if (dryRun) {
-		console.log(`🧪 Publishing ${name}@${version} to JSR (dry-run)...`);
-		args.push("--dry-run");
-		execFileSync("deno", args, { stdio: "inherit", env });
+		// A PR that bumps a sibling depends on a version npm won't have until the
+		// release publishes it, so Deno can't resolve the dependent yet.
+		const jsr = JSON.parse(await Bun.file("jsr.json").text()) as { imports?: Record<string, string> };
+		const unpublished = Object.values(jsr.imports ?? {})
+			.filter((spec) => spec.startsWith("npm:@moq/"))
+			.map((spec) => spec.slice("npm:".length))
+			.filter((spec) => {
+				try {
+					execFileSync("npm", ["view", spec, "version"], { stdio: "ignore" });
+					return false;
+				} catch {
+					return true;
+				}
+			});
+		if (unpublished.length > 0) {
+			console.log(`⏭️  Skipping JSR dry-run: ${unpublished.join(", ")} not on npm yet`);
+		} else {
+			console.log(`🧪 Publishing ${name}@${version} to JSR (dry-run)...`);
+			args.push("--dry-run");
+			execFileSync("deno", args, { stdio: "inherit", env });
+		}
 	} else if (jsrDone) {
 		console.log(`⏭️  ${name}@${version} already on JSR, skipping`);
 	} else {
