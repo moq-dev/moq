@@ -38,7 +38,7 @@ import map required:
 ```
 
 Pin a version range in the URL for production, e.g.
-`https://esm.sh/@moq/publish@0.2/element`. jsDelivr's `+esm` endpoint
+`https://esm.sh/@moq/publish@0.5/element`. jsDelivr's `+esm` endpoint
 (`https://cdn.jsdelivr.net/npm/@moq/publish/element.js/+esm`) works the same way
 if you prefer it.
 

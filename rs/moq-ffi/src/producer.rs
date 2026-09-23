@@ -3,6 +3,7 @@ use std::sync::Arc;
 use moq_mux::catalog::hang::Extra;
 
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
+use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::{MoqAudioInit, MoqContainerFormat, MoqContainerInit, MoqFrame, MoqVideoInit, MoqVideoProperties};
@@ -663,7 +664,7 @@ pub struct MoqTrackProducer {
 }
 
 impl MoqTrackProducer {
-	pub(crate) fn demand(&self) -> Result<moq_net::track::Demand, MoqError> {
+	pub(crate) fn track_demand(&self) -> Result<moq_net::track::Demand, MoqError> {
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or(MoqError::Closed)?;
 		Ok(track.demand())
@@ -691,13 +692,22 @@ impl MoqTrackProducer {
 		Ok(Arc::new(MoqTrackDynamic::new(track.dynamic())))
 	}
 
+	/// A watch-only handle to whether this track has subscribers.
+	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
+		Ok(MoqTrackDemand::new(self.track_demand()?))
+	}
+
 	/// Wait until this track has at least one active consumer.
+	///
+	/// Prefer [`demand`](Self::demand), a handle that can wait without borrowing this producer.
 	pub async fn used(&self) -> Result<(), MoqError> {
 		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
 		crate::ffi::detached(async move { track.used().await }).await
 	}
 
 	/// Wait until this track has no active consumers.
+	///
+	/// Prefer [`demand`](Self::demand), a handle that can wait without borrowing this producer.
 	pub async fn unused(&self) -> Result<(), MoqError> {
 		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
 		crate::ffi::detached(async move { track.unused().await }).await
@@ -893,7 +903,17 @@ impl MoqMediaProducer {
 		Ok(media.demand.name().to_string())
 	}
 
+	/// A watch-only handle to whether this track has subscribers.
+	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		Ok(MoqTrackDemand::new(
+			guard.as_ref().ok_or(MoqError::Closed)?.demand.clone(),
+		))
+	}
+
 	/// Wait until this track has at least one active consumer.
+	///
+	/// Prefer [`demand`](Self::demand), a handle that can wait without borrowing this producer.
 	pub async fn used(&self) -> Result<(), MoqError> {
 		let demand = self
 			.inner
@@ -907,6 +927,8 @@ impl MoqMediaProducer {
 	}
 
 	/// Wait until this track has no active consumers.
+	///
+	/// Prefer [`demand`](Self::demand), a handle that can wait without borrowing this producer.
 	pub async fn unused(&self) -> Result<(), MoqError> {
 		let demand = self
 			.inner
