@@ -54,11 +54,16 @@ what the session can publish.
 
 Tests: announce through a mount, subscribe through a mount to an unannounced
 path under a dynamic prefix in `source`, a mount shadowing a local path,
-patterns that exclude `at`, a publish attempt under `at` refused, a
+patterns that exclude `at`, publishing under `at` unchanged by the mount
+(denied stays denied, allowed stays allowed), a
 split-horizon regression (a route learned from the client is not advertised
 back through the mount), and a retry regression (a mounted handler rejects,
 then a source route change makes the request resolve), and a stats
 regression asserting mounted egress lands on the logical path.
+
+Benchmark: sweep mount count and subscriber session count together, so
+cursor registration and announcement delivery touch only the mounts whose
+source changed rather than scanning every mount or session.
 
 ## Related
 
