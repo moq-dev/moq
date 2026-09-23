@@ -1498,7 +1498,7 @@ mod test {
 		// On lite-06 the declared budget is what resolves the start, so it stands.
 		let mut declared =
 			producer.subscribe(track::Subscription::default().with_max_age(std::time::Duration::from_secs(5)));
-		position_cursor(&mut declared, Version::Lite06Wip, None);
+		position_cursor(&mut declared, Version::Lite06, None);
 		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
 
@@ -1642,7 +1642,7 @@ mod announce_test {
 
 	type TestPublisher = Publisher<SinkSession>;
 
-	const VERSION: Version = Version::Lite06Wip;
+	const VERSION: Version = Version::Lite06;
 
 	/// The hops stamped on every harness route.
 	fn pub_hops() -> Hops {
@@ -2762,7 +2762,7 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			version: Version::Lite06Wip,
+			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
 		};
 
@@ -2802,7 +2802,7 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			version: Version::Lite06Wip,
+			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
 		};
 
@@ -2846,7 +2846,7 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			version: Version::Lite06Wip,
+			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
 		};
 
@@ -2908,7 +2908,7 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			version: Version::Lite06Wip,
+			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
 		};
 
@@ -2977,7 +2977,7 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			version: Version::Lite06Wip,
+			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
 		};
 
@@ -3047,7 +3047,7 @@ mod tests {
 			runtime: crate::time::Clock::tokio(),
 			session: SinkSession::new(Default::default()),
 			origin: origin.consume(),
-			version: Version::Lite06Wip,
+			version: Version::Lite06,
 			peer_setup,
 			goaway,
 			peer_hop: Some(assigned),

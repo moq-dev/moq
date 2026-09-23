@@ -15,7 +15,7 @@ use moq_tokio::moq_net;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The newest moq-lite ALPN both sides should converge on. Derived from
-/// `moq_net::ALPNS` so a future bump (e.g. lite-05 promoted out of WIP)
+/// `moq_net::ALPNS` so a future version bump
 /// doesn't break this test independently of the production negotiation.
 /// We filter on the `moq-lite-` prefix specifically; the relay smoke test
 /// is asserting lite behavior, not IETF moqt drafts.
@@ -776,13 +776,13 @@ async fn internal_unix_round_trip() {
 	handle.abort();
 }
 
-/// Every version whose SETUP carries a request path the server reads: moq-lite-05
+/// Every version whose SETUP carries a request path the server reads: moq-lite-05/06
 /// (Setup Stream) and moq-transport 14-18 (the `Path` SETUP parameter, in-band on
-/// the bidi stream for 14-16 and the uni Setup Stream for 17-18). lite-06-wip shares
-/// lite-05's SETUP path handling but is opt-in only, so it isn't exercised here.
+/// the bidi stream for 14-16 and the uni Setup Stream for 17-18).
 fn path_versions() -> Vec<moq_net::Version> {
 	[
 		"moq-lite-05",
+		"moq-lite-06",
 		"moq-transport-14",
 		"moq-transport-15",
 		"moq-transport-16",

@@ -61,8 +61,8 @@ mod test {
 			frame_start: 4,
 		};
 		let mut buf = Vec::new();
-		msg.encode_msg(&mut buf, Version::Lite06Wip).unwrap();
-		let got = Group::decode_msg(&mut buf.as_slice(), Version::Lite06Wip).unwrap();
+		msg.encode_msg(&mut buf, Version::Lite06).unwrap();
+		let got = Group::decode_msg(&mut buf.as_slice(), Version::Lite06).unwrap();
 		assert_eq!((got.sequence, got.frame_start), (7, 4));
 	}
 

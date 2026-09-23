@@ -84,8 +84,8 @@ Decisions settled while planning, recorded so review does not relitigate them:
   `auth::Token`, and `auth::Request`; JS mirrors as `connection.auth`.
 
 Everything here is additive: `Session::auth()` is new, the relay derives the
-grant from the origin handles it already scopes, and lite-06 is an opt-in WIP
-ALPN.
+grant from the origin handles it already scopes, and AUTH is added to the
+existing lite-06 ALPN.
 
 ## Quests
 

@@ -115,12 +115,7 @@ mod tests {
 	/// while every registry we speak agrees on the value, so pin that.
 	#[test]
 	fn both_registries_agree_about_a_cancellation() {
-		// Every negotiable version, plus the work-in-progress one `Versions::all` holds back.
-		let versions = crate::Versions::all()
-			.iter()
-			.copied()
-			.chain([crate::Version::Lite(lite::Version::Lite06Wip)])
-			.collect::<Vec<_>>();
+		let versions = crate::Versions::all().iter().copied().collect::<Vec<_>>();
 
 		for version in versions {
 			assert_eq!(

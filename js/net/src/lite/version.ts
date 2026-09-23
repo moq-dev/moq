@@ -4,7 +4,7 @@ export const Version = {
 	DRAFT_03: 0xff0dad03,
 	DRAFT_04: 0xff0dad04,
 	DRAFT_05: 0xff0dad05,
-	/// Work-in-progress lite-06, advertised as the preferred WebTransport subprotocol.
+	/// Lite-06, advertised as the preferred WebTransport subprotocol.
 	/// Adds announce ids: each active ANNOUNCE_BROADCAST implicitly assigns the next
 	/// ordinal, and ended/restart reference that id instead of repeating the path.
 	/// Also adds frame-precise subscribe/fetch bounds and a GROUP frame offset.
@@ -224,10 +224,8 @@ export const ALPN_04 = "moq-lite-04";
 /// The ALPN string for Draft05, which uses ALPN-based version negotiation.
 export const ALPN_05 = "moq-lite-05";
 
-/// The ALPN string for the work-in-progress Draft06. It is NOT in the default
-/// WebTransport `protocols` list, so lite-06 is never advertised or negotiated by
-/// default; a peer only reaches it when both sides explicitly offer this ALPN.
-export const ALPN_06_WIP = "moq-lite-06-wip";
+/// The ALPN string for Draft06.
+export const ALPN_06 = "moq-lite-06";
 
 const VERSION_NAMES: Record<number, string> = {
 	[Version.DRAFT_01]: "moq-lite-01",
@@ -235,7 +233,7 @@ const VERSION_NAMES: Record<number, string> = {
 	[Version.DRAFT_03]: "moq-lite-03",
 	[Version.DRAFT_04]: "moq-lite-04",
 	[Version.DRAFT_05]: "moq-lite-05",
-	[Version.DRAFT_06]: "moq-lite-06-wip",
+	[Version.DRAFT_06]: "moq-lite-06",
 };
 
 export function versionName(v: Version): string {

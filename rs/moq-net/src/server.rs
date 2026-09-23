@@ -7,7 +7,7 @@ use crate::origin;
 use crate::time::{Clock, Instant};
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_22, ALPN_LITE, ALPN_LITE_03,
-	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Role, Session, SessionError, Version,
+	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, Consume, Error, NEGOTIATED, Role, Session, SessionError, Version,
 	Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup, stats,
@@ -157,9 +157,9 @@ impl Server {
 	{
 		let runtime = Clock::new(now);
 		let (path, role, origin, handshake) = match session.protocol() {
-			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06_WIP)) => {
+			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06)) => {
 				let version = match alpn {
-					ALPN_LITE_06_WIP => lite::Version::Lite06Wip,
+					ALPN_LITE_06 => lite::Version::Lite06,
 					_ => lite::Version::Lite05,
 				};
 				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
@@ -293,7 +293,7 @@ impl Server {
 			}
 			// Every lite ALPN goes through the same entry point, which is also
 			// what a `!Send` transport calls directly.
-			Some(ALPN_LITE_05 | ALPN_LITE_06_WIP | ALPN_LITE_04 | ALPN_LITE_03) => {
+			Some(ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_04 | ALPN_LITE_03) => {
 				return self.accept_request_lite(now, session).await;
 			}
 			Some(ALPN_LITE) | None => {

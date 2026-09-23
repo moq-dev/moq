@@ -34,7 +34,7 @@ afterEach(() => {
 
 function stubTransport(stats: { estimatedSendRate?: number }): void {
 	const stub = function StubWebTransport() {
-		const pair = createMockTransportPair(Lite.ALPN_06_WIP, { stats });
+		const pair = createMockTransportPair(Lite.ALPN_06, { stats });
 		void accept(pair.server, url);
 		return pair.client;
 	};

@@ -120,7 +120,7 @@ underneath it.
   choose an encoding whose economic stride exceeds the maximum accumulated
   topology distance allowed by the bounded hop list, which at a 32-entry chain
   and a 5-cost worst link is 160.
-- Cluster sessions use `moq-lite-06-wip`, explicitly. Lite05 silently drops
+- Cluster sessions use `moq-lite-06`, explicitly. Lite05 silently drops
   the cost; the MoQT Cluster extension is not the chosen cluster wire for this
   questline.
 - Fleet rollout stays downstream: moq.pro owns rendering the priced radius-two

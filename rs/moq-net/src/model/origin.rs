@@ -6387,7 +6387,7 @@ mod tests {
 
 		let mut buf = Vec::new();
 		Cost::DRAIN
-			.encode(&mut buf, crate::lite::Version::Lite06Wip)
+			.encode(&mut buf, crate::lite::Version::Lite06)
 			.expect("a draining route is still forwarded, so its cost must encode");
 	}
 }

@@ -133,7 +133,7 @@ test("a peer that severs immediately keeps escalating the backoff", async () => 
 	let attempts = 0;
 	const stub = function StubWebTransport() {
 		attempts++;
-		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		const pair = createMockTransportPair(Lite.ALPN_06);
 		// Sever the session as soon as the server side finishes the handshake.
 		void accept(pair.server, url).then((server) => server.close());
 		return pair.client;
@@ -178,7 +178,7 @@ test("an explicitly undefined delay field falls back to its default", async () =
 	let dials = 0;
 	const stub = function StubWebTransport() {
 		dials += 1;
-		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		const pair = createMockTransportPair(Lite.ALPN_06);
 		void accept(pair.server, url).then((server) => server.close());
 		return pair.client;
 	};
@@ -223,7 +223,7 @@ test("an announced request follows the reconnect loop", async () => {
 	const published: BroadcastProducer[] = [];
 	const clientOrigin = new OriginProducer();
 	const stub = function StubWebTransport() {
-		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		const pair = createMockTransportPair(Lite.ALPN_06);
 		const origin = new OriginProducer();
 		void accept(pair.server, url, { publish: origin.consume() }).then((server) => {
 			sessions.push(server);
@@ -267,7 +267,7 @@ test("a reload that gives up keeps requests pending until it is disposed", async
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	const stub = function StubWebTransport() {
-		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		const pair = createMockTransportPair(Lite.ALPN_06);
 		void accept(pair.server, url).then(() => {
 			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
 		});
@@ -319,7 +319,7 @@ test("a page hide after give-up does not retry the refused URL", async () => {
 	let attempts = 0;
 	const stub = function StubWebTransport() {
 		attempts++;
-		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		const pair = createMockTransportPair(Lite.ALPN_06);
 		void accept(pair.server, url).then(() => {
 			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
 		});
@@ -363,7 +363,7 @@ test("a session rejected as unauthorized surfaces the code and stops retrying", 
 	const url = new URL("https://example.com/");
 	const closes: (Error | null)[] = [];
 	const stub = function StubWebTransport() {
-		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		const pair = createMockTransportPair(Lite.ALPN_06);
 		// Reject at the MoQ layer: accept the transport, then close with a code, the
 		// way a relay's Request::close does after it has already accepted the transport.
 		void accept(pair.server, url).then(() => {
