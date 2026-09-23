@@ -16,6 +16,7 @@ pub mod cluster;
 mod config;
 mod connection;
 mod duration;
+mod fetch;
 mod http_client;
 pub mod internal;
 mod listener;
@@ -52,6 +53,7 @@ fn configured_tier(label: Option<String>) -> moq_net::stats::Tier {
 
 pub use config::*;
 pub use connection::*;
+pub use fetch::*;
 pub use relay::*;
 #[cfg(feature = "test-support")]
 pub use test_support::*;

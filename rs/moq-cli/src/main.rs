@@ -10,6 +10,7 @@ mod complete;
 #[cfg(feature = "capture")]
 mod devices;
 mod duration;
+mod fetch;
 mod hls;
 mod moq;
 mod play;
@@ -316,6 +317,9 @@ async fn main() -> anyhow::Result<()> {
 		}
 	}
 
+	if let [Command::Fetch(_)] = stages.as_slice() {
+		cli.dial_only("fetch")?;
+	}
 	cli.moq.validate()?;
 
 	let net = Net {
@@ -334,6 +338,7 @@ async fn main() -> anyhow::Result<()> {
 		// lone one of those runs by itself; everything else is a list of stages.
 		if stages.len() == 1 && !stages[0].is_stageable() {
 			match stages.remove(0) {
+				Command::Fetch(args) => return fetch::run(cli.moq, args, net).await,
 				#[cfg(feature = "play")]
 				Command::Play(args) => return run_play(cli.moq, args, net).await,
 				#[cfg(feature = "transcode")]
