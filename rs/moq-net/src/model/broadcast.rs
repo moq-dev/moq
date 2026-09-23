@@ -408,10 +408,10 @@ impl Producer {
 		Poll::Ready((name, producer))
 	}
 
-	/// Abort the spliced tracks never handed out by [`Self::poll_spliced_assigned`],
-	/// releasing their subscribers with `err`. Called when the broadcast closes for
-	/// good; whoever took the others ends them.
-	pub(crate) fn abort_unassigned(&self, err: Error) {
+	/// Let go of every spliced track, aborting with `err` the ones never handed
+	/// out by [`Self::poll_spliced_assigned`]. Called when the broadcast ends:
+	/// whoever took the others decides how they end.
+	pub(crate) fn release_spliced(&self, err: Error) {
 		let mut state = self.state.lock();
 		if let Some(spliced) = state.spliced.as_mut() {
 			for name in std::mem::take(&mut spliced.pending) {
@@ -419,6 +419,7 @@ impl Producer {
 					let _ = producer.abort(err.clone());
 				}
 			}
+			spliced.tracks.clear();
 		}
 	}
 

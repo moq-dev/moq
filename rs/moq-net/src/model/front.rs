@@ -113,8 +113,8 @@ pub(super) enum Action {
 	Abort { track: Arc<str>, err: Error },
 	/// Arm (or clear) the deadline the front wants to be woken at.
 	Arm { at: Option<Instant> },
-	/// The front is over: reject the parked requesters with `err`, let each
-	/// read track conclude with the copy it is spliced from, and abort the rest
+	/// The front is over: reject the parked requesters with `err`, leave each
+	/// read track to end with the copy it is spliced from, and abort the rest
 	/// with `err`.
 	End { err: Error },
 }

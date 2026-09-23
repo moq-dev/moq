@@ -1813,7 +1813,7 @@ async fn run_front(task: FrontTask) {
 
 	events.push_back(select(&mut front, &sources, &mut seen));
 
-	let err = 'serve: loop {
+	loop {
 		while let Some(event) = events.pop_front() {
 			for action in front.step(event) {
 				match action {
@@ -2017,7 +2017,26 @@ async fn run_front(task: FrontTask) {
 						}
 					}
 					Action::Arm { at } => deadline.set(at),
-					Action::End { err } => break 'serve err,
+					Action::End { err } => {
+						if let Ok(mut pending) = request.write() {
+							pending.resolved.get_or_insert(Err(err.clone()));
+						}
+						// Ending the broadcast only retracts it: no new requesters or
+						// tracks, and a newcomer at the path gets a fresh front. Tracks
+						// in flight carry on (moq-lite: retraction does not disturb
+						// subscriptions already in flight): dropping their producers
+						// leaves each reader on the copy it was spliced from, ending
+						// when and as that copy ends.
+						broadcast.finish();
+						broadcast.release_spliced(err.clone());
+						for (_, mut io) in tracks.drain() {
+							// Nothing in flight: unread, never spliced, or only a warm cache.
+							if !io.resume.is_used() || !io.resume.is_spliced() || io.warm.is_some() {
+								let _ = io.resume.abort(err.clone());
+							}
+						}
+						return;
+					}
 				}
 			}
 		}
@@ -2177,61 +2196,7 @@ async fn run_front(task: FrontTask) {
 			Step::Table => select(&mut front, &sources, &mut seen),
 		};
 		events.push_back(event);
-	};
-
-	if let Ok(mut pending) = request.write() {
-		pending.resolved.get_or_insert(Err(err.clone()));
 	}
-	// Closed to new requesters and new tracks: a newcomer at the path gets a
-	// fresh front. The tracks already handed out drain below.
-	broadcast.finish();
-	broadcast.abort_unassigned(err.clone());
-	drop((sources, upstream, watch));
-	drain(tracks, err).await;
-}
-
-/// End the logical tracks of a front that is over. A track still read concludes
-/// with the copy it is spliced from, cleanly or with that copy's error, so a
-/// subscription in flight gets everything its source sent (moq-lite: retraction
-/// does not disturb subscriptions already in flight). The rest abort with `err`.
-async fn drain(tracks: HashMap<Arc<str>, TrackIo>, err: Error) {
-	let mut draining = Vec::new();
-	for (name, mut io) in tracks {
-		// A warm copy is a cache of a track nobody read, not its source.
-		let copy = io.warm.is_none().then(|| io.resume.current()).flatten();
-		match copy {
-			Some(copy) if io.resume.is_used() => draining.push((name, io.resume, copy)),
-			_ => {
-				let _ = io.resume.abort(err.clone());
-			}
-		}
-	}
-
-	kio::wait(|waiter| {
-		draining.retain_mut(|(name, resume, copy)| {
-			if let Poll::Ready(result) = copy.poll_complete(waiter) {
-				let _ = match result {
-					Ok(()) => resume.finish(),
-					Err(err) => {
-						tracing::debug!(name = %name, %err, "aborting track");
-						resume.abort(err)
-					}
-				};
-				return false;
-			}
-			// Nobody is left to drain it: stop holding the copy's subscription.
-			if resume.poll_unused(waiter).is_ready() {
-				let _ = resume.abort(err.clone());
-				return false;
-			}
-			true
-		});
-		match draining.is_empty() {
-			true => Poll::Ready(()),
-			false => Poll::Pending,
-		}
-	})
-	.await
 }
 
 /// The announced routes, keyed by prefix: a trie with one node per path
@@ -4978,7 +4943,7 @@ mod tests {
 		let rival_server = rig.standby(&[11]);
 
 		// The incumbent's session dies, taking its track with it: a live copy
-		// would otherwise keep draining after the front ends.
+		// would otherwise keep serving after the front ends.
 		drop(incumbent);
 		drop(source);
 		rig.incumbent_track.abort(Error::Dropped).unwrap();
