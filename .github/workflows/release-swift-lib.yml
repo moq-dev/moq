@@ -67,10 +67,10 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       ffi_version: ${{ steps.version.outputs.ffi_version }}
-      ffi_changed: ${{ steps.ffi-diff.outputs.changed }}
+      ffi_unreleased: ${{ steps.ffi-diff.outputs.unreleased }}
       # On PRs we only build (dry-run). On main/dev we publish when the version
       # isn't already tagged on the mirror.
-      publish: ${{ (github.event_name == 'push' || github.event_name == 'workflow_run') && steps.ffi-diff.outputs.changed != 'true' && steps.ffi-gate.outputs.exists == 'true' && steps.gate.outputs.exists == 'false' }}
+      publish: ${{ (github.event_name == 'push' || github.event_name == 'workflow_run') && steps.ffi-diff.outputs.unreleased != 'true' && steps.ffi-gate.outputs.exists == 'true' && steps.gate.outputs.exists == 'false' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -94,33 +94,14 @@ jobs:
           echo "ffi_version=$FFI_VERSION" >> "$GITHUB_OUTPUT"
           echo "wrapper $VERSION, moq-ffi pin $FFI_VERSION"
 
+      # workflow_run is chained after Release Swift FFI, so its tag is published.
+      # PRs run it too, so the dry-run shows whether merging would publish.
       - name: Check for unreleased FFI changes
         id: ffi-diff
+        if: github.event_name != 'workflow_run'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          elif [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            if git diff --quiet "$BASE_SHA"...HEAD -- rs/moq-ffi; then
-              echo "changed=false" >> "$GITHUB_OUTPUT"
-            else
-              echo "changed=true" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            TAG="moq-ffi-v${{ steps.version.outputs.ffi_version }}"
-            if ! git rev-parse --verify --quiet "refs/tags/${TAG}" >/dev/null; then
-              echo "::warning::missing local tag ${TAG}; deferring to the Release Swift FFI chain."
-              echo "changed=true" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            if git diff --quiet "$TAG" HEAD -- rs/moq-ffi; then
-              echo "changed=false" >> "$GITHUB_OUTPUT"
-            else
-              echo "::warning::moq-ffi has unreleased changes; deferring to the Release Swift FFI chain."
-              echo "changed=true" >> "$GITHUB_OUTPUT"
-            fi
-          fi
+          FFI_VERSION: ${{ steps.version.outputs.ffi_version }}
+        run: .github/scripts/release.sh ffi-unreleased "$FFI_VERSION"
 
       - name: Check FFI mirror tag
         id: ffi-gate
@@ -129,7 +110,7 @@ jobs:
         run: .github/scripts/release.sh git-tag-exists moq-dev/moq-swift-ffi "$FFI_VERSION"
 
       - name: Unpublished FFI notice
-        if: steps.ffi-diff.outputs.changed != 'true' && steps.ffi-gate.outputs.exists != 'true' && github.event_name != 'pull_request'
+        if: steps.ffi-diff.outputs.unreleased != 'true' && steps.ffi-gate.outputs.exists != 'true' && github.event_name != 'pull_request'
         env:
           FFI_VERSION: ${{ steps.version.outputs.ffi_version }}
         run: echo "::warning::moq-swift-ffi ${FFI_VERSION} is not published; deferring to the Release Swift FFI chain."
@@ -170,7 +151,7 @@ jobs:
 
       - name: Check FFI mirror tag
         id: ffi
-        if: needs.build.outputs.publish == 'true' || (github.event_name == 'pull_request' && needs.build.outputs.ffi_changed != 'true')
+        if: needs.build.outputs.publish == 'true' || (github.event_name == 'pull_request' && needs.build.outputs.ffi_unreleased != 'true')
         env:
           FFI_VERSION: ${{ needs.build.outputs.ffi_version }}
         # Treat a missing mirror repo / unreachable remote as "not published"
@@ -193,11 +174,11 @@ jobs:
         run: ./swift/scripts/verify.sh --tarball "artifacts/moq-${BUILD_VERSION}-swift.tar.gz"
 
       - name: Skip notice
-        if: needs.build.outputs.ffi_changed == 'true'
+        if: needs.build.outputs.ffi_unreleased == 'true'
         run: echo "::notice::moq-ffi has unreleased changes; skipping the published-package cross-resolve and deferring wrapper publication to the FFI release chain."
 
       - name: Unpublished FFI notice
-        if: (needs.build.outputs.publish == 'true' || github.event_name == 'pull_request') && needs.build.outputs.ffi_changed != 'true' && steps.ffi.outputs.exists != 'true'
+        if: (needs.build.outputs.publish == 'true' || github.event_name == 'pull_request') && needs.build.outputs.ffi_unreleased != 'true' && steps.ffi.outputs.exists != 'true'
         env:
           FFI_VERSION: ${{ needs.build.outputs.ffi_version }}
         run: echo "::notice::moq-swift-ffi ${FFI_VERSION} not published yet; skipping cross-package resolve."
