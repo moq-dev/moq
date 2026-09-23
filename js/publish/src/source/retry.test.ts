@@ -33,6 +33,7 @@ class FakeMediaDevices extends EventTarget {
 
 	// getUserMedia rejects, the way it does once the last device is gone.
 	missing = false;
+	denied = false;
 
 	// Hand back an already-dead track, the way a device that vanished mid-call would.
 	bornDead = false;
@@ -50,6 +51,7 @@ class FakeMediaDevices extends EventTarget {
 
 	async getUserMedia(): Promise<MediaStream> {
 		this.attempts += 1;
+		if (this.denied) throw new DOMException("Permission denied", "NotAllowedError");
 		if (this.missing) throw new Error("NotFoundError");
 
 		const track = new FakeTrack();
@@ -173,6 +175,33 @@ function published(media: Media | undefined): unknown {
 	const source = media?.audio ?? media?.video;
 	if (!source) return undefined;
 	return "track" in source ? source.track : source;
+}
+
+for (const [kind, create] of [
+	["camera", (enabled: Signal<boolean>) => new Camera({ enabled })],
+	["microphone", (enabled: Signal<boolean>) => new Microphone({ enabled })],
+] as const) {
+	test(`${kind} reports a refusal and stops retrying until capture is reset`, async () => {
+		using media = install(new FakeMediaDevices());
+		media.denied = true;
+		const enabled = new Signal(true);
+		const source = create(enabled);
+		await settle();
+
+		expect(source.out.error.peek()?.name).toBe("NotAllowedError");
+		expect(source.out.source.peek()).toBeUndefined();
+		await new Promise((resolve) => setTimeout(resolve, Retry.DELAY.max + QUIET_MARGIN));
+		expect(media.attempts).toBe(1);
+
+		media.denied = false;
+		enabled.set(false);
+		await settle();
+		expect(source.out.error.peek()).toBeUndefined();
+		enabled.set(true);
+		await waitUntil(() => source.out.source.peek() !== undefined);
+		expect(media.attempts).toBe(2);
+		source.close();
+	});
 }
 
 test("a microphone re-opens when its track dies", async () => {
@@ -321,8 +350,8 @@ test(
 		const mic = new Microphone({ enabled: true, constraints: { channelCount: 99 } });
 		await settle();
 
-		// Spend the whole budget. The fake ignores constraints, so `missing` is what makes every
-		// attempt fail; the constraint edit only moves the settings the budget is keyed to.
+		// The fake ignores constraints, so `missing` causes a terminal failure. The next
+		// constraint edit is new intent and reopens the capture.
 		media.missing = true;
 		mic.constraints.set({ channelCount: 98 });
 		await waitSpent(media);

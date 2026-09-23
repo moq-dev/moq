@@ -97,7 +97,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 - [Binary stats](/quest/m0/stats-binary/README.md) - an allocation-free stats tick and an on-demand FlatBuffers `.fb.z` flavor with a checked-in schema
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
 - [A/V clock](/quest/m0/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
-- [Capture denial](/quest/m0/browser-permission-qa.md) - moq-publish surfaces a refused camera or microphone instead of retrying forever, and recovers on grant
 
 ## Related
 
