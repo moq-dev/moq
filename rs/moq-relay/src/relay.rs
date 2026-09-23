@@ -695,6 +695,7 @@ async fn shutdown_signal() -> anyhow::Result<()> {
 ///
 /// The accept loop for a single [`moq_tokio::Server`]. [`Relay::run`] owns
 /// worker selection and shutdown for embedders.
+#[cfg(feature = "_quic")]
 async fn serve(
 	server: moq_tokio::Server,
 	cluster: cluster::Cluster,
@@ -702,8 +703,8 @@ async fn serve(
 	shutdown: shutdown::Observer,
 	sessions: crate::session::Registry,
 ) -> anyhow::Result<()> {
-	// External callers still bind through this entry point; Relay::run binds
-	// before readiness and passes the listener to the same accept loop.
+	// Each QUIC worker binds here; Relay::run binds the shared listener before
+	// readiness and passes it to the same accept loop.
 	let listener = server.listen().await.context("failed to bind listeners")?;
 	serve_listening(listener, cluster, auth, shutdown, sessions).await
 }
