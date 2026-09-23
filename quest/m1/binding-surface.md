@@ -19,11 +19,13 @@ fallback settings. moq.pro's Python sidecar reads route sources from here.
   additive, so `cpp/obs/src` and `doc/bin/obs.md` change only if OBS uses them.
 - Update `doc/lib/{py,swift,kt,go,dart,c}` in the same PR.
 - Test each surface in every wrapper that has tests.
-- This adds methods in today's flat FFI shape; FFI shape (#3976) reshapes
-  them later.
 
 ## Required
 
 - Native decode delay (#3967) has merged
 - Route source (#3972) has merged
 - moq-ffi WebSocket fallback settings (#3961) have merged
+
+## Related
+
+- [FFI shape](/quest/m1/ffi-shape/README.md) - reshapes the flat methods this adds
