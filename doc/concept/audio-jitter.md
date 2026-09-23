@@ -37,7 +37,17 @@ frame:
 | Native | `container::Consumer::read()`, awaited by `moq-audio`'s decode consumer |
 
 Both sit below the decoder and above nothing: no reordering, no gap handling, no
-age budget. A frame dropped by the relay is never observed, which is correct.
+age budget.
+
+Natively that holds only as far as the caller lets it. The container consumer
+reads groups in sequence order and applies its age budget inside `read()`, so a
+group skipped for age is never observed, and a frame queued behind a stalled
+group is observed when the stall clears. A caller that estimates keeps the budget
+at least as long as the estimate's ceiling, which is why `moq play` waits 2 s on
+a stalled group under `--delay auto`. The observation is also only as honest as
+the caller is prompt: `read()` is timed when it resolves, so a player drains it
+as packets come and lets the playback buffer hold the target, rather than
+pacing reads to the speaker. A frame dropped by the relay is never observed, which is correct.
 A frame the container will later discard *is* observed, which is also correct:
 it arrived, and when it arrived is the measurement.
 

@@ -57,7 +57,7 @@ pub fn run(
 		.context("failed to create the playback event loop")?;
 	let proxy = event_loop.create_proxy();
 	let video = Arc::new(Mutex::new(VecDeque::new()));
-	let presentation = Arc::new(Mutex::new(Presentation::new(args.delay.into_std())));
+	let presentation = Arc::new(Mutex::new(Presentation::new(args.video_delay())));
 	// Signals the decoder that the presenter took a frame, so it can hand over
 	// the next one instead of dropping it.
 	let drained = Arc::new(tokio::sync::Notify::new());
