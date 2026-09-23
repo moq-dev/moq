@@ -26,6 +26,13 @@ AUTH can carry the full grant once the pattern-interest prerequisite lands.
   extras use the session's `auth().add()` once connected. moq-ffi
   `MoqClient::set_tokens`, libmoq `moq_client_set_tokens` (mirrored in the
   wrappers and `cpp/obs/src`), and `js/net`'s `connect` options field follow.
+- Credential refresh belongs with token presentation. Resolve the configured
+  credential source before each dial. After an authorization refusal, resolve
+  it once more and retry only when the credential changed; do not loop on a
+  rejected credential. On an AUTH-capable session, replace a token through
+  its own AUTH stream so the accepted grant union remains live. Keep `?jwt=`
+  as the fallback for peers without AUTH. Choose the public credential-source
+  API while implementing this quest.
 - Presenting: WebTransport negotiates the moq version as a subprotocol of
   the CONNECT request that carries the URL, so the client cannot wait to
   learn whether the peer speaks AUTH. The client copies the first configured
