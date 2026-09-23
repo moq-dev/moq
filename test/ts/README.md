@@ -204,7 +204,7 @@ different moment, separates them.
 
 ```bash
 just test ts --pair                      # round-trip twice, grade the pair
-just test ts --pair --pair-join 20       # join the second leg 20s in
+just test ts --pair --pair-join 20 --duration 60   # join the second leg 20s in
 ./table-anchor.py a.ts b.ts              # grade two captures you already have
 ```
 
@@ -212,6 +212,14 @@ The second subscriber joins late on purpose. Two exporters started together can
 agree on a cadence by having started together, which is the confound; a leg that
 joins mid-broadcast has to derive its emission points from the media, because it
 has no shared history to derive them from.
+
+**What gets graded is the overlap, not the run**, so `--pair` defaults to a 45 s
+duration rather than the 20 s the other arms use, and refuses a run leaving less
+than 25 s of it. At 20 s with a 5 s join the legs share 15 s, which is about
+seven SDT emissions against a floor of eight — the table this mode exists to
+check would quietly drop to report-only. Raise `--duration` when you raise
+`--pair-join`. `--pair` cannot be combined with `--live`: they grade different
+things.
 
 The measurement is the PTS of the frame each table was emitted against. `export
 ts` writes the tables that are due and then the frame's PES packets into one
@@ -225,8 +233,17 @@ broadcast.
 |---|---|
 | `--min-agreement` | percent of shared emission points required per table (default 90) |
 | `--min-emissions` | a table with fewer emissions in the overlap is reported, not graded (default 8) |
+| `--min-window` | seconds of shared media required before any verdict is given (default 20) |
 | `--strict` | fail on report-only tables too |
 | `--report-json` | write the full report |
+
+`--min-window` exists because a capture that came up short is the commonest way
+this grades clean: too little shared media puts the slower tables under the
+emission floor, and a table reported without a verdict reads as a pass. The
+window is taken from the media the two captures carry, **not** from the
+emissions being scored — deriving it from the emissions is itself a false pass,
+since a leg that stops emitting a table halfway through would pull the upper
+bound back to its own last emission and score its desertion as 100 %.
 
 Two things are deliberately not graded. A table seen on only one leg is reported
 without a verdict, because that is a carriage question rather than an anchoring

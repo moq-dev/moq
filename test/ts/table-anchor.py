@@ -107,32 +107,59 @@ def parse_pts(pkt):
 
 
 def pmt_pids(path):
-    """PIDs the PAT maps a programme to, so a PMT is found rather than guessed."""
+    """PIDs the PAT maps a programme to, so a PMT is found rather than guessed.
+
+    Sections are reassembled across packets. A PAT carrying more than about forty
+    programmes does not fit in one packet, and stopping at the packet boundary would
+    silently find only the programmes that happened to land in the first one — which
+    on a full multiplex is a subset, with no error to say so.
+    """
     found = set()
+    section, want = bytearray(), 0
     for pkt in packets(path):
-        if pid_of(pkt) != 0x0000 or not pkt[1] & 0x40:
+        if pid_of(pkt) != 0x0000:
             continue
         off = payload_offset(pkt)
         if off is None or off >= PKT:
             continue
-        off += 1 + pkt[off]  # pointer_field
-        if off + 8 > PKT or pkt[off] != 0x00:  # table_id 0x00 = PAT
+        if pkt[1] & 0x40:  # payload_unit_start: a section begins here
+            off += 1 + pkt[off]  # pointer_field
+            if off >= PKT or pkt[off] != 0x00:  # table_id 0x00 = PAT
+                section, want = bytearray(), 0
+                continue
+            section = bytearray(pkt[off:])
+            want = 0
+        elif section:
+            section += pkt[off:]
+        else:
             continue
-        length = ((pkt[off + 1] & 0x0F) << 8) | pkt[off + 2]
-        body, end = off + 8, min(off + 3 + length - 4, PKT)
+        if not want:
+            if len(section) < 3:
+                continue
+            want = 3 + (((section[1] & 0x0F) << 8) | section[2])
+        if len(section) < want:
+            continue
+        body, end = 8, want - 4  # past the section header, stopping before the CRC
         while body + 4 <= end:
-            program = (pkt[body] << 8) | pkt[body + 1]
-            pid = ((pkt[body + 2] & 0x1F) << 8) | pkt[body + 3]
+            program = (section[body] << 8) | section[body + 1]
+            pid = ((section[body + 2] & 0x1F) << 8) | section[body + 3]
             if program != 0:  # programme 0 is the NIT, not a PMT
                 found.add(pid)
             body += 4
+        section, want = bytearray(), 0
     return found
 
 
 def anchors(path, pmts):
-    """For each table PID, the frame PTS values at which it was emitted."""
+    """Frame PTS values each table was emitted at, and the capture's media bounds.
+
+    The bounds are returned alongside because the scoring window has to come from
+    the media the capture covers, not from the emissions themselves — see
+    `agreement()`.
+    """
     out = defaultdict(list)
     pending = []
+    lo = hi = None
     watched = set(WELL_KNOWN) | pmts
     for pkt in packets(path):
         pid = pid_of(pkt)
@@ -143,11 +170,15 @@ def anchors(path, pmts):
                 pending.append(pid)
             continue
         pts = parse_pts(pkt)
-        if pts is not None and pending:
+        if pts is None:
+            continue
+        lo = pts if lo is None or pts < lo else lo
+        hi = pts if hi is None or pts > hi else hi
+        if pending:
             for table in pending:
                 out[table].append(pts)
             pending = []
-    return out
+    return out, (lo, hi)
 
 
 def name(pid, pmts):
@@ -156,20 +187,23 @@ def name(pid, pmts):
     return f"PMT {pid:#06x}" if pid in pmts else f"PID {pid:#06x}"
 
 
-def agreement(a_pts, b_pts):
+def agreement(a_pts, b_pts, window):
     """Share of emission points the legs share, over the media time they both cover.
 
-    Returns None when the legs do not overlap in media time at all, which is a
+    The window is the media both captures carry, and it must come from the captures
+    rather than from the emissions being scored. Deriving it from the emissions
+    instead is a false pass: a leg that stops emitting a table halfway through pulls
+    the upper bound back to its own last emission, so the partner's later emissions
+    fall outside the window and the desertion scores 100 %.
+
+    Returns None when the captures do not overlap in media time at all, which is a
     different answer from "they overlap and disagree" and must not be scored as 0.
     """
-    sa, sb = set(a_pts), set(b_pts)
-    if not sa or not sb:
+    lo, hi = window
+    if lo is None or hi is None or lo > hi:
         return None
-    lo, hi = max(min(sa), min(sb)), min(max(sa), max(sb))
-    if lo > hi:
-        return None
-    oa = {t for t in sa if lo <= t <= hi}
-    ob = {t for t in sb if lo <= t <= hi}
+    oa = {t for t in a_pts if lo <= t <= hi}
+    ob = {t for t in b_pts if lo <= t <= hi}
     union = oa | ob
     if not union:
         return None
@@ -243,20 +277,47 @@ def main():
         default=8,
         help="a table with fewer emissions in the overlap is reported, not graded (default 8)",
     )
+    ap.add_argument(
+        "--min-window",
+        type=float,
+        default=20.0,
+        help="seconds of shared media required before any verdict is given (default 20)",
+    )
     ap.add_argument("--strict", action="store_true", help="fail on shape checks too")
     ap.add_argument("--report-json", help="write the full report here")
     args = ap.parse_args()
 
     pmts = pmt_pids(args.a) | pmt_pids(args.b)
-    a, b = anchors(args.a, pmts), anchors(args.b, pmts)
+    a, (a_lo, a_hi) = anchors(args.a, pmts)
+    b, (b_lo, b_hi) = anchors(args.b, pmts)
     if not a and not b:
         print("error: neither capture carries a table on a known PID", file=sys.stderr)
+        return 1
+    if None in (a_lo, a_hi, b_lo, b_hi):
+        print("error: a capture carries no PTS, so there is no media time to compare in", file=sys.stderr)
+        return 1
+    # The media both captures carry. Every table is scored inside this one window, so a
+    # table one leg abandons is scored against the partner's emissions rather than
+    # silently shrinking the window to hide them.
+    window = (max(a_lo, b_lo), min(a_hi, b_hi))
+    shared_s = (window[1] - window[0]) / 90000.0
+    print(f"### shared media window: {shared_s:.1f}s")
+    # A window too short to carry the slower tables would put them under the emission
+    # floor and report them without a verdict, which reads as a pass. Refuse the run
+    # instead: a capture that came up short is the commonest way this grades clean.
+    if shared_s < args.min_window:
+        print(
+            f"error: the captures share only {shared_s:.1f}s of media, below the "
+            f"{args.min_window:.0f}s needed for a verdict",
+            file=sys.stderr,
+        )
+        print("  run for longer, join earlier, or lower --min-window deliberately", file=sys.stderr)
         return 1
 
     rows = []
     for pid in sorted(set(a) | set(b)):
         label = name(pid, pmts)
-        scored = agreement(a.get(pid, []), b.get(pid, []))
+        scored = agreement(a.get(pid, []), b.get(pid, []), window)
         if scored is None:
             rows.append((pid, label, len(a.get(pid, [])), len(b.get(pid, [])), None, None, "one leg only"))
             continue

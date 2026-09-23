@@ -63,7 +63,11 @@ PAIR=""     # subscribe twice and grade the two captures against each other
 # exporters started together can share a cadence by starting together, which is
 # exactly the thing under test.
 PAIR_JOIN="${TSC_PAIR_JOIN:-5}"
-PASSTHRU=() # forwarded to compliance.py (thresholds, --report-json, ...)
+# Shortest overlap worth a verdict, in seconds. Below this the slower tables fall under
+# the analyzer's emission floor and go report-only, which reads as a pass.
+PAIR_MIN_OVERLAP="${TSC_PAIR_MIN_OVERLAP:-25}"
+DURATION_SET="" # so pair mode can raise the default without overriding an explicit --duration
+PASSTHRU=()     # forwarded to compliance.py (thresholds, --report-json, ...)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -77,6 +81,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --duration)
             DURATION="$2"
+            DURATION_SET=1
             shift 2
             ;;
         --bitrate)
@@ -117,6 +122,25 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$PAIR" ]]; then
+    if [[ -n "$LIVE" ]]; then
+        echo "error: --live and --pair grade different things and cannot be combined" >&2
+        echo "  --live grades one exporter's release timing; --pair grades two exporters against each other" >&2
+        exit 1
+    fi
+    # The overlap, not the run, is what gets graded, and the default run is too short to
+    # produce one worth grading: at 20s with a 5s join the legs share 15s, which is about
+    # seven SDT emissions against a floor of eight, so the table this mode exists to check
+    # would quietly drop to report-only. Give pair mode its own default and check the
+    # arithmetic rather than letting a short window pass as a clean one.
+    [[ -n "$DURATION_SET" ]] || DURATION=45
+    if ((DURATION - PAIR_JOIN < PAIR_MIN_OVERLAP)); then
+        echo "error: --pair needs at least ${PAIR_MIN_OVERLAP}s of overlap; this run has $((DURATION - PAIR_JOIN))s" >&2
+        echo "  raise --duration above $((PAIR_JOIN + PAIR_MIN_OVERLAP)), or lower --pair-join" >&2
+        exit 1
+    fi
+fi
 
 URL="" # set once a port is reserved, below
 
