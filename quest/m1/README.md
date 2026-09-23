@@ -19,10 +19,10 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 
 - [Play harness](/quest/m1/play-harness.md) - moq play's tune-in, rendition-switch, and drain logic runs in per-PR CI without a device
 - [Missing fetch group](/quest/m1/fetch-missing-group.md) - HTTP /fetch answers 404 and `moq fetch` fails cleanly for a group the track lacks
-- [Auth expiry clock](/quest/m1/auth-expiry-clock.md) - moq-auth and the relay hold one fixed expiry deadline and honour the same skew allowance
 - [Hidden broadcasts](/quest/m1/hidden-broadcasts.md) - announce discovery skips `.`-named paths unless a request opts in over lite-07 or an IETF parameter, so older clients (bar authenticated cluster peers during rollout) never see them
 - [Origin narrowing](/quest/m1/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
 - [Auth embedder](/quest/m1/auth-embedder.md) - the lease owns its re-check clock, a gateway session holds a lease, and `Cluster::admit` scopes and tags origins in one call
+- [Auth expiry clock](/quest/m1/auth-expiry-clock.md) - moq-auth and the relay hold one fixed expiry deadline and honour the same skew allowance
 - [Binding surface](/quest/m1/binding-surface.md) - moq-ffi, libmoq, and every wrapper expose the decode delay, route source, and connection timing
 - [Binding docs](/quest/m1/binding-docs.md) - every binding doc sample names a symbol that exists, checked nightly
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, audio, and video namespaces built from the handle below
