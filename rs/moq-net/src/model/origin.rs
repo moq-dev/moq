@@ -797,7 +797,7 @@ struct RemoteFront {
 	/// unresolved). The producer lives here so the teardown can reject requesters
 	/// still parked on a front whose watcher was cancelled.
 	request: kio::Producer<PendingBroadcast>,
-	/// The front's spliced broadcast, weak: dead once its watcher exits, so a
+	/// The front's spliced broadcast, weak: dead once the front ends, so a
 	/// later request re-creates the front instead of joining a corpse.
 	broadcast: broadcast::WeakConsumer,
 }
@@ -1813,7 +1813,7 @@ async fn run_front(task: FrontTask) {
 
 	events.push_back(select(&mut front, &sources, &mut seen));
 
-	loop {
+	let err = 'serve: loop {
 		while let Some(event) = events.pop_front() {
 			for action in front.step(event) {
 				match action {
@@ -2017,14 +2017,7 @@ async fn run_front(task: FrontTask) {
 						}
 					}
 					Action::Arm { at } => deadline.set(at),
-					Action::End { err } => {
-						if let Ok(mut pending) = request.write() {
-							pending.resolved.get_or_insert(Err(err.clone()));
-						}
-						broadcast.abort_spliced(err);
-						broadcast.finish();
-						return;
-					}
+					Action::End { err } => break 'serve err,
 				}
 			}
 		}
@@ -2184,7 +2177,61 @@ async fn run_front(task: FrontTask) {
 			Step::Table => select(&mut front, &sources, &mut seen),
 		};
 		events.push_back(event);
+	};
+
+	if let Ok(mut pending) = request.write() {
+		pending.resolved.get_or_insert(Err(err.clone()));
 	}
+	// Closed to new requesters and new tracks: a newcomer at the path gets a
+	// fresh front. The tracks already handed out drain below.
+	broadcast.finish();
+	broadcast.abort_unassigned(err.clone());
+	drop((sources, upstream, watch));
+	drain(tracks, err).await;
+}
+
+/// End the logical tracks of a front that is over. A track still read concludes
+/// with the copy it is spliced from, cleanly or with that copy's error, so a
+/// subscription in flight gets everything its source sent (moq-lite: retraction
+/// does not disturb subscriptions already in flight). The rest abort with `err`.
+async fn drain(tracks: HashMap<Arc<str>, TrackIo>, err: Error) {
+	let mut draining = Vec::new();
+	for (name, mut io) in tracks {
+		// A warm copy is a cache of a track nobody read, not its source.
+		let copy = io.warm.is_none().then(|| io.resume.current()).flatten();
+		match copy {
+			Some(copy) if io.resume.is_used() => draining.push((name, io.resume, copy)),
+			_ => {
+				let _ = io.resume.abort(err.clone());
+			}
+		}
+	}
+
+	kio::wait(|waiter| {
+		draining.retain_mut(|(name, resume, copy)| {
+			if let Poll::Ready(result) = copy.poll_complete(waiter) {
+				let _ = match result {
+					Ok(()) => resume.finish(),
+					Err(err) => {
+						tracing::debug!(name = %name, %err, "aborting track");
+						resume.abort(err)
+					}
+				};
+				return false;
+			}
+			// Nobody is left to drain it: stop holding the copy's subscription.
+			if resume.poll_unused(waiter).is_ready() {
+				let _ = resume.abort(err.clone());
+				return false;
+			}
+			true
+		});
+		match draining.is_empty() {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}
+	})
+	.await
 }
 
 /// The announced routes, keyed by prefix: a trie with one node per path
@@ -4772,7 +4819,7 @@ mod tests {
 		subscription: track::Subscriber,
 		/// Keeps the incumbent's track producing; dropping it would abort the
 		/// track out from under the front mid-test.
-		_incumbent_track: track::Producer,
+		incumbent_track: track::Producer,
 	}
 
 	impl ResumeRig {
@@ -4815,7 +4862,7 @@ mod tests {
 					producer,
 					resolved,
 					subscription,
-					_incumbent_track: track,
+					incumbent_track: track,
 				},
 				server,
 				source,
@@ -4930,8 +4977,11 @@ mod tests {
 		// Another publisher entirely: same path, different first hop.
 		let rival_server = rig.standby(&[11]);
 
+		// The incumbent's session dies, taking its track with it: a live copy
+		// would otherwise keep draining after the front ends.
 		drop(incumbent);
 		drop(source);
+		rig.incumbent_track.abort(Error::Dropped).unwrap();
 
 		// The subscription ends rather than splicing onto the rival's frames.
 		let err = rig.subscription.recv_group().await.err().expect("subscription ends");
@@ -4955,6 +5005,7 @@ mod tests {
 
 		drop(incumbent);
 		drop(source);
+		rig.incumbent_track.abort(Error::Dropped).unwrap();
 
 		let err = rig.subscription.recv_group().await.err().expect("subscription ends");
 		assert!(matches!(err, Error::Dropped), "unexpected end: {err}");

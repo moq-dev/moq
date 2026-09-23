@@ -388,6 +388,12 @@ impl Producer {
 		self.state.read().resume_position()
 	}
 
+	/// The track the newest segment reads: where the logical track ends if no
+	/// route takes it over.
+	pub(crate) fn current(&self) -> Option<track::Consumer> {
+		self.state.read().segments.last().map(|segment| segment.track.clone())
+	}
+
 	/// Mark the logical track as complete: no further switches. Subscribers see a
 	/// clean end once the final segment's track finishes.
 	pub fn finish(&mut self) -> Result<()> {
