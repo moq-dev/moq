@@ -2,32 +2,40 @@
 
 ## Goal
 
-A Rust consumer of `origin::Consumer::announced()` learns, once, that the
-routes live at subscribe time have all been delivered, so "list what is live"
-needs no guess. Today the stream replays the current routes and continues live
-with no boundary, and moq-cli's `--broadcast` completion
-(`rs/moq-cli/src/complete.rs`) stops on a 30ms settle / 500ms budget timer
-instead.
+A Rust consumer of `origin::Consumer::announced()` is told, once and in
+order, that the routes live at subscribe time have all been delivered, so
+"list what is live" needs no guess. Today the stream replays the current
+routes and continues live with no boundary, and moq-cli's `--broadcast`
+completion (`rs/moq-cli/src/complete.rs`) stops on a 30ms settle / 500ms
+budget timer instead.
 
 ## Plan
 
-- The fact is per announce producer, but consumers read a merged origin. Each
-  producer (a session's subscriber, a cluster peer) reports when its initial
-  set has landed; an in-process producer is caught up immediately. The
-  consumer's caught-up signal fires once every producer present at subscribe
-  time has reported. A producer that closes before reporting drops out of
-  the pending set, so a dead session cannot stall the signal. The API shape (an event kind, an awaitable, or a flag) is
-  the implementer's call; propose it in the PR.
-- The wire already carries the boundary: `AnnounceOk.active` on lite-05+ and
-  `AnnounceInit` on lite-01/02. Versions without one (lite-03/04, IETF) fall
-  back to the settle timer completion uses today, owned in one place rather
-  than by each caller.
-- Move completion onto the signal; the timer survives only for marker-less
-  versions.
-- Test: a relay with N announced broadcasts signals caught up after exactly N
-  updates on each lite version that carries a count, and an empty relay
-  signals immediately, and a session that closes before its count arrives
-  does not block the signal.
+- `AnnounceConsumer::next()` yields an enum: each route update as today,
+  then a single `Live` marker once the initial set has been delivered, then
+  live updates. `Live` comes after every replayed update, so a caller that
+  stops at it has seen the whole set. This changes a published return type,
+  so the quest lands on `dev`.
+- The fact is per source, but consumers read a merged origin, which today
+  has no source registry. Each remote announce subscription (a session's
+  subscriber, a cluster peer) holds a pending guard from the origin until
+  its initial set has landed; in-process routes are replayed synchronously
+  and are never pending. A cursor yields `Live` once every guard pending at
+  subscribe time has cleared. A source that closes before clearing drops
+  its guard, so a dead session cannot stall the marker. No cost while no
+  guard is pending.
+- A source clears on the wire's boundary: `AnnounceOk.active` on lite-05+,
+  `AnnounceInit` on lite-01/02. Versions without one (lite-03/04, IETF)
+  clear on a settle timer owned by the session, the one place it lives.
+- Move completion onto `Live`; the timer survives only in the session for
+  marker-less versions. Look at the other settle and deadline loops
+  (`moq-bench` startup, relay cluster discovery, test `settle()` helpers)
+  and move any that want the initial set.
+- Test: a relay with N announced broadcasts yields `Live` after exactly N
+  updates on each lite version that carries a count, an empty relay yields
+  it immediately, and a session that closes before its count arrives does
+  not block it.
 
-Public API: additive on moq-net. Wire: none. JS parity is
-[a separate quest](/quest/next/js-announce-caught-up.md).
+Public API: breaking on moq-net (`next()` returns an enum). Wire: none. JS
+parity is [a separate quest](/quest/next/js-announce-caught-up.md), and an
+IETF count is [another](/quest/next/ietf-announce-count.md).
