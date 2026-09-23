@@ -127,7 +127,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [#3489](/quest/m1/3489-ts-import-stream-liveness.md) - moq import ts: every elementary stream reports its access units and how long it has been quiet
 - [SRT import stats](/quest/m1/srt-import-stats.md) - the SRT gateway reports the same per-stream counters instead of nothing
 - [Text availability](/quest/m1/text-schema.md) - a text track publishes its own coverage index instead of copying the media timeline
-- [SRT metadata parity](/quest/m1/srt-metadata.md) - the SRT publisher preserves MPEG-TS metadata byte-faithfully like the CLI importer
 - [ID3 catalog section](/quest/m1/id3.md) - timed ID3 as a first-class container-neutral catalog section
 - [fMP4 emsg](/quest/m1/emsg.md) - event messages survive fMP4 import, and the timed-metadata contract ID3, SCTE-35, and FLV script tags share is settled with them
 - [FLV script tags](/quest/m1/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
