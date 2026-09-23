@@ -34,9 +34,11 @@ members = [
     "rs/moq-tokio",
     "rs/moq-transcode",
     "rs/moq-uring",
+    "rs/moq-v4l",
     "rs/moq-video",
     "rs/moq-wasm",
     "rs/quest",
+    "rs/uniffi-bindgen",
 ]
 default-members = [
     "rs/kio",
@@ -72,9 +74,14 @@ default-members = [
     "rs/moq-tokio",
     "rs/moq-transcode",
     "rs/moq-uring",
+    "rs/moq-v4l",
     "rs/moq-video",
     # "rs/moq-wasm",  # wasm32-unknown-unknown target only
     "rs/quest",
+    # Maturin runs the workspace's `uniffi-bindgen` binary from the root to
+    # generate the Python wheel, and that only searches default members. A
+    # `cargo build -p moq-ffi` still never compiles it.
+    "rs/uniffi-bindgen",
 ]
 resolver = "2"
 
@@ -88,9 +95,9 @@ ignored = ["getrandom"]
 # it to 1.95 (sysinfo 0.39), and moq-cli does too because it depends on that
 # library. Those crates are applications; the point of the per-crate override
 # is to keep the bump off the libraries others actually build on. The nix flake
-# / rust-toolchain.toml pin the build toolchain to 1.95 (so the whole workspace
-# including the relay compiles) rather than latest stable, which keeps the
-# relay's ceiling from creeping up unnoticed.
+# / rust-toolchain.toml pin the build toolchain to a fixed version rather than
+# latest stable, which keeps the relay's ceiling from creeping up unnoticed.
+# That pin sits above every MSRV here; rust-toolchain.toml says why.
 rust-version = "1.91"
 
 [workspace.dependencies]
@@ -100,6 +107,7 @@ aws-lc-rs = "1"
 axum = { version = "0.8", features = ["tokio"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.23"
+bitflags = "2"
 block2 = "0.6.2"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
@@ -165,6 +173,10 @@ moq-transcode = { version = "0.0.19", path = "rs/moq-transcode", default-feature
 # stack the io_uring path compiles; cargo features are additive, so a default-on
 # backend could not be opted out of.
 moq-uring = { version = "0.0.1", path = "rs/moq-uring", default-features = false }
+# In-tree fork of `v4l` with the videodev2.h bindings checked in, so moq-video's
+# `capture` and `v4l2` need no libclang or kernel headers. Linux only; an empty
+# stub elsewhere.
+moq-v4l = { version = "0.0.1", path = "rs/moq-v4l" }
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 # dlopen's libva at runtime (no libva-dev at build, no NEEDED libva in the binary).
 moq-vaapi = "0.0.4"
@@ -212,6 +224,9 @@ tower-http = { version = "0.7", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tracing-test = "0.2"
+# The runtime pin and the bindgen CLI pin must not drift; the `uniffi-bindgen`
+# package owns the `cli` feature, moq-ffi the rest.
+uniffi = "0.32"
 url = "2"
 usage = { package = "usage-rs", version = "6.3.0" }
 uuid = { version = "1.26", features = ["v7"] }

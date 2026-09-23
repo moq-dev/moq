@@ -34,9 +34,8 @@ That is why `vaapi` is off by default while `nvidia` is on. Commit the
 generated bindings to the crate and drop the build script and the bindgen
 dependency, as `moq-nvenc` does: the output is portable (layout tests off,
 fixed-width types, `c_char` left symbolic), so one checked-in file serves
-every Linux target. Then the feature can return to default-on here. The
-`v4l2` feature has the same shape, but its bindgen lives in the third-party
-`v4l` crate, so that is a separate decision.
+every Linux target, as `moq-v4l` already does for `videodev2.h`. Then the
+feature can return to default-on here.
 
 Note what is already fine: a host with libva present but no usable VA driver
 already falls back cleanly, since `Encoder::new` returns `Err` and

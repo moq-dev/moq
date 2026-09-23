@@ -17,7 +17,7 @@ spread, and one is nominated as the clock source. `SyncInput`
 (`js/watch/src/sync.ts:21-46`, today `delay`, `buffer`, `probe`, `audio`,
 `video`) breaks once, and a third track joins without another pair of inputs.
 The measured spread per track comes from
-[Watch](/quest/next/audio-jitter-target/watch.md); its branch carries flat
+[Watch](/quest/main/audio-jitter-target/watch.md); its branch carries flat
 `audioSpread` and `videoSpread` inputs in place of `probe`, which this quest
 folds into the handles. `SyncInput` is a published `@moq/watch` shape, so
 the break lands on dev.
@@ -42,9 +42,9 @@ Recommendations for the implementation:
 
 ## Required
 
-- [Watch](/quest/next/audio-jitter-target/watch.md) - lands the per-track spread inputs this shape carries
+- [Watch](/quest/main/audio-jitter-target/watch.md) - lands the per-track spread inputs this shape carries
 
 ## Related
 
-- [Audio jitter target](/quest/next/audio-jitter-target/README.md) - the estimator this sits on
+- [Audio jitter target](/quest/main/audio-jitter-target/README.md) - the estimator this sits on
 - [Time stretch](/quest/next/watch-audio-time-stretch.md) - stretching needs a clock to converge toward

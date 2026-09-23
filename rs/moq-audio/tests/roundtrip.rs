@@ -77,7 +77,9 @@ async fn opus_round_trip_48k_stereo() {
 	{
 		let pcm: Vec<f32> = frame
 			.data
-			.chunks_exact(4)
+			.as_chunks::<4>()
+			.0
+			.iter()
 			.map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
 			.collect();
 		total_frames += pcm.len() as u64 / 2;
@@ -193,7 +195,9 @@ async fn pcm_round_trip_is_lossless() {
 	assert_eq!(frame.timestamp, Timestamp::from_micros(123_000).unwrap());
 	let decoded: Vec<f32> = frame
 		.data
-		.chunks_exact(4)
+		.as_chunks::<4>()
+		.0
+		.iter()
 		.map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
 		.collect();
 	assert_eq!(decoded, samples);

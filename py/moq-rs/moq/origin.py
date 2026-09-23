@@ -136,10 +136,19 @@ class BroadcastRequest:
 
 
 class OriginDynamic:
-    """A served route: advertises a prefix and yields requests beneath it."""
+    """A served route: advertises a prefix and yields requests beneath it.
+
+    Usable as an async context manager that cancels the route on exit.
+    """
 
     def __init__(self, inner: MoqOriginDynamic) -> None:
         self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
 
     def __aiter__(self):
         return self
@@ -188,9 +197,9 @@ class OriginConsumer:
 
         Resolution order: a local broadcast at the exact path, then the best
         announced route covering the path (served on demand by the session that
-        announced it), then a dynamic handler on the origin (if any); raises if
-        nothing can serve it. Unlike `announced_broadcast`, this does not wait
-        for a future announcement.
+        announced it), then a dynamic handler on the origin (if any). Unlike
+        `announced_broadcast`, this answers for what is reachable now and raises
+        if nothing can serve the path.
         """
         return BroadcastConsumer(await self._inner.request_broadcast(path))
 

@@ -1,6 +1,9 @@
 [toolchain]
-# Pinned to the build toolchain: moq-relay's 1.95 (the highest crate MSRV), so
-# the whole workspace compiles. NOT the 1.91 workspace library floor in
-# Cargo.toml. Keep in sync with flake.nix / nix/overlay.nix.
-channel = "1.95.0"
+# Pinned to the build toolchain, NOT the 1.91 workspace library floor or the
+# 1.95 relay MSRV in Cargo.toml. It has to be at least 1.98: below that, rustc
+# strips Mach-O debuginfo with an llvm-objcopy that leaves the LINKEDIT string
+# pool 4-byte aligned, and macOS 27's dyld refuses to load such an image. That
+# makes every release-profile proc macro and cdylib (moq-ffi, moq-gst) a coin
+# flip there. Keep in sync with flake.nix / nix/overlay.nix.
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]

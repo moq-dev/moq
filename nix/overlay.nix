@@ -2,13 +2,12 @@
 { crane }:
 final: prev:
 let
-  # Pin crane to the workspace MSRV (Cargo.toml rust-version /
-  # rust-toolchain.toml) so `nix build` uses the same toolchain as
-  # `nix develop` and release artifacts build with the version CI verifies.
-  # Without an explicit toolchain, crane falls back to `final.rustc`/
-  # `final.cargo`, which nixpkgs resolves to its own default Rust.
+  # Pin crane to the same build toolchain as rust-toolchain.toml / flake.nix so
+  # `nix build` uses what `nix develop` does and release artifacts build with
+  # the version CI verifies. Without an explicit toolchain, crane falls back to
+  # `final.rustc`/`final.cargo`, which nixpkgs resolves to its own default Rust.
   #
-  rustToolchain = final.rust-bin.stable."1.95.0".default;
+  rustToolchain = final.rust-bin.stable."1.98.1".default;
   craneLib = (crane.mkLib final).overrideToolchain rustToolchain;
 
   # Helper function to get crate info from Cargo.toml
@@ -145,10 +144,10 @@ let
     doCheck = false;
     nativeBuildInputs = with final; [
       pkg-config
-      # libmoq is the only nix-built package that pulls moq-video, and on Linux
-      # that brings v4l -> v4l2-sys-mit, whose build.rs runs bindgen over
-      # <linux/videodev2.h>. Sets LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS so it
-      # finds libclang and the libc headers, same as the devShell in flake.nix.
+      # libmoq is the only nix-built package that pulls moq-video, and its `vaapi`
+      # feature brings moq-vaapi, whose build.rs runs bindgen over its vendored
+      # libva headers. Sets LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS so it finds
+      # libclang and the libc headers, same as the devShell in flake.nix.
       rustPlatform.bindgenHook
     ];
 

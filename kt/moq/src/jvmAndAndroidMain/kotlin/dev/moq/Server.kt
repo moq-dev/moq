@@ -9,16 +9,13 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.launch
 import uniffi.moq.MoqException
-import uniffi.moq.MoqOriginConfig
-import uniffi.moq.MoqOriginProducer
-import uniffi.moq.MoqRequest
 import uniffi.moq.MoqServer
 
 /**
  * A listening MoQ server with publish/subscribe conveniences.
  *
  * Build one with [Server.listen]. Broadcasts created via [createBroadcast] are
- * served to incoming sessions, and [requests] streams each incoming [MoqRequest]
+ * served to incoming sessions, and [requests] streams each incoming [Request]
  * for the caller to accept or reject.
  *
  * [Server] is [AutoCloseable]; `use { ... }` (or [close]) stops accepting new
@@ -30,7 +27,7 @@ class Server internal constructor(
     val server: MoqServer,
     /** The bound local address, e.g. `127.0.0.1:4443`. Resolved by [listen]. */
     val localAddr: String,
-    private val publishOrigin: MoqOriginProducer?,
+    private val publishOrigin: OriginProducer?,
 ) : AutoCloseable {
     /**
      * Create a live broadcast at [path], served to incoming sessions.
@@ -53,13 +50,13 @@ class Server internal constructor(
     fun certFingerprints(): List<String> = server.certFingerprints()
 
     /**
-     * Stream of incoming sessions. Each [MoqRequest] must be answered with
+     * Stream of incoming sessions. Each [Request] must be answered with
      * `accept()` to complete the handshake or `reject(code)` to reject it; the
      * returned session must be held to keep the connection alive.
      *
      * The Flow completes when the server stops accepting.
      */
-    fun requests(): Flow<MoqRequest> = flow {
+    fun requests(): Flow<Request> = flow {
         while (true) {
             currentCoroutineContext().ensureActive()
             emit(server.accept() ?: break)
@@ -90,7 +87,11 @@ class Server internal constructor(
         }
     }
 
-    /** Stop accepting new sessions and release the native server handle; in-flight sessions stay alive. */
+    /**
+     * Stop accepting new sessions and release the native server handle, closing
+     * the listening socket before it returns so the address can be bound again
+     * immediately. In-flight sessions stay alive until their handles are dropped.
+     */
     override fun close() {
         server.cancel()
     }
@@ -111,13 +112,13 @@ class Server internal constructor(
             tlsCert: List<String>? = null,
             tlsKey: List<String>? = null,
             tlsGenerate: List<String>? = null,
-            publish: MoqOriginProducer? = null,
-            subscribe: MoqOriginProducer? = null,
+            publish: OriginProducer? = null,
+            subscribe: OriginProducer? = null,
         ): Server {
             // With neither side specified, wire ONE shared origin to both so a
             // broadcast announced on this server is also visible to sessions
             // publishing into it. Mirrors Moq.connect.
-            val shared = if (publish == null && subscribe == null) MoqOriginProducer(MoqOriginConfig()) else null
+            val shared = if (publish == null && subscribe == null) OriginProducer(OriginConfig()) else null
             val publishOrigin = publish ?: shared
             val subscribeOrigin = subscribe ?: shared
 

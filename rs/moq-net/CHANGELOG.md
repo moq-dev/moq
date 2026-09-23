@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `group::Producer::used` waits until the group has a consumer, matching `unused`.
+- `StreamError::ControlTimeout` (moq-lite stream code 0x31): a request stream torn down because the peer never answered, distinct from `DeliveryTimeout`. The moq-transport registry has no value for it, so an IETF peer is sent INTERNAL_ERROR.
 
 ### Fixed
 

@@ -98,8 +98,8 @@
 	pointer-events: none;
 }
 
-.buffer-visualization:hover .buffer-target-label,
-.buffer-visualization--dragging .buffer-target-label {
+.buffer-visualization--dragging .buffer-target-label,
+.buffer-visualization:hover .buffer-target-label {
 	opacity: 1;
 }
 

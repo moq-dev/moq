@@ -45,6 +45,10 @@ impl Consumer {
 	/// the earlier ones are already superseded, so a consumer that has fallen behind catches up to
 	/// the head in a single step. A compressed group's frames are still decoded in order, since they
 	/// share one window; only the yield is skipped. Switching to a newer group discards the older one.
+	///
+	/// A group the transport can no longer serve is discarded the same way, not reported: on a
+	/// snapshot track its content is superseded by definition, so the reader waits for the
+	/// replacement. Only a failure of the track itself ends the stream.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		// Drain to the newest group, starting a cold window whenever we switch.
 		let track_finished = loop {
@@ -64,11 +68,27 @@ impl Consumer {
 		let mut latest = None;
 		let mut group_pending = false;
 		while let Some(group) = &mut self.group {
-			match group.poll_read_frame(waiter)? {
-				Poll::Ready(Some(frame)) => latest = Some(self.decode(&frame.payload)?),
+			match group.poll_read_frame(waiter) {
+				Poll::Ready(Ok(Some(frame))) => latest = Some(self.decode(&frame.payload)?),
 				// The current group is exhausted; wait for a newer one.
-				Poll::Ready(None) => {
+				Poll::Ready(Ok(None)) => {
 					self.group = None;
+					break;
+				}
+				// The transport can no longer serve the rest of this group: it was superseded and
+				// reclaimed (`Old`), dropped under memory pressure (`Evicted`), or read past the
+				// drift budget (`Lagged`). A snapshot reader only ever wants the newest value, so a
+				// group whose content is gone is never fatal: drop it and wait for its replacement.
+				// A track- or session-level failure still arrives through `poll_next_group` above.
+				Poll::Ready(Err(err)) => {
+					let sequence = group.sequence;
+					self.group = None;
+					tracing::warn!(
+						track = self.track.name(),
+						group = sequence,
+						error = ?err,
+						"snapshot group lost; waiting for a newer one"
+					);
 					break;
 				}
 				// The group is still open but has nothing buffered yet.

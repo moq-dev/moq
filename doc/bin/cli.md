@@ -123,8 +123,8 @@ M2M) with a built-in H.264 software fallback;
 audio is Opus. The camera is opened only while someone is watching, and
 `--bitrate` is the opening ceiling. Backends with live bitrate control lower it
 to fit the connection's bandwidth estimate. `moq devices` prints every source
-id. Requires the `capture` feature; on Linux that needs libclang, V4L2, and
-ALSA headers, and `--display` also needs the `pipewire` feature (links
+id. Requires the `capture` feature; on Linux that needs the ALSA headers for
+the microphone, and `--display` also needs the `pipewire` feature (links
 libpipewire).
 
 ## Transcode

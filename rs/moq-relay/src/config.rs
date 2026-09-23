@@ -165,7 +165,7 @@ impl Default for Config {
 // for completions, docs, and the released-flag test -- is `spec`.
 #[derive(usage::Cli, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
-#[usage(name = "moq-relay", version = env!("VERSION"))]
+#[usage(name = "moq-relay", version = env!("CARGO_PKG_VERSION"))]
 #[usage(completion, settings)]
 struct Cli {
 	#[usage(flatten)]
