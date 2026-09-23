@@ -23,7 +23,7 @@ and Google comparison do not gate these bug fixes.
 ## Required
 
 - [Preserve QUIC packet identity in BBR](/quest/m1/quic/bbr-packet-identity.md)
-- [Finish each BBR ACK sample before using it](/quest/m1/quic/bbr-ack-sampling.md)
+- [moq-dev/noq#4](https://github.com/moq-dev/noq/pull/4) merged: each BBR ACK sample completes before the model uses it
 - [Mark application starvation before the next BBR send](/quest/m1/quic/bbr-app-limited.md)
 - [Finish BBR bandwidth-probe feedback once](/quest/m1/quic/bbr-probe-feedback.md)
 - [Recalibrate BBR startup pacing from measured RTT](/quest/m1/quic/bbr-startup-pacing.md)

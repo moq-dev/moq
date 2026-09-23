@@ -26,13 +26,14 @@ Communicate starvation before subsequent sends, preserving the delivery
 boundary that ends the sampler's limited phase. Distinguish producer
 starvation from cwnd, pacing, anti-amplification, receiver credit, and local
 buffer limits; do not silently change receiver-limited policy. Cover streams,
-datagrams, resumed backlog, repeated empty polls, and ACK batching. Coordinate
-any controller event changes with the packet identity and ACK sampling fixes.
+datagrams, resumed backlog, repeated empty polls, and ACK batching. Build on
+[moq-dev/noq#4](https://github.com/moq-dev/noq/pull/4), which folds each ACK
+into the model once, in `on_end_acks`, after the app-limited marker updates.
+Coordinate any controller event changes with the packet identity fix.
 Keep state private where possible; document any public Controller change and
 its consumers. No wire change is intended. Wire regressions into fork CI.
 
 ## Related
 
-- [Finish each BBR ACK sample](/quest/m1/quic/bbr-ack-sampling.md) - a separate ordering defect in the same callback lifecycle
 - [Release BBR fixes](/quest/m1/quic/bbr-release.md) - deliver correct labels before policy experiments
 - [Upstream the fork](/quest/m1/quic/upstream.md) - offer the general fix upstream
