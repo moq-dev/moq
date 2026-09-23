@@ -1697,12 +1697,17 @@ impl Drop for WarmCopy {
 	}
 }
 
-/// Cache `source`'s groups on a new local track the origin owns.
+/// Cache `source`'s finished groups on a new local track the origin owns.
 fn warm_copy(source: &track::Consumer) -> Option<WarmCopy> {
 	let info = source.cached_info()?;
 	let mut track = track::Producer::new(Arc::new(source.broadcast().clone()), source.name(), info);
 	for (group, visible) in source.cached_groups() {
-		let _ = track.adopt_group(group, visible);
+		// An open group is left for the re-splice to deliver whole. Dropping the source
+		// copy resets it mid-transfer, and its dead head would anchor the next takeover
+		// mid-group, asking upstream for a tail no returning reader can use.
+		if group.is_finished() {
+			let _ = track.adopt_group(group, visible);
+		}
 	}
 	let dynamic = track.dynamic();
 	Some(WarmCopy {
