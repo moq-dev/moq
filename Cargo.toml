@@ -228,7 +228,7 @@ tracing-test = "0.2"
 # package owns the `cli` feature, moq-ffi the rest.
 uniffi = "0.32"
 url = "2"
-usage = { package = "usage-rs", version = "6.3.0" }
+usage = { package = "usage-rs", version = "6.11.1" }
 uuid = { version = "1.26", features = ["v7"] }
 web-async = { version = "0.1.5", features = ["tracing"] }
 web-transport-iroh = "0.7"
