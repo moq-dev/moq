@@ -59,6 +59,15 @@ func (p *JSONSnapshotProducer) Update(value any) error {
 	return p.inner.Update(string(encoded))
 }
 
+// Demand returns a watch-only handle to whether the track has subscribers.
+func (p *JSONSnapshotProducer) Demand() (*TrackDemand, error) {
+	inner, err := p.inner.Demand()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDemand{inner: inner}, nil
+}
+
 // Finish closes the snapshot track.
 func (p *JSONSnapshotProducer) Finish() error {
 	return p.inner.Finish()
@@ -76,6 +85,15 @@ func (p *JSONStreamProducer) Append(value any) error {
 		return err
 	}
 	return p.inner.Append(string(encoded))
+}
+
+// Demand returns a watch-only handle to whether the track has subscribers.
+func (p *JSONStreamProducer) Demand() (*TrackDemand, error) {
+	inner, err := p.inner.Demand()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDemand{inner: inner}, nil
 }
 
 // Finish closes the stream track.

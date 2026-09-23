@@ -26,4 +26,4 @@ it exits non-zero.
 
 ## Required
 
-- [Caught up](/quest/next/cli-inspect/caught-up.md) - snapshot mode exits on the consumer's caught-up signal
+- [Caught up](/quest/next/cli-inspect/caught-up.md) - snapshot mode exits on the consumer's `Live` marker, so `ls` follows it onto `dev`
