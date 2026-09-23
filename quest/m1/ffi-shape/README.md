@@ -19,10 +19,12 @@ Settled shape:
   origin, broadcast, track, group); `media` merges hang and moq-mux, since a
   binding never sees that split (catalog, import producers, container
   consumers); `json`, `audio`, and `video` own their producers and consumers.
-- A layer's type is constructed from the handle below it, like Rust
-  (`moq_json::snapshot::Producer::new(track)`), not reached through an
-  accessor on the broadcast. Sketch, not a contract:
-  `json.SnapshotProducer(broadcast, name)`, `video.Encoder(broadcast, config)`.
+- A layer's type is constructed from the handles its Rust constructor takes,
+  not reached through an accessor on the broadcast: JSON wraps a track
+  (`moq_json::snapshot::Producer::new(track, config)`), so it also works on a
+  track accepted from a request; the codecs take the broadcast and its
+  catalog. Sketch, not a contract: `json.SnapshotProducer(track, config)`,
+  `video.Encoder(broadcast, catalog, config)`.
 - UniFFI 0.32 allows one namespace per crate, so moq-ffi groups by type and
   the wrappers supply real namespaces in each language's idiom: Python
   submodules, Go subpackages (`moq.dev/moq/json`, aliased on import next to
@@ -45,7 +47,7 @@ work no child does:
 
 ## Quests
 
-- [JSON](/quest/m1/ffi-shape/json.md) - the pilot: json becomes its own namespace in every binding and sets the per-language pattern
+- [JSON](/quest/m1/ffi-shape/json.md) - the pilot: json becomes its own namespace wrapping a track in every binding and sets the per-language pattern
 - [Net](/quest/m1/ffi-shape/net.md) - client and server take config records, snapshots are records, and the verbs match moq-net
 - [Media](/quest/m1/ffi-shape/media.md) - catalog, import, and container consume move under `media`
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video encoders and decoders move under their own namespaces with one constructor shape

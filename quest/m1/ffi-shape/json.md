@@ -3,7 +3,7 @@
 ## Goal
 
 JSON tracks live under `json` in moq-ffi and every wrapper, constructed from a
-broadcast, and `BroadcastProducer`/`BroadcastConsumer` lose
+track producer or consumer as in `moq-json`, and `BroadcastProducer`/`BroadcastConsumer` lose
 `publish_json_*`/`subscribe_json_*`. The per-language namespace pattern this
 sets is what the other children copy.
 
@@ -15,7 +15,9 @@ wired into its package build, tests, and docs. Settle the pattern here and
 write it down where the next child will find it (`rs/moq-ffi/CLAUDE.md` if it
 is a convention, after reading `PROMPTING.md`).
 
-Mirror `moq-json`'s names (`snapshot`, `stream`) and constructors. Snapshot and
+Mirror `moq-json`'s names (`snapshot`, `stream`) and constructors, which
+take a track: that also covers a track accepted from a request, which the
+broadcast methods cannot reach. Snapshot and
 stream producers keep `demand()`. Payloads stay `String` at the FFI; wrappers
 that already type them (Swift's generic producer, Kotlin's reified `update`)
 keep doing so, and the rest may follow.
