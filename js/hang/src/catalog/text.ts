@@ -52,7 +52,12 @@ export const TextConfigSchema = z.object({
 
 	// The maximum jitter before the next cue is flushed, in milliseconds. The player's jitter buffer
 	// should be at least this large; absent means each cue is flushed immediately.
-	jitter: z.optional(u53Schema),
+	jitter: z.optional(
+		z.pipe(
+			u53Schema,
+			z.transform((value) => (value === 0 ? undefined : value)),
+		),
+	),
 });
 
 /** Schema for the catalog text section: a map of track name to rendition config. */

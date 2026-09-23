@@ -173,6 +173,7 @@ where
 		E: crate::catalog::hang::CatalogExt,
 		R: crate::catalog::RenditionConfig<E>,
 	{
+		let baseline = rendition.jitter_baseline();
 		Self {
 			inner: track,
 			container,
@@ -187,7 +188,7 @@ where
 			previous_timestamp: None,
 			cadence: None,
 			reordered: false,
-			estimator: crate::catalog::Estimator::new(),
+			estimator: crate::catalog::Estimator::with_baseline(baseline),
 			bandwidth: None,
 			rendition: Some(Box::new(rendition)),
 		}
@@ -757,7 +758,7 @@ mod tests {
 	/// The catalog estimate falls out of the writes themselves: a publisher never records anything
 	/// by hand, it just hands `estimate()` to its rendition.
 	#[tokio::test]
-	async fn writes_measure_the_catalog_estimate() {
+	async fn writes_measure_bitrate_without_inventing_jitter() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
@@ -768,7 +769,7 @@ mod tests {
 		producer.finish().unwrap();
 
 		let estimate = producer.estimate();
-		assert_eq!(estimate.jitter, Some(std::time::Duration::from_millis(25)));
+		assert_eq!(estimate.jitter, None, "PTS spacing alone is not flush delay");
 		assert_eq!(estimate.bitrate, Some(1_600_000));
 	}
 
@@ -941,7 +942,7 @@ mod tests {
 
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(16_000, false)).unwrap();
-		assert_eq!(producer.estimate().jitter, Some(std::time::Duration::from_millis(16)));
+		assert_eq!(producer.estimate().jitter, None, "PTS spacing alone is not flush delay");
 
 		producer.reorder(Timestamp::from_micros(48_000).unwrap());
 		assert_eq!(

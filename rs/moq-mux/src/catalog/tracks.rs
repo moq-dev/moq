@@ -473,6 +473,10 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		self.catalog.timestamp(hint)
 	}
 
+	pub(crate) fn jitter_baseline(&self) -> std::sync::Arc<std::sync::Mutex<super::estimate::Baseline>> {
+		self.catalog.jitter_baseline.clone()
+	}
+
 	/// Validate and publish the rendition, fulfilling its reservation only after the edit succeeds.
 	///
 	/// Whatever [`Estimate`] fields `config` already carries are authoritative and left alone; the
@@ -483,6 +487,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	pub(crate) fn set(&mut self, mut config: C) -> crate::Result<()> {
 		let supplied = config.estimate();
 		let resolved = Self::resolved(&supplied, &self.detected);
+		self.check_jitter(&resolved)?;
 		config.set_estimate(resolved.clone());
 		{
 			let mut guard = self.catalog.modify()?;
@@ -525,16 +530,28 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if !C::detects() {
 			return Ok(());
 		}
-		self.detected = estimate.clone();
 		if !self.present {
+			self.detected = estimate;
 			return Ok(());
 		}
 		let resolved = Self::resolved(&self.supplied, &estimate);
+		self.check_jitter(&resolved)?;
+		self.detected = estimate;
 		if self.published.as_ref() != Some(&resolved) {
 			let mut config = self.config()?;
 			config.set_estimate(resolved.clone());
 			self.replace(config)?;
 			self.published = Some(resolved);
+		}
+		Ok(())
+	}
+
+	fn check_jitter(&self, next: &Estimate) -> crate::Result<()> {
+		if self.present
+			&& let Some(previous) = self.config()?.estimate().jitter
+			&& next.jitter.is_none_or(|jitter| jitter < previous)
+		{
+			return Err(crate::Error::JitterDecreased);
 		}
 		Ok(())
 	}
@@ -554,6 +571,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if !self.present {
 			return Err(crate::Error::NotPublished);
 		}
+		self.check_jitter(&config.estimate())?;
 		let mut guard = self.catalog.modify()?;
 		let mut next = (*guard).clone();
 		config.insert(&mut next, &self.name);
@@ -627,6 +645,25 @@ mod tests {
 	}
 
 	#[test]
+	fn published_jitter_never_decreases() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		rendition.set(config(None, Some(Duration::from_millis(100)))).unwrap();
+		let smaller = config(None, Some(Duration::from_millis(50)));
+		assert!(matches!(rendition.set(smaller.clone()), Err(crate::Error::JitterDecreased)));
+		assert!(matches!(rendition.replace(smaller), Err(crate::Error::JitterDecreased)));
+		assert_eq!(catalog.snapshot().video.renditions["v"].jitter, Some(Duration::from_millis(100)));
+
+		let (_broadcast, catalog, mut detected) = video_track();
+		detected.set(config(None, None)).unwrap();
+		detected.estimate(Estimate::default().with_jitter(Duration::from_millis(100))).unwrap();
+		assert!(matches!(
+			detected.estimate(Estimate::default().with_jitter(Duration::from_millis(50))),
+			Err(crate::Error::JitterDecreased)
+		));
+		assert_eq!(catalog.snapshot().video.renditions["v"].jitter, Some(Duration::from_millis(100)));
+	}
+
+	#[test]
 	fn importer_returns_rejected_jitter() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
@@ -664,10 +701,11 @@ mod tests {
 		assert_eq!(config.container, hang::catalog::Container::Loc);
 	}
 
-	/// Feed ~40ms 100 kB frames (one per group) over more than the bitrate window, as a
-	/// [`container::Producer`](crate::container::Producer) would.
+	/// Feed ~40ms 100 kB frames over more than the bitrate window, with a measured
+	/// 40ms container batch span. PTS spacing alone says nothing about flush delay.
 	fn feed<E: CatalogExt, C: RenditionConfig<E>>(rendition: &mut Rendition<E, C>) {
 		let mut estimator = super::super::Estimator::new();
+		estimator.burst(Duration::from_millis(40));
 		for i in 0..60u64 {
 			let t = ts(i * 40_000);
 			estimator.cut(Some(t));
