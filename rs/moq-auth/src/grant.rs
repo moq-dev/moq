@@ -50,6 +50,11 @@ pub struct Grant {
 
 	/// An opaque label handed to stats, so traffic can be bucketed.
 	pub tier: Option<String>,
+
+	/// The session is a cluster peer (another relay): what it announces entered
+	/// the cluster elsewhere, not here.
+	#[serde(skip_serializing_if = "std::ops::Not::not")]
+	pub peer: bool,
 }
 
 impl Grant {
@@ -100,11 +105,13 @@ mod tests {
 			expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
+			peer: true,
 		};
 		let json = serde_json::to_value(&grant).unwrap();
 		assert_eq!(json["expires"], 4_102_444_800_i64);
 		assert_eq!(json["revalidate"], 60);
 		assert_eq!(json["publish"], serde_json::json!(["alice/**"]));
+		assert_eq!(json["peer"], true);
 		assert_eq!(serde_json::from_value::<Grant>(json).unwrap(), grant);
 	}
 
@@ -119,10 +126,11 @@ mod tests {
 			expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
+			peer: true,
 		};
 		assert_eq!(
 			serde_json::to_string(&grant).unwrap(),
-			r#"{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket"}"#
+			r#"{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","peer":true}"#
 		);
 	}
 

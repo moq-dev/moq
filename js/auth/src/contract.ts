@@ -120,6 +120,8 @@ export const GrantSchema = z
 		revalidate: z.optional(z.int().check(z.positive())),
 		/** An opaque label handed to stats, so traffic can be bucketed. */
 		tier: z.optional(z.string()),
+		/** The session is a cluster peer (another relay): what it announces entered the cluster elsewhere. */
+		peer: z.optional(z.boolean()),
 	})
 	.check(
 		z.refine((grant) => (grant.publish?.length ?? 0) > 0 || (grant.subscribe?.length ?? 0) > 0, {
