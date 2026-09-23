@@ -32,8 +32,8 @@ public final class OriginProducer: Sendable {
 
     /// Create a broadcast at `path`, returning the producer that feeds it.
     ///
-    /// The broadcast starts unadvertised: reachable by exact path, but not
-    /// visible to announcement streams. Advertise it with
+    /// The broadcast appears on this origin's local announcement streams
+    /// immediately. Advertise it to peers with
     /// `BroadcastProducer.announce(route:)` after populating tracks. `finish()`
     /// unpublishes immediately, while releasing the producer without finishing
     /// also unpublishes but reads to subscribers as a failure rather than a
@@ -167,7 +167,7 @@ public final class AnnounceConsumer: AsyncSequence, Sendable {
 ///
 /// A route claims that `prefix` and every path beneath it can be served; it
 /// carries no broadcast. Resolve a specific path with `OriginConsumer.requestBroadcast`.
-/// By convention a publisher announces each broadcast's exact path.
+/// Local broadcasts appear on creation; announce to forward them to peers.
 public final class AnnounceUpdate: Sendable {
     let ffi: MoqAnnounceUpdate
 

@@ -52,7 +52,7 @@ Moq.connect("https://relay.example.com").use { moq ->
 ```
 
 The three advertising operations: `moq.createBroadcast(path)` (or
-`origin.createBroadcast`) returns an unadvertised producer;
+`origin.createBroadcast`) returns a locally discoverable producer;
 `broadcast.announce(route)` / `broadcast.unannounce()` own that exact-path
 advertisement; `origin.dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
@@ -88,6 +88,26 @@ is `VideoPixelFormat.I420` when null, or `VideoPixelFormat.RGBA` for four bytes
 a pixel, and every frame repeats the layout it was decoded to. `resize` is best
 effort: only NVDEC has a built-in scaler, and MediaCodec is not it, so read each
 frame's own `width` and `height` rather than assuming it took.
+
+## Connection stats
+
+`session.stats()` returns a `ConnectionStats` snapshot. Each field is `null`
+when the transport backend does not report it (native QUIC reports all of them;
+browser WebTransport reports few or none) or before it is available, which is
+not the same as zero. `rttUs` is microseconds; the `rtt` extension property
+reads it as a `kotlin.time.Duration`.
+
+| Field | Unit | Meaning |
+| --- | --- | --- |
+| `rttUs` | microseconds | Smoothed round-trip time. |
+| `estimatedSendRateBps` | bits per second | Send bandwidth from the congestion controller. |
+| `estimatedRecvRateBps` | bits per second | Receive bandwidth from MoQ PROBE. |
+| `bytesSent` | bytes | Total sent, including retransmissions and overhead. |
+| `bytesReceived` | bytes | Total received, including duplicates and overhead. |
+| `bytesLost` | bytes | Total lost, detected via retransmission or acknowledgement. |
+| `packetsSent` | datagrams | Total datagrams sent. |
+| `packetsReceived` | datagrams | Total datagrams received. |
+| `packetsLost` | datagrams | Total datagrams detected as lost. |
 
 - API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/moq)
 - Source: [`kt/`](https://github.com/moq-dev/moq/tree/main/kt); `just kt check` builds and tests locally

@@ -39,4 +39,3 @@ external symptom is a `source` that never becomes defined.
 ## Related
 
 - [Publisher audio unlock](/quest/next/publish-audio-unlock.md) - the other publisher path that fails silently without a gesture
-- [Failure artifacts](/quest/next/qa-failure-artifacts.md) - shared trace and sample output

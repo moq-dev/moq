@@ -73,22 +73,32 @@ final class SmokeTests: XCTestCase {
         _ = try origin.dynamic(prefix: "")
     }
 
-    func testAnnounceThenUnannounceIsVisible() async throws {
+    func testLocalDiscoverySurvivesUnannounceUntilFinish() async throws {
         let origin = OriginProducer()
         let broadcast = try origin.createBroadcast(path: "live")
         _ = try broadcast.publishTrack(name: "events")
-        try broadcast.announce()
+        let consumer = origin.consume()
+        let announced = try consumer.announced(prefix: "")
+        let created = try await announced.next()
+        XCTAssertEqual(created?.prefix, "live")
+        XCTAssertEqual(created?.active, true)
+        XCTAssertEqual(created?.route.cost, 0)
 
-        let announced = try origin.consume().announced(prefix: "")
-        let first = try await announced.next()
-        XCTAssertEqual(first?.prefix, "live")
-        XCTAssertEqual(first?.active, true)
+        try broadcast.announce(route: Route(cost: 3))
+        let advertised = try await announced.next()
+        XCTAssertEqual(advertised?.active, true)
+        XCTAssertEqual(advertised?.route.cost, 3)
 
         try broadcast.unannounce()
+        let local = try await announced.next()
+        XCTAssertEqual(local?.active, true)
+        XCTAssertEqual(local?.route.cost, 0)
+        _ = try await consumer.requestBroadcast(path: "live")
+
+        try broadcast.finish()
         let retracted = try await announced.next()
         XCTAssertEqual(retracted?.prefix, "live")
         XCTAssertEqual(retracted?.active, false)
-        _ = try await origin.consume().requestBroadcast(path: "live")
     }
 
     func testAnnouncedPatternCaptures() async throws {

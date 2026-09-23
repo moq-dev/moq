@@ -60,7 +60,9 @@ local.microphoneEnabled.set(true);
 const room = new Room({ connection, identity });
 
 // room.remotes is a Map<identity, Remote>. Each Remote has camera/screen
-// Members; assign member.canvas and set member.muted to false to play audio.
+// Members; call member.canvas.set(canvas) to display video and
+// member.muted.set(false) to play audio.
+// member.player exposes the complete Watch.Player pipeline.
 ```
 
 hang.live should depend on this package for `Room`, `Local`, `Remote`, and the `hang/*.json` metadata tracks. Location stays an app-defined catalog extension (`TRACK.location`). hang.live's JSON chat (`TRACK.chat` = `hang/chat.json`) is also an extension; the JSON window track is `Chat.TRACK` (`"chat"`).
@@ -78,4 +80,4 @@ const event = await subscriber.recv(); // push, pop, or skip
 
 A conferencing demo (no memes, no 3D, no chat UI) lives at [`demo/web/src/meet.html`](../../demo/web/src/meet.html).
 
-Room members start muted; set `member.muted` to `false` to play audio. Chat uses uncompressed JSON strings, a retained ten-second window with push/pop/skip events; it is not compatible with the raw UTF-8 iroh-live track. Empty normalized identities are rejected by `claims`.
+Room members start muted; call `member.muted.set(false)` to play audio. Chat uses uncompressed JSON strings, a retained ten-second window with push/pop/skip events; it is not compatible with the raw UTF-8 iroh-live track. Empty normalized identities are rejected by `claims`.

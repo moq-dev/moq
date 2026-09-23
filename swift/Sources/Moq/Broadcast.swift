@@ -152,8 +152,8 @@ public final class BroadcastProducer: Sendable {
 
     /// Advertise this broadcast's exact path as a route.
     ///
-    /// Announcing again re-prices the route in place. An unannounced broadcast
-    /// stays reachable by exact path; announcing only makes the path discoverable.
+    /// Announcing again re-prices the route in place. The path is already
+    /// discoverable locally; announce advertises it to peers.
     public func announce(route: Route = Route()) throws {
         try ffi.announce(route: route)
     }

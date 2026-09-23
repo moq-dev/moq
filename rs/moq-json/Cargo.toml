@@ -14,7 +14,6 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [dependencies]
 bytes = { workspace = true }
-json-patch = "4"
 kio = { workspace = true }
 moq-flate = { workspace = true }
 moq-net = { workspace = true }
@@ -26,7 +25,12 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+json-patch = "4"
 
 [[bench]]
 name = "codec"
+harness = false
+
+[[bench]]
+name = "allocations"
 harness = false

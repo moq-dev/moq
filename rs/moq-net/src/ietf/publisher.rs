@@ -333,10 +333,7 @@ where
 	/// Our origin handle with [`Self::exclude`] applied, the view both the data plane
 	/// and the announce loops read this peer's routes through.
 	fn excluding(&self, peer: &cluster::Peer) -> origin::Consumer {
-		match self.exclude(peer) {
-			crate::Hop::UNKNOWN => self.origin.clone(),
-			exclude => self.origin.clone().excluding(exclude),
-		}
+		self.origin.clone().excluding(self.exclude(peer))
 	}
 
 	/// The Hop ID whose paths must not be advertised (or served) back to this peer.
@@ -1717,10 +1714,7 @@ where
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
-		let origin = match self.exclude(&peer) {
-			crate::Hop::UNKNOWN => origin,
-			exclude => origin.excluding(exclude),
-		};
+		let origin = origin.excluding(self.exclude(&peer));
 
 		// Draft-14/15 predate NAMESPACE, so they answer with their own PUBLISH_NAMESPACE
 		// requests and keep this stream open for the subscription's lifetime.

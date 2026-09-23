@@ -237,9 +237,8 @@ impl MoqBroadcastProducer {
 
 	/// Advertise this broadcast's exact path as a route.
 	///
-	/// Announcing again re-prices the route in place. An unannounced broadcast
-	/// stays reachable by exact path for subscribes and fetches; announcing only
-	/// makes the path discoverable. Errors with `Closed` on a standalone
+	/// Announcing again re-prices the route in place. The path is already
+	/// discoverable on this origin's local cursor; announce advertises it to peers. Errors with `Closed` on a standalone
 	/// broadcast (no origin to announce on).
 	pub fn announce(&self, route: crate::origin::MoqRoute) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -252,7 +251,7 @@ impl MoqBroadcastProducer {
 
 	/// Retract this broadcast's exact-path advertisement, if any.
 	///
-	/// The broadcast stays reachable by exact path. Errors with `Closed` on a
+	/// The broadcast stays discoverable and reachable locally. Errors with `Closed` on a
 	/// standalone broadcast (no origin to announce on).
 	pub fn unannounce(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();

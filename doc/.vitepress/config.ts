@@ -90,6 +90,7 @@ export default defineConfig({
 						{ text: "Transport", link: "/concept/transport" },
 						{ text: "moq-lite", link: "/concept/moq-lite" },
 						{ text: "hang", link: "/concept/hang" },
+						{ text: "Audio jitter", link: "/concept/audio-jitter" },
 						{ text: "Standards", link: "/concept/standard" },
 						{
 							text: "Use cases",

@@ -2055,7 +2055,7 @@ fn announced_filters_patterns_and_reports_captures() {
 }
 
 #[test]
-fn announced_deactivation() {
+fn local_announcement_survives_unannounce() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe {
@@ -2085,22 +2085,23 @@ fn announced_deactivation() {
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
 	assert!(info.active);
 
-	// Going non-live unannounces the broadcast without tearing it down: it stays
-	// reachable by exact path for subscribes and fetches.
+	// Unannouncing withdraws the peer advertisement, while the local cursor
+	// and exact request remain live until the broadcast finishes.
 	assert_eq!(moq_publish_unannounce(broadcast), 0);
+	let _ = request_broadcast(origin, path);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 
 	let deactivated_id = id(cb.recv());
 	assert_eq!(unsafe { moq_origin_announced_info(deactivated_id, &mut info) }, 0);
-	assert!(!info.active, "broadcast should be inactive after unannounce");
+	assert!(!info.active, "broadcast should be inactive after finish");
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
-	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
 #[test]
-fn create_broadcast_does_not_announce() {
+fn create_broadcast_announces_locally() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe {
@@ -2117,10 +2118,8 @@ fn create_broadcast_does_not_announce() {
 
 	let path = b"quiet";
 	let broadcast = id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len()) });
-	// Reachable by exact path without being announced.
+	// Creation reaches local cursors and exact requests before peer advertising.
 	let _ = request_broadcast(origin, path);
-
-	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
 	let announced_id = id(cb.recv());
 	let mut info = moq_announce_update {
 		prefix: std::ptr::null(),

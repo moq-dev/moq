@@ -583,8 +583,8 @@ class BroadcastProducer:
     def announce(self, route: Route | None = None) -> None:
         """Advertise this broadcast's exact path as a route.
 
-        Announcing again re-prices the route in place. An unannounced broadcast
-        stays reachable by exact path; announcing only makes the path discoverable.
+        Announcing again re-prices the route in place. The path is already
+        discoverable locally; announce advertises it to peers.
         """
         self._inner.announce(route if route is not None else Route())
 

@@ -555,10 +555,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
-		let origin = match Hop::new(exclude_hop) {
-			Ok(peer) => origin.excluding(peer),
-			Err(_) => origin,
-		};
+		let origin = origin.excluding(Hop::new(exclude_hop).unwrap_or(Hop::UNKNOWN));
 		let announced = origin.announced();
 		let run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
 		self.state = AnnounceState::Run { origin, announced, run };

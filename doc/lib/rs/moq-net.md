@@ -16,7 +16,7 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 ## What it gives you
 
 - **Origins** scope what a session can see, and merge duplicate subscriptions so a broadcast is pulled upstream once no matter how many local readers.
-- **Broadcasts** are created unadvertised, then announced as an exact route, or served below a prefix with `dynamic`. Discovery accepts pattern unions; events carry the advertised prefix and captures for a complete match.
+- **Broadcasts** appear on local announce cursors when created, then can be advertised to peers as an exact route, or served below a prefix with `dynamic`. Discovery accepts pattern unions; events carry the advertised prefix and captures for a complete match.
 - **Patterns** (`Pattern`, `Patterns`) are re-exported from [`moq-pattern`](https://docs.rs/moq-pattern). Literal `Path` stays a coordinate.
 - **Tracks** carry groups with a priority, a retention window, and a timescale. Subscribers set their own priority and max age and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.
@@ -108,8 +108,8 @@ Three operations, on an origin:
 
 - `origin.publish(path, route)` creates and advertises a broadcast in one call.
 - `origin.create_broadcast(path)` returns a producer. The broadcast is
-  reachable by exact path immediately and invisible to discovery until
-  advertised.
+  reachable and visible to local discovery immediately. Peers see it only after
+  `broadcast.announce(route)`.
 - `broadcast.announce(route)` / `broadcast.unannounce()` own that
   advertisement. Announcing again re-prices the standing route. The route
   retracts on `unannounce()`, `finish()`, or the last producer dropping.

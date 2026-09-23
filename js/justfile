@@ -52,6 +52,8 @@ check $FILES="":
     	echo "js: no JS changes; skipping."
     	exit 0
     fi
+    # doc/ is in this scope, so the binding pages are checked here.
+    python3 ../rs/scripts/stats-docs.py
     bun install --frozen-lockfile
     bun common/deps.ts
     if tty -s; then

@@ -70,7 +70,7 @@ broadcast.Finish()   // keep the producer reachable while publishing, then finis
 ```
 
 The three advertising operations: `client.CreateBroadcast(path)` (or
-`origin.CreateBroadcast`) returns an unadvertised producer;
+`origin.CreateBroadcast`) returns a locally discoverable producer;
 `broadcast.Announce(route)` / `broadcast.Unannounce()` own that exact-path
 advertisement; `origin.Dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
@@ -112,6 +112,25 @@ is I420 when nil, or `VideoPixelFormatRgba` for four bytes a pixel, and every
 `VideoDecodedFrame` repeats the layout it was decoded to. `Resize` is best
 effort: only NVDEC has a built-in scaler, so read each frame's own `Width` and
 `Height` rather than assuming it took.
+
+## Connection stats
+
+`Session().Stats()` returns a `ConnectionStats` snapshot. Each field is a
+pointer, nil when the transport backend does not report it (native QUIC reports
+all of them; browser WebTransport reports few or none) or before it is
+available, which is not the same as zero.
+
+| Field | Unit | Meaning |
+| --- | --- | --- |
+| `RttUs` | microseconds | Smoothed round-trip time. |
+| `EstimatedSendRateBps` | bits per second | Send bandwidth from the congestion controller. |
+| `EstimatedRecvRateBps` | bits per second | Receive bandwidth from MoQ PROBE. |
+| `BytesSent` | bytes | Total sent, including retransmissions and overhead. |
+| `BytesReceived` | bytes | Total received, including duplicates and overhead. |
+| `BytesLost` | bytes | Total lost, detected via retransmission or acknowledgement. |
+| `PacketsSent` | datagrams | Total datagrams sent. |
+| `PacketsReceived` | datagrams | Total datagrams received. |
+| `PacketsLost` | datagrams | Total datagrams detected as lost. |
 
 - API reference: [pkg.go.dev/github.com/moq-dev/moq-go](https://pkg.go.dev/github.com/moq-dev/moq-go)
 - Source: [`go/`](https://github.com/moq-dev/moq/tree/main/go); `just go check` builds and tests locally

@@ -12020,7 +12020,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqannouncedbroadcast_available() !=
-      13508) {
+      42497) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqannouncedbroadcast_cancel() != 63175) {
@@ -12039,7 +12039,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_announced_broadcast() !=
-      33060) {
+      16445) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_request_broadcast() !=
@@ -12060,7 +12060,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginproducer_create_broadcast() !=
-      11806) {
+      47748) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginproducer_dynamic() != 56233) {
@@ -12081,7 +12081,7 @@ void _checkApiChecksums() {
       47317) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_announce() != 3962) {
+  if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_announce() != 14026) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_consume() != 27634) {
@@ -12138,7 +12138,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_unannounce() !=
-      2622) {
+      39609) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqcontainerproducer_cut() != 17534) {

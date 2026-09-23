@@ -82,13 +82,13 @@ func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
 
 // Announce advertises this broadcast's exact path as a route.
 //
-// Announcing again re-prices the route in place. An unannounced broadcast
-// stays reachable by exact path; announcing only makes the path discoverable.
+// Announcing again re-prices the route in place. The path is already
+// discoverable locally; Announce advertises it to peers.
 func (b *BroadcastProducer) Announce(route Route) error {
 	return b.inner.Announce(route)
 }
 
-// Unannounce retracts this broadcast's exact-path advertisement, if any.
+// Unannounce withdraws peer advertising while preserving local discovery.
 func (b *BroadcastProducer) Unannounce() error {
 	return b.inner.Unannounce()
 }

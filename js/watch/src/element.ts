@@ -9,12 +9,13 @@ import type * as Catalog from "@moq/hang/catalog";
 import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
-import * as Audio from "./audio";
-import { Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast";
+import type * as Audio from "./audio";
+import { type Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast";
 import { formatDuration, parseDuration } from "./duration";
-import { type Delay, Sync } from "./sync";
-import * as Text from "./text";
-import * as Video from "./video";
+import { Player } from "./player";
+import type { Delay, Sync } from "./sync";
+import type * as Text from "./text";
+import type * as Video from "./video";
 
 const OBSERVED = [
 	"url",
@@ -103,6 +104,9 @@ export default class MoqWatch extends HTMLElement {
 	 */
 	connection: Moq.Connection;
 
+	/** Headless playback pipeline behind this element. */
+	readonly player: Player;
+
 	// The broadcast being watched.
 	broadcast: Broadcast;
 
@@ -160,11 +164,6 @@ export default class MoqWatch extends HTMLElement {
 	#captionsOverlay = new Signal<HTMLElement | undefined>(undefined);
 	#captionsOverlayEl?: HTMLDivElement;
 
-	// Whether to download. Driven by the renderer/emitter policy, read by the decoders.
-	#captionsEnabled = new Signal(false);
-	#videoEnabled = new Signal(false);
-	#audioEnabled = new Signal(false);
-
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
 
@@ -189,101 +188,27 @@ export default class MoqWatch extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.connection.close());
 
-		this.broadcast = new Broadcast({
+		this.player = new Player({
 			origin: this.connection.origin,
+			probe: this.connection.probe,
 			enabled: this.#enabled,
 			name: this.#name,
 			announced: this.#announced,
 			catalogFormat: this.#catalogFormat,
 			catalog: this.#catalog,
-		});
-		this.signals.cleanup(() => this.broadcast.close());
-
-		// The decoders' support probes drive rendition selection: anything WebCodecs can't play is filtered out.
-		const videoSource = new Video.Source({
-			broadcast: this.broadcast,
-			target: this.controls.target,
-			supported: Video.Decoder.supported,
-			probe: this.connection.probe,
-		});
-		const audioSource = new Audio.Source({
-			broadcast: this.broadcast,
-			supported: Audio.Decoder.supported,
-		});
-		this.signals.cleanup(() => {
-			videoSource.close();
-			audioSource.close();
-		});
-
-		this.text = new Text.Source({
-			broadcast: this.broadcast,
-			target: this.controls.captions,
-		});
-		this.signals.cleanup(() => this.text.close());
-
-		this.sync = new Sync({
-			delay: this.controls.delay,
-			buffer: this.controls.buffer,
-			probe: this.connection.probe,
-		});
-		this.signals.cleanup(() => this.sync.close());
-
-		this.video = new Video.Decoder({ source: videoSource, sync: this.sync, enabled: this.#videoEnabled });
-		this.audio = new Audio.Decoder({ source: audioSource, sync: this.sync, enabled: this.#audioEnabled });
-		this.signals.cleanup(() => {
-			this.video.close();
-			this.audio.close();
-		});
-
-		this.emitter = new Audio.Emitter({
-			source: this.audio,
-			volume: this.controls.volume,
-			muted: this.controls.muted,
-			paused: this.controls.paused,
-		});
-		this.renderer = new Video.Renderer({
-			decoder: this.video,
 			canvas: this.#canvas,
-			visible: this.controls.visible,
-		});
-		this.signals.cleanup(() => {
-			this.emitter.close();
-			this.renderer.close();
-		});
-
-		this.textRenderer = new Text.Renderer({
-			source: this.text,
-			sync: this.sync,
 			container: this.#captionsOverlay,
-			enabled: this.#captionsEnabled,
+			...this.controls,
 		});
-		this.signals.cleanup(() => this.textRenderer.close());
-
-		// Captions follow playback, like audio and video. The caption clock runs off wall time, so
-		// leaving them on while paused scrolls text over a frozen frame.
-		this.signals.run((effect) => {
-			this.#captionsEnabled.set(effect.get(this.#enabled) && !effect.get(this.controls.paused));
-		});
-
-		// Audio download follows the emitter's enable policy (paused/muted). The decoder itself
-		// refuses instant mode because an unpaced clock cannot keep an audio ring filled.
-		this.signals.run((effect) => {
-			this.#audioEnabled.set(effect.get(this.emitter.out.enabled));
-		});
-
-		// Video downloads while playing and on-screen. When paused, keep downloading only
-		// until a frame is on the canvas, then stop: a cold paused start still shows a poster
-		// instead of black, without streaming while paused. Read the rendered frame only in
-		// the paused branch so playback doesn't re-run this every painted frame.
-		this.signals.run((effect) => {
-			const visible = effect.get(this.renderer.out.visible);
-			if (!effect.get(this.controls.paused)) {
-				this.#videoEnabled.set(visible);
-				return;
-			}
-			const frame = effect.get(this.renderer.out.frame);
-			this.#videoEnabled.set(visible && !frame);
-		});
+		this.signals.cleanup(() => this.player.close());
+		this.broadcast = this.player.broadcast;
+		this.video = this.player.video;
+		this.audio = this.player.audio;
+		this.renderer = this.player.renderer;
+		this.emitter = this.player.emitter;
+		this.text = this.player.text;
+		this.textRenderer = this.player.textRenderer;
+		this.sync = this.player.sync;
 
 		// Mute/volume coupling. The element owns the writable volume/muted Signals, so
 		// the policy lives here: muting stashes and zeroes the volume; a zero volume
@@ -598,8 +523,7 @@ export default class MoqWatch extends HTMLElement {
 	 * and flush the audio buffer so the next utterance plays from its own first frame.
 	 */
 	reset(): void {
-		this.sync.reset();
-		this.audio.reset();
+		this.player.reset();
 	}
 
 	get catalogFormat(): CatalogFormat | undefined {

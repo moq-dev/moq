@@ -80,3 +80,7 @@ harness = false
 [[bench]]
 name = "priority"
 harness = false
+
+[[bench]]
+name = "stats"
+harness = false

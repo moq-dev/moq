@@ -13,8 +13,8 @@ relay.
 
 ## Plan
 
-- Replace the CLI's three server helpers with `moq_relay::serve` over the
-  cluster, the auth, and the shutdown handle. `MoqSide` nests
+- Replace the CLI's three server helpers with the relay's acceptance path,
+  exposing a small library entry point when the CLI needs it. `MoqSide` nests
   `moq_relay::auth::Config` and `stats::Config`, so `--auth-*` and `--stats-*`
   read the same on both binaries; `--auth-public '**'` is the open listener,
   spelled the same on both.

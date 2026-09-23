@@ -14,6 +14,7 @@ on:
   # validated before it merges. Source regressions still surface nightly.
   pull_request:
     paths:
+      - "test/lib/**"
       - "test/smoke/**"
       # The TS/IRD compliance harness runs in the same job (see below).
       - "test/ts/**"
@@ -83,25 +84,51 @@ jobs:
       - name: Smoke (full matrix)
         run: nix develop --command just test smoke --all
         shell: bash -leo pipefail {0}
+        env:
+          # The run writes its directory here, so a failed one is uploaded below
+          # and a passing one is deleted as usual.
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
       - name: Negative control
         run: nix develop --command just test smoke-negative
         shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
       # Browser-to-browser media QA: presented frame progress, audible tone, audio/video skew, and
       # the publication lifecycle, plus the negative controls that prove each assertion can fail.
       - name: Media output and lifecycle
         run: nix develop --command just test smoke-media
         shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
       # Round-trips a PCR-paced TS through a relay and checks the subscriber's
       # `export ts` output with TSDuck (tsp/tsanalyze from the nix devShell).
       - name: TS compliance
         run: nix develop --command just test ts
         shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
       # Builds the sparse-EPG and pending-version fixtures and round-trips
       # them, asserting the schedule survives and pending sections are dropped.
       - name: EIT fixtures
         run: nix develop --command just test ts-eit
         shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # A failing harness run keeps its directory, holding the process logs, the
+      # relay config, and a Playwright trace of the failing page. Upload it for a
+      # short while so a red cell is diagnosable; a passing run deletes its own.
+      # Nothing needs redacting: the certificate and tokens are the harness's
+      # throwaway test ones.
+      - name: Upload failure artifacts
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: smoke-failure
+          path: ${{ runner.temp }}/moq-test-runs
+          retention-days: 7
+          if-no-files-found: ignore

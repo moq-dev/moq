@@ -40,6 +40,8 @@ check *args:
     just rs _select-test
     just rs _publish-test
     just rs _doc-names-test
+    # A new MoqConnectionStats field has to reach every binding's doc page.
+    python3 rs/scripts/stats-docs.py
     rs/scripts/package-nfpm.test.sh
     cargo clippy --locked --all-targets {{ args }} -- -D warnings
     cargo fmt --all --check

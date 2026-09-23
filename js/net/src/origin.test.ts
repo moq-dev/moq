@@ -845,7 +845,7 @@ test("closing the origin makes an existing request unroutable", async () => {
 	request.close();
 });
 
-test("createBroadcast is unadvertised until announce", async () => {
+test("createBroadcast announces locally and forwards only after announce", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("room");
@@ -855,11 +855,10 @@ test("createBroadcast is unadvertised until announce", async () => {
 	expect(wireOf(consumer).advertised.peek()?.has(path)).toBe(false);
 
 	const announced = consumer.announced();
-	const pending = announced.next();
-	broadcast.announce();
-	expect(await pending).toMatchObject({ prefix: path, kind: "announced", route: Route.default });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "announced", route: Route.default });
 
 	broadcast.announce({ cost: 4n });
+	expect(wireOf(consumer).advertised.peek()?.has(path)).toBe(true);
 	expect(await announced.next()).toMatchObject({
 		prefix: path,
 		kind: "updated",
@@ -867,11 +866,13 @@ test("createBroadcast is unadvertised until announce", async () => {
 	});
 
 	broadcast.unannounce();
-	expect(await announced.next()).toMatchObject({ prefix: path, kind: "retracted" });
+	expect(wireOf(consumer).advertised.peek()?.has(path)).toBe(false);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "updated", route: Route.default });
 	expect(wireOf(consumer).routes(path)).toBe(true);
 
-	announced.close();
 	broadcast.close();
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "retracted" });
+	announced.close();
 	origin.close();
 });
 

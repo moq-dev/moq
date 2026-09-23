@@ -125,7 +125,7 @@ class Client:
         self._session = None
 
     def create_broadcast(self, path: str) -> BroadcastProducer:
-        """Create an unadvertised broadcast at ``path``. Announce it after populating tracks.
+        """Create a locally announced broadcast at ``path``. Advertise it to peers after populating tracks.
 
         See :meth:`OriginProducer.create_broadcast`.
         """

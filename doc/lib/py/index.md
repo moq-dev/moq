@@ -67,7 +67,7 @@ asyncio.run(main())
 
 The three advertising operations, as the other bindings spell them:
 `client.create_broadcast(path)` (or `OriginProducer.create_broadcast`) returns
-an unadvertised producer; `broadcast.announce(route)` /
+a locally discoverable producer; `broadcast.announce(route)` /
 `broadcast.unannounce()` own that exact-path advertisement;
 `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
 (`""` for everything). Hold the returned handle while the claim should stay
@@ -99,6 +99,25 @@ is `VideoPixelFormat.I420` when unset, or `VideoPixelFormat.RGBA` for four
 bytes a pixel, and every frame repeats the layout it was decoded to. `resize`
 is best effort: only NVDEC has a built-in scaler, so read each frame's own
 `width` and `height` rather than assuming it took.
+
+## Connection stats
+
+`session.stats()` returns a `ConnectionStats` snapshot. Each field is `None`
+when the transport backend does not report it (native QUIC reports all of them;
+browser WebTransport reports few or none) or before it is available, which is
+not the same as zero.
+
+| Field | Unit | Meaning |
+| --- | --- | --- |
+| `rtt_us` | microseconds | Smoothed round-trip time. |
+| `estimated_send_rate_bps` | bits per second | Send bandwidth from the congestion controller. |
+| `estimated_recv_rate_bps` | bits per second | Receive bandwidth from MoQ PROBE. |
+| `bytes_sent` | bytes | Total sent, including retransmissions and overhead. |
+| `bytes_received` | bytes | Total received, including duplicates and overhead. |
+| `bytes_lost` | bytes | Total lost, detected via retransmission or acknowledgement. |
+| `packets_sent` | datagrams | Total datagrams sent. |
+| `packets_received` | datagrams | Total datagrams received. |
+| `packets_lost` | datagrams | Total datagrams detected as lost. |
 
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)

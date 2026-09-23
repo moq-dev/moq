@@ -284,16 +284,29 @@ class SmokeTest {
     }
 
     @Test
-    fun `announce then unannounce is visible`() = runTest {
+    fun `local discovery survives unannounce until finish`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.createBroadcast("live").use { broadcast ->
                 broadcast.publishTrack("events", null)
-                broadcast.announce(Route())
-                val announced = origin.consume().announced(AnnounceConfig())
-                val first = announced.next()!!
-                assertEquals("live", first.prefix())
-                assertTrue(first.active())
+                val consumer = origin.consume()
+                val announced = consumer.announced(AnnounceConfig())
+                val created = announced.next()!!
+                assertEquals("live", created.prefix())
+                assertTrue(created.active())
+                assertEquals(0uL, created.route().cost)
+
+                broadcast.announce(Route(cost = 3uL))
+                val advertised = announced.next()!!
+                assertTrue(advertised.active())
+                assertEquals(3uL, advertised.route().cost)
+
                 broadcast.unannounce()
+                val local = announced.next()!!
+                assertTrue(local.active())
+                assertEquals(0uL, local.route().cost)
+                consumer.requestBroadcast("live")
+
+                broadcast.finish()
                 val retracted = announced.next()!!
                 assertEquals("live", retracted.prefix())
                 assertTrue(!retracted.active())

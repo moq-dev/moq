@@ -1277,8 +1277,8 @@ pub extern "C" fn moq_origin_create() -> i32 {
 
 /// Create a broadcast at `path` on an origin, for publishing media tracks.
 ///
-/// The broadcast starts unadvertised: reachable by exact path, but not visible
-/// to announcement streams. Fill it with the `moq_publish_*` functions, then
+/// The broadcast appears on this origin's local announcement streams immediately.
+/// Fill it with the `moq_publish_*` functions, then advertise it to peers with
 /// [moq_publish_announce] after populating. [moq_publish_finish] unpublishes
 /// immediately.
 ///
@@ -1520,11 +1520,11 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 
 /// Consume a broadcast from an origin by path, waiting until something can serve it.
 ///
-/// It waits for whatever will serve the path to arrive (e.g. an announcement over the network)
-/// and then delivers the broadcast handle via `on_broadcast`. Use it right after
-/// [moq_session_connect] to avoid racing announcement gossip. Serving and advertising are
-/// separate, so a local broadcast at the exact path resolves without ever being announced. To
-/// answer for what is reachable now and fail otherwise, use [moq_origin_request] instead.
+/// Resolves against future announcements: it waits for the announcement to arrive (e.g. over the
+/// network) and then delivers the broadcast handle via `on_broadcast`. Use it right after
+/// [moq_session_connect] to avoid racing announcement gossip. To resolve against only what is
+/// reachable by exact path now, use [moq_origin_request] instead. A local
+/// broadcast appears on this origin's cursor when created, before peer advertising.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once announced, then exactly once
 /// more with a terminal code: `0` (the wait finished, including after
@@ -1631,7 +1631,7 @@ pub extern "C" fn moq_origin_close(origin: u32) -> i32 {
 /// Advertise a broadcast's exact path as a route.
 ///
 /// Announcing again re-prices the route in place. A NULL `route` uses the default
-/// (no hops, cost 0). An unannounced broadcast stays reachable by exact path.
+/// (no hops, cost 0). The path remains discoverable locally before and after peer advertising.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

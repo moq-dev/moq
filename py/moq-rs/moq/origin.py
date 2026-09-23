@@ -185,10 +185,10 @@ class OriginConsumer:
         return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter)))
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
-        """Await the broadcast at ``path``, resolving once something can serve it.
+        """Await a route covering ``path``, then resolve the broadcast there.
 
-        Serving and advertising are separate, so a local broadcast at the exact
-        path resolves without ever being announced.
+        A local broadcast appears on this origin's cursor when created, before
+        it is advertised to peers.
         """
         return AnnouncedBroadcast(self._inner.announced_broadcast(path))
 
@@ -240,8 +240,8 @@ class OriginProducer:
     def create_broadcast(self, path: str) -> BroadcastProducer:
         """Create a broadcast at ``path``, returning the producer that feeds it.
 
-        The broadcast starts unadvertised: reachable by exact path, but not
-        visible to announcement streams. Advertise it with
+        The broadcast appears on this origin's local announcement streams
+        immediately. Advertise it to peers with
         :meth:`BroadcastProducer.announce` after populating tracks. Create,
         :meth:`dynamic` if tracks are served on demand, populate, then announce.
         ``finish()`` unpublishes immediately, while dropping the producer without
