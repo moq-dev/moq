@@ -20,4 +20,4 @@ decision, with a quest for the chosen mechanism.
 
 ## Related
 
-- [Broadcast epochs](/quest/m2/epoch/README.md) - explicit epochs are what a redundant pair would share
+- [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - explicit epochs are what a redundant pair would share

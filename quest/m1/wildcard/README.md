@@ -271,5 +271,5 @@ than announce state.
   pattern, and its catalog names the generations a wildcard cannot
 - [pop-skipping](/quest/m1/pop-skipping/README.md) - it owns the route cost and
   the rank hash this reuses
-- [Broadcast epochs](/quest/m2/epoch/README.md) - derived output moves under the
+- [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - derived output moves under the
   source's `@<epoch>` segment, which the suffix patterns still match

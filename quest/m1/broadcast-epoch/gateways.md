@@ -16,4 +16,4 @@ describes ingest paths.
 
 ## Required
 
-- [Origin](/quest/m2/epoch/origin.md) - the publish default
+- [Origin](/quest/m1/broadcast-epoch/origin.md) - the publish default

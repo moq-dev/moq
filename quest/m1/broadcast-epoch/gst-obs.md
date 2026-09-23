@@ -15,4 +15,4 @@ show paths.
 
 ## Required
 
-- [Bindings](/quest/m2/epoch/bindings.md) - OBS publishes through libmoq
+- [Bindings](/quest/m1/broadcast-epoch/bindings.md) - OBS publishes through libmoq

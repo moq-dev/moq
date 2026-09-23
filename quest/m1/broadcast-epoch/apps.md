@@ -18,4 +18,4 @@ The UI and logs show the full epoch path, and a watch link can pin one.
 
 ## Required
 
-- [Origin](/quest/m2/epoch/origin.md) - the publish default and follow logic
+- [Origin](/quest/m1/broadcast-epoch/origin.md) - the publish default and follow logic

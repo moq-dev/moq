@@ -9,7 +9,7 @@ and reports its wall-clock time. A path splits into its epoch-free name and
 an optional epoch. The epoch rides in the path, so it survives any
 moq-transport relay with no wire change.
 
-This is the shared primitive the [broadcast epochs](/quest/m2/epoch/README.md)
+This is the shared primitive the [broadcast epochs](/quest/m1/broadcast-epoch/README.md)
 line builds on, and it replaces the e2ee-local `moq_e2ee::Epoch`.
 
 ## Plan
@@ -30,7 +30,7 @@ line builds on, and it replaces the e2ee-local `moq_e2ee::Epoch`.
 - Golden cross-language vectors for parse, reject, order, and time, beside
   the existing path tests.
 - Nothing mints by default here. Publish and consume behavior is
-  [origin](/quest/m2/epoch/origin.md).
+  [origin](/quest/m1/broadcast-epoch/origin.md).
 
 Public API: additive `Epoch` and path helpers in both languages. The
 `moq_e2ee::Epoch` move is a break on an unpublished crate. Wire: none.

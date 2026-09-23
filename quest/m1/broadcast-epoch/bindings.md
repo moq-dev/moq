@@ -18,4 +18,4 @@ reconnect counter `session.epoch()` is renamed so "epoch" has one meaning.
 
 ## Required
 
-- [Origin](/quest/m2/epoch/origin.md) - the behavior the bindings surface
+- [Origin](/quest/m1/broadcast-epoch/origin.md) - the behavior the bindings surface
