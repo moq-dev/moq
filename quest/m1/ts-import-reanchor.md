@@ -26,13 +26,15 @@ Work in `rs/moq-mux/src/container/ts/import.rs`:
 
 - Reproduce first: an H.264 fixture that loops with B-frames, with and
   without the PCR discontinuity flag, fails on HEAD.
-- Lift `LegacyStream::reanchor` (shift to the live edge, keep the offset until
-  the next discontinuity) into one helper every stream kind applies before
-  `write`, instead of copying it per arm.
+- Lift `LegacyStream::reanchor` into one helper every stream kind applies
+  before `write`, instead of copying it per arm. Make the shift cumulative:
+  today it is set once, so a second unflagged loop wrap lands below the edge
+  again. Grow the offset whenever the shifted timestamp is still below the
+  edge; a discontinuity clears it.
 - Sections re-anchor the same way, so an SCTE-35 cue after a B-frame publishes
   at the edge.
 - Tests beside `pcr_discontinuity_breaks_every_track`: H.264 backward restart
-  flagged and unflagged, AAC one frame short of the loop period, verbatim PES
+  flagged and unflagged, two unflagged loop wraps in a row (legacy audio too), AAC one frame short of the loop period, verbatim PES
   below the edge, a section after a B-frame PES.
 
 ## Closes
