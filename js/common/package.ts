@@ -60,12 +60,17 @@ if (pkg.files) {
 	pkg.files = pkg.files.map((p: string) => rewritePath(p, "js"));
 }
 
+// npm normalizes bin targets to drop the leading "./" and warns when it has to.
+function rewriteBin(p: string): string {
+	return rewritePath(p, "js").replace(/^\.\//, "");
+}
+
 if (pkg.bin) {
 	if (typeof pkg.bin === "string") {
-		pkg.bin = rewritePath(pkg.bin, "js");
+		pkg.bin = rewriteBin(pkg.bin);
 	} else if (typeof pkg.bin === "object") {
 		for (const key in pkg.bin) {
-			pkg.bin[key] = rewritePath(pkg.bin[key], "js");
+			pkg.bin[key] = rewriteBin(pkg.bin[key]);
 		}
 	}
 }
