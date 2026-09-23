@@ -70,6 +70,7 @@ pub(crate) fn bytes<T: Serialize>(old: &Value, new: &T, scratch: &RefCell<Scratc
 	let forced = Cell::new(false);
 	let node = new.serialize(Differ {
 		baseline: old,
+		present: true,
 		forced: &forced,
 		scratch,
 		depth: 0,
@@ -105,6 +106,7 @@ const NULL: Value = Value::Null;
 #[derive(Copy, Clone)]
 struct Differ<'a> {
 	baseline: &'a Value,
+	present: bool,
 	forced: &'a Cell<bool>,
 	scratch: &'a RefCell<Scratch>,
 	depth: usize,
@@ -124,6 +126,7 @@ impl<'a> Differ<'a> {
 		(
 			Differ {
 				baseline,
+				present: existed,
 				forced: self.forced,
 				scratch: self.scratch,
 				depth: self.depth + 1,
@@ -252,16 +255,16 @@ impl<'a> Serializer for Differ<'a> {
 		SerializeSeq::end(seq)
 	}
 	fn serialize_none(self) -> Result<Node, Error> {
-		self.scalar(&Value::Null, self.baseline.is_null(), true)
+		self.scalar(&Value::Null, self.present && self.baseline.is_null(), true)
 	}
 	fn serialize_some<T: Serialize + ?Sized>(self, value: &T) -> Result<Node, Error> {
 		value.serialize(self)
 	}
 	fn serialize_unit(self) -> Result<Node, Error> {
-		self.scalar(&Value::Null, self.baseline.is_null(), true)
+		self.scalar(&Value::Null, self.present && self.baseline.is_null(), true)
 	}
 	fn serialize_unit_struct(self, _name: &'static str) -> Result<Node, Error> {
-		self.scalar(&Value::Null, self.baseline.is_null(), true)
+		self.scalar(&Value::Null, self.present && self.baseline.is_null(), true)
 	}
 	fn serialize_unit_variant(self, _name: &'static str, _idx: u32, variant: &'static str) -> Result<Node, Error> {
 		self.scalar(&variant, self.baseline.as_str() == Some(variant), false)
@@ -435,6 +438,7 @@ impl SerializeSeq for SeqDiff<'_> {
 			let equal = matches!(
 				value.serialize(Differ {
 					baseline,
+					present: true,
 					forced: &forced,
 					scratch: self.differ.scratch,
 					depth: self.differ.depth + 1,
@@ -927,6 +931,15 @@ mod test {
 		assert!(!result.forced_snapshot);
 		assert_eq!(result.patch, json!({ "b": 2 }));
 		check(json!({ "a": 1 }), json!({ "a": 1, "b": 2 }));
+	}
+
+	#[test]
+	fn added_null_key_forces_snapshot() {
+		check(json!({ "a": 1 }), json!({ "a": 1, "x": null }));
+		check(
+			json!({ "items": [{ "a": 1 }] }),
+			json!({ "items": [{ "a": 1, "x": null }] }),
+		);
 	}
 
 	#[test]

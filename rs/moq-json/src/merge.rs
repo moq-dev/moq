@@ -114,13 +114,14 @@ impl<'de> serde::de::Visitor<'de> for Check<'_> {
 				depth: self.depth + 1,
 			})?;
 		}
+		if len == 0 || ordered {
+			return Ok(());
+		}
 		let mut scratch = self.scratch.borrow_mut();
 		let keys = &mut scratch.keys[self.depth][..len];
-		if !ordered {
-			keys.sort_unstable();
-			if keys.windows(2).any(|pair| pair[0] == pair[1]) {
-				return Err(serde::de::Error::custom("duplicate JSON object key"));
-			}
+		keys.sort_unstable();
+		if keys.windows(2).any(|pair| pair[0] == pair[1]) {
+			return Err(serde::de::Error::custom("duplicate JSON object key"));
 		}
 		Ok(())
 	}
@@ -287,6 +288,13 @@ mod test {
 		let mut target = json!({"a": 1, "b": 2});
 		assert!(apply_bytes(&mut target, br#"{"a":3,"b":[]"#, &RefCell::new(CheckScratch::default())).is_err());
 		assert_eq!(target, json!({"a": 1, "b": 2}));
+	}
+
+	#[test]
+	fn empty_object_patch_does_not_panic() {
+		let mut target = json!({ "value": 1 });
+		apply_bytes(&mut target, br#"{"value":{}}"#, &RefCell::new(CheckScratch::default())).unwrap();
+		assert_eq!(target, json!({ "value": {} }));
 	}
 
 	#[test]
