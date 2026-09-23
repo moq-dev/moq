@@ -177,6 +177,9 @@ function writeJsrConfig() {
 		...(license ? { license } : {}),
 		exports,
 		...(Object.keys(imports).length ? { imports } : {}),
+		// A sibling @moq package is published to npm minutes before its dependents
+		// in the same release, and Deno otherwise refuses npm versions under 24h old.
+		minimumDependencyAge: 0,
 		// dist is gitignored, so un-ignore it with a "!" negation; JSR honors
 		// .gitignore otherwise and would drop the whole build from the graph.
 		publish: { include: ["dist", "README.md", "LICENSE*"], exclude: ["!dist"] },
