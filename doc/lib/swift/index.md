@@ -79,7 +79,7 @@ pacing; and `client.setQuicMaxStreams` raises the peer's inbound stream cap.
 (`publishJsonSnapshot(name:of:)`, `subscribeJsonStream(name:as:)`), and the
 rest of the [shared feature list](/lib/#what-every-binding-can-do) maps one
 to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix:)` for broadcasts, `appendDatagram`/
-`datagrams`, `setCatalogSection`, `used()`/`unused()`. `session.bandwidth()`
+`datagrams`, `setCatalogSection`, `demand()` for `used()`/`unused()`. `session.bandwidth()`
 divides the connection's send estimate; pass it to `encodeVideo` /
 `encodeAudio` or `reserve` a share for an app-owned track. `MoqError.isAuth` and
 `isShutdown` classify errors. `protocolError` is the structured protocol failure
