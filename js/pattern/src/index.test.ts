@@ -448,6 +448,13 @@ describe("Patterns", () => {
 		expect(set.size).toBe(1);
 	});
 
+	test("matches what any member matches", () => {
+		const set = new Patterns([Pattern.parse("a/*"), Pattern.parse("b/**")]);
+		for (const path of ["a/x", "b", "b/c/d"]) expect(set.matches(path), path).toBe(true);
+		for (const path of ["", "a", "a/x/y", "c"]) expect(set.matches(path), path).toBe(false);
+		expect(new Patterns().matches("")).toBe(false);
+	});
+
 	test("equality is set equality", () => {
 		const a = new Patterns([Pattern.parse("a"), Pattern.parse("b")]);
 		const b = new Patterns([Pattern.parse("b"), Pattern.parse("a"), Pattern.parse("a")]);
