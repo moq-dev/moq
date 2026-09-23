@@ -245,14 +245,14 @@ async function readGroups(subscriber: Track.Subscriber, last: number) {
 	}
 }
 
-test("Legacy Producer marks a discontinuity with one empty frame at the live edge", async () => {
+test("Legacy Producer cut marks the break with one empty frame at the live edge", async () => {
 	const track = new Track.Producer("test");
 	const subscriber = replay(track);
 	const producer = new LegacyProducer(track, new LegacyFormat("audio"));
 	producer.encode(new Uint8Array([1]), 0 as Time.Micro, true);
 	producer.encode(new Uint8Array([1]), 20_000 as Time.Micro, true);
-	producer.discontinuity();
-	producer.discontinuity(); // nothing new to mark
+	producer.cut();
+	producer.cut(); // nothing new to mark
 	producer.encode(new Uint8Array([1]), 5_000_000 as Time.Micro, true);
 	producer.close();
 
@@ -264,26 +264,46 @@ test("Legacy Producer marks a discontinuity with one empty frame at the live edg
 	]);
 });
 
-test("Legacy Producer marks nothing on a data track or before any frame", async () => {
+test("Legacy Producer cut marks the break at the caller's end", async () => {
+	const track = new Track.Producer("test");
+	const subscriber = replay(track);
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	producer.encode(new Uint8Array([1]), 0 as Time.Micro, true);
+	producer.cut(33_000 as Time.Micro);
+	producer.close();
+
+	expect(await readGroups(subscriber, 1)).toEqual([
+		[
+			0,
+			[
+				[0, 1],
+				[33_000, 0],
+			],
+		],
+		[1, [[33_000, 0]]],
+	]);
+});
+
+test("Legacy Producer cut marks nothing on a data track or before any frame", async () => {
 	const data = new Track.Producer("data");
 	const producer = new LegacyProducer(data, new LegacyFormat("data"));
 	producer.encode(new Uint8Array([1]), 0 as Time.Micro, true);
-	producer.discontinuity();
+	producer.cut();
 	expect(data.appendGroup().sequence).toBe(1);
 
 	const empty = new Track.Producer("empty");
-	new LegacyProducer(empty, new LegacyFormat("video")).discontinuity();
+	new LegacyProducer(empty, new LegacyFormat("video")).cut();
 	expect(empty.appendGroup().sequence).toBe(0);
 });
 
 // A group's reach runs to its successor's first frame, so without the marker the group before a
 // pause would stretch across the whole gap and read as live to anyone joining after the resume.
-test("Legacy Producer discontinuity keeps pre-pause media from reading as live", async () => {
+test("Legacy Producer cut keeps pre-pause media from reading as live", async () => {
 	const track = new Track.Producer("test");
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), 0 as Time.Micro, true);
 	producer.encode(new Uint8Array([1]), 33_000 as Time.Micro, false);
-	producer.discontinuity();
+	producer.cut();
 	producer.encode(new Uint8Array([1]), 5_000_000 as Time.Micro, true);
 	producer.close();
 

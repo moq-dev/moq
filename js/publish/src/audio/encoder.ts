@@ -263,9 +263,8 @@ export class Encoder {
 		});
 
 		// When demand disappears, end the epoch with a discontinuity marker (see
-		// Container.Legacy.Producer.discontinuity) so a later subscriber resumes on the same track
-		// without the pre-gap frames reading as live. Its empty payload marks where the source
-		// media ends.
+		// Container.Legacy.Producer.cut) so a later subscriber resumes on the same track without the
+		// pre-gap frames reading as live. Its empty payload marks where the source media ends.
 		effect.run((effect) => {
 			const track = effect.get(rendition.track);
 			if (!track) return;
