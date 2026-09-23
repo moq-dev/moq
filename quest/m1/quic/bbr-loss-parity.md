@@ -34,4 +34,4 @@ no `Controller` or wire change.
 ## Related
 
 - [Release BBR fixes](/quest/m1/quic/bbr-release.md) - the corrected baseline this builds on
-- [Upstream the fork](/quest/m1/quic/upstream.md) - offer the fix alongside the seven
+- [Upstream the fork](/quest/m1/quic/upstream.md) - offers this fix alongside the seven
