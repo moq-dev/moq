@@ -4,7 +4,7 @@
 
 What stays at the root reads like moq-net: `Client` and `Server` take config
 records, getter-only handles are records, producers watch subscribers only
-through `demand()`, and the verbs binding-parity could not rename additively
+through `demand()`, and the verbs no additive change could rename
 are renamed.
 
 ## Plan
@@ -17,7 +17,7 @@ are renamed.
 - Objects that are only getters become records (`AnnounceUpdate` today).
   Handles with verbs (`Request`, `TrackRequest`, `GroupRequest`) stay objects.
 - `TrackProducer` drops `name`/`is_used`/`used`/`unused` for `demand()`.
-- The renames left over from binding parity:
+- The renames no additive change could make:
   - `subscribe` to `consume` on Python `Client`/`connect`, Kotlin
     `Moq.connect`/`Server.listen`, Dart `Moq.connect`, and Go
     `WithSubscribeOrigin`/`WithServerSubscribeOrigin`.
