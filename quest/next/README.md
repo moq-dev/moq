@@ -88,6 +88,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Browser benchmarks](/quest/next/browser-benchmarks.md) - measure JS transport, container, decode, and render costs in an identified browser
 - [Closure counters](/quest/next/closure-counters.md) - a departed node's return never regresses the closure counters a consumer already saw
 - [RTMP interleaving](/quest/next/rtmp-interleaving.md) - isolate partial messages before optimizing assembly copies
+- [Bounded announce prefix table](/quest/next/announce-prefix-table.md) - compress repeated path tuples on each ordered lite-07 announce stream, with bounded state and measured QUIC-byte savings
 - [Relay memory](/quest/next/relay-memory.md) - remeasure what an announcement costs after prefix routes
 - [PoP skipping](/quest/next/pop-skipping/README.md) - short cold paths for unpopular broadcasts without losing warm backhaul dedup
 - [Route cost in the JS origin](/quest/next/route-cost.md) - the browser origin ranks routes by cost and hops like Rust instead of newest-first
