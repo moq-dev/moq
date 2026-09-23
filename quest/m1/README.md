@@ -28,7 +28,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, audio, and video namespaces built from the handle below
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
 - [Gateway embedding](/quest/m1/gateway-embed.md) - moq-hls, moq-rtmp, and moq-rtc expose the loop their binaries run to an in-process embedder
-- [Catalog consumer](/quest/m1/hang-catalog-consumer.md) - reading a catalog is one call in Rust and JS, and JS gains a timeline consumer
 - [Ingest source](/quest/m1/net-ingest-source.md) - an announce says whether the broadcast entered on this relay or a peer
 - [Publisher clocks](/quest/m1/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
 - [Broadcast route](/quest/m1/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()

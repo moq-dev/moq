@@ -21,6 +21,12 @@ that carry a timestamp with every frame.
 cargo add hang
 ```
 
+`Catalog::<E>::subscribe(&broadcast).await?` opens the uncompressed catalog
+track and returns a typed consumer; `consumer.next().await?` yields root updates.
+Updates exceeding `catalog::MAX_RENDITIONS` are refused with
+`Error::TooManyRenditions`. Media retention uses the public
+`container::MAX_AGE` constant.
+
 Producing media is usually done through [`moq-mux`](/lib/rs/moq-mux) (from a
 container) or [`moq-video`](/lib/rs/moq-video) and
 [`moq-audio`](/lib/rs/moq-audio) (from a device), which build the catalog for

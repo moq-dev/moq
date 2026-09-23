@@ -17,7 +17,7 @@ export class Producer<T> {
 	#group?: Moq.Group.Producer;
 
 	/** Wrap a track to publish a record log into it. */
-	constructor(config: Producer.Config) {
+	constructor(config: Producer.Config<T>) {
 		this.#track = config.track;
 		this.#encoder = new Encoder(config);
 	}
@@ -92,5 +92,5 @@ export class Producer<T> {
 
 export namespace Producer {
 	/** Stream producer options, including the destination track. */
-	export type Config = CodecConfig & { track: Moq.Track.Producer };
+	export type Config<T> = CodecConfig<T> & { track: Moq.Track.Producer };
 }

@@ -33,6 +33,7 @@ function findEscaping(base: Moq.Path.Valid, catalog: Catalog.Root): string | und
 
 /** Throw if any rendition's `broadcast` reference escapes the root. */
 function assertResolvable(base: Moq.Path.Valid, catalog: Catalog.Root): Catalog.Root {
+	Catalog.checkRenditions(catalog);
 	const escaping = findEscaping(base, catalog);
 	if (escaping !== undefined) {
 		throw new Error(`rendition ${JSON.stringify(escaping)}: broadcast reference escapes the root ${base}`);
@@ -279,12 +280,12 @@ export class Broadcast {
 			// catalog is rejected the same way a fetched one is, minus the throw: this runs in
 			// the effect body, where an exception would surface as an unhandled error.
 			const catalog = effect.get(this.in.catalog);
-			const escaping = catalog && findEscaping(name, catalog);
-			if (escaping !== undefined) {
-				console.error("rejecting catalog: broadcast reference escapes the root", name, escaping);
+			let accepted: Catalog.Root | undefined;
+			try {
+				accepted = catalog && assertResolvable(name, catalog);
+			} catch (err) {
+				console.error("rejecting catalog", name, err);
 			}
-
-			const accepted = escaping === undefined ? catalog : undefined;
 			this.#raw.set(accepted, true);
 			effect.cleanup(() => this.#raw.set(undefined, true));
 			this.#out.status.set(accepted ? "live" : "loading");
