@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use moq_net::Timestamp;
 
@@ -39,7 +39,8 @@ impl Estimate {
 /// Measures the catalog jitter and bitrate of one track from the frames written to it.
 ///
 /// A [`container::Producer`](crate::container::Producer) created through the catalog owns one,
-/// feeds it as you write, and publishes the result automatically:
+/// feeds it as you write, and publishes the result automatically. Local encoders also call
+/// `flush` for each frame they hand to the transport:
 ///
 /// ```no_run
 /// # fn example<E: moq_mux::catalog::hang::CatalogExt>(
@@ -86,7 +87,10 @@ impl Estimator {
 	}
 
 	pub(crate) fn with_baseline(baseline: Arc<Mutex<Baseline>>) -> Self {
-		Self { baseline, ..Self::default() }
+		Self {
+			baseline,
+			..Self::default()
+		}
 	}
 
 	/// Observe a frame of `bytes` encoded bytes at presentation time `timestamp`, as written by
@@ -96,7 +100,10 @@ impl Estimator {
 		self.bitrate.write(timestamp, bytes);
 	}
 
-	fn observe_flush_at(&mut self, timestamp: u128, now: u128) {
+	/// Measure when an encoder handed a frame to the transport. Only locally encoded frames should
+	/// call this; imports keep clock-free batch and reorder estimates. The shared baseline cancels
+	/// the constant offset between `Instant` and the broadcast media clock.
+	pub fn flush(&mut self, timestamp: Timestamp, now: Instant) {
 		let spread = self.baseline.lock().unwrap().observe(timestamp, now);
 		self.jitter.max = self.jitter.max.max(spread);
 	}
@@ -111,7 +118,7 @@ impl Estimator {
 		self.bitrate.cut(end.map(nanos));
 	}
 
-	/// Discard the open span and the last frame time, so nothing is measured across a break in the
+	/// Discard the open bitrate span, so nothing is measured across a break in the
 	/// timeline. See [`container::Producer::discontinuity`](crate::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) {
 		self.bitrate.discontinuity();
@@ -260,30 +267,45 @@ impl Jitter {
 
 /// The minimum encode lateness seen anywhere in one broadcast over the recent window.
 ///
-/// A monotonic deque makes observation and expiration amortized constant time. It is shared
-/// across renditions so a consistently slower encoder cannot establish its own zero offset.
+/// An `Instant` has no public mapping to the broadcast's media epoch. The first observation
+/// chooses a local origin; its unknown offset is common to every rendition and cancels when
+/// subtracting the recent minimum. A monotonic deque makes insertion and expiry amortized O(1).
 #[derive(Default)]
 pub(crate) struct Baseline {
+	epoch: Option<Instant>,
+	last_now: Option<Instant>,
 	samples: VecDeque<Sample>,
 }
 
 struct Sample {
-	now: u128,
+	at: Instant,
 	lateness: i128,
 }
 
 impl Baseline {
-	fn observe(&mut self, timestamp: u128, now: u128) -> Duration {
-		let cutoff = now.saturating_sub(JITTER_WINDOW.as_nanos());
-		while self.samples.front().is_some_and(|sample| sample.now < cutoff) {
+	fn observe(&mut self, timestamp: Timestamp, now: Instant) -> Duration {
+		let epoch = *self.epoch.get_or_insert(now);
+		// Concurrent encoders can sample `now` in one order and enter this lock in another.
+		// Keep expiry times ordered without changing the lateness sample itself.
+		let at = self.last_now.map_or(now, |last| last.max(now));
+		self.last_now = Some(at);
+		while self
+			.samples
+			.front()
+			.is_some_and(|sample| at.duration_since(sample.at) > JITTER_WINDOW)
+		{
 			self.samples.pop_front();
 		}
 
-		let lateness = now as i128 - timestamp as i128;
+		let elapsed = match now.checked_duration_since(epoch) {
+			Some(duration) => duration.as_nanos() as i128,
+			None => -(epoch.duration_since(now).as_nanos() as i128),
+		};
+		let lateness = elapsed - timestamp.as_nanos() as i128;
 		while self.samples.back().is_some_and(|sample| sample.lateness >= lateness) {
 			self.samples.pop_back();
 		}
-		self.samples.push_back(Sample { now, lateness });
+		self.samples.push_back(Sample { at, lateness });
 		let minimum = self.samples.front().expect("the current sample was inserted").lateness;
 		let spread = u64::try_from(lateness - minimum).unwrap_or(u64::MAX);
 		Duration::from_nanos(spread)
@@ -312,9 +334,10 @@ mod tests {
 	#[test]
 	fn batch_flush_at_its_end_reports_its_media_span() {
 		let mut estimator = Estimator::new();
-		estimator.observe_flush_at(0, 0);
-		estimator.observe_flush_at(0, 120_000_000);
-		estimator.observe_flush_at(40_000_000, 120_000_000);
+		let anchor = Instant::now();
+		estimator.flush(micros(0), anchor);
+		estimator.flush(micros(0), anchor + Duration::from_millis(120));
+		estimator.flush(micros(40_000), anchor + Duration::from_millis(120));
 		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(120)));
 	}
 
@@ -323,8 +346,9 @@ mod tests {
 		let baseline = Arc::new(Mutex::new(Baseline::default()));
 		let mut audio = Estimator::with_baseline(baseline.clone());
 		let mut video = Estimator::with_baseline(baseline);
-		audio.observe_flush_at(0, 0);
-		video.observe_flush_at(0, 200_000_000);
+		let anchor = Instant::now();
+		audio.flush(micros(0), anchor);
+		video.flush(micros(0), anchor + Duration::from_millis(200));
 		assert_eq!(audio.estimate().jitter, None);
 		assert_eq!(video.estimate().jitter, Some(Duration::from_millis(200)));
 	}
@@ -332,14 +356,29 @@ mod tests {
 	#[test]
 	fn shared_baseline_exposes_offset_and_expires_drift() {
 		let mut baseline = Baseline::default();
-		assert_eq!(baseline.observe(0, 0), Duration::ZERO);
-		assert_eq!(baseline.observe(0, 200_000_000), Duration::from_millis(200));
-		assert_eq!(baseline.observe(240_000_000, 240_000_000), Duration::ZERO);
-		assert_eq!(baseline.observe(240_000_000, 440_000_000), Duration::from_millis(200));
+		let anchor = Instant::now();
+		assert_eq!(baseline.observe(micros(0), anchor), Duration::ZERO);
+		assert_eq!(
+			baseline.observe(micros(0), anchor + Duration::from_millis(200)),
+			Duration::from_millis(200)
+		);
+		assert_eq!(
+			baseline.observe(micros(240_000), anchor + Duration::from_millis(240)),
+			Duration::ZERO
+		);
+		assert_eq!(
+			baseline.observe(micros(240_000), anchor + Duration::from_millis(440)),
+			Duration::from_millis(200)
+		);
 
 		let mut drift = Baseline::default();
 		let maximum = (0..100u128)
-			.map(|second| drift.observe(second * 1_000_000_000, second * 1_001_000_000))
+			.map(|second| {
+				drift.observe(
+					micros((second * 1_000_000) as u64),
+					anchor + Duration::from_millis((second * 1_001) as u64),
+				)
+			})
 			.max()
 			.unwrap();
 		assert!(maximum <= Duration::from_millis(10), "{maximum:?}");
@@ -348,8 +387,15 @@ mod tests {
 	#[test]
 	fn early_flush_keeps_lowering_the_baseline() {
 		let mut baseline = Baseline::default();
+		let anchor = Instant::now();
 		for second in 0..100u128 {
-			assert_eq!(baseline.observe(second * 2_000_000_000, second * 1_000_000_000), Duration::ZERO);
+			assert_eq!(
+				baseline.observe(
+					micros((second * 2_000_000) as u64),
+					anchor + Duration::from_secs(second as u64)
+				),
+				Duration::ZERO
+			);
 		}
 	}
 

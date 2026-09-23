@@ -1,5 +1,7 @@
 //! Encode raw PCM and publish it as a moq audio track.
 
+use std::time::Instant;
+
 use bytes::Bytes;
 
 use moq_mux::catalog::hang::CatalogExt;
@@ -385,6 +387,7 @@ impl<E: CatalogExt> Producer<E> {
 			duration: None,
 		};
 		track.write(mux_frame)?;
+		track.flush(timestamp, Instant::now())?;
 		// No boundary to give: the next packet bounds this one, and Opus frames have a
 		// deterministic duration anyway.
 		track.cut(None)?;
@@ -406,12 +409,14 @@ impl<E: CatalogExt> Producer<E> {
 		for (index, packet) in terminal.packets.into_iter().enumerate() {
 			let offset = Timestamp::from_scale((index * terminal.frame_size) as u64, terminal.codec_rate as u64)?
 				.convert(terminal.start.scale())?;
+			let timestamp = terminal.start.checked_add(offset)?;
 			track.write(MuxFrame {
-				timestamp: terminal.start.checked_add(offset)?,
+				timestamp,
 				payload: packet.payload,
 				keyframe: false,
 				duration: None,
 			})?;
+			track.flush(timestamp, Instant::now())?;
 		}
 
 		track.cut(Some(terminal.end))?;

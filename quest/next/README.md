@@ -28,6 +28,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Ingest source](/quest/next/net-ingest-source.md) - an announce says whether the broadcast entered on this relay or a peer
 - [@moq/net additive](/quest/next/js-net-additive.md) - a live-broadcasts getter, `Table.dynamic`, credential refresh before redial, inferred `share`
 - [Publisher clocks](/quest/next/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
+- [GStreamer encoder jitter](/quest/next/gst-encoder-jitter-provenance.md) - only opted-in local encoder pads feed the shared flush clock
 - [Broadcast route](/quest/next/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()
 - [io_uring handshake cancellation](/quest/next/uring-handshake-cancel.md) - dropping a pending handshake releases its connection while the worker keeps running
 - [io_uring handshake flush](/quest/next/uring-handshake-flush.md) - a dial resolves only once its last handshake flight is on the wire, never stranding the peer
@@ -35,7 +36,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [CLI inspection](/quest/next/cli-inspect/README.md) - `moq ls` lists what is live and `moq fetch` reads a group over MoQ, and a guide shows how to inspect a relay
 - [JS caught up](/quest/next/js-announce-caught-up.md) - @moq/net's announce consumer says when the initial set has landed, like Rust
 
-- [Jitter clock](/quest/next/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes, fed by encoders only, and never decreases
 - [Capture denial](/quest/next/browser-permission-qa.md) - moq-publish surfaces a refused camera or microphone instead of retrying forever, and recovers on grant
 - [Publisher audio unlock](/quest/next/publish-audio-unlock.md) - the publisher's capture AudioContext is resumed on a gesture or the source is refused, so no silent audio track is announced
 - [IETF leftovers](/quest/next/ietf-leftovers.md) - moq-net: the 0x21 priority property, a NOT_SUPPORTED reply to TRACK_STATUS, and the two FETCH refusal codes come from the registry

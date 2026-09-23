@@ -81,8 +81,8 @@ pub struct Producer<C: Container, R = ()> {
 	/// A presentation endpoint cannot bound the decode-order tail after reordering.
 	reordered: bool,
 
-	/// Measures the jitter and bitrate of what gets written, for the catalog. Always on: it costs
-	/// two counters, and a caller who doesn't publish a rendition simply never reads it.
+	/// Measures bitrate, reorder, batch, and explicit encoder flush observations for the catalog.
+	/// A caller without a published rendition simply never reads the estimate.
 	estimator: crate::catalog::Estimator,
 
 	/// Peak-hold claim on the connection allocator, when one was supplied.
@@ -226,6 +226,13 @@ where
 			rendition.estimate(self.estimator.estimate())?;
 		}
 		Ok(())
+	}
+
+	/// Record when a locally encoded frame reached the transport. Imported media must leave
+	/// this clock observation out and rely on its container batch and reorder measurements.
+	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
+		self.estimator.flush(timestamp, now);
+		self.publish_estimate()
 	}
 
 	/// The catalog key owned by this producer.
@@ -457,7 +464,7 @@ where
 				let first = iter.next().unwrap();
 				let (min, max) = iter.fold((first, first), |(min, max), d| (min.min(d), max.max(d)));
 				if max.saturating_sub(min) >= self.buffer_duration {
-					self.flush(None)?;
+					self.flush_buffer(None)?;
 				}
 			}
 		}
@@ -499,7 +506,7 @@ where
 		}
 
 		let tail_end = marker_at.filter(|_| !self.reordered);
-		self.flush(tail_end)?;
+		self.flush_buffer(tail_end)?;
 		if let Some(group) = self.group.as_mut() {
 			self.container.finish_group(group, tail_end)?;
 		}
@@ -643,7 +650,7 @@ where
 	/// stays exact in native ticks; a micros round-trip would quantize scales like
 	/// 90 kHz (3003 ticks is not a whole number of micros) and fMP4 would refuse
 	/// the inexact `trun` conversion.
-	fn flush(&mut self, next: Option<moq_net::Timestamp>) -> crate::Result<()> {
+	fn flush_buffer(&mut self, next: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		if self.buffer.is_empty() {
 			return Ok(());
 		}
@@ -771,6 +778,36 @@ mod tests {
 		let estimate = producer.estimate();
 		assert_eq!(estimate.jitter, None, "PTS spacing alone is not flush delay");
 		assert_eq!(estimate.bitrate, Some(1_600_000));
+	}
+
+	#[test]
+	fn catalog_flush_shares_the_baseline_and_publishes_only_the_slower_rendition() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut tracks = Vec::new();
+		for name in ["fast", "slow"] {
+			let net = broadcast
+				.create_track(name, catalog.track_info(hang::catalog::PRIORITY.video))
+				.unwrap();
+			let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			let mut track = catalog
+				.video(net, Container::Legacy(crate::container::Kind::Video), config)
+				.unwrap();
+			track.write(frame(0, true)).unwrap();
+			tracks.push(track);
+		}
+
+		let anchor = std::time::Instant::now();
+		let pts = Timestamp::from_micros(0).unwrap();
+		tracks[0].flush(pts, anchor).unwrap();
+		tracks[1]
+			.flush(pts, anchor + std::time::Duration::from_millis(200))
+			.unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["fast"].jitter, None);
+		assert_eq!(
+			catalog.snapshot().video.renditions["slow"].jitter,
+			Some(std::time::Duration::from_millis(200))
+		);
 	}
 
 	/// A passthrough producer claims nothing until the first window closes, then

@@ -649,18 +649,29 @@ mod tests {
 		let (_broadcast, catalog, mut rendition) = video_track();
 		rendition.set(config(None, Some(Duration::from_millis(100)))).unwrap();
 		let smaller = config(None, Some(Duration::from_millis(50)));
-		assert!(matches!(rendition.set(smaller.clone()), Err(crate::Error::JitterDecreased)));
+		assert!(matches!(
+			rendition.set(smaller.clone()),
+			Err(crate::Error::JitterDecreased)
+		));
 		assert!(matches!(rendition.replace(smaller), Err(crate::Error::JitterDecreased)));
-		assert_eq!(catalog.snapshot().video.renditions["v"].jitter, Some(Duration::from_millis(100)));
+		assert_eq!(
+			catalog.snapshot().video.renditions["v"].jitter,
+			Some(Duration::from_millis(100))
+		);
 
 		let (_broadcast, catalog, mut detected) = video_track();
 		detected.set(config(None, None)).unwrap();
-		detected.estimate(Estimate::default().with_jitter(Duration::from_millis(100))).unwrap();
+		detected
+			.estimate(Estimate::default().with_jitter(Duration::from_millis(100)))
+			.unwrap();
 		assert!(matches!(
 			detected.estimate(Estimate::default().with_jitter(Duration::from_millis(50))),
 			Err(crate::Error::JitterDecreased)
 		));
-		assert_eq!(catalog.snapshot().video.renditions["v"].jitter, Some(Duration::from_millis(100)));
+		assert_eq!(
+			catalog.snapshot().video.renditions["v"].jitter,
+			Some(Duration::from_millis(100))
+		);
 	}
 
 	#[test]

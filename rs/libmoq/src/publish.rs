@@ -224,6 +224,14 @@ impl Publish {
 		Ok(())
 	}
 
+	/// Record a locally encoded frame's transport handoff. Generic imports remain clock-free
+	/// unless their caller explicitly identifies the frame as encoder output.
+	pub fn media_flush(&mut self, media: Id, timestamp: hang::container::Timestamp) -> Result<(), Error> {
+		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
+		track.flush(timestamp, std::time::Instant::now())?;
+		Ok(())
+	}
+
 	/// Draw a group boundary on this media importer.
 	///
 	/// This ends the open group; the next frame starts a new one. Audio has no boundary of its own

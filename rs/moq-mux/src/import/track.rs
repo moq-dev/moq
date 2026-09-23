@@ -384,6 +384,26 @@ impl Track {
 		Ok(())
 	}
 
+	/// Record a locally encoded frame's transport handoff. Call this only for an original
+	/// encoder; file, pipe, and network imports must leave the clock out of the estimate.
+	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> Result<()> {
+		match self.kind {
+			TrackKind::Avc3 { ref mut import, .. } | TrackKind::Avc1 { ref mut import, .. } => {
+				import.flush(timestamp, now)
+			}
+			TrackKind::Hev1 { ref mut import, .. } | TrackKind::Hvc1 { ref mut import, .. } => {
+				import.flush(timestamp, now)
+			}
+			TrackKind::Av01 { ref mut import, .. } => import.flush(timestamp, now),
+			TrackKind::Vp8(ref mut import) => import.flush(timestamp, now),
+			TrackKind::Vp9(ref mut import) => import.flush(timestamp, now),
+			TrackKind::Aac(ref mut import) => import.flush(timestamp, now),
+			TrackKind::Opus(ref mut import) => import.flush(timestamp, now),
+			TrackKind::Mp3(ref mut import) => import.flush(timestamp, now),
+			TrackKind::Flac(ref mut import) => import.flush(timestamp, now),
+		}
+	}
+
 	/// Finish the importer, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
 		match self.kind {

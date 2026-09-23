@@ -49,6 +49,8 @@ std::atomic<int> g_begin_capture{0};
 std::atomic<bool> g_settings_ok{true};
 std::string g_rate_control = "CBR";
 moq_video_hint g_video_hint{};
+std::atomic<int> g_video_flushes{0};
+std::atomic<int> g_audio_flushes{0};
 // Lets a test run something inside obs_output_signal_stop, standing in for a
 // frontend that stops the output straight from the signal handler.
 std::function<void()> g_on_signal;
@@ -139,9 +141,9 @@ bool obs_encoder_get_extra_data(const obs_encoder_t *, uint8_t **, size_t *)
 	return false;
 }
 
-const char *obs_encoder_get_codec(const obs_encoder_t *)
+const char *obs_encoder_get_codec(const obs_encoder_t *encoder)
 {
-	return "h264";
+	return encoder == reinterpret_cast<const obs_encoder_t *>(0x3) ? "opus" : "h264";
 }
 
 // VideoInit reads coded size and CBR from the encoder. Any new libobs call in
@@ -244,7 +246,7 @@ int32_t moq_publish_video(uint32_t, const moq_video_init *config)
 
 int32_t moq_publish_audio(uint32_t, const moq_audio_init *)
 {
-	return 7;
+	return 8;
 }
 
 int32_t moq_publish_media_finish(uint32_t)
@@ -254,6 +256,15 @@ int32_t moq_publish_media_finish(uint32_t)
 
 int32_t moq_publish_media_frame(uint32_t, const uint8_t *, uintptr_t, uint64_t)
 {
+	return 0;
+}
+
+int32_t moq_publish_media_flush(uint32_t handle, uint64_t)
+{
+	if (handle == 7)
+		g_video_flushes++;
+	else if (handle == 8)
+		g_audio_flushes++;
 	return 0;
 }
 
@@ -403,6 +414,8 @@ void reset()
 	g_settings_ok = true;
 	g_rate_control = "CBR";
 	g_video_hint = {};
+	g_video_flushes = 0;
+	g_audio_flushes = 0;
 	g_start_gate = nullptr;
 	g_connect_fires_terminal = false;
 	g_connect_fires_terminal_threaded = false;
@@ -438,6 +451,14 @@ int main()
 		packet.timebase_num = 1;
 		packet.timebase_den = 30;
 		o.Data(&packet);
+		CHECK(g_video_flushes == 1);
+		encoder_packet audio{};
+		audio.type = OBS_ENCODER_AUDIO;
+		audio.encoder = reinterpret_cast<obs_encoder_t *>(0x3);
+		audio.timebase_num = 1;
+		audio.timebase_den = 48000;
+		o.Data(&audio);
+		CHECK(g_audio_flushes == 1);
 		CHECK(g_video_hint.has_coded);
 		CHECK(g_video_hint.has_bitrate == (g_rate_control == "CBR"));
 		if (g_video_hint.has_bitrate)

@@ -33,6 +33,10 @@ OBS Studio install.
   **About** lists plugin and libmoq versions, documentation links, and available
   video encoders.
 
+OBS reports each locally encoded packet's handoff to libmoq against the shared
+broadcast media clock. The catalog's `jitter` is the largest measured delay
+above the recent audio/video baseline, rounded up to milliseconds.
+
 ## Source quality and moq-transcode
 
 OBS publishes **one** hang mezzanine. It does not encode a viewer ladder inside
