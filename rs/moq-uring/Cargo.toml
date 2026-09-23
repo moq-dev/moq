@@ -76,6 +76,7 @@ harness = false
 name = "echo_noq"
 path = "benches/echo_noq.rs"
 harness = false
+required-features = ["noq"]
 
 [[bench]]
 name = "session_lite"

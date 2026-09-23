@@ -710,7 +710,7 @@ c-tests:
 # Compile the workspace at the feature extremes.
 features:
     cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
-    cargo hack check --locked -p moq-tokio --each-feature --features aws-lc-rs
+    cargo hack check --locked -p moq-tokio --each-feature --exclude-features _transport --features aws-lc-rs
     cargo check --locked -p moq-relay --no-default-features
     just rs relay-minimal
     cargo check --locked -p moq-cli --no-default-features
