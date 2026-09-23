@@ -97,6 +97,8 @@ export interface TrackRequestOptions {
 export const hooks: {
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
+	/** Access the existing producer while a request awaits immutable wire metadata. */
+	pendingTrackProducer: (request: Request) => Producer;
 	/**
 	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
 	 *
@@ -139,6 +141,9 @@ export const hooks: {
 	) => void;
 } = {
 	makeRequest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	pendingTrackProducer: () => {
 		throw new Error("track.ts not loaded");
 	},
 	tryRecvGroup: () => {

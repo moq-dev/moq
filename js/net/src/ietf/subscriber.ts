@@ -4,7 +4,7 @@ import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
@@ -16,7 +16,7 @@ import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.
 import * as Cluster from "./cluster.ts";
 import { requestReason, toRequestCode } from "./error.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
-import { toWire } from "./priority.ts";
+import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishError } from "./publish.ts";
 import {
 	type PublishNamespace,
@@ -447,12 +447,9 @@ export class Subscriber {
 
 		console.debug(`subscribe start: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 
-		// IETF negotiates group order in SUBSCRIBE_OK; this implementation only supports
-		// descending (newest-first), which is what moq-lite fixes group order to, so the
-		// mapping needs nothing here. (There's no per-frame timescale either, so every
-		// property stays at its default.) This resolves the consumer's track.info() and
-		// gives us the write side that incoming object streams are routed into.
-		const producer = request.accept({});
+		// Keep the request pending until SUBSCRIBE_OK supplies immutable track metadata.
+		// Group streams already wait on the alias, so early data stays behind this response.
+		const producer = hooks.pendingTrackProducer(request);
 
 		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
 		// flows back via `state` so the timeout path can clean up the stream
@@ -489,7 +486,7 @@ export class Subscriber {
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			const e = error(err);
-			producer.close(e);
+			request.reject(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
@@ -668,6 +665,8 @@ export class Subscriber {
 		}
 
 		const ok = await SubscribeOk.decode(state.stream.reader, version);
+		if (state.cancelled) throw new Error("subscribe cancelled before acceptance");
+		request.accept({ priority: fromWire(ok.properties.priority ?? 128) });
 
 		try {
 			this.#aliases.set(ok.trackAlias, producer, { broadcast, name: request.name });
@@ -920,6 +919,9 @@ export class Subscriber {
 		try {
 			// The control message establishing this alias can arrive after the data stream.
 			const track = await this.#aliases.get(group.trackAlias);
+			// The alias binds after SUBSCRIBE_OK commits the track property; an omitted
+			// header priority inherits it (draft-21 section 10.4).
+			if (!group.flags.hasPriority) group.publisherPriority = toWire((await track.info()).priority);
 
 			track.writeGroup(producer);
 

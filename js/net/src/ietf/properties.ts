@@ -11,6 +11,7 @@ const TIMESCALE = 0x08n;
 // It shares its number with the GROUP_ORDER *message parameter*, which is a different
 // registry: that one is only legal in SUBSCRIBE, PUBLISH_OK, and FETCH, where the
 // subscriber states its own preference.
+const DEFAULT_PUBLISHER_PRIORITY = 0x0en;
 const DEFAULT_PUBLISHER_GROUP_ORDER = 0x22n;
 
 /**
@@ -25,6 +26,9 @@ export interface Properties {
 	///
 	/// `undefined` declares no timeline, so the subscriber times objects by arrival.
 	timescale?: Timescale;
+
+	/// Publisher priority for a group header without its priority flag. The wire default is 128.
+	priority?: number;
 
 	/// The publisher's preference for prioritizing groups within a subscription,
 	/// Ascending (0x1) or Descending (0x2).
@@ -52,6 +56,15 @@ export async function encode(w: Writer, properties: Properties, version: IetfVer
 		await w.u62(TIMESCALE);
 		await w.u62(BigInt(properties.timescale));
 		prevType = TIMESCALE;
+	}
+
+	if (properties.priority !== undefined) {
+		if (!Number.isInteger(properties.priority) || properties.priority < 0 || properties.priority > 255) {
+			throw new RangeError(`invalid publisher priority: ${properties.priority}`);
+		}
+		await w.u62(DEFAULT_PUBLISHER_PRIORITY - prevType);
+		await w.u62(BigInt(properties.priority));
+		prevType = DEFAULT_PUBLISHER_PRIORITY;
 	}
 
 	if (properties.groupOrder !== undefined) {
@@ -94,6 +107,9 @@ export async function decode(r: Reader, version: IetfVersion): Promise<Propertie
 				// A zero timescale is invalid; treat it as no declaration rather than
 				// failing the whole message over one property we could have ignored.
 				properties.timescale = Timescale(Number(value));
+			} else if (abs === DEFAULT_PUBLISHER_PRIORITY) {
+				if (value > 255n) throw new Error(`invalid publisher priority: ${value}`);
+				properties.priority = Number(value);
 			} else if (abs === DEFAULT_PUBLISHER_GROUP_ORDER) {
 				// Only Ascending (0x1) and Descending (0x2) are defined here. Unlike the draft-14
 				// fields, 0x0 has no "publisher decides" meaning to fall back on.

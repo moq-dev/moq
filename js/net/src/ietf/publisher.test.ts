@@ -21,6 +21,7 @@ import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { SubscribeNamespace } from "./subscribe_namespace.ts";
+import { TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
@@ -128,6 +129,50 @@ function publisher(
 		origin,
 	};
 }
+
+test("TRACK_STATUS gets exact NOT_SUPPORTED refusal bytes on every draft", async () => {
+	const phrase = new TextEncoder().encode("TRACK_STATUS is not supported");
+	for (const version of [
+		Version.DRAFT_14,
+		Version.DRAFT_15,
+		Version.DRAFT_16,
+		Version.DRAFT_17,
+		Version.DRAFT_18,
+		Version.DRAFT_19,
+		Version.DRAFT_20,
+		Version.DRAFT_21,
+		Version.DRAFT_22,
+	] as const) {
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const session = new NativeSession(pair.server, version, true);
+		const { pub, origin } = publisher(pair.server, { session });
+		const written: Uint8Array[] = [];
+		const stream = new Stream({
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>({
+				write: (chunk) => {
+					written.push(new Uint8Array(chunk));
+				},
+			}),
+			version,
+		});
+		await pub.runTrackStatusRequest(
+			new TrackStatusRequest({ requestId: 7n, trackNamespace: Path.from("test"), trackName: "video" }),
+			stream,
+		);
+		await stream.writer.closed;
+		const body = [
+			...(version <= Version.DRAFT_16 ? [7] : []),
+			3,
+			...(version >= Version.DRAFT_16 ? [0] : []),
+			phrase.length,
+			...phrase,
+		];
+		const expected = [version === Version.DRAFT_14 ? 0x0f : 0x05, 0, body.length, ...body];
+		expect(written.flatMap((chunk) => Array.from(chunk))).toEqual(expected);
+		origin.close();
+	}
+});
 
 // The header is part of the group's lifetime too. If it blocks on flow control, advancing
 // the live edge must reset the stream without waiting for that write to finish.

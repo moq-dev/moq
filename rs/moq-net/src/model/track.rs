@@ -1127,6 +1127,11 @@ pub struct Producer {
 }
 
 impl Producer {
+	/// The immutable publisher priority committed when this track was accepted.
+	pub(crate) fn publisher_priority(&self) -> u8 {
+		self.info.priority
+	}
+
 	/// Build a producer for the given track metadata.
 	///
 	/// Crate-private: tracks are born from their broadcast via
@@ -3947,6 +3952,19 @@ impl Request {
 	/// stop serving and drop the request.
 	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state.poll_unused(waiter).map(|_| ())
+	}
+
+	/// Reject only while no consumer needs this pending track. Demand and the check
+	/// share one lock, so demand returning after `poll_unused` wins the race.
+	pub(crate) fn reject_unused(&self, err: Error) -> bool {
+		match self.state.write_unused() {
+			kio::Unused::Idle(mut guard) => {
+				guard.abort = Some(err);
+				true
+			}
+			kio::Unused::Closed => true,
+			kio::Unused::Used => false,
+		}
 	}
 
 	/// Serve the request with the given track, resolving every waiting subscriber.

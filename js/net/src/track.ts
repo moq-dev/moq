@@ -209,6 +209,7 @@ export class Request {
 
 	static {
 		hooks.makeRequest = (options) => new Request(options);
+		hooks.pendingTrackProducer = (request) => request.#producer;
 	}
 
 	/** The aggregate subscription requested for this track. */

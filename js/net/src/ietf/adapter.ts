@@ -636,7 +636,10 @@ export class ControlStreamAdapter implements Session {
 				return { route: Route.FollowUp, requestId: subNs08 };
 			}
 			case 0x0e: {
-				// v15: NamespaceDone entry (no requestId) — route to SubscribeNamespace stream
+				if (this.version === Version.DRAFT_14 || this.version === Version.DRAFT_15) {
+					throw new Error("unexpected message 0x0e");
+				}
+				// v16+: NamespaceDone entry (no requestId) — route to SubscribeNamespace stream
 				const subNs0e = this.#subscribeNamespaces.values().next().value;
 				if (subNs0e === undefined) throw new Error("unexpected message 0x0e: no SubscribeNamespace stream");
 				return { route: Route.FollowUp, requestId: subNs0e };

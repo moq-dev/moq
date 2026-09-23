@@ -13,7 +13,7 @@ SUBSCRIBE, which PR #3519 built and was closed for.
 
 ## Plan
 
-### DEFAULT_PUBLISHER_PRIORITY (0x21)
+### DEFAULT_PUBLISHER_PRIORITY (0x0E)
 
 The group header is done: dev stamps
 `priority::to_wire(self.track.info().priority)`
@@ -21,13 +21,13 @@ The group header is done: dev stamps
 `toWire(info.priority)` (`js/net/src/ietf/publisher.ts:239`). What remains
 is the property. `rs/moq-net/src/ietf/properties.rs` knows only TIMESCALE
 0x08 (`:27`) and DEFAULT_PUBLISHER_GROUP_ORDER 0x22 (`:34`), and
-`js/net/src/ietf/properties.ts` the same two (`:8`, `:14`); 0x21 falls
+`js/net/src/ietf/properties.ts` the same two (`:8`, `:14`); 0x0E falls
 through the unknown path. The subscriber builds `track::Info::default()`
 with only timescale and max age (`rs/moq-net/src/ietf/subscriber.rs:1419`),
 and an absent header priority flag resolves to a literal 128
 (`rs/moq-net/src/ietf/group.rs:333`, `js/net/src/ietf/object.ts:254`).
 
-- Add 0x21 beside 0x22 in both property modules. Encode it on SUBSCRIBE_OK
+- Add 0x0E beside 0x22 in both property modules. Encode it on SUBSCRIBE_OK
   and PUBLISH from `info.priority` through `priority::to_wire`; decode it
   through `priority::from_wire` into `track::Info::priority` where the
   subscriber builds its `Info`. The block is written from draft-17 on and
@@ -38,7 +38,7 @@ and an absent header priority flag resolves to a literal 128
   draft's text rather than keeping 128 by assumption, and cite the section
   in the type's docs. The model has no per-group priority, so a subgroup
   value that disagrees with the track's is decoded and dropped.
-- Tests: 0x21 round-trips on SUBSCRIBE_OK on every draft that carries the
+- Tests: 0x0E round-trips on SUBSCRIBE_OK on every draft that carries the
   block and is absent from the bytes on those that do not; a subgroup
   without the flag decodes to the declared default; a conflicting header
   leaves `track::Info::priority` unchanged.
@@ -75,7 +75,7 @@ draft-15+ with a bare `RequestOk`, a success, and draft-14 with a
 
 ### FETCH refusal codes
 
-#3562 on main sent INVALID_JOINING_REQUEST_ID (0x7 on draft-14, 0x32 after)
+#3562 on main sent INVALID_JOINING_REQUEST_ID (0x7 on draft-14, 0x32 on drafts 15-19)
 for a joining FETCH naming no subscription and INVALID_RANGE (0x5 on
 draft-14, 0x11 after) for an empty snapshot. The dev merge lost both:
 `reject_fetch` keys the code on an `Error` through `request::to_code`

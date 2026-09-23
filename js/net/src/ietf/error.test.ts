@@ -11,9 +11,18 @@ const ALL: IetfVersion[] = [
 	Version.DRAFT_18,
 	Version.DRAFT_19,
 	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
 ];
 
-const KINDS: RequestKind[] = ["subscribe", "fetch", "publish", "publish_namespace", "subscribe_namespace"];
+const KINDS: RequestKind[] = [
+	"subscribe",
+	"fetch",
+	"publish",
+	"publish_namespace",
+	"subscribe_namespace",
+	"track_status",
+];
 
 /** Every condition a rejection can carry. A new one belongs here. */
 const CONDITIONS: RequestCondition[] = [
@@ -22,6 +31,8 @@ const CONDITIONS: RequestCondition[] = [
 	"timeout",
 	"not_supported",
 	"does_not_exist",
+	"invalid_range",
+	"invalid_joining_request_id",
 	"uninterested",
 	"malformed_track",
 	"going_away",
@@ -45,6 +56,7 @@ function registered(kind: RequestKind, version: IetfVersion): number[] {
 			case "publish_namespace":
 				return [0x0, 0x1, 0x2, 0x3, 0x4, 0x10, 0x12];
 			case "subscribe_namespace":
+			case "track_status":
 				return [0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x10, 0x12];
 		}
 	}
@@ -57,6 +69,19 @@ function registered(kind: RequestKind, version: IetfVersion): number[] {
 		0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36,
 	];
 }
+
+test("fetch refusal codes follow each draft registry", () => {
+	for (const version of ALL) {
+		const range = version === Version.DRAFT_14 ? 0x5 : 0x11;
+		expect(toRequestCode("invalid_range", "fetch", version)).toBe(range);
+		expect(fromRequestCode(range, "fetch", version)).toBe("invalid_range");
+		const joining = version === Version.DRAFT_14 ? 0x7 : version <= Version.DRAFT_19 ? 0x32 : undefined;
+		expect(toRequestCode("invalid_joining_request_id", "fetch", version)).toBe(joining ?? 0);
+		if (joining !== undefined)
+			expect(fromRequestCode(joining, "fetch", version)).toBe("invalid_joining_request_id");
+		else expect(fromRequestCode(0x32, "fetch", version)).toBeUndefined();
+	}
+});
 
 test("only registered codes reach the wire", () => {
 	for (const version of ALL) {

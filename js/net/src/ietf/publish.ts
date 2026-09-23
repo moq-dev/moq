@@ -16,6 +16,7 @@ export class Publish {
 	trackName: string;
 	trackAlias: bigint;
 	groupOrder: number;
+	priority?: number;
 	contentExists: boolean;
 	largest: { groupId: bigint; objectId: bigint } | undefined;
 	forward: boolean;
@@ -26,6 +27,7 @@ export class Publish {
 		trackName,
 		trackAlias,
 		groupOrder,
+		priority,
 		contentExists,
 		largest,
 		forward,
@@ -35,6 +37,7 @@ export class Publish {
 		trackName: string;
 		trackAlias: bigint;
 		groupOrder: number;
+		priority?: number;
 		contentExists: boolean;
 		largest: { groupId: bigint; objectId: bigint } | undefined;
 		forward: boolean;
@@ -44,6 +47,7 @@ export class Publish {
 		this.trackName = trackName;
 		this.trackAlias = trackAlias;
 		this.groupOrder = groupOrder;
+		this.priority = priority;
 		this.contentExists = contentExists;
 		this.largest = largest;
 		this.forward = forward;
@@ -90,7 +94,7 @@ export class Publish {
 			await params.encode(w, version);
 
 			// Track Properties are the final field, so nothing may follow.
-			await Properties.encode(w, { groupOrder: this.groupOrder }, version);
+			await Properties.encode(w, { groupOrder: this.groupOrder, priority: this.priority }, version);
 		}
 	}
 
@@ -142,6 +146,7 @@ export class Publish {
 			trackName,
 			trackAlias,
 			groupOrder,
+			priority: properties.priority,
 			contentExists: !!largest,
 			largest,
 			forward,

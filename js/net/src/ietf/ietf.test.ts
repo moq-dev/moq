@@ -90,6 +90,77 @@ async function encodeFetchFrameVersioned(
 	return concatChunks(written);
 }
 
+test("DEFAULT_PUBLISHER_PRIORITY has exact SUBSCRIBE_OK bytes per draft", async () => {
+	for (const version of [
+		Version.DRAFT_14,
+		Version.DRAFT_15,
+		Version.DRAFT_16,
+		Version.DRAFT_17,
+		Version.DRAFT_18,
+		Version.DRAFT_19,
+		Version.DRAFT_20,
+		Version.DRAFT_21,
+		Version.DRAFT_22,
+	] as const) {
+		const requestId = version <= Version.DRAFT_16 ? 7n : undefined;
+		const baseline = await encodeVersioned(new Subscribe.SubscribeOk({ requestId, trackAlias: 42n }), version);
+		const encoded = await encodeVersioned(
+			new Subscribe.SubscribeOk({ requestId, trackAlias: 42n, properties: { priority: 37 } }),
+			version,
+		);
+		if (version <= Version.DRAFT_16) {
+			expect(Array.from(encoded)).toEqual(Array.from(baseline));
+		} else {
+			expect(Array.from(encoded)).toEqual([baseline[0], baseline[1] + 2, ...baseline.slice(2), 0x0e, 37]);
+			const decoded = await decodeVersioned(encoded, Subscribe.SubscribeOk.decode, version);
+			expect(decoded.properties.priority).toBe(37);
+		}
+	}
+});
+
+test("DEFAULT_PUBLISHER_PRIORITY has exact PUBLISH bytes per draft", async () => {
+	for (const version of [
+		Version.DRAFT_14,
+		Version.DRAFT_15,
+		Version.DRAFT_16,
+		Version.DRAFT_17,
+		Version.DRAFT_18,
+		Version.DRAFT_19,
+		Version.DRAFT_20,
+		Version.DRAFT_21,
+		Version.DRAFT_22,
+	] as const) {
+		const fields = {
+			requestId: 1n,
+			trackNamespace: Path.from("ns"),
+			trackName: "video",
+			trackAlias: 42n,
+			groupOrder: 2,
+			contentExists: false,
+			largest: undefined,
+			forward: true,
+		};
+		const baseline = await encodeVersioned(new Publish(fields), version);
+		const encoded = await encodeVersioned(new Publish({ ...fields, priority: 37 }), version);
+		if (version <= Version.DRAFT_16) {
+			expect(Array.from(encoded)).toEqual(Array.from(baseline));
+		} else {
+			// The new property precedes GROUP_ORDER, so its delta changes 0x22 to 0x14.
+			expect(Array.from(encoded)).toEqual([
+				baseline[0],
+				baseline[1] + 2,
+				...baseline.slice(2, -2),
+				0x0e,
+				37,
+				0x14,
+				2,
+			]);
+			const decoded = await decodeVersioned(encoded, Publish.decode, version);
+			expect(decoded.priority).toBe(37);
+		}
+	}
+});
+
 test("Message Parameters: uint8 wire encoding changes in draft 17", async () => {
 	const params = new Parameters();
 	params.subscriberPriority = 255;

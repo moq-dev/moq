@@ -66,7 +66,13 @@ export function sharedStreamCode(code: number, version: IetfVersion): boolean {
  *
  * @internal
  */
-export type RequestKind = "subscribe" | "fetch" | "publish" | "publish_namespace" | "subscribe_namespace";
+export type RequestKind =
+	| "subscribe"
+	| "fetch"
+	| "publish"
+	| "publish_namespace"
+	| "subscribe_namespace"
+	| "track_status";
 
 /**
  * What a rejection reports, before the draft picks the number for it.
@@ -86,6 +92,8 @@ export type RequestCondition =
 	/** This endpoint does not implement the request at all. */
 	| "not_supported"
 	/** The broadcast or track the peer asked for is not here. */
+	| "invalid_range"
+	| "invalid_joining_request_id"
 	| "does_not_exist"
 	/** The content the peer offered is not wanted here, so it should stop offering it. */
 	| "uninterested"
@@ -103,6 +111,23 @@ const NOT_SUPPORTED = 0x3;
 /** A draining session. Draft-17 and later. */
 const GOING_AWAY = 0x6;
 
+/** FETCH-only errors. INVALID_JOINING_REQUEST_ID was removed in draft-20. */
+const INVALID_RANGE_14 = 0x5;
+const INVALID_RANGE = 0x11;
+const INVALID_JOINING_REQUEST_ID_14 = 0x7;
+const INVALID_JOINING_REQUEST_ID = 0x32;
+
+function invalidRange(kind: RequestKind, version: IetfVersion): number | undefined {
+	if (kind !== "fetch") return undefined;
+	return version === Version.DRAFT_14 ? INVALID_RANGE_14 : INVALID_RANGE;
+}
+
+function invalidJoiningRequestId(kind: RequestKind, version: IetfVersion): number | undefined {
+	if (kind !== "fetch") return undefined;
+	if (version === Version.DRAFT_14) return INVALID_JOINING_REQUEST_ID_14;
+	return version <= Version.DRAFT_19 ? INVALID_JOINING_REQUEST_ID : undefined;
+}
+
 /** Draft-14 calls it TRACK_DOES_NOT_EXIST; draft-15 renamed it and moved it off 0x4. */
 const DOES_NOT_EXIST_14 = 0x4;
 const DOES_NOT_EXIST = 0x10;
@@ -118,7 +143,7 @@ const MALFORMED_TRACK = 0x12;
 /** The value for "the thing you asked for is not here", or undefined where none is assigned. */
 function doesNotExist(kind: RequestKind, version: IetfVersion): number | undefined {
 	if (version !== Version.DRAFT_14) return DOES_NOT_EXIST;
-	return kind === "subscribe" || kind === "fetch" ? DOES_NOT_EXIST_14 : undefined;
+	return kind === "subscribe" || kind === "fetch" || kind === "track_status" ? DOES_NOT_EXIST_14 : undefined;
 }
 
 /** The value for "we do not want this", or undefined where none is assigned. */
@@ -159,13 +184,17 @@ export function toRequestCode(condition: RequestCondition, kind: RequestKind, ve
 			return TIMEOUT;
 		case "not_supported":
 			return NOT_SUPPORTED;
+		case "invalid_range":
+			return invalidRange(kind, version) ?? INTERNAL_ERROR;
+		case "invalid_joining_request_id":
+			return invalidJoiningRequestId(kind, version) ?? INTERNAL_ERROR;
 		case "does_not_exist":
 			return doesNotExist(kind, version) ?? INTERNAL_ERROR;
 		// A subscriber that asked for content cannot act on "we do not want it": what it needs
 		// to know is that we do not have it, which is the same refusal from its side. Only the
 		// requests that offer content say UNINTERESTED.
 		case "uninterested":
-			return kind === "subscribe" || kind === "fetch"
+			return kind === "subscribe" || kind === "fetch" || kind === "track_status"
 				? (doesNotExist(kind, version) ?? INTERNAL_ERROR)
 				: (uninterested(kind, version) ?? INTERNAL_ERROR);
 		case "malformed_track":
@@ -194,6 +223,8 @@ export function fromRequestCode(code: number, kind: RequestKind, version: IetfVe
 	}
 
 	if (code === doesNotExist(kind, version)) return "does_not_exist";
+	if (code === invalidRange(kind, version)) return "invalid_range";
+	if (code === invalidJoiningRequestId(kind, version)) return "invalid_joining_request_id";
 	if (code === uninterested(kind, version)) return "uninterested";
 	if (code === malformedTrack(kind, version)) return "malformed_track";
 	if (code === goingAway(version)) return "going_away";
