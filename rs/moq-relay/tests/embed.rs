@@ -130,7 +130,12 @@ async fn embed_and_stop(mut config: Config) {
 	let web = relay
 		.web()
 		.routes()
-		.route("/embedded", axum::routing::get(|| async { "embedded\n" }));
+		.route("/embedded", axum::routing::get(|| async { "embedded\n" }))
+		.route(
+			"/restricted",
+			axum::routing::post(|| async { ([("access-control-allow-origin", "https://trusted.example")], "private") }),
+		)
+		.route("/plain-post", axum::routing::post(|| async { "plain" }));
 	let running = tokio::spawn(relay.with_web(web).run());
 	ready.wait().await.expect("relay ready");
 
@@ -156,6 +161,57 @@ async fn embed_and_stop(mut config: Config) {
 			.get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
 			.unwrap(),
 		"*"
+	);
+	let response = reqwest::Client::new()
+		.post(format!("http://127.0.0.1:{}/restricted", http.port()))
+		.header(reqwest::header::ORIGIN, "https://untrusted.example")
+		.send()
+		.await
+		.expect("post to restricted embedder route");
+	assert_eq!(
+		response
+			.headers()
+			.get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+			.unwrap(),
+		"https://trusted.example",
+		"relay CORS must preserve the embedder's policy on POST"
+	);
+	let response = reqwest::Client::new()
+		.post(format!("http://127.0.0.1:{}/plain-post", http.port()))
+		.header(reqwest::header::ORIGIN, "https://untrusted.example")
+		.send()
+		.await
+		.expect("post to plain embedder route");
+	assert!(
+		response
+			.headers()
+			.get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+			.is_none(),
+		"relay CORS must not grant wildcard access to POST"
+	);
+	let response = reqwest::Client::new()
+		.request(
+			reqwest::Method::OPTIONS,
+			format!("http://127.0.0.1:{}/embedded", http.port()),
+		)
+		.header(reqwest::header::ORIGIN, "https://example.test")
+		.header(reqwest::header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+		.send()
+		.await
+		.expect("preflight embedded GET route");
+	assert_eq!(
+		response
+			.headers()
+			.get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+			.unwrap(),
+		"*"
+	);
+	assert_eq!(
+		response
+			.headers()
+			.get(reqwest::header::ACCESS_CONTROL_ALLOW_METHODS)
+			.unwrap(),
+		"GET"
 	);
 
 	let broadcast = origin.create_broadcast("test").expect("create broadcast");
@@ -244,6 +300,29 @@ fn http_and_quic(cert: &std::path::Path, key: &std::path::Path, quic_bind: Strin
 	config.web.ws = false;
 	public_auth(&mut config);
 	config
+}
+
+/// A late TCP bind failure must close readiness without reporting success.
+#[tokio::test]
+async fn tcp_bind_failure_does_not_report_ready() {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let occupied = TcpListener::bind("127.0.0.1:0").expect("reserve TCP port");
+	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
+	config.listen.tcp.bind = Some(occupied.local_addr().expect("reserved address"));
+	let relay = Relay::load(config).await.expect("load relay before TCP bind");
+	let ready = relay.ready();
+	let running = tokio::spawn(relay.run());
+
+	let result = tokio::time::timeout(TIMEOUT, ready.wait())
+		.await
+		.expect("readiness never resolved");
+	assert!(result.is_err(), "failed TCP bind reported readiness");
+	let error = running
+		.await
+		.expect("run panicked")
+		.expect_err("run accepted an occupied TCP port");
+	assert!(error.to_string().contains("failed to bind listeners"), "{error:#}");
 }
 
 /// Shared Tokio runtime: one work-stealing runtime owns QUIC.

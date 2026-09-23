@@ -22,7 +22,6 @@ use bytes::Bytes;
 use futures::{FutureExt, future::BoxFuture};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::server::TlsStream;
-use tower_http::cors::{Any, CorsLayer};
 use tower_service::Service;
 
 use crate::{auth, cluster};
@@ -322,8 +321,8 @@ impl Web {
 	/// Includes the WebSocket polyfill catch-all (`/{*path}`, when
 	/// `config.ws`), but NOT the
 	/// landing-page fallback (that is global, so [`serve`](Self::serve) sets it
-	/// once across the merged router). CORS is applied to the complete router by [`Self::serve`],
-	/// including any routes the embedder merges in.
+	/// once across the merged router). GET CORS is applied to the complete router by [`Self::serve`],
+	/// including any routes the embedder merges in without their own policy.
 	pub fn routes(&self) -> Router {
 		let app = Router::new()
 			.route("/health", get(serve_health))
@@ -370,7 +369,7 @@ impl Web {
 		} = self.bind()?;
 		let app = app
 			.fallback(serve_landing)
-			.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
+			.layer(axum::middleware::from_fn(get_cors))
 			.into_make_service_with_connect_info::<crate::listener::Peer>();
 		let ws = config.resolved_ws();
 
@@ -411,6 +410,40 @@ impl Web {
 		let app = self.routes();
 		self.serve(app).await
 	}
+}
+
+// Public GET routes are readable cross-origin. Preserve an embedder's own
+// response policy and leave every other method to its router.
+async fn get_cors(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+	let method = request.method().clone();
+	if method == Method::OPTIONS
+		&& request.headers().get(http::header::ACCESS_CONTROL_REQUEST_METHOD)
+			== Some(&http::HeaderValue::from_static("GET"))
+	{
+		let mut response = StatusCode::OK.into_response();
+		response.headers_mut().insert(
+			http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+			http::HeaderValue::from_static("*"),
+		);
+		response.headers_mut().insert(
+			http::header::ACCESS_CONTROL_ALLOW_METHODS,
+			http::HeaderValue::from_static("GET"),
+		);
+		return response;
+	}
+
+	let mut response = next.run(request).await;
+	if method == Method::GET
+		&& !response
+			.headers()
+			.contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+	{
+		response.headers_mut().insert(
+			http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+			http::HeaderValue::from_static("*"),
+		);
+	}
+	response
 }
 
 /// Build a [`rustls::ServerConfig`] for the HTTPS listener.

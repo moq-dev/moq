@@ -505,6 +505,9 @@ impl Relay {
 				.context("failed to start the io_uring QUIC workers")?;
 		}
 
+		// The shared TCP/Unix sockets bind here rather than inside the accept loop:
+		// readiness must fail if one of them cannot be opened.
+		let server = server.listen().await.context("failed to bind listeners")?;
 		ready.send_replace(true);
 
 		#[cfg(unix)]
@@ -604,7 +607,7 @@ impl Relay {
 			async move {
 				match idle {
 					true => std::future::pending().await,
-					false => serve(server, cluster, auth, shutdown, sessions).await,
+					false => serve_listening(server, cluster, auth, shutdown, sessions).await,
 				}
 			}
 		};
@@ -699,11 +702,20 @@ pub async fn serve(
 	shutdown: shutdown::Observer,
 	sessions: crate::session::Registry,
 ) -> anyhow::Result<()> {
-	// Binds whatever is still unbound (the `tcp`/`unix` listeners), so a bind
-	// failure is reported here rather than as an immediate stop.
-	let mut server = server.listen().await.context("failed to bind listeners")?;
+	// External callers still bind through this entry point; Relay::run binds
+	// before readiness and passes the listener to the same accept loop.
+	let listener = server.listen().await.context("failed to bind listeners")?;
+	serve_listening(listener, cluster, auth, shutdown, sessions).await
+}
 
-	while let Some(request) = server.accept().await {
+async fn serve_listening(
+	mut listener: moq_tokio::Listener,
+	cluster: cluster::Cluster,
+	auth: auth::Auth,
+	shutdown: shutdown::Observer,
+	sessions: crate::session::Registry,
+) -> anyhow::Result<()> {
+	while let Some(request) = listener.accept().await {
 		let conn = Connection::new(request, cluster.clone(), auth.clone())
 			.with_id(cluster.next_connection_id())
 			.with_shutdown(shutdown.clone())
