@@ -10,6 +10,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::consumer::MoqBroadcastConsumer;
+use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::producer::MoqBroadcastProducer;
@@ -190,16 +191,10 @@ impl MoqJsonSnapshotProducer {
 		Ok(())
 	}
 
-	/// Wait until this track has at least one active consumer.
-	pub async fn used(&self) -> Result<(), MoqError> {
-		let demand = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.demand();
-		crate::ffi::detached(async move { demand.used().await }).await
-	}
-
-	/// Wait until this track has no active consumers.
-	pub async fn unused(&self) -> Result<(), MoqError> {
-		let demand = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.demand();
-		crate::ffi::detached(async move { demand.unused().await }).await
+	/// A watch-only handle to whether this track has subscribers.
+	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
 	}
 
 	/// Finish the track, closing any open group.
@@ -267,16 +262,10 @@ impl MoqJsonStreamProducer {
 		Ok(())
 	}
 
-	/// Wait until this track has at least one active consumer.
-	pub async fn used(&self) -> Result<(), MoqError> {
-		let demand = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.demand();
-		crate::ffi::detached(async move { demand.used().await }).await
-	}
-
-	/// Wait until this track has no active consumers.
-	pub async fn unused(&self) -> Result<(), MoqError> {
-		let demand = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.demand();
-		crate::ffi::detached(async move { demand.unused().await }).await
+	/// A watch-only handle to whether this track has subscribers.
+	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
 	}
 
 	/// Finish the track, closing the group.

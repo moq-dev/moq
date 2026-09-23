@@ -59,14 +59,13 @@ func (p *JSONSnapshotProducer) Update(value any) error {
 	return p.inner.Update(string(encoded))
 }
 
-// Used blocks until the track has at least one active subscriber.
-func (p *JSONSnapshotProducer) Used(ctx context.Context) error {
-	return p.inner.Used(ctx)
-}
-
-// Unused blocks until the track has no active subscribers.
-func (p *JSONSnapshotProducer) Unused(ctx context.Context) error {
-	return p.inner.Unused(ctx)
+// Demand returns a watch-only handle to whether the track has subscribers.
+func (p *JSONSnapshotProducer) Demand() (*TrackDemand, error) {
+	inner, err := p.inner.Demand()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDemand{inner: inner}, nil
 }
 
 // Finish closes the snapshot track.
@@ -88,14 +87,13 @@ func (p *JSONStreamProducer) Append(value any) error {
 	return p.inner.Append(string(encoded))
 }
 
-// Used blocks until the track has at least one active subscriber.
-func (p *JSONStreamProducer) Used(ctx context.Context) error {
-	return p.inner.Used(ctx)
-}
-
-// Unused blocks until the track has no active subscribers.
-func (p *JSONStreamProducer) Unused(ctx context.Context) error {
-	return p.inner.Unused(ctx)
+// Demand returns a watch-only handle to whether the track has subscribers.
+func (p *JSONStreamProducer) Demand() (*TrackDemand, error) {
+	inner, err := p.inner.Demand()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDemand{inner: inner}, nil
 }
 
 // Finish closes the stream track.

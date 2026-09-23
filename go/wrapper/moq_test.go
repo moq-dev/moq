@@ -751,6 +751,20 @@ func TestJSONDemand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	snapshotDemand, err := snapshot.Demand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamDemand, err := stream.Demand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name := snapshotDemand.Name(); name != "status" {
+		t.Fatalf("Name = %q, want status", name)
+	}
+	if snapshotDemand.IsUsed() {
+		t.Fatal("IsUsed before any subscriber")
+	}
 
 	snapshotConsumer, err := consumer.SubscribeJSONSnapshot(ctx, "status", moq.JSONSubscribeOptions{})
 	if err != nil {
@@ -760,20 +774,27 @@ func TestJSONDemand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := snapshot.Used(ctx); err != nil {
+	if err := snapshotDemand.Used(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := stream.Used(ctx); err != nil {
+	if err := streamDemand.Used(ctx); err != nil {
 		t.Fatal(err)
 	}
 
 	snapshotConsumer.Cancel()
 	streamConsumer.Cancel()
-	if err := snapshot.Unused(ctx); err != nil {
+	if err := snapshotDemand.Unused(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := stream.Unused(ctx); err != nil {
+	if err := streamDemand.Unused(ctx); err != nil {
 		t.Fatal(err)
+	}
+
+	if err := snapshot.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshotDemand.Used(ctx); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("Used after Finish = %v, want ErrClosed", err)
 	}
 }
 
