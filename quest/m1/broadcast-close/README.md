@@ -25,6 +25,15 @@ Decided with the maintainer on #4007 (the #4002 fix):
 - Garbage-collected bindings get an explicit `close()` rather than relying on
   finalizers.
 
+Every change here behaves the same through a local consumer and a remote one;
+only latency differs. Each child tests its scenario both in-process and over
+an in-memory mock session, like `rs/moq-net/tests/finished_broadcast_mock.rs`.
+
+`broadcast::Consumer` keeps its close signal, documented as "this broadcast
+object ended", not "the path went offline": announcements say whether a path
+is live, and a path can be announced again by a new object. Caches and moq-hls
+use it to tell a live object from a replaced one at the same path.
+
 Stage it as the children below: Rust first, then the bindings, then the `dev`
 removal.
 
@@ -36,4 +45,5 @@ removal.
 
 ## Related
 
+- [Announce to serve](/quest/m1/announce-to-serve.md) - `unannounce()` retracts locally too, so `close()` is its permanent form
 - [#4002](https://github.com/moq-dev/moq/issues/4002) - broadcast end aborted in-flight tracks; fixed by #4007, which made ending a front retract without touching its tracks

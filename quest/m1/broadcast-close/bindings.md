@@ -20,6 +20,8 @@ Every binding ends a broadcast with `close()`, mirroring Rust, and its
   `close` errors or no-ops, whichever Rust settles on.
 - Update `doc/lib/{py,swift,kt,go,dart,c}`, including `doc/lib/go/index.md`'s
   `broadcast.Finish()` sample.
+- Fix the moq-ffi `origin.rs` doc comment that points users at a
+  `broadcast.closed()` the bindings don't have.
 
 ## Required
 
