@@ -50,7 +50,9 @@ connect exchange, then yields a `Request` once the client wants to publish or
 play. The `Request` is either a `Publish` or a `Play`; you inspect the app and
 stream key, make a decision, and `accept` or `reject` it. This mirrors
 `moq-tokio`'s `Server` / `Request`, so there's no callback: the auth policy lives
-in your loop.
+in your loop. To keep `run`'s first-publisher-wins rule, claim each publish's
+resolved path on a shared `moq_rtmp::ActivePaths` and hold the guard while the
+publish runs.
 
 ```rust
 let mut server = moq_rtmp::Server::bind("0.0.0.0:1935".parse()?).await?;
@@ -83,11 +85,11 @@ while let Some(request) = server.accept().await {
 Two ways to serve `rtmps://`:
 
 - **Let the gateway terminate TLS.** Set `Config::tls` (or call
-  `Server::with_tls`) with a `rustls::ServerConfig`, and the listener speaks
-  RTMPS with no other change. Build the config from a `moq_tokio::tls::Listen`
-  instance (RTMPS has no ALPN), or supply any `rustls::ServerConfig`. To serve
-  both RTMP and RTMPS, clone one base config so duplicate-publish rejection is
-  shared across both listeners, then call `run` with a cloned origin.
+  `Server::with_tls`) with a `rustls::ServerConfig`, and the listener serves
+  RTMPS alongside plaintext RTMP on the same port: a client that opens with a
+  TLS ClientHello is TLS-terminated, any other is served as plaintext. Build the
+  config from a `moq_tokio::tls::Listen` instance (RTMPS has no ALPN), or supply
+  any `rustls::ServerConfig`.
 
   ```rust
   let mut tls = moq_tokio::tls::Listen::default();
@@ -96,10 +98,7 @@ Two ways to serve `rtmps://`:
 
   let mut rtmp = moq_rtmp::Config::default();
   rtmp.listen = Some("0.0.0.0:1935".parse()?);
-
-  let mut rtmps = rtmp.clone();
-  rtmps.listen = Some("0.0.0.0:443".parse()?);
-  rtmps.tls = Some(server_config); // Arc<rustls::ServerConfig>
+  rtmp.tls = Some(server_config); // Arc<rustls::ServerConfig>: rtmp:// and rtmps://
   ```
 
 - **Bring your own transport.** Accept the connection and complete the TLS

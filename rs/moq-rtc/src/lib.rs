@@ -25,7 +25,9 @@
 //! (resolving the broadcast name from a verified token), skip the routers and
 //! call [`whip::accept`] (ingest) / [`whep::accept`] (egress) from your own
 //! handler. Return the [`Response::answer`] in your HTTP response, then run
-//! [`Response::run`] to drive the media session for its lifetime.
+//! [`Response::run`] to drive the media session for its lifetime. The routers and
+//! the `axum` re-export sit behind the default `server` feature, so such an
+//! embedder can drop them with `default-features = false`.
 //!
 //! ## Bitstream gotcha
 //!
@@ -55,7 +57,8 @@ mod session;
 /// returned by [`Server::publish_router`] / [`Server::subscribe_router`] (and by
 /// [`whip::router`] / [`whep::router`]) into their own app without adding their own
 /// axum dependency (and risking a version mismatch). A major axum bump is therefore
-/// a breaking change for this crate.
+/// a breaking change for this crate. Only with the `server` feature.
+#[cfg(feature = "server")]
 pub use axum;
 
 /// Re-export of the URL type, so consumers can build the [`url::Url`] that
@@ -68,7 +71,7 @@ pub use client::Client;
 pub use error::*;
 pub use server::{Response, Server, whep, whip};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 mod tests {
 	use std::time::Duration;
 

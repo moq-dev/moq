@@ -18,7 +18,7 @@
 //!   yield every rendition and every finalized segment in order, for mirroring a broadcast to
 //!   storage.
 
-mod master;
+pub mod master;
 mod mpd;
 mod playlist;
 mod rendition;
@@ -114,14 +114,12 @@ impl Broadcaster {
 	}
 
 	/// Whether the source broadcast has closed (ended or dropped).
-	#[cfg(feature = "server")]
-	pub(crate) fn is_closed(&self) -> bool {
+	pub fn is_closed(&self) -> bool {
 		self.broadcast.is_closed()
 	}
 
-	/// Resolve once the source broadcast closes, so the server can evict a dead broadcaster.
-	#[cfg(feature = "server")]
-	pub(crate) async fn closed(&self) {
+	/// Resolve once the source broadcast closes, so a pool can evict a dead broadcaster.
+	pub async fn closed(&self) {
 		self.broadcast.closed().await;
 	}
 
@@ -161,7 +159,7 @@ impl Broadcaster {
 			}
 			match rendition.kind {
 				Kind::Video => video.push(master::VideoVariant {
-					name: rendition.name.clone(),
+					uri: master::rendition_uri(Kind::Video, &rendition.name, query),
 					bandwidth: rendition.bandwidth(),
 					width: rendition.width,
 					height: rendition.height,
@@ -169,12 +167,13 @@ impl Broadcaster {
 				}),
 				Kind::Audio => audio.push(master::AudioVariant {
 					name: rendition.name.clone(),
+					uri: master::rendition_uri(Kind::Audio, &rendition.name, query),
 					bandwidth: rendition.bandwidth(),
 					codec: rendition.codec.clone(),
 				}),
 			}
 		}
-		master::render_master(&video, &audio, query)
+		master::render(&video, &audio)
 	}
 
 	/// Render the DASH manifest (MPD) from the current renditions and their views of the
@@ -231,7 +230,7 @@ impl Broadcaster {
 	/// already-ended timeline). Every rendition's window is fed from the same timeline, so the
 	/// first rendition's readiness stands in for the broadcast's. Bounding the wait is the
 	/// caller's policy.
-	#[cfg(feature = "server")]
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	pub(crate) async fn playable(&self) {
 		if let Some(rendition) = self.renditions.snapshot().into_iter().next() {
 			rendition.playable().await;
@@ -852,7 +851,7 @@ mod tests {
 		let master = broadcaster.master_playlist(None);
 		assert!(master.contains("video/video0/media.m3u8"), "master lists the rendition");
 
-		let playlist = rendition.playlist();
+		let playlist = rendition.snapshot();
 		assert_eq!(playlist.segments.len(), 2, "the live-edge group is not listed");
 		assert_eq!(playlist.segments[0].segment, 0);
 		assert_eq!(playlist.segments[0].duration, Duration::from_secs(2));
@@ -1055,7 +1054,7 @@ mod tests {
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
 
 		// The timeline section carries no wall field anymore; the root clock names the epoch.
-		let snapshot = rendition.playlist();
+		let snapshot = rendition.snapshot();
 		assert_eq!(
 			snapshot.program_date_time,
 			Some(SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS))
@@ -1111,7 +1110,7 @@ mod tests {
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
 
-		assert_eq!(rendition.playlist().program_date_time, None);
+		assert_eq!(rendition.snapshot().program_date_time, None);
 		let playlist = rendition.media_playlist(None).expect("playlist renders");
 		assert!(!playlist.contains("PROGRAM-DATE-TIME"), "{playlist}");
 
@@ -1221,7 +1220,7 @@ mod tests {
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
 
-		let playlist = rendition.playlist();
+		let playlist = rendition.snapshot();
 		assert_eq!(playlist.segments[0].duration, Duration::from_secs(3));
 		assert_eq!(
 			playlist.target_duration, 3,
@@ -1287,8 +1286,8 @@ mod tests {
 		let _ = tokio::time::timeout(Duration::from_secs(5), audio_rendition.playable()).await;
 
 		// Both playlists list the same segment numbers over the same spans.
-		let video_playlist = video_rendition.playlist();
-		let audio_playlist = audio_rendition.playlist();
+		let video_playlist = video_rendition.snapshot();
+		let audio_playlist = audio_rendition.snapshot();
 		assert_eq!(video_playlist.media_sequence, audio_playlist.media_sequence);
 		let video_segments: Vec<u64> = video_playlist.segments.iter().map(|s| s.segment).collect();
 		let audio_segments: Vec<u64> = audio_playlist.segments.iter().map(|s| s.segment).collect();
@@ -1664,7 +1663,7 @@ mod tests {
 	async fn until_empty(rendition: &Rendition) {
 		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 		loop {
-			if rendition.playlist().segments.is_empty() {
+			if rendition.snapshot().segments.is_empty() {
 				return;
 			}
 			assert!(
@@ -1714,7 +1713,7 @@ mod tests {
 			.unwrap()
 			.expect("the original sibling is servable");
 		assert!(contains(&served, OLD), "the first hop serves the original publisher");
-		assert!(!rendition.playlist().segments.is_empty());
+		assert!(!rendition.snapshot().segments.is_empty());
 
 		// The replacement is already announced before the incumbent is dropped, matching a
 		// rival publisher that appears while the current first hop is still serving.
@@ -1738,7 +1737,7 @@ mod tests {
 		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
 		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 		loop {
-			if !rendition.playlist().segments.is_empty() {
+			if !rendition.snapshot().segments.is_empty() {
 				break;
 			}
 			assert!(
@@ -1748,7 +1747,7 @@ mod tests {
 			tokio::task::yield_now().await;
 		}
 		let listed = rendition
-			.playlist()
+			.snapshot()
 			.segments
 			.into_iter()
 			.find(|segment| !segment.gap)
@@ -1849,13 +1848,13 @@ mod tests {
 		drop((old_server, old_media, _old_track));
 		until_empty(&rendition).await;
 		for _ in 0..4 {
-			assert!(rendition.playlist().segments.is_empty());
+			assert!(rendition.snapshot().segments.is_empty());
 			assert!(rendition.segment(0).await.unwrap().is_none());
 		}
 
 		let new_server = origin.dynamic("media", sibling_route(11)).unwrap();
 		let mut new_media = moq_net::broadcast::Info::new().produce();
-		let _ = rendition.playlist();
+		let _ = rendition.snapshot();
 		accept_sibling(&new_server, &new_media).await;
 		tokio::time::timeout(Duration::from_secs(5), origin.consume().request_broadcast("media"))
 			.await
@@ -1865,7 +1864,7 @@ mod tests {
 		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
 		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 		loop {
-			if !rendition.playlist().segments.is_empty() {
+			if !rendition.snapshot().segments.is_empty() {
 				break;
 			}
 			assert!(
@@ -1875,7 +1874,7 @@ mod tests {
 			tokio::task::yield_now().await;
 		}
 		let listed = rendition
-			.playlist()
+			.snapshot()
 			.segments
 			.into_iter()
 			.find(|segment| !segment.gap)

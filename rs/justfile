@@ -716,6 +716,7 @@ features:
     cargo check --locked -p moq-cli --no-default-features
     cargo check --locked -p moq-bench --no-default-features
     cargo check --locked -p moq-boy --no-default-features
+    cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
     cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
     cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features

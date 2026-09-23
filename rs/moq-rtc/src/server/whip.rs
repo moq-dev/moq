@@ -4,6 +4,7 @@
 //! and returns an SDP answer. The request path becomes the broadcast name on
 //! the upstream publish origin.
 
+#[cfg(feature = "server")]
 use axum::{
 	Router,
 	body::Bytes,
@@ -18,19 +19,22 @@ use crate::{Error, Result, ingest::IngestSink, sdp, server::Server, session};
 
 pub use crate::server::Response;
 
+#[cfg(feature = "server")]
 #[derive(Clone)]
 struct RouterState {
 	server: Server,
 	publisher: moq_net::origin::Producer,
 }
 
-/// Build the WHIP axum router.
+/// Build the WHIP axum router. Only with the `server` feature.
+#[cfg(feature = "server")]
 pub fn router(server: Server, publisher: moq_net::origin::Producer) -> Router {
 	Router::new()
 		.route("/{*path}", post(handle).delete(delete))
 		.with_state(RouterState { server, publisher })
 }
 
+#[cfg(feature = "server")]
 async fn handle(
 	State(state): State<RouterState>,
 	Path(path): Path<String>,
@@ -64,6 +68,7 @@ async fn handle(
 
 /// Router glue: enforce the WHIP `Content-Type` then hand the raw offer to
 /// [`accept`], using the request path as the (unauthenticated) broadcast name.
+#[cfg(feature = "server")]
 async fn accept_offer(
 	server: &Server,
 	publisher: &moq_net::origin::Producer,
@@ -78,6 +83,7 @@ async fn accept_offer(
 	accept(server, publisher, path, offer).await
 }
 
+#[cfg(feature = "server")]
 async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> StatusCode {
 	crate::server::delete(&state.server, &path)
 }
@@ -160,6 +166,7 @@ pub async fn accept(
 	})
 }
 
+#[cfg(feature = "server")]
 fn is_sdp(headers: &HeaderMap) -> bool {
 	headers
 		.get(header::CONTENT_TYPE)
@@ -168,6 +175,7 @@ fn is_sdp(headers: &HeaderMap) -> bool {
 		.unwrap_or(false)
 }
 
+#[cfg(feature = "server")]
 fn status_for(err: &Error) -> StatusCode {
 	match err {
 		Error::InvalidSdp(_) => StatusCode::BAD_REQUEST,

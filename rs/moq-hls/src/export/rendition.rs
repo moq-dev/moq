@@ -376,11 +376,26 @@ impl Rendition {
 	/// argument rather than a [`Config`](super::Config) field because one broadcaster fans out
 	/// to viewers holding different tokens.
 	pub fn media_playlist(&self, query: Option<&str>) -> Option<String> {
-		self.is_playable().then(|| super::render_media(&self.playlist(), query))
+		self.is_playable().then(|| super::render_media(&self.snapshot(), query))
 	}
 
-	/// Render the media playlist from the current timeline window.
-	pub(crate) fn playlist(&self) -> Snapshot {
+	/// Wait until the media playlist is servable, then render it: at least one segment is
+	/// listed and the `EXT-X-MAP` init segment it references is buildable, so a player never
+	/// loads a map that 404s. `None` when the init cannot be built yet.
+	///
+	/// Waits without bound for the first segment; bounding it is the caller's policy. `query`
+	/// propagates exactly as in [`media_playlist`](Self::media_playlist).
+	pub async fn playlist(&self, query: Option<&str>) -> Result<Option<String>> {
+		self.playable().await;
+		// init() caches, so the player's follow-up GET of init.mp4 is free.
+		if self.init().await?.is_none() {
+			return Ok(None);
+		}
+		Ok(self.media_playlist(query))
+	}
+
+	/// Snapshot the media playlist from the current timeline window.
+	pub(crate) fn snapshot(&self) -> Snapshot {
 		self.media.sync(&self.live);
 		let window = self.live.window();
 
