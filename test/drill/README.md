@@ -105,6 +105,6 @@ corpus nobody replays.
 ## Not covered here
 
 - An impaired path (delay, loss, rate limits). Loopback is the only path these
-  drills see; `quest/next/transport-impairment-profile.md` adds the seeded UDP
+  drills see; `quest/m1/transport-impairment-profile.md` adds the seeded UDP
   shaper they run under.
 - CI lane scheduling.

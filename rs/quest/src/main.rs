@@ -36,8 +36,9 @@ enum Command {
 	/// Print the branch carrying a quest, then every branch it merges through.
 	///
 	/// One per line, nearest first, ending at `main`: a quest merges into its
-	/// questline's branch, and a questline into its parent's. A line missing
-	/// from the remote is created from the one printed after it.
+	/// questline's branch, a questline into its parent's, and a milestone's
+	/// children into `main`. A line missing from the remote is created from the
+	/// one printed after it.
 	Branch {
 		/// Quest or questline to locate.
 		path: PathBuf,
