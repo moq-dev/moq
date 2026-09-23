@@ -156,8 +156,15 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
-      - name: Publish to Maven Central
+      # check-version runs outside the serialized group, so an earlier run
+      # holding it may have published this version since. Check again.
+      - name: Recheck wrapper publication
+        id: recheck
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        run: .github/scripts/release.sh maven-exists dev.moq moq "${{ needs.check-version.outputs.version }}"
+
+      - name: Publish to Maven Central
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.recheck.outputs.exists != 'true'
         env:
           MOQ_VERSION: ${{ needs.check-version.outputs.version }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
