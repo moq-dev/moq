@@ -114,14 +114,17 @@ export class Consumer implements AsyncIterable<Event> {
 		if ("push" in event) {
 			const { index } = event.push;
 			const value = RecordSchema.parse(event.push.value);
-			const pts = (value.pts * 1_000_000) / this.#timescale;
-			const duration = (value.duration * 1_000_000) / this.#timescale;
-			if (!Number.isSafeInteger(pts) || !Number.isSafeInteger(duration)) {
-				throw new Error("timeline timestamp overflow");
-			}
-			return { push: { index, entry: { ...value, pts: pts as Time.Micro, duration: duration as Time.Micro } } };
+			const pts = this.#micros(value.pts);
+			const duration = this.#micros(value.duration);
+			return { push: { index, entry: { ...value, pts, duration } } };
 		}
 		return event;
+	}
+
+	#micros(units: number): Time.Micro {
+		const value = (BigInt(units) * 1_000_000n) / BigInt(this.#timescale);
+		if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("timeline timestamp overflow");
+		return Number(value) as Time.Micro;
 	}
 
 	/** Iterate timeline events until the track ends. */

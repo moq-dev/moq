@@ -555,3 +555,17 @@ test("timeline consumer yields converted push and pop events", async () => {
 	consumer.close();
 	broadcast.close();
 });
+
+test("timeline consumer floors fractional microseconds without floating point drift", async () => {
+	const broadcast = new Broadcast.Producer();
+	const track = broadcast.createTrack("timeline.z");
+	const producer = new Json.Window.Producer<Record>({ track, compression: true });
+	const consumer = Consumer.subscribe(broadcast.consume(), { track: "timeline.z", timescale: u53(3) });
+	producer.push({ segment: 0, pts: 1, duration: 2 });
+	expect(await consumer.next()).toEqual({
+		push: { index: 0, entry: { segment: 0, pts: 333_333 as Time.Micro, duration: 666_666 as Time.Micro } },
+	});
+	producer.finish();
+	consumer.close();
+	broadcast.close();
+});
