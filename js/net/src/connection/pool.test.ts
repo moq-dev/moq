@@ -230,6 +230,24 @@ test("a publish through one handle resolves locally for another", async () => {
 	watcher.close();
 });
 
+test("a borrowed connection origin exposes live routes and dynamic serving", async () => {
+	stubTransports();
+	const handle = new Connection({ url, linger });
+	try {
+		await waitUntil(() => handle.origin.peek() !== undefined);
+		const table = handle.origin.peek();
+		if (!table) throw new Error("expected an origin");
+		const live = table.broadcasts();
+		const prefix = Path.from("on-demand");
+		const route = table.dynamic(prefix);
+		expect(live.peek().get(prefix)).toBeDefined();
+		route.close();
+		expect(live.peek().has(prefix)).toBe(false);
+	} finally {
+		handle.close();
+	}
+});
+
 test("share: false keeps a private loop and origin", async () => {
 	const dials = stubTransports();
 
@@ -245,19 +263,51 @@ test("share: false keeps a private loop and origin", async () => {
 	privateLoop.close();
 });
 
-test("caller-owned origins, transport options, and delay refuse to share", () => {
+test("connection-specific options infer a private loop and origin", async () => {
+	const dials = stubTransports();
+	const origin = new OriginProducer();
+	const shared = new Connection({ url, linger });
+	try {
+		await waitUntil(() => shared.status.peek() === "connected");
+		const options = [
+			{ webtransport: { congestionControl: "throughput" as const } },
+			{ websocket: { enabled: false } },
+			{ discovery: false },
+			{ delay: { timeout: Time.Milli(0) } },
+			{ publish: origin.consume() },
+			{ consume: origin },
+		];
+		for (const option of options) {
+			const handle = new Connection({ url, ...option });
+			try {
+				await waitUntil(() => handle.status.peek() === "connected");
+				expect(handle.origin.peek()).not.toBe(shared.origin.peek());
+			} finally {
+				handle.close();
+			}
+		}
+		expect(dials.count()).toBe(1 + options.length);
+	} finally {
+		shared.close();
+		origin.close();
+	}
+});
+
+test("explicit share: true refuses connection-specific options", () => {
 	const origin = new OriginProducer();
 	try {
-		expect(() => new Connection({ consume: origin })).toThrow(/share: false/);
-		expect(() => new Connection({ publish: origin.consume() })).toThrow(/share: false/);
-		expect(() => new Connection({ webtransport: { serverCertificate: "x" } })).toThrow(/share: false/);
-		expect(() => new Connection({ webtransport: { serverCertificateHashes: [{ value: "aa" }] } })).toThrow(
+		expect(() => new Connection({ share: true, consume: origin })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, publish: origin.consume() })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, webtransport: { serverCertificate: "x" } })).toThrow(/share: false/);
+		expect(
+			() => new Connection({ share: true, webtransport: { serverCertificateHashes: [{ value: "aa" }] } }),
+		).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, webtransport: { congestionControl: "throughput" } })).toThrow(
 			/share: false/,
 		);
-		expect(() => new Connection({ webtransport: { congestionControl: "throughput" } })).toThrow(/share: false/);
-		expect(() => new Connection({ websocket: { enabled: false } })).toThrow(/share: false/);
-		expect(() => new Connection({ discovery: false })).toThrow(/share: false/);
-		expect(() => new Connection({ delay: { timeout: Time.Milli(0) } })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, websocket: { enabled: false } })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, discovery: false })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, delay: { timeout: Time.Milli(0) } })).toThrow(/share: false/);
 	} finally {
 		origin.close();
 	}
