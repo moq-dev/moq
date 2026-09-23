@@ -6,10 +6,10 @@ A broadcast whose path has a segment starting with `.` below the requested
 prefix is left out of announce discovery unless the request opts in. A prefix
 that names the dot segment itself (`.stats/`) lists what is under it, and
 subscribing to an exact hidden path needs no opt-in. Clients that predate the
-opt-in never discover hidden paths, so a platform can add `.`-named
-broadcasts (stats, internal routes) without breaking deployed apps that list
-everything and play what they find. moq.pro broke a robotics customer this
-way.
+opt-in never discover hidden paths (except authenticated cluster peers during
+the rollout, below), so a platform can add `.`-named broadcasts (stats,
+internal routes) without breaking deployed apps that list everything and play
+what they find. moq.pro broke a robotics customer this way.
 
 Non-goals: access control (tokens still decide what a session reads), a
 publisher-side flag (the name alone decides), and suffixes (`catalog.pro`
@@ -21,6 +21,8 @@ stays visible; only a leading `.` hides a segment).
   version decodes as not opted in. IETF sessions get the same opt-in as a
   SUBSCRIBE_NAMESPACE parameter, absent meaning hidden. Specify both in
   `drafts/` and validate with `just drafts check`.
+  PR #3938 (announce prefix table) also claims lite-07: whichever lands first
+  defines the version, and the other joins it or bumps to the next.
 - Filter on the serving side, where `lite/publisher.rs` already scopes a
   request to its prefix and the token, and in the IETF publisher, so a hidden
   path never reaches a session that did not ask. The local origin consumer
@@ -29,6 +31,9 @@ stays visible; only a leading `.` hides a segment).
   and in Rust the equivalent on the scoped consumer. Rust sends one
   ANNOUNCE_REQUEST per literal head of the session's allowed patterns today,
   so settle how a per-scope opt-in reaches its own request.
+- Bindings: expose the opt-in on the moq-ffi announce config, libmoq, the
+  hand-written wrappers (py, go, swift, kt, dart), and `doc/lib/*`, so
+  binding consumers can still list hidden paths.
 - Cluster peers opt in, so `.internal/origins` and an embedder's dot paths
   still cross the mesh. For the rollout only, a relay treats an authenticated
   cluster peer that negotiated below lite-07 as opted in, so a mixed-version
@@ -47,3 +52,4 @@ stays visible; only a leading `.` hides a segment).
 ## Related
 
 - [IETF announce count](/quest/m1/ietf-announce-count.md) - another opt-in moq-transport extension on the namespace subscription
+- [#3938](https://github.com/moq-dev/moq/pull/3938) - plans a lite-07 announce prefix table, sharing the version bump
