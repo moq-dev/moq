@@ -112,4 +112,4 @@ Current decisions, open questions, or implementation guidance.
   path and remove every reference; that reveals what it unblocks. Remove a
   heading with its last entry.
 - Deleting a README deletes its directory. The root and the milestones are
-  permanent.
+  permanent: an empty milestone stays as a horizon.

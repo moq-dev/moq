@@ -44,5 +44,5 @@ stop here and write down why.
 
 ## Related
 
-- [#2907](/quest/m2/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md) - the browser generator spike; same Task and `#[cfg]`-inside-export gotchas apply
+- [#2907](/quest/m4/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md) - the browser generator spike; same Task and `#[cfg]`-inside-export gotchas apply
 - [C# generator](/quest/m2/cs/generator.md) - the same 0.32 port against NordSecurity's C# generator

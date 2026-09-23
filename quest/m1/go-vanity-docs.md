@@ -23,16 +23,10 @@ at `github.com/moq-dev/moq-go`, leaving the page half on each path, and the
 `import` line does not match the old mirror layout either (the package sat at
 `github.com/moq-dev/moq-go/moq`).
 
-Once the condition below clears, revert #3847 (`git revert 62795f159`) and
-confirm both `https://pkg.go.dev/moq.dev/moq` and
-`https://pkg.go.dev/moq.dev/moq-ffi` return 200. If the chain did not re-cut
-the wrapper, look at the Release Go run for the ffi tag before touching the
-docs.
-
-## Required
-
-- `moq-go@latest` on the mirror declares `module moq.dev/moq` (the Release Go
-  chain after the `moq-ffi-v0.4.0` tag from #3730)
+Revert #3847 (`git revert 62795f159`) and confirm both
+`https://pkg.go.dev/moq.dev/moq` and `https://pkg.go.dev/moq.dev/moq-ffi`
+return 200. If the chain did not re-cut the wrapper, look at the Release Go run
+for the ffi tag before touching the docs.
 
 ## Related
 

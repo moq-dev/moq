@@ -2,21 +2,19 @@
 
 ## Goal
 
-Later work: deferred features, design studies, and experiments, plus quests
-waiting on an upstream release.
+Later work: deferred features, design studies, and experiments.
 
 ## Plan
 
 Nothing here blocks a release. Promote a quest into
 [m1](/quest/m1/README.md) when it joins the next wave, including planning
 work whose decisions are worth settling now; deferral does not abandon a
-feature. A study may end with a measured no-go. A quest waiting on an upstream
-release states it as a plain-text `Required` bullet. Work gated on hardware,
-a partner, or a provider waits in [m3](/quest/m3/README.md).
+feature. A study may end with a measured no-go. Work gated on hardware, a
+partner, or a provider waits in [m3](/quest/m3/README.md); work waiting on an
+upstream release waits in [m4](/quest/m4/README.md).
 
 ## Quests
 
-- [Go vanity docs](/quest/m2/go-vanity-docs.md) - the Go page names only `moq.dev/moq` once the republished mirrors declare it
 - [AV1 metadata separation](/quest/m2/av1-metadata.md) - retain metadata OBUs inline while evaluating separate delivery
 - [SEI separation](/quest/m2/sei/README.md) - retain inline SEI until measured savings or a metadata-only consumer justify a split
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - compare immutable track definitions with explicit catalog-to-group binding
@@ -35,19 +33,16 @@ a partner, or a provider waits in [m3](/quest/m3/README.md).
 - [MediaCodec encode](/quest/m2/audio-encode-mediacodec.md) - Android encodes AAC-LC
 - [Video codec coverage](/quest/m2/video-codec-coverage.md) - prioritize remaining native AV1 and portable decoder gaps
 - [#2147](/quest/m2/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - moq-video: 10-bit HEVC and AV1 support in the NVIDIA codec path
-- [VAAPI encode and decode](/quest/m2/video-vaapi.md) - DMA-BUF encode, H.265 decode, and pre-generated bindings that remove the libclang build dependency, all gated on a moq-dev/vaapi release
 - [Direct3D11 render import](/quest/m2/render-d3d11.md) - Windows presents without downloading every frame to system memory
 - [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - video with periodic intra refresh publishes, imports, and tunes in cleanly with one group per sweep and a catalog `warmup`
 - [#2819](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: carry PipeWire DMA-BUFs safely into the Vulkan renderer
 - [Unreal prototype](/quest/m2/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
 - [Unity prototype](/quest/m2/unity.md) - the C# package under IL2CPP, playing subscribed audio
-- [#2907](/quest/m2/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md) - the browser reaches moq-ffi through a generated TypeScript binding once a JS generator is stable
 - [C# through moq-ffi](/quest/m2/cs/README.md) - generated C# over moq-ffi as a NuGet package with native runtimes
 - [vcpkg registry](/quest/m2/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
 - [Conan remote](/quest/m2/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
 - [Compressed tracks](/quest/m2/flate/README.md) - any track compresses per group from every language, not only the JSON modes
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
-- [Safari WebTransport](/quest/m2/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
 - [Multipath spike](/quest/m2/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends
 - [Receive timestamps](/quest/m2/quic-receive-ts.md) - per-packet arrival times in ACKs, the feedback GCC and deadlines need
 - [QUIC GCC](/quest/m2/quic-gcc.md) - a measured verdict on delay-based congestion control for media egress, shipping as `RealTime`

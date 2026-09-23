@@ -27,4 +27,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Browser through moq-ffi](/quest/m2/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md) - the study these blockers were found by
+- [Browser through moq-ffi](/quest/m4/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md) - the study these blockers were found by
