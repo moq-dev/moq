@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/moq-dev/moq/compare/moq-rtmp-v0.2.11...moq-rtmp-v0.3.0) - 2026-09-23
+
+### Added
+
+- *(gateway)* [**breaking**] align embedding APIs ([#3818](https://github.com/moq-dev/moq/pull/3818))
+- *(net)* [**breaking**] simplify origin scoping ([#3804](https://github.com/moq-dev/moq/pull/3804))
+- *(hang)* [**breaking**] unify catalog APIs ([#3813](https://github.com/moq-dev/moq/pull/3813))
+- *(net)* [**breaking**] slim the moq-net public surface ([#3779](https://github.com/moq-dev/moq/pull/3779))
+- *(rtmp)* report the connect tcUrl on a publish or play request
+
+### Other
+
+- Merge origin/main into dev
+
 ## [0.2.11](https://github.com/moq-dev/moq/compare/moq-rtmp-v0.2.10...moq-rtmp-v0.2.11) - 2026-09-17
 
 ### Other

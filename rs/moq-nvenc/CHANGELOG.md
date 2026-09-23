@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/moq-dev/moq/compare/moq-nvenc-v0.0.5...moq-nvenc-v0.0.6) - 2026-09-23
+
+### Added
+
+- [**breaking**] refuse released spellings and drop unused deprecated APIs ([#3719](https://github.com/moq-dev/moq/pull/3719))
+
+### Fixed
+
+- *(nvenc)* [**breaking**] make driver loading fallible ([#3838](https://github.com/moq-dev/moq/pull/3838))
+- *(moq-nvenc)* roll back failed resource mapping ([#3834](https://github.com/moq-dev/moq/pull/3834))
+- *(nvenc)* [**breaking**] retain resources through completion ([#3835](https://github.com/moq-dev/moq/pull/3835))
+
+### Other
+
+- *(quest)* complete the media release review ([#3878](https://github.com/moq-dev/moq/pull/3878))
+
 ### Changed
 
 - [**breaking**] `Encoder::load` validates the driver table and returns a non-exhaustive

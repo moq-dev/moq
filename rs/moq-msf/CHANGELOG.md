@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/moq-dev/moq/compare/moq-msf-v0.4.2...moq-msf-v0.5.0) - 2026-09-23
+
+### Added
+
+- *(json)* [**breaking**] Config means the same thing in json and binary ([#3718](https://github.com/moq-dev/moq/pull/3718))
+- *(ffi)* [**breaking**] drop MoqCancel; Go cancels through context.Context ([#3723](https://github.com/moq-dev/moq/pull/3723))
+- *(drafts)* specify the MPEG-TS catalog extension and carry it over MSF ([#3720](https://github.com/moq-dev/moq/pull/3720))
+
+### Fixed
+
+- *(msf)* compile the extension collision check in release builds
+
 ## [0.4.2](https://github.com/moq-dev/moq/compare/moq-msf-v0.4.1...moq-msf-v0.4.2) - 2026-09-01
 
 ### Other

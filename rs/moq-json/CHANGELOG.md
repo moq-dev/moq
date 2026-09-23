@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/moq-dev/moq/compare/moq-json-v0.3.12...moq-json-v0.4.0) - 2026-09-23
+
+### Added
+
+- *(json)* edit a snapshot value through a closure ([#3889](https://github.com/moq-dev/moq/pull/3889))
+- *(net)* [**breaking**] slim the moq-net public surface ([#3779](https://github.com/moq-dev/moq/pull/3779))
+- [**breaking**] borrow publisher finish so abort can still run ([#3714](https://github.com/moq-dev/moq/pull/3714))
+- *(json)* [**breaking**] Config means the same thing in json and binary ([#3718](https://github.com/moq-dev/moq/pull/3718))
+
+### Fixed
+
+- *(moq-json)* a lost snapshot group is not fatal ([#3907](https://github.com/moq-dev/moq/pull/3907))
+- *(moq-json)* a snapshot edit fails on a shape mismatch instead of seeding a default ([#3874](https://github.com/moq-dev/moq/pull/3874))
+
+### Other
+
+- *(json)* bound snapshot update allocations ([#3929](https://github.com/moq-dev/moq/pull/3929))
+- *(json)* skip the snapshot baseline parse when deltas are disabled ([#3916](https://github.com/moq-dev/moq/pull/3916))
+- Merge origin/main into dev
+- Merge remote-tracking branch 'origin/main' into merge-main-into-dev-20260914
+
 ### Changed
 
 - [**breaking**] Codec options are `Config` in snapshot and stream. Track-owning options are

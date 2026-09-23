@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.26](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.25...moq-audio-v0.0.26) - 2026-09-23
+
+### Added
+
+- *(hang)* [**breaking**] unify catalog APIs ([#3813](https://github.com/moq-dev/moq/pull/3813))
+- *(net)* [**breaking**] slim the moq-net public surface ([#3779](https://github.com/moq-dev/moq/pull/3779))
+- [**breaking**] borrow publisher finish so abort can still run ([#3714](https://github.com/moq-dev/moq/pull/3714))
+- *(hang)* [**breaking**] timelines only move forward ([#3711](https://github.com/moq-dev/moq/pull/3711))
+
+### Fixed
+
+- *(audio)* [**breaking**] enforce exclusive AEC ownership ([#3844](https://github.com/moq-dev/moq/pull/3844))
+- *(moq-audio,moq-video)* build capture and Android again, and gate both on PRs ([#3850](https://github.com/moq-dev/moq/pull/3850))
+- *(ci)* repair nightly and meta-review failures ([#3799](https://github.com/moq-dev/moq/pull/3799))
+- *(net)* drop origin source track when last reader leaves
+
+### Other
+
+- *(rs)* read constant-size chunks with as_chunks ([#3899](https://github.com/moq-dev/moq/pull/3899))
+- *(quest)* complete the media release review ([#3878](https://github.com/moq-dev/moq/pull/3878))
+- Report dropped playback sample frames ([#3845](https://github.com/moq-dev/moq/pull/3845))
+- *(audio)* [**breaking**] separate configuration contracts ([#3843](https://github.com/moq-dev/moq/pull/3843))
+- *(audio)* [**breaking**] expose demand without track authority ([#3842](https://github.com/moq-dev/moq/pull/3842))
+- Unify mux track and rendition ownership ([#3857](https://github.com/moq-dev/moq/pull/3857))
+- Make media backends optional ([#3839](https://github.com/moq-dev/moq/pull/3839))
+- *(audio)* [**breaking**] remove ineffective FEC flag ([#3841](https://github.com/moq-dev/moq/pull/3841))
+- Merge origin/main into dev
+- Merge remote-tracking branch 'origin/main' into merge-main-into-dev-20260914
+
 ### Changed
 
 - PipeWire and PulseAudio host flags no longer activate device I/O without
