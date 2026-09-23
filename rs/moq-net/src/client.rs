@@ -66,8 +66,8 @@ impl Client {
 		self
 	}
 
-	/// Set the request path to advertise in the SETUP (moq-lite-05 and every
-	/// moq-transport draft we speak).
+	/// Set the request path to advertise in SETUP (moq-lite-05 and newer, and
+	/// every moq-transport draft we speak).
 	///
 	/// Only for transports that carry no request URI of their own (native QUIC, qmux
 	/// over TCP/TLS, unix sockets), so the server learns which path the client wants.

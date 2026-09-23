@@ -1110,7 +1110,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	handle.await.expect("server panicked").expect("server failed");
 }
 
-/// Route re-advertisement on the default version (lite-05: a duplicate ANNOUNCE).
+/// Route re-advertisement on the default version (lite-06: ANNOUNCE_RESTART by id).
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_reannounce() {
