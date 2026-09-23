@@ -8,6 +8,7 @@ interface SampleSpan {
 
 interface Update {
 	readonly discontinuity: number;
+	readonly group: number;
 	readonly end?: Time.Micro;
 	readonly frame?: { readonly timestamp: Time.Micro };
 }
@@ -26,6 +27,8 @@ export interface DecodedSpan {
 export class Terminal {
 	#discontinuity = 0;
 	#end?: Time.Micro;
+	// The group that carried `#end`. It bounds only the terminal packets that follow it there.
+	#endGroup?: number;
 	#epoch?: Time.Micro;
 	#preSkip = 0;
 	#preSkipRemaining?: number;
@@ -51,8 +54,13 @@ export class Terminal {
 			this.#end = undefined;
 			this.#resetEpoch();
 		}
+		// A frame from a later group is new media, e.g. resuming after a discontinuity marker.
+		if (next.frame && next.group !== this.#endGroup) this.#end = undefined;
 		if (next.frame && this.#epoch === undefined) this.#epoch = next.frame.timestamp;
-		if (next.end !== undefined) this.#end = next.end;
+		if (next.end !== undefined) {
+			this.#end = next.end;
+			this.#endGroup = next.group;
+		}
 		return reset;
 	}
 

@@ -84,6 +84,8 @@ export class Producer {
 	#liveEdge?: Time.Micro;
 	// Gap between consecutive timestamps, used to close the last group when no successor exists.
 	#interval?: Time.Micro;
+	// A discontinuity marker is the newest group, so another one would say nothing new.
+	#marked = false;
 
 	/** Wrap a track to publish legacy-container frames into it. */
 	constructor(track: Moq.Track.Producer, format: Format, props: ProducerProps = {}) {
@@ -94,6 +96,7 @@ export class Producer {
 
 	/** Encode and append a frame; a keyframe starts a new group. Throws if the first frame is not a keyframe, or if the timestamp sits below the live edge earlier groups reached. */
 	encode(data: Uint8Array | Source, timestamp: Time.Micro, keyframe: boolean) {
+		this.#marked = false;
 		if (keyframe) {
 			const rewound = this.#previous !== undefined && timestamp < this.#previous;
 			this.cut(rewound ? undefined : timestamp);
@@ -151,6 +154,35 @@ export class Producer {
 		this.#end = undefined;
 		this.#previous = undefined;
 		this.#reordered = false;
+	}
+
+	/**
+	 * Publish a marker group standing for a break in the timeline: content stopped, and whatever
+	 * comes next does not continue it. Call it when the timeline is about to jump, e.g. an encoder
+	 * pausing for lack of demand or switching source.
+	 *
+	 * Closes the open group, then writes a group of one empty frame at the live edge. Without it, a
+	 * group's reach runs to its successor's first frame, so the group before a pause reads as live
+	 * until whatever resumes it, and a subscriber joining mid-break is handed that stale media. The
+	 * marker bounds it, and it is the latest group a joiner lands on. Data tracks only close the
+	 * group, since an empty payload is data. A no-op until a frame follows the last marker.
+	 */
+	discontinuity() {
+		this.cut();
+		// Nothing is measured across the break.
+		this.#interval = undefined;
+		const timestamp = this.#liveEdge;
+		if (this.#format.kind === "data" || this.#marked || timestamp === undefined) return;
+
+		const group = this.#track.appendGroup();
+		this.#timeline?.record(group.sequence, timestamp, false);
+		this.#timeline?.end(timestamp);
+		group.writeFrame({
+			payload: encodeFrame(new Uint8Array(), timestamp),
+			timestamp: Time.Timestamp.fromMicros(timestamp),
+		});
+		group.close();
+		this.#marked = true;
 	}
 
 	#refuse(timestamp: Time.Micro) {
