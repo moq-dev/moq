@@ -39,6 +39,13 @@ impl<T> Producer<T> {
 	pub fn consume(&self) -> moq_net::track::Subscriber {
 		self.inner.lock().unwrap().track.inner.subscribe(None)
 	}
+
+	/// A watch-only handle to the underlying track's subscriber demand.
+	///
+	/// Weak, so holding it neither keeps the track open nor contends with publishing.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.inner.lock().unwrap().track.inner.demand()
+	}
 }
 
 impl<T: Serialize> Producer<T> {
