@@ -35,6 +35,7 @@ import {
 	SELECTORS,
 	serve,
 	sleep,
+	startTrace,
 	throwPageErrors,
 	waitFor,
 	waitForFixture,
@@ -343,14 +344,19 @@ async function browserFor(args: string[] = []): Promise<Browser> {
 }
 
 /** Open a subscriber page and wait for the player to start sampling. Never reloads. */
-async function subscriber(broadcast: string, label: string, muted = false): Promise<[Page, BrowserErrors]> {
+async function subscriber(
+	broadcast: string,
+	label: string,
+	muted = false,
+	trace = true,
+): Promise<[Page, BrowserErrors]> {
 	const [page, errors] = await open(
 		await browserFor(),
 		// visible="always" because the window is never frontmost in a headless run, and the default
 		// policy would stop downloading video and leave the canvas black.
 		pageUrl(server.origin, "subscribe", { url: relay, broadcast, visible: "always", muted: String(muted) }),
 		label,
-		true,
+		trace,
 	);
 	await waitForWatch(page);
 	return [page, errors];
@@ -478,7 +484,9 @@ try {
 	// No reload anywhere below. The publisher is known ready, so a subscriber that needs a second
 	// page load to find the broadcast is an initialization bug, not a race.
 	console.error("=== cold start ===");
-	let [player, playerErrors] = await subscriber(broadcast, "player");
+	// No trace yet. DOM snapshots evaluate with a user gesture, and the player's graph is built
+	// after the first of those, so Chromium would start it running and the gate below would fail.
+	let [player, playerErrors] = await subscriber(broadcast, "player", false, false);
 
 	// Video has to reach the canvas with no gesture at all: only audio is ever gated.
 	const first = await waitForState(player, playerErrors, {
@@ -502,6 +510,9 @@ try {
 	);
 	console.error(`  presented frame ${first.frameId} before any gesture; player audio stayed suspended`);
 
+	// The context already exists and is suspended. A snapshot sets sticky activation but does not
+	// resume it; pointerdown still has to.
+	await startTrace(player, "player");
 	await gesture(player);
 	// Deliberately does not wait for a tone: whether audio actually carries the fixture is what
 	// assertMedia measures, so silence has to fail there rather than time out here.
