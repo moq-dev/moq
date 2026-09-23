@@ -25,7 +25,6 @@ import { reanchorFloor, ringSamples } from "./latency";
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
 import { type DecodedSpan, Terminal } from "./terminal";
-import { unlockOnGesture } from "./unlock";
 import { Warmup } from "./warmup";
 
 // How long the latency target must hold steady before a floor increase re-anchors. Coalesces a
@@ -237,8 +236,8 @@ export class Decoder {
 		if (!context) return;
 
 		// The context is built at page load (see #runWorklet), before any user gesture, so it
-		// must be started from a real interaction. See unlockOnGesture.
-		unlockOnGesture(effect, context);
+		// must be started from a real interaction.
+		Util.Gesture.unlock(effect, context);
 
 		// NOTE: You should disconnect/reconnect the worklet to save power when disabled.
 	}

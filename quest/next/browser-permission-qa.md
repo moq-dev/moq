@@ -35,7 +35,3 @@ external symptom is a `source` that never becomes defined.
   Chromium enforces the gate on the fixture page and has been seen not
   enforcing it on the player's, whose graph is built a second later. Find
   what decides it, then assert the gate rather than only exercising it.
-
-## Related
-
-- [Publisher audio unlock](/quest/next/publish-audio-unlock.md) - the other publisher path that fails silently without a gesture

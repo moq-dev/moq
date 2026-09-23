@@ -112,7 +112,9 @@ new Publish.Audio.Encoder("audio", { broadcast, capture: audioCapture, enabled: 
 Standalone components start enabled unless you pass `enabled: false` (or a
 signal). Camera and microphone sources may prompt for permission on
 construction, so build an enabled screen source inside the user gesture that
-authorizes screen capture.
+authorizes screen capture. Audio capture that starts before the page's first
+click or keypress waits for one: browsers suspend Web Audio until then, and the
+audio rendition stays out of the catalog until samples flow.
 
 Every input and output is a signal from [`@moq/signals`](/lib/js/signals).
 Load from a CDN (`https://esm.sh/@moq/publish/element`) for a no-build embed.
