@@ -121,13 +121,13 @@ impl Playback {
 	}
 }
 
-/// The half a finished task was driving, or `None` if it was cancelled (on the
-/// way out, where which half it was no longer matters).
-pub(super) fn joined(
-	result: Result<(Kind, anyhow::Result<()>), tokio::task::JoinError>,
-) -> anyhow::Result<Option<Kind>> {
+/// The half a finished task was driving and what it left behind, or `None` if
+/// it was cancelled (on the way out, where which half it was no longer matters).
+pub(super) fn joined<T>(
+	result: Result<(Kind, anyhow::Result<T>), tokio::task::JoinError>,
+) -> anyhow::Result<Option<(Kind, T)>> {
 	match result {
-		Ok((kind, result)) => result.map(|()| Some(kind)),
+		Ok((kind, result)) => result.map(|left| Some((kind, left))),
 		Err(err) if err.is_cancelled() => Ok(None),
 		Err(err) => Err(err.into()),
 	}
