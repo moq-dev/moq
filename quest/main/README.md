@@ -88,7 +88,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 ## Quests
 
-- [IETF leftovers](/quest/main/ietf-leftovers.md) - moq-net and JS align three registered IETF values across negotiated drafts
 - [Binding parity](/quest/main/binding-parity.md) - every wrapper reaches every moq-ffi method in its own idiom with moq-net's verbs
 
 ## Related
