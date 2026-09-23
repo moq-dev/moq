@@ -1314,7 +1314,7 @@ impl Cluster {
 			client
 				.iter()
 				.any(|version| Self::carries_request_path(version) && server.contains(version)),
-			"--cluster-lan needs --connect-version and --listen-version to share a version that carries a request path (moq-lite-05 or any moq-transport version)"
+			"--cluster-lan needs --connect-version and --listen-version to share a version that carries a request path (moq-lite-05 and newer, or any moq-transport version)"
 		);
 		Ok(())
 	}
@@ -1357,7 +1357,7 @@ impl Cluster {
 			if let Some(connect) = &self.connect {
 				anyhow::ensure!(
 					connect.versions().iter().any(Self::carries_request_path),
-					"--cluster-lan needs --connect-version to include a version that carries a request path (moq-lite-05 or any moq-transport version)"
+					"--cluster-lan needs --connect-version to include a version that carries a request path (moq-lite-05 and newer, or any moq-transport version)"
 				);
 			} else {
 				anyhow::bail!("`--cluster-lan` needs a dial template (call Cluster::with_connect)");

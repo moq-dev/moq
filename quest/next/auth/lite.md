@@ -112,10 +112,10 @@ before publishing what that token unlocks. On a miss, abort the session with
 teardown already formats one; log it at error level too, since `Error`
 carries no payload).
 
-Gate everything on `Version::Lite06Wip`; older versions never open the stream
+Gate everything on `Version::Lite06`; older versions never open the stream
 and `auth().grant()` stays `None` there. Land the accept side and the
 `Unsupported` handling before any build opens the stream, since
-`moq-lite-06-wip` is one ALPN with no sub-version.
+`moq-lite-06` is one ALPN with no sub-version.
 
 ### JavaScript
 

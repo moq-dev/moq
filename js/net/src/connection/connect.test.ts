@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ALPN_05 } from "../lite/version.ts";
+import { ALPN_05, ALPN_06 } from "../lite/version.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
 
@@ -53,6 +53,27 @@ function stubWebTransport(transport: WebTransport): () => void {
 		globalThis.WebTransport = original;
 	};
 }
+
+test("WebTransport offers lite-06 first by default", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const original = globalThis.WebTransport;
+	let protocols: string[] | undefined;
+
+	function StubWebTransport(this: unknown, _url: string | URL, options: WebTransportOptions) {
+		protocols = options.protocols;
+		return pair.client;
+	}
+	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
+
+	try {
+		const connection = await connect(url, { websocket: { enabled: false } });
+		connection.close();
+	} finally {
+		globalThis.WebTransport = original;
+	}
+
+	expect(protocols?.[0]).toBe("moq-lite-06");
+});
 
 test("connect logs the relay URL without its credentials", async () => {
 	const pair = createMockTransportPair(ALPN_05);

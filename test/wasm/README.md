@@ -56,7 +56,7 @@ One per protocol flavour, since negotiation is the part that broke:
 
 | name    | relay                            | negotiates                             |
 | ------- | -------------------------------- | -------------------------------------- |
-| `lite`  | defaults                         | `moq-lite-05`, over its own ALPN       |
+| `lite`  | defaults                         | `moq-lite-06`, over its own ALPN   |
 | `ietf`  | `--listen-version moq-transport-19` | `moq-transport-19`, over its own ALPN  |
 | `setup` | `--listen-version moq-lite-02`   | the `moql` ALPN, version chosen by SETUP |
 
@@ -74,7 +74,7 @@ uncovered here.
   consecutive groups, checking every frame byte for byte. One frame is 128 KiB,
   which is what exercises the chunked read path in the transport adapter.
 - **refuses a track the publisher does not serve** -- the refusal has to
-  surface, as a rejected `subscribe` (lite-05, which looks a track's info up
+  surface, as a rejected `subscribe` (lite-06, which looks a track's info up
   first) or as a track that yields no group (IETF, lite-02). A hang fails on the
   case timeout.
 
@@ -99,7 +99,7 @@ here becomes a second wasm session and the interop runs both ways.
 Firefox. Playwright can launch it and it opens WebTransport sessions here, but
 it ships no `WebTransport.prototype.protocol`, so it cannot request or read a
 subprotocol. Run against Firefox 153, the `lite` relay negotiates `moq-lite-02`
-over SETUP instead of `moq-lite-05` and the `ietf` relay rejects the connection
+over SETUP instead of `moq-lite-06` and the `ietf` relay rejects the connection
 outright: four of the nine cases fail, including the version-negotiation case
 this harness exists for. There is nothing left to assert about negotiation, so
 Firefox joins the matrix when Gecko implements the subprotocol, not before.

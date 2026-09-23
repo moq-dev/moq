@@ -1,5 +1,5 @@
 /**
- * The lite-05 SETUP message: each endpoint advertises its capabilities once, as the
+ * The lite-05+ SETUP message: each endpoint advertises its capabilities once, as the
  * sole message on a unidirectional Setup Stream ({@link DataType.Setup}), then closes it.
  *
  * @module

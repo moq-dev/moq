@@ -1,4 +1,4 @@
-//! The lite-05 SETUP message: each endpoint advertises its capabilities once, as
+//! The lite-05+ SETUP message: each endpoint advertises its capabilities once, as
 //! the sole message on a unidirectional Setup Stream, then closes it.
 
 use crate::coding::*;

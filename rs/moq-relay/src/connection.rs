@@ -188,8 +188,8 @@ pub(crate) struct Grants {
 /// Authorize an admitted session and resolve what it may serve, however
 /// its transport is driven (the shared runtime or a QUIC worker).
 ///
-/// The client advertises which direction it intends to use (moq-lite-05
-/// SETUP). A bidirectional connection (e.g. a cluster peer) advertises
+/// The client advertises which direction it intends to use in SETUP
+/// (moq-lite-05 and newer). A bidirectional connection (e.g. a cluster peer) advertises
 /// nothing, so the only requirement is that the token grants *something*. But
 /// a gateway that only publishes or only subscribes says so, and a token
 /// missing that direction's scope is rejected here during the handshake,

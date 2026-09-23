@@ -7,7 +7,7 @@ use crate::origin;
 use crate::time::{Clock, Instant};
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_22, ALPN_LITE, ALPN_LITE_03,
-	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Role, Session, SessionError, Version,
+	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, Consume, Error, NEGOTIATED, Role, Session, SessionError, Version,
 	Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup, stats,
@@ -157,9 +157,9 @@ impl Server {
 	{
 		let runtime = Clock::new(now);
 		let (path, role, origin, handshake) = match session.protocol() {
-			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06_WIP)) => {
+			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06)) => {
 				let version = match alpn {
-					ALPN_LITE_06_WIP => lite::Version::Lite06Wip,
+					ALPN_LITE_06 => lite::Version::Lite06,
 					_ => lite::Version::Lite05,
 				};
 				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
@@ -247,8 +247,8 @@ impl Server {
 	/// serve, and call [`ok`](Handshake::ok) or [`close`](Handshake::close). Session start
 	/// is deferred to `ok()`, so origins set on the handshake always take effect.
 	///
-	/// The path is surfaced for moq-lite-05 and every moq-transport draft we speak;
-	/// it's empty on versions with no in-band request path (e.g. lite 01-04).
+	/// The path is surfaced for moq-lite-05 and newer, and every moq-transport
+	/// draft we speak; it's empty on versions with no in-band request path (lite 01-04).
 	pub async fn accept_request<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
 	where
 		S: crate::transport::poll::Boxable,
@@ -293,7 +293,7 @@ impl Server {
 			}
 			// Every lite ALPN goes through the same entry point, which is also
 			// what a `!Send` transport calls directly.
-			Some(ALPN_LITE_05 | ALPN_LITE_06_WIP | ALPN_LITE_04 | ALPN_LITE_03) => {
+			Some(ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_04 | ALPN_LITE_03) => {
 				return self.accept_request_lite(now, session).await;
 			}
 			Some(ALPN_LITE) | None => {
@@ -630,8 +630,8 @@ where
 	///
 	/// Empty when the client advertised none: either it sent an empty path, or the
 	/// version carries none in-band (lite 01-04). Those mean the same thing, so the
-	/// wire distinction isn't surfaced. Populated for moq-lite-05 and every
-	/// moq-transport draft we speak. See the note on [`Server::accept_request`].
+	/// wire distinction isn't surfaced. Populated for moq-lite-05 and newer,
+	/// and every moq-transport draft we speak. See the note on [`Server::accept_request`].
 	pub fn path(&self) -> &str {
 		self.path.as_deref().unwrap_or("")
 	}
@@ -639,8 +639,8 @@ where
 	/// The single [`Role`] the client advertised in its SETUP, or `None` for a
 	/// bidirectional session.
 	///
-	/// Only moq-lite-05 carries a role, so `None` covers three cases that the wire
-	/// doesn't distinguish: an older version, a client that omitted the parameter, and a
+	/// Only moq-lite-05 and newer carry a role, so `None` covers three cases
+	/// that the wire doesn't distinguish: an older version, a client that omitted the parameter, and a
 	/// client that explicitly advertised both directions. All three mean the same thing
 	/// (the client may publish and subscribe), so authorize on what the token grants.
 	/// See the note on [`Server::accept_request`].
