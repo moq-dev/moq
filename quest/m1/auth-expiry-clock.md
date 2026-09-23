@@ -11,13 +11,15 @@ ends immediately in the relay.
 
 ## Plan
 
-- `Client::drive` sets its deadline once per grant and measures it on the
-  tokio clock, so its outage tests run on a paused clock like the relay's
-  (#3969 fixed the relay side).
+- Build on the lease clock auth-embedder introduces: `lease::Producer` sets
+  its deadline once per grant and measures it on the tokio clock, so the
+  client's outage tests run on a paused clock like the relay's (#3969 fixed
+  the relay side).
 - Apply the skew allowance in one place both sides share.
 - Test: re-polling keeps the deadline; a grant within the skew window is live
   on both sides; the client outage tests run on a paused clock.
 
 ## Required
 
+- [Auth embedder](/quest/m1/auth-embedder.md) - introduces the lease clock this fixes
 - The relay's fixed expiry deadline (#3969) has merged

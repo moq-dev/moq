@@ -15,7 +15,8 @@ fallback settings. moq.pro's Python sidecar reads route sources from here.
   language's duration type where the wrapper already uses one, handles over
   flat methods where a surface has more than one call.
 - libmoq gets the decode delay and route source in `rs/libmoq` itself, with
-  tests, not only in the C docs; regenerate `moq.h`.
+  tests, not only in the C docs; regenerate `moq.h`. The additions are
+  additive, so `cpp/obs/src` and `doc/bin/obs.md` change only if OBS uses them.
 - Update `doc/lib/{py,swift,kt,go,dart,c}` in the same PR.
 - Test each surface in every wrapper that has tests.
 - This adds methods in today's flat FFI shape; FFI shape (#3976) reshapes
