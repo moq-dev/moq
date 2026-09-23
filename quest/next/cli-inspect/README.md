@@ -22,4 +22,3 @@ This README owns the guide, written once both verbs land: a new
 
 - [Caught up](/quest/next/cli-inspect/caught-up.md) - moq-net's announce consumer says when the initial set has landed, and shell completion drops its settle timer
 - [ls](/quest/next/cli-inspect/ls.md) - `moq ls` prints the live set and exits, or follows changes, as paths or JSON lines
-- [Fetch](/quest/next/cli-inspect/fetch.md) - `moq fetch` writes one group of a track to stdout, raw or as JSON lines
