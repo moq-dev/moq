@@ -34,6 +34,10 @@ Either way the regression test is a video-only burst larger than the queue with
 a delay wider than the queue holds, asserting the clock ends up at the live edge
 rather than a delay behind it.
 
+## Required
+
+- [Play harness](/quest/m1/play-harness.md) - the regression test runs on it
+
 ## Related
 
 - [Playout clock](https://github.com/moq-dev/moq/pull/3528) - added the clock this bounds

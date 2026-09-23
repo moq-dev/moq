@@ -2,8 +2,8 @@
 
 ## Goal
 
-moq-ffi and every wrapper (Python, Go, Swift, Kotlin, Dart) expose three
-surfaces that landed in Rust only: the audio decode delay
+moq-ffi, libmoq, and every wrapper (Python, Go, Swift, Kotlin, Dart) expose
+three surfaces that landed in Rust only: the audio decode delay
 (`decode::Options::delay` and `Consumer::delay()`), where a route came from
 (`Route::source()` and `origin::Consumer::local()`), and libmoq's connection
 timing (`failover_delay_us`, `resolution_delay_us`) beside the WebSocket
@@ -14,8 +14,12 @@ fallback settings. moq.pro's Python sidecar reads route sources from here.
 - One PR, each wrapper touched once, in its own idiom: durations as the
   language's duration type where the wrapper already uses one, handles over
   flat methods where a surface has more than one call.
+- libmoq gets the decode delay and route source in `rs/libmoq` itself, with
+  tests, not only in the C docs; regenerate `moq.h`.
 - Update `doc/lib/{py,swift,kt,go,dart,c}` in the same PR.
 - Test each surface in every wrapper that has tests.
+- This adds methods in today's flat FFI shape; FFI shape (#3976) reshapes
+  them later.
 
 ## Required
 

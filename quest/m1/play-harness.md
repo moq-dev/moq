@@ -20,10 +20,6 @@ feature, which CI only compiles in the nightly clippy run, so its regressions
   [Play tune-in backpressure](/quest/m1/play-tunein-backpressure.md), which
   owns that fix.
 
-## Related
-
-- [Play tune-in backpressure](/quest/m1/play-tunein-backpressure.md) - its regression test runs here
-
 ## Required
 
 - The rendition-switch gap fix (#3966) has merged
