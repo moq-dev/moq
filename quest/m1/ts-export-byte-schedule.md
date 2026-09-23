@@ -28,10 +28,6 @@ UDP sink is out of scope; delivery stays with an external tool.
 - `doc/bin/cli.md`: say that export pads to `mpegts.muxRate` on a constant-rate
   schedule and what latency that adds.
 
-## Required
-
-- [#2829](/quest/m1/2829-moq-export-ts-the-audio-video-interleave-is-decided-by.md) - the watermark decides frame order in the same `poll_next` loop this schedules
-
 ## Closes
 
 - [#3925](https://github.com/moq-dev/moq/issues/3925) - close this issue when the quest finishes
