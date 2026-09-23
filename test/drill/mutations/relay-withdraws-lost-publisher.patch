@@ -1,0 +1,30 @@
+# drill: interrupted_publisher_republishes_new_content
+# expect: the interrupted publisher: no announcement change
+#
+# Removes the relay's withdrawal of a publisher it lost. Each announced route
+# holds an origin handle whose drop retracts it; wrapping that in `ManuallyDrop`
+# means a route outlives the session that announced it, so a crashed publisher's
+# name stays announced with nothing behind it.
+diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
+index 729a23e4b..dac9990c6 100644
+--- a/rs/moq-net/src/lite/subscriber.rs
++++ b/rs/moq-net/src/lite/subscriber.rs
+@@ -2566,7 +2566,8 @@ struct AnnouncedRoute {
+ 	/// without recomputing the chain.
+ 	route: crate::origin::Route,
+ 	/// Dropping it retracts the route and rejects its queued requests.
+-	dynamic: crate::origin::Dynamic,
++	// MUTATION: never dropped, so a route outlives the session that announced it.
++	dynamic: std::mem::ManuallyDrop<crate::origin::Dynamic>,
+ 	/// One minted source per requested path, finished on a clean retraction and
+ 	/// aborted (via drop) when the session dies.
+ 	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
+@@ -2578,7 +2579,7 @@ impl AnnouncedRoute {
+ 	fn new(route: crate::origin::Route, dynamic: crate::origin::Dynamic) -> Self {
+ 		Self {
+ 			route,
+-			dynamic,
++			dynamic: std::mem::ManuallyDrop::new(dynamic),
+ 			sources: HashMap::new(),
+ 			drained: false,
+ 		}
