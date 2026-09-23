@@ -238,6 +238,9 @@ async fn serve_client(
 		anyhow::bail!("grant allows nothing this endpoint serves at {}", token.root);
 	}
 
+	// `publish` here is what the session may subscribe to, scoped by the token's
+	// `subscribe` field, and `subscribe` the reverse.
+	let lease = lease.with_origins(publish.clone(), subscribe.clone());
 	let mut request = request;
 	if let Some(publish) = publish {
 		request = request.with_publisher(publish.consume());

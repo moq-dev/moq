@@ -277,6 +277,90 @@ fn bench_subscribe(c: &mut Criterion) {
 	group.finish();
 }
 
+/// An origin with `publishers` broadcasts under `room/` and `subscribers`
+/// sessions, each holding its own scoped handle and cursor as a relay session
+/// does. With `narrowed`, every session's handle is narrowed in place.
+struct Sessions {
+	producer: origin::Producer,
+	driver: origin::Driver,
+	_publishers: Vec<broadcast::Producer>,
+	handles: Vec<origin::Consumer>,
+	cursors: Vec<announce::Consumer>,
+}
+
+fn sessions(publishers: usize, subscribers: usize, narrowed: bool) -> Sessions {
+	let (producer, driver) = origin::Producer::new(origin::Config::default());
+	let publishers = (0..publishers)
+		.map(|i| producer.publish(format!("room/{i}"), origin::Route::default()).unwrap())
+		.collect();
+	let everything = Patterns::from(Pattern::all());
+	// One segment below the session root: every path here, but a real ceiling.
+	let one: Patterns = Patterns::from("*".parse::<Pattern>().unwrap());
+	let handles: Vec<origin::Consumer> = (0..subscribers.max(1))
+		.map(|_| {
+			let handle = producer.scope("room", &everything).unwrap();
+			if narrowed {
+				handle.narrow(&one).unwrap();
+			}
+			handle.consume()
+		})
+		.collect();
+	let mut cursors: Vec<announce::Consumer> = handles.iter().take(subscribers).map(|h| h.announced()).collect();
+	for cursor in &mut cursors {
+		while cursor.next().now_or_never().flatten().is_some() {}
+	}
+	Sessions {
+		producer,
+		driver,
+		_publishers: publishers,
+		handles,
+		cursors,
+	}
+}
+
+/// The cost a narrowing adds to the hot paths, against sessions that never
+/// narrowed: an announce fanning out to every session's cursor, and a request
+/// through one session's handle. The `plain` rows must match the unnarrowed
+/// origin, since an origin that never narrows skips the ceiling check entirely.
+fn bench_narrow(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/narrow");
+	for (publishers, subscribers) in SHAPES {
+		for narrowed in [false, true] {
+			let label = if narrowed { "narrowed" } else { "plain" };
+			let shape = format!("{publishers}p_{subscribers}s");
+			group.bench_function(BenchmarkId::new(format!("announce/{label}"), &shape), |b| {
+				let mut fleet = sessions(publishers, subscribers, narrowed);
+				b.iter(|| {
+					let handle = fleet
+						.producer
+						.publish("room/incoming", origin::Route::default())
+						.unwrap();
+					for cursor in &mut fleet.cursors {
+						cursor.next().now_or_never().flatten().expect("announce delivered");
+					}
+					drop(handle);
+					for cursor in &mut fleet.cursors {
+						cursor.next().now_or_never().flatten().expect("retract delivered");
+					}
+				});
+			});
+			group.bench_function(BenchmarkId::new(format!("request/{label}"), &shape), |b| {
+				let mut fleet = sessions(publishers, subscribers, narrowed);
+				let waiter = kio::Waiter::noop();
+				b.iter(|| {
+					let pending = fleet.handles[0].request_broadcast("0");
+					fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+					pending
+						.now_or_never()
+						.expect("resolves once driven")
+						.expect("local broadcast");
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
 /// Resolving one broadcast among `publishers`: a local hit walks the table to
 /// the exact path and joins the front serving it, and a miss under a broadcast
 /// published above it walks the table to prove nothing serves it. Neither may
@@ -382,6 +466,7 @@ criterion_group!(
 	bench_serve_idle,
 	bench_subscribe,
 	bench_request,
+	bench_narrow,
 	bench_handoff
 );
 criterion_main!(benches);

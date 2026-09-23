@@ -212,8 +212,8 @@ impl Token {
 	}
 
 	/// Whether `other` still covers everything this token scopes: the same root and
-	/// every grant still held. A narrower re-check closes the session until
-	/// pattern scopes can resize it in place.
+	/// every grant still held. A narrower re-check resizes the session in place
+	/// when it can ([`Lease::with_origins`]) and closes it otherwise.
 	pub(crate) fn covered_by(&self, other: &Self) -> bool {
 		self.root == other.root && other.subscribe.covers(&self.subscribe) && other.publish.covers(&self.publish)
 	}
@@ -232,6 +232,15 @@ pub struct Lease {
 	/// When the grant runs out, enforced here whoever drives the lease: a fixed
 	/// grant has no driver, and an auth server's may be mid-outage.
 	expires: Option<SystemTime>,
+	/// The session's origin handles, narrowed in place by a narrower re-check.
+	/// `None` when the holder attached none, so a narrower re-check ends the lease.
+	origins: Option<Origins>,
+}
+
+/// The origin handles a session serves through, one per token field.
+struct Origins {
+	subscribe: Option<moq_net::origin::Producer>,
+	publish: Option<moq_net::origin::Producer>,
 }
 
 impl Lease {
@@ -243,7 +252,21 @@ impl Lease {
 			token: Token::new(path, &grant),
 			expires: grant.expires,
 			consumer,
+			origins: None,
 		}
+	}
+
+	/// Narrow these origin handles in place when a re-check narrows the grant,
+	/// instead of ending the lease: `subscribe` and `publish` are the handles
+	/// scoped by the token field of the same name, `None` for a side the session
+	/// does not serve.
+	pub fn with_origins(
+		mut self,
+		subscribe: Option<moq_net::origin::Producer>,
+		publish: Option<moq_net::origin::Producer>,
+	) -> Self {
+		self.origins = Some(Origins { subscribe, publish });
+		self
 	}
 
 	/// The scope the session was admitted under.
@@ -259,10 +282,13 @@ impl Lease {
 	/// Wait for the lease to stop covering the session: the grant expired, was
 	/// revoked, or was re-checked into one that no longer covers the token.
 	///
-	/// A changed root or a narrower grant ends it: origin handles cannot yet narrow
-	/// a live scope in place (tracked by `quest/next/origin-narrowing.md`). A changed
-	/// tier is kept for this session and applies to its next connection, since the
-	/// stats carriers resolved their counters at admission.
+	/// A narrower grant narrows the attached origin handles in place
+	/// ([`Self::with_origins`]), which retracts the announcements and refuses the
+	/// requests it no longer covers. It ends the lease instead when no handles are
+	/// attached, or when a broadcast still served or published falls outside it,
+	/// since ending those in place is not implemented. A changed root always ends
+	/// it. A changed tier is kept for this session and applies to its next
+	/// connection, since the stats carriers resolved their counters at admission.
 	pub async fn ended(&mut self) -> lease::Reason {
 		loop {
 			let expire = async {
@@ -279,7 +305,11 @@ impl Lease {
 							return "root changed".into();
 						}
 						if !self.token.covered_by(&fresh) {
-							return "grant narrowed".into();
+							if let Err(err) = self.narrow(&fresh) {
+								tracing::info!(%err, "grant narrowed past what the session can shed");
+								return "grant narrowed".into();
+							}
+							tracing::info!(subscribe = ?self.token.subscribe, publish = ?self.token.publish, "grant narrowed in place");
 						}
 						if fresh.tier != self.token.tier {
 							tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed; applies to the next session");
@@ -291,6 +321,27 @@ impl Lease {
 				() = expire => return lease::Reason::Expired,
 			}
 		}
+	}
+
+	/// Narrow each side of the session that `fresh` narrows, and adopt it. A side
+	/// that widened keeps what it was admitted with: widening is never a narrowing.
+	fn narrow(&mut self, fresh: &Token) -> Result<(), moq_net::Error> {
+		let Some(origins) = &self.origins else {
+			return Err(moq_net::Error::Unsupported);
+		};
+		if !fresh.subscribe.covers(&self.token.subscribe) {
+			if let Some(origin) = &origins.subscribe {
+				origin.narrow(&fresh.subscribe)?;
+			}
+			self.token.subscribe = fresh.subscribe.clone();
+		}
+		if !fresh.publish.covers(&self.token.publish) {
+			if let Some(origin) = &origins.publish {
+				origin.narrow(&fresh.publish)?;
+			}
+			self.token.publish = fresh.publish.clone();
+		}
+		Ok(())
 	}
 
 	/// End the lease with the session's close classification and the totals it
@@ -618,6 +669,36 @@ mod tests {
 		assert!(narrow.covered_by(&wide));
 		assert!(!wide.covered_by(&narrow));
 		assert!(!wide.covered_by(&moved));
+	}
+
+	/// A narrower re-check narrows the session's origins in place and keeps the
+	/// lease, unless a broadcast the session published falls outside it.
+	#[tokio::test]
+	async fn a_narrower_recheck_narrows_the_origins_in_place() {
+		use futures::FutureExt;
+
+		let (origin, _driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		let (decider, consumer) = lease::Producer::new(Grant::new(patterns(&["**"]), patterns(&["**"])));
+		let lease = Lease::new("/room", consumer);
+		let token = lease.token().clone();
+		let subscribe = origin.scope(&token.root, &token.subscribe).unwrap();
+		let publish = origin.scope(&token.root, &token.publish).unwrap();
+		let mut lease = lease.with_origins(Some(subscribe.clone()), Some(publish.clone()));
+
+		decider.update(Grant::new(patterns(&["**"]), patterns(&["bob/**"])));
+		assert!(lease.ended().now_or_never().is_none(), "narrowed in place");
+		assert_eq!(subscribe.allowed(), patterns(&["bob/**"]));
+		assert_eq!(lease.token().subscribe, patterns(&["bob/**"]));
+
+		// Widening back is kept as admitted, not applied.
+		decider.update(Grant::new(patterns(&["**"]), patterns(&["**"])));
+		assert!(lease.ended().now_or_never().is_none());
+		assert_eq!(subscribe.allowed(), patterns(&["bob/**"]));
+
+		let _cam = publish.create_broadcast("alice/cam").unwrap();
+		decider.update(Grant::new(patterns(&["bob/**"]), patterns(&["bob/**"])));
+		let reason = lease.ended().now_or_never().expect("a live broadcast falls outside");
+		assert_eq!(reason.as_str(), "grant narrowed");
 	}
 
 	#[test]

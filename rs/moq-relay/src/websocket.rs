@@ -121,7 +121,7 @@ struct SessionInputs {
 async fn handle_socket<T>(
 	socket: T,
 	session: SessionInputs,
-	mut lease: auth::Lease,
+	lease: auth::Lease,
 	pending: Option<(crate::session::Registry, moq_auth::Request)>,
 ) -> anyhow::Result<()>
 where
@@ -143,6 +143,7 @@ where
 		mut shutdown,
 		socket_stats,
 	} = session;
+	let mut lease = lease.with_origins(subscribe.clone(), publish.clone());
 
 	// Wrap the WebSocket in a WebTransport compatibility layer. We have to
 	// forward the negotiated subprotocol explicitly; axum performed the

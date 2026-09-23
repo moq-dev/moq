@@ -746,6 +746,7 @@ async fn serve_connection(
 		};
 
 	let peer_hop = request.peer_hop();
+	let lease = lease.with_origins(grants.subscribe.clone(), grants.publish.clone());
 	let mut request = request.with_stats(grants.stats);
 	if let Some(subscribe) = grants.subscribe {
 		request = request.with_publisher(&subscribe);

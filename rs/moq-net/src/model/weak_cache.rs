@@ -109,6 +109,11 @@ where
 		self.map.values()
 	}
 
+	/// Iterate every entry with its key, closed ones included.
+	pub fn entries(&self) -> impl Iterator<Item = (&K, &V)> {
+		self.map.iter()
+	}
+
 	/// Remove and return the entry for `key`, if any.
 	pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
 	where

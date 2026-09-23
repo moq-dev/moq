@@ -39,7 +39,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   the union and cancels publications and subscriptions that lose authorization.
   Other authorized work continues on the same session. An empty union leaves
   the session connected with no access, so it can accept a fresh token.
-  [Origin narrowing](/quest/next/origin-narrowing.md) owns the common resize
+  [Handout revocation](/quest/next/handout-revocation.md) owns the common resize
   operation; relay token handling requires it rather than shipping a temporary
   close-on-shrink policy.
 - **A public grant contains publish patterns, subscribe patterns, and an
@@ -106,7 +106,7 @@ existing lite-06 ALPN.
 
 ## Related
 
-- [Origin narrowing](/quest/next/origin-narrowing.md) - resizes a live session
+- [Handout revocation](/quest/next/handout-revocation.md) - resizes a live session
   when the union shrinks, for revalidation and token expiry alike
 - [Pattern interest](/quest/next/path-patterns.md) - moves AUTH's legacy wire prefixes to patterns along with ANNOUNCE_REQUEST
 - [Expiring media grants](/quest/next/processor/grant-lease.md) - a worker's

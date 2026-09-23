@@ -701,6 +701,9 @@ struct RouteEntry {
 	/// Whether peer announce cursors see the entry. Local cursors also see an
 	/// origin-owned broadcast before its producer advertises it.
 	advertised: bool,
+	/// The grant of the handle that announced it, so a narrowing can tell which
+	/// routes its handles published.
+	grant: Arc<Grant>,
 	/// [`prefix_claim`] of [`Self::prefix`], built once at announce time.
 	///
 	/// The announce sync evaluates a route's claim once per (cursor, route) pair,
@@ -740,6 +743,18 @@ impl RouteEntry {
 			Some(peer) if peer != Hop::UNKNOWN => self.via != peer && !self.hops.contains(&peer),
 			_ => true,
 		}
+	}
+
+	/// Whether every path this route serves lies within the absolute `patterns`:
+	/// a published broadcast serves its exact path, a served route its scope
+	/// beneath the prefix.
+	fn within(&self, patterns: &Patterns) -> bool {
+		if self.server.is_none() {
+			return patterns.matches(self.prefix.as_str());
+		}
+		self.scope
+			.intersect(&Patterns::from(self.claim.clone()))
+			.is_ok_and(|served| patterns.covers(&served))
 	}
 
 	/// Whether this route and `allowed` share any path beneath the advertised prefix.
@@ -820,8 +835,15 @@ impl WeakEntry for RemoteFront {
 struct TableCursor {
 	/// The prefix stripped from every delivered path.
 	root: PathOwned,
-	/// The absolute patterns this cursor is scoped to (its token / scope).
+	/// The absolute patterns this cursor is scoped to (its token / scope),
+	/// narrowed in place by [`OriginState::narrow`].
 	allowed: Patterns,
+	/// The grant of the handle that opened it, so a narrowing finds it.
+	grant: Arc<Grant>,
+	/// The handle's own patterns once a narrowing replaced `allowed`: captures
+	/// name what the handle's wildcards stand for, so a narrowing that keeps a
+	/// prefix must not change its identity. `None` until then.
+	unnarrowed: Option<Patterns>,
 	/// Where the cursor hangs in the [`RouteTable`]: the literal heads of
 	/// `allowed`. A route the cursor can see sits at or under one of them, or on
 	/// the walk down to one.
@@ -859,7 +881,9 @@ impl TableCursor {
 	/// exact announced prefix. An overlap-only route does not pin every wildcard.
 	fn captures(&self, prefix: &Path) -> Option<Vec<Pattern>> {
 		let literal = Pattern::literal(prefix.as_str()).ok()?;
-		self.allowed
+		self.unnarrowed
+			.as_ref()
+			.unwrap_or(&self.allowed)
 			.iter()
 			.filter_map(|allowed| {
 				allowed
@@ -880,28 +904,66 @@ impl TableCursor {
 	}
 }
 
+static NEXT_GRANT_ID: AtomicU64 = AtomicU64::new(0);
+
+/// A node in the tree of handle scopes, one per origin and per `scope` call, so
+/// a narrowing reaches every handle derived below it.
+///
+/// Carries no state: what a narrowing sets lives in [`OriginState::narrowed`],
+/// under the lock every check already takes, keyed by `id`.
+struct Grant {
+	id: u64,
+	parent: Option<Arc<Grant>>,
+}
+
+impl Grant {
+	fn new(parent: Option<Arc<Grant>>) -> Arc<Self> {
+		Arc::new(Self {
+			id: NEXT_GRANT_ID.fetch_add(1, Ordering::Relaxed),
+			parent,
+		})
+	}
+
+	/// This grant and every grant it was derived from, nearest first.
+	fn chain(&self) -> impl Iterator<Item = &Grant> {
+		std::iter::successors(Some(self), |grant| grant.parent.as_deref())
+	}
+
+	/// Whether this grant is `id` or was derived from it.
+	fn within(&self, id: u64) -> bool {
+		self.chain().any(|grant| grant.id == id)
+	}
+}
+
 /// A handle's view of an origin: the absolute patterns it may reach.
 #[derive(Clone)]
 struct OriginScope {
-	// The paths this handle may reach, absolute.
+	// The paths this handle may reach, absolute, before any narrowing.
 	allowed: Patterns,
+	// Where the handle sits in the scope tree; see [`OriginState::narrowed`].
+	grant: Arc<Grant>,
 }
 
 impl OriginScope {
-	/// A view that reaches nothing.
-	fn empty() -> Self {
+	/// This view reaching nothing, still under the same grant.
+	fn emptied(&self) -> Self {
 		Self {
 			allowed: Patterns::new(),
+			grant: self.grant.clone(),
 		}
 	}
 
-	/// This view narrowed to the absolute `patterns`: the paths in both.
+	/// This view narrowed to the absolute `patterns`: the paths in both, under a
+	/// new grant derived from this one.
 	fn narrow(&self, patterns: &Patterns) -> Option<Self> {
 		let allowed = self.allowed.intersect(patterns).ok()?;
 		if allowed.is_empty() {
 			None
 		} else {
-			Some(Self { allowed })
+			Some(Self {
+				allowed,
+				grant: Grant::new(Some(self.grant.clone())),
+			})
 		}
 	}
 
@@ -909,17 +971,13 @@ impl OriginScope {
 	fn permits(&self, path: &Path) -> bool {
 		self.allowed.matches(path.as_str())
 	}
-
-	/// What this view reaches, named from `root`.
-	fn relative(&self, root: &Path) -> Patterns {
-		self.allowed.rebase(root.as_str())
-	}
 }
 
 impl Default for OriginScope {
 	fn default() -> Self {
 		Self {
 			allowed: Patterns::from(Pattern::all()),
+			grant: Grant::new(None),
 		}
 	}
 }
@@ -1096,7 +1154,7 @@ impl Producer {
 		let (tasks, _) = TaskSet::new();
 		Self {
 			hop,
-			scope: OriginScope::empty(),
+			scope: OriginScope::default().emptied(),
 			root: PathOwned::default(),
 			shared: kio::Shared::default(),
 			pool: cache::Pool::default(),
@@ -1167,7 +1225,7 @@ impl Producer {
 			shared: self.shared.clone(),
 			requested: full.clone(),
 			prefixes: vec![(full.clone(), claim)],
-			scope: self.scope.allowed.clone(),
+			scope: self.scope.clone(),
 			local: true,
 			stats: self.stats.clone(),
 		};
@@ -1299,6 +1357,25 @@ impl Producer {
 		})
 	}
 
+	/// Narrow what this handle, its clones, and every handle derived from them may
+	/// reach to `patterns`, relative to its root, in place.
+	///
+	/// Announce cursors under the grant retract the prefixes they can no longer
+	/// see, and requests, publishes, and served routes outside `patterns` fail
+	/// with [`Error::Unauthorized`] from then on.
+	///
+	/// Fails with [`Error::Unauthorized`] when `patterns` reaches anything this
+	/// handle cannot (widening is never a narrowing), [`Error::Unsupported`] while
+	/// a live broadcast is served at a path being removed or a route the grant
+	/// published serves one (ending those in place is not implemented, so the
+	/// caller closes the session instead), [`Error::BoundsExceeded`] when rooting
+	/// the patterns exceeds the path limit, or [`Error::Closed`] once the origin's
+	/// [`Driver`] has been dropped. A failure changes nothing.
+	pub fn narrow(&self, patterns: &Patterns) -> Result<(), Error> {
+		let rooted = patterns.rooted(self.root.as_str()).map_err(|_| BoundsExceeded)?;
+		self.shared.lock().narrow(&self.scope, rooted)
+	}
+
 	/// Cheap read handle over this origin's route table.
 	///
 	/// Use [`Consumer::announced`] to register interest and start receiving
@@ -1316,7 +1393,11 @@ impl Producer {
 
 	/// The patterns this producer may publish under, relative to its root.
 	pub fn allowed(&self) -> Patterns {
-		self.scope.relative(&self.root)
+		let narrowed = self.shared.lock().narrowed_reach(&self.scope);
+		narrowed
+			.as_ref()
+			.unwrap_or(&self.scope.allowed)
+			.rebase(self.root.as_str())
 	}
 
 	/// Converts a relative path to an absolute path.
@@ -1337,8 +1418,8 @@ struct Announcing {
 	/// scopes decide visibility and request authorization without changing the
 	/// route's prefix shape.
 	prefixes: Vec<(PathOwned, Pattern)>,
-	/// The absolute paths the producer is authorized to serve.
-	scope: Patterns,
+	/// The paths the producer is authorized to serve.
+	scope: OriginScope,
 	local: bool,
 	stats: stats::Session,
 }
@@ -1359,7 +1440,7 @@ impl Announcing {
 			shared: producer.shared.clone(),
 			requested: requested.clone(),
 			prefixes: vec![(requested, claim)],
-			scope: producer.scope.allowed.clone(),
+			scope: producer.scope.clone(),
 			local: false,
 			stats: producer.stats.clone(),
 		})
@@ -1379,6 +1460,20 @@ impl Announcing {
 			return Err(Error::Closed);
 		}
 
+		// Only a narrowed grant pays for this: the pre-checks against the handle's
+		// own scope already ran, and a narrowing is what they cannot see.
+		let narrowed = shared.narrowed_reach(&self.scope);
+		if let Some(reach) = &narrowed {
+			let permitted = self.prefixes.iter().all(|(prefix, claim)| match self.local {
+				true => reach.matches(prefix.as_str()),
+				false => reach.overlaps(claim),
+			});
+			if !permitted {
+				return Err(Error::Unauthorized);
+			}
+		}
+		let scope = narrowed.unwrap_or_else(|| self.scope.allowed.clone());
+
 		let mut entries = Vec::with_capacity(self.prefixes.len());
 		for (prefix, claim) in &self.prefixes {
 			let id = shared.next_route;
@@ -1386,7 +1481,7 @@ impl Announcing {
 			shared.routes.insert(RouteEntry {
 				id,
 				prefix: prefix.clone(),
-				scope: self.scope.clone(),
+				scope: scope.clone(),
 				hops: meta.0.clone(),
 				cost: meta.1,
 				via,
@@ -1394,6 +1489,7 @@ impl Announcing {
 				server: serving.server.clone(),
 				source: serving.source.clone(),
 				advertised: serving.advertised,
+				grant: self.scope.grant.clone(),
 				claim: claim.clone(),
 			});
 			shared.sync_route(prefix, claim);
@@ -2519,9 +2615,100 @@ struct OriginState {
 	// Set when the origin's driver dropped: new requests fail with `Closed`
 	// immediately and handlers observe the end instead of parking forever.
 	closed: bool,
+
+	// The ceilings set by `narrow`, keyed by grant id: a handle reaches only what
+	// every ceiling on its grant chain allows. Empty until something narrows, so
+	// an origin that never narrows pays one emptiness check per request. Weak so
+	// a dead grant's entry is reclaimed on the next narrowing.
+	narrowed: HashMap<u64, (std::sync::Weak<Grant>, Patterns)>,
 }
 
 impl OriginState {
+	/// The ceilings narrowing `grant`, nearest first. Walks nothing when no handle
+	/// on this origin has ever narrowed.
+	fn ceilings<'a>(&'a self, grant: &'a Grant) -> impl Iterator<Item = &'a Patterns> {
+		let narrowed = &self.narrowed;
+		(!narrowed.is_empty())
+			.then(|| grant.chain())
+			.into_iter()
+			.flatten()
+			.filter_map(|grant| narrowed.get(&grant.id).map(|(_, ceiling)| ceiling))
+	}
+
+	/// Whether the narrowings above `scope` still permit the absolute `path`. The
+	/// handle's own scope is checked separately, without the lock.
+	fn permits(&self, scope: &OriginScope, path: &Path) -> bool {
+		self.ceilings(&scope.grant)
+			.all(|ceiling| ceiling.matches(path.as_str()))
+	}
+
+	/// What `scope` reaches once every narrowing above it applies, or `None` when
+	/// none does and its own patterns stand as they are.
+	fn narrowed_reach(&self, scope: &OriginScope) -> Option<Patterns> {
+		let mut reach: Option<Patterns> = None;
+		for ceiling in self.ceilings(&scope.grant) {
+			let current = reach.as_ref().unwrap_or(&scope.allowed);
+			// An intersection too large to spell reaches nothing rather than too much.
+			reach = Some(current.intersect(ceiling).unwrap_or_default());
+		}
+		reach
+	}
+
+	/// Narrow `scope`'s grant to the absolute `patterns`; see [`Producer::narrow`].
+	fn narrow(&mut self, scope: &OriginScope, patterns: Patterns) -> Result<(), Error> {
+		if self.closed {
+			return Err(Error::Closed);
+		}
+		let current = self.narrowed_reach(scope).unwrap_or_else(|| scope.allowed.clone());
+		if !current.covers(&patterns) {
+			return Err(Error::Unauthorized);
+		}
+
+		// Ending what was already handed out is not implemented, so refuse while
+		// anything live falls in the part being removed. Fronts are shared across
+		// handles and carry no owner, so any live one there counts.
+		let id = scope.grant.id;
+		let served = self.fronts.entries().any(|((path, _), front)| {
+			!front.is_closed() && current.matches(path.as_str()) && !patterns.matches(path.as_str())
+		});
+		let published = self
+			.routes
+			.entries()
+			.any(|entry| entry.grant.within(id) && !entry.within(&patterns));
+		if served || published {
+			return Err(Error::Unsupported);
+		}
+
+		self.narrowed.retain(|_, (grant, _)| grant.strong_count() > 0);
+		self.narrowed
+			.insert(id, (Arc::downgrade(&scope.grant), patterns.clone()));
+
+		// Re-scope the cursors under the grant in place: re-hang them at their new
+		// heads and re-sync every prefix they presented, which retracts the ones
+		// they can no longer see.
+		let Self { routes, cursors, .. } = self;
+		for (cursor_id, cursor) in cursors.iter_mut() {
+			if !cursor.grant.within(id) {
+				continue;
+			}
+			for head in &cursor.heads {
+				routes.remove_cursor(head, *cursor_id);
+			}
+			let narrowed = cursor.allowed.intersect(&patterns).unwrap_or_default();
+			let unnarrowed = std::mem::replace(&mut cursor.allowed, narrowed);
+			cursor.unnarrowed.get_or_insert(unnarrowed);
+			cursor.heads = interest_prefixes(&cursor.allowed);
+			for head in &cursor.heads {
+				routes.add_cursor(head, *cursor_id);
+			}
+			let presented: Vec<PathOwned> = cursor.current.keys().cloned().collect();
+			for prefix in &presented {
+				Self::sync_cursor(routes, cursor, prefix);
+			}
+		}
+		Ok(())
+	}
+
 	/// Re-deliver the best route at every presented prefix `prefix` maps to, on
 	/// every cursor it can present on. Called after an entry covering `prefix`
 	/// was added, updated, or removed. `claim` is `prefix`'s [`prefix_claim`],
@@ -3123,7 +3310,7 @@ impl Consumer {
 	/// rather than tearing the stream down.
 	pub(crate) fn empty(&self) -> Self {
 		Self {
-			scope: OriginScope::empty(),
+			scope: self.scope.emptied(),
 			..self.clone()
 		}
 	}
@@ -3137,7 +3324,7 @@ impl Consumer {
 	pub fn announced(&self) -> AnnounceConsumer {
 		AnnounceConsumer::new(
 			self.root.clone(),
-			self.scope.allowed.clone(),
+			&self.scope,
 			self.stats.clone(),
 			self.exclude,
 			&self.shared,
@@ -3223,9 +3410,10 @@ impl Consumer {
 	pub async fn routed_broadcast(&self, path: impl AsPath) -> Result<broadcast::Consumer, Error> {
 		let path = path.as_path();
 
-		// `allowed` keeps narrower permissions intact: if the whole path is not
+		// The scope keeps narrower permissions intact: if the whole path is not
 		// reachable, no route can ever cover it, so bail rather than loop forever.
-		if !self.allowed().matches(path.as_str()) {
+		// A narrowing is checked by the request itself, under the lock it takes.
+		if !self.scope.permits(&self.root.join(&path)) {
 			return Err(Error::Unauthorized);
 		}
 		loop {
@@ -3276,6 +3464,25 @@ impl Consumer {
 		})
 	}
 
+	/// Narrow what this handle, its clones, and every handle derived from them may
+	/// reach to `patterns`, relative to its root, in place.
+	///
+	/// Announce cursors under the grant retract the prefixes they can no longer
+	/// see, and requests, publishes, and served routes outside `patterns` fail
+	/// with [`Error::Unauthorized`] from then on.
+	///
+	/// Fails with [`Error::Unauthorized`] when `patterns` reaches anything this
+	/// handle cannot (widening is never a narrowing), [`Error::Unsupported`] while
+	/// a live broadcast is served at a path being removed or a route the grant
+	/// published serves one (ending those in place is not implemented, so the
+	/// caller closes the session instead), [`Error::BoundsExceeded`] when rooting
+	/// the patterns exceeds the path limit, or [`Error::Closed`] once the origin's
+	/// [`Driver`] has been dropped. A failure changes nothing.
+	pub fn narrow(&self, patterns: &Patterns) -> Result<(), Error> {
+		let rooted = patterns.rooted(self.root.as_str()).map_err(|_| BoundsExceeded)?;
+		self.shared.lock().narrow(&self.scope, rooted)
+	}
+
 	/// Resolve a broadcast by exact path.
 	///
 	/// Returns a [`kio::Pending`] future, mirroring
@@ -3319,6 +3526,9 @@ impl Consumer {
 		// The origin's driver dropped: nothing will ever serve this.
 		if state.closed {
 			return kio::Pending::new(Requesting::failed(Error::Closed));
+		}
+		if !state.permits(&self.scope, &absolute) {
+			return kio::Pending::new(Requesting::failed(Error::Unauthorized));
 		}
 
 		// Join the live front for this path and exclusion, if any: its watcher
@@ -3383,7 +3593,11 @@ impl Consumer {
 
 	/// The patterns this consumer may reach, relative to its root.
 	pub fn allowed(&self) -> Patterns {
-		self.scope.relative(&self.root)
+		let narrowed = self.shared.lock().narrowed_reach(&self.scope);
+		narrowed
+			.as_ref()
+			.unwrap_or(&self.scope.allowed)
+			.rebase(self.root.as_str())
 	}
 
 	/// Converts a relative path to an absolute path.
@@ -3422,7 +3636,7 @@ pub struct AnnounceConsumer {
 impl AnnounceConsumer {
 	fn new(
 		root: PathOwned,
-		allowed: Patterns,
+		scope: &OriginScope,
 		stats: stats::Session,
 		exclude: Option<Hop>,
 		shared: &kio::Shared<OriginState>,
@@ -3438,12 +3652,17 @@ impl AnnounceConsumer {
 					state.ended = true;
 				}
 			} else {
+				let narrowed = table.narrowed_reach(scope);
+				let unnarrowed = narrowed.is_some().then(|| scope.allowed.clone());
+				let allowed = narrowed.unwrap_or_else(|| scope.allowed.clone());
 				table.register_cursor(
 					id,
 					TableCursor {
 						root: root.clone(),
 						heads: interest_prefixes(&allowed),
 						allowed,
+						grant: scope.grant.clone(),
+						unnarrowed,
 						exclude,
 						state: state.clone(),
 						current: HashMap::new(),
@@ -5702,5 +5921,125 @@ mod tests {
 		Cost::DRAIN
 			.encode(&mut buf, crate::lite::Version::Lite06)
 			.expect("a draining route is still forwarded, so its cost must encode");
+	}
+
+	/// A session's handle narrows in place: its cursors, including one derived
+	/// before the narrowing, retract what fell outside, later cursors never see
+	/// it, and requests for it are refused, while a sibling session is untouched.
+	#[tokio::test]
+	async fn narrow_retracts_and_refuses_outside_the_grant() {
+		let producer = origin(1).produce();
+		let _alice = producer.publish("room/alice/audio", Route::default()).unwrap();
+		let _bob = producer.publish("room/bob/audio", Route::default()).unwrap();
+
+		let session = producer.scope("room", &scopes(&[""])).unwrap();
+		let consumer = session.consume();
+		let mut announced = consumer.announced();
+		announced.assert_next_active("alice/audio");
+		announced.assert_next_active("bob/audio");
+		let derived = consumer.scope("alice", &scopes(&[""])).unwrap();
+		let mut derived_announced = derived.announced();
+		derived_announced.assert_next_active("audio");
+
+		let sibling = producer.scope("room", &scopes(&[""])).unwrap().consume();
+		let mut sibling_announced = sibling.announced();
+		sibling_announced.assert_next_active("alice/audio");
+		sibling_announced.assert_next_active("bob/audio");
+
+		session.narrow(&scopes(&["bob"])).unwrap();
+		announced.assert_next_ended("alice/audio");
+		announced.assert_next_wait();
+		derived_announced.assert_next_ended("audio");
+		sibling_announced.assert_next_wait();
+
+		assert_eq!(consumer.allowed(), scopes(&["bob"]));
+		assert!(derived.allowed().is_empty());
+		let mut later = consumer.announced();
+		later.assert_next_active("bob/audio");
+		later.assert_next_wait();
+
+		assert!(matches!(
+			consumer.request_broadcast("alice/audio").await,
+			Err(Error::Unauthorized)
+		));
+		assert!(matches!(
+			derived.request_broadcast("audio").await,
+			Err(Error::Unauthorized)
+		));
+		assert!(matches!(
+			consumer.routed_broadcast("alice/audio").await,
+			Err(Error::Unauthorized)
+		));
+		consumer.request_broadcast("bob/audio").await.expect("still granted");
+		sibling.request_broadcast("alice/audio").await.expect("another session");
+	}
+
+	/// Narrowing never widens: a grant reaching anything the handle cannot is
+	/// refused, and so is one reaching part of it plus something new.
+	#[tokio::test]
+	async fn narrow_refuses_a_wider_grant() {
+		let producer = origin(1).produce();
+		let session = producer.scope("room", &scopes(&["alice", "bob"])).unwrap();
+
+		assert!(matches!(session.narrow(&scopes(&[""])), Err(Error::Unauthorized)));
+		assert!(matches!(
+			session.narrow(&scopes(&["alice", "carol"])),
+			Err(Error::Unauthorized)
+		));
+		session.narrow(&scopes(&["alice"])).unwrap();
+		// The narrowed grant is now the ceiling, so its old breadth is wider.
+		assert!(matches!(session.narrow(&scopes(&["bob"])), Err(Error::Unauthorized)));
+		session.narrow(&Patterns::new()).unwrap();
+		assert!(session.allowed().is_empty());
+	}
+
+	/// Ending what was already handed out is not implemented, so a narrowing that
+	/// would remove a live resolved broadcast is refused and changes nothing.
+	#[tokio::test]
+	async fn narrow_refuses_while_a_removed_broadcast_is_served() {
+		let producer = origin(1).produce();
+		let _alice = producer.publish("room/alice", Route::default()).unwrap();
+		let _bob = producer.publish("room/bob", Route::default()).unwrap();
+		let session = producer.scope("room", &scopes(&[""])).unwrap();
+		let consumer = session.consume();
+		let mut announced = consumer.announced();
+		announced.assert_next_active("alice");
+		announced.assert_next_active("bob");
+
+		let _served = consumer.request_broadcast("alice").await.expect("resolves");
+		assert!(matches!(session.narrow(&scopes(&["bob"])), Err(Error::Unsupported)));
+		announced.assert_next_wait();
+		consumer.request_broadcast("alice").await.expect("still granted");
+
+		// A served path the narrowing keeps is no obstacle.
+		session.narrow(&scopes(&["alice"])).unwrap();
+		announced.assert_next_ended("bob");
+	}
+
+	/// The publish side: a live broadcast or served route outside the new grant
+	/// refuses the narrowing, and once narrowed, publishing outside it is refused.
+	#[tokio::test]
+	async fn narrow_refuses_publishing_outside_the_grant() {
+		let producer = origin(1).produce();
+		let session = producer.scope("room", &scopes(&[""])).unwrap();
+
+		let alice = session.publish("alice", Route::default()).unwrap();
+		assert!(matches!(session.narrow(&scopes(&["bob"])), Err(Error::Unsupported)));
+		drop(alice);
+		let everything = session.dynamic("", Route::default()).unwrap();
+		assert!(matches!(session.narrow(&scopes(&["bob"])), Err(Error::Unsupported)));
+		drop(everything);
+
+		let _bob = session.dynamic("bob", Route::default()).unwrap();
+		session.narrow(&scopes(&["bob"])).unwrap();
+		assert!(matches!(session.create_broadcast("alice"), Err(Error::Unauthorized)));
+		assert!(matches!(
+			session.dynamic("alice", Route::default()),
+			Err(Error::Unauthorized)
+		));
+		session.create_broadcast("bob/cam").expect("still granted");
+		producer
+			.create_broadcast("room/alice")
+			.expect("the parent is not narrowed");
 	}
 }

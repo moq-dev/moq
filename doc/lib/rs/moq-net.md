@@ -126,6 +126,12 @@ overlaps that scope; exact creates and requests must match it, so a broad
 route can advertise the wire-compatible prefix while excluded requests are
 refused locally. A disjoint route is `Unauthorized`.
 
+`handle.narrow(&patterns)` narrows a live scope in place, for the handle, its
+clones, and every handle derived from them: their cursors retract what fell
+outside and later requests and publishes there are `Unauthorized`. A wider
+union is `Unauthorized`, and one that would remove a live served broadcast or
+a route the handle published is `Unsupported` and changes nothing.
+
 `origin.consume().announced()` yields `announce::Update` values: `path` is the
 covered prefix relative to the consumer's root, `kind` is `Announced`,
 `Updated` (a reprice in place), or `Retracted`, `captures` reports what the

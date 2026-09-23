@@ -4,7 +4,8 @@
 //! or QUIC) or its axum WebSocket path (`serve_ws` over `ws://`), points it at a
 //! scripted auth server, connects a publisher and a subscriber, confirms media
 //! flows, then asserts the relay follows the server's word: a re-check that moves
-//! the tier keeps the session, a narrower grant or a refusal closes it, an outage
+//! the tier keeps the session, a narrower grant narrows it in place unless
+//! something live falls outside, when it closes it like a refusal, an outage
 //! keeps it until `expires`, and every close reports `end` with what it moved.
 //! The last tests swap the server for an in-process decider answering
 //! `Admissions`, and prove the lease it drives reaches the session the same way.
@@ -412,9 +413,10 @@ async fn a_moved_tier_keeps_the_session() {
 	relay.abort();
 }
 
-/// A narrower grant closes the session on the next re-check, over TCP and WebSocket.
+/// A narrower grant narrows an idle session in place on the next re-check, over
+/// TCP and WebSocket: nothing it served or published falls outside it.
 #[tokio::test]
-async fn a_narrower_grant_closes_live_sessions() {
+async fn a_narrower_grant_narrows_idle_sessions_in_place() {
 	for scheme in ["tcp", "ws"] {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		let auth = build_auth(script.spawn().await);
@@ -428,10 +430,50 @@ async fn a_narrower_grant_closes_live_sessions() {
 		narrow.publish = ["nobody/**".parse().unwrap()].into_iter().collect();
 		script.on_revalidate(Answer::Grant(narrow));
 
-		assert_closed(pub_session, Duration::from_secs(5), &format!("{scheme} publisher")).await;
-		assert_closed(sub_session, Duration::from_secs(5), &format!("{scheme} subscriber")).await;
+		tokio::time::sleep(Duration::from_millis(2500)).await;
+		assert!(
+			script.seen.lock().unwrap().iter().any(|r| r.event == Event::Revalidate),
+			"{scheme}: the relay re-checked"
+		);
+		for (session, what) in [(&pub_session, "publisher"), (&sub_session, "subscriber")] {
+			assert!(
+				tokio::time::timeout(Duration::from_millis(200), session.closed())
+					.await
+					.is_err(),
+				"{scheme}: narrowing must not close the idle {what}"
+			);
+		}
 		relay.abort();
 	}
+}
+
+/// A narrower grant closes a session still publishing outside it, since ending
+/// that broadcast in place is not implemented.
+#[tokio::test]
+async fn a_narrower_grant_closes_a_session_publishing_outside_it() {
+	let script = Script::new(grant(Duration::from_secs(3600)));
+	let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
+
+	let origin = moq_tokio::origin::spawn();
+	let _live = origin.publish("live", Default::default()).expect("publish broadcast");
+	let session = tokio::time::timeout(
+		TIMEOUT,
+		client()
+			.with_publisher(origin.consume())
+			.with_reconnect(false)
+			.connect(room_url("tcp", port))
+			.established(),
+	)
+	.await
+	.expect("publisher connect timeout")
+	.expect("publisher connect failed");
+
+	let mut narrow = grant(Duration::from_secs(3600));
+	narrow.publish = ["nobody/**".parse().unwrap()].into_iter().collect();
+	script.on_revalidate(Answer::Grant(narrow));
+
+	assert_closed(session, Duration::from_secs(5), "publisher").await;
+	relay.abort();
 }
 
 /// A refusal on re-check closes the session, and the `end` says why.

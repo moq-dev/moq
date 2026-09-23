@@ -50,9 +50,13 @@ names nothing refuses, and one with `revalidate` but no `expires` is refused
 as invalid. A few seconds of clock skew are tolerated on `expires`.
 
 **Revalidate and outage.** On the cadence the relay POSTs `revalidate` with the
-same request. A grant applies: a changed `root` or one that no longer covers
-what the session holds closes it with `Unauthorized` (the live session is not
-resized in place); a changed `tier` is logged and
+same request. A grant applies: a changed `root` closes the session with
+`Unauthorized`. A narrower grant narrows the live session in place: its
+announcements outside the grant are retracted and new requests and publishes
+there are refused. It closes the session instead while a broadcast the session
+publishes, or any broadcast still being served, falls outside the new grant,
+since ending those in place is not implemented yet. A widened grant keeps what
+the session was admitted with. A changed `tier` is logged and
 applies to the session's next connection, since its stats counters were
 resolved at admission. A 401 or 403 closes the session now, as does a 2xx
 whose grant names nothing. A 2xx that fails validation otherwise (already

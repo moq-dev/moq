@@ -34,7 +34,7 @@ expiry, an expiry that leaves the union intact ends only that token, and
   publish-only session never starts receiving announcements because a later
   token happened to carry subscribe prefixes, and swapped in whenever the set
   grows; keep it behind one function, and a shrinking union goes through
-  [Origin narrowing](/quest/next/origin-narrowing.md) rather than a close.
+  [Handout revocation](/quest/next/handout-revocation.md) rather than a close.
 - Expiry: the deadline today is the admitted lease's `closed()` inside one
   `tokio::select!` arm. Select on one lease per token in the set instead, and on any firing recompute the union without it: unchanged
   means `AUTH_ERROR { Expired }` on that token's stream and the session
@@ -78,7 +78,7 @@ Additive.
 
 ## Required
 
-- [Origin narrowing](/quest/next/origin-narrowing.md) - the live re-scope a shrinking token union needs, so no temporary close-on-shrink policy ships
+- [Handout revocation](/quest/next/handout-revocation.md) - the live re-scope a shrinking token union needs, so no temporary close-on-shrink policy ships
 - [Pattern interest](/quest/next/path-patterns.md) - AUTH can represent the complete grants relay revalidation returns
 - [Lite stream](/quest/next/auth/lite.md) - supplies the AUTH stream and
   `auth::Request` this consumes
