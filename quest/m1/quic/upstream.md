@@ -18,8 +18,12 @@ the tests it landed with.
 Offer the seven [BBR correctness fixes](/quest/m1/quic/bbr-release.md) with
 their regressions before promoting BBR as the default. Reuse existing
 upstream work, particularly [PR #802](https://github.com/n0-computer/noq/pull/802),
-and preserve attribution. Fixes can be offered as their shapes settle;
-upstream acceptance never gates the fork's corrected release.
+and preserve attribution; the fork found that #802's `has_sample()` check
+fires one ACK late under noq's callback order and that its 1-ms floor keeps
+sub-millisecond paths at the placeholder rate, so offer both back there. The
+additive `PacketId` callbacks answer upstream's TODO on the `Controller`
+impl. Fixes can be offered as their shapes settle; upstream acceptance never
+gates the fork's corrected release.
 
 Then the feature proposal order, each linked to its producing quest:
 
