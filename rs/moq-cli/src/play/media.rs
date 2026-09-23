@@ -241,19 +241,19 @@ async fn play_video(
 			let _ = proxy.send_event(Event::Wake);
 		}
 
-		// Wait for room rather than dropping the oldest. Audio is paced to real
-		// time, so during a catch-up burst the frames at the front are still ahead
-		// of the clock, and dropping them would blank the window until the clock
-		// reached whatever survived. The playout clock is anchored to the wall
-		// clock, so the queue always drains and this always clears.
-		while video.lock().unwrap().len() >= MAX_VIDEO_FRAMES {
-			drained.notified().await;
-		}
-
-		video.lock().unwrap().push_back(frame);
+		queue_video(&video, &drained, frame).await;
 		let _ = proxy.send_event(Event::Wake);
 	}
 	Ok(())
+}
+
+// Shared with the burst regression so it exercises the same queue admission
+// decision as the decoder, without needing a graphics device or decoded surface.
+async fn queue_video<T>(video: &Mutex<VecDeque<T>>, drained: &tokio::sync::Notify, frame: T) {
+	while video.lock().unwrap().len() >= MAX_VIDEO_FRAMES {
+		drained.notified().await;
+	}
+	video.lock().unwrap().push_back(frame);
 }
 
 struct AudioPlayback {
@@ -395,4 +395,42 @@ async fn play_audio(mut consumer: moq_audio::decode::Consumer, playback: AudioPl
 	let _ = tokio::time::timeout(depth + AUDIO_CHUNK + AUDIO_DRAIN_GRACE, drain).await;
 
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::future::Future;
+	use std::task::{Context, Poll, Waker};
+
+	#[test]
+	fn a_wide_delay_does_not_park_the_decoder_before_the_live_edge() {
+		let delay = Duration::from_secs(2);
+		let now = Instant::now();
+		let mut presentation = Presentation::new(delay);
+		let video = Mutex::new(VecDeque::new());
+		let drained = tokio::sync::Notify::new();
+		let last = moq_net::Timestamp::from_millis(60 * 33).unwrap();
+
+		// A two-second 30fps tune-in burst arrives before any frame is due. The
+		// window cannot drain yet, but the decoder must still observe its edge.
+		let mut burst = Box::pin(async {
+			for index in 0..=60 {
+				let timestamp = moq_net::Timestamp::from_millis(index * 33).unwrap();
+				presentation.video(timestamp, now);
+				queue_video(&video, &drained, timestamp).await;
+			}
+		});
+		let mut context = Context::from_waker(Waker::noop());
+		let result = burst.as_mut().poll(&mut context);
+		drop(burst);
+
+		assert_eq!(
+			presentation.due(last),
+			Some(now + delay),
+			"the decoder did not observe the live edge"
+		);
+		assert!(matches!(result, Poll::Ready(())), "the decoder parked on a full queue");
+		assert!(video.lock().unwrap().len() <= MAX_VIDEO_FRAMES);
+	}
 }
