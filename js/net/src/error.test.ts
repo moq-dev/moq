@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { StreamError as QmuxStreamError } from "@moq/qmux";
 import {
+	controlTimeout,
 	FrameTooLarge,
 	fromClose,
 	fromTransport,
@@ -220,6 +221,7 @@ test("the code tables match the spec", () => {
 	// The stream table adds moq-lite's own 48-63 assignments. 32-47 is reserved and
 	// carries nothing, so no code sits there.
 	const assignedLite: StreamCode[] = [
+		StreamCode.ControlTimeout,
 		StreamCode.NoCapacity,
 		StreamCode.GroupTooLarge,
 		StreamCode.NotFound,
@@ -236,6 +238,7 @@ test("the code tables match the spec", () => {
 		}
 	}
 	// The values the Rust `StreamError` sends for the same conditions.
+	expect(Number(StreamCode.ControlTimeout)).toBe(0x31);
 	expect(Number(StreamCode.NoCapacity)).toBe(0x30);
 	expect(Number(StreamCode.GroupTooLarge)).toBe(0x32);
 	expect(Number(StreamCode.NotFound)).toBe(0x33);
@@ -316,6 +319,36 @@ test("toStreamCode: a local condition maps to the code the peer can act on", () 
 	expect(toStreamCode(new SessionError(SessionCode.GoawayTimeout))).toBe(StreamCode.Internal);
 });
 
+// A control request that outlived its deadline is not late content. It carries its own code so a
+// peer can tell "you never answered" from "your content arrived too late".
+test("toStreamCode: a control timeout keeps its own code", () => {
+	const timeout = controlTimeout(new TimeoutError("subscribe timed out after 10000ms waiting for SUBSCRIBE_OK"));
+	expect(timeout).toBeInstanceOf(StreamError);
+	expect(timeout.code).toBe(StreamCode.ControlTimeout);
+	expect(timeout.message).toBe("subscribe timed out after 10000ms waiting for SUBSCRIBE_OK");
+
+	// On moq-lite the reset says CONTROL_TIMEOUT.
+	expect(toStreamCode(timeout)).toBe(StreamCode.ControlTimeout);
+
+	// The moq-transport registry has no value for it, so every draft reads it as INTERNAL_ERROR.
+	for (const version of [
+		Version.DRAFT_14,
+		Version.DRAFT_15,
+		Version.DRAFT_16,
+		Version.DRAFT_17,
+		Version.DRAFT_18,
+		Version.DRAFT_19,
+		Version.DRAFT_20,
+		Version.DRAFT_21,
+		Version.DRAFT_22,
+	]) {
+		expect(toStreamCode(timeout, { version })).toBe(StreamCode.Internal);
+	}
+
+	// A bare TimeoutError still means delivery: only the control timers build the above.
+	expect(toStreamCode(new TimeoutError("content arrived late"))).toBe(StreamCode.DeliveryTimeout);
+});
+
 test("toStreamCode and fromTransport agree on what a code means", () => {
 	// Every registered code survives the round trip, so a relay decoding and re-encoding one
 	// cannot change what the next hop reads.
@@ -327,6 +360,7 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 		StreamCode.GoingAway,
 		StreamCode.TooFarBehind,
 		StreamCode.MalformedTrack,
+		StreamCode.ControlTimeout,
 		StreamCode.NoCapacity,
 		StreamCode.GroupTooLarge,
 		StreamCode.NotFound,
@@ -358,6 +392,7 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 
 test("toStreamCode: lite-only codes do not reach an IETF peer", () => {
 	for (const code of [
+		StreamCode.ControlTimeout,
 		StreamCode.NotFound,
 		StreamCode.Old,
 		StreamCode.Evicted,

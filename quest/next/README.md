@@ -20,7 +20,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 
 ## Quests
 
-- [Binary stats](/quest/next/stats-binary/README.md) - an allocation-free stats tick and an on-demand FlatBuffers `.fb.z` flavor with a checked-in schema
 - [Origin narrowing](/quest/next/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
 - [Local announcements](/quest/next/local-announce.md) - an origin's announce cursor and its broadcast resolver agree on what exists
 - [Relay embedding](/quest/next/relay-embed.md) - an embedder reads the resolved config, reuses the CLI merge, registers listener health, and spawns a test relay without TOML strings
@@ -29,7 +28,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Gateway embedding](/quest/next/gateway-embed.md) - moq-hls, moq-rtmp, and moq-rtc expose the loop their binaries run to an in-process embedder
 - [Catalog consumer](/quest/next/hang-catalog-consumer.md) - reading a catalog is one call in Rust and JS, and JS gains a timeline consumer
 - [Ingest source](/quest/next/net-ingest-source.md) - an announce says whether the broadcast entered on this relay or a peer
-- [Headless player](/quest/next/watch-player.md) - `Watch.Player` assembles the pipeline the element, the room, and moq.pro each rebuild
 - [@moq/net additive](/quest/next/js-net-additive.md) - a live-broadcasts getter, `Table.dynamic`, credential refresh before redial, inferred `share`
 - [Publisher clocks](/quest/next/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
 - [Broadcast route](/quest/next/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()
@@ -40,7 +38,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [CLI inspection](/quest/next/cli-inspect/README.md) - `moq ls` lists what is live and `moq fetch` reads a group over MoQ, and a guide shows how to inspect a relay
 - [JS caught up](/quest/next/js-announce-caught-up.md) - @moq/net's announce consumer says when the initial set has landed, like Rust
 
-- [Audio jitter target](/quest/next/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
 - [Jitter clock](/quest/next/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes, fed by encoders only, and never decreases
 - [Capture denial](/quest/next/browser-permission-qa.md) - moq-publish surfaces a refused camera or microphone instead of retrying forever, and recovers on grant
 - [Publisher audio unlock](/quest/next/publish-audio-unlock.md) - the publisher's capture AudioContext is resumed on a gesture or the source is refused, so no silent audio track is announced
@@ -53,7 +50,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Wildcard](/quest/next/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
 - [#2152](/quest/next/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq accepts sessions, the moq-ffi call C still lacks
 - [js/publish discontinuity](/quest/next/js-publish-discontinuity.md) - the JS container producer and js/publish emit the same marker group on encoder restart
-- [Failure artifacts](/quest/next/qa-failure-artifacts.md) - a failing harness run keeps its run directory and a Playwright trace, and CI uploads them
 - [Impaired path](/quest/next/transport-impairment-profile.md) - the transport drills run over a seeded, impaired UDP path on any host
 - [Tooling](/quest/next/tooling/README.md) - justfiles become a one-line menu over `sh/`, one impact map scopes CI, and every workflow step runs a recipe
 - [Generation](/quest/next/hls-generation.md) - init URLs follow the rendition config and segment URLs carry an embedder-supplied generation, so caching can be re-enabled
@@ -99,7 +95,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Publish channel count](/quest/next/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence
 - [JS abandonment](/quest/next/js-subscribe-abandonment.md) - a viewer returning during IETF subscribe setup keeps its track across microtasks
 - [IETF stream types](/quest/next/ietf-uni-stream-types.md) - padding streams are discarded stream-only and an unknown uni type closes the session, per draft-21
-- [Control timeout code](/quest/next/control-timeout-code.md) - an unanswered control request resets with CONTROL_TIMEOUT on lite and INTERNAL_ERROR on IETF
 - [#2991](/quest/next/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic producer per track name in both languages, with the sequence namespace surviving a replacement
 - [JS track end](/quest/next/2318-js-net-remaining-capability-gaps-vs-rs-moq-net-setup-role.md) - js/net declares a track end ahead of the live edge and observes the publisher's SUBSCRIBE_END
 - [E2EE](/quest/next/e2ee/README.md) - TypeScript and Rust peers interoperate over encrypted broadcasts no relay can decrypt

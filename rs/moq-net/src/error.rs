@@ -125,6 +125,11 @@ pub enum StreamError {
 	#[error("delivery timeout")]
 	DeliveryTimeout,
 
+	/// A control request took too long to be answered. The stream counterpart to
+	/// [`SessionError::Timeout`], which covers the same condition at session scope.
+	#[error("control timeout")]
+	ControlTimeout,
+
 	/// The session is going away (a GOAWAY was received).
 	#[error("going away")]
 	GoingAway,
@@ -192,8 +197,8 @@ impl StreamError {
 			Self::GoingAway => 0x4,
 			Self::TooFarBehind => 0x5,
 			Self::MalformedTrack => 0x12,
-			// 0x30 NO_CAPACITY, 0x31 CONTROL_TIMEOUT: assigned by other work in this
-			// range. Do not reuse them.
+			// 0x30 NO_CAPACITY is assigned by other work in this range. Do not reuse it.
+			Self::ControlTimeout => 0x31,
 			Self::GroupTooLarge => 0x32,
 			Self::NotFound => 0x33,
 			Self::Old => 0x34,
@@ -224,6 +229,7 @@ impl StreamError {
 			0x4 => Self::GoingAway,
 			0x5 => Self::TooFarBehind,
 			0x12 => Self::MalformedTrack,
+			0x31 => Self::ControlTimeout,
 			0x32 => Self::GroupTooLarge,
 			0x33 => Self::NotFound,
 			0x34 => Self::Old,
@@ -650,6 +656,7 @@ mod tests {
 			StreamError::Internal,
 			StreamError::Cancel,
 			StreamError::DeliveryTimeout,
+			StreamError::ControlTimeout,
 			StreamError::GoingAway,
 			StreamError::TooFarBehind,
 			StreamError::MalformedTrack,
@@ -667,9 +674,10 @@ mod tests {
 			assert_eq!(StreamError::from_code(err.to_code()), err, "{err:?} did not round trip");
 		}
 
-		// moq-lite's own 48-63 range, pinned to the draft's table. They stay off 0x30-0x31
-		// (NO_CAPACITY / CONTROL_TIMEOUT), which other work assigns.
+		// moq-lite's own 48-63 range, pinned to the draft's table. They stay off 0x30
+		// (NO_CAPACITY), which other work assigns.
 		for (err, code) in [
+			(StreamError::ControlTimeout, 0x31),
 			(StreamError::GroupTooLarge, 0x32),
 			(StreamError::NotFound, 0x33),
 			(StreamError::Old, 0x34),
@@ -714,7 +722,7 @@ mod tests {
 
 		// Registered stream codes survive the hop unchanged.
 		for code in [
-			0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+			0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
 		] {
 			let relayed = StreamError::from(&Error::from(StreamError::from_code(code)));
 			assert_eq!(relayed.to_code(), code, "stream {code:#x} changed across a relay");
@@ -792,6 +800,7 @@ mod tests {
 		// stays opaque: the draft forbids reading a meaning out of it.
 		assert!(matches!(stream(0x34), Error::Stream(StreamError::Old)));
 		assert!(matches!(stream(0x38), Error::Stream(StreamError::FrameTooLarge)));
+		assert!(matches!(stream(0x31), Error::Stream(StreamError::ControlTimeout)));
 		assert!(matches!(stream(0x22), Error::Stream(StreamError::Unknown(0x22))));
 		assert!(matches!(session(0x22), Error::Session(SessionError::Unknown(0x22))));
 

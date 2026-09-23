@@ -37,7 +37,7 @@ const TRACK: &str = "drill";
 
 /// A relay on its own runtime, so a drill can kill it the way a crash does.
 ///
-/// Aborting the `run` task is not enough: [`moq_relay::serve`] spawns a task per
+/// Aborting the `run` task is not enough: the relay accept loop spawns a task per
 /// connection, and those keep serving a relay whose accept loop is gone. Owning
 /// the runtime means one shutdown takes the accept loop, every connection task,
 /// and the UDP socket at once.

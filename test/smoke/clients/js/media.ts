@@ -23,6 +23,7 @@ import {
 	check,
 	command,
 	Failure,
+	finishTraces,
 	launch,
 	open,
 	type PlayerState,
@@ -330,6 +331,7 @@ async function subscriber(broadcast: string, label: string): Promise<[Page, Brow
 		// policy would stop downloading video and leave the canvas black.
 		pageUrl(server.origin, "subscribe", { url: relay, broadcast, visible: "always" }),
 		label,
+		true,
 	);
 	await waitForWatch(page);
 	return [page, errors];
@@ -559,29 +561,31 @@ try {
 	}
 } catch (err) {
 	failure = err instanceof Error ? err : new Error(String(err));
-} finally {
-	for (const browser of browsers) await browser.close().catch(() => {});
-	server.stop();
 }
 
+// The verdict decides whether the trace is evidence: a negative control passes by failing, so a
+// caught error alone is not a failure.
+let code = 0;
 if (expectFail !== undefined) {
 	// A negative control. The run has to fail, and fail on the assertion it was aimed at: a pass, or
 	// a failure somewhere else, both mean the assertion does not measure what it claims to.
 	if (!failure) {
 		console.error(`negative control passed, but it must fail on "${expectFail}"`);
-		process.exit(1);
-	}
-	if (!(failure instanceof Failure) || failure.assertion !== expectFail) {
+		code = 1;
+	} else if (!(failure instanceof Failure) || failure.assertion !== expectFail) {
 		console.error(`negative control was aimed at "${expectFail}" but broke elsewhere: ${failure.message}`);
-		process.exit(1);
+		code = 1;
+	} else {
+		console.error(`negative control failed as required: ${failure.message}`);
 	}
-	console.error(`negative control failed as required: ${failure.message}`);
-	process.exit(0);
+} else if (failure) {
+	console.error(`FAIL ${failure.message}`);
+	code = 1;
+} else {
+	console.error("media: all checks passed");
 }
 
-if (failure) {
-	console.error(`FAIL ${failure.message}`);
-	process.exit(1);
-}
-console.error("media: all checks passed");
-process.exit(0);
+await finishTraces(code !== 0);
+for (const browser of browsers) await browser.close().catch(() => {});
+server.stop();
+process.exit(code);

@@ -26,22 +26,22 @@ use crate::{Error, Result, SessionError};
 /// Maximum New Session URI length, in bytes. Both wires cap it here, and a
 /// receiver treats anything longer as a protocol violation.
 pub(crate) const MAX_URI: usize = 8192;
+const MAX_TIMEOUT_MS: u64 = (1 << 62) - 1;
 
 /// A GOAWAY: the sender intends to close the session soon and the peer should
 /// migrate its subscriptions elsewhere.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct Goaway {
 	/// Where the peer should reconnect, including any credentials it needs.
 	/// Empty means reconnect to the same endpoint.
-	pub uri: String,
+	pub(crate) uri: String,
 
 	/// How long the sender waits before force-closing with
 	/// [`Error::GoawayTimeout`]. `None` means no deadline.
 	///
 	/// Only moq-transport draft-17+ carries this on the wire. Elsewhere it still
 	/// applies locally, so the sender enforces a deadline the peer cannot see.
-	pub timeout: Option<Duration>,
+	pub(crate) timeout: Option<Duration>,
 }
 
 impl Goaway {
@@ -63,11 +63,24 @@ impl Goaway {
 
 	/// Force-close the session with [`Error::GoawayTimeout`] if the peer is still
 	/// around after `timeout`.
+	///
+	/// Zero means no deadline. Positive values round up to the next millisecond
+	/// and saturate at the wire's 62-bit millisecond limit, so the local deadline
+	/// agrees with what a moq-transport peer receives.
 	pub fn with_timeout(mut self, timeout: Duration) -> Self {
-		// The wire encodes 0 as "no deadline", so keep the local timer consistent
-		// rather than force-closing almost immediately.
-		self.timeout = (!timeout.is_zero()).then_some(timeout);
+		let millis = timeout.as_nanos().div_ceil(1_000_000).min(u128::from(MAX_TIMEOUT_MS)) as u64;
+		self.timeout = (millis != 0).then(|| Duration::from_millis(millis));
 		self
+	}
+
+	/// The URI to reconnect to, or empty to reuse the current endpoint.
+	pub fn uri(&self) -> &str {
+		&self.uri
+	}
+
+	/// The drain deadline sent to the peer, if any.
+	pub fn timeout(&self) -> Option<Duration> {
+		self.timeout
 	}
 }
 
@@ -417,6 +430,19 @@ mod tests {
 		// An empty URI ("I am going away") is still allowed.
 		let (handle, _protocol) = Handle::new(false);
 		handle.producer().send(Goaway::default()).unwrap();
+	}
+
+	#[test]
+	fn timeout_matches_wire_milliseconds() {
+		assert_eq!(Goaway::new().with_timeout(Duration::ZERO).timeout(), None);
+		assert_eq!(
+			Goaway::new().with_timeout(Duration::from_micros(1)).timeout(),
+			Some(Duration::from_millis(1))
+		);
+		assert_eq!(
+			Goaway::new().with_timeout(Duration::MAX).timeout(),
+			Some(Duration::from_millis(MAX_TIMEOUT_MS))
+		);
 	}
 
 	/// A URI past the wire cap is refused at the send chokepoint rather than
