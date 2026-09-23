@@ -1,5 +1,5 @@
 /**
- * Vite config for the browser smoke client. `@moq/publish` is consumed here as
+ * Vite config for the browser interop client. `@moq/publish` is consumed here as
  * workspace *source*, not the prebuilt npm package, so its audio capture worklet
  * (`./capture-worklet.ts?worklet`) is not pre-inlined; the same plugin
  * `@moq/publish` uses for its own build inlines it as a blob URL here too.

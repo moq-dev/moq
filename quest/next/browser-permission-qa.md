@@ -22,7 +22,7 @@ external symptom is a `source` that never becomes defined.
   user refused. Refused is refused; a silent retry loop is warn-then-ignore.
 - Keep `announce="source"` holding the broadcast back while there is no
   source, so a subscriber sees no announcement.
-- Regression in `test/smoke/clients/js/media.ts`: drive
+- Regression in `test/interop/clients/js/media.ts`: drive
   `<moq-publish source="camera">` with `--use-fake-device-for-media-stream`
   so the device is deterministic while Playwright's permission state decides
   the verdict. Assert the denial is visible through the element's state, no

@@ -1,5 +1,5 @@
 {
-	"name": "@moq/smoke-browser",
+	"name": "@moq/interop-browser",
 	"private": true,
 	"type": "module",
 	"scripts": {

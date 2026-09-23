@@ -50,7 +50,7 @@ reads the same release manifest so a release bumps both.
 ## Quests
 
 - [Generator](/quest/next/cpp/generator.md) - the uniffi 0.32 C++ generator with futures and expected-style errors, pinned and generating `cpp/ffi` in CI
-- [Package](/quest/next/cpp/package.md) - the `cpp/moq` wrapper, CMake package, release tarball, smoke client, and docs
+- [Package](/quest/next/cpp/package.md) - the `cpp/moq` wrapper, CMake package, release tarball, interop client, and docs
 - [OBS migration](/quest/next/cpp/obs.md) - the OBS plugin moves from libmoq handles and trampolines to the generated C++
 
 ## Related

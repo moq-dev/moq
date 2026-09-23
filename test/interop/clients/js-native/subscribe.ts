@@ -1,5 +1,5 @@
 /**
- * Native-JS (non-browser) smoke subscriber: run the workspace `@moq/net` +
+ * Native-JS (non-browser) interop subscriber: run the workspace `@moq/net` +
  * `@moq/hang` under a runtime with no native WebTransport, via moq's own
  * `@moq/web-transport` polyfill (a prebuilt NAPI QUIC/HTTP3 addon, the one piece
  * that comes from npm rather than this checkout). Runs under both node and bun.

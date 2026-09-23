@@ -20,7 +20,7 @@ up front.
 ## Quests
 
 - [Generator](/quest/future/cs/generator.md) - uniffi-bindgen-cs on uniffi 0.32, pinned and generating `cs/ffi` in CI
-- [Package](/quest/future/cs/package.md) - the `cs/moq` wrapper, NuGet package with native runtimes, smoke client, and docs
+- [Package](/quest/future/cs/package.md) - the `cs/moq` wrapper, NuGet package with native runtimes, interop client, and docs
 
 ## Related
 

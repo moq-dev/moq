@@ -1,4 +1,4 @@
-"""Cross-language interop client for the smoke test (workspace py/moq-rs, import `moq`).
+"""Cross-language interop client for the interop test (workspace py/moq-rs, import `moq`).
 
 publish:   read raw Annex-B H.264 from stdin (e.g. piped from ffmpeg) and feed
            it to a streaming importer, which infers frame boundaries. Alongside
@@ -7,8 +7,8 @@ publish:   read raw Annex-B H.264 from stdin (e.g. piped from ffmpeg) and feed
 subscribe: connect, find the video track in the catalog, and exit 0 as soon as
            any non-empty frame arrives (exit 1 on timeout / no data).
 
-    ffmpeg ... -f h264 - | python smoke.py publish --url http://localhost:4443 --broadcast b.hang
-    python smoke.py subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20
+    ffmpeg ... -f h264 - | python interop.py publish --url http://localhost:4443 --broadcast b.hang
+    python interop.py subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20
 """
 
 import argparse
@@ -142,7 +142,7 @@ def main() -> None:
     except (TimeoutError, asyncio.TimeoutError):
         print("error: timed out waiting for data", file=sys.stderr)
         sys.exit(1)
-    except Exception as err:  # noqa: BLE001 - smoke client: any failure is a failure
+    except Exception as err:  # noqa: BLE001 - interop client: any failure is a failure
         print(f"error: {err}", file=sys.stderr)
         sys.exit(1)
 

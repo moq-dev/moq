@@ -6,16 +6,16 @@
 # Shebang recipes read their arguments as $1..$n.
 set positional-arguments
 
-# Two cross-language interop smoke tests exist:
+# Two cross-language interop tests exist:
 #   - https://github.com/moq-dev/smoke installs each client from its PUBLIC
 #     package registry to catch packaging breakage in a release.
-#   - `just test smoke` (smoke/, below) builds every client from THIS checkout
+#   - `just test interop` (interop/, below) builds every client from THIS checkout
 #     to catch interop regressions before anything is published.
 # Fall back to the root justfile so `just js test` (etc.) resolve from here.
 
 set fallback
 set working-directory := '.'
-# `smoke` reads its args as `$1`/`$@`; the `positional-arguments` setting above
+# `interop` reads its args as `$1`/`$@`; the `positional-arguments` setting above
 # is what lets a shebang recipe see them.
 
 # The `check` sibling: same diff scoping, same BASE resolution, and what CI runs
@@ -70,28 +70,28 @@ all:
     just rs test --workspace --exclude moq-net-fuzz
     just py test
 
-# Cross-language media interop smoke test, built from this checkout. Stands up a
+# Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
-# sanity check). `smoke --all` runs the full matrix: rust + python + go +
+# sanity check). `interop --all` runs the full matrix: rust + python + go +
 # browser publish; everyone subscribes (incl. native node/bun JS, the C libmoq
 # client, and the GStreamer moqsrc plugin). --timeout 30 gives headless Chromium
 # cold-start headroom. Other flags pass through, e.g.
-# `just test smoke --publishers rust,python --subscribers rust,c`.
-smoke *args:
+# `just test interop --publishers rust,python --subscribers rust,c`.
+interop *args:
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ "${1:-}" == --all ]]; then
         shift
-        ./smoke/smoke.sh --publishers rust,python,go,js --subscribers rust,python,go,js,js-native-node,js-native-bun,c,gst --timeout 30 "$@"
+        ./interop/interop.sh --publishers rust,python,go,js --subscribers rust,python,go,js,js-native-node,js-native-bun,c,gst --timeout 30 "$@"
     else
-        ./smoke/smoke.sh "$@"
+        ./interop/interop.sh "$@"
     fi
 
 # Negative control: no publisher, every subscriber must time out (proves the
 
 # harness can actually report failure).
-smoke-negative *args:
-    ./smoke/smoke.sh --negative {{ args }}
+interop-negative *args:
+    ./interop/interop.sh --negative {{ args }}
 
 # Browser-to-browser media QA against a deterministic fixture: presented frame progress, audible
 # tone, audio/video skew, and the publication lifecycle (cold start, pause, rejoin, detach,
@@ -99,8 +99,8 @@ smoke-negative *args:
 # shifted tone, and a leaked session; each must fail the assertion it names. --timeout 30 gives
 
 # headless Chromium cold-start headroom.
-smoke-media *args:
-    ./smoke/smoke.sh --media --timeout 30 {{ args }}
+media *args:
+    ./interop/interop.sh --media --timeout 30 {{ args }}
 
 # Disrupts a real relay over real QUIC three ways: cancel a stalled reader, kill
 # the relay mid-group, and republish an interrupted publisher's name. Ordinary

@@ -20,7 +20,7 @@ decide.
 supplying `channelCount` is what puts the AudioWorklet behind a forced Web
 Audio downmix. The `"max"` path, taken when the field is omitted, does not.
 
-What was measured, on macOS headless Chromium through `just test smoke-media`,
+What was measured, on macOS headless Chromium through `just test media`,
 publishing a `MediaStreamAudioDestinationNode` track into a graph already
 running at 48 kHz:
 
@@ -47,7 +47,7 @@ What is not established, and should be first:
 
 The regression belongs where the evidence came from: the browser fixture can
 pin a channel count again once this is fixed, and
-`test/smoke/clients/js/src/fixture.ts` carries a comment saying why it does
+`test/interop/clients/js/src/fixture.ts` carries a comment saying why it does
 not. A unit test that counts worklet callbacks under an explicit downmix would
 be cheaper than a full media run, if one can be made to fail reliably.
 

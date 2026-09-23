@@ -9,7 +9,7 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { type Browser, type BrowserContext, chromium, type Page } from "playwright";
-import { CONTROL, type FixtureState, type Resources, type Sample, type SmokeControl } from "./src/contract";
+import { CONTROL, type FixtureState, type Resources, type Sample, type InteropControl } from "./src/contract";
 
 /**
  * A failed check, named after the property it was measuring.
@@ -164,7 +164,7 @@ export function throwPageErrors(errors: BrowserErrors): void {
 /** Wait until the player element exists and has published its first sample. */
 export async function waitForWatch(page: Page): Promise<void> {
 	await page.evaluate((tag) => customElements.whenDefined(tag), SELECTORS.watch);
-	await page.locator(`${SELECTORS.watch}[data-smoke-ready]`).waitFor({ state: "attached" });
+	await page.locator(`${SELECTORS.watch}[data-interop-ready]`).waitFor({ state: "attached" });
 }
 
 /** Read one sample plus the player chrome. Throws until the page has sampled at least once. */
@@ -176,7 +176,7 @@ export async function readPlayerState(page: Page): Promise<PlayerState> {
 		const centerPlay = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.centerPlay);
 
 		return {
-			sample: watch?.dataset.smokeState,
+			sample: watch?.dataset.interopState,
 			controlLabel: control?.getAttribute("aria-label") ?? undefined,
 			centerPlayVisible: centerPlay ? getComputedStyle(centerPlay).display !== "none" : false,
 		};
@@ -193,15 +193,15 @@ export async function readPlayerState(page: Page): Promise<PlayerState> {
 /** Read what the fixture publisher says about itself. Throws until it has published anything. */
 export async function readFixtureState(page: Page): Promise<FixtureState> {
 	const state = await page.evaluate(
-		(selector) => document.querySelector<HTMLElement>(selector)?.dataset.smokeFixture,
+		(selector) => document.querySelector<HTMLElement>(selector)?.dataset.interopFixture,
 		SELECTORS.fixture,
 	);
 	if (!state) throw new Error("the fixture publisher has not published its state");
 	return JSON.parse(state) as FixtureState;
 }
 
-/** Invoke one of the page's {@link SmokeControl} commands. */
-export async function command(page: Page, name: keyof SmokeControl): Promise<void> {
+/** Invoke one of the page's {@link InteropControl} commands. */
+export async function command(page: Page, name: keyof InteropControl): Promise<void> {
 	await page.evaluate(
 		([key, fn]) => {
 			const control = (window as unknown as Record<string, Record<string, () => void> | undefined>)[key];
@@ -214,7 +214,7 @@ export async function command(page: Page, name: keyof SmokeControl): Promise<voi
 
 /** Read the page's live resource counts, which outlive the player element. */
 export async function readResources(page: Page): Promise<Resources> {
-	const state = await page.evaluate(() => document.body.dataset.smokeResources);
+	const state = await page.evaluate(() => document.body.dataset.interopResources);
 	if (!state) throw new Error("the page has not published resource counts");
 	return JSON.parse(state) as Resources;
 }

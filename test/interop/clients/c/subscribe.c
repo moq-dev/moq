@@ -1,4 +1,4 @@
-// Subscribe-only cross-language interop client for the smoke test, linked
+// Subscribe-only cross-language interop client for the interop test, linked
 // against the workspace libmoq (the C bindings, built by `cargo build -p libmoq`).
 //
 // libmoq is a handle + callback API: connect, consume a broadcast, get a
@@ -8,7 +8,7 @@
 // raw-stream importer that the other clients use to publish isn't part of this
 // subscribe-only client.
 //
-//   c-smoke subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20
+//   c-interop subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20
 #include <moq.h>
 
 #include <pthread.h>
@@ -183,7 +183,7 @@ int main(int argc, char **argv) {
         // a leading "subscribe" positional (and anything else) is ignored.
     }
     if (!url || !broadcast) {
-        fprintf(stderr, "usage: c-smoke subscribe --url U --broadcast B [--timeout S]\n");
+        fprintf(stderr, "usage: c-interop subscribe --url U --broadcast B [--timeout S]\n");
         return 2;
     }
 
@@ -248,7 +248,7 @@ int main(int argc, char **argv) {
 
     fprintf(stderr, "received a frame from %s\n", broadcast);
 
-    // The data path succeeded, which is all this smoke client verifies. Returning
+    // The data path succeeded, which is all this interop client verifies. Returning
     // (rather than _exit) is the other half of what it verifies: an embedder that
     // closes and drains gets a clean process exit, with libmoq's runtime thread
     // still live behind its LazyLock.

@@ -144,7 +144,7 @@ export type Sample = {
  * Each one is a DOM edit plus the bookkeeping that has to happen with it, which is why the page
  * owns them rather than the driver reaching in.
  */
-export type SmokeControl = {
+export type InteropControl = {
 	/** Stop the fixture publisher, releasing its session. */
 	stop(): void;
 	/** Start (or restart) the fixture publisher on the same broadcast path. */
@@ -158,9 +158,9 @@ export type SmokeControl = {
 };
 
 /** The `window` property the commands are published on. */
-export const CONTROL = "__moqSmoke";
+export const CONTROL = "__moqInterop";
 
 /** Publish the commands a role supports. Page-side only. */
-export function publish(commands: Partial<SmokeControl>): void {
+export function publish(commands: Partial<InteropControl>): void {
 	(window as unknown as Record<string, unknown>)[CONTROL] = commands;
 }
