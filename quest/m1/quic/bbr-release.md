@@ -21,6 +21,7 @@ Fixes merged in the fork and awaiting release:
 - [moq-dev/noq#6](https://github.com/moq-dev/noq/pull/6) - finished bandwidth probes age the max-bw window once and stop classifying losses as probe feedback
 - [moq-dev/noq#7](https://github.com/moq-dev/noq/pull/7) - the first measured RTT replaces the 1ms estimate behind BBR's startup pacing rate
 - [moq-dev/noq#8](https://github.com/moq-dev/noq/pull/8) - packets sent during ProbeRTT are application-limited, so its reduced rate cannot lower BBR's bandwidth model
+- [moq-dev/noq#9](https://github.com/moq-dev/noq/pull/9) - a spurious loss episode restores the BBR model, window, and probe saved when the episode began
 
 Verify the fork's regression suite and MoQ's default and supported runtime
 builds against the released artifacts, including compatibility of controller
@@ -28,10 +29,6 @@ consumers if a callback API changed. Run a media-shaped transfer through the
 real QUIC stack to confirm handshake sampling, pacing, and recovery work
 together. This integration check is required; the broader media-flow study
 and Google comparison do not gate these bug fixes.
-
-## Required
-
-- [Preserve BBR state across a spurious loss episode](/quest/m1/quic/bbr-loss-undo.md)
 
 ## Related
 

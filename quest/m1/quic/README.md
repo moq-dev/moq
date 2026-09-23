@@ -51,7 +51,6 @@ This is a transport API change, not a MoQ wire change.
 
 ## Quests
 
-- [Preserve BBR state across a spurious loss episode](/quest/m1/quic/bbr-loss-undo.md) - consecutive losses preserve the original recovery snapshot
 - [Release BBR fixes](/quest/m1/quic/bbr-release.md) - publish and pin the corrected controller independently of later features
 - [Align BBR loss handling with draft-06](/quest/m1/quic/bbr-loss-parity.md) - losses use their own sample and undo re-enters ProbeUp through Refill
 - [Mark BBR starvation wherever the source runs dry](/quest/m1/quic/bbr-app-limited-edges.md) - partial polls count, local send caps do not, receiver credit is pinned
