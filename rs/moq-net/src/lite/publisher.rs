@@ -2212,7 +2212,7 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	emit_range: bool,
 	start_sent: bool,
 	end_sent: bool,
-	// Serve datagrams off this same subscriber, but only on lite-05 over a
+	// Serve datagrams off this same subscriber, but only on lite-05+ over a
 	// datagram-capable transport (qmux/WebSocket/TCP/UDS report size 0). No group
 	// fallback: otherwise off.
 	datagrams: bool,
