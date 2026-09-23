@@ -70,7 +70,7 @@ STATIC="$TARGET_BASE/$PROFILE/libmoq_ffi.a"
 # Generate bindings.
 BINDGEN_OUT=$(mktemp -d)
 trap 'rm -rf "$BINDGEN_OUT"' EXIT
-cargo run --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi --bin uniffi-bindgen \
+cargo run --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package uniffi-bindgen \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml" -- \
     generate --library "$CDYLIB" --language swift --out-dir "$BINDGEN_OUT"
 

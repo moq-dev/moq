@@ -106,9 +106,10 @@ class Server:
                     continue
                 session = await request.accept()  # hold to keep the connection alive
 
-    Exiting the context manager stops accepting new sessions but does not
-    close in-flight sessions; those stay alive until their handles are
-    dropped or `Session.cancel()` is called.
+    Exiting the context manager stops accepting new sessions and releases the
+    listening socket before it returns, so the address can be bound again
+    immediately. In-flight sessions stay alive until their handles are dropped
+    or `Session.cancel()` is called.
 
     In advanced mode, provide your own origins for full control::
 

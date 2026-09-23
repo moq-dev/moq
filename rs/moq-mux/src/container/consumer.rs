@@ -257,6 +257,12 @@ impl<F: Container> Consumer<F> {
 						// group live or cleanly finished. A decode error is real and the caller
 						// must see it, not have the group silently dropped.
 						if !group.poll_aborted(waiter) {
+							tracing::warn!(
+								track = self.track.name(),
+								group = group.group.sequence,
+								error = ?e,
+								"group payload failed to decode; ending the reader"
+							);
 							return Poll::Ready(Err(e));
 						}
 						// The group aged out of the relay cache (`Error::Old`) or was otherwise
@@ -264,7 +270,12 @@ impl<F: Container> Consumer<F> {
 						// evicted alongside it, so jump straight to that group instead of
 						// stepping one-by-one and then blocking on a sequence gap of groups
 						// that will never arrive.
-						tracing::warn!(error = ?e, "current group evicted; skipping to next buffered group");
+						tracing::warn!(
+							track = self.track.name(),
+							group = group.group.sequence,
+							error = ?e,
+							"current group evicted; skipping to next buffered group"
+						);
 						self.pending.pop_front();
 						self.current = self.pending.front().map_or(self.current + 1, |g| g.sequence);
 						continue 'read;
@@ -428,7 +439,17 @@ impl<F: Container> Consumer<F> {
 	// Returns Pending until all groups have been consumed.
 	fn poll_read_finish(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), F::Error>> {
 		loop {
-			let Some(group) = ready!(self.track.poll_recv_group(waiter)?) else {
+			// The whole track is gone, so there is no group to skip to and the reader ends. Log it
+			// here: the caller only gets the bare error, with nothing to say which track died.
+			let next = match ready!(self.track.poll_recv_group(waiter)) {
+				Ok(next) => next,
+				Err(err) => {
+					tracing::warn!(track = self.track.name(), error = ?err, "track failed; ending the reader");
+					return Poll::Ready(Err(err.into()));
+				}
+			};
+
+			let Some(group) = next else {
 				// Track is finished.
 				return Poll::Ready(Ok(()));
 			};

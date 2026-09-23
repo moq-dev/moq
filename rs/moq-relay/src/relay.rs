@@ -629,10 +629,9 @@ async fn shutdown_signal() -> anyhow::Result<()> {
 /// Accept sessions off `server` until it stops, spawning a [`Connection`] task
 /// for each.
 ///
-/// The accept loop for a single [`moq_tokio::Server`]. Embedders driving a
-/// [`Relay`] call [`Relay::run`] instead, which owns worker selection and
-/// shutdown; this stays public for a server the caller bound itself.
-pub async fn serve(
+/// The accept loop for a single [`moq_tokio::Server`]. [`Relay::run`] owns
+/// worker selection and shutdown for embedders.
+async fn serve(
 	server: moq_tokio::Server,
 	cluster: cluster::Cluster,
 	auth: auth::Auth,

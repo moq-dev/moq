@@ -28,4 +28,4 @@ dev; the clock the stretch converges toward is
 ## Required
 
 - [Plan: A/V clock](/quest/dev/plan-av-clock.md) - stretching against a free-running ring only moves the drift
-- [Watch](/quest/next/audio-jitter-target/watch.md) - the recorded traces this replays, and the JS target it converges toward
+- [Watch](/quest/main/audio-jitter-target/watch.md) - the recorded traces this replays, and the JS target it converges toward

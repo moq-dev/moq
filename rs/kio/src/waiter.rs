@@ -808,6 +808,10 @@ mod tests {
 	#[test]
 	fn park_retires_a_waiter_for_another_task() {
 		struct Nop;
+		// Not `Waker::noop()`, which clippy suggests: that is a singleton, so the two
+		// wakers below would name the same task and the assertion would pass without
+		// testing anything. What this needs is two wakers that do nothing and differ.
+		#[expect(clippy::manual_noop_waker, reason = "the two wakers must not be identical")]
 		impl std::task::Wake for Nop {
 			fn wake(self: Arc<Self>) {}
 		}

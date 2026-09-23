@@ -2,13 +2,12 @@
 { crane }:
 final: prev:
 let
-  # Pin crane to the workspace MSRV (Cargo.toml rust-version /
-  # rust-toolchain.toml) so `nix build` uses the same toolchain as
-  # `nix develop` and release artifacts build with the version CI verifies.
-  # Without an explicit toolchain, crane falls back to `final.rustc`/
-  # `final.cargo`, which nixpkgs resolves to its own default Rust.
+  # Pin crane to the same build toolchain as rust-toolchain.toml / flake.nix so
+  # `nix build` uses what `nix develop` does and release artifacts build with
+  # the version CI verifies. Without an explicit toolchain, crane falls back to
+  # `final.rustc`/`final.cargo`, which nixpkgs resolves to its own default Rust.
   #
-  rustToolchain = final.rust-bin.stable."1.95.0".default;
+  rustToolchain = final.rust-bin.stable."1.98.1".default;
   craneLib = (crane.mkLib final).overrideToolchain rustToolchain;
 
   # Helper function to get crate info from Cargo.toml

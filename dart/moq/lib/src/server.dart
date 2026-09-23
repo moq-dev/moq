@@ -36,8 +36,9 @@ final class ListenOptions {
 ///
 /// Build one with [Server.listen]. Broadcasts created via [createBroadcast] are
 /// served to incoming sessions, and [requests] streams each incoming [Request]
-/// for the caller to accept or reject. [close] stops accepting new sessions;
-/// in-flight sessions stay alive until their handles are dropped or cancelled.
+/// for the caller to accept or reject. [close] stops accepting new sessions and
+/// releases the listening socket before it returns; in-flight sessions stay
+/// alive until their handles are dropped or cancelled.
 final class Server {
   /// The underlying server handle.
   final MoqServer server;
@@ -114,7 +115,9 @@ final class Server {
     }
   }
 
-  /// Stop accepting new sessions and release the native server handle.
+  /// Stop accepting new sessions and release the native server handle, closing
+  /// the listening socket before it returns so the address can be bound again
+  /// immediately.
   void close() {
     server.cancel();
   }

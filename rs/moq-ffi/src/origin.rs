@@ -166,7 +166,7 @@ struct AnnouncedBroadcast {
 
 impl AnnouncedBroadcast {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		// `routed_broadcast` rides out the churn between a route covering the path
+		// `routed_broadcast` rides out the churn between something covering the path
 		// and the path actually resolving (failover, an advertise-only announce
 		// racing its handler).
 		let broadcast = self.origin.routed_broadcast(&self.path).await?;
@@ -329,10 +329,12 @@ impl MoqOriginConsumer {
 		}))
 	}
 
-	/// Wait for a route to cover `path`, then resolve the broadcast there.
+	/// Resolve the broadcast at `path`, waiting until something can serve it.
 	///
 	/// This is how you resolve a path right after connecting: announcements arrive over the
-	/// session after it opens, so `request_broadcast` on its own races them.
+	/// session after it opens, so `request_broadcast` on its own races them. Serving and
+	/// advertising are separate, so a local broadcast at the exact path resolves without
+	/// ever being announced.
 	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let path = moq_net::Path::new(&path).to_owned();
@@ -358,9 +360,9 @@ impl MoqOriginConsumer {
 	///
 	/// Resolution order: a local broadcast at the exact path, then the best announced route
 	/// covering the path (served on demand by the session that announced it), then a dynamic
-	/// handler on the origin (if any). Errors if nothing can serve it. Unlike
-	/// `announced_broadcast`, this does *not* wait for a future announcement. Drop the
-	/// returned future to cancel.
+	/// handler on the origin (if any). Unlike `announced_broadcast`, this answers for what is
+	/// reachable *now* and errors if nothing can serve the path. Drop the returned future to
+	/// cancel.
 	///
 	/// Calling this straight after connecting therefore races the session's announcements
 	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first.

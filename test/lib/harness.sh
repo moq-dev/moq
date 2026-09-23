@@ -86,6 +86,9 @@ harness_begin() {
     # owner even where the temp root itself is world-readable.
     chmod 700 "$HARNESS_RUN"
     HARNESS_RERUN="$rerun"
+    # The browser drivers cannot see a shell variable, and a Playwright trace has
+    # to land beside the logs it explains, so the path rides the environment.
+    export MOQ_TEST_RUN="$HARNESS_RUN"
 
     # Cancellation needs its own traps: children run in their own process groups
     # (see `harness_spawn`), so a ^C aimed at this shell's group never reaches
@@ -381,16 +384,18 @@ harness_finish() {
 
     [[ -n "$HARNESS_RUN" ]] || return "$status"
 
-    if [[ "${MOQ_TEST_KEEP:-0}" == 0 ]]; then
+    # A failing run is exactly when the logs matter, so keep it without asking;
+    # MOQ_TEST_KEEP does the same for a passing run you want to inspect.
+    if [[ "${MOQ_TEST_KEEP:-0}" == 0 && "$status" -eq 0 ]]; then
         rm -rf "$HARNESS_RUN"
     else
         # The ports are already released and the children are gone, so a retained
         # directory is evidence only. Say so rather than implying a live session.
         echo "kept: $HARNESS_RUN (children reaped, ports released)" >&2
         echo "remove it with: rm -rf $HARNESS_RUN" >&2
-    fi
-    if [[ -n "$HARNESS_RERUN" && ("$status" -ne 0 || "${MOQ_TEST_KEEP:-0}" != 0) ]]; then
-        echo "rerun: $HARNESS_RERUN" >&2
+        if [[ -n "$HARNESS_RERUN" ]]; then
+            echo "rerun: $HARNESS_RERUN" >&2
+        fi
     fi
     return "$status"
 }

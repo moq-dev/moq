@@ -49,6 +49,24 @@ final class SmokeTests: XCTestCase {
         }
     }
 
+    /// `cancel()` releases the listening socket before it returns, so the same
+    /// address binds again with no retry.
+    func testServerCloseReleasesPort() async throws {
+        let first = Server()
+        try first.bind("127.0.0.1:0")
+        try first.generateTls(hostnames: ["localhost"])
+        let addr = try await first.listen()
+        first.cancel()
+
+        // No retry: cancel() closed the socket, so this binds on the first try.
+        let second = Server()
+        try second.bind(addr)
+        try second.generateTls(hostnames: ["localhost"])
+        let rebound = try await second.listen()
+        XCTAssertEqual(rebound, addr)
+        second.cancel()
+    }
+
     func testOriginProducerIsConstructible() throws {
         let origin = OriginProducer(cacheCapacityBytes: 4096)
         _ = origin.consume()

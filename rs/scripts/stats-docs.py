@@ -4,7 +4,7 @@
 `MoqConnectionStats` in `rs/moq-ffi/src/session.rs` is the source of truth:
 every field it declares must appear, in the language's own casing, on each page
 under `doc/lib/`, so a new field cannot land undocumented. Run from
-`just check`; see `_check-common`.
+`just js check` and `just rs check`.
 """
 
 import re

@@ -104,6 +104,65 @@ mod test {
 		out
 	}
 
+	/// A snapshot group the transport can no longer serve -- `Old` when the relay reclaims a
+	/// superseded group, `Evicted` under memory pressure, `Lagged` past the drift budget -- is not
+	/// fatal. A snapshot reader only wants the newest value, so it drops the group and takes the
+	/// replacement. Regression test for `moq export ts` exiting on `Error: json: old` when a
+	/// catalog group aged out of the relay cache underneath it.
+	#[test]
+	fn a_lost_group_waits_for_its_replacement() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let mut consumer = Consumer::<Value>::new(track.subscribe(None), consumer::Config::default());
+		let waiter = kio::Waiter::noop();
+
+		// Group 0 delivers a value, then stays open with the reader parked on its next frame.
+		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":1}"#))
+			.unwrap();
+		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(v))) if v == json!({ "a": 1 })));
+		assert!(consumer.poll_next(&waiter).is_pending());
+
+		// The relay reclaims the group out from under the reader.
+		group.abort(moq_net::Error::Old).unwrap();
+		assert!(
+			consumer.poll_next(&waiter).is_pending(),
+			"a lost group must not end the reader"
+		);
+
+		// The replacement arrives and the reader picks up where the value now lives.
+		let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":2}"#))
+			.unwrap();
+		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(v))) if v == json!({ "a": 2 })));
+	}
+
+	/// Nothing replaces a lost group once the track is finished, so the reader ends cleanly on the
+	/// last value it reconstructed instead of reporting the eviction as a failure.
+	#[test]
+	fn a_lost_group_on_a_finished_track_ends_cleanly() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let mut consumer = Consumer::<Value>::new(track.subscribe(None), consumer::Config::default());
+		let waiter = kio::Waiter::noop();
+
+		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":1}"#))
+			.unwrap();
+		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(v))) if v == json!({ "a": 1 })));
+
+		group.abort(moq_net::Error::Old).unwrap();
+		track.finish().unwrap();
+		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(None))));
+	}
+
 	#[test]
 	fn a_cut_makes_the_next_update_a_snapshot_group() {
 		let (mut producer, track) = producer(cfg(100));

@@ -27,6 +27,10 @@ build -p moq-relay` for the relay. Each relay reserves its own port (see
 `WASM_PROFILE` picks the relay's cargo profile, and `RELAY_BIN` points at a
 prebuilt relay instead.
 
+A failing run keeps its run directory, including a Playwright trace of the
+failing page, and CI uploads it; a passing run deletes its own. See
+[the harness contract](../README.md).
+
 ## Shape
 
 `run.sh` builds, starts the relays, and hands their URLs to `driver.ts`, which
