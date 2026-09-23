@@ -112,6 +112,39 @@ public final class GroupConsumer: AsyncSequence, Sendable {
     }
 }
 
+/// A watch-only handle to whether a published track has subscribers.
+///
+/// Returned by a producer's `demand()`. Weak: holding it neither keeps the track open nor locks
+/// the producer, so a wait can park here while the producer keeps publishing. Waits throw
+/// `MoqError.Closed` once the track is released.
+public final class TrackDemand: Sendable {
+    let ffi: MoqTrackDemand
+
+    init(_ ffi: MoqTrackDemand) {
+        self.ffi = ffi
+    }
+
+    /// The name of the track this watches.
+    public var name: String {
+        ffi.name()
+    }
+
+    /// Whether the track has at least one active consumer right now.
+    public var isUsed: Bool {
+        ffi.isUsed()
+    }
+
+    /// Suspend until the track has at least one active consumer.
+    public func used() async throws {
+        try await ffi.used()
+    }
+
+    /// Suspend until the track has no active consumers.
+    public func unused() async throws {
+        try await ffi.unused()
+    }
+}
+
 /// Write side of a raw track.
 public final class TrackProducer: Sendable {
     let ffi: MoqTrackProducer
@@ -131,12 +164,17 @@ public final class TrackProducer: Sendable {
         TrackConsumer(try ffi.consume(subscription: subscription))
     }
 
-    /// Suspend until the track has at least one active consumer.
+    /// A watch-only handle to whether the track has subscribers.
+    public func demand() throws -> TrackDemand {
+        TrackDemand(try ffi.demand())
+    }
+
+    /// Suspend until the track has at least one active consumer. Prefer `demand()`.
     public func used() async throws {
         try await ffi.used()
     }
 
-    /// Suspend until the track has no active consumers.
+    /// Suspend until the track has no active consumers. Prefer `demand()`.
     public func unused() async throws {
         try await ffi.unused()
     }
