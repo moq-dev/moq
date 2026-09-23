@@ -43,7 +43,3 @@ exists, so replace the forward reference with the profile and seed usage.
 Kernel-real impairment (`netem` in a private network namespace) is out of
 scope: it is Linux only, needs `CAP_NET_ADMIN`, and the drills test the
 protocol's reaction to loss and delay, not the kernel's rendering of them.
-
-## Related
-
-- [Failure artifacts](/quest/next/qa-failure-artifacts.md) - stores profiles, seeds, and traces

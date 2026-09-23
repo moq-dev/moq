@@ -17,4 +17,4 @@ to the VitePress sidebar.
 
 ## Required
 
-- [FlatBuffers flavor](/quest/next/stats-binary/flatbuffers.md) - the encoding the page documents
+- [FlatBuffers flavor](/quest/main/stats-binary/flatbuffers.md) - the encoding the page documents

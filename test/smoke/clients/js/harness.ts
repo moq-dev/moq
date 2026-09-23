@@ -6,8 +6,9 @@
  *
  * @module
  */
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { type Browser, chromium, type Page } from "playwright";
+import { type Browser, type BrowserContext, chromium, type Page } from "playwright";
 import { CONTROL, type FixtureState, type Resources, type Sample, type SmokeControl } from "./src/contract";
 
 /**
@@ -94,8 +95,48 @@ export function launch(args: string[] = []): Promise<Browser> {
 	return chromium.launch({ channel: "chromium", headless: true, args });
 }
 
-/** Open a page and start collecting its errors, echoing everything it logs. */
-export async function open(browser: Browser, url: string, label = "page"): Promise<[Page, BrowserErrors]> {
+/** Contexts tracing this process, saved by {@link finishTraces} when the run fails. */
+const traces: Array<{ context: BrowserContext; name: string }> = [];
+
+/**
+ * Start a Playwright trace on the page's context, before it navigates.
+ *
+ * A no-op outside a harness run: without `MOQ_TEST_RUN` there is no directory to write to, and a
+ * trace only survives a failure anyway. See {@link finishTraces}.
+ */
+export async function startTrace(page: Page, name: string): Promise<void> {
+	if (!process.env.MOQ_TEST_RUN) return;
+	await page.context().tracing.start({ screenshots: true, snapshots: true });
+	traces.push({ context: page.context(), name: `${name}-${randomUUID()}` });
+}
+
+/** Save a trace per started context into the run directory when `failed`, and discard it otherwise. */
+export async function finishTraces(failed: boolean): Promise<void> {
+	const run = process.env.MOQ_TEST_RUN;
+	for (const { context, name } of traces) {
+		try {
+			// `path` is what writes the trace; without it, stop only frees the buffers.
+			if (run && failed) await context.tracing.stop({ path: join(run, `${name}.trace.zip`) });
+			else await context.tracing.stop();
+		} catch {
+			// A trace is evidence, never the verdict: a broken context must not mask the failure.
+		}
+	}
+	traces.length = 0;
+}
+
+/** Open a page and start collecting its errors, echoing everything it logs.
+ *
+ * `trace` starts a Playwright trace before the navigation, so a failed run can save it with
+ * {@link finishTraces}. The caller decides which pages are worth tracing: a page that streams for
+ * the whole run holds its trace in memory, so it is not one.
+ */
+export async function open(
+	browser: Browser,
+	url: string,
+	label = "page",
+	trace = false,
+): Promise<[Page, BrowserErrors]> {
 	const page = await browser.newPage();
 	const errors: BrowserErrors = { page: [], console: [] };
 	page.on("console", (message) => {
@@ -106,6 +147,7 @@ export async function open(browser: Browser, url: string, label = "page"): Promi
 		console.error(`[${label} error] ${error.message}`);
 		errors.page.push(error.message);
 	});
+	if (trace) await startTrace(page, label);
 	await page.goto(url, { waitUntil: "load" });
 	return [page, errors];
 }

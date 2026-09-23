@@ -16,6 +16,7 @@ import { parseArgs } from "node:util";
 import type { Page } from "playwright";
 import {
 	type BrowserErrors,
+	finishTraces,
 	launch,
 	open,
 	type PlayerState,
@@ -87,7 +88,7 @@ const browser = await launch([
 
 let code = 1;
 try {
-	const [page, errors] = await open(browser, pageUrl(server.origin, role, { url, broadcast }));
+	const [page, errors] = await open(browser, pageUrl(server.origin, role, { url, broadcast }), role, role === "subscribe");
 	if (role === "subscribe") await waitForWatch(page);
 
 	if (role === "publish") {
@@ -164,6 +165,8 @@ try {
 		code = 0;
 	}
 } finally {
+	// `code` is 0 only when the role's checks all passed, so it decides whether the trace is kept.
+	await finishTraces(code !== 0);
 	await browser.close().catch(() => {});
 	server.stop();
 }

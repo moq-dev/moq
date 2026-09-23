@@ -22,6 +22,9 @@ Where it allocates today, as a starting point rather than a fixed list:
 - `snapshot::Decoder`: it inflates into a fresh `Bytes`, parses a `Value`,
   and deserializes `T` from that `Value`.
 - `stream` and `window`: check whether they repeat the same pattern.
+- `moq_flate::Encoder::frame` returns a fresh `Bytes` per frame. One owned
+  payload per published frame is the floor (the track caches it), but the
+  compressor's working buffer can be reused.
 
 Directions worth weighing: serialize a patch straight to reused bytes
 instead of building a patch tree first, reuse serialization and inflate
@@ -32,7 +35,3 @@ emitted bytes; see its comment), so keep that property if you change it.
 Additive changes land on `main`. If a public accessor such as
 `Encoder::value()` has to change shape, that is a published break: raise it
 before moving the quest to dev.
-
-## Related
-
-- [Allocation-free tick](/quest/next/stats-binary/tick.md) - the stats-side churn; the JSON stats tracks gain from both

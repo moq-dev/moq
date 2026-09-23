@@ -41,6 +41,7 @@ on:
       - "rs/kio/**"
       - "js/wasm/**"
       - "test/wasm/**"
+      - "test/lib/**"
       - "justfile"
       - "test/justfile"
       - ".cargo/config.toml"
@@ -101,3 +102,19 @@ jobs:
       - name: WASM
         run: nix develop --command just test wasm
         shell: bash -leo pipefail {0}
+        env:
+          # The run writes its directory here, so a failed one is uploaded below
+          # and a passing one is deleted as usual.
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # A failing harness run keeps its directory, holding the relay logs, their
+      # configs, and a Playwright trace of the failing page. Upload it for a
+      # short while so a red run is diagnosable; a passing run deletes its own.
+      - name: Upload failure artifacts
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: wasm-failure
+          path: ${{ runner.temp }}/moq-test-runs
+          retention-days: 7
+          if-no-files-found: ignore

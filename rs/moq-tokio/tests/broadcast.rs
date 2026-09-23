@@ -3184,16 +3184,16 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 		.await
 		.expect("goaway timed out")
 		.expect("session closed before GOAWAY");
-	assert_eq!(&*goaway.uri, "https://elsewhere.example/");
+	assert_eq!(goaway.uri(), "https://elsewhere.example/");
 	assert!(draining.peek().is_some());
 	if expect_wire_timeout {
 		assert_eq!(
-			goaway.timeout,
+			goaway.timeout(),
 			Some(Duration::from_secs(5)),
 			"draft-17+ carries the deadline"
 		);
 	} else {
-		assert_eq!(goaway.timeout, None, "no wire timeout on this version");
+		assert_eq!(goaway.timeout(), None, "no wire timeout on this version");
 	}
 
 	// Honor the GOAWAY: leave, letting the server's drain complete cleanly.
@@ -3277,7 +3277,7 @@ async fn goaway_timeout_force_close_moq_transport_19_quic() {
 		.await
 		.expect("goaway timed out")
 		.expect("session closed before GOAWAY");
-	assert_eq!(goaway.timeout, Some(Duration::from_millis(200)));
+	assert_eq!(goaway.timeout(), Some(Duration::from_millis(200)));
 
 	// The server force-closes after the 200ms deadline. Assert the enforcement:
 	// the session ends promptly despite the client overstaying. The close

@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- [**breaking**] `stats::Registry::report` refills a caller-owned `&mut Report` instead of returning a new one, so an interval drain reuses its buffers.
 - [**breaking**] Dead exports removed: `Hops::replace_first`, `origin::Dynamic::{hop, root}`, `DRAIN_COST` / `MAX_COST` (use `Cost::{DRAIN, MAX}`), `broadcast::Producer::remove_track`, `track::Producer::start_sequence`, `Subscriber::with_groups`, `Ordered::with_groups`, `group::Consumer::with_frames`, `cache::Pool::same_pool`, `Timestamp::new_const`, `Error::to_code`, `Route::with_hop` (build `Hops` and use `with_hops`), and `Cost: From<(u64, u64)>` (use `Cost { warm, cold }`).
 - [**breaking**] `track::SubscriberControl` is `track::Control`, `track::GroupRequest` is `group::Request`, `ConnectionStats` is `session::Stats` with `estimated_send_rate` / `estimated_recv_rate` as `Option<bandwidth::Rate>`, and the paused handshake `Request<S, R>` is `server::Handshake`.
 - [**breaking**] `create_track`, `reserve_track`, `unique_track`, `finish`, `create_group`, and `append_group` take `&self`. `track::Consumer::info()` is `query()`. `track::Demand` gains `is_used` / `poll_used` / `poll_unused`. `track::Producer::poll_unused` returns `Poll<Result<()>>`. `bandwidth::Producer::closed()` returns the cause.

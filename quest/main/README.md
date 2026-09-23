@@ -89,6 +89,7 @@ do not add another media abstraction or a renderer crate during stabilization.
 ## Quests
 
 - [Binding parity](/quest/main/binding-parity.md) - every wrapper reaches every moq-ffi method in its own idiom with moq-net's verbs
+- [Binary stats](/quest/main/stats-binary/README.md) - an allocation-free stats tick and an on-demand FlatBuffers `.fb.z` flavor with a checked-in schema
 - [Audio jitter target](/quest/main/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
 
 ## Related

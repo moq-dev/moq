@@ -20,7 +20,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 
 ## Quests
 
-- [Binary stats](/quest/next/stats-binary/README.md) - an allocation-free stats tick and an on-demand FlatBuffers `.fb.z` flavor with a checked-in schema
 - [JSON churn](/quest/next/json-churn.md) - a moq-json update allocates a bounded amount whatever the document size, in every caller
 - [Origin narrowing](/quest/next/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
 - [Local announcements](/quest/next/local-announce.md) - an origin's announce cursor and its broadcast resolver agree on what exists
@@ -30,7 +29,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Gateway embedding](/quest/next/gateway-embed.md) - moq-hls, moq-rtmp, and moq-rtc expose the loop their binaries run to an in-process embedder
 - [Catalog consumer](/quest/next/hang-catalog-consumer.md) - reading a catalog is one call in Rust and JS, and JS gains a timeline consumer
 - [Ingest source](/quest/next/net-ingest-source.md) - an announce says whether the broadcast entered on this relay or a peer
-- [Headless player](/quest/next/watch-player.md) - `Watch.Player` assembles the pipeline the element, the room, and moq.pro each rebuild
 - [@moq/net additive](/quest/next/js-net-additive.md) - a live-broadcasts getter, `Table.dynamic`, credential refresh before redial, inferred `share`
 - [Publisher clocks](/quest/next/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
 - [Broadcast route](/quest/next/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()
@@ -53,7 +51,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Wildcard](/quest/next/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
 - [#2152](/quest/next/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq accepts sessions, the moq-ffi call C still lacks
 - [js/publish discontinuity](/quest/next/js-publish-discontinuity.md) - the JS container producer and js/publish emit the same marker group on encoder restart
-- [Failure artifacts](/quest/next/qa-failure-artifacts.md) - a failing harness run keeps its run directory and a Playwright trace, and CI uploads them
 - [Impaired path](/quest/next/transport-impairment-profile.md) - the transport drills run over a seeded, impaired UDP path on any host
 - [Tooling](/quest/next/tooling/README.md) - justfiles become a one-line menu over `sh/`, one impact map scopes CI, and every workflow step runs a recipe
 - [Generation](/quest/next/hls-generation.md) - init URLs follow the rendition config and segment URLs carry an embedder-supplied generation, so caching can be re-enabled
