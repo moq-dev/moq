@@ -23,10 +23,7 @@ Reject invalid references and lengths as protocol violations. Keep
 the path.
 
 Introduce `moq-lite-07` after lite-06. Keep lite-06 framing intact; do not
-silently reinterpret an already negotiated stream. Lite-07 is shared with
-hidden broadcasts (#3980), which claims it for its announce opt-in: whichever
-lands first defines the version, and the other joins it or bumps to the next.
-Prove mixed-version peers negotiate a common older version and that a new
+silently reinterpret an already negotiated stream. Prove mixed-version peers negotiate a common older version and that a new
 stream after reconnect starts with an empty table. Exercise
 literal fallback, repeated PID, nested tuple prefixes, table-full eviction,
 malformed reference, duplicate route, and interleaved starts/ends in codec and
@@ -48,3 +45,5 @@ the internal moq.pro mesh after lite-06 has rolled out.
   path encoding does not remove
 - [PoP skipping](/quest/m1/pop-skipping/README.md) - the lite-06 rollout
   work that must complete before moq.pro activates this encoding
+- [Hidden broadcasts](/quest/m1/hidden-broadcasts.md) - also claims lite-07;
+  whichever lands first defines it, and the other joins or bumps it

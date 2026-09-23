@@ -23,8 +23,6 @@ stays visible; only a leading `.` hides a segment).
   SETUP extension says the peer understands it (like the cluster parameters),
   since unknown IETF parameters fail decoding. Specify both in `drafts/` and
   validate with `just drafts check`.
-  PR #3938 (announce prefix table) also claims lite-07: whichever lands first
-  defines the version, and the other joins it or bumps to the next.
 - Filter on the serving side, where `lite/publisher.rs` already scopes a
   request to its prefix and the token, and in the IETF publisher, so a hidden
   path never reaches a session that did not ask. The local origin consumer
@@ -57,4 +55,4 @@ stays visible; only a leading `.` hides a segment).
 ## Related
 
 - [IETF announce count](/quest/m1/ietf-announce-count.md) - another opt-in moq-transport extension on the namespace subscription
-- [#3938](https://github.com/moq-dev/moq/pull/3938) - plans a lite-07 announce prefix table, sharing the version bump
+- [Announce prefix table](/quest/m2/announce-prefix-table.md) - also claims lite-07; whichever lands first defines it, and the other joins or bumps it
