@@ -3702,6 +3702,20 @@ mod tests {
 		request.unwrap()
 	}
 
+	/// Yield to the driver until the subscription has its next group or its end.
+	async fn next_group(subscription: &mut crate::track::Subscriber) -> Result<Option<crate::group::Consumer>, Error> {
+		let mut next = None;
+		settle(|| match subscription.poll_recv_group(&kio::Waiter::noop()) {
+			Poll::Ready(result) => {
+				next = Some(result);
+				true
+			}
+			Poll::Pending => false,
+		})
+		.await;
+		next.unwrap()
+	}
+
 	#[tokio::test]
 	async fn announce_and_retract() {
 		let producer = origin(1).produce();
@@ -5120,6 +5134,101 @@ mod tests {
 		// The path is free again for a fresh broadcast.
 		let _third = producer.create_broadcast("room/alice").unwrap();
 		assert!(consumer.get_broadcast("room/alice").is_some());
+	}
+
+	/// The publisher finishes a track, then its broadcast. A subscription already in
+	/// flight must conclude normally: the track's last group, then the end. moq-lite,
+	/// ANNOUNCE_END: "Retraction does not disturb subscriptions already in flight,
+	/// which conclude normally with SUBSCRIBE_END."
+	///
+	/// The runtime is single-threaded and the publisher's whole ending has no await in
+	/// it, so the outcome does not depend on timing.
+	#[tokio::test]
+	async fn a_finished_broadcast_concludes_in_flight_subscriptions() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let broadcast = producer.create_broadcast("room/alice").unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
+
+		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
+		let mut subscription = resolved
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		// A textbook clean end, innermost first: the group, the track, the broadcast.
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
+		group.finish().unwrap();
+		track.finish().unwrap();
+		drop(track);
+		broadcast.finish();
+
+		let mut group = next_group(&mut subscription)
+			.await
+			.expect("a cleanly finished track was served as an error")
+			.expect("the track ended before its last group");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"tail");
+		drop(group);
+
+		let end = next_group(&mut subscription)
+			.await
+			.expect("a cleanly finished track ended as an error");
+		assert!(end.is_none(), "a group followed the final one");
+	}
+
+	/// A route served from upstream is retracted (what the lite subscriber does on
+	/// ANNOUNCE_END: finish the source it minted, drop the route) while the track's
+	/// last group and end are still on their way. The subscription already in flight
+	/// must still conclude normally. moq-lite, ANNOUNCE_END: "Retraction does not
+	/// disturb subscriptions already in flight, which conclude normally with
+	/// SUBSCRIBE_END."
+	#[tokio::test]
+	async fn a_retracted_route_concludes_in_flight_subscriptions() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer
+			.dynamic("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+
+		let pending = consumer.request_broadcast("room/alice");
+		let request = queued(&server).await;
+		let source = broadcast::Info::new().produce();
+		let track = source.create_track("video", None).unwrap();
+		request.accept(&source);
+
+		let resolved = pending.await.expect("resolves");
+		let mut subscription = resolved
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+
+		// ANNOUNCE_END overtakes the track's end: the route is retracted, and the front
+		// has acted on it, before the track's last group and end arrive.
+		source.finish();
+		drop(server);
+		settle(|| resolved.is_closed()).await;
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
+		group.finish().unwrap();
+		track.finish().unwrap();
+		drop(track);
+
+		let mut group = next_group(&mut subscription)
+			.await
+			.expect("a retracted route's track was served as an error")
+			.expect("the track ended before its last group");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"tail");
+		drop(group);
+
+		let end = next_group(&mut subscription)
+			.await
+			.expect("a cleanly finished track ended as an error");
+		assert!(end.is_none(), "a group followed the final one");
 	}
 
 	/// An origin front drops the source track as soon as its last reader leaves,
