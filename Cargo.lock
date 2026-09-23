@@ -4712,7 +4712,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml 1.1.6+spec-1.1.0",
- "tower-http 0.7.1",
  "tower-service",
  "tracing",
  "url",
