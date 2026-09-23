@@ -76,7 +76,7 @@ jobs:
       - name: Check bindings publication
         id: bindings
         if: steps.wrapper.outputs.exists != 'true'
-        run: .github/scripts/release.sh maven-version-in-range dev.moq moq-ffi "[0.3,0.4)"
+        run: .github/scripts/release.sh maven-version-in-range dev.moq moq-ffi "[0.4,0.5)"
 
       - name: Decide publish
         id: decide
@@ -89,7 +89,7 @@ jobs:
             exit 0
           fi
 
-          # Bindings guard: the wrapper POM declares dev.moq:moq-ffi:[0.3,0.4),
+          # Bindings guard: the wrapper POM declares dev.moq:moq-ffi:[0.4,0.5),
           # so don't publish a wrapper that consumers can't resolve. Require a
           # compatible bindings release to exist first (it's published separately
           # by release-kt-ffi.yml on a moq-ffi-v* tag). Re-run via
@@ -98,7 +98,7 @@ jobs:
             echo "dev.moq:moq:${VERSION} not published yet; bindings available; will publish."
             echo "should_publish=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::dev.moq:moq-ffi has no [0.3,0.4) release on Maven Central yet; skipping wrapper publish until the bindings land (then re-run this workflow)."
+            echo "::warning::dev.moq:moq-ffi has no [0.4,0.5) release on Maven Central yet; skipping wrapper publish until the bindings land (then re-run this workflow)."
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
           fi
 
