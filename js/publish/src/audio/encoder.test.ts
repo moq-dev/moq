@@ -3,7 +3,6 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
-import { Fanout } from "../fanout";
 import type { AudioFrame, Format } from "./capture";
 import { Encoder, resolve } from "./encoder";
 
@@ -60,6 +59,9 @@ describe("resolve", () => {
 class LaggingAudioEncoder {
 	static readonly LAG = 2;
 
+	// Called on configure; the encoder publishes its pipeline synchronously right after.
+	static onConfigure: (() => void) | undefined;
+
 	state: CodecState = "unconfigured";
 	#output: EncodedAudioChunkOutputCallback;
 	#held: { timestamp: number; duration: number }[] = [];
@@ -70,6 +72,7 @@ class LaggingAudioEncoder {
 
 	configure(): void {
 		this.state = "configured";
+		LaggingAudioEncoder.onConfigure?.();
 	}
 
 	encode(data: AudioData): void {
@@ -127,8 +130,46 @@ function installFakeWebCodecs() {
 	};
 }
 
-async function settle(): Promise<void> {
-	for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+// A capture stream that hands over one frame per read. The reader pushes each frame through the
+// pipeline before reading again, so a pending read proves the previous frame was fully processed.
+class Feed {
+	readonly stream: ReadableStream<AudioFrame>;
+	#deliver: ((frame: AudioFrame) => void) | undefined;
+	#requested!: () => void;
+	#request = this.#next();
+
+	constructor() {
+		this.stream = new ReadableStream<AudioFrame>(
+			{
+				pull: (controller) =>
+					new Promise<void>((resolve) => {
+						this.#deliver = (frame) => {
+							controller.enqueue(frame);
+							resolve();
+						};
+						this.#requested();
+					}),
+			},
+			{ highWaterMark: 0 },
+		);
+	}
+
+	#next(): Promise<void> {
+		return new Promise((resolve) => {
+			this.#requested = resolve;
+		});
+	}
+
+	// Resolves once every frame pushed so far has been processed.
+	async drain(): Promise<void> {
+		await this.#request;
+	}
+
+	async push(frame: AudioFrame): Promise<void> {
+		await this.drain();
+		this.#request = this.#next();
+		this.#deliver?.(frame);
+	}
 }
 
 // The encoder outlives a demand gap, so chunks it held when demand disappeared surface after the
@@ -136,14 +177,19 @@ async function settle(): Promise<void> {
 // step below the marker aborts every subscriber.
 test("a demand gap marks where submitted audio ends and drops the chunks held across it", async () => {
 	using _webcodecs = installFakeWebCodecs();
+	const configured = new Promise<void>((resolve) => {
+		LaggingAudioEncoder.onConfigure = resolve;
+	});
 
 	const track = new Moq.Track.Producer("audio").accept();
 	const written: [number, number][] = [];
+	let onWrite: (() => void) | undefined;
 	const writeFrame = track.writeFrame.bind(track);
 	track.writeFrame = (frame) => {
 		const [timestamp, payload] = Moq.Varint.decode(frame.payload);
 		written.push([timestamp, payload.byteLength]);
 		writeFrame(frame);
+		onWrite?.();
 	};
 
 	const rendition = {
@@ -152,18 +198,13 @@ test("a demand gap marks where submitted audio ends and drops the chunks held ac
 		close: () => track.close(),
 	};
 
-	let enqueue!: (frame: AudioFrame) => void;
-	const source = new ReadableStream<AudioFrame>({
-		start: (controller) => {
-			enqueue = (frame) => controller.enqueue(frame);
-		},
-	});
+	const feed = new Feed();
 	const capture = {
 		in: { source: new Signal(undefined) },
 		out: {
 			root: new Signal(undefined),
 			format: new Signal<Format>({ sampleRate: 48_000, channelCount: 1 }),
-			frames: new Signal(new Fanout(source)),
+			frames: new Signal({ subscribe: () => feed.stream }),
 		},
 	};
 
@@ -176,19 +217,24 @@ test("a demand gap marks where submitted audio ends and drops the chunks held ac
 	let index = 0;
 	const push = async (count: number) => {
 		for (let i = 0; i < count; i++, index++) {
-			enqueue({ timestamp: Time.Micro(18_699.6 + index * 20_000), channels: [new Float32Array(960)] });
-			await settle();
+			await feed.push({ timestamp: Time.Micro(18_699.6 + index * 20_000), channels: [new Float32Array(960)] });
 		}
+		await feed.drain();
 	};
 
 	try {
-		await settle();
+		await configured;
 		await push(4); // two written, two held
+
+		const marked = new Promise<void>((resolve) => {
+			onWrite = resolve;
+		});
 		rendition.track.set(undefined);
-		await settle();
+		await marked;
+		onWrite = undefined;
+
 		await push(2); // gated
 		rendition.track.set(track);
-		await settle();
 		await push(4); // releases the two held pre-gap chunks, then two resumed ones
 
 		expect(written).toEqual([
@@ -199,6 +245,7 @@ test("a demand gap marks where submitted audio ends and drops the chunks held ac
 			[158_700, 1],
 		]);
 	} finally {
+		LaggingAudioEncoder.onConfigure = undefined;
 		encoder.close();
 	}
 });
