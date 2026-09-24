@@ -72,6 +72,16 @@ pub use server::{Response, Server, whep, whip};
 mod tests {
 	use std::time::Duration;
 
+	/// The next route update, skipping the caught-up marker.
+	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+		loop {
+			match announced.next().await? {
+				moq_net::announce::Event::Update(update) => return Some(update),
+				moq_net::announce::Event::Live => continue,
+			}
+		}
+	}
+
 	use axum::Router;
 	use bytes::Bytes;
 
@@ -103,7 +113,7 @@ mod tests {
 			},
 		)
 		.expect("publish source packet");
-		let announcement = tokio::time::timeout(TIMEOUT, announcements.next())
+		let announcement = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 			.await
 			.expect("source announcement timed out")
 			.expect("source origin closed");

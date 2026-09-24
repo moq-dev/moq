@@ -25,6 +25,16 @@ pub fn spawn_config(config: moq_net::origin::Config) -> moq_net::origin::Produce
 mod tests {
 	use super::*;
 
+	/// The next route update, skipping the caught-up marker.
+	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+		loop {
+			match announced.next().await? {
+				moq_net::announce::Event::Update(update) => return Some(update),
+				moq_net::announce::Event::Live => continue,
+			}
+		}
+	}
+
 	/// The spawned driver runs the origin's lifecycle: an announced route
 	/// reaches a consumer, and dropping the announcement retracts it.
 	#[tokio::test]
@@ -35,12 +45,12 @@ mod tests {
 		let broadcast = origin.create_broadcast("cam").expect("create broadcast");
 		broadcast.announce(Default::default()).expect("create broadcast");
 
-		let update = announced.next().await.expect("announce");
+		let update = next_update(&mut announced).await.expect("announce");
 		assert_eq!(update.prefix.as_str(), "cam");
 		assert!(update.kind.is_active());
 
 		broadcast.finish();
-		let update = announced.next().await.expect("retraction");
+		let update = next_update(&mut announced).await.expect("retraction");
 		assert!(!update.kind.is_active());
 	}
 

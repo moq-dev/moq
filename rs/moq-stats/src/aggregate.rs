@@ -295,7 +295,8 @@ impl<V: Mergeable> Merged<V> {
 		// unannounce. A closed stream ends the merged view.
 		loop {
 			match self.announce.poll_next(waiter) {
-				Poll::Ready(Some(update)) => changed |= self.apply_announce(update),
+				Poll::Ready(Some(moq_net::announce::Event::Update(update))) => changed |= self.apply_announce(update),
+				Poll::Ready(Some(moq_net::announce::Event::Live)) => {}
 				Poll::Ready(None) => return Poll::Ready(Ok(None)),
 				Poll::Pending => break,
 			}
@@ -489,6 +490,16 @@ mod tests {
 		producer
 	}
 
+	/// The next route update, skipping the caught-up marker.
+	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+		loop {
+			match announced.next().await? {
+				moq_net::announce::Event::Update(update) => return Some(update),
+				moq_net::announce::Event::Live => continue,
+			}
+		}
+	}
+
 	use std::time::Duration;
 
 	use moq_net::{PathOwned, Timestamp, announce, broadcast, origin, track};
@@ -533,7 +544,7 @@ mod tests {
 		source.announce(origin::Route::default()).expect("announce");
 		let track = source.create_track("video", None).expect("create_track");
 
-		let update = announced.next().await.expect("announce");
+		let update = next_update(&mut announced).await.expect("announce");
 		assert!(update.kind.is_active());
 		let consumer = egress.request_broadcast(path).await.expect("resolve");
 		let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();

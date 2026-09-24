@@ -126,14 +126,16 @@ overlaps that scope; exact creates and requests must match it, so a broad
 route can advertise the wire-compatible prefix while excluded requests are
 refused locally. A disjoint route is `Unauthorized`.
 
-`origin.consume().announced()` yields `announce::Update` values: `path` is the
-covered prefix relative to the consumer's root, `kind` is `Announced`,
-`Updated` (a reprice in place), or `Retracted`, `captures` reports what the
-most specific matching scope member's wildcards stood for when the prefix
-pins them, and `route` carries hops and cost (on a retraction, its last
-values). The consumer is also a `futures::Stream`. A prefix is not a
-broadcast name; sessions request each scope member's literal head and filter
-locally.
+`origin.consume().announced()` yields `announce::Event`s. An
+`Event::Update(update)` carries `prefix`, the covered prefix relative to the
+consumer's root; `kind`, which is `Announced`, `Updated` (a reprice in
+place), or `Retracted`; `captures`, what the most specific matching scope
+member's wildcards stood for when the prefix pins them; and `route`, its hops
+and cost (on a retraction, its last values). A single `Event::Live` follows
+the routes live at subscribe time, including every route a connected peer
+was still sending, so a caller listing what is live stops there. The
+consumer is also a `futures::Stream`. A prefix is not a broadcast name;
+sessions request each scope member's literal head and filter locally.
 
 ## Limiting reads
 

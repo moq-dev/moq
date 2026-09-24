@@ -47,13 +47,6 @@ const BUDGET: Duration = Duration::from_millis(500);
 /// (a blocking device enumeration) still cannot hold the answer back.
 const CEILING: Duration = Duration::from_millis(1_500);
 
-/// How long the announce sweep waits for a sibling after an announcement lands.
-///
-/// A relay sends its whole announced set back to back, so the gap between the
-/// first and the last is a round trip, not a budget. Without this the sweep would
-/// always cost [`BUDGET`], even when the answer arrived in a few milliseconds.
-const SETTLE: Duration = Duration::from_millis(30);
-
 /// The completers every build has, keyed by the *value* name they answer for.
 ///
 /// The value name, not the flag: that is what Usage matches an overlay on, and the
@@ -481,11 +474,9 @@ fn broadcasts(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 		// sweep is running is one the user cannot name by the time they press enter.
 		let mut announced = origin.consume().announced();
 		let mut live = BTreeSet::new();
-		// The first announcement gets the whole remaining budget; each one after it
-		// only has to beat its siblings, which are already on the wire.
-		let mut until = deadline;
-		while let Ok(Some(update)) = timeout_at(until, announced.next()).await {
-			until = deadline.min(Instant::now() + SETTLE);
+		// The marker says the relay's whole set has arrived; the budget only bounds
+		// a relay that is slow to send it.
+		while let Ok(Some(moq_net::announce::Event::Update(update))) = timeout_at(deadline, announced.next()).await {
 			let path = update.prefix.to_string();
 			// The root broadcast is the connection path itself, which an unset
 			// `--broadcast` already names; there is no word to insert for it.

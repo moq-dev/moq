@@ -206,7 +206,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	);
 
 	// ── data path ───────────────────────────────────────────────────
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -397,7 +397,7 @@ async fn relay_websocket_root_path_upgrades() {
 	// ── data path ───────────────────────────────────────────────────
 	// The root auth scope is the empty path, so the broadcast announces at its
 	// own name with no prefix.
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -485,7 +485,7 @@ async fn two_publish_only_clients_coexist() {
 
 	let mut seen = std::collections::HashSet::new();
 	while seen.len() < 2 {
-		let update = tokio::time::timeout(TIMEOUT, announcements.next())
+		let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 			.await
 			.expect("announcement timeout")
 			.expect("origin closed");
@@ -628,7 +628,7 @@ async fn internal_tcp_round_trip() {
 	// ── data path ───────────────────────────────────────────────────
 	// The internal listener grants the empty root, so the broadcast announces
 	// at its own name with no path prefix.
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -742,7 +742,7 @@ async fn internal_unix_round_trip() {
 			.expect("subscriber connect failed");
 
 	// ── data path ───────────────────────────────────────────────────
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -825,7 +825,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -1099,4 +1099,14 @@ async fn connect_once(
 ) -> moq_tokio::Result<(moq_tokio::Client, moq_tokio::Connection)> {
 	let connection = client.clone().with_reconnect(false).connect(url).established().await?;
 	Ok((client, connection))
+}
+
+/// The next route update, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+	loop {
+		match announced.next().await? {
+			moq_net::announce::Event::Update(update) => return Some(update),
+			moq_net::announce::Event::Live => continue,
+		}
+	}
 }

@@ -685,7 +685,12 @@ impl AnnounceRun {
 
 				// Send ANNOUNCE_INIT as the first message with all currently active routes.
 				// We use `try_next()` to synchronously get the initial updates.
-				while let Some(update) = announced.try_next() {
+				while let Some(event) = announced.try_next() {
+					// The marker only says the origin caught up; the peer learns the
+					// initial set's end from the version's own framing.
+					let announce::Event::Update(update) = event else {
+						continue;
+					};
 					let absolute = origin.absolute(&update.prefix);
 					let suffix = self.suffix(&update);
 
@@ -713,7 +718,12 @@ impl AnnounceRun {
 				// them afterward. The receiver stamps our origin onto each hop chain, so we
 				// forward the stored chain as-is (no self push here).
 				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
-				while let Some(update) = announced.try_next() {
+				while let Some(event) = announced.try_next() {
+					// The marker only says the origin caught up; the peer learns the
+					// initial set's end from the version's own framing.
+					let announce::Event::Update(update) = event else {
+						continue;
+					};
 					let absolute = origin.absolute(&update.prefix);
 					let suffix = self.suffix(&update);
 
@@ -785,12 +795,16 @@ impl AnnounceRun {
 				return Poll::Pending;
 			};
 
-			let Some(update) = next else {
-				// The buffer is empty (flushed at the loop top), so FIN now and
-				// wait for the acknowledgement.
-				stream.writer.finish()?;
-				self.phase = AnnouncePhase::Closing;
-				continue;
+			let update = match next {
+				Some(announce::Event::Update(update)) => update,
+				Some(announce::Event::Live) => continue,
+				None => {
+					// The buffer is empty (flushed at the loop top), so FIN now and
+					// wait for the acknowledgement.
+					stream.writer.finish()?;
+					self.phase = AnnouncePhase::Closing;
+					continue;
+				}
 			};
 
 			let absolute = origin.absolute(&update.prefix);

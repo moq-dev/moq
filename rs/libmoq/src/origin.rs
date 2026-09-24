@@ -147,7 +147,9 @@ impl Origin {
 				biased;
 				_ = &mut close => return Ok(()),
 				next = consumer.next() => match next {
-					Some(announced) => announced,
+					Some(moq_net::announce::Event::Update(update)) => update,
+					// The C API has no caught-up callback yet.
+					Some(moq_net::announce::Event::Live) => continue,
 					None => return Ok(()),
 				},
 			};

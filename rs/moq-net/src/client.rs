@@ -735,6 +735,37 @@ mod tests {
 		.expect("connect failed");
 	}
 
+	/// A peer that never delivers its announce count cannot stall the live
+	/// marker past its session: dropping the session lands the source.
+	#[tokio::test(start_paused = true)]
+	async fn a_dead_session_does_not_hold_the_live_marker() {
+		let gate = kio::Producer::new(true);
+		let transport = crate::lite::test_transport::SinkSession::gated_bi(gate.consume())
+			.with_protocol(crate::version::ALPN_LITE_05);
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let client = Client::new()
+			.with_versions([Version::Lite(lite::Version::Lite05)].into())
+			.with_subscriber(origin.clone());
+		let (session, driver) = client
+			.connect(tokio::time::Instant::now().into_std(), transport)
+			.await
+			.expect("connect failed");
+
+		let mut announced = origin.consume().announced();
+		let mut next = std::pin::pin!(announced.next());
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_secs(5), next.as_mut())
+				.await
+				.is_err(),
+			"live before the peer answered"
+		);
+
+		drop(driver);
+		drop(session);
+		assert!(matches!(next.await, Some(crate::announce::Event::Live)));
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn alpn_lite_falls_back_to_draft14_and_switches_version_post_setup() {
 		run_alpn_lite_fallback_case(Some(ALPN_LITE)).await;

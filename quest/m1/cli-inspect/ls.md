@@ -14,6 +14,9 @@ it exits non-zero.
 
 ## Plan
 
+- Snapshot mode reads the announce cursor up to its `announce::Event::Live`
+  marker, which follows the relay's whole initial set; `--follow` prints
+  through it.
 - A MoQ verb beside import/export/play, not a stageable one: it consumes the
   origin and never publishes. It is a subscriber-only session, so it works
   with a subscribe-only token.
@@ -23,7 +26,3 @@ it exits non-zero.
 - Test: against an in-process relay, snapshot mode prints exactly the
   announced set and exits, `--follow` prints the initial replay then a `-` when
   a publisher leaves, and `--json` lines parse.
-
-## Required
-
-- [Caught up](/quest/m1/cli-inspect/caught-up.md) - snapshot mode exits on the consumer's `Live` marker, so `ls` follows it onto `dev`

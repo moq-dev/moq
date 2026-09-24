@@ -143,7 +143,15 @@ impl OriginDynamic {
 
 impl Announced {
 	async fn next(&mut self) -> Result<Option<Arc<MoqAnnounceUpdate>>, MoqError> {
-		match self.inner.next().await {
+		// The bindings have no caught-up marker yet.
+		let update = loop {
+			match self.inner.next().await {
+				Some(moq_net::announce::Event::Update(update)) => break Some(update),
+				Some(moq_net::announce::Event::Live) => continue,
+				None => break None,
+			}
+		};
+		match update {
 			Some(update) => Ok(Some(Arc::new(MoqAnnounceUpdate {
 				prefix: update.prefix.to_string(),
 				captures: update

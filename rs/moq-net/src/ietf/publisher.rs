@@ -1777,8 +1777,15 @@ where
 					if let Poll::Ready(res) = target.poll_closed(&mut cx) {
 						return Poll::Ready(NamespaceEvent::Closed(res));
 					}
-					if let Poll::Ready(update) = announced.poll_next(waiter) {
-						return Poll::Ready(NamespaceEvent::Update(update));
+					// The origin's live marker means nothing to the peer here.
+					while let Poll::Ready(next) = announced.poll_next(waiter) {
+						match next {
+							Some(crate::announce::Event::Live) => continue,
+							Some(crate::announce::Event::Update(update)) => {
+								return Poll::Ready(NamespaceEvent::Update(Some(update)));
+							}
+							None => return Poll::Ready(NamespaceEvent::Update(None)),
+						}
 					}
 					if retry.poll(waiter).is_ready() {
 						return Poll::Ready(NamespaceEvent::Retry);

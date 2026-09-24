@@ -865,8 +865,10 @@ async fn serve_announced(
 	let mut announced = origin.consume().announced();
 	let mut broadcasts = Vec::new();
 
-	while let Some(update) = announced.try_next() {
-		if update.kind.is_active() {
+	while let Some(event) = announced.try_next() {
+		if let moq_net::announce::Event::Update(update) = event
+			&& update.kind.is_active()
+		{
 			broadcasts.push(update.prefix);
 		}
 	}

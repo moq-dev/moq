@@ -253,7 +253,7 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 	.expect("subscriber connect timeout")
 	.expect("subscriber connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -511,7 +511,7 @@ async fn http_routes_hold_a_lease() {
 	.await
 	.expect("subscriber connect timeout")
 	.expect("subscriber connect failed");
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -939,4 +939,14 @@ async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
 		.expect("run returned after the trigger")
 		.expect("relay task panicked")
 		.expect("relay exited with an error");
+}
+
+/// The next route update, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+	loop {
+		match announced.next().await? {
+			moq_net::announce::Event::Update(update) => return Some(update),
+			moq_net::announce::Event::Live => continue,
+		}
+	}
 }

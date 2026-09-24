@@ -247,7 +247,7 @@ async fn embed_and_stop(mut config: Config) {
 	.expect("connect timeout")
 	.expect("connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announced.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -464,4 +464,14 @@ fn embedded_cli_merges_only_relay_settings() {
 		.unwrap();
 	assert_eq!(parsed.worker_name.as_deref(), Some("recorder"));
 	assert_eq!(parsed.relay.cluster.id, Some(9));
+}
+
+/// The next route update, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+	loop {
+		match announced.next().await? {
+			moq_net::announce::Event::Update(update) => return Some(update),
+			moq_net::announce::Event::Live => continue,
+		}
+	}
 }

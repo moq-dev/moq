@@ -1419,6 +1419,16 @@ impl Request {
 mod tests {
 	use super::*;
 
+	/// The next route update, skipping the caught-up marker.
+	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+		loop {
+			match announced.next().await? {
+				moq_net::announce::Event::Update(update) => return Some(update),
+				moq_net::announce::Event::Live => continue,
+			}
+		}
+	}
+
 	#[test]
 	fn version_help_lists_every_parseable_name() {
 		#[derive(usage::Cli)]
@@ -1582,7 +1592,7 @@ mod tests {
 
 		// Without the server's publisher the session announces nothing, so this is
 		// where the regression shows up.
-		let update = tokio::time::timeout(TIMEOUT, announced.next())
+		let update = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
 			.await
 			.expect("announce timeout")
 			.expect("origin closed");

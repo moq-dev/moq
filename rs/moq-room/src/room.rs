@@ -78,8 +78,10 @@ impl Room {
 				return Poll::Ready(Some(event));
 			}
 
-			let Some(update) = ready!(self.announced.poll_next(waiter)) else {
-				return Poll::Ready(None);
+			let update = match ready!(self.announced.poll_next(waiter)) {
+				Some(announce::Event::Update(update)) => update,
+				Some(announce::Event::Live) => continue,
+				None => return Poll::Ready(None),
 			};
 			let path = update.prefix;
 			let Some(parsed) = parse(&path) else {

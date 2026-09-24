@@ -66,8 +66,10 @@ pub async fn handle_viewers(
 ) -> anyhow::Result<()> {
 	let mut announced = viewer_origin.announced();
 	loop {
-		let Some(update) = announced.next().await else {
-			break;
+		let update = match announced.next().await {
+			Some(moq_net::announce::Event::Update(update)) => update,
+			Some(moq_net::announce::Event::Live) => continue,
+			None => break,
 		};
 
 		let viewer_id = update.prefix.to_string();

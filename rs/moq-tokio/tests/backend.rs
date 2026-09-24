@@ -176,7 +176,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -629,7 +629,7 @@ async fn iroh_connect() {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -858,4 +858,14 @@ async fn window_test(scheme: &str) {
 #[tokio::test]
 async fn noq_windows() {
 	window_test("moqt").await;
+}
+
+/// The next route update, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+	loop {
+		match announced.next().await? {
+			moq_net::announce::Event::Update(update) => return Some(update),
+			moq_net::announce::Event::Live => continue,
+		}
+	}
 }

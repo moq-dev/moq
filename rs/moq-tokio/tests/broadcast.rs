@@ -83,7 +83,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -197,7 +197,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -320,7 +320,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -450,7 +450,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -561,7 +561,7 @@ async fn broadcast_moq_lite_05_default_timescale() {
 		.expect("connect timeout")
 		.expect("connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timeout")
 		.expect("origin closed");
@@ -711,7 +711,7 @@ async fn broadcast_moq_transport_20_current_group_join() {
 
 /// Wait for the next announce event, failing the test on a timeout or a closed origin.
 async fn next_announce(announcements: &mut moq_net::announce::Consumer) -> moq_net::announce::Update {
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	tokio::time::timeout(TIMEOUT, next_update(announcements))
 		.await
 		.expect("announce timeout")
 		.expect("origin closed")
@@ -985,7 +985,10 @@ async fn broadcast_route_migration() {
 
 	// The path was never retracted across the swap: any events delivered are
 	// active metadata updates (the standby's chain taking over).
-	while let Some(update) = announcements.try_next() {
+	while let Some(event) = announcements.try_next() {
+		let moq_net::announce::Event::Update(update) = event else {
+			continue;
+		};
 		assert!(update.kind.is_active(), "failover must not retract the route");
 	}
 
@@ -1702,7 +1705,7 @@ async fn broadcast_websocket() {
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -1824,7 +1827,7 @@ async fn broadcast_websocket_fallback() {
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -2091,7 +2094,7 @@ async fn quic_driver_task_inherits_connection_span() {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -2209,7 +2212,7 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 		.expect("connect timeout")
 		.expect("connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timeout")
 		.expect("origin closed");
@@ -2348,7 +2351,7 @@ async fn idle_subscription_releases_the_viewer_count() {
 		.expect("connect timeout")
 		.expect("connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timeout")
 		.expect("origin closed");
@@ -2758,7 +2761,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 		.expect("client connect failed");
 
 	// The "allowed" announce stream still delivers even though "denied" was FINed.
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -2858,7 +2861,7 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 	);
 	assert!(update.kind.is_active());
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), announcements.next())
+		tokio::time::timeout(Duration::from_millis(200), next_update(&mut announcements))
 			.await
 			.is_err(),
 		"a path outside one of the grants was announced"
@@ -2961,7 +2964,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 
 		// The client serves "allowed/test"; the "denied" interest is FINed but must not
 		// tear down the session.
-		let update = tokio::time::timeout(TIMEOUT, announcements.next())
+		let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 			.await
 			.expect("announce timed out")
 			.expect("origin closed");
@@ -3142,7 +3145,7 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 		.expect("client connect failed");
 
 	// Subscribe and read the pre-GOAWAY group.
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -3470,4 +3473,14 @@ async fn abort_carries_its_code_to_the_peer() {
 	);
 
 	server_handle.abort();
+}
+
+/// The next route update, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+	loop {
+		match announced.next().await? {
+			moq_net::announce::Event::Update(update) => return Some(update),
+			moq_net::announce::Event::Live => continue,
+		}
+	}
 }

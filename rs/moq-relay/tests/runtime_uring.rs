@@ -156,7 +156,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	}
 
 	for (index, (_connection, consumer, announced)) in subscribers.iter_mut().enumerate() {
-		let update = tokio::time::timeout(TIMEOUT, announced.next())
+		let update = tokio::time::timeout(TIMEOUT, next_update(announced))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} announcement timeout"))
 			.expect("origin closed");
@@ -312,7 +312,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	let mut announced = consumer.announced();
 	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;
 
-	let update = tokio::time::timeout(TIMEOUT, announced.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -391,7 +391,7 @@ async fn uring_workers_write_qlog_traces() {
 	let consumer = subscriber_origin.consume();
 	let mut announced = consumer.announced();
 	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;
-	let update = tokio::time::timeout(TIMEOUT, announced.next())
+	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -461,4 +461,14 @@ async fn spawn_auth_server(policy: moq_auth::serve::Policy) -> url::Url {
 	let server = moq_auth::serve::Server::new(policy);
 	tokio::spawn(async move { server.serve(listener).await });
 	url
+}
+
+/// The next route update, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+	loop {
+		match announced.next().await? {
+			moq_net::announce::Event::Update(update) => return Some(update),
+			moq_net::announce::Event::Live => continue,
+		}
+	}
 }

@@ -1060,6 +1060,20 @@ struct AnnouncePrefix<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	prefix: PathOwned,
 	state: PrefixState<S>,
+	/// Held from the request until the peer's initial set has landed in the
+	/// origin, so announce cursors know when they have caught up. Taken at
+	/// construction, before the session is handed out, so no cursor misses it.
+	replaying: Option<crate::model::Replaying>,
+}
+
+/// How the peer's initial set ends on this version.
+enum Landing {
+	/// Lite05+: after this many more announces, the count in ANNOUNCE_OK.
+	Count(u64),
+	/// Lite03/04 carry no boundary: once the stream goes quiet.
+	Quiet(crate::model::Quiet),
+	/// It has landed. Lite01/02 land it in ANNOUNCE_INIT, before the run.
+	Landed,
 }
 
 enum PrefixState<S: crate::transport::poll::Session> {
@@ -1073,6 +1087,8 @@ enum PrefixState<S: crate::transport::poll::Session> {
 	Cost {
 		stream: Stream<S, Version>,
 		responder_origin: Option<crate::Hop>,
+		/// Lite05+: the initial set's size, from ANNOUNCE_OK.
+		active: Option<u64>,
 	},
 	/// Lite01/02: reading the ANNOUNCE_INIT set.
 	ReadInit { stream: Stream<S, Version>, run: PrefixRun },
@@ -1095,14 +1111,29 @@ struct PrefixRun {
 	// but a peer may.
 	next_announce_id: u64,
 	announced_by_id: HashMap<u64, PathOwned>,
+	landing: Landing,
 }
 
 impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 	fn new(subscriber: Subscriber<S>, prefix: PathOwned) -> Self {
 		Self {
+			replaying: Some(subscriber.origin.replaying()),
 			subscriber,
 			prefix,
 			state: PrefixState::Open,
+		}
+	}
+
+	/// Drop the guard once the initial set has landed.
+	fn poll_landing(replaying: &mut Option<crate::model::Replaying>, landing: &mut Landing, waiter: &kio::Waiter) {
+		let landed = match landing {
+			Landing::Count(remaining) => *remaining == 0,
+			Landing::Quiet(quiet) => quiet.poll(waiter).is_ready(),
+			Landing::Landed => return,
+		};
+		if landed {
+			*landing = Landing::Landed;
+			*replaying = None;
 		}
 	}
 
@@ -1140,16 +1171,14 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						false => PrefixState::Cost {
 							stream,
 							responder_origin: None,
+							active: None,
 						},
 					};
 				}
 				PrefixState::ReadOk { stream } => {
 					// Lite05+: the publisher reports its own origin id, which we stamp onto
 					// every received Announce's hop chain since it no longer does so itself.
-					// Its `active` count marks where the initial set ends; nothing here needs
-					// that boundary, so it is read and dropped. Callers that must not race an
-					// announcement use `origin::Consumer::announced_broadcast`, which waits
-					// for the path itself.
+					// Its `active` count marks where the initial set ends.
 					let ok = ready!(stream.reader.poll_decode::<lite::AnnounceOk>(&mut cx))?;
 					// A peer may legally report id 0 (no identity). Keep it: the assigned
 					// identity stays on `via` and is never forwarded as a hop.
@@ -1160,6 +1189,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					self.state = PrefixState::Cost {
 						stream,
 						responder_origin: Some(origin),
+						active: Some(ok.active),
 					};
 				}
 				PrefixState::Cost { .. } => {
@@ -1167,17 +1197,24 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					let PrefixState::Cost {
 						stream,
 						responder_origin,
+						active,
 					} = std::mem::replace(&mut self.state, PrefixState::Open)
 					else {
 						unreachable!()
 					};
 
+					let landing = match (active, self.subscriber.version) {
+						(Some(active), _) => Landing::Count(active),
+						(None, Version::Lite01 | Version::Lite02) => Landing::Landed,
+						(None, _) => Landing::Quiet(crate::model::Quiet::new(&self.subscriber.runtime)),
+					};
 					let run = PrefixRun {
 						responder_origin,
 						link_cost,
 						announced: Announced::default(),
 						next_announce_id: 0,
 						announced_by_id: HashMap::new(),
+						landing,
 					};
 
 					// Lite01/02 send the initial set as one ANNOUNCE_INIT message, so they
@@ -1208,6 +1245,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					else {
 						unreachable!()
 					};
+					self.replaying = None;
 					self.state = PrefixState::Run { stream, run };
 				}
 				PrefixState::Run { stream, run } => {
@@ -1228,6 +1266,11 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(&mut cx) {
 							Poll::Ready(Ok(Some(announce))) => {
 								self.subscriber.handle_announce(&self.prefix, announce, run)?;
+								match &mut run.landing {
+									Landing::Count(remaining) => *remaining = remaining.saturating_sub(1),
+									Landing::Quiet(quiet) => quiet.heard(),
+									Landing::Landed => {}
+								}
 							}
 							Poll::Ready(Ok(None)) => {
 								// The publisher FINed: it has nothing (more) to announce for this
@@ -1246,6 +1289,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					// Materialize requested paths under the attached routes; leaves the
 					// waiter registered on every route's request queue.
 					run.announced.poll_serve(&self.subscriber, waiter);
+					Self::poll_landing(&mut self.replaying, &mut run.landing, waiter);
 					return Poll::Pending;
 				}
 			}

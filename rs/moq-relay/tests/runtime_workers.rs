@@ -119,7 +119,7 @@ async fn workers_serve_quic_and_share_one_origin() {
 	}
 
 	for (index, (_connection, consumer, announced)) in subscribers.iter_mut().enumerate() {
-		let update = tokio::time::timeout(TIMEOUT, announced.next())
+		let update = tokio::time::timeout(TIMEOUT, next_update(announced))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} announcement timeout"))
 			.expect("origin closed");
@@ -157,4 +157,14 @@ async fn workers_serve_quic_and_share_one_origin() {
 	drop(subscribers);
 	running.abort();
 	let _ = running.await;
+}
+
+/// The next route update, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+	loop {
+		match announced.next().await? {
+			moq_net::announce::Event::Update(update) => return Some(update),
+			moq_net::announce::Event::Live => continue,
+		}
+	}
 }

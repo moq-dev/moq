@@ -1017,6 +1017,16 @@ mod tests {
 		producer
 	}
 
+	/// The next route update, skipping the caught-up marker.
+	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+		loop {
+			match announced.next().await? {
+				moq_net::announce::Event::Update(update) => return Some(update),
+				moq_net::announce::Event::Live => continue,
+			}
+		}
+	}
+
 	use std::collections::BTreeMap;
 
 	use moq_net::stats::{Registry, Tier};
@@ -1068,7 +1078,7 @@ mod tests {
 		source.announce(origin::Route::default()).expect("announce");
 		let producer = source.create_track("video", None).expect("create_track");
 
-		let update = announced.next().await.expect("announce");
+		let update = next_update(&mut announced).await.expect("announce");
 		assert!(update.kind.is_active());
 		let consumer = egress.request_broadcast(path).await.expect("resolve");
 
@@ -1109,7 +1119,7 @@ mod tests {
 	async fn announced(origin: &origin::Producer) -> (String, moq_net::broadcast::Consumer) {
 		let mut consumer = origin.consume().announced();
 		tokio::time::advance(Duration::from_millis(1)).await;
-		let update = consumer.next().await.expect("expected announce");
+		let update = next_update(&mut consumer).await.expect("expected announce");
 		assert!(update.kind.is_active());
 		let broadcast = origin
 			.consume()

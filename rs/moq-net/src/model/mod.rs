@@ -43,7 +43,9 @@ pub mod origin {
 
 /// Subscribing to route (un)announcements from an origin.
 pub mod announce {
-	pub use super::origin_impl::{AnnounceConsumer as Consumer, AnnounceKind as Kind, AnnounceUpdate as Update};
+	pub use super::origin_impl::{
+		AnnounceConsumer as Consumer, AnnounceEvent as Event, AnnounceKind as Kind, AnnounceUpdate as Update,
+	};
 }
 
 // Hop identity and the `Consume` conversion trait aren't part of a role
@@ -52,6 +54,9 @@ pub use origin_impl::{Consume, Hop, Hops, InvalidHop};
 
 // The announce-interest prefixes a scope needs on a prefix-shaped wire.
 pub(crate) use origin_impl::interest_prefixes;
+
+// Held by a session until the peer's initial announce set has landed.
+pub(crate) use origin_impl::{Quiet, Replaying};
 
 // The advertise-only route guard, for tests shaping the route table.
 #[cfg(test)]

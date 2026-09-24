@@ -602,9 +602,59 @@ struct OriginConsumerState {
 	/// Set by the origin's teardown: the cursor drains `pending`, then reports
 	/// the end instead of parking forever on a table that can never fire again.
 	ended: bool,
+	/// Progress toward the one [`AnnounceEvent::Live`] marker.
+	live: LiveState,
+}
+
+/// Where a cursor stands on delivering its initial set.
+enum LiveState {
+	/// This many remote sources pending at subscribe time are still replaying.
+	Waiting(usize),
+	/// Every source has landed: the marker follows once these prefixes, pending
+	/// when the last one landed, have been delivered (or cancelled).
+	Owed(BTreeSet<PathOwned>),
+	/// The marker was delivered.
+	Done,
+}
+
+impl Default for LiveState {
+	fn default() -> Self {
+		Self::Waiting(0)
+	}
 }
 
 impl OriginConsumerState {
+	/// One source the cursor was waiting on has landed its initial set.
+	fn landed(&mut self) {
+		if let LiveState::Waiting(count) = &mut self.live {
+			*count = count.saturating_sub(1);
+			if *count == 0 {
+				self.live = LiveState::Owed(self.pending.keys().cloned().collect());
+			}
+		}
+	}
+
+	/// `prefix` left the pending set (delivered or cancelled), so the marker no
+	/// longer waits on it. A prefix still pending (the announce trailing a
+	/// retraction) stays owed.
+	fn settled(&mut self, prefix: &PathOwned) {
+		if let LiveState::Owed(owed) = &mut self.live
+			&& !self.pending.contains_key(prefix)
+		{
+			owed.remove(prefix);
+		}
+	}
+
+	/// Whether the marker is due now.
+	fn live_due(&self) -> bool {
+		matches!(&self.live, LiveState::Owed(owed) if owed.is_empty())
+	}
+
+	/// Whether [`Self::take`] has something to hand out, or the cursor ended.
+	fn ready(&self) -> bool {
+		!self.pending.is_empty() || self.ended || self.live_due()
+	}
+
 	fn apply_announce(&mut self, prefix: PathOwned, meta: RouteMeta, captures: Option<Vec<Pattern>>) {
 		let meta = (meta, captures);
 		let new = match self.pending.remove(&prefix) {
@@ -623,7 +673,7 @@ impl OriginConsumerState {
 		match self.pending.remove(&prefix) {
 			// The pending announce was never delivered and neither was any earlier
 			// one, so the pair cancels entirely.
-			Some(PendingUpdate::Announce(_)) if !self.delivered.contains(&prefix) => {}
+			Some(PendingUpdate::Announce(_)) if !self.delivered.contains(&prefix) => self.settled(&prefix),
 			// Either nothing is pending or the pending announce was a metadata
 			// update on a delivered route; the consumer still owes a retraction.
 			None | Some(PendingUpdate::Announce(_) | PendingUpdate::Unannounce(_)) => {
@@ -637,8 +687,19 @@ impl OriginConsumerState {
 		}
 	}
 
-	/// Take one update to deliver to the consumer, if any.
-	fn take(&mut self) -> Option<AnnounceUpdate> {
+	/// Take one event to deliver to the consumer, if any: the marker as soon as
+	/// it is due, otherwise the next update.
+	fn take(&mut self) -> Option<AnnounceEvent> {
+		if self.live_due() {
+			self.live = LiveState::Done;
+			return Some(AnnounceEvent::Live);
+		}
+		let update = self.take_update()?;
+		self.settled(&update.prefix);
+		Some(AnnounceEvent::Update(update))
+	}
+
+	fn take_update(&mut self) -> Option<AnnounceUpdate> {
 		let prefix = self.pending.keys().next()?.clone();
 		let ((meta, captures), kind) = match self.pending.remove(&prefix).unwrap() {
 			PendingUpdate::Announce(meta) => {
@@ -956,6 +1017,17 @@ impl AnnounceKind {
 	}
 }
 
+/// What an [`AnnounceConsumer`] yields.
+#[derive(Clone, Debug)]
+pub enum AnnounceEvent {
+	/// A route was announced, re-priced, or retracted.
+	Update(AnnounceUpdate),
+	/// Every route live when the cursor subscribed has been delivered; what
+	/// follows is live changes. Yielded once, and only after each remote source
+	/// feeding the origin at subscribe time has landed its initial set.
+	Live,
+}
+
 /// A route announcement, update, or retraction, delivered by [`AnnounceConsumer`].
 ///
 /// An announcement is always a prefix, never a broadcast: it advertises that
@@ -1234,6 +1306,28 @@ impl Producer {
 				advertised: true,
 			},
 		)
+	}
+
+	/// Register a remote announce source that is replaying its initial set.
+	///
+	/// Every announce cursor registered while the guard lives withholds its
+	/// [`AnnounceEvent::Live`] marker until the guard drops, so a session drops it
+	/// once the peer's initial routes are in the table (or the session dies).
+	pub(crate) fn replaying(&self) -> Replaying {
+		let mut state = self.shared.lock();
+		let id = state.next_replaying;
+		state.next_replaying += 1;
+		state.replaying.insert(
+			id,
+			ReplayingSource {
+				scope: self.scope.allowed.clone(),
+				waiting: Vec::new(),
+			},
+		);
+		Replaying {
+			shared: self.shared.clone(),
+			id,
+		}
 	}
 
 	/// Advertise a route over `prefix` and serve the requests beneath it.
@@ -2533,9 +2627,22 @@ struct OriginState {
 	// a front dies with its watcher and a later request re-creates it.
 	fronts: WeakCache<FrontKey, RemoteFront>,
 
+	// Remote announce sources still replaying their initial set, keyed by
+	// [`Replaying`] id. Empty outside a session's first round trip.
+	replaying: HashMap<u64, ReplayingSource>,
+	next_replaying: u64,
+
 	// Set when the origin's driver dropped: new requests fail with `Closed`
 	// immediately and handlers observe the end instead of parking forever.
 	closed: bool,
+}
+
+/// A remote announce source still replaying its initial set.
+struct ReplayingSource {
+	/// The absolute patterns the source may announce under.
+	scope: Patterns,
+	/// The cursors registered while it replayed, each owed its landing.
+	waiting: Vec<ConsumerId>,
 }
 
 impl OriginState {
@@ -2659,6 +2766,19 @@ impl OriginState {
 		for p in &presented {
 			Self::sync_cursor(&self.routes, &mut cursor, p);
 		}
+		// The marker also waits on every source still replaying into this
+		// cursor's scope; with none, it follows the replay above.
+		let mut waiting = 0;
+		for source in self.replaying.values_mut() {
+			if source.scope.iter().any(|pattern| cursor.allowed.overlaps(pattern)) {
+				source.waiting.push(id);
+				waiting += 1;
+			}
+		}
+		if let Ok(mut state) = cursor.state.write() {
+			state.live = LiveState::Waiting(waiting + 1);
+			state.landed();
+		}
 		for head in &cursor.heads {
 			self.routes.add_cursor(head, id);
 		}
@@ -2699,6 +2819,66 @@ impl OriginState {
 			}
 		}
 		best
+	}
+}
+
+/// A remote announce source still replaying its initial set, from
+/// [`Producer::replaying`]. Drop it once the set has landed.
+pub(crate) struct Replaying {
+	shared: kio::Shared<OriginState>,
+	id: u64,
+}
+
+impl Drop for Replaying {
+	fn drop(&mut self) {
+		let mut state = self.shared.lock();
+		let Some(source) = state.replaying.remove(&self.id) else {
+			return;
+		};
+		for id in source.waiting {
+			// A cursor dropped since registering is simply gone.
+			if let Some(cursor) = state.cursors.get(&id)
+				&& let Ok(mut cursor) = cursor.state.write()
+			{
+				cursor.landed();
+			}
+		}
+	}
+}
+
+/// When a [`Replaying`] source has landed, for wires that never say where the
+/// initial set ends (lite-03/04, moq-transport): once its stream goes quiet.
+///
+/// A peer writes its whole set back to back, so the first announcement gets a
+/// round trip's grace and each one after it only has to beat its siblings.
+pub(crate) struct Quiet {
+	deadline: crate::runtime::Deadline<Clock>,
+	clock: Clock,
+}
+
+impl Quiet {
+	/// How long the stream may stay silent before its first announcement.
+	const FIRST: Duration = Duration::from_millis(500);
+	/// How long the stream may stay silent between announcements.
+	const GAP: Duration = Duration::from_millis(30);
+
+	/// Start counting from now.
+	pub(crate) fn new(clock: &Clock) -> Self {
+		Self {
+			deadline: crate::runtime::Deadline::after(clock, Self::FIRST),
+			clock: clock.clone(),
+		}
+	}
+
+	/// An announcement arrived: the set is still landing.
+	pub(crate) fn heard(&mut self) {
+		let now = crate::runtime::Timers::now(&self.clock);
+		self.deadline.set(now.checked_add(Self::GAP));
+	}
+
+	/// Ready once the stream has gone quiet.
+	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		self.deadline.poll(waiter)
 	}
 }
 
@@ -3217,7 +3397,9 @@ impl Consumer {
 		// forwarding, so it must not drive the announce guards.
 		let mut announced = consumer.untagged().announced();
 		loop {
-			let update = announced.next().await?;
+			let AnnounceEvent::Update(update) = announced.next().await? else {
+				continue;
+			};
 			if update.kind.is_active() && path.has_prefix(&update.prefix) {
 				return Some(update.route);
 			}
@@ -3481,7 +3663,10 @@ impl AnnounceConsumer {
 	}
 
 	/// Drive the egress announce guards for one update.
-	fn hand_out(&mut self, update: AnnounceUpdate) -> AnnounceUpdate {
+	fn hand_out(&mut self, event: AnnounceEvent) -> AnnounceEvent {
+		let AnnounceEvent::Update(update) = &event else {
+			return event;
+		};
 		let absolute = self.root.join(&update.prefix).to_owned();
 		if update.kind.is_active() {
 			let scope = self.stats.egress(&absolute);
@@ -3491,40 +3676,39 @@ impl AnnounceConsumer {
 		} else {
 			self.guards.remove(&update.prefix);
 		}
-		update
+		event
 	}
 
 	/// Returns the next route announcement, update, or retraction, its prefix
-	/// relative to this cursor's root.
+	/// relative to this cursor's root, or the one [`AnnounceEvent::Live`] marker.
 	///
-	/// A retraction is only delivered for a previously announced prefix, and a
+	/// The routes live at subscribe time come first, then the marker, then live
+	/// changes, so a caller listing what is live stops at the marker. A
+	/// retraction is only delivered for a previously announced prefix, and a
 	/// repeated announcement for the same prefix is a metadata update. Returns
 	/// None if the cursor is closed. The consumer is also a [`futures::Stream`]
-	/// of the same updates.
-	pub async fn next(&mut self) -> Option<AnnounceUpdate> {
+	/// of the same events.
+	pub async fn next(&mut self) -> Option<AnnounceEvent> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	/// Poll for the next update, without blocking.
+	/// Poll for the next event, without blocking.
 	///
-	/// Returns `Poll::Ready(Some(_))` for an update, `Poll::Ready(None)` if the
+	/// Returns `Poll::Ready(Some(_))` for an event, `Poll::Ready(None)` if the
 	/// cursor is closed, or `Poll::Pending` after registering `waiter` to be
-	/// notified when the next update arrives.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceUpdate>> {
-		let update = {
-			let mut state = match ready!(self.state.poll(waiter, |state| {
-				if state.pending.is_empty() && !state.ended {
-					Poll::Pending
-				} else {
-					Poll::Ready(())
-				}
+	/// notified when the next event arrives.
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceEvent>> {
+		let event = {
+			let mut state = match ready!(self.state.poll(waiter, |state| match state.ready() {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
 			})) {
 				Ok(state) => state,
 				// Closed: discard the Ref so its MutexGuard doesn't escape this call.
 				Err(_) => return Poll::Ready(None),
 			};
 			match state.take() {
-				Some(update) => update,
+				Some(event) => event,
 				None => {
 					// Ended by the origin's teardown, pending updates already
 					// drained; close the channel so every closure signal agrees.
@@ -3533,16 +3717,16 @@ impl AnnounceConsumer {
 				}
 			}
 		};
-		Poll::Ready(Some(self.hand_out(update)))
+		Poll::Ready(Some(self.hand_out(event)))
 	}
 
-	/// Returns the next update without blocking.
+	/// Returns the next event without blocking.
 	///
-	/// Returns None if there is no update available; NOT because the cursor is closed.
+	/// Returns None if there is no event available; NOT because the cursor is closed.
 	/// Use [`Self::is_closed`] to check if the cursor is closed.
-	pub fn try_next(&mut self) -> Option<AnnounceUpdate> {
-		let update = self.state.write().ok()?.take()?;
-		Some(self.hand_out(update))
+	pub fn try_next(&mut self) -> Option<AnnounceEvent> {
+		let event = self.state.write().ok()?.take()?;
+		Some(self.hand_out(event))
 	}
 
 	/// Returns true if the cursor is closed (no more updates will arrive).
@@ -3563,7 +3747,7 @@ impl AnnounceConsumer {
 }
 
 impl futures::Stream for AnnounceConsumer {
-	type Item = AnnounceUpdate;
+	type Item = AnnounceEvent;
 
 	fn poll_next(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Option<Self::Item>> {
 		let this = self.get_mut();
@@ -3589,19 +3773,41 @@ use futures::FutureExt;
 #[cfg(test)]
 #[allow(missing_docs)] // test-only assertion helpers
 impl AnnounceConsumer {
+	/// The next update without blocking, skipping the [`AnnounceEvent::Live`]
+	/// marker: these helpers pin routes, and the marker has its own tests.
+	fn next_update_now(&mut self) -> Option<Option<AnnounceUpdate>> {
+		loop {
+			match self.next().now_or_never()? {
+				Some(AnnounceEvent::Live) => continue,
+				Some(AnnounceEvent::Update(update)) => return Some(Some(update)),
+				None => return Some(None),
+			}
+		}
+	}
+
 	/// The next update must be an active route at `expected`; returns it.
 	pub fn assert_next_active(&mut self, expected: impl AsPath) -> Route {
 		let expected = expected.as_path();
-		let update = self.next().now_or_never().expect("next blocked").expect("no next");
+		let update = self.next_update_now().expect("next blocked").expect("no next");
 		assert_eq!(update.prefix, expected, "wrong prefix");
 		assert!(update.kind.is_active(), "should be an active route");
 		update.route
 	}
 
+	/// The `try_next` counterpart of [`Self::next_update_now`].
+	fn try_next_update(&mut self) -> Option<AnnounceUpdate> {
+		loop {
+			match self.try_next()? {
+				AnnounceEvent::Live => continue,
+				AnnounceEvent::Update(update) => return Some(update),
+			}
+		}
+	}
+
 	/// The `try_next` counterpart of [`Self::assert_next_active`].
 	pub fn assert_try_next_active(&mut self, expected: impl AsPath) -> Route {
 		let expected = expected.as_path();
-		let update = self.try_next().expect("no next");
+		let update = self.try_next_update().expect("no next");
 		assert_eq!(update.prefix, expected, "wrong prefix");
 		assert!(update.kind.is_active(), "should be an active route");
 		update.route
@@ -3610,14 +3816,22 @@ impl AnnounceConsumer {
 	/// The next update must be a retraction at `expected`.
 	pub fn assert_next_ended(&mut self, expected: impl AsPath) {
 		let expected = expected.as_path();
-		let update = self.next().now_or_never().expect("next blocked").expect("no next");
+		let update = self.next_update_now().expect("next blocked").expect("no next");
 		assert_eq!(update.prefix, expected, "wrong prefix");
 		assert_eq!(update.kind, AnnounceKind::Retracted, "should be a retraction");
 	}
 
 	pub fn assert_next_wait(&mut self) {
-		if let Some(res) = self.next().now_or_never() {
+		if let Some(res) = self.next_update_now() {
 			panic!("next should block: got {:?}", res.map(|u| u.prefix));
+		}
+	}
+
+	/// The next event must be the [`AnnounceEvent::Live`] marker.
+	pub fn assert_next_live(&mut self) {
+		match self.next().now_or_never() {
+			Some(Some(AnnounceEvent::Live)) => {}
+			other => panic!("expected the live marker: got {other:?}"),
 		}
 	}
 }
@@ -3749,6 +3963,80 @@ mod tests {
 		drop(announcement);
 		announced.assert_next_ended("room/alice");
 		announced.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn an_empty_origin_is_live_at_once() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().announced();
+		announced.assert_next_live();
+		announced.assert_next_wait();
+
+		// Later routes are live changes; the marker never repeats.
+		let _alice = producer.announce("alice", Route::default()).unwrap();
+		announced.assert_next_active("alice");
+		assert!(announced.next().now_or_never().is_none());
+	}
+
+	#[tokio::test]
+	async fn live_follows_the_replayed_routes() {
+		let producer = origin(1).produce();
+		let _b = producer.announce("b", Route::default()).unwrap();
+		let _c = producer.announce("c", Route::default()).unwrap();
+		let mut announced = producer.consume().announced();
+
+		// A route arriving before the replay drains may come either side of the
+		// marker, but never pushes it past the replay.
+		let _a = producer.announce("a", Route::default()).unwrap();
+		let mut seen = Vec::new();
+		loop {
+			match announced.next().now_or_never().expect("blocked").expect("closed") {
+				AnnounceEvent::Live => break,
+				AnnounceEvent::Update(update) => seen.push(update.prefix.to_string()),
+			}
+		}
+		assert!(
+			seen.contains(&"b".to_string()) && seen.contains(&"c".to_string()),
+			"{seen:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn a_replayed_route_retracted_before_delivery_does_not_hold_live() {
+		let producer = origin(1).produce();
+		let alice = producer.announce("alice", Route::default()).unwrap();
+		let mut announced = producer.consume().announced();
+		drop(alice);
+		announced.assert_next_live();
+		announced.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn a_replaying_source_withholds_live_until_it_lands() {
+		let producer = origin(1).produce();
+		let room = producer.scope("", &scopes(&["room"])).unwrap();
+		let replaying = room.replaying();
+
+		let mut announced = producer.consume().announced();
+		// Out of the source's scope: nothing to wait for.
+		let mut elsewhere = producer.consume().scope("", &scopes(&["other"])).unwrap().announced();
+		elsewhere.assert_next_live();
+
+		// Routes the source lands arrive before the marker.
+		let _alice = room.announce("room/alice", Route::default()).unwrap();
+		announced.assert_next_active("room/alice");
+		assert!(
+			announced.next().now_or_never().is_none(),
+			"live before the source landed"
+		);
+
+		drop(replaying);
+		announced.assert_next_live();
+
+		// A cursor registered after the source landed does not wait on it.
+		let mut later = producer.consume().announced();
+		later.assert_next_active("room/alice");
+		later.assert_next_live();
 	}
 
 	#[tokio::test]
@@ -4113,17 +4401,17 @@ mod tests {
 			.unwrap();
 		let mut announced = consumer.announced();
 
-		let first = announced.next().now_or_never().expect("next").expect("announce");
+		let first = announced.next_update_now().expect("next").expect("announce");
 		assert_eq!(first.prefix.as_str(), "");
 		assert_eq!(first.kind, AnnounceKind::Announced);
 		assert_eq!(first.captures, Some(Vec::new()));
 
 		drop(exact);
-		let retracted = announced.next().now_or_never().expect("next").expect("retract");
+		let retracted = announced.next_update_now().expect("next").expect("retract");
 		assert_eq!(retracted.prefix.as_str(), "");
 		assert_eq!(retracted.kind, AnnounceKind::Retracted);
 		assert_eq!(retracted.captures, Some(Vec::new()));
-		let replacement = announced.next().now_or_never().expect("next").expect("announce");
+		let replacement = announced.next_update_now().expect("next").expect("announce");
 		assert_eq!(replacement.prefix.as_str(), "");
 		assert_eq!(replacement.kind, AnnounceKind::Announced);
 		assert_eq!(replacement.captures, None);
@@ -4183,14 +4471,14 @@ mod tests {
 		let second = producer.dynamic("live", Route::default().with_cost(1)).unwrap();
 
 		let mut announced = producer.consume().announced();
-		let update = announced.next().now_or_never().expect("next").expect("no next");
+		let update = announced.next_update_now().expect("next").expect("no next");
 		assert_eq!(update.prefix.as_str(), "live");
 		assert_eq!(update.kind, AnnounceKind::Announced);
 		assert_eq!(update.route.cost, Cost::new(1));
 		announced.assert_next_wait();
 
 		drop(second);
-		let update = announced.next().now_or_never().expect("next").expect("no next");
+		let update = announced.next_update_now().expect("next").expect("no next");
 		assert_eq!(update.prefix.as_str(), "live");
 		assert_eq!(update.kind, AnnounceKind::Updated);
 		assert_eq!(update.route.cost, Cost::new(3));
@@ -4288,18 +4576,18 @@ mod tests {
 		let producer = origin(1).produce();
 		let server = producer.dynamic("live", Route::default()).unwrap();
 		let mut announced = producer.consume().announced();
-		let update = StreamExt::next(&mut announced)
-			.now_or_never()
-			.expect("next")
-			.expect("no next");
+		let mut next = || StreamExt::next(&mut announced).now_or_never();
+		let Some(Some(AnnounceEvent::Update(update))) = next() else {
+			panic!("expected the replayed route");
+		};
 		assert_eq!(update.prefix.as_str(), "live");
 		assert_eq!(update.kind, AnnounceKind::Announced);
-		assert!(StreamExt::next(&mut announced).now_or_never().is_none());
+		assert!(matches!(next(), Some(Some(AnnounceEvent::Live))));
+		assert!(next().is_none());
 		drop(server);
-		let update = StreamExt::next(&mut announced)
-			.now_or_never()
-			.expect("next")
-			.expect("no next");
+		let Some(Some(AnnounceEvent::Update(update))) = next() else {
+			panic!("expected the retraction");
+		};
 		assert_eq!(update.kind, AnnounceKind::Retracted);
 	}
 
@@ -5703,7 +5991,7 @@ mod tests {
 
 		let alice = producer.create_broadcast("room/alice/chat").unwrap();
 		alice.announce(Route::default()).unwrap();
-		let update = announced.try_next().expect("alice's chat");
+		let update = announced.try_next_update().expect("alice's chat");
 		assert_eq!(update.prefix.as_str(), "room/alice/chat");
 		assert_eq!(update.captures, Some(vec!["alice".parse::<Pattern>().unwrap()]));
 
@@ -5712,7 +6000,7 @@ mod tests {
 		announced.assert_next_wait();
 
 		let broad = producer.announce("room", Route::default()).unwrap();
-		let update = announced.try_next().expect("overlapping broad route");
+		let update = announced.try_next_update().expect("overlapping broad route");
 		assert_eq!(update.prefix.as_str(), "room");
 		assert_eq!(update.captures, None, "an overlap does not pin the wildcard");
 
@@ -5729,7 +6017,7 @@ mod tests {
 		local.announce(Route::default()).unwrap();
 
 		let mut announced = producer.consume().announced();
-		let update = announced.try_next().expect("one winning route");
+		let update = announced.try_next_update().expect("one winning route");
 		assert_eq!(update.prefix.as_str(), "room/alice");
 		assert_eq!(update.route.cost, Cost::default());
 		announced.assert_next_wait();

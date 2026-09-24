@@ -43,7 +43,14 @@ async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()> {
 	// Wait for a route to be announced, then resolve the broadcast at its path.
 	// The convention is that a publisher announces each broadcast's exact path.
-	let update = consumer.announced().next().await.context("origin closed")?;
+	let mut announced = consumer.announced();
+	let update = loop {
+		match announced.next().await.context("origin closed")? {
+			moq_net::announce::Event::Update(update) => break update,
+			// Nothing is live yet: keep waiting for the first route.
+			moq_net::announce::Event::Live => continue,
+		}
+	};
 	anyhow::ensure!(update.kind.is_active(), "route retracted: {}", update.prefix);
 	let path = update.prefix;
 
