@@ -14,10 +14,26 @@ use crate::{Error, Id, NonZeroSlab, State, ffi};
 struct TaskEntry {
 	close: Option<oneshot::Sender<()>>,
 	callback: ffi::OnStatus,
-	/// Reads live connection stats, reporting `None` while reconnecting.
-	stats: moq_tokio::connection::Monitor,
-	/// One allocator for the session. Every `moq_session_bandwidth` handle clones
-	/// it, so they share one reservation registry.
+	link: Link,
+}
+
+/// What backs a session handle.
+enum Link {
+	/// A dialed connection: a loop that redials, so it is offline between connections.
+	Dialed {
+		/// Reads live connection stats, reporting `None` while reconnecting.
+		monitor: moq_tokio::connection::Monitor,
+		/// One allocator for the session. Every `moq_session_bandwidth` handle clones
+		/// it, so they share one reservation registry.
+		bandwidth: moq_net::bandwidth::Allocator,
+	},
+	/// A server-accepted session: a single transport, `None` until SETUP completes.
+	Accepted(Option<Accepted>),
+}
+
+struct Accepted {
+	session: moq_net::Session,
+	/// Shared by every `moq_session_bandwidth` handle, like [`Link::Dialed`]'s.
 	bandwidth: moq_net::bandwidth::Allocator,
 }
 
@@ -84,15 +100,16 @@ impl Session {
 		// Build the reconnect loop up front so we can grab a monitor for it
 		// before moving it into the spawned task.
 		let reconnect = client.connect(url);
-		let stats = reconnect.monitor();
-		let bandwidth = moq_net::bandwidth::Allocator::new(reconnect.send_bandwidth());
+		let link = Link::Dialed {
+			monitor: reconnect.monitor(),
+			bandwidth: moq_net::bandwidth::Allocator::new(reconnect.send_bandwidth()),
+		};
 
 		let closed = oneshot::channel();
 		let entry = TaskEntry {
 			close: Some(closed.0),
 			callback,
-			stats,
-			bandwidth,
+			link,
 		};
 		let id = self.task.insert(Some(entry))?;
 
@@ -120,43 +137,115 @@ impl Session {
 		Ok(id)
 	}
 
-	/// The session's bandwidth allocator. Clones share one reservation registry.
-	pub fn bandwidth(&self, id: Id) -> Result<moq_net::bandwidth::Allocator, Error> {
-		Ok(self
+	/// Complete SETUP for an incoming session, reporting `1` once established.
+	pub fn accept(
+		&mut self,
+		request: moq_tokio::server::Request,
+		publish: Option<moq_net::origin::Producer>,
+		consume: Option<moq_net::origin::Producer>,
+		callback: ffi::OnStatus,
+	) -> Result<Id, Error> {
+		let mut request = request;
+		if let Some(publish) = &publish {
+			request = request.with_publisher(publish);
+		}
+		if let Some(consume) = &consume {
+			request = request.with_subscriber(consume.clone());
+		}
+
+		let closed = oneshot::channel();
+		let entry = TaskEntry {
+			close: Some(closed.0),
+			callback,
+			link: Link::Accepted(None),
+		};
+		let id = self.task.insert(Some(entry))?;
+
+		tokio::spawn(async move {
+			// Keep the origin producers alive for the lifetime of the session.
+			let _publish = publish;
+			let _consume = consume;
+
+			let res = tokio::select! {
+				_ = closed.1 => Ok(()),
+				res = Self::serve(id, callback, request) => res,
+			};
+
+			let entry = State::lock().session.task.remove(id).flatten();
+			if let Some(entry) = entry {
+				// Close the transport now rather than whenever the last clone drops.
+				if let Link::Accepted(Some(accepted)) = &entry.link {
+					accepted.session.abort(moq_net::Error::Cancel);
+				}
+				entry.callback.call(res);
+			}
+		});
+
+		Ok(id)
+	}
+
+	/// Establish an accepted session, publish it to the entry, and wait for it to close.
+	async fn serve(id: Id, callback: ffi::OnStatus, request: moq_tokio::server::Request) -> Result<(), Error> {
+		let session = request.ok().await.map_err(map_connect_error)?;
+		let bandwidth = session
+			.send_bandwidth()
+			.map(moq_net::bandwidth::Allocator::new)
+			.unwrap_or_else(moq_net::bandwidth::Allocator::unlimited);
+
+		if let Some(entry) = State::lock().session.task.get_mut(id).and_then(|entry| entry.as_mut()) {
+			entry.link = Link::Accepted(Some(Accepted {
+				session: session.clone(),
+				bandwidth,
+			}));
+		}
+
+		// A server-accepted session is a single transport, so it only ever reaches epoch 1.
+		callback.call(1);
+		Err(session.closed().await.into())
+	}
+
+	fn link(&self, id: Id) -> Result<&Link, Error> {
+		Ok(&self
 			.task
 			.get(id)
 			.and_then(|entry| entry.as_ref())
 			.ok_or(Error::SessionNotFound)?
-			.bandwidth
-			.clone())
+			.link)
+	}
+
+	/// The session's bandwidth allocator. Clones share one reservation registry.
+	///
+	/// Errors with [`Error::Offline`] for an accepted session still in SETUP.
+	pub fn bandwidth(&self, id: Id) -> Result<moq_net::bandwidth::Allocator, Error> {
+		match self.link(id)? {
+			Link::Dialed { bandwidth, .. } => Ok(bandwidth.clone()),
+			Link::Accepted(accepted) => Ok(accepted.as_ref().ok_or(Error::Offline)?.bandwidth.clone()),
+		}
 	}
 
 	/// Snapshot the current connection's stats.
 	///
 	/// Errors with [`Error::SessionNotFound`] if the handle is unknown, or [`Error::Offline`]
-	/// if the session is currently between connections (reconnecting).
+	/// if the session has no live connection (reconnecting, or still in SETUP).
 	pub fn stats(&self, id: Id) -> Result<moq_net::session::Stats, Error> {
-		self.task
-			.get(id)
-			.and_then(|entry| entry.as_ref())
-			.ok_or(Error::SessionNotFound)?
-			.stats
-			.stats()
-			.ok_or(Error::Offline)
+		Ok(self.snapshot(id)?.0)
 	}
 
 	/// Statistics and protocol from the same live connection.
 	///
 	/// Errors with [`Error::SessionNotFound`] if the handle is unknown, or [`Error::Offline`]
-	/// if the session is currently between connections (reconnecting).
-	pub fn snapshot(&self, id: Id) -> Result<moq_tokio::connection::Snapshot, Error> {
-		self.task
-			.get(id)
-			.and_then(|entry| entry.as_ref())
-			.ok_or(Error::SessionNotFound)?
-			.stats
-			.snapshot()
-			.ok_or(Error::Offline)
+	/// if the session has no live connection (reconnecting, or still in SETUP).
+	pub fn snapshot(&self, id: Id) -> Result<(moq_net::session::Stats, moq_net::Version), Error> {
+		match self.link(id)? {
+			Link::Dialed { monitor, .. } => {
+				let snapshot = monitor.snapshot().ok_or(Error::Offline)?;
+				Ok((snapshot.stats, snapshot.version))
+			}
+			Link::Accepted(accepted) => {
+				let session = &accepted.as_ref().ok_or(Error::Offline)?.session;
+				Ok((session.stats(), session.version()))
+			}
+		}
 	}
 
 	/// Forward connection epochs to the status callback until the reconnect loop stops.
