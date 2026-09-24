@@ -4171,7 +4171,7 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.0.27"
+version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
  "bytes",
@@ -4584,7 +4584,7 @@ dependencies = [
 
 [[package]]
 name = "moq-nvenc"
-version = "0.0.6"
+version = "0.1.0"
 dependencies = [
  "cudarc",
  "libloading 0.9.0",
@@ -4701,7 +4701,7 @@ dependencies = [
 
 [[package]]
 name = "moq-sock"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "core_affinity",
  "libc",
@@ -4798,7 +4798,7 @@ dependencies = [
 
 [[package]]
 name = "moq-transcode"
-version = "0.0.21"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4817,7 +4817,7 @@ dependencies = [
 
 [[package]]
 name = "moq-uring"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4851,7 +4851,7 @@ dependencies = [
 
 [[package]]
 name = "moq-v4l"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
  "libc",
@@ -4874,7 +4874,7 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.0.27"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "ash",
