@@ -95,6 +95,7 @@ class Server:
 
         async with Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
             broadcast = server.create_broadcast("live")
+            broadcast.announce()  # unannounced broadcasts are invisible
             await server.serve()
 
     Or hand-roll the accept loop if you need per-request control::

@@ -556,14 +556,16 @@ fn fnv_key(name: &str, origins: impl IntoIterator<Item = Hop>) -> u64 {
 
 /// Ordering key for a route entry covering one prefix. Lower wins: an identified
 /// chain (no 0) outranks an anonymous one regardless of cost, then the cheapest
-/// cost, then the shortest hop chain, then a deterministic hash of the prefix and
-/// chain so every node converges on the same winner, and finally the newest
-/// announcement, so a reconnect under an otherwise identical route wins the
-/// moment it lands instead of after the transport retires the old session.
-fn route_order(prefix: &Path, entry: &RouteEntry) -> (bool, Cost, usize, u64, Reverse<u64>) {
+/// cost, then a broadcast published on this origin (it serves what is here, not a
+/// claim that has to ask), then the shortest hop chain, then a deterministic hash
+/// of the prefix and chain so every node converges on the same winner, and finally
+/// the newest announcement, so a reconnect under an otherwise identical route wins
+/// the moment it lands instead of after the transport retires the old session.
+fn route_order(prefix: &Path, entry: &RouteEntry) -> (bool, Cost, bool, usize, u64, Reverse<u64>) {
 	(
 		entry.is_anonymous(),
 		entry.cost,
+		!entry.local,
 		entry.hops.len(),
 		fnv_key(prefix.as_str(), entry.hops.iter().copied()),
 		Reverse(entry.id),
@@ -4223,6 +4225,26 @@ mod tests {
 
 		assert!(!first.is_closed(), "the old front must keep serving its readers");
 		assert!(!first.is_clone(&second), "the newcomer must not join the old front");
+	}
+
+	/// At equal cost the local broadcast wins even over a route with no hops of its
+	/// own, such as a later claim on this origin: locality is the tie-break after
+	/// cost, not the newest entry.
+	#[tokio::test]
+	async fn local_broadcast_wins_a_tie_with_a_hopless_route() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let _local = producer.publish("room/alice", Route::default()).unwrap();
+		let server = producer.dynamic("room/alice", Route::default()).unwrap();
+
+		// Were the claim to win, the request would park on its handler forever.
+		let resolved = tokio::time::timeout(Duration::from_secs(1), consumer.request_broadcast("room/alice"))
+			.await
+			.expect("the newer hopless route won the tie")
+			.expect("resolves");
+		assert_eq!(resolved.info().path.as_str(), "room/alice");
+		assert!(server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
 	}
 
 	/// At equal cost the local broadcast wins, since it has no hops.
