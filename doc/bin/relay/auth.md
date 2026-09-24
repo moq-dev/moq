@@ -41,9 +41,7 @@ received.
 **Grant.** `publish` and `subscribe` as pattern unions (`foo/**` is a subtree,
 `**` is everything, an empty list is nothing), `root` (optional; replaces the
 dialed path, which is how a slug aliases to a canonical id), `expires`
-(optional unix seconds; the session closes then, timed on the relay's
-monotonic clock from when the grant arrives, so a later wall-clock step does
-not move it), `revalidate` (optional
+(optional unix seconds; the session closes then), `revalidate` (optional
 seconds until the relay asks again), and `tier` (optional label handed to
 [stats](/bin/relay/config#stats)). A 2xx with a grant admits. A 401 or 403 refuses.
 Anything else at connect, a timeout, a 5xx, or an unparseable body, refuses and
