@@ -247,6 +247,8 @@ A receiver that has spent its retry, or has no other candidate, MUST refuse down
 Every other refusal, including an unrecognized code, is terminal.
 A receiver SHOULD NOT cache refusals.
 
+A relay MUST NOT advertise a namespace merely because it resolved it: the covering advertisement stays the only one until the publisher advertises the concrete namespace, which it SHOULD do once producing, so a later request finds the running content by its exact namespace instead of resolving a second producer.
+
 Two advertisements whose HOP_PATH begins with the same non-zero Hop ID come from the same publisher and carry interchangeable content: a receiver MAY hold them as redundant paths and fail an active subscription over to the survivor at a group boundary.
 If the first entries differ, or either is 0, they are distinct publishers reusing a namespace ({{publishers}}).
 
@@ -263,7 +265,8 @@ One rule for advertisement and dispatch keeps advertised paths truthful and prev
 {{moqt}} lets several publishers advertise one namespace and leaves to the relay how it serves a SUBSCRIBE among them.
 Under this extension an advertisement is a path, so a session advertises a namespace at most once, a relay forwards only the best path it knows ({{selection}}), and a subscription is served from one source at a time.
 
-A receiver MAY still hold paths to several publishers of one namespace and choose between them as it sees fit: serve from the cheapest and move to the next when it fails or refuses the request, or try each in cost order until one accepts.
+A receiver MAY still hold paths to several publishers of one namespace and choose between them as it sees fit: serve from the cheapest and move to the next when it fails.
+A refusal moves to another publisher only as {{selection}} allows: once, and only for NO_CAPACITY.
 The advertised path and the served source stay the same publisher: a relay that moves to another MUST withdraw its advertisement and advertise the new path ({{updating}}), so the first Hop ID downstream always names the publisher whose Objects flow.
 Moving between distinct publishers is a discontinuity: their groups are not one sequence, so a subscriber sees an unrelated Location, and a FETCH that succeeds against one may fail against the other.
 
@@ -325,7 +328,8 @@ This document requests one registration in the "REQUEST_ERROR Codes" registry.
 # Appendix A: Changelog
 
 ## moq-cluster-02
-- Defined request resolution against the longest covering prefix and the NO_CAPACITY refusal with its single re-resolution.
+- Defined request resolution against the longest covering prefix and the NO_CAPACITY refusal with its single re-resolution; any other refusal is terminal, including between several publishers of one namespace.
+- A relay does not advertise a namespace because it resolved it; the publisher advertises the concrete namespace once producing.
 
 ## moq-cluster-01
 - Assigned identities are local selection state and MUST NOT be forwarded.
