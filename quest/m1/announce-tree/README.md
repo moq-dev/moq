@@ -47,8 +47,8 @@ plus a backup.
 
 ### Failover
 
-Every relay holds a backup that avoids its parent. When a link or relay fails,
-the relay next to it promotes its backup and sends downstream an in-place
+A relay with a node-protecting backup survives its parent failing: the relay
+next to a failed link or relay promotes its backup and sends downstream an in-place
 update (lite-06 `ANNOUNCE_RESTART`), not an end, so downstream relays never
 reconverge. A relay with only a link-protecting backup, or none, loses the
 route when its parent relay fails, and reconverges when the topology digest

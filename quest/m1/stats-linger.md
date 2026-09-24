@@ -16,8 +16,8 @@ drain one minute after that. The linger is elapsed time, not ticks, so it holds
 at any `--stats-interval` and after a stalled ticker. Keep it a constant;
 depth 0 is unchanged.
 
-Test it on paused tokio time, at two intervals: a session that closes leaves its group announced through
-the linger, a session returning within it keeps the same announcement with no
+Test it on paused tokio time, at two intervals: a session that closes leaves
+its group announced through the linger, a session returning within it keeps the same announcement with no
 end or start, and the group is withdrawn once the linger passes.
 
 ## Related
