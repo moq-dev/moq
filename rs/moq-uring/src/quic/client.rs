@@ -50,6 +50,9 @@ impl Config {
 
 /// Dial [`Config::peer`] over `socket`, driving the handshake to completion.
 ///
+/// Resolves once the handshake's final flight is staged on the socket, so the
+/// worker may stop right after without stranding the peer.
+///
 /// Shorthand for a dial-only [`Endpoint`](super::Endpoint) and one
 /// [`connect`](super::Endpoint::connect) through it. The connection's driver
 /// runs as a task on the worker that adopted `socket`, so the returned

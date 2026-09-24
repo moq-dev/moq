@@ -39,6 +39,12 @@ pub(crate) struct State {
 	/// fresh egress reaches the wire.
 	driver: kio::WaiterList,
 
+	/// noq reported the handshake complete, which it does before this side's
+	/// final flight is sent.
+	connected: bool,
+	/// The handshake is complete and its final flight staged: congestion
+	/// control or pacing can hold part of that flight back, and a peer that
+	/// never receives it never finishes its handshake.
 	established: bool,
 	establish_waiters: kio::WaiterList,
 
@@ -90,6 +96,7 @@ impl State {
 	fn new() -> Self {
 		Self {
 			driver: kio::WaiterList::new(),
+			connected: false,
 			established: false,
 			establish_waiters: kio::WaiterList::new(),
 			accept_bi_waiters: kio::WaiterList::new(),
@@ -382,6 +389,10 @@ pub(crate) async fn establish(shared: Shared) -> Result<Connection, Error> {
 		}
 		if let Some(err) = &state.closed {
 			return Poll::Ready(Err(err.clone()));
+		}
+		// Nothing will ever stage the rest of the handshake.
+		if shared.owner.handle().is_none() {
+			return Poll::Ready(Err(Error::Io(crate::shared::Shared::gone_error().to_string())));
 		}
 		waiter.register(&mut state.establish_waiters);
 		Poll::Pending
@@ -680,6 +691,7 @@ impl Driver {
 				self.shared.state.borrow_mut().fail(err);
 				return Poll::Ready(());
 			}
+			self.publish_established();
 			self.publish_close();
 
 			// Arm, *then* poll: the poll is what registers the waiter, so
@@ -725,10 +737,7 @@ impl Driver {
 
 			let mut state = self.shared.state.borrow_mut();
 			match event {
-				moq_noq_proto::Event::Connected => {
-					state.established = true;
-					state.establish_waiters.wake();
-				}
+				moq_noq_proto::Event::Connected => state.connected = true,
 				moq_noq_proto::Event::ConnectionLost { reason } => state.fail(reason.into()),
 				moq_noq_proto::Event::DatagramReceived => state.datagram_recv_waiters.wake(),
 				moq_noq_proto::Event::DatagramsUnblocked => state.datagram_send_waiters.wake(),
@@ -739,6 +748,18 @@ impl Driver {
 				| moq_noq_proto::Event::NatTraversal(_) => {}
 			}
 		}
+	}
+
+	/// Hand the connection over once the handshake is complete and the flush
+	/// above has staged all of its final flight, so a caller that stops the
+	/// worker the moment the handshake resolves strands no peer.
+	fn publish_established(&mut self) {
+		let mut state = self.shared.state.borrow_mut();
+		if !state.connected || state.established || self.shared.conn.borrow().has_pending_handshake_data() {
+			return;
+		}
+		state.established = true;
+		state.establish_waiters.wake();
 	}
 
 	/// Publish the terminal error for a close this side asked for.

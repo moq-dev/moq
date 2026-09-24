@@ -152,6 +152,10 @@ impl Endpoint {
 
 	/// Dial [`Config::peer`](crate::quic::client::Config::peer) through this
 	/// endpoint's socket, driving the handshake to completion.
+	///
+	/// Resolves once the handshake's final flight is staged on the socket, so
+	/// the worker may stop right after without stranding the peer. A worker
+	/// that stops before then fails the dial.
 	pub async fn connect(&self, config: &crate::quic::client::Config) -> Result<Connection, Error> {
 		if let Some(err) = self.inner.closed() {
 			return Err(err);
