@@ -17,24 +17,27 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 
 ## Quests
 
+- [Play harness](/quest/m1/play-harness.md) - moq play's tune-in, rendition-switch, and drain logic runs in per-PR CI without a device
+- [Missing fetch group](/quest/m1/fetch-missing-group.md) - HTTP /fetch answers 404 and `moq fetch` fails cleanly for a group the track lacks
+- [Hidden broadcasts](/quest/m1/hidden-broadcasts.md) - announce discovery skips `.`-named paths unless a request opts in over lite-07 or an IETF parameter, so older clients (bar authenticated cluster peers during rollout) never see them
 - [Origin narrowing](/quest/m1/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
 - [Auth embedder](/quest/m1/auth-embedder.md) - the lease owns its re-check clock, a gateway session holds a lease, and `Cluster::admit` scopes and tags origins in one call
+- [Auth expiry clock](/quest/m1/auth-expiry-clock.md) - moq-auth and the relay hold one fixed expiry deadline and honour the same skew allowance
+- [Binding surface](/quest/m1/binding-surface.md) - moq-ffi, libmoq, and every wrapper expose the decode delay, route source, and connection timing
 - [Binding docs](/quest/m1/binding-docs.md) - every binding doc sample names a symbol that exists, checked nightly
-- [Go vanity docs](/quest/m1/go-vanity-docs.md) - the Go page names only `moq.dev/moq` again, reverting #3847
+- [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, audio, and video namespaces built from the handle below
+- [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
 - [Gateway embedding](/quest/m1/gateway-embed.md) - moq-hls, moq-rtmp, and moq-rtc expose the loop their binaries run to an in-process embedder
 - [Catalog consumer](/quest/m1/hang-catalog-consumer.md) - reading a catalog is one call in Rust and JS, and JS gains a timeline consumer
 - [Ingest source](/quest/m1/net-ingest-source.md) - an announce says whether the broadcast entered on this relay or a peer
-- [@moq/net additive](/quest/m1/js-net-additive.md) - a live-broadcasts getter, `Table.dynamic`, credential refresh before redial, inferred `share`
 - [Publisher clocks](/quest/m1/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
 - [Broadcast route](/quest/m1/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()
-- [io_uring handshake cancellation](/quest/m1/uring-handshake-cancel.md) - dropping a pending handshake releases its connection while the worker keeps running
 - [io_uring handshake flush](/quest/m1/uring-handshake-flush.md) - a dial resolves only once its last handshake flight is on the wire, never stranding the peer
 - [CLI inspection](/quest/m1/cli-inspect/README.md) - `moq ls` lists what is live and `moq fetch` reads a group over MoQ, and a guide shows how to inspect a relay
 - [JS caught up](/quest/m1/js-announce-caught-up.md) - @moq/net's announce consumer says when the initial set has landed, like Rust
 - [IETF announce count](/quest/m1/ietf-announce-count.md) - an opt-in moq-transport extension carries the replay count, so IETF announce consumers go live without a timer
 
 - [Jitter clock](/quest/m1/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes, fed by encoders only, and never decreases
-- [Capture denial](/quest/m1/browser-permission-qa.md) - moq-publish surfaces a refused camera or microphone instead of retrying forever, and recovers on grant
 - [Publisher audio unlock](/quest/m1/publish-audio-unlock.md) - the publisher's capture AudioContext is resumed on a gesture or the source is refused, so no silent audio track is announced
 - [IETF leftovers](/quest/m1/ietf-leftovers.md) - moq-net: the 0x21 priority property, a NOT_SUPPORTED reply to TRACK_STATUS, and the two FETCH refusal codes come from the registry
 - [FFI WebSocket fallback](/quest/m1/ffi-websocket-fallback.md) - moq-ffi and every wrapper can disable or delay the WebSocket fallback
@@ -112,11 +115,13 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Catalog warmup](/quest/m1/catalog-warmup.md) - `warmup` on video and audio renditions, in the catalog and the draft
 - [Audio warmup](/quest/m1/audio-warmup.md) - a viewer joining an Opus rendition mid-stream never hears the unconverged first 80 ms
 - [#3021](/quest/m1/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - GStreamer maps every pad onto one continuous broadcast clock across source restarts
-- [#2829](/quest/m1/2829-moq-export-ts-the-audio-video-interleave-is-decided-by.md) - moq export ts: the interleave is a media-time watermark bounded by `--max-age`, so two exporters render one broadcast in one order
+- [TS import re-anchor](/quest/m1/ts-import-reanchor.md) - moq import ts survives a content join, loop wrap, or flagged restart on every elementary stream, not only legacy audio
+- [Export linger](/quest/m1/export-linger.md) - every `moq export` waits `--linger` for a broadcast to return, and exits 0 on a clean end and 1 on a drop
+- [#2829](/quest/m1/2829-moq-export-ts-the-audio-video-interleave-is-decided-by.md) - moq export ts: the interleave is a media-time watermark bounded by `--max-age` and unchanged SI repeats sit on a media-time grid, so two exporters render one broadcast in one order
+- [TS byte schedule](/quest/m1/ts-export-byte-schedule.md) - moq export ts places PCRs and padding on the byte grid `mpegts.muxRate` implies, so a receiver can clock off arrival
 - [#3489](/quest/m1/3489-ts-import-stream-liveness.md) - moq import ts: every elementary stream reports its access units and how long it has been quiet
 - [SRT import stats](/quest/m1/srt-import-stats.md) - the SRT gateway reports the same per-stream counters instead of nothing
 - [Text availability](/quest/m1/text-schema.md) - a text track publishes its own coverage index instead of copying the media timeline
-- [SRT metadata parity](/quest/m1/srt-metadata.md) - the SRT publisher preserves MPEG-TS metadata byte-faithfully like the CLI importer
 - [ID3 catalog section](/quest/m1/id3.md) - timed ID3 as a first-class container-neutral catalog section
 - [fMP4 emsg](/quest/m1/emsg.md) - event messages survive fMP4 import, and the timed-metadata contract ID3, SCTE-35, and FLV script tags share is settled with them
 - [FLV script tags](/quest/m1/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import

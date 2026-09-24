@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 rust-version.workspace = true
 
@@ -76,6 +76,7 @@ harness = false
 name = "echo_noq"
 path = "benches/echo_noq.rs"
 harness = false
+required-features = ["noq"]
 
 [[bench]]
 name = "session_lite"

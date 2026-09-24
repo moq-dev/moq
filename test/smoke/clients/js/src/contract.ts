@@ -43,6 +43,14 @@ export type FixtureState = {
 	encodedFrames: number;
 };
 
+/** The camera publisher state mirrored onto its element for Playwright. */
+export type CaptureState = {
+	videoError?: string;
+	audioError?: string;
+	videoActive: boolean;
+	audioActive: boolean;
+};
+
 /** Rate the tone is generated and captured at. Stated rather than probed, so the catalog is fixed. */
 export const SAMPLE_RATE = 48000;
 
@@ -92,6 +100,12 @@ export function leakedPlayerStarted(before: Resources, now: Resources): boolean 
 export type Sample = {
 	/** Monotonic counter, so a driver can tell a fresh sample from a repeat of the last one. */
 	seq: number;
+	/** Whether the subscriber has resolved an announced broadcast. */
+	broadcastActive: boolean;
+	/** The subscriber's catalog state, which stays offline without an announcement. */
+	broadcastStatus: "offline" | "loading" | "live";
+	/** Whether this document has received user activation. */
+	userActivated: boolean;
 	/** `performance.now()` when the sample was taken. */
 	at: number;
 

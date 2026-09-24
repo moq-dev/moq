@@ -3,7 +3,7 @@
 // media-output and lifecycle checks) poll the state each role mirrors onto the DOM.
 import type MoqPublish from "@moq/publish/element";
 import type MoqWatch from "@moq/watch/element";
-import { FAULTS, type Fault, publish } from "./contract";
+import { type CaptureState, FAULTS, type Fault, publish, SAMPLE_MS } from "./contract";
 import { Fixture } from "./fixture";
 import { attach, watchResources } from "./probe";
 
@@ -27,6 +27,21 @@ if (role === "publish") {
 	// camera and microphone input. Audio is encoded lazily when a player asks.
 	el.setAttribute("source", "camera");
 	document.body.appendChild(el);
+	// Playwright reads the shared DOM, so mirror the public source state onto the element.
+	const sample = () => {
+		type CaptureSource = { out: { source: { peek(): unknown }; error?: { peek(): Error | undefined } } };
+		const video = el.sources.video.peek() as CaptureSource | undefined;
+		const audio = el.sources.audio.peek() as CaptureSource | undefined;
+		const state: CaptureState = {
+			videoError: video?.out.error?.peek()?.name,
+			audioError: audio?.out.error?.peek()?.name,
+			videoActive: video?.out.source.peek() !== undefined,
+			audioActive: audio?.out.source.peek() !== undefined,
+		};
+		el.dataset.smokeCapture = JSON.stringify(state);
+	};
+	sample();
+	self.setInterval(sample, SAMPLE_MS);
 } else if (role === "fixture") {
 	// The deterministic publisher. Needs no camera, no microphone, and no permissive launch flags:
 	// the picture and the tone are generated in the page. See fixture.ts.
@@ -54,6 +69,7 @@ if (role === "publish") {
 	const el = document.createElement("moq-watch") as MoqWatch;
 	el.setAttribute("url", url);
 	el.setAttribute("name", broadcast);
+	if (params.get("muted") === "true") el.setAttribute("muted", "");
 	// A render target is what makes <moq-watch> actually subscribe to and decode
 	// the video track. @moq/publish only encodes on subscriber demand, so without
 	// this the publisher never produces frames.

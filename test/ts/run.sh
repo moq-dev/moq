@@ -16,6 +16,7 @@
 #   ./run.sh --strict              # fail on broadcast-shape warnings too
 #   ./run.sh --with-eit            # add a synthetic EPG first, report which SI survived
 #   ./run.sh --live                # grade PCR release timing off the live pipe
+#   ./run.sh --pair                # two exporters of one broadcast, grade table anchoring
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
 # on the stream's own PCR clock, which is the right basis for the IRD model it
@@ -25,6 +26,13 @@
 # release timing and byte position alongside the values. Nightly runs this arm
 # (.github/workflows/nightly.yml); it is not a per-PR gate, because it needs a
 # real-time window to measure at all.
+#
+# `--pair` changes the rig rather than the analyzer: it subscribes twice to one
+# broadcast, the second joining late, and grades the two captures against each
+# other with table-anchor.py. One exporter cannot show whether a table's emission
+# points belong to the broadcast or to the process that happened to be running,
+# because there is nothing to disagree with -- so this is the only arm that can
+# see a cadence regression at all.
 set -euo pipefail
 
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -50,7 +58,16 @@ PROFILE="${TSC_PROFILE:-debug}"
 STRICT=""
 WITH_EIT="" # add a synthetic EPG to the source and report which SI survived
 LIVE=""     # grade the exporter's stdout as it arrives, rather than a capture
-PASSTHRU=() # forwarded to compliance.py (thresholds, --report-json, ...)
+PAIR=""     # subscribe twice and grade the two captures against each other
+# How far into the run the second subscriber joins. A late join is the point: two
+# exporters started together can share a cadence by starting together, which is
+# exactly the thing under test.
+PAIR_JOIN="${TSC_PAIR_JOIN:-5}"
+# Shortest overlap worth a verdict, in seconds. Below this the slower tables fall under
+# the analyzer's emission floor and go report-only, which reads as a pass.
+PAIR_MIN_OVERLAP="${TSC_PAIR_MIN_OVERLAP:-25}"
+DURATION_SET="" # so pair mode can raise the default without overriding an explicit --duration
+PASSTHRU=()     # forwarded to compliance.py (thresholds, --report-json, ...)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -64,6 +81,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --duration)
             DURATION="$2"
+            DURATION_SET=1
             shift 2
             ;;
         --bitrate)
@@ -90,12 +108,39 @@ while [[ $# -gt 0 ]]; do
             LIVE=1
             shift
             ;;
+        --pair)
+            PAIR=1
+            shift
+            ;;
+        --pair-join)
+            PAIR_JOIN="$2"
+            shift 2
+            ;;
         *)
             PASSTHRU+=("$1")
             shift
             ;;
     esac
 done
+
+if [[ -n "$PAIR" ]]; then
+    if [[ -n "$LIVE" ]]; then
+        echo "error: --live and --pair grade different things and cannot be combined" >&2
+        echo "  --live grades one exporter's release timing; --pair grades two exporters against each other" >&2
+        exit 1
+    fi
+    # The overlap, not the run, is what gets graded, and the default run is too short to
+    # produce one worth grading: at 20s with a 5s join the legs share 15s, which is about
+    # seven SDT emissions against a floor of eight, so the table this mode exists to check
+    # would quietly drop to report-only. Give pair mode its own default and check the
+    # arithmetic rather than letting a short window pass as a clean one.
+    [[ -n "$DURATION_SET" ]] || DURATION=45
+    if ((DURATION - PAIR_JOIN < PAIR_MIN_OVERLAP)); then
+        echo "error: --pair needs at least ${PAIR_MIN_OVERLAP}s of overlap; this run has $((DURATION - PAIR_JOIN))s" >&2
+        echo "  raise --duration above $((PAIR_JOIN + PAIR_MIN_OVERLAP)), or lower --pair-join" >&2
+        exit 1
+    fi
+fi
 
 URL="" # set once a port is reserved, below
 
@@ -165,6 +210,7 @@ MOQ="$TARGET_BASE/$PROFILE/moq"
 BROADCAST="tscompliance-$$-${RANDOM}.hang"
 SRC_TS="$HARNESS_RUN/source.ts"
 SUB_TS="$HARNESS_RUN/sub.ts"
+SUB_B_TS="$HARNESS_RUN/sub-b.ts"
 
 # Source TS: a real capture (preserves all PIDs/PSI) or a generated broadcast-like
 # clip (H.264 + AAC, one-second GOP, per-frame PES so audio interleaves evenly).
@@ -257,6 +303,17 @@ capture() {
         "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts >"$SUB_TS" 2>"$HARNESS_RUN/sub.log"
 }
 
+# shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
+capture_b() {
+    # Joining late is the point. Two exporters started together can agree on a
+    # cadence by having started together, which is the confound this arm exists to
+    # remove: a leg that joins mid-broadcast has to derive its emission points from
+    # the media, because it has no shared history to derive them from.
+    sleep "$PAIR_JOIN"
+    timeout -k 3 $((DURATION + 20)) \
+        "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts >"$SUB_B_TS" 2>"$HARNESS_RUN/sub-b.log"
+}
+
 if [[ -n "$LIVE" ]]; then
     echo "### grading subscriber output live (export ts | pcr-timing.py)"
     harness_spawn sub - grade_live
@@ -265,6 +322,11 @@ else
     harness_spawn sub - capture
 fi
 SUB_PID="$HARNESS_PID"
+if [[ -n "$PAIR" ]]; then
+    echo "### capturing a second subscriber, joining ${PAIR_JOIN}s late"
+    harness_spawn sub-b - capture_b
+    SUB_B_PID="$HARNESS_PID"
+fi
 sleep 1
 
 # Pace on the source PCR (real media time), not a fixed bitrate: a synthetic clip
@@ -351,6 +413,36 @@ if [[ ! -s "$SUB_TS" ]]; then
     echo "error: subscriber captured no data" >&2
     dump_logs
     exit 1
+fi
+
+# ── pair: the two captures are the measurement ──────────────────────────────
+if [[ -n "$PAIR" ]]; then
+    harness_reap "$SUB_B_PID"
+    if [[ ! -s "$SUB_B_TS" ]]; then
+        echo "error: the second subscriber captured no data" >&2
+        sed 's/^/  sub-b: /' "$HARNESS_RUN/sub-b.log" >&2 || true
+        dump_logs
+        exit 1
+    fi
+    echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') + $(wc -c <"$SUB_B_TS" | tr -d ' ') bytes -> comparing table anchors"
+    echo
+    if ! python3 "$DIR/table-anchor.py" "$SUB_TS" "$SUB_B_TS" $STRICT \
+        ${PASSTHRU[@]+"${PASSTHRU[@]}"}; then
+        echo >&2
+        echo "error: table anchor analysis failed (see round-trip logs below)" >&2
+        sed 's/^/  sub-b: /' "$HARNESS_RUN/sub-b.log" >&2 || true
+        dump_logs
+        exit 1
+    fi
+    # As in --live: a grader can only speak for what reached it, so a publisher that
+    # died mid-run must not be reported as a clean pair.
+    if [[ "$PUB_RC" -ne 0 ]]; then
+        echo >&2
+        echo "error: the publisher exited $PUB_RC; the graded pair is not a whole round-trip" >&2
+        dump_logs
+        exit 1
+    fi
+    exit 0
 fi
 
 if [[ -n "$CAPTURE_OUT" ]]; then
