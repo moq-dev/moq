@@ -4171,7 +4171,7 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.0.27"
+version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
  "bytes",
@@ -4584,7 +4584,7 @@ dependencies = [
 
 [[package]]
 name = "moq-nvenc"
-version = "0.0.6"
+version = "0.1.0"
 dependencies = [
  "cudarc",
  "libloading 0.9.0",
@@ -4701,7 +4701,7 @@ dependencies = [
 
 [[package]]
 name = "moq-sock"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "core_affinity",
  "libc",
@@ -4798,7 +4798,7 @@ dependencies = [
 
 [[package]]
 name = "moq-transcode"
-version = "0.0.21"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4851,7 +4851,7 @@ dependencies = [
 
 [[package]]
 name = "moq-v4l"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
  "libc",
@@ -4859,9 +4859,9 @@ dependencies = [
 
 [[package]]
 name = "moq-vaapi"
-version = "0.0.4"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "091df44de531fc6e5346da91f2dd7d1ebbb4a2e741ddadaf49aef017e659cb57"
+checksum = "a697143830ed57c5ce0e96016e845e0b097f607c536847c12890e3bd23ff4db9"
 dependencies = [
  "anyhow",
  "bindgen 0.70.1",
@@ -4874,7 +4874,7 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.0.27"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "ash",

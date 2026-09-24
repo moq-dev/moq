@@ -126,7 +126,7 @@ overlaps that scope; exact creates and requests must match it, so a broad
 route can advertise the wire-compatible prefix while excluded requests are
 refused locally. A disjoint route is `Unauthorized`.
 
-`origin.consume().announced()` yields `announce::Update` values: `path` is the
+`origin.consume().announced()` yields `announce::Update` values: `prefix` is the
 covered prefix relative to the consumer's root, `kind` is `Announced`,
 `Updated` (a reprice in place), or `Retracted`, `captures` reports what the
 most specific matching scope member's wildcards stood for when the prefix
