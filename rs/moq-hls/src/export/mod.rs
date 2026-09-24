@@ -11,9 +11,9 @@
 //! The same machinery serves two kinds of consumer:
 //!
 //! * the HTTP serve path (pull): [`Broadcaster::rendition`] /
-//!   [`Broadcaster::master_playlist`] / [`Broadcaster::manifest`] and the crate-internal
-//!   `Rendition::playlist` / `Rendition::segment`, rendered/fetched per request (that pull
-//!   surface is gated behind the `server` feature); and
+//!   [`Broadcaster::master_playlist`] / [`Broadcaster::manifest`] and
+//!   [`Rendition::playlist`] / [`Rendition::init`] / [`Rendition::segment`], rendered or
+//!   fetched per request, with or without the `server` feature's router; and
 //! * a recorder (push): the [`renditions::Consumer`] and [`segments::Consumer`] cursors, which
 //!   yield every rendition and every finalized segment in order, for mirroring a broadcast to
 //!   storage.
