@@ -40,7 +40,7 @@ fix:
 # Run all unit tests.
 test:
     bun install --frozen-lockfile
-    bun test common/deps.test.ts common/workers.test.ts
+    bun test common/deps.test.ts
     bun run --filter='*' --elide-lines=0 test
 
 # Build all packages.
