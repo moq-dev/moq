@@ -72,7 +72,8 @@ expiry, an expiry that leaves the union intact ends only that token, and
   an expired or invalid token is refused and nothing changes; a token with a
   different root is refused naming it; a token adding a prefix rebuilds the
   origin scope and the prefix is now solicited; withdrawing the only token
-  covering a prefix closes the session; an mTLS session refuses a token; a
+  covering a prefix resets that prefix's streams with `UNAUTHORIZED` and
+  the session stays connected; an mTLS session refuses a token; a
   proxy-mode outage on re-check keeps the token.
 
 Additive.

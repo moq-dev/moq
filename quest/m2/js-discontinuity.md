@@ -10,6 +10,11 @@ same name means a routine group close in Rust and a timeline break in JS.
 
 ## Plan
 
+[#4045](https://github.com/moq-dev/moq/pull/4045) deletes
+`quest/m1/js-publish-discontinuity.md`, since #3982 already put the marker
+in `cut()`; this rename is the only remaining JS work.
+
+
 In `js/hang/src/container/legacy.ts`, rename the public `cut(end?)` to
 `discontinuity()` (taking the same optional end) and keep the routine close
 private until a caller needs it public. Move `js/publish/src/video/encoder.ts`
