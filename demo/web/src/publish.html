@@ -20,8 +20,8 @@
 		<!-- Left: preview + player chrome. -->
 		<section>
 			<!--
-				announce="source": only advertise the broadcast once a source is picked,
-				so the watch inspector shows no phantom tile while idle.
+				announce="source": advertise only after the enabled source tracks are live,
+				so the watch inspector shows no tile while capture is idle or refused.
 
 				The preview renders into the <canvas>. With "Encoded preview" off it shows
 				the raw capture (preview="source"); on, it decodes a copy of the *encoded*

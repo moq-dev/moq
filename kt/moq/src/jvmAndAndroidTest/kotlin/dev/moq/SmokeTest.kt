@@ -190,7 +190,7 @@ class SmokeTest {
     /**
      * Video has the same Flow audio does. Decoding real frames needs an encoder
      * backend, so this pins the extension's shape; the decode itself is covered
-     * by the interop smoke tests.
+     * by the interop test (`just test interop`).
      */
     @Test
     fun `video consumer exposes a frames flow like audio does`() {

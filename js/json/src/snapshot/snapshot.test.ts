@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Group, Error as NetError, Time, Track } from "@moq/net";
+import { Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Producer } from "./producer.ts";
 
@@ -390,4 +390,15 @@ test("a compressed delta is gated on its encoded size, not its plaintext", async
 	const values: Value[] = [];
 	for await (const value of consumer) values.push(value);
 	expect(values[values.length - 1]).toEqual({ v: "x".repeat(Group.MAX_GROUP_CACHE_BYTES), q: "a" });
+});
+
+// A malformed or failed group must reach the caller; only an explicit retention gap is resumable.
+test("snapshot consumer propagates a non-gap frame failure", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer<Value>({ track: track.subscribe() });
+	const group = track.appendGroup();
+	group.writeFrame({ payload: new TextEncoder().encode('{"ok":true}'), timestamp: Time.Timestamp.now() });
+	expect(await consumer.next()).toEqual({ ok: true });
+	group.close(new NetError.Stream(StreamCode.Internal));
+	await expect(consumer.next()).rejects.toMatchObject({ code: StreamCode.Internal });
 });

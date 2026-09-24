@@ -1,7 +1,14 @@
-import type * as Moq from "@moq/net";
+import * as Moq from "@moq/net";
 
 import { Decoder } from "./decoder.ts";
 import type { Config as CodecConfig } from "./encoder.ts";
+
+const GAPS: Moq.StreamCode[] = [
+	Moq.StreamCode.TooFarBehind,
+	Moq.StreamCode.Old,
+	Moq.StreamCode.Evicted,
+	Moq.StreamCode.GroupTooLarge,
+];
 
 /**
  * Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
@@ -71,7 +78,8 @@ export class Consumer<T> {
 			let frame: Moq.Group.Frame | undefined;
 			try {
 				frame = await this.#group.readFrame();
-			} catch {
+			} catch (err) {
+				if (!(err instanceof Moq.Error.Stream && GAPS.includes(err.code))) throw err;
 				// The group was reset or we fell behind its eviction window. Resync from
 				// the next group, which begins with a fresh snapshot (frame 0), so no
 				// partial state is presented.

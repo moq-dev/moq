@@ -22,6 +22,11 @@ quests reach.
 
 The seven BBR correctness fixes follow the fork bootstrap. They are separate
 PRs, but one owner should work in the shared controller code at a time.
+Their controller-level regressions extend the shared test `Sim` in
+`bbr3/mod.rs` with only what each needs, rather than adding another
+simulation loop; a fix at the transport boundary still needs a transport
+test through the real callbacks. The existing loops stay, since the fork
+merges upstream weekly and a port would conflict.
 The [BBR release](/quest/m1/quic/bbr-release.md) delivers them without waiting
 for the remaining transport features. The
 [Google comparison](/quest/m2/quic-bbr-google.md) is a separate study.
@@ -54,6 +59,8 @@ This is a transport API change, not a MoQ wire change.
 - [Protect bandwidth samples during BBR ProbeRTT](/quest/m1/quic/bbr-probe-rtt.md) - intentionally reduced sending cannot masquerade as reduced capacity
 - [Preserve BBR state across a spurious loss episode](/quest/m1/quic/bbr-loss-undo.md) - consecutive losses preserve the original recovery snapshot
 - [Release BBR fixes](/quest/m1/quic/bbr-release.md) - publish and pin the corrected controller independently of later features
+- [Align BBR loss handling with draft-06](/quest/m1/quic/bbr-loss-parity.md) - losses use their own sample and undo re-enters ProbeUp through Refill
+- [Mark BBR starvation wherever the source runs dry](/quest/m1/quic/bbr-app-limited-edges.md) - partial polls count, local send caps do not, receiver credit is pinned
 - [Deliver the application close before io_uring teardown](/quest/m1/quic/uring-close.md) -
   the peer receives the final close when the client immediately stops its worker
 - [Measure ECN on the backbone](/quest/m1/quic/ecn-measure.md) - a written

@@ -74,7 +74,7 @@
     },
     "js/auth": {
       "name": "@moq/auth",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "bin": {
         "moq-auth": "./src/cli.ts",
       },
@@ -95,7 +95,7 @@
     },
     "js/binary": {
       "name": "@moq/binary",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
         "@moq/flate": "workspace:^",
         "@moq/net": "workspace:^",
@@ -137,7 +137,7 @@
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.4.3",
+      "version": "0.5.0",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.10.9",
@@ -161,7 +161,7 @@
     },
     "js/json": {
       "name": "@moq/json",
-      "version": "0.3.3",
+      "version": "0.4.0",
       "dependencies": {
         "@moq/flate": "workspace:^",
         "@moq/net": "workspace:^",
@@ -179,7 +179,7 @@
     },
     "js/loc": {
       "name": "@moq/loc",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "dependencies": {
         "@moq/net": "workspace:^",
       },
@@ -191,7 +191,7 @@
     },
     "js/moq-boy": {
       "name": "@moq/boy",
-      "version": "0.3.1",
+      "version": "0.4.0",
       "dependencies": {
         "@moq/json": "workspace:^",
         "@moq/net": "workspace:^",
@@ -212,7 +212,7 @@
     },
     "js/msf": {
       "name": "@moq/msf",
-      "version": "0.2.2",
+      "version": "0.3.0",
       "dependencies": {
         "@moq/net": "workspace:^",
         "@zod/mini": "^4.6.5",
@@ -225,7 +225,7 @@
     },
     "js/net": {
       "name": "@moq/net",
-      "version": "0.3.5",
+      "version": "0.4.0",
       "dependencies": {
         "@moq/pattern": "workspace:^",
         "@moq/qmux": "^0.3.3",
@@ -248,7 +248,7 @@
     },
     "js/pattern": {
       "name": "@moq/pattern",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "devDependencies": {
         "@types/bun": "^1.4.2",
         "rimraf": "^6.1.3",
@@ -257,7 +257,7 @@
     },
     "js/publish": {
       "name": "@moq/publish",
-      "version": "0.4.7",
+      "version": "0.5.0",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",
@@ -277,7 +277,7 @@
     },
     "js/room": {
       "name": "@moq/room",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",
@@ -297,7 +297,7 @@
     },
     "js/signals": {
       "name": "@moq/signals",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "devDependencies": {
         "@types/bun": "^1.4.2",
         "@types/react": "^19.3.0",
@@ -323,7 +323,7 @@
     },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.5.4",
+      "version": "0.6.0",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",
@@ -342,8 +342,8 @@
         "vite": "^8.3.0",
       },
     },
-    "test/smoke/clients/js": {
-      "name": "@moq/smoke-browser",
+    "test/interop/clients/js": {
+      "name": "@moq/interop-browser",
       "dependencies": {
         "@moq/net": "workspace:*",
         "@moq/publish": "workspace:*",
@@ -356,8 +356,8 @@
         "vite": "^8.3.0",
       },
     },
-    "test/smoke/clients/js-native": {
-      "name": "@moq/smoke-native",
+    "test/interop/clients/js-native": {
+      "name": "@moq/interop-native",
       "dependencies": {
         "@moq/hang": "workspace:*",
         "@moq/json": "workspace:*",
@@ -673,9 +673,9 @@
 
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 
-    "@moq/smoke-browser": ["@moq/smoke-browser@workspace:test/smoke/clients/js"],
+    "@moq/interop-browser": ["@moq/interop-browser@workspace:test/interop/clients/js"],
 
-    "@moq/smoke-native": ["@moq/smoke-native@workspace:test/smoke/clients/js-native"],
+    "@moq/interop-native": ["@moq/interop-native@workspace:test/interop/clients/js-native"],
 
     "@moq/wasm": ["@moq/wasm@workspace:js/wasm"],
 

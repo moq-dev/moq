@@ -5,7 +5,7 @@ tests live in each language's own justfile.
 
 | Harness | Entry point | What it proves |
 | --- | --- | --- |
-| [smoke](smoke/README.md) | `just test smoke` | every client built from this checkout interoperates |
+| [interop](interop/README.md) | `just test interop` | every client built from this checkout interoperates |
 | [wasm](wasm/README.md) | `just test wasm` | the `@moq/wasm` bindings work in a real browser |
 | [ts](ts/README.md) | `just test ts` | the subscriber's `export ts` output is IRD-compliant |
 
@@ -37,7 +37,7 @@ as the same user, which is what makes the reservations mean anything.
 
 The reservation settles contention between harness runs, not with the rest of the
 machine, so each harness still refuses a port something unrelated is already
-serving on. Pinning a port (`SMOKE_PORT`, `WASM_PORT`, `TSC_PORT`, `--port`) takes
+serving on. Pinning a port (`INTEROP_PORT`, `WASM_PORT`, `TSC_PORT`, `--port`) takes
 that exact one or fails.
 
 Every port, pinned or walked to from `MOQ_TEST_PORT_BASE`, has to be 1024..65535
@@ -74,7 +74,7 @@ any Playwright trace survive with the command that reproduces it. A passing run
 deletes its own.
 
 ```bash
-MOQ_TEST_KEEP=1 just test smoke
+MOQ_TEST_KEEP=1 just test interop
 ```
 
 `MOQ_TEST_KEEP=1` keeps a passing run's directory too, for when the problem is in
@@ -82,7 +82,7 @@ what the test did not assert. Either way the children are still reaped and the
 ports still released: what is kept is evidence, not a live session. Remove it
 with the `rm -rf` the run prints; nothing expires it for you.
 
-In CI the harness writes under `MOQ_TEST_RUNS`, and `smoke.yml` and `wasm.yml`
+In CI the harness writes under `MOQ_TEST_RUNS`, and `interop.yml` and `wasm.yml`
 upload that directory as a short-lived artifact when the job fails.
 
 ## Worktrees
