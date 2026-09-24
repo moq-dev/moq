@@ -25,8 +25,8 @@ then `None`, dropping an unconverted slot frees it, and a failed conversion
 does not leak the buffer. Update the `just rs vulkan-cuda` hardware test and
 `doc/lib/rs/moq-video.md` inline.
 
-Public API: `moq-video` 0.0.x, breaking for `Converter::convert` callers. Wire:
-none.
+Public API: `moq-video` 0.1.x, breaking for `Converter::convert` callers, so
+it targets dev. Wire: none.
 
 ## Related
 

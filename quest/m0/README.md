@@ -45,10 +45,9 @@ Their package boundaries are explicit:
 - Published `moq-tokio` keeps its worker signatures and `bind` re-export while
   adapting internal plumbing. Its root names do not move.
 
-The media crates are also 0.0.x, so their changes target main. Adapt callers in
-other packages without breaking their published APIs, C layouts, or wire
-formats. Do not bump versions as part of these quests. The media review
-found the four crates ready for a separately requested 0.1 release.
+The media crates are 0.1.x too, so a published break to them targets dev.
+Adapt callers in other packages without breaking their published APIs, C
+layouts, or wire formats. Do not bump versions as part of these quests.
 
 Their package boundaries are explicit:
 
