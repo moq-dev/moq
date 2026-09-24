@@ -801,6 +801,9 @@ struct RemoteFront {
 	/// The front's spliced broadcast, weak: dead once the front ends, so a
 	/// later request re-creates the front instead of joining a corpse.
 	broadcast: broadcast::WeakConsumer,
+	/// Which routes serve the front's content, fixed by its first source. A
+	/// request joins the front only while the best route is one of them.
+	pin: kio::Lock<Pin>,
 }
 
 /// The last route a cursor observed: entry id, metadata, servability, and captures.
@@ -1730,6 +1733,8 @@ struct FrontTask {
 	watch: Watch,
 	/// Resolves the requesters parked on the front's channel.
 	request: kio::Producer<PendingBroadcast>,
+	/// Published for requesters once the first source fixes it; see [`RemoteFront::pin`].
+	pin: kio::Lock<Pin>,
 	timers: Clock,
 }
 
@@ -1766,6 +1771,7 @@ async fn run_front(task: FrontTask) {
 		exclude,
 		watch,
 		request,
+		pin,
 		timers,
 	} = task;
 
@@ -1854,6 +1860,7 @@ async fn run_front(task: FrontTask) {
 							continue;
 						};
 						front.identify(candidate);
+						*pin.lock() = front.pin();
 						if let Some(source) = source {
 							let id = next_source;
 							next_source += 1;
@@ -3354,13 +3361,23 @@ impl Consumer {
 		// Join the live front for this path and exclusion, if any: its watcher
 		// resolves (or already resolved) the request channel with the front's
 		// spliced broadcast, so repeat requests share one upstream
-		// subscription.
+		// subscription. Only while the best route still serves the front's
+		// content, though: once a different publisher wins (a cheaper route), a
+		// newcomer gets a fresh front from it, and the old front keeps serving the
+		// readers it has, since other content can't be spliced into it.
 		let key = (absolute.clone(), self.exclude);
 		if let Some(front) = state.fronts.get(&key) {
-			let pending = Requesting::queued(front.request.consume())
-				.with_path(requested)
-				.with_stats(scope);
-			return kio::Pending::new(pending);
+			let pin = *front.pin.lock();
+			let current = state
+				.best_route(&absolute.as_path(), self.exclude, Pin::Any, &HashSet::new())
+				.is_some_and(|entry| entry.qualifies(pin));
+			if current {
+				let pending = Requesting::queued(front.request.consume())
+					.with_path(requested)
+					.with_stats(scope);
+				return kio::Pending::new(pending);
+			}
+			state.fronts.remove(&key);
 		}
 
 		// A route covers the path: mint the front and hand its watcher the
@@ -3375,11 +3392,13 @@ impl Consumer {
 		let request = kio::Producer::<PendingBroadcast>::default();
 		let consumer = request.consume();
 		let watch = state.watch(&self.shared, &absolute);
+		let pin = kio::Lock::new(Pin::Any);
 		state.fronts.insert(
 			key,
 			RemoteFront {
 				request: request.clone(),
 				broadcast: broadcast.consume().weak(),
+				pin: pin.clone(),
 			},
 		);
 		// Released before the push: a set whose handles are gone drops the task,
@@ -3392,6 +3411,7 @@ impl Consumer {
 			exclude: self.exclude,
 			watch,
 			request,
+			pin,
 			timers: self.timers.clone(),
 		}));
 		kio::Pending::new(Requesting::queued(consumer).with_path(requested).with_stats(scope))
@@ -4175,6 +4195,34 @@ mod tests {
 		let upstream = broadcast::Info::new().produce();
 		request.accept(&upstream);
 		pending.await.expect("resolves through the cheaper route");
+	}
+
+	/// A cheaper route that appears after a front was minted wins new requests too:
+	/// the cached front serves other content, so a newcomer gets a fresh front from
+	/// the winner, while the old front keeps serving the readers it already has.
+	#[tokio::test]
+	async fn cheaper_route_after_a_front_wins_new_requests() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let _local = producer.publish("room/alice", Route::default().with_cost(5)).unwrap();
+		let first = consumer
+			.request_broadcast("room/alice")
+			.await
+			.expect("resolves locally");
+
+		let server = producer
+			.dynamic("room/alice", Route::default().with_hops(hops(&[10])).with_cost(1))
+			.unwrap();
+
+		let pending = consumer.request_broadcast("room/alice");
+		let request = queued(&server).await;
+		let upstream = broadcast::Info::new().produce();
+		request.accept(&upstream);
+		let second = pending.await.expect("resolves through the cheaper route");
+
+		assert!(!first.is_closed(), "the old front must keep serving its readers");
+		assert!(!first.is_clone(&second), "the newcomer must not join the old front");
 	}
 
 	/// At equal cost the local broadcast wins, since it has no hops.

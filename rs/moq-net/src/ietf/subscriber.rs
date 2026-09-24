@@ -1525,7 +1525,9 @@ where
 	async fn run_subscribe(
 		&mut self,
 		broadcast_path: Path<'_>,
-		broadcast: broadcast::Dynamic,
+		// Held for the subscription's lifetime but never watched: the broadcast ending
+		// is a retraction, which does not disturb a subscription already in flight.
+		_broadcast: broadcast::Dynamic,
 		request: track::Request,
 	) {
 		// Accept right away: IETF group data can arrive before SubscribeOk, so we
@@ -1611,11 +1613,12 @@ where
 		// A publisher can be serving before its SUBSCRIBE_OK reaches us, since the data
 		// streams are independent of the request stream. Waiting for the response alone would
 		// miss the local side going away in that window and leave the publisher serving a
-		// track nobody reads, which is the leak this whole path exists to close.
+		// track nobody reads, which is the leak this whole path exists to close. The broadcast
+		// ending is not a local side going away: a retraction does not disturb subscriptions
+		// already in flight, and this one is.
 		enum Setup {
 			Response(Result<Option<Accepted>, Error>),
 			Unused,
-			BroadcastClosed(Error),
 		}
 
 		let track_name = track.name().to_owned();
@@ -1633,9 +1636,6 @@ where
 					if track.poll_unused(waiter).is_ready() {
 						return Poll::Ready(Setup::Unused);
 					}
-					if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
-						return Poll::Ready(Setup::BroadcastClosed(err));
-					}
 					Poll::Pending
 				})
 				.await;
@@ -1646,10 +1646,6 @@ where
 						Ok(()) => break None,
 						Err(used) => track = used,
 					},
-					Setup::BroadcastClosed(err) => {
-						let _ = track.abort(err);
-						break None;
-					}
 				}
 			}
 		};
@@ -3354,6 +3350,70 @@ mod tests {
 			vec![crate::ietf::error::CANCELLED],
 			"and must stop the direction the publisher writes",
 		);
+	}
+
+	/// A retraction does not disturb subscriptions already in flight, and one whose
+	/// SUBSCRIBE_OK has not arrived yet is in flight too: the publisher may already be
+	/// serving it. The broadcast ending in that window must not abort the track or cancel
+	/// the subscription.
+	#[tokio::test(start_paused = true)]
+	async fn a_retraction_before_subscribe_ok_keeps_the_subscription() {
+		const VERSION: Version = Version::Draft16;
+
+		// A peer that accepts the stream and then says nothing at all.
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let log = session.log.clone();
+
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::Clock::tokio(),
+			session,
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+
+		let request = dynamic.requested_track().await.expect("no track requested");
+
+		let serving = tokio::spawn(async move {
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+		});
+
+		// Let the SUBSCRIBE go out, then retract the broadcast before any response.
+		settle().await;
+		producer.finish();
+		settle().await;
+
+		assert!(
+			!serving.is_finished(),
+			"a retraction ended a subscription still in flight"
+		);
+		assert_eq!(
+			occurrences(&log, &[ietf::Unsubscribe::ID as u8]),
+			0,
+			"a retraction must not cancel a subscription still in flight",
+		);
+
+		// The reader leaving is still what ends it.
+		drop(subscription);
+		drop(track);
+		drop(consumer);
+		tokio::time::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.expect("run_subscribe parked after its reader left")
+			.unwrap();
 	}
 
 	/// The control messages that actually reached the wire, by type id.
