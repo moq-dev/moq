@@ -107,7 +107,7 @@ owned by that prerequisite, not duplicated in archive storage.
 
 ## Quests
 
-- [Record from moq-cli](/quest/m1/archive/cli.md) - attach the writer to every `moq-cli` import path
+- [Archive endpoint](/quest/m1/archive/cli.md) - `moq ... export archive` records and `import archive` replays
 - [Recording reader](/quest/m1/archive/reader.md) - serve archived FETCH through a supplied `broadcast::Producer`
 - [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
 - [Offline archive HLS](/quest/m1/archive/hls.md) - render playlists from the archive timeline and fetch segment media lazily
