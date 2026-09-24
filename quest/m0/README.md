@@ -15,10 +15,10 @@ dev landed on main as #3793 on 2026-09-20;
 [Release](/quest/m0/release.md) names what gates the release that follows.
 Published API or wire breaks still land on dev; the quest's Plan says so.
 
-The archive and E2EE crates are 0.0.x; socket, uring, audio, video, transcode,
-and nvenc are 0.1.x so dependents can take compatible patches. Their API quests
-gate the release; a published break to a 0.1.x crate targets dev. Inspect
-transitive public exposure before changing a shared symbol: `moq-tokio`
+The archive, E2EE, and uring crates are 0.0.x; socket, audio, video,
+transcode, and nvenc are 0.1.x so dependents can take compatible patches. Their
+API quests gate the release; a published break to a 0.1.x crate targets dev.
+Inspect transitive public exposure before changing a shared symbol: `moq-tokio`
 publicly re-exports `moq-sock`'s bind module. Keep that re-export and its
 current names.
 
