@@ -40,6 +40,9 @@ if (role !== "subscribe" || !url || !broadcast || !Number.isFinite(timeoutMs) ||
 	process.exit(2);
 }
 
+// Group resets that only mean content was skipped at the live edge.
+const GAPS: Moq.StreamCode[] = [Moq.StreamCode.TooFarBehind, Moq.StreamCode.Old, Moq.StreamCode.Evicted];
+
 async function run(): Promise<void> {
 	const origin = new Moq.Origin.Producer();
 	const connection = await Moq.Connection.connect({ url: new URL(url as string), consume: origin });
@@ -72,7 +75,15 @@ async function run(): Promise<void> {
 			const group = await video.recvGroup();
 			if (!group) break;
 			for (;;) {
-				const frame = await group.readFrame();
+				let frame: Moq.Group.Frame | undefined;
+				try {
+					frame = await group.readFrame();
+				} catch (err) {
+					// A live subscriber can be handed a group the relay then drops for a newer one;
+					// that is a gap, not a failure, so move on to the next group.
+					if (!(err instanceof Moq.Error.Stream && GAPS.includes(err.code))) throw err;
+					break;
+				}
 				if (!frame) break;
 				total += frame.payload.byteLength;
 				if (total > 0) {

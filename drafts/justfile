@@ -10,9 +10,9 @@
 
 set working-directory := '.'
 
-# List the draft sources (their names are the argument to `build` / `publish`).
+# List the draft names (the argument to `build` / `publish`).
 default:
-    ls draft-*.md
+    @ls draft-*.md | sed 's/\.md$//'
 
 # Render one draft to <name>.txt and <name>.html (local editor's copy, gitignored).
 build name:
