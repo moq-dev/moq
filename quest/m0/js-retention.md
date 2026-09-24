@@ -25,17 +25,21 @@ Settled with the maintainer:
 - Add `effect.race(promise)` to `@moq/signals`: resolves with the promise's
   value, or `undefined` once the current run tears down, and removes its
   teardown listener either way. One promise; a site racing several combines
-  them with `race` first.
+  them with `race` first. A teardown that wins must also dispose the inner
+  `race`'s subscriptions, or each run leaks them; settle how at PR time.
 - Export a free `race(values)` from `@moq/signals`, shaped like
   `Promise.race`: it accepts promises and `GetPromise` values, subscribes to
   pending ones (an already settled one wins at once), and disposes every
-  listener when the first settles. It sits beside `Signal.race`.
+  subscription when the first settles. A native promise's reaction cannot be
+  removed, so a caller never passes one that outlives the call. It sits beside
+  `Signal.race`.
 - Every internal `effect.cancel` race moves to `effect.race`, and
-  `effect.cancel` is marked `@deprecated`. Its deletion is a published break,
+  `effect.cancel` is marked `@internal`, per the `js/CLAUDE.md` deprecation
+  convention. Its deletion is a published break,
   left to [Remove effect.cancel](/quest/m1/effect-cancel.md). Both additions
   are additive, so this quest targets main.
-- `Effect.spawn` drops a task once it settles; a rerun or close still waits on
-  pending ones.
+- `Effect.spawn` drops a task once it settles; a rerun still waits on pending
+  ones, and close still releases them without waiting.
 - Audit every `Promise.race` and `Once.then` under `js/`, not only the reported
   sites: signals, net, hang, watch, publish, room, and the rest. Convert each
   race whose operand outlives the call. `Sync.wait` is internal, so it can wake
