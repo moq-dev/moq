@@ -71,8 +71,7 @@ Other changes to a deployment:
   carrying the retired `put` or `get` claims fail verification, so re-mint
   them when the relay and auth server upgrade.
 - **mTLS admits nothing on its own.** A verified client certificate is reported
-  to the auth server, which grants it. `moq auth serve --mtls-publish '**'
-  --mtls-subscribe '**'` restores the old full access for every certificate
+  to the auth server, which grants it. `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` restores the old full access for every certificate
   the relay's client CA verifies, so keep that CA to cluster peers.
 - **`moq --listen` needs auth.** A CLI listener refuses to start without
   `--auth-url` or `--auth-public` instead of accepting everyone.
