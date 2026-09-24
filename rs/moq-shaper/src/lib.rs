@@ -11,8 +11,8 @@
 //! timing: the seed makes the decisions reproducible, not the clock.
 //!
 //! A profile that silently did nothing would turn an impaired run into an
-//! unimpaired pass, so [`Shaper::verify`] fails unless every impairment the
-//! profile configures treated at least one datagram.
+//! unimpaired pass, so [`Shaper::verify`] fails when an impairment the profile
+//! configures never acted and the traffic makes that silence implausible.
 
 use std::{
 	cmp::Reverse,
@@ -59,6 +59,11 @@ impl Profile {
 		anyhow::ensure!(
 			(0.0..=1.0).contains(&self.reorder),
 			"reorder {} is not a probability",
+			self.reorder
+		);
+		anyhow::ensure!(
+			self.reorder == 0.0 || !self.delay.is_zero(),
+			"reorder {} needs a delay to overtake",
 			self.reorder
 		);
 		anyhow::ensure!(
@@ -425,7 +430,8 @@ struct Link {
 impl Link {
 	/// Each direction of each flow draws from its own stream of the one seed,
 	/// so a flow's decisions do not depend on how its datagrams interleave with
-	/// anyone else's.
+	/// anyone else's. Flows are numbered in the order they first send, since a
+	/// client's ephemeral port is no identity across runs.
 	fn new(
 		profile: &Profile,
 		seed: u64,
@@ -459,9 +465,9 @@ impl Link {
 
 		let mut depart = now;
 		if let Some(rate) = &self.profile.rate {
-			// GCRA: a datagram may leave once the backlog ahead of it is within
-			// the burst allowance.
-			let full_at = self.full_at.max(now);
+			// GCRA: a datagram may leave once the backlog, itself included, is
+			// within the burst allowance.
+			let full_at = self.full_at.max(now) + rate.cost(datagram.len() as u64);
 			let start = full_at
 				.checked_sub(rate.cost(rate.burst))
 				.map_or(now, |start| start.max(now));
@@ -472,7 +478,7 @@ impl Link {
 			if start > now {
 				bump(&tally.throttled);
 			}
-			self.full_at = full_at + rate.cost(datagram.len() as u64);
+			self.full_at = full_at;
 			depart = start;
 		}
 
@@ -626,6 +632,24 @@ mod tests {
 		assert_eq!(shaper.verify().unwrap().up.overflowed, 0);
 	}
 
+	#[tokio::test]
+	async fn the_burst_counts_the_datagram_itself() {
+		// A burst of one datagram lets the first out at once and holds the second.
+		let one = Profile {
+			rate: Some(Rate {
+				bits_per_second: 8_000,
+				burst: 4,
+				queue: Duration::from_secs(1),
+			}),
+			..Default::default()
+		};
+		let (shaper, client) = setup(11, one, Profile::default()).await;
+		let got = round_trip(&client, 2).await;
+
+		assert_eq!(got, [0, 1]);
+		assert_eq!(shaper.stats().up.throttled, 1);
+	}
+
 	#[test]
 	fn silence_is_only_a_failure_once_it_is_implausible() {
 		let config = Config {
@@ -672,21 +696,32 @@ mod tests {
 
 	#[tokio::test]
 	async fn an_invalid_profile_is_refused() {
-		let bad = Profile {
+		let refused = |bad: Profile, why: &'static str| async move {
+			let err = Shaper::bind(Config {
+				bind: LOCALHOST,
+				target: LOCALHOST,
+				seed: 0,
+				up: bad,
+				down: Profile::default(),
+			})
+			.await
+			.err()
+			.unwrap_or_else(|| panic!("accepted a profile where {why}"));
+			assert!(format!("{err:#}").contains(why), "{err:#}");
+		};
+
+		let jittery = Profile {
 			delay: Duration::from_millis(5),
 			jitter: Duration::from_millis(10),
 			..Default::default()
 		};
-		let err = Shaper::bind(Config {
-			bind: LOCALHOST,
-			target: LOCALHOST,
-			seed: 0,
-			up: bad,
-			down: Profile::default(),
-		})
-		.await
-		.err()
-		.expect("jitter beyond the delay was accepted");
-		assert!(format!("{err:#}").contains("exceeds delay"), "{err:#}");
+		refused(jittery, "exceeds delay").await;
+
+		// With nothing in flight to overtake, a reorder would count without acting.
+		let undelayed = Profile {
+			reorder: 0.1,
+			..Default::default()
+		};
+		refused(undelayed, "needs a delay").await;
 	}
 }

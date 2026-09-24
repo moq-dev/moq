@@ -80,7 +80,9 @@ relay leaves the path up, the way a network outlives the server behind it.
 Every decision the shaper makes comes from one seed. Each run picks a fresh one
 and prints it, with the profile, as `impaired: MOQ_SHAPER_SEED=...`; setting that
 variable replays the same decisions. Kernel scheduling still varies delivery
-timing, so the seed makes the decisions reproducible, not the clock.
+timing, so the seed makes the decisions reproducible, not the clock. Each client
+draws from its own stream, numbered in the order clients first send, so
+concurrent clients that race to connect can swap streams between runs.
 
 The impairment is asserted, not assumed. The shaper counts what it lost,
 throttled, delayed, and reordered, the drill prints those counters, and
