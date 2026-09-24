@@ -18,6 +18,13 @@ Today the cause is lost in several places. Rust:
   bug.
 - The IETF subscriber's `State::drop` aborts every subscription with
   `Error::Cancel` (`rs/moq-net/src/ietf/subscriber.rs`).
+- Worse, the reader can see a clean end. Once SUBSCRIBE_END has declared
+  the boundary, a session that dies with a group below it still in flight
+  leaves `recv_group()` returning `Ok(None)`, skipping that group (#4061).
+  The abort does reach the track, but the clean-end check wins whenever the
+  reader polls after the close lands, so the outcome depends on who reads
+  first. A declared end is only clean once every group below it is
+  accounted for; an abort before then wins.
 
 JS:
 
@@ -38,7 +45,14 @@ error.
 
 Test by killing a session mid-track in both languages and asserting the reader
 sees the session's error, and by resetting a subscribe stream on lite-05 and
-later.
+later. For #4061, pin the deterministic mock repro and the real-QUIC one from
+`kidq330/bug/subscription_ends_clean_with_missing_group`
+(`subscription_end_integrity` in `moq-net` and `moq-tokio`), with their
+controls: a finished track still ends clean while its session lives.
+
+## Closes
+
+- [#4061](https://github.com/moq-dev/moq/issues/4061) - close this issue when the quest finishes
 
 ## Related
 
