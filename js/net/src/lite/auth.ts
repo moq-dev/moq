@@ -497,6 +497,7 @@ export class AuthSession implements AuthApi {
 				result = new Unsupported();
 			} else {
 				result = error(err);
+				if (!this.#closed) console.warn("auth token ended", result);
 			}
 		}
 

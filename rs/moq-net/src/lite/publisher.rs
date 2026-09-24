@@ -481,9 +481,10 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 		};
 		match stream.writer.buffer(&msg) {
 			// This wire carries prefixes only: refuse what it cannot express rather
-			// than widen it.
+			// than widen it. The presenter logs the refusal; a pattern grant is routine
+			// until the wire carries patterns, so it is not worth a warning here too.
 			Err(Error::Encode(crate::coding::EncodeError::Unsupported)) => {
-				tracing::warn!("auth grant not representable as prefixes; refusing the token");
+				tracing::debug!("auth grant not representable as prefixes; refusing the token");
 				stream.writer.buffer(&lite::AuthReply::Error(lite::AuthError {
 					code: crate::SessionError::Internal.to_code().into(),
 					reason: "grant not representable".to_string(),
