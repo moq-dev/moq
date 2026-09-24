@@ -53,12 +53,21 @@ resets immediately, and proves the peer receives the session association and
 error instead of timing out. Exercise it through the Chrome wasm harness and
 the native interop matrix.
 
+Then use it in MoQ. A publisher that resets a group stream uses a Reliable
+Size covering the group header, so the subscriber can always attribute the
+reset to its group. Once reliable reset is negotiated, subscribers drop the
+grace they wait for missing groups below a track's declared end (see the track
+tail quests). Browsers keep the grace until WebTransport exposes
+reliable reset.
+
 Track the unversioned draft during implementation. The planning baseline is
 draft 10, with transport parameter `0x1d` and frame type `0x24`; do not freeze
 provisional codepoints if the document changes before release.
 
 ## Related
 
+- [JS track tail](/quest/m1/js-track-tail.md) and [Rust track tail](/quest/m1/rust-track-tail.md) -
+  wait a grace for a group whose reset lost its header, until this lands
 - [qmux on the QUIC stream state machine](/quest/m1/quic/qmux.md) - consumes
   the same reset state without a parallel implementation
 - The removed quiche backend was the one stack that had this, so it is the
