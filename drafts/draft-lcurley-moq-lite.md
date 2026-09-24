@@ -33,13 +33,6 @@ normative:
 
 informative:
   I-D.lcurley-moq-cluster:
-    title: "MoQ Cluster Extension"
-    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-cluster/
-    author:
-      -
-        ins: L. Curley
-        name: Luke Curley
-    date: false
 
 --- abstract
 
