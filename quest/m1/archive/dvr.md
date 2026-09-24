@@ -7,8 +7,9 @@ same timeline and group-range objects as an unbounded archive.
 
 ## Plan
 
-The recording writer prerequisite owns retention, checkpoint recovery, deletion
-grace, and restart cleanup. This quest consumes that contract and owns viewer
+The recording writer owns retention and deletion grace, and
+[Resume a recording](/quest/m1/archive/recovery.md) owns checkpoint recovery
+and restart cleanup. This quest consumes that contract and owns viewer
 seek and return-to-live behavior, not a second writer implementation.
 
 The player reads the archive timeline, FETCHes old groups through the normal
@@ -24,7 +25,7 @@ Use the writer/reader fixtures; a retention defect is fixed in its owning layer.
 
 ## Required
 
-- [Recording writer](/quest/m1/archive/writer.md)
+- [Resume a recording](/quest/m1/archive/recovery.md)
 - [Recording reader](/quest/m1/archive/reader.md)
 
 ## Closes
