@@ -233,8 +233,8 @@ impl Fanout {
 
 	/// List every rendition under `generation` from now on.
 	///
-	/// Replacing a generation drops what was listed under it: those rows belong to the run it
-	/// named. The first one only labels the run already flowing, so an embedder that supplies
+	/// Replacing a generation drops what was listed under it and the inits built from it: those
+	/// belong to the run it named. The first one only labels the run already flowing, so an embedder that supplies
 	/// it right after construction loses nothing to a race with the first records.
 	pub fn set_generation(&self, generation: Option<Arc<str>>) {
 		let mut feed = self.feed.lock().unwrap();
@@ -251,9 +251,10 @@ impl Fanout {
 			let Some(rendition) = target.upgrade() else {
 				return false;
 			};
-			rendition.label(generation.clone());
 			if restart {
-				rendition.clear();
+				rendition.restart(generation.clone());
+			} else {
+				rendition.label(generation.clone());
 			}
 			true
 		});

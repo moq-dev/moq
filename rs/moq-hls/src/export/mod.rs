@@ -149,8 +149,8 @@ impl Broadcaster {
 	///
 	/// A restarted publisher is spliced into the same broadcast and restarts its segment
 	/// numbers, so `seg/0.m4s` would name different bytes on each run. Supply a new generation
-	/// before the new run's media flows. Replacing one drops every listed segment, while the
-	/// first only labels the run already flowing. A segment URL carrying any other generation
+	/// before the new run's media flows. Replacing one drops every listed segment and every
+	/// init built from the old run's media, while the first only labels the run already flowing. A segment URL carrying any other generation
 	/// is refused. Init URLs need none: they carry a hash of their bytes.
 	///
 	/// Fails unless `generation` is non-empty ASCII letters, digits, `-`, and `_`.
@@ -208,6 +208,10 @@ impl Broadcaster {
 	/// wall clock (or, absent one, at an anchor estimated from the first record's arrival); a
 	/// finished broadcast renders `static`. `query` propagates to every child URL exactly as
 	/// in [`master_playlist`](Self::master_playlist).
+	///
+	/// Each representation names its init by a hash of the bytes, so a rendition is left out
+	/// until its init is known. An inline-parameter-set codec only learns it from media: await
+	/// each rendition's [`init`](Rendition::init) first.
 	pub fn manifest(&self, query: Option<&str>) -> Option<String> {
 		let mut video = Vec::new();
 		let mut audio = Vec::new();
@@ -985,6 +989,60 @@ mod tests {
 			rendition.media_playlist(None).is_none(),
 			"clearing the generation is a change too"
 		);
+	}
+
+	// A restarted inline-codec publisher can carry new parameter sets under the same catalog, so
+	// a new generation drops the init built from the old run's media along with its rows.
+	#[tokio::test]
+	async fn a_new_generation_rebuilds_an_inline_init() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let reserved = catalog.reserve();
+		let mut registration = catalog.test_video("video0").unwrap();
+		let mut config = video_config();
+		config.coded_width = None;
+		config.coded_height = None;
+		registration.set(config).unwrap();
+		drop(reserved);
+		let track = broadcast.create_track("video0", None).unwrap();
+		let mut media = catalog
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
+			.unwrap();
+		for micros in [0, 2_000_000, 4_000_000] {
+			media.write(vp8_frame(micros, true)).unwrap();
+		}
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
+		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+		let old = rendition.init().await.unwrap().expect("init segment");
+		broadcaster.set_generation(Some("run-1")).unwrap();
+		broadcaster.set_generation(Some("run-2")).unwrap();
+
+		// The new run's keyframes are 640x480 under the same catalog.
+		for micros in [6_000_000, 8_000_000, 10_000_000] {
+			media
+				.write(moq_mux::container::Frame {
+					timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+					payload: bytes::Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01]),
+					keyframe: true,
+					duration: None,
+				})
+				.unwrap();
+		}
+		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+		let new = rendition.init().await.unwrap().expect("init segment");
+		assert_ne!(new, old, "the new run's init is built from its own media");
+		let playlist = rendition.media_playlist(None).expect("playable");
+		assert_eq!(rendition.init_versioned(init_hash(&playlist)).await.unwrap(), Some(new));
 	}
 
 	#[tokio::test]
