@@ -6,9 +6,9 @@ A PipeWire camera that delivers I420 or NV12 in separate memory blocks produces 
 
 ## Plan
 
-The buffer offer sets `SPA_PARAM_BUFFERS_blocks` to 1, so a producer that puts each plane in its own block never links. Offer enough blocks for the format, two for NV12 and three for I420, and map each block into the frame the CPU path already converts. A one-block buffer keeps the current mapping.
+The buffer offer sets `SPA_PARAM_BUFFERS_blocks` to 1, so a producer that puts each plane in its own block never links. NV12 is already negotiated. Offer two blocks and map each into the NV12 conversion that exists. I420 is not. `camera::RAW_FORMATS` drops it before selection, and `convert` has no I420 arm, so negotiate it and pack its three planes into the I420 frame the rest of the pipeline already takes. A one-block buffer of a format already supported keeps the current mapping.
 
-Unit-test the offer and a multi-block NV12 and I420 buffer with no camera attached. `doc/lib/rs/moq-video.md` already says a Pi CSI camera and a sandboxed camera are reachable. This quest is what makes the separate-plane case of that sentence true. No new page.
+Unit-test the offer, a multi-block NV12 buffer, and a multi-block I420 buffer, with no camera attached. `doc/lib/rs/moq-video.md` already says a Pi CSI camera and a sandboxed camera are reachable. This quest is what makes the separate-plane case of that sentence true. No new page.
 
 ## Related
 
