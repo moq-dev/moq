@@ -1,33 +1,34 @@
-name: Smoke
+name: Interop
 
-# Cross-language interop smoke test built from THIS checkout (not the published
+# Cross-language interop test built from THIS checkout (not the published
 # packages, unlike the moq-dev/smoke repo). Stands up a relay and runs the
 # publish x subscribe matrix across rust / python / go / browser / native-js / c,
-# then the TS/IRD compliance harness over the exporter's output.
+# then browser-to-browser media QA and the TS/IRD compliance harness over the
+# exporter's output.
 on:
   # Manual on-demand runs.
   workflow_dispatch:
   # Nightly: catch an interop regression in the current tree before a user does.
   schedule:
     - cron: "0 8 * * *"
-  # On PRs that touch the harness itself, so a change to the smoke test is
+  # On PRs that touch the harness itself, so a change to the interop test is
   # validated before it merges. Source regressions still surface nightly.
   pull_request:
     paths:
       - "test/lib/**"
-      - "test/smoke/**"
+      - "test/interop/**"
       # The TS/IRD compliance harness runs in the same job (see below).
       - "test/ts/**"
-      # The smoke job also depends on the recipe that invokes it and the
+      # The interop job also depends on the recipe that invokes it and the
       # workspace membership that links the JS clients to source.
       - "test/justfile"
       - "package.json"
       # The Go client builds against the modules this script stages.
       - "go/scripts/**"
-      - ".github/workflows/smoke.yml"
+      - ".github/workflows/interop.yml"
 
 concurrency:
-  group: smoke-${{ github.ref }}
+  group: interop-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -35,8 +36,8 @@ permissions:
   contents: read
 
 jobs:
-  smoke:
-    name: Smoke
+  interop:
+    name: Interop
     runs-on: ubuntu-latest
     # The matrix runs in real time (ffmpeg -re pacing + per-subscriber timeouts);
     # this is a safety net against a hung relay/client plus a cold first build.
@@ -75,22 +76,22 @@ jobs:
 
       # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
       # runtime libs (`--with-deps` needs the host package manager) so the
-      # browser client can launch headless Chromium. smoke.sh's own
+      # browser client can launch headless Chromium. interop.sh's own
       # `playwright install` then no-ops.
       - name: Playwright Chromium
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
         shell: bash -leo pipefail {0}
 
-      - name: Smoke (full matrix)
-        run: nix develop --command just test smoke --all
+      - name: Interop (full matrix)
+        run: nix develop --command just test interop --all
         shell: bash -leo pipefail {0}
         env:
           # The run writes its directory here, so a failed one is uploaded below
           # and a passing one is deleted as usual.
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
-      - name: Negative control
-        run: nix develop --command just test smoke-negative
+      - name: Interop negative control
+        run: nix develop --command just test interop-negative
         shell: bash -leo pipefail {0}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
@@ -98,7 +99,7 @@ jobs:
       # Browser-to-browser media QA: presented frame progress, audible tone, audio/video skew, and
       # the publication lifecycle, plus the negative controls that prove each assertion can fail.
       - name: Media output and lifecycle
-        run: nix develop --command just test smoke-media
+        run: nix develop --command just test media
         shell: bash -leo pipefail {0}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
@@ -128,7 +129,7 @@ jobs:
         if: ${{ failure() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: smoke-failure
+          name: interop-failure
           path: ${{ runner.temp }}/moq-test-runs
           retention-days: 7
           if-no-files-found: ignore

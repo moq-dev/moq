@@ -368,7 +368,7 @@ const gesture = (page: Page) => page.mouse.click(1, 1);
 async function readCapture(page: Page): Promise<CaptureState> {
 	const state = await inspect(
 		page,
-		() => document.querySelector<HTMLElement>("moq-publish")?.dataset.smokeCapture,
+		() => document.querySelector<HTMLElement>("moq-publish")?.dataset.interopCapture,
 		undefined,
 	);
 	if (!state) throw new Error("the publisher has not published its capture state");
@@ -450,7 +450,7 @@ async function captureDenial(broadcast: string): Promise<void> {
 
 let failure: Error | undefined;
 try {
-	const broadcast = `smoke-media-${process.pid}.hang`;
+	const broadcast = `media-${process.pid}.hang`;
 
 	// ── publisher ────────────────────────────────────────────────────────────
 	const [publisher, publisherErrors] = await open(
@@ -574,7 +574,7 @@ try {
 	// ── unsubscribe and rejoin ───────────────────────────────────────────────
 	if (wants("rejoin")) {
 		console.error("=== unsubscribe and rejoin ===");
-		await player.locator(SELECTORS.watch).evaluate((el) => el.setAttribute("name", "smoke-media-nowhere.hang"));
+		await player.locator(SELECTORS.watch).evaluate((el) => el.setAttribute("name", "media-nowhere.hang"));
 		const left = await waitFrozen(
 			player,
 			playerErrors,

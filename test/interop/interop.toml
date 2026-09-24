@@ -1,4 +1,4 @@
-# Relay config for the cross-language interop smoke test.
+# Relay config for the cross-language interop test.
 # Anonymous access, self-signed localhost cert, QUIC + WebSocket on 127.0.0.1:4443.
 
 [log]

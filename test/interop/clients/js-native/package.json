@@ -1,5 +1,5 @@
 {
-	"name": "@moq/smoke-native",
+	"name": "@moq/interop-native",
 	"private": true,
 	"type": "module",
 	"dependencies": {

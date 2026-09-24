@@ -16,7 +16,7 @@ import {
 	chromium,
 	type Page,
 } from "playwright";
-import { CONTROL, type FixtureState, type Resources, type Sample, type SmokeControl } from "./src/contract";
+import { CONTROL, type FixtureState, type InteropControl, type Resources, type Sample } from "./src/contract";
 
 /**
  * A failed check, named after the property it was measuring.
@@ -196,7 +196,7 @@ export async function waitForWatch(page: Page): Promise<void> {
 	while (Date.now() < deadline) {
 		const ready = await inspect(
 			page,
-			(tag) => document.querySelector(`${tag}[data-smoke-ready]`) !== null,
+			(tag) => document.querySelector(`${tag}[data-interop-ready]`) !== null,
 			SELECTORS.watch,
 		);
 		if (ready) return;
@@ -216,7 +216,7 @@ export async function readPlayerState(page: Page): Promise<PlayerState> {
 			const centerPlay = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.centerPlay);
 
 			return {
-				sample: watch?.dataset.smokeState,
+				sample: watch?.dataset.interopState,
 				controlLabel: control?.getAttribute("aria-label") ?? undefined,
 				centerPlayVisible: centerPlay ? getComputedStyle(centerPlay).display !== "none" : false,
 			};
@@ -236,15 +236,15 @@ export async function readPlayerState(page: Page): Promise<PlayerState> {
 export async function readFixtureState(page: Page): Promise<FixtureState> {
 	const state = await inspect(
 		page,
-		(selector) => document.querySelector<HTMLElement>(selector)?.dataset.smokeFixture,
+		(selector) => document.querySelector<HTMLElement>(selector)?.dataset.interopFixture,
 		SELECTORS.fixture,
 	);
 	if (!state) throw new Error("the fixture publisher has not published its state");
 	return JSON.parse(state) as FixtureState;
 }
 
-/** Invoke one of the page's {@link SmokeControl} commands. */
-export async function command(page: Page, name: keyof SmokeControl): Promise<void> {
+/** Invoke one of the page's {@link InteropControl} commands. */
+export async function command(page: Page, name: keyof InteropControl): Promise<void> {
 	await page.evaluate(
 		([key, fn]) => {
 			const control = (window as unknown as Record<string, Record<string, () => void> | undefined>)[key];
@@ -257,7 +257,7 @@ export async function command(page: Page, name: keyof SmokeControl): Promise<voi
 
 /** Read the page's live resource counts, which outlive the player element. */
 export async function readResources(page: Page): Promise<Resources> {
-	const state = await page.evaluate(() => document.body.dataset.smokeResources);
+	const state = await page.evaluate(() => document.body.dataset.interopResources);
 	if (!state) throw new Error("the page has not published resource counts");
 	return JSON.parse(state) as Resources;
 }

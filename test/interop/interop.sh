@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cross-language media interop smoke test against THIS checkout.
+# Cross-language media interop test against THIS checkout.
 #
 # Unlike the standalone moq-dev/smoke repo (which installs each client from its
 # public registry to catch packaging breakage), this builds every client from
@@ -14,35 +14,35 @@
 # verifies rendered WebCodecs output, player pause/resume, and that audio.
 set -euo pipefail
 
-SMOKE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-WORKSPACE=$(cd "$SMOKE_DIR/../.." && pwd)
-CLIENTS="$SMOKE_DIR/clients"
+INTEROP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+WORKSPACE=$(cd "$INTEROP_DIR/../.." && pwd)
+CLIENTS="$INTEROP_DIR/clients"
 
 # Run directory, reserved ports, and process-group ownership. See test/README.md.
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
-source "$SMOKE_DIR/../lib/harness.sh"
+source "$INTEROP_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
 # flag and every environment override this run was actually given.
-RERUN="$(harness_env SMOKE_TIMEOUT SMOKE_FPS SMOKE_SIZE SMOKE_PORT SMOKE_PROFILE RELAY_BIN MOQ_BIN)just test smoke$(harness_argv "$@")"
+RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN MOQ_BIN)just test interop$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
-TIMEOUT="${SMOKE_TIMEOUT:-20}"
-FPS="${SMOKE_FPS:-30}"
-SIZE="${SMOKE_SIZE:-320x240}"
-# Empty means "any reserved port"; SMOKE_PORT pins one instead.
-PORT="${SMOKE_PORT:-}"
+TIMEOUT="${INTEROP_TIMEOUT:-20}"
+FPS="${INTEROP_FPS:-30}"
+SIZE="${INTEROP_SIZE:-320x240}"
+# Empty means "any reserved port"; INTEROP_PORT pins one instead.
+PORT="${INTEROP_PORT:-}"
 URL=""
 NEGATIVE=0
 MEDIA=0
 
 # Cargo profile for the relay/cli/libmoq builds. Debug compiles faster, which is
-# what a smoke test wants; the workload (320x240@30) is trivial either way.
-PROFILE="${SMOKE_PROFILE:-debug}"
+# what an interop test wants; the workload (320x240@30) is trivial either way.
+PROFILE="${INTEROP_PROFILE:-debug}"
 
 # Binaries under test. Built from source below unless overridden to point at a
-# prebuilt (mirrors the standalone smoke repo's RELAY_BIN/MOQ_BIN escape hatch).
+# prebuilt (mirrors the standalone moq-dev/smoke repo's RELAY_BIN/MOQ_BIN escape hatch).
 RELAY="${RELAY_BIN:-}"
 MOQ="${MOQ_BIN:-}"
 
@@ -87,7 +87,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Numeric guards so a fat-fingered --timeout / SMOKE_PORT fails clearly here
+# Numeric guards so a fat-fingered --timeout / INTEROP_PORT fails clearly here
 # instead of surfacing later as a cryptic `timeout` or relay-bind error.
 [[ "$TIMEOUT" =~ ^[0-9]+(\.[0-9]+)?$ ]] || {
     echo "error: timeout must be a positive number (got '$TIMEOUT')" >&2
@@ -124,12 +124,12 @@ needs_js() {
     needs js || needs js-native-node || needs js-native-bun
 }
 
-harness_begin smoke "$RERUN"
+harness_begin interop "$RERUN"
 
 TARGET_BASE=""    # cargo target dir (resolved in require_tools)
 PY=""             # python interpreter with the workspace moq build (set in prepare)
-C_SMOKE=""        # compiled C client binary (set in prepare)
-GO_SMOKE=""       # compiled Go client binary (set in prepare)
+C_INTEROP=""      # compiled C client binary (set in prepare)
+GO_INTEROP=""     # compiled Go client binary (set in prepare)
 GST_PLUGIN_DIR="" # dir holding the built moq-gst plugin (set in prepare)
 BROKEN_LANGS=""   # clients whose source build failed
 
@@ -209,7 +209,7 @@ prepare_python() {
     fi
 }
 
-# Link the JS workspace (the smoke clients are bun workspace members, so the
+# Link the JS workspace (the interop clients are bun workspace members, so the
 # @moq/* packages resolve to this checkout's source) and build the browser page.
 prepare_js() {
     have bun || {
@@ -242,7 +242,7 @@ prepare_js() {
 
 # Stage the Go modules from this checkout (go/scripts/stage.sh builds moq-ffi for
 # the host, regenerates the bindings, and wires the wrapper to them by replace),
-# then build the smoke client against that exact tree. The client is copied to a
+# then build the interop client against that exact tree. The client is copied to a
 # scratch dir first so the committed go.mod keeps its placeholder require; every
 # dependency resolves to a local directory, so nothing hits the module proxy.
 prepare_go() {
@@ -265,7 +265,7 @@ prepare_go() {
     wrapper_pkg=$(printf '%s\n' "$staged" | sed -n 2p)
     mkdir -p "$src"
     cp "$CLIENTS/go/go.mod" "$CLIENTS/go/main.go" "$src/"
-    GO_SMOKE="$HARNESS_RUN/go-smoke"
+    GO_INTEROP="$HARNESS_RUN/go-interop"
     if ! (
         cd "$src"
         export CGO_ENABLED=1 GOFLAGS=-mod=mod
@@ -273,7 +273,7 @@ prepare_go() {
             -replace="moq.dev/moq=$wrapper_pkg" \
             -replace="moq.dev/moq-ffi=$ffi_pkg"
         # Scratch copy is outside the git tree; stamping VCS info fails in a worktree.
-        go build -buildvcs=false -o "$GO_SMOKE" .
+        go build -buildvcs=false -o "$GO_INTEROP" .
     ) >"$HARNESS_RUN/go-build.log" 2>&1; then
         mark_broken go "go build failed"
         sed 's/^/        /' "$HARNESS_RUN/go-build.log" >&2 || true
@@ -318,8 +318,8 @@ prepare_c() {
             *) os_libs+=("-l$entry") ;;
         esac
     done <"$native_libs"
-    C_SMOKE="$HARNESS_RUN/c-smoke"
-    if ! "$cc" "$CLIENTS/c/subscribe.c" -I"$TARGET_BASE/include" -L"$TARGET_BASE/$PROFILE" -lmoq "${os_libs[@]}" -o "$C_SMOKE" >"$HARNESS_RUN/c-compile.log" 2>&1; then
+    C_INTEROP="$HARNESS_RUN/c-interop"
+    if ! "$cc" "$CLIENTS/c/subscribe.c" -I"$TARGET_BASE/include" -L"$TARGET_BASE/$PROFILE" -lmoq "${os_libs[@]}" -o "$C_INTEROP" >"$HARNESS_RUN/c-compile.log" 2>&1; then
         mark_broken c "cc compile failed"
         sed 's/^/        /' "$HARNESS_RUN/c-compile.log" >&2 || true
     fi
@@ -386,9 +386,9 @@ if harness_probe "$URL/certificate.sha256"; then
 fi
 
 echo "starting relay on 127.0.0.1:${PORT}..."
-# smoke.toml is the source of truth; rewrite its port into a scratch copy so the
+# interop.toml is the source of truth; rewrite its port into a scratch copy so the
 # committed file never has to be edited for a run.
-sed "s/4443/${PORT}/g" "$SMOKE_DIR/smoke.toml" >"$HARNESS_RUN/relay.toml"
+sed "s/4443/${PORT}/g" "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
 harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$HARNESS_RUN/relay.toml"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "relay never became ready" >&2
@@ -422,11 +422,11 @@ run_publisher() {
             ffmpeg_h264 | "$MOQ" --connect "$URL" --broadcast "$broadcast" import avc3
             ;;
         python)
-            ffmpeg_h264 | "$PY" "$CLIENTS/python/smoke.py" \
+            ffmpeg_h264 | "$PY" "$CLIENTS/python/interop.py" \
                 publish --url "$URL" --broadcast "$broadcast"
             ;;
         go)
-            ffmpeg_h264 | "$GO_SMOKE" publish --url "$URL" --broadcast "$broadcast"
+            ffmpeg_h264 | "$GO_INTEROP" publish --url "$URL" --broadcast "$broadcast"
             ;;
         js)
             # Headless Chromium encodes its own H.264 from a fake camera via
@@ -475,14 +475,14 @@ run_subscriber() {
             [[ "${n:-0}" -ge 1 ]]
             ;;
         python)
-            "$PY" "$CLIENTS/python/smoke.py" \
+            "$PY" "$CLIENTS/python/interop.py" \
                 subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"
             ;;
         go)
-            "$GO_SMOKE" subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"
+            "$GO_INTEROP" subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"
             ;;
         c)
-            "$C_SMOKE" subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"
+            "$C_INTEROP" subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"
             ;;
         gst)
             # moqsrc exposes each rendition as a Sometimes pad (video_%u / audio_%u),
@@ -643,10 +643,10 @@ elif [[ "$NEGATIVE" -eq 1 ]]; then
     # Negative control: no publisher. Every subscriber must FAIL (time out with
     # no data), proving the harness can actually report failure.
     echo "=== negative control: subscribers expect NO data ==="
-    run_round "none" "smoke-missing-$$-$RANDOM.hang" ""
+    run_round "none" "interop-missing-$$-$RANDOM.hang" ""
 else
     for pub in "${PUB_LIST[@]}"; do
-        broadcast="smoke-${pub}-$$-${RANDOM}.hang"
+        broadcast="interop-${pub}-$$-${RANDOM}.hang"
         echo "=== publisher: $pub  broadcast: $broadcast ==="
         if is_broken "$pub"; then
             for sub in "${SUB_LIST[@]}"; do
@@ -661,11 +661,11 @@ else
 fi
 
 if [[ "$overall" -eq 0 ]]; then
-    echo "smoke: all checks passed"
+    echo "interop: all checks passed"
 else
     # The relay's view is often the only place that says WHY a session died
     # (auth rejection, protocol error, close codes), so surface it on failure.
-    echo "smoke: FAILURES detected" >&2
+    echo "interop: FAILURES detected" >&2
     echo "--- relay log (last 150 lines) ---" >&2
     tail -n 150 "$HARNESS_RUN/relay.log" 2>/dev/null | sed 's/^/  relay: /' >&2 || true
 fi

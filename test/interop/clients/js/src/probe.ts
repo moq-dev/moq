@@ -93,14 +93,14 @@ function readCanvas(canvas: HTMLCanvasElement | null) {
  */
 export function watchResources(): void {
 	const sample = () => {
-		document.body.dataset.smokeResources = JSON.stringify(resources());
+		document.body.dataset.interopResources = JSON.stringify(resources());
 	};
 	sample();
 	self.setInterval(sample, SAMPLE_MS);
 }
 
 /**
- * Start sampling a player onto `el.dataset.smokeState`, and mark it ready for a driver to poll.
+ * Start sampling a player onto `el.dataset.interopState`, and mark it ready for a driver to poll.
  *
  * Returns a function that stops sampling.
  */
@@ -144,11 +144,11 @@ export function attach(el: MoqWatch): () => void {
 			resources: resources(),
 		};
 
-		el.dataset.smokeState = JSON.stringify(state);
+		el.dataset.interopState = JSON.stringify(state);
 	};
 
 	sample();
-	el.dataset.smokeReady = "";
+	el.dataset.interopReady = "";
 
 	const timer = self.setInterval(sample, SAMPLE_MS);
 	return () => self.clearInterval(timer);

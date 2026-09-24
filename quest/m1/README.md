@@ -43,7 +43,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [IETF leftovers](/quest/m1/ietf-leftovers.md) - moq-net: the 0x21 priority property, a NOT_SUPPORTED reply to TRACK_STATUS, and the two FETCH refusal codes come from the registry
 - [FFI WebSocket fallback](/quest/m1/ffi-websocket-fallback.md) - moq-ffi and every wrapper can disable or delay the WebSocket fallback
 - [Play tune-in backpressure](/quest/m1/play-tunein-backpressure.md) - moq play: a tune-in burst larger than the video queue parks the decoder, so the clock never reaches live at a wide `--delay`
-- [Play audio rendition gap](/quest/m1/play-audio-rendition-gap.md) - moq play: a retired audio rendition drains its sink before the replacement fills one, so the switch costs a `--delay` of silence
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - generic on-demand group serving and IETF FETCH for browser publishers
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS, on the catalog and store the release ships
 - [Wildcard](/quest/m1/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability

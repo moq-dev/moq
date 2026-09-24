@@ -1,4 +1,4 @@
-// Cross-language interop client for the smoke test, built against the workspace
+// Cross-language interop client for the interop test, built against the workspace
 // go/wrapper module.
 //
 // publish reads raw Annex-B H.264 from stdin (e.g. piped from ffmpeg) and feeds
@@ -8,8 +8,8 @@
 // in the catalog, and exits 0 as soon as any non-empty frame arrives (exit 1 on
 // timeout or no data).
 //
-//	ffmpeg ... -f h264 - | go-smoke publish --url http://localhost:4443 --broadcast b.hang
-//	go-smoke subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20
+//	ffmpeg ... -f h264 - | go-interop publish --url http://localhost:4443 --broadcast b.hang
+//	go-interop subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20
 package main
 
 import (
@@ -227,7 +227,7 @@ func subscribe(ctx context.Context, url, broadcast string, timeout time.Duration
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: go-smoke publish|subscribe --url URL --broadcast PATH [--timeout SECONDS]")
+		return errors.New("usage: go-interop publish|subscribe --url URL --broadcast PATH [--timeout SECONDS]")
 	}
 	role := os.Args[1]
 

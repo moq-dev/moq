@@ -165,7 +165,7 @@ export class Fixture {
 				audioActive: effect.get(audio.out.active),
 				encodedFrames: effect.get(video.out.stats).frames,
 			};
-			host.dataset.smokeFixture = JSON.stringify(state);
+			host.dataset.interopFixture = JSON.stringify(state);
 		});
 	}
 
@@ -218,6 +218,6 @@ export class Fixture {
 	close(): void {
 		this.#signals.close();
 		this.host.replaceChildren();
-		delete this.host.dataset.smokeFixture;
+		delete this.host.dataset.interopFixture;
 	}
 }

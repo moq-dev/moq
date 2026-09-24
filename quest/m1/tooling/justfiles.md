@@ -89,5 +89,5 @@ and `preset` bodies.
 Docs: `doc/setup/dev.md`, `CONTRIBUTING.md`, `test/README.md`, and the
 `CLAUDE.md` mentions of `just wasm` follow the survivors. Verify with `just
 check`, `just test`, and `just check --all`, and confirm every recipe name
-check.yml, cache.yml, nightly.yml, smoke.yml, wasm.yml, obs.yml, swift.yml,
+check.yml, cache.yml, nightly.yml, interop.yml, wasm.yml, obs.yml, swift.yml,
 and release-*.yml invoke still resolves.

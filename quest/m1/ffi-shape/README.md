@@ -43,7 +43,7 @@ work no child does:
   each language's module, linked from every binding page.
 - The bindings section of the following release's upgrade page: old call to
   new call per language.
-- `just test smoke --all` green on the finished line.
+- `just test interop --all` green on the finished line.
 
 ## Quests
 

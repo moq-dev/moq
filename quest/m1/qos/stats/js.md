@@ -27,7 +27,7 @@ dashboard reads relay stats through the package instead of its own copies.
   existing UI stats panels read the same signals.
 - `demo/web/src/stats.ts` drops its hand-written interfaces and
   `STATS_PREFIX` for the package, and the demo gains a stats path on both
-  elements so the media smoke test reads a browser viewer's report through
+  elements so the media test reads a browser viewer's report through
   `moq export stats`.
 - `doc/lib/js` documents the package.
 

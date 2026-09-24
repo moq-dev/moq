@@ -1,6 +1,6 @@
-# In-tree smoke test
+# In-tree interop test
 
-Cross-language interop smoke test that builds every client from **this checkout**
+Cross-language interop test that builds every client from **this checkout**
 and runs them against each other.
 
 This is the in-tree companion to [moq-dev/smoke](https://github.com/moq-dev/smoke).
@@ -19,7 +19,7 @@ subscriber checks end-to-end: the browser encodes fake microphone audio, and the
 Python and Go clients encode a synthetic tone through `moq-ffi` at a 2.5 ms frame
 duration, so the matrix covers the FFI audio path with a non-default codec config.
 
-`just test smoke-media` is a separate, browser-only run that asks a harder
+`just test media` is a separate, browser-only run that asks a harder
 question: is the media a viewer gets actually advancing and in sync, and does the
 player survive the publication lifecycle. See [Media QA](#media-qa).
 
@@ -64,36 +64,36 @@ workspace packages, because the JS clients here are bun workspace members.
 You need the workspace toolchain on `PATH` (cargo, ffmpeg, bun, uv, go,
 uniffi-bindgen-go, a C compiler). `nix develop` provides all of it except
 Playwright's Chromium, which
-`smoke.sh` fetches on first run (`bunx playwright install chromium`).
+`interop.sh` fetches on first run (`bunx playwright install chromium`).
 
 ```bash
 # Default: rust publishes, rust subscribes (a fast sanity check).
-just test smoke
+just test interop
 
 # Full matrix: rust/python/go/browser publish; everyone subscribes.
-just test smoke --all
+just test interop --all
 
 # Pick your own axes:
-just test smoke --publishers rust,python --subscribers rust,c,js-native-bun
+just test interop --publishers rust,python --subscribers rust,c,js-native-bun
 
 # Negative control: no publisher, every subscriber must time out.
-just test smoke-negative
+just test interop-negative
 
 # Browser-to-browser media output and lifecycle, plus its own negative controls.
-just test smoke-media
+just test media
 ```
 
 Subscriber names: `rust`, `python`, `go`, `js` (browser), `js-native-node`,
 `js-native-bun`, `c`, `gst`. Publisher names: `rust`, `python`, `go`, `js`.
 
 A client whose source build fails fails only its own matrix cells (see
-`mark_broken` in `smoke.sh`); it never aborts the rest of the run.
+`mark_broken` in `interop.sh`); it never aborts the rest of the run.
 
 ## Media QA
 
 The matrix asks "did bytes arrive and did a pixel light up". That passes on a
 frozen picture, on silence, and on audio a second out of step, so
-`just test smoke-media` measures the media itself, browser to browser.
+`just test media` measures the media itself, browser to browser.
 
 The publisher is a fixture, not a fake camera: a canvas painting a frame counter
 as black/white blocks, and a tone stepping through a fixed frequency table. Both
@@ -152,7 +152,7 @@ Not covered yet: other browser engines (the capability probe is the groundwork)
 and any claim about physical playback.
 
 The relay's port is reserved for the run rather than fixed, so two checkouts can
-smoke-test at once; `SMOKE_PORT` pins one instead. A failing run keeps its
+run the interop test at once; `INTEROP_PORT` pins one instead. A failing run keeps its
 directory, including a Playwright trace of the failing page, and CI uploads it;
 `MOQ_TEST_KEEP=1` keeps a passing run's too. See [the harness
 contract](../README.md).
@@ -160,10 +160,10 @@ contract](../README.md).
 ## Layout
 
 ```text
-smoke.sh                  orchestrator: build clients, run the relay + matrix or media checks
-smoke.toml                relay config (anonymous, self-signed localhost)
+interop.sh              orchestrator: build clients, run the relay + matrix or media checks
+interop.toml            relay config (anonymous, self-signed localhost)
 clients/
-  python/smoke.py         publish/subscribe via py/moq-rs (import moq)
+  python/interop.py       publish/subscribe via py/moq-rs (import moq)
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
   js/                     headless-Chromium publish/subscribe via @moq/watch + @moq/publish
     driver.ts             the interop matrix's browser publisher/subscriber
@@ -180,6 +180,6 @@ clients/
 
 ## CI
 
-`.github/workflows/smoke.yml` runs the full matrix nightly (and on demand, and on
-PRs that touch `test/smoke/`). A red cell means a real interop break in the
+`.github/workflows/interop.yml` runs the full matrix nightly (and on demand, and on
+PRs that touch `test/interop/`). A red cell means a real interop break in the
 current tree.

@@ -38,7 +38,7 @@ if (role === "publish") {
 			videoActive: video?.out.source.peek() !== undefined,
 			audioActive: audio?.out.source.peek() !== undefined,
 		};
-		el.dataset.smokeCapture = JSON.stringify(state);
+		el.dataset.interopCapture = JSON.stringify(state);
 	};
 	sample();
 	self.setInterval(sample, SAMPLE_MS);

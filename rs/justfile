@@ -684,7 +684,7 @@ c-tests:
         exit 1
     fi
 
-    # Same list build.rs (moq.pc), CMakeLists.txt, and test/smoke/smoke.sh read:
+    # Same list build.rs (moq.pc), CMakeLists.txt, and test/interop/interop.sh read:
     # `framework:Foo` is a linker framework flag, anything else a plain library.
     case "$(uname -s)" in
         Darwin) native_libs=rs/libmoq/native-libs/apple.txt ;;
