@@ -1449,15 +1449,21 @@ where
 			request.accept(&source);
 
 			// Retain the source so a retraction can finish it. If the route was
-			// retracted since, the guard drops here and consumers observe the abort.
-			{
+			// retracted since the accept, finish it here as that retraction would
+			// have, and still serve what it took on: tracks subscribed since carry on.
+			let guard = crate::model::broadcast::SourceGuard::new(source);
+			let retracted = {
 				let mut state = self.state.lock();
-				let Some(entry) = state.broadcasts.get_mut(&path) else {
-					continue;
-				};
-				entry
-					.sources
-					.insert(requested.clone(), crate::model::broadcast::SourceGuard::new(source));
+				match state.broadcasts.get_mut(&path) {
+					Some(entry) => {
+						entry.sources.insert(requested.clone(), guard);
+						None
+					}
+					None => Some(guard),
+				}
+			};
+			if let Some(guard) = retracted {
+				guard.finish();
 			}
 
 			let this = self.clone();
