@@ -114,8 +114,8 @@ pub(super) enum Action {
 	/// Arm (or clear) the deadline the front wants to be woken at.
 	Arm { at: Option<Instant> },
 	/// The front is over: reject the parked requesters with `err`, leave each
-	/// read track to end with the copy it is spliced from, and abort the rest
-	/// with `err`.
+	/// read track to end with the copy it is spliced from or still waiting on,
+	/// abort the rest with `err`, and drop every source.
 	End { err: Error },
 }
 
@@ -627,9 +627,9 @@ impl Front {
 			return;
 		}
 		self.ended = true;
-		if let Some((source, _)) = self.serving.take() {
-			actions.push(Action::Detach { source });
-		}
+		// No Detach: the driver keeps the serving source's copies until End, so a
+		// track still waiting on its info can be spliced to the copy it asked.
+		self.serving = None;
 		actions.push(Action::End { err });
 	}
 }
@@ -834,7 +834,7 @@ mod tests {
 				best: None,
 				serving_closing: false,
 			}),
-			&[Action::Detach { source: 100 }, Action::End { err: Error::Dropped }],
+			&[Action::End { err: Error::Dropped }],
 		);
 	}
 
@@ -860,7 +860,7 @@ mod tests {
 				best: None,
 				serving_closing: false,
 			}),
-			&[Action::Detach { source: 100 }, Action::End { err: Error::Dropped }],
+			&[Action::End { err: Error::Dropped }],
 		);
 	}
 
@@ -1170,7 +1170,7 @@ mod tests {
 				best: Some(local(2)),
 				serving_closing: true,
 			}),
-			&[Action::Detach { source: 100 }, Action::End { err: Error::Dropped }],
+			&[Action::End { err: Error::Dropped }],
 		);
 	}
 
@@ -1186,10 +1186,7 @@ mod tests {
 	#[test]
 	fn teardown_ends_everything() {
 		let mut front = serving(remote(1, 10), 100);
-		assert_actions(
-			front.step(Event::Closed),
-			&[Action::Detach { source: 100 }, Action::End { err: Error::Dropped }],
-		);
+		assert_actions(front.step(Event::Closed), &[Action::End { err: Error::Dropped }]);
 	}
 
 	/// Every sequence of events up to a small depth, over a small alphabet,

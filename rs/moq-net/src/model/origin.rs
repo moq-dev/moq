@@ -2055,6 +2055,16 @@ async fn run_front(task: FrontTask) {
 						broadcast.finish();
 						broadcast.release_spliced(err.clone());
 						for (_, mut io) in tracks.drain() {
+							// A reader still waiting on its source's answer is in flight
+							// too: splice the copy it asked, so it ends as that copy does.
+							let waiting = io.staged.take().map(|(_, copy)| copy);
+							let waiting = waiting.or_else(|| io.query.take().map(|(_, copy, _)| copy));
+							if let Some(copy) = waiting
+								&& io.resume.is_used() && !io.resume.is_spliced()
+								&& io.resume.takeover(&copy).is_err()
+							{
+								continue;
+							}
 							// Nothing in flight: unread, never spliced, or only a warm cache.
 							if !io.resume.is_used() || !io.resume.is_spliced() || io.warm.is_some() {
 								let _ = io.resume.abort(err.clone());
@@ -4335,6 +4345,39 @@ mod tests {
 		broadcast.announce(Route::default()).unwrap();
 		let again = consumer.request_broadcast("room/alice").await.expect("resolves again");
 		assert!(!again.is_clone(&resolved));
+	}
+
+	/// A subscriber still waiting on the source's track info is in flight too:
+	/// unannouncing leaves it on the copy it asked for, which the source can
+	/// still answer and finish.
+	#[tokio::test]
+	async fn unannounce_keeps_a_track_awaiting_its_info() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
+		let mut dynamic = broadcast.dynamic();
+		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
+		let track = resolved.track("video").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the front asked the source")
+			.expect("request");
+
+		broadcast.unannounce();
+		settle(|| resolved.is_closed()).await;
+
+		let source = request.accept(None);
+		let mut group = source.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
+		group.finish().unwrap();
+		source.finish().unwrap();
+
+		let mut subscription = subscribing.await.unwrap().expect("subscribe survives the retraction");
+		let mut group = subscription.recv_group().await.unwrap().expect("the source's group");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"late");
+		assert!(matches!(subscription.recv_group().await, Ok(None)), "ends cleanly");
 	}
 
 	/// A re-announce that lands before the front acts on the retraction reuses
