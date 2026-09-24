@@ -418,7 +418,10 @@ impl TrackState {
 			};
 			self.recorder.record(group.sequence, first, true);
 			self.recorder.end(last);
-			buffered.entry(name.to_string()).or_default().insert(group.sequence, group);
+			buffered
+				.entry(name.to_string())
+				.or_default()
+				.insert(group.sequence, group);
 		}
 	}
 }
@@ -758,7 +761,12 @@ mod tests {
 
 	#[async_trait::async_trait]
 	impl ObjectStore for Failing {
-		async fn put_opts(&self, location: &Path, payload: PutPayload, opts: PutOptions) -> object_store::Result<PutResult> {
+		async fn put_opts(
+			&self,
+			location: &Path,
+			payload: PutPayload,
+			opts: PutOptions,
+		) -> object_store::Result<PutResult> {
 			if location.as_ref().contains(&format!("/{}/groups/", self.track)) {
 				return Err(object_store::Error::NotImplemented {
 					operation: "put".into(),
@@ -818,14 +826,20 @@ mod tests {
 	fn group(track: &track::Producer, sequence: u64, timestamps: &[u64]) {
 		let mut group = track.create_group(group::Info { sequence }).unwrap();
 		for &timestamp in timestamps {
-			group.write_frame(ms(timestamp), format!("{sequence}@{timestamp}")).unwrap();
+			group
+				.write_frame(ms(timestamp), format!("{sequence}@{timestamp}"))
+				.unwrap();
 		}
 		group.finish().unwrap();
 	}
 
 	/// Replay every stored timeline object, returning the records still in the window.
 	async fn window<S: ObjectStore>(store: &Store<S>) -> Vec<Record> {
-		let entries: Vec<_> = store.list(&Query::segments(TIMELINE).unwrap()).try_collect().await.unwrap();
+		let entries: Vec<_> = store
+			.list(&Query::segments(TIMELINE).unwrap())
+			.try_collect()
+			.await
+			.unwrap();
 		let mut segments: Vec<u64> = entries
 			.into_iter()
 			.map(|entry| match entry.key {
@@ -899,7 +913,9 @@ mod tests {
 		let _ignored = track(&source, "ignored");
 
 		let store = Store::new(InMemory::new(), "rec");
-		let writer = Writer::new(store.clone(), source.consume(), Config::default()).await.unwrap();
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
 		let control = writer.control();
 		control.pacing_track("video").await.unwrap();
 		control.track("catalog.json").await.unwrap();
@@ -940,7 +956,9 @@ mod tests {
 			track: "audio",
 		};
 		let store = Store::new(failing, "rec");
-		let writer = Writer::new(store.clone(), source.consume(), Config::default()).await.unwrap();
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
 		let control = writer.control();
 		control.pacing_track("video").await.unwrap();
 		control.pacing_track("audio").await.unwrap();
@@ -982,7 +1000,10 @@ mod tests {
 
 		// Segments 3 and 4 hold two seconds; the partial final segment 5 is always kept.
 		let records = window(&store).await;
-		assert_eq!(records.iter().map(|record| record.segment).collect::<Vec<_>>(), vec![3, 4, 5]);
+		assert_eq!(
+			records.iter().map(|record| record.segment).collect::<Vec<_>>(),
+			vec![3, 4, 5]
+		);
 		check_objects(&store, &records).await;
 
 		let stored: HashSet<_> = store
@@ -1001,7 +1022,9 @@ mod tests {
 		let video = track(&source, "video");
 
 		let store = Store::new(InMemory::new(), "rec");
-		let writer = Writer::new(store.clone(), source.consume(), Config::default()).await.unwrap();
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
 		writer.control().pacing_track("video").await.unwrap();
 
 		group(&video, 0, &[0]);
@@ -1025,7 +1048,9 @@ mod tests {
 		let audio = track(&source, "audio");
 
 		let store = Store::new(InMemory::new(), "rec");
-		let writer = Writer::new(store.clone(), source.consume(), Config::default()).await.unwrap();
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
 		let control = writer.control();
 		control.pacing_track("video").await.unwrap();
 		control.pacing_track("audio").await.unwrap();
@@ -1050,7 +1075,11 @@ mod tests {
 
 		let records = window(&store).await;
 		assert_eq!(ranges(&records, "video"), vec![(0, 0), (1, 1), (2, 2), (3, 3)]);
-		assert_eq!(ranges(&records, "audio"), vec![(0, 0)], "the incomplete group is dropped");
+		assert_eq!(
+			ranges(&records, "audio"),
+			vec![(0, 0)],
+			"the incomplete group is dropped"
+		);
 		check_objects(&store, &records).await;
 		drop(stalled);
 	}
@@ -1065,10 +1094,7 @@ mod tests {
 		let control = writer.control();
 		control.pacing_track("video").await.unwrap();
 		assert_eq!(control.track("video").await, Err(Error::Enrolled("video".into())));
-		assert_eq!(
-			control.track(TIMELINE).await,
-			Err(Error::Enrolled(TIMELINE.into()))
-		);
+		assert_eq!(control.track(TIMELINE).await, Err(Error::Enrolled(TIMELINE.into())));
 	}
 
 	#[tokio::test]
@@ -1082,7 +1108,10 @@ mod tests {
 		let control = writer.control();
 		assert_eq!(
 			control.pacing_track("video").await,
-			Err(Error::Priority { existing: 7, intended: 0 })
+			Err(Error::Priority {
+				existing: 7,
+				intended: 0
+			})
 		);
 	}
 
@@ -1092,7 +1121,9 @@ mod tests {
 		let video = track(&source, "video");
 
 		let store = Store::new(InMemory::new(), "rec");
-		let writer = Writer::new(store.clone(), source.consume(), Config::default()).await.unwrap();
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
 		writer.control().pacing_track("video").await.unwrap();
 		group(&video, 0, &[0]);
 		video.finish().unwrap();
