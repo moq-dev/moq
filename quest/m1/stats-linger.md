@@ -10,11 +10,13 @@ group emits nothing, so aggregate consumers read the same counters.
 ## Plan
 
 `publish` in `rs/moq-stats/src/produce.rs` drops a group on the first drain
-with no traffic or session rows. Record the tick a group went idle, reset it
-when rows return, and drop the group only after one minute of idle ticks.
-Keep the linger a constant; depth 0 is unchanged.
+with no traffic or session rows. Record the instant a group went idle, from
+tokio's clock, reset it when rows return, and drop the group at the first
+drain one minute after that. The linger is elapsed time, not ticks, so it holds
+at any `--stats-interval` and after a stalled ticker. Keep it a constant;
+depth 0 is unchanged.
 
-Test it tick-driven: a session that closes leaves its group announced through
+Test it on paused tokio time, at two intervals: a session that closes leaves its group announced through
 the linger, a session returning within it keeps the same announcement with no
 end or start, and the group is withdrawn once the linger passes.
 

@@ -37,6 +37,13 @@ Tests, in-process, driven by the test clock with no sleeps:
 - Through a topology change, every relay holds the route at every step.
 - A warm exact-path route from a second carrier reaches only the relays
   nearer that carrier.
+- On a graph where a relay has no node-protecting backup, it still receives
+  at most two copies.
+
+Add a benchmark beside `origin/announce_duplicate` that sweeps route count
+against cluster-peer count and times route churn with tree forwarding on and
+off, so a cost that grows per route and peer, not per touched path, shows up as
+a slope.
 
 ## Required
 

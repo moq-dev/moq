@@ -27,9 +27,11 @@ cluster peer session only to:
 
 - the peers it is the parent of in the shortest-path tree rooted at the
   route's source, the first hop in its chain that is a node of the graph;
-- the peers it is the backup for: for peer `P` whose parent is `Q`, the
+- the peer it is the backup for: for peer `P` whose parent is `Q`, the
   cheapest neighbour of `P` other than `Q` whose own tree path to the source
-  avoids both `P` and `Q`.
+  avoids both `P` and `Q`. If none does, the cheapest neighbour whose path
+  avoids `P`, which protects the `P`-`Q` link but not `Q` itself. If none
+  does either, `P` has no backup.
 
 Every relay computes the same trees from the same graph: link prices are the
 configured cluster costs, and ties break on the lower hop id. A route whose
@@ -48,8 +50,11 @@ plus a backup.
 Every relay holds a backup that avoids its parent. When a link or relay fails,
 the relay next to it promotes its backup and sends downstream an in-place
 update (lite-06 `ANNOUNCE_RESTART`), not an end, so downstream relays never
-reconverge. A relay with no qualifying neighbour is fed by every neighbour for
-that source.
+reconverge. A relay with only a link-protecting backup, or none, loses the
+route when its parent relay fails, and reconverges when the topology digest
+changes. That keeps every relay at two copies at most on any graph. The
+topology quest reports how many relays lack a node-protecting backup, so a
+graph that needs one more link shows it.
 
 ### Agreement
 

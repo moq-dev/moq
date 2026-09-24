@@ -5,7 +5,8 @@
 Every cluster relay publishes its live peer links, and once the cluster
 settles, every relay holds the same graph and the same digest of it.
 Forwarding is unchanged. The relay's internal HTTP listener reports the digest,
-node count, and link count, so an operator can see agreement.
+node count, link count, and the relays with no node-protecting backup, so an
+operator can see agreement and the graph's weak spots.
 
 ## Plan
 
