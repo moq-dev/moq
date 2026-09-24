@@ -317,10 +317,13 @@ async fn main() -> anyhow::Result<()> {
 		}
 	}
 
+	// `fetch` only dials, so an ambient listener or cluster setting it never uses
+	// is not validated either.
 	if let [Command::Fetch(_)] = stages.as_slice() {
 		cli.dial_only("fetch")?;
+	} else {
+		cli.moq.validate()?;
 	}
-	cli.moq.validate()?;
 
 	let net = Net {
 		quic: cli.moq.quic.clone(),
