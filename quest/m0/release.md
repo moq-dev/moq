@@ -87,5 +87,5 @@ Public API: none beyond the required quests. Wire: none.
 
 ## Required
 
-- [Binding docs](/quest/m1/binding-docs.md) - the binding pages compile against the wrappers
+- [JS retention](/quest/m0/js-retention.md) - the player no longer grows its heap per frame
 - The merged relay has soaked on moq.pro staging and the maintainer has signed it off

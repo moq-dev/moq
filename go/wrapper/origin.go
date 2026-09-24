@@ -47,9 +47,9 @@ func (o *OriginProducer) Dynamic(prefix string, route Route) (*OriginDynamic, er
 // CreateBroadcast creates a broadcast at the given path, returning the producer
 // that feeds it.
 //
-// The broadcast appears on this origin's local announcement streams immediately.
-// Advertise it to peers with [BroadcastProducer.Announce]
-// after populating tracks. Finish unpublishes immediately, while dropping the
+// The broadcast is invisible and unroutable, for this origin's consumers and
+// peers alike, until [BroadcastProducer.Announce]. Announce it after
+// populating tracks. Finish unpublishes immediately, while dropping the
 // producer without finishing also unpublishes but reads to subscribers as a
 // failure rather than a deliberate end.
 func (o *OriginProducer) CreateBroadcast(path string) (*BroadcastProducer, error) {
@@ -149,10 +149,11 @@ func (o *OriginConsumer) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, e
 	return &AnnouncedBroadcast{inner: inner}, nil
 }
 
-// RequestBroadcast resolves a broadcast at path as soon as it can be served: a
-// local broadcast at the exact path, the best announced route covering it
-// (served on demand by the session that announced it), or a dynamic fallback on
-// the origin; errors if nothing can serve it. Unlike AnnouncedBroadcast, it
+// RequestBroadcast resolves a broadcast at path as soon as it can be served,
+// through the best announced route covering it: an announced broadcast on this
+// origin, a route a session announced (served on demand by that session), or a
+// dynamic handler on the origin; errors if nothing can serve it, including a
+// broadcast created but not announced. Unlike AnnouncedBroadcast, it
 // does not wait for a future announcement. Blocks until resolved.
 func (o *OriginConsumer) RequestBroadcast(ctx context.Context, path string) (*BroadcastConsumer, error) {
 	inner, err := o.inner.RequestBroadcast(ctx, path)

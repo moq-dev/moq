@@ -561,8 +561,8 @@ mod tests {
 	/// verbatim stream (SCTE-35) and one PES-framed verbatim stream, by importing
 	/// `bbb.ts` into a broadcast that also holds the two ancillary tracks and
 	/// re-exporting with the `mpegts` catalog extension.
-	/// Let the origin's spawned attach task run: a created broadcast becomes
-	/// routable asynchronously, shortly after `create_broadcast` returns.
+	/// Let the origin's driver run the fronts that requests and announcements
+	/// started: they serve asynchronously, shortly after the call returns.
 	async fn settle() {
 		for _ in 0..10 {
 			tokio::task::yield_now().await;
@@ -683,6 +683,7 @@ mod tests {
 		// The broadcast is created on a throwaway origin so the exporter can resolve it by path.
 		let origin = moq_tokio::origin::spawn();
 		let broadcast = origin.create_broadcast("cli").unwrap();
+		broadcast.announce(Default::default()).unwrap();
 		settle().await;
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts, Default::default()).unwrap();
 		#[allow(irrefutable_let_patterns)]
