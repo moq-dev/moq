@@ -3274,8 +3274,9 @@ impl Consumer {
 		}
 
 		// Use an untagged stream: this is a lookup, not egress announce
-		// forwarding, so it must not drive the announce guards.
-		let mut announced = consumer.untagged().announced();
+		// forwarding, so it must not drive the announce guards. Hiding narrows
+		// discovery, not lookup, so a hidden path resolves like any other.
+		let mut announced = consumer.untagged().with_hidden(true).announced();
 		loop {
 			let update = announced.next().await?;
 			if update.kind.is_active() && path.has_prefix(&update.prefix) {

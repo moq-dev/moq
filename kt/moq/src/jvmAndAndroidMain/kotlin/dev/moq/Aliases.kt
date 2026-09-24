@@ -31,7 +31,7 @@ typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
 /** A stream of route announcements and retractions under a prefix. */
 typealias AnnounceConsumer = uniffi.moq.MoqAnnounceConsumer
-/** A literal prefix plus an optional relative pattern for announcement discovery. */
+/** A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery. */
 typealias AnnounceConfig = uniffi.moq.MoqAnnounceConfig
 /** A pending wait for a route to cover a specific path. */
 typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast

@@ -80,4 +80,3 @@ assert both observe the same thing:
 ## Related
 
 - [Broadcast close](/quest/m1/broadcast-close/README.md) - `close()` is a permanent `unannounce()`, and every broadcast end must behave the same locally and remotely
-- [Hidden broadcasts](/quest/m1/hidden-broadcasts.md) - the other rule for which announced paths a cursor sees

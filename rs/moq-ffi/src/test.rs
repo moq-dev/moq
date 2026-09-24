@@ -1496,6 +1496,7 @@ async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
 		.announced(MoqAnnounceConfig {
 			prefix: "a/".into(),
 			filter: None,
+			hidden: false,
 		})
 		.unwrap();
 
@@ -1548,6 +1549,7 @@ async fn announced_filters_patterns_and_reports_captures() {
 		.announced(MoqAnnounceConfig {
 			prefix: "room".into(),
 			filter: Some("*/chat".into()),
+			hidden: false,
 		})
 		.unwrap();
 
@@ -1573,6 +1575,32 @@ async fn announced_filters_patterns_and_reports_captures() {
 	assert!(update.active());
 
 	chat.finish().unwrap();
+}
+
+/// A `.`-named broadcast is listed only when the config opts in or the prefix names it.
+#[tokio::test]
+async fn announced_hides_dot_paths_unless_asked() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let _stats = create_announced(&origin, ".stats/node");
+	let _cam = create_announced(&origin, "cam");
+
+	for (prefix, hidden, expected) in [("", false, "cam"), ("", true, ".stats/node"), (".stats", false, ".stats/node")] {
+		let announced = consumer
+			.announced(MoqAnnounceConfig {
+				prefix: prefix.into(),
+				filter: None,
+				hidden,
+			})
+			.unwrap();
+		// Updates arrive in path order, and `.` sorts before letters.
+		let update = tokio::time::timeout(TIMEOUT, announced.next())
+			.await
+			.expect("timed out waiting for an announcement")
+			.unwrap()
+			.expect("the origin should keep announcing");
+		assert_eq!(update.prefix(), expected, "prefix {prefix:?}, hidden {hidden}");
+	}
 }
 
 /// A broadcast consumed straight from a local producer has no origin, so a rendition naming a

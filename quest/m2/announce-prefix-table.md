@@ -6,7 +6,7 @@ MoQ-lite announcement starts can refer to repeated path-segment prefixes,
 including a customer PID, using a bounded table scoped to one ordered Announce
 Stream. Repeated-name traffic uses fewer actual network bytes without changing
 the reconstructed path, route behavior, or the raw path length reported for
-usage. The new encoding uses lite-07, while lite-06 and older versions remain
+usage. The new encoding uses lite-08, while lite-07 and older versions remain
 compatible.
 
 ## Plan
@@ -22,7 +22,7 @@ Reject invalid references and lengths as protocol violations. Keep
 `ANNOUNCE_END` and `ANNOUNCE_UPDATE` on their lite-06 IDs rather than re-sending
 the path.
 
-Introduce `moq-lite-07` after lite-06. Keep lite-06 framing intact; do not
+Introduce `moq-lite-08` after lite-07. Keep lite-07 framing intact; do not
 silently reinterpret an already negotiated stream. Prove mixed-version peers negotiate a common older version and that a new
 stream after reconnect starts with an empty table. Exercise
 literal fallback, repeated PID, nested tuple prefixes, table-full eviction,
@@ -45,5 +45,3 @@ the internal moq.pro mesh after lite-06 has rolled out.
   path encoding does not remove
 - [PoP skipping](/quest/m1/pop-skipping/README.md) - the lite-06 rollout
   work that must complete before moq.pro activates this encoding
-- [Hidden broadcasts](/quest/m1/hidden-broadcasts.md) - also claims lite-07;
-  whichever lands first defines it, and the other joins or bumps it

@@ -78,6 +78,8 @@ while the claim should stay advertised, and reject the requests you will not
 serve. A route is a capability, not an inventory. `Announced(options)` combines
 a literal prefix with an optional relative pattern; `ann.Prefix()` stays
 relative to the origin and `ann.Captures()` reports the wildcard matches.
+Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
+`Hidden: true`.
 
 Every call that can block takes a `context.Context` first. Cancelling it
 returns `ctx.Err()` promptly and tears the in-flight native work down, so a

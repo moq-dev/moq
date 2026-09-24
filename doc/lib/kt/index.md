@@ -59,7 +59,8 @@ path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
 serve. A route is a capability, not an inventory. `announcements(config)` takes
 a literal prefix plus an optional relative pattern; `announcement.prefix()`
-stays origin-relative and `captures()` reports the wildcard matches.
+stays origin-relative and `captures()` reports the wildcard matches. Paths with
+a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless `hidden = true`.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `moq.epoch()` counts the connections, 1 on the first, pairing with

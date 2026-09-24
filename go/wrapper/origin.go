@@ -125,6 +125,8 @@ type AnnounceOptions struct {
 	Prefix string
 	// Filter is a pattern relative to Prefix. Nil matches every path beneath it.
 	Filter *string
+	// Hidden also lists paths with a segment starting with "." below Prefix.
+	Hidden bool
 }
 
 // Announced streams routes under a literal prefix matching an optional pattern filter.
@@ -132,6 +134,7 @@ func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, 
 	inner, err := o.inner.Announced(ffi.MoqAnnounceConfig{
 		Prefix: options.Prefix,
 		Filter: options.Filter,
+		Hidden: options.Hidden,
 	})
 	if err != nil {
 		return nil, err

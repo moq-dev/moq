@@ -75,6 +75,8 @@ advertised, and reject the requests you will not serve. A route is a
 capability, not an inventory. `announced(prefix, filter=...)` combines a literal
 root with an optional relative pattern; each announcement `.prefix` stays
 relative to the origin and `.captures` reports what the pattern wildcards matched.
+Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
+`hidden=True`.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing

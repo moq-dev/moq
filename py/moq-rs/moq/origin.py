@@ -180,9 +180,14 @@ class OriginConsumer:
     def __init__(self, inner: MoqOriginConsumer) -> None:
         self._inner = inner
 
-    def announced(self, prefix: str = "", *, filter: str | None = None) -> AnnounceConsumer:
-        """Iterate routes in the literal ``prefix`` matching the optional pattern ``filter``."""
-        return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter)))
+    def announced(self, prefix: str = "", *, filter: str | None = None, hidden: bool = False) -> AnnounceConsumer:
+        """Iterate routes in the literal ``prefix`` matching the optional pattern ``filter``.
+
+        Paths with a segment starting with ``.`` below ``prefix`` are hidden unless ``hidden``.
+        """
+        return AnnounceConsumer(
+            self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter, hidden=hidden))
+        )
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
         """Await a route covering ``path``, then resolve the broadcast there.
