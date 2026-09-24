@@ -31,6 +31,9 @@ remaining gap is the subscriber's bookkeeping:
   instead of `stream_count: 0`. On receipt, treat the count as a hint: stop
   waiting once that many are accounted for, but accept a late stream below the
   boundary within the grace, so a published peer's 0 keeps working.
+- IETF publisher on drafts 14-22: write the END_OF_TRACK object at the
+  boundary, which moq-net does not send today, and assert the
+  boundary end to end.
 
 Confirm Stream Count's meaning for the implemented IETF drafts first, and
 where each draft carries the track's end (draft-07's SUBSCRIBE_DONE Final

@@ -78,6 +78,9 @@ And the publishers:
   finished or been reset.
 - IETF sends PublishDone after the same drain, with the real number of data
   streams it opened instead of the hardcoded 0.
+- IETF on drafts 14-22 writes the END_OF_TRACK object at the boundary; today
+  it writes only GROUP_END (`js/net/src/ietf/object.ts`), so no in-repo
+  subscriber could learn the end. Assert the boundary end to end.
 - A received stream count is a hint: stop waiting once that many streams are
   accounted for, but accept a late stream below the boundary within the grace.
   A published peer's 0 then behaves like today's lite FIN plus the grace.
