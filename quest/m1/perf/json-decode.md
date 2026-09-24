@@ -16,3 +16,7 @@ it drops by more than 10x on a stats decode benchmark, with the same wire.
 - Patch in place on the typed value where the shape allows it; fall back to
   the `Value` merge only for shapes that cannot be patched, and say which.
 - Public API: none expected. Wire: none.
+
+## Related
+
+- [Binary delta stats](/quest/m2/stats-delta.md) - the format change gated on what this leaves on the table
