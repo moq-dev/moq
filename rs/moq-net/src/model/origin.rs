@@ -1182,7 +1182,7 @@ impl Producer {
 			cache_duration: self.cache_duration,
 			path: full,
 		};
-		let source = info.produce().with_stats(ingress);
+		let source = info.produce().with_stats(ingress.clone());
 		let entry = announcing.announce(
 			Route::default(),
 			Serving {
@@ -1193,6 +1193,7 @@ impl Producer {
 		)?;
 		Ok(source.with_announcer(Announcer {
 			entry,
+			ingress,
 			_keepalive: self.tasks.keepalive(),
 		}))
 	}
@@ -1407,13 +1408,15 @@ impl Announcing {
 		}
 		drop(shared);
 
-		// Ingress announce guard: held for the advertisement's lifetime.
-		let guard = self.stats.ingress(&self.requested).announce();
+		// Ingress announce guard: held while the route is advertised.
+		let guard = serving
+			.advertised
+			.then(|| self.stats.ingress(&self.requested).announce());
 
 		Ok(AnnounceProducer {
 			shared: self.shared.clone(),
 			entries,
-			_guard: guard,
+			guard,
 		})
 	}
 }
@@ -1433,6 +1436,8 @@ struct Serving {
 /// broadcast has none and cannot announce.
 pub(crate) struct Announcer {
 	entry: AnnounceProducer,
+	/// The ingress counters an advertised interval's announce guard comes from.
+	ingress: stats::Scope,
 	/// A published broadcast is lifecycle work: the origin's driver keeps
 	/// running for as long as one lives, even once every producer handle is
 	/// gone, so a session handed a producer can drop it and keep serving.
@@ -1442,12 +1447,17 @@ pub(crate) struct Announcer {
 impl Announcer {
 	/// Advertise the broadcast's path with `route`, or re-price it in place.
 	pub(crate) fn announce(&mut self, route: Route) -> Result<(), Error> {
-		self.entry.update(route)
+		self.entry.update(route)?;
+		if self.entry.guard.is_none() {
+			self.entry.guard = Some(self.ingress.announce());
+		}
+		Ok(())
 	}
 
 	/// Withdraw the advertisement from local and remote consumers alike.
 	pub(crate) fn withdraw(&mut self) {
 		self.entry.withdraw();
+		self.entry.guard = None;
 	}
 }
 
@@ -1463,8 +1473,8 @@ pub(crate) struct AnnounceProducer {
 	/// The table entries this advertisement created, by prefix and id. A prefix
 	/// remains unchanged; pattern scopes only filter its visibility and requests.
 	entries: Vec<(PathOwned, u64)>,
-	/// Ingress announce stats guard, held for the advertisement's lifetime.
-	_guard: stats::Announce,
+	/// Ingress announce stats guard, held only while the entries are advertised.
+	guard: Option<stats::Announce>,
 }
 
 impl AnnounceProducer {
@@ -4246,6 +4256,41 @@ mod tests {
 			.expect("resolves");
 		assert_eq!(resolved.info().path.as_str(), "room/alice");
 		assert!(server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
+	}
+
+	/// Ingress announce stats count advertised intervals, not the broadcast's
+	/// lifetime: nothing while hidden, one per announce, none for a re-price.
+	#[tokio::test]
+	async fn announce_stats_follow_the_advertisement() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let producer = origin(1)
+			.produce()
+			.with_stats(registry.tier(stats::Tier::default()).session("root"));
+		let announces = || {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.find(|(_, role, _)| *role == stats::Role::Subscriber)
+				.map(|(_, _, traffic)| (traffic.announces_started, traffic.announces_ended))
+				.unwrap_or_default()
+		};
+
+		let broadcast = producer.create_broadcast("room/alice").unwrap();
+		assert_eq!(announces(), (0, 0), "a hidden broadcast is not announced");
+		broadcast.announce(Route::default()).unwrap();
+		broadcast
+			.announce(Route {
+				cost: Cost::new(3),
+				..Route::default()
+			})
+			.unwrap();
+		assert_eq!(announces(), (1, 0), "a re-price is not another announce");
+		broadcast.unannounce();
+		assert_eq!(announces(), (1, 1));
+		broadcast.announce(Route::default()).unwrap();
+		drop(broadcast);
+		assert_eq!(announces(), (2, 2));
 	}
 
 	/// At equal cost the local broadcast wins.
