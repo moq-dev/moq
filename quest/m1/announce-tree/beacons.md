@@ -2,9 +2,11 @@
 
 ## Goal
 
-Every cluster relay announces a beacon at `.internal/topology/<hop>`. Its
-upstreams track publishes, per source relay, the relay's parent tie set and a
-backup for each member. Forwarding is unchanged. The internal HTTP listener
+Every cluster relay announces a beacon: an empty, track-less broadcast at
+`.internal/topology/<hop>`. From the beacon routes it holds, each relay
+computes its upstream table: for each source relay, its parent tie set and a
+backup for each member. Nothing is sent on the wire yet, and forwarding is
+unchanged. The internal HTTP listener
 shows the table and the sources whose backups are only link-protecting or
 missing, so an operator can see weak spots in the mesh.
 
@@ -26,8 +28,9 @@ missing, so an operator can see weak spots in the mesh.
   - for each member `u`, the backup `b_u`: the best standby whose chain avoids
     `u`, else the best on a session other than `u`'s, else none, with which
     kind it is. When `u` is `S` itself, only link protection is possible.
-- Publish the table on the beacon's `upstreams` track whenever it changes.
-  Entries name neighbours by hop id. Hop ids stay random per restart when
+- Recompute the table whenever a beacon route or link changes, and expose
+  change notifications for [forwarding](/quest/m1/announce-tree/forward.md) to
+  send. Entries name neighbours by hop id. Hop ids stay random per restart when
   unconfigured; a restarted relay is a new source.
 - Keep it separate from the `.internal/origins` dial gossip
   (`rs/moq-relay/src/cluster.rs`). Static deployments such as moq.pro leave

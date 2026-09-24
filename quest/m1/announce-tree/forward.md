@@ -2,7 +2,7 @@
 
 ## Goal
 
-On cluster peer sessions, lite and IETF alike, a relay sends a route only to
+On lite-07 cluster peer sessions, a relay sends a route only to
 the receivers that chose it as parent or backup for that route's prefix and
 source, following the [line's rule](/quest/m1/announce-tree/README.md). It
 floods whatever a receiver has no choice for. On a sparse mesh, a broadcast
@@ -13,12 +13,13 @@ unchanged, so this targets `main`.
 
 ## Plan
 
-- Apply the rule once, in the shared cursor layer in
-  `rs/moq-net/src/model/origin.rs`, which both `lite/publisher.rs` and
-  `ietf/publisher.rs` consume through `excluding(peer).announced()`.
-- The cursor's excluded hop identifies the peer. A peer with a published
-  [upstream table](/quest/m1/announce-tree/beacons.md) is in tree mode; any
-  other peer sees today's behaviour.
+- As a subscriber on each cluster session, send the relay's
+  [upstream table](/quest/m1/announce-tree/beacons.md) over the
+  [wire](/quest/m1/announce-tree/wire.md), and send an update whenever it
+  changes.
+- As a publisher, apply a received table in the shared cursor layer in
+  `rs/moq-net/src/model/origin.rs`. A cursor with a table is in tree mode;
+  any other cursor sees today's behaviour, so IETF links flood.
 - Split horizon filters before selection today, so a peer receives this
   relay's best route that doesn't come through it. Keep that selection and
   apply the tree check after it. If the check fails, the cursor presents
@@ -29,13 +30,14 @@ unchanged, so this targets `main`.
   [ranking](/quest/m1/announce-tree/route-order.md).
 - A source with no entry in the receiver's table is flooded. This covers
   unreachable sources, anonymous chains, and meshes split by an older relay.
-- When a peer's table changes, re-sync every cursor serving that peer.
-  Today `sync_cursor` runs only on a route change, so add that path. It
+- When a table update arrives, re-sync that cursor at the update's position
+  in the stream. Today `sync_cursor` runs only on a route change, so add that
+  path. It
   starts routes where this relay newly qualifies and ends them where it no
   longer does.
 - With several sessions to one peer hop, send on one of them only.
-- A relay flag, on by default, controls whether the relay publishes its
-  upstream table. Turning it off makes every neighbour flood to that relay
+- A relay flag, on by default, controls whether the relay sends its upstream
+  table. Turning it off makes every neighbour flood to that relay
   again, so one relay can be rolled back with a config change.
 
 The [simulator](/quest/m1/announce-tree/simulator.md) must hold completeness,
@@ -44,7 +46,7 @@ regression cases for:
 
 - the split mesh through an older relay;
 - competing sources at a tie;
-- an IETF cluster link.
+- an IETF cluster link and a lite-06 cluster link, which both flood.
 
 Add a benchmark beside `origin/announce_duplicate` sweeping route count
 against cluster-peer count, with tree forwarding on and off, so a cost that
@@ -57,3 +59,5 @@ on a table change is the obvious candidate.
   choices the rule reads
 - [Cluster simulator](/quest/m1/announce-tree/simulator.md) - the invariant
   check it must pass
+- [Upstream interest on the wire](/quest/m1/announce-tree/wire.md) - how the
+  table reaches the sender
