@@ -289,15 +289,14 @@ impl<T: DeserializeOwned> Decoder<T> {
 	}
 }
 
-/// Deserialize one frame, naming the JSON path of any failure.
+/// Deserialize one whole frame, naming the JSON path of any failure.
 fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 	// Tracking the path allocates for every key walked, which dwarfed the decode itself, so it only
-	// runs again to explain a failure.
-	if let Ok(value) = T::deserialize(&mut serde_json::Deserializer::from_slice(bytes)) {
-		return Ok(value);
-	}
-	serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_slice(bytes))
-		.map_err(|err| Error::Json(err.to_string()))
+	// runs again to explain a failure. Trailing data has no path, so it keeps the plain error.
+	serde_json::from_slice(bytes).map_err(|err| {
+		let tracked = serde_path_to_error::deserialize::<_, T>(&mut serde_json::Deserializer::from_slice(bytes));
+		Error::Json(tracked.err().map_or_else(|| err.to_string(), |err| err.to_string()))
+	})
 }
 
 impl<T> Group<'_, T> {
