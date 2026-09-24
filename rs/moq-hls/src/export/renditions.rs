@@ -19,6 +19,7 @@ use moq_mux::timeline::Entry;
 
 use super::Upstream;
 use super::rendition::{Kind, Rendition};
+use super::segments::Discontinuities;
 
 /// The `(kind, name)` identity of a rendition. Video and audio are separate axes, so a video
 /// and an audio rendition may share a name without colliding.
@@ -46,9 +47,12 @@ pub enum Event {
 struct Feed {
 	/// Every rendition ever created and still alive, pruned as they drop.
 	targets: Vec<Weak<Rendition>>,
-	/// Recent records, replayed into a rendition created mid-broadcast so its playlist window
-	/// isn't empty until the next record. Evicted with the same policy as the windows.
-	history: VecDeque<(u64, Entry)>,
+	/// Recent records with their discontinuity sequence, replayed into a rendition created
+	/// mid-broadcast so its playlist window isn't empty until the next record. Evicted with the
+	/// same policy as the windows.
+	history: VecDeque<(u64, Entry, u64)>,
+	/// Stamps each record once, so every rendition agrees on where the timeline breaks.
+	discontinuities: Discontinuities,
 	/// The timeline ended cleanly; late-created renditions start ended (`EXT-X-ENDLIST`).
 	ended: bool,
 	/// The timeline stream is over (cleanly or not); late-created renditions start closed.
@@ -93,6 +97,7 @@ impl Producer {
 				feed: Arc::new(Mutex::new(Feed {
 					targets: Vec::new(),
 					history: VecDeque::new(),
+					discontinuities: Discontinuities::default(),
 					ended: false,
 					closed: false,
 					anchor: None,
@@ -182,7 +187,7 @@ impl Fanout {
 
 		// Same eviction policy as the per-rendition windows, so a replay reconstructs the
 		// same window a live rendition would have.
-		if let Some((_, back)) = feed.history.back()
+		if let Some((_, back, _)) = feed.history.back()
 			&& (Duration::from(entry.pts) < Duration::from(back.pts) || entry.segment <= back.segment)
 		{
 			feed.history.clear();
@@ -194,7 +199,9 @@ impl Fanout {
 			let end = Duration::from(entry.pts) + entry.duration;
 			feed.anchor = Some(SystemTime::now().checked_sub(end).unwrap_or(SystemTime::UNIX_EPOCH));
 		}
-		feed.history.push_back((index, entry.clone()));
+		let pts = Duration::from(entry.pts);
+		let discontinuity = feed.discontinuities.stamp(pts, pts + entry.duration);
+		feed.history.push_back((index, entry.clone(), discontinuity));
 		while feed.history.len() >= 2 {
 			let newest = &feed.history.back().unwrap().1;
 			let span =
@@ -210,7 +217,7 @@ impl Fanout {
 			let Some(rendition) = target.upgrade() else {
 				return false;
 			};
-			rendition.push(index, &entry, window);
+			rendition.push(index, &entry, discontinuity, window);
 			true
 		});
 	}
@@ -218,7 +225,7 @@ impl Fanout {
 	/// Remove records that left the source timeline window from every rendition window.
 	pub fn pop(&self, range: std::ops::Range<u64>) {
 		let mut feed = self.feed.lock().unwrap();
-		feed.history.retain(|(index, _)| !range.contains(index));
+		feed.history.retain(|(index, _, _)| !range.contains(index));
 		feed.targets.retain(|target| {
 			let Some(rendition) = target.upgrade() else {
 				return false;
@@ -232,6 +239,7 @@ impl Fanout {
 	pub fn skip(&self) {
 		let mut feed = self.feed.lock().unwrap();
 		feed.history.clear();
+		feed.discontinuities.interrupt();
 		feed.targets.retain(|target| {
 			let Some(rendition) = target.upgrade() else {
 				return false;
@@ -292,8 +300,8 @@ impl Producer {
 	/// (and the ended/closed markers) so its window matches its siblings'.
 	fn register(&self, rendition: &Arc<Rendition>) {
 		let mut feed = self.fanout.feed.lock().unwrap();
-		for (index, entry) in &feed.history {
-			rendition.push(*index, entry, self.fanout.window);
+		for (index, entry, discontinuity) in &feed.history {
+			rendition.push(*index, entry, *discontinuity, self.fanout.window);
 		}
 		if feed.ended {
 			rendition.end();
