@@ -161,16 +161,13 @@ impl<T: DeserializeOwned> Decoder<T> {
 		let bytes = inflated.as_deref().unwrap_or(payload);
 
 		if !group.positioned {
-			let header: Header<T> = serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_slice(bytes))
-				.map_err(|err| Error::Json(err.to_string()))?;
+			let header: Header<T> = parse(bytes)?;
 			self.apply_header(header.offset, header.start.unwrap_or(header.offset), header.records)?;
 			group.positioned = true;
 			return Ok(());
 		}
 
-		match serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_slice(bytes))
-			.map_err(|err| Error::Json(err.to_string()))?
-		{
+		match parse(bytes)? {
 			Op::Push(record) => self.apply_push(record),
 			Op::Pop(count) => self.apply_pop(count),
 		}
@@ -290,6 +287,16 @@ impl<T: DeserializeOwned> Decoder<T> {
 
 		Ok(())
 	}
+}
+
+/// Deserialize one whole frame, naming the JSON path of any failure.
+fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+	// Tracking the path allocates for every key walked, which dwarfed the decode itself, so it only
+	// runs again to explain a failure. Trailing data has no path, so it keeps the plain error.
+	serde_json::from_slice(bytes).map_err(|err| {
+		let tracked = serde_path_to_error::deserialize::<_, T>(&mut serde_json::Deserializer::from_slice(bytes));
+		Error::Json(tracked.err().map_or_else(|| err.to_string(), |err| err.to_string()))
+	})
 }
 
 impl<T> Group<'_, T> {

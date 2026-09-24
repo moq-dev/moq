@@ -31,5 +31,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [io_uring handshake cancellation](/quest/m1/uring-handshake-cancel.md) - the same establish path, for a dropped dial
 - [uring identity](https://github.com/moq-dev/moq/pull/3865) - where the window was found

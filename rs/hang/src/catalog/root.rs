@@ -2,6 +2,9 @@
 use crate::Result;
 use crate::catalog::{Audio, Binary, Json, PRIORITY, Text, Video};
 use serde::de::DeserializeOwned;
+
+/// Maximum number of video, audio, and text renditions accepted in one catalog update.
+pub const MAX_RENDITIONS: usize = 64;
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
@@ -127,6 +130,18 @@ impl Catalog<()> {
 }
 
 impl<E> Catalog<E> {
+	/// Refuse a catalog with more renditions than a consumer can hold.
+	pub fn check_renditions(&self) -> Result<()> {
+		let count = self.video.renditions.len() + self.audio.renditions.len() + self.text.renditions.len();
+		if count > MAX_RENDITIONS {
+			return Err(crate::Error::TooManyRenditions {
+				count,
+				max: MAX_RENDITIONS,
+			});
+		}
+		Ok(())
+	}
+
 	/// Copy the media sections into a catalog with no application extension.
 	pub fn media(&self) -> Catalog<()> {
 		Catalog {
@@ -141,6 +156,15 @@ impl<E> Catalog<E> {
 }
 
 impl<E: DeserializeOwned + Default> Catalog<E> {
+	/// Subscribe to catalog updates on a broadcast.
+	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer) -> Result<super::Consumer<E>> {
+		let track = broadcast
+			.track(Catalog::DEFAULT_NAME)?
+			.subscribe(Catalog::default_subscription())
+			.await?;
+		Ok(super::Consumer::new(track))
+	}
+
 	/// Parse a catalog from a string.
 	#[allow(clippy::should_implement_trait)]
 	pub fn from_str(s: &str) -> Result<Self> {
@@ -189,6 +213,29 @@ mod test {
 	};
 
 	use super::*;
+
+	#[test]
+	fn too_many_renditions_is_a_typed_refusal() {
+		let mut catalog = Catalog::<()>::default();
+		for i in 0..MAX_RENDITIONS {
+			catalog
+				.audio
+				.renditions
+				.insert(format!("audio{i}"), AudioConfig::new(Opus, 48_000, 2));
+		}
+		assert!(catalog.check_renditions().is_ok());
+		catalog
+			.audio
+			.renditions
+			.insert("one-more".into(), AudioConfig::new(Opus, 48_000, 2));
+		assert!(matches!(
+			catalog.check_renditions(),
+			Err(crate::Error::TooManyRenditions {
+				count: 65,
+				max: MAX_RENDITIONS
+			})
+		));
+	}
 
 	#[test]
 	fn simple() {

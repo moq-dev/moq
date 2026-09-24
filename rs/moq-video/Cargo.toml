@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.0.26"
+version = "0.1.1"
 edition = "2024"
 rust-version.workspace = true
 
@@ -51,8 +51,8 @@ openh264 = ["dep:openh264", "dep:openh264-sys2"]
 # default because moq-vaapi's build script runs bindgen over its vendored libva
 # headers, so the build host needs libclang. At runtime libva is dlopen'd: the
 # binary carries no NEEDED libva and still starts on a libva-less host, where
-# automatic backend selection falls back to the next candidate. The decoder is
-# hardware-validated, while the encoder is not yet.
+# automatic backend selection falls back to the next candidate. Both are
+# validated on Intel Meteor Lake.
 vaapi = ["dmabuf", "dep:moq-vaapi"]
 # The V4L2 stateful memory-to-memory hardware codecs on Linux: the H.264 encoder
 # and decoder most ARM SoCs expose (a Raspberry Pi's VideoCore, and the
@@ -86,10 +86,12 @@ render = [
     "objc2-core-video/CVMetalTextureCache",
     "objc2-core-video/objc2-metal",
 ]
-# Screen capture on Linux via xdg-desktop-portal + PipeWire (Wayland and X11).
-# Off by default because the `pipewire` crate links libpipewire-0.3 via pkg-config
-# at build time (and its bindgen needs libclang), so it only belongs in builds
-# that actually capture displays. Camera capture (V4L2) needs only what
+# Screen capture on Linux via xdg-desktop-portal + PipeWire (Wayland and X11),
+# and camera capture from PipeWire camera nodes: libcamera sensors such as a
+# Raspberry Pi CSI camera, and any camera from inside a Flatpak or Snap sandbox
+# through the camera portal. Off by default because the `pipewire` crate links
+# libpipewire-0.3 via pkg-config at build time (and its bindgen needs libclang),
+# so it only belongs in builds that use it. V4L2 camera capture needs only what
 # `capture` already does.
 pipewire = ["capture", "dmabuf", "dep:pipewire", "dep:ashpd"]
 
@@ -136,10 +138,12 @@ yuv = "0.8.14"
 ndk = { version = "0.9", optional = true, default-features = false, features = ["media", "api-level-26"] }
 
 [target.'cfg(target_os="linux")'.dependencies]
-# xdg-desktop-portal ScreenCast negotiation for the `pipewire` feature (pure Rust,
-# zbus over DBus). The portal owns source selection: the user picks a monitor in a
-# compositor dialog, and we get back a PipeWire fd + node id to stream from.
-ashpd = { version = "0.13", optional = true, default-features = false, features = ["tokio", "screencast"] }
+# xdg-desktop-portal ScreenCast and Camera negotiation for the `pipewire` feature
+# (pure Rust, zbus over DBus). The ScreenCast portal owns source selection: the
+# user picks a monitor in a compositor dialog, and we get back a PipeWire fd +
+# node id to stream from. The Camera portal grants a sandboxed app a PipeWire
+# remote that exposes the cameras.
+ashpd = { version = "0.13", optional = true, default-features = false, features = ["tokio", "screencast", "camera"] }
 # The NVIDIA codecs, behind the default-on `nvidia` feature. Everything is
 # dlopen'd at runtime: cudarc loads CUDA, and moq-nvenc (an in-tree fork of
 # nvidia-video-codec-sdk, see rs/moq-nvenc) loads libnvidia-encode. So the binary
@@ -176,7 +180,8 @@ moq-v4l = { workspace = true, optional = true }
 # then falls back to the next candidate instead of failing at load, matching the
 # NVENC and NVDEC backends.
 moq-vaapi = { workspace = true, optional = true }
-# PipeWire video stream for the portal's node, behind the `pipewire` feature.
+# PipeWire video stream for a portal's node or a camera node, behind the
+# `pipewire` feature.
 # Links libpipewire-0.3 via pkg-config at build time; bindgen needs libclang.
 pipewire = { version = "0.10", optional = true }
 # X11 display/window enumeration and capture. Pure Rust and used when no

@@ -28,7 +28,3 @@ symbol that exists with the arity it shows. Twelve do not today.
   the wrapper, nightly at least, so the drift cannot return.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Binding parity](/quest/m0/binding-parity.md) - document the surface after it settles

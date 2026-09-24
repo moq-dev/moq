@@ -12,10 +12,10 @@ why it cannot. `<moq-publish>` never announces an audio track that silently carr
 `@moq/watch`'s decoder handles the same problem with `unlockOnGesture`; the publisher has no
 equivalent.
 
-Observed in `test/smoke/clients/js`, which drives Chromium with no autoplay override: handing the
+Observed in `test/interop/clients/js`, which drives Chromium with no autoplay override: handing the
 capture its source at page load left the audio rendition without a catalog config indefinitely, and
 the fixture only became ready once the source was withheld until after a real click. The fixture
-carries that workaround today (`test/smoke/clients/js/src/fixture.ts:109`), with a comment pointing
+carries that workaround today (`test/interop/clients/js/src/fixture.ts:109`), with a comment pointing
 here.
 
 - Confirm the mechanism before fixing it. The suspended capture context is the likely cause (a
@@ -26,9 +26,5 @@ here.
   error rather than announcing a track that will never carry samples.
 - The permission-granted path can reach `#runTrack` with no gesture at all (a pre-granted camera on
   page load), so a gesture is not something the capture can assume already happened.
-- Drop the workaround in `test/smoke/clients/js/src/fixture.ts` and let the harness assert the
+- Drop the workaround in `test/interop/clients/js/src/fixture.ts` and let the harness assert the
   behavior instead.
-
-## Related
-
-- [Browser permission QA](/quest/m1/browser-permission-qa.md) - the other publisher path that runs without a gesture

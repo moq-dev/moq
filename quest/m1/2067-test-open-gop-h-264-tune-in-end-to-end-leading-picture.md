@@ -25,7 +25,7 @@ the references and should be clean.
   `test/ts/run.sh` is closed-GOP IDR today, so add the open-GOP source as a
   second round-trip rather than replacing it.
 - Characterization: drive `<moq-watch>` through the media harness
-  (`just test smoke-media`, `test/smoke/clients/js/media.ts`) with the
+  (`just test media`, `test/interop/clients/js/media.ts`) with the
   open-GOP fixture: continuous playback across recovery points and a cold
   tune-in at one, counting dropped and corrupt frames and decoder errors; a
   hardware decoder by hand if available. Record the numbers in the PR and in the

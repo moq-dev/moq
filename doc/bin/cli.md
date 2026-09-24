@@ -100,7 +100,9 @@ behind it. Once the speaker owns the clock, video follows the speaker instead.
 Each role follows the catalog for as long as it lasts. Each decoder starts at
 the newest cached group, including when a rendition is reopened, so playback
 does not replay the retained backlog. A publisher that retires the rendition
-being played ends that track and the role picks a replacement. Playback is
+being played ends that track and the role picks a replacement. A retired audio
+rendition plays out what the speaker holds while its replacement fills, so the
+switch does not cost a delay of silence. Playback is
 behind the `play` feature, since it pulls in windowing and audio-device
 dependencies:
 
@@ -124,8 +126,8 @@ audio is Opus. The camera is opened only while someone is watching, and
 `--bitrate` is the opening ceiling. Backends with live bitrate control lower it
 to fit the connection's bandwidth estimate. `moq devices` prints every source
 id. Requires the `capture` feature; on Linux that needs the ALSA headers for
-the microphone, and `--display` also needs the `pipewire` feature (links
-libpipewire).
+the microphone, and `--display` and `pipewire:` cameras also need the
+`pipewire` feature (links libpipewire).
 
 ## Transcode
 

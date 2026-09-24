@@ -517,3 +517,102 @@ fn a_dropped_stream_carries_a_webtransport_code() {
 
 	client.join().expect("client thread");
 }
+
+/// A pending HTTP/3 handshake owns the connection even before it has read
+/// SETTINGS or CONNECT. Both suspension points must close on cancellation.
+fn cancelling_a_pending_web_handshake(send_settings: bool) {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let server = h3_endpoint(&handle, &certs);
+	let sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("client socket");
+	let client = quic::Endpoint::new(sock, quic::endpoint::Config::default()).expect("client endpoint");
+	let mut dial = quic::client::Config::new(server.local_addr(), "localhost");
+	dial.alpn = vec!["h3".to_string()];
+	dial.verify = false;
+
+	worker
+		.block_on(async {
+			let mut peer = client.connect(&dial).await.expect("dial");
+			let conn = server.accept().await.expect("accept");
+			let mut watch = conn.clone();
+			let mut control = None;
+			if send_settings {
+				use web_transport_trait::Stats as _;
+				let before = watch.stats().bytes_received().expect("receive stats");
+				let mut stream = std::future::poll_fn(|cx| peer.poll_open_uni(cx))
+					.await
+					.expect("control stream");
+				let mut settings = web_transport_proto::Settings::default();
+				settings.enable_webtransport(1);
+				let mut bytes = Vec::new();
+				settings.encode(&mut bytes);
+				let mut remaining = bytes.as_slice();
+				while !remaining.is_empty() {
+					let n = std::future::poll_fn(|cx| stream.poll_write(cx, remaining))
+						.await
+						.expect("write settings");
+					remaining = &remaining[n..];
+				}
+				control = Some(stream);
+				within(&handle, "peer SETTINGS to arrive", async {
+					loop {
+						if watch.stats().bytes_received().expect("receive stats") > before {
+							break;
+						}
+						let mut tick = moq_uring::Timer::after(&handle, std::time::Duration::from_millis(10));
+						kio::wait(|waiter| tick.poll(waiter)).await;
+					}
+				})
+				.await;
+			}
+
+			let mut handshake = Box::pin(quic::web::Request::accept(conn));
+			std::future::poll_fn(|cx| {
+				assert!(
+					handshake.as_mut().poll(cx).is_pending(),
+					"the handshake must await peer input"
+				);
+				std::task::Poll::Ready(())
+			})
+			.await;
+			drop(handshake);
+
+			let err = within(
+				&handle,
+				"cancelled WebTransport connection to close",
+				std::future::poll_fn(|cx| watch.poll_closed(cx)),
+			)
+			.await;
+			assert!(matches!(err, quic::Error::App { code: 0x101, .. }), "got {err:?}");
+			within(
+				&handle,
+				"peer to receive the close",
+				std::future::poll_fn(|cx| peer.poll_closed(cx)),
+			)
+			.await;
+			drop(control);
+
+			let sibling = within(&handle, "sibling dial", client.connect(&dial))
+				.await
+				.expect("sibling dial");
+			let accepted = within(&handle, "sibling accept", server.accept())
+				.await
+				.expect("sibling accept");
+			assert_eq!(sibling.protocol(), Some("h3"));
+			assert_eq!(accepted.protocol(), Some("h3"));
+		})
+		.expect("worker");
+}
+
+#[test]
+fn cancelling_before_peer_settings_closes_the_connection() {
+	cancelling_a_pending_web_handshake(false);
+}
+
+#[test]
+fn cancelling_while_awaiting_connect_closes_the_connection() {
+	cancelling_a_pending_web_handshake(true);
+}

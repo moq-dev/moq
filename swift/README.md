@@ -16,7 +16,7 @@ The Swift integration ships as two SPM packages, each mirrored to its own repo:
 ## Install
 
 ```swift
-.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.6"),
+.package(url: "https://github.com/moq-dev/moq-swift", from: "0.5.0"),
 ```
 
 SPM resolves `MoqFFI` (and its prebuilt `MoqFFI.xcframework`, attached to the matching `moq-ffi-v*` GitHub Release) transitively. You only depend on `moq-swift`.
@@ -54,6 +54,7 @@ To publish through the auto-created origin:
 ```swift
 let broadcast = try session.publish.createBroadcast(path: "my-stream")
 // ... configure tracks on broadcast ...
+try broadcast.announce() // unannounced broadcasts are invisible
 ```
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `session.shutdown()` is an alias for `cancel(code: 0)` (code 0 means "no error").

@@ -14,6 +14,8 @@
 //! moq --connect http://127.0.0.1:4443 --connect-tls-insecure export ts > /dev/null
 //! ```
 
+#![cfg(feature = "cluster-lan")]
+
 use std::time::Duration;
 
 use moq_relay::cluster;
