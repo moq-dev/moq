@@ -79,6 +79,13 @@ export class Retry {
 		this.#rerun.update((rerun) => rerun + 1);
 	}
 
+	/** Stop attempting this capture until its settings, device list, or permission changes. */
+	terminal(): void {
+		this.#failures = Retry.LIMIT + 1;
+		this.#wait = undefined;
+		this.#rerun.update((rerun) => rerun + 1);
+	}
+
 	/** The attempt produced a live track. Reruns the effect if it dies. */
 	succeeded(effect: Effect, track: MediaStreamTrack): void {
 		effect.timer(() => {

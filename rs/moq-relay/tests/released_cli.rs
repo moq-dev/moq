@@ -135,8 +135,8 @@ fn envs(cmd: &usage::argv::spec::CommandMeta<'_>) -> HashMap<String, String> {
 		for env in flag
 			.env
 			.into_iter()
-			.chain(flag.env_fallback.iter().copied())
-			.chain(flag.deprecated_env.iter().copied())
+			.chain(flag.extra.env_fallback.iter().copied())
+			.chain(flag.extra.deprecated_env.iter().copied())
 		{
 			out.insert(env.to_string(), name.to_string());
 		}

@@ -155,6 +155,10 @@ export class Encoder {
 	// discontinuity and re-anchors on.
 	#pipeline: Pipeline | undefined;
 
+	// The exclusive end of the newest frame written to the live track, where a demand gap's
+	// discontinuity marker goes. Cleared once the marker is written.
+	#end: Time.Micro | undefined;
+
 	// The fatal error an AudioEncoder reported, if any. That instance can never encode again and
 	// reconfiguring it would be a retry, so the rendition stays down for the life of this encoder.
 	#fatal = new Signal<Error | undefined>(undefined);
@@ -256,6 +260,23 @@ export class Encoder {
 			if (!enabled || !format || fatal) return;
 
 			this.#encode(rendition.track, format, effect);
+		});
+
+		// When demand disappears, end the epoch with a discontinuity marker (see
+		// Container.Legacy.Producer.cut) so a later subscriber resumes on the same track without the
+		// pre-gap frames reading as live. Its empty payload marks where the source media ends.
+		effect.run((effect) => {
+			const track = effect.get(rendition.track);
+			if (!track) return;
+			effect.cleanup(() => {
+				const end = this.#end;
+				this.#end = undefined;
+				if (end === undefined || track.closed.peek() !== undefined) return;
+				track.writeFrame({
+					payload: Container.Legacy.encodeFrame(new Uint8Array(), end),
+					timestamp: Time.Timestamp.fromMicros(end),
+				});
+			});
 		});
 
 		effect.run((effect) => {
@@ -384,10 +405,13 @@ export class Encoder {
 
 						// Each audio frame is its own group so the relay can forward it without
 						// waiting for a group boundary. Loss is handled by the codec's PLC.
-						track.peek()?.writeFrame({
+						const live = track.peek();
+						if (!live) return;
+						live.writeFrame({
 							payload: Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro),
 							timestamp: Time.Timestamp.fromMicros(frame.timestamp as Time.Micro),
 						});
+						this.#end = (frame.timestamp + (frame.duration ?? 0)) as Time.Micro;
 					},
 					error: (err) => {
 						console.error("encoder error", err);

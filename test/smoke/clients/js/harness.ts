@@ -8,7 +8,14 @@
  */
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { type Browser, type BrowserContext, chromium, type Page } from "playwright";
+import {
+	type Browser,
+	type BrowserContext,
+	type BrowserContextOptions,
+	type CDPSession,
+	chromium,
+	type Page,
+} from "playwright";
 import { CONTROL, type FixtureState, type Resources, type Sample, type SmokeControl } from "./src/contract";
 
 /**
@@ -136,8 +143,9 @@ export async function open(
 	url: string,
 	label = "page",
 	trace = false,
+	options?: BrowserContextOptions,
 ): Promise<[Page, BrowserErrors]> {
-	const page = await browser.newPage();
+	const page = await browser.newPage(options);
 	const errors: BrowserErrors = { page: [], console: [] };
 	page.on("console", (message) => {
 		console.error(`[${label}] ${message.text()}`);
@@ -161,26 +169,60 @@ export function throwPageErrors(errors: BrowserErrors): void {
 	if (messages.length > 0) throw new Error(messages.join("\n"));
 }
 
+// Playwright's page.evaluate and locator reads grant user activation in Chromium. A state probe
+// before the deliberate click would therefore unlock Web Audio and invalidate the gesture test.
+const sessions = new WeakMap<Page, CDPSession>();
+
+/** Inspect page state without granting user activation to the document. */
+export async function inspect<A, T>(page: Page, fn: (arg: A) => T, arg: A): Promise<Awaited<T>> {
+	let session = sessions.get(page);
+	if (!session) {
+		session = await page.context().newCDPSession(page);
+		sessions.set(page, session);
+	}
+	const result = await session.send("Runtime.evaluate", {
+		expression: `(${fn.toString()})(${JSON.stringify(arg) ?? "undefined"})`,
+		returnByValue: true,
+		awaitPromise: true,
+		userGesture: false,
+	});
+	if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+	return result.result.value as Awaited<T>;
+}
+
 /** Wait until the player element exists and has published its first sample. */
 export async function waitForWatch(page: Page): Promise<void> {
-	await page.evaluate((tag) => customElements.whenDefined(tag), SELECTORS.watch);
-	await page.locator(`${SELECTORS.watch}[data-smoke-ready]`).waitFor({ state: "attached" });
+	const deadline = Date.now() + 30_000;
+	while (Date.now() < deadline) {
+		const ready = await inspect(
+			page,
+			(tag) => document.querySelector(`${tag}[data-smoke-ready]`) !== null,
+			SELECTORS.watch,
+		);
+		if (ready) return;
+		await sleep(POLL_INTERVAL_MS);
+	}
+	throw new Error("the player did not publish its first sample");
 }
 
 /** Read one sample plus the player chrome. Throws until the page has sampled at least once. */
 export async function readPlayerState(page: Page): Promise<PlayerState> {
-	const state = await page.evaluate((selectors) => {
-		const watch = document.querySelector<HTMLElement>(selectors.watch);
-		const ui = document.querySelector(selectors.ui);
-		const control = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.control);
-		const centerPlay = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.centerPlay);
+	const state = await inspect(
+		page,
+		(selectors) => {
+			const watch = document.querySelector<HTMLElement>(selectors.watch);
+			const ui = document.querySelector(selectors.ui);
+			const control = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.control);
+			const centerPlay = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.centerPlay);
 
-		return {
-			sample: watch?.dataset.smokeState,
-			controlLabel: control?.getAttribute("aria-label") ?? undefined,
-			centerPlayVisible: centerPlay ? getComputedStyle(centerPlay).display !== "none" : false,
-		};
-	}, SELECTORS);
+			return {
+				sample: watch?.dataset.smokeState,
+				controlLabel: control?.getAttribute("aria-label") ?? undefined,
+				centerPlayVisible: centerPlay ? getComputedStyle(centerPlay).display !== "none" : false,
+			};
+		},
+		SELECTORS,
+	);
 
 	if (!state.sample) throw new Error("the player has not published a sample");
 	return {
@@ -192,7 +234,8 @@ export async function readPlayerState(page: Page): Promise<PlayerState> {
 
 /** Read what the fixture publisher says about itself. Throws until it has published anything. */
 export async function readFixtureState(page: Page): Promise<FixtureState> {
-	const state = await page.evaluate(
+	const state = await inspect(
+		page,
 		(selector) => document.querySelector<HTMLElement>(selector)?.dataset.smokeFixture,
 		SELECTORS.fixture,
 	);

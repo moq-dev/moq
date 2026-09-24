@@ -93,8 +93,7 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 ## Quests
 
-- [Binding parity](/quest/m0/binding-parity.md) - every wrapper reaches every moq-ffi method in its own idiom with moq-net's verbs
-- [Release](/quest/m0/release.md) - the release moq.pro adopts: binding parity, an upgrade page, and a staging soak gate it rather than the merge
+- [Release](/quest/m0/release.md) - the release moq.pro adopts: binding docs, an upgrade page, and a staging soak gate it rather than the merge
 - [Binary stats](/quest/m0/stats-binary/README.md) - an allocation-free stats tick and an on-demand FlatBuffers `.fb.z` flavor with a checked-in schema
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
 - [A/V clock](/quest/m0/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles

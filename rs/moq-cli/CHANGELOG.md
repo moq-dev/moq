@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1](https://github.com/moq-dev/moq/compare/moq-cli-v0.12.0...moq-cli-v0.12.1) - 2026-09-23
+
+### Fixed
+
+- *(ci)* repair nightly builds hidden behind the first failure ([#3956](https://github.com/moq-dev/moq/pull/3956))
+
 ## [0.12.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.11.2...moq-cli-v0.12.0) - 2026-09-23
 
 ### Added

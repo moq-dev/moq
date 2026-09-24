@@ -11,9 +11,12 @@ is VBR, inserts no null packets, and paces PCR once per media frame, so several
 broadcast-shape checks are expected to flag. The report quantifies exactly where
 and by how much.
 
-Two instruments live here. `compliance.py` (via `run.sh`) grades a captured file
+Three instruments live here. `compliance.py` (via `run.sh`) grades a captured file
 against the IRD model. [`pcr-timing.py`](#pcr-timing-pcr-timingpy) grades a live
 pipe, which is the only way to see *when* the exporter released each PCR.
+[`table-anchor.py`](#table-anchoring-table-anchorpy) grades two exporters of one
+broadcast against each other, which is the only way to see whether a table's
+emission points come from the media or from the exporter's own clock.
 
 ## Running
 
@@ -24,6 +27,7 @@ just test ts --analyze-only x.ts # skip the round-trip, analyze a file
 just test ts --strict           # also fail on broadcast-shape warnings
 just test ts --with-eit         # add a synthetic EPG first, report which SI survived
 just test ts --live             # grade PCR release timing off the live pipe
+just test ts --pair             # two exporters of one broadcast, grade table anchoring
 ```
 
 `--live` swaps the analyzer, not the rig: the same round-trip runs, but the
@@ -181,6 +185,79 @@ does not define one.
 
 `--report-json <path>` writes the full report, and `--strict` promotes the shape
 check to hard.
+
+## Table anchoring (`table-anchor.py`)
+
+Every other check here grades one stream in isolation, and no single stream can
+answer the question this one asks: **are a table's emission points a property of
+the broadcast, or of the exporter that happened to emit them?**
+
+It matters because two exporters of one broadcast are how redundancy is built. A
+receiver merging two legs, or cutting from one to the other, needs them to agree
+about where the tables sit. If each leg emits to its own clock the two outputs
+are not interchangeable, and the divergence is permanent rather than something a
+longer run settles.
+
+One stream cannot show this because a timer and an anchor look identical from
+inside: both produce a table every so often. Only a second leg, joining at a
+different moment, separates them.
+
+```bash
+just test ts --pair                      # round-trip twice, grade the pair
+just test ts --pair --pair-join 20 --duration 60   # join the second leg 20s in
+./table-anchor.py a.ts b.ts              # grade two captures you already have
+```
+
+The second subscriber joins late on purpose. Two exporters started together can
+agree on a cadence by having started together, which is the confound; a leg that
+joins mid-broadcast has to derive its emission points from the media, because it
+has no shared history to derive them from.
+
+**What gets graded is the overlap, not the run**, so `--pair` defaults to a 45 s
+duration rather than the 20 s the other arms use, and refuses a run leaving less
+than 25 s of it. At 20 s with a 5 s join the legs share 15 s, which is about
+seven SDT emissions against a floor of eight — the table this mode exists to
+check would quietly drop to report-only. Raise `--duration` when you raise
+`--pair-join`. `--pair` cannot be combined with `--live`: they grade different
+things.
+
+The measurement is the PTS of the frame each table was emitted against. `export
+ts` writes the tables that are due and then the frame's PES packets into one
+buffer, so the first PES header after a table gives the PTS of the frame that
+triggered it. **Agreement** is the emission points both legs used over those
+either used, counted only inside the media time the two captures share, so a
+late join costs nothing. 100 % means the emission points are a function of the
+broadcast.
+
+| Option | Meaning |
+|---|---|
+| `--min-agreement` | percent of shared emission points required per table (default 90) |
+| `--min-emissions` | a table with fewer emissions in the overlap is reported, not graded (default 8) |
+| `--min-window` | seconds of shared media required before any verdict is given (default 20) |
+| `--strict` | fail on report-only tables too |
+| `--report-json` | write the full report |
+
+`--min-window` exists because a capture that came up short is the commonest way
+this grades clean: too little shared media puts the slower tables under the
+emission floor, and a table reported without a verdict reads as a pass. The
+window is taken from the media the two captures carry, **not** from the
+emissions being scored — deriving it from the emissions is itself a false pass,
+since a leg that stops emitting a table halfway through would pull the upper
+bound back to its own last emission and score its desertion as 100 %.
+
+Two things are deliberately not graded. A table seen on only one leg is reported
+without a verdict, because that is a carriage question rather than an anchoring
+one. TDT/TOT is report-only whatever its agreement, since it carries wall-clock
+time and is *supposed* to track a clock rather than the media.
+
+Where both legs run the same period at different phase, the report says so
+rather than leaving a percentage to interpret:
+
+```
+  FAIL  SDT/BAT          10      10      19       1      5.26%
+                    both legs emit every 2.000s, 0.480s out of phase
+                    -> a timer started with the exporter, not an anchor in the media
+```
 
 ## EIT fixtures
 

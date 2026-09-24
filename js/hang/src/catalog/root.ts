@@ -1,10 +1,13 @@
+import * as Json from "@moq/json";
+import type * as Moq from "@moq/net";
 import * as z from "@zod/mini";
-
 import { ArchiveSchema } from "./archive";
 import { AudioSchema } from "./audio";
 import { BinarySchema } from "./binary";
 import { ClockSchema } from "./clock";
+import { TRACK } from "./format";
 import { JsonSchema } from "./json";
+import { PRIORITY } from "./priority";
 import { section } from "./section";
 import { TextSchema } from "./text";
 import { VideoSchema } from "./video";
@@ -42,3 +45,38 @@ export const RootSchema = z.looseObject({
 
 /** The root catalog object: the media and archive sections, the data track sections, plus any app extensions. */
 export type Root = z.infer<typeof RootSchema>;
+
+/** Maximum number of video, audio, and text renditions accepted in one catalog update. */
+export const MAX_RENDITIONS = 64;
+
+/** A catalog update announced more media renditions than a reader will retain. */
+export class TooManyRenditions extends Error {
+	readonly count: number;
+
+	constructor(count: number) {
+		super(`catalog has ${count} renditions, over the limit of ${MAX_RENDITIONS}`);
+		this.name = "TooManyRenditions";
+		this.count = count;
+	}
+}
+
+/** Refuse an update with too many media renditions. */
+export function checkRenditions(root: Root): Root {
+	const count =
+		Object.keys(root.video?.renditions ?? {}).length +
+		Object.keys(root.audio?.renditions ?? {}).length +
+		Object.keys(root.text?.renditions ?? {}).length;
+	if (count > MAX_RENDITIONS) throw new TooManyRenditions(count);
+	return root;
+}
+
+/** Subscribe to a broadcast's catalog and iterate validated root updates. */
+export async function* watch(broadcast: Moq.Broadcast.Consumer): AsyncIterable<Root> {
+	const track = broadcast.track(TRACK).subscribe({ priority: PRIORITY.catalog });
+	try {
+		const consumer = new Json.Snapshot.Consumer<Root>({ track, schema: RootSchema });
+		for await (const root of consumer) yield checkRenditions(root);
+	} finally {
+		track.close();
+	}
+}
