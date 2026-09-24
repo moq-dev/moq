@@ -318,6 +318,7 @@ impl Rendition {
 			duration: entry.duration,
 			pts: entry.pts,
 			end: Duration::from(entry.pts) + entry.duration,
+			discontinuity: 0,
 		};
 		self.live.push(row, window);
 	}
@@ -407,19 +408,12 @@ impl Rendition {
 
 		let program_date_time = window.segments.first().and_then(|first| self.wall_clock(first.pts));
 
-		// A jump in content time between consecutive rows is a discontinuity: the next segment
-		// doesn't continue the previous one's timeline. Tolerate sub-millisecond drift from
-		// timescale rounding.
-		let mut previous_end: Option<Duration> = None;
+		let mut previous: Option<u64> = None;
 		let segments = window
 			.segments
 			.into_iter()
 			.map(|s| {
-				let discontinuity = previous_end.is_some_and(|end| {
-					let start = Duration::from(s.pts);
-					start.saturating_sub(end).max(end.saturating_sub(start)) > Duration::from_millis(1)
-				});
-				previous_end = Some(s.end);
+				let discontinuity = previous.replace(s.discontinuity).is_some_and(|p| p != s.discontinuity);
 				Segment {
 					segment: s.segment,
 					duration: s.duration,
