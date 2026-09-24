@@ -16,7 +16,7 @@ on:
     paths:
       - ".github/workflows/release-dart-ffi.yml"
       - "dart/moq_ffi/**"
-      - "dart/scripts/**"
+      - "sh/dart/**"
       - "rs/moq-ffi/**"
       - "!rs/moq-ffi/Cargo.toml"
 
@@ -48,7 +48,7 @@ jobs:
 
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version moq-ffi
+        run: sh/gh/release.sh parse-version moq-ffi
 
   build:
     name: Build Native Asset (${{ matrix.target }})
@@ -157,7 +157,7 @@ jobs:
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
-          ./dart/scripts/package.sh \
+          ./sh/dart/package.sh \
             --package moq_ffi \
             --version "$BUILD_VERSION" \
             --output release-out
@@ -188,7 +188,7 @@ jobs:
 
       - name: Find previous tag
         id: prev_tag
-        run: .github/scripts/release.sh prev-tag moq-ffi
+        run: sh/gh/release.sh prev-tag moq-ffi
 
       - name: Download Native Assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -204,7 +204,7 @@ jobs:
           RELEASE_TITLE: "moq-ffi v${{ needs.parse-version.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
           RELEASE_CHECKSUMS: SHA256SUMS-dart
-        run: .github/scripts/release.sh create artifacts
+        run: sh/gh/release.sh create artifacts
 
   publish:
     name: Publish moq_ffi to pub.dev

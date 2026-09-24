@@ -1,7 +1,7 @@
 // swift-tools-version:5.9
 // Released manifest for the ergonomic wrapper at moq-dev/moq-swift. The
 // source-of-truth template lives at swift/Package.swift.template in
-// moq-dev/moq; swift/scripts/package.sh substitutes the moq-ffi version pin
+// moq-dev/moq; sh/swift/package.sh substitutes the moq-ffi version pin
 // (REPLACE_FFI_VERSION) at release time.
 //
 // The wrapper versions independently of the bindings (see swift/VERSION). The

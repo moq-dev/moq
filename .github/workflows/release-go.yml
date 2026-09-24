@@ -105,7 +105,7 @@ jobs:
         if: github.event_name == 'push'
         env:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
-        run: .github/scripts/release.sh ffi-unreleased "$FFI_VERSION"
+        run: sh/gh/release.sh ffi-unreleased "$FFI_VERSION"
 
       # Skip on unreleased ffi changes, and when the pinned ffi's mirror tag is
       # missing (release-plz merged but Release Go FFI hasn't published yet):
@@ -160,7 +160,7 @@ jobs:
           LINE: ${{ steps.line.outputs.line }}
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
         run: |
-          ./go/scripts/package-wrapper.sh --line "$LINE" --ffi-version "$FFI_VERSION" --output release-out
+          ./sh/go/package-wrapper.sh --line "$LINE" --ffi-version "$FFI_VERSION" --output release-out
 
       - name: Upload wrapper module
         if: steps.gate.outputs.skip != 'true'
@@ -203,4 +203,4 @@ jobs:
           GO_MIRROR_TOKEN: ${{ steps.token.outputs.token }}
           GIT_AUTHOR_NAME: moq-bot
           GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
-        run: ./go/scripts/publish-wrapper.sh
+        run: ./sh/go/publish-wrapper.sh

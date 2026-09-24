@@ -1,13 +1,13 @@
-set fallback
+set working-directory := '..'
 
-# actionlint is skipped when absent locally; the root `_tools` preflight makes
-# it a hard requirement under MOQ_STRICT, so CI can't skip it.
-
-# Lint GitHub Actions workflows.
+# Lint GitHub Actions workflows and their alert coverage.
 check:
-    python3 {{ source_directory() }}/scripts/install-formula.test.py
-    {{ source_directory() }}/scripts/release.test.sh
-    @if command -v nfpm >/dev/null 2>&1 && command -v envsubst >/dev/null 2>&1 && command -v dpkg-deb >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then python3 {{ source_directory() }}/../rs/scripts/package-rename.test.py; fi
-    @if command -v actionlint >/dev/null 2>&1; then actionlint; fi
-    {{ source_directory() }}/scripts/alert.sh check-coverage
-    @if command -v rustc >/dev/null 2>&1; then {{ source_directory() }}/scripts/package-binary.test.sh; fi
+    actionlint
+    sh/gh/alert.sh check-coverage
+
+# Tests of the release tooling itself; nightly, not on every pull request.
+test:
+    python3 sh/gh/install-formula.test.py
+    sh/gh/release.test.sh
+    python3 sh/rs/package-rename.test.py
+    sh/go/publish-wrapper.test.sh

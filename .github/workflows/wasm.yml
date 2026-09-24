@@ -43,6 +43,7 @@ on:
       - "test/wasm/**"
       - "test/lib/**"
       - "justfile"
+      - "js/justfile"
       - "test/justfile"
       - ".cargo/config.toml"
       - "package.json"

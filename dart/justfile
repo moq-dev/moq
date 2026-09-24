@@ -1,18 +1,13 @@
 #!/usr/bin/env just --justfile
 
 # Check the generated bindings and both Dart packages.
-check $FILES="":
-    ./scripts/check.sh "{{ FILES }}"
+check:
+    ../sh/dart/check.sh
 
 # Format Dart sources.
-fix $FILES="":
-    ./scripts/check.sh --fix "{{ FILES }}"
+fix:
+    ../sh/dart/check.sh --fix
 
 # Regenerate the raw UniFFI Dart bindings.
 generate:
-    ./scripts/generate.sh
-
-# Remove Dart tool state and build output.
-clean:
-    rm -rf moq/.dart_tool moq_ffi/.dart_tool
-    rm -rf moq/build moq_ffi/build
+    ../sh/dart/generate.sh

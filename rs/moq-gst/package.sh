@@ -145,7 +145,7 @@ mkdir -p "$OUTPUT_DIR"
 
 echo ">> Running nfpm ($PACKAGER)..."
 export VERSION ARCH="$PKG_ARCH" PKG_NAME PLUGIN_PATH="$BUILT_SO" PLUGIN_DIR
-"$WORKSPACE_DIR/rs/scripts/package-nfpm.sh" \
+"$WORKSPACE_DIR/sh/rs/package-nfpm.sh" \
     "$WORKSPACE_DIR/packaging/moq-gst/nfpm.yaml" "$PACKAGER" "$OUTPUT_DIR/"
 
 echo ">> Done. Artifacts in: $OUTPUT_DIR"

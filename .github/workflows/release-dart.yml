@@ -12,7 +12,7 @@ on:
     paths:
       - ".github/workflows/release-dart.yml"
       - "dart/moq/**"
-      - "dart/scripts/**"
+      - "sh/dart/**"
 
 permissions:
   contents: read
@@ -47,7 +47,7 @@ jobs:
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             VERSION=$(sed -n 's/^version: //p' dart/moq/pubspec.yaml | head -1)
           else
-            .github/scripts/release.sh parse-version moq-dart
+            sh/gh/release.sh parse-version moq-dart
             exit 0
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -69,7 +69,7 @@ jobs:
         env:
           BUILD_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          ./dart/scripts/package.sh \
+          ./sh/dart/package.sh \
             --package moq \
             --version "$BUILD_VERSION" \
             --output release-out

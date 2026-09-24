@@ -30,7 +30,7 @@ on:
       - "kt/build.gradle.kts"
       - "kt/settings.gradle.kts"
       - ".github/workflows/release-kt-lib.yml"
-      - ".github/scripts/release.sh"
+      - "sh/gh/release.sh"
   pull_request:
     paths:
       - "kt/moq/**"
@@ -38,7 +38,7 @@ on:
       - "kt/build.gradle.kts"
       - "kt/settings.gradle.kts"
       - ".github/workflows/release-kt-lib.yml"
-      - ".github/scripts/release.sh"
+      - "sh/gh/release.sh"
       - "rs/moq-ffi/build.sh"
   # Manual trigger so a wrapper bump can be published once the bindings it
   # depends on land on Maven Central (the guard below skips otherwise).
@@ -103,18 +103,18 @@ jobs:
       - name: Check for unreleased FFI changes
         id: ffi-diff
         if: github.event_name != 'workflow_run'
-        run: .github/scripts/release.sh ffi-unreleased "${{ steps.ffi.outputs.version }}"
+        run: sh/gh/release.sh ffi-unreleased "${{ steps.ffi.outputs.version }}"
 
       - name: Check wrapper publication
         id: wrapper
-        run: .github/scripts/release.sh maven-exists dev.moq moq "${{ steps.version.outputs.version }}"
+        run: sh/gh/release.sh maven-exists dev.moq moq "${{ steps.version.outputs.version }}"
 
       # The bindings this checkout generates must be on Maven Central, or the
       # wrapper's POM range resolves to an older moq-ffi without them.
       - name: Check bindings publication
         id: bindings
         if: github.event_name != 'workflow_run' && steps.wrapper.outputs.exists != 'true' && steps.ffi-diff.outputs.unreleased != 'true'
-        run: .github/scripts/release.sh maven-exists dev.moq moq-ffi "${{ steps.ffi.outputs.version }}"
+        run: sh/gh/release.sh maven-exists dev.moq moq-ffi "${{ steps.ffi.outputs.version }}"
 
       - name: Decide publish
         id: decide
@@ -202,7 +202,7 @@ jobs:
       - name: Recheck wrapper publication
         id: recheck
         if: github.event_name != 'pull_request'
-        run: .github/scripts/release.sh maven-exists dev.moq moq "${{ needs.check-version.outputs.version }}"
+        run: sh/gh/release.sh maven-exists dev.moq moq "${{ needs.check-version.outputs.version }}"
 
       - name: Publish to Maven Central
         if: github.event_name != 'pull_request' && steps.recheck.outputs.exists != 'true'

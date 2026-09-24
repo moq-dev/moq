@@ -92,7 +92,7 @@ command -v wasm-bindgen >/dev/null 2>&1 || {
 
 # ── build ───────────────────────────────────────────────────────────────────
 echo "building @moq/wasm..."
-(cd "$WORKSPACE" && just wasm)
+(cd "$WORKSPACE" && just js wasm)
 
 echo "building moq-relay ($PROFILE)..."
 flag=()

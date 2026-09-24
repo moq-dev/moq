@@ -39,7 +39,7 @@ jobs:
 
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version moq-ffi
+        run: sh/gh/release.sh parse-version moq-ffi
 
   build:
     name: Build moq-ffi (${{ matrix.target }})
@@ -199,7 +199,7 @@ jobs:
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
-          ./kt/scripts/package.sh \
+          ./sh/kt/package.sh \
             --version "$BUILD_VERSION" \
             --lib-dir libs \
             --bindings-dir bindings \

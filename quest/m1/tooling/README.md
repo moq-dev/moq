@@ -19,7 +19,6 @@ requires the one before it, so they land as one line of pull requests.
 
 ## Quests
 
-- [Thin justfiles](/quest/m1/tooling/justfiles.md) - recipe bodies move to `sh/`, one impact map scopes check/fix/test, self-tests and guards are deleted
 - [Workflows call just](/quest/m1/tooling/workflows-call-just.md) - no workflow `run:` step names a `.sh`; every script a workflow needs has a recipe
 - [Binary release workflow](/quest/m1/tooling/release-binary.md) - moq-cli and moq-relay share one reusable workflow behind two thin callers
 - [FFI release workflow](/quest/m1/tooling/release-ffi.md) - the five `release-*-ffi.yml` share the moq-ffi target matrix and artifact staging
