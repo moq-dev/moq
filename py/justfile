@@ -59,8 +59,8 @@ check $FILES="":
     just samples
     just docs
 
-# Samples leave their inputs (`payload`, `pts`) undefined, so only that rule is
-# off; a missing name, wrong arity, or wrong argument type in a doc still fails.
+# Samples leave their inputs (`payload`, `pts`) to the reader, so they follow
+# the declarations in moq-rs/tests/doc_prelude.py.
 
 # Type-check every Python sample in the docs against the installed wrapper.
 samples:
@@ -68,8 +68,11 @@ samples:
     set -euo pipefail
     out=$(mktemp -d)
     trap 'rm -rf "$out"' EXIT
-    bash ../doc/lib/samples.sh python ../doc/lib/py/index.md moq-rs/README.md moq-rs/docs/index.md > "$out/samples.py"
-    echo '{"pythonVersion": "3.10", "reportUndefinedVariable": "none"}' > "$out/pyrightconfig.json"
+    {
+    	cat moq-rs/tests/doc_prelude.py
+    	bash ../doc/lib/samples.sh python ../doc/lib/py/index.md moq-rs/README.md moq-rs/docs/index.md
+    } > "$out/samples.py"
+    echo '{"pythonVersion": "3.10"}' > "$out/pyrightconfig.json"
     uv run --no-sync pyright --project "$out" "$out/samples.py"
 
 # Auto-fix lint and formatting issues. Skips on the same terms as `check`.
