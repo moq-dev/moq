@@ -1088,7 +1088,9 @@ impl Side {
 /// * the egress viewer refcount map (first/last active subscription per broadcast),
 ///   driving `broadcasts_started` / `broadcasts_ended`.
 ///
-/// [`Session::set_tier`] moves a live context to another tier.
+/// [`Session::set_tier`] moves a live context to another tier: presence and traffic
+/// recorded afterwards land there, while what was already counted stays put and an
+/// open subscription or announce closes on the tier it opened on.
 ///
 /// [`Session::default`] is the no-op context (disabled registry / untagged caller):
 /// every bump reached through it is silently dropped, so a handle can hold one
@@ -1147,11 +1149,7 @@ impl Session {
 		}
 	}
 
-	/// Move this session to `tier`: its presence leaves the old tier's gauge for
-	/// the new one's, and traffic recorded from now on lands under `tier`. What
-	/// was already counted stays where it was, and an open subscription or
-	/// announce closes on the tier it opened on. A no-op for the same tier or the
-	/// no-op context.
+	/// Record this session's presence and later traffic under `tier` from now on.
 	pub fn set_tier(&self, tier: Tier) {
 		let Some(inner) = &self.inner else { return };
 		let mut current = inner.current.lock().expect("stats session poisoned");
@@ -1189,7 +1187,7 @@ impl Session {
 		let resolved = inner.resolve(&path);
 		Scope {
 			session: self.clone(),
-			resolved: Some(Arc::new(Mutex::new(resolved))),
+			resolved: Some(Mutex::new(resolved)),
 			side,
 			path,
 		}
@@ -1340,13 +1338,14 @@ impl Meter {
 /// [`Meter`]s for the payload path and RAII guards for the subscription / announce
 /// lifecycle, each recording under the session's tier at the time. Cheap to clone;
 /// empty (no-op) when the broadcast is untracked.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub(crate) struct Scope {
 	/// The owning context: its tier, and the egress viewer refcount map.
 	session: Session,
 	/// The counters for `(path, tier)`, re-resolved when the session changes tier.
-	/// Shared by clones; `None` for the no-op context.
-	resolved: Option<Arc<Mutex<Resolved>>>,
+	/// Per clone, so tracks sharing a broadcast never contend on the per-group path;
+	/// `None` for the no-op context.
+	resolved: Option<Mutex<Resolved>>,
 	side: Side,
 	/// Absolute broadcast path, used to key the viewer refcount and as the
 	/// `announced_bytes` length.
@@ -1354,10 +1353,25 @@ pub(crate) struct Scope {
 }
 
 /// A [`Scope`]'s counters and the session tier generation they belong to.
+#[derive(Clone)]
 struct Resolved {
 	generation: u64,
 	/// `None` when untracked.
 	counters: Option<Arc<TierCounters>>,
+}
+
+impl Clone for Scope {
+	fn clone(&self) -> Self {
+		Self {
+			session: self.session.clone(),
+			resolved: self
+				.resolved
+				.as_ref()
+				.map(|r| Mutex::new(r.lock().expect("stats scope poisoned").clone())),
+			side: self.side,
+			path: self.path.clone(),
+		}
+	}
 }
 
 impl Scope {
