@@ -145,3 +145,4 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Audio capture without ALSA link](/quest/m1/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound
 - [Ship capture and playback](/quest/m1/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
 - [io_uring flow control](/quest/m1/uring-flow-control-windows.md) - the relay's io_uring workers honor the QUIC flow-control windows instead of refusing them
+- [Remove effect.cancel](/quest/m1/effect-cancel.md) - `@moq/signals` drops the deprecated `Effect.cancel` on dev
