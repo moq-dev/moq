@@ -6,8 +6,10 @@ A broadcast exists for other people only while it is announced, locally and
 remotely alike. Until `announce()`, a created broadcast is invisible to every
 announce cursor and `request_broadcast` refuses it with `Unroutable`.
 `unannounce()` withdraws it from local consumers as well as peers, and a later
-`announce()` brings it back. A consumer in the same process sees exactly what a
-consumer across a session sees; only the latency differs.
+`announce()` brings it back. A local broadcast competes on its announced cost
+like any other route, so a cheaper remote route wins over it. A consumer in the
+same process sees exactly what a consumer across a session sees; only the
+latency differs.
 
 ## Plan
 
@@ -31,6 +33,14 @@ arm in `TableCursor::visible`) and unservable by `best_route`. The
 `AnnounceProducer::withdraw` path then makes `unannounce()` a full retraction.
 Retraction ends a front the way #4007 made it: in-flight tracks carry on to
 their own FIN or reset.
+
+Route selection stops preferring local entries. `OriginState::best_route` and
+the announce cursor's pick in `OriginState::sync_route` both order candidates by
+`(!entry.local, route_order(..))`, so a local route wins whatever its cost. Drop
+the `!entry.local` key. Cost then decides, and a tie still falls to the local
+route because it has no hops. This decides which route a front starts from;
+once it has a source, its identity pin (`Pin::Local` or `Pin::Publisher`) still
+limits failover to the same content.
 
 Audit every caller that creates a broadcast and relies on it being visible or
 requestable unannounced. As starting points, these files create one with no
