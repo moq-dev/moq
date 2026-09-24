@@ -13,13 +13,13 @@ unchanged, so this targets `main`.
 
 ## Plan
 
-- As a subscriber on each cluster session, send the relay's
-  [upstream table](/quest/m1/announce-tree/beacons.md) over the
-  [wire](/quest/m1/announce-tree/wire.md), and send an update whenever it
-  changes.
-- As a publisher, apply a received table in the shared cursor layer in
-  `rs/moq-net/src/model/origin.rs`. A cursor with a table is in tree mode;
-  any other cursor sees today's behaviour, so IETF links flood.
+- Apply the peer's latest UPSTREAMS table, from its
+  [cluster stream](/quest/m1/announce-tree/cluster-stream.md), in the shared
+  cursor layer in `rs/moq-net/src/model/origin.rs`. A cursor whose session
+  has a table is in tree mode. Any other cursor, including customers, lite-06
+  peers, and IETF links, sees today's behaviour.
+- A route's source for this rule is the first hop in its chain that is a
+  known relay in [reachability](/quest/m1/announce-tree/reachability.md).
 - Split horizon filters before selection today, so a peer receives this
   relay's best route that doesn't come through it. Keep that selection and
   apply the tree check after it. If the check fails, the cursor presents
@@ -30,10 +30,9 @@ unchanged, so this targets `main`.
   [ranking](/quest/m1/announce-tree/route-order.md).
 - A source with no entry in the receiver's table is flooded. This covers
   unreachable sources, anonymous chains, and meshes split by an older relay.
-- When a table update arrives, re-sync that cursor at the update's position
-  in the stream. Today `sync_cursor` runs only on a route change, so add that
-  path. It
-  starts routes where this relay newly qualifies and ends them where it no
+- When a table update arrives, re-sync that peer's cursors. Today
+  `sync_cursor` runs only on a route change, so add that path. It starts
+  routes where this relay newly qualifies and ends them where it no
   longer does.
 - With several sessions to one peer hop, send on one of them only.
 - A relay flag, on by default, controls whether the relay sends its upstream
@@ -55,9 +54,7 @@ on a table change is the obvious candidate.
 
 ## Required
 
-- [Beacons and upstream tables](/quest/m1/announce-tree/beacons.md) - the
-  choices the rule reads
+- [Relay reachability and upstream tables](/quest/m1/announce-tree/reachability.md) -
+  the choices the rule reads
 - [Cluster simulator](/quest/m1/announce-tree/simulator.md) - the invariant
   check it must pass
-- [Upstream interest on the wire](/quest/m1/announce-tree/wire.md) - how the
-  table reaches the sender

@@ -23,28 +23,31 @@ per announce belong to the [prefix table](/quest/m2/announce-prefix-table.md).
 
 ### Receivers choose
 
-No relay needs the cluster graph. Every relay announces a beacon: an empty,
-track-less announcement of itself that is always flooded. Beacons are routed
-like any broadcast. So each relay already holds its best route, by
-its own `route_order`, to every other relay's beacon, plus the standby routes
-its neighbours offered. From those, relay `P` derives for each source relay
-`S`:
+No relay needs the cluster graph. Relays speaking lite-07 open a
+[cluster stream](/quest/m1/announce-tree/cluster-stream.md) to each other. On it
+each relay advertises itself, and forwards its best reachability to every other
+relay, path-vector style with costs and hop chains. That gives each relay its
+best route, by the same ranking as `route_order`, to every other relay, plus
+the standby its neighbours offered. From those, relay `P` derives for each
+source relay `S`:
 
-- the tie set `U_S`: the neighbours whose beacon routes to `S` tie for best;
+- the tie set `U_S`: the neighbours whose routes to `S` tie for best;
 - for each member `u` of `U_S`, a backup `b_u`: its best standby route to `S`
   whose chain avoids `u` (node-protecting). Failing that, the best route over
   a session other than `u`'s (link-protecting). Failing that, none.
 
-`P` sends that table to each neighbour on its announce stream (moq-lite-07),
-and updates it in place when it changes. For a route with prefix `X` from source `S`, the
-parent is the member of `U_S` that ranks highest by rendezvous hash of
-`(X, member)`, and the backup is that member's `b`. A neighbour sends the
-route to `P` only if it is that parent or that backup. The source is the first
-hop in the route's chain that has a beacon.
+`P` sends that table to each neighbour on the same stream and replaces it when
+it changes. For a route with prefix `X` from source `S`, the parent is the
+member of `U_S` that ranks highest by rendezvous hash of `(X, member)`, and
+the backup is that member's `b`. A neighbour sends the route to `P` only if it
+is that parent or that backup. The source is the first hop in the route's
+chain that is a known relay. Broadcast announcements and ANNOUNCE_REQUEST are
+unchanged, and no `.internal` path is added.
 
 The neighbour floods, exactly as today, in these cases:
 
-- `P` sent no table (a customer, an older relay, or an IETF link);
+- `P` has no cluster stream or table (a customer, an older relay, or an IETF
+  link);
 - the source has no entry in `P`'s table (unreachable, still converging, or a
   chain with an anonymous hop).
 
@@ -73,10 +76,10 @@ and sends downstream an in-place update (lite-06 `ANNOUNCE_RESTART`, IETF
 `PublishNamespaceUpdate`), then sends its neighbours the updated table.
 
 A relay with only a link-protecting backup, or none, loses the route when its
-parent relay dies, until the beacons reconverge.
+parent relay dies, until reachability reconverges.
 
-Table changes take effect at once. Each neighbour applies the update at its
-position in the announce stream and re-syncs `P`'s cursor against it.
+Table changes take effect at once: each neighbour re-syncs `P`'s cursors
+against the new table.
 
 ## Quests
 
@@ -85,11 +88,12 @@ position in the announce stream and re-syncs `P`'s cursor against it.
 - [Rendezvous ranking](/quest/m1/announce-tree/route-order.md) - `route_order`
   breaks cost ties per prefix by rendezvous hash of the source, then of the
   next hop, identically at every relay
-- [Beacons and upstream tables](/quest/m1/announce-tree/beacons.md) - every
-  relay announces a beacon and computes its parent tie set and backups per
-  source, with forwarding unchanged
-- [Upstream interest on the wire](/quest/m1/announce-tree/wire.md) - lite-07
-  carries the upstream table on the announce stream, updatable mid-stream
+- [Cluster stream](/quest/m1/announce-tree/cluster-stream.md) - a lite-07
+  relay-only stream carrying RELAY reachability adverts and the UPSTREAMS
+  table
+- [Relay reachability and upstream tables](/quest/m1/announce-tree/reachability.md) -
+  relays learn routes to every relay over the cluster stream and send their
+  chosen parents and backups, with forwarding unchanged
 - [Cluster simulator](/quest/m1/announce-tree/simulator.md) - seeded random
   meshes, failures, and version mixes check route completeness and copy
   bounds after every step

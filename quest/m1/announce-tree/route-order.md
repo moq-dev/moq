@@ -17,13 +17,12 @@ entry. The chain hash differs between relays for the same source, which is
 what lets two relays pick different sources on a tie. Insert two keys after
 chain length:
 
-- the source: the first hop in the chain that has a beacon, or else the first
-  hop;
+- the source: the first hop in the chain, which the draft already calls a
+  route's identity;
 - the next hop: the last hop in the chain.
 
-Each is scored as a rendezvous hash with the prefix, highest first. The
-beacon lookup arrives with
-[beacons](/quest/m1/announce-tree/beacons.md); until then, use the first hop.
+Each is scored as a rendezvous hash with the prefix, highest first. Both are
+the same at every relay the route reaches.
 `best_route` on the data plane uses the same order, so subscriptions follow the
 announced choice.
 
