@@ -154,12 +154,10 @@ export class Publisher {
 	#session: Session;
 	#requiresSolicitation: boolean;
 
-	// The published broadcasts, borrowed from the origin this session serves. The origin
-	// outlives the session, so this is read-only here: subscribe_namespace streams watch it
-	// for changes, and closing the session leaves the broadcasts alone. The namespaces are
-	// advertised with an unsolicited PUBLISH_NAMESPACE (see {@link runPublishNamespaces}), or on
-	// request if the peer asked for that (see {@link runSubscribeNamespace}).
-	#broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
+	// The origin this session serves, borrowed: it outlives the session, and closing the
+	// session leaves its broadcasts alone. The namespaces are advertised with an unsolicited
+	// PUBLISH_NAMESPACE (see {@link runPublishNamespaces}), or on request if the peer asked
+	// for that (see {@link runSubscribeNamespace}).
 	#advertised: Getter<ReadonlyMap<Path.Valid, Advertised> | undefined>;
 	#publish?: OriginConsumer;
 
@@ -194,7 +192,6 @@ export class Publisher {
 		this.#quic = quic;
 		this.#session = session;
 		const origin = publish && wireOf(publish);
-		this.#broadcasts = origin?.broadcasts ?? new Signal(new Map());
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
 		this.#publish = publish;
 		this.#requiresSolicitation = requiresSolicitation;
@@ -214,7 +211,7 @@ export class Publisher {
 		let refusal: { errorCode: number; reasonPhrase: string } | undefined;
 		try {
 			broadcast =
-				this.#broadcasts.peek()?.get(name) ?? (this.#publish && (await wireOf(this.#publish).demand(name)));
+				this.#publish && (wireOf(this.#publish).local(name) ?? (await wireOf(this.#publish).demand(name)));
 			if (!broadcast) {
 				refusal = {
 					errorCode: toRequestCode("does_not_exist", "subscribe", version),

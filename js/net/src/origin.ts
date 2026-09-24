@@ -917,6 +917,7 @@ export class Consumer {
 			get advertised() {
 				return state.originated;
 			},
+			local: (path) => this.#local(path),
 			demand: (path) => this.#demand(path),
 		});
 	}
@@ -1204,16 +1205,25 @@ export class Consumer {
 	 * @internal
 	 */
 	/**
+	 * The announced local broadcast at `path`, when it beats the originated routes there.
+	 * Resolves through what rebuildOriginated advertised: a peer never sees received routes.
+	 */
+	#local(path: Path.Valid): broadcast.Consumer | undefined {
+		const local = this.#state.local.peek()?.get(path);
+		if (local && this.#state.localWins(path, this.#state.bestEntry(path, received))) return local;
+		return undefined;
+	}
+
+	/**
 	 * Resolve `path` for serving: an announced local broadcast, or wait for an originated
 	 * dynamic to accept it. Undefined when nothing here can serve the path.
 	 *
 	 * @internal
 	 */
 	async #demand(path: Path.Valid): Promise<broadcast.Consumer | undefined> {
-		// Resolve through what rebuildOriginated advertised: a peer never sees received routes.
+		const local = this.#local(path);
+		if (local) return local;
 		const entry = this.#state.bestEntry(path, received);
-		const local = this.#state.local.peek()?.get(path);
-		if (local && this.#state.localWins(path, entry)) return local;
 		if (!entry?.server) return undefined;
 
 		const server = entry.server;

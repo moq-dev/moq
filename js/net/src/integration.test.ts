@@ -743,6 +743,33 @@ test("integration: subscribing to an unserved broadcast is refused as NotFound",
 	server.close();
 });
 
+test("integration: a peer is served the cheaper route it was offered, not the local broadcast", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06);
+	const origin = new OriginProducer();
+	const path = Path.from("test");
+	const local = origin.createBroadcast(path);
+	local.announce({ cost: 5n });
+	const dynamic = origin.dynamic(path, { cost: 1n });
+
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const remote = wireOf(client).consume(path);
+	const track = remote.track("video").subscribe();
+	const { value: request } = await withTimeout(dynamic.requested().next(), 1000, "the cheaper route was never asked");
+	expect(request?.path).toBe(path);
+
+	track.close();
+	remote.close();
+	client.close();
+	server.close();
+	dynamic.close();
+	local.close();
+	origin.close();
+});
+
 test("integration: lite draft-05 fetches a cached group", async () => {
 	const enc = new TextEncoder();
 	const dec = new TextDecoder();
