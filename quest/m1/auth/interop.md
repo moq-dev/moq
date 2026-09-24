@@ -10,8 +10,8 @@ with no grant passes silently.
 
 ## Plan
 
-The Rust and JS interop clients print
-the grant it received in one parseable line; `test/interop/interop.sh`
+The Rust and JS interop clients each print the grant they received in one
+parseable line; `test/interop/interop.sh`
 compares it against the token the cell minted. The negative round mints a
 token that excludes the published path and expects the publisher's session
 to close with `Unauthorized` naming the path, and the subscriber to see

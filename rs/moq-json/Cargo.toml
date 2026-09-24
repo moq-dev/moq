@@ -34,3 +34,7 @@ harness = false
 [[bench]]
 name = "allocations"
 harness = false
+
+[[bench]]
+name = "window"
+harness = false

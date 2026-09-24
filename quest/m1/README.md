@@ -27,7 +27,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Binding docs](/quest/m1/binding-docs.md) - every binding doc sample names a symbol that exists, checked nightly
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, audio, and video namespaces built from the handle below
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
-- [Announce to serve](/quest/m1/announce-to-serve.md) - a broadcast is visible and requestable only while announced, locally exactly as remotely
+- [IETF subscriptions end cleanly](/quest/m1/ietf-publish-done.md) - a finished moq-transport track ends cleanly for its subscriber instead of reading PUBLISH_DONE as an error
 - [Broadcast close](/quest/m1/broadcast-close/README.md) - `close()` is the one way to end a broadcast in every language, a permanent retraction that leaves in-flight tracks alone
 - [Gateway embedding](/quest/m1/gateway-embed.md) - moq-hls, moq-rtmp, and moq-rtc expose the loop their binaries run to an in-process embedder
 - [Ingest source](/quest/m1/net-ingest-source.md) - an announce says whether the broadcast entered on this relay or a peer
@@ -46,7 +46,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - generic on-demand group serving and IETF FETCH for browser publishers
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS, on the catalog and store the release ships
 - [Wildcard](/quest/m1/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
-- [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq accepts sessions, the moq-ffi call C still lacks
 - [js/publish discontinuity](/quest/m1/js-publish-discontinuity.md) - the JS container producer and js/publish emit the same marker group on encoder restart
 - [Impaired path](/quest/m1/transport-impairment-profile.md) - the transport drills run over a seeded, impaired UDP path on any host
 - [Tooling](/quest/m1/tooling/README.md) - justfiles become a one-line menu over `sh/`, one impact map scopes CI, and every workflow step runs a recipe
@@ -54,7 +53,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Path patterns](/quest/m1/path-patterns.md) - one matcher for every predicate over broadcast paths: tokens, origins, interest
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [Stats retier](/quest/m1/stats-retier.md) - a re-checked tier retags a live session's stats in place instead of waiting for its next connection
-- [io_uring link facts](/quest/m1/uring-link-facts.md) - the io_uring workers report a session's peer address and SNI to the auth server like the tokio listener does
 - [Listener close](/quest/m1/listener-close.md) - closing a listener releases its UDP socket before returning, so a restart can rebind the port
 - [Test ports](/quest/m1/tokio-test-ports.md) - moq-tokio tests bind QUIC and WebSocket on independent ephemeral ports, so a parallel run cannot collide
 - [Decoded frame ownership](/quest/m1/decoded-frames.md) - retain moq-video Frames across bindings, with native views or CPU conversion as needed

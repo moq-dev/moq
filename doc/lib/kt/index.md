@@ -52,7 +52,7 @@ Moq.connect("https://relay.example.com").use { moq ->
 ```
 
 The three advertising operations: `moq.createBroadcast(path)` (or
-`origin.createBroadcast`) returns a locally discoverable producer;
+`origin.createBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.announce(route)` / `broadcast.unannounce()` own that exact-path
 advertisement; `origin.dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
