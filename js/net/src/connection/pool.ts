@@ -265,7 +265,7 @@ export class Connection {
 	 * and URL switches: a switch retracts everything from
 	 * the old relay's origin, then the new one's arrivals stream in.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all()): Announce.Consumer {
+	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
 		const producer = new Announce.Producer();
 		const consumer = producer.consume();
 
@@ -283,7 +283,7 @@ export class Connection {
 			const origin = effect.get(this.#origin);
 			if (!origin) return;
 
-			const upstream = origin.announced(scope);
+			const upstream = origin.announced(scope, options);
 			effect.cleanup(() => upstream.close());
 
 			// Track what this origin announced so a URL switch retracts it; the last

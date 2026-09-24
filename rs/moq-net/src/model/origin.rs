@@ -879,15 +879,13 @@ impl TableCursor {
 		(entry.advertised || (entry.local && self.exclude.is_none()))
 			&& entry.visible_to(self.exclude)
 			&& entry.overlaps(&self.allowed)
-			&& self.hidden.admits(self.hides(&entry.prefix))
+			&& self.discovers(&entry.prefix)
 	}
 
-	/// Whether a segment of `prefix` below the head it sits under starts with
-	/// `.`. A route at or above a head has nothing below it, so it never hides.
-	fn hides(&self, prefix: &Path) -> bool {
-		self.heads
-			.iter()
-			.any(|head| prefix.strip_prefix(head).is_some_and(|below| below.is_hidden()))
+	/// Whether the hidden rule lets this cursor discover a route at `prefix`.
+	fn discovers(&self, prefix: &Path) -> bool {
+		(self.hidden.include || !hides(&self.heads, prefix))
+			&& self.hidden.beyond.as_ref().is_none_or(|outer| hides(outer, prefix))
 	}
 }
 
@@ -955,26 +953,21 @@ pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<PathOwned> {
 /// interest head) starts with `.`; a prefix that names the dot segment itself
 /// lists what is under it. Only discovery is affected: a request by exact path
 /// resolves either way.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Hidden {
-	/// Only visible routes.
-	#[default]
-	Exclude,
-	/// Visible and hidden routes alike.
-	Include,
-	/// Only hidden routes: an opt-in that tops up a feed already carrying the
-	/// visible ones.
-	Only,
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Hidden {
+	/// Report hidden routes too.
+	include: bool,
+	/// Report only what a feed scoped to these heads hides, for a stream that tops
+	/// up a feed already carrying everything visible from them.
+	beyond: Option<Vec<PathOwned>>,
 }
 
-impl Hidden {
-	fn admits(self, hidden: bool) -> bool {
-		match self {
-			Self::Exclude => !hidden,
-			Self::Include => true,
-			Self::Only => hidden,
-		}
-	}
+/// Whether a segment of `prefix` below the head it sits under starts with `.`.
+/// A route at or above a head has nothing below it, so it never hides.
+fn hides(heads: &[PathOwned], prefix: &Path) -> bool {
+	heads
+		.iter()
+		.any(|head| prefix.strip_prefix(head).is_some_and(|below| below.is_hidden()))
 }
 
 /// What an [`AnnounceUpdate`] reports about its path.
@@ -3134,7 +3127,7 @@ impl Consumer {
 			shared: producer.shared.clone(),
 			stats,
 			exclude: None,
-			hidden: Hidden::Exclude,
+			hidden: Hidden::default(),
 			pool: producer.pool.clone(),
 			cache_duration: producer.cache_duration,
 			tasks: producer.tasks.downgrade(),
@@ -3164,22 +3157,20 @@ impl Consumer {
 	/// Hidden routes are left out by default, so a platform can add `.`-named
 	/// broadcasts without them turning up in apps that list everything.
 	pub fn with_hidden(mut self, hidden: bool) -> Self {
-		self.hidden = match hidden {
-			true => Hidden::Include,
-			false => Hidden::Exclude,
-		};
+		self.hidden.include = hidden;
 		self
 	}
 
-	/// A clone whose [`announced`](Self::announced) reports only hidden routes.
-	pub(crate) fn only_hidden(mut self) -> Self {
-		self.hidden = Hidden::Only;
+	/// A clone whose [`announced`](Self::announced) reports only the routes a feed
+	/// from `outer` hides, for a stream topping up that feed.
+	pub(crate) fn beyond(mut self, outer: &Consumer) -> Self {
+		self.hidden.beyond = Some(interest_prefixes(&outer.scope.allowed));
 		self
 	}
 
-	/// Whether [`announced`](Self::announced) reports hidden routes alongside the rest.
+	/// Whether [`announced`](Self::announced) reports hidden routes too.
 	pub(crate) fn includes_hidden(&self) -> bool {
-		self.hidden == Hidden::Include
+		self.hidden.include
 	}
 
 	/// Attach an egress stats context: broadcasts handed out through this handle (and
@@ -3225,7 +3216,7 @@ impl Consumer {
 			self.scope.allowed.clone(),
 			self.stats.clone(),
 			self.exclude,
-			self.hidden,
+			self.hidden.clone(),
 			&self.shared,
 		)
 	}
@@ -3854,10 +3845,18 @@ mod tests {
 		announced.assert_next_active("room/.internal");
 		announced.assert_next_wait();
 
-		// A tail feed reports only what the default hid.
-		let mut announced = consumer.clone().only_hidden().announced();
+		// A top-up feed reports only what a feed from the root hid, filtered by its own
+		// prefix and opt-in.
+		let mut announced = consumer.clone().with_hidden(true).beyond(&consumer).announced();
 		announced.assert_next_active(".stats/node");
 		announced.assert_next_active("room/.internal");
+		announced.assert_next_wait();
+		let room = consumer.scope("", &scopes(&["room"])).unwrap().beyond(&consumer);
+		let mut announced = room.announced();
+		announced.assert_next_wait();
+		let stats = consumer.scope("", &scopes(&[".stats"])).unwrap().beyond(&consumer);
+		let mut announced = stats.announced();
+		announced.assert_next_active(".stats/node");
 		announced.assert_next_wait();
 	}
 

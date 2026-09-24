@@ -47,7 +47,8 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		return;
 	}
 
-	const announced = conn.announced();
+	// Hidden routes are mirrored too; each local reader opts in on its own.
+	const announced = conn.announced(undefined, { hidden: true });
 	const inserted = new Map<Path.Valid, Dynamic>();
 
 	// End the stream the moment the session closes rather than waiting for the wire to

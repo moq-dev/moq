@@ -94,7 +94,8 @@ A publisher SHOULD NOT advertise a hidden namespace in response to a SUBSCRIBE_N
 Hiding is a convenience for discovery, not access control, so a publisher MAY treat a subscriber it trusts, such as another relay in its own cluster, as opted in.
 
 An unsolicited PUBLISH_NAMESPACE answers no prefix, so it is measured against the empty one: a publisher SHOULD NOT send one for a hidden namespace.
-When unsolicited advertisements are live and a SUBSCRIBE_NAMESPACE opts in, the publisher SHOULD answer it with only the hidden namespaces under its prefix, which are the ones the unsolicited advertisements left out, so no namespace is advertised twice.
+When unsolicited advertisements are live, a SUBSCRIBE_NAMESPACE is answered with only the namespaces they left out, which is to say those hidden from the empty prefix, that the subscription may see.
+That covers both an opt-in and a prefix that names a hidden field itself, and no namespace is advertised twice.
 
 Hiding narrows discovery and nothing else.
 A SUBSCRIBE, FETCH, or TRACK_STATUS for a track in a hidden namespace is served exactly as it would be without this extension.

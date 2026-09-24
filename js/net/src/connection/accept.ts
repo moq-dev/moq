@@ -114,7 +114,7 @@ async function acceptAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, solicit, cluster } = await exchangeSetup(transport, version, "moq-lite-js");
+	const { control, solicit, hidden, cluster } = await exchangeSetup(transport, version, "moq-lite-js");
 
 	return new Ietf.Connection({
 		...wiring,
@@ -123,6 +123,7 @@ async function acceptAlpn(
 		quic: transport,
 		control,
 		solicit,
+		hidden,
 		cluster,
 		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.
 		maxRequestId: 0n,
@@ -158,6 +159,7 @@ async function acceptSetup(
 	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Ietf.solicitIntoSetup(params);
+	Ietf.hiddenIntoSetup(params);
 
 	const server = new Ietf.ServerSetup({ version, parameters: params });
 	await server.encode(stream.writer, version);
@@ -173,6 +175,7 @@ async function acceptSetup(
 		maxRequestId,
 		version,
 		solicit: Ietf.solicitFromSetup(client.parameters),
+			hidden: Ietf.hiddenFromSetup(client.parameters),
 	});
 }
 
@@ -216,6 +219,7 @@ async function acceptNegotiated(
 	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Ietf.solicitIntoSetup(params);
+	Ietf.hiddenIntoSetup(params);
 
 	const server = new Ietf.ServerSetup({ version: selectedVersion, parameters: params });
 	await server.encode(stream.writer, setupVersion);
@@ -239,6 +243,7 @@ async function acceptNegotiated(
 			maxRequestId,
 			version: selectedVersion as Ietf.IetfVersion,
 			solicit: Ietf.solicitFromSetup(client.parameters),
+			hidden: Ietf.hiddenFromSetup(client.parameters),
 		});
 	} else {
 		throw new Error(`unsupported version: ${selectedVersion.toString(16)}`);

@@ -37,8 +37,9 @@ export interface Established {
 	 * Subscribe to broadcast announcements matching `scope`, any pattern (`foo/**`
 	 * for a subtree, `room/* /chat` for each room's chat, default `**`). Paths are
 	 * relative to the session; captures report what the scope's wildcards stood for.
+	 * Hidden routes are left out unless `options.hidden` opts in.
 	 */
-	announced(scope?: Path.Pattern): announce.Consumer;
+	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
 
 	/**
 	 * Snapshot the transport's counters, querying it fresh on each call.
