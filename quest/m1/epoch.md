@@ -17,9 +17,10 @@ line builds on, and it replaces the e2ee-local `moq_e2ee::Epoch`.
 - Move `rs/moq-e2ee/src/epoch.rs` into `moq-net` and add the JS equivalent.
   Parsing is strict: `@` followed by a lowercase hyphenated UUIDv7. Nothing else
   counts as an epoch, so an app's own UUID segments never parse as one.
-- Path helpers split a path into name and epoch and join them back. New path
-  construction rejects a segment that starts with `@` but is not a valid epoch,
-  so the marker stays unambiguous. Check how that interacts with
+- Path helpers split a path into name and epoch and join them back. A segment
+  like `@alice` is valid today and stays valid: strict parsing already keeps it
+  from reading as an epoch. Rejecting it instead would break the path contract
+  and land on `dev`. Check how the split interacts with
   [path patterns](/quest/m1/path-patterns.md) and
   [hidden broadcasts](/quest/m1/hidden-broadcasts.md) (a leading `.`).
 - `moq-e2ee` uses the shared type. Update

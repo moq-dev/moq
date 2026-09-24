@@ -11,9 +11,8 @@ the old route's QUIC idle timeout. Moving to a new epoch is a clean boundary
 by its full path.
 
 The epoch rides in the path, so it survives any moq-transport relay, and no
-wire message changes. A publisher that cannot or will not mint one is still
-served: a request for a bare name resolves to its newest live epoch on every
-protocol version.
+wire message changes. At an epoch-aware relay, a request for a bare name
+resolves to its newest live epoch on every protocol version.
 
 Non-goals: redundant publishers sharing one epoch, and failing over between
 them faster than the keep-alive (the [redundant ingest](/quest/m2/redundant-ingest.md)
@@ -34,9 +33,13 @@ Decided:
 - Viewers follow the greatest epoch with a live route. When it goes away and an
   older one is still live, they fall back to it.
 - A bare request with no route of its own resolves to that same epoch on every
-  version, so lite-06 and IETF clients and third-party relays keep working.
-  When a newer epoch appears, the bare subscription ends with a typed reset,
-  and the client's normal resubscribe lands on the new one.
+  version, so lite-06 and IETF clients keep working through an epoch-aware
+  relay. When a newer epoch appears, the bare subscription ends with a typed
+  reset, and the client's normal resubscribe lands on the new one.
+- An unmodified third-party relay routes `foo/@<epoch>` but never resolves a
+  bare `foo`, since a route covers its descendants, not its parent. A
+  bare-name viewer behind one needs a publisher that opts out with the raw
+  prefix route. Document this rather than promise it works.
 - Derived output lives under the epoch it came from
   (`pid/foo.hang/@e/transcode.pro`), so nested epochs must parse. This moves
   the [wildcard](/quest/m1/wildcard/README.md) line's derived-output example

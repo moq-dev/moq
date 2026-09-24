@@ -12,6 +12,12 @@ any wire change.
 
 - Publish: the broadcast create-and-announce path appends `Epoch::mint()`
   unless the path already has an epoch. `announce(prefix, route)` stays raw.
+  A bare path already at the 32-part limit has no room for the epoch segment:
+  refuse it at publish, pointing at the raw route, rather than fail at encode.
+- Auth: a grant that admits bare `foo` admits `foo/@<epoch>` for both publish
+  and subscribe, and a grant on one epoch never widens to the bare name or its
+  siblings. Check how exact grants and patterns match today, and test both
+  sides in moq-relay's auth tests.
 - Consume: `routed` and `request_broadcast` on a bare name watch the routes
   one `@` segment below it. They pick the greatest live epoch, and on a table
   change, re-select: move up at once, or fall back when the current one is
@@ -30,8 +36,9 @@ any wire change.
   describe resolution or takeover. The rule is a relay behavior, so state it
   in the draft even though no field changes.
 
-Public API: behavior change on publish (the announced path gains an epoch)
-and on bare-name consume. Decide at PR time whether that retargets to `dev`.
+Public API: behavior change on publish (the announced path gains an epoch,
+and a 32-part bare path is refused), on bare-name consume, and on what an
+exact grant admits. Decide at PR time whether that retargets to `dev`.
 Wire: none.
 
 ## Related
