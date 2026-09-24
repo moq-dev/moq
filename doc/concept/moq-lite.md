@@ -96,8 +96,8 @@ the announced prefix pins every wildcard in the most-specific matching scope
 member. The Rust consumer is a `Stream` and the TypeScript one an async iterable.
 The Rust consumer also yields one `announce::Event::Live` once the routes live
 at subscribe time have all been delivered, including those a peer session was
-still sending: moq-lite-05+ counts them in ANNOUNCE_OK, moq-lite-01/02 send
-them in ANNOUNCE_INIT, and older or IETF sessions wait for the stream to go
+still sending: moq-lite-05+ counts them in ANNOUNCE\_OK, moq-lite-01/02 send
+them in ANNOUNCE\_INIT, and older or IETF sessions wait for the stream to go
 quiet.
 
 Announcements are hints; requests are the authority. When a subscriber asks
