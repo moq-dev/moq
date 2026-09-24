@@ -459,8 +459,9 @@ pub struct Route {
 	pub hops: Hops,
 
 	/// What pulling content via this route costs, accumulated per link: lower wins
-	/// among routes of the same anonymity, with ties broken by hop length, then a
-	/// deterministic hash, and finally the most recently announced route. See [`Cost`].
+	/// among routes of the same anonymity, with ties broken by a broadcast published
+	/// on this origin, then hop length, then a deterministic hash, and finally the
+	/// most recently announced route. See [`Cost`].
 	pub cost: Cost,
 
 	/// The announcing session's declared or assigned identity.
@@ -2687,7 +2688,7 @@ impl OriginState {
 	/// identity: only routes it admits are candidates, since a route from anyone
 	/// else is different content rather than an alternate path (see [`Front`]).
 	/// A broadcast published on this origin competes on cost like any other
-	/// route, winning ties because it has no hops.
+	/// route and wins a tie.
 	fn best_route(&self, path: &Path, exclude: Option<Hop>, pin: Pin, refused: &HashSet<u64>) -> Option<&RouteEntry> {
 		// Covering prefixes of one path form a chain, so the deepest node with a
 		// candidate holds the unique longest prefix; walking down, the last such
@@ -4247,7 +4248,7 @@ mod tests {
 		assert!(server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
 	}
 
-	/// At equal cost the local broadcast wins, since it has no hops.
+	/// At equal cost the local broadcast wins.
 	#[tokio::test]
 	async fn local_broadcast_wins_a_cost_tie() {
 		let producer = origin(1).produce();

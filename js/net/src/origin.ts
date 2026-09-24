@@ -370,10 +370,9 @@ class OriginState {
 	/**
 	 * Whether the announced local broadcast at `path` wins over `entry`, the best route a
 	 * session or dynamic handle announced there. Cost decides, as for any two routes: an
-	 * identified route strictly cheaper than the local one wins, and a tie falls to the
-	 * local broadcast because it has no hops. A route at a shorter prefix never competes,
-	 * since the most specific prefix wins outright. False when nothing is announced
-	 * locally at `path`.
+	 * identified route strictly cheaper than the local one wins, and the local broadcast
+	 * wins a tie. A route at a shorter prefix never competes, since the most specific
+	 * prefix wins outright. False when nothing is announced locally at `path`.
 	 */
 	localWins(path: Path.Valid, entry: RouteEntry | undefined): boolean {
 		const local = this.advertisedLocal.peek()?.get(path);
