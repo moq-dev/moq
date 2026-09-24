@@ -43,8 +43,10 @@ Settled constraints either way:
 - `IntersectionObserver`, `visibilitychange`, and the element's size stay on
   main and reach the worker as inputs. A canvas can be transferred only once,
   so a replaced canvas element is a new transfer.
-- `renderer.out.frame` goes away; nothing outside the video module reads it.
-  Timestamps and stats cross the bridge like any other signal.
+- `renderer.out.frame` goes away. Its one reader, `Player`'s paused-poster
+  gate (keep video enabled until a frame is painted, then stop), moves with
+  the renderer or reads a painted flag across the bridge. Timestamps and stats
+  cross the bridge like any other signal.
 - The cross-thread signal bridge is a generic addition to `@moq/signals`, not
   private to watch. Prove its shape here.
 
