@@ -2056,14 +2056,17 @@ async fn run_front(task: FrontTask) {
 						broadcast.release_spliced(err.clone());
 						for (_, mut io) in tracks.drain() {
 							// A reader still waiting on its source's answer is in flight
-							// too: splice the copy it asked, so it ends as that copy does.
+							// too: splice the copy it asked, past any warm cache, so it
+							// ends as that copy does.
 							let waiting = io.staged.take().map(|(_, copy)| copy);
 							let waiting = waiting.or_else(|| io.query.take().map(|(_, copy, _)| copy));
 							if let Some(copy) = waiting
-								&& io.resume.is_used() && !io.resume.is_spliced()
-								&& io.resume.takeover(&copy).is_err()
+								&& io.resume.is_used()
 							{
-								continue;
+								if io.resume.takeover(&copy).is_err() {
+									continue;
+								}
+								io.warm = None;
 							}
 							// Nothing in flight: unread, never spliced, or only a warm cache.
 							if !io.resume.is_used() || !io.resume.is_spliced() || io.warm.is_some() {
@@ -4378,6 +4381,62 @@ mod tests {
 		let mut group = subscription.recv_group().await.unwrap().expect("the source's group");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"late");
 		assert!(matches!(subscription.recv_group().await, Ok(None)), "ends cleanly");
+	}
+
+	/// The same holds for a reader returning to a parked track: its warm cache
+	/// does not stand in for the copy it is waiting on.
+	#[tokio::test]
+	async fn unannounce_keeps_a_returning_reader_awaiting_its_info() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
+		let mut dynamic = broadcast.dynamic();
+		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
+		let track = resolved.track("video").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the front asked the source")
+			.expect("request");
+		let source = request.accept(None);
+		let mut group = source.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut subscription = subscribing.await.unwrap().expect("subscribe");
+		subscription.recv_group().await.unwrap().expect("the cached group");
+		drop(subscription);
+
+		// Parked: the source copy goes, the delivered group stays warm. The source
+		// then tears its idle track down, so a returning reader asks it afresh.
+		tokio::time::timeout(Duration::from_secs(1), source.unused())
+			.await
+			.expect("parked")
+			.expect("source open");
+		drop(source);
+		let track = resolved.track("video").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the front asked the source again")
+			.expect("request");
+
+		broadcast.unannounce();
+		settle(|| resolved.is_closed()).await;
+
+		// A fresh source copy numbers groups past what the cache already delivered.
+		let source = request.accept(None);
+		let mut group = source.create_group(1u64.into()).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
+		group.finish().unwrap();
+		source.finish().unwrap();
+
+		let mut subscription = subscribing.await.unwrap().expect("subscribe survives the retraction");
+		let mut payloads = Vec::new();
+		while let Some(mut group) = subscription.recv_group().await.expect("ends cleanly") {
+			payloads.push(group.read_frame().await.unwrap().unwrap().payload);
+		}
+		assert_eq!(payloads.last().map(|p| &p[..]), Some(&b"late"[..]));
 	}
 
 	/// A re-announce that lands before the front acts on the retraction reuses
