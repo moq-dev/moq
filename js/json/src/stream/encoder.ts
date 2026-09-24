@@ -1,9 +1,13 @@
 import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
+import type * as z from "@zod/mini";
 
 import { type Compression, isDeflate } from "../compression.ts";
+import { Desync } from "../error.ts";
 
 /** Options for an {@link Encoder}. */
-export interface Config {
+export interface Config<T = unknown> {
+	/** Validate each record before publishing and after decoding. */
+	schema?: z.ZodMiniType<T>;
 	/**
 	 * Compress the group as one sync-flushed `deflate-raw` stream, so each record reuses the earlier
 	 * ones as context and shrinks sharply. A {@link Decoder} reading the frames must set the same
@@ -48,6 +52,7 @@ export interface Pending {
  * starts a cold window that the new group's decoder can follow.
  */
 export class Encoder<T> {
+	#schema?: Config<T>["schema"];
 	#compress: boolean;
 	// The DEFLATE window for the whole log, present while compressing.
 	#flate?: Flate;
@@ -61,7 +66,8 @@ export class Encoder<T> {
 	// tell that it is acknowledging a record that is no longer the outstanding one.
 	#generation = 0;
 
-	constructor(config: Config = {}) {
+	constructor(config: Config<T> = {}) {
+		this.#schema = config.schema;
 		this.#compress = isDeflate(config.compression);
 		this.#flate = this.#compress ? new Flate() : undefined;
 	}
@@ -90,10 +96,11 @@ export class Encoder<T> {
 		// than an undecodable stream, and encoding continues.
 		if (this.#pending && this.#compress) this.#desynced = true;
 		if (this.#desynced) {
-			throw new Error("compression desynchronized: a record was encoded but never written");
+			throw new Desync();
 		}
 
-		const text = JSON.stringify(value);
+		const valid = this.#schema ? this.#schema.parse(value) : value;
+		const text = JSON.stringify(valid);
 		if (text === undefined) {
 			// `JSON.stringify` yields undefined for a top-level undefined, function, or symbol, which
 			// would otherwise frame as empty bytes and fail on the consumer instead of here.

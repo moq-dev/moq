@@ -79,7 +79,7 @@ staging with `/metrics` watched and a fresh viewer joining a days-old
 `moq import ts` broadcast over HLS at the end; the bounded `moq_json::window`
 timeline (#3240) is what makes that hold, and only a long run proves it. dev
 landed on main as #3793; before cutting, run `just check --all`,
-`just test all`, and `just test smoke --all` on the release revision and record
+`just test all`, and `just test interop --all` on the release revision and record
 it. Then cut the release under the existing release-plz and npm workflows; this
 quest bumps no versions itself.
 

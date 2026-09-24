@@ -60,6 +60,7 @@ impl<E: CatalogExt> Consumer<E> {
 						}
 					};
 					let catalog = from_msf(&msf)?;
+					catalog.check_renditions()?;
 					return Poll::Ready(Ok(Some(catalog)));
 				}
 				None => self.group = None,

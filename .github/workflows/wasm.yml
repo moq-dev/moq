@@ -21,8 +21,8 @@ name: WASM
 #
 # Two things the harness needs are deliberately out, because they are fixtures
 # rather than the code under test, and both are already gated elsewhere:
-# `js/net/**` (the publisher; its own unit tests plus the smoke matrix) and
-# `rs/moq-relay/**` (the server; the Rust test suite plus smoke). Naming either
+# `js/net/**` (the publisher; its own unit tests plus the interop matrix) and
+# `rs/moq-relay/**` (the server; the Rust test suite plus interop). Naming either
 # would launch a browser on a large share of pull requests. The cost is that a
 # break arriving through one of them lands on `main` and shows up the next time
 # this runs.
@@ -63,7 +63,7 @@ jobs:
     name: WASM
     if: github.event.action != 'closed'
     # x64, not the arm runner the other jobs use: this is the configuration
-    # smoke.yml already launches Playwright's Chromium on.
+    # interop.yml already launches Playwright's Chromium on.
     runs-on: ubuntu-latest
     timeout-minutes: 60
 

@@ -797,7 +797,7 @@ struct RemoteFront {
 	/// unresolved). The producer lives here so the teardown can reject requesters
 	/// still parked on a front whose watcher was cancelled.
 	request: kio::Producer<PendingBroadcast>,
-	/// The front's spliced broadcast, weak: dead once its watcher exits, so a
+	/// The front's spliced broadcast, weak: dead once the front ends, so a
 	/// later request re-creates the front instead of joining a corpse.
 	broadcast: broadcast::WeakConsumer,
 }
@@ -1697,12 +1697,17 @@ impl Drop for WarmCopy {
 	}
 }
 
-/// Cache `source`'s groups on a new local track the origin owns.
+/// Cache `source`'s finished groups on a new local track the origin owns.
 fn warm_copy(source: &track::Consumer) -> Option<WarmCopy> {
 	let info = source.cached_info()?;
 	let mut track = track::Producer::new(Arc::new(source.broadcast().clone()), source.name(), info);
 	for (group, visible) in source.cached_groups() {
-		let _ = track.adopt_group(group, visible);
+		// An open group is left for the re-splice to deliver whole. Dropping the source
+		// copy resets it mid-transfer, and its dead head would anchor the next takeover
+		// mid-group, asking upstream for a tail no returning reader can use.
+		if group.is_finished() {
+			let _ = track.adopt_group(group, visible);
+		}
 	}
 	let dynamic = track.dynamic();
 	Some(WarmCopy {
@@ -2021,8 +2026,20 @@ async fn run_front(task: FrontTask) {
 						if let Ok(mut pending) = request.write() {
 							pending.resolved.get_or_insert(Err(err.clone()));
 						}
-						broadcast.abort_spliced(err);
+						// Ending the broadcast only retracts it: no new requesters or
+						// tracks, and a newcomer at the path gets a fresh front. Tracks
+						// in flight carry on (moq-lite: retraction does not disturb
+						// subscriptions already in flight): dropping their producers
+						// leaves each reader on the copy it was spliced from, ending
+						// when and as that copy ends.
 						broadcast.finish();
+						broadcast.release_spliced(err.clone());
+						for (_, mut io) in tracks.drain() {
+							// Nothing in flight: unread, never spliced, or only a warm cache.
+							if !io.resume.is_used() || !io.resume.is_spliced() || io.warm.is_some() {
+								let _ = io.resume.abort(err.clone());
+							}
+						}
 						return;
 					}
 				}
@@ -3702,6 +3719,20 @@ mod tests {
 		request.unwrap()
 	}
 
+	/// Yield to the driver until the subscription has its next group or its end.
+	async fn next_group(subscription: &mut crate::track::Subscriber) -> Result<Option<crate::group::Consumer>, Error> {
+		let mut next = None;
+		settle(|| match subscription.poll_recv_group(&kio::Waiter::noop()) {
+			Poll::Ready(result) => {
+				next = Some(result);
+				true
+			}
+			Poll::Pending => false,
+		})
+		.await;
+		next.unwrap()
+	}
+
 	#[tokio::test]
 	async fn announce_and_retract() {
 		let producer = origin(1).produce();
@@ -4758,7 +4789,7 @@ mod tests {
 		subscription: track::Subscriber,
 		/// Keeps the incumbent's track producing; dropping it would abort the
 		/// track out from under the front mid-test.
-		_incumbent_track: track::Producer,
+		incumbent_track: track::Producer,
 	}
 
 	impl ResumeRig {
@@ -4801,7 +4832,7 @@ mod tests {
 					producer,
 					resolved,
 					subscription,
-					_incumbent_track: track,
+					incumbent_track: track,
 				},
 				server,
 				source,
@@ -4916,8 +4947,11 @@ mod tests {
 		// Another publisher entirely: same path, different first hop.
 		let rival_server = rig.standby(&[11]);
 
+		// The incumbent's session dies, taking its track with it: a live copy
+		// would otherwise keep serving after the front ends.
 		drop(incumbent);
 		drop(source);
+		rig.incumbent_track.abort(Error::Dropped).unwrap();
 
 		// The subscription ends rather than splicing onto the rival's frames.
 		let err = rig.subscription.recv_group().await.err().expect("subscription ends");
@@ -4941,6 +4975,7 @@ mod tests {
 
 		drop(incumbent);
 		drop(source);
+		rig.incumbent_track.abort(Error::Dropped).unwrap();
 
 		let err = rig.subscription.recv_group().await.err().expect("subscription ends");
 		assert!(matches!(err, Error::Dropped), "unexpected end: {err}");
@@ -5120,6 +5155,101 @@ mod tests {
 		// The path is free again for a fresh broadcast.
 		let _third = producer.create_broadcast("room/alice").unwrap();
 		assert!(consumer.get_broadcast("room/alice").is_some());
+	}
+
+	/// The publisher finishes a track, then its broadcast. A subscription already in
+	/// flight must conclude normally: the track's last group, then the end. moq-lite,
+	/// ANNOUNCE_END: "Retraction does not disturb subscriptions already in flight,
+	/// which conclude normally with SUBSCRIBE_END."
+	///
+	/// The runtime is single-threaded and the publisher's whole ending has no await in
+	/// it, so the outcome does not depend on timing.
+	#[tokio::test]
+	async fn a_finished_broadcast_concludes_in_flight_subscriptions() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let broadcast = producer.create_broadcast("room/alice").unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
+
+		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
+		let mut subscription = resolved
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		// A textbook clean end, innermost first: the group, the track, the broadcast.
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
+		group.finish().unwrap();
+		track.finish().unwrap();
+		drop(track);
+		broadcast.finish();
+
+		let mut group = next_group(&mut subscription)
+			.await
+			.expect("a cleanly finished track was served as an error")
+			.expect("the track ended before its last group");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"tail");
+		drop(group);
+
+		let end = next_group(&mut subscription)
+			.await
+			.expect("a cleanly finished track ended as an error");
+		assert!(end.is_none(), "a group followed the final one");
+	}
+
+	/// A route served from upstream is retracted (what the lite subscriber does on
+	/// ANNOUNCE_END: finish the source it minted, drop the route) while the track's
+	/// last group and end are still on their way. The subscription already in flight
+	/// must still conclude normally. moq-lite, ANNOUNCE_END: "Retraction does not
+	/// disturb subscriptions already in flight, which conclude normally with
+	/// SUBSCRIBE_END."
+	#[tokio::test]
+	async fn a_retracted_route_concludes_in_flight_subscriptions() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer
+			.dynamic("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+
+		let pending = consumer.request_broadcast("room/alice");
+		let request = queued(&server).await;
+		let source = broadcast::Info::new().produce();
+		let track = source.create_track("video", None).unwrap();
+		request.accept(&source);
+
+		let resolved = pending.await.expect("resolves");
+		let mut subscription = resolved
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+
+		// ANNOUNCE_END overtakes the track's end: the route is retracted, and the front
+		// has acted on it, before the track's last group and end arrive.
+		source.finish();
+		drop(server);
+		settle(|| resolved.is_closed()).await;
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
+		group.finish().unwrap();
+		track.finish().unwrap();
+		drop(track);
+
+		let mut group = next_group(&mut subscription)
+			.await
+			.expect("a retracted route's track was served as an error")
+			.expect("the track ended before its last group");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"tail");
+		drop(group);
+
+		let end = next_group(&mut subscription)
+			.await
+			.expect("a cleanly finished track ended as an error");
+		assert!(end.is_none(), "a group followed the final one");
 	}
 
 	/// An origin front drops the source track as soon as its last reader leaves,

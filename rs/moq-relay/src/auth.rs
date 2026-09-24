@@ -230,8 +230,10 @@ pub struct Lease {
 	consumer: lease::Consumer,
 	token: Token,
 	/// When the grant runs out, enforced here whoever drives the lease: a fixed
-	/// grant has no driver, and an auth server's may be mid-outage.
-	expires: Option<SystemTime>,
+	/// grant has no driver, and an auth server's may be mid-outage. Fixed on tokio's
+	/// clock when the grant arrives, so re-polling [`ended`](Self::ended) never
+	/// restarts the countdown.
+	expires: Option<tokio::time::Instant>,
 }
 
 impl Lease {
@@ -241,7 +243,7 @@ impl Lease {
 		let grant = consumer.grant();
 		Self {
 			token: Token::new(path, &grant),
-			expires: grant.expires,
+			expires: deadline(&grant),
 			consumer,
 		}
 	}
@@ -267,7 +269,7 @@ impl Lease {
 		loop {
 			let expire = async {
 				match self.expires {
-					Some(at) => tokio::time::sleep(at.duration_since(SystemTime::now()).unwrap_or_default()).await,
+					Some(at) => tokio::time::sleep_until(at).await,
 					None => std::future::pending().await,
 				}
 			};
@@ -284,7 +286,7 @@ impl Lease {
 						if fresh.tier != self.token.tier {
 							tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed; applies to the next session");
 						}
-						self.expires = grant.expires;
+						self.expires = deadline(&grant);
 					},
 					Err(reason) => return reason,
 				},
@@ -299,6 +301,12 @@ impl Lease {
 	pub fn close(self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
 		self.consumer.close(reason, bytes)
 	}
+}
+
+/// The grant's `expires` as a deadline on tokio's clock, counted from now.
+fn deadline(grant: &Grant) -> Option<tokio::time::Instant> {
+	let at = grant.expires?;
+	Some(tokio::time::Instant::now() + at.duration_since(SystemTime::now()).unwrap_or_default())
 }
 
 enum Decider {
@@ -591,6 +599,28 @@ mod tests {
 		let auth = Auth::refuse("relay-1");
 		let request = auth.request(moq_auth::Transport::Quic, "/anon/room");
 		assert!(matches!(auth.admit(request).await, Err(Error::Refused)));
+	}
+
+	/// The session supervisor re-polls `ended` on every nudge; that must not
+	/// restart the countdown to `expires`.
+	#[tokio::test(start_paused = true)]
+	async fn re_polling_keeps_the_expiry_deadline() {
+		use std::time::Duration;
+
+		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
+		grant.expires = Some(SystemTime::now() + Duration::from_secs(10));
+		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant));
+		for _ in 0..9 {
+			assert!(
+				tokio::time::timeout(Duration::from_secs(1), lease.ended())
+					.await
+					.is_err()
+			);
+		}
+		let reason = tokio::time::timeout(Duration::from_secs(2), lease.ended())
+			.await
+			.expect("expired at the deadline despite re-polling");
+		assert_eq!(reason, lease::Reason::Expired);
 	}
 
 	#[test]

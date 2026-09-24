@@ -5,7 +5,7 @@ description: Idiomatic Go over cgo via moq.dev/moq
 
 # Go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/moq-dev/moq-go.svg)](https://pkg.go.dev/github.com/moq-dev/moq-go)
+[![Go Reference](https://pkg.go.dev/badge/moq.dev/moq.svg)](https://pkg.go.dev/moq.dev/moq)
 
 `moq.dev/moq`: `context.Context` cancellation, `error`
 returns, and Go 1.23 range-over-func iterators for live streams. The native
@@ -18,7 +18,7 @@ go get moq.dev/moq@latest
 ```
 
 ```go
-import "github.com/moq-dev/moq-go"
+import "moq.dev/moq"
 
 // Subscribe. The iterator is live, so run it in its own goroutine.
 client, err := moq.Dial(ctx, "https://relay.example.com", moq.WithTLSRoots("ca.pem"))
@@ -132,6 +132,6 @@ available, which is not the same as zero.
 | `PacketsReceived` | datagrams | Total datagrams received. |
 | `PacketsLost` | datagrams | Total datagrams detected as lost. |
 
-- API reference: [pkg.go.dev/github.com/moq-dev/moq-go](https://pkg.go.dev/github.com/moq-dev/moq-go)
+- API reference: [pkg.go.dev/moq.dev/moq](https://pkg.go.dev/moq.dev/moq)
 - Source: [`go/`](https://github.com/moq-dev/moq/tree/main/go); `just go check` builds and tests locally
 - Mirrors the vanity path resolves to: [moq-dev/moq-go](https://github.com/moq-dev/moq-go) (wrapper), [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) (raw bindings and static libraries)

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/moq-dev/moq/compare/moq-uring-v0.0.1...moq-uring-v0.0.2) - 2026-09-23
+
+### Fixed
+
+- *(uring)* close cancelled handshakes ([#3932](https://github.com/moq-dev/moq/pull/3932))
+- *(ci)* repair nightly builds hidden behind the first failure ([#3956](https://github.com/moq-dev/moq/pull/3956))
+
 ## [0.0.1](https://github.com/moq-dev/moq/releases/tag/moq-uring-v0.0.1) - 2026-09-23
 
 ### Added
