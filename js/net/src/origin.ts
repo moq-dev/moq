@@ -402,7 +402,11 @@ class OriginState {
 	route(path: Path.Valid, slot: Pick<RequestSlot, "answer" | "refused">): broadcast.Consumer | undefined {
 		const entry = this.bestEntry(path, (candidate) => slot.refused.has(candidate));
 		const local = this.local.peek()?.get(path);
-		if (local && this.localWins(path, entry)) return local;
+		if (local && this.localWins(path, entry)) {
+			// Nothing reads a remote front the local broadcast replaced, so close its session subscription.
+			this.releaseMaterialized(path);
+			return local;
+		}
 
 		const cached = this.materialized.get(path);
 		if (cached && cached.entry === entry) {

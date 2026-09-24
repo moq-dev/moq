@@ -1011,14 +1011,17 @@ test("a request prefers a cheaper received route over an announced local broadca
 	const request = consumer.request(path);
 	expect(request.active.peek()).toBeUndefined();
 	await settle();
-	expect(request.active.peek()).toBeDefined();
+	const remote = request.active.peek();
+	expect(remote).toBeDefined();
 	const announced = consumer.announced();
 	expect(await announced.next()).toMatchObject({ prefix: path, route: { hops: [PEER] } });
 
-	// Re-priced below it, the local broadcast wins at once.
+	// Re-priced below it, the local broadcast wins at once, and the remote front it replaced closes.
 	local.announce({ cost: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: path, kind: "retracted" });
 	expect(await announced.next()).toMatchObject({ prefix: path, kind: "announced", route: Route.default });
+	expect(request.active.peek()).not.toBe(remote);
+	expect(remote?.closed.peek()).not.toBeUndefined();
 
 	announced.close();
 	request.close();
