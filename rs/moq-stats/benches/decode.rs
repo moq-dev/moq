@@ -55,7 +55,7 @@ const TICKS: u64 = 16;
 /// Broadcast `index` at `tick`: every tenth broadcast is live when `changed_percent` is 10, all of
 /// them when it is 100. Idle broadcasts keep their counters, so they drop out of the delta.
 fn traffic(index: usize, tick: u64, changed_percent: usize) -> Traffic {
-	let live = index % 100 < changed_percent;
+	let live = index.is_multiple_of(100 / changed_percent);
 	let tick = if live { tick } else { 0 };
 	let mut traffic = Traffic::default();
 	traffic.announces_started = 1;
