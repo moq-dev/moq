@@ -27,7 +27,10 @@ meaningless zero.
   `js/hang`, and the draft, beside the `jitter`
   [data sections](/quest/m1/data-sections.md) adds.
 - Feed the catalog's flush clock from the `moq-mux` data producers when a
-  capture time is present, and publish the result through the embedded config's
+  capture time is present and a frame was actually emitted. A `moq-json`
+  snapshot `update` with an unchanged value succeeds without writing one, so
+  the lower producer reports whether it emitted, and a repeated value must not
+  move the baseline (cover it in tests). Publish the result through the embedded config's
   `Estimate`, as [data sections](/quest/m1/data-sections.md) does for bitrate.
 - Mirror the capture timestamp in the published `js/binary` and `js/json`
   producers, so browser publishers can produce the same timed tracks.

@@ -38,7 +38,10 @@ truth.
   (`MillisCeil`, same meaning as video and audio) to `BinaryConfig` and
   `JsonConfig` in `rs/hang`, `js/hang`, and the Binary and JSON sections of
   `drafts/draft-lcurley-moq-hang.md`. Opt the data producers into bitrate
-  detection through the embedded config's `Estimate`. `jitter` is set by the
+  detection through the embedded config's `Estimate`. Extend `js/publish`'s
+  `CatalogProducer.mutate` check (nonzero, never lowered;
+  `js/publish/src/catalog.ts`), today audio and video only, to the `json` and
+  `binary` sections, with tests. `jitter` is set by the
   publisher only here; detection is [data jitter](/quest/m1/data-jitter.md),
   because flush lateness needs a source timestamp the producers do not take
   yet.

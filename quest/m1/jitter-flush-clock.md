@@ -61,7 +61,8 @@ media span of each emitted batch and advertise no `delay`.
   (`rs/hang/src/catalog/millis.rs`) to `TextConfig`
   (`rs/hang/src/catalog/text/mod.rs:124`), and mirror the zero-as-absent
   normalization in `js/hang/src/catalog/text.ts` and the text section of
-  `js/publish/src/catalog.ts`.
+  `js/publish/src/catalog.ts`. The `js/publish` check covers `delay` as well
+  as `jitter`, in every section that carries them.
 - **Player.** `Sync` registers each subscribed rendition's `delay` and
   `jitter` and computes `max(delay + jitter) - min(delay)`; it recomputes when
   a rendition registers, unregisters, or its catalog entry rises. When the
