@@ -35,6 +35,12 @@ media span of each emitted batch and advertise no `delay`.
   rendition, is the minimum of those. `delay` is the rendition baseline minus
   the broadcast baseline; `jitter` is `lateness - rendition baseline`. Each is
   reported as its lifetime maximum.
+- **Open:** lifetime maxima taken against a sliding baseline stop sharing an
+  origin when the earliest rendition changes. If A starts at 0 and B at
+  200 ms, B keeps `delay: 200`; if A then drifts to 500 ms, A advertises 300
+  and `Sync` computes `300 - 200 = 100` while the tracks are 300 ms apart.
+  Settle a fixed common origin, coordinated rebasing, or no subtraction
+  before implementing.
 - A faster-than-real-time source flushes early; each frame becomes the new
   minimum and both stay at zero, which is correct for something that is not
   live.

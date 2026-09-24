@@ -18,11 +18,14 @@ meaningless zero.
   payload carry its capture timestamp, written as the frame timestamp, without a
   `_with_x` twin of `update`/`append` (for example, accept a type that converts
   from a bare payload).
-- The capture time must come from the publisher's clock, the one
-  `Timestamp::now()` reads. A device-native clock (a flight controller's boot
+- The capture time must be on the broadcast's `moq_mux::Clock`, the timeline
+  media PTS use. `Timestamp::now()` has its own jittered per-process epoch, so
+  a data frame stamped with it cannot be compared with media; map the capture
+  instant through the broadcast clock, in a type that cannot be mistaken for
+  an unmapped `Timestamp`. A device-native clock (a flight controller's boot
   time) is an unrelated epoch that would report nonsense and, through the
   broadcast-wide baseline, distort every other track; it stays in the payload.
-  Reject a timestamp ahead of `now` rather than clamp it.
+  Reject a timestamp ahead of the clock's `now` rather than clamp it.
 - Add optional `delay` to `JsonConfig` and `BinaryConfig` in `rs/hang`,
   `js/hang`, and the draft, beside the `jitter`
   [data sections](/quest/m1/data-sections.md) adds.
