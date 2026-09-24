@@ -138,7 +138,7 @@ impl<T> Pending<'_, T> {
 impl<T> Drop for Pending<'_, T> {
 	fn drop(&mut self) {
 		if self.edit.is_some() {
-			self.encoder.resync();
+			self.encoder.reset();
 		}
 	}
 }
@@ -216,8 +216,11 @@ impl<T> Encoder<T> {
 		self.offset..self.start + self.window.len() as u64
 	}
 
-	/// Discard group-local state after an encoded frame did not reach the wire.
-	fn resync(&mut self) {
+	/// Discard group-local state, so the next edit opens a new group with a header.
+	///
+	/// Call this whenever the caller closes the current group behind the encoder's back. It is also
+	/// how the encoder recovers after an encoded frame did not reach the wire.
+	pub fn reset(&mut self) {
 		self.flate = None;
 		self.op_bytes = 0;
 		self.header_len = 0;
@@ -288,7 +291,7 @@ impl<T> Encoder<T> {
 		let encoded = self.frame(bytes)?;
 		let group_bytes = self.header_len.saturating_add(self.op_bytes);
 		if group_bytes > moq_net::group::MAX_CACHE_BYTES {
-			self.resync();
+			self.reset();
 			Ok(None)
 		} else {
 			Ok(Some(encoded))

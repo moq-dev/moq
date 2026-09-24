@@ -697,6 +697,19 @@ impl Pending {
 			.clear();
 		self
 	}
+
+	/// Drop one track whose media could not be stored, keeping every other track's ranges.
+	///
+	/// Like [`gap`](Self::gap) for a single track: the record stays committable without advertising
+	/// objects that are not durable.
+	pub fn omit(mut self, track: &str) -> Self {
+		self.record
+			.as_mut()
+			.expect("a pending record is present until commit")
+			.tracks
+			.remove(track);
+		self
+	}
 }
 
 impl Deref for Pending {
@@ -753,6 +766,17 @@ impl Output {
 			return Ok(());
 		};
 		match sink.pop(count) {
+			Ok(()) => Ok(()),
+			Err(moq_json::Error::Net(err)) => Err(err.into()),
+			Err(err) => Err(err.into()),
+		}
+	}
+
+	fn flush(&mut self) -> crate::Result<()> {
+		let Some(sink) = self.sink.as_mut() else {
+			return Ok(());
+		};
+		match sink.cut() {
 			Ok(()) => Ok(()),
 			Err(moq_json::Error::Net(err)) => Err(err.into()),
 			Err(err) => Err(err.into()),
@@ -962,6 +986,14 @@ impl Producer {
 	/// Remove up to `count` oldest records from the visible timeline window.
 	pub fn pop(&self, count: u64) -> crate::Result<()> {
 		self.output.lock().unwrap().pop(count)
+	}
+
+	/// Close the timeline track's open group, so every push and pop so far sits in a complete group.
+	///
+	/// A recorder stores those groups before committing the next segment. The next edit opens a
+	/// new group restating the window.
+	pub fn flush(&self) -> crate::Result<()> {
+		self.output.lock().unwrap().flush()
 	}
 
 	fn publish_ready(&self) {
@@ -1343,6 +1375,61 @@ mod test {
 			consumer.poll_next(&waiter),
 			Poll::Ready(Ok(Some(Event::Push { index: 0, .. })))
 		));
+	}
+
+	#[tokio::test]
+	async fn omitting_a_track_keeps_the_others() {
+		let (broadcast, mut timeline) = setup();
+		let segmenter = timeline.deferred().unwrap();
+		let mut video = segmenter.pacing_track("video0");
+		let mut audio = segmenter.pacing_track("audio0");
+		video.record(0, ms(0), true);
+		audio.record(0, ms(0), true);
+		video.record(1, ms(2_000), true);
+		audio.record(1, ms(2_000), true);
+
+		let pending = segmenter.next().expect("the complete segment is ready for storage");
+		timeline.push(pending.omit("audio0")).unwrap();
+		drop((video, audio));
+		let tail = segmenter.finish();
+		while let Some(pending) = tail.next() {
+			timeline.push(pending).unwrap();
+		}
+		timeline.finish().unwrap();
+
+		assert_eq!(
+			drain(&broadcast, &timeline).await,
+			vec![
+				entry(0, 0, 2_000, &[("video0", &[(0, 0)])]),
+				entry(1, 2_000, 0, &[("audio0", &[(1, 1)]), ("video0", &[(1, 1)])]),
+			]
+		);
+	}
+
+	#[test]
+	fn flush_closes_the_timeline_group() {
+		let (broadcast, timeline) = setup();
+		let segmenter = timeline.deferred().unwrap();
+		let replay = moq_net::track::Subscription::default().with_max_age(Duration::from_secs(30));
+		let groups = broadcast.consume().track(DEFAULT_NAME).unwrap().subscribe(replay);
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(mut groups)) = groups.poll_ok(&waiter) else {
+			panic!("the deferred timeline track exists");
+		};
+
+		let mut video = segmenter.pacing_track("video0");
+		video.record(0, ms(0), true);
+		video.record(1, ms(2_000), true);
+		timeline.push(segmenter.next().unwrap()).unwrap();
+		timeline.pop(1).unwrap();
+		timeline.flush().unwrap();
+
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("the pushed record opened a group");
+		};
+		assert_eq!(group.frame_count(), 2, "the push header and the pop share one group");
+		assert!(group.poll_finished(&waiter).is_ready(), "flush closes it");
+		assert!(groups.poll_recv_group(&waiter).is_pending());
 	}
 
 	#[test]

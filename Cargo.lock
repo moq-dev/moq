@@ -4159,6 +4159,10 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "hang",
+ "kio 0.6.0",
+ "moq-json",
+ "moq-mux",
  "moq-net",
  "object_store",
  "percent-encoding",
@@ -4167,6 +4171,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
