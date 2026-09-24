@@ -55,6 +55,7 @@ final server = await Server.listen(
   ),
 );
 final live = server.createBroadcast('live/camera');
+live.announce(route: MoqRoute()); // unannounced broadcasts are invisible
 await for (final request in server.requests()) {
   final session = await request.accept();
   print(session.epoch());
@@ -62,7 +63,7 @@ await for (final request in server.requests()) {
 ```
 
 The three advertising operations: `moq.createBroadcast(path)` (or
-`origin.createBroadcast`) returns a locally discoverable producer;
+`origin.createBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.announce(route:)` / `broadcast.unannounce()` own that exact-path
 advertisement; `origin.dynamic_(prefix:, route:)` claims `prefix` and
 every path beneath it (`''` for everything; Dart spells the origin method

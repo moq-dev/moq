@@ -1382,38 +1382,42 @@ fn audio_rejects_bad_init_bytes() {
 	);
 }
 
-/// Creating a broadcast makes it discoverable on the origin's local cursor.
-/// Peer advertisements still require `announce`.
+/// Creating a broadcast does not make it exist for anyone: nothing crosses the
+/// announce cursor and nothing resolves until `announce`, locally exactly as for a
+/// peer. `announced_broadcast` waits for the announcement.
 #[tokio::test]
-async fn create_broadcast_announces_locally() {
+async fn create_broadcast_is_invisible_until_announced() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let broadcast = origin.create_broadcast("live".into()).unwrap();
 
-	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let update = tokio::time::timeout(TIMEOUT, announced.next())
+	let unroutable = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
 		.await
-		.expect("timed out waiting for local announcement")
-		.expect("announcement")
-		.expect("cursor is open");
+		.expect("an unroutable request answers at once");
+	assert!(unroutable.is_err(), "an unannounced broadcast is unroutable");
+
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let pending = tokio::spawn(async move { announced.next().await });
+	let waiting = consumer.announced_broadcast("live".into()).unwrap();
+	let waited = tokio::spawn(async move { waiting.available().await });
+	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+	assert!(!pending.is_finished(), "create_broadcast must not advertise the path");
+	assert!(!waited.is_finished(), "an unannounced broadcast must not resolve");
+
+	broadcast.announce(MoqRoute::default()).unwrap();
+	tokio::time::timeout(TIMEOUT, waited)
+		.await
+		.expect("timed out waiting for the announced broadcast")
+		.expect("task")
+		.expect("the announced broadcast resolves");
+	let update = tokio::time::timeout(TIMEOUT, pending)
+		.await
+		.expect("timed out waiting for announce")
+		.expect("task")
+		.expect("announce reaches the cursor")
+		.expect("the cursor is still open");
 	assert_eq!(update.prefix(), "live");
 	assert!(update.active());
-
-	let requested = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
-		.await
-		.expect("timed out requesting local broadcast")
-		.expect("local broadcast resolves");
-	assert_eq!(requested.inner().info().path.as_str(), "live");
-
-	let waited = tokio::time::timeout(
-		TIMEOUT,
-		consumer.announced_broadcast("live".into()).unwrap().available(),
-	)
-	.await
-	.expect("timed out awaiting local broadcast")
-	.expect("local broadcast resolves");
-	assert_eq!(waited.inner().info().path.as_str(), "live");
-
 	broadcast.finish().unwrap();
 }
 
@@ -1668,54 +1672,47 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 }
 
 #[tokio::test]
-async fn unannounce_withdraws_only_from_peers() {
+async fn announce_and_unannounce_toggles_discovery() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let broadcast = origin.create_broadcast("live".into()).unwrap();
+	broadcast.announce(MoqRoute::default()).unwrap();
+
+	// The consumer observes the flag through the announce stream: an active
+	// announcement, then its retraction.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-
-	let first = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.unwrap()
-		.unwrap()
-		.unwrap();
-	assert!(first.active());
-	assert_eq!(first.route().cost, 0);
-
-	broadcast
-		.announce(MoqRoute {
-			cost: 3,
-			..Default::default()
-		})
-		.unwrap();
-	let advertised = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.unwrap()
-		.unwrap()
-		.unwrap();
-	assert!(advertised.active());
-	assert_eq!(advertised.route().cost, 3);
+	async fn wait_live(announced: &MoqAnnounceConsumer, announce: bool) {
+		loop {
+			let announcement = tokio::time::timeout(TIMEOUT, announced.next())
+				.await
+				.expect("timed out waiting for an announce update")
+				.unwrap()
+				.expect("origin ended while waiting for an announce update");
+			if announcement.prefix() == "live" && announcement.active() == announce {
+				return;
+			}
+		}
+	}
+	wait_live(&announced, true).await;
 
 	broadcast.unannounce().unwrap();
-	let local = tokio::time::timeout(TIMEOUT, announced.next())
+	wait_live(&announced, false).await;
+
+	// Unannounced for local consumers exactly as for peers.
+	let unroutable = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
 		.await
-		.unwrap()
-		.unwrap()
-		.unwrap();
-	assert!(local.active());
-	assert_eq!(local.route().cost, 0);
+		.expect("an unroutable request answers at once");
+	assert!(unroutable.is_err(), "an unannounced broadcast is unroutable");
+
+	// Announcing again brings it back.
+	broadcast.announce(MoqRoute::default()).unwrap();
+	wait_live(&announced, true).await;
 	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
 		.await
-		.expect("timed out requesting the local broadcast")
-		.expect("local broadcast stays reachable");
+		.expect("timed out requesting the reannounced broadcast")
+		.expect("a reannounced broadcast resolves");
 
 	broadcast.finish().unwrap();
-	let ended = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.unwrap()
-		.unwrap()
-		.unwrap();
-	assert!(!ended.active());
 }
 
 #[tokio::test]

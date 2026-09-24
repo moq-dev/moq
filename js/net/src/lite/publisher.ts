@@ -347,13 +347,7 @@ export class Publisher {
 	// subscriptions share it, since a second getWriter on the same stream would throw.
 	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
 
-	// The published broadcasts, borrowed from the origin this session serves. The origin
-	// outlives the session, so this is read-only here: subscribe/fetch look it up, and
-	// closing the session leaves the broadcasts alone.
-	#broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
-
-	// Originated advertisements this session forwards. Unadvertised local broadcasts
-	// stay reachable by exact path without appearing here.
+	// Originated advertisements this session forwards.
 	#advertised: Getter<ReadonlyMap<Path.Valid, Advertised> | undefined>;
 
 	#publish?: OriginConsumer;
@@ -380,7 +374,6 @@ export class Publisher {
 		this.version = version;
 		this.hop = hop;
 		const origin = publish && wireOf(publish);
-		this.#broadcasts = origin?.broadcasts ?? new Signal(new Map());
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
 		this.#publish = publish;
 
@@ -553,8 +546,8 @@ export class Publisher {
 		let front: broadcast.Consumer | undefined;
 		try {
 			front =
-				this.#broadcasts.peek()?.get(msg.broadcast) ??
-				(this.#publish && (await wireOf(this.#publish).demand(msg.broadcast)));
+				this.#publish &&
+				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -673,8 +666,8 @@ export class Publisher {
 		let front: broadcast.Consumer | undefined;
 		try {
 			front =
-				this.#broadcasts.peek()?.get(msg.broadcast) ??
-				(this.#publish && (await wireOf(this.#publish).demand(msg.broadcast)));
+				this.#publish &&
+				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -873,8 +866,8 @@ export class Publisher {
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
 		try {
 			const front =
-				this.#broadcasts.peek()?.get(msg.broadcast) ??
-				(this.#publish && (await wireOf(this.#publish).demand(msg.broadcast)));
+				this.#publish &&
+				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track);

@@ -54,6 +54,15 @@ anonymous mark and travels the chain unchanged. A route that passed through an
 anonymous hop at any depth ranks below every fully identified route, whatever
 the costs say; among anonymous routes, cost keeps ordering.
 
+A broadcast exists only while it is announced, for consumers in the same
+process and across a session alike: one that is created but never announced
+can be neither discovered nor requested. A broadcast published locally
+competes with remote routes to its path on cost like any other route, winning
+only a tie. Retracting a route (an unannounce, or the peer's `ANNOUNCE_END`)
+stops new requests from resolving through it but leaves subscriptions already
+in flight alone: each track runs to its own end, the publisher's FIN or reset.
+moq-transport sessions behave the same when a namespace is withdrawn.
+
 ### Hidden broadcasts
 
 A path segment starting with `.` hides a route from discovery, the way a

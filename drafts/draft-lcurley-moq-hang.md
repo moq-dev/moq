@@ -304,10 +304,10 @@ type TextSchema = {
 }
 
 type TextConfig = {
-	"format": "vtt" | "ttml" | "utf8" | string,
-	"role": "subtitle" | "caption" | string | undefined,
-	"lang": string | undefined,
-	// plus the common rendition fields
+  "format": "vtt" | "ttml" | "utf8" | string,
+  "role": "subtitle" | "caption" | string | undefined,
+  "lang": string | undefined,
+  // plus the common rendition fields
 }
 ~~~
 

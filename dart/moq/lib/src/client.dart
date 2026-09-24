@@ -130,7 +130,7 @@ final class Moq {
     }
   }
 
-  /// Create an unadvertised broadcast at [path].
+  /// Create an unannounced broadcast at [path], invisible to everyone until announced.
   ///
   /// Advertise it with `announce` after populating tracks. Create, `dynamic`
   /// if tracks are served on demand, populate, then announce.
