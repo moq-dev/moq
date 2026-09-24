@@ -57,7 +57,7 @@ Other changes to a deployment:
 - **Auth is one contract** (#3688). The relay asks an auth server per session
   (`--auth-url`) or applies a static anonymous grant (`--auth-public`); exactly
   one is required. `--auth-key`, `--auth-key-dir`, `--auth-api`,
-  `--auth-public-api`, `--auth-domain`, `--auth-mtls-tier`, and `--auth-tls-*`
+  `--auth-api-mode`, `--auth-public-api`, `--auth-domain`, `--auth-mtls-tier`, and `--auth-tls-*`
   are gone: run `moq auth serve --key-dir ...` next to the relay and point
   `--auth-url` at it. The flag-by-flag mapping is in
   [Migrating from the relay flags](/bin/relay/auth#migrating-from-the-relay-flags).
@@ -122,7 +122,7 @@ Other changes to a deployment:
   `Track::new` is `Track::audio` / `Track::video`.
 - **moq-relay embedding** (#3638). `Relay` fields are private: clone the
   handles you need, mount routes, then call `Relay::run`.
-  `Cluster::with_cache` moved to `ClusterOptions`.
+  `Cluster::with_cache` moved to `cluster::Options`.
 
 ## JavaScript
 
@@ -169,8 +169,6 @@ own casing:
   `MoqAnnouncement` is `MoqAnnounceUpdate`; `MoqBroadcastRequest::abort` is
   `reject`, and `MoqOriginOptions` is `MoqOriginConfig`.
 - **`MoqAudioCodec`** is an `opus()` object (#3671).
-- **`MoqCancel` is gone.** Go cancels through `context.Context`; the other
-  bindings use their native async cancellation.
 - **Errors.** `MoqError::Protocol` carries a `MoqProtocolError` (scope, wire
   code, kind) instead of a flattened message.
 - **Track and group `finish()`** keeps the handle open so a later `abort()` can
