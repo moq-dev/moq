@@ -100,9 +100,10 @@ impl Media {
 					result = tasks.join_next(), if !tasks.is_empty() => {
 						let ended = joined(result.expect("guarded by is_empty"))?.map(|(kind, sink)| {
 							if kind == Kind::Audio {
-								// Nothing holds playback to the speaker's cadence any more, so
-								// video takes the playout anchor back.
-								self.presentation.lock().unwrap().stopped();
+								// The tail still sounds, so the speaker keeps the anchor, but a
+								// replacement is a track boundary whose timestamps need not
+								// continue this one: its first frame re-pins.
+								self.presentation.lock().unwrap().restarted();
 							}
 							// The retired sink still holds a delay of audio, and a replacement
 							// holds its own before its first sample sounds. Played one after
@@ -134,8 +135,11 @@ impl Media {
 				}
 			}
 
-			if !playback.playing(Kind::Audio) && tails.is_empty() {
-				engine = None;
+			// The engine is only open while some audio is, so releasing it marks the
+			// last of it going quiet: nothing holds playback to the speaker's cadence
+			// any more, and video takes the anchor back.
+			if !playback.playing(Kind::Audio) && tails.is_empty() && engine.take().is_some() {
+				self.presentation.lock().unwrap().stopped();
 			}
 
 			// Start whatever isn't playing from the newest snapshot, which is not
