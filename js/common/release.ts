@@ -71,26 +71,49 @@ if (dryRun) {
 if (publishJsr) {
 	// Call `deno publish` directly (what `jsr publish` wraps) using the deno from
 	// the nix devshell, so parallel package releases don't race on a runtime
-	// jsr/deno download into a shared bunx cache. These unstable flags mirror what
-	// the jsr CLI passes. jsr.json and the generated dist leave the tree dirty, so
-	// allow it. OIDC trusted publishing kicks in automatically under GitHub
-	// Actions; locally it falls back to an interactive browser login.
+	// jsr/deno download into a shared bunx cache. jsr.json and the generated dist
+	// leave the tree dirty, so allow it. OIDC trusted publishing kicks in
+	// automatically under GitHub Actions; locally it falls back to an interactive
+	// browser login.
 	const args = [
 		"publish",
 		"--unstable-bare-node-builtins",
 		"--unstable-sloppy-imports",
-		"--unstable-byonm",
 		"--no-check",
 		"--allow-dirty",
 	];
+	// Ignore package.json so deps resolve through jsr.json's npm: import map, as
+	// a JSR consumer would. Otherwise Deno follows the workspace symlinks into a
+	// sibling's src/, whose Vite-only imports (`?inline`) only its npm build
+	// resolves. This means a dependency must already be on npm, which holds since
+	// `bun --filter` releases dependencies first.
+	const env = { ...process.env, DENO_NO_PACKAGE_JSON: "1" };
 	if (dryRun) {
-		console.log(`🧪 Publishing ${name}@${version} to JSR (dry-run)...`);
-		args.push("--dry-run");
-		execFileSync("deno", args, { stdio: "inherit" });
+		// A PR that bumps a sibling depends on a version npm won't have until the
+		// release publishes it, so Deno can't resolve the dependent yet.
+		const jsr = JSON.parse(await Bun.file("jsr.json").text()) as { imports?: Record<string, string> };
+		const unpublished = Object.values(jsr.imports ?? {})
+			.filter((spec) => spec.startsWith("npm:@moq/"))
+			.map((spec) => spec.slice("npm:".length))
+			.filter((spec) => {
+				try {
+					execFileSync("npm", ["view", spec, "version"], { stdio: "ignore" });
+					return false;
+				} catch {
+					return true;
+				}
+			});
+		if (unpublished.length > 0) {
+			console.log(`⏭️  Skipping JSR dry-run: ${unpublished.join(", ")} not on npm yet`);
+		} else {
+			console.log(`🧪 Publishing ${name}@${version} to JSR (dry-run)...`);
+			args.push("--dry-run");
+			execFileSync("deno", args, { stdio: "inherit", env });
+		}
 	} else if (jsrDone) {
 		console.log(`⏭️  ${name}@${version} already on JSR, skipping`);
 	} else {
 		console.log(`🚀 Publishing ${name}@${version} to JSR...`);
-		execFileSync("deno", args, { stdio: "inherit" });
+		execFileSync("deno", args, { stdio: "inherit", env });
 	}
 }

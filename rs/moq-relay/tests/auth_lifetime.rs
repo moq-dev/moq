@@ -604,17 +604,34 @@ async fn http_routes_hold_a_lease() {
 }
 
 /// An outage keeps the session until `expires`, then closes it as expired.
-#[tokio::test]
+///
+/// Paused: the relay times the lease and its re-checks on tokio's clock, so the
+/// minutes below pass virtually. `expires` is wall-clock, so the relay's deadline
+/// comes early by the setup's real time, which the slack absorbs.
+#[tokio::test(start_paused = true)]
 async fn an_outage_keeps_the_session_until_expires() {
-	let script = Script::new(grant(Duration::from_secs(4)));
+	const EXPIRES: Duration = Duration::from_secs(120);
+	const SLACK: Duration = Duration::from_secs(30);
+
+	let mut grant = grant(EXPIRES);
+	grant.revalidate = Some(Duration::from_secs(10));
+	let script = Script::new(grant);
+	// Down from the start: a re-check that succeeded would restart the deadline
+	// at whatever the virtual clock had reached.
+	script.on_revalidate(Answer::Status(503));
 	let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
-	let admitted = std::time::Instant::now();
 	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
 
-	script.on_revalidate(Answer::Status(503));
-
-	// Well into the outage the session is still up...
-	tokio::time::sleep(Duration::from_millis(2000)).await;
+	// Through every failed re-check up to just short of expires, the session is up...
+	tokio::time::sleep(EXPIRES - SLACK).await;
+	let outages = script
+		.seen
+		.lock()
+		.unwrap()
+		.iter()
+		.filter(|r| r.event == Event::Revalidate)
+		.count();
+	assert!(outages > 0, "no re-check reached the server during the outage");
 	assert!(
 		tokio::time::timeout(Duration::from_millis(100), pub_session.closed())
 			.await
@@ -623,13 +640,21 @@ async fn an_outage_keeps_the_session_until_expires() {
 	);
 
 	// ...and it closes once the grant expires, not later.
-	assert_closed(pub_session, Duration::from_secs(4), "publisher").await;
-	assert_closed(sub_session, Duration::from_secs(4), "subscriber").await;
-	let elapsed = admitted.elapsed();
-	assert!(elapsed >= Duration::from_secs(3), "closed before expires: {elapsed:?}");
+	assert_closed(pub_session, SLACK, "publisher").await;
+	assert_closed(sub_session, SLACK, "subscriber").await;
 
-	tokio::time::sleep(Duration::from_millis(200)).await;
-	for end in script.ends() {
+	let ends = tokio::time::timeout(TIMEOUT, async {
+		loop {
+			let ends = script.ends();
+			if ends.len() == 2 {
+				return ends;
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("both sessions report their end");
+	for end in ends {
 		let Event::End { reason, .. } = &end.event else {
 			unreachable!()
 		};

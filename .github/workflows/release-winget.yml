@@ -86,7 +86,7 @@ jobs:
           crate="${BASH_REMATCH[1]}"
           version="${BASH_REMATCH[2]}"
           case "$crate" in
-            moq-cli)       identifier="moq-dev.moq-cli" ;;
+            moq-cli)       identifier="moq-dev.moq" ;;
             moq-relay)     identifier="moq-dev.moq-relay" ;;
             *)
               echo "No winget identifier mapped for crate: $crate" >&2

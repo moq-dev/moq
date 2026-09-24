@@ -47,10 +47,10 @@ for (;;) {
 }
 ```
 
-- **Origins** hold the broadcasts, not the connection: closing a session unannounces them but leaves them created for the next one. `origin.request(path)` prefers a local broadcast, so a page that watches what it publishes reads its own copy with no round trip. Create, populate, then `announce()` for an exact path; use `dynamic(prefix, route)` when the set of paths is not known: an exact-path subscribe before the tracks exist is refused, and announcing advertises the path to peers.
-- **Connections** race WebTransport against WebSocket. `new Connection({ url })` pools one connection per relay URL and reconnects with backoff, which the elements use. `closed` settles when the handle is released (`null` on a clean close); the failure that stopped retrying the current URL is `error`, and a new URL recovers the same handle. A connection owns one send-rate sampler and one `Bandwidth.Allocator`; publishers reserve against it so their encoder targets sum to the estimate instead of each matching it.
+- **Origins** hold the broadcasts, not the connection: closing a session unannounces them but leaves them created for the next one. `origin.request(path)` resolves an announced local broadcast with no round trip, so a page that watches what it publishes reads its own copy, unless a cheaper route announces the same path. Create, populate, then `announce()` for an exact path; use `dynamic(prefix, route)` when the set of paths is not known: an exact-path subscribe before the tracks exist is refused, and nobody, local or remote, can see or reach a broadcast until it announces.
+- **Connections** race WebTransport against WebSocket. `new Connection({ url })` pools one connection per relay URL and reconnects with backoff, which the elements use. Supplying WebTransport/WebSocket options, discovery, delay, or a caller-owned origin selects a private loop; explicit `share: true` refuses those options. `closed` settles when the handle is released (`null` on a clean close); the failure that stopped retrying the current URL is `error`, and a new URL recovers the same handle. A connection owns one send-rate sampler and one `Bandwidth.Allocator`; publishers reserve against it so their encoder targets sum to the estimate instead of each matching it.
 - **Bandwidth** (`Bandwidth.Allocator`) divides the connection's send-rate estimate by track priority, max-min fair within a tier. An idle track claims nothing. The receive side is untouched.
-- **Discovery** by any pattern scope (`origin.announced(scope)`, such as `room/*/chat`; default everything). Each event's `path` is the covered prefix relative to the origin, `captures` reports what the scope's wildcards matched when the prefix pins them, and `kind` says whether it was announced, updated, or retracted. The consumer is an async iterable. `origin.dynamic(prefix, route)` advertises a prefix.
+- **Discovery** by any pattern scope (`origin.announced(scope)`, such as `room/*/chat`; default everything). Each event's `prefix` is the covered prefix relative to the origin, `captures` reports what the scope's wildcards matched when the prefix pins them, and `kind` says whether it was announced, updated, or retracted. The consumer is an async iterable. `origin.broadcasts(scope)` is a live `Getter<ReadonlyMap<Path.Valid, Route>>` of the same covered prefixes for UIs that need the current set. A borrowed `Connection.origin` also exposes `dynamic(prefix, route)` for serving paths on demand.
 - **Subscriptions** carry a priority, a `Time.Milli` max age, and optional `groups` bounds. Groups arrive out of order and are read frame by frame, with `Error.TooFarBehind` when a reader asks for a frame the group never held and `Error.GroupTooLarge` when a write exceeds the cache budget and aborts the group.
 - **Datagrams** on moq-lite 05+ and fetch-by-sequence for history.
 - **Errors** live under one namespace: a stream reset throws `Error.Stream` with a `StreamCode`, while a session close gives `Error.Session` with a `SessionCode`. The registries are disjoint, so the same number means different things in each, and 64+ is yours. Named conditions such as `Error.TooFarBehind`, `Error.FrameTooLarge`, and `Error.GroupTooLarge` subclass `Error.Stream`, so one `code` check handles a condition raised here or reported by the peer. IETF streams use their own mapping: cancellation sends CANCELLED, other local failures send INTERNAL\_ERROR, and received codes remain opaque.
@@ -86,19 +86,19 @@ Moq.Path.Pattern.parse("camera-*").rooted("room").text; // "room/camera-*"
 Three operations, on an origin:
 
 - `origin.createBroadcast(path)` returns a producer. The broadcast is
-  reachable and visible to local discovery immediately. Peers see it only after
+  invisible and unreachable, for local consumers and peers alike, until
   `broadcast.announce()`.
 - `broadcast.announce(route)` / `broadcast.unannounce()` own that
   advertisement. Announcing again re-prices the standing route.
 - `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
   (`""` claims everything). Hold the returned `Origin.Dynamic` while the
   claim should stay advertised; `close()` retracts it. A request beneath it
-  with no local broadcast is an `Origin.Request` to `accept` or `reject`;
+  that no announced local broadcast wins is an `Origin.Request` to `accept` or `reject`;
   reject what you will not serve rather than narrowing the claim, since a
   route is always a prefix on every wire.
 
 A route is a capability, not an inventory. `origin.announced(scope)` yields
-`Announce.Update` values: `path` is the covered prefix relative to the origin,
+`Announce.Update` values: `prefix` is the covered prefix relative to the origin,
 `captures` is one pattern per scope wildcard when the prefix pins a complete
 match (otherwise `undefined`), `kind` is `"announced"`, `"updated"` (a
 reprice in place), or `"retracted"`, and `route` carries hops and cost (on a

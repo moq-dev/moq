@@ -12,7 +12,7 @@
 # Usage:
 #
 #     source "$(dirname "${BASH_SOURCE[0]}")/../lib/harness.sh"
-#     harness_begin smoke "just test smoke"
+#     harness_begin interop "just test interop"
 #     harness_port relay
 #     harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$HARNESS_RUN/relay.toml"
 #     harness_endpoint relay "http://127.0.0.1:$HARNESS_PORT"
@@ -56,7 +56,7 @@ harness_argv() {
 }
 
 # Print the environment overrides among NAMES that are set, as a requoted prefix
-# for the rerun command: `harness_env SMOKE_PORT SMOKE_PROFILE`. Timing, port,
+# for the rerun command: `harness_env INTEROP_PORT INTEROP_PROFILE`. Timing, port,
 # and profile knobs arrive this way rather than in argv, so a command built from
 # argv alone reruns with the defaults and reproduces a different test.
 #
@@ -130,7 +130,7 @@ harness_valid_port() {
 # Reserve a port for this run, held until it exits, and set HARNESS_PORT.
 #
 # `harness_port <label> [wanted]`. With `wanted` that exact port is taken or the
-# call fails, which is what an explicit SMOKE_PORT/WASM_PORT asks for; without it
+# call fails, which is what an explicit INTEROP_PORT/WASM_PORT asks for; without it
 # the search walks up from MOQ_TEST_PORT_BASE.
 #
 # The answer lands in a variable rather than on stdout because `$(harness_port)`

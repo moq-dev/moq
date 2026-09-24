@@ -49,6 +49,7 @@ row per io_uring worker.
 - [Ingest batch](/quest/m1/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per chunk burst instead of per chunk
 - [Egress cache refresh](/quest/m1/perf/egress-keepalive.md) - measure refresh costs while preserving slow-reader retention
 - [Owned decoding copies](/quest/m1/perf/coding-decode.md) - measure and reduce owned decode allocations and copies
+- [JSON snapshot decode](/quest/m1/perf/json-decode.md) - moq-json patches the typed value, cutting stats decode allocations by more than 10x
 - [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - moq-uring: ~2.5% of relay CPU is vdso clock reads; the drive loop and its callers each re-read Instant::now()
 - [Cache shard](/quest/m1/perf/cache-shard.md) - stop hammering one process-global cache line from every worker
 - [#3199](/quest/m1/perf/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup

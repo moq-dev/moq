@@ -32,9 +32,9 @@ public final class OriginProducer: Sendable {
 
     /// Create a broadcast at `path`, returning the producer that feeds it.
     ///
-    /// The broadcast appears on this origin's local announcement streams
-    /// immediately. Advertise it to peers with
-    /// `BroadcastProducer.announce(route:)` after populating tracks. `finish()`
+    /// The broadcast is invisible and unroutable, for this origin's consumers
+    /// and peers alike, until `BroadcastProducer.announce(route:)`. Announce it
+    /// after populating tracks. `finish()`
     /// unpublishes immediately, while releasing the producer without finishing
     /// also unpublishes but reads to subscribers as a failure rather than a
     /// deliberate end.
@@ -122,9 +122,9 @@ public final class OriginConsumer: Sendable {
         AnnouncedBroadcast(try ffi.announcedBroadcast(path: path))
     }
 
-    /// Request a broadcast by path, resolving as soon as it can be served: a local
-    /// broadcast at the exact path, then the best announced route covering the path
-    /// (served on demand by the session that announced it), then a dynamic fallback on
+    /// Request a broadcast by path, resolving as soon as it can be served through the
+    /// best announced route covering it: an announced broadcast on this origin, a route
+    /// a session announced (served on demand by that session), or a dynamic handler on
     /// the origin, or an error if nothing can serve it. Unlike `announcedBroadcast`,
     /// this does not wait for a future announcement.
     public func requestBroadcast(path: String) async throws -> BroadcastConsumer {
@@ -167,7 +167,7 @@ public final class AnnounceConsumer: AsyncSequence, Sendable {
 ///
 /// A route claims that `prefix` and every path beneath it can be served; it
 /// carries no broadcast. Resolve a specific path with `OriginConsumer.requestBroadcast`.
-/// Local broadcasts appear on creation; announce to forward them to peers.
+/// By convention a publisher announces each broadcast's exact path.
 public final class AnnounceUpdate: Sendable {
     let ffi: MoqAnnounceUpdate
 

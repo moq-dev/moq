@@ -1,11 +1,15 @@
 {
 	"name": "@moq/watch",
 	"type": "module",
-	"version": "0.5.4",
+	"version": "0.6.0",
 	"jsr": false,
 	"description": "Watch Media over QUIC broadcasts",
 	"license": "(MIT OR Apache-2.0)",
-	"repository": "github:moq-dev/moq",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/moq-dev/moq.git",
+		"directory": "js/watch"
+	},
 	"exports": {
 		".": "./src/index.ts",
 		"./element": "./src/element.ts",

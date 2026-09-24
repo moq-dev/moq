@@ -580,7 +580,11 @@ impl MapDiff<'_> {
 				last_capacity,
 				..
 			} = &mut *scratch;
-			let seen = &mut seen[depth][..self.seen_len];
+			// A map emptied of every key offered none, so nothing sized `seen` for this depth.
+			let seen: &mut [String] = match seen.get_mut(depth) {
+				Some(seen) => &mut seen[..self.seen_len],
+				None => &mut [],
+			};
 			let out = &mut bytes[depth];
 			if self.ordered {
 				seen.sort_unstable();
@@ -918,6 +922,15 @@ mod test {
 			}
 		}
 		assert!(diff(&json!({ "key": 1, "other": 2 }), &Duplicate).forced_snapshot);
+	}
+
+	#[test]
+	fn emptying_a_map_removes_every_key() {
+		// No key is serialized at the emptied map's depth, so nothing has sized the
+		// scratch for it yet.
+		check(json!({ "a": 1 }), json!({}));
+		check(json!({ "a": 1, "b": 2 }), json!({}));
+		check(json!({ "x": { "a": 1 } }), json!({ "x": {} }));
 	}
 
 	#[test]

@@ -13,9 +13,8 @@ Use the argument (if provided) to filter to specific quests/questlines.
 Inspect any blocked quests, and determine if they can be unblocked.
 A line whose `Quests` list has emptied is a ready quest too: finishing it marks the line's PR ready.
 
-For each quest, interactively prompt the user if we should /start-quest, /plan-quests, skip, or delete.
+One at a time, for each each quest, interactively prompt the user if we should /start-quest, /plan-quests, skip, or delete.
 Include a short summary and your recommendation.
-Do this one at a time and open each quest in the browser for the user to review.
 
 Spawn a background sub-agent for each /start-quest.
 Create a fresh worktree on the base `quest branch` prints, creating that line branch first if it is missing.
