@@ -354,16 +354,10 @@ fn tls_matches(want: &Option<String>, have: Option<&str>) -> bool {
 	}
 }
 
+/// The wire spelling `moq-auth` serializes, so a new transport is filterable without a second list.
 fn parse_transport(value: &str) -> Option<Transport> {
-	Some(match value {
-		"quic" => Transport::Quic,
-		"iroh" => Transport::Iroh,
-		"websocket" => Transport::WebSocket,
-		"tcp" => Transport::Tcp,
-		"unix" => Transport::Unix,
-		"http" => Transport::Http,
-		_ => return None,
-	})
+	use serde::{Deserialize, de::IntoDeserializer};
+	Transport::deserialize(IntoDeserializer::<serde::de::value::Error>::into_deserializer(value)).ok()
 }
 
 fn parse_role(value: &str) -> Option<Role> {
@@ -487,6 +481,15 @@ mod tests {
 	fn query_and_unknown_fields_are_refused() {
 		assert!(matches!(Filter::from_query(Some("query=jwt")), Err(Error::Unknown(field)) if field == "query"));
 		assert!(matches!(Filter::from_query(Some("foo=bar")), Err(Error::Unknown(field)) if field == "foo"));
+	}
+
+	#[test]
+	fn every_transport_spelling_filters() {
+		for transport in [Transport::Quic, Transport::Http, Transport::Rtmp, Transport::Srt, Transport::WebRtc] {
+			let filter = Filter::from_query(Some(&format!("transport={transport}"))).unwrap();
+			assert_eq!(filter.transport, Some(transport));
+		}
+		assert!(Filter::from_query(Some("transport=carrier-pigeon")).is_err());
 	}
 
 	#[test]

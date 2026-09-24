@@ -5,7 +5,7 @@ description: Idiomatic Go over cgo via moq.dev/moq
 
 # Go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/moq-dev/moq-go.svg)](https://pkg.go.dev/github.com/moq-dev/moq-go)
+[![Go Reference](https://pkg.go.dev/badge/moq.dev/moq.svg)](https://pkg.go.dev/moq.dev/moq)
 
 `moq.dev/moq`: `context.Context` cancellation, `error`
 returns, and Go 1.23 range-over-func iterators for live streams. The native
@@ -18,7 +18,7 @@ go get moq.dev/moq@latest
 ```
 
 ```go
-import "github.com/moq-dev/moq-go"
+import "moq.dev/moq"
 
 // Subscribe. The iterator is live, so run it in its own goroutine.
 client, err := moq.Dial(ctx, "https://relay.example.com", moq.WithTLSRoots("ca.pem"))
@@ -70,7 +70,7 @@ broadcast.Finish()   // keep the producer reachable while publishing, then finis
 ```
 
 The three advertising operations: `client.CreateBroadcast(path)` (or
-`origin.CreateBroadcast`) returns a locally discoverable producer;
+`origin.CreateBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.Announce(route)` / `broadcast.Unannounce()` own that exact-path
 advertisement; `origin.Dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
@@ -104,7 +104,7 @@ take anything `encoding/json` handles and return `json.RawMessage`. The rest
 of the [shared feature list](/lib/#what-every-binding-can-do) maps one to
 one: `FetchGroup`/`FetchMediaGroup`, `Dynamic()` with `Requests(ctx)`,
 `Session.Bandwidth()` to divide the send estimate,
-`AppendDatagram`/`Datagrams(ctx)`, `SetCatalogSection`, `Used`/`Unused`,
+`AppendDatagram`/`Datagrams(ctx)`, `SetCatalogSection`, `Demand()` for `Used`/`Unused`,
 `Session().Stats()`. `moq.IsAuthError` and `moq.IsShutdown` classify errors. `moq.ProtocolError(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one.
 
 `DecodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.Format`
@@ -132,6 +132,6 @@ available, which is not the same as zero.
 | `PacketsReceived` | datagrams | Total datagrams received. |
 | `PacketsLost` | datagrams | Total datagrams detected as lost. |
 
-- API reference: [pkg.go.dev/github.com/moq-dev/moq-go](https://pkg.go.dev/github.com/moq-dev/moq-go)
+- API reference: [pkg.go.dev/moq.dev/moq](https://pkg.go.dev/moq.dev/moq)
 - Source: [`go/`](https://github.com/moq-dev/moq/tree/main/go); `just go check` builds and tests locally
 - Mirrors the vanity path resolves to: [moq-dev/moq-go](https://github.com/moq-dev/moq-go) (wrapper), [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) (raw bindings and static libraries)

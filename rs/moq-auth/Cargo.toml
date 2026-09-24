@@ -12,9 +12,9 @@ rust-version.workspace = true
 [features]
 default = ["client"]
 # The HTTP client that drives a lease against an auth server.
-client = ["dep:reqwest", "dep:rustls", "tokio", "dep:tracing"]
+client = ["dep:reqwest", "dep:rustls", "dep:tokio", "dep:tracing", "dep:rand"]
 # The reference auth server behind `moq auth serve`: the policy a relay held, on axum.
-serve = ["dep:axum", "tokio", "dep:tracing", "tokio/net"]
+serve = ["dep:axum", "dep:tokio", "dep:tracing", "tokio/net"]
 tokio = ["dep:tokio"]
 
 [dependencies]
@@ -26,7 +26,7 @@ kio = { workspace = true }
 moq-pattern = { workspace = true, features = ["serde"] }
 p256 = "0.14.0"
 p384 = "0.14.0"
-rand = { workspace = true }
+rand = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["rustls", "json"], optional = true }
 rsa = "0.9.10"
 rustls = { version = "0.23", default-features = false, optional = true }
@@ -34,7 +34,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["base64"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["fs", "rt", "time", "sync", "macros"], optional = true }
+tokio = { workspace = true, features = ["fs", "macros", "rt", "time", "sync"], optional = true }
 tracing = { workspace = true, optional = true }
 url = { workspace = true }
 

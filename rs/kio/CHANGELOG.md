@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/moq-dev/moq/compare/kio-v0.5.9...kio-v0.6.0) - 2026-09-23
+
+### Added
+
+- [**breaking**] refuse released spellings and drop unused deprecated APIs ([#3719](https://github.com/moq-dev/moq/pull/3719))
+
+### Other
+
+- pin rust 1.98.1 so macOS 27 loads our stripped dylibs ([#3904](https://github.com/moq-dev/moq/pull/3904))
+- *(net)* [**breaking**] return the next deadline from driver polls ([#3828](https://github.com/moq-dev/moq/pull/3828))
+- Merge remote-tracking branch 'origin/main' into merge-main-into-dev-20260914
+
 ## [0.5.9](https://github.com/moq-dev/moq/compare/kio-v0.5.8...kio-v0.5.9) - 2026-09-13
 
 ### Fixed

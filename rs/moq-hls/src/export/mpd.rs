@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use super::Kind;
@@ -47,6 +48,10 @@ pub(crate) struct Representation {
 	/// Whether this rendition's window has ended (the broadcast finished). Not rendered;
 	/// [`Manifest`] callers use it to pick static vs dynamic.
 	pub ended: bool,
+	/// The init segment's content hash (`init.{init}.mp4`).
+	pub init: String,
+	/// The publisher run every segment URL carries (`seg/{generation}.t$Time$.m4s`).
+	pub generation: Option<Arc<str>>,
 }
 
 /// Everything a manifest render needs; built by `Broadcaster::manifest`.
@@ -117,6 +122,12 @@ fn max_segment_duration<'a>(representations: impl Iterator<Item = &'a Representa
 fn render_representation(out: &mut String, rep: &Representation, suffix: &str) {
 	let kind = rep.kind.as_str();
 	let name = escape(&rep.name);
+	let init = escape(&rep.init);
+	let generation = rep
+		.generation
+		.as_deref()
+		.map(|g| format!("{}.", escape(g)))
+		.unwrap_or_default();
 
 	let mut attrs = format!(
 		"id=\"{kind}/{name}\" bandwidth=\"{}\" codecs=\"{}\"",
@@ -143,7 +154,7 @@ fn render_representation(out: &mut String, rep: &Representation, suffix: &str) {
 
 	let _ = writeln!(
 		out,
-		"        <SegmentTemplate timescale=\"{}\" initialization=\"{kind}/{name}/init.mp4{suffix}\" media=\"{kind}/{name}/seg/t$Time$.m4s{suffix}\">",
+		"        <SegmentTemplate timescale=\"{}\" initialization=\"{kind}/{name}/init.{init}.mp4{suffix}\" media=\"{kind}/{name}/seg/{generation}t$Time$.m4s{suffix}\">",
 		rep.timescale.max(1)
 	);
 	let _ = writeln!(out, "          <SegmentTimeline>");
@@ -275,6 +286,8 @@ mod tests {
 			timescale: 1000,
 			segments,
 			ended,
+			init: "0123abcd".into(),
+			generation: None,
 		}
 	}
 
@@ -292,6 +305,8 @@ mod tests {
 			timescale: 1000,
 			segments,
 			ended,
+			init: "4567cdef".into(),
+			generation: None,
 		}
 	}
 
@@ -328,7 +343,7 @@ mod tests {
 			"<AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"2\"/>"
 		));
 		assert!(out.contains(
-			"<SegmentTemplate timescale=\"1000\" initialization=\"video/video0/init.mp4\" media=\"video/video0/seg/t$Time$.m4s\">"
+			"<SegmentTemplate timescale=\"1000\" initialization=\"video/video0/init.0123abcd.mp4\" media=\"video/video0/seg/t$Time$.m4s\">"
 		));
 		assert!(out.contains("<S t=\"0\" d=\"2000\"/>"));
 		assert!(out.contains("<S t=\"2000\" d=\"2000\"/>"));
@@ -371,8 +386,26 @@ mod tests {
 		};
 
 		let out = render_manifest(&manifest, Some("jwt=abc.def&x=1"));
-		assert!(out.contains("initialization=\"video/video0/init.mp4?jwt=abc.def&amp;x=1\""));
+		assert!(out.contains("initialization=\"video/video0/init.0123abcd.mp4?jwt=abc.def&amp;x=1\""));
 		assert!(out.contains("media=\"video/video0/seg/t$Time$.m4s?jwt=abc.def&amp;x=1\""));
+	}
+
+	#[test]
+	fn generation_rides_every_media_url() {
+		let mut rep = video(vec![(0, 2_000)], false);
+		rep.generation = Some("run-7".into());
+		let manifest = Manifest {
+			availability_start: Some(SystemTime::UNIX_EPOCH),
+			publish: SystemTime::UNIX_EPOCH,
+			window: Duration::from_secs(16),
+			finished: false,
+			video: vec![rep],
+			audio: Vec::new(),
+		};
+
+		let out = render_manifest(&manifest, None);
+		assert!(out.contains("initialization=\"video/video0/init.0123abcd.mp4\""));
+		assert!(out.contains("media=\"video/video0/seg/run-7.t$Time$.m4s\""));
 	}
 
 	#[test]

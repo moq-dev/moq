@@ -127,7 +127,8 @@ struct Clock {
 impl Clock {
 	fn new(grant: &Grant) -> Self {
 		Self {
-			next: grant.revalidate.map(|cadence| tokio::time::Instant::now() + cadence),
+			// A cadence too far out to schedule is no scheduled re-check; `expires` still bounds the grant.
+			next: grant.revalidate.and_then(|cadence| tokio::time::Instant::now().checked_add(cadence)),
 			expires: grant.expires,
 			cadence: grant.revalidate,
 			failures: 0,
@@ -559,6 +560,17 @@ mod tests {
 			later = producer.failed();
 		}
 		assert!(later <= Duration::from_secs(30).mul_f64(1.25));
+	}
+
+	#[cfg(feature = "tokio")]
+	#[tokio::test]
+	async fn an_unschedulable_cadence_never_rechecks() {
+		tokio::time::pause();
+		let mut grant = grant("a/**");
+		grant.revalidate = Some(Duration::MAX);
+		let (producer, _consumer) = Producer::new(grant);
+		tokio::time::advance(Duration::from_secs(3600)).await;
+		assert!(tokio::time::timeout(Duration::ZERO, producer.due()).await.is_err());
 	}
 
 	#[cfg(feature = "tokio")]

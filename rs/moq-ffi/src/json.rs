@@ -10,6 +10,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::consumer::MoqBroadcastConsumer;
+use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::producer::MoqBroadcastProducer;
@@ -190,6 +191,12 @@ impl MoqJsonSnapshotProducer {
 		Ok(())
 	}
 
+	/// A watch-only handle to whether this track has subscribers.
+	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
+	}
+
 	/// Finish the track, closing any open group.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -253,6 +260,12 @@ impl MoqJsonStreamProducer {
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
 		producer.append(&value)?;
 		Ok(())
+	}
+
+	/// A watch-only handle to whether this track has subscribers.
+	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
 	}
 
 	/// Finish the track, closing the group.

@@ -304,10 +304,10 @@ type TextSchema = {
 }
 
 type TextConfig = {
-	"format": "vtt" | "ttml" | "utf8" | string,
-	"role": "subtitle" | "caption" | string | undefined,
-	"lang": string | undefined,
-	// plus the common rendition fields
+  "format": "vtt" | "ttml" | "utf8" | string,
+  "role": "subtitle" | "caption" | string | undefined,
+  "lang": string | undefined,
+  // plus the common rendition fields
 }
 ~~~
 
@@ -547,6 +547,7 @@ A group with no decodable frames is a walk-now discontinuity: one empty codec pa
 A consumer MUST NOT submit the marker to a decoder.
 Empty groups (zero objects) are permitted and mean nothing.
 After a discontinuity the timeline continues forward.
+A publisher that stops producing and may resume on the same track (e.g. an encoder idle for lack of demand) SHOULD publish a discontinuity marker when it stops, so the group before the pause does not reach across the gap and read as live.
 A group whose timestamps fall below the live edge earlier groups reached is malformed.
 A delivered sequence hole is a playhead event unless the boundary is contiguous within 1 ms.
 A consumer re-applies startup delay and skip at a playhead event; it does not reset codec state.
@@ -565,8 +566,8 @@ A consumer MUST skip it and MUST NOT submit it to a decoder.
 It does not mean the track ended.
 
 For audio, an empty codec payload retains its terminal-trimming meaning: its timestamp is the exclusive endpoint of the source media.
-When a codec must receive additional packets to emit buffered source samples, the marker MUST precede those terminal packets.
-A consumer MUST NOT submit the marker to the codec decoder, MUST decode the terminal packets, and MUST discard decoded samples at or after the endpoint.
+When a codec must receive additional packets to emit buffered source samples, the marker MUST precede those terminal packets in the same group.
+A consumer MUST NOT submit the marker to the codec decoder, MUST decode the terminal packets, and MUST discard decoded samples at or after the endpoint until a later group begins.
 Audio publishers do not append per-group duration markers because the codec defines each packet's duration.
 Data tracks retain empty payloads as data, without endpoint semantics.
 
@@ -1072,6 +1073,8 @@ A publisher MAY estimate an unknown final duration from the frame cadence, but M
 - Required exclusive DVR restart recovery to remove unreferenced group objects left by interrupted expiration.
 - Replaced the catalog root `timeline` field with `archive`, carrying the timeline track plus optional `replay`, `store`, and recording `version`.
 - A marker group of one empty frame declares a discontinuity. Empty groups mean nothing. Timestamps only move forward; a group below the live edge is malformed. A delivered sequence hole is a playhead event unless contiguous within 1 ms.
+- A publisher that stops producing and may resume on the same track SHOULD publish a discontinuity marker when it stops.
+- An audio endpoint bounds only the terminal packets that follow it in its own group.
 - Replaced the archive timeline `wall` field with a root `clock` section (`wall` plus `timescale`): one fixed broadcast mapping every track and the archive index convert into, independent of any archive. Zero timescales and walls past the JSON-safe integer range are refused.
 
 # Acknowledgments

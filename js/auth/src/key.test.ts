@@ -60,7 +60,7 @@ test("decode checks the signature, algorithm, and kid without applying claims po
 	const custom = await new SignJWT({ custom: "accepted", exp: 1 })
 		.setProtectedHeader({ alg: "HS256", kid: testKey.kid })
 		.sign(secret);
-	expect(Key.decode(key, custom)).resolves.toEqual({ custom: "accepted", exp: 1 });
+	await expect(Key.decode(key, custom)).resolves.toEqual({ custom: "accepted", exp: 1 });
 	await expect(Key.verify(key, custom)).rejects.toThrow();
 
 	const wrongKid = await new SignJWT({ custom: "accepted" })

@@ -57,6 +57,13 @@ impl<T> Producer<T> {
 	pub fn is_used(&self) -> bool {
 		take(&self.inner).track.inner.is_used()
 	}
+
+	/// A watch-only handle to the underlying track's subscriber demand, to wait for it to change.
+	///
+	/// Weak, so holding it neither keeps the track open nor contends with publishing.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		take(&self.inner).track.inner.demand()
+	}
 }
 
 impl<T: Serialize> Producer<T> {

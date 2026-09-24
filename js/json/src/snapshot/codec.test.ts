@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { MissingSnapshot } from "../error.ts";
 import { Decoder } from "./decoder.ts";
 import { type Config, Encoder } from "./encoder.ts";
 
@@ -318,4 +319,9 @@ test("the frame cap forces a keyframe", () => {
 	expect(frames.length).toBe(FRAME_CAP + 1);
 	expect(frames.filter((f) => f[0]).length).toBe(2);
 	expect(frames[FRAME_CAP][0]).toBe(true);
+});
+
+test("delta before snapshot has a typed error", () => {
+	const decoder = new Decoder<Doc>();
+	expect(() => decoder.delta(new TextEncoder().encode("{}"))).toThrow(MissingSnapshot);
 });

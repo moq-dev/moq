@@ -66,14 +66,14 @@ disposable copy of the tree; the checkout it runs from is never modified.
 
 ```bash
 just test drill-sensitivity --list
-just test drill-sensitivity reconnect-linger-disabled
+just test drill-sensitivity reconnect-stops-after-session-loss
 ```
 
 | Mutation | Removes | Drill that must fail |
 |---|---|---|
 | `subscriber-leaks-broadcasts` | releasing the broadcasts a subscribing session fed when that session ends | `cancel_under_backpressure_releases_the_reader` |
-| `reconnect-linger-disabled` | the linger window that carries a broadcast across a reconnect | `relay_killed_mid_group_aborts_then_resumes` |
-| `relay-linger-never-expires` | the end of the relay's linger window for a vanished publisher | `interrupted_publisher_republishes_new_content` |
+| `reconnect-stops-after-session-loss` | redialing after an established session is lost | `relay_killed_mid_group_aborts_then_resumes` |
+| `relay-withdraws-lost-publisher` | withdrawing a publisher's announcements when its session is lost | `interrupted_publisher_republishes_new_content` |
 
 A mutated tree that fails to compile is a failure of the proof, not a pass: a
 compile error shows the patch touched something, not that the drill was
@@ -105,6 +105,6 @@ corpus nobody replays.
 ## Not covered here
 
 - An impaired path (delay, loss, rate limits). Loopback is the only path these
-  drills see; `quest/next/transport-impairment-profile.md` adds the seeded UDP
+  drills see; `quest/m1/transport-impairment-profile.md` adds the seeded UDP
   shaper they run under.
 - CI lane scheduling.

@@ -32,6 +32,7 @@
  * @module
  */
 
+export { MissingSnapshot } from "../error.ts";
 export { Consumer } from "./consumer.ts";
 export { Decoder } from "./decoder.ts";
 export { type Config, type Encoded, Encoder, type Pending } from "./encoder.ts";

@@ -258,22 +258,41 @@ function joinPath(root: string, rel: string): string {
 	return root === "" ? rel : rel === "" ? root : `${root}/${rel}`;
 }
 
+// Which of `paths` a pattern matches, as a bitset, so the exhaustive checks compare a few
+// bigints per case instead of asserting path by path.
+function matchBits(pattern: Pattern, paths: string[]): bigint {
+	let bits = 0n;
+	for (const [k, p] of paths.entries()) if (pattern.matches(p)) bits |= 1n << BigInt(k);
+	return bits;
+}
+
+// `matchBits` memoized by pattern: thousands of intersections share a few hundred members.
+function matcher(paths: string[]): (pattern: Pattern) => bigint {
+	const cache = new Map<string, bigint>();
+	return (pattern) => {
+		let bits = cache.get(pattern.text);
+		if (bits === undefined) {
+			bits = matchBits(pattern, paths);
+			cache.set(pattern.text, bits);
+		}
+		return bits;
+	};
+}
+
+// The first of `paths` set in `wrong`, so a failed comparison names a witness.
+function witness(paths: string[], wrong: bigint): string | undefined {
+	return wrong === 0n ? undefined : paths[(wrong & -wrong).toString(2).length - 1];
+}
+
 describe("exhaustive", () => {
 	test("contains and overlaps agree with matching", () => {
 		for (const alphabet of ALPHABETS) {
 			const patterns = allPatterns(alphabet);
-			const paths = allPaths(alphabet, alphabet.maxPath);
-			// Which paths each pattern matches, computed once so the pairwise checks
-			// compare tables instead of re-matching strings.
-			const table = patterns.map((pattern) => paths.map((p) => pattern.matches(p)));
-			for (const [i, a] of patterns.entries()) {
-				for (const [j, b] of patterns.entries()) {
-					let contains = true;
-					let overlaps = false;
-					for (let k = 0; k < paths.length; k++) {
-						if (table[j][k] && !table[i][k]) contains = false;
-						if (table[i][k] && table[j][k]) overlaps = true;
-					}
+			const matched = matcher(allPaths(alphabet, alphabet.maxPath));
+			for (const a of patterns) {
+				for (const b of patterns) {
+					const contains = (matched(b) & ~matched(a)) === 0n;
+					const overlaps = (matched(a) & matched(b)) !== 0n;
 					expect(a.contains(b), `${a} contains ${b}`).toBe(contains);
 					expect(a.overlaps(b), `${a} overlaps ${b}`).toBe(overlaps);
 					expect(a.equals(b), `${a} equals ${b}`).toBe(contains && b.contains(a));
@@ -293,12 +312,13 @@ describe("exhaustive", () => {
 		for (const alphabet of ALPHABETS) {
 			const patterns = allPatterns(alphabet);
 			const paths = allPaths(alphabet, alphabet.maxPath);
-			const table = patterns.map((pattern) => paths.map((p) => pattern.matches(p)));
-			for (const [i, a] of patterns.entries()) {
-				for (const [j, b] of patterns.entries()) {
+			const matched = matcher(paths);
+			for (const a of patterns) {
+				for (const b of patterns) {
 					const both = a.intersect(b);
-					const wrong = paths.findIndex((p, k) => both.matches(p) !== (table[i][k] && table[j][k]));
-					expect(wrong === -1 ? "" : paths[wrong], `${a} & ${b} disagrees on a path`).toBe("");
+					let union = 0n;
+					for (const member of both) union |= matched(member);
+					expect(witness(paths, union ^ (matched(a) & matched(b))), `${a} & ${b} disagrees`).toBeUndefined();
 					expect(both.equals(b.intersect(a)), `${a} & ${b} commutes`).toBe(true);
 					expect(both.size === 0, `${a} & ${b} empty iff disjoint`).toBe(!a.overlaps(b));
 					if (a.contains(b)) expect(texts(both), `${a} & ${b} is the contained one`).toEqual([b.text]);
@@ -341,15 +361,18 @@ describe("exhaustive", () => {
 
 	test("rebase matches exactly what lies beneath the root", () => {
 		for (const alphabet of ALPHABETS) {
+			const patterns = allPatterns(alphabet);
 			const relative = allPaths(alphabet, 3);
-			for (const pattern of allPatterns(alphabet)) {
-				for (const root of allPaths(alphabet, 2)) {
-					const rebased = pattern.rebase(root);
-					for (const rel of relative) {
-						expect(rebased.matches(rel), `${pattern} at ${root} on ${rel}`).toBe(
-							pattern.matches(joinPath(root, rel)),
-						);
-					}
+			const matched = matcher(relative);
+			for (const root of allPaths(alphabet, 2)) {
+				const beneath = relative.map((rel) => joinPath(root, rel));
+				for (const pattern of patterns) {
+					let union = 0n;
+					for (const member of pattern.rebase(root)) union |= matched(member);
+					expect(
+						witness(relative, union ^ matchBits(pattern, beneath)),
+						`${pattern} at ${root} disagrees`,
+					).toBeUndefined();
 				}
 			}
 		}
@@ -357,15 +380,18 @@ describe("exhaustive", () => {
 
 	test("rooted inverts rebase", () => {
 		for (const alphabet of ALPHABETS) {
-			for (const pattern of allPatterns(alphabet)) {
-				for (const root of allPaths(alphabet, 2)) {
+			const patterns = allPatterns(alphabet);
+			const relative = allPaths(alphabet, 3);
+			const matched = matcher(relative);
+			for (const root of allPaths(alphabet, 2)) {
+				const beneath = relative.map((rel) => joinPath(root, rel));
+				for (const pattern of patterns) {
 					const rooted = pattern.rooted(root);
 					expect(rooted.rebase(root).contains(pattern), `${pattern} under ${root}`).toBe(true);
-					for (const p of allPaths(alphabet, 3)) {
-						expect(rooted.matches(joinPath(root, p)), `${rooted} on ${joinPath(root, p)}`).toBe(
-							pattern.matches(p),
-						);
-					}
+					expect(
+						witness(relative, matchBits(rooted, beneath) ^ matched(pattern)),
+						`${rooted} disagrees with ${pattern} under ${root}`,
+					).toBeUndefined();
 				}
 			}
 		}
@@ -420,6 +446,13 @@ describe("Patterns", () => {
 		expect(set.insert(Pattern.parse("**"))).toBe(true);
 		expect(texts(set)).toEqual(["**"]);
 		expect(set.size).toBe(1);
+	});
+
+	test("matches what any member matches", () => {
+		const set = new Patterns([Pattern.parse("a/*"), Pattern.parse("b/**")]);
+		for (const path of ["a/x", "b", "b/c/d"]) expect(set.matches(path), path).toBe(true);
+		for (const path of ["", "a", "a/x/y", "c"]) expect(set.matches(path), path).toBe(false);
+		expect(new Patterns().matches("")).toBe(false);
 	});
 
 	test("equality is set equality", () => {

@@ -261,7 +261,7 @@ describe("Rust-serialized contract", () => {
 	const RUST_INVALID_END =
 		'{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}';
 	const RUST_GRANT =
-		'{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket"}';
+		'{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","peer":true}';
 
 	test("parse a request a Rust relay sent", () => {
 		const request = RequestSchema.parse(JSON.parse(RUST_REQUEST));
@@ -297,6 +297,7 @@ describe("Rust-serialized contract", () => {
 			expires: 4102444800,
 			revalidate: 60,
 			tier: "websocket",
+			peer: true,
 		});
 		expect(JSON.stringify(grant)).toBe(RUST_GRANT);
 	});

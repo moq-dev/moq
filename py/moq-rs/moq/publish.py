@@ -21,6 +21,7 @@ from moq_ffi import (
     MoqJsonStreamProducer,
     MoqMediaProducer,
     MoqMediaStreamProducer,
+    MoqTrackDemand,
     MoqTrackDynamic,
     MoqTrackProducer,
     MoqTrackRequest,
@@ -75,12 +76,16 @@ class MediaProducer:
         """The generated media track name."""
         return self._inner.name()
 
+    def demand(self) -> TrackDemand:
+        """A watch-only handle to whether this media track has subscribers."""
+        return TrackDemand(self._inner.demand())
+
     async def used(self) -> None:
-        """Wait until this media track has at least one active subscriber."""
+        """Wait until this media track has at least one active subscriber. Prefer :meth:`demand`."""
         await self._inner.used()
 
     async def unused(self) -> None:
-        """Wait until this media track has no active subscribers."""
+        """Wait until this media track has no active subscribers. Prefer :meth:`demand`."""
         await self._inner.unused()
 
     def write_frame(self, payload: bytes, timestamp_us: int = 0) -> None:
@@ -217,6 +222,36 @@ class GroupProducer:
         self._inner.abort(error_code)
 
 
+class TrackDemand:
+    """A watch-only handle to whether a published track has subscribers.
+
+    Returned by a producer's ``demand()``. Weak: holding it neither keeps the
+    track open nor locks the producer, so a wait can park here while the
+    producer keeps publishing. Waits raise ``moq.Error.Closed`` once the track
+    is released.
+    """
+
+    def __init__(self, inner: MoqTrackDemand) -> None:
+        self._inner = inner
+
+    @property
+    def name(self) -> str:
+        """The name of the track this watches."""
+        return self._inner.name()
+
+    def is_used(self) -> bool:
+        """Whether the track has at least one active subscriber right now."""
+        return self._inner.is_used()
+
+    async def used(self) -> None:
+        """Wait until the track has at least one active subscriber."""
+        await self._inner.used()
+
+    async def unused(self) -> None:
+        """Wait until the track has no active subscribers."""
+        await self._inner.unused()
+
+
 class TrackProducer:
     """Track producer: write arbitrary byte payloads with no codec required.
 
@@ -231,12 +266,16 @@ class TrackProducer:
         """The track name."""
         return self._inner.name()
 
+    def demand(self) -> TrackDemand:
+        """A watch-only handle to whether this track has subscribers."""
+        return TrackDemand(self._inner.demand())
+
     async def used(self) -> None:
-        """Wait until this track has at least one active subscriber."""
+        """Wait until this track has at least one active subscriber. Prefer :meth:`demand`."""
         await self._inner.used()
 
     async def unused(self) -> None:
-        """Wait until this track has no active subscribers."""
+        """Wait until this track has no active subscribers. Prefer :meth:`demand`."""
         await self._inner.unused()
 
     def dynamic(self) -> TrackDynamic:
@@ -386,6 +425,10 @@ class JsonSnapshotProducer:
     def __init__(self, inner: MoqJsonSnapshotProducer) -> None:
         self._inner = inner
 
+    def demand(self) -> TrackDemand:
+        """A watch-only handle to whether this track has subscribers."""
+        return TrackDemand(self._inner.demand())
+
     def update(self, value: Any) -> None:
         """Publish a new value. A no-op if unchanged from the previous update."""
         self._inner.update(json.dumps(value))
@@ -404,6 +447,10 @@ class JsonStreamProducer:
 
     def __init__(self, inner: MoqJsonStreamProducer) -> None:
         self._inner = inner
+
+    def demand(self) -> TrackDemand:
+        """A watch-only handle to whether this track has subscribers."""
+        return TrackDemand(self._inner.demand())
 
     def append(self, value: Any) -> None:
         """Append one record to the log."""
@@ -431,12 +478,16 @@ class AudioProducer:
         """The audio track name."""
         return self._inner.name()
 
+    def demand(self) -> TrackDemand:
+        """A watch-only handle to whether this audio track has subscribers."""
+        return TrackDemand(self._inner.demand())
+
     async def used(self) -> None:
-        """Wait until this audio track has at least one active subscriber."""
+        """Wait until this audio track has at least one active subscriber. Prefer :meth:`demand`."""
         await self._inner.used()
 
     async def unused(self) -> None:
-        """Wait until this audio track has no active subscribers."""
+        """Wait until this audio track has no active subscribers. Prefer :meth:`demand`."""
         await self._inner.unused()
 
     def reset_epoch(self) -> None:
@@ -477,12 +528,16 @@ class VideoProducer:
         """The video track name."""
         return self._inner.name()
 
+    def demand(self) -> TrackDemand:
+        """A watch-only handle to whether this video track has subscribers."""
+        return TrackDemand(self._inner.demand())
+
     async def used(self) -> None:
-        """Wait until this video track has at least one active subscriber."""
+        """Wait until this video track has at least one active subscriber. Prefer :meth:`demand`."""
         await self._inner.used()
 
     async def unused(self) -> None:
-        """Wait until this video track has no active subscribers."""
+        """Wait until this video track has no active subscribers. Prefer :meth:`demand`."""
         await self._inner.unused()
 
     def write(self, frame: VideoFrame) -> None:
@@ -583,13 +638,13 @@ class BroadcastProducer:
     def announce(self, route: Route | None = None) -> None:
         """Advertise this broadcast's exact path as a route.
 
-        Announcing again re-prices the route in place. The path is already
-        discoverable locally; announce advertises it to peers.
+        Announcing again re-prices the route in place. Until announced, the
+        broadcast is invisible and unroutable for local consumers and peers alike.
         """
         self._inner.announce(route if route is not None else Route())
 
     def unannounce(self) -> None:
-        """Retract this broadcast's exact-path advertisement, if any."""
+        """Retract this broadcast's advertisement, if any, from local consumers and peers alike."""
         self._inner.unannounce()
 
     def set_video_properties(self, properties: VideoProperties) -> None:

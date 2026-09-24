@@ -12,10 +12,10 @@ cargo install moq-cli
 ### Docker
 
 ```bash
-docker pull moqdev/moq-cli
+docker pull moqdev/moq
 ```
 
-Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/moqdev/moq-cli).
+Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/moqdev/moq).
 
 ## Usage
 

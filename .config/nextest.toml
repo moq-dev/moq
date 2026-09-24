@@ -19,6 +19,11 @@ slow-timeout = { period = "30s", terminate-after = 2 }
 # race until proven otherwise (see Root Cause First in CLAUDE.md).
 retries = 0
 
+# `--all-targets` still compiles the criterion benches, which is what catches a
+# bench that no longer builds. Running them in test mode only replays the
+# workload once, and the large origin fan-outs take ~20s each for no signal.
+default-filter = "not kind(bench)"
+
 # CI has noisier neighbours and cold caches, so give a test longer before
 # calling it wedged.
 [profile.ci]

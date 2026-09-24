@@ -510,6 +510,7 @@ check $BASE="" *args:
         just drafts check
         just rs check --workspace --exclude moq-net-fuzz {{ args }}
         just rs tokio-features
+        just rs media-features
         just --justfile bench/justfile check
         cargo run --quiet --locked --package quest -- check
         # Not covered by the line above: moq-wasm only exists on the wasm32 target.
