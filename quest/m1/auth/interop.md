@@ -10,12 +10,14 @@ with no grant passes silently.
 
 ## Plan
 
-Each interop client (Rust, JS, and every binding that speaks lite-06) prints
+The Rust and JS interop clients print
 the grant it received in one parseable line; `test/interop/interop.sh`
 compares it against the token the cell minted. The negative round mints a
 token that excludes the published path and expects the publisher's session
 to close with `Unauthorized` naming the path, and the subscriber to see
-nothing. Cells below lite-06 skip both checks. No public API or wire change.
+nothing. Cells below lite-06 skip both checks, as do binding clients until
+[Bindings](/quest/m1/auth/bindings.md) gives them a grant to print; that
+quest adds them to the same assertion. No public API or wire change.
 
 ## Required
 

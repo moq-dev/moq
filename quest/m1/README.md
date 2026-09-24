@@ -56,7 +56,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Stats retier](/quest/m1/stats-retier.md) - a re-checked tier retags a live session's stats in place instead of waiting for its next connection
 - [io_uring link facts](/quest/m1/uring-link-facts.md) - the io_uring workers report a session's peer address and SNI to the auth server like the tokio listener does
 - [Listener close](/quest/m1/listener-close.md) - closing a listener releases its UDP socket before returning, so a restart can rebind the port
-- [Test ports](/quest/m1/tokio-test-ports.md) - moq-tokio tests pre-bind the TCP and UDP sockets they serve on, so a parallel run cannot collide
+- [Test ports](/quest/m1/tokio-test-ports.md) - moq-tokio tests bind QUIC and WebSocket on independent ephemeral ports, so a parallel run cannot collide
 - [Decoded frame ownership](/quest/m1/decoded-frames.md) - retain moq-video Frames across bindings, with native views or CPU conversion as needed
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - generated C++ over moq-ffi with futures and expected-style errors, shipped as a tarball, vcpkg, and Conan, and adopted by the OBS plugin
 - [OBS native codecs](/quest/m1/obs-moq-video/README.md) - remove FFmpeg decoding dependencies, deliver GPU frames, and use native audio/video encoders

@@ -1,4 +1,4 @@
-# [XS] moq-tokio tests pre-bind their ports
+# [XS] moq-tokio tests bind their ports independently
 
 ## Goal
 
@@ -9,5 +9,8 @@ parallel test holds. `websocket_forbidden_does_not_end_a_quic_connect`
 ## Plan
 
 `test_server()` takes an ephemeral UDP port and then binds TCP on the same
-number, which was never reserved on TCP. Bind both sockets up front and hand
-them to the server, so nothing is left to collide on. Never retry. No public API or wire change.
+number, which was never reserved on TCP. Bind the QUIC and WebSocket
+listeners each on `:0` and hand the test client the WebSocket port
+explicitly, adding a client config override for the fallback URL's port if
+none exists (test-only if possible; otherwise note it as a public API
+addition). No retry. No wire change.
