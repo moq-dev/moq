@@ -7,9 +7,9 @@ import { type Effect, type Getter, Signal } from "@moq/signals";
  * gesture, and a `resume()` made then is rejected. A single unconditional attempt would fire once,
  * be rejected, and never retry, leaving the graph silent. This instead attempts `resume()`
  * immediately (for autoplay-permissive browsers like Chrome with prior engagement), then retries on
- * every `pointerdown`/`keydown` until the context is actually running, dropping the gesture
- * listeners once it is. `pointerdown` and `keydown` cover mouse, touch, pen, and keyboard, and each
- * carries a user activation.
+ * every gesture until the context is actually running, dropping the listeners once it is. A mouse
+ * grants activation on `pointerdown` but touch and pen only on `pointerup`, so both are listened to,
+ * plus `keydown`.
  *
  * Safari also reports an "interrupted" state (a WebKit-only value outside the
  * suspended/running/closed set) and can leave it on its own; mirroring `statechange` into the
@@ -30,6 +30,7 @@ export function unlock(effect: Effect, context: AudioContext): Getter<boolean> {
 
 		resume();
 		inner.event(document, "pointerdown", resume);
+		inner.event(document, "pointerup", resume);
 		inner.event(document, "keydown", resume);
 	});
 

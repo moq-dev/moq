@@ -53,11 +53,15 @@ test("retries resume() on a user gesture until the context is running", async ()
 	document.dispatchEvent(new Event("keydown"));
 	expect(ctx.resumeCalls).toBe(3);
 
+	// Touch and pen only grant activation on pointerup, so a tap must retry there too.
+	document.dispatchEvent(new Event("pointerup"));
+	expect(ctx.resumeCalls).toBe(4);
+
 	// Once the context is actually running, stop retrying: further gestures are no-ops.
 	ctx.transition("running");
 	await flush();
 	document.dispatchEvent(new Event("pointerdown"));
-	expect(ctx.resumeCalls).toBe(3);
+	expect(ctx.resumeCalls).toBe(4);
 
 	effect.close();
 });

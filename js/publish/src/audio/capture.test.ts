@@ -245,6 +245,7 @@ function installGatedWebAudio() {
 	let activated = false;
 	const contexts: GatedContext[] = [];
 	const worklets: GatedWorklet[] = [];
+	const roots: FakeGraphNode[] = [];
 
 	class GatedContext extends EventTarget {
 		state: string = "suspended";
@@ -290,8 +291,17 @@ function installGatedWebAudio() {
 
 	class FakeGraphNode {
 		channelCount = 2;
-		connect(): void {}
-		disconnect(): void {}
+		outputs = new Set<unknown>();
+		constructor() {
+			roots.push(this);
+		}
+		connect(node: unknown): void {
+			this.outputs.add(node);
+		}
+		disconnect(node?: unknown): void {
+			if (node === undefined) this.outputs.clear();
+			else this.outputs.delete(node);
+		}
 	}
 
 	const globals: Record<string, unknown> = {
@@ -311,6 +321,7 @@ function installGatedWebAudio() {
 	return {
 		contexts,
 		worklets,
+		roots,
 		// A real click: the page gains user activation, then the event reaches its listeners.
 		gesture() {
 			activated = true;
@@ -373,11 +384,14 @@ test("drops the format while the context is interrupted", async () => {
 	await settle();
 	expect(capture.out.format.peek()).toBeUndefined();
 	expect(capture.out.frames.peek()).toBeUndefined();
+	// The retired worklet is cut from the source, or it keeps posting alongside its replacement.
+	expect(webaudio.roots[0].outputs.size).toBe(0);
 
 	// Back to running rebuilds the worklet on a fresh anchor.
 	webaudio.contexts[0].transition("running");
 	await settle();
 	expect(webaudio.worklets.length).toBe(2);
+	expect([...webaudio.roots[0].outputs]).toEqual([webaudio.worklets[1]]);
 	webaudio.worklets[1].render();
 	expect(capture.out.format.peek()).toBeDefined();
 

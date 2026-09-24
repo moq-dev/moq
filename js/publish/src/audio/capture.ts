@@ -190,9 +190,9 @@ export class Capture {
 				// tracks share an epoch and stay in sync.
 				processorOptions: { zero: performance.now() * 1000 },
 			});
-			inner.cleanup(() => worklet.disconnect());
-
+			// The edge originates at root, so only root can remove it; the worklet has no outputs.
 			root.connect(worklet);
+			inner.cleanup(() => root.disconnect(worklet));
 
 			const fanout = new Fanout(this.#drain(worklet, context.sampleRate, inner), { queue: QUEUE });
 			inner.cleanup(() => fanout.close());
