@@ -18,7 +18,8 @@ error lists and rerun.
 ## Wire
 
 Older protocol versions still negotiate, so relays and clients can be upgraded
-in any order, with two exceptions:
+in any order, apart from [re-minting tokens](#relay-and-cli) and two wire
+changes:
 
 - The lite 06 ALPN is `moq-lite-06`, not `moq-lite-06-wip`. An explicit
   `moq-lite-06-wip` in a version list is refused (#3941).
@@ -67,9 +68,12 @@ Other changes to a deployment:
   `public_subscribe` / `public_publish`.
 - **Re-mint tokens.** JWT `publish` and `subscribe` claims are patterns, so a
   token granting `alice` covers only `alice`; sign `alice/**` instead. Tokens
-  carrying the retired `put` or `get` claims fail verification.
+  carrying the retired `put` or `get` claims fail verification, so re-mint
+  them when the relay and auth server upgrade.
 - **mTLS admits nothing on its own.** A verified client certificate is reported
-  to the auth server, which grants it (`moq auth serve --mtls-publish '**' --mtls-subscribe '**'` restores the old full access for cluster peers).
+  to the auth server, which grants it. `moq auth serve --mtls-publish '**'
+  --mtls-subscribe '**'` restores the old full access for every certificate
+  the relay's client CA verifies, so keep that CA to cluster peers.
 - **`moq --listen` needs auth.** A CLI listener refuses to start without
   `--auth-url` or `--auth-public` instead of accepting everyone.
 - **noq is the only QUIC stack** (#3811). The `quinn` and `quiche` cargo
@@ -125,6 +129,9 @@ Other changes to a deployment:
   `Cluster::with_cache` moved to `cluster::Options`.
 
 ## JavaScript
+
+The JavaScript packages have no changelog; this list follows the breaking
+PRs, so a minor rename may be missing.
 
 - **@moq/token is @moq/auth.** `sign` / `verify` are `Key.sign` / `Key.verify`,
   and claims are pattern unions (see [Re-mint tokens](#relay-and-cli)).
