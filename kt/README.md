@@ -11,7 +11,7 @@ Most apps want `dev.moq:moq`. Reach for `dev.moq:moq-ffi` directly only if you w
 
 ## Install
 
-```kotlin
+```kotlin ignore
 // build.gradle.kts
 dependencies {
     implementation("dev.moq:moq:0.5.0")
@@ -62,7 +62,7 @@ The `dev.moq` package is intentionally thin: Kotlin has extension functions, so 
 
 ## Local development
 
-`just kt check` builds `moq-ffi` for the host, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the `:moq-ffi` JNA-resource layout, and runs `gradle :moq-ffi:jvmTest :moq:jvmTest`. It needs `cargo`, a JDK, and Gradle, all provided by the `nix develop` shell. A missing toolchain is an error so Kotlin wrapper drift cannot slip past a green check.
+`just kt check` builds `moq-ffi` for the host, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the `:moq-ffi` JNA-resource layout, and runs `gradle :moq-ffi:jvmTest :moq:jvmTest`. The tests compile every Kotlin sample in this README and `doc/lib/kt` too, extracted by `doc/lib/samples.sh`. It needs `cargo`, a JDK, and Gradle, all provided by the `nix develop` shell. A missing toolchain is an error so Kotlin wrapper drift cannot slip past a green check.
 
 The wrapper resolves `moq-ffi` from the sibling project (a Gradle `dependencySubstitution` in `kt/moq/build.gradle.kts`), so tests run against freshly-built bindings; the published metadata still carries the floating range.
 

@@ -12,7 +12,7 @@ consumer, `Sendable` handles, and `Task` cancellation that reaches the native
 side. It depends on `MoqFFI`, which ships a prebuilt XCFramework with arm64
 slices for iOS 15+, the iOS Simulator, and macOS 12.3+.
 
-```swift
+```swift ignore
 dependencies: [
     .package(url: "https://github.com/moq-dev/moq-swift", from: "<version>"),   // latest: see the badge above
 ],
@@ -32,7 +32,7 @@ for try await announcement in try session.consume.announced(prefix: "live/", fil
     // Updates stay origin-relative; captures reports what each wildcard matched.
     print(announcement.captures ?? [])
     let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
-    for try await catalog in try broadcast.subscribeCatalog() {
+    for try await catalog in try await broadcast.subscribeCatalog() {
         print(catalog)
     }
 }
@@ -45,9 +45,9 @@ let broadcast = try session.publish.createBroadcast(path: "my-stream.hang")
 let audio = try broadcast.publishAudio(format: .opus, initData: opusInit)
 try audio.writeFrame(packet, timestampUs: 20_000)
 
-let video = try broadcast.publishVideo(
+let video = try broadcast.encodeVideo(
     input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: 30),
-    output: VideoEncoderOutput(codec: .h264, track: "camera", bitrate: nil, gop: nil, kind: .auto)
+    output: VideoEncoderOutput(codec: .h264, track: "camera", kind: .auto)
 )
 try video.write(VideoFrame(timestampUs: pts, data: rgba))
 try broadcast.announce()
@@ -84,6 +84,10 @@ divides the connection's send estimate; pass it to `encodeVideo` /
 `encodeAudio` or `reserve` a share for an app-owned track. `MoqError.isAuth` and
 `isShutdown` classify errors. `protocolError` is the structured protocol failure
 (scope, verbatim code, kind) when the peer sent one.
+
+`encodeAudio` encodes raw PCM inside the binding. Its codec is an object,
+`AudioCodec.opus()`, and `AudioEncoderOutput.frameDurationUs` sets the Opus
+frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000.
 
 `decodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.format`
 is `.i420` when unset, or `.rgba` for four bytes a pixel, and every frame
