@@ -19,7 +19,7 @@ class Moq internal constructor(
     private val client: Client,
 ) : AutoCloseable {
     /**
-     * Create a locally announced broadcast at [path].
+     * Create an unannounced broadcast at [path], invisible to everyone until announced.
      *
      * Advertise it with `announce` after populating tracks. `finish()` unpublishes immediately.
      */

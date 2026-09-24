@@ -9,7 +9,9 @@ broadcasts" instead of a spinner that never resolves.
 
 ## Plan
 
-Mirror the Rust shape, name, and marker-less fallback. Test the same cases
+Mirror the Rust shape, name, and marker-less fallback: one flat event,
+`Announced`, `Updated`, `Retracted` (each carrying the announce), or `Live`,
+replacing the update's `kind` field. Test the same cases
 in JS. Public API: the announce consumer's yield type changes, so it lands
 with the Rust break. Wire: none.
 

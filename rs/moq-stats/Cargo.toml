@@ -24,3 +24,7 @@ web-async = { workspace = true }
 [dev-dependencies]
 futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
+
+[[bench]]
+name = "decode"
+harness = false
