@@ -16,7 +16,3 @@ Regenerate `moq.h` and update `doc/lib/c/index.md`, whose capability list alread
 claims group fetch. Decoder output configuration landed separately on the dev line.
 The `moq_group_request_*` tests in `rs/libmoq/src/test.rs` fetch from Rust for
 lack of this entry point; switch them to it.
-
-## Related
-
-- [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - server-side accept

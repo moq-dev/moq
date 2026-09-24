@@ -197,6 +197,54 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	let _ = running.await;
 }
 
+/// A session the workers accept reports its peer address, the listener's
+/// address, and the name the client dialed, as the tokio listener does: the
+/// SNI on raw QUIC and WebTransport alike.
+#[tokio::test]
+async fn uring_workers_report_link_facts() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let port = free_udp_port();
+
+	let relay = Relay::load(uring_config(&cert, &key, port)).await.expect("load relay");
+	let local = relay.addr().expect("bound address");
+	let sessions = relay.sessions().clone();
+	let running = tokio::spawn(relay.run());
+
+	let mut connections = Vec::new();
+	for scheme in ["moql", "https"] {
+		let url: url::Url = format!("{scheme}://localhost:{port}/link").parse().expect("parse url");
+		connections.push(connect(client(), url).await);
+	}
+
+	// A client can see its session established before the relay lists it.
+	let deadline = std::time::Instant::now() + TIMEOUT;
+	let views = loop {
+		let views = sessions.list(&Default::default());
+		if views.len() == 2 {
+			break views;
+		}
+		assert!(std::time::Instant::now() < deadline, "expected 2 sessions: {views:?}");
+		tokio::time::sleep(Duration::from_millis(25)).await;
+	};
+	for view in &views {
+		let remote = view.remote.expect("peer address");
+		assert!(remote.ip().is_loopback() && remote.port() != 0, "peer address {remote}");
+		assert_ne!(remote, local, "the peer is not the listener");
+		assert_eq!(view.local, Some(local), "listener address");
+		assert_eq!(view.server_name.as_deref(), Some("localhost"), "dialed name");
+	}
+
+	drop(connections);
+	running.abort();
+	let _ = running.await;
+}
+
 /// One HTTP/1.1 GET against `addr`, returning the response body.
 ///
 /// Hand-rolled because the relay has no HTTP client among its dev
