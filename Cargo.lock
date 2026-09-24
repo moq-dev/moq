@@ -4615,11 +4615,13 @@ dependencies = [
  "libc",
  "moq-auth",
  "moq-net",
+ "moq-shaper",
  "moq-sock",
  "moq-stats",
  "moq-tokio",
  "moq-uring",
  "qmux",
+ "rand 0.10.3",
  "rcgen",
  "reqwest",
  "reqwest-middleware",
@@ -4697,6 +4699,17 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+]
+
+[[package]]
+name = "moq-shaper"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "humantime",
+ "rand 0.10.3",
+ "tokio",
 ]
 
 [[package]]

@@ -90,6 +90,8 @@ sd-notify = { workspace = true }
 
 [dev-dependencies]
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
+moq-shaper = { path = "../moq-shaper" }
+rand = { workspace = true }
 rcgen = "0.14"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
