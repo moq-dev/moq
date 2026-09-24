@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -9208,7 +9210,7 @@ class FfiConverterUint8List {
 
   static LiftRetVal<Uint8List> read(Uint8List buf) {
     final length = buf.buffer.asByteData(buf.offsetInBytes).getInt32(0);
-    final bytes = Uint8List.view(buf.buffer, buf.offsetInBytes + 4, length);
+    final bytes = buf.sublist(4, 4 + length);
     return LiftRetVal(bytes, length + 4);
   }
 

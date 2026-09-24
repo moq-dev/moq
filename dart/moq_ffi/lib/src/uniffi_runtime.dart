@@ -8,6 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
 
 class UniffiInternalError implements Exception {
@@ -110,7 +111,11 @@ T rustCallWithLifter<T, F>(
   try {
     final rawResult = ffiCall(status);
     checkCallStatus(errorHandler ?? NullRustCallStatusErrorHandler(), status);
-    return lifter(rawResult);
+    final lifted = lifter(rawResult);
+    if (rawResult is RustBuffer) {
+      rawResult.free();
+    }
+    return lifted;
   } finally {
     calloc.free(status);
   }
@@ -175,7 +180,12 @@ RustBuffer toRustBuffer(Uint8List data) {
   final bytes = calloc<ForeignBytes>();
   bytes.ref.len = length;
   bytes.ref.data = frameData;
-  return RustBuffer.fromBytes(bytes.ref);
+  try {
+    return RustBuffer.fromBytes(bytes.ref);
+  } finally {
+    calloc.free(frameData);
+    calloc.free(bytes);
+  }
 }
 
 ForeignBytes lowerForeignBytes(Uint8List data) {
@@ -233,6 +243,7 @@ mixin FfiConverterPrimitive<T> on FfiConverter<T, T> {
   @override
   T lower(T value) => value;
 }
+
 Uint8List createUint8ListFromInt(int value) {
   int length = value.bitLength ~/ 8 + 1;
   if (length != 4 && length != 8) {
