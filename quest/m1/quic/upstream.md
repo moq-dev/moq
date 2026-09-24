@@ -15,11 +15,17 @@ lands in the fork on MoQ's schedule; once a feature has shipped in a MoQ
 release and its shape has stopped moving, split it into an upstream PR with
 the tests it landed with.
 
-Offer the seven [BBR correctness fixes](/quest/m1/quic/bbr-release.md) with
-their regressions before promoting BBR as the default. Reuse existing
+Offer the seven [BBR correctness fixes](/quest/m1/quic/bbr-release.md) and
+their [loss](/quest/m1/quic/bbr-loss-parity.md) and
+[starvation](/quest/m1/quic/bbr-app-limited-edges.md) follow-ups with their
+regressions before promoting BBR as the default. Reuse existing
 upstream work, particularly [PR #802](https://github.com/n0-computer/noq/pull/802),
-and preserve attribution. Fixes can be offered as their shapes settle;
-upstream acceptance never gates the fork's corrected release.
+and preserve attribution; the fork found that #802's `has_sample()` check
+fires one ACK late under noq's callback order and that its 1-ms floor keeps
+sub-millisecond paths at the placeholder rate, so offer both back there. The
+additive `PacketId` callbacks answer upstream's TODO on the `Controller`
+impl. Fixes can be offered as their shapes settle; upstream acceptance never
+gates the fork's corrected release.
 
 Then the feature proposal order, each linked to its producing quest:
 
@@ -50,6 +56,8 @@ offered and answered.
 ## Required
 
 - [Release BBR fixes](/quest/m1/quic/bbr-release.md) - the corrected controller and its regression evidence
+- [Align BBR loss handling with draft-06](/quest/m1/quic/bbr-loss-parity.md)
+- [Mark BBR starvation wherever the source runs dry](/quest/m1/quic/bbr-app-limited-edges.md)
 
 - [Per-stream ACK progress](/quest/m1/quic/ack-progress.md)
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md)

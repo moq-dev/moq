@@ -316,7 +316,7 @@ fn bench_request(c: &mut Criterion) {
 }
 
 /// Publisher handoff at one path: a subscriber is reading from one local
-/// source when a second attaches at the same path and takes over (newest
+/// source when a second announces at the same path and takes over (newest
 /// wins). Measured from the standby's attach to the subscriber receiving its
 /// first group, with `publishers` unrelated broadcasts in the table.
 fn bench_handoff(c: &mut Criterion) {
@@ -340,7 +340,7 @@ fn bench_handoff(c: &mut Criterion) {
 				runtime.block_on(async {
 					let mut total = Duration::ZERO;
 					for _ in 0..iterations {
-						let incumbent = producer.create_broadcast("room/live").unwrap();
+						let incumbent = producer.publish("room/live", origin::Route::default()).unwrap();
 						let track = incumbent.create_track("video", None).unwrap();
 						let mut first = track.append_group().unwrap();
 						first.write_frame(Timestamp::ZERO, b"one".as_ref()).unwrap();
@@ -356,6 +356,8 @@ fn bench_handoff(c: &mut Criterion) {
 						let mut second = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 						second.write_frame(Timestamp::ZERO, b"two".as_ref()).unwrap();
 						second.finish().unwrap();
+						// Announcing is what makes the standby a route the front can take.
+						standby.announce(origin::Route::default()).unwrap();
 						subscription.recv_group().await.unwrap().expect("standby group");
 						total += started.elapsed();
 

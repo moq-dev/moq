@@ -23,6 +23,7 @@
 
 export type { Compression } from "./compression.ts";
 export { type Diff, deepEqual, diff, merge } from "./diff.ts";
+export { Desync, MissingSnapshot } from "./error.ts";
 export * as Snapshot from "./snapshot/index.ts";
 export * as Stream from "./stream/index.ts";
 export * as Window from "./window/index.ts";

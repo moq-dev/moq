@@ -96,7 +96,7 @@ union without disconnecting, cancelling only work that loses authorization;
 an out-of-scope new publication aborts before any PUBLISH_NAMESPACE is written; a
 peer without the option (the relay built without it, and the interop runner's
 reference relay) sees no AUTH stream and keeps working. Run
-`just test smoke --all`.
+`just test interop --all`.
 
 On main, additive.
 
