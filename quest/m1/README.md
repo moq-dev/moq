@@ -18,7 +18,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 ## Quests
 
 - [Stats linger](/quest/m1/stats-linger.md) - a `.stats` group stays announced a minute past its last row, so session gaps stop starting and ending cluster-wide announces
-- [Tree-routed announcements](/quest/m1/announce-tree/README.md) - each cluster relay chooses a parent and backup per source and neighbours send it only those routes, so an announce costs ~2 per relay instead of one per link
+- [Tree-routed announcements](/quest/m1/announce-tree/README.md) - each cluster relay chooses a parent and backup per source and neighbours send it only those routes, flooding any route it has no choice for, so an announce costs ~2 per relay instead of one per link
 - [Play harness](/quest/m1/play-harness.md) - moq play's tune-in, rendition-switch, and drain logic runs in per-PR CI without a device
 - [Missing fetch group](/quest/m1/fetch-missing-group.md) - HTTP /fetch answers 404 and `moq fetch` fails cleanly for a group the track lacks
 - [Hidden broadcasts](/quest/m1/hidden-broadcasts.md) - announce discovery skips `.`-named paths unless a request opts in over lite-07 or an IETF parameter, so older clients (bar authenticated cluster peers during rollout) never see them

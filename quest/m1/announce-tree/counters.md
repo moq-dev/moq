@@ -18,7 +18,8 @@ length), since downstream billing reads it.
   lite-05's duplicate `ANNOUNCE`). `hand_out` counts only real starts today.
 - `announce_wire_bytes`: the encoded size of every message on announce
   streams (requests, starts, ends, restarts), counted where the lite publisher
-  and subscriber encode and decode them.
+  and subscriber encode and decode them, plus the IETF namespace messages
+  where `rs/moq-net/src/ietf` does.
 
 Test the Prometheus rendering. Also test, through two origins joined by a
 session, that one start, a re-price, and an end move each counter once and
