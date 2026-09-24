@@ -31,6 +31,29 @@ void main() {
     expect(growth, lessThan(leaked ~/ 4));
   });
 
+  test('a non-null optional argument is released', () async {
+    // A local broadcast has no origin to resolve against, so each call lowers
+    // the optional String and then throws, also covering the error buffer.
+    final consumer = MoqBroadcastProducer().consume();
+    final reference = 'x' * size;
+    Future<void> call() => expectLater(
+      consumer.resolve(reference: reference),
+      throwsA(isA<MoqException>()),
+    );
+
+    for (var i = 0; i < 100; i++) {
+      await call();
+    }
+
+    final before = ProcessInfo.currentRss;
+    for (var i = 0; i < iterations; i++) {
+      await call();
+    }
+    final growth = ProcessInfo.currentRss - before;
+
+    expect(growth, lessThan(leaked ~/ 4));
+  });
+
   test('an async return is released', () async {
     final payload = Uint8List(size);
 
