@@ -2841,7 +2841,7 @@ dependencies = [
  "bytes",
  "derive_more 2.1.1",
  "hex",
- "kio",
+ "kio 0.6.0",
  "lazy_static",
  "moq-json",
  "moq-mux",

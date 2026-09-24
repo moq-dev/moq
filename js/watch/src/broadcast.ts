@@ -15,17 +15,25 @@ import { toHang } from "./msf";
  * publisher that emits one has a bug, and quietly serving the rest hides that while the
  * missing rendition resurfaces later as a track that never fills.
  */
+function broadcastRefs(
+	section: Record<string, { broadcast?: Path.Relative }> | undefined,
+): [string, Path.Relative | undefined][] {
+	return Object.entries(section ?? {}).map(([name, config]) => [name, config.broadcast]);
+}
+
 function findEscaping(base: Moq.Path.Valid, catalog: Catalog.Root): string | undefined {
-	// Every section carrying renditions must be listed here; one left out silently exempts
-	// its renditions from the containment check.
-	const renditions = [
-		...Object.entries(catalog.video?.renditions ?? {}),
-		...Object.entries(catalog.audio?.renditions ?? {}),
-		...Object.entries(catalog.text?.renditions ?? {}),
+	// Every section carrying a `broadcast` reference must be listed here, including data
+	// tracks. One left out silently exempts its tracks from the containment check.
+	const refs = [
+		...broadcastRefs(catalog.video?.renditions),
+		...broadcastRefs(catalog.audio?.renditions),
+		...broadcastRefs(catalog.text?.renditions),
+		...broadcastRefs(catalog.json?.tracks),
+		...broadcastRefs(catalog.binary?.tracks),
 	];
 
-	for (const [name, config] of renditions) {
-		if (config.broadcast && Path.tryResolve(base, config.broadcast) === undefined) return name;
+	for (const [name, rel] of refs) {
+		if (rel && Path.tryResolve(base, rel) === undefined) return name;
 	}
 
 	return undefined;
@@ -55,8 +63,8 @@ function filterRenditions<T extends ReferencedRendition>(
 	return Object.fromEntries(Object.entries(renditions).filter(([, config]) => usable(config.broadcast)));
 }
 
-// Every section carrying renditions must be listed here, same as `findEscaping`; one left
-// out silently exempts its renditions from the reachability filter.
+// Every section carrying a `broadcast` reference must be listed here, same as `findEscaping`;
+// one left out silently exempts its tracks from the reachability filter.
 function filterCatalog(catalog: Catalog.Root, usable: (rel: Path.Relative | undefined) => boolean): Catalog.Root {
 	return {
 		...catalog,
@@ -68,6 +76,10 @@ function filterCatalog(catalog: Catalog.Root, usable: (rel: Path.Relative | unde
 			: undefined,
 		text: catalog.text
 			? { ...catalog.text, renditions: filterRenditions(catalog.text.renditions, usable) }
+			: undefined,
+		json: catalog.json ? { ...catalog.json, tracks: filterRenditions(catalog.json.tracks, usable) } : undefined,
+		binary: catalog.binary
+			? { ...catalog.binary, tracks: filterRenditions(catalog.binary.tracks, usable) }
 			: undefined,
 	};
 }
