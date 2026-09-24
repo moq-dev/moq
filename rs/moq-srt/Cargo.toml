@@ -28,5 +28,5 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 # Builds the synthetic broadcasts the egress tests mux back to TS.
-hang = { workspace = true }
+hang = { path = "../hang" }
 srt-protocol = "0.4"

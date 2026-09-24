@@ -363,6 +363,10 @@ _select-test:
 # Published crates need the current workspace version as the lower bound for
 # internal dependencies. The workspace only tests that version set, and a looser
 # bound lets package verification combine incompatible older releases.
+#
+# Internal dev-dependencies must be path-only. `cargo publish` keeps a versioned
+# dev-dependency and requires it on crates.io, but release-plz orders publishes
+# by normal dependencies only, so a bumped dev-dependency is often not there yet.
 [private]
 _publish-test:
     #!/usr/bin/env bash
@@ -384,6 +388,22 @@ _publish-test:
     if [[ -n "$stale" ]]; then
         echo "rs: published workspace dependency lower bounds are stale:" >&2
         echo "$stale" >&2
+        exit 1
+    fi
+
+    versioned=$(jq -r '
+        .packages[]
+        | select(.publish != [])
+        | .name as $package
+        | .dependencies[]
+        | select(.source == null and .path != null and .kind == "dev" and .req != "*")
+        | "\($package): \(.name) \(.req)"
+    ' <<< "$metadata")
+
+    if [[ -n "$versioned" ]]; then
+        echo "rs: published crates have versioned workspace dev-dependencies:" >&2
+        echo "$versioned" >&2
+        echo "use { path = \"../<crate>\" } instead of { workspace = true }." >&2
         exit 1
     fi
 

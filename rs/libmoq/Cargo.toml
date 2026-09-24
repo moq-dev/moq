@@ -44,4 +44,4 @@ url = { workspace = true }
 cbindgen = "0.29"
 
 [dev-dependencies]
-moq-loc = { workspace = true }
+moq-loc = { path = "../moq-loc" }

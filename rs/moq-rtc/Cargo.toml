@@ -33,5 +33,5 @@ uuid = { version = "1", features = ["v4"] }
 # Signs the MESSAGE-INTEGRITY on a forged STUN binding request: str0m rejects a
 # request without one, and its own SHA1 provider is private.
 aws-lc-rs = { workspace = true }
-moq-tokio = { workspace = true }
+moq-tokio = { path = "../moq-tokio", default-features = false }
 tokio = { workspace = true, features = ["test-util"] }

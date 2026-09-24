@@ -53,7 +53,7 @@ tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 io-uring = { workspace = true }
 libc = { workspace = true }
 moq-noq-udp = { workspace = true }
-moq-tokio = { workspace = true, features = ["noq", "aws-lc-rs"] }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["noq", "aws-lc-rs"] }
 nix = { workspace = true }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
 rustls = "0.23"

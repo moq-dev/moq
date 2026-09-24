@@ -58,5 +58,5 @@ tracing = { workspace = true }
 # `rustls::ServerConfig`. No transport feature: a QUIC backend here would be
 # unified into every other crate a `--workspace` build selects, which is exactly
 # what hid moq-tokio's backend-less build from the nightly feature matrix.
-moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["aws-lc-rs"] }
 tokio = { workspace = true, features = ["test-util"] }
