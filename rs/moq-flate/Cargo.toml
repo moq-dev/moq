@@ -14,5 +14,7 @@ categories = ["compression"]
 
 [dependencies]
 bytes = { workspace = true }
-flate2 = { workspace = true }
+# zlib-rs, not the default miniz_oxide: miniz_oxide 0.9.1 can return from a sync flush with output
+# space left but the flush unfinished, silently truncating the frame.
+flate2 = { workspace = true, features = ["zlib-rs", "runtime_detection"] }
 thiserror = { workspace = true }

@@ -116,7 +116,7 @@ criterion = "0.8"
 # (`fallback-dynamic-loading`), so nothing links against libcuda at build time.
 cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
 dispatch2 = "0.3.1"
-flate2 = "1.1"
+flate2 = { version = "1.1", default-features = false }
 futures = "0.3"
 getrandom = { version = "0.4", features = ["wasm_js"] }
 hang = { version = "0.21.1", path = "rs/hang" }
