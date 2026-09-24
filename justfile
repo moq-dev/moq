@@ -54,7 +54,7 @@ bench-runtime $ROUNDS="3" $WORKERS="":
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
     bun install
-    cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-semver-checks release-plz
+    cargo install --locked cargo-shear cargo-sort cargo-semver-checks release-plz
 
 # Lints and compiles only the packages the branch changed plus everything
 # depending on them; `check --all` is the unscoped suite. CI runs the same
