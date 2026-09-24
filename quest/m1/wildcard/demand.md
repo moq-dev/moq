@@ -27,8 +27,8 @@ reactive shape announcements have today.
 Do not simply delete the gate. It exists so the player does not subscribe to
 absent broadcasts and so renditions appear and disappear reactively with
 announcements. The Rust side needs nothing here: `moq-mux::Source` resolves
-references through `request_broadcast`, which
-[resolve](/quest/m1/wildcard/resolve.md) teaches to consult patterns.
+references through `request_broadcast`, which already resolves a path
+through the longest covering prefix.
 
 Two existing soft spots to not reintroduce: the first evaluation runs before
 the announcement stream has populated, briefly hiding cross-broadcast
@@ -42,8 +42,3 @@ playable, subscribing it is what starts production (the subscribe arrives
 before any announcement), the rendition disappears when the last covering
 wildcard is withdrawn, and a concrete announcement arriving later changes
 nothing visibly.
-
-## Required
-
-- [Resolve](/quest/m1/wildcard/resolve.md) - recognizing the wildcard is useless
-  until the relay routes the resulting subscribe through it

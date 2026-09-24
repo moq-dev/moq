@@ -18,7 +18,12 @@ use std::{
 	time::Duration,
 };
 
-use crate::{Error, Hop, runtime::Instant, track};
+use crate::{Error, Hop, StreamError, runtime::Instant, track};
+
+/// Whether `err` is a NO_CAPACITY refusal, raised here or received off the wire.
+fn no_capacity(err: &Error) -> bool {
+	matches!(err, Error::NoCapacity | Error::Stream(StreamError::NoCapacity))
+}
 
 /// A route the table selected for the front: the entry id, the endpoint that
 /// originated it, and whether it is a broadcast published on this origin.
@@ -200,8 +205,18 @@ pub(super) struct Front {
 	serving_closing: bool,
 	/// The route an upstream request is in flight through.
 	upstream: Option<u64>,
-	/// Routes that refused the path while another source was serving.
+	/// Routes that refused the path while another source was serving, or that
+	/// refused it for capacity.
 	refused: HashSet<u64>,
+	/// The first hop of an advertiser that refused for capacity: every route it
+	/// originated is skipped, not just the one that was asked.
+	shunned: Option<Hop>,
+	/// Whether the one re-resolution a capacity refusal permits was spent.
+	retried: bool,
+	/// Whether the identity's routes were received from a peer, rather than
+	/// originated on this origin. Only a received refusal is re-resolved: an
+	/// originated one is the advertiser's own answer and is passed on as is.
+	received: bool,
 	/// Why the last candidate fell through, reported if the front ends unresolved.
 	last_err: Option<Error>,
 	/// Whether the parked requesters were resolved (the first source attached).
@@ -227,6 +242,9 @@ impl Front {
 			serving_closing: false,
 			upstream: None,
 			refused: HashSet::new(),
+			shunned: None,
+			retried: false,
+			received: false,
 			last_err: None,
 			resolved: false,
 			tracks: BTreeMap::new(),
@@ -242,9 +260,10 @@ impl Front {
 		self.identity.pin()
 	}
 
-	/// The routes that refused the path; the driver skips them when selecting.
-	pub(super) fn refused_routes(&self) -> &HashSet<u64> {
-		&self.refused
+	/// Whether selection skips the route `route` originated by `first`: it
+	/// refused the path, or its advertiser refused it for capacity.
+	pub(super) fn skips(&self, route: u64, first: Option<Hop>) -> bool {
+		self.refused.contains(&route) || (first.is_some() && first == self.shunned)
 	}
 
 	/// Forget refused routes that left the table (a reconnect is a fresh entry).
@@ -368,10 +387,16 @@ impl Front {
 				self.last_err = Some(Error::Unroutable);
 				actions.push(Action::Reselect);
 			}
+			// A capacity refusal before anything was served: ask another advertiser, once.
+			Err(Refusal { err, standing: true }) if self.serving.is_none() && self.can_retry(&err) => {
+				self.upstream = None;
+				self.retry(route, actions);
+			}
 			// An authoritative refusal of the path. It ends a front with no
 			// other source; a serving front merely skips the refuser.
 			Err(Refusal { err, standing: true }) => {
 				self.upstream = None;
+				let err = self.terminal(err);
 				match self.serving {
 					Some(_) => {
 						self.refused.insert(route);
@@ -382,6 +407,46 @@ impl Front {
 				}
 			}
 		}
+	}
+
+	/// Whether `err` permits the one re-resolution: a capacity refusal, not yet
+	/// retried, before any source served a track. Only then may the front move
+	/// to another advertiser, since nothing it delivered names the refuser.
+	fn can_retry(&self, err: &Error) -> bool {
+		no_capacity(err) && self.received && !self.retried && self.info.is_empty()
+	}
+
+	/// A refusal as reported downstream: a received NO_CAPACITY that was not
+	/// re-resolved becomes unroutable, so the single retry never compounds hop by hop.
+	fn terminal(&self, err: Error) -> Error {
+		if self.received && no_capacity(&err) {
+			Error::Unroutable
+		} else {
+			err
+		}
+	}
+
+	/// Re-resolve once after `route` refused for capacity: drop its source, skip
+	/// every route its advertiser originated, and select afresh. Finding nothing
+	/// ends the front unroutable.
+	fn retry(&mut self, route: u64, actions: &mut Vec<Action>) {
+		self.retried = true;
+		self.refused.insert(route);
+		if let Identity::Publisher(hop) = self.identity {
+			self.shunned = Some(hop);
+		}
+		self.identity = Identity::Undetermined;
+		self.last_err = Some(Error::Unroutable);
+		if let Some((source, _)) = self.serving.take() {
+			self.serving_closing = false;
+			actions.push(Action::Detach { source });
+			for track in self.tracks.values_mut() {
+				if matches!(track.state, TrackState::Querying { source: s } if s == source) {
+					track.state = TrackState::Idle;
+				}
+			}
+		}
+		actions.push(Action::Reselect);
 	}
 
 	fn attach(&mut self, source: u64, route: u64, actions: &mut Vec<Action>) {
@@ -420,6 +485,7 @@ impl Front {
 		if self.identity != Identity::Undetermined {
 			return;
 		}
+		self.received = candidate.first.is_some();
 		self.identity = match (candidate.local, candidate.first) {
 			(true, _) => Identity::Local,
 			(false, Some(hop)) if hop != Hop::UNKNOWN => Identity::Publisher(hop),
@@ -541,6 +607,17 @@ impl Front {
 		if closing {
 			return;
 		}
+		// The serving source refusing for capacity before serving anything: its
+		// advertiser cannot take the path, so another one is asked instead.
+		if let Some((serving, route)) = self.serving
+			&& serving == source
+			&& self.can_retry(&err)
+		{
+			self.retry(route, actions);
+			return;
+		}
+		let err = self.terminal(err);
+		let track = self.tracks.get_mut(&name).expect("refusing a known track");
 		track.refused.insert(source);
 		track.refusal = Some(err);
 		self.redispatch(name, actions);
@@ -888,7 +965,170 @@ mod tests {
 			}),
 			&[Action::Reselect],
 		);
-		assert!(front.refused_routes().contains(&2));
+		assert!(front.refused.contains(&2));
+		assert_eq!(front.serving, Some((100, 1)));
+	}
+
+	#[test]
+	fn capacity_refusal_reresolves_once_skipping_the_advertiser() {
+		let mut front = Front::new(LINGER);
+		front.step(Event::Selected {
+			best: Some(remote(1, 10)),
+			serving_closing: false,
+		});
+		front.identify(remote(1, 10));
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 1,
+				result: Err(Refusal {
+					err: Error::NoCapacity,
+					standing: true,
+				}),
+			}),
+			&[Action::Reselect],
+		);
+		// Every route the refusing advertiser originated is skipped, not just the one asked.
+		assert!(front.skips(1, Some(hop(10))));
+		assert!(front.skips(3, Some(hop(10))));
+		assert!(!front.skips(2, Some(hop(20))));
+
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(2, 20)),
+				serving_closing: false,
+			}),
+			&[Action::Request { route: 2 }],
+		);
+		front.identify(remote(2, 20));
+		// A second capacity refusal is terminal, and is not forwarded as one.
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Err(Refusal {
+					err: Error::Stream(StreamError::NoCapacity),
+					standing: true,
+				}),
+			}),
+			&[Action::End { err: Error::Unroutable }],
+		);
+	}
+
+	#[test]
+	fn capacity_refusal_with_no_alternative_is_unroutable() {
+		let mut front = Front::new(LINGER);
+		front.step(Event::Selected {
+			best: Some(remote(1, 10)),
+			serving_closing: false,
+		});
+		front.identify(remote(1, 10));
+		front.step(Event::Resolved {
+			route: 1,
+			result: Err(Refusal {
+				err: Error::NoCapacity,
+				standing: true,
+			}),
+		});
+		assert_actions(
+			front.step(Event::Selected {
+				best: None,
+				serving_closing: false,
+			}),
+			&[Action::End { err: Error::Unroutable }],
+		);
+	}
+
+	#[test]
+	fn an_originated_capacity_refusal_is_passed_on() {
+		// A handler on this origin is the advertiser itself: its refusal is not a
+		// relayed one, so the peer that asked is the one to re-resolve.
+		let handler = Candidate {
+			route: 1,
+			first: None,
+			local: false,
+		};
+		let mut front = Front::new(LINGER);
+		front.step(Event::Selected {
+			best: Some(handler),
+			serving_closing: false,
+		});
+		front.identify(handler);
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 1,
+				result: Err(Refusal {
+					err: Error::NoCapacity,
+					standing: true,
+				}),
+			}),
+			&[Action::End { err: Error::NoCapacity }],
+		);
+	}
+
+	#[test]
+	fn capacity_refused_track_moves_to_another_advertiser() {
+		// A remote session accepts the broadcast at once and refuses per track, so the
+		// capacity refusal arrives on the first track query.
+		let mut front = Front::new(LINGER);
+		front.step(Event::Selected {
+			best: Some(remote(1, 10)),
+			serving_closing: false,
+		});
+		front.identify(remote(1, 10));
+		front.step(Event::Resolved {
+			route: 1,
+			result: Ok(100),
+		});
+		front.step(Event::TrackAssigned { track: name("video") });
+		front.step(Event::Used { track: name("video") });
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::Stream(StreamError::NoCapacity)),
+			}),
+			&[Action::Detach { source: 100 }, Action::Reselect],
+		);
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(2, 20)),
+				serving_closing: false,
+			}),
+			&[Action::Request { route: 2 }],
+		);
+		front.identify(remote(2, 20));
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+		assert_eq!(front.identity, Identity::Publisher(hop(20)));
+	}
+
+	#[test]
+	fn capacity_refusal_after_serving_is_terminal() {
+		// Something was already served, so moving to another advertiser would splice
+		// different content: the refusal is final, and not forwarded as NO_CAPACITY.
+		let mut front = serving(remote(1, 10), 100);
+		front.step(Event::TrackAssigned { track: name("audio") });
+		front.step(Event::Used { track: name("audio") });
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("audio"),
+				source: 100,
+				closing: false,
+				result: Err(Error::NoCapacity),
+			}),
+			&[Action::Abort {
+				track: name("audio"),
+				err: Error::Unroutable,
+			}],
+		);
 		assert_eq!(front.serving, Some((100, 1)));
 	}
 
@@ -909,7 +1149,7 @@ mod tests {
 			}),
 			&[Action::Reselect],
 		);
-		assert!(front.refused_routes().is_empty());
+		assert!(front.refused.is_empty());
 		assert!(!front.ended());
 	}
 
@@ -1204,6 +1444,12 @@ mod tests {
 				closing: false,
 				result: Err(Error::NotFound),
 			},
+			Event::TrackInfo {
+				track: name("v"),
+				source: 100,
+				closing: false,
+				result: Err(Error::NoCapacity),
+			},
 			Event::TrackEnded {
 				track: name("v"),
 				source: 100,
@@ -1226,6 +1472,13 @@ mod tests {
 				let mut next = front.clone();
 				let before = format!("{next:?}");
 				let actions = next.step(event.clone());
+				// The driver fixes the identity from the candidate it requests through.
+				if let Event::Selected {
+					best: Some(candidate), ..
+				} = event && actions.iter().any(|action| matches!(action, Action::Request { .. }))
+				{
+					next.identify(*candidate);
+				}
 				*sequences += 1;
 
 				// An event that changes nothing produces nothing, except letting
@@ -1244,6 +1497,13 @@ mod tests {
 				for action in &actions {
 					if let Action::Query { track, source } = action {
 						assert!(!next.tracks[track].refused.contains(source));
+					}
+				}
+				// A received capacity refusal is never forwarded: it is retried once or
+				// ends unroutable.
+				for action in &actions {
+					if let Action::End { err } | Action::Abort { err, .. } = action {
+						assert!(!(next.received && no_capacity(err)), "{event:?} forwarded {err:?}");
 					}
 				}
 				// At most one takeover per track per event.

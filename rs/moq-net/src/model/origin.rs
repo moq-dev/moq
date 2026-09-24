@@ -2,7 +2,7 @@ use crate::{broadcast, cache, stats, track};
 use kio::Pollable;
 use std::{
 	cmp::Reverse,
-	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+	collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
 	fmt,
 	sync::Arc,
 	sync::atomic::{AtomicU64, Ordering},
@@ -1803,7 +1803,9 @@ async fn run_front(task: FrontTask) {
 		*seen = watch.seen();
 		front.retain_routes(|route| table.routes.covers(&path.as_path(), route));
 		let best = table
-			.best_route(&path.as_path(), exclude, front.pin(), front.refused_routes())
+			.best_route(&path.as_path(), exclude, front.pin(), |entry| {
+				front.skips(entry.id, entry.hops.iter().next().copied())
+			})
 			.map(|entry| Candidate {
 				route: entry.id,
 				first: entry.hops.iter().next().copied(),
@@ -2666,18 +2668,25 @@ impl OriginState {
 	}
 
 	/// The best served route covering `path` (absolute) for a requester excluding
-	/// `exclude`, skipping the `refused` entry ids.
+	/// `exclude`, ignoring the entries `skip` rejects.
 	///
 	/// The most specific covering prefix wins outright, so a narrow advertise-only
 	/// announcement shadows a broad served one: requests under it resolve
 	/// unroutable instead of being routed around it. Among routes at the winning
-	/// prefix, the cheapest served one is picked by [`route_order`].
+	/// prefix, the cheapest served one `skip` admits is picked by [`route_order`];
+	/// skipping never falls through to a broader prefix.
 	///
 	/// `pin` is the front's identity: only routes it admits are candidates, since
 	/// a route from anyone else is different content rather than an alternate
 	/// path (see [`Front`]). A broadcast published on this origin outranks any
 	/// remote route at the same prefix.
-	fn best_route(&self, path: &Path, exclude: Option<Hop>, pin: Pin, refused: &HashSet<u64>) -> Option<&RouteEntry> {
+	fn best_route(
+		&self,
+		path: &Path,
+		exclude: Option<Hop>,
+		pin: Pin,
+		skip: impl Fn(&RouteEntry) -> bool,
+	) -> Option<&RouteEntry> {
 		// Covering prefixes of one path form a chain, so the deepest node with a
 		// candidate holds the unique longest prefix; walking down, the last such
 		// node decides.
@@ -2690,10 +2699,10 @@ impl OriginState {
 				.filter(|entry| entry.scope.matches(path.as_str()))
 				.filter(|entry| entry.visible_to(exclude))
 				.filter(|entry| entry.qualifies(pin))
-				.filter(|entry| !refused.contains(&entry.id))
 				.peekable();
 			if candidates.peek().is_some() {
 				best = candidates
+					.filter(|entry| !skip(entry))
 					.filter(|entry| entry.serves(path))
 					.min_by_key(|entry| (!entry.local, route_order(&entry.prefix, entry)));
 			}
@@ -3353,7 +3362,7 @@ impl Consumer {
 
 		// Nothing serves the path: no local broadcast and no served route.
 		if state
-			.best_route(&absolute.as_path(), self.exclude, Pin::Any, &HashSet::new())
+			.best_route(&absolute.as_path(), self.exclude, Pin::Any, |_| false)
 			.is_none()
 		{
 			return kio::Pending::new(Requesting::failed(Error::Unroutable));
@@ -4610,6 +4619,66 @@ mod tests {
 			let frame = group.read_frame().await.expect("read frame").expect("frame");
 			assert_eq!(&frame.payload[..], name.as_bytes());
 		}
+	}
+
+	#[tokio::test]
+	async fn capacity_refusal_reresolves_within_the_tier() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		// Routes received from peers: the cheaper worker, a spare, and a catch-all.
+		let full = producer
+			.dynamic("jobs", Route::default().with_hops(hops(&[10])).with_cost(1))
+			.unwrap();
+		let spare = producer
+			.dynamic("jobs", Route::default().with_hops(hops(&[20])).with_cost(2))
+			.unwrap();
+		let catch_all = producer.dynamic("", Route::default().with_hops(hops(&[30]))).unwrap();
+
+		let pending = consumer.request_broadcast("jobs/a");
+		queued(&full).await.reject(Error::NoCapacity);
+		let request = queued(&spare).await;
+		assert_eq!(request.path().as_str(), "jobs/a");
+		let served = broadcast::Info::new().produce();
+		request.accept(&served);
+		pending.await.expect("the spare serves it");
+
+		// Both refusing ends unroutable, never reaching the broader catch-all.
+		let pending = consumer.request_broadcast("jobs/b");
+		queued(&full).await.reject(Error::NoCapacity);
+		queued(&spare).await.reject(Error::NoCapacity);
+		let err = tokio::time::timeout(Duration::from_secs(5), pending)
+			.await
+			.expect("the front must give up, not spin")
+			.err()
+			.unwrap();
+		assert!(matches!(err, Error::Unroutable), "{err:?}");
+		assert!(
+			catch_all.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"a capacity refusal fell through to a less specific route"
+		);
+	}
+
+	#[tokio::test]
+	async fn capacity_refusal_with_no_peer_in_the_tier_is_unroutable() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let full = producer
+			.dynamic("jobs", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		let catch_all = producer.dynamic("", Route::default().with_hops(hops(&[30]))).unwrap();
+
+		let pending = consumer.request_broadcast("jobs/a");
+		queued(&full).await.reject(Error::NoCapacity);
+		let err = tokio::time::timeout(Duration::from_secs(5), pending)
+			.await
+			.expect("the front must give up, not spin")
+			.err()
+			.unwrap();
+		assert!(matches!(err, Error::Unroutable), "{err:?}");
+		assert!(
+			catch_all.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"a capacity refusal fell through to a less specific route"
+		);
 	}
 
 	#[tokio::test]
