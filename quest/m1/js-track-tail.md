@@ -39,8 +39,14 @@ Build the primitive first, which absorbs #2318's remaining work:
 
 Then the subscribers, lite and IETF:
 
-- SUBSCRIBE_END, or PublishDone, calls `finishAt`. The subscribe stream's FIN
-  no longer closes the track.
+- The declared end calls `finishAt`, and the subscribe stream's FIN no longer
+  closes the track. On moq-lite it is SUBSCRIBE_END. On IETF it depends on the
+  draft: draft-07's SUBSCRIBE_DONE carries a Final Group and Object, while on
+  drafts 14-22 PUBLISH_DONE carries no location, so the boundary comes from the
+  END_OF_TRACK object. Verify this against each draft.
+- A PublishDone whose status is an error (INTERNAL_ERROR or similar) aborts
+  the track with it; only a clean status (TRACK_ENDED or equivalent) ends it
+  cleanly.
 - Keep accepting groups below the boundary until each is accounted for:
   completed, reset, dropped via SUBSCRIBE_DROP, or covered by the stream
   count. Then end cleanly.

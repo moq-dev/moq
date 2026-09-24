@@ -32,8 +32,11 @@ remaining gap is the subscriber's bookkeeping:
   waiting once that many are accounted for, but accept a late stream below the
   boundary within the grace, so a published peer's 0 keeps working.
 
-Confirm Stream Count's meaning for the implemented IETF drafts first, as the
-JS quest does; both must agree.
+Confirm Stream Count's meaning for the implemented IETF drafts first, and
+where each draft carries the track's end (draft-07's SUBSCRIBE_DONE Final
+Group and Object, or the END_OF_TRACK object on drafts 14-22), as the JS quest
+does; both must agree. A PublishDone with an error status aborts the track
+rather than ending it cleanly.
 
 Reproduce each case before fixing it: a group header decoded after the
 subscribe stream's FIN, and a late stream after PublishDone, over the mock
