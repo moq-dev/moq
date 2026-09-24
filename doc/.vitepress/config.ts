@@ -76,6 +76,7 @@ export default defineConfig({
 						{ text: "Install", link: "/setup/install" },
 						{ text: "Development", link: "/setup/dev" },
 						{ text: "Production", link: "/setup/prod" },
+						{ text: "Upgrade", link: "/setup/upgrade" },
 						{ text: "Coding agents", link: "/setup/agent" },
 					],
 				},

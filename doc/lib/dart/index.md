@@ -55,6 +55,7 @@ final server = await Server.listen(
   ),
 );
 final live = server.createBroadcast('live/camera');
+live.announce(route: MoqRoute()); // unannounced broadcasts are invisible
 await for (final request in server.requests()) {
   final session = await request.accept();
   print(session.epoch());
@@ -62,7 +63,7 @@ await for (final request in server.requests()) {
 ```
 
 The three advertising operations: `moq.createBroadcast(path)` (or
-`origin.createBroadcast`) returns a locally discoverable producer;
+`origin.createBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.announce(route:)` / `broadcast.unannounce()` own that exact-path
 advertisement; `origin.dynamic_(prefix:, route:)` claims `prefix` and
 every path beneath it (`''` for everything; Dart spells the origin method
@@ -78,6 +79,10 @@ broadcasts. `Moq.connect` and `Server.listen` take a `ConnectOptions` /
 and `backoff:` re-paces the retries. `moq.epoch` counts the connections, 1 on the first, pairing with
 `session.status()` to log each reconnect; `maxStreams` raises the peer's
 inbound stream cap for a subscriber to many tracks.
+
+The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
+a 200 ms head start. `websocketEnabled: false` turns it off for a QUIC-only
+relay, and a `websocketDelay` `Duration` changes the head start.
 
 Types are spelled without the `Moq` prefix (`Session`, `BroadcastProducer`,
 `Backoff`); the generated names stay valid, since these are aliases rather than

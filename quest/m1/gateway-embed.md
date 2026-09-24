@@ -20,9 +20,9 @@ Additive, so on main:
   `Rendition::playlist(query)` folding the three-step playable/init/media
   dance; `master::{VideoVariant, AudioVariant, render}` public with a `uri`
   per variant (the recorder forked 160 lines of `export/master.rs` for a
-  different layout). [HLS generation](/quest/m1/hls-generation.md) lands on
-  whatever layout hook this becomes, for the DASH renderer
-  (`Broadcaster::manifest`, `export/mpd.rs`) as well.
+  different layout). The layout hook keeps the versioned media URLs,
+  `init.{hash}.mp4` and `seg/{generation}.{segment}.m4s`, for the DASH
+  renderer (`Broadcaster::manifest`, `export/mpd.rs`) as well.
 - `moq_rtmp::listen::Config.tls: Option<Arc<ServerConfig>>` meaning sniff
   and serve both on one port, and `ActivePaths` public or folded into
   `Publish::accept`.
@@ -30,7 +30,3 @@ Additive, so on main:
   and `pub use axum`; moq.pro's `default-features = false` is a no-op today.
 
 Public API: additive. Wire: none.
-
-## Related
-
-- [HLS generation](/quest/m1/hls-generation.md) - the URL hook that depends on the master layout

@@ -26,7 +26,7 @@ session while unused handles are dropped, and prove all serving stops when
 the group terminates. Wire the tests into normal or nightly CI.
 
 Public API: no further `moq-tokio` ownership change. The prerequisite may
-change `moq-sock`'s 0.0.x API. Wire: no format change. Close #2964 only when
+change `moq-sock`'s 0.1.x API. Wire: no format change. Close #2964 only when
 both the dev ownership proof and this integration are complete.
 
 ## Closes
