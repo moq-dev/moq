@@ -1,4 +1,4 @@
-# [M] moq export ts: the interleave is a function of the media, not of arrival
+# [M] moq export ts: the interleave and SI placement are a function of the media, not of arrival
 
 ## Goal
 
@@ -10,7 +10,10 @@ tracks that *currently hold* a frame, so when audio for `t` has not arrived
 but video for `t+1` has, video goes first, and which frame leads is a
 property of when bytes reached that process. Measured in #2829: 4.4 % of
 slots differ between two legs started at the same instant, on multi-track
-content, after #2825 fixed the table cadence.
+content, after #2825 fixed the table cadence. Unchanged SDT and NIT repeats
+land on the same instants in both legs too: today their cadence counts from
+the first frame each exporter muxed, so two legs that joined at different
+moments never agree (#3948).
 
 ## Plan
 
@@ -33,6 +36,11 @@ the operator's existing knob.
 - A discontinuity on one track still drains the in-hand tail under the old
   generation first (the existing `emit(None)` arm) before the watermark
   applies to the new one.
+- SI: `si_due` measures from each entry's own `last_emit`, so the phase is
+  the exporter's start. Put unchanged repeats on the absolute media-time grid
+  `due` already gives PAT and PMT; a revised snapshot keeps its prompt path,
+  since a grid boundary right after a revision re-sends a stale table (#2934).
+  TDT/TOT may need the revision path only.
 - `doc/bin/cli.md`: the `export --max-age` line says it also bounds how long
   the muxer holds a leading track for a lagging one.
 
@@ -40,7 +48,10 @@ Tests, in `export_test.rs`: audio for `t` arriving after video for `t+1`
 still emits audio first; a track that never delivers past `max-age` is
 emitted around and the order resumes once it catches up; two exporters fed
 the same frames in different arrival orders produce byte-identical output on
-the multi-track fixture; `max-age` zero keeps today's arrival order.
+the multi-track fixture; `max-age` zero keeps today's arrival order; two
+exporters started at different offsets emit unchanged SDT at the same media
+times. #3947 adds `just test ts --pair` with a cross-leg table grader; land or
+adopt it as the end-to-end check.
 
 Continuity counters are out of scope: a late-joining exporter cannot know
 the packet count of every earlier group, so per-process counters stay
@@ -49,3 +60,4 @@ the packet count of every earlier group, so per-process counters stay
 ## Closes
 
 - [#2829](https://github.com/moq-dev/moq/issues/2829) - close this issue when the quest finishes
+- [#3948](https://github.com/moq-dev/moq/issues/3948) - close this issue when the quest finishes

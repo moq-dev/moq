@@ -3,10 +3,11 @@
 ## Goal
 
 The first release from the merged tree is the one moq.pro pins: every
-binding matches the moq-ffi surface it exposes, an upgrade page walks a
+binding's docs match the surface it exposes, an upgrade page walks a
 consumer from the last main release to this one, and the merged relay has
 run on staging long enough that the origin and HLS rewrites are trusted.
-Binding parity gates this release, not the merge.
+The binding restructure in [FFI shape](/quest/m1/ffi-shape/README.md)
+follows this release rather than riding it.
 
 ## Plan
 
@@ -86,6 +87,5 @@ Public API: none beyond the required quests. Wire: none.
 
 ## Required
 
-- [Binding parity](/quest/m0/binding-parity.md) - every wrapper reaches every moq-ffi method
 - [Binding docs](/quest/m1/binding-docs.md) - the binding pages compile against the wrappers
 - The merged relay has soaked on moq.pro staging and the maintainer has signed it off

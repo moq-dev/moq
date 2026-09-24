@@ -28,7 +28,3 @@ here.
   page load), so a gesture is not something the capture can assume already happened.
 - Drop the workaround in `test/smoke/clients/js/src/fixture.ts` and let the harness assert the
   behavior instead.
-
-## Related
-
-- [Browser permission QA](/quest/m1/browser-permission-qa.md) - the other publisher path that runs without a gesture

@@ -72,29 +72,13 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      # workflow_run is chained after Release Py FFI, so its tag is published.
       - name: Gate on published FFI
         id: ffi-gate
+        if: github.event_name == 'push'
         env:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
-        run: |
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
-            echo "Release Py FFI completed for v${FFI_VERSION}; proceeding."
-            echo "unreleased=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          TAG="moq-ffi-v${FFI_VERSION}"
-          if ! git rev-parse --verify --quiet "refs/tags/${TAG}" >/dev/null; then
-            echo "::warning::missing local tag ${TAG}; deferring to the Release Py FFI chain."
-            echo "unreleased=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if ! git diff --quiet "$TAG" HEAD -- rs/moq-ffi; then
-            echo "::warning::moq-ffi has unreleased changes; deferring to the Release Py FFI chain."
-            echo "unreleased=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "unreleased=false" >> "$GITHUB_OUTPUT"
-          fi
+        run: .github/scripts/release.sh ffi-unreleased "$FFI_VERSION"
 
       - name: Check FFI on PyPI
         id: ffi-pypi

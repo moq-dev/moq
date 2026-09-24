@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import { Group, Error as NetError, Track } from "@moq/net";
+import * as z from "@zod/mini";
+import { Desync } from "../error.ts";
 import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
@@ -182,4 +184,19 @@ test("a failed write on the very first record still ends the track", async () =>
 	const group = await subscriber.nextGroup();
 	expect(group).toBeDefined();
 	await expect(group?.readFrame()).rejects.toThrow(NetError.FrameTooLarge);
+});
+
+test("stream schema validates on both sides", () => {
+	const schema = z.object({ n: z.number() });
+	const encoder = new Encoder<Rec>({ schema });
+	const decoder = new Decoder<Rec>({ schema });
+	expect(() => encoder.encode({ n: "bad" } as unknown as Rec)).toThrow();
+	expect(decoder.decode(encoder.encode({ n: 1 }).payload)).toEqual({ n: 1 });
+	expect(() => decoder.decode(new TextEncoder().encode('{"n":"bad"}'))).toThrow();
+});
+
+test("a lost compressed stream frame has a typed error", () => {
+	const encoder = new Encoder<Rec>({ compression: "deflate" });
+	encoder.encode({ n: 1 });
+	expect(() => encoder.encode({ n: 2 })).toThrow(Desync);
 });

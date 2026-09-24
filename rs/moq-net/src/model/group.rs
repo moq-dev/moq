@@ -803,6 +803,11 @@ impl Producer {
 		self.alive.aborted.load(Ordering::Acquire)
 	}
 
+	/// Whether the group was finished: it holds every frame it will ever have.
+	pub(crate) fn is_finished(&self) -> bool {
+		self.state.read().fin.is_some()
+	}
+
 	/// The index of the first frame this group still holds, or `None` once it has been
 	/// aborted. Non-zero when the group started later (see [`Self::start_at`]); a reader
 	/// positioned below it is [`Error::Lagged`].

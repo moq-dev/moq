@@ -110,11 +110,18 @@ Each run covers, against a real local relay:
 - **cold start** - the publisher reports when it is announced and encoding, then
   a fresh page joins. No reload, unlike the matrix driver: a subscriber that
   needs a second page load is an initialization bug, not a race.
-- **user gesture** - launched with no Chromium flags at all: no fake camera, no
-  fake permission prompt, no autoplay override. Both pages are clicked and both
-  must carry audio afterwards. The run does not assert silence beforehand:
-  Chromium enforces the gate on the fixture page and has been seen not enforcing
-  it on the player's, so that assertion would measure the browser.
+- **user gesture** - Chromium is launched with
+  `--autoplay-policy=document-user-activation-required`, which applies to
+  top-level Web Audio contexts. The fixture and player graphs must be suspended
+  before either page is clicked, then both must carry audio afterwards. Harness
+  state probes use CDP with `userGesture: false`: Playwright's usual page reads
+  themselves grant activation and would invalidate this assertion.
+- **capture permission** - the camera case uses a fake device for deterministic
+  input, while Playwright denies and then grants permissions. Both source errors
+  must be visible; neither a full nor a microphone-only denial may announce a
+  broadcast. Granting both permissions must recover and encode without reload.
+  The fake device is not physical hardware, and the headless permission decision
+  is not a person clicking a browser prompt.
 - **pause and resume**, **unsubscribe and rejoin**, **detach and reattach**,
   **publisher stop and same-path republish**, and **late join**.
 - **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
@@ -141,9 +148,8 @@ The leaked-session control waits for an extra `AudioContext` rather than an extr
 session: every player on one relay URL shares a transport, so a session count
 cannot move.
 
-Not covered yet: other browser engines (the capability probe is the groundwork),
-camera/microphone permission denial, asserting the gesture gate rather than only
-exercising it, and any claim about physical playback.
+Not covered yet: other browser engines (the capability probe is the groundwork)
+and any claim about physical playback.
 
 The relay's port is reserved for the run rather than fixed, so two checkouts can
 smoke-test at once; `SMOKE_PORT` pins one instead. A failing run keeps its

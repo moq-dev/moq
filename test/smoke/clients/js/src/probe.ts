@@ -126,6 +126,9 @@ export function attach(el: MoqWatch): () => void {
 
 		const state: Sample = {
 			seq: seq++,
+			broadcastActive: el.broadcast.out.active.peek() !== undefined,
+			broadcastStatus: el.broadcast.out.status.peek(),
+			userActivated: navigator.userActivation.hasBeenActive,
 			at: performance.now(),
 			...readCanvas(el.querySelector("canvas")),
 			videoFrames: el.video.out.stats.peek()?.frameCount ?? 0,

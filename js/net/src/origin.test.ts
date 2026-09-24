@@ -3,7 +3,7 @@ import { getter } from "@moq/signals";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { Route } from "./hop.ts";
-import type { Consumer } from "./origin.ts";
+import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { wireOf } from "./wire.ts";
@@ -53,6 +53,103 @@ async function routed(consumer: Consumer, path: Path.Valid): Promise<BroadcastCo
 function provider(producer: BroadcastProducer) {
 	return () => producer.consume();
 }
+
+test("a borrowed table exposes dynamic serving and a live scoped broadcast map", async () => {
+	const origin = new Producer();
+	const table: Table = origin;
+	const scope = Path.Pattern.parse("room/**");
+	const live = table.broadcasts(scope);
+	const changes: ReadonlyMap<Path.Valid, Route>[] = [];
+	const stop = live.subscribe((value) => changes.push(value));
+	expect(live.peek().size).toBe(0);
+
+	const other = table.createBroadcast(Path.from("other"));
+	const localPath = Path.from("room/alice");
+	const local = table.createBroadcast(localPath);
+	expect(live.peek().get(localPath)).toEqual(Route.default);
+	expect(live.peek().has(Path.from("other"))).toBe(false);
+
+	local.announce({ cost: 4n });
+	await settle();
+	expect(live.peek().get(localPath)).toEqual(Route.normalize({ cost: 4n }));
+	expect(changes.some((value) => value.get(localPath)?.cost.warm === 4n)).toBe(true);
+
+	const prefix = Path.from("room");
+	const dynamic = table.dynamic(prefix, { cost: 2n });
+	expect(live.peek().get(prefix)).toEqual(Route.normalize({ cost: 2n }));
+	dynamic.update({ cost: 3n });
+	await settle();
+	expect(live.peek().get(prefix)).toEqual(Route.normalize({ cost: 3n }));
+
+	dynamic.close();
+	local.close();
+	other.close();
+	await settle();
+	expect(live.peek().size).toBe(0);
+	stop();
+	origin.close();
+});
+
+test("unscoped broadcast getters share one fresh snapshot per mutation", () => {
+	const origin = new Producer();
+	const first = origin.broadcasts();
+	const second = origin.consume().broadcasts();
+	const empty = first.peek();
+	expect(second.peek()).toBe(empty);
+
+	const path = Path.from("room/alice");
+	const handle = origin.dynamic(path, { cost: 1n });
+	const added = second.peek();
+	expect(added).not.toBe(empty);
+	expect(first.peek()).toBe(added);
+	expect(added.get(path)).toEqual(Route.normalize({ cost: 1n }));
+
+	handle.update({ cost: 2n });
+	const repriced = first.peek();
+	expect(repriced).not.toBe(added);
+	expect(second.peek()).toBe(repriced);
+	expect(repriced.get(path)).toEqual(Route.normalize({ cost: 2n }));
+
+	handle.close();
+	origin.close();
+});
+
+test("broadcast map gives local paths precedence over received routes", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("room/alice");
+	const remote = wireOf(origin).receive(path, { cost: 5n });
+	const live = consumer.broadcasts();
+	expect(live.peek().get(path)).toEqual(Route.normalize({ cost: 5n }));
+
+	const local = origin.createBroadcast(path);
+	expect(live.peek().get(path)).toEqual(Route.default);
+	local.close();
+	await settle();
+	expect(live.peek().get(path)).toEqual(Route.normalize({ cost: 5n }));
+
+	remote.close();
+	await settle();
+	expect(live.peek().size).toBe(0);
+	origin.close();
+	expect(live.peek().size).toBe(0);
+});
+
+test("a scoped route remains visible when an exact local path is outside the scope", () => {
+	const origin = new Producer();
+	const path = Path.from("room");
+	const remote = wireOf(origin).receive(path, { cost: 5n });
+	const local = origin.createBroadcast(path);
+	const scope = Path.Pattern.parse("room/*");
+	const live = origin.broadcasts(scope);
+
+	expect(origin.broadcasts().peek().get(path)).toEqual(Route.default);
+	expect(live.peek().get(path)).toEqual(Route.normalize({ cost: 5n }));
+
+	local.close();
+	remote.close();
+	origin.close();
+});
 
 test("a published broadcast resolves by path", async () => {
 	const origin = new Producer();

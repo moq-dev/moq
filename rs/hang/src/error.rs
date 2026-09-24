@@ -13,6 +13,14 @@ pub enum Error {
 	#[error("json error: {0}")]
 	Json(String),
 
+	/// A catalog has more media renditions than a consumer will hold.
+	#[error("catalog has {count} renditions, over the limit of {max}")]
+	TooManyRenditions { count: usize, max: usize },
+
+	/// A catalog broadcast reference escapes its root.
+	#[error("catalog broadcast reference escapes the root: {0}")]
+	EscapingBroadcast(String),
+
 	/// The specified codec is invalid or malformed.
 	#[error("invalid codec")]
 	InvalidCodec,

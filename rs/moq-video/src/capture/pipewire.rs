@@ -1980,8 +1980,8 @@ mod tests {
 				.await
 				.unwrap_or_else(|error| panic!("read frame {i}: {error}"))
 				.unwrap_or_else(|| panic!("no frame {i}"));
-			assert_eq!(frame.width(), stream.width());
-			assert_eq!(frame.height(), stream.height());
+			assert_eq!(frame.surface.width(), stream.width());
+			assert_eq!(frame.surface.height(), stream.height());
 		}
 		eprintln!("captured 5 frames at {}x{}", stream.width(), stream.height());
 	}
