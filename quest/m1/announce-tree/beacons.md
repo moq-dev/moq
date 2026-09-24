@@ -18,9 +18,9 @@ missing, so an operator can see weak spots in the mesh.
   peer never becomes anyone's parent. Drive the hold from tokio time so tests
   pause it.
 - For each source `S` (the beacon's hop), derive:
-  - the tie set `U_S`: neighbours whose beacon routes tie for best under
-    [rendezvous ranking](/quest/m1/announce-tree/route-order.md), down to its
-    hash keys;
+  - the tie set `U_S`: neighbours whose beacon routes tie for best on
+    every key of [rendezvous ranking](/quest/m1/announce-tree/route-order.md)
+    before its hash keys;
   - for each member `u`, the backup `b_u`: the best standby whose chain avoids
     `u`, else the best on a session other than `u`'s, else none, with which
     kind it is. When `u` is `S` itself, only link protection is possible.
