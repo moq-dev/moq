@@ -22,9 +22,11 @@ remaining gap is the subscriber's bookkeeping:
   `Error::Cancel` (`ietf/subscriber.rs`, `Alias::Retired`). Retire it only
   once the streams are accounted for or the grace expires.
 - Grace: a group reset before its header arrived can never be accounted for,
-  so give up after the subscription's effective `max_age` and end cleanly,
-  skipping the missing group as stale. The reliable-reset quest removes this
-  wait once headers survive a reset.
+  so give up after the same grace as the JS quest and end cleanly, skipping
+  the missing group as stale: the effective `max_age` as a wall-clock stopgap
+  on moq-lite (with a fallback when none is set), and a bounded wall-clock
+  wait on IETF. The reliable-reset quest removes both.
+- Only stream-delivered groups are waited for; datagrams are never.
 - IETF publisher: send the real number of data streams opened in PublishDone
   instead of `stream_count: 0`. On receipt, treat the count as a hint: stop
   waiting once that many are accounted for, but accept a late stream below the
@@ -43,4 +45,4 @@ in flight.
 
 - [JS track tail](/quest/m1/js-track-tail.md) - the same rule in `@moq/net`
 - [Session death error](/quest/m1/session-death-error.md) - tracks ending wrong when the session dies
-- [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - removes the `max_age` grace
+- [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - removes the grace

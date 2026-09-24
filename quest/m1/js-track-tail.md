@@ -2,8 +2,8 @@
 
 ## Goal
 
-A `@moq/net` subscriber delivers every group of a track up to the publisher's
-declared end, over moq-lite and IETF alike, then ends cleanly. A group cut off
+A `@moq/net` subscriber delivers every stream-delivered group of a track up to
+the publisher's declared end, over moq-lite and IETF alike, then ends cleanly. A group cut off
 mid-read is never presented as complete. JS publishers finish their group
 streams before they end a subscription, as the drafts require. A browser
 publisher can also declare a track's end ahead of the live edge, and a browser
@@ -45,10 +45,24 @@ Then the subscribers, lite and IETF:
   completed, reset, dropped via SUBSCRIBE_DROP, or covered by the stream
   count. Then end cleanly.
 - A group reset before its header arrived can never be accounted for, so
-  after the boundary is known, give up on missing groups after the
-  subscription's effective `max_age` (the smaller of the subscriber's and the
-  track's) and end cleanly. The group is skipped like any stale group. The
-  reliable-reset quest removes this wait once group headers survive a reset.
+  after the boundary is known the subscriber gives up on missing groups after
+  a grace, then ends cleanly, skipping them like any stale group:
+  - moq-lite: the subscription's effective `max_age` (the smaller of the
+    subscriber's and the track's), used as a wall-clock duration. This is the
+    wrong clock on purpose, as a stopgap: `max_age` measures presentation-time
+    drift and elsewhere never adds wall-clock delay. Define a fallback for a
+    subscription and track with no `max_age`, since a zero grace reintroduces
+    the race. The correct fix is the publisher sending SUBSCRIBE_DROP for
+    every group it reset or never finished, which accounts for every group
+    with no timer; reliable reset is probably better still.
+  - IETF: a bounded wall-clock wait, since moq-transport has no per-group drop
+    and itself says subscribers SHOULD use a timeout here. Settle its value.
+  - The reliable-reset quest removes both waits once a reset group stream
+    keeps its header.
+- The complete-tail guarantee covers groups delivered on streams only.
+  Datagrams are unreliable by design and a lost one leaves no signal, so the
+  subscriber never waits for a datagram-delivered sequence, and a
+  datagram-only subscription ends at the boundary at once.
 - A group ends on its own stream's FIN or reset, never because its track
   ended. A reset aborts the group.
 
@@ -85,4 +99,4 @@ and to stream_count follows the published drafts, which already required it.
 
 - [Rust track tail](/quest/m1/rust-track-tail.md) - the same rule in moq-net, so local and remote readers match
 - [Session death error](/quest/m1/session-death-error.md) - the other way a JS track ends wrong: cleanly instead of with the error
-- [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - removes the `max_age` grace once a reset group stream keeps its header
+- [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - removes the grace once a reset group stream keeps its header
