@@ -17,6 +17,10 @@
 //! these models cover the kio handoff every handle is built on, not every
 //! critical section moq-net owns.
 //!
+//! Unlike kio's own models, these are bounded (see [`model`]): each one composes
+//! dozens of kio operations, so an exhaustive search grows exponentially with every
+//! lock or refcount the model layer adds to a path.
+//!
 //! Run with `just rs loom`; the whole file compiles away without `cfg(loom)`.
 #![cfg(loom)]
 
@@ -24,14 +28,28 @@ use bytes::Bytes;
 use loom::{future::block_on, thread};
 use moq_net::{Error, Timestamp, broadcast, cache};
 
+/// Preemptions per execution unless `LOOM_MAX_PREEMPTIONS` overrides it. Loom's own
+/// guidance is that 2 or 3 catches most bugs, and each extra level multiplies the
+/// search several times over. Unbounded, `back_to_back_groups_arrive_in_order` no
+/// longer finishes within an hour.
+const PREEMPTION_BOUND: usize = 3;
+
+/// [`loom::model`] with a preemption bound, so the search stays polynomial in the
+/// number of operations on a path rather than exponential.
+fn model<F: Fn() + Sync + Send + 'static>(f: F) {
+	let mut builder = loom::model::Builder::new();
+	builder.preemption_bound.get_or_insert(PREEMPTION_BOUND);
+	builder.check(f);
+}
+
 /// A frame written on the publisher thread must reach a subscriber parked on
 /// `next_frame`, however the write interleaves with the reader's parking.
 #[test]
 fn frame_reaches_a_parked_subscriber() {
-	loom::model(|| {
-		let mut broadcast = broadcast::Info::new().produce();
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut track = broadcast.create_track("video", None).expect("create track");
+		let track = broadcast.create_track("video", None).expect("create track");
 		let track_consumer = consumer.track("video").expect("track");
 
 		let publisher = thread::spawn(move || {
@@ -59,15 +77,15 @@ fn frame_reaches_a_parked_subscriber() {
 /// the lock while group 2 is already being written.
 #[test]
 fn back_to_back_groups_arrive_in_order() {
-	loom::model(|| {
-		let mut broadcast = broadcast::Info::new().produce();
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut track = broadcast.create_track("video", None).expect("create track");
+		let track = broadcast.create_track("video", None).expect("create track");
 		let track_consumer = consumer.track("video").expect("track");
 
 		let publisher = thread::spawn(move || {
 			for _ in 0..2 {
-				let mut group = track.append_group().expect("append group");
+				let group = track.append_group().expect("append group");
 				group.finish().expect("finish group");
 			}
 			track.finish().expect("finish track");
@@ -100,9 +118,9 @@ fn back_to_back_groups_arrive_in_order() {
 /// store escaping the guard entirely.
 #[test]
 fn group_abort_flag_never_leads_the_group_state() {
-	loom::model(|| {
-		let mut broadcast = broadcast::Info::new().produce();
-		let mut track = broadcast.create_track("video", None).expect("create track");
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track("video", None).expect("create track");
 		let group = track.append_group().expect("append group");
 		let mut before = track.subscribe(None);
 		let mut racing = track.subscribe(None);
@@ -147,8 +165,8 @@ fn group_abort_flag_never_leads_the_group_state() {
 /// appearing on another thread must always wake it.
 #[test]
 fn subscriber_wakes_parked_demand() {
-	loom::model(|| {
-		let mut broadcast = broadcast::Info::new().produce();
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).expect("create track");
 		let demand = track.demand();
@@ -176,19 +194,19 @@ fn subscriber_wakes_parked_demand() {
 /// the pool's own counters would need those swapped for loom's atomics too.
 #[test]
 fn concurrent_tracks_drain_a_shared_pool() {
-	loom::model(|| {
+	model(|| {
 		let config = cache::Config::default()
 			.with_capacity(512)
 			.with_expiry(cache::DEFAULT_EXPIRY);
 		let pool = cache::Pool::new(config);
 		let mut info = broadcast::Info::new();
 		info.pool = pool.clone();
-		let mut broadcast = info.produce();
+		let broadcast = info.produce();
 
 		let handles: Vec<_> = ["video", "audio"]
 			.into_iter()
 			.map(|name| {
-				let mut track = broadcast.create_track(name, None).expect("create track");
+				let track = broadcast.create_track(name, None).expect("create track");
 				thread::spawn(move || {
 					let mut group = track.append_group().expect("append group");
 					group
@@ -221,8 +239,8 @@ fn concurrent_tracks_drain_a_shared_pool() {
 /// subscribe resolving `Err` on a handle the broadcast just gave out.
 #[test]
 fn an_idle_teardown_never_cancels_a_returning_viewer() {
-	loom::model(|| {
-		let mut broadcast = broadcast::Info::new().produce();
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		// Nothing is consuming it, which is the wake the teardown acts on.
 		let track = broadcast.create_track("video", None).expect("create track");
@@ -259,8 +277,8 @@ fn an_idle_teardown_never_cancels_a_returning_viewer() {
 /// than leaving it waiting for a group that will never come.
 #[test]
 fn publisher_drop_resolves_a_parked_subscriber() {
-	loom::model(|| {
-		let mut broadcast = broadcast::Info::new().produce();
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).expect("create track");
 		let track_consumer = consumer.track("video").expect("track");

@@ -864,8 +864,10 @@ doctest *args:
 # Our assertions are plain `assert!`, not `debug_assert!`, so nothing is
 # compiled out (verified by re-running the mutation check in release).
 #
-# The search is deliberately unbounded (no `preemption_bound`), so it covers
-# every interleaving rather than just the short ones.
+# kio's models search every interleaving. moq-net's compose far more operations
+# per path, so they cap preemptions (see `tests/loom.rs`) to stop the search
+# growing exponentially with each lock the model layer adds. Set
+# `LOOM_MAX_PREEMPTIONS` to search deeper.
 #
 # kio's own unit tests are `cfg(not(loom))`: they'd construct loom primitives
 # outside `loom::model`, which panics.

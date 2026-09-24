@@ -292,7 +292,10 @@ mod tests {
 		hd.codec = "avc1\"\n#EXT-X-ENDLIST".into();
 		hd.uri = "#EXT-X-ENDLIST".into();
 		let out = render(&[hd], &[]);
-		assert!(out.contains("CODECS=\"avc1%22%0A#EXT-X-ENDLIST\"\n%23EXT-X-ENDLIST\n"), "{out}");
+		assert!(
+			out.contains("CODECS=\"avc1%22%0A#EXT-X-ENDLIST\"\n%23EXT-X-ENDLIST\n"),
+			"{out}"
+		);
 		assert!(!out.contains("\n#EXT-X-ENDLIST"), "{out}");
 
 		let mut main = audio("main", 128_000, "opus\"\n#EXT-X-ENDLIST");
