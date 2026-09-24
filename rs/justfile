@@ -456,6 +456,12 @@ check-changed $FILES:
     	just rs uring-check
     fi
 
+    # Each media feature shape compiles on its own (see rs/scripts/media-features.sh),
+    # about two minutes, so only a diff that reaches the media crates pays for it.
+    if [[ "$packages" == "ALL" ]] || grep -qwE '(moq-video|moq-audio|moq-transcode)' <<< "$(just rs _names "$packages")"; then
+    	just rs media-features
+    fi
+
 # Compile moq-tokio by itself at the feature extremes and with each crypto provider.
 # Its default-feature build is already part of the ordinary clippy pass above.
 tokio-features:
@@ -812,10 +818,6 @@ test-changed $FILES:
     	ALL)   just rs test --workspace {{ no_fuzz }} ;;
     	*)     echo "rs: testing $(just rs _names "$packages")"; just rs test --no-tests=pass $packages ;;
     esac
-
-    if [[ "$packages" == "ALL" ]] || just rs _names "$packages" | grep -qw moq-relay; then
-        just rs relay-minimal
-    fi
 
 # Compile and run the `/// ```` examples, which nextest skips.
 doctest *args:

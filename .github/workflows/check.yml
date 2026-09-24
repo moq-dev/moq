@@ -81,9 +81,6 @@ jobs:
         env:
           MOQ_STRICT: 1
 
-      - name: Media feature contracts
-        run: nix develop --command just rs media-features
-
   test:
     name: Test
     if: github.event.action != 'closed'
