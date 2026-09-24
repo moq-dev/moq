@@ -1187,7 +1187,7 @@ impl Session {
 		let resolved = inner.resolve(&path);
 		Scope {
 			session: self.clone(),
-			resolved: Some(Mutex::new(resolved)),
+			resolved: Some(Box::new(Mutex::new(resolved))),
 			side,
 			path,
 		}
@@ -1344,8 +1344,8 @@ pub(crate) struct Scope {
 	session: Session,
 	/// The counters for `(path, tier)`, re-resolved when the session changes tier.
 	/// Per clone, so tracks sharing a broadcast never contend on the per-group path;
-	/// `None` for the no-op context.
-	resolved: Option<Mutex<Resolved>>,
+	/// boxed to keep every track handle small. `None` for the no-op context.
+	resolved: Option<Box<Mutex<Resolved>>>,
 	side: Side,
 	/// Absolute broadcast path, used to key the viewer refcount and as the
 	/// `announced_bytes` length.
@@ -1367,7 +1367,7 @@ impl Clone for Scope {
 			resolved: self
 				.resolved
 				.as_ref()
-				.map(|r| Mutex::new(r.lock().expect("stats scope poisoned").clone())),
+				.map(|r| Box::new(Mutex::new(r.lock().expect("stats scope poisoned").clone()))),
 			side: self.side,
 			path: self.path.clone(),
 		}
