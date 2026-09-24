@@ -18,14 +18,6 @@ author:
 
 normative:
   moqt: I-D.ietf-moq-transport
-  I-D.lcurley-moq-pattern:
-    title: "MoQ Pattern Extension"
-    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-pattern/
-    author:
-      -
-        ins: L. Curley
-        name: Luke Curley
-    date: false
   qmux: I-D.ietf-quic-qmux
   qmuxws:
     title: "QMux over WebSocket"
@@ -40,6 +32,14 @@ normative:
   RFC9002:
 
 informative:
+  I-D.lcurley-moq-cluster:
+    title: "MoQ Cluster Extension"
+    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-cluster/
+    author:
+      -
+        ins: L. Curley
+        name: Luke Curley
+    date: false
 
 --- abstract
 
@@ -312,7 +312,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x12  | MALFORMED_TRACK | The track's content could not be parsed. |
 | ------- | ------------- | ----------- |
-|  0x30  | NO_CAPACITY | The publisher could serve this request but has no capacity for it now. Permits one re-resolution (see [Resolution](#resolution)); elsewhere it is terminal like any refusal. Bridges to NO_CAPACITY in {{I-D.lcurley-moq-pattern}}. |
+|  0x30  | NO_CAPACITY | The publisher could serve this request but has no capacity for it now. Permits one re-resolution (see [Resolution](#resolution)); elsewhere it is terminal like any refusal. Bridges to NO_CAPACITY in {{I-D.lcurley-moq-cluster}}. |
 | ------- | ------------- | ----------- |
 |  0x31  | CONTROL_TIMEOUT | The peer took too long to answer a control request. Distinct from DELIVERY_TIMEOUT, which is content that missed its deadline; it has no moq-transport value and bridges to INTERNAL_ERROR. |
 | ------- | ------------- | ----------- |

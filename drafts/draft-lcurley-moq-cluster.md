@@ -18,14 +18,6 @@ author:
 
 normative:
   moqt: I-D.ietf-moq-transport
-  I-D.lcurley-moq-pattern:
-    title: "MoQ Pattern Extension"
-    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-pattern/
-    author:
-      -
-        ins: L. Curley
-        name: Luke Curley
-    date: false
 
 informative:
 
@@ -160,7 +152,7 @@ An endpoint MUST NOT append the block when nothing negotiated it, and MUST NOT i
 NAMESPACE_DONE ({{moqt}} Section 10.17) carries no state from this extension.
 
 An advertisement claims capability, not inventory: namespaces beneath the advertised one can be served, not that any exists.
-Per-request refusals follow {{I-D.lcurley-moq-pattern}}.
+A publisher that serves only some of them advertises the covering namespace and refuses the requests it will not serve ({{selection}}).
 
 ## HOP_PATH Parameter {#hop-path}
 HOP_PATH is the ordered list of Hop IDs an advertisement has passed through, from the original publisher to the peer sending it:
@@ -243,13 +235,17 @@ The expected update is a ROUTE_COST change, which is how a relay signals that it
 
 
 # Path Selection {#selection}
-A receiver resolving a request consults only the most specific advertisements covering it: the longest prefix.
+A receiver resolving a SUBSCRIBE, FETCH, or track-status request consults only the most specific advertisements covering it: the longest prefix.
+A refusal never falls through to a less specific tier.
 
 Within that tier, a receiver SHOULD prefer a HOP_PATH that contains no 0 entry over one that does, then the lowest ROUTE_COST, breaking ties toward the shorter HOP_PATH and then toward the most recently received.
 This is advisory: a receiver MAY apply local policy, such as measured RTT, instead.
 
-NO_CAPACITY and its single re-resolution are defined by {{I-D.lcurley-moq-pattern}}.
-Excluding the refusing advertiser excludes every route with its non-zero first Hop ID, or its session when that ID is 0.
+NO_CAPACITY ({{iana}}) refuses a request the publisher could serve but has no capacity for now.
+It permits ONE re-resolution within the same tier, excluding the refusing advertiser: every route with its non-zero first Hop ID, or its session when that ID is 0.
+A receiver that has spent its retry, or has no other candidate, MUST refuse downstream with a code other than NO_CAPACITY, so retries cannot compound hop by hop.
+Every other refusal, including an unrecognized code, is terminal.
+A receiver SHOULD NOT cache refusals.
 
 Two advertisements whose HOP_PATH begins with the same non-zero Hop ID come from the same publisher and carry interchangeable content: a receiver MAY hold them as redundant paths and fail an active subscription over to the survivor at a group boundary.
 If the first entries differ, or either is 0, they are distinct publishers reusing a namespace ({{publishers}}).
@@ -284,10 +280,12 @@ Because a relay only appends to HOP_PATH, it cannot make a competing path look s
 ROUTE_COST has no such protection: it is a single value the sender chooses, so a relay can advertise 0 for content it is not carrying and attract subscriptions it then has to fetch.
 Both cost only a suboptimal path choice, and the latter is self-limiting, since the traffic won this way must then be served.
 
+Implementations SHOULD bound the work started by requests beneath a broad advertisement, using NO_CAPACITY when capacity is exhausted.
+
 A receiver MUST NOT make security decisions based on Hop IDs, and a deployment spanning a trust boundary SHOULD treat a peer's ROUTE_COST as a hint to clamp or ignore rather than an accounting figure.
 
 
-# IANA Considerations
+# IANA Considerations {#iana}
 
 This document requests the following registrations.
 High, distinctive values are requested to avoid the low ranges reserved by {{moqt}} and to minimize collisions with provisional registrations by other extensions.
@@ -313,10 +311,21 @@ Both are carried in PUBLISH_NAMESPACE, in REQUEST_UPDATE of a PUBLISH_NAMESPACE 
 
 The Key-Value-Pair parity is load-bearing: HOP_PATH is odd, so its value is a length-prefixed byte string, while HOP_ID, RELAY_COST, and ROUTE_COST are even, so their values are bare varints.
 
+## MOQT Error Codes
+
+This document requests one registration in the "REQUEST_ERROR Codes" registry.
+
+| Value   | Name        | Reference     |
+|:--------|:------------|:--------------|
+| 0x40B5A | NO_CAPACITY | This Document |
+
 
 --- back
 
 # Appendix A: Changelog
+
+## moq-cluster-02
+- Defined request resolution against the longest covering prefix and the NO_CAPACITY refusal with its single re-resolution.
 
 ## moq-cluster-01
 - Assigned identities are local selection state and MUST NOT be forwarded.
@@ -326,4 +335,4 @@ The Key-Value-Pair parity is load-bearing: HOP_PATH is odd, so its value is a le
 - A PUBLISH_NAMESPACE is updated with REQUEST_UPDATE on its request stream instead of a repeated PUBLISH_NAMESPACE; HOP_PATH and ROUTE_COST are registered for REQUEST_UPDATE. A NAMESPACE is still re-sent on its stream.
 - A session advertises a namespace at most once and a subscription is served from one source at a time. A receiver chooses among several publishers of one namespace; moving between them is a discontinuity unless they share a Hop ID.
 - Named the routing protocols whose single per-direction metric RELAY_COST follows.
-- Path selection consults the most specific advertisement first, the longest prefix; an advertisement is always a prefix, and a request beneath it that the advertiser will not serve is refused ({{I-D.lcurley-moq-pattern}}). Standby seeds are bounded by deployment limits.
+- Path selection consults the most specific advertisement first, the longest prefix; an advertisement is always a prefix, and a request beneath it that the advertiser will not serve is refused. Standby seeds are bounded by deployment limits.
