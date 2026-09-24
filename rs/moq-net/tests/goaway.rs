@@ -443,13 +443,12 @@ async fn goaway_drains_routes(version: Version) {
 		// re-prices the route in place, which arrives as another active update.
 		let mut announced = sub.announced();
 		loop {
-			let moq_net::announce::Event::Update(update) = announced.next().await.expect("update") else {
+			let (moq_net::announce::Event::Announced(update) | moq_net::announce::Event::Updated(update)) =
+				announced.next().await.expect("update")
+			else {
 				continue;
 			};
-			if update.kind.is_active()
-				&& update.prefix.as_str() == "test"
-				&& update.route.cost == moq_net::origin::Cost::DRAIN
-			{
+			if update.prefix.as_str() == "test" && update.route.cost == moq_net::origin::Cost::DRAIN {
 				break;
 			}
 		}

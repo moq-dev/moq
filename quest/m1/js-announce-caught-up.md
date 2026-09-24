@@ -8,7 +8,8 @@ broadcasts" instead of a spinner that never resolves.
 
 ## Plan
 
-Mirror the Rust shape (`announce::Event` is `Update(Update)` or `Live`), its
+Mirror the Rust shape (one flat `announce::Event`: `Announced`, `Updated`,
+`Retracted`, each holding an `Announce`, or `Live`), its
 per-source guards (a session holds one per announce stream until the count,
 ANNOUNCE_INIT, or a quiet stream lands it), and the marker-less fallback. Test the same cases
 in JS. Public API: the announce consumer's yield type changes, so it lands

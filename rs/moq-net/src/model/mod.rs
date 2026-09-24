@@ -43,9 +43,7 @@ pub mod origin {
 
 /// Subscribing to route (un)announcements from an origin.
 pub mod announce {
-	pub use super::origin_impl::{
-		AnnounceConsumer as Consumer, AnnounceEvent as Event, AnnounceKind as Kind, AnnounceUpdate as Update,
-	};
+	pub use super::origin_impl::{Announce, AnnounceConsumer as Consumer, AnnounceEvent as Event};
 }
 
 // Hop identity and the `Consume` conversion trait aren't part of a role

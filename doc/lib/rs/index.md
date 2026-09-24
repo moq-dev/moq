@@ -51,9 +51,8 @@ let session = client.with_origin(origin.clone()).connect(url);
 let consumer = origin.consume();
 let mut announced = consumer.announced();
 while let Some(event) = announced.next().await {
-    // `Live` marks the end of what was already live; keep waiting past it.
-    let moq_net::announce::Event::Update(update) = event else { continue };
-    if !update.kind.is_active() { continue }
+    // Skip retractions, and `Live`, which marks the end of what was already live.
+    let moq_net::announce::Event::Announced(update) = event else { continue };
     let broadcast = consumer.request_broadcast(&update.prefix).await?;
     let catalog = broadcast
         .track(hang::Catalog::DEFAULT_NAME)?

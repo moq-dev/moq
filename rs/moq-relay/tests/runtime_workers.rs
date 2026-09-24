@@ -119,12 +119,12 @@ async fn workers_serve_quic_and_share_one_origin() {
 	}
 
 	for (index, (_connection, consumer, announced)) in subscribers.iter_mut().enumerate() {
-		let update = tokio::time::timeout(TIMEOUT, next_update(announced))
+		let (update, active) = tokio::time::timeout(TIMEOUT, next_update(announced))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} announcement timeout"))
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "test");
-		assert!(update.kind.is_active(), "expected announce, got retraction");
+		assert!(active, "expected announce, got retraction");
 		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} request timeout"))
@@ -159,12 +159,15 @@ async fn workers_serve_quic_and_share_one_origin() {
 	let _ = running.await;
 }
 
-/// The next route update, skipping the caught-up marker.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+/// The next route and whether it is active, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 	loop {
-		match announced.next().await? {
-			moq_net::announce::Event::Update(update) => return Some(update),
+		return match announced.next().await? {
+			moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
+				Some((route, true))
+			}
+			moq_net::announce::Event::Retracted(route) => Some((route, false)),
 			moq_net::announce::Event::Live => continue,
-		}
+		};
 	}
 }

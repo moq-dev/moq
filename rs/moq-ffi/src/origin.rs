@@ -146,19 +146,22 @@ impl Announced {
 		// The bindings have no caught-up marker yet.
 		let update = loop {
 			match self.inner.next().await {
-				Some(moq_net::announce::Event::Update(update)) => break Some(update),
+				Some(moq_net::announce::Event::Announced(update) | moq_net::announce::Event::Updated(update)) => {
+					break Some((update, true));
+				}
+				Some(moq_net::announce::Event::Retracted(update)) => break Some((update, false)),
 				Some(moq_net::announce::Event::Live) => continue,
 				None => break None,
 			}
 		};
 		match update {
-			Some(update) => Ok(Some(Arc::new(MoqAnnounceUpdate {
+			Some((update, active)) => Ok(Some(Arc::new(MoqAnnounceUpdate {
 				prefix: update.prefix.to_string(),
 				captures: update
 					.captures
 					.map(|captures| captures.into_iter().map(|capture| capture.to_string()).collect()),
 				route: update.route.into(),
-				active: update.kind.is_active(),
+				active,
 			}))),
 			None => Ok(None),
 		}

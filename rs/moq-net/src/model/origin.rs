@@ -694,35 +694,30 @@ impl OriginConsumerState {
 			self.live = LiveState::Done;
 			return Some(AnnounceEvent::Live);
 		}
-		let update = self.take_update()?;
-		self.settled(&update.prefix);
-		Some(AnnounceEvent::Update(update))
-	}
-
-	fn take_update(&mut self) -> Option<AnnounceUpdate> {
 		let prefix = self.pending.keys().next()?.clone();
-		let ((meta, captures), kind) = match self.pending.remove(&prefix).unwrap() {
+		let ((meta, captures), kind): (_, fn(Announce) -> AnnounceEvent) = match self.pending.remove(&prefix).unwrap() {
 			PendingUpdate::Announce(meta) => {
 				// The consumer has seen this prefix before, so it is a metadata update.
 				let kind = match self.delivered.insert(prefix.clone()) {
-					true => AnnounceKind::Announced,
-					false => AnnounceKind::Updated,
+					true => AnnounceEvent::Announced,
+					false => AnnounceEvent::Updated,
 				};
 				(meta, kind)
 			}
 			PendingUpdate::Unannounce(meta) => {
 				self.delivered.remove(&prefix);
-				(meta, AnnounceKind::Retracted)
+				(meta, AnnounceEvent::Retracted)
 			}
 			PendingUpdate::UnannounceAnnounce { old, new } => {
 				// Deliver the retraction now; leave the trailing announce pending so
 				// the next take returns it for the same prefix.
 				self.delivered.remove(&prefix);
 				self.pending.insert(prefix.clone(), PendingUpdate::Announce(new));
-				(old, AnnounceKind::Retracted)
+				(old, AnnounceEvent::Retracted)
 			}
 		};
-		Some(AnnounceUpdate {
+		self.settled(&prefix);
+		Some(kind(Announce {
 			prefix,
 			captures,
 			route: Route {
@@ -730,8 +725,7 @@ impl OriginConsumerState {
 				cost: meta.1,
 				via: Hop::UNKNOWN,
 			},
-			kind,
-		})
+		}))
 	}
 }
 
@@ -999,36 +993,22 @@ pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<PathOwned> {
 	heads
 }
 
-/// What an [`AnnounceUpdate`] reports about its path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AnnounceKind {
-	/// A route now covers the path; the cursor had none there.
-	Announced,
-	/// The route covering the path changed hops or cost; it is delivered in place.
-	Updated,
-	/// No route covers the path any more.
-	Retracted,
-}
-
-impl AnnounceKind {
-	/// Whether a route covers the path after this update.
-	pub fn is_active(self) -> bool {
-		!matches!(self, Self::Retracted)
-	}
-}
-
 /// What an [`AnnounceConsumer`] yields.
 #[derive(Clone, Debug)]
 pub enum AnnounceEvent {
-	/// A route was announced, re-priced, or retracted.
-	Update(AnnounceUpdate),
-	/// Every route live when the cursor subscribed has been delivered; what
-	/// follows is live changes. Yielded once, and only after each remote source
-	/// feeding the origin at subscribe time has landed its initial set.
+	/// A route now covers the prefix; the cursor had none there.
+	Announced(Announce),
+	/// The route covering the prefix changed hops or cost; it is delivered in place.
+	Updated(Announce),
+	/// No route covers the prefix any more. Carries its last advertised route.
+	Retracted(Announce),
+	/// Every route live at subscribe time has been delivered; what follows is
+	/// live changes. Yielded once, and only after each remote source feeding the
+	/// origin at subscribe time has landed its initial set.
 	Live,
 }
 
-/// A route announcement, update, or retraction, delivered by [`AnnounceConsumer`].
+/// A route over a prefix, delivered by [`AnnounceConsumer`] inside an [`AnnounceEvent`].
 ///
 /// An announcement is always a prefix, never a broadcast: it advertises that
 /// [`prefix`](Self::prefix) and every path beneath it are servable. A broadcast
@@ -1036,7 +1016,7 @@ pub enum AnnounceEvent {
 /// [`Consumer::request_broadcast`]; the application decides which paths name
 /// broadcasts, and filters with a [`Pattern`] locally when it wants a subset.
 #[derive(Clone, Debug)]
-pub struct AnnounceUpdate {
+pub struct Announce {
 	/// The prefix the route covers, relative to the consuming cursor's root.
 	pub prefix: PathOwned,
 	/// What the scope's wildcards stood for when the announced prefix pins all of
@@ -1045,8 +1025,6 @@ pub struct AnnounceUpdate {
 	/// The route serving the prefix. On a retraction this carries its last
 	/// advertised metadata.
 	pub route: Route,
-	/// Whether the prefix was announced, re-priced, or retracted.
-	pub kind: AnnounceKind,
 }
 
 /// Publishes broadcasts and announces routes into an origin.
@@ -3397,11 +3375,10 @@ impl Consumer {
 		// forwarding, so it must not drive the announce guards.
 		let mut announced = consumer.untagged().announced();
 		loop {
-			let AnnounceEvent::Update(update) = announced.next().await? else {
-				continue;
-			};
-			if update.kind.is_active() && path.has_prefix(&update.prefix) {
-				return Some(update.route);
+			if let AnnounceEvent::Announced(announce) | AnnounceEvent::Updated(announce) = announced.next().await?
+				&& path.has_prefix(&announce.prefix)
+			{
+				return Some(announce.route);
 			}
 		}
 	}
@@ -3664,17 +3641,17 @@ impl AnnounceConsumer {
 
 	/// Drive the egress announce guards for one update.
 	fn hand_out(&mut self, event: AnnounceEvent) -> AnnounceEvent {
-		let AnnounceEvent::Update(update) = &event else {
-			return event;
-		};
-		let absolute = self.root.join(&update.prefix).to_owned();
-		if update.kind.is_active() {
-			let scope = self.stats.egress(&absolute);
-			self.guards
-				.entry(update.prefix.clone())
-				.or_insert_with(|| scope.announce());
-		} else {
-			self.guards.remove(&update.prefix);
+		match &event {
+			AnnounceEvent::Announced(announce) | AnnounceEvent::Updated(announce) => {
+				let scope = self.stats.egress(self.root.join(&announce.prefix));
+				self.guards
+					.entry(announce.prefix.clone())
+					.or_insert_with(|| scope.announce());
+			}
+			AnnounceEvent::Retracted(announce) => {
+				self.guards.remove(&announce.prefix);
+			}
+			AnnounceEvent::Live => {}
 		}
 		event
 	}
@@ -3773,57 +3750,62 @@ use futures::FutureExt;
 #[cfg(test)]
 #[allow(missing_docs)] // test-only assertion helpers
 impl AnnounceConsumer {
-	/// The next update without blocking, skipping the [`AnnounceEvent::Live`]
-	/// marker: these helpers pin routes, and the marker has its own tests.
-	fn next_update_now(&mut self) -> Option<Option<AnnounceUpdate>> {
+	/// The next route event without blocking, skipping the
+	/// [`AnnounceEvent::Live`] marker: these helpers pin routes, and the marker
+	/// has its own tests.
+	fn next_route_now(&mut self) -> Option<Option<AnnounceEvent>> {
 		loop {
 			match self.next().now_or_never()? {
 				Some(AnnounceEvent::Live) => continue,
-				Some(AnnounceEvent::Update(update)) => return Some(Some(update)),
-				None => return Some(None),
+				event => return Some(event),
 			}
+		}
+	}
+
+	/// The `try_next` counterpart of [`Self::next_route_now`].
+	fn try_next_route(&mut self) -> Option<AnnounceEvent> {
+		loop {
+			match self.try_next()? {
+				AnnounceEvent::Live => continue,
+				event => return Some(event),
+			}
+		}
+	}
+
+	/// The route of an active event at `expected`.
+	fn active(event: AnnounceEvent, expected: &Path) -> Route {
+		match event {
+			AnnounceEvent::Announced(announce) | AnnounceEvent::Updated(announce) => {
+				assert_eq!(announce.prefix, *expected, "wrong prefix");
+				announce.route
+			}
+			other => panic!("should be an active route: got {other:?}"),
 		}
 	}
 
 	/// The next update must be an active route at `expected`; returns it.
 	pub fn assert_next_active(&mut self, expected: impl AsPath) -> Route {
-		let expected = expected.as_path();
-		let update = self.next_update_now().expect("next blocked").expect("no next");
-		assert_eq!(update.prefix, expected, "wrong prefix");
-		assert!(update.kind.is_active(), "should be an active route");
-		update.route
-	}
-
-	/// The `try_next` counterpart of [`Self::next_update_now`].
-	fn try_next_update(&mut self) -> Option<AnnounceUpdate> {
-		loop {
-			match self.try_next()? {
-				AnnounceEvent::Live => continue,
-				AnnounceEvent::Update(update) => return Some(update),
-			}
-		}
+		let event = self.next_route_now().expect("next blocked").expect("no next");
+		Self::active(event, &expected.as_path())
 	}
 
 	/// The `try_next` counterpart of [`Self::assert_next_active`].
 	pub fn assert_try_next_active(&mut self, expected: impl AsPath) -> Route {
-		let expected = expected.as_path();
-		let update = self.try_next_update().expect("no next");
-		assert_eq!(update.prefix, expected, "wrong prefix");
-		assert!(update.kind.is_active(), "should be an active route");
-		update.route
+		let event = self.try_next_route().expect("no next");
+		Self::active(event, &expected.as_path())
 	}
 
 	/// The next update must be a retraction at `expected`.
 	pub fn assert_next_ended(&mut self, expected: impl AsPath) {
-		let expected = expected.as_path();
-		let update = self.next_update_now().expect("next blocked").expect("no next");
-		assert_eq!(update.prefix, expected, "wrong prefix");
-		assert_eq!(update.kind, AnnounceKind::Retracted, "should be a retraction");
+		match self.next_route_now().expect("next blocked").expect("no next") {
+			AnnounceEvent::Retracted(announce) => assert_eq!(announce.prefix, expected.as_path(), "wrong prefix"),
+			other => panic!("should be a retraction: got {other:?}"),
+		}
 	}
 
 	pub fn assert_next_wait(&mut self) {
-		if let Some(res) = self.next_update_now() {
-			panic!("next should block: got {:?}", res.map(|u| u.prefix));
+		if let Some(event) = self.next_route_now() {
+			panic!("next should block: got {event:?}");
 		}
 	}
 
@@ -3992,7 +3974,8 @@ mod tests {
 		loop {
 			match announced.next().now_or_never().expect("blocked").expect("closed") {
 				AnnounceEvent::Live => break,
-				AnnounceEvent::Update(update) => seen.push(update.prefix.to_string()),
+				AnnounceEvent::Announced(announce) => seen.push(announce.prefix.to_string()),
+				other => panic!("only announcements before the marker: got {other:?}"),
 			}
 		}
 		assert!(
@@ -4401,19 +4384,22 @@ mod tests {
 			.unwrap();
 		let mut announced = consumer.announced();
 
-		let first = announced.next_update_now().expect("next").expect("announce");
+		let Some(Some(AnnounceEvent::Announced(first))) = announced.next_route_now() else {
+			panic!("expected the announcement");
+		};
 		assert_eq!(first.prefix.as_str(), "");
-		assert_eq!(first.kind, AnnounceKind::Announced);
 		assert_eq!(first.captures, Some(Vec::new()));
 
 		drop(exact);
-		let retracted = announced.next_update_now().expect("next").expect("retract");
+		let Some(Some(AnnounceEvent::Retracted(retracted))) = announced.next_route_now() else {
+			panic!("expected the retraction");
+		};
 		assert_eq!(retracted.prefix.as_str(), "");
-		assert_eq!(retracted.kind, AnnounceKind::Retracted);
 		assert_eq!(retracted.captures, Some(Vec::new()));
-		let replacement = announced.next_update_now().expect("next").expect("announce");
+		let Some(Some(AnnounceEvent::Announced(replacement))) = announced.next_route_now() else {
+			panic!("expected the replacement");
+		};
 		assert_eq!(replacement.prefix.as_str(), "");
-		assert_eq!(replacement.kind, AnnounceKind::Announced);
 		assert_eq!(replacement.captures, None);
 	}
 
@@ -4471,16 +4457,18 @@ mod tests {
 		let second = producer.dynamic("live", Route::default().with_cost(1)).unwrap();
 
 		let mut announced = producer.consume().announced();
-		let update = announced.next_update_now().expect("next").expect("no next");
+		let Some(Some(AnnounceEvent::Announced(update))) = announced.next_route_now() else {
+			panic!("expected the announcement");
+		};
 		assert_eq!(update.prefix.as_str(), "live");
-		assert_eq!(update.kind, AnnounceKind::Announced);
 		assert_eq!(update.route.cost, Cost::new(1));
 		announced.assert_next_wait();
 
 		drop(second);
-		let update = announced.next_update_now().expect("next").expect("no next");
+		let Some(Some(AnnounceEvent::Updated(update))) = announced.next_route_now() else {
+			panic!("expected the reprice");
+		};
 		assert_eq!(update.prefix.as_str(), "live");
-		assert_eq!(update.kind, AnnounceKind::Updated);
 		assert_eq!(update.route.cost, Cost::new(3));
 
 		drop(first);
@@ -4577,18 +4565,14 @@ mod tests {
 		let server = producer.dynamic("live", Route::default()).unwrap();
 		let mut announced = producer.consume().announced();
 		let mut next = || StreamExt::next(&mut announced).now_or_never();
-		let Some(Some(AnnounceEvent::Update(update))) = next() else {
+		let Some(Some(AnnounceEvent::Announced(update))) = next() else {
 			panic!("expected the replayed route");
 		};
 		assert_eq!(update.prefix.as_str(), "live");
-		assert_eq!(update.kind, AnnounceKind::Announced);
 		assert!(matches!(next(), Some(Some(AnnounceEvent::Live))));
 		assert!(next().is_none());
 		drop(server);
-		let Some(Some(AnnounceEvent::Update(update))) = next() else {
-			panic!("expected the retraction");
-		};
-		assert_eq!(update.kind, AnnounceKind::Retracted);
+		assert!(matches!(next(), Some(Some(AnnounceEvent::Retracted(_)))));
 	}
 
 	#[tokio::test]
@@ -5991,7 +5975,9 @@ mod tests {
 
 		let alice = producer.create_broadcast("room/alice/chat").unwrap();
 		alice.announce(Route::default()).unwrap();
-		let update = announced.try_next_update().expect("alice's chat");
+		let Some(AnnounceEvent::Announced(update)) = announced.try_next_route() else {
+			panic!("expected alice's chat");
+		};
 		assert_eq!(update.prefix.as_str(), "room/alice/chat");
 		assert_eq!(update.captures, Some(vec!["alice".parse::<Pattern>().unwrap()]));
 
@@ -6000,7 +5986,9 @@ mod tests {
 		announced.assert_next_wait();
 
 		let broad = producer.announce("room", Route::default()).unwrap();
-		let update = announced.try_next_update().expect("overlapping broad route");
+		let Some(AnnounceEvent::Announced(update)) = announced.try_next_route() else {
+			panic!("expected the overlapping broad route");
+		};
 		assert_eq!(update.prefix.as_str(), "room");
 		assert_eq!(update.captures, None, "an overlap does not pin the wildcard");
 
@@ -6017,7 +6005,9 @@ mod tests {
 		local.announce(Route::default()).unwrap();
 
 		let mut announced = producer.consume().announced();
-		let update = announced.try_next_update().expect("one winning route");
+		let Some(AnnounceEvent::Announced(update)) = announced.try_next_route() else {
+			panic!("expected one winning route");
+		};
 		assert_eq!(update.prefix.as_str(), "room/alice");
 		assert_eq!(update.route.cost, Cost::default());
 		announced.assert_next_wait();

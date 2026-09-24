@@ -336,13 +336,10 @@ async fn subscribe(
 			_ = &mut deadline => break,
 			update = announced.next() => {
 				let update = match update {
-					Some(moq_net::announce::Event::Update(update)) => update,
-					Some(moq_net::announce::Event::Live) => continue,
+					Some(moq_net::announce::Event::Announced(update) | moq_net::announce::Event::Updated(update)) => update,
+					Some(moq_net::announce::Event::Retracted(_) | moq_net::announce::Event::Live) => continue,
 					None => break,
 				};
-				if !update.kind.is_active() {
-					continue;
-				}
 				let path = update.prefix.to_string();
 				if own.contains(&path) || !seen.insert(path.clone()) {
 					continue;
@@ -365,13 +362,10 @@ async fn subscribe(
 	// there is nothing to spread over.
 	while selected < want {
 		let update = match announced.next().await {
-			Some(moq_net::announce::Event::Update(update)) => update,
-			Some(moq_net::announce::Event::Live) => continue,
+			Some(moq_net::announce::Event::Announced(update) | moq_net::announce::Event::Updated(update)) => update,
+			Some(moq_net::announce::Event::Retracted(_) | moq_net::announce::Event::Live) => continue,
 			None => break,
 		};
-		if !update.kind.is_active() {
-			continue;
-		}
 		let path = update.prefix.to_string();
 		if own.contains(&path) || !seen.insert(path.clone()) {
 			continue;

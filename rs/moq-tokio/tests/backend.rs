@@ -176,12 +176,12 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	assert!(active, "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
 		.expect("request timed out")
@@ -629,12 +629,12 @@ async fn iroh_connect() {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	assert!(active, "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
 		.expect("request timed out")
@@ -860,12 +860,15 @@ async fn noq_windows() {
 	window_test("moqt").await;
 }
 
-/// The next route update, skipping the caught-up marker.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+/// The next route and whether it is active, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 	loop {
-		match announced.next().await? {
-			moq_net::announce::Event::Update(update) => return Some(update),
+		return match announced.next().await? {
+			moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
+				Some((route, true))
+			}
+			moq_net::announce::Event::Retracted(route) => Some((route, false)),
 			moq_net::announce::Event::Live => continue,
-		}
+		};
 	}
 }

@@ -626,13 +626,16 @@ fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
 mod tests {
 	use super::*;
 
-	/// The next route update, skipping the caught-up marker.
-	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+	/// The next route and whether it is active, skipping the caught-up marker.
+	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		loop {
-			match announced.next().await? {
-				moq_net::announce::Event::Update(update) => return Some(update),
+			return match announced.next().await? {
+				moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
+					Some((route, true))
+				}
+				moq_net::announce::Event::Retracted(route) => Some((route, false)),
 				moq_net::announce::Event::Live => continue,
-			}
+			};
 		}
 	}
 
@@ -929,8 +932,8 @@ mod tests {
 
 		// Leave 46 bytes across two frames behind the live edge, then read 1234
 		// egress bytes out of the default-tier broadcast.
-		let update = next_update(&mut announced).await.unwrap();
-		assert!(update.kind.is_active());
+		let (update, active) = next_update(&mut announced).await.unwrap();
+		assert!(active);
 		let bc = egress
 			.request_broadcast(moq_net::Path::new(update.prefix.as_str()))
 			.await

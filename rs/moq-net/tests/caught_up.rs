@@ -47,10 +47,8 @@ async fn caught_up(version: &str, paths: &[&str]) -> Vec<String> {
 		loop {
 			match announced.next().await.expect("cursor closed") {
 				announce::Event::Live => break,
-				announce::Event::Update(update) => {
-					assert!(update.kind.is_active(), "{version}: nothing was retracted");
-					live.push(update.prefix.to_string());
-				}
+				announce::Event::Announced(update) => live.push(update.prefix.to_string()),
+				other => panic!("{version}: only announcements before the marker: got {other:?}"),
 			}
 		}
 	};

@@ -111,19 +111,17 @@ async fn main() -> anyhow::Result<()> {
 			loop {
 				tokio::select! {
 					Some(event) = announced.next() => match event {
-						announce::Event::Live => {}
-						announce::Event::Update(update) => match update.kind.is_active() {
-						true => {
+						announce::Event::Announced(update) | announce::Event::Updated(update) => {
 							tracing::info!(broadcast = %update.prefix, "broadcast is online, subscribing to track");
 							let broadcast = consumer.request_broadcast(&update.prefix).await?;
 							let track = broadcast
 								.track(&track)?.subscribe(None).await?;
 							clock = Some(Subscriber::new(track));
 						}
-						false => {
+						announce::Event::Retracted(update) => {
 							tracing::warn!(broadcast = %update.prefix, "broadcast is offline, waiting...");
 						}
-						},
+						announce::Event::Live => {}
 					},
 					res = reconnect.closed() => return Ok(res?),
 					// Drops the previous subscriber on each new announce.

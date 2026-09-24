@@ -476,17 +476,20 @@ fn broadcasts(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 		let mut live = BTreeSet::new();
 		// The marker says the relay's whole set has arrived; the budget only bounds
 		// a relay that is slow to send it.
-		while let Ok(Some(moq_net::announce::Event::Update(update))) = timeout_at(deadline, announced.next()).await {
-			let path = update.prefix.to_string();
+		while let Ok(Some(event)) = timeout_at(deadline, announced.next()).await {
 			// The root broadcast is the connection path itself, which an unset
 			// `--broadcast` already names; there is no word to insert for it.
-			if path.is_empty() {
-				continue;
+			match event {
+				moq_net::announce::Event::Announced(announce) | moq_net::announce::Event::Updated(announce) => {
+					if !announce.prefix.is_empty() {
+						live.insert(announce.prefix.to_string());
+					}
+				}
+				moq_net::announce::Event::Retracted(announce) => {
+					live.remove(announce.prefix.as_str());
+				}
+				moq_net::announce::Event::Live => break,
 			}
-			match update.kind.is_active() {
-				true => live.insert(path),
-				false => live.remove(&path),
-			};
 		}
 		drop(connection);
 

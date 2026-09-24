@@ -78,8 +78,9 @@ impl Room {
 				return Poll::Ready(Some(event));
 			}
 
-			let update = match ready!(self.announced.poll_next(waiter)) {
-				Some(announce::Event::Update(update)) => update,
+			let (update, active) = match ready!(self.announced.poll_next(waiter)) {
+				Some(announce::Event::Announced(update) | announce::Event::Updated(update)) => (update, true),
+				Some(announce::Event::Retracted(update)) => (update, false),
 				Some(announce::Event::Live) => continue,
 				None => return Poll::Ready(None),
 			};
@@ -90,7 +91,7 @@ impl Room {
 			if self.local.as_ref().is_some_and(|id| *id == parsed.identity) {
 				continue;
 			}
-			if !update.kind.is_active() {
+			if !active {
 				return Poll::Ready(Some(Event {
 					identity: parsed.identity,
 					kind: parsed.kind,
