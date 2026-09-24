@@ -219,12 +219,15 @@ pub struct ActivePaths(Arc<Mutex<HashSet<String>>>);
 
 impl ActivePaths {
 	/// Claim `path`, returning a guard that releases it on drop, or `None` if it
-	/// is already claimed.
-	pub fn claim(&self, path: &str) -> Option<PathGuard> {
+	/// is already claimed. Paths compare after normalization, as
+	/// [`Publish::accept`](crate::Publish::accept) resolves them, so `live//cam`
+	/// and `/live/cam` are one claim.
+	pub fn claim(&self, path: impl moq_net::AsPath) -> Option<PathGuard> {
+		let path = path.as_path().as_str().to_string();
 		let mut set = self.0.lock().expect("active paths mutex poisoned");
-		set.insert(path.to_string()).then(|| PathGuard {
+		set.insert(path.clone()).then(|| PathGuard {
 			paths: self.0.clone(),
-			path: path.to_string(),
+			path,
 		})
 	}
 }
@@ -289,6 +292,7 @@ mod tests {
 
 		let guard = active.claim("live/cam0").expect("first claim succeeds");
 		assert!(active.claim("live/cam0").is_none());
+		assert!(active.claim("/live//cam0/").is_none(), "claims compare normalized");
 		let other = active.claim("live/cam1").expect("distinct path claims");
 
 		drop(guard);

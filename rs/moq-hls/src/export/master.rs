@@ -35,8 +35,11 @@ pub(crate) fn rendition_uri(kind: Kind, name: &str, query: Option<&str>) -> Stri
 fn quoted_string(value: &str) -> String {
 	let mut quoted = String::with_capacity(value.len());
 	for character in value.chars() {
-		if character == '"' || character.is_ascii_control() {
-			let _ = write!(quoted, "%{:02X}", character as u32);
+		// `is_control` spans C0, DEL, and C1 (U+0080..=U+009F), all forbidden in a playlist.
+		if character == '"' || character.is_control() {
+			for byte in character.encode_utf8(&mut [0; 4]).bytes() {
+				let _ = write!(quoted, "%{byte:02X}");
+			}
 		} else {
 			quoted.push(character);
 		}
@@ -275,12 +278,12 @@ mod tests {
 
 	#[test]
 	fn names_and_uris_cannot_inject() {
-		let mut variant = audio("音声\"\nINJECT\u{7f}\u{1f3b5}", 128_000, "opus");
+		let mut variant = audio("音声\"\nINJECT\u{7f}\u{85}\u{1f3b5}", 128_000, "opus");
 		variant.uri = "a\"\n#EXT-X-INJECT".into();
 
 		let out = render(&[], &[variant]);
 
-		assert!(out.contains("NAME=\"音声%22%0AINJECT%7F🎵\""));
+		assert!(out.contains("NAME=\"音声%22%0AINJECT%7F%C2%85🎵\""), "{out}");
 		assert!(out.contains("URI=\"a%22%0A#EXT-X-INJECT\""));
 		assert!(!out.contains("\nINJECT"));
 		assert!(!out.contains("\n#EXT-X-INJECT"));
