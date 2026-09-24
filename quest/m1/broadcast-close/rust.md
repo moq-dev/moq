@@ -9,9 +9,20 @@ no Rust or JS code in the repository calls a deprecated end API.
 
 In `rs/moq-net/src/model/broadcast.rs`:
 
-- Add `close(&self)`: set `closing`, answer unserved names with `NotFound`,
-  close the liveness token, and retire the announcer, as `finish` does today
-  without setting `finished`. Borrow, like `finish`: any clone ends it.
+- Add `close(&self)`: set `closing`, close the liveness token, and retire the
+  announcer, as `finish` does today without setting `finished`. Borrow, like
+  `finish`: any clone ends it.
+- Once a broadcast has ended, by `close()` or its last producer dropping, every
+  new lookup on any consumer answers `Unroutable`: `Consumer::track`, and the
+  requests still pending for names nothing served. That is what a fresh
+  `request_broadcast` for the path answers, so a consumer can't tell a raw
+  handle from one reached through an origin, or a local source from a remote
+  one. Today the same lookup answers `NotFound` while clones live and `Dropped`
+  after. Tracks already read are untouched and end on their own FIN or reset.
+  This changes the error a published API returns; say so in the PR.
+- Document `broadcast::Producer::consume()` as a view of this one publisher: a
+  new publisher at the path is never spliced into it, so a consumer that should
+  not care about its source goes through an origin.
 - Mark `finish`, `abort`, and `Consumer::is_finished` `#[deprecated]` and
   `#[doc(hidden)]` per `rs/CLAUDE.md`. `finish` forwards to `close`. Leave
   `abort`'s behavior alone until the `dev` removal.
