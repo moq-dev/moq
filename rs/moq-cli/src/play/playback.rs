@@ -76,6 +76,11 @@ impl Playback {
 		self.half_mut(kind).playing = true;
 	}
 
+	/// Whether a task is driving this half.
+	pub(super) fn playing(&self, kind: Kind) -> bool {
+		self.half(kind).playing
+	}
+
 	/// Record a task ending, re-arming selection for that half.
 	pub(super) fn ended(&mut self, kind: Option<Kind>) {
 		if let Some(kind) = kind {

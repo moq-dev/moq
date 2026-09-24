@@ -76,9 +76,10 @@ impl Media {
 		let mut catalogs = catalog.select(self.args.select.selection(None));
 		let mut tasks = tokio::task::JoinSet::new();
 		let mut playback = Playback::default();
-		// Opened with the first audio rendition and shared by every one after it,
-		// so a retired rendition's sink can play out beside its replacement's: a
-		// second stream on an exclusive device would fail to open.
+		// Shared by an audio rendition and the retired tails still playing beside
+		// it, so their sinks mix on one stream: a second stream on an exclusive
+		// device would fail to open. Released once none of them is left, so an
+		// idle `play` does not hold the device.
 		let mut engine = None;
 		// Retired audio sinks still playing out what they hold.
 		let mut tails = tokio::task::JoinSet::new();
@@ -108,13 +109,13 @@ impl Media {
 							// the other, a rendition switch costs that delay in silence, so the
 							// tail plays out while the replacement fills.
 							if let Some(sink) = sink {
-								while tails.try_join_next().is_some() {}
 								tails.spawn(drain(sink));
 							}
 							kind
 						});
 						playback.ended(ended);
 					}
+					_ = tails.join_next(), if !tails.is_empty() => {}
 					// Followed for as long as it lasts, not just until something is
 					// playing: a publisher retires renditions (a transcode ladder
 					// resizing under a source that changed resolution) by naming the
@@ -131,6 +132,10 @@ impl Media {
 						}
 					}
 				}
+			}
+
+			if !playback.playing(Kind::Audio) && tails.is_empty() {
+				engine = None;
 			}
 
 			// Start whatever isn't playing from the newest snapshot, which is not
