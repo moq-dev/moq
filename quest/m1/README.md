@@ -31,6 +31,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, audio, and video namespaces built from the handle below
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
 - [IETF subscriptions end cleanly](/quest/m1/ietf-publish-done.md) - a finished moq-transport track ends cleanly for its subscriber instead of reading PUBLISH_DONE as an error
+- [Data sections](/quest/m1/data-sections.md) - an application lists JSON and binary tracks in its own catalog section with its own per-track fields, published in one moq-mux call; data entries gain `bitrate` and `jitter`
 - [Broadcast close](/quest/m1/broadcast-close/README.md) - `close()` is the one way to end a broadcast in every language, a permanent retraction that leaves in-flight tracks alone
 - [Gateway embedding](/quest/m1/gateway-embed.md) - moq-hls, moq-rtmp, and moq-rtc expose the loop their binaries run to an in-process embedder
 - [Ingest source](/quest/m1/net-ingest-source.md) - an announce says whether the broadcast entered on this relay or a peer
@@ -42,6 +43,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [IETF announce count](/quest/m1/ietf-announce-count.md) - an opt-in moq-transport extension carries the replay count, so IETF announce consumers go live without a timer
 
 - [Jitter clock](/quest/m1/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes, fed by encoders only, and never decreases
+- [Data jitter](/quest/m1/data-jitter.md) - JSON and binary tracks with a source time advertise a detected flush-lateness `jitter`
 - [Publisher audio unlock](/quest/m1/publish-audio-unlock.md) - the publisher's capture AudioContext is resumed on a gesture or the source is refused, so no silent audio track is announced
 - [IETF leftovers](/quest/m1/ietf-leftovers.md) - moq-net: the 0x21 priority property, a NOT_SUPPORTED reply to TRACK_STATUS, and the two FETCH refusal codes come from the registry
 - [FFI WebSocket fallback](/quest/m1/ffi-websocket-fallback.md) - moq-ffi and every wrapper can disable or delay the WebSocket fallback
