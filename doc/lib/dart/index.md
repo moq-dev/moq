@@ -55,6 +55,7 @@ final server = await Server.listen(
   ),
 );
 final live = server.createBroadcast('live/camera');
+live.announce(route: MoqRoute()); // unannounced broadcasts are invisible
 await for (final request in server.requests()) {
   final session = await request.accept();
   print(session.epoch());
