@@ -19,7 +19,7 @@ driver, the beacon sink, the analyzer, the ring replay, `bench.sh`'s five
 scenarios, and `compare.mjs`. What it does not have is a home in `test/`, a
 budget, or a schedule.
 
-- Land the driver and analyzer under `test/`, alongside the existing `smoke`
+- Land the driver and analyzer under `test/`, alongside the existing `interop`
   and `drill` lanes, wired into the `justfile` the way they are. Playwright is
   already in the tree for the harness quests, so prefer it over a bespoke CDP
   driver if the switch is cheap; if it is not, say so and keep CDP.

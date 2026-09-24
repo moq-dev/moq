@@ -615,7 +615,12 @@ export class Decoder {
 
 	// Apply ordered container metadata before handling the result. An endpoint that also
 	// starts a new epoch must survive the reset so its following drain is trimmed.
-	#onNext(next: { discontinuity: number; end?: Time.Micro; frame?: { timestamp: Time.Micro } }): boolean {
+	#onNext(next: {
+		discontinuity: number;
+		group: number;
+		end?: Time.Micro;
+		frame?: { timestamp: Time.Micro };
+	}): boolean {
 		if (!this.#terminal.update(next)) return false;
 		this.#ring?.reset();
 		this.sync.reset();

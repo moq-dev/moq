@@ -44,6 +44,13 @@ struct State {
 	sequence: u64,
 	/// The timeline track ended: the broadcast is over (`EXT-X-ENDLIST`).
 	ended: bool,
+	/// The discontinuity sequence stamped onto the next row, bumped whenever the content
+	/// timeline breaks.
+	discontinuity: u64,
+	/// The end of the last pushed row, to detect a jump even after its row left the window.
+	last_end: Option<Duration>,
+	/// The rows were cleared, so the next row can't continue the previous timeline.
+	broken: bool,
 }
 
 /// One playlist segment: its aligned number, timing, and this rendition's group ranges.
@@ -63,6 +70,10 @@ pub(crate) struct Row {
 	/// The segment's ending presentation timestamp (`pts + duration`), for window eviction
 	/// and discontinuity detection.
 	pub end: Duration,
+	/// The discontinuity sequence, assigned by [`Producer::push`]. It changes wherever the
+	/// content timeline breaks, identically on every rendition fed the same records, so
+	/// renditions mark the same breaks however many segments each one skipped.
+	pub discontinuity: u64,
 }
 
 /// A consistent read of the window, for rendering one playlist (the serve path only).
@@ -79,10 +90,8 @@ pub(crate) struct Window {
 
 /// The next segment a [`Consumer`] should emit, resolved from the window.
 enum Next {
-	/// A segment is ready to fetch, along with the segment number that follows it in the
-	/// window (`None` if it's the newest row). The successor lets a cursor notice a gap: if
-	/// the next segment it emits isn't this successor, rows were evicted unseen in between.
-	Ready { row: Row, successor: Option<u64> },
+	/// A segment is ready to fetch.
+	Ready(Row),
 	/// No further segment will ever appear (the timeline ended).
 	Ended,
 	/// Nothing new yet; wait for the next window change.
@@ -106,16 +115,14 @@ impl State {
 	/// window before the cursor reached them are skipped: the cursor resumes at the oldest
 	/// row still in the window.
 	fn next_after(&self, after: Option<u64>) -> Next {
-		let mut iter = self.rows.iter().enumerate().filter(|(_, r)| match after {
+		let next = self.rows.iter().find(|r| match after {
 			Some(after) => r.segment > after,
 			None => true,
 		});
-		let Some((index, row)) = iter.next() else {
-			return if self.ended { Next::Ended } else { Next::Pending };
-		};
-		Next::Ready {
-			row: row.clone(),
-			successor: self.rows.get(index + 1).map(|next| next.segment),
+		match next {
+			Some(row) => Next::Ready(row.clone()),
+			None if self.ended => Next::Ended,
+			None => Next::Pending,
 		}
 	}
 }
@@ -128,12 +135,15 @@ impl Producer {
 				rows: VecDeque::new(),
 				sequence: 0,
 				ended: false,
+				discontinuity: 0,
+				last_end: None,
+				broken: false,
 			}),
 		}
 	}
 
 	/// Append a row, evicting the front of the window past `window`.
-	pub fn push(&self, row: Row, window: Duration) {
+	pub fn push(&self, mut row: Row, window: Duration) {
 		let Ok(mut state) = self.state.write() else {
 			return;
 		};
@@ -149,6 +159,18 @@ impl Producer {
 		if state.rows.is_empty() {
 			state.sequence = row.segment;
 		}
+
+		// Tolerate sub-millisecond drift from timescale rounding.
+		let start = Duration::from(row.pts);
+		let jumped = state
+			.last_end
+			.is_some_and(|end| start.saturating_sub(end).max(end.saturating_sub(start)) > Duration::from_millis(1));
+		if state.broken || jumped {
+			state.discontinuity += 1;
+		}
+		state.broken = false;
+		state.last_end = Some(row.end);
+		row.discontinuity = state.discontinuity;
 
 		state.rows.push_back(row);
 
@@ -186,6 +208,7 @@ impl Producer {
 	pub fn clear(&self) {
 		if let Ok(mut state) = self.state.write() {
 			state.rows.clear();
+			state.broken = true;
 		}
 	}
 
@@ -276,8 +299,7 @@ impl Producer {
 			state: self.state.consume(),
 			rendition,
 			after: None,
-			expected: None,
-			gap: false,
+			emitted: None,
 		}
 	}
 }
@@ -293,9 +315,10 @@ pub struct Segment {
 	pub duration: Duration,
 	/// Wall-clock start time, when the timeline advertises an anchor.
 	pub program_date_time: Option<SystemTime>,
-	/// The media timeline is broken before this segment: one or more segments were skipped
-	/// since the previous one (evicted from the window before they could be fetched, or gaps
-	/// with no content for this rendition). A recorder marks an `EXT-X-DISCONTINUITY` here.
+	/// The content timeline breaks before this segment (the source skipped or restarted), so a
+	/// recorder marks an `EXT-X-DISCONTINUITY` here. Every rendition marks the same breaks, as
+	/// HLS requires. Segments this cursor skipped (evicted, uncached, or gaps with no content
+	/// for this rendition) leave a hole on a continuous timeline, not a discontinuity.
 	pub discontinuity: bool,
 }
 
@@ -311,11 +334,8 @@ pub struct Consumer {
 	/// advanced once a segment is fetched or skipped, so a transient fetch error re-tries the
 	/// same segment on the next call instead of losing it.
 	after: Option<u64>,
-	/// The successor segment recorded when the last one was emitted. If the next segment
-	/// isn't it, rows were evicted unseen in between (a gap).
-	expected: Option<u64>,
-	/// A gap opened since the last emitted segment (a skip); set on the next one's discontinuity.
-	gap: bool,
+	/// The discontinuity sequence of the last segment returned.
+	emitted: Option<u64>,
 }
 
 impl Consumer {
@@ -328,47 +348,39 @@ impl Consumer {
 	/// The next segment, with its media; `None` once the rendition ends.
 	///
 	/// Waits for the next segment, then FETCHes and transmuxes its groups. A segment whose
-	/// groups already left the relay cache (or that is a gap for this rendition) is skipped
-	/// (this resumes at the next one, flagging [`Segment::discontinuity`]) rather than
-	/// surfaced as an error; a real fetch/transmux failure is returned, leaving the cursor to
-	/// retry it on the next call.
+	/// groups already left the relay cache (or that is a gap for this rendition) is skipped,
+	/// resuming at the next one, rather than surfaced as an error; a real fetch/transmux
+	/// failure is returned, leaving the cursor to retry it on the next call.
 	pub async fn next(&mut self) -> Result<Option<Segment>> {
 		loop {
-			let Some((row, successor)) = kio::wait(|waiter| self.poll_next(waiter)).await else {
+			let Some(row) = kio::wait(|waiter| self.poll_next(waiter)).await else {
 				return Ok(None);
 			};
-			// A gap opened if the segment we're about to emit isn't the successor the previous
-			// one recorded (rows between them evicted unseen).
-			let gap = discontinuity(self.gap, self.after, self.expected, row.segment);
-
 			match self.rendition.segment(row.segment).await? {
 				Some(media) => {
-					self.after = Some(row.segment);
-					self.expected = successor;
-					self.gap = false;
 					return Ok(Some(Segment {
 						segment: row.segment,
 						media,
 						duration: row.duration,
 						program_date_time: self.rendition.wall_clock(row.pts),
-						discontinuity: gap,
+						discontinuity: self.emit(&row),
 					}));
 				}
-				// A gap for this rendition, or its groups aged out of the cache before we
-				// fetched them; skip to the next and carry the gap onto whichever segment we
-				// emit next.
-				None => {
-					self.after = Some(row.segment);
-					self.expected = successor;
-					self.gap = true;
-				}
+				None => self.after = Some(row.segment),
 			}
 		}
 	}
 
-	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<(Row, Option<u64>)>> {
+	/// Advance past `row` as returned, reporting whether it starts a new discontinuity.
+	fn emit(&mut self, row: &Row) -> bool {
+		self.after = Some(row.segment);
+		let previous = self.emitted.replace(row.discontinuity);
+		previous.is_some_and(|previous| previous != row.discontinuity)
+	}
+
+	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<Row>> {
 		let poll = self.state.poll(waiter, |state| match state.next_after(self.after) {
-			Next::Ready { row, successor } => Poll::Ready(Some((row, successor))),
+			Next::Ready(row) => Poll::Ready(Some(row)),
 			Next::Ended => Poll::Ready(None),
 			Next::Pending => Poll::Pending,
 		});
@@ -379,12 +391,6 @@ impl Consumer {
 			Poll::Pending => Poll::Pending,
 		}
 	}
-}
-
-fn discontinuity(gap: bool, after: Option<u64>, expected: Option<u64>, segment: u64) -> bool {
-	gap || expected
-		.or_else(|| after.map(|after| after.saturating_add(1)))
-		.is_some_and(|expected| expected != segment)
 }
 
 #[cfg(test)]
@@ -400,6 +406,7 @@ mod tests {
 			duration: Duration::from_millis(duration_ms),
 			pts,
 			end: Duration::from(pts) + Duration::from_millis(duration_ms),
+			discontinuity: 0,
 		}
 	}
 
@@ -474,10 +481,38 @@ mod tests {
 			snapshot.segments.iter().map(|row| row.segment).collect::<Vec<_>>(),
 			vec![10]
 		);
-		assert!(
-			discontinuity(false, Some(4), None, snapshot.segments[0].segment),
-			"a cursor caught up before the skip marks the next segment discontinuous"
+		assert_eq!(
+			snapshot.segments[0].discontinuity, 1,
+			"the row after a skipped source range starts a new discontinuity"
 		);
+	}
+
+	#[test]
+	fn a_skipped_row_on_a_continuous_timeline_is_not_a_discontinuity() {
+		let live = Producer::new();
+		let window = Duration::from_secs(30);
+		for i in 0..3u64 {
+			live.push(row(i, i, i * 2_000, 2_000), window);
+		}
+
+		// A cursor that emits segment 0 and skips segment 1 (uncached, or a gap for its
+		// rendition) must not mark segment 2: a sibling that fetched segment 1 wouldn't, and
+		// players require renditions to agree on discontinuities.
+		let snapshot = live.window();
+		assert_eq!(snapshot.segments[0].discontinuity, snapshot.segments[2].discontinuity);
+	}
+
+	#[test]
+	fn a_content_time_jump_starts_a_new_discontinuity() {
+		let live = Producer::new();
+		let window = Duration::from_secs(30);
+		live.push(row(0, 0, 0, 2_000), window);
+		live.push(row(1, 1, 2_000, 2_000), window);
+		live.push(row(2, 2, 10_000, 2_000), window);
+		live.push(row(3, 3, 12_000, 2_000), window);
+
+		let sequences: Vec<_> = live.window().segments.iter().map(|row| row.discontinuity).collect();
+		assert_eq!(sequences, vec![0, 0, 1, 1]);
 	}
 
 	#[test]
@@ -494,6 +529,7 @@ mod tests {
 				duration: Duration::from_secs(1),
 				pts: moq_net::Timestamp::from_millis(1_000).unwrap(),
 				end: Duration::from_millis(2_000),
+				discontinuity: 0,
 			},
 			window,
 		);
@@ -531,20 +567,12 @@ mod tests {
 		live.push(row(0, 0, 0, 2_000), window);
 		live.push(row(1, 1, 2_000, 2_000), window);
 
-		let first = match live.state.read().next_after(None) {
-			Next::Ready { row, successor } => {
-				assert_eq!(successor, Some(1));
-				row
-			}
-			_ => panic!("expected a segment"),
+		let Next::Ready(first) = live.state.read().next_after(None) else {
+			panic!("expected a segment");
 		};
 		assert_eq!(first.segment, 0);
-		let second = match live.state.read().next_after(Some(0)) {
-			Next::Ready { row, successor } => {
-				assert_eq!(successor, None);
-				row
-			}
-			_ => panic!("expected a segment"),
+		let Next::Ready(second) = live.state.read().next_after(Some(0)) else {
+			panic!("expected a segment");
 		};
 		assert_eq!(second.segment, 1);
 		assert!(

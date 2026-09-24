@@ -16,18 +16,17 @@ old archive records. Preserve allowed B-frame ordering within a group.
 
 Keep source-specific timestamp conversion at the adapter boundary. Refuse an
 unmappable source explicitly. Discontinuity markers signal the existing
-playhead contract; they do not replace the wall epoch. Coordinate browser
-encoder restart markers with the discontinuity prerequisite.
+playhead contract; they do not replace the wall epoch. In `js/publish`, the
+video encoder marks a break through `Container.Legacy.Producer.cut()` whenever
+its encode loop stops (demand gap or capture swap). The audio encoder writes its
+own marker on a demand gap only: an audio pipeline rebuild and the framer's
+input-gap reset still write none.
 
 Add CI fixtures for simultaneous A/V, late first frames, restart to zero,
 restart after idle, system-wall adjustment, and retained archive playback.
 The fixtures must exercise publisher integration rather than only the clock
 helper. Update publisher and import docs; this quest adds no new clock API or
 catalog representation. GStreamer's clock observation remains its own quest.
-
-## Required
-
-- [Publisher discontinuity](/quest/m1/js-publish-discontinuity.md) - use the settled browser restart-marker path
 
 ## Related
 

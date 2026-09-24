@@ -322,8 +322,8 @@ mod tests {
 	use hang::catalog::{H264, VideoConfig};
 	use moq_net::path::Relative;
 
-	/// Let the origin's spawned attach task run: a created broadcast becomes
-	/// routable asynchronously, shortly after `create_broadcast` returns.
+	/// Let the origin's driver run the fronts that requests and announcements
+	/// started: they serve asynchronously, shortly after the call returns.
 	async fn settle() {
 		for _ in 0..10 {
 			tokio::task::yield_now().await;
@@ -367,7 +367,7 @@ mod tests {
 		let source = Source::new(origin.consume(), "live");
 		let binding = source.bind(None).unwrap();
 		assert!(binding.broadcast().await.is_err());
-		let _publisher = origin.create_broadcast("live").unwrap();
+		let _publisher = origin.publish("live", Default::default()).unwrap();
 		settle().await;
 		assert!(!source.broadcast().await.unwrap().is_closed());
 		assert!(binding.broadcast().await.is_err());

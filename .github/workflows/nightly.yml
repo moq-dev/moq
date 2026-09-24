@@ -69,6 +69,14 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
 
+      # A single route re-price should expose any slope over the route table or
+      # over independent observers of the new live broadcast map.
+      - name: JS origin broadcast map benchmark
+        if: ${{ !cancelled() }}
+        run: |
+          nix develop --command bun install --frozen-lockfile
+          nix develop --command bun js/net/bench/broadcasts.ts
+
       - name: Audit
         if: ${{ !cancelled() }}
         run: nix develop --command just rs audit

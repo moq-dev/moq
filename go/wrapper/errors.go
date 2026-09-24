@@ -19,7 +19,7 @@ var (
 )
 
 // Error sentinels re-exported from the ffi layer without the MoqError prefix, so
-// callers can errors.Is against them without importing moq-go-ffi directly.
+// callers can errors.Is against them without importing moq.dev/moq-ffi directly.
 // These mirror the variants of the native error enum; transparent variants
 // (Protocol, Media, ...) wrap a lower-level error whose detail survives in the
 // message.

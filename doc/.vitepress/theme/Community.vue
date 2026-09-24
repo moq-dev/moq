@@ -20,6 +20,10 @@ const CACHE_TTL = 60 * 60 * 1000;
 const stars = ref();
 const chatters = ref();
 
+// "1.5k" in the navbar; the link's title carries the exact count.
+const format = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
+const compact = (n) => format.format(n).toLowerCase();
+
 function readCache() {
 	try {
 		const cached = JSON.parse(localStorage.getItem(CACHE_KEY));
@@ -63,13 +67,19 @@ onMounted(async () => {
 
 <template>
 	<div class="moq-community">
-		<a href="https://github.com/moq-dev/moq" title="GitHub">
+		<a
+			href="https://github.com/moq-dev/moq"
+			:title="stars === undefined ? 'GitHub' : `${stars.toLocaleString()} GitHub stars`"
+		>
 			<img src="/emoji/github.svg" alt="GitHub" />
-			<span v-if="stars !== undefined">{{ stars.toLocaleString() }}</span>
+			<span v-if="stars !== undefined">{{ compact(stars) }}</span>
 		</a>
-		<a href="https://discord.moq.dev" title="Discord">
+		<a
+			href="https://discord.moq.dev"
+			:title="chatters === undefined ? 'Discord' : `${chatters.toLocaleString()} Discord members`"
+		>
 			<img src="/emoji/discord.svg" alt="Discord" />
-			<span v-if="chatters !== undefined">{{ chatters.toLocaleString() }}</span>
+			<span v-if="chatters !== undefined">{{ compact(chatters) }}</span>
 		</a>
 	</div>
 </template>

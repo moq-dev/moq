@@ -96,14 +96,16 @@ impl Presentation {
 		self.restart = true;
 	}
 
-	/// The audio track stopped, so nothing holds playback to the speaker's
-	/// cadence any more and video takes the anchor back.
+	/// The speaker went quiet, so nothing holds playback to its cadence any
+	/// more and video takes the anchor back.
 	///
 	/// A replacement rendition takes ownership again on its first frame, and
 	/// re-pins there: it is a track boundary, so its timestamps are not
-	/// necessarily continuous with what just ended.
+	/// necessarily continuous with what just ended. That covers a pending
+	/// restart, which would otherwise re-pin the frame after it too.
 	pub(super) fn stopped(&mut self) {
 		self.speaker = false;
+		self.restart = false;
 	}
 
 	/// When `timestamp` should be presented, or `None` before any frame has
@@ -300,6 +302,28 @@ mod tests {
 		presentation.restarted();
 		presentation.audio(Duration::from_secs(1), DELAY, now);
 		assert_eq!(presentation.due(ms(1_000)), Some(now + DELAY));
+	}
+
+	/// A retired rendition marks a restart for its replacement, which may never
+	/// come. The next track re-pins on its first frame for taking ownership, so a
+	/// restart left over would re-pin the frame after it onto that frame's jitter.
+	#[test]
+	fn a_stopped_speaker_drops_a_pending_restart() {
+		let start = Instant::now();
+		let mut presentation = Presentation::new(DELAY);
+		presentation.audio(Duration::from_secs(10), DELAY, start);
+		presentation.restarted();
+		presentation.stopped();
+
+		presentation.audio(Duration::from_secs(1), DELAY, start);
+		// 20ms of media, 40ms of wall clock: a late frame paces and leaves the
+		// anchor where it was.
+		let now = start + Duration::from_millis(40);
+		presentation.audio(Duration::from_millis(1_020), DELAY, now);
+		assert_eq!(
+			presentation.due(ms(1_020)),
+			Some(start + Duration::from_millis(20) + DELAY)
+		);
 	}
 
 	/// The window sleeps on the deadline it last computed, so an anchor the
