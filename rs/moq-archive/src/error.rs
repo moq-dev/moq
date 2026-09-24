@@ -73,6 +73,10 @@ pub enum Error {
 	/// `.info` JSON is malformed.
 	#[error("json: {0}")]
 	Json(String),
+
+	/// Publishing the replayed archive failed.
+	#[error("moq: {0}")]
+	Moq(String),
 }
 
 impl From<object_store::Error> for Error {
@@ -81,6 +85,12 @@ impl From<object_store::Error> for Error {
 			object_store::Error::NotFound { path, .. } => Self::NotFound(path),
 			other => Self::Store(other.to_string()),
 		}
+	}
+}
+
+impl From<moq_net::Error> for Error {
+	fn from(err: moq_net::Error) -> Self {
+		Self::Moq(err.to_string())
 	}
 }
 

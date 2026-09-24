@@ -25,7 +25,6 @@ Use the writer/reader fixtures; a retention defect is fixed in its owning layer.
 ## Required
 
 - [Recording writer](/quest/m1/archive/writer.md)
-- [Recording reader](/quest/m1/archive/reader.md)
 
 ## Closes
 

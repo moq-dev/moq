@@ -1,7 +1,8 @@
 //! Versioned hang recording objects on any [`object_store::ObjectStore`].
 //!
 //! The crate owns the portable layout and codecs: percent-encoded track names, `.info` JSON,
-//! the binary segment envelope, and put/get/list/delete. Callers that need runtime dispatch
+//! the binary segment envelope, and put/get/list/delete. A [`Reader`] serves a recording back
+//! through a `moq_net` broadcast. Callers that need runtime dispatch
 //! supply `Arc<dyn ObjectStore>`; the archive API itself stays generic.
 //!
 //! Group bounds are finite inclusive ranges in first-to-last order:
@@ -16,12 +17,14 @@ pub use object_store;
 mod error;
 pub mod info;
 mod path;
+pub mod reader;
 pub mod segment;
 pub mod store;
 
 pub use error::{Error, Result};
 pub use info::Info;
 pub use path::Key;
+pub use reader::Reader;
 pub use segment::{Frame, Group, Object};
 pub use store::Store;
 

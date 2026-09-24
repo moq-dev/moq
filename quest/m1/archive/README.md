@@ -37,6 +37,10 @@ The segment engine is in `rs/moq-mux/src/timeline.rs`:
 
 `rs/moq-archive` stores the versioned objects on any `object_store::ObjectStore`:
 percent-encoded track names, `.info` JSON, the binary envelope, and put/get/list/delete.
+`moq_archive::Reader` (`rs/moq-archive/src/reader/mod.rs`) replays the timeline onto a
+supplied `broadcast::Producer` and serves FETCH through `track::Dynamic` with a byte-bounded
+object LRU. `Reader::refresh` follows by listing timeline keys after its cursor, so gaps and
+DVR expiry recover from the next checkpoint; `Reader::finish` applies out-of-band finality.
 
 ### Format
 
@@ -104,7 +108,6 @@ owned by that prerequisite, not duplicated in archive storage.
 ## Quests
 
 - [Recording writer](/quest/m1/archive/writer.md) - feed the segmenter from a `broadcast::Consumer`, store each segment, then commit its record
-- [Recording reader](/quest/m1/archive/reader.md) - serve archived FETCH through a supplied `broadcast::Producer`
 - [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
 - [Offline archive HLS](/quest/m1/archive/hls.md) - render playlists from the archive timeline and fetch segment media lazily
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback

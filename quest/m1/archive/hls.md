@@ -36,7 +36,3 @@ explicit binding. Track immutability and update correlation belong to
 
 Prove aligned audio/video switching, missing track segments, discontinuities,
 caller-supplied finality, and bounded LRU reads.
-
-## Required
-
-- [Recording reader](/quest/m1/archive/reader.md)

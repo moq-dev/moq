@@ -15,12 +15,17 @@ categories = ["multimedia", "filesystem"]
 [dependencies]
 bytes = { workspace = true }
 futures = { workspace = true }
+hang = { workspace = true }
+kio = { workspace = true }
+moq-json = { workspace = true }
 moq-net = { workspace = true }
 object_store = { workspace = true }
 percent-encoding = { workspace = true }
+quick_cache = "0.7"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 async-trait = "0.1"
