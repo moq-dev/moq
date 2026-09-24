@@ -26,5 +26,5 @@ that the wire bytes match the encoded messages.
 
 ## Related
 
-- [Tree forwarding](/quest/m1/announce-tree/forward.md) - asserts its message
-  counts with these
+- [Cluster simulator](/quest/m1/announce-tree/simulator.md) - reports its
+  per-event counts with these
