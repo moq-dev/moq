@@ -34,6 +34,16 @@ arm in `TableCursor::visible`) and unservable by `best_route`. The
 Retraction ends a front the way #4007 made it: in-flight tracks carry on to
 their own FIN or reset.
 
+A front ends when its route leaves the table and no route with the same
+content identity replaces it, even if its source is still alive. Today
+`Front::selected` keeps serving a live source with no route ("its route may
+return"), and `request_broadcast` joins a front whose route has retracted. So
+after a local `unannounce()` the broadcast stays open and requestable. Remotely,
+ANNOUNCE_END ends the source the subscriber minted, so the front closes and new
+requests get `Unroutable`. A re-announce that lands before the front acts on
+the retraction reuses the same route entry, so the front carries on: the same
+window a remote reannouncement gets.
+
 Route selection stops preferring local entries. `OriginState::best_route` and
 the announce cursor's pick in `OriginState::sync_route` both order candidates by
 `(!entry.local, route_order(..))`, so a local route wins whatever its cost. Drop
