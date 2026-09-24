@@ -34,6 +34,9 @@ unchanged, so this targets `main`.
   starts routes where this relay newly qualifies and ends them where it no
   longer does.
 - With several sessions to one peer hop, send on one of them only.
+- A relay flag, on by default, controls whether the relay publishes its
+  upstream table. Turning it off makes every neighbour flood to that relay
+  again, so one relay can be rolled back with a config change.
 
 The [simulator](/quest/m1/announce-tree/simulator.md) must hold completeness,
 the copy bound, failover, and loop freedom across a sweep of seeds. Add named

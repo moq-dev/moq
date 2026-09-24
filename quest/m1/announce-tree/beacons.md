@@ -14,7 +14,9 @@ missing, so an operator can see weak spots in the mesh.
   always flooded, so every relay holds a best route and standby routes to
   every beacon.
 - A link joins the upstream computation only after its session has been up
-  continuously for a hold time, and leaves the moment it drops. A flapping
+  continuously for 10 s, the same threshold at which the cluster dial loop
+  resets its backoff, and leaves the moment it drops. Until then it carries
+  beacons and any source the receiver has no entry for. A flapping
   peer never becomes anyone's parent. Drive the hold from tokio time so tests
   pause it.
 - For each source `S` (the beacon's hop), derive:
