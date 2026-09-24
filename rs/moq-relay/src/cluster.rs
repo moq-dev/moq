@@ -3022,6 +3022,8 @@ mod tests {
 		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
 		// The self-registration route must be visible on the origin.
+		// The watcher subscribed to an empty origin, so its marker comes first.
+		assert!(matches!(watcher.try_next(), Some(moq_net::announce::Event::Live)));
 		let Some(moq_net::announce::Event::Update(update)) = watcher.try_next() else {
 			panic!("self-registration must be published");
 		};
