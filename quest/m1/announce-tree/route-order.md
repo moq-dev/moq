@@ -32,7 +32,9 @@ comment at `route_order` saying why, because the tree forwarding completeness
 argument depends on it.
 
 This changes tie-breaks for every moq-relay deployment, so call it out in the
-PR. Tests:
+PR. Update the equal-route tie-breaks in the routing section of
+`drafts/draft-lcurley-moq-lite.md` in the same change. Today the draft orders
+ties by shortest path, then recency, and the draft and code must agree. Tests:
 
 - two sources at equal cost for one prefix: every relay in a three-relay line
   picks the same source;

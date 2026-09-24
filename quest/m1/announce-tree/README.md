@@ -8,7 +8,8 @@ its best route to every neighbour but the one it came from, so one broadcast
 start or stop sends about `2E - (N - 1)` announces and every relay holds one
 copy per neighbour. On moq.pro's 34-relay, 140-link mesh that is ~247 per
 event, and [PoP skipping](/quest/m1/pop-skipping/README.md) roughly doubles
-`E`. After this line a relay hears each broadcast from at most two neighbours,
+`E`. After this line, once every relay speaks lite-07, a relay hears each
+broadcast from at most two neighbours,
 a parent and a backup that it chose itself. A relay whose backup avoids its
 parent keeps the broadcast through that parent's failure with no round trip.
 This applies on lite-07 cluster links. IETF and older links keep flooding,

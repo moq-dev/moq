@@ -5,8 +5,8 @@
 On lite-07 cluster peer sessions, a relay sends a route only to
 the receivers that chose it as parent or backup for that route's prefix and
 source, following the [line's rule](/quest/m1/announce-tree/README.md). It
-floods whatever a receiver has no choice for. On a sparse mesh, a broadcast
-start costs at most `2(N - 1)` announce starts in steady state instead of
+floods whatever a receiver has no choice for. On a sparse mesh where every relay speaks
+lite-07, a broadcast start costs at most `2(N - 1)` announce starts in steady state instead of
 `2E - (N - 1)`. A relay whose backup is node-protecting keeps its routes
 through its parent's failure with no gap. Customer sessions and the wire are
 unchanged, so this targets `main`.

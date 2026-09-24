@@ -25,8 +25,9 @@ After each step settles, assert:
 
 - **Completeness**: every relay that can reach a source of a prefix holds a
   route for it.
-- **Bound**: every relay in tree mode for a source holds at most two copies of
-  each route from it.
+- **Bound**: a relay whose inbound peers all honor its table holds at most two
+  copies of each route from a source. With flooding neighbours (lite-06,
+  IETF, or flood-only), the bound is two plus one per flooding neighbour.
 - **Failover**: a relay with a node-protecting backup keeps the route through
   its parent's failure, with in-place updates downstream and no end.
 - **No loops**: no chain contains a hop twice.
