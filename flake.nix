@@ -304,8 +304,9 @@
         ];
 
         # uniffi-bindgen-dart renders rs/moq-ffi into dart/moq_ffi. The fork
-        # carries the uniffi 0.32 port and library-mode CLI while those changes
-        # remain open upstream.
+        # carries the uniffi 0.32 port, library-mode CLI, and RustBuffer leak
+        # fixes while those changes remain open upstream. Its tags add a
+        # `-kixelated.N` pre-release so they never collide with upstream's.
         uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-dart";
           version = "0.3.1-kixelated.1+v0.32.0";

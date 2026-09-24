@@ -131,7 +131,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Dart on iOS](/quest/m1/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
 - [libmoq shutdown](/quest/m1/libmoq-shutdown.md) - OBS exits cleanly with the plugin loaded: a C ABI `moq_shutdown` stops the libmoq thread before the module is unloaded
 - [Kotlin JVM exit](/quest/m1/kt-jvm-exit.md) - a Kotlin/JVM program exits cleanly whatever the moq-ffi runtime thread is doing, like Python does since #3766
-- [Dart leaks](/quest/m1/dart-leak.md) - the generated Dart bindings leak native memory on every call
 - [Dart publish](/quest/m1/dart-publish.md) - the packages are built and dry-run clean but exist nowhere consumers can install from
 - [Dart codec parity](/quest/m1/dart-codecs.md) - Dart is the one binding that cannot originate media
 - [libmoq fetch](/quest/m1/libmoq-fetch.md) - libmoq gains an additive cached-group fetch entry point
