@@ -3002,7 +3002,7 @@ mod tests {
 
 		// Snapshot a consumer on the cluster origin before run() takes ownership of
 		// `cluster` so we can later check that the registration was published.
-		let mut watcher = cluster.origin.consume().announced();
+		let mut watcher = cluster.origin.consume().with_hidden(true).announced();
 
 		let started = cluster.clone().start().await.expect("cluster start");
 		let mut handle = tokio::spawn(async move { started.run().await });

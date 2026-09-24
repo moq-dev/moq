@@ -1110,7 +1110,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	handle.await.expect("server panicked").expect("server failed");
 }
 
-/// Route re-advertisement on the default version (lite-06: ANNOUNCE_RESTART by id).
+/// Route re-advertisement on the default version (lite-07: ANNOUNCE_RESTART by id).
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_reannounce() {
@@ -1148,6 +1148,12 @@ async fn broadcast_moq_lite_03() {
 #[tokio::test]
 async fn broadcast_moq_lite_06() {
 	broadcast_test("moqt", Some("moq-lite-06"), Some("moq-lite-06")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_moq_lite_07() {
+	broadcast_test("moqt", Some("moq-lite-07"), Some("moq-lite-07")).await;
 }
 
 #[tracing_test::traced_test]
@@ -1871,7 +1877,7 @@ async fn broadcast_websocket_fallback() {
 ///
 /// Bump this whenever [`moq_net::Versions::all`] gains a newer Lite variant
 /// so the regression tests below keep tracking "the newest", not a frozen value.
-const NEWEST_LITE: &str = "moq-lite-06";
+const NEWEST_LITE: &str = "moq-lite-07";
 
 /// Regression guard for the WebSocket ALPN path. Lite02 over WebSocket means
 /// the qmux subprotocol negotiation produced a bare `moql` (or no match)
