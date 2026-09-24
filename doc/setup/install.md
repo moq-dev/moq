@@ -18,7 +18,8 @@ Package names match the executables everywhere except crates.io, where the
 crate is `moq-cli`. Existing Homebrew
 installs migrate through formula renames; apt upgrades use transitional
 packages, and dnf replaces the old packages. The `moqdev/moq-cli` Docker image
-and the `#moq-cli` flake package stop at 0.12.1; use `moqdev/moq` and `#moq`.
+and the `#moq-cli` flake package stop at 0.12.1 and now exit with an error
+naming `moqdev/moq` and `#moq`.
 
 Use `moq auth` for keys and tokens; installing `moq` includes it.
 

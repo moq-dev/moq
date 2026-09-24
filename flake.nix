@@ -427,6 +427,13 @@
           # nixpkgs already has an unrelated `moq`.
           moq = overlayPkgs.moq-cli;
 
+          # The package was `moq-cli` through 0.12.1. Refuse with the new name
+          # so `nix run` and `nix profile upgrade` break instead of going stale.
+          moq-cli = pkgs.writeShellScriptBin "moq" ''
+            echo "error: the moq-cli package is now moq: nix run github:moq-dev/moq#moq" >&2
+            exit 1
+          '';
+
           # Inherit packages from the overlay
           inherit (overlayPkgs)
             moq-relay
