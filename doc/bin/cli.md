@@ -23,7 +23,8 @@ or Docker; see [Install](/setup/install).
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
 | `play` | | Decode and play in a native window with sound. |
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
-| `token` | | Generate, sign, and verify relay JWTs. |
+| `fetch` | `<track>` | Write one group of a track to stdout. |
+| `auth` | | Generate, sign, and verify relay JWTs. |
 | `devices` | | List capture sources and their ids. |
 
 ## Grammar
@@ -32,6 +33,7 @@ or Docker; see [Install](/setup/install).
 moq <MoQ side> import <source> [options]
 moq <MoQ side> export <sink> [options]
 moq <MoQ side> play [options]
+moq <MoQ side> fetch <track> [options]
 ```
 
 The **MoQ side** goes first and attaches the process to the network:
@@ -154,6 +156,27 @@ Custom `--rung` values may be supplied in any order. Heights round down to even;
 heights and bitrates must then increase strictly together. Duplicate heights or
 bitrates, inverted rankings, and zero-sized or zero-bitrate rungs are rejected
 before connecting.
+
+## Fetch
+
+```bash
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang fetch catalog.json | jq
+moq ... fetch video/hd --group 42 --json
+```
+
+Writes one group of a track to stdout over MoQ, with the session's own auth:
+the counterpart of the relay's HTTP `/fetch/<broadcast>/<track>?group=N`. Without
+`--group` it reads the newest group. By default stdout carries the frame
+payloads back to back, byte for byte what `curl` gets from `/fetch`. `--json`
+prints one line per frame instead:
+`{"group": 42, "frame": 0, "size": 1234, "payload": "<base64>"}`, with a
+zero-based `frame` and padded standard base64.
+
+`<track>` is the literal track name. `/fetch` splits its path on the last `/`,
+so the two agree only for names without one. Fetch only dials `--connect`, and
+refuses a listener or cluster flag. It gives up after 30 seconds, as `/fetch`
+does, and exits non-zero when the broadcast or group is not found, the relay
+refuses, or the deadline passes.
 
 ## Multiple stages
 

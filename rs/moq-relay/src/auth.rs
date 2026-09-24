@@ -186,6 +186,8 @@ pub struct Token {
 	pub publish: Patterns,
 	/// The tier this session's stats record under.
 	pub tier: Tier,
+	/// Whether the session is a cluster peer, so its routes entered elsewhere.
+	pub peer: bool,
 }
 
 impl Token {
@@ -202,6 +204,7 @@ impl Token {
 			subscribe: grant.subscribe.clone(),
 			publish: grant.publish.clone(),
 			tier: crate::configured_tier(grant.tier.clone()),
+			peer: grant.peer,
 		}
 	}
 
@@ -262,7 +265,9 @@ impl Lease {
 	/// revoked, or was re-checked into one that no longer covers the token.
 	///
 	/// A changed root or a narrower grant ends it: origin handles cannot yet narrow
-	/// a live scope in place (tracked by `quest/m1/origin-narrowing.md`). A changed
+	/// a live scope in place (tracked by `quest/m1/origin-narrowing.md`). A flipped
+	/// `peer` ends it too, since the routes it already announced would be
+	/// misreported as entering here or from a peer. A changed
 	/// tier is kept for this session and applies to its next connection, since the
 	/// stats carriers resolved their counters at admission.
 	pub async fn ended(&mut self) -> lease::Reason {
@@ -279,6 +284,11 @@ impl Lease {
 						let fresh = self.token.recheck(&grant);
 						if fresh.root != self.token.root {
 							return "root changed".into();
+						}
+						// Routes the session already announced were recorded as
+						// entering here or from a peer; a flip would misreport them.
+						if fresh.peer != self.token.peer {
+							return "peer changed".into();
 						}
 						if !self.token.covered_by(&fresh) {
 							return "grant narrowed".into();
@@ -648,6 +658,21 @@ mod tests {
 		assert!(narrow.covered_by(&wide));
 		assert!(!wide.covered_by(&narrow));
 		assert!(!wide.covered_by(&moved));
+	}
+
+	/// Routes a session announced were recorded as a peer's or not; a re-check that
+	/// flips it closes the session rather than misreport them.
+	#[tokio::test]
+	async fn a_recheck_that_flips_peer_closes() {
+		let grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
+		let (producer, consumer) = lease::Producer::new(grant.clone());
+		let mut lease = Lease::new("/", consumer);
+		assert!(!lease.token().peer);
+
+		let mut peer = grant;
+		peer.peer = true;
+		producer.update(peer);
+		assert_eq!(lease.ended().await.to_string(), "peer changed");
 	}
 
 	#[test]

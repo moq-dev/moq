@@ -31,16 +31,17 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, audio, and video namespaces built from the handle below
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
 - [IETF subscriptions end cleanly](/quest/m1/ietf-publish-done.md) - a finished moq-transport track ends cleanly for its subscriber instead of reading PUBLISH_DONE as an error
+- [Data sections](/quest/m1/data-sections.md) - an application lists JSON and binary tracks in its own catalog section with its own per-track fields, published in one moq-mux call; data entries gain `bitrate` and `jitter`
 - [Broadcast close](/quest/m1/broadcast-close/README.md) - `close()` is the one way to end a broadcast in every language, a permanent retraction that leaves in-flight tracks alone
-- [Ingest source](/quest/m1/net-ingest-source.md) - an announce says whether the broadcast entered on this relay or a peer
+- [Relay peer set](/quest/m1/relay-peer-set.md) - a wire consumer tells a client hop from a peer hop, and every mesh credential can mark a peer
 - [Publisher clocks](/quest/m1/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
-- [Broadcast route](/quest/m1/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()
 - [CLI inspection](/quest/m1/cli-inspect/README.md) - `moq ls` lists what is live and `moq fetch` reads a group over MoQ, and a guide shows how to inspect a relay
 - [JS caught up](/quest/m1/js-announce-caught-up.md) - @moq/net's announce consumer says when the initial set has landed, like Rust
 - [Bindings caught up](/quest/m1/announce-live-bindings.md) - moq-ffi, libmoq, and every wrapper yield the same flat announce event, `Live` included
 - [IETF announce count](/quest/m1/ietf-announce-count.md) - an opt-in moq-transport extension carries the replay count, so IETF announce consumers go live without a timer
 
-- [Jitter clock](/quest/m1/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes, fed by encoders only, and never decreases
+- [Jitter clock](/quest/m1/jitter-flush-clock.md) - renditions advertise `delay` (lag behind the earliest track) and `jitter` (spread), measured at encoder flush, never lowered; js/watch sizes playout over what it subscribes
+- [Data jitter](/quest/m1/data-jitter.md) - JSON and binary tracks with a capture time advertise a detected `delay` and `jitter`
 - [Publisher audio unlock](/quest/m1/publish-audio-unlock.md) - the publisher's capture AudioContext is resumed on a gesture or the source is refused, so no silent audio track is announced
 - [IETF leftovers](/quest/m1/ietf-leftovers.md) - moq-net: the 0x21 priority property, a NOT_SUPPORTED reply to TRACK_STATUS, and the two FETCH refusal codes come from the registry
 - [FFI WebSocket fallback](/quest/m1/ffi-websocket-fallback.md) - moq-ffi and every wrapper can disable or delay the WebSocket fallback
