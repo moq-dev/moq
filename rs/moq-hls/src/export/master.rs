@@ -44,6 +44,15 @@ fn quoted_string(value: &str) -> String {
 	quoted
 }
 
+/// A URI on its own playlist line, where a leading `#` would read as a tag or comment.
+fn uri_line(uri: &str) -> String {
+	let quoted = quoted_string(uri);
+	match quoted.strip_prefix('#') {
+		Some(rest) => format!("%23{rest}"),
+		None => quoted,
+	}
+}
+
 /// A video rendition entry for the master playlist.
 #[derive(Clone, Debug)]
 pub struct VideoVariant {
@@ -118,18 +127,18 @@ fn render_video(out: &mut String, variant: &VideoVariant, audio: Option<&AudioGr
 	if let (Some(width), Some(height)) = (variant.width, variant.height) {
 		let _ = write!(line, ",RESOLUTION={width}x{height}");
 	}
-	let _ = write!(line, ",CODECS=\"{codecs}\"");
+	let _ = write!(line, ",CODECS=\"{}\"", quoted_string(&codecs));
 	if let Some(group) = audio {
 		let _ = write!(line, ",AUDIO=\"{}\"", group.id);
 	}
 	let _ = writeln!(out, "{line}");
-	let _ = writeln!(out, "{}", quoted_string(&variant.uri));
+	let _ = writeln!(out, "{}", uri_line(&variant.uri));
 }
 
 /// Render the multivariant playlist. The first rendition in each audio codec group is default.
 ///
-/// A `"` or control character in a name or URI is percent-encoded, so neither can break
-/// out of its attribute or line.
+/// A `"` or control character in a name, codec, or URI is percent-encoded, as is a leading
+/// `#` on a variant's URI line, so none can break out of its attribute or line.
 pub fn render(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 	let mut out = String::new();
 	let _ = writeln!(out, "#EXTM3U");
@@ -166,9 +175,10 @@ pub fn render(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 			let _ = writeln!(
 				out,
 				"#EXT-X-STREAM-INF:BANDWIDTH={},CODECS=\"{}\"",
-				variant.bandwidth, variant.codec
+				variant.bandwidth,
+				quoted_string(&variant.codec)
 			);
-			let _ = writeln!(out, "{}", quoted_string(&variant.uri));
+			let _ = writeln!(out, "{}", uri_line(&variant.uri));
 		}
 	}
 
@@ -274,5 +284,21 @@ mod tests {
 		assert!(out.contains("URI=\"a%22%0A#EXT-X-INJECT\""));
 		assert!(!out.contains("\nINJECT"));
 		assert!(!out.contains("\n#EXT-X-INJECT"));
+	}
+
+	#[test]
+	fn codecs_and_uri_lines_cannot_inject() {
+		let mut hd = video("hd", None, None);
+		hd.codec = "avc1\"\n#EXT-X-ENDLIST".into();
+		hd.uri = "#EXT-X-ENDLIST".into();
+		let out = render(&[hd], &[]);
+		assert!(out.contains("CODECS=\"avc1%22%0A#EXT-X-ENDLIST\"\n%23EXT-X-ENDLIST\n"), "{out}");
+		assert!(!out.contains("\n#EXT-X-ENDLIST"), "{out}");
+
+		let mut main = audio("main", 128_000, "opus\"\n#EXT-X-ENDLIST");
+		main.uri = "#frag".into();
+		let out = render(&[], &[main]);
+		assert!(out.contains("CODECS=\"opus%22%0A#EXT-X-ENDLIST\"\n%23frag\n"), "{out}");
+		assert!(!out.contains("\n#EXT-X-ENDLIST"), "{out}");
 	}
 }
