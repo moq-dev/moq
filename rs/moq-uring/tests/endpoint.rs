@@ -610,3 +610,64 @@ fn an_identity_is_read_once() {
 		})
 		.expect("worker");
 }
+
+/// Cancelling a dial after it created a connection closes that connection,
+/// even though its driver and the endpoint remain alive for sibling dials.
+#[test]
+fn cancelling_a_dial_releases_its_connection() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let socket = |handle: &moq_uring::Handle| {
+		handle
+			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+			.expect("socket")
+	};
+	let server = quic::Endpoint::new(
+		socket(&handle),
+		quic::endpoint::Config::default().with_server(server_config(&certs)),
+	)
+	.expect("server endpoint");
+	let client = quic::Endpoint::new(socket(&handle), quic::endpoint::Config::default()).expect("client endpoint");
+
+	worker
+		.block_on(async {
+			let mut config = dial_config(server.local_addr());
+			config.transport.idle_timeout = Duration::from_secs(30);
+			let mut dial = Box::pin(client.connect(&config));
+			std::future::poll_fn(|cx| {
+				assert!(
+					dial.as_mut().poll(cx).is_pending(),
+					"the dial must suspend during establishment"
+				);
+				Poll::Ready(())
+			})
+			.await;
+			drop(dial);
+
+			within(&handle, "cancelled dial bookkeeping to drain", async {
+				loop {
+					if format!("{client:?}").contains("conns: 0") {
+						break;
+					}
+					let mut tick = moq_uring::Timer::after(&handle, Duration::from_millis(10));
+					kio::wait(|waiter| tick.poll(waiter)).await;
+				}
+			})
+			.await;
+
+			let dialed = within(
+				&handle,
+				"sibling dial",
+				client.connect(&dial_config(server.local_addr())),
+			)
+			.await
+			.expect("sibling dial");
+			let accepted = within(&handle, "sibling accept", server.accept())
+				.await
+				.expect("sibling accept");
+			assert_eq!(dialed.protocol(), Some(ALPN));
+			assert_eq!(accepted.protocol(), Some(ALPN));
+		})
+		.expect("worker");
+}

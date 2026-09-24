@@ -8,8 +8,8 @@
  * frame counter painted on the canvas and the tone step on the audio graph. Everything asserted
  * here is browser output. Nothing here says anything about what a physical speaker emits.
  *
- * Launches with no Chromium flags at all - no fake camera, no fake permission prompt, no autoplay
- * override - and never reloads the page: the publisher reports when it is ready.
+ * Launches with Chromium's gesture-required autoplay policy. The capture case adds a fake device
+ * while Playwright controls permission. No page reloads: the publisher reports when it is ready.
  *
  *     bun media.ts --url http://127.0.0.1:4443 [--timeout 30] [--cases pause,detach]
  *     bun media.ts --url ... --fault silent-audio --cases none --expect-fail "audio tone"
@@ -24,6 +24,7 @@ import {
 	command,
 	Failure,
 	finishTraces,
+	inspect,
 	launch,
 	open,
 	type PlayerState,
@@ -34,17 +35,26 @@ import {
 	SELECTORS,
 	serve,
 	sleep,
+	startTrace,
 	throwPageErrors,
+	waitFor,
 	waitForFixture,
 	waitForResources,
 	waitForState,
 	waitForWatch,
 } from "./harness";
-import { FAULTS, KEYFRAME_INTERVAL_MS, leakedPlayerStarted, SAMPLE_MS, SAMPLE_RATE } from "./src/contract";
+import {
+	type CaptureState,
+	FAULTS,
+	KEYFRAME_INTERVAL_MS,
+	leakedPlayerStarted,
+	SAMPLE_MS,
+	SAMPLE_RATE,
+} from "./src/contract";
 import * as Pattern from "./src/pattern";
 
 /** Cases beyond the mandatory capability probe, publisher readiness, and cold start. */
-const CASES = ["pause", "rejoin", "detach", "republish", "late-join"] as const;
+const CASES = ["capture-denial", "pause", "rejoin", "detach", "republish", "late-join"] as const;
 type Case = (typeof CASES)[number];
 
 const { values } = parseArgs({
@@ -139,12 +149,7 @@ const HELD_MS = 1500;
  * The picture, not a status flag, is what a viewer sees stop, so this is what "playback stopped"
  * has to mean. A canvas that goes unreadable counts as stopped too.
  */
-async function waitFrozen(
-	page: Page,
-	errors: BrowserErrors,
-	assertion: string,
-	description: string,
-): Promise<number> {
+async function waitFrozen(page: Page, errors: BrowserErrors, assertion: string, description: string): Promise<number> {
 	const deadline = Date.now() + SETTLE_MS;
 	let frame: number | undefined;
 	let since = Date.now();
@@ -267,35 +272,51 @@ async function capabilities(page: Page): Promise<void> {
 	// The fixture's own configuration, so the probe answers "can this browser run this fixture"
 	// rather than "can it run something like it".
 	const wanted = { sampleRate: SAMPLE_RATE, width: Pattern.WIDTH, height: Pattern.HEIGHT };
-	const found = await page.evaluate(async (wanted) => {
-		const has = (name: string) => typeof (globalThis as Record<string, unknown>)[name] === "function";
-		const probe = async (fn: () => Promise<{ supported?: boolean }>) => {
-			try {
-				return (await fn()).supported === true;
-			} catch {
-				return false;
-			}
-		};
-		return {
-			WebTransport: has("WebTransport"),
-			VideoDecoder: has("VideoDecoder"),
-			VideoEncoder: has("VideoEncoder"),
-			AudioDecoder: has("AudioDecoder"),
-			AudioEncoder: has("AudioEncoder"),
-			AudioWorkletNode: has("AudioWorkletNode"),
-			MediaStreamTrackProcessor: has("MediaStreamTrackProcessor"),
-			"canvas.captureStream": typeof HTMLCanvasElement.prototype.captureStream === "function",
-			"encode avc1.42001f": await probe(() =>
-				VideoEncoder.isConfigSupported({ codec: "avc1.42001f", width: wanted.width, height: wanted.height }),
-			),
-			"encode opus": await probe(() =>
-				AudioEncoder.isConfigSupported({ codec: "opus", sampleRate: wanted.sampleRate, numberOfChannels: 1 }),
-			),
-			"decode opus": await probe(() =>
-				AudioDecoder.isConfigSupported({ codec: "opus", sampleRate: wanted.sampleRate, numberOfChannels: 1 }),
-			),
-		};
-	}, wanted);
+	const found = await inspect(
+		page,
+		async (wanted) => {
+			const has = (name: string) => typeof (globalThis as Record<string, unknown>)[name] === "function";
+			const probe = async (fn: () => Promise<{ supported?: boolean }>) => {
+				try {
+					return (await fn()).supported === true;
+				} catch {
+					return false;
+				}
+			};
+			return {
+				WebTransport: has("WebTransport"),
+				VideoDecoder: has("VideoDecoder"),
+				VideoEncoder: has("VideoEncoder"),
+				AudioDecoder: has("AudioDecoder"),
+				AudioEncoder: has("AudioEncoder"),
+				AudioWorkletNode: has("AudioWorkletNode"),
+				MediaStreamTrackProcessor: has("MediaStreamTrackProcessor"),
+				"canvas.captureStream": typeof HTMLCanvasElement.prototype.captureStream === "function",
+				"encode avc1.42001f": await probe(() =>
+					VideoEncoder.isConfigSupported({
+						codec: "avc1.42001f",
+						width: wanted.width,
+						height: wanted.height,
+					}),
+				),
+				"encode opus": await probe(() =>
+					AudioEncoder.isConfigSupported({
+						codec: "opus",
+						sampleRate: wanted.sampleRate,
+						numberOfChannels: 1,
+					}),
+				),
+				"decode opus": await probe(() =>
+					AudioDecoder.isConfigSupported({
+						codec: "opus",
+						sampleRate: wanted.sampleRate,
+						numberOfChannels: 1,
+					}),
+				),
+			};
+		},
+		wanted,
+	);
 
 	for (const [name, ok] of Object.entries(found)) console.error(`  ${ok ? "yes" : "NO "}  ${name}`);
 
@@ -313,25 +334,29 @@ async function capabilities(page: Page): Promise<void> {
 const server = serve();
 const browsers: Browser[] = [];
 
-// One browser per role, launched with no arguments at all: no fake camera, no fake permission
-// prompt, no autoplay override. Pages in one browser share a renderer scheduler, and the one that
-// is not frontmost is throttled and reported hidden, which stalls both the fixture's clock and the
-// player's download policy.
-async function browserFor(): Promise<Browser> {
-	const browser = await launch();
+// One browser per role. Chromium's default autoplay behavior varies with engagement and when the
+// graph is built, so require a gesture in this QA run. Pages in one browser share a renderer
+// scheduler, and the one that is not frontmost is throttled and reported hidden.
+async function browserFor(args: string[] = []): Promise<Browser> {
+	const browser = await launch(["--autoplay-policy=document-user-activation-required", ...args]);
 	browsers.push(browser);
 	return browser;
 }
 
 /** Open a subscriber page and wait for the player to start sampling. Never reloads. */
-async function subscriber(broadcast: string, label: string): Promise<[Page, BrowserErrors]> {
+async function subscriber(
+	broadcast: string,
+	label: string,
+	muted = false,
+	trace = true,
+): Promise<[Page, BrowserErrors]> {
 	const [page, errors] = await open(
 		await browserFor(),
 		// visible="always" because the window is never frontmost in a headless run, and the default
 		// policy would stop downloading video and leave the canvas black.
-		pageUrl(server.origin, "subscribe", { url: relay, broadcast, visible: "always" }),
+		pageUrl(server.origin, "subscribe", { url: relay, broadcast, visible: "always", muted: String(muted) }),
 		label,
-		true,
+		trace,
 	);
 	await waitForWatch(page);
 	return [page, errors];
@@ -339,6 +364,89 @@ async function subscriber(broadcast: string, label: string): Promise<[Page, Brow
 
 // A real click, so the page carries user activation. Every audio path is gated on it.
 const gesture = (page: Page) => page.mouse.click(1, 1);
+
+async function readCapture(page: Page): Promise<CaptureState> {
+	const state = await inspect(
+		page,
+		() => document.querySelector<HTMLElement>("moq-publish")?.dataset.smokeCapture,
+		undefined,
+	);
+	if (!state) throw new Error("the publisher has not published its capture state");
+	return JSON.parse(state) as CaptureState;
+}
+
+/** A denied browser permission is visible, silent to discovery, and revives on a later grant. */
+async function captureDenial(broadcast: string): Promise<void> {
+	console.error("=== capture denial and grant ===");
+	const [viewer, viewerErrors] = await subscriber(broadcast, "capture viewer", true);
+	const [publisher, publisherErrors] = await open(
+		await browserFor(["--use-fake-device-for-media-stream"]),
+		pageUrl(server.origin, "publish", { url: relay, broadcast }),
+		"capture publisher",
+		false,
+		{ permissions: [] },
+	);
+
+	const denied = await waitFor(publisher, publisherErrors, readCapture, {
+		deadline: Date.now() + timeoutMs,
+		assertion: "capture denial is visible",
+		description: "both refused capture sources to report NotAllowedError",
+		predicate: (state) => state.videoError === "NotAllowedError" && state.audioError === "NotAllowedError",
+	});
+	check(
+		!denied.videoActive && !denied.audioActive,
+		"capture denial holds publication",
+		() => `denied capture exposed media: ${JSON.stringify(denied)}`,
+	);
+
+	const absent = await collect(viewer, viewerErrors, 1000);
+	check(
+		absent.length > 0 &&
+			absent.every(
+				(state) =>
+					!state.broadcastActive &&
+					state.broadcastStatus === "offline" &&
+					!state.hasAudio &&
+					state.videoFrames === 0,
+			),
+		"capture denial holds publication",
+		() => `a viewer saw a partial or announced broadcast: ${JSON.stringify(absent.at(-1))}`,
+	);
+
+	await publisher.context().grantPermissions(["camera"]);
+	const partial = await waitFor(publisher, publisherErrors, readCapture, {
+		deadline: Date.now() + timeoutMs,
+		assertion: "partial capture is withheld",
+		description: "camera capture while microphone permission remains denied",
+		predicate: (state) => state.videoActive && state.audioError === "NotAllowedError",
+	});
+	check(!partial.audioActive, "partial capture is withheld", () => JSON.stringify(partial));
+	const withheld = await collect(viewer, viewerErrors, 1000);
+	check(
+		withheld.every(
+			(state) => !state.broadcastActive && state.broadcastStatus === "offline" && state.videoFrames === 0,
+		),
+		"partial capture is withheld",
+		() => `viewer saw a video-only broadcast despite microphone denial: ${JSON.stringify(withheld.at(-1))}`,
+	);
+
+	await publisher.context().grantPermissions(["camera", "microphone"]);
+	await waitFor(publisher, publisherErrors, readCapture, {
+		deadline: Date.now() + timeoutMs,
+		assertion: "capture grant recovers",
+		description: "camera and microphone to capture after permission changes without a reload",
+		predicate: (state) => state.videoActive && state.audioActive && !state.videoError && !state.audioError,
+	});
+	await waitForState(viewer, viewerErrors, {
+		deadline: Date.now() + timeoutMs,
+		assertion: "capture grant announces",
+		description: "the previously absent broadcast to announce and encode video",
+		predicate: (state) => state.broadcastActive && state.videoFrames > 0,
+	});
+	const navigations = await publisher.evaluate(() => performance.getEntriesByType("navigation").length);
+	check(navigations === 1, "capture grant recovers", () => `publisher reloaded ${navigations} times`);
+	console.error("  refused capture stayed absent, then both tracks captured and encoded after grant without reload");
+}
 
 let failure: Error | undefined;
 try {
@@ -355,12 +463,13 @@ try {
 	await capabilities(publisher);
 
 	console.error("=== publisher readiness ===");
-	// What this run can and cannot say about the gesture gate. Chromium enforces it on the fixture
-	// page (its audio graph stays suspended, and `resume()` never settles, until the click below)
-	// but not consistently on the player's, whose graph is built later and has been seen running
-	// with no activation at all. So the gate is exercised, not asserted: both pages are clicked and
-	// both must carry audio afterwards. Asserting silence beforehand would measure this browser.
-	console.error("  no fake-device or autoplay flags; each page is clicked before audio is required");
+	const beforePublisherGesture = await readFixtureState(publisher);
+	check(
+		beforePublisherGesture.audioState === "suspended" && beforePublisherGesture.frameId < 0,
+		"publisher gesture gate",
+		() => `fixture started without a gesture: ${JSON.stringify(beforePublisherGesture)}`,
+	);
+	console.error("  fixture graph suspended before a click under document activation policy");
 
 	await gesture(publisher);
 	const ready = await waitForFixture(publisher, publisherErrors, {
@@ -375,7 +484,9 @@ try {
 	// No reload anywhere below. The publisher is known ready, so a subscriber that needs a second
 	// page load to find the broadcast is an initialization bug, not a race.
 	console.error("=== cold start ===");
-	let [player, playerErrors] = await subscriber(broadcast, "player");
+	// No trace yet. DOM snapshots evaluate with a user gesture, and the player's graph is built
+	// after the first of those, so Chromium would start it running and the gate below would fail.
+	let [player, playerErrors] = await subscriber(broadcast, "player", false, false);
 
 	// Video has to reach the canvas with no gesture at all: only audio is ever gated.
 	const first = await waitForState(player, playerErrors, {
@@ -384,8 +495,24 @@ try {
 		description: "the first presented fixture frame",
 		predicate: (state) => state.frameId !== undefined,
 	});
-	console.error(`  presented frame ${first.frameId} before any gesture, audio ${first.audioContext ?? "absent"}`);
+	const beforePlayerGesture = await waitForState(player, playerErrors, {
+		deadline: Date.now() + timeoutMs,
+		assertion: "player gesture gate",
+		description: "the player audio graph to exist before a gesture",
+		predicate: (state) => state.audioContext !== undefined,
+	});
+	check(
+		!beforePlayerGesture.userActivated &&
+			beforePlayerGesture.audioContext === "suspended" &&
+			beforePlayerGesture.toneStep === undefined,
+		"player gesture gate",
+		() => `player audio ran without a gesture: ${JSON.stringify(beforePlayerGesture)}`,
+	);
+	console.error(`  presented frame ${first.frameId} before any gesture; player audio stayed suspended`);
 
+	// The context already exists and is suspended. A snapshot sets sticky activation but does not
+	// resume it; pointerdown still has to.
+	await startTrace(player, "player");
 	await gesture(player);
 	// Deliberately does not wait for a tone: whether audio actually carries the fixture is what
 	// assertMedia measures, so silence has to fail there rather than time out here.
@@ -559,6 +686,8 @@ try {
 		console.error(`  joined at frame ${joined.frameId}, live edge was ${live.frameId}`);
 		assertMedia(await collect(player, playerErrors, WINDOW_MS), "late join");
 	}
+
+	if (wants("capture-denial")) await captureDenial(`${broadcast}-capture.hang`);
 } catch (err) {
 	failure = err instanceof Error ? err : new Error(String(err));
 }

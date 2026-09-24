@@ -24,8 +24,8 @@ export type SourceType = "camera" | "screen" | "file";
  * When to announce the broadcast.
  *
  * `always` announces immediately, `never` never announces, and `source` waits until media is
- * actually being captured (a live audio/video track, i.e. permission granted). Defaults to
- * `source` so we don't announce an empty broadcast with no audio/video.
+ * actually being captured. A camera source waits for every enabled track, so a refused microphone
+ * cannot advertise a partial broadcast. Defaults to `source`.
  */
 export type AnnounceMode = "always" | "source" | "never";
 
@@ -167,12 +167,14 @@ export default class MoqPublish extends HTMLElement {
 
 		this.signals.run((effect) => {
 			const announce = effect.get(this.controls.announce);
-			// "source" waits until media is actually being captured -- a live audio or
-			// video track exists -- not merely a source *type* selected. Otherwise we'd
-			// announce an empty broadcast while the getUserMedia/getDisplayMedia
-			// permission prompt is still pending (or after the user denies it).
-			const hasMedia = effect.get(this.#videoSource) !== undefined || effect.get(this.#audioSource) !== undefined;
-			this.#announcing.set(announce === "always" || (announce === "source" && hasMedia));
+			// A camera source is one publication: wait for every enabled track so denying
+			// either permission cannot advertise a partial broadcast.
+			const video = effect.get(this.#videoSource) !== undefined;
+			const audio = effect.get(this.#audioSource) !== undefined;
+			const camera = effect.get(this.controls.source) === "camera";
+			const ready =
+				!camera || ((!effect.get(this.#videoEnabled) || video) && (!effect.get(this.#audioEnabled) || audio));
+			this.#announcing.set(announce === "always" || (announce === "source" && (video || audio) && ready));
 		});
 
 		this.#capture = new Video.Capture({ source: this.#videoSource });

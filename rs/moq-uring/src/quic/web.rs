@@ -113,13 +113,17 @@ impl Guard {
 	fn disarm(&mut self) {
 		self.conn = None;
 	}
+
+	fn close(&mut self, reason: &str) {
+		if let Some(conn) = self.conn.take() {
+			conn.close_code(H3_GENERAL_PROTOCOL_ERROR, reason);
+		}
+	}
 }
 
 impl Drop for Guard {
 	fn drop(&mut self) {
-		if let Some(conn) = self.conn.take() {
-			conn.close_code(H3_GENERAL_PROTOCOL_ERROR, "webtransport handshake abandoned");
-		}
+		self.close("webtransport handshake abandoned");
 	}
 }
 
@@ -131,16 +135,17 @@ impl Request {
 	/// `conn`. There is no timeout here; a peer that stalls mid-handshake is
 	/// bounded by the connection's idle timeout.
 	pub async fn accept(conn: Connection) -> Result<Self, Error> {
-		// Nothing else will close it. The endpoint keeps a connection, its
-		// routes, and its driver task until the driver sees a terminal state,
-		// and the backlog stopped counting this one when it was accepted, so a
-		// peer that keeps sending would otherwise hold a rejected handshake
-		// open for as long as it liked.
-		let failed = conn.clone();
+		// The endpoint and driver retain this connection after the future is
+		// dropped. Own its close before the first await; the returned Request
+		// takes over that duty once the handshake succeeds.
+		let mut guard = Guard::new(conn.clone());
 		match Self::handshake(conn).await {
-			Ok(request) => Ok(request),
+			Ok(request) => {
+				guard.disarm();
+				Ok(request)
+			}
 			Err(err) => {
-				failed.close_code(H3_GENERAL_PROTOCOL_ERROR, &err.to_string());
+				guard.close(&err.to_string());
 				Err(err)
 			}
 		}
