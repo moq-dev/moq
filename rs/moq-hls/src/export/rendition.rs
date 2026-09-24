@@ -1,7 +1,7 @@
 //! One rendition: playlists from its view of the broadcast timeline, segments fetched on
 //! demand.
 
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
@@ -9,6 +9,7 @@ use bytes::Bytes;
 use hang::catalog::{Archive, AudioConfig, Clock, VideoConfig};
 use moq_mux::container::fmp4::Muxer;
 use moq_mux::timeline::Entry;
+use sha2::{Digest, Sha256};
 
 use super::playlist::{Segment, Snapshot};
 use super::upstream::Upstream;
@@ -59,6 +60,23 @@ impl Kind {
 			Kind::Video => "video",
 			Kind::Audio => "audio",
 		}
+	}
+}
+
+/// A built init segment, with the content hash that versions its URL (`init.{hash}.mp4`).
+///
+/// Hashing the bytes rather than a list of catalog fields covers every input that shapes the
+/// init, and lets two edges serving the same rendition agree on the URL without coordinating.
+struct Init {
+	bytes: Bytes,
+	hash: String,
+}
+
+impl Init {
+	fn new(bytes: Bytes) -> Self {
+		// 64 bits: the URL only has to tell apart the inits one rendition name ever carries.
+		let hash = Sha256::digest(&bytes)[..8].iter().map(|b| format!("{b:02x}")).collect();
+		Self { bytes, hash }
 	}
 }
 
@@ -207,8 +225,14 @@ pub struct Rendition {
 	/// The broadcast serving this rendition's media. A sibling is bound when the rendition is
 	/// created and rebound if that publisher is replaced (see [`Upstream::bind`]).
 	media: Media,
-	/// The init segment, built on first request.
-	init: tokio::sync::Mutex<Option<Bytes>>,
+	/// The init segment, built on first request. A reconfigure rebuilds the whole rendition, so
+	/// it never changes once set.
+	init: OnceLock<Init>,
+	/// Serializes init builds, so concurrent first requests fetch the keyframe group once.
+	building: tokio::sync::Mutex<()>,
+	/// The embedder's label for the publisher run, carried by every segment URL (see
+	/// [`Broadcaster::set_generation`](super::Broadcaster::set_generation)).
+	generation: RwLock<Option<Arc<str>>>,
 }
 
 impl Rendition {
@@ -276,7 +300,9 @@ impl Rendition {
 			clock,
 			live: Arc::new(segments::Producer::new()),
 			media: Media::bind(upstream, config.broadcast.as_ref())?,
-			init: tokio::sync::Mutex::new(None),
+			init: OnceLock::new(),
+			building: tokio::sync::Mutex::new(()),
+			generation: RwLock::new(None),
 		})
 	}
 
@@ -301,7 +327,9 @@ impl Rendition {
 			clock,
 			live: Arc::new(segments::Producer::new()),
 			media: Media::bind(upstream, config.broadcast.as_ref())?,
-			init: tokio::sync::Mutex::new(None),
+			init: OnceLock::new(),
+			building: tokio::sync::Mutex::new(()),
+			generation: RwLock::new(None),
 		})
 	}
 
@@ -331,6 +359,16 @@ impl Rendition {
 	/// Clear rows that can no longer be followed by a consecutive source timeline record.
 	pub(crate) fn clear(&self) {
 		self.live.clear();
+	}
+
+	/// List every segment URL under `generation` from now on.
+	pub(crate) fn label(&self, generation: Option<Arc<str>>) {
+		*self.generation.write().expect("generation lock poisoned") = generation;
+	}
+
+	/// The generation every segment URL currently carries.
+	pub(crate) fn generation(&self) -> Option<Arc<str>> {
+		self.generation.read().expect("generation lock poisoned").clone()
 	}
 
 	/// Mark this rendition's window ended (the timeline finished cleanly).
@@ -371,13 +409,19 @@ impl Rendition {
 	/// playlist with no segments confuses players, so a server should treat `None` as "not
 	/// ready" rather than serve it.
 	///
+	/// The playlist names its init segment by a hash of the bytes, so it is also `None` until
+	/// the init is known. An inline-parameter-set codec (no catalog `description`) only learns
+	/// it from media: await [`init`](Self::init) first.
+	///
 	/// `query` is an optional query string (without the leading `?`, e.g. `jwt=<token>`)
 	/// appended to every child URL (the init map and each segment), so a stock player that does
 	/// not replay request headers still carries a credential on its follow-up requests. It is an
 	/// argument rather than a [`Config`](super::Config) field because one broadcaster fans out
 	/// to viewers holding different tokens.
 	pub fn media_playlist(&self, query: Option<&str>) -> Option<String> {
-		self.is_playable().then(|| super::render_media(&self.playlist(), query))
+		let init = self.built_init()?;
+		self.is_playable()
+			.then(|| super::render_media(&self.playlist(), &init.hash, query))
 	}
 
 	/// Render the media playlist from the current timeline window.
@@ -429,6 +473,7 @@ impl Rendition {
 			segments,
 			finished: window.ended,
 			program_date_time,
+			generation: self.generation(),
 		}
 	}
 
@@ -441,8 +486,10 @@ impl Rendition {
 
 	/// This rendition's DASH representation: its master-level metadata plus its slice of the
 	/// shared timeline as `(t, d)` pairs in the timeline's own timescale (the record values
-	/// verbatim, so `$Time$` addressing resolves exactly).
-	pub(crate) fn representation(&self) -> mpd::Representation {
+	/// verbatim, so `$Time$` addressing resolves exactly). `None` until the init is known, as
+	/// for [`media_playlist`](Self::media_playlist).
+	pub(crate) fn representation(&self) -> Option<mpd::Representation> {
+		let init = self.built_init()?;
 		self.media.sync(&self.live);
 		let window = self.live.window();
 		let timescale = self.timescale();
@@ -466,7 +513,7 @@ impl Rendition {
 			Config::Video(config) => (config.framerate, None, None),
 			Config::Audio(config) => (None, Some(config.sample_rate), Some(config.channel_count)),
 		};
-		mpd::Representation {
+		Some(mpd::Representation {
 			name: self.name.clone(),
 			kind: self.kind,
 			bandwidth: self.bandwidth(),
@@ -479,7 +526,9 @@ impl Rendition {
 			timescale: self.section.timescale.max(1),
 			segments,
 			ended: window.ended,
-		}
+			init: init.hash.clone(),
+			generation: self.generation(),
+		})
 	}
 
 	/// Fetch and transmux the segment whose timeline `pts` is `time`, in the timeline's
@@ -544,10 +593,33 @@ impl Rendition {
 	/// For inline-parameter-set codecs (no catalog `description`), the parameter sets are
 	/// resolved by fetching the newest keyframe group first.
 	pub async fn init(&self) -> Result<Option<Bytes>> {
+		Ok(self.load_init().await?.map(|init| init.bytes.clone()))
+	}
+
+	/// The init segment served at `init.{hash}.mp4`: `None` when `hash` names any other bytes,
+	/// so a URL never serves an init it does not describe.
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	pub(crate) async fn init_versioned(&self, hash: &str) -> Result<Option<Bytes>> {
+		let init = self.load_init().await?;
+		Ok(init.filter(|init| init.hash == hash).map(|init| init.bytes.clone()))
+	}
+
+	/// The init segment if it is already built, or can be without media: an out-of-band codec
+	/// builds its init straight from the catalog.
+	fn built_init(&self) -> Option<&Init> {
+		if let Some(init) = self.init.get() {
+			return Some(init);
+		}
+		// A muxer error surfaces from `init()`, which the serve path awaits before rendering.
+		let bytes = self.muxer().ok()?.init().ok()??;
+		Some(self.init.get_or_init(|| Init::new(bytes)))
+	}
+
+	async fn load_init(&self) -> Result<Option<&Init>> {
 		let binding = self.media.sync(&self.live);
-		let mut cache = self.init.lock().await;
-		if let Some(bytes) = cache.as_ref() {
-			return Ok(Some(bytes.clone()));
+		let _building = self.building.lock().await;
+		if let Some(init) = self.init.get() {
+			return Ok(Some(init));
 		}
 
 		let mut muxer = self.muxer()?;
@@ -576,8 +648,7 @@ impl Rendition {
 				bytes
 			}
 		};
-		*cache = Some(bytes.clone());
-		Ok(Some(bytes))
+		Ok(Some(self.init.get_or_init(|| Init::new(bytes))))
 	}
 
 	/// Fetch and transmux the segment numbered `segment`.

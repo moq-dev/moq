@@ -4405,6 +4405,7 @@ dependencies = [
  "percent-encoding",
  "rand 0.10.3",
  "reqwest",
+ "sha2",
  "thiserror 2.0.21",
  "tokio",
  "tower",

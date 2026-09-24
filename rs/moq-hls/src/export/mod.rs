@@ -144,6 +144,29 @@ impl Broadcaster {
 		self.renditions.ready().await;
 	}
 
+	/// Version every segment URL with `generation`, a label for the publisher run the
+	/// broadcast carries now, or stop versioning with `None` (the default).
+	///
+	/// A restarted publisher is spliced into the same broadcast and restarts its segment
+	/// numbers, so `seg/0.m4s` would name different bytes on each run. Supply a new generation
+	/// before the new run's media flows. Replacing one drops every listed segment, while the
+	/// first only labels the run already flowing. A segment URL carrying any other generation
+	/// is refused. Init URLs need none: they carry a hash of their bytes.
+	///
+	/// Fails unless `generation` is non-empty ASCII letters, digits, `-`, and `_`.
+	pub fn set_generation(&self, generation: Option<&str>) -> crate::Result<()> {
+		if let Some(generation) = generation
+			&& (generation.is_empty()
+				|| !generation
+					.bytes()
+					.all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+		{
+			return Err(crate::Error::InvalidGeneration(generation.to_string()));
+		}
+		self.renditions.fanout().set_generation(generation.map(Arc::from));
+		Ok(())
+	}
+
 	/// Render the multivariant (master) playlist from the current renditions.
 	///
 	/// `query` is an optional query string (without the leading `?`, e.g. `jwt=<token>`)
@@ -195,7 +218,11 @@ impl Broadcaster {
 			if availability_start.is_none() {
 				availability_start = rendition.wall_clock(moq_net::Timestamp::ZERO);
 			}
-			let representation = rendition.representation();
+			// Without its init there is nothing to name in `initialization`; the serve path
+			// builds every init before rendering (see `build_inits`).
+			let Some(representation) = rendition.representation() else {
+				continue;
+			};
 			match rendition.kind {
 				Kind::Video => video.push(representation),
 				Kind::Audio => audio.push(representation),
@@ -225,6 +252,17 @@ impl Broadcaster {
 			},
 			query,
 		))
+	}
+
+	/// Build every rendition's init segment, so the manifest can name each by its hash. A
+	/// rendition whose init can't be built yet is left out of the render.
+	#[cfg(feature = "server")]
+	pub(crate) async fn build_inits(&self) {
+		for rendition in self.renditions.snapshot() {
+			if let Err(err) = rendition.init().await {
+				tracing::warn!(rendition = %rendition.name, %err, "failed to build init segment");
+			}
+		}
 	}
 
 	/// Resolve once the broadcast has something listable (its first complete segment, or an
@@ -811,6 +849,144 @@ mod tests {
 		drop((media, registration, broadcast));
 	}
 
+	/// The text between `start` and the next `end` in `haystack`.
+	fn between<'a>(haystack: &'a str, start: &str, end: &str) -> &'a str {
+		let rest = &haystack[haystack.find(start).unwrap_or_else(|| panic!("no {start:?}")) + start.len()..];
+		&rest[..rest.find(end).unwrap_or_else(|| panic!("no {end:?}"))]
+	}
+
+	/// The init hash a media playlist maps.
+	fn init_hash(playlist: &str) -> &str {
+		between(playlist, "#EXT-X-MAP:URI=\"init.", ".mp4")
+	}
+
+	/// Publish a VP8 rendition with three GOPs, 2s apart, so segments 0 and 1 are listable.
+	fn publish_vp8(
+		broadcast: &mut moq_net::broadcast::Producer,
+	) -> (
+		moq_mux::catalog::Producer,
+		TestRendition,
+		moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
+	) {
+		let catalog = moq_mux::catalog::Producer::new(broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let reserved = catalog.reserve();
+		let mut registration = catalog.test_video("video0").unwrap();
+		registration.set(video_config()).unwrap();
+		drop(reserved);
+		let track = broadcast.create_track("video0", None).unwrap();
+		let mut media = catalog
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
+			.unwrap();
+		for (micros, keyframe) in [(0, true), (1_000_000, false), (2_000_000, true), (4_000_000, true)] {
+			media.write(vp8_frame(micros, keyframe)).unwrap();
+		}
+		(catalog, registration, media)
+	}
+
+	// A reconfigure that changes the init bytes changes the init URL, and the old URL stops
+	// resolving, so a cache can never hand a player the previous init under the new one.
+	#[tokio::test]
+	async fn a_reconfigure_versions_the_init_url() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let (_catalog, mut registration, _media) = publish_vp8(&mut broadcast);
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let old = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
+		let old_playlist = old
+			.media_playlist(None)
+			.expect("an out-of-band init renders without a fetch");
+		let old_hash = init_hash(&old_playlist).to_string();
+
+		let mut config = video_config();
+		config.coded_width = Some(640);
+		config.coded_height = Some(480);
+		registration.set(config).unwrap();
+
+		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+		let new = loop {
+			let current = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
+			if !Arc::ptr_eq(&current, &old) {
+				break current;
+			}
+			assert!(
+				tokio::time::Instant::now() < deadline,
+				"the reconfigure never rebuilt the rendition"
+			);
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		};
+		let new_init = new.init().await.unwrap().expect("init segment");
+		let _ = tokio::time::timeout(Duration::from_secs(5), new.playable()).await;
+		let new_playlist = new.media_playlist(None).expect("playable");
+		let new_hash = init_hash(&new_playlist);
+		assert_ne!(new_hash, old_hash, "different init bytes get a different URL");
+		assert_eq!(new.init_versioned(new_hash).await.unwrap(), Some(new_init));
+		assert!(new.init_versioned(&old_hash).await.unwrap().is_none());
+	}
+
+	// A generation rides every segment URL. The first one labels the run already listed;
+	// replacing it drops that run's rows, and the next run lists under the new generation.
+	#[tokio::test]
+	async fn a_generation_versions_segment_urls_and_a_new_one_resets_the_window() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let (_catalog, _registration, mut media) = publish_vp8(&mut broadcast);
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
+		let unversioned = rendition.media_playlist(None).expect("playable");
+		assert!(unversioned.contains("\nseg/0.m4s\n"));
+
+		assert!(matches!(
+			broadcaster.set_generation(Some("run.1")),
+			Err(crate::Error::InvalidGeneration(_))
+		));
+		assert!(broadcaster.set_generation(Some("")).is_err());
+
+		broadcaster.set_generation(Some("run-1")).unwrap();
+		let labeled = rendition
+			.media_playlist(None)
+			.expect("the first generation keeps the rows");
+		assert!(labeled.contains("\nseg/run-1.0.m4s\n"));
+		assert!(labeled.contains("\nseg/run-1.1.m4s\n"));
+		assert_eq!(
+			init_hash(&labeled),
+			init_hash(&unversioned),
+			"the init needs no generation"
+		);
+		let manifest = broadcaster.manifest(None).expect("manifest");
+		assert!(manifest.contains("media=\"video/video0/seg/run-1.t$Time$.m4s\""));
+
+		broadcaster.set_generation(Some("run-2")).unwrap();
+		assert!(
+			rendition.media_playlist(None).is_none(),
+			"a new generation drops the old run's rows"
+		);
+
+		media.write(vp8_frame(6_000_000, true)).unwrap();
+		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+		let restarted = rendition.media_playlist(None).expect("the new run lists");
+		assert!(restarted.contains("\nseg/run-2.2.m4s\n"));
+		assert!(!restarted.contains("run-1"));
+
+		broadcaster.set_generation(None).unwrap();
+		assert!(
+			rendition.media_playlist(None).is_none(),
+			"clearing the generation is a change too"
+		);
+	}
+
 	#[tokio::test]
 	async fn serves_playlist_and_segments_from_the_timeline() {
 		let origin = produce_origin();
@@ -863,18 +1039,23 @@ mod tests {
 		);
 		assert!(!playlist.finished);
 
+		// Without coded dimensions VP8 learns its init from a keyframe, and the playlist names
+		// the init by hash, so nothing renders until the init is built.
+		assert!(rendition.media_playlist(None).is_none());
+		let init = rendition.init().await.unwrap().expect("init segment");
+		assert_eq!(&init[4..8], b"ftyp");
+
 		let rendered = rendition.media_playlist(None).expect("playable");
-		assert!(rendered.contains("#EXT-X-MAP:URI=\"init.mp4\"\n"));
+		let hash = init_hash(&rendered);
 		assert!(rendered.contains("seg/0.m4s\n"));
 		assert!(rendered.contains("seg/1.m4s\n"));
+		assert_eq!(rendition.init_versioned(hash).await.unwrap(), Some(init));
+		assert!(rendition.init_versioned("0000000000000000").await.unwrap().is_none());
 
 		// The same render, but carrying a credential into every child URL.
 		let signed = rendition.media_playlist(Some("jwt=abc.def")).expect("playable");
-		assert!(signed.contains("#EXT-X-MAP:URI=\"init.mp4?jwt=abc.def\"\n"));
+		assert!(signed.contains(&format!("#EXT-X-MAP:URI=\"init.{hash}.mp4?jwt=abc.def\"\n")));
 		assert!(signed.contains("seg/0.m4s?jwt=abc.def\n"));
-
-		let init = rendition.init().await.unwrap().expect("init segment");
-		assert_eq!(&init[4..8], b"ftyp");
 
 		let segment = rendition.segment(0).await.unwrap().expect("segment fetched on demand");
 		assert_eq!(&segment[4..8], b"moof", "a fetched group transmuxes to moof+mdat");
@@ -996,9 +1177,11 @@ mod tests {
 		assert_eq!(manifest.matches("<S t=\"2000\" d=\"2000\"/>").count(), 2);
 		assert!(!manifest.contains("<S t=\"4000\""), "the live-edge group is not listed");
 
-		// A credential rides every child URL.
+		// A credential rides every child URL, and the init is named by its hash.
 		let signed = broadcaster.manifest(Some("jwt=abc.def")).expect("manifest renders");
-		assert!(signed.contains("initialization=\"video/video0/init.mp4?jwt=abc.def\""));
+		let hash = between(&signed, "initialization=\"video/video0/init.", ".mp4?jwt=abc.def\"");
+		let init = video_rendition.init().await.unwrap().expect("init segment");
+		assert_eq!(video_rendition.init_versioned(hash).await.unwrap(), Some(init));
 		assert!(signed.contains("media=\"video/video0/seg/t$Time$.m4s?jwt=abc.def\""));
 
 		// $Time$ resolves to the same bytes the aligned number does; unknown times miss.
