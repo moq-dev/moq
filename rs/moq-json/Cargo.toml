@@ -34,3 +34,7 @@ harness = false
 [[bench]]
 name = "allocations"
 harness = false
+
+[[bench]]
+name = "table"
+harness = false
