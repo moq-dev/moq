@@ -64,7 +64,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Encodes a stream's frame payloads into one shared DEFLATE window, one self-delimited slice per
 /// frame. Hold one per stream; create a fresh one for each independent stream.
-pub struct Encoder(Compress);
+// Boxed: zlib-rs keeps its ~140-byte stream header inline, which would bloat every type that embeds
+// an encoder or decoder.
+pub struct Encoder(Box<Compress>);
 
 impl Encoder {
 	/// Start a fresh encoder with a cold window at [`DEFAULT_LEVEL`].
@@ -76,7 +78,7 @@ impl Encoder {
 	/// smaller and slower). Values above `9` are clamped.
 	pub fn with_level(level: u32) -> Self {
 		// `false`: raw DEFLATE, no zlib header/trailer, matching `deflate-raw` on the browser side.
-		Self(Compress::new(flate2::Compression::new(level.min(9)), false))
+		Self(Box::new(Compress::new(flate2::Compression::new(level.min(9)), false)))
 	}
 
 	/// Compress the next frame's `payload`, returning its slice of the stream: the DEFLATE bytes minus
@@ -127,7 +129,7 @@ impl Default for Encoder {
 /// Decodes a stream's frame slices back into the original payloads. Hold one per stream; feed slices
 /// in frame order (each frame builds on the earlier ones).
 pub struct Decoder {
-	inner: Decompress,
+	inner: Box<Decompress>,
 	max_frame_size: u64,
 }
 
@@ -144,7 +146,7 @@ impl Decoder {
 	pub fn with_max_frame_size(max_frame_size: u64) -> Self {
 		// `false`: raw DEFLATE, matching the encoder.
 		Self {
-			inner: Decompress::new(false),
+			inner: Box::new(Decompress::new(false)),
 			max_frame_size,
 		}
 	}
