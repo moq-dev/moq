@@ -1071,6 +1071,7 @@ pub struct Cluster {
 }
 
 /// A gateway or network session admitted with its lease, scoped origins, and stats.
+#[non_exhaustive]
 pub struct Admitted {
 	/// The live authorization that must be held for the session's lifetime.
 	pub lease: auth::Lease,

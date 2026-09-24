@@ -103,6 +103,7 @@ pub enum Event {
 /// How a session reached the relay, including QUIC, relay HTTP, and gateways.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Transport {
 	/// QUIC, either directly or through WebTransport over HTTP/3.
 	Quic,

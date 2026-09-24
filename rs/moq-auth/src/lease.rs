@@ -128,7 +128,9 @@ impl Clock {
 	fn new(grant: &Grant) -> Self {
 		Self {
 			// A cadence too far out to schedule is no scheduled re-check; `expires` still bounds the grant.
-			next: grant.revalidate.and_then(|cadence| tokio::time::Instant::now().checked_add(cadence)),
+			next: grant
+				.revalidate
+				.and_then(|cadence| tokio::time::Instant::now().checked_add(cadence)),
 			expires: grant.expires,
 			cadence: grant.revalidate,
 			failures: 0,

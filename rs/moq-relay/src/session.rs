@@ -485,7 +485,13 @@ mod tests {
 
 	#[test]
 	fn every_transport_spelling_filters() {
-		for transport in [Transport::Quic, Transport::Http, Transport::Rtmp, Transport::Srt, Transport::WebRtc] {
+		for transport in [
+			Transport::Quic,
+			Transport::Http,
+			Transport::Rtmp,
+			Transport::Srt,
+			Transport::WebRtc,
+		] {
 			let filter = Filter::from_query(Some(&format!("transport={transport}"))).unwrap();
 			assert_eq!(filter.transport, Some(transport));
 		}

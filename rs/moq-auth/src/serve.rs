@@ -23,6 +23,7 @@ use crate::{Event, Grant, Key, KeyId, KeySet, Permissions, Request};
 /// Where the signing keys a `jwt` is verified against come from. Read per request,
 /// so a rotated file takes effect without a restart.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Keys {
 	/// One key file; the token's `kid` must match the key.
 	File(PathBuf),
