@@ -1924,8 +1924,11 @@ impl Cluster {
 
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
 		// root, so presence is keyed under the empty root within the cluster tier.
+		// A peer that predates the hidden opt-in still discovers our hidden routes;
+		// see `connection::authorize`.
 		let mut client = client
-			.with_origin(self.origin.clone())
+			.with_publisher(self.origin.consume().with_hidden(true))
+			.with_subscriber(self.origin.clone())
 			.with_stats(self.stats.tier(self.cluster_tier()).session(""));
 		if let Some(cost) = cost {
 			client = client.with_cost(cost);

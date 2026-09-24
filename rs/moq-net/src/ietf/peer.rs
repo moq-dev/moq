@@ -15,6 +15,10 @@ pub(crate) struct Peer {
 	/// unsolicited PUBLISH_NAMESPACE is unwanted. `None` when it declared nothing, which
 	/// is the one case where sending us one anyway is not a protocol violation.
 	pub solicit: Option<bool>,
+
+	/// MoQ Hidden: whether the peer understands the HIDDEN parameter on
+	/// SUBSCRIBE_NAMESPACE, so we may send it.
+	pub hidden: bool,
 }
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
@@ -73,6 +77,7 @@ mod tests {
 				cost: Some(3),
 			},
 			solicit: None,
+			hidden: false,
 		};
 
 		let slot = PeerSetup::default();
@@ -83,6 +88,7 @@ mod tests {
 				cost: Some(0),
 			},
 			solicit: Some(true),
+			hidden: true,
 		});
 
 		assert_eq!(slot.get().await, first);

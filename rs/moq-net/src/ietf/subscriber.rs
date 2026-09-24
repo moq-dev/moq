@@ -634,9 +634,8 @@ where
 	/// our namespace -- a peer outside it has never heard of our root, so a rooted
 	/// subscriber asks for its scope and mounts the replies under the root.
 	///
-	/// Asked unconditionally, without waiting on the peer's SETUP: a peer with nothing to
-	/// advertise answers with an empty set, which costs one stream, while waiting to find
-	/// out costs a round trip on every session.
+	/// Asked unconditionally: a peer with nothing to advertise answers with an empty set,
+	/// which costs one stream.
 	pub fn subscribe_prefixes(&self) -> Vec<PathOwned> {
 		crate::model::interest_prefixes(&self.origin.allowed())
 	}
@@ -659,6 +658,12 @@ where
 			return Err(Error::GoingAway);
 		}
 
+		// Hidden namespaces are requested too, as on moq-lite: the session mirrors the
+		// peer into the origin and each local reader opts in on its own. The parameter
+		// fails decoding at a peer that doesn't know it, so it waits on the peer's SETUP
+		// to say whether it does (MoQ Hidden).
+		let hidden = self.peer_setup.get().await.hidden;
+
 		let request_id = self.control.next_request_id(&self.runtime).await?;
 
 		// Draft-18+ uses SUBSCRIBE_NAMESPACE (0x50); earlier drafts use the legacy
@@ -669,6 +674,7 @@ where
 					request_id,
 					namespace: prefix.clone(),
 					subscribe_options: 0x01, // NAMESPACE only
+					hidden,
 				};
 				stream.writer.encode(&ietf::SubscribeNamespaceLegacy::ID).await?;
 				stream.writer.encode(&msg).await?;
@@ -677,6 +683,7 @@ where
 				let msg = ietf::SubscribeNamespace {
 					request_id,
 					namespace: prefix.clone(),
+					hidden,
 				};
 				stream.writer.encode(&ietf::SubscribeNamespace::ID).await?;
 				stream.writer.encode(&msg).await?;
@@ -2880,13 +2887,17 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 		let (tasks, _task_set) = crate::util::TaskSet::new();
+		// The request waits on the peer's SETUP to learn whether it may opt in to
+		// hidden namespaces.
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
 		let mut subscriber = Subscriber::new(
 			crate::time::Clock::tokio(),
 			session.clone(),
 			scoped,
 			Control::new(None, false),
 			None,
-			peer::PeerSetup::default(),
+			peer_setup,
 			crate::Hop::new(1).unwrap(),
 			None,
 			Version::Draft16,

@@ -829,6 +829,8 @@ struct TableCursor {
 	/// Skip routes whose hop chain or announcing session (`via`) is this peer
 	/// (control-plane split horizon).
 	exclude: Option<Hop>,
+	/// Which routes beneath a hidden segment are reported.
+	hidden: Hidden,
 	/// The delivery buffer, drained by the cursor's `poll_next`.
 	state: kio::Producer<OriginConsumerState>,
 	/// The last delivered best route per presented (relative) prefix, for change
@@ -877,6 +879,15 @@ impl TableCursor {
 		(entry.advertised || (entry.local && self.exclude.is_none()))
 			&& entry.visible_to(self.exclude)
 			&& entry.overlaps(&self.allowed)
+			&& self.hidden.admits(self.hides(&entry.prefix))
+	}
+
+	/// Whether a segment of `prefix` below the head it sits under starts with
+	/// `.`. A route at or above a head has nothing below it, so it never hides.
+	fn hides(&self, prefix: &Path) -> bool {
+		self.heads
+			.iter()
+			.any(|head| prefix.strip_prefix(head).is_some_and(|below| below.is_hidden()))
 	}
 }
 
@@ -936,6 +947,34 @@ pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<PathOwned> {
 	let covered = heads.clone();
 	heads.retain(|head| !covered.iter().any(|other| other != head && head.has_prefix(other)));
 	heads
+}
+
+/// Which routes beneath a hidden segment an announce cursor reports.
+///
+/// A route is hidden when a segment below the cursor's requested prefix (its
+/// interest head) starts with `.`; a prefix that names the dot segment itself
+/// lists what is under it. Only discovery is affected: a request by exact path
+/// resolves either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Hidden {
+	/// Only visible routes.
+	#[default]
+	Exclude,
+	/// Visible and hidden routes alike.
+	Include,
+	/// Only hidden routes: an opt-in that tops up a feed already carrying the
+	/// visible ones.
+	Only,
+}
+
+impl Hidden {
+	fn admits(self, hidden: bool) -> bool {
+		match self {
+			Self::Exclude => !hidden,
+			Self::Include => true,
+			Self::Only => hidden,
+		}
+	}
 }
 
 /// What an [`AnnounceUpdate`] reports about its path.
@@ -3068,6 +3107,9 @@ pub struct Consumer {
 	// advertised. `None` is a local cursor and filters nothing.
 	exclude: Option<Hop>,
 
+	// Which routes beneath a hidden (`.`-prefixed) segment `announced` reports.
+	hidden: Hidden,
+
 	// The cache policy remote fronts inherit, mirroring what
 	// `create_broadcast` gives a local front.
 	pool: cache::Pool,
@@ -3092,6 +3134,7 @@ impl Consumer {
 			shared: producer.shared.clone(),
 			stats,
 			exclude: None,
+			hidden: Hidden::Exclude,
 			pool: producer.pool.clone(),
 			cache_duration: producer.cache_duration,
 			tasks: producer.tasks.downgrade(),
@@ -3114,6 +3157,29 @@ impl Consumer {
 	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
 		self.exclude = Some(peer);
 		self
+	}
+
+	/// A clone whose [`announced`](Self::announced) also reports hidden routes:
+	/// those with a segment starting with `.` below the requested prefix.
+	/// Hidden routes are left out by default, so a platform can add `.`-named
+	/// broadcasts without them turning up in apps that list everything.
+	pub fn with_hidden(mut self, hidden: bool) -> Self {
+		self.hidden = match hidden {
+			true => Hidden::Include,
+			false => Hidden::Exclude,
+		};
+		self
+	}
+
+	/// A clone whose [`announced`](Self::announced) reports only hidden routes.
+	pub(crate) fn only_hidden(mut self) -> Self {
+		self.hidden = Hidden::Only;
+		self
+	}
+
+	/// Whether [`announced`](Self::announced) reports hidden routes alongside the rest.
+	pub(crate) fn includes_hidden(&self) -> bool {
+		self.hidden == Hidden::Include
 	}
 
 	/// Attach an egress stats context: broadcasts handed out through this handle (and
@@ -3150,6 +3216,8 @@ impl Consumer {
 	/// Allocates a per-cursor coalescing buffer and replays the currently
 	/// announced routes as initial updates. Routes stay prefixes and are named
 	/// relative to this consumer's root; its patterns only filter visibility.
+	/// Routes with a segment starting with `.` below the literal head of those
+	/// patterns are hidden unless [`with_hidden`](Self::with_hidden) opted in.
 	/// Drop the returned [`AnnounceConsumer`] to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
 		AnnounceConsumer::new(
@@ -3157,6 +3225,7 @@ impl Consumer {
 			self.scope.allowed.clone(),
 			self.stats.clone(),
 			self.exclude,
+			self.hidden,
 			&self.shared,
 		)
 	}
@@ -3442,6 +3511,7 @@ impl AnnounceConsumer {
 		allowed: Patterns,
 		stats: stats::Session,
 		exclude: Option<Hop>,
+		hidden: Hidden,
 		shared: &kio::Shared<OriginState>,
 	) -> Self {
 		let state = kio::Producer::<OriginConsumerState>::default();
@@ -3462,6 +3532,7 @@ impl AnnounceConsumer {
 						heads: interest_prefixes(&allowed),
 						allowed,
 						exclude,
+						hidden,
 						state: state.clone(),
 						current: HashMap::new(),
 					},
@@ -3749,6 +3820,74 @@ mod tests {
 		drop(announcement);
 		announced.assert_next_ended("room/alice");
 		announced.assert_next_wait();
+	}
+
+	/// A `.`-prefixed segment below the requested prefix hides a route from
+	/// discovery unless the reader opts in; one inside the prefix does not.
+	#[tokio::test]
+	async fn hidden_routes_need_an_opt_in() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let _visible = producer.announce("room/alice", Route::default()).unwrap();
+		let _stats = producer.announce(".stats/node", Route::default()).unwrap();
+		let _nested = producer.announce("room/.internal", Route::default()).unwrap();
+		// Only a leading dot hides: a suffix is part of the name.
+		let _suffix = producer.announce("room/catalog.pro", Route::default()).unwrap();
+
+		let mut announced = consumer.announced();
+		announced.assert_next_active("room/alice");
+		announced.assert_next_active("room/catalog.pro");
+		announced.assert_next_wait();
+
+		let mut announced = consumer.clone().with_hidden(true).announced();
+		announced.assert_next_active(".stats/node");
+		announced.assert_next_active("room/.internal");
+		announced.assert_next_active("room/alice");
+		announced.assert_next_active("room/catalog.pro");
+		announced.assert_next_wait();
+
+		// Naming the dot segment lists what is under it, by root or by pattern.
+		let mut announced = consumer.scope(".stats", &Patterns::from(Pattern::all())).unwrap().announced();
+		announced.assert_next_active("node");
+		announced.assert_next_wait();
+		let mut announced = consumer.scope("", &scopes(&["room/.internal"])).unwrap().announced();
+		announced.assert_next_active("room/.internal");
+		announced.assert_next_wait();
+
+		// A tail feed reports only what the default hid.
+		let mut announced = consumer.clone().only_hidden().announced();
+		announced.assert_next_active(".stats/node");
+		announced.assert_next_active("room/.internal");
+		announced.assert_next_wait();
+	}
+
+	/// Hiding narrows discovery only: an exact request resolves without an opt-in.
+	#[tokio::test]
+	async fn hidden_broadcast_resolves_by_path() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let _broadcast = producer.create_broadcast(".stats/node").unwrap();
+
+		consumer.announced().assert_next_wait();
+		let resolved = consumer.request_broadcast(".stats/node").await.expect("resolves");
+		assert_eq!(resolved.info().path.as_str(), ".stats/node");
+	}
+
+	/// A route that turns up later is filtered the same way as the replay.
+	#[tokio::test]
+	async fn hidden_route_announced_later_stays_hidden() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let mut announced = consumer.announced();
+		let mut opted = consumer.clone().with_hidden(true).announced();
+
+		let hidden = producer.announce(".stats/node", Route::default()).unwrap();
+		announced.assert_next_wait();
+		opted.assert_next_active(".stats/node");
+
+		drop(hidden);
+		announced.assert_next_wait();
+		opted.assert_next_ended(".stats/node");
 	}
 
 	#[tokio::test]

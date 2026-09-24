@@ -8,7 +8,7 @@ use crate::{
 };
 
 use super::{
-	Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter, cluster, peer, solicit,
+	Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter, cluster, hidden, peer, solicit,
 	subscriber::is_protocol_violation,
 };
 
@@ -498,6 +498,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 	Ok(peer::Peer {
 		cluster: cluster::peer_from_setup(params, version)?,
 		solicit: solicit::from_setup(params, version)?,
+		hidden: hidden::from_setup(params, version),
 	})
 }
 
@@ -529,6 +530,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	}
 	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
 	solicit::into_setup(&mut parameters, version);
+	hidden::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer.encode(&setup::Setup { parameters }).await?;
@@ -988,7 +990,8 @@ mod tests {
 			version: Version::Draft18,
 			path: None,
 			peer_setup_stream: None,
-			peer_declared: None,
+			// The requests wait on the peer's SETUP (MoQ Hidden).
+			peer_declared: Some(peer::Peer::default()),
 		})
 		.expect("start the session");
 		let _driver = tokio::spawn(driver);

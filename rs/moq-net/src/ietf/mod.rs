@@ -14,6 +14,7 @@ mod fetch;
 mod filter;
 mod goaway;
 mod group;
+pub mod hidden;
 mod location;
 pub mod message;
 mod namespace;
