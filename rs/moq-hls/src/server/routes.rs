@@ -28,6 +28,7 @@ pub fn router(server: Server) -> Router {
 
 /// A parsed request path: the broadcast, and the resource under it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Route {
 	/// The broadcast path, percent-decoded. An embedder that scopes its origin rewrites
 	/// this relative to that scope before calling [`Server::respond`].
@@ -45,6 +46,7 @@ pub enum Resource {
 	/// `manifest.mpd`: the DASH manifest.
 	Manifest,
 	/// `{kind}/{rendition}/media.m3u8`: a rendition's HLS media playlist.
+	#[non_exhaustive]
 	Media {
 		/// The rendition's kind.
 		kind: Kind,
@@ -52,6 +54,7 @@ pub enum Resource {
 		rendition: String,
 	},
 	/// `{kind}/{rendition}/init.mp4`: a rendition's CMAF init segment.
+	#[non_exhaustive]
 	Init {
 		/// The rendition's kind.
 		kind: Kind,
@@ -59,6 +62,7 @@ pub enum Resource {
 		rendition: String,
 	},
 	/// `{kind}/{rendition}/seg/{sequence}.m4s`: a segment by its HLS number.
+	#[non_exhaustive]
 	Segment {
 		/// The rendition's kind.
 		kind: Kind,
@@ -69,6 +73,7 @@ pub enum Resource {
 	},
 	/// `{kind}/{rendition}/seg/t{pts}.m4s`: the same bytes, addressed by the DASH
 	/// timeline pts (`$Time$`).
+	#[non_exhaustive]
 	SegmentAt {
 		/// The rendition's kind.
 		kind: Kind,
