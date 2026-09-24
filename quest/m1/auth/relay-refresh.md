@@ -82,3 +82,5 @@ Additive.
 - [Pattern interest](/quest/m1/path-patterns.md) - AUTH can represent the complete grants relay revalidation returns
 - [Lite stream](/quest/m1/auth/lite.md) - supplies the AUTH stream and
   `auth::Request` this consumes
+- [Unauthorized reset](/quest/m1/auth/unauthorized.md) - the code this
+  relay's revocations reset with
