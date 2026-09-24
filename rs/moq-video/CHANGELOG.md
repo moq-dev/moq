@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/moq-dev/moq/compare/moq-video-v0.1.0...moq-video-v0.1.1) - 2026-09-24
+
+### Added
+
+- *(moq-video)* one VAAPI render node for encode, decode and resize ([#4023](https://github.com/moq-dev/moq/pull/4023))
+
 ## [0.0.27](https://github.com/moq-dev/moq/compare/moq-video-v0.0.26...moq-video-v0.0.27) - 2026-09-23
 
 ### Fixed
