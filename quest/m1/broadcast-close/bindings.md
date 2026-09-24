@@ -8,8 +8,9 @@ Every binding ends a broadcast with `close()`, mirroring Rust, and its
 ## Plan
 
 - moq-ffi: add `MoqBroadcastProducer::close()` next to `finish()` in
-  `rs/moq-ffi/src/producer.rs`. It closes the catalog, then the broadcast, as
-  `finish` does. Deprecate `finish`.
+  `rs/moq-ffi/src/producer.rs`. It closes the broadcast, then the catalog, as
+  `finish` does, so a catalog error cannot stop the broadcast from ending.
+  Deprecate `finish`.
 - libmoq: export `moq_publish_close` and deprecate `moq_publish_finish`. Move
   `cpp/obs/src/moq-output.cpp` and the C tests over.
 - Wrappers: `py/moq-rs` `BroadcastProducer.close()` (its `finish` docstring

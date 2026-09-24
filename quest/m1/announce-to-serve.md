@@ -72,7 +72,9 @@ assert both observe the same thing:
 
 - created, not yet announced
 - announced
-- unannounced with a track in flight
+- unannounced with a track in flight: the track reaches its own end
+- unannounced with a track in flight, then a fresh request for the path: it
+  answers `Unroutable` rather than joining the broadcast still draining
 - announced again
 
 ## Related

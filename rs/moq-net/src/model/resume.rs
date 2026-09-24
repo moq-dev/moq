@@ -2091,10 +2091,11 @@ impl Subscriber {
 		}
 	}
 
-	/// Drive the final segment to completion: its group count when its track
+	/// Wait for the final segment's track to end: its group count when it
 	/// finished, `None` when it died or there is no segment. Earlier segments don't
-	/// decide the end. Only the subscription is resolved here: consuming groups
-	/// would steal them from a `recv_group` caller on the same subscriber.
+	/// decide the end. Only the subscription is resolved here: consuming groups, or
+	/// completing the segment, would steal them from a `recv_group` caller on the
+	/// same subscriber.
 	fn poll_final(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		let anchor = min_some(self.stale_cap, self.end_sequence);
 		let Some(seg) = self.segments.last_mut() else {
@@ -2109,11 +2110,9 @@ impl Subscriber {
 		));
 		match &mut seg.sub {
 			SubState::Done(count) => Poll::Ready(*count),
-			SubState::Active(sub) => {
-				let count = ready!(sub.poll_finished(waiter)).ok();
-				seg.complete(count);
-				Poll::Ready(count)
-			}
+			// Observe only: the cursor may still hold groups, so the read path
+			// completes the segment once it drains.
+			SubState::Active(sub) => Poll::Ready(ready!(sub.poll_finished(waiter)).ok()),
 			SubState::Pending(_) => unreachable!("poll_activate resolved above"),
 		}
 	}
@@ -4684,6 +4683,36 @@ mod test {
 				true => assert!(matches!(result, Ok(0))),
 				false => assert!(matches!(result, Err(Error::Dropped))),
 			}
+		}
+	}
+
+	/// Waiting for the end, or polling datagrams, must not consume the final
+	/// segment: groups still queued in its cursor are delivered afterwards, for a
+	/// finished producer and a dropped one alike.
+	#[tokio::test]
+	async fn end_waiters_leave_queued_groups_readable() {
+		for dropped in [false, true] {
+			let (mut track_a, consumer_a) = track_pair("a");
+
+			let mut producer = Producer::new();
+			producer.switch(&consumer_a, None).unwrap();
+			let mut sub = producer.consume().subscribe(replay());
+
+			write_group(&mut track_a, 0, "a0");
+			track_a.finish().unwrap();
+			match dropped {
+				true => drop(producer),
+				false => producer.finish().unwrap(),
+			}
+
+			let count = sub.finished().now_or_never().expect("the end is known");
+			assert!(matches!(count, Ok(1)), "{count:?}");
+			let datagram = kio::wait(|waiter| sub.poll_recv_datagram(waiter)).now_or_never();
+			assert!(matches!(datagram, Some(Ok(None))), "{datagram:?}");
+
+			assert_eq!(recv(&mut sub), 0, "dropped={dropped}");
+			let end = sub.recv_group().now_or_never().expect("must not stall forever");
+			assert!(matches!(end, Ok(None)), "dropped={dropped}");
 		}
 	}
 
