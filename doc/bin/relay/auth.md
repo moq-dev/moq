@@ -42,8 +42,10 @@ received.
 `**` is everything, an empty list is nothing), `root` (optional; replaces the
 dialed path, which is how a slug aliases to a canonical id), `expires`
 (optional unix seconds; the session closes then), `revalidate` (optional
-seconds until the relay asks again), and `tier` (optional label handed to
-[stats](/bin/relay/config#stats)). A 2xx with a grant admits. A 401 or 403 refuses.
+seconds until the relay asks again), `tier` (optional label handed to
+[stats](/bin/relay/config#stats)), and `peer` (optional; `true` marks another
+relay, so what it announces counts as entering the cluster elsewhere, not as
+ingest here). A 2xx with a grant admits. A 401 or 403 refuses.
 Anything else at connect, a timeout, a 5xx, or an unparseable body, refuses and
 logs an error; nothing is admitted because the server was down. A grant that
 names nothing refuses, and one with `revalidate` but no `expires` is refused
@@ -52,10 +54,10 @@ as invalid. A few seconds of clock skew are tolerated on `expires`.
 **Revalidate and outage.** On the cadence the relay POSTs `revalidate` with the
 same request. A grant applies: a changed `root` or one that no longer covers
 what the session holds closes it with `Unauthorized` (the live session is not
-resized in place); a changed `tier` keeps the session and moves its stats: its
-presence counts under the new tier from then on, as does each group and
-subscription it starts afterwards, while one already in flight finishes where
-it began. A 401 or 403 closes the session now, as does a 2xx
+resized in place), and so does a flipped `peer`; a changed `tier` keeps the
+session and moves its stats: its presence counts under the new tier from then
+on, as does each group and subscription it starts afterwards, while one already
+in flight finishes where it began. A 401 or 403 closes the session now, as does a 2xx
 whose grant names nothing. A 2xx that fails validation otherwise (already
 expired, `revalidate` without `expires`, or a zero cadence) closes it as
 `invalid`. Anything else (408, 429, 404, 400, 5xx, a timeout, a transport

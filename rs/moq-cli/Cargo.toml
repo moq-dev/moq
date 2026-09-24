@@ -89,6 +89,7 @@ pulseaudio = ["moq-audio?/pulseaudio"]
 anyhow = { workspace = true, features = ["backtrace"] }
 axum = { workspace = true }
 axum-server = { workspace = true }
+base64 = { workspace = true }
 bytes = { workspace = true }
 hang = { workspace = true }
 humantime = { workspace = true }
@@ -127,6 +128,8 @@ sd-notify = { workspace = true }
 # the wrong catalog track apart from one reading the right one: `moq-mux`'s producer
 # publishes hang and MSF from the same source, so both answer for an ordinary broadcast.
 moq-msf = { path = "../moq-msf" }
+# `test_relay` stands up a real relay for the `fetch` tests to read through.
+moq-relay = { path = "../moq-relay", default-features = false, features = ["test-support"] }
 tempfile = { workspace = true }
 # `test-util` enables `tokio::time::pause` so the TS round-trip test simulates the
 # exporter drain timeouts instantly instead of waiting on the wall clock.

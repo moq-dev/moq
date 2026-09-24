@@ -2,7 +2,7 @@
 //!
 //! Grammar: `moq <MoQ side> <stage> [-- <stage>]...`, where a stage is
 //! `<import|export> <endpoint> [endpoint opts]`, plus `moq <MoQ side> play` for
-//! native playback.
+//! native playback and `moq <MoQ side> fetch <track>` to read one group.
 //!
 //! - The MoQ side (`--connect`, the `--listen*` transport binds, `--cluster-lan`,
 //!   and `--cluster-connect` / `--cluster-connect-api`; all optional, at least
@@ -181,6 +181,12 @@ impl Invocation {
 		self.typed.reject(command)
 	}
 
+	/// Refuse every MoQ-side flag but `--connect` and `--broadcast`, on a verb that
+	/// only reads from a relay. Answered from the command line, like [`Self::reject`].
+	pub fn dial_only(&self, command: &str) -> anyhow::Result<()> {
+		self.typed.dial_only(command)
+	}
+
 	/// Split `argv` on `--` and run each chunk through a real parser.
 	pub fn try_parse_from<I, T>(argv: I) -> Result<Self, ParseError>
 	where
@@ -248,8 +254,8 @@ impl Invocation {
 		}
 
 		// Only `import` and `export` share an Origin. The rest own the process: `play`
-		// drives a window on the main thread, `transcode` builds its own Origin, and
-		// `token` / `devices` never touch the network at all.
+		// drives a window on the main thread, `transcode` builds its own Origin, `fetch`
+		// opens its own session, and `auth` / `devices` never touch the network at all.
 		if let Some(command) = self.stages.iter().find(|command| !command.is_stageable()) {
 			anyhow::bail!(
 				"`{}` must be the only verb; it can't share a process with another `--` stage",
@@ -505,6 +511,25 @@ impl MoqSide {
 	/// the same reason it used to be out of it -- an ambient `MOQ_HOP` no longer
 	/// reaches here, so a typed one can be refused like the rest.
 	fn reject(&self, command: &str) -> anyhow::Result<()> {
+		if let Some(flag) = self.given().next() {
+			anyhow::bail!("`{command}` runs locally and takes no MoQ side; drop {flag}");
+		}
+		Ok(())
+	}
+
+	/// Refuse every MoQ-side flag except the dial, on a verb that only reads from a
+	/// relay: a listener or cluster it would never serve is not silently ignored.
+	/// Private for the same reason as [`Self::reject`], and reached through
+	/// [`Invocation::dial_only`].
+	fn dial_only(&self, command: &str) -> anyhow::Result<()> {
+		if let Some(flag) = self.given().find(|flag| !matches!(*flag, "--connect" | "--broadcast")) {
+			anyhow::bail!("`{command}` only dials a relay with --connect; drop {flag}");
+		}
+		Ok(())
+	}
+
+	/// The MoQ-side flags this side was given.
+	fn given(&self) -> impl Iterator<Item = &'static str> {
 		#[cfg(feature = "cluster-lan")]
 		let cluster_secret = self.cluster.lan.secret.is_some();
 		#[cfg(not(feature = "cluster-lan"))]
@@ -516,7 +541,7 @@ impl MoqSide {
 
 		// A legacy `--client-connect` must be rejected here too; the fold has already
 		// landed it in `url`.
-		let ignored = [
+		let flags = [
 			("--connect", self.client.url.is_some()),
 			("--listen", self.server.bind.is_some()),
 			("--listen-tcp-bind", self.server.tcp.bind.is_some()),
@@ -535,26 +560,24 @@ impl MoqSide {
 			("--broadcast", self.broadcast.is_some()),
 			("--hop", self.hop.is_some()),
 		];
-		let ignored = ignored.into_iter().find(|(_, given)| *given).map(|(flag, _)| flag);
 		#[cfg(unix)]
-		let ignored = ignored
-			.or_else(|| self.server.unix.bind.is_some().then_some("--listen-unix-bind"))
-			.or_else(|| {
-				let allow = &self.server.unix.allow;
-				[
-					("--listen-unix-allow-uid", !allow.uid.is_empty()),
-					("--listen-unix-allow-gid", !allow.gid.is_empty()),
-					("--listen-unix-allow-pid", !allow.pid.is_empty()),
-				]
-				.into_iter()
-				.find_map(|(flag, given)| given.then_some(flag))
-			});
+		let unix = {
+			let allow = &self.server.unix.allow;
+			[
+				("--listen-unix-bind", self.server.unix.bind.is_some()),
+				("--listen-unix-allow-uid", !allow.uid.is_empty()),
+				("--listen-unix-allow-gid", !allow.gid.is_empty()),
+				("--listen-unix-allow-pid", !allow.pid.is_empty()),
+			]
+		};
+		#[cfg(not(unix))]
+		let unix = [];
 
-		if let Some(flag) = ignored {
-			anyhow::bail!("`{command}` runs locally and takes no MoQ side; drop {flag}");
-		}
-
-		Ok(())
+		flags
+			.into_iter()
+			.chain(unix)
+			.filter(|(_, given)| *given)
+			.map(|(flag, _)| flag)
 	}
 }
 
@@ -572,6 +595,8 @@ pub enum Command {
 	/// The released spelling of [`Self::Export`].
 	#[usage(hide = true)]
 	Subscribe(Export),
+	/// Write one group of a track to stdout.
+	Fetch(crate::fetch::Args),
 	/// Play a broadcast in a native window and speaker.
 	#[cfg(feature = "play")]
 	Play(crate::play::Args),
@@ -629,6 +654,7 @@ impl Command {
 		match self {
 			Self::Import(_) | Self::Publish(_) => "import",
 			Self::Export(_) | Self::Subscribe(_) => "export",
+			Self::Fetch(_) => "fetch",
 			#[cfg(feature = "play")]
 			Self::Play(_) => "play",
 			#[cfg(feature = "transcode")]
