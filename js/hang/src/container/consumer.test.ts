@@ -227,6 +227,90 @@ test("Legacy Producer refuses a keyframe that rewinds the timeline", () => {
 	producer.close();
 });
 
+/** Read every group a subscriber is served until `last`, as (sequence, [timestamp, payload size][]). */
+async function readGroups(subscriber: Track.Subscriber, last: number) {
+	const groups: [number, [number, number][]][] = [];
+	for (;;) {
+		const group = await subscriber.recvGroup();
+		if (!group) throw new Error("track ended before the last group");
+		const frames: [number, number][] = [];
+		for (;;) {
+			const frame = await group.readFrame();
+			if (!frame) break;
+			const [timestamp, payload] = Varint.decode(frame.payload);
+			frames.push([timestamp, payload.byteLength]);
+		}
+		groups.push([group.sequence, frames]);
+		if (group.sequence === last) return groups;
+	}
+}
+
+test("Legacy Producer cut marks the break with one empty frame at the live edge", async () => {
+	const track = new Track.Producer("test");
+	const subscriber = replay(track);
+	const producer = new LegacyProducer(track, new LegacyFormat("audio"));
+	producer.encode(new Uint8Array([1]), 0 as Time.Micro, true);
+	producer.encode(new Uint8Array([1]), 20_000 as Time.Micro, true);
+	producer.cut();
+	producer.cut(); // nothing new to mark
+	producer.encode(new Uint8Array([1]), 5_000_000 as Time.Micro, true);
+	producer.close();
+
+	expect(await readGroups(subscriber, 3)).toEqual([
+		[0, [[0, 1]]],
+		[1, [[20_000, 1]]],
+		[2, [[20_000, 0]]],
+		[3, [[5_000_000, 1]]],
+	]);
+});
+
+test("Legacy Producer cut marks the break at the caller's end", async () => {
+	const track = new Track.Producer("test");
+	const subscriber = replay(track);
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	producer.encode(new Uint8Array([1]), 0 as Time.Micro, true);
+	producer.cut(33_000 as Time.Micro);
+	producer.close();
+
+	expect(await readGroups(subscriber, 1)).toEqual([
+		[
+			0,
+			[
+				[0, 1],
+				[33_000, 0],
+			],
+		],
+		[1, [[33_000, 0]]],
+	]);
+});
+
+test("Legacy Producer cut marks nothing on a data track or before any frame", async () => {
+	const data = new Track.Producer("data");
+	const producer = new LegacyProducer(data, new LegacyFormat("data"));
+	producer.encode(new Uint8Array([1]), 0 as Time.Micro, true);
+	producer.cut();
+	expect(data.appendGroup().sequence).toBe(1);
+
+	const empty = new Track.Producer("empty");
+	new LegacyProducer(empty, new LegacyFormat("video")).cut();
+	expect(empty.appendGroup().sequence).toBe(0);
+});
+
+// A group's reach runs to its successor's first frame, so without the marker the group before a
+// pause would stretch across the whole gap and read as live to anyone joining after the resume.
+test("Legacy Producer cut keeps pre-pause media from reading as live", async () => {
+	const track = new Track.Producer("test");
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	producer.encode(new Uint8Array([1]), 0 as Time.Micro, true);
+	producer.encode(new Uint8Array([1]), 33_000 as Time.Micro, false);
+	producer.cut();
+	producer.encode(new Uint8Array([1]), 5_000_000 as Time.Micro, true);
+	producer.close();
+
+	const subscriber = track.subscribe({ maxAge: Time.Milli(1_000) });
+	expect((await readGroups(subscriber, 2)).map(([sequence]) => sequence)).toEqual([1, 2]);
+});
+
 test("LegacyFormat throws on truncated input", () => {
 	const format = new LegacyFormat("data");
 	// A varint that indicates more bytes follow but is truncated
@@ -1191,10 +1275,10 @@ test("Consumer delivers a contiguous group after one that completed out of order
 	consumer.close();
 });
 
-// While the cursor sits below every buffered group (a real PTS gap it is waiting out), the delivery
-// head still has to run the max age check on each frame. If only the head is receiving frames,
-// that check is the only thing left that can break the stall.
-test("Consumer age-skips a waited-out gap when only the head receives frames (CMAF)", async () => {
+// A resubscribe can replay a stale group, lose the group after it, then carry on live. Once the live
+// head reaches past where presentation left off by more than the budget, whatever is missing would
+// arrive too old to play, so the head is the group to play next and must not be dropped as "slow".
+test("Consumer plays the head once a waited-out gap exceeds the budget (CMAF)", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), {
 		format: new CmafFormat(TEST_INIT),
@@ -1209,35 +1293,59 @@ test("Consumer age-skips a waited-out gap when only the head receives frames (CM
 	a.close();
 	expect((await consumer.next())?.frame).toBeUndefined(); // #active falls back to the 1001 phantom
 
-	// B (seq 2000) starts at 90_000 ticks (1_000_000µs), far past A's end: a real gap, so the cursor
-	// stays on the phantom and B is never promoted.
+	// The reader is parked on the missing 1001, as a decoder is while it waits for the next group.
+	const pending = consumer.next();
+
+	// B (seq 2000) starts at 90_000 ticks (1_000_000µs), a second past A's end: the missing group
+	// could only ever arrive far beyond the 100ms budget, so B plays from its first frame.
 	const b = new Group.Producer(2000);
 	track.writeGroup(b);
 	b.writeFrame({ payload: encodeCmafFrame(0x02, 90_000, 1), timestamp: Time.Timestamp.now() });
-	await settle();
 
-	// C (seq 3000) lands just behind B, inside the 100ms budget, then goes silent for the rest of
-	// the test. So C's frames can't be what re-runs the max age check.
-	const c = new Group.Producer(3000);
-	track.writeGroup(c);
-	c.writeFrame({ payload: encodeCmafFrame(0x03, 93_000, 2), timestamp: Time.Timestamp.now() });
-	await settle();
-
-	const pending = consumer.next();
-
-	// B alone grows past the budget (90_000 -> 108_000 ticks, a 200ms span).
-	for (let i = 1; i <= 6; i++) {
-		b.writeFrame({ payload: encodeCmafFrame(0x02, 90_000 + i * 3000, 3 + i), timestamp: Time.Timestamp.now() });
-		await settle(10);
-	}
-
-	// The max age check drops B as the oldest and delivery resumes at C.
 	const result = await Promise.race([pending, settle(300).then(() => "timeout" as const)]);
 	expect(result).not.toBe("timeout");
 	const delivered = result as { frame?: Frame; continuous?: boolean } | undefined;
-	expect(delivered?.frame?.payload).toEqual(new Uint8Array([0x03]));
-	// B's content was thrown away, so downstream must not treat the span as delivered.
+	expect(delivered?.frame?.payload).toEqual(new Uint8Array([0x02]));
+	// The missing group's span was never delivered, so downstream must not bridge it.
 	expect(delivered?.continuous).toBe(false);
+
+	consumer.close();
+});
+
+// A gap still inside the budget is waited out: the missing group may yet arrive in time.
+test("Consumer waits on a gap within the budget, then plays the head once it exceeds it (CMAF)", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), {
+		format: new CmafFormat(TEST_INIT),
+		maxAge: 100 as Time.Milli,
+	});
+
+	// A (seq 1000): one frame, ends at 3000 ticks (33_333µs).
+	const a = new Group.Producer(1000);
+	track.writeGroup(a);
+	a.writeFrame({ payload: encodeCmafFrame(0x01, 0, 0), timestamp: Time.Timestamp.now() });
+	expect((await consumer.next())?.frame?.payload).toEqual(new Uint8Array([0x01]));
+	a.close();
+	expect((await consumer.next())?.frame).toBeUndefined();
+
+	// B (seq 2000) starts at 6000 ticks (66_667µs): a gap, but only 33ms past A's end.
+	const b = new Group.Producer(2000);
+	track.writeGroup(b);
+	b.writeFrame({ payload: encodeCmafFrame(0x02, 6000, 1), timestamp: Time.Timestamp.now() });
+
+	const pending = consumer.next();
+	const early = await Promise.race([pending, settle(50).then(() => "waiting" as const)]);
+	expect(early).toBe("waiting");
+
+	// B alone grows past the budget (up to 12_000 ticks, 100ms past A's end and beyond).
+	for (let i = 1; i <= 3; i++) {
+		b.writeFrame({ payload: encodeCmafFrame(0x02, 6000 + i * 3000, 1 + i), timestamp: Time.Timestamp.now() });
+		await settle(10);
+	}
+
+	const result = await Promise.race([pending, settle(300).then(() => "timeout" as const)]);
+	expect(result).not.toBe("timeout");
+	expect((result as { frame?: Frame } | undefined)?.frame?.payload).toEqual(new Uint8Array([0x02]));
 
 	consumer.close();
 });

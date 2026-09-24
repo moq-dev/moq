@@ -55,6 +55,20 @@ export class Device<Kind extends "audio" | "video"> {
 		});
 
 		this.#signals.run(this.#runRequested.bind(this));
+
+		// A grant after an explicit denial is new information. The capture source listens to this
+		// permission signal while stopped and reopens without requiring a page reload.
+		this.#signals.run((effect) => {
+			effect.spawn(async () => {
+				const status = await navigator.permissions
+					?.query({ name: (kind === "video" ? "camera" : "microphone") as PermissionName })
+					.catch(() => undefined);
+				if (!status || effect.abort.aborted) return;
+				const update = () => this.#out.permission.set(status.state === "granted");
+				update();
+				effect.event(status, "change", update);
+			});
+		});
 	}
 
 	/**

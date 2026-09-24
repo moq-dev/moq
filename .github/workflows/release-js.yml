@@ -10,10 +10,19 @@ on:
     paths:
       - 'js/**'
       - '.github/workflows/release-js.yml'
+  # Dry-run: builds, packs, and runs `deno publish --dry-run`, which catches
+  # JSR-only failures before they break a release on main.
+  pull_request:
+    paths:
+      - 'js/**'
+      - '.github/workflows/release-js.yml'
 
+# Only publishing runs share the serialized group. GitHub keeps a single pending
+# run per group and drops the older one, so a PR sharing it would cancel a
+# queued release. Dry-runs get a per-ref group and cancel superseded builds.
 concurrency:
-  group: release-js
-  cancel-in-progress: false
+  group: release-js-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   release:
@@ -39,4 +48,6 @@ jobs:
         run: nix develop --command bun install --frozen-lockfile
 
       - name: Release packages
+        env:
+          DRY_RUN: ${{ github.event_name == 'pull_request' }}
         run: nix develop --command bun --filter '*' release

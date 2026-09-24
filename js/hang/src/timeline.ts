@@ -17,8 +17,9 @@
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
 import type { Time } from "@moq/net";
+import * as z from "@zod/mini";
 import type * as Catalog from "./catalog";
-import { u53 } from "./catalog";
+import { u53, u53Schema } from "./catalog";
 
 /**
  * A contiguous run of groups a track contributes to a segment, `start` through `end`
@@ -48,6 +49,18 @@ export interface Record {
 	tracks?: { [track: string]: Range[] };
 }
 
+const RecordSchema = z.looseObject({
+	segment: u53Schema,
+	pts: u53Schema,
+	duration: u53Schema,
+	tracks: z.optional(
+		z.record(
+			z.string(),
+			z.array(z.object({ start: u53Schema, end: u53Schema, keyframe: z.optional(z.boolean()) })),
+		),
+	),
+});
+
 /** The default timeline timescale: 1000 units per second (milliseconds). */
 export const DEFAULT_TIMESCALE = 1000;
 
@@ -66,6 +79,68 @@ const CHECKPOINT_RECORDS = 256;
  * from the catalog's root `archive` entry, so this is only a default.
  */
 export const DEFAULT_NAME = "timeline.z";
+
+/** A complete segment with timestamps converted to microseconds. */
+export type Entry = Omit<Record, "pts" | "duration"> & { pts: Time.Micro; duration: Time.Micro };
+
+/** One change to the visible timeline window. */
+export type Event = { push: { index: number; entry: Entry } } | { pop: Json.Window.Span } | { skip: Json.Window.Span };
+
+/** Reads the timeline advertised by a catalog archive entry. */
+export class Consumer implements AsyncIterable<Event> {
+	readonly #track: Moq.Track.Subscriber;
+	readonly #window: Json.Window.Consumer<Record>;
+	readonly #timescale: number;
+
+	/** Wrap a subscription to the archive's timeline track. */
+	private constructor(track: Moq.Track.Subscriber, archive: Catalog.Archive) {
+		this.#track = track;
+		if (!Number.isSafeInteger(archive.timescale) || archive.timescale <= 0) {
+			throw new Error("invalid timeline timescale");
+		}
+		this.#timescale = archive.timescale;
+		this.#window = new Json.Window.Consumer<Record>({ track, compression: true });
+	}
+
+	/** Subscribe to the timeline named by the catalog's archive entry. */
+	static subscribe(broadcast: Moq.Broadcast.Consumer, archive: Catalog.Archive): Consumer {
+		return new Consumer(broadcast.track(archive.track).subscribe(), archive);
+	}
+
+	/** Get the next timeline event, or `undefined` when the track ends. */
+	async next(): Promise<Event | undefined> {
+		const event = await this.#window.next();
+		if (event === undefined) return undefined;
+		if ("push" in event) {
+			const { index } = event.push;
+			const value = RecordSchema.parse(event.push.value);
+			const pts = this.#micros(value.pts);
+			const duration = this.#micros(value.duration);
+			return { push: { index, entry: { ...value, pts, duration } } };
+		}
+		return event;
+	}
+
+	#micros(units: number): Time.Micro {
+		const value = (BigInt(units) * 1_000_000n) / BigInt(this.#timescale);
+		if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("timeline timestamp overflow");
+		return Number(value) as Time.Micro;
+	}
+
+	/** Iterate timeline events until the track ends. */
+	async *[Symbol.asyncIterator](): AsyncIterator<Event> {
+		for (;;) {
+			const event = await this.next();
+			if (event === undefined) return;
+			yield event;
+		}
+	}
+
+	/** Close the timeline subscription. */
+	close(): void {
+		this.#track.close();
+	}
+}
 
 /** How a {@link Producer} paces its segments. */
 export interface ProducerProps {

@@ -13,6 +13,11 @@ name: Release Kotlin lib
 # so the sibling `:moq-ffi` project compiles (the wrapper resolves it via the
 # project substitution in kt/moq/build.gradle.kts); native libs aren't needed
 # because JNA is compileOnly.
+#
+# Those bindings come from this checkout, so a push is deferred while rs/moq-ffi
+# has changes since its release tag: the wrapper could call FFI API that no
+# published moq-ffi has. Release Kotlin FFI re-triggers this workflow once the
+# next moq-ffi release lands, which then publishes from that tag's commit.
 
 on:
   push:
@@ -38,18 +43,26 @@ on:
   # Manual trigger so a wrapper bump can be published once the bindings it
   # depends on land on Maven Central (the guard below skips otherwise).
   workflow_dispatch:
+  workflow_run:
+    workflows: ["Release Kotlin FFI"]
+    types:
+      - completed
 
 permissions:
   contents: read
-
-concurrency:
-  group: release-kt-lib
-  cancel-in-progress: false
 
 jobs:
   check-version:
     name: Check version
     runs-on: ubuntu-latest
+    # workflow_run has the base repository's privileges, so accept only a
+    # successful upstream tag-push run from the expected release workflow.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.repository_owner == 'moq-dev' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v'))
     outputs:
       version: ${{ steps.version.outputs.version }}
       should_publish: ${{ steps.decide.outputs.should_publish }}
@@ -57,6 +70,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          # Tags, for the unreleased FFI check.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Read moq.version
@@ -69,36 +85,56 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve FFI version
+        id: ffi
+        env:
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
+            VERSION="${HEAD_BRANCH#moq-ffi-v}"
+          else
+            VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # workflow_run is chained after Release Kotlin FFI, so its tag is
+      # published. PRs run it too, so the dry-run shows whether merging would
+      # publish.
+      - name: Check for unreleased FFI changes
+        id: ffi-diff
+        if: github.event_name != 'workflow_run'
+        run: .github/scripts/release.sh ffi-unreleased "${{ steps.ffi.outputs.version }}"
+
       - name: Check wrapper publication
         id: wrapper
         run: .github/scripts/release.sh maven-exists dev.moq moq "${{ steps.version.outputs.version }}"
 
+      # The bindings this checkout generates must be on Maven Central, or the
+      # wrapper's POM range resolves to an older moq-ffi without them.
       - name: Check bindings publication
         id: bindings
-        if: steps.wrapper.outputs.exists != 'true'
-        run: .github/scripts/release.sh maven-version-in-range dev.moq moq-ffi "[0.3,0.4)"
+        if: github.event_name != 'workflow_run' && steps.wrapper.outputs.exists != 'true' && steps.ffi-diff.outputs.unreleased != 'true'
+        run: .github/scripts/release.sh maven-exists dev.moq moq-ffi "${{ steps.ffi.outputs.version }}"
 
       - name: Decide publish
         id: decide
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          FFI_VERSION: ${{ steps.ffi.outputs.version }}
+          WRAPPER_EXISTS: ${{ steps.wrapper.outputs.exists }}
+          FFI_UNRELEASED: ${{ steps.ffi-diff.outputs.unreleased }}
+          BINDINGS_EXISTS: ${{ steps.bindings.outputs.exists }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-
-          if [[ "${{ steps.wrapper.outputs.exists }}" == "true" ]]; then
+          if [[ "$WRAPPER_EXISTS" == "true" ]]; then
             echo "dev.moq:moq:${VERSION} already on Maven Central; nothing to publish."
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Bindings guard: the wrapper POM declares dev.moq:moq-ffi:[0.3,0.4),
-          # so don't publish a wrapper that consumers can't resolve. Require a
-          # compatible bindings release to exist first (it's published separately
-          # by release-kt-ffi.yml on a moq-ffi-v* tag). Re-run via
-          # workflow_dispatch once it lands.
-          if [[ "${{ steps.bindings.outputs.exists }}" == "true" ]]; then
-            echo "dev.moq:moq:${VERSION} not published yet; bindings available; will publish."
+          elif [[ "$FFI_UNRELEASED" == "true" ]]; then
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_run" || "$BINDINGS_EXISTS" == "true" ]]; then
+            echo "dev.moq:moq:${VERSION} not published yet; moq-ffi ${FFI_VERSION} available; will publish."
             echo "should_publish=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::dev.moq:moq-ffi has no [0.3,0.4) release on Maven Central yet; skipping wrapper publish until the bindings land (then re-run this workflow)."
+            echo "::warning::dev.moq:moq-ffi:${FFI_VERSION} is not on Maven Central yet; skipping wrapper publish until it lands (then re-run this workflow)."
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -107,6 +143,14 @@ jobs:
     needs: [check-version]
     # PRs always run (dry-run). Pushes publish only when the version is new.
     if: github.event_name == 'pull_request' || needs.check-version.outputs.should_publish == 'true'
+    # Only publishing runs share the serialized group. GitHub keeps a single
+    # pending run per group and drops the older one, so a PR or a no-op push
+    # sharing it silently cancelled a queued release. Scoped to this job so runs
+    # that skip publishing never enter it. Dry-runs get a per-ref group instead
+    # and cancel their superseded builds.
+    concurrency:
+      group: release-kt-lib-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     env:
       # Picked up by com.vanniktech.maven.publish via Gradle project properties.
@@ -120,6 +164,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
 
       - name: Install Rust
@@ -152,8 +197,15 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
+      # check-version runs outside the serialized group, so an earlier run
+      # holding it may have published this version since. Check again.
+      - name: Recheck wrapper publication
+        id: recheck
+        if: github.event_name != 'pull_request'
+        run: .github/scripts/release.sh maven-exists dev.moq moq "${{ needs.check-version.outputs.version }}"
+
       - name: Publish to Maven Central
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        if: github.event_name != 'pull_request' && steps.recheck.outputs.exists != 'true'
         env:
           MOQ_VERSION: ${{ needs.check-version.outputs.version }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}

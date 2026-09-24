@@ -237,6 +237,21 @@ class SmokeTest {
         }
     }
 
+    @Test
+    fun `json producer demand follows subscribers`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val config = JsonSnapshotConfig(deltaRatio = 0u, compression = false)
+            val demand: TrackDemand = broadcast.publishJsonSnapshot("status", config).demand()
+            assertEquals("status", demand.name())
+            assertEquals(false, demand.isUsed())
+
+            val consumer = broadcast.consume().subscribeJsonSnapshot("status", config)
+            demand.used()
+            consumer.cancel()
+            demand.unused()
+        }
+    }
+
     /**
      * A pre-encoded `String` must reach the wire untouched: the member overload
      * wins over the reified extension, which would otherwise double-encode it

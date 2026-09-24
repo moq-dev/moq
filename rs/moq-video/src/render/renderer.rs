@@ -583,12 +583,12 @@ mod tests {
 		let mut stream = crate::capture::open(&capture).await.expect("portal screen capture");
 
 		for index in 0..16 {
-			let surface = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read())
+			let frame = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read())
 				.await
 				.unwrap_or_else(|_| panic!("timed out waiting for frame {index}"))
 				.unwrap_or_else(|error| panic!("capture failed before frame {index}: {error}"))
 				.unwrap_or_else(|| panic!("capture ended before frame {index}"));
-			let Surface::DmaBuf(buffer) = &surface else {
+			let Surface::DmaBuf(buffer) = &frame.surface else {
 				panic!("frame {index} used shared memory instead of DMA-BUF");
 			};
 			assert!(
@@ -603,7 +603,6 @@ mod tests {
 				buffer.format().as_raw()
 			);
 
-			let frame = Frame::new(surface, Timestamp::ZERO);
 			let imported = renderer
 				.source
 				.import(&device, &frame.surface)

@@ -354,9 +354,28 @@ pub(crate) fn launch(
 	(shared, future)
 }
 
+/// Own a connection until its handshake is handed to a public handle.
+///
+/// The driver and endpoint keep their own references, so dropping a pending
+/// establishment future without closing it leaves both alive until timeout.
+struct EstablishGuard {
+	shared: Option<Shared>,
+}
+
+impl Drop for EstablishGuard {
+	fn drop(&mut self) {
+		if let Some(shared) = self.shared.take() {
+			shared.close_code(0, "QUIC handshake abandoned");
+		}
+	}
+}
+
 /// Wait out the handshake, yielding the connection's public handle.
 pub(crate) async fn establish(shared: Shared) -> Result<Connection, Error> {
-	kio::wait(|waiter| {
+	let mut guard = EstablishGuard {
+		shared: Some(shared.clone()),
+	};
+	let result = kio::wait(|waiter| {
 		let mut state = shared.state.borrow_mut();
 		if state.established {
 			return Poll::Ready(Ok(()));
@@ -367,7 +386,12 @@ pub(crate) async fn establish(shared: Shared) -> Result<Connection, Error> {
 		waiter.register(&mut state.establish_waiters);
 		Poll::Pending
 	})
-	.await?;
+	.await;
+	if result.is_err() {
+		// The driver already reached a terminal state.
+		guard.shared = None;
+	}
+	result?;
 
 	let alpn = {
 		let conn = shared.conn.borrow();
@@ -378,11 +402,13 @@ pub(crate) async fn establish(shared: Shared) -> Result<Connection, Error> {
 			.map(|proto| String::from_utf8_lossy(&proto).into_owned())
 	};
 
-	Ok(Connection {
+	let conn = Connection {
 		shared,
 		park: kio::Park::default(),
 		alpn,
-	})
+	};
+	guard.shared = None;
+	Ok(conn)
 }
 
 impl web_transport_trait::poll::Session for Connection {

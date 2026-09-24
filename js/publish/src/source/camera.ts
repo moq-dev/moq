@@ -21,6 +21,8 @@ export interface CameraProps extends Inputs<CameraInput> {
 type CameraOutput = {
 	// The live camera track, or undefined while disabled or denied.
 	source: Signal<Media | undefined>;
+	/** A terminal getUserMedia failure, cleared when a new capture attempt begins. */
+	error: Signal<Error | undefined>;
 };
 
 /** Captures video from a camera, tracking the available devices. */
@@ -47,6 +49,7 @@ export class Camera {
 
 	readonly #out: CameraOutput = {
 		source: new Signal<Media | undefined>(undefined),
+		error: new Signal<Error | undefined>(undefined),
 	};
 	readonly out = readonlys(this.#out);
 
@@ -68,6 +71,7 @@ export class Camera {
 		if (!enabled) {
 			// Being switched off is the app's reset, so a later enable starts with a full budget.
 			this.#retry.refund();
+			this.#out.error.set(undefined);
 			return;
 		}
 
@@ -85,8 +89,14 @@ export class Camera {
 			effect.subscribe(this.device.out.available, (available) => {
 				if (available !== spent) this.#retry.refund();
 			});
+			const permitted = this.device.out.permission.peek();
+			effect.subscribe(this.device.out.permission, (granted) => {
+				if (granted && !permitted) this.#retry.refund();
+			});
 			return;
 		}
+
+		this.#out.error.set(undefined);
 
 		// Build final constraints with device selection, defaulting resolution unless overridden.
 		const finalConstraints: MediaTrackConstraints = {
@@ -96,23 +106,31 @@ export class Camera {
 		};
 
 		effect.spawn(async () => {
-			const media = navigator.mediaDevices.getUserMedia({ video: finalConstraints }).catch(() => undefined);
+			const media = navigator.mediaDevices.getUserMedia({ video: finalConstraints });
 
-			// If the effect is cancelled for any reason (ex. cancel), stop any media that we got.
+			// If the effect is cancelled, stop any stream that arrives after cancellation too.
 			effect.cleanup(() =>
-				media.then((media) =>
-					media?.getTracks().forEach((track) => {
-						track.stop();
-					}),
+				media.then(
+					(stream) =>
+						stream.getTracks().forEach((track) => {
+							track.stop();
+						}),
+					() => {},
 				),
 			);
 
-			const stream = await Promise.race([media, effect.cancel]);
+			let stream: MediaStream | undefined;
+			try {
+				stream = await Promise.race([media, effect.cancel.then(() => undefined)]);
+			} catch (error) {
+				if (effect.abort.aborted) return;
+				this.#out.error.set(error instanceof Error ? error : new Error(String(error)));
+				this.#retry.terminal();
+				return;
+			}
 
 			// A torn-down run is not a failed attempt: whatever cancelled it reruns us.
-			if (effect.abort.aborted) return;
-
-			if (!stream) return this.#retry.failed();
+			if (effect.abort.aborted || !stream) return;
 
 			const source = stream.getVideoTracks()[0] as Video.StreamTrack | undefined;
 

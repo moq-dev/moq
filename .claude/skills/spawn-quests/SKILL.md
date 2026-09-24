@@ -13,16 +13,10 @@ Use the argument (if provided) to filter to specific quests/questlines.
 Inspect any blocked quests, and determine if they can be unblocked.
 A line whose `Quests` list has emptied is a ready quest too: finishing it marks the line's PR ready.
 
-For each quest, interactively prompt the user if:
+One at a time, for each each quest, interactively prompt the user if we should /start-quest, /plan-quests, skip, or delete.
+Include a short summary and your recommendation.
 
-1. /start-quest
-2. /plan-quests
-3. skip it
-4. delete it
-
-Include a recommended option.
-
-For each quest to work on, spawn a background sub-agent to /start-quest.
+Spawn a background sub-agent for each /start-quest.
 Create a fresh worktree on the base `quest branch` prints, creating that line branch first if it is missing.
 Limit the concurrency to at most N agents in parallel, where N is half the number of physical CPU cores.
 
@@ -32,4 +26,4 @@ Prompt the user if they want to /plan-quests for any suggested follow-ups.
 Run /plan-quests for any selected quests in the foreground.
 Perform any research and monitoring in the background.
 
-Finally, create a PR if there are any created/updated quests.
+Finally, create a PR for any created/updated quests.
