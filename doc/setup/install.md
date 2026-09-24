@@ -14,10 +14,11 @@ Two binaries and two plugins ship prebuilt:
 | GStreamer plugin | `moqsink`, `moqsrc` | [GStreamer](/bin/gstreamer) elements |
 | OBS plugin | | [OBS Studio](/bin/obs) output and source |
 
-Homebrew and Linux package names match the executables. Cargo crates and
-Windows package IDs retain `moq-cli`. Existing Homebrew
+Package names match the executables everywhere except crates.io, where the
+crate is `moq-cli`. Existing Homebrew
 installs migrate through formula renames; apt upgrades use transitional
-packages, and dnf replaces the old packages.
+packages, and dnf replaces the old packages. The `moqdev/moq-cli` Docker image
+and the `#moq-cli` flake package stop at 0.12.1; use `moqdev/moq` and `#moq`.
 
 Use `moq auth` for keys and tokens; installing `moq` includes it.
 
@@ -32,11 +33,11 @@ brew install moq-dev/tap/moq-relay moq-dev/tap/moq
 
 # Nix (pin a release tag to use the binary cache)
 nix run github:moq-dev/moq#moq-relay -- relay.toml
-nix run github:moq-dev/moq#moq-cli -- --help
+nix run github:moq-dev/moq#moq -- --help
 
 # Docker (linux/amd64 and linux/arm64)
 docker run -p 4443:4443/udp -p 4443:4443/tcp -v "$PWD/relay.toml:/app/relay.toml:ro" moqdev/moq-relay /app/relay.toml
-docker run -i moqdev/moq-cli --help
+docker run -i moqdev/moq --help
 ```
 
 Static binaries for Linux (x86\_64, aarch64), macOS (Apple Silicon), and Windows
@@ -87,7 +88,7 @@ works without root, and config edits survive upgrades.
 
 ```powershell
 winget install moq-dev.moq-relay
-winget install moq-dev.moq-cli
+winget install moq-dev.moq
 ```
 
 The OBS plugin ships as a zip for Windows x64 and macOS arm64 on the

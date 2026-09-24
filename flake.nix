@@ -419,14 +419,17 @@
             name = "moq-all";
             paths = [
               moq-relay
-              moq-cli
+              moq
             ];
           };
+
+          # Named after the executable. The overlay keeps `moq-cli` because
+          # nixpkgs already has an unrelated `moq`.
+          moq = overlayPkgs.moq-cli;
 
           # Inherit packages from the overlay
           inherit (overlayPkgs)
             moq-relay
-            moq-cli
             moq-bench
             moq-boy
             libmoq

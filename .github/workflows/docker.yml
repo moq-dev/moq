@@ -11,13 +11,13 @@ on:
   workflow_call:
     inputs:
       package:
-        description: "Flake package to build (moq-relay, moq-cli)"
+        description: "Crate to build (moq-relay, moq-cli)"
         required: true
         type: string
   workflow_dispatch:
     inputs:
       package:
-        description: "Flake package to build (moq-relay, moq-cli)"
+        description: "Crate to build (moq-relay, moq-cli)"
         required: true
         type: string
         default: moq-relay
@@ -32,7 +32,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      target: ${{ steps.parse.outputs.target }}
+      package: ${{ steps.parse.outputs.package }}
       version: ${{ steps.parse.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,19 +41,24 @@ jobs:
 
       - id: parse
         env:
-          PACKAGE: ${{ inputs.package }}
+          CRATE: ${{ inputs.package }}
         run: |
           ref=${GITHUB_REF#refs/tags/}
-          if [[ -n "$PACKAGE" ]]; then
-            target="$PACKAGE"
+          if [[ -n "$CRATE" ]]; then
+            crate="$CRATE"
           elif [[ "$ref" =~ ^([a-z-]+)-v[0-9.]+$ ]]; then
-            target="${BASH_REMATCH[1]}"
+            crate="${BASH_REMATCH[1]}"
           else
             echo "Tag format not recognized." >&2
             exit 1
           fi
-          echo "target=${target}" >> "$GITHUB_OUTPUT"
-          .github/scripts/release.sh parse-version "$target"
+          # The flake package and image are named after the executable.
+          case "$crate" in
+            moq-cli) package=moq ;;
+            *) package="$crate" ;;
+          esac
+          echo "package=${package}" >> "$GITHUB_OUTPUT"
+          .github/scripts/release.sh parse-version "$crate"
 
   build:
     name: Build ${{ matrix.platform }}
@@ -89,8 +94,8 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           build-args: |
-            package=${{ needs.parse.outputs.target }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ needs.parse.outputs.target }},push-by-digest=true,name-canonical=true,push=${{ github.ref_type == 'tag' }}
+            package=${{ needs.parse.outputs.package }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ needs.parse.outputs.package }},push-by-digest=true,name-canonical=true,push=${{ github.ref_type == 'tag' }}
 
       - name: Export digest
         if: github.ref_type == 'tag'
@@ -132,6 +137,6 @@ jobs:
         run: |
           # shellcheck disable=SC2046  # intentional word-splitting: one arg per digest
           docker buildx imagetools create \
-            -t ${{ env.REGISTRY }}/${{ needs.parse.outputs.target }}:${{ needs.parse.outputs.version }} \
-            -t ${{ env.REGISTRY }}/${{ needs.parse.outputs.target }}:latest \
-            $(printf "${{ env.REGISTRY }}/${{ needs.parse.outputs.target }}@sha256:%s " *)
+            -t ${{ env.REGISTRY }}/${{ needs.parse.outputs.package }}:${{ needs.parse.outputs.version }} \
+            -t ${{ env.REGISTRY }}/${{ needs.parse.outputs.package }}:latest \
+            $(printf "${{ env.REGISTRY }}/${{ needs.parse.outputs.package }}@sha256:%s " *)
