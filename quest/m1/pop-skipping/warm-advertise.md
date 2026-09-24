@@ -49,3 +49,7 @@ retracted after the last copy expires and is not re-advertised afterwards; a
 draining path retracts rather than repricing, and a subscriber on it moves to
 the broader route; a second relay carrying the same broadcast ties on warm and
 is separated by cold.
+
+## Related
+
+- [Tree-routed announcements](/quest/m1/announce-tree/README.md) - bounds a warm route to the relays nearer its carrier than any other source
