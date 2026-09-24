@@ -82,6 +82,10 @@ with `session.status()` to log each reconnect; `moq.Backoff` tunes the pacing
 (`timeout_us=0` retries forever); and `moq.connect(..., max_streams=...)`
 raises the peer's inbound stream cap.
 
+The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
+a 200 ms head start. Pass `websocket_enabled=False` to `moq.connect` for a
+QUIC-only relay, or a `websocket_delay` `timedelta` to change the head start.
+
 Everything in the [shared feature list](/lib/#what-every-binding-can-do) is
 here: `moq.Server` with per-request accept/reject, `fetch_group` and
 `fetch_media_group`, `dynamic()` handlers for on-demand tracks and

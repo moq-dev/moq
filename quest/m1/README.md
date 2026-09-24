@@ -44,7 +44,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Jitter clock](/quest/m1/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes, fed by encoders only, and never decreases
 - [Publisher audio unlock](/quest/m1/publish-audio-unlock.md) - the publisher's capture AudioContext is resumed on a gesture or the source is refused, so no silent audio track is announced
 - [IETF leftovers](/quest/m1/ietf-leftovers.md) - moq-net: the 0x21 priority property, a NOT_SUPPORTED reply to TRACK_STATUS, and the two FETCH refusal codes come from the registry
-- [FFI WebSocket fallback](/quest/m1/ffi-websocket-fallback.md) - moq-ffi and every wrapper can disable or delay the WebSocket fallback
 - [Play tune-in backpressure](/quest/m1/play-tunein-backpressure.md) - moq play: a tune-in burst larger than the video queue parks the decoder, so the clock never reaches live at a wide `--delay`
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - generic on-demand group serving and IETF FETCH for browser publishers
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS, on the catalog and store the release ships

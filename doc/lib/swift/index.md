@@ -74,6 +74,11 @@ broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing
 with `session.status()` to log each reconnect; `client.setBackoff` tunes the
 pacing; and `client.setQuicMaxStreams` raises the peer's inbound stream cap.
 
+The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
+a 200 ms head start. `client.setWebsocketEnabled(false)` turns it off for a
+QUIC-only relay, and `client.setWebsocketDelay(_:)` changes the head start, in
+microseconds.
+
 `Server` binds, generates or loads TLS, and hands you each request to
 `accept()` or `reject(code:)`; `request.transport` is a `Transport` enum. JSON tracks take `Codable` types
 (`publishJsonSnapshot(name:of:)`, `subscribeJsonStream(name:as:)`), and the

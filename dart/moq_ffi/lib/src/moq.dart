@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -7506,6 +7508,8 @@ abstract class MoqClientInterface {
   void setTlsRoots({required List<String> paths});
   void setTlsSystemRoots({required bool systemRoots});
   void setTlsVerify({required bool verify});
+  void setWebsocketDelay({required int delayUs});
+  void setWebsocketEnabled({required bool enabled});
 }
 
 final _MoqClientFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -7673,6 +7677,26 @@ class MoqClient implements MoqClientInterface {
       uniffi_moq_ffi_fn_method_moqclient_set_tls_verify(
         uniffiClonePointer(),
         FfiConverterBool.lower(verify),
+        status,
+      );
+    }, moqExceptionErrorHandler);
+  }
+
+  void setWebsocketDelay({required int delayUs}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqclient_set_websocket_delay(
+        uniffiClonePointer(),
+        FfiConverterUInt64.lower(delayUs),
+        status,
+      );
+    }, moqExceptionErrorHandler);
+  }
+
+  void setWebsocketEnabled({required bool enabled}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqclient_set_websocket_enabled(
+        uniffiClonePointer(),
+        FfiConverterBool.lower(enabled),
         status,
       );
     }, moqExceptionErrorHandler);
@@ -11154,6 +11178,24 @@ external void uniffi_moq_ffi_fn_method_moqclient_set_tls_verify(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Void Function(Pointer<Void>, Uint64, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqclient_set_websocket_delay(
+  Pointer<Void> ptr,
+  int delay_us,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, Int8, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqclient_set_websocket_enabled(
+  Pointer<Void> ptr,
+  int enabled,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -12074,6 +12116,12 @@ external int uniffi_moq_ffi_checksum_method_moqclient_set_tls_system_roots();
 external int uniffi_moq_ffi_checksum_method_moqclient_set_tls_verify();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqclient_set_websocket_delay();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqclient_set_websocket_enabled();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqsession_bandwidth();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -12644,6 +12692,13 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqclient_set_tls_verify() != 64525) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqclient_set_websocket_delay() != 53033) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqclient_set_websocket_enabled() !=
+      65261) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_bandwidth() != 8006) {

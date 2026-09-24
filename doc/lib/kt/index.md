@@ -67,6 +67,10 @@ broadcasts. `moq.epoch()` counts the connections, 1 on the first, pairing with
 pacing (`timeoutUs = 0` retries forever); and `maxStreams` raises the peer's
 inbound stream cap.
 
+The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
+a 200 ms head start. `Moq.connect(websocketEnabled = false)` turns it off for a
+QUIC-only relay, and a `websocketDelay` `Duration` changes the head start.
+
 `Server.listen(bind, tlsGenerate = ...)` accepts sessions with per-request
 `accept()`/`reject()`. Generated configuration setters, including
 `MoqRequest.setPublish`/`setConsume`, throw if a connect, listen, or accept is
