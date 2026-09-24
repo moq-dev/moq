@@ -13,7 +13,8 @@ final class AnnounceOptions {
 
   const AnnounceOptions({this.prefix = '', this.filter, this.hidden = false});
 
-  AnnounceConfig get _ffi => AnnounceConfig(prefix: prefix, filter: filter, hidden: hidden);
+  AnnounceConfig get _ffi =>
+      AnnounceConfig(prefix: prefix, filter: filter, hidden: hidden);
 }
 
 /// Everything [Moq.connect] can be told beyond the URL.

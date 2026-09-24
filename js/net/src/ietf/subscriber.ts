@@ -313,7 +313,10 @@ export class Subscriber {
 					);
 				} else {
 					await stream.writer.u53(SubscribeNamespace.id);
-					await new SubscribeNamespace({ namespace: prefix, requestId, hidden }).encode(stream.writer, version);
+					await new SubscribeNamespace({ namespace: prefix, requestId, hidden }).encode(
+						stream.writer,
+						version,
+					);
 				}
 				console.debug(`subscribe_namespace written: requestId=${requestId}`);
 

@@ -322,9 +322,7 @@ test("hidden paths need an opt-in or a scope naming the dot segment", async () =
 
 	expect([...consumer.broadcasts().peek().keys()]).toEqual([Path.from("room/catalog.pro")]);
 	expect(consumer.broadcasts(undefined, { hidden: true }).peek().size).toBe(3);
-	expect([...consumer.broadcasts(Path.Pattern.parse(".stats/**")).peek().keys()]).toEqual([
-		Path.from(".stats/node"),
-	]);
+	expect([...consumer.broadcasts(Path.Pattern.parse(".stats/**")).peek().keys()]).toEqual([Path.from(".stats/node")]);
 
 	const plain = consumer.announced();
 	expect(await plain.next()).toMatchObject({ prefix: Path.from("room/catalog.pro") });

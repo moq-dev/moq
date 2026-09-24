@@ -326,7 +326,10 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 		if version == lite06 {
 			continue;
 		}
-		let bc = consumer.request_broadcast(".x/y").await.expect("hidden broadcast resolves");
+		let bc = consumer
+			.request_broadcast(".x/y")
+			.await
+			.expect("hidden broadcast resolves");
 		let mut sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 		let mut group = tokio::time::timeout(TIMEOUT, sub.recv_group())
 			.await

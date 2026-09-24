@@ -737,20 +737,19 @@ async fn serve_connection(
 	};
 
 	let role = request.role();
-	let grants =
-		match crate::connection::authorize(
-			&serve.cluster,
-			lease.token(),
-			role,
-			identity.is_some() || lan,
-			&moq_tokio::server::Transport::Quic,
-		) {
-			Ok(grants) => grants,
-			Err(err) => {
-				request.close(moq_net::Error::Unauthorized);
-				return Err(err);
-			}
-		};
+	let grants = match crate::connection::authorize(
+		&serve.cluster,
+		lease.token(),
+		role,
+		identity.is_some() || lan,
+		&moq_tokio::server::Transport::Quic,
+	) {
+		Ok(grants) => grants,
+		Err(err) => {
+			request.close(moq_net::Error::Unauthorized);
+			return Err(err);
+		}
+	};
 
 	let peer_hop = request.peer_hop();
 	let mut request = request.with_stats(grants.stats);

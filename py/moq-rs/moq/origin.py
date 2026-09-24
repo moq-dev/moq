@@ -185,9 +185,7 @@ class OriginConsumer:
 
         Paths with a segment starting with ``.`` below ``prefix`` are hidden unless ``hidden``.
         """
-        return AnnounceConsumer(
-            self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter, hidden=hidden))
-        )
+        return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter, hidden=hidden)))
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
         """Await a route covering ``path``, then resolve the broadcast there.

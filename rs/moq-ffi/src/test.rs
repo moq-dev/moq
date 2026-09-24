@@ -1585,7 +1585,11 @@ async fn announced_hides_dot_paths_unless_asked() {
 	let _stats = create_announced(&origin, ".stats/node");
 	let _cam = create_announced(&origin, "cam");
 
-	for (prefix, hidden, expected) in [("", false, "cam"), ("", true, ".stats/node"), (".stats", false, ".stats/node")] {
+	for (prefix, hidden, expected) in [
+		("", false, "cam"),
+		("", true, ".stats/node"),
+		(".stats", false, ".stats/node"),
+	] {
 		let announced = consumer
 			.announced(MoqAnnounceConfig {
 				prefix: prefix.into(),

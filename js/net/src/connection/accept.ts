@@ -175,7 +175,7 @@ async function acceptSetup(
 		maxRequestId,
 		version,
 		solicit: Ietf.solicitFromSetup(client.parameters),
-			hidden: Ietf.hiddenFromSetup(client.parameters),
+		hidden: Ietf.hiddenFromSetup(client.parameters),
 	});
 }
 

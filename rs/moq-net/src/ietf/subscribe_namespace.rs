@@ -479,7 +479,12 @@ mod tests {
 				hidden,
 			};
 			let mut buf = bytes::Bytes::from(body(&msg, Version::Draft18));
-			assert_eq!(SubscribeNamespace::decode_msg(&mut buf, Version::Draft18).unwrap().hidden, hidden);
+			assert_eq!(
+				SubscribeNamespace::decode_msg(&mut buf, Version::Draft18)
+					.unwrap()
+					.hidden,
+				hidden
+			);
 
 			for version in [Version::Draft14, Version::Draft16, Version::Draft17] {
 				let msg = SubscribeNamespaceLegacy {

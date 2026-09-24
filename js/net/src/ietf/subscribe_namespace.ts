@@ -33,7 +33,11 @@ export class SubscribeNamespace {
 	/** MoQ Hidden: also advertise hidden namespaces. Only sent to a peer that declared it. */
 	hidden: boolean;
 
-	constructor({ namespace, requestId, hidden = false }: { namespace: Path.Valid; requestId: bigint; hidden?: boolean }) {
+	constructor({
+		namespace,
+		requestId,
+		hidden = false,
+	}: { namespace: Path.Valid; requestId: bigint; hidden?: boolean }) {
 		this.namespace = namespace;
 		this.requestId = requestId;
 		this.hidden = hidden;

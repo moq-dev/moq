@@ -95,8 +95,7 @@ impl Connection {
 
 		let transport = self.request.transport();
 		let role = self.request.role();
-		let cluster_peer =
-			self.request.peer_identity().is_some() || cluster::Cluster::is_lan_path(self.request.path());
+		let cluster_peer = self.request.peer_identity().is_some() || cluster::Cluster::is_lan_path(self.request.path());
 		let grants = match authorize(&self.cluster, lease.token(), role, cluster_peer, &transport) {
 			Ok(grants) => grants,
 			Err(err) => {
