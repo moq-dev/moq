@@ -1145,6 +1145,34 @@ test("reject surfaces the error from demand", async () => {
 	origin.close();
 });
 
+test("a peer is offered and served the cheapest originated route", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const prefix = Path.from("live");
+	const cheap = origin.dynamic(prefix, { cost: 1n });
+	const pricey = origin.dynamic(prefix, { cost: 10n });
+
+	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.route).toEqual(Route.normalize({ cost: 1n }));
+	const pending = wireOf(consumer).demand(Path.from("live/cam"));
+	const { value: req } = await cheap.requested().next();
+	const upstream = new BroadcastProducer();
+	req?.accept(upstream.consume());
+	expect(await pending).toBeDefined();
+
+	// An exact-path local broadcast competes with them on cost too.
+	const local = origin.createBroadcast(prefix);
+	local.announce({ cost: 5n });
+	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.route).toEqual(Route.normalize({ cost: 1n }));
+	local.announce({ cost: 0n });
+	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.route).toEqual(Route.normalize({ cost: 0n }));
+
+	local.close();
+	upstream.close();
+	pricey.close();
+	cheap.close();
+	origin.close();
+});
+
 test("a shared reject still surfaces from demand", async () => {
 	const origin = new Producer();
 	const handle = origin.dynamic(Path.from("live"));

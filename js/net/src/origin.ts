@@ -54,7 +54,7 @@ export interface RequestSlot {
  * One advertised prefix: hops and cost, plus an optional server that answers
  * requests beneath it.
  *
- * Newest entry per prefix is the one requests resolve through. An originated
+ * The preferred entry per prefix is the one requests resolve through. An originated
  * entry is forwarded by sessions; a received one is not, so a shared origin
  * cannot echo a peer's announcements back to it.
  *
@@ -76,11 +76,11 @@ function compareRoutes(a: Route, b: Route): number {
 	return 0;
 }
 
-/** The preferred of `entries` (newest first) skipping `refused`: the best route, then fewest hops, then newest. */
-function preferredEntry(entries: readonly RouteEntry[], refused?: ReadonlySet<RouteEntry>): RouteEntry | undefined {
+/** The preferred of `entries` (newest first) not skipped: the best route, then fewest hops, then newest. */
+function preferredEntry(entries: readonly RouteEntry[], skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
 	let best: RouteEntry | undefined;
 	for (const entry of entries) {
-		if (refused?.has(entry)) continue;
+		if (skip?.(entry)) continue;
 		if (!best) {
 			best = entry;
 			continue;
@@ -91,6 +91,11 @@ function preferredEntry(entries: readonly RouteEntry[], refused?: ReadonlySet<Ro
 		if (order < 0) best = entry;
 	}
 	return best;
+}
+
+/** Whether a session received `entry`, so it is never forwarded to a peer. */
+function received(entry: RouteEntry): boolean {
+	return !entry.originated;
 }
 
 function noCapacity(): StreamError {
@@ -308,7 +313,8 @@ class OriginState {
 		const requests = this.requests.peek();
 		for (const [path, cached] of [...this.materialized]) {
 			if (!Path.hasPrefix(prefix, path)) continue;
-			if (cached.entry !== this.bestEntry(path, requests?.get(path)?.refused)) {
+			const refused = requests?.get(path)?.refused;
+			if (cached.entry !== this.bestEntry(path, (entry) => refused?.has(entry) ?? false)) {
 				this.materialized.delete(path);
 				cached.front.close();
 			}
@@ -328,13 +334,17 @@ class OriginState {
 			return;
 		}
 		const next = new Map<Path.Valid, Advertised>();
+		for (const [prefix, entries] of routes ?? []) {
+			const mine = preferredEntry(entries, received);
+			if (mine) next.set(prefix, { identity: mine.identity, route: mine.route.peek() });
+		}
+		// A local broadcast and an originated dynamic at one path compete on cost, as they do for requests.
 		for (const [path, route] of advertised ?? []) {
 			const front = local?.get(path);
-			if (front) next.set(path, { identity: front, route });
-		}
-		for (const [prefix, entries] of routes ?? []) {
-			const mine = entries.find((entry) => entry.originated);
-			if (mine) next.set(prefix, { identity: mine.identity, route: mine.route.peek() });
+			const entries = routes?.get(path);
+			if (front && this.localWins(path, entries && preferredEntry(entries, received))) {
+				next.set(path, { identity: front, route });
+			}
 		}
 		this.originated.set(next);
 	}
@@ -351,13 +361,13 @@ class OriginState {
 		cached.front.close();
 	}
 
-	/** The preferred entry on the most specific route covering `path`, skipping `refused`, if any. */
-	bestEntry(path: Path.Valid, refused?: ReadonlySet<RouteEntry>): RouteEntry | undefined {
+	/** The preferred entry on the most specific route covering `path`, ignoring skipped entries, if any. */
+	bestEntry(path: Path.Valid, skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
 		let bestPrefix: Path.Valid | undefined;
 		let best: RouteEntry | undefined;
 		for (const [prefix, entries] of this.routes.peek() ?? []) {
 			if (!Path.hasPrefix(prefix, path)) continue;
-			const entry = preferredEntry(entries, refused);
+			const entry = preferredEntry(entries, skip);
 			if (!entry) continue;
 			if (bestPrefix === undefined || prefix.length > bestPrefix.length) {
 				bestPrefix = prefix;
@@ -390,7 +400,7 @@ class OriginState {
 	 * route retracting, a better session taking over) swaps it out.
 	 */
 	route(path: Path.Valid, slot: Pick<RequestSlot, "answer" | "refused">): broadcast.Consumer | undefined {
-		const entry = this.bestEntry(path, slot.refused);
+		const entry = this.bestEntry(path, (candidate) => slot.refused.has(candidate));
 		const local = this.local.peek()?.get(path);
 		if (local && this.localWins(path, entry)) return local;
 
@@ -1200,11 +1210,11 @@ export class Consumer {
 	 * @internal
 	 */
 	async #demand(path: Path.Valid): Promise<broadcast.Consumer | undefined> {
+		// Resolve through what rebuildOriginated advertised: a peer never sees received routes.
+		const entry = this.#state.bestEntry(path, received);
 		const local = this.#state.local.peek()?.get(path);
-		if (local) return local;
-
-		const entry = this.#state.bestEntry(path);
-		if (!entry?.originated || !entry.server) return undefined;
+		if (local && this.#state.localWins(path, entry)) return local;
+		if (!entry?.server) return undefined;
 
 		const server = entry.server;
 		const live = server.served.get(path);
