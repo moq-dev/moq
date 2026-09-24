@@ -155,9 +155,13 @@ export class Encoder {
 	// discontinuity and re-anchors on.
 	#pipeline: Pipeline | undefined;
 
-	// The exclusive end of the newest frame written to the live track, where a demand gap's
-	// discontinuity marker goes. Cleared once the marker is written.
-	#end: Time.Micro | undefined;
+	// Where the next frame submitted to the AudioEncoder starts, i.e. the exclusive end of the
+	// newest one, where a demand gap's discontinuity marker goes. Cleared once the marker is written.
+	#next: Time.Micro | undefined;
+
+	// The newest demand gap's marker. The AudioEncoder outlives the gap, so chunks it still held
+	// when demand disappeared surface after the resume; they sit below the marker and are dropped.
+	#floor: Time.Micro | undefined;
 
 	// The fatal error an AudioEncoder reported, if any. That instance can never encode again and
 	// reconfiguring it would be a retry, so the rendition stays down for the life of this encoder.
@@ -264,14 +268,15 @@ export class Encoder {
 
 		// When demand disappears, end the epoch with a discontinuity marker (see
 		// Container.Legacy.Producer.cut) so a later subscriber resumes on the same track without the
-		// pre-gap frames reading as live. Its empty payload marks where the source media ends.
+		// pre-gap frames reading as live. Its empty payload marks where the submitted media ends.
 		effect.run((effect) => {
 			const track = effect.get(rendition.track);
 			if (!track) return;
 			effect.cleanup(() => {
-				const end = this.#end;
-				this.#end = undefined;
+				const end = this.#next;
+				this.#next = undefined;
 				if (end === undefined || track.closed.peek() !== undefined) return;
+				this.#floor = end;
 				track.writeFrame({
 					payload: Container.Legacy.encodeFrame(new Uint8Array(), end),
 					timestamp: Time.Timestamp.fromMicros(end),
@@ -407,11 +412,11 @@ export class Encoder {
 						// waiting for a group boundary. Loss is handled by the codec's PLC.
 						const live = track.peek();
 						if (!live) return;
+						if (this.#floor !== undefined && frame.timestamp < this.#floor) return;
 						live.writeFrame({
 							payload: Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro),
 							timestamp: Time.Timestamp.fromMicros(frame.timestamp as Time.Micro),
 						});
-						this.#end = (frame.timestamp + (frame.duration ?? 0)) as Time.Micro;
 					},
 					error: (err) => {
 						console.error("encoder error", err);
@@ -439,6 +444,10 @@ export class Encoder {
 							// on the capture clock, but there is nowhere to send a chunk with no subscriber.
 							if (!track.peek()) continue;
 
+							// Round to whole microseconds once, here, so a chunk's timestamp and the marker
+							// placed at the next frame's start agree exactly.
+							const timestamp = Math.round(data.timestamp) as Time.Micro;
+
 							const joinedLength = data.channels.reduce((total, channel) => total + channel.length, 0);
 							const joined = new Float32Array(joinedLength);
 
@@ -452,13 +461,14 @@ export class Encoder {
 								sampleRate: config.sampleRate,
 								numberOfFrames: data.channels[0].length,
 								numberOfChannels: data.channels.length,
-								timestamp: data.timestamp,
+								timestamp,
 								data: joined,
 								transfer: [joined.buffer],
 							});
 
 							encoder.encode(frame);
 							frame.close();
+							this.#next = Math.round(framer.next) as Time.Micro;
 						}
 					},
 				};

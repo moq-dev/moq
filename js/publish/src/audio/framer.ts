@@ -80,6 +80,11 @@ export class Framer {
 		return output;
 	}
 
+	/** Where the next frame will start. Throws until the first input sets the origin. */
+	get next(): Time.Micro {
+		return this.#timestamp();
+	}
+
 	// Whether this chunk starts somewhere other than where the previous one left off.
 	#discontinuous(timestamp: Time.Micro): boolean {
 		if (this.#origin === undefined) return false;
