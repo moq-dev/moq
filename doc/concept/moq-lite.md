@@ -58,7 +58,7 @@ A broadcast exists only while it is announced, for consumers in the same
 process and across a session alike: one that is created but never announced
 can be neither discovered nor requested. A broadcast published locally
 competes with remote routes to its path on cost like any other route, winning
-only a tie. Retracting a route (an unannounce, or the peer's ANNOUNCE_END)
+only a tie. Retracting a route (an unannounce, or the peer's `ANNOUNCE_END`)
 stops new requests from resolving through it but leaves subscriptions already
 in flight alone: each track runs to its own end, the publisher's FIN or reset.
 moq-transport sessions behave the same when a namespace is withdrawn.
