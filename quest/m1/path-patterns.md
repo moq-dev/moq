@@ -92,10 +92,6 @@ effect of this wire work.
 Test Rust and JavaScript interop, leading wildcards, `**` zero-segment
 matches, containment refusal, and old-version behavior.
 
-## Required
-
-- [Lite auth](/quest/m1/auth/lite.md) - establish the AUTH exchange before upgrading its grants to patterns
-
 ## Related
 
 - [Wildcard advertisements](/quest/m1/wildcard/README.md) - routing adopts the

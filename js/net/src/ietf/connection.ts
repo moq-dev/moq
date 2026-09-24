@@ -1,5 +1,6 @@
 import { type Getter, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
+import * as Auth from "../auth.ts";
 import type { Established } from "../connection/established.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
@@ -41,6 +42,9 @@ export class Connection implements Established {
 
 	/** moq-transport has no PROBE, so this stays empty; see {@link Established.probe}. */
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
+
+	/** moq-transport carries no AUTH exchange yet; see {@link Established.auth}. */
+	readonly auth: Auth.Auth = new Auth.None();
 
 	// The established WebTransport session.
 	#quic: WebTransport;

@@ -93,6 +93,18 @@ impl Version {
 		}
 	}
 
+	/// Whether either endpoint may open an Auth Stream (0x7) to present a token and
+	/// learn its grant. Added to lite-06, whose peers that predate it reset the
+	/// stream as an unknown type.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_auth(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether announcements carry implicit announce ids: each `active`
 	/// ANNOUNCE_BROADCAST assigns the next per-stream ordinal, and `ended`/`restart`
 	/// reference that id instead of repeating the path. Added in lite-06.

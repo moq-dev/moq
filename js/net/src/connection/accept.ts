@@ -39,6 +39,8 @@ export interface AcceptProps {
 type SessionProps = {
 	discovery: boolean;
 	publish?: OriginConsumer;
+	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
+	client: boolean;
 };
 
 /**
@@ -66,6 +68,7 @@ async function acceptInner(
 	const wiring: SessionProps = {
 		discovery: props.discovery ?? true,
 		publish: props.publish,
+		client: false,
 	};
 
 	if (protocol === Ietf.ALPN.DRAFT_22) {

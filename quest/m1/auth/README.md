@@ -89,9 +89,6 @@ existing lite-06 ALPN.
 
 ## Quests
 
-- [Lite stream](/quest/m1/auth/lite.md) - both sides of a lite-06 session
-  exchange grants over AUTH streams, exposed as `Session::auth()`, and an
-  out-of-scope announce aborts the session
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
 - [moq-transport](/quest/m1/auth/moq-transport.md) - the same exchange as a
