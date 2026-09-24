@@ -43,6 +43,7 @@ all:
 # what makes this a couple of seconds per draft rather than a minute.
 check:
     bun install --frozen-lockfile --cwd ..
+    @! grep -nP '\t' draft-*.md || { echo "tabs render unpredictably in xml2rfc; indent with spaces" >&2; exit 1; }
     @for f in draft-*.md; do \
         echo "checking $f"; \
         kramdown-rfc --v3 < "$f" > "${f%.md}.xml" || exit 1; \
