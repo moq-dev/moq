@@ -1028,6 +1028,35 @@ test("a request prefers a cheaper received route over an announced local broadca
 	origin.close();
 });
 
+test("the cheapest received route competes with the local broadcast, not the newest", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("room");
+	const upstream = new BroadcastProducer();
+	const served: string[] = [];
+	const via = (name: string) => () => {
+		served.push(name);
+		return upstream.consume();
+	};
+	const cheap = serve(origin, path, via("cheap"), Route.normalize({ hops: [PEER], cost: 1n }));
+	const pricey = serve(origin, path, via("pricey"), Route.normalize({ hops: [PEER], cost: 10n }));
+	const local = origin.createBroadcast(path);
+	local.announce({ cost: 5n });
+
+	expect(consumer.broadcasts().peek().get(path)).toEqual(Route.normalize({ hops: [PEER], cost: 1n }));
+	const request = consumer.request(path);
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(served).toEqual(["cheap"]);
+
+	request.close();
+	local.close();
+	pricey();
+	cheap();
+	upstream.close();
+	origin.close();
+});
+
 test("a handle serves a request under live", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

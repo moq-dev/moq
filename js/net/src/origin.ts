@@ -67,6 +67,32 @@ export interface RouteEntry {
 	readonly server?: ServeState;
 }
 
+/** Orders two routes by preference: identified before anonymous, then lower warm cost, then lower cold cost. */
+function compareRoutes(a: Route, b: Route): number {
+	const anonymous = Number(isAnonymous(a)) - Number(isAnonymous(b));
+	if (anonymous !== 0) return anonymous;
+	if (a.cost.warm !== b.cost.warm) return a.cost.warm < b.cost.warm ? -1 : 1;
+	if (a.cost.cold !== b.cost.cold) return a.cost.cold < b.cost.cold ? -1 : 1;
+	return 0;
+}
+
+/** The preferred of `entries` (newest first) skipping `refused`: the best route, then fewest hops, then newest. */
+function preferredEntry(entries: readonly RouteEntry[], refused?: ReadonlySet<RouteEntry>): RouteEntry | undefined {
+	let best: RouteEntry | undefined;
+	for (const entry of entries) {
+		if (refused?.has(entry)) continue;
+		if (!best) {
+			best = entry;
+			continue;
+		}
+		const a = entry.route.peek();
+		const b = best.route.peek();
+		const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
+		if (order < 0) best = entry;
+	}
+	return best;
+}
+
 function noCapacity(): StreamError {
 	return new StreamError(StreamCode.NoCapacity, { message: "no capacity" });
 }
@@ -206,14 +232,15 @@ class OriginState {
 		const local = new Map<Path.Valid, Advertised>();
 		const available = new Map<Path.Valid, Route>();
 		for (const [path, routes] of this.routes.peek() ?? []) {
-			const entry = routes[0];
+			const entry = preferredEntry(routes);
 			if (!entry) continue;
 			const value = { identity: entry.identity, route: entry.route.peek() };
 			remote.set(path, value);
 			available.set(path, value.route);
 		}
 		for (const [path, front] of this.local.peek() ?? []) {
-			if (!this.localWins(path, this.routes.peek()?.get(path)?.[0])) continue;
+			const routes = this.routes.peek()?.get(path);
+			if (!this.localWins(path, routes && preferredEntry(routes))) continue;
 			const value = { identity: front, route: this.advertisedLocal.peek()?.get(path) ?? Route.default };
 			local.set(path, value);
 			available.set(path, value.route);
@@ -324,14 +351,14 @@ class OriginState {
 		cached.front.close();
 	}
 
-	/** The newest entry on the most specific route covering `path`, skipping `refused`, if any. */
+	/** The preferred entry on the most specific route covering `path`, skipping `refused`, if any. */
 	bestEntry(path: Path.Valid, refused?: ReadonlySet<RouteEntry>): RouteEntry | undefined {
 		let bestPrefix: Path.Valid | undefined;
 		let best: RouteEntry | undefined;
 		for (const [prefix, entries] of this.routes.peek() ?? []) {
-			const entry = entries.find((candidate) => !refused?.has(candidate));
-			if (!entry) continue;
 			if (!Path.hasPrefix(prefix, path)) continue;
+			const entry = preferredEntry(entries, refused);
+			if (!entry) continue;
 			if (bestPrefix === undefined || prefix.length > bestPrefix.length) {
 				bestPrefix = prefix;
 				best = entry;
@@ -352,10 +379,7 @@ class OriginState {
 		const local = this.advertisedLocal.peek()?.get(path);
 		if (!local || !this.local.peek()?.has(path)) return false;
 		if (!entry || !this.routes.peek()?.get(path)?.includes(entry)) return true;
-		const remote = entry.route.peek();
-		if (isAnonymous(remote)) return true;
-		if (remote.cost.warm !== local.cost.warm) return local.cost.warm < remote.cost.warm;
-		return local.cost.cold <= remote.cost.cold;
+		return compareRoutes(local, entry.route.peek()) <= 0;
 	}
 
 	/**
