@@ -305,9 +305,8 @@ async fn run(config: &Config) -> Result<()> {
 		res = input::handle_viewers(&viewer_consumer, &cmd_tx) => res,
 	};
 
-	// Cleanly close the broadcast so subscribers see a normal end rather than
-	// Error::Dropped.
-	broadcast.finish();
+	// Close the broadcast now, even if the emulator thread still holds a clone.
+	broadcast.close();
 	result
 }
 

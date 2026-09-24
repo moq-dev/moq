@@ -34,12 +34,10 @@ object ended", not "the path went offline": announcements say whether a path
 is live, and a path can be announced again by a new object. Caches and moq-hls
 use it to tell a live object from a replaced one at the same path.
 
-Stage it as the children below: Rust first, then the bindings, then the `dev`
-removal.
+Stage it as the children below: the bindings, then the `dev` removal.
 
 ## Quests
 
-- [Rust close](/quest/m1/broadcast-close/rust.md) - moq-net gains `close()`, deprecates `finish`/`abort`/`is_finished`, and every Rust and JS caller moves over
 - [Binding close](/quest/m1/broadcast-close/bindings.md) - moq-ffi, libmoq, and every wrapper expose `close()` and deprecate `finish`
 - [Remove finish](/quest/m1/broadcast-close/remove.md) - on dev, the deprecated broadcast end APIs are gone and `closed()` carries no cause
 

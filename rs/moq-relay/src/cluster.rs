@@ -1549,9 +1549,9 @@ impl Cluster {
 			}
 		}
 
-		// Deliberate shutdown: finishing the registration retracts the route.
+		// Deliberate shutdown: closing the registration retracts the route.
 		if let Some(registration) = self_registration.as_mut() {
-			registration.finish();
+			registration.close();
 		}
 		Ok(())
 	}

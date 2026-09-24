@@ -84,9 +84,8 @@ async fn main() -> anyhow::Result<()> {
 				_ = clock.run() => Ok(()),
 			};
 
-			// Cleanly close the broadcast on exit so subscribers see a normal end
-			// rather than Error::Dropped.
-			broadcast.finish();
+			// End the broadcast on exit.
+			broadcast.close();
 			result
 		}
 		Command::Subscribe => {

@@ -190,7 +190,7 @@ impl Transcoder {
 		tasks.shutdown().await;
 
 		derived.finish()?;
-		output.finish();
+		output.close();
 		Ok(())
 	}
 }

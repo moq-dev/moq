@@ -1126,11 +1126,8 @@ impl Producer {
 	/// polled. Register a [`broadcast::Producer::dynamic`] handler right away, so
 	/// the first consumer finds the tracks it serves.
 	///
-	/// End the broadcast with [`broadcast::Producer::finish`]; dropping it
-	/// without finishing also works, but logs a warning. Either way the path
-	/// closes once it was the last source; an unfinished drop additionally aborts
-	/// the spliced tracks with an error, so consumers observe a failure rather
-	/// than a clean end.
+	/// End the broadcast with [`broadcast::Producer::close`] or by dropping it;
+	/// either way the path closes once it was the last source.
 	///
 	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this
 	/// producer may publish under (after [`scope`](Self::scope)),
@@ -1161,7 +1158,7 @@ impl Producer {
 		// The broadcast is a route table entry at its exact path from the start,
 		// so requests resolve to it and the newest publisher at a path wins;
 		// local cursors see it immediately. The entry lives as long as the
-		// broadcast: its announcer drops on finish, abort, or the last handle.
+		// broadcast: its announcer drops on close, abort, or the last handle.
 		let announcing = Announcing {
 			hop: self.hop,
 			shared: self.shared.clone(),
@@ -2032,7 +2029,7 @@ async fn run_front(task: FrontTask) {
 						// subscriptions already in flight): dropping their producers
 						// leaves each reader on the copy it was spliced from, ending
 						// when and as that copy ends.
-						broadcast.finish();
+						broadcast.close();
 						broadcast.release_spliced(err.clone());
 						for (_, mut io) in tracks.drain() {
 							// Nothing in flight: unread, never spliced, or only a warm cache.
@@ -3789,7 +3786,7 @@ mod tests {
 		broadcast.announce(Route::default()).unwrap();
 		announced.assert_next_wait();
 		peer.assert_next_active("room/alice");
-		broadcast.finish();
+		broadcast.close();
 		announced.assert_next_ended("room/alice");
 		peer.assert_next_ended("room/alice");
 		assert!(matches!(broadcast.announce(Route::default()), Err(Error::Closed)));
@@ -5147,9 +5144,9 @@ mod tests {
 		assert!(again.is_clone(&resolved));
 
 		// Losing one source keeps the front alive; losing both closes it.
-		first.finish();
+		first.close();
 		settle(|| consumer.get_broadcast("room/alice").is_some()).await;
-		second.finish();
+		second.close();
 		settle(|| consumer.get_broadcast("room/alice").is_none()).await;
 
 		// The path is free again for a fresh broadcast.
@@ -5185,7 +5182,7 @@ mod tests {
 		group.finish().unwrap();
 		track.finish().unwrap();
 		drop(track);
-		broadcast.finish();
+		broadcast.close();
 
 		let mut group = next_group(&mut subscription)
 			.await
@@ -5230,7 +5227,7 @@ mod tests {
 
 		// ANNOUNCE_END overtakes the track's end: the route is retracted, and the front
 		// has acted on it, before the track's last group and end arrive.
-		source.finish();
+		source.close();
 		drop(server);
 		settle(|| resolved.is_closed()).await;
 		let mut group = track.append_group().unwrap();
@@ -5460,7 +5457,7 @@ mod tests {
 
 		// The incumbent leaving exhausts the table: the refusal is never retried.
 		drop(track);
-		first.finish();
+		first.close();
 		assert!(matches!(subscription.recv_group().await, Err(Error::Unsupported)));
 	}
 
@@ -5659,7 +5656,7 @@ mod tests {
 		// Publishing through the nested view lands where the root says.
 		let broadcast = nested.create_broadcast("room/chat/live").unwrap();
 		assert!(producer.consume().get_broadcast("room/chat/live").is_some());
-		broadcast.finish();
+		broadcast.close();
 	}
 
 	#[test]

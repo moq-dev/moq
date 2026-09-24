@@ -21,14 +21,14 @@ use crate::Result;
 /// transport packets and retains any partial trailing packet internally for the
 /// next call (the same pattern `moq-cli import ... stdin ts` uses against stdin).
 /// Either [`Self::finish`] or dropping the publisher ends the broadcast and
-/// unannounces the path, the former without the dropped-without-finish warning.
+/// unannounces the path.
 pub struct Publisher {
 	// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
 	// verbatim, so the importer uses the `mpegts` catalog extension rather than the
 	// media-only `()`, which would route those PIDs to `Stream::Ignored` and drop them.
 	importer: ts::Import<ts::Ext>,
-	// A clone of the importer's producer, so a deliberate end can finish() the
-	// broadcast (prompt unannounce) even though the importer owns it.
+	// A clone of the importer's producer, so an end can close the broadcast
+	// (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
 }
 
@@ -65,16 +65,17 @@ impl Publisher {
 	/// the broadcast so the origin unannounces it immediately.
 	pub fn finish(&mut self) -> Result<()> {
 		self.importer.finish().map_err(moq_mux::Error::from)?;
-		self.broadcast.finish();
+		self.broadcast.close();
 		Ok(())
 	}
 
 	/// Abort the published tracks with `err` so subscribers see the real cause
 	/// (the SRT caller dropped, a demux error) rather than a generic `Error::Dropped`.
 	///
-	/// Consumes the publisher: the broadcast is done.
+	/// Consumes the publisher and closes the broadcast.
 	pub fn abort(self, err: moq_net::Error) {
 		self.importer.abort(err);
+		self.broadcast.close();
 	}
 }
 
