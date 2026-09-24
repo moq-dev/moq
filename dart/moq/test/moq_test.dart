@@ -138,32 +138,35 @@ void main() {
     );
   });
 
-  test('local discovery survives unannounce until finish', () async {
+  test('a broadcast is reachable only while announced', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final broadcast = origin.createBroadcast(path: 'live');
     broadcast.publishTrack(name: 'events', info: null);
     final consumer = origin.consume();
-    final announced = consumer.announced(config: MoqAnnounceConfig());
-    final created = await announced.next().timeout(timeout);
-    expect(created?.prefix(), 'live');
-    expect(created?.active(), isTrue);
-    expect(created?.route().cost, 0);
+    await expectLater(
+      consumer.requestBroadcast(path: 'live').timeout(timeout),
+      throwsA(anything),
+    );
 
-    broadcast.announce(route: MoqRoute(cost: 3));
-    final advertised = await announced.next().timeout(timeout);
-    expect(advertised?.active(), isTrue);
-    expect(advertised?.route().cost, 3);
+    broadcast.announce(route: MoqRoute());
+    final announced = consumer.announced(config: MoqAnnounceConfig());
+    final first = await announced.next().timeout(timeout);
+    expect(first?.prefix(), 'live');
+    expect(first?.active(), isTrue);
 
     broadcast.unannounce();
-    final local = await announced.next().timeout(timeout);
-    expect(local?.active(), isTrue);
-    expect(local?.route().cost, 0);
-    await consumer.requestBroadcast(path: 'live').timeout(timeout);
-
-    broadcast.finish();
     final retracted = await announced.next().timeout(timeout);
     expect(retracted?.prefix(), 'live');
     expect(retracted?.active(), isFalse);
+    await expectLater(
+      consumer.requestBroadcast(path: 'live').timeout(timeout),
+      throwsA(anything),
+    );
+
+    broadcast.announce(route: MoqRoute());
+    final back = await announced.next().timeout(timeout);
+    expect(back?.active(), isTrue);
+    await consumer.requestBroadcast(path: 'live').timeout(timeout);
     announced.cancel();
     announced.dispose();
   });

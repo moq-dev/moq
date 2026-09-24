@@ -346,8 +346,7 @@ export class Publisher {
 	// closing the session leaves the broadcasts alone.
 	#broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
 
-	// Originated advertisements this session forwards. Unadvertised local broadcasts
-	// stay reachable by exact path without appearing here.
+	// Originated advertisements this session forwards.
 	#advertised: Getter<ReadonlyMap<Path.Valid, Advertised> | undefined>;
 
 	#publish?: OriginConsumer;

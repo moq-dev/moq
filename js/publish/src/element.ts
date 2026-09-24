@@ -21,7 +21,7 @@ type Observed = (typeof OBSERVED)[number];
 export type SourceType = "camera" | "screen" | "file";
 
 /**
- * When to announce the broadcast.
+ * When to announce the broadcast. Nobody can see or subscribe to it until it is announced.
  *
  * `always` announces immediately, `never` never announces, and `source` waits until media is
  * actually being captured. A camera source waits for every enabled track, so a refused microphone

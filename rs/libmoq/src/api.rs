@@ -1274,10 +1274,9 @@ pub extern "C" fn moq_origin_create() -> i32 {
 
 /// Create a broadcast at `path` on an origin, for publishing media tracks.
 ///
-/// The broadcast appears on this origin's local announcement streams immediately.
-/// Fill it with the `moq_publish_*` functions, then advertise it to peers with
-/// [moq_publish_announce] after populating. [moq_publish_finish] unpublishes
-/// immediately.
+/// The broadcast is invisible and unroutable, on this origin and its peers
+/// alike, until [moq_publish_announce]. Fill it with the `moq_publish_*`
+/// functions, then announce it. [moq_publish_finish] unpublishes immediately.
 ///
 /// Returns a non-zero broadcast handle on success, or a negative code on failure.
 ///
@@ -1520,8 +1519,8 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 /// Resolves against future announcements: it waits for the announcement to arrive (e.g. over the
 /// network) and then delivers the broadcast handle via `on_broadcast`. Use it right after
 /// [moq_session_connect] to avoid racing announcement gossip. To resolve against only what is
-/// reachable by exact path now, use [moq_origin_request] instead. A local
-/// broadcast appears on this origin's cursor when created, before peer advertising.
+/// reachable now, use [moq_origin_request] instead. A broadcast created on this origin
+/// resolves once it is announced, like a remote one.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once announced, then exactly once
 /// more with a terminal code: `0` (the wait finished, including after
@@ -1568,9 +1567,9 @@ pub extern "C" fn moq_origin_announced_broadcast_cancel(task: u32) -> i32 {
 
 /// Request a broadcast from an origin by path, resolving as soon as it can be served.
 ///
-/// Resolves against what is reachable by exact path *now*, where
-/// [moq_origin_announced_broadcast] waits indefinitely: it returns an existing broadcast at once,
-/// whether announced or not, and fails when none is reachable. It does NOT wait for a later
+/// Resolves against what is announced *now*, where [moq_origin_announced_broadcast] waits
+/// indefinitely: it returns an announced broadcast at once, and fails when none is reachable,
+/// including a broadcast created but not announced. It does NOT wait for a later
 /// announcement. Serve on-demand paths with [moq_origin_dynamic].
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
@@ -1628,7 +1627,8 @@ pub extern "C" fn moq_origin_close(origin: u32) -> i32 {
 /// Advertise a broadcast's exact path as a route.
 ///
 /// Announcing again re-prices the route in place. A NULL `route` uses the default
-/// (no hops, cost 0). The path remains discoverable locally before and after peer advertising.
+/// (no hops, cost 0). Until announced, the broadcast is invisible and unroutable for
+/// local consumers and peers alike.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -1645,7 +1645,8 @@ pub unsafe extern "C" fn moq_publish_announce(broadcast: u32, route: *const moq_
 
 /// Retract a broadcast's exact-path advertisement, if any.
 ///
-/// The broadcast stays reachable by exact path. Returns a zero on success, or a
+/// Local consumers and peers alike stop discovering and requesting it; tracks already in
+/// flight carry on, and announcing again brings it back. Returns a zero on success, or a
 /// negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_unannounce(broadcast: u32) -> i32 {

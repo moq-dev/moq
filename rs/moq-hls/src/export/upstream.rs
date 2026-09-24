@@ -41,14 +41,14 @@ mod tests {
 	async fn self_references_keep_the_catalog_broadcast_after_replacement() {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		let driver = tokio::spawn(moq_net::time::run(driver));
-		let old = origin.create_broadcast("a/live").unwrap();
+		let old = origin.publish("a/live", Default::default()).unwrap();
 		let source = moq_mux::Source::new(origin.consume(), "a/live");
 		let upstream = Upstream {
 			source,
 			broadcast: old.consume(),
 		};
 		drop(old);
-		let _replacement = origin.create_broadcast("a/live").unwrap();
+		let _replacement = origin.publish("a/live", Default::default()).unwrap();
 		for _ in 0..10 {
 			tokio::task::yield_now().await;
 		}

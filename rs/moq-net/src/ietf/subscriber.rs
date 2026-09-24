@@ -1381,9 +1381,26 @@ where
 		Ok(())
 	}
 
+	/// Run `tasks` to their own end, or until the session dies.
+	///
+	/// A retraction does not disturb subscriptions already in flight: what ended
+	/// takes no new work, but the work it started finishes.
+	async fn drain(&self, tasks: &mut TaskSet) {
+		let mut session = self.session.clone();
+		kio::wait(|waiter| {
+			let mut cx = std::task::Context::from_waker(waiter.waker());
+			if session.poll_closed(&mut cx).is_ready() {
+				return Poll::Ready(());
+			}
+			tasks.poll(waiter)
+		})
+		.await
+	}
+
 	/// Serve materialization requests for one announced namespace: mint a source
 	/// per requested path and serve its track requests until the route is
-	/// retracted or the session dies.
+	/// retracted or the session dies. Tracks in flight at a retraction run to
+	/// their own end.
 	async fn run_route(&self, path: PathOwned) {
 		let mut broadcasts = TaskSet::owned();
 		let mut closed_session = self.session.clone();
@@ -1413,8 +1430,12 @@ where
 
 			let request = match next {
 				Some(Ok(request)) => request,
-				// Retracted or torn down: no request will ever arrive again.
-				Some(Err(_)) | None => break,
+				// Retracted or torn down: no request will ever arrive again, but
+				// the broadcasts already served keep their tracks in flight.
+				Some(Err(_)) | None => {
+					self.drain(&mut broadcasts).await;
+					break;
+				}
 			};
 
 			// The request path is absolute; the wire (and our origin handle) speak
@@ -1481,6 +1502,8 @@ where
 				Some(Ok(request)) => request,
 				Some(Err(err)) => {
 					tracing::debug!(%err, "broadcast closed");
+					// No new tracks, but those in flight run to their own end.
+					self.drain(&mut subscribes).await;
 					break;
 				}
 				// Session gone.
@@ -1709,11 +1732,11 @@ where
 			}
 		};
 
-		// One event ends the subscription: the last consumer leaving, the broadcast
-		// dying, or the subscribe stream closing.
+		// One event ends the subscription: the last consumer leaving, or the
+		// subscribe stream closing. The broadcast ending does not: a retraction
+		// does not disturb subscriptions already in flight.
 		enum End {
 			Unused,
-			BroadcastClosed(Error),
 			StreamClosed(Result<(), Error>),
 		}
 
@@ -1729,9 +1752,6 @@ where
 				if track.poll_unused(waiter).is_ready() {
 					return Poll::Ready(End::Unused);
 				}
-				if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
-					return Poll::Ready(End::BroadcastClosed(err));
-				}
 				let mut cx = std::task::Context::from_waker(waiter.waker());
 				stream.reader.poll_closed(&mut cx).map(End::StreamClosed)
 			})
@@ -1745,11 +1765,6 @@ where
 					}
 					Err(used) => track = used,
 				},
-				End::BroadcastClosed(err) => {
-					tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "broadcast closed");
-					let _ = track.abort(err);
-					break true;
-				}
 				End::StreamClosed(res) => {
 					match res {
 						Ok(()) => {

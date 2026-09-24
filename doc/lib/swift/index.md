@@ -56,7 +56,7 @@ session.shutdown()
 ```
 
 The three advertising operations: `session.publish.createBroadcast(path:)`
-returns a locally discoverable producer; `broadcast.announce(route:)` /
+returns an unannounced producer, invisible to everyone; `broadcast.announce(route:)` /
 `broadcast.unannounce()` own that exact-path advertisement;
 `session.publish.dynamic(prefix:route:)` claims `prefix` and every path
 beneath it (`""` for everything). Hold the returned `OriginDynamic` while the

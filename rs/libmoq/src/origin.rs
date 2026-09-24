@@ -257,8 +257,8 @@ impl Origin {
 	/// Request the broadcast at `path`, delivering its handle once it can be served.
 	///
 	/// Unlike [`Self::consume`] (announced-only, fails fast) and [`Self::consume_announced`]
-	/// (waits indefinitely for a future announcement), this resolves against any broadcast
-	/// reachable by exact path now, whether announced or not: the callback fires the broadcast
+	/// (waits indefinitely for a future announcement), this resolves against any route
+	/// announced now: the callback fires the broadcast
 	/// handle (> 0) once served, then a terminal `0`; or a single terminal code (`0` on close,
 	/// negative on error) if it can't be served. Returns a task handle for cancellation.
 	pub fn request(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
@@ -292,7 +292,7 @@ impl Origin {
 		path: String,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		// Resolves to an error when no broadcast is reachable by exact path.
+		// Resolves to an error when no announced route can serve the path.
 		let pending = consumer.request_broadcast(path.as_str());
 
 		// `biased` so a pending close always wins over a ready broadcast.
@@ -320,7 +320,7 @@ impl Origin {
 		Ok(())
 	}
 
-	/// Create a locally announced broadcast at `path` on an origin.
+	/// Create an unannounced broadcast at `path` on an origin.
 	///
 	/// Errors with [`Error::Moq`] if the path is outside the origin's scope.
 	pub fn create_broadcast<P: moq_net::AsPath>(

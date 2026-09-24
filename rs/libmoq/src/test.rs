@@ -52,6 +52,26 @@ fn request_broadcast(origin: u32, path: &[u8]) -> u32 {
 	}
 }
 
+/// Request `path` once and return the first callback code: a broadcast handle, or
+/// the negative error that ended the request.
+fn request_once(origin: u32, path: &[u8]) -> i32 {
+	let cb = Callback::new();
+	let _task = id(unsafe {
+		moq_origin_request(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+	let code = cb.recv();
+	if code > 0 {
+		cb.recv_terminal();
+	}
+	code
+}
+
 /// RAII guard that calls a closure on drop.
 struct Guard<F: FnOnce()>(Option<F>);
 impl<F: FnOnce()> Drop for Guard<F> {
@@ -2055,7 +2075,7 @@ fn announced_filters_patterns_and_reports_captures() {
 }
 
 #[test]
-fn local_announcement_survives_unannounce() {
+fn announced_deactivation() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe {
@@ -2085,23 +2105,29 @@ fn local_announcement_survives_unannounce() {
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
 	assert!(info.active);
 
-	// Unannouncing withdraws the peer advertisement, while the local cursor
-	// and exact request remain live until the broadcast finishes.
+	// Going non-live unannounces the broadcast without tearing it down: local
+	// consumers stop reaching it, exactly as peers do, until it announces again.
 	assert_eq!(moq_publish_unannounce(broadcast), 0);
-	let _ = request_broadcast(origin, path);
-	assert_eq!(moq_publish_finish(broadcast), 0);
 
 	let deactivated_id = id(cb.recv());
 	assert_eq!(unsafe { moq_origin_announced_info(deactivated_id, &mut info) }, 0);
-	assert!(!info.active, "broadcast should be inactive after finish");
+	assert!(!info.active, "broadcast should be inactive after unannounce");
+	assert!(request_once(origin, path) < 0, "an unannounced broadcast is unroutable");
+
+	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
+	let reannounced_id = id(cb.recv());
+	assert_eq!(unsafe { moq_origin_announced_info(reannounced_id, &mut info) }, 0);
+	assert!(info.active, "broadcast should be active again after announce");
+	let _ = request_broadcast(origin, path);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
 #[test]
-fn create_broadcast_announces_locally() {
+fn create_broadcast_is_unroutable_until_announced() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe {
@@ -2118,7 +2144,10 @@ fn create_broadcast_announces_locally() {
 
 	let path = b"quiet";
 	let broadcast = id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len()) });
-	// Creation reaches local cursors and exact requests before peer advertising.
+	// Nobody reaches it, locally included, until it announces.
+	assert!(request_once(origin, path) < 0, "an unannounced broadcast is unroutable");
+
+	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
 	let _ = request_broadcast(origin, path);
 	let announced_id = id(cb.recv());
 	let mut info = moq_announce_update {

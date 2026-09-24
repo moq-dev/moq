@@ -67,7 +67,7 @@ asyncio.run(main())
 
 The three advertising operations, as the other bindings spell them:
 `client.create_broadcast(path)` (or `OriginProducer.create_broadcast`) returns
-a locally discoverable producer; `broadcast.announce(route)` /
+an unannounced producer, invisible to everyone; `broadcast.announce(route)` /
 `broadcast.unannounce()` own that exact-path advertisement;
 `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
 (`""` for everything). Hold the returned handle while the claim should stay
