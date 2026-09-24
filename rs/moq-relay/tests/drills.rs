@@ -369,7 +369,6 @@ async fn subscribe(origin: &moq_net::origin::Consumer, path: &str) -> Reader {
 /// the cancel itself: the stalled reader's handles release, and everyone else
 /// keeps being served. The rejoin below is the half of that behavior worth
 /// grading here.
-lanes!(cancel_under_backpressure_releases_the_reader);
 async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	let relay = RelayHost::start(None).await;
 	let path = Path::start(lane, &relay).await;
@@ -483,6 +482,8 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	path.verify();
 }
 
+lanes!(cancel_under_backpressure_releases_the_reader);
+
 /// Drill: kill the relay mid-group, then bring it back.
 ///
 /// Two things have to hold. An interrupted track must abort, because a clean
@@ -490,7 +491,6 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 /// into one is the worst possible failure mode. And the reconnect loop has to
 /// restore service: the dead session's broadcast closes with it, and a fresh
 /// subscribe through the same origin resumes once the relay returns.
-lanes!(relay_killed_mid_group_aborts_then_resumes);
 async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	let mut relay = RelayHost::start(None).await;
 	let port = relay.port;
@@ -575,6 +575,8 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	path.verify();
 }
 
+lanes!(relay_killed_mid_group_aborts_then_resumes);
+
 /// Wait for a reconnect loop to report `want`, failing with what it said instead.
 async fn expect_status(reconnect: &mut moq_tokio::Connection, want: moq_tokio::Status, who: &str) {
 	loop {
@@ -594,7 +596,6 @@ async fn expect_status(reconnect: &mut moq_tokio::Connection, want: moq_tokio::S
 /// announced that nothing serves, and the replacement has to be new content: a
 /// subscriber that re-consumes the same name after a republish gets what the
 /// new publisher is sending, never the previous one's cache.
-lanes!(interrupted_publisher_republishes_new_content);
 async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	let relay = RelayHost::start(None).await;
 	let path = Path::start(lane, &relay).await;
@@ -690,6 +691,8 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	path.verify();
 }
 
+lanes!(interrupted_publisher_republishes_new_content);
+
 /// Wait for `path` to be announced (`want`) or unannounced (`!want`).
 async fn expect_announce(announced: &mut moq_net::announce::Consumer, path: &str, want: bool, who: &str) {
 	loop {
@@ -709,7 +712,6 @@ async fn expect_announce(announced: &mut moq_net::announce::Consumer, path: &str
 /// Every drill above proves something by reading a frame. This one runs the same
 /// harness with no publisher and requires that no announcement and no broadcast
 /// ever arrive, so "the frame showed up" cannot be a harness artifact.
-lanes!(no_publisher_never_delivers);
 async fn no_publisher_never_delivers(lane: Lane) {
 	let relay = RelayHost::start(None).await;
 	let path = Path::start(lane, &relay).await;
@@ -750,3 +752,5 @@ async fn no_publisher_never_delivers(lane: Lane) {
 	drop(relay);
 	path.verify();
 }
+
+lanes!(no_publisher_never_delivers);
