@@ -141,9 +141,9 @@ jobs:
             -t ${{ env.REGISTRY }}/${{ needs.parse.outputs.package }}:latest \
             $(printf "${{ env.REGISTRY }}/${{ needs.parse.outputs.package }}@sha256:%s " *)
 
-      # The image was moqdev/moq-cli through 0.12.1. Point `latest` there at a
+      # The image was moqdev/moq-cli through 0.12.2. Point `latest` there at a
       # refusal naming the new image, so a user tracking it breaks instead of
-      # silently staying on 0.12.1. Pinned versions keep working.
+      # silently staying on 0.12.2. Pinned versions keep working.
       - name: Refuse the old image name
         if: needs.parse.outputs.package == 'moq'
         run: |
