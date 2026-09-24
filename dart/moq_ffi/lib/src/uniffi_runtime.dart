@@ -320,7 +320,7 @@ Future<T> uniffiRustCallAsync<T, F>(
     try {
       final result = completeFunc(rustFuture, status);
       checkCallStatus(errorHandler ?? NullRustCallStatusErrorHandler(), status);
-      return liftAndFree(result, liftFunc);
+      return liftAndFree<T, F>(result, liftFunc);
     } finally {
       calloc.free(status);
     }

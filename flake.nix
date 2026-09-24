@@ -309,13 +309,13 @@
         # `-kixelated.N` pre-release so they never collide with upstream's.
         uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-dart";
-          version = "0.3.1-kixelated.2+v0.32.0";
+          version = "0.3.1-kixelated.3+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-dart";
             rev = "v${version}";
-            hash = "sha256-EEyfihz8cNtHZOA30KDyrIr0oKa5q4xw/DTVkbqhXcs=";
+            hash = "sha256-yeyXkNiZTciTPXfYewrxl3aTpnaKdCmmJdjtpkk/WKc=";
           };
 
           # The upstream repository ignores Cargo.lock so cargo installs test
