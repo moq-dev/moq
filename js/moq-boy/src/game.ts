@@ -266,7 +266,7 @@ export class Game {
 		const consumer = new Json.Snapshot.Consumer({ track: statusTrack, schema: GameStatusSchema });
 
 		// Closing the track on cleanup unblocks a pending next() (it returns undefined), so the loop
-		// ends without racing effect.cancel.
+		// ends without racing the teardown.
 		effect.spawn(async () => {
 			for (;;) {
 				let status: GameStatus | undefined;

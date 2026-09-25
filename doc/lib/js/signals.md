@@ -38,7 +38,8 @@ The rules that differ from other signal libraries:
 
 - **Nothing is tracked implicitly.** `effect.get(signal)` subscribes; `signal.peek()` doesn't.
 - **Writes coalesce per microtask** and only notify on a real change (deep for plain objects, identity for class instances).
-- **Effects own their resources.** `effect.timer`, `interval`, `animate`, `event`, `spawn`, and `run` (a nested effect) all clean up on rerun or close, so never call `setTimeout` or `addEventListener` inside one directly. A rerun waits for the previous run's `spawn` tasks to settle, and `effect.abort`/`effect.cancel` tell them to stop.
+- **Effects own their resources.** `effect.timer`, `interval`, `animate`, `event`, `spawn`, and `run` (a nested effect) all clean up on rerun or close, so never call `setTimeout` or `addEventListener` inside one directly. A rerun waits for the previous run's `spawn` tasks to settle, and `effect.abort`/`effect.race` tell them to stop.
+- **Race with `race`, not `Promise.race`.** `Promise.race` leaves a listener on every value that loses, so racing a long-lived one (a `closed`, a run's teardown) once per frame grows the heap. `race([...])` accepts promises and `Once` values and drops its listeners when it settles; `effect.race(promise)` also resolves `undefined` once the run is torn down.
 - **Dev builds warn** about effects that tracked nothing, effects garbage-collected without `close()`, and signals leaking subscribers.
 
 Components follow one shape: `in` (wired inputs), `out` (read-only derived

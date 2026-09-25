@@ -30,7 +30,7 @@ a live-only broadcast with no archive timeline.
 
 ## Required
 
-- [Publisher clocks](/quest/m1/publisher-clock.md) - built-in publishers populate the mapping applications read
+- [CLI import clock](/quest/m1/cli-import-clock.md) - built-in publishers populate the mapping applications read
 
 ## Closes
 

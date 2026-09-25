@@ -317,19 +317,17 @@ impl MoqBroadcastProducer {
 
 	/// Publish one audio codec as a new track.
 	///
-	/// The track is named after the format (`0.opus`), so the catalog is how a subscriber finds it.
-	/// [`MoqAudioInit::data`] is required: audio resolves its rendition entirely from those bytes.
-	pub fn publish_audio(&self, init: MoqAudioInit) -> Result<Arc<MoqMediaProducer>, MoqError> {
+	/// The track is [`MoqAudioInit::track`], or else named after the format (`0.opus`), so the
+	/// catalog is how a subscriber finds it. [`MoqAudioInit::data`] is required: audio resolves its
+	/// rendition entirely from those bytes.
+	pub fn publish_audio(&self, mut init: MoqAudioInit) -> Result<Arc<MoqMediaProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
+		let track = init.track.take();
 		let init: moq_mux::import::AudioInit = init.into();
-		let broadcast = state.broadcast.clone();
-		let name = broadcast.unique_name(&format!(".{}", init.format));
-		let request = broadcast
-			.reserve_track(name)
-			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+		let request = reserve_track(&state.broadcast, track, &init.format)?;
 
 		let import = moq_mux::import::Track::audio(request, state.catalog.reserve(), init)
 			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
@@ -341,17 +339,14 @@ impl MoqBroadcastProducer {
 	/// Named as in [`publish_audio`](Self::publish_audio). [`MoqVideoInit::data`] may be empty for a
 	/// format that resolves in band; a hint carrying the codec publishes the catalog before the
 	/// first keyframe.
-	pub fn publish_video(&self, init: MoqVideoInit) -> Result<Arc<MoqMediaProducer>, MoqError> {
+	pub fn publish_video(&self, mut init: MoqVideoInit) -> Result<Arc<MoqMediaProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
+		let track = init.track.take();
 		let init: moq_mux::import::VideoInit = init.into();
-		let broadcast = state.broadcast.clone();
-		let name = broadcast.unique_name(&format!(".{}", init.format));
-		let request = broadcast
-			.reserve_track(name)
-			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+		let request = reserve_track(&state.broadcast, track, &init.format)?;
 
 		let import = moq_mux::import::Track::video(request, state.catalog.reserve(), init)
 			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
@@ -387,6 +382,9 @@ impl MoqBroadcastProducer {
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
+		if init.track.is_some() {
+			return Err(MoqError::Codec("a requested track already has a name".into()));
+		}
 		let request = request.take()?;
 		let import = moq_mux::import::Track::audio(request, state.catalog.reserve(), init.into())
 			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
@@ -404,6 +402,9 @@ impl MoqBroadcastProducer {
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
+		if init.track.is_some() {
+			return Err(MoqError::Codec("a requested track already has a name".into()));
+		}
 		let request = request.take()?;
 		let import = moq_mux::import::Track::video(request, state.catalog.reserve(), init.into())
 			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
@@ -414,17 +415,14 @@ impl MoqBroadcastProducer {
 	///
 	/// Only the self-delimiting formats work here (`Avc3`, `Hev1`, `Av01`); the rest need length
 	/// prefixes or an out-of-band config record. There is no audio counterpart for the same reason.
-	pub fn publish_video_stream(&self, init: MoqVideoInit) -> Result<Arc<MoqMediaStreamProducer>, MoqError> {
+	pub fn publish_video_stream(&self, mut init: MoqVideoInit) -> Result<Arc<MoqMediaStreamProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
+		let track = init.track.take();
 		let init: moq_mux::import::VideoInit = init.into();
-		let broadcast = state.broadcast.clone();
-		let name = broadcast.unique_name(&format!(".{}", init.format));
-		let request = broadcast
-			.reserve_track(name)
-			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+		let request = reserve_track(&state.broadcast, track, &init.format)?;
 
 		let import = moq_mux::import::TrackStream::video(request, state.catalog.reserve(), init)
 			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
@@ -960,6 +958,19 @@ impl MoqMediaProducer {
 		Ok(())
 	}
 
+	/// Record a locally encoded frame's handoff for catalog jitter measurement.
+	///
+	/// `timestamp_us` is on the broadcast media clock. Call this after `write_frame` only for
+	/// encoder output; imported files, pipes, and network media stay clock-free.
+	pub fn flush(&self, timestamp_us: u64) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
+		let mut guard = self.inner.lock().unwrap();
+		let media = guard.as_mut().ok_or(MoqError::Closed)?;
+		media.import.flush(timestamp, std::time::Instant::now())?;
+		Ok(())
+	}
+
 	/// Draw a group boundary here.
 	///
 	/// Audio has no boundary of its own (every packet is independently decodable), so this is the
@@ -1120,4 +1131,16 @@ impl MoqContainerStreamProducer {
 			.map_err(|err| MoqError::Codec(format!("finish failed: {err}")))?;
 		Ok(())
 	}
+}
+
+/// Reserve the named track, or a unique one named after the format.
+fn reserve_track(
+	broadcast: &moq_net::broadcast::Producer,
+	track: Option<String>,
+	format: &impl std::fmt::Display,
+) -> Result<moq_net::track::Request, MoqError> {
+	let name = track.unwrap_or_else(|| broadcast.unique_name(&format!(".{format}")));
+	broadcast
+		.reserve_track(name)
+		.map_err(|err| MoqError::Codec(format!("init failed: {err}")))
 }
