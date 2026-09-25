@@ -72,9 +72,9 @@ impl<T> Consumer<T> {
 	/// channel is still open, registers the [`Waiter`] for notification.
 	/// Returns `Err(`[`Ref`]`)` if the channel has been closed while the
 	/// condition returned by `f` is still pending.
-	pub fn poll<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<R, Ref<'_, T>>>
+	pub fn poll<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
-		F: FnMut(&Ref<'_, T>) -> Poll<R>,
+		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
 	{
 		let state = self.state.lock();
 		let consumer_state = Ref { state };

@@ -94,11 +94,13 @@ native side.
 `AudioCodec.opus()`, and `AudioEncoderOutput.frameDurationUs` sets the Opus
 frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000.
 
-`decodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.format`
-is `VideoPixelFormat.I420` when null, or `VideoPixelFormat.RGBA` for four bytes
-a pixel, and every frame repeats the layout it was decoded to. `resize` is best
-effort: only NVDEC has a built-in scaler, and MediaCodec is not it, so read each
-frame's own `width` and `height` rather than assuming it took.
+Each frame from `decodeVideo` owns its decoded picture until `close()` (or
+`use {}`), including after the consumer is cancelled. `frame.pixels(format)`
+converts it on demand: `VideoPixelFormat.I420`, or `VideoPixelFormat.RGBA` for
+four bytes a pixel. Close frames promptly, since held frames hold decoder
+buffers. `resize` is best effort: only NVDEC has a built-in scaler, and
+MediaCodec is not it, so read each frame's own `width()` and `height()` rather
+than assuming it took.
 
 ## Connection stats
 

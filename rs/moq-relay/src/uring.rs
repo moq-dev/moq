@@ -674,10 +674,23 @@ async fn serve_connection(
 		}
 	};
 	let path = if path.is_empty() { "/".to_string() } else { path };
+	let mut auth_request = serve.auth.request(moq_auth::Transport::Quic, path.clone());
+	auth_request.query = query;
+	auth_request.remote = Some(remote);
+	auth_request.local = Some(serve.local);
+	// Like the tokio listener: the SNI, else the host a WebTransport client addressed.
+	auth_request.server_name = sni.or_else(|| {
+		url.as_ref()
+			.and_then(|url| url.host_str())
+			.filter(|host| !host.is_empty())
+			.map(str::to_owned)
+	});
+	auth_request.alpn = alpn.clone();
+	auth_request.role = request.role().and_then(crate::auth::role);
+	auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
 	let mut registration = None;
-	let lan = cluster::Cluster::is_lan_path(&path);
-	let lease = if lan {
-		match cluster::Cluster::lan_credential(&path) {
+	let admitted = if cluster::Cluster::is_lan_path(&path) {
+		let lease = match cluster::Cluster::lan_credential(&path) {
 			Some(presented) => match serve.cluster.verify_lan_credential(presented) {
 				Some(true) => serve.auth.admit_fixed("/", serve.cluster.lan_peer_grant()),
 				Some(false) => {
@@ -693,36 +706,26 @@ async fn serve_connection(
 				request.close(moq_net::Error::Unauthorized);
 				anyhow::bail!("LAN peer did not present a membership proof");
 			}
+		};
+		match serve.cluster.scope(lease, &auth_request) {
+			Ok(admitted) => admitted,
+			Err(err) => {
+				request.close(moq_net::Error::Unauthorized);
+				return Err(err.into());
+			}
 		}
 	} else {
-		let mut auth_request = serve.auth.request(moq_auth::Transport::Quic, path);
-		auth_request.query = query;
-		auth_request.remote = Some(remote);
-		auth_request.local = Some(serve.local);
-		// Like the tokio listener: the SNI, else the host a WebTransport client addressed.
-		auth_request.server_name = sni.or_else(|| {
-			url.as_ref()
-				.and_then(|url| url.host_str())
-				.filter(|host| !host.is_empty())
-				.map(str::to_owned)
-		});
-		auth_request.alpn = alpn.clone();
-		auth_request.role = request.role().map(|role| match role {
-			moq_net::Role::Publisher => moq_auth::Role::Publisher,
-			_ => moq_auth::Role::Subscriber,
-		});
-		auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
 		if identity.is_some() {
 			tracing::debug!(id, "client certificate verified; reported to the auth server");
 		}
-
 		let auth = serve.auth.clone();
+		let cluster = serve.cluster.clone();
 		let sessions = serve.sessions.clone();
 		match serve
 			.tokio
 			.spawn(async move {
-				let lease = auth.admit(auth_request.clone()).await?;
-				Ok::<_, crate::auth::Error>((lease, sessions.register(auth_request)))
+				let admitted = cluster.admit(&auth, auth_request.clone()).await?;
+				Ok::<_, crate::auth::Error>((admitted, sessions.register(auth_request)))
 			})
 			.await
 			.context("auth task failed")?
@@ -748,29 +751,20 @@ async fn serve_connection(
 		}
 	};
 
-	let role = request.role();
-	let grants = match crate::connection::authorize(
-		&serve.cluster,
-		lease.token(),
-		role,
-		identity.is_some() || lan,
-		&moq_tokio::server::Transport::Quic,
-	) {
-		Ok(grants) => grants,
-		Err(err) => {
-			request.close(moq_net::Error::Unauthorized);
-			return Err(err);
-		}
-	};
+	let cluster::Admitted {
+		lease,
+		publisher,
+		subscriber,
+		stats,
+	} = admitted;
 
 	let peer_hop = request.peer_hop();
-	let lease = lease.with_stats(grants.stats.clone());
-	let mut request = request.with_stats(grants.stats);
-	if let Some(subscribe) = grants.subscribe {
-		request = request.with_publisher(subscribe);
+	let mut request = request.with_stats(stats);
+	if let Some(subscriber) = subscriber {
+		request = request.with_publisher(subscriber);
 	}
-	if let Some(publish) = grants.publish {
-		request = request.with_subscriber(publish);
+	if let Some(publisher) = publisher {
+		request = request.with_subscriber(publisher);
 	}
 	let (session, driver) = request.ok().await?;
 	let driver_handle = handle.clone();

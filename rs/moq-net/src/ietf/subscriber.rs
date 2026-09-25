@@ -1408,7 +1408,7 @@ where
 	async fn drain(&self, tasks: &mut TaskSet) {
 		let mut session = self.session.clone();
 		kio::wait(|waiter| {
-			let mut cx = std::task::Context::from_waker(waiter.waker());
+			let mut cx = waiter.context();
 			if session.poll_closed(&mut cx).is_ready() {
 				return Poll::Ready(());
 			}
@@ -1427,7 +1427,7 @@ where
 		loop {
 			let next = broadcasts
 				.drive(|waiter| {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					if closed_session.poll_closed(&mut cx).is_ready() {
 						return Poll::Ready(None);
 					}
@@ -1516,7 +1516,7 @@ where
 		loop {
 			let next = subscribes
 				.drive(|waiter| {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					if closed_session.poll_closed(&mut cx).is_ready() {
 						return Poll::Ready(None);
 					}
@@ -2738,7 +2738,7 @@ impl GroupIngest {
 		group: &mut group::Producer,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match &mut self.phase {
 				IngestPhase::Delta => {

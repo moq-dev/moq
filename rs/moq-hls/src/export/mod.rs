@@ -2285,11 +2285,11 @@ mod tests {
 		assert_eq!(first.segment, 0);
 		assert_eq!(&first.media[4..8], b"moof", "the segment carries its transmuxed media");
 		assert_eq!(first.duration, Duration::from_secs(2));
-		assert!(!first.discontinuity, "a clean start is not a discontinuity");
+		assert_eq!(first.discontinuity, 0, "a clean start is not a discontinuity");
 
 		let second = segments.next().await.unwrap().expect("second segment");
 		assert_eq!(second.segment, 1);
-		assert!(!second.discontinuity, "consecutive segments are continuous");
+		assert_eq!(second.discontinuity, 0, "consecutive segments are continuous");
 
 		// Tear down the publisher mid-group. The track ends abruptly (the cursor drains the
 		// segments it already saw and ends; the still-open live-edge group is NOT finalized,

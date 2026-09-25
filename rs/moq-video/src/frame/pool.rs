@@ -8,7 +8,7 @@
 //! also keeps a free off the per-frame path.
 
 use std::num::NonZeroUsize;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::Error;
 
@@ -29,7 +29,7 @@ pub(crate) struct Pool<A: Alloc> {
 }
 
 struct State<B> {
-	/// Buffers handed out and not yet returned.
+	/// Reservations held, filled or not.
 	live: usize,
 	/// Returned buffers with their lengths, ready for reuse.
 	idle: Vec<(usize, B)>,
@@ -53,12 +53,33 @@ impl<A: Alloc> Pool<A> {
 		self.capacity
 	}
 
+	/// Hold one of the pool's buffers, or `None` while every one is live. The
+	/// buffer itself is picked by [`Reservation::fill`], once its size is known.
+	pub(crate) fn reserve(self: &Arc<Self>) -> Option<Reservation<A>> {
+		let mut state = self.state.lock().expect("GPU frame pool poisoned");
+		if state.live >= self.capacity {
+			return None;
+		}
+		state.live += 1;
+		Some(Reservation(Held {
+			pool: self.clone(),
+			buffer: None,
+		}))
+	}
+}
+
+/// A place in the pool, returned on drop.
+pub(crate) struct Reservation<A: Alloc>(Held<A>);
+
+impl<A: Alloc> Reservation<A> {
 	/// A buffer of at least `len` bytes: the smallest idle one that fits, else a
 	/// fresh allocation while under capacity, else an idle one too small for the
-	/// job freed to make room. With every buffer live, the pool is full and this
-	/// fails rather than growing.
-	pub(crate) fn take(&self, len: usize) -> Result<A::Buffer, Error> {
-		let mut state = self.state.lock().expect("GPU frame pool poisoned");
+	/// job freed to make room. Only a failed allocation is an error, and it
+	/// releases the reservation.
+	pub(crate) fn fill(self, len: usize) -> Result<Lease<A>, Error> {
+		let mut held = self.0;
+		let pool = &held.pool;
+		let mut state = pool.state.lock().expect("GPU frame pool poisoned");
 		let fits = state
 			.idle
 			.iter()
@@ -66,121 +87,177 @@ impl<A: Alloc> Pool<A> {
 			.filter(|(_, (have, _))| *have >= len)
 			.min_by_key(|(_, (have, _))| *have)
 			.map(|(index, _)| index);
-		if let Some(index) = fits {
-			let (_, buffer) = state.idle.swap_remove(index);
-			state.live += 1;
-			return Ok(buffer);
-		}
-		if state.live + state.idle.len() >= self.capacity {
-			if state.live >= self.capacity {
-				return Err(Error::Unsupported(format!(
-					"GPU frame pool capacity {} exhausted; drop a frame before converting another",
-					self.capacity
-				)));
+		let buffer = match fits {
+			Some(index) => state.idle.swap_remove(index),
+			None => {
+				// `live` counts this reservation, so an idle buffer exists
+				// whenever the two together exceed capacity.
+				if state.live + state.idle.len() > pool.capacity {
+					let smallest = state
+						.idle
+						.iter()
+						.enumerate()
+						.min_by_key(|(_, (have, _))| *have)
+						.map(|(index, _)| index)
+						.expect("an idle buffer exists past capacity");
+					state.idle.swap_remove(smallest);
+				}
+				(len, pool.alloc.alloc(len)?)
 			}
-			// Every idle buffer is too small: free the smallest and allocate.
-			let smallest = state
-				.idle
-				.iter()
-				.enumerate()
-				.min_by_key(|(_, (have, _))| *have)
-				.map(|(index, _)| index)
-				.expect("an idle buffer exists when live is under capacity");
-			state.idle.swap_remove(smallest);
-		}
-		let buffer = self.alloc.alloc(len)?;
-		state.live += 1;
-		Ok(buffer)
+		};
+		drop(state);
+		held.buffer = Some(buffer);
+		Ok(Lease(held))
 	}
+}
 
-	/// Return a buffer of `len` bytes taken from this pool.
-	pub(crate) fn put(&self, len: usize, buffer: A::Buffer) {
-		let mut state = self.state.lock().expect("GPU frame pool poisoned");
+/// A reservation holding its buffer, returned to the pool for reuse on drop.
+pub(crate) struct Lease<A: Alloc>(Held<A>);
+
+impl<A: Alloc> Lease<A> {
+	/// The pool this buffer came from.
+	pub(crate) fn pool(&self) -> &Arc<Pool<A>> {
+		&self.0.pool
+	}
+}
+
+impl<A: Alloc> std::ops::Deref for Lease<A> {
+	type Target = A::Buffer;
+
+	fn deref(&self) -> &A::Buffer {
+		&self.0.buffer.as_ref().expect("a lease holds its buffer").1
+	}
+}
+
+/// What both handles release: the place, and the buffer once filled.
+struct Held<A: Alloc> {
+	pool: Arc<Pool<A>>,
+	buffer: Option<(usize, A::Buffer)>,
+}
+
+impl<A: Alloc> Drop for Held<A> {
+	fn drop(&mut self) {
+		let mut state = self.pool.state.lock().expect("GPU frame pool poisoned");
 		state.live -= 1;
-		state.idle.push((len, buffer));
+		state.idle.extend(self.buffer.take());
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use std::cell::Cell;
+	use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 	use super::*;
 
 	/// Counts allocations; each buffer is its length.
-	struct Counting(Cell<usize>);
+	struct Counting(AtomicUsize);
 
 	impl Alloc for Counting {
 		type Buffer = usize;
 
 		fn alloc(&self, len: usize) -> Result<usize, Error> {
-			self.0.set(self.0.get() + 1);
+			self.0.fetch_add(1, Ordering::Relaxed);
 			Ok(len)
 		}
 	}
 
-	fn pool(capacity: usize) -> Pool<Counting> {
-		Pool::new(Counting(Cell::new(0)), NonZeroUsize::new(capacity).unwrap())
+	fn pool(capacity: usize) -> Arc<Pool<Counting>> {
+		Arc::new(Pool::new(
+			Counting(AtomicUsize::new(0)),
+			NonZeroUsize::new(capacity).unwrap(),
+		))
+	}
+
+	fn take(pool: &Arc<Pool<Counting>>, len: usize) -> Lease<Counting> {
+		pool.reserve().expect("a free place").fill(len).unwrap()
 	}
 
 	#[test]
-	fn a_full_pool_refuses_rather_than_grows() {
+	fn reserve_yields_capacity_places_then_none() {
 		let pool = pool(2);
 		assert_eq!(pool.capacity(), 2);
-		let a = pool.take(100).unwrap();
-		let _b = pool.take(100).unwrap();
-		let err = pool.take(100).unwrap_err();
-		assert!(matches!(err, Error::Unsupported(_)), "{err}");
-		assert_eq!(pool.alloc.0.get(), 2);
+		let a = pool.reserve().unwrap();
+		let _b = pool.reserve().unwrap();
+		assert!(pool.reserve().is_none(), "a full pool refuses rather than grows");
+		assert_eq!(
+			pool.alloc.0.load(Ordering::Relaxed),
+			0,
+			"a reservation alone allocates nothing"
+		);
 
-		pool.put(100, a);
-		pool.take(100).unwrap();
-		assert_eq!(pool.alloc.0.get(), 2, "a returned buffer is reused, not reallocated");
+		drop(a);
+		assert!(pool.reserve().is_some(), "an unfilled reservation frees its place");
+		assert_eq!(pool.alloc.0.load(Ordering::Relaxed), 0);
+	}
+
+	#[test]
+	fn a_dropped_lease_returns_its_buffer() {
+		let pool = pool(2);
+		let a = take(&pool, 100);
+		let _b = take(&pool, 100);
+		assert!(Arc::ptr_eq(a.pool(), &pool));
+		assert!(pool.reserve().is_none());
+		assert_eq!(pool.alloc.0.load(Ordering::Relaxed), 2);
+
+		// A filled lease dropped unused, as a failed conversion drops its
+		// destination, frees its place and keeps its buffer for the next frame.
+		drop(a);
+		let _c = take(&pool, 100);
+		assert_eq!(
+			pool.alloc.0.load(Ordering::Relaxed),
+			2,
+			"a returned buffer is reused, not reallocated"
+		);
+		assert_eq!(pool.state.lock().unwrap().live, 2);
 	}
 
 	#[test]
 	fn reuse_picks_the_smallest_buffer_that_fits() {
 		let pool = pool(3);
-		let small = pool.take(10).unwrap();
-		let medium = pool.take(50).unwrap();
-		let large = pool.take(100).unwrap();
-		pool.put(10, small);
-		pool.put(50, medium);
-		pool.put(100, large);
+		drop((take(&pool, 10), take(&pool, 50), take(&pool, 100)));
 
-		assert_eq!(pool.take(40).unwrap(), 50);
-		assert_eq!(pool.take(40).unwrap(), 100, "the next fit, not a fresh allocation");
-		assert_eq!(pool.alloc.0.get(), 3);
+		let medium = take(&pool, 40);
+		assert_eq!(*medium, 50);
+		assert_eq!(*take(&pool, 40), 100, "the next fit, not a fresh allocation");
+		assert_eq!(pool.alloc.0.load(Ordering::Relaxed), 3);
 	}
 
 	#[test]
 	fn an_idle_buffer_too_small_is_replaced_within_capacity() {
 		let pool = pool(2);
-		let _live = pool.take(10).unwrap();
-		let idle = pool.take(10).unwrap();
-		pool.put(10, idle);
+		let _live = take(&pool, 10);
+		drop(take(&pool, 10));
 
 		// Capacity is reached (one live, one idle), but the idle buffer cannot
 		// serve a bigger frame: it is freed and a fresh one takes its place.
-		assert_eq!(pool.take(100).unwrap(), 100);
-		assert_eq!(pool.alloc.0.get(), 3);
-		assert!(pool.take(10).is_err(), "both buffers are live now");
+		let big = take(&pool, 100);
+		assert_eq!(*big, 100);
+		assert_eq!(pool.alloc.0.load(Ordering::Relaxed), 3);
+		assert!(pool.reserve().is_none(), "both buffers are live now");
 	}
 
 	#[test]
-	fn an_allocation_failure_leaves_the_count_intact() {
-		struct Failing;
+	fn a_failed_allocation_releases_the_reservation() {
+		/// Fails its first allocation, then succeeds.
+		struct Flaky(AtomicBool);
 
-		impl Alloc for Failing {
+		impl Alloc for Flaky {
 			type Buffer = ();
 
 			fn alloc(&self, _len: usize) -> Result<(), Error> {
-				Err(Error::Codec(anyhow::anyhow!("out of device memory")))
+				if self.0.swap(false, Ordering::Relaxed) {
+					return Err(Error::Codec(anyhow::anyhow!("out of device memory")));
+				}
+				Ok(())
 			}
 		}
 
-		let pool = Pool::new(Failing, NonZeroUsize::new(1).unwrap());
-		assert!(matches!(pool.take(8), Err(Error::Codec(_))));
+		let pool = Arc::new(Pool::new(Flaky(AtomicBool::new(true)), NonZeroUsize::new(1).unwrap()));
+		assert!(matches!(pool.reserve().unwrap().fill(8), Err(Error::Codec(_))));
 		assert_eq!(pool.state.lock().unwrap().live, 0);
+		pool.reserve()
+			.expect("the failed fill released its place")
+			.fill(8)
+			.unwrap();
 	}
 }

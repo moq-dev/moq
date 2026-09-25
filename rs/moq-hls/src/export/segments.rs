@@ -325,11 +325,13 @@ pub struct Segment {
 	pub duration: Duration,
 	/// Wall-clock start time, when the timeline advertises an anchor.
 	pub program_date_time: Option<SystemTime>,
-	/// The content timeline breaks before this segment (the source skipped or restarted), so a
-	/// recorder marks an `EXT-X-DISCONTINUITY` here. Every rendition marks the same breaks, as
-	/// HLS requires. Segments this cursor skipped (evicted, uncached, or gaps with no content
-	/// for this rendition) leave a hole on a continuous timeline, not a discontinuity.
-	pub discontinuity: bool,
+	/// How many times the content timeline broke (the source skipped or restarted) since the
+	/// previous segment this cursor returned, so a recorder writes that many
+	/// `EXT-X-DISCONTINUITY` tags here; 0 means continuous. Every rendition counts the same
+	/// breaks, as HLS requires, even across a stretch one rendition skipped entirely. Skipped
+	/// segments (evicted, uncached, or gaps with no content for this rendition) leave a hole
+	/// on a continuous timeline, not a discontinuity.
+	pub discontinuity: u64,
 }
 
 /// A cursor over one rendition's segments, in timeline order.
@@ -361,11 +363,11 @@ impl Position {
 		self.discontinuity.get_or_insert(row.discontinuity);
 	}
 
-	/// Pass `row` as returned, reporting whether it starts a new discontinuity.
-	fn emit(&mut self, row: &Row) -> bool {
+	/// Pass `row` as returned, counting the timeline breaks since the last row passed.
+	fn emit(&mut self, row: &Row) -> u64 {
 		self.after = Some(row.segment);
 		let previous = self.discontinuity.replace(row.discontinuity);
-		previous.is_some_and(|previous| previous != row.discontinuity)
+		previous.map_or(0, |previous| row.discontinuity.saturating_sub(previous))
 	}
 }
 
@@ -524,14 +526,24 @@ mod tests {
 	fn skipped_rows_do_not_hide_or_invent_breaks() {
 		// Skipping a row on a continuous timeline is a hole, not a discontinuity.
 		let mut position = Position::default();
-		assert!(!position.emit(&stamped(0, 0)), "a clean start");
+		assert_eq!(position.emit(&stamped(0, 0)), 0, "a clean start");
 		position.skip(&stamped(1, 0));
-		assert!(!position.emit(&stamped(2, 0)));
+		assert_eq!(position.emit(&stamped(2, 0)), 0);
 
 		// A break before the first fetch still counts: a sibling that fetched row 0 marks row 1.
 		let mut position = Position::default();
 		position.skip(&stamped(0, 0));
-		assert!(position.emit(&stamped(1, 1)));
+		assert_eq!(position.emit(&stamped(1, 1)), 1);
+	}
+
+	#[test]
+	fn skipping_a_whole_discontinuity_counts_both_breaks() {
+		// A cursor that emits row 0, skips row 1 (the only row of sequence 1), then emits row 2
+		// must still report both breaks, or its discontinuity sequence falls behind a sibling's.
+		let mut position = Position::default();
+		assert_eq!(position.emit(&stamped(0, 0)), 0);
+		position.skip(&stamped(1, 1));
+		assert_eq!(position.emit(&stamped(2, 2)), 2);
 	}
 
 	#[test]
