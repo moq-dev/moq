@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.12.3"
+version = "0.12.4"
 edition = "2024"
 # Depends on moq-relay, whose sysinfo 0.39 needs 1.95, above the 1.91 workspace
 # floor. This binary is an application, so the bump stays here rather than
@@ -134,7 +134,7 @@ sd-notify = { workspace = true }
 
 [dev-dependencies]
 # Decodes the timeline the archive round-trip test checks.
-moq-json = { workspace = true }
+moq-json = { path = "../moq-json" }
 # `test_relay` stands up a real relay for the `fetch` tests to read through.
 moq-relay = { path = "../moq-relay", default-features = false, features = ["test-support"] }
 tempfile = { workspace = true }

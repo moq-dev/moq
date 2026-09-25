@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/moq-dev/moq/compare/moq-json-v0.5.0...moq-json-v0.5.1) - 2026-09-25
+
+### Other
+
+- *(json)* skip unchanged root entries in the snapshot diff ([#4020](https://github.com/moq-dev/moq/pull/4020))
+
 ## [0.5.0](https://github.com/moq-dev/moq/compare/moq-json-v0.4.2...moq-json-v0.5.0) - 2026-09-25
 
 ### Fixed

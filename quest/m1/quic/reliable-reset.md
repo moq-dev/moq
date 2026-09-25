@@ -66,8 +66,8 @@ provisional codepoints if the document changes before release.
 
 ## Related
 
-- [JS track tail](/quest/m1/js-track-tail.md) and [Rust track tail](/quest/m1/rust-track-tail.md) -
-  wait a grace for a group whose reset lost its header, until this lands
+- [Rust track tail](/quest/m1/rust-track-tail.md) - waits a grace for a group
+  whose reset lost its header until this lands, as `@moq/net` already does
 - [qmux on the QUIC stream state machine](/quest/m1/quic/qmux.md) - consumes
   the same reset state without a parallel implementation
 - The removed quiche backend was the one stack that had this, so it is the

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.15](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.14...moq-tokio-v0.19.15) - 2026-09-25
+
+### Fixed
+
+- *(moq-tokio)* release the QUIC socket before Listener::close returns ([#4087](https://github.com/moq-dev/moq/pull/4087))
+
+### Other
+
+- *(moq-tokio)* dial the WebSocket fallback on its own ephemeral port ([#4084](https://github.com/moq-dev/moq/pull/4084))
+
 ## [0.19.14](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.13...moq-tokio-v0.19.14) - 2026-09-25
 
 ### Added

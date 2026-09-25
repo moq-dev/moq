@@ -400,9 +400,10 @@ async fn playlists_read_only_the_timeline_and_segments_one_object() {
 		]
 	);
 
-	// A repeated request hits the reader's cache.
+	// A repeated request hits the reader's object cache. The parked track re-subscribes
+	// upstream to confirm its warm cache, which re-reads only the small `.info`.
 	replay.rendition(Kind::Video, "360p").segment(1).await.unwrap().unwrap();
-	assert_eq!(recording.gets(), Vec::<String>::new());
+	assert_eq!(recording.gets(), ["rec/360p/.info"]);
 }
 
 #[tokio::test]

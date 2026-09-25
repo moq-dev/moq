@@ -15,41 +15,14 @@
 //! # Wire format
 //!
 //! A [`Producer`] publishes one broadcast per node at `<prefix>/node/<node>`
-//! (default prefix `.stats`; the node suffix disambiguates relays sharing a
-//! cluster origin and may be multi-segment, e.g. `sjc/1`). A grouping `depth`
-//! splits that into one broadcast per leading broadcast-path segments at
-//! `<prefix>/<group>/node/<node>`, so a consumer can announce-scope to a
-//! single group. Parse announce paths back with [`parse_node_path`].
-//!
-//! Traffic is bucketed by [`Tier`] (an arbitrary label chosen by business
-//! logic: billing class, region, ...). The default tier is unprefixed; a named
-//! tier prefixes its track names with its label. Each broadcast carries, per
-//! tier, a publisher (egress) and a subscriber (ingress) traffic track plus a
-//! sessions track, each in a plain and a compressed flavor:
-//!
-//! * `publisher.json` / `subscriber.json`: each frame is a JSON object mapping
-//!   broadcast path to a cumulative [`Traffic`] snapshot ([`TrafficFrame`]),
-//!   one full snapshot per frame.
-//! * `sessions.json`: each frame maps auth root to a cumulative [`Presence`]
-//!   gauge ([`SessionsFrame`]), counting connected sessions regardless of data
-//!   flow.
-//! * `<name>.json.z`: a compressed sibling of each of the above, encoded with
-//!   [`moq_json::snapshot`] (group-scoped DEFLATE plus RFC 7396 merge-patch
-//!   deltas). Since successive stats frames are nearly identical, this is a
-//!   fraction of the plain track's bytes; read it with [`Consumer`] (or
-//!   `moq_json` directly), not as raw JSON frames.
-//!
-//! Named-tier tracks (`<tier>/publisher.json`, ...) are created the first time
-//! traffic records under that label; default-tier tracks always exist and hold
-//! `{}` while idle. Compute names with [`traffic_track`] / [`sessions_track`].
-//!
-//! An entry appears in a frame while it is live (a started counter still exceeds
-//! its `*_ended` counterpart, so traffic could resume at any moment) or on
-//! the tick its snapshot changed, then is dropped once fully closed. Counters
-//! are cumulative and monotonic: a downstream aggregator computes rates from
-//! successive snapshots, and a counter going backwards means the relay
-//! restarted or the entry was garbage collected and re-created, so consumers
-//! should treat a decrease as a fresh segment.
+//! (default prefix `.stats`), or one per group of leading broadcast-path
+//! segments at `<prefix>/<group>/node/<node>`; parse announce paths back with
+//! [`parse_node_path`]. Each [`Tier`] carries `publisher.json`,
+//! `subscriber.json`, and `sessions.json` tracks of cumulative [`Traffic`] and
+//! [`Presence`] counters, plus `.json.z` siblings encoded with
+//! [`moq_json::snapshot`]; compute names with [`traffic_track`] /
+//! [`sessions_track`]. The full contract (paths, tracks, both encodings, and
+//! counter semantics) is at <https://doc.moq.dev/concept/stats>.
 
 pub mod aggregate;
 pub mod consume;
