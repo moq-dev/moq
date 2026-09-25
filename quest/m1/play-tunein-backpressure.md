@@ -1,4 +1,4 @@
-# [S] play: a tune-in burst must not stall behind the video queue
+# [M] play: a tune-in burst must not stall behind the video queue
 
 ## Goal
 
@@ -20,19 +20,24 @@ refuses to re-anchor on. The anchor stays pinned wherever the first frame landed
 The frames are raw decoded surfaces, so a queue sized by the delay is not the
 answer: 30 frames of 1080p NV12 is already ~90 MB.
 
-Two shapes worth weighing, and the choice is A/V policy:
+Chosen A/V policy: buffer encoded frames for the whole `max_age` window,
+decode only a few ahead of presentation, and evict the oldest decoded frame
+when that small queue fills. Video keeps observing the live edge without moving
+the anchor while audio owns it. `moq_video::decode::Consumer` owns both the
+container reader and the native decoder today, so split or compose them without
+duplicating the subscription and codec rules. Bound the encoded buffer by media
+age and account for its bytes; `--delay` allows 10s, which as raw 1080p frames
+would be ~900 MB.
 
-- Separate observing arrivals from queueing them. The clock only needs the
-  timestamp, so the read loop could keep draining the decoder and fold each
-  arrival while the queue is full, holding only the newest frames.
-- Drop from the queue instead of parking. `play_video` deliberately does not
-  drop the oldest today, because during a catch-up burst the front frames are
-  still ahead of the clock. A frame already past due under a moved anchor is a
-  different case, and dropping those is what the window would do anyway.
+The regression lives on #3946's branch (`quest/main/play-tunein-backpressure`,
+`play::media::tests`): 61 frames at 30fps, a 2s delay, and no window drain park
+the decoder at frame 31, leaving the newest frame due 990ms late. Port it onto
+the harness, and also cover video-only and speaker-owned anchors, delayed
+drains, reordering, discontinuity, and the decoder's tail flush.
 
-Either way the regression test is a video-only burst larger than the queue with
-a delay wider than the queue holds, asserting the clock ends up at the live edge
-rather than a delay behind it.
+## Required
+
+- [Play harness](/quest/m1/play-harness.md) - the regression test runs on it
 
 ## Related
 

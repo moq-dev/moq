@@ -78,6 +78,7 @@ mod tests {
 	fn draft21_and_draft22_match_draft20_on_the_wire() {
 		let properties = Properties {
 			timescale: Some(Timescale::new(90_000).unwrap()),
+			priority: Some(64),
 			group_order: Some(GroupOrder::Descending),
 		};
 

@@ -1,11 +1,11 @@
-# [M] cpp/moq: the wrapper, CMake package, release tarball, smoke client, and docs
+# [M] cpp/moq: the wrapper, CMake package, release tarball, interop client, and docs
 
 ## Goal
 
 `find_package(moq)` or the tarball's `moq.pc` gives a C++17 program
 `<moq/moq.hpp>`, and the program publishes and subscribes through the full
 moq-ffi surface with futures and `moq::expected`, `co_await`-able on C++20.
-A `test/smoke/clients/cpp` client joins `just test smoke --all`, and
+A `test/interop/clients/cpp` client joins `just test interop --all`, and
 `doc/lib/cpp` documents the package the way `doc/lib/go` does Go.
 
 ## Plan
@@ -32,7 +32,7 @@ A `test/smoke/clients/cpp` client joins `just test smoke --all`, and
   dry-run through the `workflow_call` chain), producing one tarball per target
   containing the static library, generated sources, wrapper headers, and the
   CMake package. The registries quest consumes these artifacts.
-- Smoke: `test/smoke/clients/cpp` subscribes and publishes like the Go client;
+- Interop: `test/interop/clients/cpp` subscribes and publishes like the Go client;
   the C client stays, since libmoq stays.
 - Docs: `doc/lib/cpp/index.md` (install via tarball, then the registries once
   they exist; the future, expected, executor, and coroutine rules) and a row in

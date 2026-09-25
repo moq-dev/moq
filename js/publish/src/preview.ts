@@ -124,7 +124,7 @@ export class Renderer {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await Promise.race([reader.read(), effect.cancel]);
+				const next = await effect.race(reader.read());
 				if (!next?.value) break;
 
 				this.#latest.update((prev) => {
@@ -269,7 +269,7 @@ export class Transcode {
 
 			inner.spawn(async () => {
 				for (;;) {
-					const next = await Promise.race([reader.read(), inner.cancel]);
+					const next = await inner.race(reader.read());
 					if (!next?.value) break;
 
 					// Ours now, so close it once the encoder has taken what it needs.

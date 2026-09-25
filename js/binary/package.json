@@ -1,10 +1,14 @@
 {
 	"name": "@moq/binary",
 	"type": "module",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Binary publishing over MoQ tracks: latest-value snapshots, or append-log streams.",
 	"license": "(MIT OR Apache-2.0)",
-	"repository": "github:moq-dev/moq",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/moq-dev/moq.git",
+		"directory": "js/binary"
+	},
 	"sideEffects": false,
 	"exports": {
 		".": "./src/index.ts"
@@ -17,7 +21,8 @@
 	},
 	"dependencies": {
 		"@moq/flate": "workspace:^",
-		"@moq/net": "workspace:^"
+		"@moq/net": "workspace:^",
+		"@moq/signals": "workspace:^"
 	},
 	"devDependencies": {
 		"@types/bun": "^1.4.2",

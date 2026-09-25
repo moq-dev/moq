@@ -189,11 +189,12 @@ field.
   declare two workers' output interchangeable and splice between them; a service
   that needs that guarantee has to carry it in its own media contract, not in
   routing.
-- **Patterns are independent of clustering.** `draft-lcurley-moq-pattern`
-  owns the matching and authorization semantics tokens and filters share;
+- **Patterns are independent of clustering.** The `moq-pattern` crate owns
+  the matching semantics tokens and filters share, with no draft of its own;
   no announce message carries a pattern on either protocol (AUTH grants on
   lite-06 do, per [Path patterns](/quest/m1/path-patterns.md)). moq-cluster adds hop
-  lists, costs, and pool selection to prefix advertisements.
+  lists, costs, pool selection, and request resolution to prefix
+  advertisements.
 
 ### Where derived output lives
 
@@ -271,3 +272,5 @@ than announce state.
   pattern, and its catalog names the generations a wildcard cannot
 - [pop-skipping](/quest/m1/pop-skipping/README.md) - it owns the route cost and
   the rank hash this reuses
+- [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - derived output moves under the
+  source's `@<epoch>` segment, which the suffix patterns still match

@@ -27,12 +27,11 @@ a CDP driver, a beacon sink, a trace analyzer, a ring replay, a five-scenario
 raw ndjson traces attached to release `rt-audio-traces-2026-09-06`. Upstream
 that rather than reinventing it.
 
-Jitter comes from the seeded userspace UDP shaper in [Impaired
-path](/quest/m1/transport-impairment-profile.md), not from a fake arrival clock,
-so the transport's own contribution is measured rather than assumed. That quest
-builds the shaper inside the relay drills' support code; it has to come out into
-something a JS harness process can also put in front of a relay. Extracting it
-is part of the browser quest.
+Jitter comes from the seeded userspace UDP shaper the transport drills run
+under (`rs/moq-shaper`, documented in `test/drill/README.md`), not from a fake
+arrival clock, so the transport's own contribution is measured rather than
+assumed. Its `moq-shaper` binary is what a JS harness process puts in front of
+a relay.
 
 Loss, reorder and rate limiting stay switched off in the profiles here. The
 buffer's job is absorbing arrival spread, and mixing congestion response into an

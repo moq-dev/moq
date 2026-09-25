@@ -11,6 +11,6 @@ The wire layer. Generic over the transport and media-agnostic: the relay never i
 
 # Testing
 
-- `just rs fuzz <target>` (`lite`, `ietf`, `varint`, `path`) needs nightly. The target bodies live in `src/fuzz.rs`; `fuzz/regressions/<target>/` replays under `just test`, so commit every crash input there.
+- `just rs fuzz <target>` (`lite`, `ietf`, `varint`, `path`) needs nightly. The target bodies live in `src/fuzz.rs`; `fuzz/regressions/<target>/` replays under `just check`, so commit every crash input there.
 - `just rs loom` model-checks the concurrent handoffs. A hang is a lost wakeup, not a flake.
-- `just test smoke --all` runs the cross-language interop matrix after a wire change.
+- `just test interop --all` runs the cross-language interop matrix after a wire change.

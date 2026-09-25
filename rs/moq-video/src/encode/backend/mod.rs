@@ -357,7 +357,7 @@ pub(crate) mod test_util {
 	/// BT.601 goes out as SMPTE 170M primaries and matrix (code point 6) with the
 	/// BT.709 transfer curve (1). The two curves are defined identically, and
 	/// CoreVideo's SMPTE 170M transfer constant is deprecated while Media
-	/// Foundation has none at all, so 1 is the only value all four backends can
+	/// Foundation has none at all, so 1 is the only value all five backends can
 	/// actually emit.
 	pub(crate) const BT601_DESCRIBED: Described = Described {
 		primaries: 6,

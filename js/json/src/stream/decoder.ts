@@ -11,11 +11,13 @@ import type { Config } from "./encoder.ts";
  * Call {@link reset} at a group boundary, matching the encoder.
  */
 export class Decoder<T> {
+	#schema?: Config<T>["schema"];
 	#decompress: boolean;
 	// The DEFLATE window for the whole log, present while decompressing.
 	#flate?: Flate;
 
-	constructor(config: Config = {}) {
+	constructor(config: Config<T> = {}) {
+		this.#schema = config.schema;
 		this.#decompress = isDeflate(config.compression);
 		this.#flate = this.#decompress ? new Flate() : undefined;
 	}
@@ -28,6 +30,7 @@ export class Decoder<T> {
 	/** Decode the next frame payload back into a record. */
 	decode(payload: Uint8Array): T {
 		const plain = this.#flate ? this.#flate.frame(payload) : payload;
-		return JSON.parse(new TextDecoder().decode(plain));
+		const value = JSON.parse(new TextDecoder().decode(plain));
+		return this.#schema ? this.#schema.parse(value) : value;
 	}
 }

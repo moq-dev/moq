@@ -268,7 +268,8 @@ struct Merged<V: Mergeable> {
 impl<V: Mergeable> Merged<V> {
 	fn new(origin: origin::Consumer, config: &Config, name: String) -> Self {
 		Self {
-			announce: origin.announced(),
+			// Stats live under a `.`-named prefix, which discovery hides by default.
+			announce: origin.clone().with_hidden(true).announced(),
 			origin,
 			prefix: config.prefix.clone(),
 			depth: config.depth,
