@@ -43,6 +43,12 @@ struct Segment {
 	end: Option<Position>,
 	/// The underlying per-session track.
 	track: track::Consumer,
+	/// Where the source is asked to start: `start`, except after a warm cache (see
+	/// [`Segment::warm_edge`]).
+	ask: Option<Position>,
+	/// A parked track's warm cache (see [`Producer::park`]), which live readers hold
+	/// until the next segment's copy resolves its start.
+	warm: bool,
 }
 
 impl Segment {
@@ -69,6 +75,23 @@ impl Segment {
 		Some(match self.end {
 			Some(end) => produced.min(end),
 			None => produced,
+		})
+	}
+
+	/// Where a copy spliced after this warm cache is asked to start: the end of the
+	/// cache's newest group, even a finished one, rather than the head of the next.
+	///
+	/// A source only resolves a start once it has a group to serve, so asking past its
+	/// newest group would leave a returning reader waiting on the next one. Asking for the
+	/// newest group's tail lets a source that is still there answer at once, and one that
+	/// moved on answer past it. Only the ask moves: the boundary stays where the cache
+	/// stops, so whatever the source sends for a finished group's empty tail (a FIN, or a
+	/// reset from a publisher that refuses empty ranges) sits outside the new segment.
+	fn warm_edge(&self) -> Option<Position> {
+		let group = self.track.peek_latest()?;
+		Some(Position {
+			group: group.sequence,
+			frame: group.frame_count() as u64,
 		})
 	}
 
@@ -234,6 +257,8 @@ impl ResumeState {
 			start,
 			end: None,
 			track,
+			ask: start,
+			warm: false,
 		});
 		self.epoch += 1;
 		self.prune();
@@ -339,11 +364,23 @@ impl Producer {
 		// segments at all) there is nothing to splice around, so the replacement
 		// replaces them outright and starts unbounded, exactly like a first splice.
 		// `switch` rejects a `None` start once a segment exists, hence the clear.
+		let ask = state
+			.segments
+			.last()
+			.filter(|last| last.warm)
+			.and_then(Segment::warm_edge);
 		let start = state.resume_position();
 		if start.is_none() {
 			state.segments.clear();
 		}
-		state.switch(track, start)
+		state.switch(track, start)?;
+		if let Some(ask) = ask
+			&& start.is_some()
+			&& let Some(last) = state.segments.last_mut()
+		{
+			last.ask = Some(ask);
+		}
+		Ok(())
 	}
 
 	/// Drop every segment, releasing the underlying tracks while keeping the
@@ -367,6 +404,30 @@ impl Producer {
 		// floor from the old numbering must not cut into it.
 		state.pruned = None;
 		state.epoch += 1;
+		Ok(())
+	}
+
+	/// Replace every segment with `warm`, a cache of what they delivered, for a track
+	/// nobody reads anymore: [`Self::release`] followed by an unbounded first splice.
+	///
+	/// Live readers hold the cache until the next [`Self::takeover`]'s copy resolves
+	/// where its feed starts. A copy that picks up at the cache's edge proves the cache
+	/// still leads into the live feed, so it is read as usual (and a group the cache
+	/// holds open continues from its next frame). A copy that starts past the edge
+	/// skipped groups its source already judged stale, so the older cache is stale too
+	/// and live readers skip it.
+	pub(crate) fn park(&mut self, warm: impl super::origin_impl::Consume<track::Consumer>) -> Result<()> {
+		let track = warm.consume();
+		let mut state = self.state.write().map_err(|_| Error::Dropped)?;
+		if state.finished || state.abort.is_some() {
+			return Err(Error::Closed);
+		}
+		state.segments.clear();
+		state.pruned = None;
+		state.switch(track, None)?;
+		if let Some(segment) = state.segments.last_mut() {
+			segment.warm = true;
+		}
 		Ok(())
 	}
 
@@ -1250,6 +1311,8 @@ struct SegmentSub {
 	id: u64,
 	start: Option<Position>,
 	end: Option<Position>,
+	/// Where the source is asked to start; see [`Segment::ask`].
+	ask: Option<Position>,
 	sub: SubState,
 	/// A completed segment's cursor, retained while parked groups may need their
 	/// max age budget re-evaluated after the outer cap rises.
@@ -1264,6 +1327,16 @@ struct SegmentSub {
 	/// the lowest is re-offered first; holding them here (rather than blocking on
 	/// the first) keeps in-range groups that arrive behind a capped one flowing.
 	parked: BTreeMap<u64, group::Consumer>,
+	/// Set while this is a warm segment (see [`Producer::park`]) that has not been
+	/// cleared for live reads: the copy spliced after it, once there is one.
+	warm: Option<Warm>,
+}
+
+/// A warm segment waiting on the copy spliced after it; see [`Subscriber::poll_activate`].
+struct Warm {
+	/// The cache's newest group.
+	edge: Option<u64>,
+	next: Option<track::Consumer>,
 }
 
 impl SegmentSub {
@@ -1432,7 +1505,7 @@ impl Subscriber {
 			};
 			self.last_prefs = prefs;
 			for seg in &mut self.segments {
-				let prefs = slice(&self.last_prefs, seg.start, seg.end);
+				let prefs = slice(&self.last_prefs, seg.ask, seg.end);
 				if let Some(sub) = seg.stale_sub_mut() {
 					let _ = sub.update(prefs);
 				}
@@ -1499,9 +1572,14 @@ impl Subscriber {
 		self.segments.retain(|s| !s.retired());
 
 		let anchor = self.anchor_end();
-		for segment in segments {
+		let nexts: Vec<_> = segments.iter().skip(1).map(|next| Some(next.track.clone())).collect();
+		let nexts = nexts.into_iter().chain(std::iter::once(None));
+		for (segment, next) in segments.into_iter().zip(nexts) {
 			match self.segments.iter_mut().find(|s| s.id == segment.id) {
 				Some(existing) => {
+					if let Some(warm) = &mut existing.warm {
+						warm.next = next;
+					}
 					if existing.end != segment.end {
 						existing.end = segment.end;
 						let cap = Self::stale_cap(existing, anchor);
@@ -1512,7 +1590,7 @@ impl Subscriber {
 							// read bounds stay on this subscriber (see `poll_recv_group`):
 							// an inner `end_at` would park boundary-crossing groups in the
 							// inner cursor, hiding the segment's completion.
-							let _ = sub.update(slice(&self.last_prefs, segment.start, segment.end));
+							let _ = sub.update(slice(&self.last_prefs, segment.ask, segment.end));
 						}
 						// A still-pending subscription picks the moved boundary up
 						// when it activates (see `poll_activate`). Groups already handed
@@ -1523,15 +1601,20 @@ impl Subscriber {
 				None => {
 					let sub = segment
 						.track
-						.subscribe(slice(&self.last_prefs, segment.start, segment.end));
+						.subscribe(slice(&self.last_prefs, segment.ask, segment.end));
 					self.segments.push(SegmentSub {
 						id: segment.id,
 						start: segment.start,
 						end: segment.end,
+						ask: segment.ask,
 						sub: SubState::Pending(sub),
 						terminal: None,
 						pruned: false,
 						parked: BTreeMap::new(),
+						warm: segment.warm.then(|| Warm {
+							edge: segment.track.latest(),
+							next,
+						}),
 					});
 				}
 			}
@@ -1657,6 +1740,25 @@ impl Subscriber {
 		anchor_end: Option<u64>,
 		waiter: &kio::Waiter,
 	) -> Poll<()> {
+		if matches!(seg.sub, SubState::Pending(_))
+			&& let Some(warm) = &seg.warm
+		{
+			// Nothing spliced after the cache yet, so nothing says it still leads into
+			// the live feed. A splice bumps the epoch, which wakes this waiter.
+			let Some(next) = &warm.next else {
+				return Poll::Pending;
+			};
+			let start = ready!(next.poll_start(waiter));
+			let edge = warm.edge;
+			seg.warm = None;
+			// The copy was asked for the cache's newest group and started past it: its
+			// source judged that group stale, so the older cache is no use to live reads.
+			if start.is_some_and(|start| edge.is_some_and(|edge| start > edge)) {
+				seg.complete(None);
+				return Poll::Ready(());
+			}
+		}
+
 		if let SubState::Pending(pending) = &mut seg.sub {
 			match ready!(pending.poll_ok(waiter)) {
 				Ok(mut sub) => {
@@ -1669,7 +1771,7 @@ impl Subscriber {
 					// budget and floor, and this must not rewind past it.
 					sub.raise_start_to(seg.first_group().max(min_sequence));
 					sub.set_stale_cap(Self::stale_cap(seg, anchor_end));
-					let _ = sub.update(slice(prefs, seg.start, seg.end));
+					let _ = sub.update(slice(prefs, seg.ask, seg.end));
 					seg.sub = SubState::Active(Box::new(sub));
 				}
 				// The underlying track was rejected or closed: stall, not error.

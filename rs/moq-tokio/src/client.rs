@@ -1158,6 +1158,79 @@ mod tests {
 		assert_eq!(value, super::TransportRace::Quic(3));
 	}
 
+	/// A WebTransport-only endpoint answers the WebSocket fallback with 403 while the
+	/// QUIC dial is still in flight. One transport being refused is not the connect's
+	/// verdict: QUIC finishes the race and the session comes up.
+	///
+	/// Inline rather than in `tests/` so each arm dials its own ephemeral port: the
+	/// public connect sends the fallback to the QUIC port, which nothing reserves over
+	/// TCP as well.
+	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[tokio::test]
+	async fn websocket_forbidden_does_not_end_a_quic_connect() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let listener = tokio::net::TcpListener::bind("[::]:0").await.unwrap();
+		let ws_port = listener.local_addr().unwrap().port();
+		let mut forbid = tokio::spawn(async move {
+			let (mut stream, _) = listener.accept().await?;
+			let mut buf = [0; 1024];
+			let _ = stream.read(&mut buf).await?;
+			stream
+				.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+				.await?;
+			Ok::<_, std::io::Error>(())
+		});
+
+		let mut listen = crate::listen::Config {
+			bind: Some("[::]:0".parse().unwrap()),
+			..Default::default()
+		};
+		listen.tls.generate = vec!["localhost".into()];
+		let mut server = listen.init(Default::default()).unwrap().listen().await.unwrap();
+		let quic_port = server.local_addr().unwrap().port();
+		let origin = crate::origin::spawn();
+		let accepted = tokio::spawn(async move {
+			let request = server.accept().await.expect("no incoming connection");
+			request
+				.with_publisher(&origin)
+				.ok()
+				.await
+				.map(|session| (server, session))
+		});
+
+		let mut config = crate::connect::Config::default();
+		config.tls.insecure = Some(true);
+		// No head start, so the fallback dials while QUIC waits on the 403.
+		config.websocket.delay = std::time::Duration::ZERO;
+		let client = config.init(Default::default()).unwrap();
+
+		// The same race `connect_inner` runs, except the fallback dials its own port,
+		// as plain ws:// so the listener above can answer without TLS.
+		let noq = client.noq.as_ref().unwrap();
+		let quic_addr: crate::connect::Addr = Url::parse(&format!("https://localhost:{quic_port}")).unwrap().into();
+		let ws_addr: crate::connect::Addr = Url::parse(&format!("http://localhost:{ws_port}")).unwrap().into();
+		// Hold QUIC until the fallback has been refused, so the 403 is always exercised.
+		let quic = async {
+			(&mut forbid).await.unwrap().expect("fallback listener failed");
+			noq.connect(&client.tls, quic_addr, &client.versions)
+				.await
+				.map(crate::transport::Session::new)
+				.map_err(Error::from)
+		};
+
+		let session = tokio::time::timeout(
+			std::time::Duration::from_secs(10),
+			client.race_moq_connect(&client.moq, ws_addr, quic),
+		)
+		.await
+		.expect("client connect timed out")
+		.expect("a fallback refused on auth must not end a connect whose QUIC arm succeeds");
+
+		drop(session);
+		accepted.await.unwrap().expect("server handshake failed");
+	}
+
 	#[cfg(all(feature = "websocket", feature = "noq"))]
 	#[tokio::test]
 	async fn race_transport_connect_reports_auth_when_both_refuse() {

@@ -223,6 +223,12 @@ pub(crate) struct TrackState {
 	// fetch can still create them.
 	start_sequence: Option<u64>,
 
+	// Whether `start_sequence` is only the floor a subscription asked for, still
+	// waiting on the serving session to resolve where the live feed begins (a
+	// lite-06+ SUBSCRIBE_START). Readers that must know the resolved start (see
+	// [`Consumer::poll_start`]) wait on it; everything else treats the floor as usual.
+	start_pending: bool,
+
 	// Where production stopped, snapshotted when the cached groups are released (an
 	// abort, or the last producer dropping). Computed live from the cache otherwise;
 	// see [`Self::resume_position`].
@@ -986,8 +992,9 @@ impl TrackState {
 	/// declaration: the signal is scoped to the current subscription's demand,
 	/// which may legitimately move in either direction. `None` clears it (the
 	/// demand dropped to the live edge, whose floor is unknown until declared).
-	fn set_start(&mut self, start_sequence: Option<u64>) {
+	fn set_start(&mut self, start_sequence: Option<u64>, pending: bool) {
 		self.start_sequence = start_sequence;
+		self.start_pending = pending;
 	}
 
 	/// Record the exclusive final sequence, rejecting a re-finish or a boundary that
@@ -1381,7 +1388,16 @@ impl Producer {
 	/// still promised. Pass `None` to clear it, for demand at the live edge:
 	/// its floor is unknown until the feed declares one.
 	pub fn start_at(&mut self, sequence: impl Into<Option<u64>>) -> Result<()> {
-		self.modify()?.set_start(sequence.into());
+		self.modify()?.set_start(sequence.into(), false);
+		Ok(())
+	}
+
+	/// Declare the floor a subscription asked for while the serving session has yet to
+	/// resolve its start: nothing below `sequence` arrives, exactly as [`Self::start_at`],
+	/// but [`Consumer::poll_start`] keeps waiting until a later [`Self::start_at`]
+	/// resolves it.
+	pub(crate) fn request_start(&mut self, sequence: Option<u64>) -> Result<()> {
+		self.modify()?.set_start(sequence, true);
 		Ok(())
 	}
 
@@ -2316,6 +2332,28 @@ impl Consumer {
 			subscription,
 			stats: self.stats.clone(),
 		})
+	}
+
+	/// Poll for the first group the live feed serves, once the serving session has
+	/// resolved it: `Some` for a declared start, `None` for none (the live edge, or a
+	/// source that never declares one). Parks while a lite-06+ session still owes its
+	/// SUBSCRIBE_START (see [`Producer::request_start`]); a closed track is ready with
+	/// whatever it last declared, since nothing will resolve it anymore.
+	pub(crate) fn poll_start(&self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => {
+				let res = state.poll(waiter, |state| match state.start_pending && state.abort.is_none() {
+					true => Poll::Pending,
+					false => Poll::Ready(state.start_sequence),
+				});
+				match res {
+					Poll::Ready(Ok(start)) => Poll::Ready(start),
+					Poll::Ready(Err(state)) => Poll::Ready(state.start_sequence),
+					Poll::Pending => Poll::Pending,
+				}
+			}
+			ConsumerKind::Spliced(_) => Poll::Ready(None),
+		}
 	}
 
 	/// The newest group, when it is already cached: resolved synchronously, without
@@ -3908,6 +3946,10 @@ pub struct Request {
 	// Ingress stats scope, threaded into the accepted [`Producer`]. Empty (no-op)
 	// unless this request was reserved on a tagged broadcast.
 	stats: stats::Scope,
+
+	// The serving session resolves the start of each subscription itself, so the
+	// accepted track's start is unknown until it says (see [`Self::resolving_start`]).
+	resolving_start: bool,
 }
 
 impl Request {
@@ -3924,7 +3966,17 @@ impl Request {
 			alive,
 			_dynamic: dynamic,
 			stats: stats::Scope::default(),
+			resolving_start: false,
 		}
+	}
+
+	/// Mark the track as served by a session that resolves each subscription's start
+	/// (lite-06+), so [`Consumer::poll_start`] waits for its declaration instead of
+	/// reading the requested floor as the start. Applied atomically with
+	/// [`Self::accept`], before any reader can see the track.
+	pub(crate) fn resolving_start(mut self) -> Self {
+		self.resolving_start = true;
+		self
 	}
 
 	/// Attach an ingress stats scope, applied to the [`Producer`] on accept. Set by
@@ -3991,6 +4043,7 @@ impl Request {
 		// tolerate it: the Producer we hand back simply can't write.
 		if let Ok(mut state) = self.state.write() {
 			state.accept(info.clone());
+			state.start_pending = self.resolving_start;
 		}
 		// Accepting the request creates the track producer: count it as one ingress
 		// subscription (closed when the last handle drops). No-op when untagged.
