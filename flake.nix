@@ -121,7 +121,7 @@
             # unification would otherwise hide a broken single-crate build.
             cargo-hack
             cargo-nextest
-            # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just wasm`).
+            # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just js wasm`).
             # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the
             # crate is pinned to nixpkgs' CLI version); bump both together.
             wasm-bindgen-cli
@@ -231,10 +231,9 @@
         ];
 
         # Linters / formatters used by `just check` and `just fix`, which
-        # guard each tool with `command -v` so they skip silently when the
-        # binary isn't on $PATH. CI sets MOQ_STRICT=1, which turns that skip
-        # into an error (see `_tools` in the root justfile), so this list and
-        # that one have to stay in step.
+        # skip a module whose tools aren't on $PATH. CI sets MOQ_STRICT=1,
+        # which turns that skip into an error (see the tools map in
+        # sh/dispatch.sh), so this list and that one have to stay in step.
         lintDeps = with pkgs; [
           shellcheck
           shfmt
@@ -263,8 +262,8 @@
         # dependency in rs/moq-ffi/Cargo.toml. Five other places name the same
         # generator version and must be bumped together: the repo and revision
         # in release-go-ffi.yml, and the `cargo install` line in
-        # rs/moq-ffi/build.sh, go/ffi/README.md, go/scripts/check.sh, and
-        # go/scripts/stage.sh.
+        # rs/moq-ffi/build.sh, go/ffi/README.md, sh/go/check.sh, and
+        # sh/go/stage.sh.
         #
         # This points at a fork rather than NordSecurity because upstream has no
         # uniffi 0.32 generator: the metadata encoding changed in 0.32 even

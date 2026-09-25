@@ -6,108 +6,53 @@
 
 set working-directory := '.'
 
-# Paths a JS check depends on: every bun workspace (they are not all under js/,
-# see the root package.json) plus the config shared by all of them. `check`,
-# `fix`, and `ci` all skip themselves when a diff misses this.
-scope := '^(js/|doc/|drafts/|demo/(boy|web)/|test/interop/clients/js|test/wasm/|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
-
 # Run all checks by default.
 default:
     just check
-
-install:
-    bun install
-
-# Takes an optional newline-separated list of changed files and skips if none
-# match the JS scope; `just js check` (no FILES) always runs.
-#
-# FILES is an exported parameter, not `{{ FILES }}`: just interpolates the
-# latter into the recipe source, where a filename like `$(...)` would run as a
-# command. Git-derived paths are untrusted input, so they stay data.
 
 # `build` runs here rather than as its own gate: the per-package `check` script
 # is `tsc --noEmit`, which never runs declaration emit, so the errors that only
 # surface when emitting a `.d.ts` (TS4023 and friends) pass `check` and then
 # break a JSR/npm publish. It costs about 20s for every package.
-
+#
 # `common/deps.ts` runs first and cheaply: bundlers resolve an undeclared
 # workspace import through hoisting, so nothing else in `check` notices one.
+# doc/ is in scope, so the binding pages' stats fields are checked here too.
 
 # Lint, type-check, biome-format, and build all packages.
-check $FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # These Workers have independent lockfiles outside the Bun workspace.
-    # Validate the deploy bundle without publishing or requiring credentials.
-    for project in infra/apt infra/rpm demo/pub; do
-    	if [[ -z "$FILES" ]] || grep -qE "^($project/|js/justfile$)" <<< "$FILES"; then
-    		(
-    			cd "../$project"
-    			bun install --frozen-lockfile
-    			bun run deploy --dry-run
-    		)
-    	fi
-    done
-    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
-    	echo "js: no JS changes; skipping."
-    	exit 0
-    fi
-    # doc/ is in this scope, so the binding pages are checked here.
-    python3 ../rs/scripts/stats-docs.py
+check:
+    python3 ../sh/rs/stats-docs.py
     bun install --frozen-lockfile
     bun common/deps.ts
-    if tty -s; then
-    	bun run --filter='*' --elide-lines=0 check
-    else
-    	bun run --filter='*' check
-    fi
+    bun run --filter='*' --elide-lines=0 check
     bun biome check
     just build
 
-# Auto-fix lint and formatting issues. Skips on the same terms as `check`.
-fix $FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
-    	echo "js: no JS changes; skipping."
-    	exit 0
-    fi
+# Validate the Worker deploy bundles outside the Bun workspace.
+workers:
+    ../sh/js/workers.sh
+
+# Auto-fix lint and formatting issues.
+fix:
     bun install
     bun biome check --write
 
-# Run all unit tests. Skips on the same terms as `check`.
-test $FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
-    	echo "js: no JS changes; skipping tests."
-    	exit 0
-    fi
+# Run all unit tests.
+test:
     bun install --frozen-lockfile
-    bun test common/deps.test.ts common/workers.test.ts
-    if tty -s; then
-        bun run --filter='*' --elide-lines=0 test
-    else
-    	bun run --filter='*' test
-    fi
+    bun test common/deps.test.ts
+    bun run --filter='*' --elide-lines=0 test
+
+# Benchmark re-pricing the origin broadcast map as routes and observers grow.
+bench:
+    bun install --frozen-lockfile
+    bun net/bench/broadcasts.ts
 
 # Build all packages.
 build:
     bun run --filter='*' build
 
-# Remove node_modules and build output. The bun workspace spans the repo
-
-# (deps hoist to the root, not into js/), so sweep from the workspace root.
-clean:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cd ..
-    find . -name .claude -prune -o \
-    	-type d \( -name node_modules -o -name dist -o -name out -o -name pkg \) \
-    	-prune -exec rm -rf {} +
-    find . -name .claude -prune -o -type f -name '*.tsbuildinfo' -exec rm -f {} +
-
-# Pull in new versions and report what's outdated.
-update:
-    bun update
-    bun outdated
+# Build browser/WASM bindings into @moq/wasm using the pinned wasm-bindgen toolchain.
+wasm:
+    cargo build --locked -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
+    wasm-bindgen --target web --out-name moq --out-dir wasm/dist "${CARGO_TARGET_DIR:-../target}/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm"

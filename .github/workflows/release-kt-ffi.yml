@@ -37,9 +37,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version moq-ffi
+        run: just gh release parse-version moq-ffi
 
   build:
     name: Build moq-ffi (${{ matrix.target }})
@@ -72,6 +74,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -98,7 +102,7 @@ jobs:
           BUILD_TARGET: ${{ matrix.target }}
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
-          ./rs/moq-ffi/build.sh \
+          just rs package-ffi \
             --target "$BUILD_TARGET" \
             --version "$BUILD_VERSION" \
             --output dist
@@ -120,6 +124,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
@@ -130,7 +136,7 @@ jobs:
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
-          ./rs/moq-ffi/build.sh \
+          just rs package-ffi \
             --bindings-only \
             --version "$BUILD_VERSION" \
             --output dist
@@ -159,6 +165,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/just
 
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
@@ -199,7 +207,7 @@ jobs:
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
-          ./kt/scripts/package.sh \
+          just kt package \
             --version "$BUILD_VERSION" \
             --lib-dir libs \
             --bindings-dir bindings \

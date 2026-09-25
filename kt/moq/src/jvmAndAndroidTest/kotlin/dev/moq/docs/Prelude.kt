@@ -1,4 +1,4 @@
-// The inputs the documentation samples leave to the reader. kt/scripts/check.sh
+// The inputs the documentation samples leave to the reader. sh/kt/check.sh
 // compiles every Kotlin sample from the docs beside this file, so a sample that
 // names a missing symbol or the wrong arity fails the check. Never executed.
 package dev.moq.docs

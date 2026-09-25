@@ -24,7 +24,7 @@ on:
       - "test/justfile"
       - "package.json"
       # The Go client builds against the modules this script stages.
-      - "go/scripts/**"
+      - "sh/go/**"
       - ".github/workflows/interop.yml"
 
 concurrency:

@@ -1,11 +1,5 @@
 set fallback
 
-mod boy
-mod pub
-mod relay
-mod sub
-mod web
-
 # Run the web demo (default).
 #
 # Picks the first free port at/after 4443 (both UDP for QUIC and TCP for HTTP)

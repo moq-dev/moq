@@ -20,9 +20,9 @@ The published module ships prebuilt `libmoq_ffi.a` for `linux/amd64`, `linux/arm
 
 ## Local development
 
-`go/scripts/stage.sh` builds `moq-ffi` for the host, runs `uniffi-bindgen-go` to regenerate `moq.go`, and stages this module plus the wrapper into `dist/` with the wrapper wired to the local ffi by a `replace`. It prints the two staged module directories, so anything that needs to build Go against this checkout (`go/scripts/check.sh`, `test/interop`) shares one staging path.
+`sh/go/stage.sh` builds `moq-ffi` for the host, runs `uniffi-bindgen-go` to regenerate `moq.go`, and stages this module plus the wrapper into `dist/` with the wrapper wired to the local ffi by a `replace`. It prints the two staged module directories, so anything that needs to build Go against this checkout (`sh/go/check.sh`, `test/interop`) shares one staging path.
 
-`go/scripts/check.sh` stages that way and then runs `go build`/`go vet`/`go test`. It also runs `publish-wrapper.test.sh`, which drives the wrapper publisher against a scratch bare repo (no cargo, no network). Run via `just go check`. Skips cleanly without `cargo`, `go`, or `uniffi-bindgen-go`.
+`sh/go/check.sh` stages that way and then runs `go build`/`go vet`/`go test`. Run via `just go check`. Skips cleanly without `cargo`, `go`, or `uniffi-bindgen-go`.
 
 The dev shell provides both `go` and `uniffi-bindgen-go`, so `nix develop --command just go check` needs no setup. Without Nix, install `uniffi-bindgen-go` once:
 
@@ -49,8 +49,8 @@ go/ffi/
     lib/<goos>_<goarch>/libmoq_ffi.a  (gitignored, staged at release time)
 ```
 
-Compiled binaries never live in the source tree. `scripts/check.sh` stages into the gitignored `dist/` working dir under the repo root; CI does the equivalent assembly into the [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) mirror.
+Compiled binaries never live in the source tree. `sh/go/check.sh` stages into the gitignored `dist/` working dir under the repo root; CI does the equivalent assembly into the [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) mirror.
 
 ## Release
 
-The `release-go-ffi.yml` workflow fires on every `moq-ffi-v*` tag, builds per-target static libraries, runs `uniffi-bindgen-go`, calls `go/scripts/package-ffi.sh` to assemble the module, and `go/scripts/publish-ffi.sh` to push the result to `moq-dev/moq-go-ffi` with a bare-semver tag (e.g. `v0.2.18`) lockstep with the crate. Go's module proxy picks up the new tag automatically.
+The `release-go-ffi.yml` workflow fires on every `moq-ffi-v*` tag, builds per-target static libraries, runs `uniffi-bindgen-go`, calls `just go package-ffi` to assemble the module, and `just go publish-ffi` to push the result to `moq-dev/moq-go-ffi` with a bare-semver tag (e.g. `v0.2.18`) lockstep with the crate. Go's module proxy picks up the new tag automatically.

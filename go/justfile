@@ -10,36 +10,41 @@ default:
 
 # Stages both the ffi and wrapper modules into dist/ (wiring the wrapper to the
 # local ffi via replace). Skips cleanly if cargo, go, or uniffi-bindgen-go is
-# missing.
-#
-# This runs the tests too, so there is no separate `just go test`. Takes an
-# optional newline-separated list of changed files and skips when none are
-# Go-scoped; `just go check` (no FILES) always runs.
+# missing. This runs the tests too, so there is no separate `just go test`.
 
 # Build moq-ffi, run uniffi-bindgen-go, then `go build`/`go vet`/`go test`.
-check $FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -n "$FILES" ]] && ! grep -qE '^(go/|rs/moq-ffi/)' <<< "$FILES"; then
-    	echo "go: no Go changes; skipping."
-    	exit 0
-    fi
-    bash scripts/check.sh
+check:
+    bash ../sh/go/check.sh
 
-# Stage the in-tree go/ffi source + per-target moq-ffi libs + generated
-# bindings into the moq.dev/moq-ffi module ready for publish.
+# Release recipes run in the caller's directory, so a relative `--output` or
+# `--tarball` means what it would to the script itself.
+
+# Stage the in-tree go/ffi source, per-target moq-ffi libs, and generated
+# bindings into the moq.dev/moq-ffi module.
+
+# Stage the moq.dev/moq-ffi module for publish.
+[no-cd]
+[positional-arguments]
 package-ffi *args:
-    bash scripts/package-ffi.sh {{ args }}
+    {{ quote(justfile_directory() / "sh/go/package-ffi.sh") }} "$@"
 
 # Stage the in-tree go/wrapper source into the moq.dev/moq module, rewriting its
-# moq.dev/moq-ffi require to the target ffi version, ready for publish.
+# moq.dev/moq-ffi require to the target ffi version.
+
+# Stage the moq.dev/moq wrapper module for publish.
+[no-cd]
+[positional-arguments]
 package-wrapper *args:
-    bash scripts/package-wrapper.sh {{ args }}
+    {{ quote(justfile_directory() / "sh/go/package-wrapper.sh") }} "$@"
 
-# The paths are the gitignored ones in go/.gitignore. `just go check` stages
-# into the workspace dist/ instead, which `just js clean` sweeps, so these only
-# show up when uniffi-bindgen-go or `go mod` is pointed at the tree directly.
+# Push the staged moq-go-ffi module to the moq-dev/moq-go-ffi mirror.
+[no-cd]
+[positional-arguments]
+publish-ffi *args:
+    {{ quote(justfile_directory() / "sh/go/publish-ffi.sh") }} "$@"
 
-# Remove the generated bindings, native libs, and vendoring from go/.
-clean:
-    rm -rf ffi/moq/moq.go ffi/moq/moq.h ffi/moq/lib ffi/go.sum ffi/vendor wrapper/go.sum wrapper/vendor
+# Push the staged moq-go wrapper module to the moq-dev/moq-go mirror.
+[no-cd]
+[positional-arguments]
+publish-wrapper *args:
+    {{ quote(justfile_directory() / "sh/go/publish-wrapper.sh") }} "$@"

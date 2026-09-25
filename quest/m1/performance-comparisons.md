@@ -7,7 +7,7 @@ estimate and preserved evidence, so a small reported speedup can be evaluated.
 
 ## Plan
 
-`rs/scripts/bench.sh` runs each relay workload once as base then current,
+`bench/run.sh` runs each relay workload once as base then current,
 without repeated rounds or alternating execution order. `cleanup` deletes the run
 directory, including Criterion estimates, load/host JSONL, relay logs, and
 summaries. Preserve the existing default command
@@ -24,7 +24,7 @@ while extending this harness rather than creating another benchmark runner.
   hardware/kernel, allocator, affinity, workload, and execution order. Preserve
   partial evidence on failure while still cleaning up owned processes/worktrees.
 - Distinguish throughput-window counters from cumulative latency/loss. Today
-  `rs/scripts/bench.sh::summarize_load` differences bytes over the last five seconds
+  `bench/relay.sh::summarize_load` differences bytes over the last five seconds
   but reads final lifetime latency and group-loss counters. Label that explicitly;
   consume windowed data when the existing latency quest supplies it. Never
   subtract percentiles or call cumulative loss a steady-state sample.
@@ -35,10 +35,6 @@ while extending this harness rather than creating another benchmark runner.
 - Test the reducer with synthetic stable, noisy, missing, invalid, and known-delta
   samples. Validate an unchanged-revision A/A run and a deliberately degraded
   fixture; keep normal machine timing informational rather than a flaky CI gate.
-
-## Required
-
-- [Thin justfiles](/quest/m1/tooling/justfiles.md) - finish benchmark script relocation before changing its lifecycle
 
 ## Related
 

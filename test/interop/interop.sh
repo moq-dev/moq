@@ -80,6 +80,14 @@ while [[ $# -gt 0 ]]; do
             MEDIA=1
             shift
             ;;
+        # The full matrix. --timeout 30 gives headless Chromium cold-start
+        # headroom; flags after it still override.
+        --all)
+            PUBLISHERS="rust,python,go,js"
+            SUBSCRIBERS="rust,python,go,js,js-native-node,js-native-bun,c,gst"
+            TIMEOUT=30
+            shift
+            ;;
         *)
             echo "unknown arg: $1" >&2
             exit 2
@@ -240,7 +248,7 @@ prepare_js() {
     fi
 }
 
-# Stage the Go modules from this checkout (go/scripts/stage.sh builds moq-ffi for
+# Stage the Go modules from this checkout (sh/go/stage.sh builds moq-ffi for
 # the host, regenerates the bindings, and wires the wrapper to them by replace),
 # then build the interop client against that exact tree. The client is copied to a
 # scratch dir first so the committed go.mod keeps its placeholder require; every
@@ -256,8 +264,8 @@ prepare_go() {
     }
     echo "building go client (workspace moq-go via uniffi-bindgen-go)..."
     local staged ffi_pkg wrapper_pkg src="$HARNESS_RUN/go-client"
-    if ! staged=$(bash "$WORKSPACE/go/scripts/stage.sh" 2>"$HARNESS_RUN/go-stage.log"); then
-        mark_broken go "go/scripts/stage.sh failed"
+    if ! staged=$(bash "$WORKSPACE/sh/go/stage.sh" 2>"$HARNESS_RUN/go-stage.log"); then
+        mark_broken go "sh/go/stage.sh failed"
         sed 's/^/        /' "$HARNESS_RUN/go-stage.log" >&2 || true
         return
     fi

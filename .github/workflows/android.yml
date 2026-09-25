@@ -50,7 +50,6 @@ concurrency:
 
 env:
   CARGO_NDK_VERSION: 4.1.2
-  JUST_VERSION: 1.52.0
 
 jobs:
   android:
@@ -74,8 +73,10 @@ jobs:
 
       # No Rust cache: this workflow only runs on pull requests, which may not
       # save one, so it would have nothing to restore.
-      - name: Install just and cargo-ndk
-        run: cargo install --locked "just@$JUST_VERSION" "cargo-ndk@$CARGO_NDK_VERSION"
+      - uses: ./.github/actions/just
+
+      - name: Install cargo-ndk
+        run: cargo install --locked "cargo-ndk@$CARGO_NDK_VERSION"
 
       - name: Check
         run: just rs android

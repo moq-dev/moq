@@ -39,6 +39,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -47,7 +49,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: .github/scripts/release.sh parse-version moq-cli
+        run: just gh release parse-version moq-cli
 
       - name: Set up packaging tools
         uses: ./.github/actions/setup-packaging
@@ -64,7 +66,7 @@ jobs:
           VERSION: ${{ steps.parse.outputs.version }}
           TARGET: ${{ matrix.target }}
         run: |
-          ./rs/scripts/package-binary.sh \
+          just rs package-binary \
             --crate moq-cli \
             --bin moq \
             --binary "target/${TARGET}/release/moq" \
@@ -80,8 +82,8 @@ jobs:
           ARCH: ${{ matrix.deb-arch }}
           BINARY_PATH: target/${{ matrix.target }}/release/moq
         run: |
-          rs/scripts/package-nfpm.sh packaging/moq-cli/nfpm.yaml deb dist/
-          rs/scripts/package-nfpm.sh packaging/moq-cli/transition.yaml deb dist/
+          just rs package-nfpm packaging/moq-cli/nfpm.yaml deb dist/
+          just rs package-nfpm packaging/moq-cli/transition.yaml deb dist/
 
       - name: Package .rpm
         shell: bash
@@ -89,7 +91,7 @@ jobs:
           VERSION: ${{ steps.parse.outputs.version }}
           ARCH: ${{ matrix.rpm-arch }}
           BINARY_PATH: target/${{ matrix.target }}/release/moq
-        run: rs/scripts/package-nfpm.sh packaging/moq-cli/nfpm.yaml rpm dist/
+        run: just rs package-nfpm packaging/moq-cli/nfpm.yaml rpm dist/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -114,6 +116,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
@@ -121,12 +125,12 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: .github/scripts/release.sh parse-version moq-cli
+        run: just gh release parse-version moq-cli
 
       - name: Build and package tarball
         shell: bash
         run: |
-          ./rs/scripts/package-binary.sh \
+          just rs package-binary \
             --crate moq-cli \
             --bin moq \
             --target ${{ matrix.target }} \
@@ -154,6 +158,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -169,12 +175,12 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: .github/scripts/release.sh parse-version moq-cli
+        run: just gh release parse-version moq-cli
 
       - name: Build and package zip
         shell: bash
         run: |
-          ./rs/scripts/package-windows.sh \
+          just rs package-windows \
             --crate moq-cli \
             --bin moq \
             --target ${{ matrix.target }} \
@@ -202,13 +208,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version moq-cli
+        run: just gh release parse-version moq-cli
 
       - name: Find previous tag
         id: prev_tag
-        run: .github/scripts/release.sh prev-tag moq-cli
+        run: just gh release prev-tag moq-cli
 
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -222,10 +230,10 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_TITLE: "moq-cli v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
-        run: .github/scripts/release.sh create artifacts
+        run: just gh release create artifacts
 
       - name: Trigger apt/rpm repo publish
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: .github/scripts/trigger-repo-publish.sh
+        run: just gh trigger-repo-publish

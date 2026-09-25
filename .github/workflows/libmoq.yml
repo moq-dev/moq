@@ -40,6 +40,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Install Nix
         if: matrix.use_nix
         uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
@@ -55,12 +57,12 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: .github/scripts/release.sh parse-version libmoq
+        run: just gh release parse-version libmoq
 
       - name: Build and package
         shell: bash
         run: |
-          ./rs/libmoq/build.sh \
+          just rs package-libmoq \
             --target ${{ matrix.target }} \
             --version ${{ steps.parse.outputs.version }} \
             --output dist
@@ -85,13 +87,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version libmoq
+        run: just gh release parse-version libmoq
 
       - name: Find previous tag
         id: prev_tag
-        run: .github/scripts/release.sh prev-tag libmoq
+        run: just gh release prev-tag libmoq
 
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -105,7 +109,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_TITLE: "libmoq v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
-        run: .github/scripts/release.sh create artifacts
+        run: just gh release create artifacts
 
   # The OBS plugin (cpp/obs) statically links libmoq, so it ships with every
   # libmoq release: rebuild it against the release we just published (no
@@ -137,10 +141,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Parse version
         id: parse
         shell: bash
-        run: .github/scripts/release.sh parse-version libmoq
+        run: just gh release parse-version libmoq
 
       # Native Xcode / Visual Studio; libobs/Qt6/ffmpeg come from the obs-deps
       # bundle and libmoq from the release we just published (--libmoq-release).
@@ -150,7 +156,7 @@ jobs:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ steps.parse.outputs.version }}
         run: |
-          ./cpp/obs/build.sh --target "$TARGET" --libmoq-release "$VERSION" --output dist
+          just obs package --target "$TARGET" --libmoq-release "$VERSION" --output dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -171,9 +177,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version libmoq
+        run: just gh release parse-version libmoq
 
       # Only the obs-moq archives: the libmoq-* artifacts from the build job
       # belong to the libmoq release, not this one.
@@ -208,4 +216,4 @@ jobs:
           RELEASE_TAG: "obs-moq-v${{ steps.parse.outputs.version }}"
           RELEASE_TITLE: "obs-moq v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
-        run: .github/scripts/release.sh create artifacts
+        run: just gh release create artifacts

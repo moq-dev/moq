@@ -29,7 +29,7 @@ player survive the publication lifecycle. See [Media QA](#media-qa).
 |---|---|---|---|
 | Rust | `rs/moq-relay` + `rs/moq-cli` | `cargo build` | publish (video) + subscribe |
 | Python | `py/moq-rs` (+ `rs/moq-ffi`, import `moq`) | `just py build` (maturin editable into `.venv`) | publish (video + audio) + subscribe |
-| Go | `go/wrapper` (+ `rs/moq-ffi`, import `moq-go/moq`) | `go/scripts/stage.sh` (uniffi-bindgen-go) + `go build` | publish (video + audio) + subscribe |
+| Go | `go/wrapper` (+ `rs/moq-ffi`, import `moq-go/moq`) | `sh/go/stage.sh` (uniffi-bindgen-go) + `go build` | publish (video + audio) + subscribe |
 | Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | publish (video + audio) + rendered playback |
 | Native JS | `js/net` + `js/hang` + the npm `@moq/web-transport` polyfill | `node` (tsx) and `bun` | subscribe |
 | C | `rs/libmoq` | `cargo build -p libmoq` + `cc` | subscribe |
@@ -40,7 +40,7 @@ The browser, native JS, C, and GStreamer clients subscribe only by choice
 intentionally minimal, and `moqsink` publishing needs request-pad muxing this
 client doesn't drive). Rust, Python, Go, and the browser publish.
 
-The Go client builds against the modules `go/scripts/stage.sh` assembles from
+The Go client builds against the modules `sh/go/stage.sh` assembles from
 this checkout: `moq-ffi` compiled for the host, bindings regenerated with
 `uniffi-bindgen-go`, and the `go/wrapper` module wired to them by a `replace`.
 That is the same staging `just go check` uses, so this cell covers the Go

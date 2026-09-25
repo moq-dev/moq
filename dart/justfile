@@ -1,18 +1,22 @@
 #!/usr/bin/env just --justfile
 
 # Check the generated bindings and both Dart packages.
-check $FILES="":
-    ./scripts/check.sh "{{ FILES }}"
+check:
+    ../sh/dart/check.sh
 
 # Format Dart sources.
-fix $FILES="":
-    ./scripts/check.sh --fix "{{ FILES }}"
+fix:
+    ../sh/dart/check.sh --fix
 
 # Regenerate the raw UniFFI Dart bindings.
 generate:
-    ./scripts/generate.sh
+    ../sh/dart/generate.sh
 
-# Remove Dart tool state and build output.
-clean:
-    rm -rf moq/.dart_tool moq_ffi/.dart_tool
-    rm -rf moq/build moq_ffi/build
+# `package` runs in the caller's directory, so a relative `--output` means
+# what it would to the script itself.
+
+# Package a Dart library for pub.dev.
+[no-cd]
+[positional-arguments]
+package *args:
+    {{ quote(justfile_directory() / "sh/dart/package.sh") }} "$@"

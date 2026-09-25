@@ -10,16 +10,6 @@
 
 set working-directory := '.'
 
-# Paths a Python check depends on. `rs/moq-ffi` is in scope because maturin
-# bundles it into the moq-ffi wheel. `check`, `fix`, and `test` all skip
-# themselves when a diff misses this; no FILES at all means force-run. The docs
-# are in scope because `check` type-checks their samples against the wrapper.
-#
-# They also skip when uv is absent, matching the kt/swift/go check scripts: an
-# incomplete local toolchain should check less rather than fail. The root
-# `_tools` preflight makes uv a hard requirement under MOQ_STRICT.
-scope := '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/lib/samples\.sh$)'
-
 default:
     just check
 
@@ -40,17 +30,7 @@ _develop:
 # the Docs after the fact. It mocks the native module, so it costs no Rust build.
 
 # Lint, type-check, editable-build, check the doc samples, and render the docs.
-check $FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
-    	echo "py: no Python changes; skipping."
-    	exit 0
-    fi
-    if ! command -v uv >/dev/null 2>&1; then
-    	echo "py: uv not on PATH, skipping" >&2
-    	exit 0
-    fi
+check:
     uv sync --locked --no-install-workspace
     uv run --no-sync ruff check .
     uv run --no-sync ruff format --check .
@@ -59,50 +39,18 @@ check $FILES="":
     just samples
     just docs
 
-# Samples leave their inputs (`payload`, `pts`) to the reader, so they follow
-# the declarations in moq-rs/tests/doc_prelude.py.
-
 # Type-check every Python sample in the docs against the installed wrapper.
 samples:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    out=$(mktemp -d)
-    trap 'rm -rf "$out"' EXIT
-    {
-    	cat moq-rs/tests/doc_prelude.py
-    	bash ../doc/lib/samples.sh python ../doc/lib/py/index.md moq-rs/README.md moq-rs/docs/index.md
-    } > "$out/samples.py"
-    echo '{"pythonVersion": "3.10"}' > "$out/pyrightconfig.json"
-    uv run --no-sync pyright --project "$out" "$out/samples.py"
+    ../sh/py/samples.sh
 
-# Auto-fix lint and formatting issues. Skips on the same terms as `check`.
-fix $FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
-    	echo "py: no Python changes; skipping."
-    	exit 0
-    fi
-    if ! command -v uv >/dev/null 2>&1; then
-    	echo "py: uv not on PATH, skipping" >&2
-    	exit 0
-    fi
+# Auto-fix lint and formatting issues.
+fix:
     uv sync --no-install-workspace
     uv run --no-sync ruff check --fix .
     uv run --no-sync ruff format .
 
-# Run the unit tests. Skips on the same terms as `check`.
-test $FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
-    	echo "py: no Python changes; skipping tests."
-    	exit 0
-    fi
-    if ! command -v uv >/dev/null 2>&1; then
-    	echo "py: uv not on PATH, skipping" >&2
-    	exit 0
-    fi
+# Run the unit tests.
+test:
     uv sync --locked --no-install-workspace
     just _develop
     uv run --no-sync pytest moq-rs/tests/ moq-ffi/tests/
@@ -113,18 +61,6 @@ test $FILES="":
 build:
     uv sync --locked --no-install-workspace
     just _develop
-
-# Remove the virtualenv, release dist, bytecode caches, and the uniffi
-# bindings maturin drops in during editable installs. The uv workspace venv
-
-# lives at the repo root, so reach up for it.
-clean:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    rm -rf dist moq-ffi/moq_ffi/_uniffi
-    rm -rf ../.venv .venv
-    find . -name .claude -prune -o -type d -name __pycache__ -prune -exec rm -rf {} +
-    find . -name .claude -prune -o -type f -name '*.pyc' -exec rm -f {} +
 
 # Build the pure-python moq-rs wrapper sdist + wheel into py/dist (for release).
 # moq-ffi is built separately by maturin (see release-py.yml); the wrapper is

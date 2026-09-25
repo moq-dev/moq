@@ -3,9 +3,6 @@
 # Tests that span more than one language or need a live relay. Unit tests run
 # in the root `just check`.
 #
-# Shebang recipes read their arguments as $1..$n.
-set positional-arguments
-
 # Two cross-language interop tests exist:
 #   - https://github.com/moq-dev/smoke installs each client from its PUBLIC
 #     package registry to catch packaging breakage in a release.
@@ -15,8 +12,6 @@ set positional-arguments
 
 set fallback
 set working-directory := '.'
-# `interop` reads its args as `$1`/`$@`; the `positional-arguments` setting above
-# is what lets a shebang recipe see them.
 
 # List the cross-language suites.
 default:
@@ -26,18 +21,10 @@ default:
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
 # sanity check). `interop --all` runs the full matrix: rust + python + go +
 # browser publish; everyone subscribes (incl. native node/bun JS, the C libmoq
-# client, and the GStreamer moqsrc plugin). --timeout 30 gives headless Chromium
-# cold-start headroom. Other flags pass through, e.g.
+# client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
 interop *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ "${1:-}" == --all ]]; then
-        shift
-        ./interop/interop.sh --publishers rust,python,go,js --subscribers rust,python,go,js,js-native-node,js-native-bun,c,gst --timeout 30 "$@"
-    else
-        ./interop/interop.sh "$@"
-    fi
+    ./interop/interop.sh {{ args }}
 
 # Negative control: no publisher, every subscriber must time out (proves the
 

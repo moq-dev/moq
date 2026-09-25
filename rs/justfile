@@ -11,140 +11,43 @@ set working-directory := '..'
 
 # `moq-net-fuzz` is a workspace member only so it shares the root lockfile; libFuzzer
 # needs a nightly toolchain and sanitizer flags, so `just rs fuzz` is the one recipe
-# that may compile it. Every `--workspace` below therefore carries this, and a new
-# one that forgets it pays a vendored C++ libFuzzer build for nothing. The root
-# justfile's `check --all` and `fix --all` spell it out, since a module cannot read this.
+# that may compile it. Every `--workspace` below therefore carries this, as does
+# sh/rs/select.sh, since it cannot read this.
 no_fuzz := "--exclude moq-net-fuzz"
 
 default:
     just check
 
-# Default features for the selected workspace packages, here and in CI. The full
-# workspace permutations (`--all-features`, `--no-default-features`) each cost a
-# separate compile that shares almost nothing with this one, so `features` below
-# covers them nightly. `check-changed` makes one scoped exception for moq-tokio,
-# whose feature-gated transport surface must compile in isolation to avoid
-# workspace feature unification hiding a broken configuration.
-#
-# No `cargo check` pass: clippy is a superset of it, and the two use different
-# rustc wrappers, so running both means compiling the workspace twice.
+# Default features for the selected packages. The full workspace permutations
+# each cost a separate compile, so `features` covers them nightly. No `cargo
+# check` pass: clippy is a superset of it, and the two use different rustc
+# wrappers, so running both compiles the workspace twice.
 #
 # A bare `just rs check` is default-members, which skips libmoq, moq-ffi,
-# moq-gst, and moq-wasm (they need cbindgen, a uniffi build, GStreamer, and a
-# wasm32 target respectively, so they stay out of a casual local check). Every
-# recipe that means "all of it" therefore passes `--workspace` explicitly, since
-# `check` is the only gate now and nothing else would compile them.
+# moq-gst, and moq-wasm; pass `--workspace` for all of it.
 
 # Compile, lint, format-check, doc-check, and verify dependency hygiene.
 check *args:
     cargo clippy --locked --all-targets {{ args }} -- -D warnings
     just rs _lint {{ args }}
 
-# `check` with the clippy pass replaced by `test`, whose clippy-driver build
-# reports the same findings. `build.warnings` turns them into errors without
-# entering cargo's fingerprint, so a later plain `test` reuses the artifacts.
-# `--no-tests=pass` because a selection can hold nothing testable (see
-# `test-changed`).
+# `check` with clippy replaced by the `test` build, whose clippy-driver reports
+# the same findings. `build.warnings` turns them into errors without entering
+# cargo's fingerprint, so a later plain `test` reuses the artifacts. A
+# selection can hold nothing testable (moq-wasm has no host tests).
 
 # Compile, lint, and test in one build, plus everything else `check` verifies.
 check-test *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if ! command -v clippy-driver >/dev/null 2>&1; then
-    	echo "rs: check-test needs clippy-driver to lint" >&2
-    	exit 1
-    fi
-    CARGO_BUILD_WARNINGS=deny just rs test --no-tests=pass {{ args }}
+    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ require("clippy-driver") }} cargo nextest run --locked --all-targets --no-tests=pass {{ args }}
     just rs _lint {{ args }}
 
 # Everything `check` verifies besides clippy.
 _lint *args:
-    just rs _select-test
-    just rs _publish-test
-    just rs _doc-names-test
-    # A new MoqConnectionStats field has to reach every binding's doc page.
-    python3 rs/scripts/stats-docs.py
-    rs/scripts/package-nfpm.test.sh
+    python3 sh/rs/stats-docs.py
     cargo fmt --all --check
-    just rs _doc-names
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps {{ args }}
     cargo shear
     cargo sort --workspace --check --no-format
-
-# Two targets whose names differ only by `-` vs `_` render to the same
-# `target/doc/<name>`, and a `cargo doc` that selects both races to clean it: the
-# collision warning escalates to `error: failed to remove directory` depending on
-# which rustdoc process gets there first. That reads as a flake, and because the doc
-# pass above is diff-scoped it surfaces on whichever unrelated PR happens to select
-# both crates. Resolve a pair by setting `doc = false` on whichever target has no
-# published API to render (usually the binary).
-#
-# Metadata only, so this costs no compilation and can sit in the PR gate. Takes an
-# optional metadata file so `_doc-names-test` can feed it synthetic workspaces.
-_doc-names metadata="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    if [[ -n "{{ metadata }}" ]]; then
-        collisions=$(jq -r -f rs/scripts/doc-names.jq < "{{ metadata }}")
-    else
-        collisions=$(cargo metadata --locked --no-deps --format-version 1 | jq -r -f rs/scripts/doc-names.jq)
-    fi
-
-    if [[ -n "$collisions" ]]; then
-        echo "rs: these targets render to the same doc directory:" >&2
-        echo "$collisions" >&2
-        echo "set doc = false on whichever has no published API." >&2
-        exit 1
-    fi
-
-# Both directions of `_doc-names`, since the interesting half is what it must NOT
-# report: cargo documents only the library when a binary shares its own package's
-# name, so flagging that would reject the conventional src/lib.rs + src/main.rs layout.
-_doc-names-test:
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    scratch=$(mktemp -d)
-    trap 'rm -rf "$scratch"' EXIT
-
-    # Same package, same name: cargo suppresses the bin, so this must pass.
-    cat > "$scratch/ok.json" <<'JSON'
-    {"packages":[{"name":"solo","targets":[
-      {"name":"solo","kind":["lib"],"doc":true},
-      {"name":"solo","kind":["bin"],"doc":true}]}]}
-    JSON
-    just rs _doc-names "$scratch/ok.json"
-
-    # Same package, differing only by `-` vs `_`: cargo folds before suppressing, so
-    # this must pass too. Comparing the names as spelled would report it.
-    cat > "$scratch/folded.json" <<'JSON'
-    {"packages":[{"name":"folded","targets":[
-      {"name":"foo_bar","kind":["lib"],"doc":true},
-      {"name":"foo-bar","kind":["bin"],"doc":true}]}]}
-    JSON
-    just rs _doc-names "$scratch/folded.json"
-
-    # Different packages: a real collision, must be reported.
-    cat > "$scratch/bad.json" <<'JSON'
-    {"packages":[
-      {"name":"a-lib","targets":[{"name":"shared_name","kind":["lib"],"doc":true}]},
-      {"name":"b-cli","targets":[{"name":"shared-name","kind":["bin"],"doc":true}]}]}
-    JSON
-    if just rs _doc-names "$scratch/bad.json" 2>/dev/null; then
-        echo "rs: _doc-names missed a cross-package collision" >&2
-        exit 1
-    fi
-
-    # `doc = false` is how a pair gets resolved, so it must stop being reported.
-    cat > "$scratch/fixed.json" <<'JSON'
-    {"packages":[
-      {"name":"a-lib","targets":[{"name":"shared_name","kind":["lib"],"doc":true}]},
-      {"name":"b-cli","targets":[{"name":"shared-name","kind":["bin"],"doc":false}]}]}
-    JSON
-    just rs _doc-names "$scratch/fixed.json"
-
-    echo "rs: _doc-names ok"
 
 # Auto-fix clippy/format/shear/sort.
 fix *args:
@@ -153,429 +56,31 @@ fix *args:
     cargo shear --fix
     cargo sort --workspace --no-format
 
-# Prints `ALL` when the diff hits something every crate depends on, and nothing
-# when no crate is affected.
-#
-# FILES is an exported parameter, not `{{ FILES }}`: just interpolates the
-# latter into the recipe source, where a filename like `$(...)` would run as a
-# command. Git-derived paths are untrusted input, so they stay data.
+# Like `check`, but only the crates in a changed-file list plus their dependents.
+check-changed $LIST:
+    sh/rs/select.sh check "$LIST"
 
-# Print `--package` flags for the crates a diff touches, plus their dependents.
-[private]
-_select $FILES:
-    #!/usr/bin/env bash
-    set -euo pipefail
+# Like `check-test`, but only the crates in a changed-file list plus their dependents.
+check-test-changed $LIST:
+    sh/rs/select.sh check-test "$LIST"
 
-    # Workspace-wide inputs affect every crate, so there is nothing to scope to.
-    #
-    # `rs/justfile` and the nextest config are in here because they define how
-    # every crate is checked and tested. They also match `^rs/` below while
-    # seeding no crate (the seed pattern needs `rs/<crate>/...`), so without this
-    # a PR editing only the recipes would compile and test nothing at all, and a
-    # broken cargo flag would pass CI on a format check alone.
-    if [[ -z "$FILES" ]] || grep -qE '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|\.config/nextest\.toml)$' <<< "$FILES"; then
-    	echo ALL
-    	exit 0
-    fi
+# Like `fix`, but only the crates in a changed-file list plus their dependents.
+fix-changed $LIST:
+    sh/rs/select.sh fix "$LIST"
 
-    grep -q '^rs/' <<< "$FILES" || exit 0
-
-    # `--no-deps` keeps this to workspace members and off the network.
-    metadata=$(cargo metadata --format-version 1 --no-deps)
-
-    # A seed is the first path segment under `rs/`, so only a crate whose manifest
-    # sits directly at `rs/<dir>/Cargo.toml` can ever be one. Drop the rest here:
-    # `moq-net-fuzz` lives at `rs/moq-net/fuzz`, so its seed is already `moq-net`,
-    # and leaving it in the graph would select it as a dependent of the crate it
-    # fuzzes and compile libFuzzer on every moq-net diff.
-    #
-    # `manifest_path` is a native path, so normalize the separator before splitting
-    # on it. Windows would otherwise match no segment, drop every package, and
-    # select nothing at all, where the assertion below fails safe to ALL.
-    metadata=$(jq '.packages |= map((.manifest_path |= gsub("\\\\"; "/")) | select(.manifest_path | split("/")[-3] == "rs"))' <<< "$metadata")
-
-    # Every remaining crate directory is named after the crate it holds, which is
-    # what makes a changed path a seed below. Verify it rather than trust it: under-
-    # selecting silently checks nothing, so fall back to checking everything.
-    if jq -e '.packages[] | select((.manifest_path | split("/")[-2]) != .name)' <<< "$metadata" > /dev/null; then
-    	echo "rs: a crate directory no longer matches its crate name; selecting everything." >&2
-    	echo ALL
-    	exit 0
-    fi
-
-    seeds=$(sed -n 's|^rs/\([^/]*\)/.*|\1|p' <<< "$FILES" | sort -u)
-
-    # Every workspace member, not just the default ones. `--no-deps` already
-    # limits this to the workspace. The non-default members (libmoq, moq-ffi,
-    # moq-gst, moq-wasm) have to participate as both seeds and dependents: they
-    # used to drop out here because `check` matched a bare `cargo check`, but
-    # `check` is the only gate now, and the `cargo clippy --workspace` in the
-    # deleted `just rs ci` is what used to cover them. Without them, a PR
-    # touching only rs/libmoq selects nothing and compiles nothing.
-    edges=$(jq -r '
-    	.packages[]
-    	| .name as $name
-    	| .dependencies[]
-    	| "\($name) \(.name)"
-    ' <<< "$metadata")
-
-    # A crate has to be rebuilt when anything it depends on changed, so walk the
-    # edges backwards until the selection stops growing.
-    selected=$(awk -v seeds="$seeds" '
-    	BEGIN { split(seeds, s, "\n"); for (i in s) want[s[i]] = 1 }
-    	{ pkg[NR] = $1; dep[NR] = $2 }
-    	END {
-    		do {
-    			grew = 0
-    			for (i = 1; i <= NR; i++)
-    				if (want[dep[i]] && !want[pkg[i]]) { want[pkg[i]] = 1; grew = 1 }
-    		} while (grew)
-    		# Every wanted crate, not just those that appear as an edge source: a
-    		# crate with no dependencies of its own emits no edge, so keying the
-    		# output on `pkg[i]` would drop it and select nothing for a direct
-    		# change to it. Test the VALUE, not the key -- awk creates a key on
-    		# every `want[dep[i]]` read above, so iterating keys alone would emit
-    		# every crate the workspace mentions. The lookup below drops names that
-    		# are not workspace crates, which is what keeps a seed like the
-    		# non-crate `rs/scripts` from reaching cargo.
-    		for (name in want) if (want[name]) print name
-    	}
-    ' <<< "$edges" | sort -u)
-
-    [[ -n "$selected" ]] || exit 0
-
-    # Emit cargo's own package ids, not bare names. A workspace crate we also
-    # publish collides with its crates.io copy as soon as any dependency pulls
-    # that copy in (the web-transport-* crates depend on a published `kio`), and
-    # `--package kio` is then ambiguous: cargo refuses during package selection,
-    # before compiling anything, so the whole gate fails. Ids from `cargo
-    # metadata` carry the source, so they are unambiguous by construction.
-    jq -r --arg selected "$selected" '
-    	($selected | split("\n")) as $want
-    	| .packages[]
-    	| select(.name as $name | $want | index($name) != null)
-    	| "--package \(.id)"
-    ' <<< "$metadata" | sort -u | tr '\n' ' '
-
-# Bare crate names for the `--package <id>` flags `_select` emits, for log lines
-# and for the wasm gate's alternation below. Matching names rather than the flag
-# spelling keeps those call sites working whatever spec form `_select` uses; the
-# previous alternation matched `--package <name>` literally and silently stopped
-# firing the moment the spec form changed. Ids are `path+file://<dir>#<version>`
-# and `_select` only emits crates whose directory it has verified matches
-# their crate name, so the last path segment is the name.
-
-# True when a selection includes a crate the wasm32 pass covers. One predicate
-# rather than the same alternation in each gate, so the test below exercises what
-# the gates actually run instead of a copy of it.
-[private]
-_wants-wasm $PACKAGES:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    grep -qwE '(moq-wasm|moq-mux|moq-ffi)' <<< "$(just rs _names "$PACKAGES")"
-
-# True when the selection includes moq-tokio, whose zero-feature build is hidden
-# by workspace feature unification whenever any dependent enables a transport.
-[private]
-_wants-tokio-features $PACKAGES:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    grep -qw 'moq-tokio' <<< "$(just rs _names "$PACKAGES")"
-
-# True when the selection includes a crate with a `capture` feature. Selection
-# pulls in dependents, so a diff to moq-mux or moq-net lands here too, which is
-# how a rename in either reaches the device code that calls it.
-[private]
-_wants-capture $PACKAGES:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    grep -qwE '(moq-video|moq-audio)' <<< "$(just rs _names "$PACKAGES")"
-
-# True when the selection includes moq-relay, whose io_uring listener is off the
-# default feature set. Selection pulls in dependents, so a diff to any crate the
-# relay is built from (moq-uring, moq-sock, moq-tokio) lands here too.
-[private]
-_wants-uring $PACKAGES:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    grep -qw 'moq-relay' <<< "$(just rs _names "$PACKAGES")"
-
-# True when the media feature contracts have to run. The contract script is not
-# a crate, so `_select` drops it; a diff that only edits the script must still
-# reach the gate, or a broken command merges on shell lint alone.
-[private]
-_wants-media-features $PACKAGES $FILES:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    grep -qwE '(moq-video|moq-audio|moq-transcode)' <<< "$(just rs _names "$PACKAGES")" \
-    	|| grep -qx 'rs/scripts/media-features.sh' <<< "$FILES"
-
-# Print the crate names behind a list of `--package` flags.
-[private]
-_names $PACKAGES:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    tr ' ' '\n' <<< "$PACKAGES" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' '
-
-# Guards the two things about selection that fail SILENTLY rather than loudly:
-# a `--package` spec cargo cannot resolve takes the gate down before it compiles
-# anything, and a wasm gate that stops matching skips the only pass that ever
-# looks at moq-wasm's code (its crate root is `#![cfg(target_arch = "wasm32")]`,
-# so the host pass sees an empty crate and reports success). Both have happened.
-
-# Check that selection emits resolvable specs and still drives the wasm gate.
-[private]
-_select-test:
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    fail() { echo "rs: _select-test: $1" >&2; exit 1; }
-
-    # `kio` is published and pulled from crates.io by the web-transport-* crates,
-    # so the workspace copy and the registry copy share a name: a bare name is
-    # ambiguous and cargo refuses. Every emitted spec must name its source, and
-    # cargo must accept it.
-    packages=$(just rs _select "rs/kio/src/waiter.rs")
-    for spec in $(sed 's/--package //g' <<< "$packages"); do
-    	[[ "$spec" == *"file://"* ]] || fail "expected a source-qualified id, got: $spec"
-    	cargo pkgid --offline "$spec" > /dev/null 2>&1 || fail "cargo cannot resolve: $spec"
-    done
-
-    # The wasm gate keys on names, so it survives whatever spec form the ids use.
-    just rs _wants-wasm "$packages" \
-    	|| fail "a kio diff must still drive the wasm gate: $(just rs _names "$packages")"
-
-    # ...and it must still be able to say no, or it is not a gate.
-    relay=$(just rs _select "rs/moq-relay/src/web.rs")
-    if just rs _wants-wasm "$relay"; then
-    	fail "a moq-relay diff must not drive it: $(just rs _names "$relay")"
-    fi
-
-    # The break the capture gate was added for: a moq-mux API change that missed
-    # its callers behind `capture`. A moq-mux diff has to reach it.
-    mux=$(just rs _select "rs/moq-mux/src/clock.rs")
-    just rs _wants-capture "$mux" \
-        || fail "a moq-mux diff must drive the capture gate: $(just rs _names "$mux")"
-    if just rs _wants-capture "$relay"; then
-        fail "a moq-relay diff must not drive the capture gate: $(just rs _names "$relay")"
-    fi
-
-    # The break the uring gate was added for: a change that breaks moq-relay's
-    # io_uring listener, which the default pass above never compiles. A moq-relay
-    # diff has to reach it, and a diff that cannot affect the relay must not.
-    just rs _wants-uring "$relay" \
-        || fail "a moq-relay diff must drive the uring gate: $(just rs _names "$relay")"
-    hls=$(just rs _select "rs/moq-hls/src/lib.rs")
-    if just rs _wants-uring "$hls"; then
-        fail "a moq-hls diff must not drive the uring gate: $(just rs _names "$hls")"
-    fi
-
-    tokio=$(just rs _select "rs/moq-tokio/src/lib.rs")
-    just rs _wants-tokio-features "$tokio" \
-        || fail "a moq-tokio diff must drive its feature matrix: $(just rs _names "$tokio")"
-    if just rs _wants-tokio-features "$relay"; then
-        fail "a moq-relay-only selection must not drive the moq-tokio feature matrix"
-    fi
-
-    # A non-crate directory under rs/ seeds a name that is not a package. It must
-    # select nothing rather than reach cargo as a bogus spec.
-    [[ -z "$(just rs _select "rs/scripts/package-binary.sh")" ]] \
-    	|| fail "a non-crate seed must select nothing"
-
-    # The contract script is that same kind of seed, so selection stays empty.
-    # The gate still has to run it: this is the diff that can break the commands.
-    [[ -z "$(just rs _select "rs/scripts/media-features.sh")" ]] \
-    	|| fail "the media contract script must not select a crate"
-    just rs _wants-media-features "" "rs/scripts/media-features.sh" \
-    	|| fail "a media-features.sh diff must drive the contract"
-    if just rs _wants-media-features "" "rs/scripts/package-binary.sh"; then
-    	fail "an unrelated script must not drive the media contract"
-    fi
-    video=$(just rs _select "rs/moq-video/src/lib.rs")
-    just rs _wants-media-features "$video" "" \
-    	|| fail "a moq-video diff must drive the media contract: $(just rs _names "$video")"
-    just rs _wants-media-features "--package file:///tmp/rs/moq-transcode#0" "" \
-    	|| fail "moq-transcode alone must drive the media contract"
-    if just rs _wants-media-features "$relay" ""; then
-    	fail "a moq-relay diff must not drive the media contract: $(just rs _names "$relay")"
-    fi
-
-    # A crate nested inside another crate's directory is covered by its parent's
-    # seed. Selecting it directly would compile libFuzzer on every moq-net diff,
-    # and its directory name is not its crate name, so it would also mis-report.
-    fuzz=$(just rs _names "$(just rs _select "rs/moq-net/fuzz/fuzz_targets/lite.rs")")
-    grep -qw moq-net <<< "$fuzz" || fail "a fuzz diff must select moq-net: $fuzz"
-    ! grep -qw fuzz <<< "$fuzz" || fail "a fuzz diff must not select the harness: $fuzz"
-
-    echo "rs: selection ok"
-
-# Published crates need the current workspace version as the lower bound for
-# internal dependencies. The workspace only tests that version set, and a looser
-# bound lets package verification combine incompatible older releases.
-#
-# Internal dev-dependencies must be path-only. `cargo publish` keeps a versioned
-# dev-dependency and requires it on crates.io, but release-plz orders publishes
-# by normal dependencies only, so a bumped dev-dependency is often not there yet.
-[private]
-_publish-test:
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    metadata=$(cargo metadata --locked --format-version 1 --no-deps)
-    stale=$(jq -r '
-        .packages as $packages
-        | $packages[] as $package
-        | select($package.publish != [])
-        | $package.dependencies[]
-        | select(.source == null and .path != null and .kind != "dev")
-        | . as $dependency
-        | ($packages[] | select(.name == $dependency.name)) as $current
-        | select($dependency.req != ("^" + $current.version))
-        | "\($package.name): \($dependency.name) requires \($dependency.req), current is ^\($current.version)"
-    ' <<< "$metadata")
-
-    if [[ -n "$stale" ]]; then
-        echo "rs: published workspace dependency lower bounds are stale:" >&2
-        echo "$stale" >&2
-        exit 1
-    fi
-
-    versioned=$(jq -r '
-        .packages[]
-        | select(.publish != [])
-        | .name as $package
-        | .dependencies[]
-        | select(.source == null and .path != null and .kind == "dev" and .req != "*")
-        | "\($package): \(.name) \(.req)"
-    ' <<< "$metadata")
-
-    if [[ -n "$versioned" ]]; then
-        echo "rs: published crates have versioned workspace dev-dependencies:" >&2
-        echo "$versioned" >&2
-        echo "use { path = \"../<crate>\" } instead of { workspace = true }." >&2
-        exit 1
-    fi
-
-    echo "rs: published workspace dependencies current"
-
-# Takes a newline-separated list of changed files; skips when no crate is
-# affected. The `just rs ...` calls below go through the root justfile's
-# `mod rs` because these recipes run from the repo root, where a bare `check`
-# would resolve to the root recipe of that name.
-
-# Like `check`, but only the crates a diff touches plus their dependents.
-# TEST=true runs `check-test` in place of `check`.
-check-changed $FILES $TEST="false":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    recipe=check
-    [[ "$TEST" == true ]] && recipe=check-test
-    packages=$(just rs _select "$FILES")
-    case "$packages" in
-    	"")    echo "rs: no crates affected; skipping." ;;
-    	ALL)   just rs "$recipe" --workspace {{ no_fuzz }} ;;
-    	*)     echo "rs: checking $(just rs _names "$packages")"; just rs "$recipe" $packages ;;
-    esac
-
-    if [[ "$packages" == "ALL" ]] || just rs _wants-tokio-features "$packages"; then
-        just rs tokio-features
-    fi
-
-    # moq-wasm's crate root is entirely `#![cfg(target_arch = "wasm32")]`, so
-    # however it got selected the host-target pass above compiled it to nothing
-    # and saw no errors in it. This wasm32 pass is what actually checks it.
-    #
-    # The alternation must list every package `wasm` compiles, not just moq-wasm:
-    # nothing in the workspace depends on moq-ffi, so an moq-ffi-only diff selects
-    # only itself and would never reach the gate that exists to cover it. moq-mux
-    # is selected by its dependents, none of which are moq-wasm.
-    if [[ "$packages" == "ALL" ]] || just rs _wants-wasm "$packages"; then
-    	just rs wasm
-    fi
-
-    # moq-video's and moq-audio's device code is behind `capture`, which is off
-    # by default, so the pass above never compiles it. Only nightly's
-    # `--all-features` did, and a break there lands on main.
-    if [[ "$packages" == "ALL" ]] || just rs _wants-capture "$packages"; then
-    	just rs capture
-    fi
-
-    # moq-relay's io_uring listener is behind `io-uring`, off by default, so the
-    # pass above never compiles it. `check --all` reaches it through `bench
-    # check`, but only for a diff under `bench/`; a relay change would otherwise
-    # land on the nightly.
-    if [[ "$packages" == "ALL" ]] || just rs _wants-uring "$packages"; then
-    	just rs uring-check
-    fi
-
-    # Each media feature shape compiles on its own (see rs/scripts/media-features.sh),
-    # about two minutes, so only a diff that reaches the media crates, or the
-    # contract script itself, pays for it.
-    if [[ "$packages" == "ALL" ]] || just rs _wants-media-features "$packages" "$FILES"; then
-    	just rs media-features
-    fi
+# Like `test`, but only the crates in a changed-file list plus their dependents.
+test-changed $LIST:
+    sh/rs/select.sh test "$LIST"
 
 # Compile moq-tokio by itself at the feature extremes and with each crypto provider.
-# Its default-feature build is already part of the ordinary clippy pass above.
 tokio-features:
-    #!/usr/bin/env bash
-    set -euo pipefail
+    sh/rs/tokio-features.sh
 
-    cargo clippy --locked -p moq-tokio --no-default-features -- -D warnings
-    cargo clippy --locked -p moq-tokio --all-features -- -D warnings
-    cargo clippy --locked -p moq-tokio --no-default-features --features noq,aws-lc-rs -- -D warnings
-    cargo clippy --locked -p moq-tokio --no-default-features --features noq,ring -- -D warnings
-
-    for feature in aws-lc-rs ring tcp uds websocket; do
-        cargo clippy --locked -p moq-tokio --no-default-features --features "$feature" -- -D warnings
-    done
-
-    want='a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature'
-    if output=$(cargo check --locked -p moq-tokio --no-default-features --features noq 2>&1); then
-        echo "rs: moq-tokio with only noq should reject its missing crypto provider" >&2
-        exit 1
-    fi
-    if ! grep -qF "$want" <<< "$output"; then
-        echo "rs: moq-tokio with only noq should fail on: $want" >&2
-        echo "$output" | grep -E '^error' >&2 || true
-        exit 1
-    fi
-
-# Same as `fix`, but scoped the same way as `check-changed`.
-fix-changed $FILES:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    packages=$(just rs _select "$FILES")
-    case "$packages" in
-    	"")    echo "rs: no crates affected; skipping." ;;
-    	ALL)   just rs fix --workspace {{ no_fuzz }} ;;
-    	*)     echo "rs: fixing $(just rs _names "$packages")"; just rs fix $packages ;;
-    esac
-
-    # Mirrors `check-changed`'s gate, alternation included: without this a wasm32
-    # lint is never auto-fixed, and `check`'s wasm32 clippy pass fails on it later.
-    if [[ "$packages" == "ALL" ]] || just rs _wants-wasm "$packages"; then
-    	just rs wasm-fix
-    fi
-
-# Runs the `#[cfg(target_os = "windows")]` code past the compiler: moq-video's
-# Media Foundation capture/encode/decode and its D3D11 frames, which the Linux
-# gate skips entirely. Cross-compiling can't stand in, because openh264-sys2
-# builds vendored C++ that needs an MSVC toolchain and openh264 is a
-# non-optional dependency.
-#
-# Windows runners are throttled too hard for a per-PR gate, so nightly.yml runs
-# this once a day instead. A break there lands on main rather than being caught
-# in review, which is the same trade the other nightly gates make.
-#
-# Default features rather than `--all-features`: jemalloc doesn't build on
-# MSVC, while moq-video's Linux-only `nvidia` default
-# are already no-ops off Linux. moq-gst is excluded because it links
-# GStreamer via pkg-config, which the Windows runner doesn't have.
-#
-# `moq-cli/play` and `moq-cli/capture` are named explicitly because they are
-# off by default, and they are the only thing that compiles the cli's own
-# device and render code.
+# Runs the `#[cfg(target_os = "windows")]` code past the compiler, which the
+# Linux gate skips; nightly.yml runs it on a Windows runner. Default features,
+# since jemalloc doesn't build on MSVC, and moq-gst is excluded because the
+# runner has no GStreamer. `moq-cli/play` and `moq-cli/capture` are the only
+# thing that compiles the cli's device and render code.
 
 # Compile the whole workspace on a Windows host. Must run ON Windows.
 windows *args:
@@ -583,111 +88,52 @@ windows *args:
 
 # Compile and test the io_uring relay path, which is off the default feature set.
 # Linux-only, and the tests below the 6.12 kernel floor skip themselves.
-#
-# `qlog` is a second axis, and the traces are what a debugging run depends on,
-# so it gets a separate pass.
 uring *args:
     just rs uring-check {{ args }}
     cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }}
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets {{ args }} -- -D warnings
     cargo nextest run --locked -p moq-uring --features qlog --all-targets {{ args }}
 
-# Compile the io_uring relay path, off the default feature set. `check-changed`
-# runs this whenever moq-relay is selected, so a change that breaks the ring
-# listener fails its own PR rather than landing on the nightly.
+# Compile the io_uring relay path, off the default feature set.
 uring-check *args:
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
 
-# Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
-# VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,
-# plus moq-audio's ScreenCaptureKit system audio and TCC permission pre-check.
-#
-# Same trade as `windows`: nightly.yml runs this once a day rather than gating a
-# merge on a Mac runner. The moq-video half also has a release-time backstop,
-# since libmoq's `libmoq-v*` tag build compiles it on Apple Silicon. The
-# moq-audio half has none: libmoq and moq-ffi take it codecs-only, so no release
-# build compiles its capture backend and this recipe is the only thing that does.
-#
-# Scoped to those two crates instead of the workspace, because they hold all
-# the Apple-gated code the Linux gate misses. moq-ffi (and through it the
-# Swift/Kotlin/Go wrappers) already compiles on macOS in swift.yml.
-# `--all-features` also compiles the off-by-default cpal hosts and PipeWire
-# capture, which are Linux-only and no-ops here, so it costs nothing extra.
+# moq-video's VideoToolbox/ScreenCaptureKit/AVFoundation code and moq-audio's
+# ScreenCaptureKit capture, which nightly.yml compiles on a Mac runner.
 
 # Compile the Apple-only code paths. Must run ON macOS.
 macos *args:
     cargo check --locked -p moq-video -p moq-audio --all-targets --all-features {{ args }}
 
-# The Linux device code: moq-video's V4L2 and X11 capture and moq-audio's cpal
-# capture, all behind the off-by-default `capture` feature. `check-changed` runs
-# this whenever either crate is selected. The per-crate `--features` spelling
-# keeps it to those two instead of widening what their dependencies compile.
-# `--all-features` would also build the bindgen codecs, which nightly covers.
-
 # Compile and lint the capture feature, which the default check skips.
 capture *args:
     cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture {{ args }} -- -D warnings
 
-# Same idea as `windows`/`macos`, for Android: moq-video's MediaCodec encoder and
-# decoder, its `Surface::HardwareBuffer` variant, and the `frame::android` module
-# are all `#[cfg(target_os = "android")]`, so a host-target check compiles none of
-# them and every error in them stays invisible.
-#
-# Unlike `windows` and `macos` this needs no special host: the Android targets
-# cross-compile from Linux in about half a minute. It needs an NDK, which
-# `cargo-ndk` finds through `ANDROID_NDK_HOME` or the standard SDK layout. The
-# dev shell provides neither, so android.yml runs this outside Nix on a GitHub
-# runner, whose image ships an NDK, for every PR that touches moq-video or
-# anything it is built from.
-#
-# arm64-v8a alone: it is the only ABI anything here ships, and the code is not
-# ABI-specific, so the other two would compile the same source twice more.
-#
-# `check` rather than a `-D warnings` clippy, matching `windows` and `macos`:
-# the capture module's plumbing is dead on a target with no capture backend, so
-# a denying lint would fail on code this recipe is not here to police.
+# moq-video's MediaCodec code is `#[cfg(target_os = "android")]`. Needs an NDK,
+# which the dev shell lacks, so android.yml runs it outside Nix. `check` rather
+# than a denying clippy: the capture plumbing is dead on a target without a
+# capture backend.
 
 # Compile the Android backends, which the host-target check skips.
 android *args:
     cargo ndk -t arm64-v8a --platform 26 check --locked -p moq-video --all-targets {{ args }}
 
-# Same idea as `windows`/`macos`, for the browser: moq-wasm's whole crate root is
-# `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace`
-# compiles an empty crate and every error in it stays invisible. Only a wasm32
-# build sees the code.
-#
-# Unlike those two this needs no special host, so `ci` runs it on every Rust PR.
-# The wasm32 target and the `getrandom`/`web-sys` cfg flags come from the Nix dev
-# shell and `.cargo/config.toml`. Not to be confused with the root `just wasm`,
-# which builds the shippable `@moq/wasm` package (wasm-bindgen, release profile);
-# this is the compile gate.
-
-# `moq-mux` and `moq-ffi` ride along in the same invocation on purpose: `moq-mux`
-# needs `getrandom`'s `wasm_js` backend that only its siblings declare, and feature
-# unification only happens within one cargo invocation. Splitting them fails on
-# getrandom. `--lib` rather than `--all-targets` because moq-mux's tests use tokio's
-# native timers and moq-ffi's drive a native relay; moq-wasm has no test targets, so
-# it loses no coverage.
+# moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a wasm32
+# build sees the code. Not to be confused with `just js wasm`, which builds the
+# shippable `@moq/wasm` package. `moq-mux` and `moq-ffi` share the invocation
+# because moq-mux needs the getrandom backend only its siblings declare, and
+# features unify only within one cargo invocation.
 
 # Compile and lint the browser/WASM bindings, which the host-target check skips.
 wasm *args:
     cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi --target wasm32-unknown-unknown --lib {{ args }} -- -D warnings
-
-# The `fix` counterpart to `wasm`. `cargo fmt` is scoped rather than `--all`
-# because this runs alongside `fix`, which already formats everything else.
 
 # Auto-fix the browser/WASM bindings.
 wasm-fix *args:
     cargo clippy --locked --fix --allow-staged --allow-dirty -p moq-wasm -p moq-mux -p moq-ffi --target wasm32-unknown-unknown --lib {{ args }}
     cargo fmt -p moq-wasm -p moq-mux -p moq-ffi
 
-# Dependency advisories plus the license/ban policy. Time-based rather than
-# diff-based: an advisory lands without this repo changing, so a per-PR run both
-# fires on PRs that cannot affect it and stays silent on the days nobody pushes.
-# Runs nightly instead (.github/workflows/nightly.yml), which also keeps a fresh
-# advisory from blocking an unrelated PR mid-review.
-
-# Audit dependencies against deny.toml.
+# Audit dependencies against deny.toml. Nightly: advisories land without a diff.
 audit:
     cargo deny check --show-stats
 
@@ -695,109 +141,16 @@ audit:
 relay-minimal:
     cargo nextest run --locked -p moq-relay --no-default-features --lib -E 'test(workers_require_a_quic_backend)'
 
-# libmoq's C fixtures (`rs/libmoq/c-tests/*.c`) link `libmoq.a` the way an
-# embedder does: an external `cc` against the generated `moq.h`, plus the native
-# libraries from `rs/libmoq/native-libs` that cargo can't inject into a link it
-# doesn't drive. Each fixture pins part of the C ABI at compile time and
-# exercises it at runtime, so it has to run, not just compile.
-#
-# Outside nextest on purpose. The staticlib link alone takes ~2 minutes, past the
-# hang budget in `.config/nextest.toml` once the rest of the workspace builds
-# beside it, and `rs/CLAUDE.md` says to make a slow test fast, not to raise the
-# ceiling. obs.yml runs this on every PR that touches rs/libmoq, right after it
-# has built the same debug libmoq.a for the plugin, and nightly.yml covers the
-# paths that filter misses.
-#
-# Unix only: linking a Rust staticlib from MSVC spells the flags and the
-# archive (`moq.lib`) differently, and this recipe doesn't model that.
+# Outside nextest because the staticlib link alone outlasts its hang budget.
 
 # Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
 c-tests:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cc="${CC:-cc}"
-    if ! command -v "$cc" >/dev/null; then
-        echo "no C compiler at '$cc'" >&2
-        exit 1
-    fi
+    sh/rs/c-tests.sh
 
-    cargo build --locked -p libmoq
-
-    # Ask cargo where it put the staticlib rather than assuming target/debug:
-    # CARGO_TARGET_DIR and a configured build target (`target/<triple>/debug`)
-    # both move it, and guessing wrong would link a stale copy or nothing.
-    # Replays the build above from cache, so it costs a process, not a compile.
-    lib=$(cargo build --locked -p libmoq --message-format=json |
-        jq -r 'select(.reason == "compiler-artifact") | .filenames[] | select(endswith("/libmoq.a"))' |
-        tail -1)
-    if [ -z "$lib" ]; then
-        echo "cargo reported no libmoq.a for libmoq" >&2
-        exit 1
-    fi
-    # The header sits beside the profile directory: rs/libmoq/build.rs writes it
-    # to `<target>/include`, one level above `<target>/<profile>/libmoq.a`.
-    profile=$(dirname "$lib")
-    include="$(dirname "$profile")/include"
-    if [ ! -f "$include/moq.h" ]; then
-        echo "$include/moq.h missing after 'cargo build --locked -p libmoq'" >&2
-        exit 1
-    fi
-
-    # Same list build.rs (moq.pc), CMakeLists.txt, and test/interop/interop.sh read:
-    # `framework:Foo` is a linker framework flag, anything else a plain library.
-    case "$(uname -s)" in
-        Darwin) native_libs=rs/libmoq/native-libs/apple.txt ;;
-        *) native_libs=rs/libmoq/native-libs/linux.txt ;;
-    esac
-    libs=()
-    while read -r entry; do
-        case "$entry" in
-            '' | '#'*) continue ;;
-            framework:*) libs+=(-framework "${entry#framework:}") ;;
-            *) libs+=("-l$entry") ;;
-        esac
-    done <"$native_libs"
-
-    out=$(mktemp -d)
-    trap 'rm -rf "$out"' EXIT
-
-    # The C docs compile against this header too: each sample beside the inputs
-    # doc-samples.h declares, and every name the prose cites. A `moq_decode_*`
-    # wildcard ends in `_` and is skipped.
-    bash doc/lib/samples.sh c doc/lib/c/index.md >"$out/doc-samples.c"
-    "$cc" -fsyntax-only -Werror=implicit-function-declaration -include rs/libmoq/c-tests/doc-samples.h -I"$include" "$out/doc-samples.c"
-    for name in $(grep -oE '\b(moq|MOQ)_[A-Za-z0-9_]*' doc/lib/c/index.md | grep -v '_$' | sort -u); do
-        if ! grep -qw "$name" "$include/moq.h"; then
-            echo "doc/lib/c/index.md cites $name, which moq.h does not declare" >&2
-            exit 1
-        fi
-    done
-
-    for source in rs/libmoq/c-tests/*.c; do
-        bin="$out/$(basename "$source" .c)"
-        "$cc" "$source" -I"$include" -L"$profile" -lmoq "${libs[@]}" -o "$bin"
-        echo "running $source"
-        "$bin"
-    done
-
-# The feature permutations `check` leaves out. Each is a full workspace compile
-# at a feature set that shares almost no artifacts with the default one (~6min
-# for the all-features clippy alone), which is why this is nightly rather than
-# part of the per-PR gate.
-#
-# `--all-features` is the only thing that compiles moq-cli's play/capture, the
-# moq-video and moq-audio device features, the Linux bindgen codecs (vaapi,
-# v4l2), PipeWire, and jemalloc. `--no-default-features` is
-# the only thing that compiles the `#[cfg(not(feature = ...))]` arms.
-#
-# Cargo unifies features across a workspace selection. Check each package alone
-# to catch missing dependencies in minimal builds. The nightly sweep adds each
-# feature to aws-lc-rs; tokio-features checks provider-free transports, standalone
-# providers, and the intentional refusal of rustls QUIC without a provider.
-#
-# Both carry `--all-targets`. A `#[cfg(test)]` module leans on whatever the
-# default features happened to import, so a test that only compiles by accident
-# is invisible to a lib-only check.
+# The feature permutations `check` leaves out, nightly. `--all-features` is the
+# only thing that compiles moq-cli's play/capture, the device features, the
+# Linux bindgen codecs, PipeWire, and jemalloc; `--no-default-features` the only
+# thing that compiles the `#[cfg(not(feature = ...))]` arms.
 
 # Compile the workspace at the feature extremes.
 features:
@@ -816,159 +169,48 @@ features:
 # Compile the media crates at supported feature boundaries and prove expensive
 # native/render dependencies are absent when their features are excluded.
 media-features:
-    rs/scripts/media-features.sh
+    sh/rs/media-features.sh
 
-# nextest, not `cargo test`, so a wedged test is killed instead of pinning a core
-# until someone notices (`.config/nextest.toml` sets the timeout). The trade is
-# doctests, which nextest does not execute; `just rs doctest` covers those.
-#
-# Takes cargo arguments, so `just rs test -p moq-net` works. `test-changed` is
-# the diff-scoped variant that `just ci test` dispatches to.
-#
-# clippy-driver as the compiler wrapper is rustc plus the lint passes, so this
-# one compilation both builds the test binaries and reports clippy findings.
-# `cargo clippy` can't be reused here: it asks cargo for metadata only, and a
-# metadata build and a codegen build have different fingerprints, so running
-# both compiles the dependency tree twice. Linting here is free, which is what
-# lets `check-test` (and so the root `just check`) compile Rust once.
-#
-# RUSTC_WORKSPACE_WRAPPER, not RUSTC_WRAPPER, for two reasons. Cargo folds it
-# into the fingerprint, so a crate already built by a plain `cargo test` is
-# rebuilt through clippy rather than silently reported as fresh with no
-# findings. And it applies to workspace crates only, so dependencies keep the
-# artifacts they share with plain cargo instead of duplicating the whole tree.
-# It is also what `cargo clippy` sets internally.
-#
-# Findings stay warnings rather than errors. `check-test` is the gate (it sets
-# `build.warnings=deny`), and a hard failure here would block running the tests
-# over an unused import while you are mid-edit.
-#
-# No RUSTFLAGS: it is part of cargo's fingerprint too, so setting it here would
-# split the artifact cache against every other cargo invocation, including CI's
-# warm cache. Skips the wrapper entirely when clippy-driver is absent.
+# nextest kills a wedged test (`.config/nextest.toml` sets the timeout), but
+# skips doctests; `just rs doctest` covers those. clippy-driver as the workspace
+# wrapper reports lint findings from the same compile, as warnings: `check-test`
+# is the gate. It is part of cargo's fingerprint, and RUSTFLAGS would split the
+# artifact cache, which is why neither is set any other way.
 
 # Run the test suite, reporting clippy findings from the same compile.
 test *args:
     RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" cargo nextest run --locked --all-targets {{ args }}
 
-# Exercise the Vulkan producer -> CUDA image contract, the GPU color conversion
-# and resize, and NVENC encoding of the result on Linux/NVIDIA hardware. The
-# driver directory is added explicitly because the Nix shell's dynamic loader
-# path does not include Ubuntu's host driver directory.
+# Exercise Vulkan -> CUDA -> NVENC on Linux/NVIDIA hardware.
 vulkan-cuda:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    driver=$(/usr/sbin/ldconfig -p | awk '/libcuda\.so\.1/{print $NF; exit}')
-    if [[ -z "$driver" ]]; then
-        echo "libcuda.so.1 is not installed" >&2
-        exit 1
-    fi
-    driver_dir=$(dirname "$driver")
-    export LD_LIBRARY_PATH="$driver_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    cargo nextest run --locked -p moq-video --run-ignored only -E 'test(/^frame::(vulkan|cuda)::tests::vulkan_cuda_/)'
-
-# Same selection as `check-changed`: compiling a crate's test binaries is the
-# expensive half of a test run, so scoping matters more here than anywhere else.
-#
-# `--no-tests=pass` only on the scoped branch. A selection can legitimately hold
-# nothing testable (moq-wasm has no host-target tests, since its crate root is
-# `#![cfg(target_arch = "wasm32")]`), and nextest exits 4 on that by default.
-# The unscoped branch keeps the default, where finding no tests really is wrong.
-
-# Like `test`, but only the crates a diff touches plus their dependents.
-test-changed $FILES:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    packages=$(just rs _select "$FILES")
-    case "$packages" in
-    	"")    echo "rs: no crates affected; skipping tests." ;;
-    	ALL)   just rs test --workspace {{ no_fuzz }} ;;
-    	*)     echo "rs: testing $(just rs _names "$packages")"; just rs test --no-tests=pass $packages ;;
-    esac
+    sh/rs/vulkan-cuda.sh
 
 # Compile and run the `/// ```` examples, which nextest skips.
 doctest *args:
     cargo test --locked --doc {{ args }}
 
+# `--cfg loom` swaps kio's primitives for loom's, so it rebuilds the world and
+# stays out of `check`. `--release` because a model check runs the body once
+# per interleaving (411s -> 51s); the assertions are plain `assert!`. kio's
+# models search every interleaving; moq-net's cap preemptions (see
+# `tests/loom.rs`, `LOOM_MAX_PREEMPTIONS`). kio's own unit tests are
+# `cfg(not(loom))`.
+
 # Permutation-test the concurrent handoffs with loom.
-#
-# `--cfg loom` swaps kio's Mutex/atomics for loom's instrumented ones, so it
-# rebuilds the world and can't share artifacts with a normal `cargo test`, so
-# it stays separate from `check`/`ci`.
-#
-# `--release` because a model check runs the body once per interleaving, so the
-# optimizer pays for itself many times over: 411s -> 51s across the two suites.
-# Our assertions are plain `assert!`, not `debug_assert!`, so nothing is
-# compiled out (verified by re-running the mutation check in release).
-#
-# kio's models search every interleaving. moq-net's compose far more operations
-# per path, so they cap preemptions (see `tests/loom.rs`) to stop the search
-# growing exponentially with each lock the model layer adds. Set
-# `LOOM_MAX_PREEMPTIONS` to search deeper.
-#
-# kio's own unit tests are `cfg(not(loom))`: they'd construct loom primitives
-# outside `loom::model`, which panics.
 loom *args:
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: {{ args }}
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom {{ args }}
 
-# Coverage-guided fuzzing of the moq-net wire codecs (libFuzzer, via cargo-fuzz).
-#
-# The one recipe that steps off the pinned toolchain: libFuzzer needs `-Zsanitizer`,
-# which is nightly-only, so this stays out of `check` and `test` the same way `loom`
-# does. What CI gets instead is the replay: the target bodies live in moq-net's hidden
-# `fuzz` module, and its own tests run the generated corpus plus everything committed
-# under `fuzz/regressions/` on stable. A crash found here becomes a regression test
-# nobody has to install cargo-fuzz to run.
-#
-# Seeds are regenerated first so the corpus follows the dispatch rather than a stale
-# run, and libFuzzer writes what it discovers to the FIRST corpus directory, which is
-# why the generated seeds are passed second and stay read-only.
-#
-# TARGET is lite, ietf, varint, or path. Arguments pass through, so
-# `just rs fuzz lite -- -max_total_time=300` bounds a run. See rs/moq-net/fuzz/README.md.
+# Needs nightly and cargo-fuzz; CI replays the corpus on stable through
+# moq-net's own tests instead. See rs/moq-net/fuzz/README.md.
+
+# Fuzz the moq-net wire codecs: `just rs fuzz lite -- -max_total_time=300`.
 fuzz target *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
+    sh/rs/fuzz.sh {{ target }} {{ args }}
 
-    if ! command -v cargo-fuzz > /dev/null 2>&1; then
-    	echo "rs: cargo-fuzz is missing: cargo install --locked cargo-fuzz" >&2
-    	exit 1
-    fi
-
-    if ! rustup run nightly rustc --version > /dev/null 2>&1; then
-    	echo "rs: the nightly toolchain is missing: rustup toolchain install nightly" >&2
-    	exit 1
-    fi
-
-    cargo run --locked -q -p moq-net --features fuzz --example fuzz-seeds -- rs/moq-net/fuzz/seeds
-    mkdir -p rs/moq-net/fuzz/corpus/{{ target }}
-
-    # Nightly by PATH rather than by `cargo +nightly`: the dev shell puts a
-    # Nix-provided cargo ahead of the rustup shim, so the `+` form is not
-    # understood, and cargo-fuzz shells out to a bare `cargo` and `rustc` anyway.
-    # Both have to be the nightly ones or the sanitizer flags are rejected.
-    export PATH="$(rustup run nightly rustc --print sysroot)/bin:$PATH"
-
-    cargo fuzz run --fuzz-dir rs/moq-net/fuzz {{ target }} \
-    	rs/moq-net/fuzz/corpus/{{ target }} rs/moq-net/fuzz/seeds/{{ target }} {{ args }}
-
+# Build the default workspace members.
 build:
     cargo build --locked
-
-# Run a moq-bench preset against a relay, e.g. `just rs bench chat https://relay.example.com`.
-# Extra args pass through, so `--connections 500 --output stats.jsonl` work as-is.
-bench preset url *args:
-    cargo run --release -p moq-bench -- --file 'rs/moq-bench/config/{{ preset }}.toml' --connect '{{ url }}' {{ args }}
-
-# Measure the Linux Tokio/epoll UDP syscall path. Extra args pass to Criterion,
-# e.g. `just rs bench-udp-tokio --quick`.
-bench-udp-tokio *args:
-    cargo bench -p moq-uring --bench udp_tokio -- {{ args }}
-
-# Measure the Linux io_uring UDP completion path with multishot recvmsg.
-bench-udp-uring *args:
-    cargo bench -p moq-uring --bench udp_uring -- {{ args }}
 
 # Run the comparable epoll and io_uring UDP matrices.
 bench-udp *args:
@@ -986,71 +228,46 @@ bench-echo *args:
 bench-session *args:
     cargo bench -p moq-uring --bench session_lite -- {{ args }}
 
-# Sample a process's CPU/memory/context switches on this host (run it where the
-# relay runs; it only reads /proc). E.g. `just rs bench-host --name moq-relay`.
-bench-host *args:
-    cargo run --release -p moq-bench --bin moq-bench-host -- {{ args }}
-
-# Remove the Rust target directory.
-clean:
-    cargo clean
-
-# Check semver compatibility against crates.io (default-members only).
-semver:
-    cargo semver-checks check-release
-
-# Update versions and changelogs via release-plz.
-bump:
-    release-plz update
-
 # Create release PRs and publish crates via release-plz.
 release:
     release-plz release-pr --git-token "$GITHUB_TOKEN"
     release-plz release --git-token "$GITHUB_TOKEN"
 
-update:
-    cargo update
-    cargo upgrade --incompatible
-
-# Build a .deb or .rpm for one of the Rust binaries locally. nfpm comes
-# from the flake's dev shell (`nix develop`). For .rpm produced this way,
-# the linkage matches the host's glibc; CI uses an AlmaLinux 9 container
-# to produce broadly compatible artifacts instead.
-#
-# Examples:
-#   just rs package moq-relay deb
-
-# just rs package moq-cli rpm
+# Build a .deb or .rpm locally: `just rs package moq-relay deb`.
 package crate packager:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    case "{{ crate }}" in
-    	moq-relay)      bin=moq-relay  ;;
-    	moq-cli)        bin=moq        ;;
-    	*) echo "Unknown crate: {{ crate }} (use moq-relay or moq-cli)" >&2; exit 1 ;;
-    esac
-    case "{{ packager }}" in
-    	deb)
-    		if command -v dpkg >/dev/null 2>&1; then
-    			arch=$(dpkg --print-architecture)
-    		else
-    			case "$(uname -m)" in
-    				x86_64)        arch=amd64 ;;
-    				aarch64|arm64) arch=arm64 ;;
-    				*) echo "Cannot infer deb arch from host $(uname -m)" >&2; exit 1 ;;
-    			esac
-    		fi
-    		;;
-    	rpm) arch=$(uname -m) ;;
-    	*) echo "Unknown packager: {{ packager }} (use deb or rpm)" >&2; exit 1 ;;
-    esac
-    version=$(grep -m1 '^version' rs/{{ crate }}/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
-    cargo build --locked --release -p {{ crate }}
-    mkdir -p dist
-    VERSION="$version" ARCH="$arch" BINARY_PATH="target/release/$bin" \
-        rs/scripts/package-nfpm.sh packaging/{{ crate }}/nfpm.yaml {{ packager }} dist/
-    if [[ "{{ packager }}" == deb && -f "packaging/{{ crate }}/transition.yaml" ]]; then
-        VERSION="$version" ARCH="$arch" \
-            rs/scripts/package-nfpm.sh packaging/{{ crate }}/transition.yaml deb dist/
-    fi
-    ls -1 dist/
+    sh/rs/package.sh {{ crate }} {{ packager }}
+
+# Build and package a workspace binary as a release tarball.
+[positional-arguments]
+package-binary *args:
+    sh/rs/package-binary.sh "$@"
+
+# Build and package a workspace binary as a Windows .zip.
+[positional-arguments]
+package-windows *args:
+    sh/rs/package-windows.sh "$@"
+
+# Render an nfpm config from the environment and build a .deb or .rpm: CONFIG PACKAGER OUTPUT.
+[positional-arguments]
+package-nfpm *args:
+    sh/rs/package-nfpm.sh "$@"
+
+# Build and package the moq-ffi native libraries, or only its bindings.
+[positional-arguments]
+package-ffi *args:
+    rs/moq-ffi/build.sh "$@"
+
+# Build and package libmoq.
+[positional-arguments]
+package-libmoq *args:
+    rs/libmoq/build.sh "$@"
+
+# Build and package the moq-gst GStreamer plugin.
+[positional-arguments]
+package-gst *args:
+    rs/moq-gst/build.sh "$@"
+
+# Load a packaged moq-gst plugin into the host's GStreamer and find its elements.
+[positional-arguments]
+gst-smoke *args:
+    rs/moq-gst/smoke.sh "$@"
