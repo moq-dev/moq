@@ -1,10 +1,10 @@
 //! HTTP-server side: accept WHIP/WHEP offers from remote clients.
 //!
-//! Mounts axum routers that publish into [`moq_net::origin::Producer`] (WHIP
+//! Accepts offers that publish into [`moq_net::origin::Producer`] (WHIP
 //! / `server publish`) and pull from [`moq_net::origin::Consumer`] (WHEP /
 //! `server subscribe`). The HTTP listener itself is the caller's
-//! responsibility; the `moq-cli` `rtc` subcommand mounts these under an
-//! HTTP server.
+//! responsibility; the `moq-cli` `rtc` subcommand mounts the bundled axum
+//! routers (the `server` feature) under an HTTP server.
 
 pub mod whep;
 pub mod whip;
@@ -16,7 +16,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(feature = "server")]
 use axum::Router;
+#[cfg(feature = "server")]
 use axum::http::{HeaderValue, StatusCode, Uri};
 use tokio::sync::{OnceCell, oneshot};
 
@@ -117,6 +119,7 @@ fn normalize_session_result(result: Result<()>) -> Result<()> {
 /// Build the `Location` header for a negotiated session by appending the
 /// resource id to the request path, preserving whatever prefix the router is
 /// mounted under.
+#[cfg(feature = "server")]
 pub(crate) fn session_location(uri: &Uri, resource_id: &str) -> Option<HeaderValue> {
 	let base = uri.path().trim_end_matches('/');
 	let path = if base.is_empty() {
@@ -174,7 +177,7 @@ impl Default for Config {
 	}
 }
 
-/// Shared WebRTC media state that hands axum routers to the caller.
+/// Shared WebRTC media state: the UDP mux and live sessions behind [`whip::accept`] and [`whep::accept`].
 #[derive(Clone)]
 pub struct Server {
 	inner: Arc<Inner>,
@@ -217,7 +220,8 @@ impl Server {
 	/// The router derives the broadcast name from the request path and performs
 	/// no authentication. To own the route and authorize requests yourself
 	/// (resolving the broadcast name from a verified token), skip the router and
-	/// call [`whip::accept`] directly from your own handler.
+	/// call [`whip::accept`] directly from your own handler. Only with the `server` feature.
+	#[cfg(feature = "server")]
 	pub fn publish_router(&self, publisher: moq_net::origin::Producer) -> Router {
 		whip::router(self.clone(), publisher)
 	}
@@ -228,7 +232,8 @@ impl Server {
 	/// The router derives the broadcast name from the request path and performs
 	/// no authentication. To own the route and authorize requests yourself
 	/// (resolving the broadcast name from a verified token), skip the router and
-	/// call [`whep::accept`] directly from your own handler.
+	/// call [`whep::accept`] directly from your own handler. Only with the `server` feature.
+	#[cfg(feature = "server")]
 	pub fn subscribe_router(&self, subscriber: moq_net::origin::Consumer) -> Router {
 		whep::router(self.clone(), subscriber)
 	}
@@ -269,6 +274,7 @@ impl Server {
 
 /// Shared `DELETE` handler for both bundled routers: parse the resource id from
 /// the trailing path segment and terminate the matching session.
+#[cfg(feature = "server")]
 pub(crate) fn delete(server: &Server, path: &str) -> StatusCode {
 	match crate::sdp::parse_resource_id(path) {
 		Ok(id) if server.terminate(&id.to_string()) => StatusCode::OK,
@@ -313,6 +319,7 @@ mod tests {
 		assert!(normalize_session_result(Err(Error::SessionClosed)).is_ok());
 	}
 
+	#[cfg(feature = "server")]
 	#[test]
 	fn session_location_preserves_mount_path() {
 		let uri: Uri = "/whip/live/cam0?token=secret".parse().unwrap();

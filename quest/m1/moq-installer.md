@@ -61,7 +61,7 @@ service setup, Windows support, or new release targets.
   Use the working canonical URL until the website quest switches the example.
   Package-manager installations continue to use their package manager for
   upgrades. Describe only the subcommands the selected release actually ships.
-- Wire installer tests into `just check` or `just test` and CI. Cover initial
+- Wire installer tests into `just check` and CI. Cover initial
   install, repeat install, upgrade, explicit downgrade, product-specific latest
   selection, unsupported hosts, corrupt/missing assets, destination conflicts,
   and failure preserving an existing executable. Use controlled fixtures for

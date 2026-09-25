@@ -3,10 +3,11 @@
 ## Goal
 
 The first release from the merged tree is the one moq.pro pins: every
-binding matches the moq-ffi surface it exposes, an upgrade page walks a
+binding's docs match the surface it exposes, an upgrade page walks a
 consumer from the last main release to this one, and the merged relay has
 run on staging long enough that the origin and HLS rewrites are trusted.
-Binding parity gates this release, not the merge.
+The binding restructure in [FFI shape](/quest/m1/ffi-shape/README.md)
+follows this release rather than riding it.
 
 ## Plan
 
@@ -77,15 +78,12 @@ The soak bullet below is cleared by hand: the merged relay serves moq.pro
 staging with `/metrics` watched and a fresh viewer joining a days-old
 `moq import ts` broadcast over HLS at the end; the bounded `moq_json::window`
 timeline (#3240) is what makes that hold, and only a long run proves it. dev
-landed on main as #3793; before cutting, run `just check --all`,
-`just test all`, and `just test smoke --all` on the release revision and record
-it. Then cut the release under the existing release-plz and npm workflows; this
+landed on main as #3793; before cutting, run `just check --all` and
+`just test interop --all` on the release revision and record it. Then cut the release under the existing release-plz and npm workflows; this
 quest bumps no versions itself.
 
 Public API: none beyond the required quests. Wire: none.
 
 ## Required
 
-- [Binding parity](/quest/m0/binding-parity.md) - every wrapper reaches every moq-ffi method
-- [Binding docs](/quest/m1/binding-docs.md) - the binding pages compile against the wrappers
 - The merged relay has soaked on moq.pro staging and the maintainer has signed it off

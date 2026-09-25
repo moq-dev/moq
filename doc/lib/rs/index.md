@@ -15,9 +15,13 @@ The reference implementation. Every crate is on
 | [moq-net](/lib/rs/moq-net) | The pub/sub layer: sessions, origins, broadcasts, tracks, groups, frames. Transport-agnostic. |
 | [moq-pattern](https://docs.rs/moq-pattern) | Exact path patterns: grammar, matching, and set algebra. Re-exported by moq-net and moq-auth. |
 | [moq-tokio](https://docs.rs/moq-tokio) | Stands up QUIC with noq, TLS, WebSocket fallback, and iroh, from config or CLI flags. |
+| [moq-sock](https://docs.rs/moq-sock) | Dual-stack socket binding, `SO_REUSEPORT` groups steered by QUIC connection ID, and CPU pinning for thread-per-core listeners. |
+| [moq-uring](https://docs.rs/moq-uring) | Experimental Linux io\_uring worker: one pinned thread per ring serving moq-lite over its own QUIC stack. |
 | [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |
 | [moq-mux](/lib/rs/moq-mux) | Import and export fMP4/CMAF, MPEG-TS, Matroska, FLV, and Annex-B. |
+| [moq-archive](https://docs.rs/moq-archive) | Versioned hang recordings on any `object_store` backend: track layout, `.info` JSON, and segment objects. |
 | [moq-video](/lib/rs/moq-video) | Native capture, hardware encode/decode (Apple, Windows, NVIDIA, VAAPI, V4L2, Android), and GPU rendering. |
+| [moq-v4l](https://docs.rs/moq-v4l) | Safe Video4Linux 2 bindings with the kernel headers checked in, so a build needs no libclang. |
 | [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |
 | [moq-transcode](https://docs.rs/moq-transcode) | Just-in-time rendition ladders, GPU-resident on NVIDIA. |
 | [moq-auth](/lib/rs/moq-auth) | The authorization contract: requests, grants, leases, the HTTP client, the reference server, JWT keys, signing, and verification, plus listing live sessions and pushing a re-check. |

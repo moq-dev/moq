@@ -13,7 +13,7 @@ runs a recipe rather than a script path.
 ## Plan
 
 `just` stays as the entry point because the vocabulary (`just check`, `just
-test`, `just fix`) is in every doc, skill, and workflow. Its cost was
+fix`) is in every doc, skill, and workflow. Its cost was
 self-inflicted: logic inside recipes. The quests below are ordered and each
 requires the one before it, so they land as one line of pull requests.
 

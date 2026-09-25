@@ -122,22 +122,18 @@ just
 # Build everything
 just build
 
-# Lint and compile what your branch changed
+# Lint, compile, and test what your branch changed
 just check
-
-# Test what your branch changed, same scope
-just test
 
 # Automatically fix some linting errors, same scope
 just fix
 
 # Same as the above, over every package
 just check --all
-just test all
 just fix --all
 ```
 
-CI runs these same two recipes, so they cover the same ground locally. It sets two things you don't: `MOQ_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
+CI runs `check` as two parallel jobs, `just ci check` and `just ci test`, so it covers the same ground as your local run. It sets two things you don't: `MOQ_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
 
 See the [development guide](https://doc.moq.dev/setup/dev) and the [justfile](justfile) for more.
 

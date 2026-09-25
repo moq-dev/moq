@@ -3,9 +3,9 @@
 Status: **phases 2-6 implemented** (openh264, VideoToolbox, NVENC, VAAPI, capture
 swap + ffmpeg removal). Capture is now native on all three platforms (AVFoundation
 / ScreenCaptureKit on macOS, V4L2 on Linux, Media Foundation on Windows), so
-**nokhwa is fully removed**. VAAPI is back via discord/cros-codecs with an NV12
-surface-upload input path; the zero-copy dmabuf capture is a follow-up. See "As
-built" at the bottom for where the implementation diverged from this plan.
+**nokhwa is fully removed**. VAAPI is back via moq-vaapi, which encodes DMA-BUFs
+on the GPU and uploads CPU frames as NV12. See "As built" at the bottom for where
+the implementation diverged from this plan.
 
 ## Goal
 
@@ -412,25 +412,24 @@ software (see `backend::open`).
 > libva and vendors the libva headers its bindgen reads, so VAAPI costs the build
 > nothing: no libva-dev, no `NEEDED libva.so.2`, no entry in the nix devShell.
 
-**Input is an NV12 surface upload, not zero-copy dmabuf.** The encoder wants an
-NV12 VA surface, but UVC webcams deliver YUYV/MJPEG (decoded to CPU I420); they
-rarely expose NV12 to import zero-copy. So `backend/vaapi.rs` drives
-`new_native_vaapi` with a `VaSurfacePool`: each frame uploads I420 into a pooled
-surface as NV12 (`libva::Image`, honoring plane pitches) and encodes the surface.
-This works with the existing CPU V4L2 capture, no new capture code.
+**Input: DMA-BUFs stay on the GPU, CPU frames are uploaded.** A
+`Surface::DmaBuf` is encoded without a download. An NV12 buffer at the encoder's
+size (a VA-API decode, or one `Surface::resize` already scaled through VPP) is
+imported and encoded in place when that size is a whole number of macroblocks;
+anything else the driver imports, packed RGB from a PipeWire screen capture in
+particular, goes through VPP into the encoder's own surface. A layout the driver
+refuses falls back to the CPU path and is not tried again. Every other surface
+is converted to I420, interleaved to NV12, and uploaded into the encoder's input
+surface, which is the path a UVC webcam's YUYV or MJPEG frames take. A V4L2 capture that exports DMA-BUFs (`VIDIOC_EXPBUF`) would let an
+NV12-capable camera skip the upload too; it is not built.
 
-Follow-up (not in this PR): the **zero-copy dmabuf path** for the rare NV12-capable
-V4L2 source. Re-add `Frame::DmaBuf`, a V4L2 `VIDIOC_EXPBUF` capture (the `v4l`
-crate exposes the raw ioctl but no dmabuf stream), and a `requires_dmabuf` capture
-coupling, then import the dmabuf into a VA surface (`MemoryType::DrmPrime2`).
-
-**NOT YET VALIDATED ON HARDWARE.** Compiles on Linux with libva headers; written
-against discord/cros-codecs `discord-0.0.5` with type/field names checked against
-source. Needs a Linux + Intel/AMD GPU to confirm: (1) the `low_power` entrypoint
-(recent Intel iHD often requires the low-power encode entrypoint, AMD the full
-one; we request full and let `Kind::Auto` fall back); (2) the NV12 upload
-pitch/offset handling round-trips; (3) `cargo deny` accepts the new transitive
-licenses (drm, drm-fourcc, etc.) once the vaapi graph resolves.
+**Validated on Intel Meteor Lake** (iHD 26.1.5) by the tests in
+`encode/backend/vaapi.rs`: they encode CPU frames, VA-API decodes handed over as
+DMA-BUFs, and packed RGB buffers at and above the encoder's size, decode each
+stream with openh264, and compare pixels. They skip without a VA-API device.
+moq-vaapi opens the full encode entrypoint and falls back to the low-power one
+(`VAEntrypointEncSliceLP`) that some Intel parts expose alone; no part that
+needs the fallback has run it yet.
 
 ### NVENC ships via dlopen (no driver dependency at build or load)
 
