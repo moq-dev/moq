@@ -40,10 +40,6 @@ harness in CI, with broader network cases at least nightly, and a verdict
 with pinned sources/configurations. Any adopted production policy gets a
 separate implementation quest; this study does not silently change defaults.
 
-## Required
-
-- [Release BBR fixes](/quest/m1/quic/bbr-release.md) - measure the corrected controller through MoQ's dependency chain
-
 ## Related
 
 - [Discover media headroom](/quest/m2/quic-probe.md) - preserving an estimate and discovering spare capacity are separate problems

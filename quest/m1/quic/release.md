@@ -24,8 +24,6 @@ the parent applies.
 
 ## Required
 
-- [Release BBR fixes](/quest/m1/quic/bbr-release.md) - preserve the corrected controller in later stack releases
-
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - the
   WebTransport-required transport extension
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - the new

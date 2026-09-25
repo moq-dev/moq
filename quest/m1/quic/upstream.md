@@ -15,7 +15,7 @@ lands in the fork on MoQ's schedule; once a feature has shipped in a MoQ
 release and its shape has stopped moving, split it into an upstream PR with
 the tests it landed with.
 
-Offer the seven [BBR correctness fixes](/quest/m1/quic/bbr-release.md) and
+Offer the seven BBR correctness fixes released in noq 1.3.1 and
 their [loss](/quest/m1/quic/bbr-loss-parity.md) and
 [starvation](/quest/m1/quic/bbr-app-limited-edges.md) follow-ups with their
 regressions before promoting BBR as the default. Reuse existing
@@ -55,7 +55,6 @@ offered and answered.
 
 ## Required
 
-- [Release BBR fixes](/quest/m1/quic/bbr-release.md) - the corrected controller and its regression evidence
 - [Align BBR loss handling with draft-06](/quest/m1/quic/bbr-loss-parity.md)
 - [Mark BBR starvation wherever the source runs dry](/quest/m1/quic/bbr-app-limited-edges.md)
 
