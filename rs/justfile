@@ -687,7 +687,7 @@ relay-minimal:
 # Unix only: linking a Rust staticlib from MSVC spells the flags and the
 # archive (`moq.lib`) differently, and this recipe doesn't model that.
 
-# Compile and run libmoq's C fixtures against libmoq.a. Must run on Unix.
+# Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
 c-tests:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -736,6 +736,19 @@ c-tests:
 
     out=$(mktemp -d)
     trap 'rm -rf "$out"' EXIT
+
+    # The C docs compile against this header too: each sample beside the inputs
+    # doc-samples.h declares, and every name the prose cites. A `moq_decode_*`
+    # wildcard ends in `_` and is skipped.
+    bash doc/lib/samples.sh c doc/lib/c/index.md >"$out/doc-samples.c"
+    "$cc" -fsyntax-only -Werror=implicit-function-declaration -include rs/libmoq/c-tests/doc-samples.h -I"$include" "$out/doc-samples.c"
+    for name in $(grep -oE '\b(moq|MOQ)_[A-Za-z0-9_]*' doc/lib/c/index.md | grep -v '_$' | sort -u); do
+        if ! grep -qw "$name" "$include/moq.h"; then
+            echo "doc/lib/c/index.md cites $name, which moq.h does not declare" >&2
+            exit 1
+        fi
+    done
+
     for source in rs/libmoq/c-tests/*.c; do
         bin="$out/$(basename "$source" .c)"
         "$cc" "$source" -I"$include" -L"$profile" -lmoq "${libs[@]}" -o "$bin"

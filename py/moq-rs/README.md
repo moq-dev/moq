@@ -120,12 +120,14 @@ client = moq.Client(
 
 ### Connection
 
-- **`connect(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, publish=None, subscribe=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
-- **`Client(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, publish=None, subscribe=None)`**. Async context manager for connecting to a relay.
+- **`connect(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, max_streams=None, reconnect=True, backoff=None, publish=None, subscribe=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
+- **`Client(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, max_streams=None, reconnect=True, backoff=None, publish=None, subscribe=None)`**. Async context manager for connecting to a relay.
   - `tls_roots`. PEM root certificate file path(s) to trust instead of the system roots.
   - `tls_system_roots`. Whether to trust platform roots in addition to custom roots.
   - `tls_fingerprints`. Hex SHA-256 fingerprint(s) to pin the peer's certificate to, the native equivalent of `serverCertificateHashes`. Accepts the values a server reports via `cert_fingerprints()`, so you can trust a self-signed certificate without `tls_verify=False`.
   - `tls_cert`, `tls_key`. Paired PEM certificate chain and private key paths for mTLS.
+  - `max_streams`. Raise the peer's inbound stream cap.
+  - `reconnect`, `backoff`. Redial with a `Backoff` when the transport drops; `reconnect=False` dials once.
   - `.session`. The established `Session` (or `None` before connecting / after exit).
 - **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), publish=None, subscribe=None)`**. Async context manager + async iterator of incoming `Request`s.
   - `.local_addr`. The bound address (useful when binding to port `0`).
@@ -142,6 +144,8 @@ client = moq.Client(
   - `.cancel(code)`, `.shutdown()`. Close with an error code, or gracefully (code 0).
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
+  - `await .status() → ConnectionStatus`, `.epoch()`. Watch reconnects; the epoch counts connections, 1 on the first.
+  - `.bandwidth() → Bandwidth`. Divide the send estimate between encoders and app-owned tracks.
 
 ### Publishing
 
@@ -149,6 +153,8 @@ client = moq.Client(
   - `.dynamic() → BroadcastDynamic`
   - `.publish_audio(format, init, *, label=None) → MediaProducer`. `init` is required: an OpusHead or AudioSpecificConfig resolves the whole rendition.
   - `.publish_video(format, init=b"", *, label=None, hint=None) → MediaProducer`. `init` may be empty for a format that resolves in band; a `VideoHint` pins catalog fields the stream can't reveal (bitrate) or publishes the catalog before the first keyframe.
+  - `.encode_video(input, output, *, bandwidth=None) → VideoProducer`. Encode raw `VideoFrame`s inside the binding; `.write(frame)` each one.
+  - `.encode_audio(name, input, output, *, bandwidth=None) → AudioProducer`. Encode raw PCM `AudioFrame`s; the codec is `output.codec`, e.g. `AudioCodec.opus()`, with `output.frame_duration_us` setting the Opus frame length.
   - `.finish()`
 - **`BroadcastDynamic`**. Async source of tracks requested by subscribers.
   - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.
@@ -189,7 +195,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 
 ### Origin (advanced)
 
-- **`OriginProducer(cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
+- **`OriginProducer(*, cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
   - `.consume() → OriginConsumer`
   - `.dynamic(prefix, route=Route()) → OriginDynamic`
   - `.create_broadcast(path) → BroadcastProducer`

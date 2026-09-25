@@ -1189,7 +1189,7 @@ impl Cluster {
 			_ => subscriber.map(|origin| origin.consume().with_stats(stats.clone())),
 		};
 		Ok(Admitted {
-			lease,
+			lease: lease.with_stats(stats.clone()),
 			publisher,
 			subscriber,
 			stats,

@@ -242,6 +242,8 @@ pub struct Lease {
 	/// clock when the grant arrives, so re-polling [`ended`](Self::ended) never
 	/// restarts the countdown.
 	expires: Option<tokio::time::Instant>,
+	/// The session's stats context, moved to a re-checked tier.
+	stats: moq_net::stats::Session,
 }
 
 impl Lease {
@@ -253,7 +255,14 @@ impl Lease {
 			token: Token::new(path, &grant),
 			expires: deadline(&grant),
 			consumer,
+			stats: Default::default(),
 		}
+	}
+
+	/// Attach the session's stats context, so a re-checked tier retags it live.
+	pub fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {
+		self.stats = stats;
+		self
 	}
 
 	/// The scope the session was admitted under.
@@ -272,9 +281,8 @@ impl Lease {
 	/// A changed root or a narrower grant ends it: origin handles cannot yet narrow
 	/// a live scope in place (tracked by `quest/m1/origin-narrowing.md`). A flipped
 	/// `peer` ends it too, since the routes it already announced would be
-	/// misreported as entering here or from a peer. A changed
-	/// tier is kept for this session and applies to its next connection, since the
-	/// stats carriers resolved their counters at admission.
+	/// misreported as entering here or from a peer. A changed tier keeps the
+	/// session and moves its [stats](Self::with_stats) to the new tier.
 	pub async fn ended(&mut self) -> lease::Reason {
 		loop {
 			let expire = async {
@@ -299,7 +307,9 @@ impl Lease {
 							return lease::Reason::Narrowed;
 						}
 						if fresh.tier != self.token.tier {
-							tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed; applies to the next session");
+							tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed");
+							self.stats.set_tier(fresh.tier.clone());
+							self.token.tier = fresh.tier;
 						}
 						self.expires = deadline(&grant);
 					},

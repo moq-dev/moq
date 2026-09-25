@@ -72,6 +72,27 @@ class SmokeTest {
     }
 
     /**
+     * The WebSocket fallback knobs reach the native client: a QUIC-only dial with
+     * no head start still fails fast, and a negative delay is refused up front
+     * rather than wrapping into an enormous one.
+     */
+    @Test
+    fun `connect accepts the websocket fallback knobs`() = runTest {
+        assertFailsWith<MoqException> {
+            Moq.connect(
+                "https://localhost:0/test",
+                tlsVerify = false,
+                reconnect = false,
+                websocketEnabled = false,
+                websocketDelay = 0.milliseconds,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Moq.connect("https://localhost:0/test", websocketDelay = (-1).milliseconds)
+        }
+    }
+
+    /**
      * The `dev.moq` typealiases resolve to the FFI objects, and the wrapper
      * extensions apply to them. Constructing through an alias is enough to
      * confirm both at compile time + lib load at runtime.

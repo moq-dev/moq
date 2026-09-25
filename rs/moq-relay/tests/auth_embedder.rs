@@ -98,3 +98,52 @@ async fn a_narrowed_gateway_grant_stops_work() {
 		Err(lease::Reason::Narrowed)
 	);
 }
+
+#[tokio::test]
+async fn a_moved_gateway_tier_retags_its_stats() {
+	use moq_net::stats;
+
+	let mut cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+	cluster.stats = stats::Registry::new(stats::Config::new());
+	let registry = cluster.stats.clone();
+	let active = |tier: &'static str| {
+		registry
+			.snapshot()
+			.sessions()
+			.into_iter()
+			.find(|(t, _)| *t == stats::Tier::new(tier))
+			.map_or(0, |(_, presence)| presence.active())
+	};
+
+	let (auth, mut admissions) = auth::Auth::embedded("edge");
+	let mut grant = Grant::new(patterns(&["media/**"]), Patterns::new());
+	grant.tier = Some("gateway".into());
+	let decider = tokio::spawn({
+		let grant = grant.clone();
+		async move {
+			let admission = admissions.next().await.unwrap();
+			let (producer, consumer) = lease::Producer::new(grant);
+			admission.grant(consumer);
+			producer
+		}
+	});
+	let admitted = cluster
+		.admit(&auth, auth.request(Transport::Srt, "/room"))
+		.await
+		.unwrap();
+	let producer = decider.await.unwrap();
+	assert_eq!(active("gateway"), 1);
+
+	let work = tokio::spawn(auth::hold(admitted.lease, std::future::pending::<()>()));
+	grant.tier = Some("moved".into());
+	producer.update(grant);
+	tokio::time::timeout(std::time::Duration::from_secs(5), async {
+		while active("moved") != 1 {
+			tokio::task::yield_now().await;
+		}
+	})
+	.await
+	.expect("the held lease retags the admitted stats");
+	assert_eq!(active("gateway"), 0);
+	work.abort();
+}

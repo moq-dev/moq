@@ -95,6 +95,10 @@ each reconnect by number; `moq.WithBackoff` tunes the pacing, with
 `moq.RetryForever` as the timeout; and `moq.WithQUICMaxStreams` raises the
 peer's inbound stream cap for a subscriber to many tracks.
 
+The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
+a 200 ms head start. `moq.WithWebSocketEnabled(false)` turns it off for a
+QUIC-only relay, and `moq.WithWebSocketDelay` changes the head start.
+
 `moq.Listen` accepts sessions with per-request `Accept`/`Reject`; `Request.Transport()`
 returns the closed `moq.Transport` enum.
 `Request.SetPublish`/`SetConsume` return an error if the request is already

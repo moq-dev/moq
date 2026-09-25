@@ -80,6 +80,10 @@ and `backoff:` re-paces the retries. `moq.epoch` counts the connections, 1 on th
 `session.status()` to log each reconnect; `maxStreams` raises the peer's
 inbound stream cap for a subscriber to many tracks.
 
+The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
+a 200 ms head start. `websocketEnabled: false` turns it off for a QUIC-only
+relay, and a `websocketDelay` `Duration` changes the head start.
+
 Types are spelled without the `Moq` prefix (`Session`, `BroadcastProducer`,
 `Backoff`); the generated names stay valid, since these are aliases rather than
 wrappers. `Container`, `Route`, and the exceptions keep theirs, because
