@@ -661,12 +661,17 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 			.expect("subscription outlived its grant");
 		assert!(matches!(err, Error::Unauthorized), "{err:?}");
 		// The served side ends too: the client stops serving what it may no longer publish.
-		loop {
+		let err = loop {
 			match up_sub.recv_group().await {
 				Ok(Some(_)) => continue,
 				Ok(None) => panic!("served subscription finished instead of ending"),
-				Err(_) => break,
+				Err(err) => break err,
 			}
+		};
+		// The relay's own reader learns the peer's code across the origin's splice, not a
+		// generic drop. moq-transport reports it in PUBLISH_DONE instead.
+		if version == LITE_06 {
+			assert!(matches!(err, Error::Stream(StreamError::Unauthorized)), "{err:?}");
 		}
 		assert_eq!(pair.client_transport.close_reason(), None);
 
