@@ -660,7 +660,10 @@ impl<E: CatalogExt> Producer<E> {
 	/// `config` is a [`json::Config`](crate::json::Config) for the `json` section, or an
 	/// application's own entry embedding a [`JsonConfig`](hang::catalog::JsonConfig) (see
 	/// [`IntoRendition`](super::IntoRendition)). The producer sets its `mode`, encodes the track
-	/// with its `compression`, and fills an absent `bitrate` from what it writes.
+	/// with its `compression`, and fills an absent `bitrate` from what it writes. A
+	/// [`delta_ratio`](crate::json::Config::delta_ratio) on `json::Config` selects the snapshot
+	/// encoder; it is not written into the catalog entry. The config is `'static` so that ratio
+	/// can be read off the builder.
 	///
 	/// Errors if the entry's section already carries that name, for example an entry seeded
 	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, or if the entry
@@ -668,10 +671,10 @@ impl<E: CatalogExt> Producer<E> {
 	pub fn json_snapshot<T: serde::Serialize>(
 		&self,
 		track: moq_net::track::Producer,
-		config: impl super::IntoRendition<E, hang::catalog::JsonConfig>,
+		config: impl super::IntoRendition<E, hang::catalog::JsonConfig> + 'static,
 	) -> crate::Result<crate::json::Snapshot<T, E>> {
 		let rendition = self.data_entry(track.name())?;
-		crate::json::Snapshot::new(track, rendition, config.into_rendition())
+		crate::json::Snapshot::new(track, rendition, config)
 	}
 
 	/// Publish `track` as an append-log JSON track, advertising it in the catalog.

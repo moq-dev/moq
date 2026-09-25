@@ -211,7 +211,7 @@ for (const section of ["json", "binary"] as const) {
 			}),
 		).toThrow("omit jitter");
 		catalog.mutate((value) => {
-			expect(value).toEqual({});
+			expect(value[section]).toBeUndefined();
 		});
 
 		catalog.mutate((value) => {

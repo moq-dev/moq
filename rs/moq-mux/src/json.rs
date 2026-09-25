@@ -131,6 +131,16 @@ fn prepare(config: &mut impl AsMut<JsonConfig>, mode: Mode) -> crate::Result<boo
 	crate::compression(json.compression.as_ref())
 }
 
+/// The snapshot encoder ratio on a [`Config`] builder, if `config` is one.
+///
+/// [`IntoRendition`] only returns the catalog entry, and this ratio is not a catalog field.
+/// Downcast keeps it on the existing builder instead of a new trait method.
+fn delta_ratio_of<C: std::any::Any>(config: &C) -> Option<u32> {
+	(config as &dyn std::any::Any)
+		.downcast_ref::<Config>()
+		.and_then(|config| config.delta_ratio)
+}
+
 /// Publishes a latest-value JSON track, advertised in the catalog for as long as this handle lives.
 ///
 /// Every [`update`](Self::update) supersedes the last, so a consumer reads only the newest value.
@@ -143,14 +153,24 @@ pub struct Snapshot<T, E: CatalogExt = ()> {
 }
 
 impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
-	pub(crate) fn new<C: RenditionConfig<E> + AsMut<JsonConfig>>(
+	pub(crate) fn new<C>(
 		track: moq_net::track::Producer,
-		rendition: crate::catalog::Rendition<E, C>,
-		mut config: C,
-	) -> crate::Result<Self> {
+		rendition: crate::catalog::Rendition<E, C::Config>,
+		config: C,
+	) -> crate::Result<Self>
+	where
+		C: IntoRendition<E, JsonConfig> + std::any::Any,
+	{
+		// Read before `into_rendition` consumes the builder. Only [`Config`] carries a ratio;
+		// a custom section entry has none, and the default encoder ratio applies.
+		let delta_ratio = delta_ratio_of(&config);
+		let mut config = config.into_rendition();
 		let mut json = moq_json::snapshot::Config::default();
 		if prepare(&mut config, Mode::Snapshot)? {
 			json.compression = moq_json::Compression::Deflate;
+		}
+		if let Some(delta_ratio) = delta_ratio {
+			json.delta_ratio = delta_ratio;
 		}
 		let inner = moq_json::snapshot::Producer::new(track, json);
 		let listing = Listing::new(rendition, config)?;
@@ -442,6 +462,46 @@ mod test {
 		let consumer = Consumer::from_track(track, &entry).unwrap();
 		assert_eq!(consumer.mode(), &Mode::Snapshot);
 		assert_eq!(drain(consumer), vec![json!({ "live": true })]);
+	}
+
+	/// `delta_ratio` is an encoder setting on [`Config`], not a catalog field. A ratio of 0
+	/// publishes each value as its own group; a positive ratio keeps the next value in that group.
+	#[test]
+	fn a_config_delta_ratio_reaches_the_encoder() {
+		let (mut broadcast, catalog) = catalog();
+		let mut full = catalog
+			.json_snapshot::<Value>(track(&mut broadcast, "full"), Config::default().with_delta_ratio(0))
+			.unwrap();
+		let mut delta = catalog
+			.json_snapshot::<Value>(track(&mut broadcast, "delta"), Config::default().with_delta_ratio(100))
+			.unwrap();
+
+		let mut full_track = full.consume();
+		let mut delta_track = delta.consume();
+		for value in [json!({ "n": 1 }), json!({ "n": 2 })] {
+			full.update(&value).unwrap();
+			delta.update(&value).unwrap();
+		}
+		full.finish().unwrap();
+		delta.finish().unwrap();
+
+		// The default subscription budget keeps only the latest group. Ratio 0 rolled a new
+		// group for the second value, so that group holds one frame. A positive ratio appends
+		// the second value to the same group.
+		assert_eq!(ready_groups(&mut full_track), vec![1]);
+		assert_eq!(ready_groups(&mut delta_track), vec![2]);
+	}
+
+	fn ready_groups(subscriber: &mut moq_net::track::Subscriber) -> Vec<usize> {
+		let waiter = kio::Waiter::noop();
+		let mut counts = Vec::new();
+		loop {
+			match subscriber.poll_recv_group(&waiter) {
+				Poll::Ready(Ok(Some(group))) => counts.push(group.frame_count()),
+				Poll::Ready(Ok(None)) | Poll::Pending => return counts,
+				Poll::Ready(Err(err)) => panic!("group ended in error: {err}"),
+			}
+		}
 	}
 
 	#[test]
