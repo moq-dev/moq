@@ -2252,9 +2252,11 @@ where
 ///
 /// Draft-14 on carries no end location in PUBLISH_DONE, so this is what lets a subscriber
 /// learn the end before the live edge reaches it. A boundary at or below a group already
-/// received is the publisher breaking its own end, which no later group can repair.
+/// received is the publisher breaking its own end, which no later group can repair. A
+/// marker that lands after the subscription already ended (its grace expired) changes
+/// nothing.
 fn end_track(track: &mut track::Producer, end: u64) -> Result<(), Error> {
-	if track.final_sequence() == Some(end) {
+	if track.final_sequence().is_some() {
 		return Ok(());
 	}
 	if let Err(err) = track.finish_at(end) {

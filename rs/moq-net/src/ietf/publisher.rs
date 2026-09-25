@@ -622,12 +622,15 @@ where
 
 			// Every data stream this subscription opened is closed by now, which PUBLISH_DONE
 			// requires, so the count it reports is final.
+			let completed = served.is_some();
 			let (res, filled) = served.unwrap_or((Ok(()), false));
 			let mut streams = track_serve.opened() + u64::from(filled);
 
 			// Draft-14 on carries no end location in PUBLISH_DONE: an END_OF_TRACK object is
-			// what tells the subscriber where the track ended.
-			if res.is_ok()
+			// what tells the subscriber where the track ended. A cancelled subscription is
+			// owed nothing more.
+			if completed
+				&& res.is_ok()
 				&& let Some(end) = track_serve.end()
 			{
 				match track_serve.write_end_of_track(end, priority).await {

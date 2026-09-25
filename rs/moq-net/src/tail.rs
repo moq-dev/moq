@@ -110,16 +110,15 @@ mod tests {
 		tail.open(0);
 		tail.open(2);
 		assert!(!tail.covers(0..3), "group 1 is missing");
-		assert_eq!(tail.accounted, [0..1, 2..3]);
+		assert_eq!(tail.accounted, vec![0..1, 2..3]);
 
 		tail.account(1..2);
-		assert!(tail.covers(0..3));
-		assert_eq!(tail.accounted, [0..3], "adjacent ranges merge");
+		assert!(tail.covers(0..3) && tail.accounted.len() == 1, "adjacent ranges merge");
 
 		tail.account(5..7);
 		tail.account(9..10);
 		tail.account(4..9);
-		assert_eq!(tail.accounted, [0..3, 4..10], "one insert swallows several ranges");
+		assert_eq!(tail.accounted, vec![0..3, 4..10], "one insert swallows several ranges");
 		assert!(tail.covers(4..10));
 		assert!(!tail.covers(2..5));
 		assert!(tail.covers(7..7), "an empty range is always covered");
