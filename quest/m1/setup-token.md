@@ -9,11 +9,9 @@ its own verifier, and forwarded by the relay in `moq_auth::Request` as
 `token`, so an auth server can verify it. Today the option is stored as
 opaque bytes and ignored.
 
-Boundaries: SETUP only. The same parameter on SUBSCRIBE and every other
-message is [Request tokens](/quest/m2/cat/request-token.md)'s refusal; renewal
-through REQUEST_UPDATE and a non-zero EXPIRES is the
-[in-band auth](/quest/m1/auth/README.md) line's AUTH exchange, not a
-per-request token. No client configuration: [Token in
+Boundaries: SETUP only. The same parameter on SUBSCRIBE, REQUEST_UPDATE, and
+every other request is [Request tokens](/quest/m1/auth/request-token.md): a
+fallback that authorizes only that request. No client configuration: [Token in
 band](/quest/m1/auth/token-in-band.md) owns presenting one.
 
 ## Plan
