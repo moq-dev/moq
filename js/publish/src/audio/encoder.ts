@@ -453,7 +453,8 @@ export class Encoder {
 						const input = resampler ? resampler.push(captured) : captured;
 						if (!input) return;
 
-						for (const data of framer.push(input)) {
+						const frames = framer.push(input);
+						for (const [i, data] of frames.entries()) {
 							// The demand gate. The framer still consumes every sample so its timestamps stay
 							// on the capture clock, but there is nowhere to send a chunk with no subscriber.
 							if (!track.peek()) continue;
@@ -492,7 +493,8 @@ export class Encoder {
 
 							encoder.encode(frame);
 							frame.close();
-							contiguous = Math.round(framer.next) as Time.Micro;
+							// One input can complete several frames, and the framer has already advanced past all of them.
+							contiguous = Math.round(frames[i + 1]?.timestamp ?? framer.next) as Time.Micro;
 							this.#next = contiguous;
 						}
 					},
