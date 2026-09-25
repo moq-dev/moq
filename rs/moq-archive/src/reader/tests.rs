@@ -5,7 +5,7 @@ use moq_net::{broadcast, group};
 use object_store::ObjectStoreExt;
 
 use super::*;
-use crate::mock::Mock;
+use crate::mock::{Mock, Op};
 use crate::segment::{Frame, Group};
 use crate::{ID_MAX, Info};
 
@@ -324,6 +324,152 @@ async fn a_missing_timeline_segment_recovers_from_the_next_checkpoint() {
 			expected("video", sequence, 0..1)
 		);
 	}
+}
+
+#[tokio::test]
+async fn a_missing_tail_is_retried_on_the_next_refresh() {
+	let mut archive = Archive::new().await;
+	for segment in 0..3 {
+		archive.media("video", &[(segment, 1)]).await;
+		archive.commit(&record(segment, &[("video", &[(segment, segment)])]), 0).await;
+	}
+	// Listed, but not yet readable.
+	archive.store.inner().hide_gets("segments/0000000000000000002");
+
+	let (broadcast, mut reader) = open(&archive).await;
+	assert!(fetch(&broadcast, "video", 1, 0).await.is_ok());
+	assert!(matches!(
+		fetch(&broadcast, "video", 2, 0).await,
+		Err(moq_net::Error::NotFound)
+	));
+
+	archive.store.inner().heal();
+	archive.store.inner().take();
+	reader.refresh().await.unwrap();
+	assert_eq!(
+		archive.store.inner().take(),
+		[
+			Op::List {
+				prefix: "rec/timeline%2Ez/segments".to_string(),
+				offset: Some("rec/timeline%2Ez/segments/0000000000000000001".to_string()),
+			},
+			Op::Get("rec/timeline%2Ez/segments/0000000000000000002".to_string()),
+		],
+		"the cursor stays before the missing tail"
+	);
+	assert_eq!(
+		fetch(&broadcast, "video", 2, 0).await.unwrap(),
+		expected("video", 2, 0..1)
+	);
+}
+
+#[tokio::test]
+async fn following_lists_only_new_timeline_keys() {
+	let mut archive = Archive::new().await;
+	archive.media("video", &[(0, 1)]).await;
+	archive.commit(&record(0, &[("video", &[(0, 0)])]), 0).await;
+	let (broadcast, mut reader) = open(&archive).await;
+
+	for segment in 1..4 {
+		// A media object stored ahead of its commit is invisible until the timeline names it.
+		archive.media("video", &[(segment, 1)]).await;
+		reader.refresh().await.unwrap();
+		assert!(matches!(
+			fetch(&broadcast, "video", segment, 0).await,
+			Err(moq_net::Error::NotFound)
+		));
+
+		archive.commit(&record(segment, &[("video", &[(segment, segment)])]), 0).await;
+		archive.store.inner().take();
+		reader.refresh().await.unwrap();
+		let previous = format!("rec/timeline%2Ez/segments/{:019}", segment - 1);
+		assert_eq!(
+			archive.store.inner().take(),
+			[
+				Op::List {
+					prefix: "rec/timeline%2Ez/segments".to_string(),
+					offset: Some(previous),
+				},
+				Op::Get(format!("rec/timeline%2Ez/segments/{segment:019}")),
+			],
+			"following segment {segment} touches no media listing"
+		);
+		assert_eq!(
+			fetch(&broadcast, "video", segment, 0).await.unwrap(),
+			expected("video", segment, 0..1)
+		);
+	}
+}
+
+#[tokio::test]
+async fn an_unordered_listing_replays_in_segment_order() {
+	let mut archive = Archive::new().await;
+	archive.store.inner().unordered();
+	for segment in 0..4 {
+		archive.media("video", &[(segment, 1)]).await;
+		let pop = u64::from(segment >= 2);
+		archive.commit(&record(segment, &[("video", &[(segment, segment)])]), pop).await;
+	}
+
+	let (broadcast, mut reader) = open(&archive).await;
+
+	// The cursor is the newest segment, not the last one listed.
+	archive.media("video", &[(4, 1)]).await;
+	archive.commit(&record(4, &[("video", &[(4, 4)])]), 1).await;
+	archive.store.inner().take();
+	reader.refresh().await.unwrap();
+	assert_eq!(
+		archive.store.inner().gets(),
+		["rec/timeline%2Ez/segments/0000000000000000004"]
+	);
+
+	for segment in 0..3 {
+		assert!(matches!(
+			fetch(&broadcast, "video", segment, 0).await,
+			Err(moq_net::Error::NotFound)
+		));
+	}
+	for segment in 3..5 {
+		assert_eq!(
+			fetch(&broadcast, "video", segment, 0).await.unwrap(),
+			expected("video", segment, 0..1)
+		);
+	}
+}
+
+#[tokio::test]
+async fn a_track_without_usable_info_is_not_found() {
+	let mut archive = Archive::new().await;
+	archive.media("audio", &[(0, 1)]).await;
+	let object = |track| Object {
+		groups: vec![Group {
+			sequence: 0,
+			frames: vec![frame(track, 0, 0)],
+		}],
+	};
+	archive.store.put_groups("bare", &object("bare")).await.unwrap();
+	archive.store.put_groups("future", &object("future")).await.unwrap();
+	archive
+		.raw(&Key::info("future").unwrap(), br#"{"version":2,"priority":0,"timescale":1000}"#)
+		.await;
+	archive
+		.commit(
+			&record(0, &[("audio", &[(0, 0)]), ("bare", &[(0, 0)]), ("future", &[(0, 0)])]),
+			0,
+		)
+		.await;
+
+	let (broadcast, _reader) = open(&archive).await;
+	for track in ["bare", "future"] {
+		assert!(
+			matches!(fetch(&broadcast, track, 0, 0).await, Err(moq_net::Error::NotFound)),
+			"{track}"
+		);
+	}
+	assert_eq!(
+		fetch(&broadcast, "audio", 0, 0).await.unwrap(),
+		expected("audio", 0, 0..1)
+	);
 }
 
 #[tokio::test]
