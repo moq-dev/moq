@@ -1078,15 +1078,15 @@ def test_encode_audio_with_opus_object():
         broadcast.finish()
 
 
-async def test_decode_video_format():
-    """The decode side picks its CPU layout: unset is I420, RGBA is four bytes a pixel."""
+async def test_decode_video_frame():
+    """A decoded frame owns its picture and converts to either layout, even after its consumer is cancelled."""
     origin = moq.OriginProducer()
-    broadcast = create_announced(origin, "video-decode-format")
+    broadcast = create_announced(origin, "video-decode-frame")
     video = broadcast.encode_video(
         moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=320, height=240, framerate=30),
-        # Software both ways so the test is deterministic everywhere. uniffi nests
-        # each variant inside the enum without declaring it a subclass, so the cast
-        # is what makes the variant typecheck.
+        # Software so the encode is deterministic everywhere. uniffi nests each
+        # variant inside the enum without declaring it a subclass, so the cast is
+        # what makes the variant typecheck.
         moq.VideoEncoderOutput(
             codec=moq.VideoCodec.H264,
             track="camera",
@@ -1101,33 +1101,27 @@ async def test_decode_video_format():
         video.write(moq.VideoFrame(timestamp_us=i * 33_333, data=rgba))
 
     consumer = origin.consume()
-    broadcast_consumer = await asyncio.wait_for(consumer.request_broadcast("video-decode-format"), timeout=5.0)
+    broadcast_consumer = await asyncio.wait_for(consumer.request_broadcast("video-decode-frame"), timeout=5.0)
     catalog = await asyncio.wait_for(broadcast_consumer.catalog(), timeout=5.0)
     track_name = next(iter(catalog.video))
     rendition = catalog.video[track_name]
 
-    # Two subscribers over one publication, so the same encoded frames are read
-    # twice and only the requested layout differs.
-    i420 = await broadcast_consumer.decode_video(track_name, rendition)
-    packed = await broadcast_consumer.decode_video(
-        track_name, rendition, moq.VideoDecoderOutput(format=moq.VideoPixelFormat.RGBA)
-    )
+    decoder = await broadcast_consumer.decode_video(track_name, rendition)
 
-    # Keep the encoder fed so both decoders see frames after they joined.
+    # Keep the encoder fed so the decoder sees frames after it joined.
     for i in range(10, 40):
         video.write(moq.VideoFrame(timestamp_us=i * 33_333, data=rgba))
 
-    frame = await asyncio.wait_for(anext(i420), timeout=5.0)
-    assert frame.format == moq.VideoPixelFormat.I420
-    assert len(frame.data) == frame.width * frame.height * 3 // 2
+    frame = await asyncio.wait_for(anext(decoder), timeout=5.0)
+    decoder.cancel()
 
-    frame = await asyncio.wait_for(anext(packed), timeout=5.0)
-    assert frame.format == moq.VideoPixelFormat.RGBA
-    assert len(frame.data) == frame.width * frame.height * 4
-    assert all(frame.data[i] == 0xFF for i in range(3, len(frame.data), 4)), "RGBA output should be opaque"
+    i420 = frame.pixels(moq.VideoPixelFormat.I420)
+    assert len(i420) == frame.width() * frame.height() * 3 // 2
 
-    i420.cancel()
-    packed.cancel()
+    packed = frame.pixels(moq.VideoPixelFormat.RGBA)
+    assert len(packed) == frame.width() * frame.height() * 4
+    assert all(packed[i] == 0xFF for i in range(3, len(packed), 4)), "RGBA output should be opaque"
+
     video.finish()
     broadcast.finish()
 

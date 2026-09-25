@@ -2040,16 +2040,18 @@ async fn video_raw_publish_consume() {
 	broadcast.finish().unwrap();
 }
 
-/// The decode side picks its CPU pixel layout: an unset `format` delivers I420,
-/// and RGBA delivers `width * height * 4` bytes, with each frame naming the
-/// layout it was decoded to.
+/// A decoded frame owns its surface and converts on demand: one frame yields
+/// both CPU layouts, a portable decode has no native view, and the frame stays
+/// readable after its consumer is cancelled and dropped and the track is gone.
+/// A native decode keeps whatever surface the picked backend produced (CUDA
+/// where NVDEC is present, CPU from openh264) and still downloads on demand.
 #[cfg(feature = "video")]
 #[tokio::test]
-async fn video_decode_format() {
+async fn video_decode_frame_ownership() {
 	use crate::video::*;
 
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let broadcast = create_announced(&origin, "video-decode-format");
+	let broadcast = create_announced(&origin, "video-decode-frame");
 
 	let video = broadcast
 		.encode_video(
@@ -2064,7 +2066,7 @@ async fn video_decode_format() {
 				track: Some("camera".into()),
 				bitrate: None,
 				gop: None,
-				// Software both ways so the test is deterministic everywhere.
+				// Software so the encode is deterministic everywhere.
 				kind: MoqVideoEncoderKind::Software,
 			},
 			None,
@@ -2084,7 +2086,7 @@ async fn video_decode_format() {
 	}
 
 	let consumer = origin.consume();
-	let broadcast_consumer = await_announced(&consumer, "video-decode-format").await;
+	let broadcast_consumer = await_announced(&consumer, "video-decode-frame").await;
 	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -2093,18 +2095,16 @@ async fn video_decode_format() {
 		.expect("expected catalog");
 	let (track, rendition) = catalog.video.iter().next().unwrap();
 
-	// Two subscribers over one publication, so the same encoded frames are read
-	// twice and only the requested layout differs.
-	let i420 = broadcast_consumer
+	let portable = broadcast_consumer
 		.decode_video(track.clone(), rendition.clone(), MoqVideoDecoderOutput::default())
 		.await
 		.unwrap();
-	let rgba_out = broadcast_consumer
+	let native = broadcast_consumer
 		.decode_video(
 			track.clone(),
 			rendition.clone(),
 			MoqVideoDecoderOutput {
-				format: Some(MoqVideoPixelFormat::Rgba),
+				native: true,
 				..Default::default()
 			},
 		)
@@ -2121,31 +2121,45 @@ async fn video_decode_format() {
 			.unwrap();
 	}
 
-	let frame = tokio::time::timeout(TIMEOUT, i420.next())
-		.await
-		.expect("timed out")
-		.unwrap()
-		.expect("expected an I420 frame");
-	assert!(matches!(frame.format, MoqVideoPixelFormat::I420));
-	assert_eq!(frame.data.len(), frame.width as usize * frame.height as usize * 3 / 2);
+	let next = async |decoder: &MoqVideoConsumer| {
+		tokio::time::timeout(TIMEOUT, decoder.next())
+			.await
+			.expect("timed out")
+			.unwrap()
+			.expect("expected a frame")
+	};
+	let frame = next(&portable).await;
+	let retained = next(&native).await;
 
-	let frame = tokio::time::timeout(TIMEOUT, rgba_out.next())
-		.await
-		.expect("timed out")
-		.unwrap()
-		.expect("expected an RGBA frame");
-	assert!(matches!(frame.format, MoqVideoPixelFormat::Rgba));
-	assert_eq!(frame.data.len(), frame.width as usize * frame.height as usize * 4);
+	// Release everything upstream of the frames before reading them.
+	portable.cancel();
+	native.cancel();
+	drop((portable, native));
+	video.finish().unwrap();
+	broadcast.finish().unwrap();
+
+	assert_eq!((retained.width(), retained.height()), (320, 240));
+	assert_eq!(
+		retained.pixels(MoqVideoPixelFormat::I420).unwrap().len(),
+		320 * 240 * 3 / 2
+	);
+
+	assert_eq!((frame.width(), frame.height()), (320, 240));
+	assert!(frame.native().is_none(), "a portable decode holds CPU pixels");
+
+	let i420 = frame.pixels(MoqVideoPixelFormat::I420).unwrap();
+	assert_eq!(i420.len(), 320 * 240 * 3 / 2);
+
+	let packed = frame.pixels(MoqVideoPixelFormat::Rgba).unwrap();
+	assert_eq!(packed.len(), 320 * 240 * 4);
 	// Every fourth byte is alpha, so an opaque frame proves the conversion ran rather than handing back planes.
 	assert!(
-		frame.data.as_chunks::<4>().0.iter().all(|px| px[3] == 0xFF),
+		packed.as_chunks::<4>().0.iter().all(|px| px[3] == 0xFF),
 		"RGBA output should be opaque"
 	);
 
-	i420.cancel();
-	rgba_out.cancel();
-	video.finish().unwrap();
-	broadcast.finish().unwrap();
+	// Converting again reads the same retained surface.
+	assert_eq!(frame.pixels(MoqVideoPixelFormat::I420).unwrap(), i420);
 }
 
 /// Regression: a `MoqVideoProducer` is shared, so its calls land on whichever

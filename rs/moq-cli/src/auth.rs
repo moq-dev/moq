@@ -367,6 +367,10 @@ pub struct Serve {
 	#[usage(long, conflicts = "--key", value_hint = usage::ValueHint::DirPath)]
 	key_dir: Option<PathBuf>,
 
+	/// A JWK Set file, selecting one verification key by the token's `kid`.
+	#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("json", "jwks"))]
+	key_set: Option<PathBuf>,
+
 	/// Patterns an anonymous session may publish (repeatable); `foo/**` for a subtree.
 	#[usage(long)]
 	public_publish: Vec<Pattern>,
@@ -414,11 +418,15 @@ impl Serve {
 		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
 			Permissions::new(publish.iter().cloned().collect(), subscribe.iter().cloned().collect())
 		};
+		if self.key_set.is_some() && (self.key.is_some() || self.key_dir.is_some()) {
+			anyhow::bail!("--key-set conflicts with --key and --key-dir");
+		}
 		let mut policy = Policy::default();
-		policy.keys = match (&self.key, &self.key_dir) {
-			(Some(key), _) => Some(Keys::File(key.clone())),
-			(None, Some(dir)) => Some(Keys::Dir(dir.clone())),
-			(None, None) => None,
+		policy.keys = match (&self.key, &self.key_dir, &self.key_set) {
+			(Some(key), _, _) => Some(Keys::File(key.clone())),
+			(None, Some(dir), _) => Some(Keys::Dir(dir.clone())),
+			(None, None, Some(set)) => Some(Keys::Set(set.clone())),
+			(None, None, None) => None,
 		};
 		policy.public = rules(&self.public_publish, &self.public_subscribe);
 		policy.mtls = rules(&self.mtls_publish, &self.mtls_subscribe);
@@ -640,6 +648,16 @@ mod tests {
 		assert_eq!(policy.expires, std::time::Duration::from_secs(7200));
 		assert_eq!(policy.limits.token, Some(3));
 		assert_eq!(policy.limits.remote, Some(8));
+
+		let set = serve(&["moq", "auth", "serve", "--key-set", "/keys.jwks"])
+			.policy()
+			.unwrap();
+		assert!(matches!(&set.keys, Some(Keys::Set(path)) if path == std::path::Path::new("/keys.jwks")));
+		assert!(
+			serve(&["moq", "auth", "serve", "--key", "/key.jwk", "--key-set", "/keys.jwks"])
+				.policy()
+				.is_err()
+		);
 
 		// Nothing configured is a server that refuses everyone, on the defaults.
 		let bare = serve(&["moq", "auth", "serve"]).policy().unwrap();

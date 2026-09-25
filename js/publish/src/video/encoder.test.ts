@@ -90,9 +90,9 @@ test("encoding tracks encoder config in its child effect", async () => {
 	}
 });
 
-test("a demand gap cuts the group and leaves the broadcast-owned track open for resume", async () => {
+test("a demand gap marks a discontinuity and leaves the broadcast-owned track open for resume", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
-	const cut = spyOn(Container.Legacy.Producer.prototype, "cut");
+	const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
 
 	const track = new Moq.Track.Producer("video").accept({ priority: 60 });
 	const live = new Signal<Moq.Track.Producer | undefined>(track);
@@ -119,20 +119,20 @@ test("a demand gap cuts the group and leaves the broadcast-owned track open for 
 		live.set(undefined);
 		await settle();
 		expect(track.closed.peek()).toBeUndefined();
-		expect(cut).toHaveBeenCalledTimes(1);
+		expect(discontinuity).toHaveBeenCalledTimes(1);
 
 		live.set(track);
 		await settle();
 		expect(track.closed.peek()).toBeUndefined();
 
-		cut.mockClear();
+		discontinuity.mockClear();
 		track.close();
 		encoder.close();
-		expect(cut).not.toHaveBeenCalled();
+		expect(discontinuity).not.toHaveBeenCalled();
 	} finally {
 		encoder.close();
 		track.close();
-		cut.mockRestore();
+		discontinuity.mockRestore();
 	}
 });
 

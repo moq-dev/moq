@@ -115,11 +115,12 @@ one: `FetchGroup`/`FetchMediaGroup`, `Dynamic()` with `Requests(ctx)`,
 `AppendDatagram`/`Datagrams(ctx)`, `SetCatalogSection`, `Demand()` for `Used`/`Unused`,
 `Session().Stats()`. `moq.IsAuthError` and `moq.IsShutdown` classify errors. `moq.ProtocolError(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one.
 
-`DecodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.Format`
-is I420 when nil, or `VideoPixelFormatRgba` for four bytes a pixel, and every
-`VideoDecodedFrame` repeats the layout it was decoded to. `Resize` is best
-effort: only NVDEC has a built-in scaler, so read each frame's own `Width` and
-`Height` rather than assuming it took.
+Each `VideoDecodedFrame` from `DecodeVideo` owns its decoded picture until
+`Close`, including after the consumer is cancelled. `Pixels(format)` converts it
+on demand: `VideoPixelFormatI420`, or `VideoPixelFormatRgba` for four bytes a
+pixel. Close frames promptly, since held frames hold decoder buffers. `Resize`
+is best effort: only NVDEC has a built-in scaler, so read each frame's own
+`Width()` and `Height()` rather than assuming it took.
 
 ## Connection stats
 

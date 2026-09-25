@@ -7,7 +7,7 @@ use p256::elliptic_curve::SecretKey;
 use p256::elliptic_curve::pkcs8::EncodePrivateKey;
 use rsa::BigUint;
 use rsa::pkcs1::EncodeRsaPrivateKey;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use std::sync::OnceLock;
 use std::{collections::HashSet, fmt, path::Path as StdPath};
 
@@ -525,34 +525,41 @@ impl Key {
 		Ok(self.encode.get_or_init(|| encoding_key))
 	}
 
-	/// Verify a token's signature with this key and return its claims.
+	/// Decode a signed token into any payload, checking only signature, algorithm, and key ID.
 	///
-	/// Rejects an expired token (the `exp` claim) and one that grants nothing.
-	/// Scoping the claims to a connection path is a separate step; see
-	/// [`Claims::authorize`].
-	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
+	/// The caller validates payload fields and expiry. Use [`verify`](Self::verify) for
+	/// this crate's strict [`Claims`] contract.
+	pub fn decode<C: DeserializeOwned>(&self, token: &str) -> crate::Result<C> {
 		if !self.operations.contains(&KeyOperation::Verify) {
 			return Err(KeyError::VerifyUnsupported.into());
 		}
-
-		let decode = self.to_decoding_key()?;
+		let header = jsonwebtoken::decode_header(token)?;
+		match (self.kid.as_ref(), header.kid.as_deref()) {
+			(Some(expected), Some(actual)) if expected.encode() == actual => {}
+			(Some(_), None) => return Err(KeyError::MissingKid.into()),
+			(_, Some(actual)) => return Err(KeyError::KeyNotFound(actual.to_string()).into()),
+			(None, None) => {}
+		}
 
 		let mut validation = jsonwebtoken::Validation::new(self.algorithm.into());
-		validation.required_spec_claims = Default::default(); // Don't require exp, but still validate it if present
-		validation.validate_exp = false; // We validate exp ourselves to handle null values
+		validation.required_spec_claims = Default::default();
+		validation.validate_exp = false;
+		validation.validate_nbf = false;
+		validation.validate_aud = false;
+		Ok(jsonwebtoken::decode::<C>(token, self.to_decoding_key()?, &validation)?.claims)
+	}
 
-		let token = jsonwebtoken::decode::<Claims>(token, decode, &validation)?;
-
-		if let Some(exp) = token.claims.expires
+	/// Verify a token's signature and this crate's strict claims, expiry, and key scope.
+	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
+		let claims: Claims = self.decode(token)?;
+		if let Some(exp) = claims.expires
 			&& exp < std::time::SystemTime::now()
 		{
 			return Err(crate::Error::TokenExpired);
 		}
-
-		token.claims.validate()?;
-		self.validate_scope(&token.claims)?;
-
-		Ok(token.claims)
+		claims.validate()?;
+		self.validate_scope(&claims)?;
+		Ok(claims)
 	}
 
 	/// Sign the claims with this key, returning the encoded token.
@@ -685,6 +692,30 @@ mod tests {
 			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 			issued: Some(SystemTime::now()),
 		}
+	}
+
+	#[test]
+	fn decode_accepts_other_payloads_but_checks_kid_and_algorithm() {
+		let key = create_test_key();
+		let mut header = Header::new(Algorithm::HS256.into());
+		header.kid = key.kid.as_ref().map(ToString::to_string);
+		let payload = serde_json::json!({"custom": "accepted", "exp": 1, "aud": "other-service"});
+		let token = jsonwebtoken::encode(&header, &payload, key.to_encoding_key().unwrap()).unwrap();
+		let decoded: serde_json::Value = key.decode(&token).unwrap();
+		assert_eq!(decoded, payload);
+		assert!(key.verify(&token).is_err(), "strict claims reject the custom payload");
+
+		header.kid = Some("someone-else".into());
+		let wrong_kid = jsonwebtoken::encode(&header, &payload, key.to_encoding_key().unwrap()).unwrap();
+		assert!(matches!(
+			key.decode::<serde_json::Value>(&wrong_kid),
+			Err(crate::Error::Key(KeyError::KeyNotFound(_)))
+		));
+
+		header.kid = key.kid.as_ref().map(ToString::to_string);
+		header.alg = jsonwebtoken::Algorithm::HS384;
+		let wrong_algorithm = jsonwebtoken::encode(&header, &payload, key.to_encoding_key().unwrap()).unwrap();
+		assert!(key.decode::<serde_json::Value>(&wrong_algorithm).is_err());
 	}
 
 	#[test]

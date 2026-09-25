@@ -274,6 +274,8 @@ rules, an explicit mTLS grant, tiers, and session limits; see
 moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe 'anon/**'
 ```
 
+`moq auth serve` also accepts `--key-set keys.jwks` to verify tokens from a JWK Set.
+
 `moq auth sessions` and `moq auth revalidate` talk to a relay's internal
 listener. A push is a re-check: the auth server's reply is what kicks. An
 empty filter is every session on that node.

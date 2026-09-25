@@ -93,11 +93,15 @@ You can also verify a token, then scope it to a connection path the way `moq aut
 ```typescript
 import { authorize, Key } from "@moq/auth";
 
-const claims = await Key.verify(key, token); // signature and expiry
+const claims = await Key.verify(key, token); // signature, kid, strict claims, and expiry
 const permissions = authorize(claims, "rooms/meeting-123"); // patterns relative to the path
 ```
 
-or as a CLI
+Use `Key.decode(key, token)` when the signed payload is not a MoQ `Claims` object.
+It returns an unvalidated value after checking signature, algorithm, and key ID;
+validate its fields and lifetime in your application.
+
+Or as a CLI:
 
 ```bash
 moq-auth verify --key root.jwk --in alice.jwt

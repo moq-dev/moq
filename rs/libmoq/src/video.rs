@@ -13,8 +13,8 @@
 //! [`moq_video_codec`]).
 
 use std::ffi::{c_char, c_void};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
@@ -159,8 +159,9 @@ pub struct moq_video_decoder_output {
 /// height/2` each), no row padding, BT.601 limited range; RGBA is tightly
 /// packed `width * height * 4` bytes, no row padding.
 ///
-/// `data` is owned by the consume slab and stays valid until the same id is
-/// released with [`moq_decode_video_frame_free`].
+/// The frame id owns the decoded picture, and the pixels are produced from it
+/// on the first [`moq_decode_video_frame`] call for that id. `data` stays valid
+/// until the same id is released with [`moq_decode_video_frame_free`].
 ///
 /// The publish side has its own [`moq_video_encoder_frame`], which carries no
 /// dimensions because the encoder already fixed them.
@@ -182,7 +183,7 @@ pub struct moq_video_frame {
 pub struct Video {
 	producers: NonZeroSlab<Shared<VideoEncoder>>,
 	consumer_tasks: NonZeroSlab<Option<VideoTaskEntry>>,
-	frames: NonZeroSlab<VideoFrame>,
+	frames: NonZeroSlab<Arc<VideoFrame>>,
 }
 
 /// Wait out an encode-thread round trip from a C entry point.
@@ -273,14 +274,58 @@ pub(crate) struct VideoEncoder {
 	ceiling: Option<Arc<AtomicU64>>,
 }
 
-/// A delivered frame, flattened to CPU bytes at delivery time in the layout
-/// [`moq_decode_video`] was asked for: the C ABI hands out a stable byte
-/// pointer, so a GPU-decoded frame (e.g. NVDEC) is downloaded exactly once here.
+/// A delivered frame: the decoded picture, retained until its id is freed, and
+/// the packed pixels [`moq_decode_video_frame`] produces from it on first use.
+///
+/// Converting on first use rather than at delivery keeps the work off the
+/// delivery task and skips it for a frame the caller frees unread. The pixels
+/// are kept once produced, since the C ABI hands out a pointer that must stay
+/// put until the id is freed.
 struct VideoFrame {
-	timestamp_us: u64,
+	frame: moq_video::Frame,
+	output: DecoderOutput,
+	pixels: OnceLock<Pixels>,
+}
+
+/// A frame's pixels in the layout and size [`moq_decode_video`] asked for.
+struct Pixels {
 	width: u32,
 	height: u32,
-	data: bytes::Bytes,
+	data: Vec<u8>,
+}
+
+impl VideoFrame {
+	fn pixels(&self) -> Result<&Pixels, Error> {
+		if let Some(pixels) = self.pixels.get() {
+			return Ok(pixels);
+		}
+
+		// The decoder's scale hint is best effort: a backend without a scaler
+		// ignores it, so enforce the requested size here rather than trusting it.
+		let resized;
+		let frame = match self.output.size {
+			Some(size) if self.frame.size() != size => {
+				resized = self.frame.resize(size, &moq_video::resize::Config::default())?;
+				&resized
+			}
+			_ => &self.frame,
+		};
+		let size = frame.size();
+		let data = match self.output.format {
+			moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 => frame.surface.to_i420()?.into_owned().into_data(),
+			moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA => frame
+				.surface
+				.to_rgba(&moq_video::convert::Config::default())?
+				.into_data(),
+		};
+
+		// Two threads racing on one id both convert; the first result is kept.
+		Ok(self.pixels.get_or_init(|| Pixels {
+			width: size.width,
+			height: size.height,
+			data,
+		}))
+	}
 }
 
 /// What [`moq_decode_video`] delivers per frame: the requested CPU pixel format
@@ -521,37 +566,11 @@ impl Video {
 				},
 			};
 
-			// The decoder's scale hint is best effort: a backend without a
-			// scaler ignores it, so enforce the requested size here rather
-			// than trusting it. The frame is already CPU pixels, so this
-			// scales on the CPU; convert outside the lock, then hold the lock
-			// only to buffer it, and release before the callback.
-			let mut frame = frame;
-			if let Some(size) = output.size
-				&& frame.size() != size
-			{
-				frame = frame.resize(size, &moq_video::resize::Config::default())?;
-			}
-			let size = frame.size();
-			let data = match output.format {
-				moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 => {
-					bytes::Bytes::from(frame.surface.into_i420()?.into_data())
-				}
-				moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA => bytes::Bytes::from(
-					frame
-						.surface
-						.to_rgba(&moq_video::convert::Config::default())?
-						.into_data(),
-				),
-			};
-			let frame = VideoFrame {
-				// The C ABI carries microseconds; the decoded frame's Timestamp is
-				// constrained to a QUIC VarInt, so the microsecond value fits a u64.
-				timestamp_us: frame.timestamp.as_micros() as u64,
-				width: size.width,
-				height: size.height,
-				data,
-			};
+			let frame = Arc::new(VideoFrame {
+				frame,
+				output,
+				pixels: OnceLock::new(),
+			});
 			let frame_id = State::lock().video.frames.insert(frame)?;
 			callback.call(Ok(frame_id));
 		}
@@ -569,16 +588,10 @@ impl Video {
 		Ok(())
 	}
 
-	pub fn frame_info(&self, id: Id, dst: &mut moq_video_frame) -> Result<(), Error> {
-		let frame = self.frames.get(id).ok_or(Error::FrameNotFound)?;
-		*dst = moq_video_frame {
-			timestamp_us: frame.timestamp_us,
-			width: frame.width,
-			height: frame.height,
-			data: frame.data.as_ptr(),
-			data_size: frame.data.len(),
-		};
-		Ok(())
+	/// Resolve a frame handle, so the caller can convert it with the global lock
+	/// released.
+	fn frame(&self, id: Id) -> Result<Arc<VideoFrame>, Error> {
+		self.frames.get(id).cloned().ok_or(Error::FrameNotFound)
 	}
 
 	pub fn frame_free(&mut self, id: Id) -> Result<(), Error> {
@@ -863,8 +876,9 @@ pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 /// supported; a non-H.264 rendition fails on the terminal callback.
 ///
 /// An unknown `output->format` or an invalid `output->width`/`height` fails
-/// here, before subscribing: an accepted request always produces the requested
-/// layout or fails on the terminal callback instead of delivering it silently.
+/// here, before subscribing. Each frame is produced in the requested layout by
+/// [`moq_decode_video_frame`], which fails for that frame rather than deliver
+/// another layout.
 ///
 /// Returns a non-zero handle on success or a negative error code.
 ///
@@ -922,8 +936,9 @@ pub unsafe extern "C" fn moq_decode_video(
 /// Returns immediately: zero on success, or a negative code if already closed.
 /// Does NOT free `user_data`; the on-frame callback still fires once more with a
 /// terminal `0` (or a negative error), which is where `user_data` should be
-/// released. Frame ids already delivered are likewise not freed; release each
-/// with [`moq_decode_video_frame_free`].
+/// released. Frame ids already delivered are likewise not freed: each stays
+/// readable after the terminal callback until released with
+/// [`moq_decode_video_frame_free`].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_decode_video_cancel(consumer: u32) -> i32 {
 	ffi::enter(move || {
@@ -932,7 +947,13 @@ pub extern "C" fn moq_decode_video_cancel(consumer: u32) -> i32 {
 	})
 }
 
-/// Copy a delivered frame's metadata into `dst`.
+/// Write a delivered frame's pixels and metadata into `dst`.
+///
+/// The first call for an `id` converts the decoded picture to the layout and
+/// size [`moq_decode_video`] asked for; later calls return the same pixels. A
+/// conversion failure returns a negative code for this frame only, leaving the
+/// id to be freed as usual. Safe to call from any thread, including inside the
+/// frame callback.
 ///
 /// The written `dst->data` pointer remains valid until the same `id` is released
 /// with [`moq_decode_video_frame_free`].
@@ -944,12 +965,26 @@ pub unsafe extern "C" fn moq_decode_video_frame(id: u32, dst: *mut moq_video_fra
 	ffi::enter(move || {
 		let id = ffi::parse_id(id)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		State::lock().video.frame_info(id, dst)
+		let frame = State::lock().video.frame(id)?;
+		let pixels = frame.pixels()?;
+		*dst = moq_video_frame {
+			// The decoded Timestamp is bounded by a QUIC VarInt, so its microseconds fit.
+			timestamp_us: frame.frame.timestamp.as_micros() as u64,
+			width: pixels.width,
+			height: pixels.height,
+			// The slab keeps its `Arc` until the id is freed, and the pixels are
+			// never replaced once set, so the pointer outlives this call.
+			data: pixels.data.as_ptr(),
+			data_size: pixels.data.len(),
+		};
+		Ok(())
 	})
 }
 
-/// Free a frame previously delivered through the consume callback. Required for
-/// every delivered frame id; closing the parent consumer is not enough.
+/// Free a frame previously delivered through the consume callback, releasing
+/// its decoded picture back to the decoder. Required for every delivered frame
+/// id; closing the parent consumer is not enough, and a decoder whose frames
+/// are all held stalls until some are freed.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_decode_video_frame_free(id: u32) -> i32 {
 	ffi::enter(move || {
