@@ -1,10 +1,13 @@
 /**
  * In-band authorization: present tokens to the peer and learn what they grant.
  *
- * Each side of a moq-lite-06 session presents the credential its connection already
- * carried (the URL, or nothing) right after setup, and learns the {@link Grant} it earned.
- * {@link Auth.grant} is the union of every token this side presented, and {@link Auth.add}
- * presents another without reconnecting. Mirrors the Rust `moq_net::auth`.
+ * Each side of a moq-lite-06 session, and of a moq-transport draft-17+ session when both
+ * sides negotiate MoQ Auth, presents the credential its connection already carried (the
+ * URL, or nothing) right after setup, and learns the {@link Grant} it earned. Older
+ * versions, and peers that do not negotiate it, carry no AUTH exchange: the grant stays
+ * undefined and {@link Auth.add} rejects with {@link Unsupported}. {@link Auth.grant} is
+ * the union of every token this side presented, and {@link Auth.add} presents another
+ * without reconnecting. Mirrors the Rust `moq_net::auth`.
  *
  * @module
  */

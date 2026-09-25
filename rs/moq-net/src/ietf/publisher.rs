@@ -197,6 +197,10 @@ struct Namespaces<S: crate::transport::poll::Session> {
 	/// The open PUBLISH_NAMESPACE request carrying each advertised namespace. Empty when
 	/// the entries ride a SUBSCRIBE_NAMESPACE stream inline.
 	requests: HashMap<crate::PathOwned, NamespaceRequest<S>>,
+	/// What our grant lets us publish (MoQ Auth), `None` while unknown.
+	permit: Option<crate::Patterns>,
+	/// The grant union's epoch last applied to `permit`.
+	epoch: u64,
 }
 
 impl<S: crate::transport::poll::Session> Namespaces<S> {
@@ -206,7 +210,14 @@ impl<S: crate::transport::poll::Session> Namespaces<S> {
 			target,
 			watched: HashMap::new(),
 			requests: HashMap::new(),
+			permit: None,
+			epoch: 0,
 		}
+	}
+
+	/// Whether our grant lets us advertise `path`. An unknown grant allows everything.
+	fn permitted(&self, path: &crate::Path) -> bool {
+		self.permit.as_ref().is_none_or(|permit| permit.matches(path.as_str()))
 	}
 }
 
@@ -218,6 +229,8 @@ enum NamespaceEvent {
 	Update(Option<crate::announce::Update>),
 	/// The retry sleep fired: re-offer whatever the peer should be holding and isn't.
 	Retry,
+	/// Our grant changed (MoQ Auth): re-check every namespace against it.
+	Regrant(Option<crate::auth::Grant>),
 }
 
 #[derive(Clone)]
@@ -242,6 +255,9 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	// Shared across request handlers; None marks a dispatched subscription still resolving.
 	joins: kio::Shared<HashMap<RequestId, Option<Joined>>>,
 	version: Version,
+	// Our grant (MoQ Auth): only what it lets us publish is advertised and served, and a
+	// shrink withdraws what it no longer covers.
+	auth: crate::auth::Handle,
 }
 
 /// The snapshot a joining FETCH inherits from its subscription.
@@ -297,7 +313,14 @@ where
 			peer_setup,
 			joins: Default::default(),
 			version,
+			auth: crate::auth::Handle::new(false),
 		}
+	}
+
+	/// Bound what we publish by the grant this session's tokens earn (MoQ Auth).
+	pub fn with_auth(mut self, auth: crate::auth::Handle) -> Self {
+		self.auth = auth;
+		self
 	}
 
 	/// What the peer declared in its SETUP, or the default (extension off) on a version
@@ -470,6 +493,22 @@ where
 
 			tracing::info!(id = %request_id, broadcast = %absolute, track = %track_name, "subscribe started");
 
+			// Serve only what our grant lets us publish (MoQ Auth), and stop once it no
+			// longer does. Checked before resolving, so a denied request never reaches the
+			// origin.
+			let mut gate = crate::auth::Gate::new(
+				self.auth.clone(),
+				msg.track_namespace.to_owned(),
+				crate::auth::Direction::Publish,
+			);
+			if !self
+				.auth
+				.allows(crate::auth::Direction::Publish, msg.track_namespace.as_str())
+			{
+				let err = Error::Unauthorized;
+				return self.reject_subscribe(stream, request_id, &err, "not granted").await;
+			}
+
 			// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in
 			// the model, through the tagged `origin::Consumer` the broadcast resolves from.
 
@@ -607,6 +646,10 @@ where
 					if let Poll::Ready(res) = waiter.poll_future(serve.as_mut()) {
 						return Poll::Ready(res);
 					}
+					if gate.poll_denied(waiter).is_ready() {
+						tracing::info!(broadcast = %absolute, track = %track_name, "subscription no longer authorized");
+						return Poll::Ready(Err(Error::Unauthorized));
+					}
 					let mut cx = std::task::Context::from_waker(waiter.waker());
 					if stream.reader.poll_closed(&mut cx).is_ready() || closed_session.poll_closed(&mut cx).is_ready() {
 						return Poll::Ready(Ok(()));
@@ -619,6 +662,7 @@ where
 			// Send PublishDone
 			let (status, reason) = match &res {
 				Ok(()) => (ietf::PublishDoneStatus::TrackEnded, "track ended"),
+				Err(Error::Unauthorized) => (ietf::PublishDoneStatus::Unauthorized, "not granted"),
 				Err(_) => (ietf::PublishDoneStatus::InternalError, "internal error"),
 			};
 			let _ = stream.writer.encode(&ietf::PublishDone::ID).await;
@@ -1308,17 +1352,23 @@ where
 		suffix: &crate::PathOwned,
 		path: &crate::PathOwned,
 	) -> Result<(), Error> {
+		let permitted = ns.permitted(path);
 		let Namespaces {
 			peer,
 			target,
 			watched,
 			requests,
+			..
 		} = ns;
 
 		let Some(watch) = watched.get(suffix) else {
 			return Ok(());
 		};
-		let advert = self.select(&watch.route, peer);
+		// Nothing our grant does not cover reaches the wire, and a shrink withdraws it.
+		let advert = match permitted {
+			true => self.select(&watch.route, peer),
+			false => Advert::None,
+		};
 		let refused = watch.refused;
 		let wanted = advert.wanted();
 		let held = watch.sent.wanted();
@@ -1811,6 +1861,12 @@ where
 	) -> Result<(), Error> {
 		let mut announced = origin.announced();
 
+		// With MoQ Auth, wait for the answer to the credential we presented at setup, so
+		// the first advertisement is already checked against our grant.
+		if self.peer_setup.get().await.auth {
+			kio::wait(|waiter| self.auth.poll_setup_answered(waiter)).await;
+		}
+
 		// When to re-offer whatever the peer should hold and doesn't, and how long to wait
 		// the next time that fails. Jittered so a relay's namespaces don't all come back on
 		// the same tick.
@@ -1833,11 +1889,16 @@ where
 			retry.set(retry_at);
 
 			let event = {
-				let Namespaces { target, .. } = &mut ns;
+				let Namespaces { target, epoch, .. } = &mut ns;
 				kio::wait(|waiter| {
 					let mut cx = std::task::Context::from_waker(waiter.waker());
 					if let Poll::Ready(res) = target.poll_closed(&mut cx) {
 						return Poll::Ready(NamespaceEvent::Closed(res));
+					}
+					// A grant change applies before the next update, so a namespace it no
+					// longer covers is withdrawn rather than re-sent.
+					if let Poll::Ready(union) = self.auth.poll_union(epoch, waiter) {
+						return Poll::Ready(NamespaceEvent::Regrant(union));
 					}
 					if let Poll::Ready(update) = announced.poll_next(waiter) {
 						return Poll::Ready(NamespaceEvent::Update(update));
@@ -1867,6 +1928,14 @@ where
 						.collect();
 
 					for suffix in deferred {
+						let path = prefix.join(&suffix);
+						self.sync_namespace(&mut ns, &suffix, &path).await?;
+					}
+				}
+				NamespaceEvent::Regrant(union) => {
+					ns.permit = union.map(|grant| grant.publish);
+					let suffixes: Vec<crate::PathOwned> = ns.watched.keys().cloned().collect();
+					for suffix in suffixes {
 						let path = prefix.join(&suffix);
 						self.sync_namespace(&mut ns, &suffix, &path).await?;
 					}
@@ -4338,6 +4407,7 @@ mod tests {
 			},
 			solicit,
 			hidden: false,
+			auth: false,
 		});
 		slot
 	}

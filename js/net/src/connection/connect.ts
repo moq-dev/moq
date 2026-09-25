@@ -365,7 +365,7 @@ async function handshakeAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, solicit, hidden, cluster } = await exchangeSetup(session, version, "moq-lite-js");
+	const { control, solicit, hidden, cluster, auth } = await exchangeSetup(session, version, "moq-lite-js");
 
 	return new Ietf.Connection({
 		...wiring,
@@ -376,6 +376,7 @@ async function handshakeAlpn(
 		solicit,
 		hidden,
 		cluster,
+		auth,
 		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.
 		maxRequestId: 0n,
 		version,

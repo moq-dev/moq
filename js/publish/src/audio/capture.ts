@@ -163,10 +163,7 @@ export class Capture {
 			// module registration was abandoned, so building against its name would throw. Gate on the race
 			// result, not `context.state`, because `AudioContext.close()` only flips `.state` to "closed"
 			// synchronously on Chrome (Firefox/Safari report "suspended").
-			const ok = await Promise.race([
-				context.audioWorklet.addModule(CaptureWorklet).then(() => true),
-				effect.cancel,
-			]);
+			const ok = await effect.race(context.audioWorklet.addModule(CaptureWorklet).then(() => true));
 			if (ok) loaded.set(true);
 		});
 

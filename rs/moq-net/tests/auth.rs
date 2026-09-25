@@ -1,5 +1,6 @@
 //! In-band AUTH over the in-memory mock transport: both sides learn their grant,
-//! tokens union, and a publication outside the grant fails loud.
+//! tokens union, and a publication outside the grant fails loud. Every case runs on
+//! moq-lite-06 and on moq-transport with the MoQ Auth extension.
 
 mod support;
 
@@ -17,6 +18,54 @@ use support::mock::{MockSession, create_mock_session_pair};
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 const LITE_06: &str = "moq-lite-06";
+/// The first draft that negotiates MoQ Auth, and the newest.
+const MOQT_17: &str = "moq-transport-17";
+const MOQT_22: &str = "moq-transport-22";
+
+/// Run each case on every version that exchanges AUTH.
+macro_rules! cases {
+	($($case:ident),* $(,)?) => {
+		mod lite_06 {
+			$(#[tokio::test] async fn $case() { super::$case(super::LITE_06).await })*
+		}
+		mod moqt_17 {
+			$(#[tokio::test] async fn $case() { super::$case(super::MOQT_17).await })*
+		}
+		mod moqt_22 {
+			$(#[tokio::test] async fn $case() { super::$case(super::MOQT_22).await })*
+		}
+	};
+}
+
+cases!(
+	both_sides_learn_their_grant_from_scoped_origins,
+	a_publish_only_session_grants_no_subscribe,
+	an_out_of_scope_announce_aborts_with_the_path,
+	a_broadcast_published_before_the_grant_is_checked,
+	an_unanswered_token_does_not_suspend_the_check,
+	tokens_union_and_withdrawing_one_shrinks_it,
+	an_update_replaces_one_tokens_grant,
+	a_revoked_grant_withdraws_and_can_be_restored,
+	a_refused_token_reports_the_code,
+	a_refused_setup_token_grants_nothing,
+	dropping_the_requests_refuses_queued_tokens,
+	a_closed_session_holds_no_grant,
+	a_reset_auth_stream_reports_unsupported,
+	a_revoked_grant_cancels_its_subscriptions,
+	an_unrepresentable_grant_is_unsupported,
+	an_unrepresentable_update_revokes_only_its_token,
+	nothing_outside_the_grant_reaches_the_peer,
+);
+
+#[tokio::test]
+async fn lite_05_has_no_grant() {
+	older_versions_have_no_grant("moq-lite-05").await
+}
+
+#[tokio::test]
+async fn moqt_16_has_no_grant() {
+	older_versions_have_no_grant("moq-transport-16").await
+}
 
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> origin::Producer {
@@ -168,11 +217,11 @@ fn within<F: std::future::Future>(f: F) -> tokio::time::Timeout<F> {
 /// Each side's default grant is what the other side's origin handles allow:
 /// its subscribe half bounds what we may publish, its publish half what we may
 /// subscribe to.
-#[tokio::test]
-async fn both_sides_learn_their_grant_from_scoped_origins() {
+async fn both_sides_learn_their_grant_from_scoped_origins(version: &'static str) {
 	within(async {
 		let relay = produce_origin(1);
 		let pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(produce_origin(2)),
 			client_subscribe: Some(produce_origin(3)),
 			server_publish: Some(relay.scope("", &patterns(&["room"])).unwrap()),
@@ -190,10 +239,10 @@ async fn both_sides_learn_their_grant_from_scoped_origins() {
 }
 
 /// A missing half grants nothing: the empty list, distinct from the empty prefix.
-#[tokio::test]
-async fn a_publish_only_session_grants_no_subscribe() {
+async fn a_publish_only_session_grants_no_subscribe(version: &'static str) {
 	within(async {
 		let pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(produce_origin(2)),
 			server_subscribe: Some(produce_origin(1)),
 			..Default::default()
@@ -211,12 +260,12 @@ async fn a_publish_only_session_grants_no_subscribe() {
 
 /// A broadcast outside the grant aborts the session and names the path, where it
 /// used to wait forever for a solicitation that never comes.
-#[tokio::test]
-async fn an_out_of_scope_announce_aborts_with_the_path() {
+async fn an_out_of_scope_announce_aborts_with_the_path(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
 		let relay = produce_origin(1);
 		let pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(publisher.clone()),
 			server_subscribe: Some(relay.scope("", &patterns(&["baz"])).unwrap()),
 			..Default::default()
@@ -245,14 +294,14 @@ async fn an_out_of_scope_announce_aborts_with_the_path() {
 }
 
 /// A broadcast published before the grant arrives is checked at admission too.
-#[tokio::test]
-async fn a_broadcast_published_before_the_grant_is_checked() {
+async fn a_broadcast_published_before_the_grant_is_checked(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
 		let early = publisher.create_broadcast("foo/bar").unwrap();
 		early.announce(Default::default()).unwrap();
 
 		let pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(publisher.clone()),
 			server_subscribe: Some(produce_origin(1).scope("", &patterns(&["baz"])).unwrap()),
 			..Default::default()
@@ -274,11 +323,11 @@ async fn a_broadcast_published_before_the_grant_is_checked() {
 
 /// Enforcement waits only for the tokens the session presented itself: a peer that
 /// never answers an app-added token cannot suspend it.
-#[tokio::test]
-async fn an_unanswered_token_does_not_suspend_the_check() {
+async fn an_unanswered_token_does_not_suspend_the_check(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
 		let mut pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(publisher.clone()),
 			server_subscribe: Some(produce_origin(1)),
 			server_requests: true,
@@ -308,12 +357,12 @@ async fn an_unanswered_token_does_not_suspend_the_check() {
 
 /// Two tokens union; closing one shrinks the union and withdraws only what it alone
 /// covered, without disconnecting.
-#[tokio::test]
-async fn tokens_union_and_withdrawing_one_shrinks_it() {
+async fn tokens_union_and_withdrawing_one_shrinks_it(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
 		let relay = produce_origin(1);
 		let mut pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(publisher.clone()),
 			server_subscribe: Some(relay.clone()),
 			server_requests: true,
@@ -353,10 +402,10 @@ async fn tokens_union_and_withdrawing_one_shrinks_it() {
 }
 
 /// An update replaces one token's grant and leaves the other alone.
-#[tokio::test]
-async fn an_update_replaces_one_tokens_grant() {
+async fn an_update_replaces_one_tokens_grant(version: &'static str) {
 	within(async {
 		let mut pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(produce_origin(2)),
 			server_subscribe: Some(produce_origin(1)),
 			server_requests: true,
@@ -382,12 +431,12 @@ async fn an_update_replaces_one_tokens_grant() {
 
 /// A revocation withdraws what the grant covered, even though the broadcast stays in
 /// the shared origin, and an empty union can be authorized again.
-#[tokio::test]
-async fn a_revoked_grant_withdraws_and_can_be_restored() {
+async fn a_revoked_grant_withdraws_and_can_be_restored(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
 		let relay = produce_origin(1);
 		let mut pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(publisher.clone()),
 			server_subscribe: Some(relay.clone()),
 			server_requests: true,
@@ -420,10 +469,10 @@ async fn a_revoked_grant_withdraws_and_can_be_restored() {
 }
 
 /// A refused token surfaces the acceptor's code.
-#[tokio::test]
-async fn a_refused_token_reports_the_code() {
+async fn a_refused_token_reports_the_code(version: &'static str) {
 	within(async {
 		let mut pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(produce_origin(2)),
 			server_requests: true,
 			..Default::default()
@@ -450,10 +499,10 @@ async fn a_refused_token_reports_the_code() {
 
 /// Refusing the setup token grants nothing: the union becomes empty rather than
 /// staying unknown, which the gates would read as unrestricted.
-#[tokio::test]
-async fn a_refused_setup_token_grants_nothing() {
+async fn a_refused_setup_token_grants_nothing(version: &'static str) {
 	within(async {
 		let mut pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(produce_origin(2)),
 			server_requests: true,
 			..Default::default()
@@ -473,10 +522,10 @@ async fn a_refused_setup_token_grants_nothing() {
 }
 
 /// Dropping the requests refuses tokens already queued, not only later ones.
-#[tokio::test]
-async fn dropping_the_requests_refuses_queued_tokens() {
+async fn dropping_the_requests_refuses_queued_tokens(version: &'static str) {
 	within(async {
 		let mut pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(produce_origin(2)),
 			server_requests: true,
 			..Default::default()
@@ -500,10 +549,10 @@ async fn dropping_the_requests_refuses_queued_tokens() {
 }
 
 /// A closed session holds no grant: every token ended with it.
-#[tokio::test]
-async fn a_closed_session_holds_no_grant() {
+async fn a_closed_session_holds_no_grant(version: &'static str) {
 	within(async {
 		let pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(produce_origin(2)),
 			server_subscribe: Some(produce_origin(1)),
 			..Default::default()
@@ -519,12 +568,13 @@ async fn a_closed_session_holds_no_grant() {
 	.expect("timed out");
 }
 
-/// A peer that takes no tokens in band resets the stream, which reads as
-/// unsupported rather than a refusal: the same as a peer that predates AUTH.
-#[tokio::test]
-async fn a_reset_auth_stream_reports_unsupported() {
+/// A peer that takes no tokens in band says so (lite resets the stream, moq-transport
+/// answers NOT_SUPPORTED), which reads as unsupported rather than a refusal: the same as
+/// a peer that predates AUTH.
+async fn a_reset_auth_stream_reports_unsupported(version: &'static str) {
 	within(async {
 		let pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(produce_origin(2)),
 			server_subscribe: Some(produce_origin(1)),
 			..Default::default()
@@ -540,14 +590,13 @@ async fn a_reset_auth_stream_reports_unsupported() {
 	.expect("timed out");
 }
 
-/// Older versions never open the stream: no grant, and no way to add a token.
-#[tokio::test]
-async fn older_versions_have_no_grant() {
+/// Versions without AUTH never open the stream: no grant, and no way to add a token.
+async fn older_versions_have_no_grant(version: &'static str) {
 	within(async {
 		let pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(produce_origin(2)),
 			server_subscribe: Some(produce_origin(1)),
-			version: Some("moq-lite-05"),
 			..Default::default()
 		})
 		.await;
@@ -560,8 +609,7 @@ async fn older_versions_have_no_grant() {
 
 /// Losing a grant cancels the subscriptions it covered, in both directions, and
 /// leaves the session up.
-#[tokio::test]
-async fn a_revoked_grant_cancels_its_subscriptions() {
+async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
 		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
@@ -579,12 +627,12 @@ async fn a_revoked_grant_cancels_its_subscriptions() {
 
 		let received = produce_origin(3);
 		let mut pair = connect(Options {
+			version: Some(version),
 			client_publish: Some(client_origin.clone()),
 			client_subscribe: Some(received.clone()),
 			server_publish: Some(server_origin.clone()),
 			server_subscribe: Some(server_origin.clone()),
 			server_requests: true,
-			..Default::default()
 		})
 		.await;
 		let mut issued = serve(pair.requests.take().unwrap(), |token| {
@@ -616,6 +664,132 @@ async fn a_revoked_grant_cancels_its_subscriptions() {
 			}
 		}
 		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A grant the wire cannot carry as prefixes is never widened: the token is refused as
+/// unsupported, promptly, and the union stays unknown rather than empty.
+async fn an_unrepresentable_grant_is_unsupported(version: &'static str) {
+	within(async {
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(produce_origin(2)),
+			server_subscribe: Some(produce_origin(1)),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut issued = serve(pair.requests.take().unwrap(), |token| match token {
+			b"" => Some(grant(&["a"], &[])),
+			b"exact" => Some(Grant {
+				publish: Patterns::from(Pattern::try_from("room/alice").unwrap()),
+				subscribe: Patterns::new(),
+				expires: None,
+			}),
+			b"mixed" => Some(Grant {
+				publish: ["room/**", "lobby"]
+					.into_iter()
+					.map(|p| Pattern::try_from(p).unwrap())
+					.collect(),
+				subscribe: Patterns::new(),
+				expires: None,
+			}),
+			b"wildcard" => Some(Grant {
+				publish: Patterns::from(Pattern::try_from("room/*/cam").unwrap()),
+				subscribe: Patterns::new(),
+				expires: None,
+			}),
+			_ => None,
+		});
+		let (_, _setup) = issued.recv().await.unwrap();
+		assert_eq!(granted(&pair.client).await, grant(&["a"], &[]));
+
+		for token in ["exact", "mixed", "wildcard"] {
+			let err = pair.client.auth().add(token).await.err().expect("not representable");
+			assert!(matches!(err, Error::Unsupported), "{token}: {err:?}");
+		}
+		// The other token is untouched, and so is the session.
+		assert_eq!(pair.client.auth().grant().peek(), Some(grant(&["a"], &[])));
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// An update the wire cannot carry revokes that token's earlier grant, and only that
+/// token's: the rest of the union and the session stay.
+async fn an_unrepresentable_update_revokes_only_its_token(version: &'static str) {
+	within(async {
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(produce_origin(2)),
+			server_subscribe: Some(produce_origin(1)),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut issued = serve(pair.requests.take().unwrap(), |token| match token {
+			b"" => Some(grant(&["a"], &[])),
+			b"t1" => Some(grant(&["b"], &[])),
+			_ => None,
+		});
+		let (_, _setup) = issued.recv().await.unwrap();
+		let t1 = pair.client.auth().add("t1").await.unwrap();
+		let (_, t1_issued) = issued.recv().await.unwrap();
+		assert_eq!(granted(&pair.client).await, grant(&["a", "b"], &[]));
+
+		t1_issued.update(Grant {
+			publish: Patterns::from(Pattern::try_from("b/exact").unwrap()),
+			subscribe: Patterns::new(),
+			expires: None,
+		});
+		// Lite resets the stream and moq-transport answers NOT_SUPPORTED; either ends it.
+		t1.closed().await;
+		assert_eq!(t1.grant().peek(), None);
+		wait_for(pair.client.auth().grant(), |g| g == &Some(grant(&["a"], &[]))).await;
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// The session closes before the peer ever hears of a broadcast outside the grant,
+/// even one published before the grant arrived: nothing is advertised until the
+/// setup token is answered.
+async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
+	within(async {
+		let publisher = produce_origin(2);
+		let early = publisher.create_broadcast("foo/bar").unwrap();
+		early.announce(Default::default()).unwrap();
+
+		// The relay accepts anything; only the grant it tells the client is narrow.
+		let relay = produce_origin(1);
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+
+		// Hold the answer, so the peer's discovery request is in long before the grant.
+		let mut requests = pair.requests.take().unwrap();
+		let setup = requests.next().await.expect("setup token");
+		let leaked = tokio::time::timeout(
+			Duration::from_millis(100),
+			wait_announced(&relay.consume(), "foo/bar", true),
+		)
+		.await;
+		assert!(leaked.is_err(), "advertised before the grant was known");
+
+		let _issued = setup.accept(grant(&["baz"], &[]));
+		assert!(matches!(
+			pair.server.closed().await,
+			Error::Session(SessionError::Unauthorized)
+		));
 	})
 	.await
 	.expect("timed out");

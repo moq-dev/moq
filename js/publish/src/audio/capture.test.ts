@@ -109,7 +109,7 @@ test("does not construct an AudioWorkletNode when torn down mid worklet load", a
 	await settle();
 
 	// Tear the run down before the module finishes loading. cleanup() calls context.close(), which on
-	// Firefox/Safari leaves .state === "suspended", then effect.cancel wins the race.
+	// Firefox/Safari leaves .state === "suspended", then the teardown wins the race.
 	capture.close();
 	await settle();
 

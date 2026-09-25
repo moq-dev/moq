@@ -74,6 +74,13 @@ pub struct Config {
 
 	/// An optional identifier for the shape of each value, typically a JSON Schema URL.
 	pub schema: Option<String>,
+
+	/// Override the snapshot encoder's [`delta_ratio`](moq_json::snapshot::Config::delta_ratio),
+	/// or `None` for its default. Only a [`Snapshot`] reads it: a stream has no deltas.
+	///
+	/// Not part of the catalog entry: deltas are a property of the frames, which every consumer
+	/// decodes the same way, so a reader needs nothing from the entry to follow them.
+	pub delta_ratio: Option<u32>,
 }
 
 impl Config {
@@ -86,6 +93,12 @@ impl Config {
 	/// Set [`schema`](Self::schema) (a builder, since the struct is `#[non_exhaustive]`).
 	pub fn with_schema(mut self, schema: impl Into<String>) -> Self {
 		self.schema = Some(schema.into());
+		self
+	}
+
+	/// Set [`delta_ratio`](Self::delta_ratio) (a builder, since the struct is `#[non_exhaustive]`).
+	pub fn with_delta_ratio(mut self, delta_ratio: u32) -> Self {
+		self.delta_ratio = Some(delta_ratio);
 		self
 	}
 
@@ -116,6 +129,9 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 		let mut json = moq_json::snapshot::Config::default();
 		if config.compression {
 			json.compression = moq_json::Compression::Deflate;
+		}
+		if let Some(delta_ratio) = config.delta_ratio {
+			json.delta_ratio = delta_ratio;
 		}
 		let inner = moq_json::snapshot::Producer::new(track, json);
 		rendition.set(config.entry(Mode::Snapshot))?;

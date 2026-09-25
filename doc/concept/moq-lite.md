@@ -47,8 +47,8 @@ A client that publishes a broadcast outside its grant closes the session with
 `UNAUTHORIZED` and names the path in the close reason, rather than waiting
 forever for a subscriber the relay will never let through. A grant is advice
 for the side that holds it; the side that issued it still enforces its own
-scope. Older versions and moq-transport have no grant; the token in the URL
-keeps working everywhere.
+scope. Older versions, and moq-transport peers that do not negotiate the MoQ Auth
+extension, have no grant; the token in the URL keeps working everywhere.
 
 ## Discovery
 

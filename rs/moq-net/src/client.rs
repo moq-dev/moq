@@ -257,6 +257,8 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
+				// The peer's SETUP decides whether AUTH is negotiated.
+				let auth = crate::auth::Handle::new(true);
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					session: session.clone(),
@@ -271,6 +273,7 @@ impl Client {
 					path: self.setup_path.clone(),
 					peer_setup_stream: None,
 					peer_declared: None,
+					auth: auth.clone(),
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -281,7 +284,7 @@ impl Client {
 					None,
 					crate::driver::Protocol::Ietf(protocol),
 					goaway,
-					crate::auth::Handle::new(false),
+					auth,
 				));
 			}
 			Some(ALPN_16) => {
@@ -420,6 +423,7 @@ impl Client {
 					path: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
+					auth: crate::auth::Handle::new(false),
 				})?;
 				(
 					None,

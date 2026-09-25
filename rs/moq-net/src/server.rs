@@ -396,8 +396,8 @@ impl Server {
 			// Cluster extension and declared a non-zero Hop ID.
 			origin: peer_setup.declared.cluster.hop.filter(|h| *h != crate::Hop::UNKNOWN),
 			assigned_hop: crate::Hop::random(),
-			// moq-transport carries no AUTH yet.
-			auth: crate::auth::Handle::new(false),
+			// The client's SETUP already settled whether MoQ Auth is negotiated.
+			auth: crate::auth::Handle::new(peer_setup.declared.auth),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -532,6 +532,7 @@ where
 				path: None,
 				peer_setup_stream: Some(peer_setup.stream),
 				peer_declared: Some(peer_setup.declared),
+				auth: auth.clone(),
 			})?;
 			tracing::debug!(?version, "connected");
 			Ok(Session::new(
@@ -649,6 +650,7 @@ where
 						path: None,
 						peer_setup_stream: None,
 						peer_declared: Some(peer_declared),
+						auth: auth.clone(),
 					})?;
 					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth)
 				}
