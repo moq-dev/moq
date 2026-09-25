@@ -18,7 +18,7 @@ error lists and rerun.
 ## Wire
 
 Older protocol versions still negotiate, so relays and clients can be upgraded
-in any order, apart from [re-minting tokens](#relay-and-cli) and two wire
+in any order, apart from [pattern-only token grants](#relay-and-cli) and two wire
 changes:
 
 - The lite 06 ALPN is `moq-lite-06`, not `moq-lite-06-wip`. An explicit
@@ -69,9 +69,11 @@ Other changes to a deployment:
 - **Token grants are patterns.** JWT `publish` and `subscribe` claims are
   patterns, so a token granting `alice` covers only `alice`; sign `alice/**`
   instead. Existing `put`/`get` tokens and key scopes keep working as subtrees,
-  and subtree-only grants are still signed in that form, so issuers and
-  verifiers can upgrade in either order. Grants only a pattern can express
-  need an upgraded verifier.
+  and subtree-only grants are still signed in that form, so a `moq-token`
+  deployment can upgrade issuers and verifiers in either order. Verifiers on
+  the pattern-only `moq-auth` 0.1.0/0.1.1 or `@moq/auth` 0.1.x/0.2.0 refuse
+  that form, so upgrade them before their issuers. Grants only a pattern can
+  express need an upgraded verifier.
 - **mTLS admits nothing on its own.** A verified client certificate is reported
   to the auth server, which grants it. `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` restores the old full access for every certificate
   the relay's client CA verifies, so keep that CA to cluster peers.
@@ -135,7 +137,7 @@ The JavaScript packages have no changelog; this list follows the breaking
 PRs, so a minor rename may be missing.
 
 - **@moq/token is @moq/auth.** `sign` / `verify` are `Key.sign` / `Key.verify`,
-  and claims are pattern unions (see [Re-mint tokens](#relay-and-cli)).
+  and claims are pattern unions (see [Token grants are patterns](#relay-and-cli)).
 - **One `Connection`** (#3614, #3636). `Connection.Reload` is
   `new Moq.Connection({ url })`, which pools one connection per relay. `closed`
   settles only on `close()`; the error that stopped retrying is `error`.
