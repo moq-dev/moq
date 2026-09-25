@@ -82,18 +82,25 @@ MKV uses the same flag to cap clusters, which otherwise follow video GOPs.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
-moq ... play --delay 500ms          # trade latency for a jittery link
+moq ... play --delay 500ms          # fix the delay instead of measuring it
 ```
 
 Decodes H.264, H.265, and AV1 video and Opus, PCM, and AAC-LC audio using
 the platform hardware decoder where available. `--video-name` and
 `--audio-name` pick a rendition.
 
-Playback runs on a clock it owns. `--delay` (default 100 ms) is how far it
-trails the live edge, which is both the jitter a late frame may absorb and the
-point past which a stalled group is skipped. The speaker holds the delay, with a
-50 ms floor under it, and the picture is scheduled against where the speaker
-actually is. While video owns the clock, a frame arriving earlier than predicted
+Playback runs on a clock it owns. `--delay` is how far it trails the live
+edge: the jitter a late frame may absorb. The default, `auto`, measures how
+unevenly audio arrives and sizes the speaker's buffer to match, using the same
+[algorithm](/concept/audio-jitter) as the browser player, so a publisher that
+flushes 100 ms at a time gets a buffer deep enough to play through the next
+flush. It waits up to 2 s on a stalled group before skipping it, since a budget
+any shorter would hide the very lateness it measures; a broadcast with no audio
+has nothing to measure, so video trails by 100 ms and skips past that. A duration fixes the delay
+instead, and doubles as the point past which a stalled group is skipped. The
+speaker holds the delay, with a 50 ms floor under it: it pads back up to the
+delay after running dry and skips back down onto it after a burst. The picture
+is scheduled against where the speaker actually is. While video owns the clock, a frame arriving earlier than predicted
 pulls playback forward, so a late start catches up to live instead of staying
 behind it. Once the speaker owns the clock, video follows the speaker instead.
 

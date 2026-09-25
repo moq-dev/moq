@@ -185,6 +185,40 @@ impl AudioTimeline {
 	}
 }
 
+/// How to hand `incoming` samples to a speaker already holding `buffered`, so
+/// it sits on `target`: the jitter buffer the browser's audio rings hold, in
+/// sample frames.
+///
+/// A `dry` ring, one that ran out or has only just opened, re-stalls: it pads up
+/// to the target before playing on, rather than playing the next arrival on an
+/// empty cushion. A ring more than
+/// `slack` over the target lands back on it by skipping the oldest of what is
+/// arriving. The slack is what a device period and a write's own length move the
+/// level by, so ordinary cadence never skips.
+pub(super) fn fit(dry: bool, buffered: u64, target: u64, slack: u64, incoming: u64) -> Fit {
+	let pad = if dry {
+		target.saturating_sub(buffered + incoming)
+	} else {
+		0
+	};
+	let level = buffered + pad + incoming;
+	let skip = if level > target + slack {
+		(level - target).min(incoming)
+	} else {
+		0
+	};
+	Fit { pad, skip }
+}
+
+/// What [`fit`] decided for one write.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Fit {
+	/// Silence to write first.
+	pub(super) pad: u64,
+	/// Samples to drop from the front of the write.
+	pub(super) skip: u64,
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -369,5 +403,35 @@ mod tests {
 		let next = timeline.push(Duration::from_millis(1_020), 960, 48_000, 4_800);
 		assert!(!next.reset_sink);
 		assert_eq!(next.silence, 0);
+	}
+
+	/// A dry ring refills to the target before the next arrival plays.
+	#[test]
+	fn a_dry_ring_restalls_to_the_target() {
+		assert_eq!(fit(true, 0, 4_800, 960, 960), Fit { pad: 3_840, skip: 0 });
+		// A fresh sink starts on a little silence of its own, which counts.
+		assert_eq!(fit(true, 2_400, 4_800, 960, 960), Fit { pad: 1_440, skip: 0 });
+		// A write longer than the target needs no padding, only the landing.
+		assert_eq!(fit(true, 0, 960, 960, 4_800), Fit { pad: 0, skip: 3_840 });
+	}
+
+	/// Ordinary cadence, a write on a ring already at the target, stays within
+	/// the slack and loses nothing.
+	#[test]
+	fn cadence_within_the_slack_plays_everything() {
+		assert_eq!(fit(false, 4_000, 4_800, 960, 960), Fit { pad: 0, skip: 0 });
+		assert_eq!(fit(false, 4_800, 4_800, 960, 960), Fit { pad: 0, skip: 0 });
+		// Running low is not running dry: nothing is padded until the ring is out.
+		assert_eq!(fit(false, 480, 4_800, 960, 960), Fit { pad: 0, skip: 0 });
+	}
+
+	/// A burst past the slack lands back on the target, and a ring already
+	/// over it drops the whole write.
+	#[test]
+	fn a_burst_lands_on_the_target() {
+		assert_eq!(fit(false, 4_800, 4_800, 960, 1_920), Fit { pad: 0, skip: 1_920 });
+		assert_eq!(fit(false, 4_000, 4_800, 960, 4_800), Fit { pad: 0, skip: 4_000 });
+		// A target that fell is reached by skipping, not by waiting to drain.
+		assert_eq!(fit(false, 9_600, 4_800, 960, 960), Fit { pad: 0, skip: 960 });
 	}
 }
