@@ -6,7 +6,7 @@ if(NOT _version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
     message(FATAL_ERROR "Unsupported version '${_version}' in cpp/moq/VERSION (want x.y.z)")
 endif()
 
-project(moq VERSION ${_version} LANGUAGES CXX)
+project(moq-cpp VERSION ${_version} LANGUAGES CXX)
 
 # Builds moq-ffi as a staticlib with cargo and renders its bindings with uniffi-bindgen-cpp,
 # the same no-Corrosion custom target rs/libmoq/CMakeLists.txt uses. Multi-config generators
@@ -74,16 +74,17 @@ foreach(_line IN LISTS _lines)
 endforeach()
 
 # The bindings compile here with the including project's standard and flags; see src/moq.cpp.
-add_library(moq STATIC src/moq.cpp)
-add_library(moq::moq ALIAS moq)
-add_dependencies(moq moq_ffi)
-target_compile_features(moq PUBLIC cxx_std_17)
-target_include_directories(moq PUBLIC
+# Named moq-cpp so an in-tree build can sit beside libmoq's `moq` target.
+add_library(moq-cpp STATIC src/moq.cpp)
+add_library(moq-cpp::moq ALIAS moq-cpp)
+add_dependencies(moq-cpp moq_ffi)
+target_compile_features(moq-cpp PUBLIC cxx_std_17)
+target_include_directories(moq-cpp PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>"
 )
 find_package(Threads REQUIRED)
-target_link_libraries(moq PUBLIC "${MOQ_FFI_LIB}" ${MOQ_NATIVE_LIBS} Threads::Threads)
+target_link_libraries(moq-cpp PUBLIC "${MOQ_FFI_LIB}" ${MOQ_NATIVE_LIBS} Threads::Threads)
 
 if(PROJECT_IS_TOP_LEVEL)
     include(GNUInstallDirs)
@@ -91,7 +92,7 @@ if(PROJECT_IS_TOP_LEVEL)
 
     install(DIRECTORY include/moq DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
     install(FILES ${_generated_paths} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/moq/ffi)
-    install(FILES src/moq.cpp DESTINATION ${CMAKE_INSTALL_DATADIR}/moq)
+    install(FILES src/moq.cpp DESTINATION ${CMAKE_INSTALL_DATADIR}/moq-cpp)
     install(FILES "${MOQ_FFI_LIB}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
     # The config takes MOQ_NATIVE_LIBS as a list; pkg-config wants linker flags.
@@ -105,20 +106,20 @@ if(PROJECT_IS_TOP_LEVEL)
         endif()
     endforeach()
 
-    configure_package_config_file(cmake/moq-config.cmake.in
-        "${CMAKE_CURRENT_BINARY_DIR}/moq-config.cmake"
-        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/moq
+    configure_package_config_file(cmake/moq-cpp-config.cmake.in
+        "${CMAKE_CURRENT_BINARY_DIR}/moq-cpp-config.cmake"
+        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/moq-cpp
         PATH_VARS CMAKE_INSTALL_INCLUDEDIR CMAKE_INSTALL_LIBDIR CMAKE_INSTALL_DATADIR
     )
-    write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/moq-config-version.cmake"
+    write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/moq-cpp-config-version.cmake"
         COMPATIBILITY SameMinorVersion
     )
     install(FILES
-        "${CMAKE_CURRENT_BINARY_DIR}/moq-config.cmake"
-        "${CMAKE_CURRENT_BINARY_DIR}/moq-config-version.cmake"
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/moq
+        "${CMAKE_CURRENT_BINARY_DIR}/moq-cpp-config.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/moq-cpp-config-version.cmake"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/moq-cpp
     )
 
-    configure_file(cmake/moq.pc.in "${CMAKE_CURRENT_BINARY_DIR}/moq.pc" @ONLY)
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/moq.pc" DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+    configure_file(cmake/moq-cpp.pc.in "${CMAKE_CURRENT_BINARY_DIR}/moq-cpp.pc" @ONLY)
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/moq-cpp.pc" DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 endif()

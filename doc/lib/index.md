@@ -17,7 +17,7 @@ protocol. A publisher in Python is consumable by a subscriber in Swift.
 | [Python](/lib/py/) | `moq-rs` on PyPI | Scripts, ML pipelines, voice agents. |
 | [Go](/lib/go/) | `moq.dev/moq` | Go services and tooling. |
 | [Dart](/lib/dart/) | `moq` on pub.dev | Flutter apps. |
-| [C++](/lib/cpp/) | `moq` via CMake or pkg-config | C++ apps, engines, and plugins. |
+| [C++](/lib/cpp/) | `moq-cpp` via CMake or pkg-config | C++ apps, engines, and plugins. |
 | [C](/lib/c/) | `libmoq` | The plain-C ABI, for C and any language with a C FFI; C++ should use the package above. |
 
 ## How they relate

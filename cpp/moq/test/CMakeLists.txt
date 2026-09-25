@@ -1,5 +1,5 @@
 # A consumer of the installed package: `just cpp check` installs cpp/moq to a prefix, then
-# builds this with find_package(moq) at C++17 and C++23.
+# builds this with find_package(moq-cpp) at C++17 and C++23.
 cmake_minimum_required(VERSION 3.21)
 project(moq-probe LANGUAGES CXX)
 
@@ -18,7 +18,7 @@ else()
     add_compile_options(-Wall -Wextra -Werror -pedantic-errors -fno-exceptions -fno-rtti)
 endif()
 
-find_package(moq REQUIRED)
+find_package(moq-cpp REQUIRED)
 
 add_executable(probe probe.cpp)
-target_link_libraries(probe PRIVATE moq::moq)
+target_link_libraries(probe PRIVATE moq-cpp::moq)

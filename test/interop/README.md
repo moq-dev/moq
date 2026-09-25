@@ -30,7 +30,7 @@ player survive the publication lifecycle. See [Media QA](#media-qa).
 | Rust | `rs/moq-relay` + `rs/moq-cli` | `cargo build` | publish (video) + subscribe |
 | Python | `py/moq-rs` (+ `rs/moq-ffi`, import `moq`) | `just py build` (maturin editable into `.venv`) | publish (video + audio) + subscribe |
 | Go | `go/wrapper` (+ `rs/moq-ffi`, import `moq-go/moq`) | `go/scripts/stage.sh` (uniffi-bindgen-go) + `go build` | publish (video + audio) + subscribe |
-| C++ | `cpp/moq` (+ `rs/moq-ffi`, `find_package(moq)`) | `cmake` build + install of `cpp/moq` (uniffi-bindgen-cpp), then `cmake` for the client | publish (video + audio) + subscribe |
+| C++ | `cpp/moq` (+ `rs/moq-ffi`, `find_package(moq-cpp)`) | `cmake` build + install of `cpp/moq` (uniffi-bindgen-cpp), then `cmake` for the client | publish (video + audio) + subscribe |
 | Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | publish (video + audio) + rendered playback |
 | Native JS | `js/net` + `js/hang` + the npm `@moq/web-transport` polyfill | `node` (tsx) and `bun` | subscribe |
 | C | `rs/libmoq` | `cargo build -p libmoq` + `cc` | subscribe |
@@ -50,7 +50,7 @@ wrapper end to end rather than only compiling it. A shell without
 
 The C++ client builds against the package the way an external project would:
 `interop.sh` configures, builds, and installs `cpp/moq` into the run directory,
-then builds `clients/cpp` with `find_package(moq)` pointed at that prefix. A
+then builds `clients/cpp` with `find_package(moq-cpp)` pointed at that prefix. A
 shell without `cmake` or `uniffi-bindgen-cpp` (the nix devShell ships both)
 marks the cell unavailable.
 
@@ -172,7 +172,7 @@ interop.toml            relay config (anonymous, self-signed localhost)
 clients/
   python/interop.py       publish/subscribe via py/moq-rs (import moq)
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
-  cpp/main.cpp            publish/subscribe via cpp/moq (find_package(moq))
+  cpp/main.cpp            publish/subscribe via cpp/moq (find_package(moq-cpp))
   js/                     headless-Chromium publish/subscribe via @moq/watch + @moq/publish
     driver.ts             the interop matrix's browser publisher/subscriber
     media.ts              the media output + lifecycle checks

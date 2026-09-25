@@ -1,5 +1,5 @@
 // Cross-language interop client for the interop test, built against the installed cpp/moq
-// package with find_package(moq).
+// package with find_package(moq-cpp).
 //
 // publish reads raw Annex-B H.264 from stdin (e.g. piped from ffmpeg) and feeds it to a
 // streaming importer, which infers frame boundaries. Alongside it, a synthetic tone is

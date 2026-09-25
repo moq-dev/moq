@@ -21,20 +21,20 @@ a method means the same thing here as in Python or Go. For a plain C ABI, use
 Each [`cpp-v*` release](https://github.com/moq-dev/moq/releases?q=cpp-v) ships
 `moq-cpp-<version>-<target>.tar.gz` (`.zip` on Windows) holding the `moq-ffi`
 static library, the headers, the generated bindings source, a CMake package,
-and `moq.pc`. Targets: Linux x86\_64 and aarch64, macOS arm64, Windows x64.
+and `moq-cpp.pc`. Targets: Linux x86\_64 and aarch64, macOS arm64, Windows x64.
 No Rust toolchain is needed to consume it.
 
 ```cmake ignore
-find_package(moq REQUIRED)   # with CMAKE_PREFIX_PATH at the unpacked archive
-target_link_libraries(app PRIVATE moq::moq)
+find_package(moq-cpp REQUIRED)   # with CMAKE_PREFIX_PATH at the unpacked archive
+target_link_libraries(app PRIVATE moq-cpp::moq)
 ```
 
 ```bash
 export PKG_CONFIG_PATH="moq-cpp-$ver-$target/lib/pkgconfig"
-c++ -std=c++17 app.cpp $(pkg-config --variable=sources moq) $(pkg-config --cflags --libs moq) -o app
+c++ -std=c++17 app.cpp $(pkg-config --variable=sources moq-cpp) $(pkg-config --cflags --libs moq-cpp) -o app
 ```
 
-The generated bindings ship as source (`share/moq/moq.cpp`) and compile inside
+The generated bindings ship as source (`share/moq-cpp/moq.cpp`) and compile inside
 your build, because `uniffi::expected` is `std::expected` or a bundled
 `tl::expected` depending on the standard. Compile it with the same standard
 as the code that includes `<moq/moq.hpp>`; `find_package` does this for you,
@@ -44,7 +44,8 @@ release runtime (`/MD`), which the Rust library uses in every configuration.
 From source, `add_subdirectory(cpp/moq)` in a checkout builds `moq-ffi` with
 cargo and renders the bindings with the pinned `uniffi-bindgen-cpp` (see
 [`cpp/moq`](https://github.com/moq-dev/moq/tree/main/cpp/moq)), then exposes
-the same `moq::moq` target.
+the same `moq-cpp::moq` target. The package is `moq-cpp`, so it installs beside
+libmoq's `moq` package without colliding.
 
 ## Example
 

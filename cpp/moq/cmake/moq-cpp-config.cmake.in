@@ -1,0 +1,26 @@
+# find_package(moq-cpp): the C++ bindings for moq-ffi as the moq-cpp::moq target. The
+# namespace is the package name, so it never collides with libmoq's moq::moq.
+
+@PACKAGE_INIT@
+
+if(NOT TARGET moq-cpp::moq)
+    find_package(Threads REQUIRED)
+
+    # The prebuilt Rust staticlib, and the system libraries an external linker must add for
+    # it, baked in for the platform this package was built for.
+    add_library(moq-cpp::ffi STATIC IMPORTED)
+    set_target_properties(moq-cpp::ffi PROPERTIES
+        IMPORTED_LOCATION "@PACKAGE_CMAKE_INSTALL_LIBDIR@/@MOQ_FFI_LIB_NAME@"
+        INTERFACE_LINK_LIBRARIES "@MOQ_NATIVE_LIBS@;Threads::Threads"
+    )
+
+    # The generated bindings compile here, in the consumer's project, so they see the same
+    # standard and flags as the code that includes <moq/moq.hpp>.
+    add_library(moq-cpp STATIC "@PACKAGE_CMAKE_INSTALL_DATADIR@/moq-cpp/moq.cpp")
+    target_compile_features(moq-cpp PUBLIC cxx_std_17)
+    target_include_directories(moq-cpp PUBLIC "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+    target_link_libraries(moq-cpp PUBLIC moq-cpp::ffi)
+    add_library(moq-cpp::moq ALIAS moq-cpp)
+endif()
+
+check_required_components(moq-cpp)

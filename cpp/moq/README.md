@@ -4,7 +4,7 @@ C++17 bindings for [rs/moq-ffi](../../rs/moq-ffi): the sources `uniffi-bindgen-c
 
 ## Layout
 
-- `CMakeLists.txt` builds moq-ffi as a staticlib with cargo, renders the bindings into the build tree, and compiles them as the `moq::moq` target. Use it with `add_subdirectory`, or install it for `find_package(moq)` and `moq.pc`.
+- `CMakeLists.txt` builds moq-ffi as a staticlib with cargo, renders the bindings into the build tree, and compiles them as the `moq-cpp::moq` target. Use it with `add_subdirectory`, or install it for `find_package(moq-cpp)` and `moq-cpp.pc`.
 - `src/moq.cpp` compiles the generated `moq/ffi/moq.cpp`. It ships as source so it builds with the consumer's standard and flags.
 - `cmake/` holds the installed CMake package and pkg-config templates.
 - `build.sh` builds the release archive `release-cpp.yml` publishes.

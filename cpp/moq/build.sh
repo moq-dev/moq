@@ -5,7 +5,7 @@ set -euo pipefail
 # Usage: ./build.sh [--target TARGET] [--output DIR]
 #
 # The archive holds what `cmake --install` lays out: the moq-ffi staticlib, the wrapper and
-# generated headers, the generated source, the CMake package, and moq.pc. Needs cargo, cmake,
+# generated headers, the generated source, the CMake package, and moq-cpp.pc. Needs cargo, cmake,
 # and uniffi-bindgen-cpp on PATH. The version is cpp/moq/VERSION.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

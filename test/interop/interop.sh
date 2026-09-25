@@ -284,7 +284,7 @@ prepare_go() {
 
 # Build and install cpp/moq (cargo builds moq-ffi, uniffi-bindgen-cpp renders the
 # bindings), then build the C++ client against the installed package with
-# find_package(moq), the way an external project consumes it. Debug, like the
+# find_package(moq-cpp), the way an external project consumes it. Debug, like the
 # rest of the run.
 prepare_cpp() {
     local t
