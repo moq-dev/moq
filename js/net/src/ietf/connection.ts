@@ -89,6 +89,7 @@ export class Connection implements Established {
 		discovery = true,
 		publish,
 		solicit,
+		hidden = false,
 		cluster,
 	}: {
 		url: URL;
@@ -106,6 +107,8 @@ export class Connection implements Established {
 		 * nothing, which is the one case where announcing at us unasked is not a bug.
 		 */
 		solicit?: boolean;
+		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
+		hidden?: boolean;
 		/**
 		 * The Hop IDs this session declared (MoQ Cluster). `undefined` on a version that
 		 * cannot negotiate the extension, as is a `peer` the peer never declared.
@@ -142,7 +145,7 @@ export class Connection implements Established {
 		});
 		this.#solicit = solicit;
 		this.#cluster = cluster;
-		this.#subscriber = new Subscriber({ session: this.#session, cluster });
+		this.#subscriber = new Subscriber({ session: this.#session, cluster, hidden });
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path) });
 
 		void this.#run();
@@ -183,8 +186,8 @@ export class Connection implements Established {
 	}
 
 	/** Gets an announced reader for `scope`; see {@link Established.announced}. */
-	announced(scope?: Path.Pattern): announce.Consumer {
-		return this.#subscriber.announced(scope);
+	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
+		return this.#subscriber.announced(scope, options);
 	}
 
 	/**
@@ -223,7 +226,11 @@ export class Connection implements Established {
 			}
 			case SubscribeNamespaceLegacy.id: {
 				const legacy = await SubscribeNamespaceLegacy.decode(stream.reader, this.#session.version);
-				const msg = new SubscribeNamespace({ requestId: legacy.requestId, namespace: legacy.namespace });
+				const msg = new SubscribeNamespace({
+					requestId: legacy.requestId,
+					namespace: legacy.namespace,
+					hidden: legacy.hidden,
+				});
 				await this.#publisher.runSubscribeNamespace(msg, stream);
 				break;
 			}

@@ -89,6 +89,10 @@ existing lite-06 ALPN.
 
 ## Quests
 
+- [Interop grants](/quest/m1/auth/interop.md) - the interop matrix asserts
+  each lite-06 cell's grant and that a publish outside it fails loud
+- [Unauthorized reset](/quest/m1/auth/unauthorized.md) - a subscription that
+  loses access resets with a dedicated UNAUTHORIZED stream code
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
 - [moq-transport](/quest/m1/auth/moq-transport.md) - the same exchange as a

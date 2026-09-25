@@ -214,8 +214,8 @@ export class Connection implements Established {
 		}
 	}
 
-	announced(scope?: Path.Pattern): announce.Consumer {
-		return this.#subscriber.announced(scope);
+	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
+		return this.#subscriber.announced(scope, options);
 	}
 
 	async #runSession() {

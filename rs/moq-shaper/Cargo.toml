@@ -1,0 +1,24 @@
+[package]
+name = "moq-shaper"
+description = "Media over QUIC - Seeded userspace UDP impairment for tests"
+authors = ["Luke Curley <kixelated@gmail.com>"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+
+version = "0.0.1"
+edition = "2024"
+rust-version.workspace = true
+
+publish = false
+
+[[bin]]
+name = "moq-shaper"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+humantime = { workspace = true }
+rand = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }

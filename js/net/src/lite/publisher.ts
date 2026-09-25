@@ -4,7 +4,7 @@ import type * as broadcast from "../broadcast.ts";
 import { closeReason, error, NotFound, reason, SessionCode, SessionError, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { type Hop, type Route, routesEqual } from "../hop.ts";
-import { hooks } from "../internal.ts";
+import { hiddenBelow, hooks } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
@@ -33,7 +33,11 @@ import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, resolvesStart,
 // Where each originated route lands under the requested prefix: its suffix beneath
 // the prefix, or the empty suffix for a route above it, where the most specific
 // such route wins the way a request through the prefix would resolve.
-function presented(prefix: Path.Valid, table: ReadonlyMap<Path.Valid, Advertised>): Map<Path.Valid, Advertised> {
+function presented(
+	prefix: Path.Valid,
+	table: ReadonlyMap<Path.Valid, Advertised>,
+	hidden: boolean,
+): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
 	let rootLen = -1;
 	for (const [covered, snap] of table) {
@@ -43,6 +47,8 @@ function presented(prefix: Path.Valid, table: ReadonlyMap<Path.Valid, Advertised
 			out.set(Path.empty(), snap);
 			continue;
 		}
+		// A hidden route stays off the wire unless the request opted in.
+		if (!hidden && hiddenBelow(prefix, covered)) continue;
 		const suffix = Path.stripPrefix(prefix, covered);
 		if (suffix !== null) out.set(suffix, snap);
 	}
@@ -342,13 +348,7 @@ export class Publisher {
 	// subscriptions share it, since a second getWriter on the same stream would throw.
 	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
 
-	// The published broadcasts, borrowed from the origin this session serves. The origin
-	// outlives the session, so this is read-only here: subscribe/fetch look it up, and
-	// closing the session leaves the broadcasts alone.
-	#broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
-
-	// Originated advertisements this session forwards. Unadvertised local broadcasts
-	// stay reachable by exact path without appearing here.
+	// Originated advertisements this session forwards.
 	#advertised: Getter<ReadonlyMap<Path.Valid, Advertised> | undefined>;
 
 	#publish?: OriginConsumer;
@@ -388,7 +388,6 @@ export class Publisher {
 		this.version = version;
 		this.hop = hop;
 		const origin = publish && wireOf(publish);
-		this.#broadcasts = origin?.broadcasts ?? new Signal(new Map());
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
 		this.#publish = publish;
 
@@ -470,7 +469,7 @@ export class Publisher {
 		// What the peer currently sees: the table under the prefix, less whatever our grant
 		// does not let us publish.
 		const visible = (table: ReadonlyMap<Path.Valid, Advertised>): Map<Path.Valid, Advertised> => {
-			const out = presented(msg.prefix, table);
+			const out = presented(msg.prefix, table, msg.hidden);
 			const grant = this.#grant?.peek();
 			if (grant) {
 				for (const suffix of [...out.keys()]) {
@@ -585,8 +584,8 @@ export class Publisher {
 		let front: broadcast.Consumer | undefined;
 		try {
 			front =
-				this.#broadcasts.peek()?.get(msg.broadcast) ??
-				(this.#publish && (await wireOf(this.#publish).demand(msg.broadcast)));
+				this.#publish &&
+				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -719,8 +718,8 @@ export class Publisher {
 		let front: broadcast.Consumer | undefined;
 		try {
 			front =
-				this.#broadcasts.peek()?.get(msg.broadcast) ??
-				(this.#publish && (await wireOf(this.#publish).demand(msg.broadcast)));
+				this.#publish &&
+				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -923,8 +922,8 @@ export class Publisher {
 		}
 		try {
 			const front =
-				this.#broadcasts.peek()?.get(msg.broadcast) ??
-				(this.#publish && (await wireOf(this.#publish).demand(msg.broadcast)));
+				this.#publish &&
+				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track);
@@ -1106,11 +1105,12 @@ export class Publisher {
 					}
 
 					try {
+						// A group that ends exactly at the start is a valid, empty range.
+						if (read.sequence + 1 >= startFrame) reached = true;
 						// Frames below the requested start were excluded, and the receiver
 						// numbers what it gets from `startFrame`.
 						if (read.sequence < startFrame) continue;
 						if (endFrame !== undefined && read.sequence > endFrame) break;
-						reached = true;
 
 						if (timestamps) {
 							// Convert each frame to the track's advertised timescale.

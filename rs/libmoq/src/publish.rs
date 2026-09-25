@@ -108,7 +108,7 @@ impl Publish {
 	}
 
 	/// Advertise the broadcast's exact path as a route. Announcing again re-prices
-	/// in place. The broadcast itself stays reachable by exact path either way.
+	/// in place. Until announced, the broadcast is invisible and unroutable.
 	pub fn announce(&mut self, broadcast: Id, route: moq_net::origin::Route) -> Result<(), Error> {
 		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
 		broadcast.producer.announce(route)?;
@@ -221,6 +221,14 @@ impl Publish {
 	pub fn media_frame(&mut self, media: Id, data: &[u8], timestamp: hang::container::Timestamp) -> Result<(), Error> {
 		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
 		track.decode(data, Some(timestamp))?;
+		Ok(())
+	}
+
+	/// Record a locally encoded frame's transport handoff. Generic imports remain clock-free
+	/// unless their caller explicitly identifies the frame as encoder output.
+	pub fn media_flush(&mut self, media: Id, timestamp: hang::container::Timestamp) -> Result<(), Error> {
+		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
+		track.flush(timestamp, std::time::Instant::now())?;
 		Ok(())
 	}
 
