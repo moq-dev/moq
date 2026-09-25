@@ -492,7 +492,7 @@ async fn dropping_the_requests_refuses_queued_tokens() {
 		tokio::time::sleep(Duration::from_millis(50)).await;
 		drop(requests);
 
-		let err = pending.await.unwrap().err().expect("refused");
+		let err = pending.await.unwrap().expect_err("refused");
 		assert!(matches!(err, Error::Session(SessionError::Unauthorized)), "{err:?}");
 	})
 	.await
