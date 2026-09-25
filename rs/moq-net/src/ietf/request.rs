@@ -108,7 +108,10 @@ impl Message for RequestOk {
 		} else {
 			None
 		};
-		decode_params!(r, version,);
+		// A REQUEST_UPDATE_OK may refresh EXPIRES, which is ignored like SUBSCRIBE_OK's.
+		decode_params!(r, version,
+			0x08 => _expires: Option<u64>,
+		);
 		Ok(Self { request_id })
 	}
 }
@@ -191,6 +194,15 @@ mod tests {
 		let decoded: RequestOk = decode_message(&encoded, Version::Draft15).unwrap();
 
 		assert_eq!(decoded.request_id, Some(RequestId(42)));
+	}
+
+	/// A REQUEST_UPDATE_OK may refresh EXPIRES; it is ignored rather than rejected.
+	#[test]
+	fn test_request_ok_ignores_expires() {
+		let bytes = [0x07, 0x01, 0x08, 0x05];
+
+		let decoded: RequestOk = decode_message(&bytes, Version::Draft16).unwrap();
+		assert_eq!(decoded.request_id, Some(RequestId(7)));
 	}
 
 	#[test]
