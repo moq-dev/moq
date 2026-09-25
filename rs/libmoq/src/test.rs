@@ -1823,17 +1823,7 @@ fn announced_free_lifecycle() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let ann_cb = Callback::new();
-	let ann_task = id(unsafe {
-		moq_origin_announced(
-			origin,
-			std::ptr::null(),
-			0,
-			std::ptr::null(),
-			0,
-			Some(channel_callback),
-			ann_cb.ptr,
-		)
-	});
+	let ann_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), ann_cb.ptr) });
 
 	// The first callback is the announcement for our broadcast.
 	let announced = id(ann_cb.recv());
@@ -1991,17 +1981,7 @@ fn local_announce() {
 	let origin = id(moq_origin_create());
 
 	let cb = Callback::new();
-	let announced_task = id(unsafe {
-		moq_origin_announced(
-			origin,
-			std::ptr::null(),
-			0,
-			std::ptr::null(),
-			0,
-			Some(channel_callback),
-			cb.ptr,
-		)
-	});
+	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 
 	let path = b"test/broadcast";
 	let broadcast = publish_broadcast(origin, path);
@@ -2035,17 +2015,14 @@ fn announced_filters_patterns_and_reports_captures() {
 	let cb = Callback::new();
 	let prefix = b"room";
 	let filter = b"*/chat";
-	let announced_task = id(unsafe {
-		moq_origin_announced(
-			origin,
-			prefix.as_ptr().cast(),
-			prefix.len(),
-			filter.as_ptr().cast(),
-			filter.len(),
-			Some(channel_callback),
-			cb.ptr,
-		)
-	});
+	let config = moq_announce_config {
+		prefix: prefix.as_ptr().cast(),
+		prefix_len: prefix.len(),
+		filter: filter.as_ptr().cast(),
+		filter_len: filter.len(),
+		hidden: false,
+	};
+	let announced_task = id(unsafe { moq_origin_announced(origin, &config, Some(channel_callback), cb.ptr) });
 
 	let audio = publish_broadcast(origin, b"room/alice/audio");
 	let chat = publish_broadcast(origin, b"room/alice/chat");
@@ -2077,21 +2054,65 @@ fn announced_filters_patterns_and_reports_captures() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A `.`-named broadcast is listed only when `hidden` opts in or the prefix names it.
+#[test]
+fn announced_hides_dot_paths_unless_asked() {
+	let origin = id(moq_origin_create());
+	let stats = publish_broadcast(origin, b".stats/node");
+	let cam = publish_broadcast(origin, b"cam");
+
+	for (prefix, hidden, expected) in [
+		("", false, "cam"),
+		("", true, ".stats/node"),
+		(".stats", false, ".stats/node"),
+	] {
+		let cb = Callback::new();
+		let config = moq_announce_config {
+			prefix: prefix.as_ptr().cast(),
+			prefix_len: prefix.len(),
+			filter: std::ptr::null(),
+			filter_len: 0,
+			hidden,
+		};
+		let task = id(unsafe { moq_origin_announced(origin, &config, Some(channel_callback), cb.ptr) });
+
+		// Updates arrive in path order, and `.` sorts before letters.
+		let announced = id(cb.recv());
+		let mut info = moq_announce_update {
+			prefix: std::ptr::null(),
+			prefix_len: 0,
+			captures: std::ptr::null(),
+			captures_len: 0,
+			has_captures: false,
+			active: false,
+		};
+		assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
+		let got = unsafe { std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len) };
+		assert_eq!(got, expected.as_bytes(), "prefix {prefix:?}, hidden {hidden}");
+
+		assert_eq!(moq_origin_announced_free(announced), 0);
+		assert_eq!(moq_origin_announced_cancel(task), 0);
+		// Later announcements may be queued ahead of the terminal; free them.
+		loop {
+			let code = cb.recv();
+			if code <= 0 {
+				assert_eq!(code, 0);
+				break;
+			}
+			assert_eq!(moq_origin_announced_free(code as u32), 0);
+		}
+	}
+
+	assert_eq!(moq_publish_finish(stats), 0);
+	assert_eq!(moq_publish_finish(cam), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn announced_deactivation() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
-	let announced_task = id(unsafe {
-		moq_origin_announced(
-			origin,
-			std::ptr::null(),
-			0,
-			std::ptr::null(),
-			0,
-			Some(channel_callback),
-			cb.ptr,
-		)
-	});
+	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 
 	let path = b"deactivate/test";
 	let broadcast = publish_broadcast(origin, path);
@@ -2133,17 +2154,7 @@ fn announced_deactivation() {
 fn create_broadcast_is_unroutable_until_announced() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
-	let announced_task = id(unsafe {
-		moq_origin_announced(
-			origin,
-			std::ptr::null(),
-			0,
-			std::ptr::null(),
-			0,
-			Some(channel_callback),
-			cb.ptr,
-		)
-	});
+	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 
 	let path = b"quiet";
 	let broadcast = id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len()) });
