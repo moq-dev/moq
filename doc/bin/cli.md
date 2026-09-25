@@ -90,6 +90,8 @@ moq ... play --delay 500ms          # trade latency for a jittery link
 Decodes H.264, H.265, and AV1 video and Opus, PCM, and AAC-LC audio using
 the platform hardware decoder where available. `--video-name` and
 `--audio-name` pick a rendition.
+HE-AAC signaled only in band (implicit SBR, as over MPEG-TS) plays as its
+half-rate AAC-LC core.
 
 Playback runs on a clock it owns. `--delay` (default 100 ms) is how far it
 trails the live edge, which is both the jitter a late frame may absorb and the
