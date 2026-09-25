@@ -224,7 +224,9 @@ impl<E: CatalogExt> Stream<E> {
 	/// Append one payload to the log.
 	///
 	/// A payload that cannot be written ends the track (see
-	/// [`moq_binary::stream::Producer::append`]) and retires the catalog entry with it.
+	/// [`moq_binary::stream::Producer::append`]) and retires the catalog entry with it. A catalog
+	/// error publishing the measured bitrate is returned after the payload was written, so the track
+	/// stays open and a retry would duplicate it.
 	pub fn append(&mut self, payload: impl Into<Bytes>) -> crate::Result<()> {
 		let payload = payload.into();
 		let len = payload.len();

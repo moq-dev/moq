@@ -238,8 +238,9 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 
 	/// Append one record to the log.
 	///
-	/// Any failure ends the track (see [`moq_json::stream::Producer::append`]) and retires the
-	/// catalog entry with it.
+	/// A record that cannot be written ends the track (see [`moq_json::stream::Producer::append`])
+	/// and retires the catalog entry with it. A catalog error publishing the measured bitrate is
+	/// returned after the record was written, so the track stays open and a retry would duplicate it.
 	pub fn append(&mut self, value: &T) -> crate::Result<()> {
 		if let Err(err) = self.inner.append(value) {
 			// The inner producer has already ended the track. Dropping the listing retires the catalog
