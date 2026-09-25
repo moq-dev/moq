@@ -51,7 +51,6 @@ This is a transport API change, not a MoQ wire change.
 
 ## Quests
 
-- [Finish BBR bandwidth-probe feedback once](/quest/m1/quic/bbr-probe-feedback.md) - cruise rounds neither age probe history repeatedly nor retain probe-loss classification
 - [Recalibrate BBR startup pacing from measured RTT](/quest/m1/quic/bbr-startup-pacing.md) - measured RTT replaces the nominal startup rate for media senders
 - [Protect bandwidth samples during BBR ProbeRTT](/quest/m1/quic/bbr-probe-rtt.md) - intentionally reduced sending cannot masquerade as reduced capacity
 - [Preserve BBR state across a spurious loss episode](/quest/m1/quic/bbr-loss-undo.md) - consecutive losses preserve the original recovery snapshot
