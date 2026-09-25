@@ -51,6 +51,8 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
+`MediaProducer.flush(timestampUs)` records a locally encoded frame's transport handoff on the broadcast media clock. Call it after `writeFrame` for live encoder output; omit it for file, pipe, and network imports. `MediaProducer` is a typealias, so the generated method is available directly.
+
 The three advertising operations: `moq.createBroadcast(path)` (or
 `origin.createBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.announce(route)` / `broadcast.unannounce()` own that exact-path
@@ -59,7 +61,8 @@ path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
 serve. A route is a capability, not an inventory. `announcements(config)` takes
 a literal prefix plus an optional relative pattern; `announcement.prefix()`
-stays origin-relative and `captures()` reports the wildcard matches.
+stays origin-relative and `captures()` reports the wildcard matches. Paths with
+a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless `hidden = true`.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `moq.epoch()` counts the connections, 1 on the first, pairing with

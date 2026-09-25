@@ -1,11 +1,11 @@
-import { race } from "@moq/signals";
+import { race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
 import { controlTimeout, error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
@@ -17,7 +17,7 @@ import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.
 import * as Cluster from "./cluster.ts";
 import { requestReason, toRequestCode } from "./error.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
-import { toWire } from "./priority.ts";
+import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishError } from "./publish.ts";
 import {
 	type PublishNamespace,
@@ -70,6 +70,14 @@ type SubscribeSetupState = {
 	rejected?: boolean;
 };
 
+/** A local announce reader's filter: its scope, the prefix it asked for, and its hidden opt-in. */
+type Filter = { scope: Path.Pattern; prefix: Path.Valid; hidden: boolean };
+
+/** Whether a reader with `filter` sees an announcement at `path`. */
+function sees(filter: Filter, path: Path.Valid): boolean {
+	return scopeOverlaps(filter.scope, path) && (filter.hidden || !hiddenBelow(filter.prefix, path));
+}
+
 /**
  * Handles subscribing to broadcasts using moq-transport protocol.
  * Uses the stream-per-request pattern (real bidi streams for v17, virtual for v14-v16).
@@ -110,7 +118,10 @@ export class Subscriber {
 	#announced = new Map<Path.Valid, { count: number; route: Route }>();
 
 	// Any consumers that want each new announcement, keyed by their local filter.
-	#announcedConsumers = new Map<announce.Producer, Path.Pattern>();
+	#announcedConsumers = new Map<announce.Producer, Filter>();
+
+	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
+	#hidden: boolean;
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -120,14 +131,18 @@ export class Subscriber {
 	constructor({
 		session,
 		cluster,
+		hidden = false,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
 		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
 		cluster?: Cluster.Hops;
+		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
+		hidden?: boolean;
 	}) {
 		this.#session = session;
 		this.#cluster = cluster;
+		this.#hidden = hidden;
 	}
 
 	/**
@@ -155,13 +170,19 @@ export class Subscriber {
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
 	 * that only answers are both discovered.
+	 *
+	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
+	 * `options.hidden` opts in. The opt-in rides the SUBSCRIBE_NAMESPACE when the peer
+	 * understands it (MoQ Hidden); the rule is also applied here, since an unsolicited
+	 * PUBLISH_NAMESPACE or a peer that never heard of it hides nothing.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
+	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
 		// The wire speaks announce interest by prefix.
 		const prefix = scopeHead(scope);
+		const filter = { scope, prefix, hidden: options?.hidden ?? false };
 		const announced = new announce.Producer();
 		for (const [active, info] of this.#announced) {
-			if (!scopeOverlaps(scope, active)) continue;
+			if (!sees(filter, active)) continue;
 			announced.append({
 				prefix: active,
 				captures: scopeCaptures(scope, active),
@@ -169,9 +190,9 @@ export class Subscriber {
 				route: info.route,
 			});
 		}
-		this.#announcedConsumers.set(announced, scope);
+		this.#announcedConsumers.set(announced, filter);
 
-		void this.#runAnnounced(announced, prefix).finally(() => {
+		void this.#runAnnounced(announced, prefix, filter.hidden && this.#hidden).finally(() => {
 			this.#announcedConsumers.delete(announced);
 			announced.close();
 		});
@@ -192,8 +213,9 @@ export class Subscriber {
 		this.#announced.set(path, { count: 1, route });
 
 		console.debug(`announced: broadcast=${path} active=true`);
-		for (const [consumer, scope] of this.#announcedConsumers) {
-			if (!scopeOverlaps(scope, path)) continue;
+		for (const [consumer, filter] of this.#announcedConsumers) {
+			if (!sees(filter, path)) continue;
+			const scope = filter.scope;
 			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "announced", route });
 		}
 	}
@@ -208,8 +230,9 @@ export class Subscriber {
 		if (existing === undefined || routesEqual(existing.route, route)) return;
 		existing.route = route;
 		console.debug(`announced: broadcast=${path} rerouted`);
-		for (const [consumer, scope] of this.#announcedConsumers) {
-			if (!scopeOverlaps(scope, path)) continue;
+		for (const [consumer, filter] of this.#announcedConsumers) {
+			if (!sees(filter, path)) continue;
+			const scope = filter.scope;
 			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "updated", route });
 		}
 	}
@@ -232,8 +255,9 @@ export class Subscriber {
 		this.#consumes.evict(path);
 		console.debug(`announced: broadcast=${path} active=false`);
 
-		for (const [consumer, scope] of this.#announcedConsumers) {
-			if (!scopeOverlaps(scope, path)) continue;
+		for (const [consumer, filter] of this.#announcedConsumers) {
+			if (!sees(filter, path)) continue;
+			const scope = filter.scope;
 			try {
 				consumer.append({
 					prefix: path,
@@ -247,7 +271,7 @@ export class Subscriber {
 		}
 	}
 
-	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid) {
+	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, hidden: boolean) {
 		const version = this.#session.version;
 
 		// Suffixes live on this stream, so a repeat is recognized as an update to the
@@ -284,10 +308,16 @@ export class Subscriber {
 					version === Version.DRAFT_17
 				) {
 					await stream.writer.u53(SubscribeNamespaceLegacy.id);
-					await new SubscribeNamespaceLegacy({ namespace: prefix, requestId }).encode(stream.writer, version);
+					await new SubscribeNamespaceLegacy({ namespace: prefix, requestId, hidden }).encode(
+						stream.writer,
+						version,
+					);
 				} else {
 					await stream.writer.u53(SubscribeNamespace.id);
-					await new SubscribeNamespace({ namespace: prefix, requestId }).encode(stream.writer, version);
+					await new SubscribeNamespace({ namespace: prefix, requestId, hidden }).encode(
+						stream.writer,
+						version,
+					);
 				}
 				console.debug(`subscribe_namespace written: requestId=${requestId}`);
 
@@ -448,12 +478,9 @@ export class Subscriber {
 
 		console.debug(`subscribe start: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 
-		// IETF negotiates group order in SUBSCRIBE_OK; this implementation only supports
-		// descending (newest-first), which is what moq-lite fixes group order to, so the
-		// mapping needs nothing here. (There's no per-frame timescale either, so every
-		// property stays at its default.) This resolves the consumer's track.info() and
-		// gives us the write side that incoming object streams are routed into.
-		const producer = request.accept({});
+		// Keep the request pending until SUBSCRIBE_OK supplies immutable track metadata.
+		// Group streams already wait on the alias, so early data stays behind this response.
+		const producer = hooks.pendingTrackProducer(request);
 
 		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
 		// flows back via `state` so the timeout path can clean up the stream
@@ -465,6 +492,11 @@ export class Subscriber {
 		// would miss the local side going away and leave it serving a track nobody reads.
 		// Demand returning before we commit is not abandonment, matching the serving loop.
 		const waitAbandoned = async (): Promise<null> => {
+			// An info-only lookup attaches no subscriber yet still waits on SUBSCRIBE_OK for
+			// the track info, so only demand that arrived and then left is abandonment.
+			while (!producer.used.peek() && producer.closed.peek() === undefined) {
+				await Signal.race(producer.used, producer.closed);
+			}
 			for (;;) {
 				await producer.unused();
 				if (producer.closed.peek() !== undefined || !producer.used.peek()) return null;
@@ -491,7 +523,7 @@ export class Subscriber {
 		} catch (err) {
 			// A control request that timed out is not late content, so it carries its own code.
 			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
-			producer.close(e);
+			request.reject(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
@@ -670,6 +702,8 @@ export class Subscriber {
 		}
 
 		const ok = await SubscribeOk.decode(state.stream.reader, version);
+		if (state.cancelled) throw new Error("subscribe cancelled before acceptance");
+		request.accept({ priority: fromWire(ok.properties.priority ?? 128) });
 
 		try {
 			this.#aliases.set(ok.trackAlias, producer, { broadcast, name: request.name });
@@ -922,6 +956,9 @@ export class Subscriber {
 		try {
 			// The control message establishing this alias can arrive after the data stream.
 			const track = await this.#aliases.get(group.trackAlias);
+			// The alias binds after SUBSCRIBE_OK commits the track property; an omitted
+			// header priority inherits it (draft-21 section 10.4).
+			if (!group.flags.hasPriority) group.publisherPriority = toWire((await track.info()).priority);
 
 			track.writeGroup(producer);
 

@@ -6,7 +6,7 @@ happens next: cancellation, a relay dying mid-group, and a publisher coming back
 under a name it already used.
 
 The drills themselves are ordinary Rust integration tests in
-`rs/moq-relay/tests/drills.rs`, so `just test` already runs them whenever
+`rs/moq-relay/tests/drills.rs`, so `just check` already runs them whenever
 moq-relay or anything under it changes. This directory holds the focused recipe
 and the sensitivity proof.
 
@@ -156,7 +156,7 @@ drill fails, these are where the mechanism is pinned.
 
 Run them with `just rs loom` and `just rs fuzz <target>`. The committed fuzz
 findings under `rs/moq-net/fuzz/regressions/` replay on stable as part of
-`just test`, so a crash a drill leads you to belongs there rather than in a
+`just check`, so a crash a drill leads you to belongs there rather than in a
 corpus nobody replays.
 
 ## Not covered here

@@ -1034,6 +1034,46 @@ mod tests {
 		assert_eq!(decoded.track_alias, 42);
 	}
 
+	/// The registered priority property is two literal bytes after the message body on
+	/// draft-17+, and absent on older drafts. The decoder returns the same wire value.
+	#[test]
+	fn subscribe_ok_priority_property_bytes_on_every_draft() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			let mut msg = SubscribeOk {
+				request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+					.then_some(RequestId(7)),
+				track_alias: 42,
+				largest: None,
+				properties: Properties::default(),
+			};
+			let baseline = encode_message(&msg, version);
+			msg.properties.priority = Some(37);
+			let encoded = encode_message(&msg, version);
+			if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+				assert_eq!(encoded, baseline, "{version}");
+			} else {
+				assert_eq!(encoded, [baseline, vec![0x0e, 37]].concat(), "{version}");
+				assert_eq!(
+					decode_message::<SubscribeOk>(&encoded, version)
+						.unwrap()
+						.properties
+						.priority,
+					Some(37)
+				);
+			}
+		}
+	}
+
 	/// GROUP_ORDER (0x22) is only a legal SUBSCRIBE_OK *message parameter* through draft-15;
 	/// a draft-16+ peer closes the session with PROTOCOL_VIOLATION when it sees one. The
 	/// publisher's preference belongs in the DEFAULT_PUBLISHER_GROUP_ORDER track property,
@@ -1046,6 +1086,7 @@ mod tests {
 			largest: None,
 			properties: Properties {
 				timescale: None,
+				priority: None,
 				group_order: Some(GroupOrder::Descending),
 			},
 		};
@@ -1073,6 +1114,7 @@ mod tests {
 			largest: None,
 			properties: Properties {
 				timescale: None,
+				priority: None,
 				group_order: Some(GroupOrder::Descending),
 			},
 		};

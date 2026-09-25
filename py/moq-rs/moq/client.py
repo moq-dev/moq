@@ -149,12 +149,12 @@ class Client:
         """
         return self._require_publisher().create_broadcast(path)
 
-    def announced(self, prefix: str = "", *, filter: str | None = None) -> AnnounceConsumer:
+    def announced(self, prefix: str = "", *, filter: str | None = None, hidden: bool = False) -> AnnounceConsumer:
         """Async-iterate broadcasts under ``prefix`` matching an optional pattern.
 
         See :meth:`OriginConsumer.announced`.
         """
-        return self._require_consumer().announced(prefix, filter=filter)
+        return self._require_consumer().announced(prefix, filter=filter, hidden=hidden)
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
         """Await announcement of the broadcast at exactly ``path``.

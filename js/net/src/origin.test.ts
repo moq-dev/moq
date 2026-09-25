@@ -324,6 +324,31 @@ test("announced streams the table under a scope with origin-relative paths", asy
 	a.close();
 });
 
+test("hidden paths need an opt-in or a scope naming the dot segment", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const hidden = publish(origin, Path.from(".stats/node"));
+	const nested = publish(origin, Path.from("room/.internal"));
+	const visible = publish(origin, Path.from("room/catalog.pro"));
+
+	expect([...consumer.broadcasts().peek().keys()]).toEqual([Path.from("room/catalog.pro")]);
+	expect(consumer.broadcasts(undefined, { hidden: true }).peek().size).toBe(3);
+	expect([...consumer.broadcasts(Path.Pattern.parse(".stats/**")).peek().keys()]).toEqual([Path.from(".stats/node")]);
+
+	const plain = consumer.announced();
+	expect(await plain.next()).toMatchObject({ prefix: Path.from("room/catalog.pro") });
+	const opted = consumer.announced(Path.Pattern.parse("room/**"), { hidden: true });
+	const seen = [(await opted.next())?.prefix, (await opted.next())?.prefix].sort();
+	expect(seen).toEqual([Path.from("room/.internal"), Path.from("room/catalog.pro")]);
+
+	plain.close();
+	opted.close();
+	hidden.close();
+	nested.close();
+	visible.close();
+	origin.close();
+});
+
 test("a remote entry resolves by path and retracts on dispose", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

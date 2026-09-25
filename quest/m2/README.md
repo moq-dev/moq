@@ -56,7 +56,8 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [L4S on the backbone](/quest/m2/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive by deadline](/quest/m2/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer
-- [Bounded announce prefix table](/quest/m2/announce-prefix-table.md) - compress repeated path tuples on each ordered lite-07 announce stream, with bounded state and measured QUIC-byte savings
+- [Bounded announce prefix table](/quest/m2/announce-prefix-table.md) - compress repeated path tuples on each ordered lite-08 announce stream, with bounded state and measured QUIC-byte savings
+- [Drop the hidden cluster exemption](/quest/m2/hidden-exemption.md) - relays stop forcing hidden broadcasts on cluster peers once every peer opts in on the wire
 - [Routing cost domains](/quest/m2/routing-cost-domains.md) - design operator boundaries and policy without adding incomparable costs
 - [Kernel pacing](/quest/m2/quic-kernel-pacing.md) - whether SO_TXTIME pacing beats a userspace pacer the io_uring driver ignores today
 - [Send batching](/quest/m2/quic-send-batching.md) - whether sendmmsg across connections pays on the tokio path

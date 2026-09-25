@@ -343,6 +343,12 @@ func (m *MediaProducer) WriteFrame(frame Frame) error {
 	return m.inner.WriteFrame(frame)
 }
 
+// Flush records a local encoder's frame handoff on the broadcast media clock.
+// Call after WriteFrame only for local encoder output, not file or network imports.
+func (m *MediaProducer) Flush(timestampUs uint64) error {
+	return m.inner.Flush(timestampUs)
+}
+
 // Cut draws a group boundary here.
 //
 // Audio has no boundary of its own (every packet is independently decodable), so this is

@@ -960,6 +960,19 @@ impl MoqMediaProducer {
 		Ok(())
 	}
 
+	/// Record a locally encoded frame's handoff for catalog jitter measurement.
+	///
+	/// `timestamp_us` is on the broadcast media clock. Call this after `write_frame` only for
+	/// encoder output; imported files, pipes, and network media stay clock-free.
+	pub fn flush(&self, timestamp_us: u64) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
+		let mut guard = self.inner.lock().unwrap();
+		let media = guard.as_mut().ok_or(MoqError::Closed)?;
+		media.import.flush(timestamp, std::time::Instant::now())?;
+		Ok(())
+	}
+
 	/// Draw a group boundary here.
 	///
 	/// Audio has no boundary of its own (every packet is independently decodable), so this is the
