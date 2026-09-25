@@ -55,6 +55,8 @@ try broadcast.announce()
 session.shutdown()
 ```
 
+For already-encoded live output, call `audio.flush(timestampUs:)` after `writeFrame` with the same broadcast-clock PTS. It measures catalog jitter at the transport handoff. File, pipe, and network imports should omit `flush`; built-in encoders observe their own output.
+
 The three advertising operations: `session.publish.createBroadcast(path:)`
 returns an unannounced producer, invisible to everyone; `broadcast.announce(route:)` /
 `broadcast.unannounce()` own that exact-path advertisement;

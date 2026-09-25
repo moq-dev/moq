@@ -54,6 +54,21 @@ framerate, and bitrate are tunable through `el.video.config`; the audio
 encoder exposes its codec and volume. For simulcast or several renditions,
 drop the element and register your own encoders on a `Publish.Broadcast`.
 
+The video and audio encoders measure how far their output falls behind the media
+clock when they flush frames. Catalog jitter is the spread above each
+rendition's own recent minimum lateness, so a constant encoder delay is not jitter.
+The advertised value only rises; frame duration alone does not set it.
+
+## Clock
+
+Every timestamp the publisher writes is `performance.now()` in microseconds,
+so camera, microphone, screen, and file sources share one timeline. The catalog
+advertises that mapping as its root `clock` from the first snapshot, with PTS
+zero at `performance.timeOrigin`, so a viewer or an HLS export can name any
+frame's wall time. The mapping is fixed for the page: a system-clock
+adjustment never retimes the broadcast. Stamp your own tracks (e.g. text cues)
+on the same timeline to stay in sync.
+
 ## Custom tracks
 
 `broadcast.net` is the underlying `Moq.Broadcast.Producer`, so an application

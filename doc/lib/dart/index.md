@@ -107,6 +107,8 @@ catalog and container types are there, so already-encoded frames flow through
 `MoqMediaProducer`/`MoqMediaConsumer`, but encoding is up to
 `package:camera`, platform channels, or another codec package.
 
+`MediaProducer.flush(timestampUs: ...)` records the handoff of a locally encoded frame on the broadcast media clock. Call it after `writeFrame` only for live encoder output; file, pipe, and network imports stay clock-free. `MediaProducer` aliases the generated FFI object, so its method is available directly.
+
 ## Connection stats
 
 `session.stats()` returns a `ConnectionStats` snapshot. Each field is `null`

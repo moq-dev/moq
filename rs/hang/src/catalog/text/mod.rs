@@ -5,7 +5,9 @@ pub use format::*;
 use std::collections::{BTreeMap, btree_map};
 
 use serde::{Deserialize, Serialize};
-use serde_with::{DisplayFromStr, DurationMilliSeconds};
+use serde_with::DisplayFromStr;
+
+use crate::catalog::millis::MillisCeil;
 
 use crate::catalog::Container;
 
@@ -101,8 +103,8 @@ pub struct TextConfig {
 	/// The maximum delay, in milliseconds, before the publisher flushes the next cue. A consumer's
 	/// jitter buffer should be at least this large. Absent means each cue is flushed immediately.
 	///
-	/// Serialized as an integer number of milliseconds (sub-ms precision is truncated).
-	#[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
+	/// Serialized as an integer number of milliseconds, rounded up.
+	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
 }

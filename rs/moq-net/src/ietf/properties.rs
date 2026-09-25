@@ -7,7 +7,7 @@
 /// Unlike Message Parameters which have a count prefix, Track Properties
 /// have no count and are read until the end of the message payload.
 ///
-/// TIMESCALE and DEFAULT_PUBLISHER_GROUP_ORDER are the ones we understand;
+/// TIMESCALE, DEFAULT_PUBLISHER_PRIORITY, and DEFAULT_PUBLISHER_GROUP_ORDER are understood;
 /// the rest are parsed and discarded.
 use bytes::Buf;
 
@@ -31,6 +31,7 @@ const TIMESCALE: u64 = 0x08;
 /// It shares its number with the GROUP_ORDER *message parameter*, which is a different
 /// registry: that one is only legal in SUBSCRIBE, PUBLISH_OK, and FETCH, where the
 /// subscriber states its own preference.
+const DEFAULT_PUBLISHER_PRIORITY: u64 = 0x0e;
 const DEFAULT_PUBLISHER_GROUP_ORDER: u64 = 0x22;
 
 /// The Track Properties block carried at the end of SUBSCRIBE_OK, PUBLISH, and FETCH_OK.
@@ -40,6 +41,10 @@ pub struct Properties {
 	///
 	/// `None` declares no timeline, so the subscriber times objects by arrival.
 	pub timescale: Option<Timescale>,
+
+	/// Publisher priority for groups whose header omits it. Draft-21 section 10.4
+	/// assigns property 0x0e and defaults to wire priority 128 when absent.
+	pub priority: Option<u8>,
 
 	/// The publisher's preference for prioritizing groups within a subscription.
 	///
@@ -68,6 +73,12 @@ impl Properties {
 			TIMESCALE.encode(w, version)?;
 			u64::from(timescale).encode(w, version)?;
 			prev_type = TIMESCALE;
+		}
+
+		if let Some(priority) = self.priority {
+			(DEFAULT_PUBLISHER_PRIORITY - prev_type).encode(w, version)?;
+			u64::from(priority).encode(w, version)?;
+			prev_type = DEFAULT_PUBLISHER_PRIORITY;
 		}
 
 		if let Some(group_order) = self.group_order {
@@ -123,6 +134,9 @@ impl Properties {
 						// A zero timescale is invalid; treat it as no declaration rather than
 						// failing the whole message over one property we could have ignored.
 						properties.timescale = Timescale::new(value).ok();
+					}
+					DEFAULT_PUBLISHER_PRIORITY => {
+						properties.priority = Some(u8::try_from(value).map_err(|_| DecodeError::InvalidValue)?);
 					}
 					DEFAULT_PUBLISHER_GROUP_ORDER => {
 						// Only Ascending and Descending are defined here. Unlike the draft-14
@@ -213,6 +227,7 @@ mod tests {
 	fn test_round_trip() {
 		let properties = Properties {
 			timescale: Some(Timescale::MICRO),
+			priority: Some(37),
 			group_order: Some(GroupOrder::Descending),
 		};
 
@@ -222,6 +237,27 @@ mod tests {
 		let mut bytes = buf.freeze();
 		assert_eq!(Properties::decode(&mut bytes, Version::Draft18).unwrap(), properties);
 		assert!(!bytes.has_remaining());
+	}
+
+	#[test]
+	fn publisher_priority_is_bounded_to_a_byte() {
+		for version in [
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			let mut buf = BytesMut::new();
+			0x0eu64.encode(&mut buf, version).unwrap();
+			256u64.encode(&mut buf, version).unwrap();
+			assert!(matches!(
+				Properties::decode(&mut buf.freeze(), version),
+				Err(DecodeError::InvalidValue)
+			));
+		}
 	}
 
 	/// Only Ascending and Descending are defined, so 0x0 is a malformed message rather than
@@ -256,6 +292,7 @@ mod tests {
 	fn test_round_trip_group_order_only() {
 		let properties = Properties {
 			timescale: None,
+			priority: None,
 			group_order: Some(GroupOrder::Descending),
 		};
 

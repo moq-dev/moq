@@ -502,13 +502,14 @@ The container used to frame this rendition's media, as described in {{container}
 If absent, it defaults to `{ "kind": "legacy" }`.
 
 ### jitter {#field-jitter}
-The maximum delay, in milliseconds, between a frame being ready and the publisher flushing it.
+The maximum delay, in milliseconds, that a publisher has measured before handing a frame to the transport.
 A consumer's jitter buffer SHOULD be at least this large to avoid stalling.
-If absent, a consumer SHOULD assume each frame is flushed immediately.
+If absent, a consumer SHOULD assume no publisher delay has been measured.
 
-It is measured at the publisher: how far behind the media clock a frame is when the publisher hands it to the transport, whether an encoder, a reorder buffer, or a segmenter held it.
-An importer can estimate this delay from the media span of a batch, such as a run of audio PES packets between video packets in TS or an fMP4 fragment, without measuring the time spent waiting for input.
-It is never a measurement of the network, which a consumer observes for itself and which no two consumers of the same broadcast would agree on.
+An encoder compares each frame's flush time with its media timestamp and subtracts the smallest lateness recently observed on the same rendition.
+The field is the spread above that minimum, so neither a constant encoder delay, a fixed clock offset, nor long-term drift counts as jitter.
+A container importer instead estimates the delay from the media span of a batch, such as a run of audio PES packets between video packets in TS or an fMP4 fragment, without measuring the time spent waiting for input.
+A publisher does not count ingest network delay in this field; a consumer measures network delay separately.
 
 A publisher MUST round the value up to a whole number of milliseconds, so a consumer sizing a buffer against it is never handed a bound below the real one.
 A publisher MUST NOT advertise `0`; a track that flushes each frame immediately omits the field instead.
@@ -517,13 +518,10 @@ A publisher MUST NOT lower a previously advertised value, since a burst it emitt
 
 For example:
 
-- If each frame is flushed immediately, a video track's `jitter` is `1000/framerate` rounded up: 34 at 30 fps.
-- If up to 3 B-frames may be emitted in a row, it is `3 * 1000/framerate`.
-- If frames are buffered into 2 second segments, it is `2000`.
-- If frames are flushed several at a time, it is the media span of the whole burst, not of one frame.
-
-An audio frame's duration is codec dependent.
-AAC often uses 1024 samples per frame, so at 44100Hz an immediately-flushed track's `jitter` is 24.
+- A frame flushed without extra delay contributes no `jitter`, regardless of frame rate.
+- An encoder that consistently flushes 200 milliseconds late contributes no `jitter`; only variation above its own minimum counts.
+- A fragment or packet batch contributes the media span between its earliest timestamp and flush point.
+- Reordered frames contribute the delay they were held before flushing, without treating a decode-order presentation timestamp gap as delay by itself.
 
 # Container {#container}
 Audio, video, and text tracks use a container to encapsulate the media payload.
@@ -1060,9 +1058,10 @@ This document has no IANA actions.
 ## moq-hang-03
 {:numbered="false"}
 
+- Defined encoder `jitter` as flush lateness above the rendition's own recent minimum, replacing fixed frame-duration hints; container batches retain media-span estimates.
 - Clarified that CMAF audio samples are sync samples independently of publisher group boundaries.
 - Clarified that container importers can estimate jitter from batch media spans without measuring input wait time.
-- Specified the `jitter` field's computation: the publisher's own structure rather than the network, rounded up to whole milliseconds, never `0` (a consumer treats `0` as absent), and never lowered once advertised. The 30 fps and 44.1 kHz AAC examples became 34 and 24.
+- Specified the `jitter` field's computation: the publisher's own structure rather than the network, rounded up to whole milliseconds, never `0` (a consumer treats `0` as absent), and never lowered once advertised.
 - For video, an empty codec payload is the exclusive end of the frame before it. A video publisher SHOULD end each group with one when the exclusive end is known. Audio retains its terminal-trimming marker before codec drain packets.
 A publisher MAY estimate an unknown final duration from the frame cadence, but MUST NOT use batching or reorder delay as that duration. A consumer skips it and does not submit it to a decoder. Audio terminal-packet trimming is unchanged.
 - Specified version 1 recording objects: JSON track properties and binary group/frame tables with ascending, delta-encoded group sequences.
