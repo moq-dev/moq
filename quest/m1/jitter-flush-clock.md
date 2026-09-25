@@ -33,11 +33,14 @@ media span of each emitted batch and advertise no `delay`.
   libmoq (so OBS), moq-ffi and its wrappers, and the `js/publish` encoders call
   it. The provisional PTS-gap floor is gone, and `moq_mux::Error::JitterDecreased`
   plus zero-as-absent text jitter enforce never-lower in Rust and JS.
-  `moq-gst` is split into [GStreamer encoder jitter](/quest/m1/gst-encoder-jitter-provenance.md).
+  `moq-gst` pads opt in with `encoder=true`; imports stay clock-free.
   What remains below is `delay` and the player. libmoq and moq-ffi expose
   `flush` but no discontinuity, so a binding publisher that pauses and resumes
   on a re-anchored PTS within the window would count the pause; add one when
-  such a caller appears.
+  such a caller appears. A `moq-gst` encoder pad has the same gap across a
+  `PLAYING -> PAUSED -> PLAYING` cycle (running time stops, the wall clock
+  does not) and a flushing seek, since `import::Track` forwards no
+  discontinuity.
 - **Measurement.** Lateness is `now - timestamp`, observed by the existing
   `flush` calls, so no call site changes. Each rendition keeps its own
   baseline, the minimum lateness over a sliding window (about 10 s), so a media
