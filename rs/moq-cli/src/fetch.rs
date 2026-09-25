@@ -228,7 +228,7 @@ mod tests {
 			.chain(args.iter().copied())
 			.chain(args.is_empty().then_some("data"));
 		let mut cli = Invocation::try_parse_from(argv).expect("parse");
-		cli.dial_only("fetch").expect("only the dial");
+		cli.dial_only("fetch", &["--broadcast"]).expect("only the dial");
 		match cli.stages.remove(0) {
 			Command::Fetch(args) => (cli.moq, args),
 			_ => unreachable!("parsed a fetch"),
@@ -354,7 +354,7 @@ mod tests {
 			"data",
 		])
 		.expect("parse");
-		let err = cli.dial_only("fetch").unwrap_err().to_string();
+		let err = cli.dial_only("fetch", &["--broadcast"]).unwrap_err().to_string();
 		assert!(err.contains("--listen-tcp-bind"), "{err}");
 	}
 }

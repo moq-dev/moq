@@ -23,6 +23,7 @@ or Docker; see [Install](/setup/install).
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
 | `play` | | Decode and play in a native window with sound. |
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
+| `ls` | `[prefix]` | List the broadcasts live on a relay. |
 | `fetch` | `<track>` | Write one group of a track to stdout. |
 | `auth` | | Generate, sign, and verify relay JWTs. |
 | `devices` | | List capture sources and their ids. |
@@ -33,6 +34,7 @@ or Docker; see [Install](/setup/install).
 moq <MoQ side> import <source> [options]
 moq <MoQ side> export <sink> [options]
 moq <MoQ side> play [options]
+moq <MoQ side> ls [prefix] [options]
 moq <MoQ side> fetch <track> [options]
 ```
 
@@ -157,6 +159,26 @@ heights and bitrates must then increase strictly together. Duplicate heights or
 bitrates, inverted rankings, and zero-sized or zero-bitrate rungs are rejected
 before connecting.
 
+## List
+
+```bash
+moq --connect https://relay.example.com/anon ls
+moq ... ls room --follow --json
+```
+
+Lists the broadcasts live on a relay over MoQ, with the session's own auth: the
+counterpart of the relay's HTTP `/announced/<prefix>`. It prints one path per
+line, relative to the `--connect` path, and exits once the relay has sent
+everything live under `prefix`. `--follow` keeps running: it prints `+ path`
+for each live broadcast, then `+ path` and `- path` as broadcasts come and go,
+and exits non-zero if the session ends. `--json` prints
+`{"path": "room/alice", "active": true}` per line instead, in either mode.
+
+Like `/announced`, it lists announced prefixes, which by convention are
+broadcast paths. A new route to a path already live prints nothing. A name
+starting with `.` stays hidden unless `prefix` names it. `ls` only dials
+`--connect`, and refuses any other MoQ-side flag.
+
 ## Fetch
 
 ```bash
@@ -279,7 +301,7 @@ track quiet for longer is muxed around until it catches up; a sparse track
 ## Debugging
 
 `RUST_LOG=debug` prints the negotiated version and every subscription.
-`curl http://relay:4443/announced/` confirms the relay is reachable and shows
-what it holds. Connection refused means UDP isn't getting through; certificate
+`moq --connect <url> ls`, or `curl http://relay:4443/announced/`, confirms the
+relay is reachable and shows what it holds. Connection refused means UDP isn't getting through; certificate
 errors on a dev relay want `--connect-tls-insecure` or the `http://`
 fingerprint flow.

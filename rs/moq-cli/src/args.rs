@@ -2,7 +2,8 @@
 //!
 //! Grammar: `moq <MoQ side> <stage> [-- <stage>]...`, where a stage is
 //! `<import|export> <endpoint> [endpoint opts]`, plus `moq <MoQ side> play` for
-//! native playback and `moq <MoQ side> fetch <track>` to read one group.
+//! native playback, `moq <MoQ side> ls [prefix]` to list what is live, and
+//! `moq <MoQ side> fetch <track>` to read one group.
 //!
 //! - The MoQ side (`--connect`, the `--listen*` transport binds, `--cluster-lan`,
 //!   and `--cluster-connect` / `--cluster-connect-api`; all optional, at least
@@ -181,10 +182,10 @@ impl Invocation {
 		self.typed.reject(command)
 	}
 
-	/// Refuse every MoQ-side flag but `--connect` and `--broadcast`, on a verb that
+	/// Refuse every MoQ-side flag but `--connect` and those in `allow`, on a verb that
 	/// only reads from a relay. Answered from the command line, like [`Self::reject`].
-	pub fn dial_only(&self, command: &str) -> anyhow::Result<()> {
-		self.typed.dial_only(command)
+	pub fn dial_only(&self, command: &str, allow: &[&str]) -> anyhow::Result<()> {
+		self.typed.dial_only(command, allow)
 	}
 
 	/// Split `argv` on `--` and run each chunk through a real parser.
@@ -255,7 +256,7 @@ impl Invocation {
 
 		// Only `import` and `export` share an Origin. The rest own the process: `play`
 		// drives a window on the main thread, `transcode` builds its own Origin, `fetch`
-		// opens its own session, and `auth` / `devices` never touch the network at all.
+		// and `ls` open their own session, and `auth` / `devices` never touch the network at all.
 		if let Some(command) = self.stages.iter().find(|command| !command.is_stageable()) {
 			anyhow::bail!(
 				"`{}` must be the only verb; it can't share a process with another `--` stage",
@@ -521,8 +522,8 @@ impl MoqSide {
 	/// relay: a listener or cluster it would never serve is not silently ignored.
 	/// Private for the same reason as [`Self::reject`], and reached through
 	/// [`Invocation::dial_only`].
-	fn dial_only(&self, command: &str) -> anyhow::Result<()> {
-		if let Some(flag) = self.given().find(|flag| !matches!(*flag, "--connect" | "--broadcast")) {
+	fn dial_only(&self, command: &str, allow: &[&str]) -> anyhow::Result<()> {
+		if let Some(flag) = self.given().find(|flag| *flag != "--connect" && !allow.contains(flag)) {
 			anyhow::bail!("`{command}` only dials a relay with --connect; drop {flag}");
 		}
 		Ok(())
@@ -595,6 +596,8 @@ pub enum Command {
 	/// The released spelling of [`Self::Export`].
 	#[usage(hide = true)]
 	Subscribe(Export),
+	/// List the broadcasts live on a relay.
+	Ls(crate::ls::Args),
 	/// Write one group of a track to stdout.
 	Fetch(crate::fetch::Args),
 	/// Play a broadcast in a native window and speaker.
@@ -654,6 +657,7 @@ impl Command {
 		match self {
 			Self::Import(_) | Self::Publish(_) => "import",
 			Self::Export(_) | Self::Subscribe(_) => "export",
+			Self::Ls(_) => "ls",
 			Self::Fetch(_) => "fetch",
 			#[cfg(feature = "play")]
 			Self::Play(_) => "play",

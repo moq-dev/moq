@@ -1,4 +1,4 @@
-# CLI inspection
+# [S] CLI inspection
 
 ## Goal
 
@@ -17,7 +17,3 @@ This README owns the guide, written once both verbs land: a new
 `doc/bin/inspect.md` covering `moq ls` and `--follow`, `moq fetch`, their
 `curl` equivalents, and reading the relay's stats track, linked from `doc/bin/cli.md`,
 `doc/bin/relay/http.md`, and the site sidebar.
-
-## Quests
-
-- [ls](/quest/m1/cli-inspect/ls.md) - `moq ls` prints the live set and exits, or follows changes, as paths or JSON lines
