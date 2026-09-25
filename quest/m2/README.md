@@ -18,6 +18,8 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [AV1 metadata separation](/quest/m2/av1-metadata.md) - retain metadata OBUs inline while evaluating separate delivery
 - [SEI separation](/quest/m2/sei/README.md) - retain inline SEI until measured savings or a metadata-only consumer justify a split
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - compare immutable track definitions with explicit catalog-to-group binding
+- [Archive recovery listing](/quest/m2/archive-recovery-listing.md) - a resumed DVR lists what changed since its checkpoint, not every stored group
+- [Archive backward timestamps](/quest/m2/archive-backward-timestamps.md) - a resumed recording refuses a track whose timestamps go backward
 - [Mobile ownership](/quest/m2/mobile-ownership.md) - decide whether Rust or platform code owns mobile capture, codecs, and rendering
 - [iOS capture](/quest/m2/mobile-capture-ios.md) - camera and screen capture if the mobile ownership decision selects Rust
 - [Android capture](/quest/m2/mobile-capture-android.md) - NDK/JNI capture using the existing codecs if mobile ownership selects Rust
@@ -34,9 +36,11 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [MediaCodec decode](/quest/m2/audio-decode-mediacodec.md) - Android decodes HE-AAC, multichannel AAC, and what else the device offers
 - [MediaCodec encode](/quest/m2/audio-encode-mediacodec.md) - Android encodes AAC-LC
 - [AAC encode refusal](/quest/m2/aac-encode-refusal.md) - AAC config encode refuses channel counts it cannot name, on dev
+- [OBS channel layouts](/quest/m2/obs-wave-layout.md) - the OBS source maps channel counts to the WAVE default layouts, like moq-audio
 - [Video codec coverage](/quest/m2/video-codec-coverage.md) - prioritize remaining native AV1 and portable decoder gaps
 - [#2147](/quest/m2/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - moq-video: 10-bit HEVC and AV1 support in the NVIDIA codec path
 - [NVENC buffer pool](/quest/m2/nvenc-pool.md) - NVENC reuses input and output buffers instead of allocating per frame, if a benchmark shows it wins
+- [NVENC held frames](/quest/m2/nvenc-held-frames.md) - moq-nvenc refuses or drives configurations whose frames the driver holds back
 - [Direct3D11 render import](/quest/m2/render-d3d11.md) - Windows presents without downloading every frame to system memory
 - [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - video with periodic intra refresh publishes, imports, and tunes in cleanly with one group per sweep and a catalog `warmup`
 - [Capture multi-plane PipeWire cameras](/quest/m2/pipewire-camera-planes.md) - I420 and NV12 cameras that deliver one memory block per plane
@@ -55,6 +59,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [QUIC GCC](/quest/m2/quic-gcc.md) - a measured verdict on delay-based congestion control for media egress, shipping as `RealTime`
 - [QUIC FEC](/quest/m2/quic-fec.md) - a measured verdict on transport-level FEC vs retransmission
 - [Google BBR comparison](/quest/m2/quic-bbr-google.md) - measure growth detection and precautionary probing after the correctness fixes
+- [WHEP ABR](/quest/m2/whep-abr.md) - a WHEP viewer switches renditions from its own congestion feedback
 - [Natural media drains](/quest/m2/quic-bbr-app-limited.md) - whether bounded drain credit avoids ProbeRTT deadline interference
 - [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [L4S on the backbone](/quest/m2/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
@@ -75,6 +80,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [SIP media stack](/quest/m2/sip-stack.md) - terminate one inbound SIP audio call leg and expose it as Opus frames
 - [Carrier voice](/quest/m2/carrier-voice/README.md) - determine whether MoQ should be the call fabric for programmable carrier voice
 - [LiveKit WebRTC bridge](/quest/m2/livekit-webrtc-bridge.md) - a go/no-go verdict, backed by a spike, on per-track LiveKit-to-MoQ bridging
+- [Expired token error](/quest/m2/auth-expired-error.md) - an expired token reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [Common Access Tokens](/quest/m2/cat/README.md) - a moq-transport client presents a CAT in SETUP and `moq auth serve` admits it with the scope its `moqt` claim names
 - [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - run exact source snapshots on accessible Linux and device hosts with retrievable debug evidence
 - [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks

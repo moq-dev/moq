@@ -1008,15 +1008,31 @@ async fn broadcast_route_migration() {
 }
 
 /// A subscriber returning to a parked track is not handed the parked cache when the
-/// upstream resolves its start past it (lite-06+ resolves the start from the budget).
+/// upstream resolves its start past it: lite-06+ resolves the start from the budget, and
+/// an IETF live join starts at the group SUBSCRIBE_OK names as Largest.
 ///
 /// The front keeps what an unread track delivered as a warm cache. While parked, the
 /// publisher moved on, so the resumed upstream subscription starts well past that cache.
 /// The cache was only fresh against its own frozen edge; serving it first put a
 /// rejoining player seconds behind live.
+///
+/// Pre-06 lite is skipped: nothing on those wires says where a subscription starts.
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_rejoin_skips_a_stale_warm_cache() {
+	let pre06 = [
+		"moq-lite-01",
+		"moq-lite-02",
+		"moq-lite-03",
+		"moq-lite-04",
+		"moq-lite-05",
+	];
+	for version in moq_net::Version::names().filter(|version| !pre06.contains(version)) {
+		rejoin_skips_a_stale_warm_cache(version).await;
+	}
+}
+
+async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 	use moq_net::Timestamp;
 
 	let ms = |ms: u64| Timestamp::from_millis(ms).unwrap();
@@ -1040,6 +1056,7 @@ async fn broadcast_rejoin_skips_a_stale_warm_cache() {
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("[::]:0".parse().unwrap());
 	config.tls.generate = vec!["localhost".into()];
+	config.version = vec![version.parse().unwrap()];
 	let mut server = config
 		.init(Default::default())
 		.expect("init server")
@@ -1061,6 +1078,7 @@ async fn broadcast_rejoin_skips_a_stale_warm_cache() {
 	let mut announcements = sub_consumer.announced();
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
+	config.version = vec![version.parse().unwrap()];
 	let client = config.init(Default::default()).expect("init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
 	let (_client, session) = tokio::time::timeout(TIMEOUT, connect_once(client.with_subscriber(sub_origin), url))
@@ -1110,12 +1128,15 @@ async fn broadcast_rejoin_skips_a_stale_warm_cache() {
 	let first = recv(&mut sub).await;
 	assert!(
 		first > 4,
-		"a rejoining reader was served the stale cache first: group {first}"
+		"{version}: a rejoining reader was served the stale cache first: group {first}"
 	);
 	let mut sequence = first;
 	while sequence < 20 {
 		sequence = recv(&mut sub).await;
-		assert!(sequence >= 4, "a rejoining reader was served stale group {sequence}");
+		assert!(
+			sequence >= 4,
+			"{version}: a rejoining reader was served stale group {sequence}"
+		);
 	}
 
 	drop(sub);

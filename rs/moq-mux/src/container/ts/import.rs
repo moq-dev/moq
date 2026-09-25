@@ -134,6 +134,9 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// advances it, so a cue could be stamped with another program's PTS.
 	last_pts: Option<Timestamp>,
 	media_unwrap: PtsUnwrap,
+	/// The source's mapping onto the broadcast clock, set by [`live`](Self::live). `None`
+	/// publishes the source's unwrapped PTS verbatim.
+	anchor: Option<crate::clock::Anchor>,
 }
 
 impl<E: catalog::Catalog> Import<E> {
@@ -176,7 +179,20 @@ impl<E: catalog::Catalog> Import<E> {
 			identity_recorded: false,
 			last_pts: None,
 			media_unwrap: PtsUnwrap::default(),
+			anchor: None,
 		}
+	}
+
+	/// Publish on the broadcast clock rather than the source's own PTS.
+	///
+	/// For a live feed with its own zero: the first frame is live on arrival, every elementary
+	/// stream shares that one mapping, and a restart (a PTS rewind or a signalled time-base
+	/// discontinuity) continues forward after the real idle gap. Without this, the unwrapped PTS
+	/// is published verbatim, which suits a source already on the clock the catalog advertises
+	/// ([`Config::with_clock`](crate::catalog::Config::with_clock)).
+	pub fn live(mut self) -> Self {
+		self.anchor = Some(crate::clock::Anchor::new(self.catalog.clock()));
+		self
 	}
 
 	/// Select the container this importer wraps decoded media renditions in.
@@ -646,7 +662,11 @@ impl<E: catalog::Catalog> Import<E> {
 			// frame must be timestamped with this frame's PTS ("now"), not the
 			// previous one's.
 			if pes.header.pts.is_some() {
-				let pts = unwrap_pts(&mut self.media_unwrap, pes.header.pts.map(|t| t.as_u64()))?;
+				let pts = unwrap_pts(
+					&mut self.media_unwrap,
+					pes.header.pts.map(|t| t.as_u64()),
+					self.anchor.as_mut(),
+				)?;
 				let video = match self.streams.get(&pid) {
 					Some(Stream::H264 { reanchor, import, .. }) => {
 						Some((reanchor, import.floor(false), import.floor(true)))
@@ -717,7 +737,7 @@ impl<E: catalog::Catalog> Import<E> {
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
-		self.published |= stream.write(pending, batched)?;
+		self.published |= stream.write(pending, batched, self.anchor.as_mut())?;
 
 		// Record the decoded media track's PID + PMT descriptors (language, ...) once
 		// its lazily created track exists, so export can preserve them.
@@ -1219,7 +1239,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 
 	/// Publish one reassembled PES payload verbatim, in its own group, stamped with
 	/// its PTS (or the live edge when the PES carried none).
-	fn write(&mut self, pending: Pending) -> anyhow::Result<bool> {
+	fn write(&mut self, pending: Pending, anchor: Option<&mut crate::clock::Anchor>) -> anyhow::Result<bool> {
 		// Record the original PES stream_id once, from the first PES, so export
 		// re-emits the stream under its real id (e.g. 0xBD for teletext/DVB AC-3).
 		if !self.stream_id_recorded {
@@ -1233,7 +1253,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 		}
 
 		let edge = self.track.live_edge();
-		let pts = match unwrap_pts(&mut self.unwrap, pending.pts)? {
+		let pts = match unwrap_pts(&mut self.unwrap, pending.pts, anchor)? {
 			Some(pts) => self.reanchor.apply(pts, edge)?,
 			// No clock to shift, so land on the edge and leave the shift alone.
 			None => edge.unwrap_or(Timestamp::ZERO),
@@ -1547,7 +1567,12 @@ enum Stream<E: catalog::Catalog = ()> {
 }
 
 impl<E: catalog::Catalog> Stream<E> {
-	fn write(&mut self, pending: Pending, batched: bool) -> anyhow::Result<bool> {
+	fn write(
+		&mut self,
+		pending: Pending,
+		batched: bool,
+		anchor: Option<&mut crate::clock::Anchor>,
+	) -> anyhow::Result<bool> {
 		match self {
 			Stream::H264 {
 				split,
@@ -1556,7 +1581,7 @@ impl<E: catalog::Catalog> Stream<E> {
 				reanchor,
 			} => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
-				let pts = unwrap_pts(unwrap, pending.pts)?;
+				let pts = unwrap_pts(unwrap, pending.pts, anchor)?;
 				// Each PES is one access unit, so flush to emit it immediately.
 				let mut frames = split.decode(&pending.data, pts)?;
 				frames.extend(split.flush(pts)?);
@@ -1578,7 +1603,7 @@ impl<E: catalog::Catalog> Stream<E> {
 				reanchor,
 			} => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
-				let pts = unwrap_pts(unwrap, pending.pts)?;
+				let pts = unwrap_pts(unwrap, pending.pts, anchor)?;
 				// Each PES is one access unit, so flush to emit it immediately.
 				let mut frames = split.decode(&pending.data, pts)?;
 				frames.extend(split.flush(pts)?);
@@ -1592,10 +1617,10 @@ impl<E: catalog::Catalog> Stream<E> {
 				}
 				Ok(published)
 			}
-			Stream::Aac(stream) => stream.write(pending, batched),
-			Stream::Opus(stream) => stream.write(pending),
-			Stream::Legacy(stream) => stream.write(pending),
-			Stream::Verbatim(stream) => stream.write(pending),
+			Stream::Aac(stream) => stream.write(pending, batched, anchor),
+			Stream::Opus(stream) => stream.write(pending, anchor),
+			Stream::Legacy(stream) => stream.write(pending, anchor),
+			Stream::Verbatim(stream) => stream.write(pending, anchor),
 			Stream::Clock | Stream::Ignored => Ok(false),
 		}
 	}
@@ -2005,8 +2030,13 @@ struct AacStream<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> AacStream<E> {
-	fn write(&mut self, pending: Pending, batched: bool) -> anyhow::Result<bool> {
-		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+	fn write(
+		&mut self,
+		pending: Pending,
+		batched: bool,
+		anchor: Option<&mut crate::clock::Anchor>,
+	) -> anyhow::Result<bool> {
+		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts, anchor)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
 		let carried = self.tail.len();
@@ -2232,7 +2262,8 @@ impl<E: CatalogExt> AacStream<E> {
 		// of it.
 		if !self.tail.is_empty() && self.import.is_some() {
 			self.resync.drain();
-			self.write(Pending::empty(), true)?;
+			// No PTS to translate, so no mapping needed.
+			self.write(Pending::empty(), true, None)?;
 		}
 		// A partial frame at end of stream isn't emissible; drop it, but leave a trace for
 		// diagnosing truncated captures.
@@ -2268,8 +2299,8 @@ struct OpusStream {
 }
 
 impl OpusStream {
-	fn write(&mut self, pending: Pending) -> anyhow::Result<bool> {
-		let base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+	fn write(&mut self, pending: Pending, anchor: Option<&mut crate::clock::Anchor>) -> anyhow::Result<bool> {
+		let base = unwrap_pts(&mut self.unwrap, pending.pts, anchor)?;
 		let edge = self.import.live_edge();
 		let base = base.map(|base| self.reanchor.apply(base, edge)).transpose()?;
 
@@ -2424,9 +2455,9 @@ struct LegacyStream<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> LegacyStream<E> {
-	fn write(&mut self, pending: Pending) -> anyhow::Result<bool> {
+	fn write(&mut self, pending: Pending, anchor: Option<&mut crate::clock::Anchor>) -> anyhow::Result<bool> {
 		let mut published = false;
-		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts, anchor)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
 		let carried = self.tail.len();
@@ -2654,7 +2685,8 @@ impl<E: CatalogExt> LegacyStream<E> {
 		// of it.
 		if !self.tail.is_empty() && self.import.is_some() {
 			self.resync.drain();
-			self.write(Pending::empty())?;
+			// No PTS to translate, so no mapping needed.
+			self.write(Pending::empty(), None)?;
 		}
 		// A partial frame at end of stream isn't emissible verbatim; drop it, but
 		// leave a trace for diagnosing truncated captures.
@@ -2722,12 +2754,19 @@ fn advance_pts(pts: Option<Timestamp>, samples: u64, sample_rate: u32) -> anyhow
 
 /// Convert a raw 90 kHz PTS to a microsecond [`Timestamp`], unwrapping the
 /// 33-bit field. Returns `None` when the PES carried no PTS.
-fn unwrap_pts(unwrap: &mut PtsUnwrap, pts: Option<u64>) -> anyhow::Result<Option<Timestamp>> {
+fn unwrap_pts(
+	unwrap: &mut PtsUnwrap,
+	pts: Option<u64>,
+	anchor: Option<&mut crate::clock::Anchor>,
+) -> anyhow::Result<Option<Timestamp>> {
 	let Some(raw) = pts else {
 		return Ok(None);
 	};
-	let extended = unwrap.unwrap(raw);
-	Ok(Some(Timestamp::from_scale(extended, 90_000)?))
+	let extended = Timestamp::from_scale(unwrap.unwrap(raw), 90_000)?;
+	Ok(Some(match anchor {
+		Some(anchor) => anchor.translate(&mut unwrap.lane, extended)?,
+		None => extended,
+	}))
 }
 
 /// The reorder delay `PTS - DTS` for one PES, as a microsecond [`Timestamp`]. `None` unless
@@ -2752,6 +2791,8 @@ fn reorder_delay(pts: Option<u64>, dts: Option<u64>) -> Option<Timestamp> {
 struct PtsUnwrap {
 	last: Option<u64>,
 	offset: u64,
+	/// This stream's position on the source's broadcast-clock mapping, when publishing live.
+	lane: crate::clock::Lane,
 }
 
 impl PtsUnwrap {
@@ -2775,6 +2816,7 @@ impl PtsUnwrap {
 	/// whatever the source does with its clock next.
 	fn discontinuity(&mut self) {
 		self.last = None;
+		self.lane.restart();
 	}
 }
 

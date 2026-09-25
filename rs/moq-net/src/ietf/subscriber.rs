@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
 	Error, Path, PathOwned, SessionError, Timescale, broadcast,
-	coding::{Reader, Stream},
+	coding::{Decode, DecodeError, Reader, Stream},
 	frame, group,
 	ietf::{self, Control, FetchType, Filter, GroupOrder, RequestId},
 	origin, track,
@@ -15,6 +15,7 @@ use crate::{
 };
 
 use super::{Message, Version, cluster, error::request, peer};
+use crate::tail::{self, Settle, Tail};
 
 use kio::Lock;
 
@@ -322,6 +323,9 @@ struct TrackState {
 
 	// A pre-draft-20 joining FETCH, which reuses the fill rendezvous.
 	joining: Option<JoiningFetch>,
+
+	// The data streams read so far, which PUBLISH_DONE's Stream Count is checked against.
+	tail: kio::Producer<Tail>,
 }
 
 impl TrackState {
@@ -348,6 +352,21 @@ impl TrackState {
 			largest: None,
 			fetch_id: None,
 			joining,
+			tail: Default::default(),
+		}
+	}
+}
+
+/// Counts a data stream toward its subscription's [`Tail`] once its handler is done with it.
+///
+/// Counting at the end rather than at the header means a Stream Count that is reached never
+/// races the stream's own work, such as the END_OF_TRACK that declares where the track ends.
+struct Counted(kio::Producer<Tail>);
+
+impl Drop for Counted {
+	fn drop(&mut self) {
+		if let Ok(mut tail) = self.0.write() {
+			tail.stream();
 		}
 	}
 }
@@ -1564,6 +1583,8 @@ where
 		}
 
 		let subscription = request.subscription();
+		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest.
+		let live = subscription.as_ref().and_then(|s| s.start).is_none();
 		let join = match subscribe_join(
 			subscription.as_ref().and_then(|s| s.start),
 			subscription.as_ref().and_then(|s| s.end),
@@ -1700,7 +1721,16 @@ where
 			.with_timescale(Timescale::MICRO)
 			.with_max_age(self.origin.default_max_age())
 			.with_priority(super::priority::from_wire(priority.unwrap_or(128)));
+		// Declared before the track is released to readers, so a warm cache waiting on
+		// this copy judges itself against where the live feed actually starts.
+		let request = match live {
+			true => request.resolving_start(),
+			false => request,
+		};
 		let mut track = request.accept(info);
+		if live {
+			let _ = track.start_at(largest.map(|largest| largest.group));
+		}
 		let mut fetching: Option<MaybeSendBox<'static, ()>> = None;
 		{
 			let mut state = self.state.lock();
@@ -1742,7 +1772,7 @@ where
 		// does not disturb subscriptions already in flight.
 		enum End {
 			Unused,
-			Done(Result<(), Error>),
+			Done(Result<u64, Error>),
 		}
 
 		let mut fetch_done = fetching.is_none();
@@ -1773,8 +1803,34 @@ where
 					},
 					End::Done(res) => {
 						match res {
-							Ok(()) => {
+							Ok(count) => {
 								tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "subscribe complete");
+								// The publisher sends PUBLISH_DONE once every data stream it opened
+								// is closed, but QUIC does not order them, so some can still be on
+								// their way. Wait until Stream Count of them are read, or a bounded
+								// grace for any reset before its header (the draft says to use a
+								// timeout). The count is a hint: a published peer sends 0, which
+								// waits out the grace.
+								let tail = self
+									.state
+									.lock()
+									.subscribes
+									.get(&request_id)
+									.map(|held| held.tail.consume());
+								if let Some(tail) = tail {
+									let mut settle = Settle::new(&self.runtime, tail, tail::GRACE);
+									kio::wait(|waiter| {
+										if !fetch_done
+											&& let Some(fut) = fetching.as_mut()
+											&& waiter.poll_future(fut.as_mut()).is_ready()
+										{
+											fetch_done = true;
+										}
+										settle.poll(waiter, |tail| count > 0 && tail.streams() >= count)
+									})
+									.await;
+								}
+								// A no-op once an END_OF_TRACK declared the end.
 								let _ = track.finish();
 							}
 							Err(err) => {
@@ -1801,11 +1857,12 @@ where
 		}
 	}
 
-	/// Read the PUBLISH_DONE that ends an Established subscription, as the end it reports.
+	/// Read the PUBLISH_DONE that ends an Established subscription, as the end it reports
+	/// and, for a clean end, its Stream Count.
 	///
 	/// The publisher must send it before its FIN (draft-19 section 3.3.2), so a FIN
 	/// without one is a failed request, not a clean end.
-	async fn read_publish_done(reader: &mut Reader<S::RecvStream, Version>, version: Version) -> Result<(), Error> {
+	async fn read_publish_done(reader: &mut Reader<S::RecvStream, Version>, version: Version) -> Result<u64, Error> {
 		match reader.decode_maybe::<u64>().await? {
 			Some(ietf::PublishDone::ID) => {}
 			Some(_) => return Err(Error::UnexpectedMessage),
@@ -1813,7 +1870,8 @@ where
 		}
 		let msg: ietf::PublishDone = reader.decode().await?;
 		tracing::debug!(message = ?msg, "received publish done");
-		msg.end(version)
+		msg.end(version)?;
+		Ok(msg.stream_count)
 	}
 
 	/// Tell the publisher to stop serving a subscription we are walking away from.
@@ -2088,13 +2146,16 @@ where
 			}
 		};
 
-		let (track, timescale, fill) = {
+		let (mut track, timescale, fill, _counted) = {
 			let state = self.state.lock();
 			let track = state.subscribes.get(&request_id).ok_or(Error::NotFound)?;
 			(
 				track.producer.clone().ok_or(Error::NotFound)?,
 				track.timescale,
 				track.fill.clone(),
+				// Every data stream counts toward PUBLISH_DONE's Stream Count, even one
+				// dropped below.
+				Counted(track.tail.clone()),
 			)
 		};
 
@@ -2129,9 +2190,9 @@ where
 		// The peek inside blocks until the publisher produces the group's first object, so
 		// race it against the subscription going away the same way the group read below is.
 		// Otherwise dropping the local subscriber cannot end this handler.
-		let (producer, start) = {
+		let opened = {
 			let mut opening = track.clone();
-			let mut open = std::pin::pin!(self.open_group(stream, &mut opening, &fill, group.group_id));
+			let mut open = std::pin::pin!(self.open_group(stream, &mut opening, &fill, &group));
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
@@ -2139,6 +2200,11 @@ where
 				waiter.poll_future(open.as_mut())
 			})
 			.await?
+		};
+		let (producer, start) = match opened {
+			Opened::Group(producer, start) => (producer, start),
+			// No object at or past object 0 of this group exists, so neither does the group.
+			Opened::EndOfTrack => return end_track(&mut track, group.group_id),
 		};
 
 		// Guarded: this handler can be dropped at any await below, and a group producer
@@ -2168,12 +2234,84 @@ where
 				tracing::debug!(%err, group = %producer.sequence, "group error");
 				let _ = producer.abort(err);
 			}
-			_ => {
+			Ok(Ended::Group) => {
 				let _ = producer.finish();
+			}
+			// No object past this group's last one exists, so the track ends after it.
+			Ok(Ended::Track) => {
+				let _ = producer.finish();
+				return end_track(&mut track, group.group_id.saturating_add(1));
 			}
 		}
 
 		Ok(())
+	}
+}
+
+/// Mark where the track ends, as an END_OF_TRACK object said.
+///
+/// Draft-14 on carries no end location in PUBLISH_DONE, so this is what lets a subscriber
+/// learn the end before the live edge reaches it. A boundary at or below a group already
+/// received is the publisher breaking its own end, which no later group can repair. A
+/// marker that lands after the subscription already ended (its grace expired) changes
+/// nothing.
+fn end_track(track: &mut track::Producer, end: u64) -> Result<(), Error> {
+	if track.final_sequence().is_some() {
+		return Ok(());
+	}
+	if let Err(err) = track.finish_at(end) {
+		tracing::warn!(%err, end, "invalid END_OF_TRACK");
+		let _ = track.clone().abort(Error::ProtocolViolation);
+		return Err(Error::ProtocolViolation);
+	}
+	Ok(())
+}
+
+/// How [`Subscriber::open_group`] resolved a subgroup stream.
+enum Opened {
+	/// The group producer the stream writes into, and the Object ID it starts at.
+	Group(group::Producer, u64),
+	/// The stream's first object is an END_OF_TRACK at object 0: the group does not exist.
+	EndOfTrack,
+}
+
+/// How a subgroup stream ended cleanly.
+#[derive(Debug, PartialEq, Eq)]
+enum Ended {
+	/// The stream finished, or carried an explicit end of group.
+	Group,
+	/// It carried an END_OF_TRACK after the group's last object.
+	Track,
+}
+
+/// Object status: no object at or past this location exists (every implemented draft).
+const END_OF_TRACK: u64 = 0x4;
+
+/// The start of a subgroup stream's first object, peeked before its group is created.
+#[derive(Debug, Clone, Copy)]
+struct FirstObject {
+	/// The Object ID, which the first object's delta is.
+	id: u64,
+	end_of_track: bool,
+}
+
+/// [`FirstObject`] for a stream whose objects carry extensions, or don't.
+#[derive(Debug)]
+struct PeekFirst<const EXTENSIONS: bool>(FirstObject);
+
+impl<const EXTENSIONS: bool> Decode<Version> for PeekFirst<EXTENSIONS> {
+	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
+		let id = u64::decode(buf, version)?;
+		if EXTENSIONS {
+			let size = usize::decode(buf, version)?;
+			if buf.remaining() < size {
+				return Err(DecodeError::Short);
+			}
+			buf.advance(size);
+		}
+		let size = u64::decode(buf, version)?;
+		let end_of_track = size == 0 && u64::decode(buf, version)? == END_OF_TRACK;
+		Ok(Self(FirstObject { id, end_of_track }))
 	}
 }
 
@@ -2183,29 +2321,36 @@ where
 {
 	/// The group producer this subgroup stream writes into, and the Object ID it starts at.
 	///
-	/// Normally the stream starts the group. While a fill is outstanding it may instead be
-	/// the tail of the group the fill fetch stream began, which the first Object ID decides,
-	/// so the stream is peeked before any producer exists. A subscription with no fill skips
-	/// the peek: creating the group up front is what it has always done, and waiting for the
-	/// first object would hold the group back for as long as the publisher takes to produce
-	/// it.
+	/// The first object is peeked before any producer exists, since an END_OF_TRACK at
+	/// object 0 means the group does not exist at all. Normally the stream then starts the
+	/// group. While a fill is outstanding it may instead be the tail of the group the fill
+	/// fetch stream began, which the first Object ID decides.
 	async fn open_group(
 		&self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		track: &mut track::Producer,
 		fill: &kio::Producer<Fill>,
-		sequence: u64,
-	) -> Result<(group::Producer, u64), Error> {
+		header: &ietf::GroupHeader,
+	) -> Result<Opened, Error> {
+		let sequence = header.group_id;
 		// Stats (groups/frames/bytes) are counted in the model as the group is written,
 		// through the tagged `track::Producer`.
 		let create = |track: &mut track::Producer| track.create_group(group::Info { sequence });
 
+		let first = match header.flags.has_extensions {
+			true => stream.decode_peek_maybe::<PeekFirst<true>>().await?.map(|peek| peek.0),
+			false => stream.decode_peek_maybe::<PeekFirst<false>>().await?.map(|peek| peek.0),
+		};
+		if first.is_some_and(|first| first.id == 0 && first.end_of_track) {
+			return Ok(Opened::EndOfTrack);
+		}
+
 		if !fill.read().outstanding() {
-			return Ok((create(track)?, 0));
+			return Ok(Opened::Group(create(track)?, 0));
 		}
 
 		// The first object's ID delta is its absolute Object ID (see `next_object_id`).
-		match stream.decode_peek_maybe::<u64>().await? {
+		match first.map(|first| first.id) {
 			// A group delivered from its start stands alone, unless the fill already
 			// headed this very sequence: the publisher then served those objects twice,
 			// and the model has one producer per group. Publish the head as the prefix it
@@ -2220,13 +2365,13 @@ where
 					return Err(Error::Unsupported);
 				}
 
-				Ok((create(track)?, 0))
+				Ok(Opened::Group(create(track)?, 0))
 			}
 
 			// A group starting partway through is the tail of one the fill began, and
 			// without that head it has a hole at the front.
 			Some(start) => match self.claim_fill(fill, track, sequence, Some(start)).await? {
-				Some(producer) => Ok((producer, start)),
+				Some(producer) => Ok(Opened::Group(producer, start)),
 				None => {
 					tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
 					Err(Error::Unsupported)
@@ -2236,8 +2381,8 @@ where
 			// A stream that ends without an object: the group is over and had nothing
 			// outside the fill's range, so the head it delivered is the whole group.
 			None => match self.claim_fill(fill, track, sequence, None).await? {
-				Some(producer) => Ok((producer, 0)),
-				None => Ok((create(track)?, 0)),
+				Some(producer) => Ok(Opened::Group(producer, 0)),
+				None => Ok(Opened::Group(create(track)?, 0)),
 			},
 		}
 	}
@@ -2308,8 +2453,8 @@ enum IngestPhase {
 	Status { timestamp: Option<crate::Timestamp> },
 	/// Streaming the object payload.
 	Payload { frame: frame::ProducerOwned },
-	/// An explicit end-of-group status arrived.
-	Finished,
+	/// An explicit end-of-group or end-of-track status arrived.
+	Finished(Ended),
 }
 
 impl GroupIngest {
@@ -2350,17 +2495,17 @@ where
 		let _: u64 = stream.decode().await?;
 		let header: ietf::FetchHeader = stream.decode().await?;
 
-		let (subscribe_id, fill, joining, largest) = {
+		let (subscribe_id, fill, joining, largest, _counted) = {
 			let state = self.state.lock();
 			// A draft-20 fill is named by the SUBSCRIBE's request id. A pre-draft-20 joining
 			// FETCH has its own id, which `fetches` maps back to that subscription.
-			let subscribe_id = state
-				.fetches
-				.get(&header.request_id)
-				.copied()
-				.unwrap_or(header.request_id);
+			let joined = state.fetches.get(&header.request_id).copied();
+			let subscribe_id = joined.unwrap_or(header.request_id);
 			let track = state.subscribes.get(&subscribe_id).ok_or(Error::NotFound)?;
-			(subscribe_id, track.fill.clone(), track.joining, track.largest)
+			// A fill is one of the subscription's own data streams, so PUBLISH_DONE counts
+			// it. A joining FETCH is a request of its own.
+			let counted = joined.is_none().then(|| Counted(track.tail.clone()));
+			(subscribe_id, track.fill.clone(), track.joining, track.largest, counted)
 		};
 
 		// SUBSCRIBE_OK declares the units these object timestamps are in, and this stream can
@@ -2729,21 +2874,21 @@ fn settle_join_live(fill: &kio::Producer<Fill>) {
 }
 
 impl GroupIngest {
-	/// `Ready(Ok(()))` once the stream FINs on an object boundary (or an explicit
-	/// end-of-group status arrives). The caller finishes or aborts the group; an
-	/// object cut short mid-payload was already aborted here with the reason.
+	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit
+	/// end-of-group or end-of-track status arrives. The caller finishes or aborts the
+	/// group; an object cut short mid-payload was already aborted here with the reason.
 	fn poll<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut group::Producer,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<(), Error>> {
+	) -> Poll<Result<Ended, Error>> {
 		let mut cx = std::task::Context::from_waker(waiter.waker());
 		loop {
 			match &mut self.phase {
 				IngestPhase::Delta => {
 					let Some(id_delta) = ready!(reader.poll_decode_maybe::<u64>(&mut cx))? else {
-						return Poll::Ready(Ok(()));
+						return Poll::Ready(Ok(Ended::Group));
 					};
 					self.prior_object = Some(next_object_id(self.prior_object, id_delta, self.start)?);
 					self.phase = match self.has_extensions {
@@ -2788,7 +2933,11 @@ impl GroupIngest {
 						frame.finish()?;
 						self.phase = IngestPhase::Delta;
 					} else if status == 3 && !self.has_end {
-						self.phase = IngestPhase::Finished;
+						self.phase = IngestPhase::Finished(Ended::Group);
+					} else if status == END_OF_TRACK {
+						// Defined on every implemented draft, whether or not the header marks
+						// the group's end.
+						self.phase = IngestPhase::Finished(Ended::Track);
 					} else {
 						return Poll::Ready(Err(Error::Unsupported));
 					}
@@ -2809,7 +2958,10 @@ impl GroupIngest {
 						}
 					}
 				}
-				IngestPhase::Finished => return Poll::Ready(Ok(())),
+				IngestPhase::Finished(ended) => {
+					let ended = std::mem::replace(ended, Ended::Group);
+					return Poll::Ready(Ok(ended));
+				}
 			}
 		}
 	}
@@ -5725,6 +5877,42 @@ mod stitch_tests {
 			]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done), "the head was claimed");
+	}
+
+	/// Append an END_OF_TRACK object: delta 0, an empty payload, then its status.
+	fn end_of_track(mut stream: Vec<u8>) -> Vec<u8> {
+		for value in [0u64, 0, END_OF_TRACK] {
+			value.encode(&mut stream, VERSION).unwrap();
+		}
+		stream
+	}
+
+	/// END_OF_TRACK after a group's last object ends the track right after that group.
+	#[tokio::test]
+	async fn an_end_of_track_after_a_group_ends_the_track_after_it() {
+		let h = Harness::new(Fill::Done, vec![end_of_track(tail_stream(SEQUENCE, 0, &[b"last"]))]);
+		let mut consumer = h.track.subscribe(None);
+		let mut stream = h.stream().await;
+
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		assert_eq!(h.track.final_sequence(), Some(SEQUENCE + 1));
+
+		let mut group = consumer.recv_group().await.unwrap().expect("the group arrives");
+		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"last");
+		assert!(group.read_frame().await.unwrap().is_none(), "the group is finished");
+		assert!(consumer.recv_group().await.unwrap().is_none(), "then the track ends");
+	}
+
+	/// END_OF_TRACK at object 0 says the group does not exist, so the track ends before it
+	/// and no group is created for it.
+	#[tokio::test]
+	async fn an_end_of_track_at_object_zero_creates_no_group() {
+		let h = Harness::new(Fill::Done, vec![end_of_track(tail_stream(SEQUENCE, 0, &[]))]);
+		let mut stream = h.stream().await;
+
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		assert_eq!(h.track.final_sequence(), Some(SEQUENCE));
+		assert_eq!(h.track.latest(), None, "no group was created");
 	}
 
 	/// The group ended exactly where we joined it, so the subscription's stream carries no

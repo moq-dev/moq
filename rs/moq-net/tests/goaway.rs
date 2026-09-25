@@ -338,7 +338,7 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		let mut opts = MockConnectOptions::new(version);
 		opts.server_publish = Some(pub_origin.clone());
 		opts.client_subscribe = Some(sub_origin.clone());
-		let MockPair { client, server } = connect_mock(opts).await;
+		let MockPair { client, server, .. } = connect_mock(opts).await;
 
 		// Subscribe BEFORE the GOAWAY and receive a first group.
 		let sub = sub_origin.consume();
@@ -425,7 +425,7 @@ async fn goaway_drains_routes(version: Version) {
 		let mut opts = MockConnectOptions::new(version);
 		opts.server_publish = Some(pub_origin.clone());
 		opts.client_subscribe = Some(sub_origin.clone());
-		let MockPair { client, server } = connect_mock(opts).await;
+		let MockPair { client, server, .. } = connect_mock(opts).await;
 
 		let sub = sub_origin.consume();
 		let route = sub.routed("test").await.expect("route announced");

@@ -28,16 +28,16 @@ before its header arrived is still invisible, so the track-tail grace stays.
   the upstream count.
 - Subscribers on lite-07 stop waiting once the count is reached, accepting a
   late stream below the end within the grace. On lite-05 and -06, the
-  DROP accounting from JS track tail (#4086) stays as it is.
+  DROP accounting already in moq-net (`rs/moq-net/src/tail.rs`) and `@moq/net`
+  (`js/net/src/tail.ts`) stays as it is.
 - Tests in both languages: a late stream after SUBSCRIBE_END, a skipped group
   that is never counted, a reset stream, and a count of zero. Add a Rust-JS
   interop case.
 
-This lands before lite-07 is finalized. Rust has never sent or acted on
-SUBSCRIBE_DROP, so [Rust track tail](/quest/m1/rust-track-tail.md) builds its
-lite accounting on the count rather than on drops.
+This lands before lite-07 is finalized. Published drafts keep SUBSCRIBE_DROP,
+which moq-net and `@moq/net` already account. lite-07 replaces it with the
+count in both. Rust still does not send SUBSCRIBE_DROP.
 
 ## Related
 
-- [Rust track tail](/quest/m1/rust-track-tail.md) - builds on this count for moq-lite
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - makes the count exact by keeping a reset stream's header

@@ -218,6 +218,10 @@ pub(crate) struct TrackState {
 	// The sequence number at which the track was finalized.
 	final_sequence: Option<u64>,
 
+	// The last producer dropped after the boundary was declared, so a group still missing
+	// below it will never be produced.
+	sealed: bool,
+
 	// The first sequence the live feed serves, once the publisher declared one
 	// (the wire's SUBSCRIBE_START). Lower groups never arrive on their own; a
 	// fetch can still create them.
@@ -437,9 +441,11 @@ impl TrackState {
 		}
 		// `final_sequence` is one past the last possible sequence. If our
 		// floor is already at/past it, nothing else can land in range.
-		if let Some(fin) = self.final_sequence
-			&& next_sequence >= fin
-		{
+		// A sealed track produces nothing more either: the last producer
+		// dropped with the boundary already declared, so a gap below it is
+		// the end, not a wait. Cached in-range groups were returned above.
+		// This is the cursor the ordered and spliced readers use.
+		if self.sealed || self.final_sequence.is_some_and(|fin| next_sequence >= fin) {
 			return Poll::Ready(Ok(None));
 		}
 		Poll::Pending
@@ -1068,11 +1074,12 @@ impl TrackState {
 	/// Whether the track has reached its end: the final boundary is set and the live
 	/// edge has caught up to it, so no further group can arrive. A future boundary
 	/// (declared via [`Producer::finish_at`] ahead of the live edge) stays incomplete
-	/// until the remaining groups are produced. Drives the end-of-stream signal from
+	/// until the remaining groups are produced, or until the last producer drops without
+	/// them. Drives the end-of-stream signal from
 	/// the read methods (`recv_group` / `next_group` / `read_frame` return `None`).
 	fn is_complete(&self) -> bool {
 		self.final_sequence
-			.is_some_and(|fin| self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin)
+			.is_some_and(|fin| self.sealed || self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin)
 	}
 
 	/// Where a replacement route should pick this track up: one past the last frame
@@ -1902,7 +1909,13 @@ impl Drop for Alive {
 		// leaves it open with `final_sequence` set, so inspect both outcomes.
 		match self.state.write() {
 			Ok(mut state) => {
-				if state.final_sequence.is_some() || state.abort.is_some() {
+				if state.final_sequence.is_some() {
+					// Groups still missing below the boundary can no longer arrive, so a
+					// reader waiting on one ends cleanly instead of with `Dropped`.
+					state.sealed = true;
+					return;
+				}
+				if state.abort.is_some() {
 					return;
 				}
 				tracing::warn!(
@@ -6719,6 +6732,50 @@ mod test {
 		assert_eq!(consumer.assert_group().sequence, 0);
 		let done = consumer.recv_group().now_or_never().expect("should not block").unwrap();
 		assert!(done.is_none(), "consumer should drain then see clean finish");
+	}
+
+	/// A boundary declared ahead of the live edge, then the last producer dropping, means
+	/// the missing groups will never come: the reader ends cleanly rather than with
+	/// `Dropped`, as it would for a track that never declared its end.
+	#[tokio::test]
+	async fn drop_short_of_the_boundary_ends_cleanly() {
+		let mut producer = track_producer("test", None);
+		producer.append_group().unwrap();
+		producer.finish_at(3).unwrap();
+
+		let mut consumer = producer.subscribe(None);
+		assert_eq!(consumer.assert_group().sequence, 0);
+		assert!(
+			consumer.recv_group().now_or_never().is_none(),
+			"groups 1 and 2 are owed"
+		);
+
+		drop(producer);
+		let done = consumer.recv_group().now_or_never().expect("should not block").unwrap();
+		assert!(
+			done.is_none(),
+			"the track ends at its boundary without the missing groups"
+		);
+	}
+
+	/// The sequence cursor ends the same way. A gap below the boundary is skipped,
+	/// a later cached group is still delivered, and the read finishes cleanly.
+	#[tokio::test]
+	async fn ordered_ends_cleanly_when_sealed_short_of_the_boundary() {
+		let mut producer = track_producer("test", None);
+		producer.create_group(group::Info { sequence: 0 }).unwrap();
+		producer.create_group(group::Info { sequence: 2 }).unwrap();
+		producer.finish_at(4).unwrap();
+
+		let mut ordered = producer.subscribe(None).ordered();
+		drop(producer);
+
+		let first = ordered.next_group().now_or_never().expect("group 0").unwrap().unwrap();
+		assert_eq!(first.sequence, 0);
+		let second = ordered.next_group().now_or_never().expect("group 2").unwrap().unwrap();
+		assert_eq!(second.sequence, 2);
+		let done = ordered.next_group().now_or_never().expect("end").unwrap();
+		assert!(done.is_none(), "missing groups below the boundary are not an error");
 	}
 
 	#[tokio::test]
