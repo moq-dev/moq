@@ -235,9 +235,7 @@ impl Redirect {
 		// The URI can carry credentials, so the error names the reason, never the URI.
 		let refuse = |reason: &str| Error::RefusedRedirect(reason.to_string());
 
-		let target = uri
-			.parse::<Url>()
-			.map_err(|_| refuse("the GOAWAY URI is malformed"))?;
+		let target = uri.parse::<Url>().map_err(|_| refuse("the GOAWAY URI is malformed"))?;
 
 		if scheme_tier(target.scheme()) < scheme_tier(current.scheme()) {
 			return Err(refuse("the GOAWAY redirect downgrades the scheme"));
@@ -2058,7 +2056,10 @@ mod tests {
 		// A session younger than the initial delay counts as redirected immediately and
 		// waits out a backoff, which this test is not about.
 		config.backoff.initial = MIN_BACKOFF;
-		let client = config.init(Default::default()).unwrap().with_subscriber(subscriber.clone());
+		let client = config
+			.init(Default::default())
+			.unwrap()
+			.with_subscriber(subscriber.clone());
 		let url: Url = format!("tcp://{HOST}:1/").parse().unwrap();
 		let _connection = client.connect(url);
 
@@ -2074,7 +2075,11 @@ mod tests {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(moq_net::Timestamp::ZERO, b"g0".as_ref()).unwrap();
 		group.finish().unwrap();
-		let g0 = tokio::time::timeout(WAIT, sub.recv_group()).await.unwrap().unwrap().unwrap();
+		let g0 = tokio::time::timeout(WAIT, sub.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
 		assert_eq!(g0.sequence, 0);
 
 		// Withdraw A from DNS, then drain it.
@@ -2093,7 +2098,11 @@ mod tests {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(moq_net::Timestamp::ZERO, b"g1".as_ref()).unwrap();
 		group.finish().unwrap();
-		let mut g1 = tokio::time::timeout(WAIT, sub.recv_group()).await.unwrap().unwrap().unwrap();
+		let mut g1 = tokio::time::timeout(WAIT, sub.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
 		assert_eq!(g1.sequence, 1, "delivery resumes at the next group after the swap");
 		assert_eq!(g1.read_frame().await.unwrap().unwrap().payload[..], b"g1"[..]);
 
@@ -2104,6 +2113,9 @@ mod tests {
 			drained.elapsed() < DEADLINE,
 			"the old session outlived the handover cap and waited for the peer's deadline"
 		);
-		assert!(accepted_a.try_recv().is_err(), "a cached resolve redialed the drained relay");
+		assert!(
+			accepted_a.try_recv().is_err(),
+			"a cached resolve redialed the drained relay"
+		);
 	}
 }

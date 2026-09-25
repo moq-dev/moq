@@ -170,7 +170,10 @@ async fn a_redirect_to_another_host_is_refused_by_default() {
 	assert!(matches!(err, moq_tokio::Error::RefusedRedirect(_)), "ended with {err}");
 
 	assert!(sessions_a.try_recv().is_err(), "redialed the configured URL");
-	assert!(sessions_b.try_recv().is_err(), "the peer moved us onto the host it named");
+	assert!(
+		sessions_b.try_recv().is_err(),
+		"the peer moved us onto the host it named"
+	);
 }
 
 /// `--goaway-redirect follow` is the opt-in that hands the peer the host, so the
@@ -227,7 +230,10 @@ async fn a_refused_redirect_skips_configured_fallbacks() {
 		.expect("the refusal never ended the connection")
 		.expect_err("a refused redirect must end with an error");
 	assert!(matches!(err, moq_tokio::Error::RefusedRedirect(_)), "ended with {err}");
-	assert!(sessions_b.try_recv().is_err(), "fell through to the configured fallback");
+	assert!(
+		sessions_b.try_recv().is_err(),
+		"fell through to the configured fallback"
+	);
 }
 
 /// An empty GOAWAY is "reconnect to me", which keeps every caller-selected fallback.
@@ -247,10 +253,7 @@ async fn an_empty_goaway_preserves_configured_fallbacks() {
 	// Stop accepting before GOAWAY so the migration must use the configured fallback.
 	task_a.abort();
 	assert!(task_a.await.expect_err("listener was aborted").is_cancelled());
-	first
-		.drain()
-		.send(moq_net::goaway::Goaway::new())
-		.expect("send goaway");
+	first.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
 
 	tokio::time::timeout(Duration::from_secs(10), sessions_b.recv())
 		.await
