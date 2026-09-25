@@ -1420,7 +1420,11 @@ mod tests {
 		// Sized against the 640x360 H.264 rendition: no room for 720p, and 120p is
 		// 212 wide either way.
 		let names: Vec<_> = derived.video.renditions.keys().map(String::as_str).collect();
-		assert_eq!(names, ["video/120p"], "the ladder was sized against the H.265 rendition");
+		assert_eq!(
+			names,
+			["video/120p"],
+			"the ladder was sized against the H.265 rendition"
+		);
 
 		transcoder.abort();
 	}
