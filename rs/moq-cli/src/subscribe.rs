@@ -105,6 +105,14 @@ pub struct SelectArgs {
 }
 
 impl SelectArgs {
+	/// Whether no selection flag was given.
+	pub(crate) fn is_empty(&self) -> bool {
+		self.video_name.is_none()
+			&& self.video_codec.is_none()
+			&& self.audio_name.is_none()
+			&& self.audio_codec.is_none()
+	}
+
 	/// Build the rendition selection shared by stdout exports and native playback.
 	///
 	/// `force` takes the place of `--video-codec`, for a sink whose format implies
