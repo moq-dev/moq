@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createMockTransportPair } from "../mock.ts";
 import { Stream } from "../stream.ts";
+import * as Time from "../time.ts";
 import { wireOf } from "../wire.ts";
 import { Connection } from "./connection.ts";
 import { GoAway } from "./goaway.ts";
@@ -35,7 +36,7 @@ test("a draft-17 GOAWAY surfaces its URI and deadline without closing the sessio
 
 		const drain = await wireOf(connection).goaway;
 		expect(drain.uri).toBe("");
-		expect(drain.timeout).toBe(5000);
+		expect(drain.timeout).toBe(Time.Milli(5000));
 
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(closed).toBe(false);
