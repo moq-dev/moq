@@ -40,7 +40,7 @@ use sonora::config::{EchoCanceller, GainController2, NoiseSuppression, NoiseSupp
 use sonora::{AudioProcessing, StreamConfig};
 
 use crate::Error;
-use crate::playback::{self, BUS_CHANNELS};
+use crate::playback::{self, REFERENCE_CHANNELS};
 
 /// Sample rate the echo reference is resampled to on its way out of the mixer.
 ///
@@ -187,7 +187,7 @@ impl Control {
 				"echo cancellation needs a microphone between 8 and 384 kHz (got {sample_rate})"
 			)));
 		}
-		if channels == 0 || channels > BUS_CHANNELS as u32 {
+		if channels == 0 || channels > REFERENCE_CHANNELS as u32 {
 			return Err(Error::Unsupported(format!(
 				"echo cancellation accepts a mono or stereo microphone (got {channels} channels)"
 			)));
@@ -381,9 +381,9 @@ impl State {
 		self.pending = Vec::with_capacity(headroom);
 		self.processed = Vec::with_capacity(headroom);
 
-		self.reference_frame = vec![0.0; REFERENCE_FRAME * BUS_CHANNELS];
-		self.render_in = vec![0.0; REFERENCE_FRAME * BUS_CHANNELS];
-		self.render_out = vec![0.0; REFERENCE_FRAME * BUS_CHANNELS];
+		self.reference_frame = vec![0.0; REFERENCE_FRAME * REFERENCE_CHANNELS];
+		self.render_in = vec![0.0; REFERENCE_FRAME * REFERENCE_CHANNELS];
+		self.render_out = vec![0.0; REFERENCE_FRAME * REFERENCE_CHANNELS];
 		self.capture_in = vec![0.0; frame * channels];
 		self.capture_out = vec![0.0; frame * channels];
 
@@ -453,7 +453,7 @@ impl State {
 		if let Some(reference) = reference {
 			while reference.available_frames() >= REFERENCE_FRAME {
 				reference.read_interleaved(reference_frame, false);
-				deinterleave(reference_frame, render_in, BUS_CHANNELS);
+				deinterleave(reference_frame, render_in, REFERENCE_CHANNELS);
 				let _ = process_render(processor, render_in, render_out);
 			}
 		}
@@ -484,7 +484,7 @@ impl State {
 
 /// The format the mixer's reference tap arrives in.
 fn reference_config() -> StreamConfig {
-	StreamConfig::new(REFERENCE_RATE, BUS_CHANNELS as u16)
+	StreamConfig::new(REFERENCE_RATE, REFERENCE_CHANNELS as u16)
 }
 
 /// Feed one reference frame to the echo model.
@@ -602,7 +602,7 @@ impl Reference {
 /// canceller reads it back at [`REFERENCE_RATE`].
 fn channel(rate: u32) -> (ResamplingProd<f32>, ResamplingCons<f32>) {
 	resampling_channel::<f32>(
-		BUS_CHANNELS,
+		REFERENCE_CHANNELS,
 		rate,
 		REFERENCE_RATE,
 		true,
@@ -652,7 +652,7 @@ mod tests {
 
 	/// Push one 10 ms stereo frame of `value` into the tap.
 	fn play(prod: &mut ResamplingProd<f32>, value: f32) {
-		prod.push_interleaved(&vec![value; REFERENCE_FRAME * BUS_CHANNELS]);
+		prod.push_interleaved(&vec![value; REFERENCE_FRAME * REFERENCE_CHANNELS]);
 	}
 
 	#[test]
@@ -976,10 +976,10 @@ mod tests {
 		fn round(&mut self) -> (f64, f64) {
 			let played: Vec<f32> = (0..self.frame).map(|_| self.noise.next()).collect();
 
-			let mut reference = vec![0.0f32; self.frame * BUS_CHANNELS];
+			let mut reference = vec![0.0f32; self.frame * REFERENCE_CHANNELS];
 			for (i, sample) in played.iter().enumerate() {
-				reference[i * BUS_CHANNELS] = *sample;
-				reference[i * BUS_CHANNELS + 1] = *sample;
+				reference[i * REFERENCE_CHANNELS] = *sample;
+				reference[i * REFERENCE_CHANNELS + 1] = *sample;
 			}
 			self.prod.push_interleaved(&reference);
 
@@ -1112,13 +1112,13 @@ mod tests {
 		let mut tone = Vec::with_capacity(frames * 2 * 4);
 		for frame in 0..frames {
 			let value = (std::f32::consts::TAU * 440.0 * frame as f32 / 48_000.0).sin() * 0.5;
-			for _ in 0..BUS_CHANNELS {
+			for _ in 0..REFERENCE_CHANNELS {
 				tone.extend_from_slice(&value.to_le_bytes());
 			}
 		}
 
 		let mut energy = 0.0f64;
-		let mut buf = vec![0.0f32; REFERENCE_FRAME * BUS_CHANNELS];
+		let mut buf = vec![0.0f32; REFERENCE_FRAME * REFERENCE_CHANNELS];
 
 		for _ in 0..20 {
 			let _ = sink.write(&tone).expect("write");

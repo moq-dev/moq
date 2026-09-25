@@ -76,6 +76,9 @@ impl MoqAudioCodec {
 pub struct MoqAudioEncoderInput {
 	pub format: MoqAudioSampleFormat,
 	pub sample_rate: u32,
+	/// Interleaved channel count, which also names the speaker layout by the
+	/// WAVE convention: 1 mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1,
+	/// 8 7.1, in front left, front right, center, LFE, back, side order.
 	pub channels: u32,
 }
 
@@ -105,7 +108,9 @@ pub struct MoqAudioDecoderOutput {
 	/// `None` delivers samples at the codec's native rate.
 	#[uniffi(default = None)]
 	pub sample_rate: Option<u32>,
-	/// `None` delivers samples at the codec's native channel count.
+	/// `None` delivers samples at the codec's native channel count. A count
+	/// names its layout as [`MoqAudioEncoderInput::channels`] describes, and
+	/// the decoder remixes to it.
 	#[uniffi(default = None)]
 	pub channels: Option<u32>,
 	/// Upper bound on buffering before skipping a stalled group, in

@@ -45,19 +45,19 @@ export function pickRate(rate: number): number {
 const AAC_LC = 2; // audioObjectType for AAC-LC
 
 // Map a channel count to its AAC channelConfiguration (ISO 14496-3 Table 1.19). Configs 1..=6 are
-// identity (5.1 is config 6 / 6 channels); 8 channels is config 7 (7.1). Anything else has no valid
-// config, so fall back to stereo (matching the Rust muxer in rs/moq-mux/src/codec/aac).
+// identity (5.1 is config 6 / 6 channels); 8 channels is config 7 (7.1). Anything else has no
+// config, and describing it as stereo would mislabel every channel past the first two.
 function channelConfig(channelCount: number): number {
-	if (channelCount >= 1 && channelCount <= 6) return channelCount;
+	if (Number.isInteger(channelCount) && channelCount >= 1 && channelCount <= 6) return channelCount;
 	if (channelCount === 8) return 7;
-	return 2;
+	throw new Error(`no AAC channel configuration for ${channelCount} channels`);
 }
 
 /**
  * Build the AAC-LC AudioSpecificConfig that decoders need when frames are raw (no ADTS header).
  *
  * Standard sample rates produce the 2-byte form; non-table rates fall back to the 5-byte form
- * with an explicit 24-bit frequency. Mirrors the Rust muxer so JS and Rust agree on the bytes.
+ * with an explicit 24-bit frequency. Throws for a channel count no configuration names.
  */
 export function audioSpecificConfig(sampleRate: number, channelCount: number): Uint8Array {
 	const config = channelConfig(channelCount);

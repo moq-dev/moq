@@ -13,8 +13,14 @@ the far end. Everything is Rust, so there is no C toolchain, CMake step, or
 codec to install.
 
 `Layout` names speaker meaning separately from a channel count. `Mono` is center,
-`Stereo` is left then right, and `Discrete(n)` preserves unnamed channels without
-inventing speaker positions. Encoding keeps source PCM in `encode::Input` and
+`Stereo` is left then right, and the surround layouts up to `SevenPointOne`
+interleave in the SMPTE/WAVE order (front left, front right, center, LFE, back,
+side). A catalog carries only a count, which reads as that count's WAVE default
+(`Layout::from_channels`: 6 is 5.1, 8 is 7.1). `Discrete(n)` preserves unnamed
+channels without inventing speaker positions, so it passes through but never
+remixes. Decoding and playback downmix with the ITU-R BS.775 coefficients and
+upmix by leaving the extra speakers silent; the playback mix runs in whatever
+layout the output device opened. Encoding keeps source PCM in `encode::Input` and
 codec requirements in `encode::Settings`; `encode::Options` adds publication
 policy. Decoding likewise separates low-level `decode::Config`, PCM
 `decode::Output`, and subscription `decode::Options`.

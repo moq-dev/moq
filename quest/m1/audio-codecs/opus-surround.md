@@ -20,7 +20,3 @@ so this is the one multichannel path Linux gets.
   channels.
 - Regression: a family-1 5.1 fixture decodes to six channels in canonical
   order; family 255 is refused at construction.
-
-## Required
-
-- [Layout](/quest/m1/audio-codecs/layout.md) - the type the mapping resolves to

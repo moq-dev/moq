@@ -883,8 +883,10 @@ mod tests {
 		assert!(matches!(Encoder::new(&settings), Err(Error::Unsupported(_))));
 	}
 
+	/// The catalog carries only a count, so a discrete layout comes back as the
+	/// count's default one, with the samples untouched.
 	#[test]
-	fn pcm_preserves_discrete_multichannel_layout() {
+	fn pcm_passes_discrete_multichannel_samples_through() {
 		let settings = Settings {
 			codec: Codec::Pcm,
 			..Settings::new(48_000, Layout::Discrete(3))
@@ -895,7 +897,7 @@ mod tests {
 		let input = [0.1, 0.2, 0.3].repeat(encoder.frame_size());
 		let output = decoder.decode(&encoder.encode(&input).unwrap().payload).unwrap();
 
-		assert_eq!(decoder.layout(), Layout::Discrete(3));
+		assert_eq!(decoder.layout(), Layout::TwoPointOne);
 		assert_eq!(output.samples, input);
 	}
 
