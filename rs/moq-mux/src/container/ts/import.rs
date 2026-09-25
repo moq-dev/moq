@@ -2064,21 +2064,23 @@ impl<E: CatalogExt> AacStream<E> {
 			let import = match &mut self.import {
 				Some(import) => import,
 				None => {
-					let config = aac::Config {
-						profile: header.object_type,
-						sample_rate: header.sample_rate,
-						channel_count: header.channel_count,
-					};
+					// Synthesize the AudioSpecificConfig `description` so out-of-band consumers
+					// (fMP4/MKV export, WebCodecs) can configure the decoder. A channel_config of 0
+					// moves the program config element out of this first frame into it.
+					let asc = aac::in_band_config(
+						header.object_type,
+						header.sample_rate,
+						header.channel_config,
+						&data[offset + header.header_len..end],
+					)?;
+					let mut config = aac::config(&asc)?;
+					config.container = self.container.clone();
 					// Consume the reservation held since the PMT: this resolves the gated rendition,
 					// and carries the catalog's declared media retention onto the track.
-					// The importer synthesizes the AudioSpecificConfig `description` from the config so
-					// out-of-band consumers (fMP4/MKV export, WebCodecs) can configure the decoder.
 					let reserved = self.reserved.take().expect("aac reservation already consumed");
 					let track = self
 						.broadcast
 						.unique_track(".aac", reserved.track_info(hang::catalog::PRIORITY.audio))?;
-					let mut config: hang::catalog::AudioConfig = config.into();
-					config.container = self.container.clone();
 					let aac = aac::Import::new(track, reserved, config)?;
 					self.import.insert(aac)
 				}
