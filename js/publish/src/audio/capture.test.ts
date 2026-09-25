@@ -21,14 +21,19 @@ function installFakeWebAudio() {
 	let audioWorkletNodes = 0;
 	const requestedRates: (number | undefined)[] = [];
 
-	class FakeAudioContext {
-		state: AudioContextState = "suspended";
+	// Already running, as after a gesture, so only the pending module load holds the worklet back.
+	class FakeAudioContext extends EventTarget {
+		state: AudioContextState = "running";
 		audioWorklet = { addModule };
 		constructor(options?: AudioContextOptions) {
+			super();
 			requestedRates.push(options?.sampleRate);
 		}
+		resume(): Promise<void> {
+			return Promise.resolve();
+		}
 		close(): Promise<void> {
-			// Firefox/Safari behavior: stays "suspended", never "closed".
+			// Firefox/Safari behavior: never flips to "closed" synchronously.
 			return Promise.resolve();
 		}
 	}
@@ -50,6 +55,7 @@ function installFakeWebAudio() {
 	}
 
 	const globals: Record<string, unknown> = {
+		document: new EventTarget(),
 		AudioContext: FakeAudioContext,
 		MediaStream: FakeMediaStream,
 		MediaStreamAudioSourceNode: FakeGraphNode,
@@ -230,4 +236,165 @@ test("rejects the removed source prop instead of publishing nothing", async () =
 	expect(() => new Encoder("audio", { enabled: true, source: new Signal(fakeSource()) } as never)).toThrow(
 		"moved to Audio.Capture",
 	);
+});
+
+// Models a browser that gates audio on a gesture: a context built without user activation starts
+// suspended, renders nothing, and `resume()` never settles until the page has been interacted with.
+function installGatedWebAudio() {
+	const page = new EventTarget();
+	let activated = false;
+	const contexts: GatedContext[] = [];
+	const worklets: GatedWorklet[] = [];
+	const roots: FakeGraphNode[] = [];
+
+	class GatedContext extends EventTarget {
+		state: string = "suspended";
+		sampleRate: number;
+		audioWorklet = { addModule: () => Promise.resolve() };
+		constructor(options?: AudioContextOptions) {
+			super();
+			this.sampleRate = options?.sampleRate ?? 48_000;
+			contexts.push(this);
+		}
+		resume(): Promise<void> {
+			// Safari holds an interrupted context until the interruption ends, whatever the page does.
+			if (!activated || this.state === "interrupted") return new Promise(() => {});
+			this.transition("running");
+			return Promise.resolve();
+		}
+		close(): Promise<void> {
+			return Promise.resolve();
+		}
+		transition(state: string): void {
+			if (this.state === state) return;
+			this.state = state;
+			this.dispatchEvent(new Event("statechange"));
+		}
+	}
+
+	class GatedWorklet {
+		port = Object.assign(new EventTarget(), { start: () => {} });
+		zero: number;
+		constructor(_context: unknown, _name: string, options?: AudioWorkletNodeOptions) {
+			this.zero = options?.processorOptions?.zero;
+			worklets.push(this);
+		}
+		connect(): void {}
+		disconnect(): void {}
+		// What the processor posts once the graph renders a quantum.
+		render(): void {
+			this.port.dispatchEvent(
+				new MessageEvent("message", { data: { timestamp: 0, channels: [new Float32Array(128)] } }),
+			);
+		}
+	}
+
+	class FakeGraphNode {
+		channelCount = 2;
+		outputs = new Set<unknown>();
+		constructor() {
+			roots.push(this);
+		}
+		connect(node: unknown): void {
+			this.outputs.add(node);
+		}
+		disconnect(node?: unknown): void {
+			if (node === undefined) this.outputs.clear();
+			else this.outputs.delete(node);
+		}
+	}
+
+	const globals: Record<string, unknown> = {
+		document: page,
+		AudioContext: GatedContext,
+		MediaStream: class {},
+		MediaStreamAudioSourceNode: FakeGraphNode,
+		AudioWorkletNode: GatedWorklet,
+	};
+
+	const originals = new Map<string, PropertyDescriptor | undefined>();
+	for (const [name, value] of Object.entries(globals)) {
+		originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+		Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+	}
+
+	return {
+		contexts,
+		worklets,
+		roots,
+		// A real click: the page gains user activation, then the event reaches its listeners.
+		gesture() {
+			activated = true;
+			page.dispatchEvent(new Event("pointerdown"));
+		},
+		[Symbol.dispose]() {
+			for (const [name, original] of originals) {
+				if (original) Object.defineProperty(globalThis, name, original);
+				else Reflect.deleteProperty(globalThis, name);
+			}
+		},
+	};
+}
+
+// Regression: a source handed over before any gesture (a pre-granted microphone on page load) built a
+// context that stayed suspended forever, since nothing ever resumed it. The worklet never posted, so the
+// format and with it the audio catalog never appeared, even after the user clicked.
+test("captures once a gesture resumes a context built before one", async () => {
+	using webaudio = installGatedWebAudio();
+
+	const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never });
+	await settle();
+
+	// Suspended: no worklet stamping frames against a clock that isn't moving, and no format.
+	expect(webaudio.contexts[0].state).toBe("suspended");
+	expect(webaudio.worklets.length).toBe(0);
+	expect(capture.out.format.peek()).toBeUndefined();
+
+	const before = performance.now() * 1000;
+	webaudio.gesture();
+	await settle();
+
+	expect(webaudio.contexts[0].state).toBe("running");
+	expect(webaudio.worklets.length).toBe(1);
+
+	// The worklet is anchored when the graph starts, not when the source appeared, so audio stays on
+	// the same wall clock as video however long the page waited for the click.
+	expect(webaudio.worklets[0].zero).toBeGreaterThanOrEqual(before);
+
+	webaudio.worklets[0].render();
+	expect(capture.out.format.peek()).toEqual({ sampleRate: 48_000, channelCount: 1 });
+
+	capture.close();
+	await settle();
+});
+
+// A suspended graph carries nothing, so an interrupted context (Safari, on a phone call) must not
+// leave the format behind for the encoder to keep advertising.
+test("drops the format while the context is interrupted", async () => {
+	using webaudio = installGatedWebAudio();
+
+	const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never });
+	await settle();
+	webaudio.gesture();
+	await settle();
+	webaudio.worklets[0].render();
+	expect(capture.out.format.peek()).toBeDefined();
+
+	webaudio.contexts[0].transition("interrupted");
+	await settle();
+	expect(capture.out.format.peek()).toBeUndefined();
+	expect(capture.out.frames.peek()).toBeUndefined();
+	// The retired worklet is cut from the source, or it keeps posting alongside its replacement.
+	expect(webaudio.roots[0].outputs.size).toBe(0);
+
+	// Back to running rebuilds the worklet on a fresh anchor.
+	webaudio.contexts[0].transition("running");
+	await settle();
+	expect(webaudio.worklets.length).toBe(2);
+	expect([...webaudio.roots[0].outputs]).toEqual([webaudio.worklets[1]]);
+	webaudio.worklets[1].render();
+	expect(capture.out.format.peek()).toBeDefined();
+
+	capture.close();
+	await settle();
 });

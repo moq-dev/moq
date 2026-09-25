@@ -117,6 +117,12 @@ impl<T: DeserializeOwned> Decoder<T> {
 			return Ok(None);
 		};
 
+		// Tracking the path allocates for every key walked, which dwarfed the decode itself on large
+		// documents, so it only runs again to explain a failure.
+		if let Ok(value) = T::deserialize(current) {
+			return Ok(Some(value));
+		}
+
 		let value = serde_path_to_error::deserialize(current).map_err(|err| {
 			let path = err.path().to_string();
 			match path.as_str() {

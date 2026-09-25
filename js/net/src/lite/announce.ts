@@ -3,7 +3,7 @@ import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
-import { hasAnnounceId, hasAnnounceOk, hasExcludeHop, hasRouteCost, Version } from "./version.ts";
+import { hasAnnounceId, hasAnnounceOk, hasExcludeHop, hasHidden, hasRouteCost, Version } from "./version.ts";
 
 // Pre-lite-06 inner status values, carried inside the single ANNOUNCE_BROADCAST body.
 const STATUS_ENDED = 0;
@@ -266,10 +266,15 @@ export class AnnounceRequest {
 	 *
 	 * Must be a bigint: peer origins are up to 62 bits and overflow u53. */
 	excludeHop: bigint;
+	/** Lite07+: also announce routes with a `.`-prefixed segment below the prefix. Not on
+	 * the wire earlier, so a value set here is ignored when encoding for an older version
+	 * and decodes as false. */
+	hidden: boolean;
 
-	constructor(prefix: Path.Valid, excludeHop: bigint = 0n) {
+	constructor(prefix: Path.Valid, excludeHop: bigint = 0n, hidden = false) {
 		this.prefix = prefix;
 		this.excludeHop = excludeHop;
+		this.hidden = hidden;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -277,12 +282,16 @@ export class AnnounceRequest {
 		if (hasExcludeHop(version)) {
 			await w.u62(this.excludeHop);
 		}
+		if (hasHidden(version)) {
+			await w.bool(this.hidden);
+		}
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<AnnounceRequest> {
 		const prefix = Path.decode(await r.string());
 		const excludeHop = hasExcludeHop(version) ? await r.u62() : 0n;
-		return new AnnounceRequest(prefix, excludeHop);
+		const hidden = hasHidden(version) ? await r.bool() : false;
+		return new AnnounceRequest(prefix, excludeHop, hidden);
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

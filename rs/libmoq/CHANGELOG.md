@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2](https://github.com/moq-dev/moq/compare/libmoq-v0.6.1...libmoq-v0.6.2) - 2026-09-24
+
+### Other
+
+- rename in-repo smoke test to interop ([#3963](https://github.com/moq-dev/moq/pull/3963))
+
 ## [0.6.1](https://github.com/moq-dev/moq/compare/libmoq-v0.6.0...libmoq-v0.6.1) - 2026-09-23
 
 ### Other

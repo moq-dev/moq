@@ -18,14 +18,6 @@ author:
 
 normative:
   moqt: I-D.ietf-moq-transport
-  I-D.lcurley-moq-pattern:
-    title: "MoQ Pattern Extension"
-    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-pattern/
-    author:
-      -
-        ins: L. Curley
-        name: Luke Curley
-    date: false
   qmux: I-D.ietf-quic-qmux
   qmuxws:
     title: "QMux over WebSocket"
@@ -40,6 +32,7 @@ normative:
   RFC9002:
 
 informative:
+  I-D.lcurley-moq-cluster:
 
 --- abstract
 
@@ -101,7 +94,7 @@ A Session consists of a connection between a client and a server.
 There is currently no P2P support within QUIC so it's out of scope for moq-lite.
 
 The moq-lite version identifier is `moq-lite-xx` where `xx` is the two-digit draft version.
-The identifier for this draft is `moq-lite-06`.
+The identifier for this draft is `moq-lite-07`.
 For bare QUIC, this is negotiated as an ALPN token during the QUIC handshake.
 For WebTransport over HTTP/3, the QUIC ALPN remains `h3` and the moq-lite version is advertised via the `WT-Available-Protocols` and `WT-Protocol` CONNECT headers.
 
@@ -312,7 +305,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x12  | MALFORMED_TRACK | The track's content could not be parsed. |
 | ------- | ------------- | ----------- |
-|  0x30  | NO_CAPACITY | The publisher could serve this request but has no capacity for it now. Permits one re-resolution (see [Resolution](#resolution)); elsewhere it is terminal like any refusal. Bridges to NO_CAPACITY in {{I-D.lcurley-moq-pattern}}. |
+|  0x30  | NO_CAPACITY | The publisher could serve this request but has no capacity for it now. Permits one re-resolution (see [Resolution](#resolution)); elsewhere it is terminal like any refusal. Bridges to NO_CAPACITY in {{I-D.lcurley-moq-cluster}}. |
 | ------- | ------------- | ----------- |
 |  0x31  | CONTROL_TIMEOUT | The peer took too long to answer a control request. Distinct from DELIVERY_TIMEOUT, which is content that missed its deadline; it has no moq-transport value and bridges to INTERNAL_ERROR. |
 | ------- | ------------- | ----------- |
@@ -389,6 +382,15 @@ When the stream is closed, the subscriber MUST assume that all routes are now un
 A route covers a path when its prefix is a leading run of the path's segments; matching is per path segment, so a prefix never matches half a segment, and equality is byte-by-byte within each segment.
 A publisher answering a request stream presents each of its routes clamped to the intersection with the requested prefix: a route above the request's prefix appears as the request prefix itself (an empty suffix), which is exactly the covered set the subscriber may see.
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK + announcements.
+
+#### Hidden Paths {#hidden}
+A route is hidden from a request when a segment of its path below the requested prefix starts with `.` (0x2E).
+A segment inside the prefix never hides anything, so a request that names the hidden segment itself (`.stats`) lists what is under it, and a route at or above the prefix has no segment below it.
+Only the first byte counts: `catalog.v2` is not hidden.
+
+A publisher SHOULD NOT announce a hidden route unless the ANNOUNCE_REQUEST set `Hidden`.
+Hiding is a convenience for discovery, not access control: a publisher MAY treat a subscriber it trusts, such as another relay in its own cluster, as opted in, and MUST authorize hidden paths like any other.
+SUBSCRIBE, FETCH, and TRACK resolve a hidden path exactly as any other.
 
 #### Routing {#routing}
 Each advertisement carries the path of Hop IDs it traversed and an accumulated Warm and Cold Route Cost (see [ANNOUNCE_START](#announce-start)), which relays use to build a loop-free mesh.
@@ -808,11 +810,16 @@ A subscriber sends an ANNOUNCE_REQUEST message to indicate it wants to receive a
 ANNOUNCE_REQUEST Message {
   Message Length (i)
   Broadcast Path Prefix (s),
+  Hidden (8),
 }
 ~~~
 
 **Broadcast Path Prefix**:
 Indicate interest for any broadcasts with a path that starts with this prefix.
+
+**Hidden**:
+1 to also receive hidden routes (see [Hidden Paths](#hidden)), 0 otherwise.
+Any other value is a PROTOCOL_VIOLATION.
 
 The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching routes, followed by ANNOUNCE_START, ANNOUNCE_END, and ANNOUNCE_UPDATE messages for any future updates, subject to [Routing](#routing).
 Implementations SHOULD consider reasonable limits on the number of matching broadcasts to prevent resource exhaustion.
@@ -1320,6 +1327,11 @@ The `Message Length` describes the payload size on the wire.
 
 
 # Appendix A: Changelog
+
+## moq-lite-07
+
+- Assigned `moq-lite-07` as this draft's protocol identifier.
+- Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
 
 ## moq-lite-06
 

@@ -1,6 +1,7 @@
 //! The connection: shared state, the driver task, and the session handle.
 
 use std::cell::RefCell;
+use std::net::SocketAddr;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll};
 use std::time::Instant;
@@ -277,6 +278,10 @@ pub struct Connection {
 	/// The negotiated ALPN, cached at establishment so `protocol()` can
 	/// borrow from the handle.
 	alpn: Option<String>,
+	/// The SNI the client presented, cached likewise.
+	server_name: Option<String>,
+	/// The peer's address when the handshake completed.
+	remote: SocketAddr,
 }
 
 impl Connection {
@@ -310,6 +315,18 @@ impl Connection {
 			.ok()?;
 		Some(chain.iter().map(|cert| cert.to_vec()).collect())
 	}
+
+	/// The peer's address as of the handshake; a peer that migrates later
+	/// keeps its connection but not this value.
+	pub fn remote_addr(&self) -> SocketAddr {
+		self.remote
+	}
+
+	/// The SNI the client presented, or `None` if it sent none. Always `None`
+	/// on a dialed connection.
+	pub fn server_name(&self) -> Option<&str> {
+		self.server_name.as_deref()
+	}
 }
 
 impl Clone for Connection {
@@ -318,6 +335,8 @@ impl Clone for Connection {
 			shared: self.shared.clone(),
 			park: kio::Park::default(),
 			alpn: self.alpn.clone(),
+			server_name: self.server_name.clone(),
+			remote: self.remote,
 		}
 	}
 }
@@ -393,19 +412,33 @@ pub(crate) async fn establish(shared: Shared) -> Result<Connection, Error> {
 	}
 	result?;
 
-	let alpn = {
+	let (alpn, server_name, remote) = {
 		let conn = shared.conn.borrow();
-		conn.crypto_session()
+		let handshake = conn
+			.crypto_session()
 			.handshake_data()
-			.and_then(|data| data.downcast::<moq_noq_proto::crypto::rustls::HandshakeData>().ok())
-			.and_then(|data| data.protocol)
-			.map(|proto| String::from_utf8_lossy(&proto).into_owned())
+			.and_then(|data| data.downcast::<moq_noq_proto::crypto::rustls::HandshakeData>().ok());
+		let (alpn, server_name) = match handshake {
+			Some(data) => (
+				data.protocol.map(|proto| String::from_utf8_lossy(&proto).into_owned()),
+				data.server_name,
+			),
+			None => (None, None),
+		};
+		// Multipath is never negotiated here, so the first path is the only one.
+		let remote = conn
+			.network_path(moq_noq_proto::PathId::ZERO)
+			.expect("an established connection has its first path")
+			.remote();
+		(alpn, server_name, remote)
 	};
 
 	let conn = Connection {
 		shared,
 		park: kio::Park::default(),
 		alpn,
+		server_name,
+		remote,
 	};
 	guard.shared = None;
 	Ok(conn)

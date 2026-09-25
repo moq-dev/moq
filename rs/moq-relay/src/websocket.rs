@@ -62,13 +62,19 @@ pub(crate) async fn serve_ws(
 	let lease = state.auth.admit(request.clone()).await?;
 	let token = lease.token();
 	let publish = state.cluster.publisher(token);
-	let subscribe = state.cluster.subscriber(token);
+	// A verified client certificate marks a cluster peer, which discovers hidden
+	// routes; see `connection::authorize`.
+	let subscribe = state
+		.cluster
+		.subscriber(token)
+		.map(|subscribe| subscribe.consume().with_hidden(request.tls.is_some()));
 	let stats = state.cluster.stats.tier(token.tier.clone()).session(&token.root);
 
 	if publish.is_none() && subscribe.is_none() {
 		// Bad token, we can't publish or subscribe.
 		return Err(StatusCode::UNAUTHORIZED.into());
 	}
+	let lease = lease.with_stats(stats.clone());
 
 	Ok(ws.on_upgrade(async move |socket| {
 		let id = state.conn_id.fetch_add(1, Ordering::Relaxed);
@@ -104,7 +110,7 @@ struct SessionInputs {
 	alpn: Option<String>,
 	versions: moq_net::Versions,
 	publish: Option<origin::Producer>,
-	subscribe: Option<origin::Producer>,
+	subscribe: Option<origin::Consumer>,
 	stats: Session,
 	shutdown: crate::shutdown::Observer,
 	/// The kernel's view of the socket under the upgrade, captured at accept time.
@@ -172,7 +178,7 @@ where
 	// publish-only or subscribe-only token.
 	let mut server = moq_net::Server::new().with_versions(versions).with_stats(stats);
 	if let Some(subscribe) = subscribe {
-		server = server.with_publisher(&subscribe);
+		server = server.with_publisher(subscribe);
 	}
 	if let Some(publish) = publish {
 		server = server.with_subscriber(publish);
@@ -235,7 +241,7 @@ where
 ///
 /// We advertise the configured qmux × moq-net subprotocol matrix, with bare
 /// qmux fallbacks last. axum picks the first entry that the client also offered, so
-/// a modern client lands on `qmux-01.moq-lite-06`; old clients still match
+/// a modern client lands on `qmux-01.moq-lite-07`; old clients still match
 /// `webtransport` or `qmux-00.moql` and negotiate via SETUP.
 ///
 /// When the client offered subprotocols and none of them are ours, the

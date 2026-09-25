@@ -38,6 +38,21 @@ export interface Update {
 	route: Route;
 }
 
+/**
+ * Options for an announcement stream.
+ *
+ * @public
+ */
+export interface Options {
+	/**
+	 * Also report hidden routes: those with a path segment starting with `.` below the
+	 * scope's literal head. Hidden routes are left out by default, so a platform can add
+	 * `.`-named broadcasts (stats, internal routes) without them turning up in apps that
+	 * list everything. Subscribing to a hidden path by name works either way.
+	 */
+	hidden?: boolean;
+}
+
 /** Whether a route covers the path after an update of this {@link Kind}. */
 export function isActive(kind: Kind): boolean {
 	return kind !== "retracted";

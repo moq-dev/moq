@@ -70,7 +70,7 @@ broadcast.Finish()   // keep the producer reachable while publishing, then finis
 ```
 
 The three advertising operations: `client.CreateBroadcast(path)` (or
-`origin.CreateBroadcast`) returns a locally discoverable producer;
+`origin.CreateBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.Announce(route)` / `broadcast.Unannounce()` own that exact-path
 advertisement; `origin.Dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
@@ -78,6 +78,8 @@ while the claim should stay advertised, and reject the requests you will not
 serve. A route is a capability, not an inventory. `Announced(options)` combines
 a literal prefix with an optional relative pattern; `ann.Prefix()` stays
 relative to the origin and `ann.Captures()` reports the wildcard matches.
+Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
+`Hidden: true`.
 
 Every call that can block takes a `context.Context` first. Cancelling it
 returns `ctx.Err()` promptly and tears the in-flight native work down, so a
@@ -94,6 +96,10 @@ the connections, 1 on the first, pairing with `Session().Status(ctx)` to log
 each reconnect by number; `moq.WithBackoff` tunes the pacing, with
 `moq.RetryForever` as the timeout; and `moq.WithQUICMaxStreams` raises the
 peer's inbound stream cap for a subscriber to many tracks.
+
+The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
+a 200 ms head start. `moq.WithWebSocketEnabled(false)` turns it off for a
+QUIC-only relay, and `moq.WithWebSocketDelay` changes the head start.
 
 `moq.Listen` accepts sessions with per-request `Accept`/`Reject`; `Request.Transport()`
 returns the closed `moq.Transport` enum.

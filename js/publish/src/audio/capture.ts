@@ -146,26 +146,36 @@ export class Capture {
 		});
 		effect.cleanup(() => context.close());
 
+		// Nothing guarantees a gesture has happened yet: a pre-granted microphone reaches here on page
+		// load. A context built then starts suspended and renders nothing until one arrives.
+		const running = Util.Gesture.unlock(effect, context);
+
 		const root = new MediaStreamAudioSourceNode(context, {
 			mediaStream: new MediaStream([source.track]),
 		});
 		effect.cleanup(() => root.disconnect());
 
-		effect.cleanup(() => {
-			this.#out.format.set(undefined);
-		});
+		const loaded = new Signal(false);
 
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
-			// Race the module load against teardown. If teardown wins, `loaded` is undefined and we bail
-			// before constructing the node: the module registration was abandoned, so building against its
-			// name would throw. Gate on the race result, not `context.state`, because `AudioContext.close()`
-			// only flips `.state` to "closed" synchronously on Chrome (Firefox/Safari report "suspended").
-			const loaded = await Promise.race([
+			// Race the module load against teardown. If teardown wins, bail before flagging it loaded: the
+			// module registration was abandoned, so building against its name would throw. Gate on the race
+			// result, not `context.state`, because `AudioContext.close()` only flips `.state` to "closed"
+			// synchronously on Chrome (Firefox/Safari report "suspended").
+			const ok = await Promise.race([
 				context.audioWorklet.addModule(CaptureWorklet).then(() => true),
 				effect.cancel,
 			]);
-			if (!loaded) return;
+			if (ok) loaded.set(true);
+		});
+
+		// Only capture while the graph runs. The worklet stamps frames from when it is built, so one built
+		// while suspended would lag the wall clock by however long the page waited for a gesture. And a
+		// suspended graph carries nothing, so it has no format: the encoder announces no audio until
+		// samples actually flow, and drops it again if Safari interrupts the context.
+		effect.run((inner) => {
+			if (!inner.get(loaded) || !inner.get(running)) return;
 
 			const channelCount = requestedChannels ?? settings.channelCount ?? root.channelCount;
 			const worklet = new AudioWorkletNode(context, "capture", {
@@ -180,15 +190,16 @@ export class Capture {
 				// tracks share an epoch and stay in sync.
 				processorOptions: { zero: performance.now() * 1000 },
 			});
-			effect.cleanup(() => worklet.disconnect());
-
+			// The edge originates at root, so only root can remove it; the worklet has no outputs.
 			root.connect(worklet);
+			inner.cleanup(() => root.disconnect(worklet));
 
-			const fanout = new Fanout(this.#drain(worklet, context.sampleRate, effect), { queue: QUEUE });
-			effect.cleanup(() => fanout.close());
+			const fanout = new Fanout(this.#drain(worklet, context.sampleRate, inner), { queue: QUEUE });
+			inner.cleanup(() => fanout.close());
+			inner.cleanup(() => this.#out.format.set(undefined));
 
-			effect.set(this.#out.root, root);
-			effect.set(this.#out.frames, fanout);
+			inner.set(this.#out.root, root);
+			inner.set(this.#out.frames, fanout);
 		});
 	}
 

@@ -442,8 +442,8 @@ _tools $FILES="":
     tools=(actionlint bun jq nix nixfmt shellcheck shfmt taplo python3 nfpm dpkg-deb envsubst rpm)
     scoped '^(drafts/|doc/\.vitepress/drafts\.ts$)' && tools+=(kramdown-rfc xml2rfc)
     scoped '^(bench/|quest/|rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo envsubst)
-    scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'     && tools+=(uv)
-    scoped '^(kt/|rs/moq-ffi/)'                                && tools+=(gradle java)
+    scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/lib/samples\.sh$)' && tools+=(uv)
+    scoped '^(kt/|rs/moq-ffi/|doc/lib/kt/|doc/lib/samples\.sh$)' && tools+=(gradle java)
     # cargo because `go check` builds moq-ffi for the host, and skips on a
     # missing cargo the same way it skips on a missing go. rsync because the
     # publish scripts stage the mirror tree with it, so the publisher test skips
@@ -510,6 +510,7 @@ check $BASE="" *args:
         just drafts check
         just rs check --workspace --exclude moq-net-fuzz {{ args }}
         just rs tokio-features
+        just rs media-features
         just --justfile bench/justfile check
         cargo run --quiet --locked --package quest -- check
         # Not covered by the line above: moq-wasm only exists on the wasm32 target.
