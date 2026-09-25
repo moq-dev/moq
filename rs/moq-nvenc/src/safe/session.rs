@@ -115,7 +115,8 @@ impl Session {
 	///
 	/// Returns [`ErrorKind::InvalidParam`] when the session was started without
 	/// an encode config, since there is then no config to resubmit, when
-	/// `bitrate` is zero, or when the proportionally scaled VBV overflows.
+	/// `bitrate` is zero, when a nonzero VBV would scale to zero, or when the
+	/// proportionally scaled VBV overflows.
 	/// Otherwise returns whatever `NvEncReconfigureEncoder` reports, e.g.
 	/// [`ErrorKind::UnsupportedParam`] if the driver rejects the rate change.
 	/// After any error the session keeps its last accepted rate settings.
@@ -370,7 +371,13 @@ fn retune(
 	if rc.vbvBufferSize != 0 && rc.averageBitRate != 0 {
 		let basis = u64::from(rc.averageBitRate);
 		let scale = |v: u32| {
-			u32::try_from(u64::from(v) * u64::from(bitrate) / basis).map_err(|_| invalid("scaled VBV exceeds u32"))
+			let scaled = u64::from(v) * u64::from(bitrate) / basis;
+			// Rounding a nonzero VBV to zero is the same dead end as a zero rate:
+			// the next retune would skip this branch and could never restore it.
+			if v != 0 && scaled == 0 {
+				return Err(invalid("scaled VBV must be nonzero"));
+			}
+			u32::try_from(scaled).map_err(|_| invalid("scaled VBV exceeds u32"))
 		};
 		rc.vbvBufferSize = scale(rc.vbvBufferSize)?;
 		rc.vbvInitialDelay = scale(rc.vbvInitialDelay)?;
@@ -590,6 +597,16 @@ mod tests {
 		})
 		.unwrap();
 		assert_eq!(rates(&config), (2_000_000, 200_000, 200_000));
+	}
+
+	#[test]
+	fn rate_that_zeroes_a_nonzero_vbv_is_refused_before_the_driver() {
+		let init = NV_ENC_INITIALIZE_PARAMS::default();
+		let mut config = rate_config(1_000, 1);
+		let error =
+			retune(&init, &mut config, 1, |_| panic!("submitted a zero VBV")).expect_err("the scaled VBV is zero");
+		assert_eq!(error.kind(), ErrorKind::InvalidParam);
+		assert_eq!(rates(&config), (1_000, 1, 1));
 	}
 
 	#[test]

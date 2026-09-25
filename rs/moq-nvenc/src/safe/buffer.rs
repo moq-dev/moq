@@ -721,7 +721,11 @@ impl<A: ResourceApi, T> Mapping<A, T> {
 /// when it goes out of scope.
 impl<A: ResourceApi, T> Drop for Mapping<A, T> {
 	fn drop(&mut self) {
-		let _ = self.api.unmap_input_resource(self.map_ptr);
+		// A failed unmap leaves the resource mapped. Unregistering or freeing
+		// it could release memory NVENC still holds, so leak the owner instead.
+		if self.api.unmap_input_resource(self.map_ptr).is_err() {
+			return;
+		}
 		// As in `new`: NVENC may still refer to an allocation it failed to
 		// unregister, so leak its owner rather than free it.
 		if self.api.unregister_resource(self.reg_ptr).is_ok() {
@@ -779,6 +783,7 @@ mod tests {
 		mapped: Cell<bool>,
 		owner_alive: Rc<Cell<bool>>,
 		map_error: Option<ErrorKind>,
+		unmap_error: Option<ErrorKind>,
 		unregister_error: Option<ErrorKind>,
 	}
 
@@ -789,6 +794,7 @@ mod tests {
 				mapped: Cell::new(false),
 				owner_alive,
 				map_error: None,
+				unmap_error: None,
 				unregister_error: None,
 			}
 		}
@@ -827,8 +833,13 @@ mod tests {
 		fn unmap_input_resource(&self, _mapped: *mut c_void) -> Result<(), EncodeError> {
 			self.assert_owner_alive();
 			self.calls.borrow_mut().unmap += 1;
-			self.mapped.set(false);
-			Ok(())
+			match self.unmap_error {
+				Some(kind) => Err(EncodeError::new(kind, None)),
+				None => {
+					self.mapped.set(false);
+					Ok(())
+				}
+			}
 		}
 
 		fn unregister_resource(&self, _registered: *mut c_void) -> Result<(), EncodeError> {
@@ -940,6 +951,26 @@ mod tests {
 				map: 1,
 				unmap: 1,
 				unregister: 1,
+			}
+		);
+	}
+
+	#[test]
+	fn failed_unmap_on_drop_retains_the_owner() {
+		let (owner, alive) = setup();
+		let mut api = TestApi::new(alive.clone());
+		api.unmap_error = Some(ErrorKind::ResourceNotMapped);
+
+		drop(register(&api, owner).expect("mapping should succeed"));
+
+		assert!(alive.get(), "a possibly mapped allocation must remain owned");
+		assert_eq!(
+			*api.calls.borrow(),
+			Calls {
+				register: 1,
+				map: 1,
+				unmap: 1,
+				unregister: 0,
 			}
 		);
 	}
