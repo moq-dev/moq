@@ -188,7 +188,7 @@ async fn a_finished_track_ends_clean_while_its_session_lives() {
 const DEATH_VERSIONS: &[&str] = &[
 	"moq-lite-03",
 	"moq-lite-05",
-	"moq-lite-07",
+	"moq-lite-07-wip",
 	"moq-transport-14",
 	"moq-transport-17",
 	"moq-transport-22",
