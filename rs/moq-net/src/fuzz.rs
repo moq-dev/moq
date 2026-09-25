@@ -173,16 +173,28 @@ fn announce_version(compress: bool) -> lite::Version {
 	}
 }
 
-/// Encode `announced` as a publisher's announce stream: lite-07 with compression, or
-/// lite-06 literal framing. Every update and end must name a live id.
-pub fn encode_announces(announced: &[Announced], compress: bool) -> Vec<u8> {
-	let version = announce_version(compress);
-	let mut encoder = lite::AnnounceEncoder::new(version);
-	let mut data = Vec::new();
-	for announced in announced {
+/// One publisher's side of an announce stream: lite-07 with compression, or lite-06
+/// literal framing.
+pub struct AnnounceWriter {
+	version: lite::Version,
+	encoder: lite::AnnounceEncoder,
+}
+
+impl AnnounceWriter {
+	/// A new stream, with nothing live.
+	pub fn new(compress: bool) -> Self {
+		let version = announce_version(compress);
+		Self {
+			version,
+			encoder: lite::AnnounceEncoder::new(version),
+		}
+	}
+
+	/// Append one announcement to `data`. An update or end must name a live id.
+	pub fn write(&mut self, announced: &Announced, data: &mut Vec<u8>) {
 		let msg = match announced {
 			Announced::Start(suffix, hops) => {
-				let (_, suffix, hops) = encoder.start(suffix.clone(), hops.clone());
+				let (_, suffix, hops) = self.encoder.start(suffix.clone(), hops.clone());
 				lite::AnnounceBroadcast::Active {
 					suffix,
 					hops,
@@ -191,16 +203,25 @@ pub fn encode_announces(announced: &[Announced], compress: bool) -> Vec<u8> {
 			}
 			Announced::Update(id, hops) => lite::AnnounceBroadcast::Restart {
 				id: *id,
-				hops: encoder.update(*id, hops.clone()),
+				hops: self.encoder.update(*id, hops.clone()),
 				cost: Default::default(),
 			},
 			Announced::End(id) => {
-				encoder.end(*id);
+				self.encoder.end(*id);
 				lite::AnnounceBroadcast::EndedId { id: *id }
 			}
 		};
-		msg.encode(&mut data, version)
+		msg.encode(data, self.version)
 			.expect("could not encode an announcement");
+	}
+}
+
+/// Encode `announced` as a fresh [`AnnounceWriter`] stream.
+pub fn encode_announces(announced: &[Announced], compress: bool) -> Vec<u8> {
+	let mut writer = AnnounceWriter::new(compress);
+	let mut data = Vec::new();
+	for announced in announced {
+		writer.write(announced, &mut data);
 	}
 	data
 }

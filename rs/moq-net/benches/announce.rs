@@ -1,9 +1,11 @@
 //! Lite-07 announce compression against lite-06 literal framing: the bytes an
 //! announce stream costs, and the CPU to encode and decode it.
 //!
-//! Swept over live routes and churn. Each stream announces `routes` routes, then
-//! replaces `churn` of them (an END and a fresh START), so the bases the encoder
-//! picks come and go. Two workloads bracket the gain:
+//! Bytes and decode are measured over a whole stream: `routes` routes, then `churn` of
+//! them replaced (an END and a fresh START), so the bases the encoder picks come and
+//! go. Encode is measured in the steady state a relay sees: the encoder already holds
+//! `routes` live routes, and each iteration retracts the oldest and starts a new one.
+//! Two workloads bracket the gain:
 //!
 //! - health: `<pid>/private/channel_N/stream-health-<ts>` from a few origins behind
 //!   a shared pair of relays, the shape that motivated compression.
@@ -17,11 +19,14 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{
 	Hop, Hops, PathOwned,
-	fuzz::{Announced, decode_announces, encode_announces},
+	fuzz::{AnnounceWriter, Announced, decode_announces, encode_announces},
 };
 
-/// `(routes, churn)` shapes.
+/// `(routes, churn)` shapes for the whole-stream measurements.
 const SHAPES: [(u64, u64); 4] = [(100, 0), (1_000, 0), (1_000, 1_000), (10_000, 1_000)];
+
+/// Live routes for the steady-state encode.
+const LIVE: [u64; 3] = [100, 1_000, 10_000];
 
 /// How many origins publish health streams, each behind the same two relays.
 const ORIGINS: u64 = 8;
@@ -99,22 +104,45 @@ fn bench(c: &mut Criterion) {
 
 	for (name, route) in WORKLOADS {
 		let mut group = c.benchmark_group(format!("announce_{name}"));
-		for (routes, churn) in SHAPES {
-			let announced = stream(routes, churn, route);
-			let shape = format!("{routes}x{churn}");
-			group.throughput(Throughput::Elements(announced.len() as u64));
+
+		for routes in LIVE {
+			// A ring twice the live set, so the route started never collides with one
+			// still live.
+			let ring: Vec<_> = (0..2 * routes)
+				.map(|n| {
+					let (path, hops) = route(n);
+					Announced::Start(path, hops)
+				})
+				.collect();
+			group.throughput(Throughput::Elements(2));
 
 			for compress in [false, true] {
 				let version = if compress { "lite07" } else { "lite06" };
-				let encoded = encode_announces(&announced, compress);
+				group.bench_function(BenchmarkId::new(format!("churn_{version}"), routes), |b| {
+					let mut writer = AnnounceWriter::new(compress);
+					let mut data = Vec::new();
+					for start in &ring[..routes as usize] {
+						writer.write(start, &mut data);
+					}
+					let mut oldest = 0;
+					b.iter(|| {
+						data.clear();
+						writer.write(&Announced::End(oldest), &mut data);
+						writer.write(&ring[((routes + oldest) % (2 * routes)) as usize], &mut data);
+						oldest += 1;
+					});
+				});
+			}
+		}
 
+		for (routes, churn) in SHAPES {
+			let announced = stream(routes, churn, route);
+			group.throughput(Throughput::Elements(announced.len() as u64));
+			for compress in [false, true] {
+				let version = if compress { "lite07" } else { "lite06" };
+				let encoded = encode_announces(&announced, compress);
 				group.bench_with_input(
-					BenchmarkId::new(format!("encode_{version}"), &shape),
-					&announced,
-					|b, announced| b.iter(|| encode_announces(announced, compress)),
-				);
-				group.bench_with_input(
-					BenchmarkId::new(format!("decode_{version}"), &shape),
+					BenchmarkId::new(format!("decode_{version}"), format!("{routes}x{churn}")),
 					&encoded,
 					|b, encoded| b.iter(|| decode_announces(encoded, compress)),
 				);

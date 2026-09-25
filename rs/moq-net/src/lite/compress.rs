@@ -295,36 +295,46 @@ impl AnnounceEncoder {
 		sizer.size
 	}
 
+	/// The wire form of `suffix`, sized from its parts so only the winner is built.
 	fn path_ref(&self, suffix: &PathOwned, next: u64) -> PathRef<'static> {
-		let literal = PathRef::literal(suffix.clone());
+		let literal = || PathRef::literal(suffix.clone());
 		let Some((keep, id)) = self.heads.longest(suffix.parts()) else {
-			return literal;
+			return literal();
 		};
-		let candidate = PathRef {
-			base: next - id,
-			keep: keep as u64,
-			rest: Path::from(suffix.parts().skip(keep).collect::<Vec<_>>().join("/")),
-		};
-		match self.size(&candidate) < self.size(&literal) {
-			true => candidate,
-			false => literal,
+		// Where the segments after `keep` start, sharing the suffix's buffer.
+		let s = suffix.as_str();
+		let start = s.match_indices('/').nth(keep - 1).map_or(s.len(), |(i, _)| i + 1);
+		let rest = suffix.slice_from(start).to_owned();
+
+		let base = next - id;
+		let keep = keep as u64;
+		let size = self.size(&base) + self.size(&keep) + self.size(&rest);
+		match size < self.size(&0u64) * 2 + self.size(suffix) {
+			true => PathRef { base, keep, rest },
+			false => literal(),
 		}
 	}
 
+	/// The wire form of `hops`, sized from its parts so only the winner is built.
 	fn hops_ref(&self, hops: &Hops, next: u64) -> HopsRef {
-		let literal = HopsRef::literal(hops.clone());
+		let literal = || HopsRef::literal(hops.clone());
 		let Some((keep, id)) = self.tails.longest(reversed(hops)) else {
-			return literal;
+			return literal();
 		};
-		let candidate = HopsRef {
-			base: next - id,
-			literal: Hops::try_from(hops.as_slice()[..hops.len() - keep].to_vec())
-				.expect("a prefix of a valid chain is valid"),
-			keep: keep as u64,
-		};
-		match self.size(&candidate) < self.size(&literal) {
-			true => candidate,
-			false => literal,
+		let head = &hops.as_slice()[..hops.len() - keep];
+
+		let base = next - id;
+		let keep = keep as u64;
+		let chain =
+			|hops: &[Hop]| self.size(&(hops.len() as u64)) + hops.iter().map(|hop| self.size(hop)).sum::<usize>();
+		let size = self.size(&base) + chain(head) + self.size(&keep);
+		match size < self.size(&0u64) * 2 + chain(hops.as_slice()) {
+			true => HopsRef {
+				base,
+				literal: Hops::try_from(head.to_vec()).expect("a prefix of a valid chain is valid"),
+				keep,
+			},
+			false => literal(),
 		}
 	}
 }
