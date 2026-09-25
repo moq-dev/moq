@@ -686,7 +686,7 @@ impl Fetching {
 impl kio::Pollable for Fetching {
 	type Output = Result<group::Consumer>;
 
-	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		if let Some(group) = (Consumer {
 			state: self.state.clone(),
 		})
@@ -709,8 +709,8 @@ impl kio::Pollable for Fetching {
 				*inner = Some((id, track, fetch));
 			}
 
-			let (latched, track, fetch) = inner.as_ref().expect("latched above");
-			let err = match kio::Pollable::poll(&**fetch, waiter) {
+			let (latched, track, fetch) = inner.as_mut().expect("latched above");
+			let err = match kio::Pollable::poll(&mut **fetch, waiter) {
 				Poll::Ready(Err(err)) => err,
 				Poll::Ready(Ok(group)) => return Poll::Ready(Ok(group)),
 				Poll::Pending => {

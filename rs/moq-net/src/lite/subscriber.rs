@@ -564,7 +564,7 @@ impl<S: crate::transport::poll::Session> UniAccept<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let _ = self.children.poll(waiter);
 
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match self.accept.poll_accept_uni(&mut cx) {
 				Poll::Ready(Ok(stream)) => {
@@ -609,7 +609,9 @@ enum UniState<S: crate::transport::poll::Session> {
 	Done,
 }
 
-impl<S: crate::transport::poll::Session> kio::Task for UniServe<S> {
+impl<S: crate::transport::poll::Session> kio::Pollable for UniServe<S> {
+	type Output = ();
+
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if let Err(err) = ready!(self.poll_serve(waiter)) {
 			tracing::debug!(%err, "error running uni stream");
@@ -632,7 +634,7 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 		loop {
 			match &mut self.state {
 				UniState::Start { reader } => {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					// A decode error here is only logged; the peer hung up or spoke garbage
 					// before the stream had a type.
 					let kind = ready!(reader.poll_decode::<lite::DataType>(&mut cx))?;
@@ -650,7 +652,7 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 						self.abort(&err);
 						return Poll::Ready(Ok(()));
 					}
-					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					let res = ready!(reader.poll_decode::<lite::Setup>(&mut cx));
 					match res {
 						Ok(setup) => {
@@ -713,7 +715,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 		loop {
 			match &mut self.state {
 				GroupRecvState::Header => {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					let hdr = ready!(self.reader.poll_decode::<lite::Group>(&mut cx))?;
 
 					let (group, track, timescale) = {
@@ -824,7 +826,7 @@ impl FrameIngest {
 		group: &mut group::Producer,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match &mut self.phase {
 				IngestPhase::Timing => {
@@ -905,7 +907,7 @@ impl<S: crate::transport::poll::Session> DatagramRecv<S> {
 		if !self.enabled {
 			return Poll::Ready(Ok(()));
 		}
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			let payload = ready!(self.recv.poll_recv_datagram(&mut cx)).map_err(Error::from_transport)?;
 			if let Err(err) = self.subscriber.route_datagram(payload) {
@@ -1019,7 +1021,7 @@ impl<S: crate::transport::poll::Session> ProbeStream<S> {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				ProbeState::Open => {
@@ -1107,7 +1109,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				PrefixState::Open => {
@@ -1287,11 +1289,13 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
+impl<S: crate::transport::poll::Session> kio::Pollable for SourceServe<S> {
+	type Output = ();
+
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let _ = self.tracks.poll(waiter);
 
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			if self.closed.poll_closed(&mut cx).is_ready() {
 				// Session gone.
@@ -2914,7 +2918,7 @@ enum EstablishState<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> Establish<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<SubStream<S>, Error>> {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				EstablishState::Open => {
@@ -3023,7 +3027,9 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
+impl<S: crate::transport::poll::Session> kio::Pollable for TrackServeRun<S> {
+	type Output = ();
+
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
 			match &mut self.state {
@@ -3114,7 +3120,7 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 	}
 
 	fn poll_fetch(&mut self, serve: &TrackServe<S>, waiter: &kio::Waiter) -> Poll<Result<track::Info, Error>> {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				TrackInfoState::Open => {
@@ -3232,7 +3238,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					}
 				}
 				ServeMode::Select => {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 
 					// Deliver any buffered SUBSCRIBE_UPDATE before selecting, so the
 					// demand that produced it is on the wire.
@@ -3424,9 +3430,11 @@ impl<S: crate::transport::poll::Session> FetchServeRun<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
+impl<S: crate::transport::poll::Session> kio::Pollable for FetchServeRun<S> {
+	type Output = ();
+
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				FetchRunState::Open { request } => {

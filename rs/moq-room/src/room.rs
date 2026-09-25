@@ -97,8 +97,8 @@ impl Room {
 				}));
 			}
 
-			let request = self.origin.request_broadcast(&path).into_inner();
-			match kio::Pollable::poll(&request, waiter) {
+			let mut request = self.origin.request_broadcast(&path).into_inner();
+			match kio::Pollable::poll(&mut request, waiter) {
 				Poll::Ready(Ok(broadcast)) => {
 					return Poll::Ready(Some(Event {
 						identity: parsed.identity,
@@ -125,7 +125,7 @@ impl Room {
 		let Some(inflight) = self.inflight.as_mut() else {
 			return Poll::Ready(None);
 		};
-		match ready!(kio::Pollable::poll(&inflight.request, waiter)) {
+		match ready!(kio::Pollable::poll(&mut inflight.request, waiter)) {
 			Ok(broadcast) => {
 				let inflight = self.inflight.take().expect("inflight still set");
 				Poll::Ready(Some(Event {

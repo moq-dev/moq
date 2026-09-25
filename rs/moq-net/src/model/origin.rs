@@ -2214,8 +2214,8 @@ async fn run_front(task: FrontTask) {
 			{
 				return Poll::Ready(Step::SourceClosed(id));
 			}
-			for (name, io) in &tracks {
-				if let Some((source, _, query)) = &io.query
+			for (name, io) in &mut tracks {
+				if let Some((source, _, query)) = &mut io.query
 					&& let Poll::Ready(result) = query.poll(waiter)
 				{
 					return Poll::Ready(Step::Info(name.clone(), *source, result));
@@ -3121,7 +3121,7 @@ impl Requesting {
 impl kio::Pollable for Requesting {
 	type Output = Result<broadcast::Consumer, Error>;
 
-	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		self.poll_ok(waiter)
 	}
 }

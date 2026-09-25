@@ -4,7 +4,7 @@ use std::{
 	collections::HashMap,
 	ops::Bound,
 	sync::Arc,
-	task::{Context, Poll, ready},
+	task::{Poll, ready},
 	time::Duration,
 };
 
@@ -172,7 +172,7 @@ where
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let _ = self.children.poll(waiter);
 
-		let mut cx = Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match Stream::poll_accept(&mut self.accept, self.shared.version, &mut cx) {
 				Poll::Ready(Ok(stream)) => {
@@ -237,7 +237,9 @@ enum ControlState<S: crate::transport::poll::Session> {
 	Done,
 }
 
-impl<S: crate::transport::poll::Session> kio::Task for Control<S> {
+impl<S: crate::transport::poll::Session> kio::Pollable for Control<S> {
+	type Output = ();
+
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if let Err(err) = ready!(self.poll_serve(waiter)) {
 			tracing::warn!(%err, "control stream error");
@@ -251,7 +253,7 @@ impl<S: crate::transport::poll::Session> Control<S> {
 		loop {
 			match &mut self.state {
 				ControlState::Start { stream } => {
-					let mut cx = Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					let kind = ready!(stream.reader.poll_decode::<lite::ControlType>(&mut cx))?;
 
 					let ControlState::Start { stream } = std::mem::replace(&mut self.state, ControlState::Done) else {
@@ -283,7 +285,7 @@ impl<S: crate::transport::poll::Session> Control<S> {
 				ControlState::Goaway { stream } => {
 					// A decode error propagates to the caller, which logs and continues: a
 					// malformed GOAWAY must not tear down the session it is trying to drain.
-					let mut cx = Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					let msg = ready!(stream.reader.poll_decode::<lite::Goaway>(&mut cx))?;
 					tracing::info!(uri = %msg.uri, "received goaway");
 
@@ -378,7 +380,7 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 
 	fn poll_probe(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let stream = self.stream.as_mut().expect("stream present");
-		let mut cx = Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 
 		loop {
 			// Deliver the previous estimate before ticking out the next one.
@@ -484,7 +486,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 			match &mut self.state {
 				AnnounceState::Decode => {
 					let stream = self.stream.as_mut().expect("stream present");
-					let mut cx = Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					let interest = ready!(stream.reader.poll_decode::<lite::AnnounceRequest>(&mut cx))?;
 					let prefix = interest.prefix.to_owned();
 					let hidden = interest.hidden;
@@ -770,7 +772,7 @@ impl AnnounceRun {
 		announced: &mut announce::Consumer,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
-		let mut cx = Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 
 		if matches!(self.phase, AnnouncePhase::Init) {
 			self.init(stream, origin, announced)?;
@@ -918,7 +920,7 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 			match &mut self.state {
 				TrackInfoState::Decode => {
 					let stream = self.stream.as_mut().expect("stream present");
-					let mut cx = Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					let msg = ready!(stream.reader.poll_decode::<lite::Track>(&mut cx))?;
 					self.absolute = self.shared.origin.absolute(&msg.broadcast).to_owned();
 					self.track = msg.track.to_string();
@@ -957,7 +959,7 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 				}
 				TrackInfoState::Finish { finished } => {
 					let stream = self.stream.as_mut().expect("stream present");
-					let mut cx = Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					if !*finished {
 						ready!(stream.writer.poll_flush(&mut cx))?;
 						stream.writer.finish()?;
@@ -1055,7 +1057,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 			match &mut self.state {
 				SubscribeState::Decode => {
 					let stream = self.stream.as_mut().expect("stream present");
-					let mut cx = Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					let msg = ready!(stream.reader.poll_decode::<lite::Subscribe>(&mut cx))?;
 
 					self.id = msg.id;
@@ -1181,7 +1183,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 				}
 				SubscribeState::Finish { finished } => {
 					let stream = self.stream.as_mut().expect("stream present");
-					let mut cx = Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					if !*finished {
 						ready!(stream.writer.poll_flush(&mut cx))?;
 						stream.writer.finish()?;
@@ -1289,7 +1291,7 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 			match &mut self.state {
 				FetchState::Decode => {
 					let stream = self.stream.as_mut().expect("stream present");
-					let mut cx = Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					let msg = ready!(stream.reader.poll_decode::<lite::Fetch>(&mut cx))?;
 
 					self.absolute = self.shared.origin.absolute(&msg.broadcast).to_owned();
@@ -1371,7 +1373,7 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 					batch_pos,
 				} => {
 					let stream = self.stream.as_mut().expect("stream present");
-					let mut cx = Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					loop {
 						ready!(stream.writer.poll_flush(&mut cx))?;
 						if let Some(pending) = chunk {
@@ -1428,7 +1430,7 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 				}
 				FetchState::Finish { finished } => {
 					let stream = self.stream.as_mut().expect("stream present");
-					let mut cx = Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					if !*finished {
 						ready!(stream.writer.poll_flush(&mut cx))?;
 						stream.writer.finish()?;
@@ -2259,7 +2261,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// ends the subscription. This is what lets relays pause an upstream subscription
 	/// across consumer churn without tearing it down.
 	fn poll(&mut self, stream: &mut Stream<S, Version>, waiter: &kio::Waiter) -> Poll<Result<TrackEnd, Error>> {
-		let mut cx = Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			// Deliver the buffered range messages before selecting more work.
 			ready!(stream.writer.poll_flush(&mut cx))?;
@@ -2433,7 +2435,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						self.state = GroupState::Done;
 						return Poll::Ready(Err(Error::Old));
 					}
-					let mut cx = Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					let stream = match ready!(self.ctx.session.poll_open_uni(&mut cx)) {
 						Ok(stream) => stream,
 						Err(err) => {
@@ -2469,7 +2471,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					batch,
 					batch_pos,
 				} => {
-					let mut cx = Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 
 					// Queue and SUBSCRIBE_UPDATE priority changes apply on every pass,
 					// whatever the write pipeline is blocked on. The rank is re-read as
@@ -2610,7 +2612,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					}
 				}
 				GroupState::Closed { writer } => {
-					let mut cx = Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					// poll_close releases the stream on completion: the peer acknowledged
 					// everything, so the Drop fallback must not reset the stream and
 					// discard bytes still retransmitting.
@@ -2626,7 +2628,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> kio::Task for GroupServe<S> {
+impl<S: crate::transport::poll::Session> kio::Pollable for GroupServe<S> {
+	type Output = ();
+
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		// The machine owns its outcome: the stream was aborted with the reason (or
 		// reset by the writer's Drop), which is all the subscriber sees.

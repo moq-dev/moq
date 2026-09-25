@@ -1626,10 +1626,7 @@ impl Producer {
 
 	/// Poll for the producer becoming unused (every consumer dropped).
 	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_unused(waiter).map(|used| match used {
-			Some(()) => Ok(()),
-			None => Err(self.abort_reason()),
-		})
+		self.state.poll_unused(waiter).map_err(|_| self.abort_reason())
 	}
 
 	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
@@ -2093,18 +2090,12 @@ impl Demand {
 
 	/// Poll-based variant of [`Self::used`].
 	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_used(waiter).map(|used| match used {
-			Some(()) => Ok(()),
-			None => Err(self.abort_reason()),
-		})
+		self.state.poll_used(waiter).map_err(|_| self.abort_reason())
 	}
 
 	/// Poll-based variant of [`Self::unused`].
 	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_unused(waiter).map(|used| match used {
-			Some(()) => Ok(()),
-			None => Err(self.abort_reason()),
-		})
+		self.state.poll_unused(waiter).map_err(|_| self.abort_reason())
 	}
 
 	/// Whether the track is gone, without waiting.
@@ -2121,16 +2112,16 @@ impl Demand {
 	pub(crate) fn poll_state(&self, waiter: &kio::Waiter) -> DemandState {
 		loop {
 			match self.state.poll_used(waiter) {
-				Poll::Ready(None) => return DemandState::Closed,
+				Poll::Ready(Err(_)) => return DemandState::Closed,
 				// Not used, and armed for it becoming used.
 				Poll::Pending => return DemandState::Idle,
 				// Used, so arm for the reverse.
-				Poll::Ready(Some(())) => match self.state.poll_unused(waiter) {
-					Poll::Ready(None) => return DemandState::Closed,
+				Poll::Ready(Ok(())) => match self.state.poll_unused(waiter) {
+					Poll::Ready(Err(_)) => return DemandState::Closed,
 					Poll::Pending => return DemandState::Active,
 					// Went idle between the two reads, so neither poll armed anything.
 					// Start over rather than returning a state with no waker behind it.
-					Poll::Ready(Some(())) => continue,
+					Poll::Ready(Ok(())) => continue,
 				},
 			}
 		}
@@ -2689,7 +2680,7 @@ impl Subscribing {
 impl kio::Pollable for Subscribing {
 	type Output = Result<Subscriber>;
 
-	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		self.poll_ok(waiter)
 	}
 }
@@ -2723,7 +2714,7 @@ impl Querying {
 impl kio::Pollable for Querying {
 	type Output = Result<Info>;
 
-	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		self.poll_ok(waiter)
 	}
 }
@@ -2830,8 +2821,8 @@ enum FetchingKind {
 impl kio::Pollable for Fetching {
 	type Output = Result<group::Consumer>;
 
-	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
-		let (state, fetch, sequence, frame_start, result) = match &self.inner {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		let (state, fetch, sequence, frame_start, result) = match &mut self.inner {
 			FetchingKind::Plain {
 				state,
 				fetch,
@@ -2842,7 +2833,7 @@ impl kio::Pollable for Fetching {
 			FetchingKind::Spliced(spliced) => {
 				// A fetched group is metered here (once), at the tagged handle: the
 				// spliced source track it comes from is the origin's own, untagged.
-				return kio::Pollable::poll(&**spliced, waiter)
+				return kio::Pollable::poll(&mut **spliced, waiter)
 					.map(|res| res.map(|group| group.with_meter(self.stats.meter())));
 			}
 		};
@@ -7084,8 +7075,8 @@ mod test {
 		// `fetch_group` stays pending and queues a request. `*pending` derefs the
 		// wrapper to the inner `Fetching` (a `kio::Pollable`).
 		assert!(consumer.peek_group(5).is_none());
-		let pending = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
-		assert!(kio::Pollable::poll(&*pending, &kio::Waiter::noop()).is_pending());
+		let mut pending = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
+		assert!(kio::Pollable::poll(&mut *pending, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
 			.requested_group()
@@ -7273,9 +7264,9 @@ mod test {
 
 		// Two fetches for the same uncached group produce ONE handler request,
 		// carrying the higher of the two priorities.
-		let first = consumer.fetch_group(5, group::Fetch::default().with_priority(1));
+		let mut first = consumer.fetch_group(5, group::Fetch::default().with_priority(1));
 		let second = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
-		assert!(kio::Pollable::poll(&*first, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&mut *first, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
 			.requested_group()
@@ -7323,8 +7314,8 @@ mod test {
 		assert!(matches!(second.await, Err(Error::Cancel)));
 
 		// The rejected attempt is gone: a retry starts a fresh one.
-		let retry = consumer.fetch_group(5, None);
-		assert!(kio::Pollable::poll(&*retry, &kio::Waiter::noop()).is_pending());
+		let mut retry = consumer.fetch_group(5, None);
+		assert!(kio::Pollable::poll(&mut *retry, &kio::Waiter::noop()).is_pending());
 		let req = dynamic
 			.requested_group()
 			.now_or_never()
@@ -7340,8 +7331,8 @@ mod test {
 		let consumer = producer.consume();
 
 		// Queued but never popped: the last handler leaving fails it fast.
-		let pending = consumer.fetch_group(5, None);
-		assert!(kio::Pollable::poll(&*pending, &kio::Waiter::noop()).is_pending());
+		let mut pending = consumer.fetch_group(5, None);
+		assert!(kio::Pollable::poll(&mut *pending, &kio::Waiter::noop()).is_pending());
 		drop(dynamic);
 		assert!(matches!(pending.await, Err(Error::NotFound)));
 
@@ -8215,8 +8206,8 @@ mod test {
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
-		let pending = consumer.fetch_group(3, None);
-		assert!(kio::Pollable::poll(&*pending, &kio::Waiter::noop()).is_pending());
+		let mut pending = consumer.fetch_group(3, None);
+		assert!(kio::Pollable::poll(&mut *pending, &kio::Waiter::noop()).is_pending());
 
 		producer.abort(Error::Cancel).unwrap();
 		assert!(pending.await.is_err());

@@ -12,10 +12,6 @@
 //! [`Queue`] is a poll-native FIFO queue built in the same style: role-less
 //! clone-able handles, bounded or unbounded, with separate wake lists for the
 //! push and pop sides.
-//!
-//! [`Fan`] hands out a [`Waker`](std::task::Waker) that wakes a whole [`WaiterList`], for
-//! driving a foreign future that keeps a single waker on behalf of everyone parked on it.
-//! It either owns the list or, via [`Fan::project`], wakes one already inside a [`Lock`].
 
 use std::{
 	fmt,
@@ -43,14 +39,14 @@ mod loom;
 mod tests;
 
 pub use consumer::Consumer;
-pub use lock::{Lock, LockGuard, WeakLock};
+pub use lock::{Lock, LockGuard};
 pub use pollable::{Pending, Pollable};
 pub use producer::{Mut, Producer, Ref, Unused};
 pub use queue::{PushError, Queue};
 pub use send::MaybeSend;
 pub use shared::Shared;
-pub use task::{Task, Tasks};
-pub use waiter::{Fan, Hold, Park, Waiter, WaiterList, wait};
+pub use task::Tasks;
+pub use waiter::{Park, Waiter, WaiterList, wait};
 pub use weak::{ConsumerWeak, ProducerWeak, Weak};
 
 /// Bytes an `Arc<T>` allocation occupies: `T` behind two reference counts, padded to

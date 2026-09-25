@@ -135,7 +135,7 @@ fn an_endpoint_runs_on_the_worker_that_adopted_its_socket() {
 			let mut deadline = moq_uring::Timer::after(&bystander_handle, Duration::from_millis(500));
 			let mut accept = std::pin::pin!(endpoint.accept());
 			kio::wait(|waiter| {
-				let mut cx = Context::from_waker(waiter.waker());
+				let mut cx = waiter.context();
 				if accept.as_mut().poll(&mut cx).is_ready() {
 					return Poll::Ready(false);
 				}

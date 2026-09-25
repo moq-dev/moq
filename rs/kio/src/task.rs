@@ -5,7 +5,7 @@
 //! the task it was aimed at (plus any newly pushed ones). A driver serving
 //! hundreds of children steps one machine per event, not all of them.
 //!
-//! A task is anything implementing [`Task`]: a plain poll closure (the same
+//! A task is any [`Pollable`] resolving to `()`: a plain poll closure (the same
 //! `FnMut(&Waiter) -> Poll<()>` shape [`wait`](crate::wait) takes, state in the
 //! captures) or a named machine implementing the trait directly. `Send` is
 //! purely inferred either way: a [`Tasks`] of `Send` tasks is `Send` and drives
@@ -45,7 +45,10 @@ use std::{
 	task::{Context, Poll, Wake, Waker},
 };
 
-use crate::waiter::{Park, Waiter};
+use crate::{
+	Pollable,
+	waiter::{Park, Waiter},
+};
 
 /// Wake-bits per chunk word and words per chunk: one chunk covers 1024 slots.
 const WORD_BITS: usize = 64;
@@ -62,7 +65,7 @@ impl Chunk {
 	}
 }
 
-/// A set of [`Task`]s polled by their owner with per-task granularity.
+/// A set of [`Pollable`] tasks polled by their owner with per-task granularity.
 ///
 /// [`poll`](Self::poll) drives the tasks that are new or woken and reports
 /// `Ready` when the set is empty; [`push`](Self::push) wakes the owner, so a
@@ -199,24 +202,7 @@ impl<T> Tasks<T> {
 	}
 }
 
-/// A unit of work a [`Tasks`] set drives: polled with a [`Waiter`] until `Ready`.
-///
-/// Every `FnMut(&Waiter) -> Poll<()>` closure implements it, so captures-based
-/// tasks need nothing extra. Implement it on a named machine to store one
-/// concrete type in a set without boxing; `Send` then stays inferred from the
-/// machine's fields, exactly as it is from a closure's captures.
-pub trait Task {
-	/// Drive the task, registering `waiter` for its next wakeup.
-	fn poll(&mut self, waiter: &Waiter) -> Poll<()>;
-}
-
-impl<F: FnMut(&Waiter) -> Poll<()>> Task for F {
-	fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
-		self(waiter)
-	}
-}
-
-impl<T: Task> Tasks<T> {
+impl<T: Pollable<Output = ()>> Tasks<T> {
 	/// Poll every task that is new or was woken since the last call, retiring
 	/// the ones that return `Ready`.
 	///
