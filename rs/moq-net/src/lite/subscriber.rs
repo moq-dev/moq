@@ -462,20 +462,28 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 // poll returning Ready.
 struct SubscriptionCleanup(Lock<HashMap<u64, TrackEntry>>);
 
+impl SubscriptionCleanup {
+	/// End every active subscription with the session's error. Group machines own
+	/// their cleanup independently; this records the track's terminal state.
+	fn abort(&self, err: &Error) {
+		for (_, entry) in self.0.lock().drain() {
+			let _ = entry.producer.abort(err.clone());
+		}
+	}
+}
+
 impl Drop for SubscriptionCleanup {
 	fn drop(&mut self) {
-		// Group machines own their cancellation cleanup independently. This records
-		// session cancellation as the track's terminal state.
-		for (_, entry) in self.0.lock().drain() {
-			let _ = entry.producer.abort(Error::Cancel);
-		}
+		// A session that ended with an error already aborted these with it; what
+		// remains was cancelled with the driver.
+		self.abort(&Error::Cancel);
 	}
 }
 
 pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
-	/// Aborts whatever is still subscribed when the driver is dropped.
-	_cleanup: SubscriptionCleanup,
+	/// Aborts whatever is still subscribed when the session ends.
+	cleanup: SubscriptionCleanup,
 	/// One machine per permitted prefix. Only an error ends the session; a
 	/// prefix finishing cleanly (publisher FIN) just retires.
 	prefixes: Vec<AnnouncePrefix<S>>,
@@ -499,13 +507,18 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 
 		Self {
 			prefixes,
-			_cleanup: SubscriptionCleanup(subscriber.subscribes.clone()),
+			cleanup: SubscriptionCleanup(subscriber.subscribes.clone()),
 			uni: UniAccept::new(subscriber.clone()),
 			bandwidth: Some(RecvBandwidth::new(subscriber.clone())),
 			datagrams: Some(DatagramRecv::new(subscriber.clone())),
 			sources: kio::Tasks::new(),
 			subscriber,
 		}
+	}
+
+	/// End every active subscription with the error that ended the session.
+	pub fn abort(&self, err: &Error) {
+		self.cleanup.abort(err);
 	}
 
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -2997,8 +3010,8 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 					return Poll::Ready(Ok(self.activate(stream)));
 				}
 				EstablishState::WaitOk { stream } => {
-					if self.closed.poll_closed(&mut cx).is_ready() {
-						return Poll::Ready(Err(Error::Dropped));
+					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
+						return Poll::Ready(Err(Error::from_transport(err)));
 					}
 					let resp = ready!(stream.reader.poll_decode::<lite::SubscribeResponse>(&mut cx))?;
 					if !matches!(resp, lite::SubscribeResponse::Ok(_)) {
@@ -3181,8 +3194,8 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 					self.state = TrackInfoState::Read { stream };
 				}
 				TrackInfoState::Read { stream } => {
-					if self.closed.poll_closed(&mut cx).is_ready() {
-						return Poll::Ready(Err(Error::Dropped));
+					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
+						return Poll::Ready(Err(Error::from_transport(err)));
 					}
 					let info = ready!(stream.reader.poll_decode::<lite::TrackInfo>(&mut cx))?;
 					// The publisher FINs after TRACK_INFO; FIN our side too and let the
@@ -3474,9 +3487,10 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 						}
 					}
 
-					// (5) The session died: hand the track back for another route.
-					if self.closed.poll_closed(&mut cx).is_ready() {
-						return Poll::Ready(ServeEnd::GiveBack(Error::Dropped));
+					// (5) The session died: hand the track back for another route, with
+					// the session's error in case none takes it.
+					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
+						return Poll::Ready(ServeEnd::GiveBack(Error::from_transport(err)));
 					}
 
 					return Poll::Pending;

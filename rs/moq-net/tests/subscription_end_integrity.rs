@@ -50,7 +50,7 @@ fn expected() -> Vec<Vec<u8>> {
 async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let mut track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let subscriber = produce_origin(2);
@@ -181,4 +181,83 @@ async fn a_finished_track_ends_clean_while_its_session_lives() {
 		"session kept alive: got {} frames, err={err:?}",
 		got.len()
 	);
+}
+
+/// Every wire the session-death rule covers: lite before and after the track and
+/// subscribe-response streams, and IETF on its shared and per-request control streams.
+const DEATH_VERSIONS: &[&str] = &[
+	"moq-lite-03",
+	"moq-lite-05",
+	"moq-lite-07",
+	"moq-transport-14",
+	"moq-transport-17",
+	"moq-transport-22",
+];
+
+/// The error the publisher's session is aborted with, carried in the close code.
+const DEATH: moq_net::SessionError = moq_net::SessionError::App(7);
+
+/// Kill the publisher's session with a group still open, and return the error the
+/// subscriber's `recv_group` ends with once it drains what arrived.
+async fn killed(version: &str) -> Option<moq_net::Error> {
+	let publisher = produce_origin(1);
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let track = broadcast.create_track("video", None).unwrap();
+	broadcast.announce(Default::default()).unwrap();
+
+	let subscriber = produce_origin(2);
+	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+	options.server_publish = Some(publisher.clone());
+	options.client_subscribe = Some(subscriber.clone());
+	let MockPair { client, server } = connect_mock(options).await;
+
+	let consumer = subscriber.consume();
+	consumer.routed("bcast").await.expect("routed");
+	let remote = consumer.request_broadcast("bcast").await.expect("broadcast resolves");
+	// Subscribing resolves only once the publisher serves the track, which it does
+	// only after seeing the subscription, so the reader runs concurrently.
+	let reader = tokio::spawn(async move {
+		let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+		let mut sub = remote
+			.track("video")
+			.unwrap()
+			.subscribe(subscription)
+			.await
+			.expect("subscribe");
+		loop {
+			let mut group = match sub.recv_group().await {
+				Ok(Some(group)) => group,
+				Ok(None) => return None,
+				Err(err) => return Some(err),
+			};
+			// The open group ends however it ends; only the track's end is at stake here.
+			while let Ok(Some(_)) = group.read_frame().await {}
+		}
+	});
+
+	track.used().await.expect("no subscriber appeared");
+	let mut group = track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, HEAD[0]).unwrap();
+	settle().await;
+
+	server.abort(moq_net::Error::Session(DEATH));
+	let err = reader.await.expect("reader panicked");
+	drop((client, server, group, track, broadcast, publisher, subscriber));
+	err
+}
+
+/// A session dying mid-track ends the subscriber's track with the session's own
+/// error: not a clean end, and not a generic `Dropped` or `Cancel`.
+#[tokio::test]
+async fn a_session_death_ends_the_track_with_its_error() {
+	tokio::time::pause();
+	for version in DEATH_VERSIONS {
+		let err = tokio::time::timeout(TIMEOUT, killed(version))
+			.await
+			.unwrap_or_else(|_| panic!("{version}: the track never ended"));
+		assert!(
+			matches!(&err, Some(moq_net::Error::Session(code)) if *code == DEATH),
+			"{version}: the track ended with {err:?}, not the session's error"
+		);
+	}
 }

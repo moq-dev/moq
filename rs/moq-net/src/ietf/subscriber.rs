@@ -152,19 +152,29 @@ struct State {
 	broadcasts: HashMap<PathOwned, BroadcastState>,
 }
 
-impl Drop for State {
-	fn drop(&mut self) {
-		// The session dispatcher owns this state and can be dropped at any await.
-		// Active receive tasks abort their own groups. Cancel any head waiting for
-		// its tail here, along with the track. Ordinary unsubscribe removes its entry.
+impl State {
+	/// End every active subscription with the error that ended the session.
+	///
+	/// Active receive tasks abort their own groups. Abort any head waiting for its
+	/// tail here, along with the track. Ordinary unsubscribe removes its entry.
+	fn abort(&mut self, err: &Error) {
 		for (_, track) in self.subscribes.drain() {
 			if let Fill::Ready { producer, .. } = &*track.fill.read() {
-				let _ = producer.clone().abort(Error::Cancel);
+				let _ = producer.clone().abort(err.clone());
 			}
 			if let Some(producer) = track.producer {
-				let _ = producer.abort(Error::Cancel);
+				let _ = producer.abort(err.clone());
 			}
 		}
+	}
+}
+
+impl Drop for State {
+	fn drop(&mut self) {
+		// The session dispatcher owns this state and can be dropped at any await. A
+		// session that ended with an error already aborted these with it; what
+		// remains was cancelled with the dispatcher.
+		self.abort(&Error::Cancel);
 	}
 }
 
@@ -511,6 +521,11 @@ where
 			version,
 			going_away,
 		}
+	}
+
+	/// End every active subscription with the error that ended the session.
+	pub fn abort(&self, err: &Error) {
+		self.state.lock().abort(err);
 	}
 
 	/// Leave `alias` in the state a cancelled subscription leaves behind: bound to a
