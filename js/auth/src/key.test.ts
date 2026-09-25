@@ -54,6 +54,25 @@ async function generateAsymmetricKeyPair(
 	};
 }
 
+test("decode checks the signature, algorithm, and kid without applying claims policy", async () => {
+	const key = Key.parse(encodeJwk(testKey));
+	const secret = new TextEncoder().encode("test-secret-that-is-long-enough-for-hmac-sha256");
+	const custom = await new SignJWT({ custom: "accepted", exp: 1 })
+		.setProtectedHeader({ alg: "HS256", kid: testKey.kid })
+		.sign(secret);
+	await expect(Key.decode(key, custom)).resolves.toEqual({ custom: "accepted", exp: 1 });
+	await expect(Key.verify(key, custom)).rejects.toThrow();
+
+	const wrongKid = await new SignJWT({ custom: "accepted" })
+		.setProtectedHeader({ alg: "HS256", kid: "other" })
+		.sign(secret);
+	await expect(Key.decode(key, wrongKid)).rejects.toThrow(/kid/);
+	const wrongAlgorithm = await new SignJWT({ custom: "accepted" })
+		.setProtectedHeader({ alg: "HS384", kid: testKey.kid })
+		.sign(secret);
+	await expect(Key.decode(key, wrongAlgorithm)).rejects.toThrow();
+});
+
 test("parse - valid JWK", () => {
 	const jwk = encodeJwk(testKey);
 	const key = Key.parse(jwk);

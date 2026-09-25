@@ -106,11 +106,13 @@ imported through `Image::bgra8` instead.
 `frame::cuda::Converter` turns a published Vulkan frame into the NV12
 `Surface::Cuda` NVENC encodes in place, on the GPU, in one declared color space
 (matrix and range) with 4:2:0 chroma averaged per 2x2 block and no transfer
-function applied. Its buffers come from a pool sized at construction, and
-`cuda::Frame::resize` scales a converted frame for a smaller rendition from the
-same pool, so one captured frame feeding HD and SD holds a fixed number of
-buffers and a producer that outruns its encoder gets an error instead of
-unbounded device memory. Open the encoder with `encode::Kind::Named("nvenc")`
+function applied. Its buffers come from a pool sized at construction:
+`Converter::reserve` holds one as a `cuda::Slot`, which `Slot::convert` fills
+with the captured frame or `Slot::resize` with a smaller rendition of it. One
+captured frame feeding HD and SD holds a fixed number of buffers, and a producer
+that outruns its encoder gets `None` from `reserve`, its cue to drop the frame,
+instead of unbounded device memory. A slot dropped unfilled, or consumed by a
+failed conversion, returns its buffer, so only a real failure is an error. Open the encoder with `encode::Kind::Named("nvenc")`
 and the same `encode::Config::color`: `Kind::Auto` could fall back to a software
 encoder that reads the frame back, and the portable `Surface::resize` downloads
 when the GPU scaler fails. Everything under `frame::cuda` and `frame::vulkan`

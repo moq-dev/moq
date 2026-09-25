@@ -237,12 +237,12 @@ export class Encoder {
 		this.#lastCaptureWall = performance.now();
 
 		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
-		// The broadcast owns this static track across demand gaps. When demand disappears, cut the
+		// The broadcast owns this static track across demand gaps. When demand disappears, close the
 		// current group, marking the break so a later subscriber resumes on the same track without
 		// the pre-gap group reading as live. A fatal encoder error still aborts the track through
 		// producer.close(err) below.
 		effect.cleanup(() => {
-			if (track.closed.peek() === undefined) producer.cut();
+			if (track.closed.peek() === undefined) producer.discontinuity();
 		});
 
 		let lastKeyframe: Time.Micro | undefined;

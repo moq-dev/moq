@@ -53,9 +53,7 @@ type (
 	Video = ffi.MoqVideo
 	// VideoHint supplies catalog fields a video stream can't reveal itself, such as bitrate, filling only the gaps.
 	VideoHint = ffi.MoqVideoHint
-	// VideoDecodedFrame is one decoded video frame: packed pixels, the layout they are in, their dimensions, and a timestamp in microseconds.
-	VideoDecodedFrame = ffi.MoqVideoDecodedFrame
-	// VideoDecoderOutput configures what DecodeVideo delivers: an optional pixel format and resize, plus a max age.
+	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max age, and whether frames keep the decoder's native surface.
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
 	// AudioFormat is a single audio codec an importer can parse.
 	AudioFormat = ffi.MoqAudioFormat
@@ -67,7 +65,7 @@ type (
 	VideoProperties = ffi.MoqVideoProperties
 	// VideoCodec identifies a published video track's codec: H.264 or H.265.
 	VideoCodec = ffi.MoqVideoCodec
-	// VideoPixelFormat is a CPU pixel layout (I420 or RGBA): written to a VideoProducer, or delivered by DecodeVideo.
+	// VideoPixelFormat is a CPU pixel layout (I420 or RGBA): written to a VideoProducer, or read from a VideoDecodedFrame.
 	VideoPixelFormat = ffi.MoqVideoPixelFormat
 	// VideoEncoderInput declares the pixel layout, resolution, and framerate of frames written to a video producer.
 	VideoEncoderInput = ffi.MoqVideoEncoderInput

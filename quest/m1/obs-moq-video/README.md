@@ -14,7 +14,7 @@ Initial video decoding covers H.264, HEVC, and AV1 where moq-video has an availa
 
 Publishing remains opt-in, with one **Use MoQ encoders** choice for video and audio. Keep the existing OBS encoder mode. Internal OBS encoder adapters call moq-video/moq-audio, preserving OBS's A/V handling and the existing encoded MoQ output. The combined choice is enabled only when both adapters are present. Start with H.264, supported HEVC, and Opus; defer AV1/AAC encoding and PCM publishing UI. Keep bitrate separate from **Low latency** (default), **Balanced**, and **Quality** presets. Presets describe supported buffering/compression controls, not an end-to-end delay promise.
 
-The quests separate portable decoding, platform GPU delivery, audio, and publishing so each can land and be validated independently. The existing CPU decode path is a fallback primitive, not a GPU implementation: it explicitly converts every surface to I420. Native frame ownership must cross the FFI boundary without that conversion.
+The quests separate portable decoding, platform GPU delivery, audio, and publishing so each can land and be validated independently. moq-ffi's decoded frames own their surface and convert to CPU pixels only on request; a native decode exposes the platform surface as a borrowed view, which each platform quest extends to its own surface type.
 
 ## Quests
 

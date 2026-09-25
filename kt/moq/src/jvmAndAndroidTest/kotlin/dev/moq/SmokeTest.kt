@@ -466,12 +466,12 @@ class SmokeTest {
     }
 
     @Test
-    fun `decode video picks its pixel format`() = runTest {
+    fun `decoded video frame owns its picture`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.createBroadcast("video-decode-format").use { broadcast ->
+            origin.createBroadcast("video-decode-frame").use { broadcast ->
                 val video = broadcast.encodeVideo(
                     VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = 30u),
-                    // Software both ways so the test is deterministic everywhere.
+                    // Software so the encode is deterministic everywhere.
                     VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", kind = softwareEncoder),
                     null,
                 )
@@ -484,35 +484,29 @@ class SmokeTest {
                     video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
                 }
 
-                val consumer = origin.consume().requestBroadcast("video-decode-format")
+                val consumer = origin.consume().requestBroadcast("video-decode-frame")
                 val catalog = consumer.subscribeCatalog().next()!!
                 val rendition = catalog.video["camera"]!!
 
-                // Two subscribers over one publication, so the same encoded frames
-                // are read twice and only the requested layout differs.
-                val i420 = consumer.decodeVideo("camera", rendition, VideoDecoderOutput())
-                val packed = consumer.decodeVideo(
-                    "camera",
-                    rendition,
-                    VideoDecoderOutput(format = VideoPixelFormat.RGBA),
-                )
+                val decoder = consumer.decodeVideo("camera", rendition, VideoDecoderOutput())
 
-                // Keep the encoder fed so both decoders see frames after they joined.
+                // Keep the encoder fed so the decoder sees frames after it joined.
                 for (i in 10 until 40) {
                     video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
                 }
 
-                val planar = i420.next()!!
-                assertEquals(VideoPixelFormat.I420, planar.format)
-                assertEquals(planar.width.toInt() * planar.height.toInt() * 3 / 2, planar.data.size)
+                decoder.next()!!.use { frame ->
+                    // The frame outlives its consumer's cancellation.
+                    decoder.cancel()
 
-                val frame = packed.next()!!
-                assertEquals(VideoPixelFormat.RGBA, frame.format)
-                assertEquals(frame.width.toInt() * frame.height.toInt() * 4, frame.data.size)
-                assertTrue(frame.data.indices.filter { it % 4 == 3 }.all { frame.data[it] == 0xFF.toByte() })
+                    val planar = frame.pixels(VideoPixelFormat.I420)
+                    assertEquals(frame.width().toInt() * frame.height().toInt() * 3 / 2, planar.size)
 
-                i420.cancel()
-                packed.cancel()
+                    val packed = frame.pixels(VideoPixelFormat.RGBA)
+                    assertEquals(frame.width().toInt() * frame.height().toInt() * 4, packed.size)
+                    assertTrue(packed.indices.filter { it % 4 == 3 }.all { packed[it] == 0xFF.toByte() })
+                }
+
                 video.finish()
             }
         }

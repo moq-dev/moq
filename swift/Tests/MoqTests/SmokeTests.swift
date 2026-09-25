@@ -341,14 +341,14 @@ final class SmokeTests: XCTestCase {
         try broadcast.close()
     }
 
-    /// The decode side picks its CPU layout: an unset `format` is I420, and RGBA
-    /// is four bytes a pixel, with each frame naming the layout it decoded to.
-    func testDecodeVideoFormat() async throws {
+    /// A decoded frame owns its picture: it converts to either CPU layout on
+    /// demand and stays readable after its consumer is cancelled.
+    func testDecodeVideoFrame() async throws {
         let origin = OriginProducer()
-        let broadcast = try origin.createBroadcast(path: "video-decode-format")
+        let broadcast = try origin.createBroadcast(path: "video-decode-frame")
         let video = try broadcast.encodeVideo(
             input: VideoEncoderInput(format: .rgba, width: 320, height: 240, framerate: 30),
-            // Software both ways so the test is deterministic everywhere.
+            // Software so the encode is deterministic everywhere.
             output: VideoEncoderOutput(codec: .h264, track: "camera", kind: .software)
         )
         try broadcast.announce()
@@ -360,39 +360,30 @@ final class SmokeTests: XCTestCase {
             try video.write(VideoFrame(timestampUs: UInt64(i) * 33_333, data: rgba))
         }
 
-        let consumer = try await origin.consume().requestBroadcast(path: "video-decode-format")
+        let consumer = try await origin.consume().requestBroadcast(path: "video-decode-frame")
         let catalogs = try await consumer.subscribeCatalog()
         // XCTUnwrap takes an autoclosure, which can't hold an await.
         let nextCatalog = try await catalogs.next()
         let catalog = try XCTUnwrap(nextCatalog)
         let rendition = try XCTUnwrap(catalog.video["camera"])
 
-        // Two subscribers over one publication, so the same encoded frames are
-        // read twice and only the requested layout differs.
-        let i420 = try await consumer.decodeVideo(name: "camera", catalogVideo: rendition)
-        defer { i420.cancel() }
-        let packed = try await consumer.decodeVideo(
-            name: "camera",
-            catalogVideo: rendition,
-            output: VideoDecoderOutput(format: .rgba)
-        )
-        defer { packed.cancel() }
+        let decoder = try await consumer.decodeVideo(name: "camera", catalogVideo: rendition)
 
-        // Keep the encoder fed so both decoders see frames after they joined.
+        // Keep the encoder fed so the decoder sees frames after it joined.
         for i in 10..<40 {
             try video.write(VideoFrame(timestampUs: UInt64(i) * 33_333, data: rgba))
         }
 
-        let nextPlanar = try await i420.next()
-        let planar = try XCTUnwrap(nextPlanar)
-        XCTAssertEqual(planar.format, .i420)
-        XCTAssertEqual(planar.data.count, Int(planar.width) * Int(planar.height) * 3 / 2)
+        let next = try await decoder.next()
+        let frame = try XCTUnwrap(next)
+        decoder.cancel()
 
-        let nextPacked = try await packed.next()
-        let frame = try XCTUnwrap(nextPacked)
-        XCTAssertEqual(frame.format, .rgba)
-        XCTAssertEqual(frame.data.count, Int(frame.width) * Int(frame.height) * 4)
-        XCTAssertTrue(stride(from: 3, to: frame.data.count, by: 4).allSatisfy { frame.data[$0] == 0xFF })
+        let planar = try frame.pixels(format: .i420)
+        XCTAssertEqual(planar.count, Int(frame.width()) * Int(frame.height()) * 3 / 2)
+
+        let packed = try frame.pixels(format: .rgba)
+        XCTAssertEqual(packed.count, Int(frame.width()) * Int(frame.height()) * 4)
+        XCTAssertTrue(stride(from: 3, to: packed.count, by: 4).allSatisfy { packed[$0] == 0xFF })
 
         try video.finish()
         try broadcast.close()
