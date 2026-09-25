@@ -79,8 +79,8 @@ pub(crate) struct Published {
 /// the answer kept for every later snapshot.
 pub(crate) struct Decoders {
 	config: moq_video::decode::Config,
-	/// Each codec probed so far, with the reason its decoder refused to open.
-	probed: Vec<(Codec, Result<(), String>)>,
+	/// Each codec probed so far, and whether its decoder opened.
+	probed: Vec<(Codec, bool)>,
 }
 
 impl Decoders {
@@ -92,15 +92,12 @@ impl Decoders {
 	}
 
 	/// A host that decodes exactly `codecs`, for tests that must not depend on
-	/// the machine they run on. Nothing is ever opened.
+	/// the machine they run on. Nothing is opened until a refusal asks why.
 	#[cfg(test)]
 	fn assume(codecs: &[Codec]) -> Self {
 		let probed = [Codec::H264, Codec::H265, Codec::Av1]
 			.into_iter()
-			.map(|codec| match codecs.contains(&codec) {
-				true => (codec, Ok(())),
-				false => (codec, Err(format!("{codec:?} is not decodable in this test"))),
-			})
+			.map(|codec| (codec, codecs.contains(&codec)))
 			.collect();
 		Self {
 			config: moq_video::decode::Config::new(),
@@ -109,11 +106,35 @@ impl Decoders {
 	}
 
 	/// Whether `rendition` (in `codec`) has a decoder on this host.
-	async fn probe(&mut self, codec: Codec, rendition: &VideoConfig) -> Result<(), String> {
-		if let Some((_, result)) = self.probed.iter().find(|(probed, _)| *probed == codec) {
-			return result.clone();
+	async fn probe(&mut self, codec: Codec, rendition: &VideoConfig) -> bool {
+		if let Some((_, decodes)) = self.probed.iter().find(|(probed, _)| *probed == codec) {
+			return *decodes;
 		}
 
+		let decodes = match self.open(rendition).await {
+			Ok(()) => true,
+			Err(err) => {
+				tracing::warn!(?codec, %err, "no decoder for this codec; its renditions will not be transcoded");
+				false
+			}
+		};
+		self.probed.push((codec, decodes));
+		decodes
+	}
+
+	/// Why `rendition`'s decoder refused to open. Only the verdict is cached, so
+	/// this opens it once more, on a path that has nothing left to serve.
+	async fn refusal(&self, rendition: &VideoConfig) -> Error {
+		match self.open(rendition).await {
+			Err(err) => err.into(),
+			// It opened this time: whatever refused was transient, and a later
+			// transcoder will probe afresh.
+			Ok(()) => Error::NoSource,
+		}
+	}
+
+	/// Open and drop a decoder for `rendition`.
+	async fn open(&self, rendition: &VideoConfig) -> Result<(), moq_video::Error> {
 		// Parameter sets in band, so the probe asks about the backend and not about
 		// this rendition's description: a malformed one belongs to the stream and
 		// fails when the rendition is decoded, not as a verdict on the whole codec.
@@ -124,24 +145,15 @@ impl Decoders {
 			VideoCodec::H265(h265) => h265.in_band = true,
 			_ => {}
 		}
-
-		let result = match moq_video::decode::Sink::open(&config, &self.config).await {
-			Ok(_) => Ok(()),
-			Err(err) => {
-				tracing::warn!(?codec, %err, "no decoder for this codec; its renditions will not be transcoded");
-				Err(err.to_string())
-			}
-		};
-		self.probed.push((codec, result.clone()));
-		result
+		moq_video::decode::Sink::open(&config, &self.config).await.map(drop)
 	}
 }
 
 /// Pick the rendition to transcode from: the highest-resolution rendition local
 /// to the source broadcast that this host can decode.
 ///
-/// [`Error::NoSource`] means wait for a later snapshot. [`Error::Undecodable`]
-/// means nothing on offer can ever be decoded here.
+/// [`Error::NoSource`] means wait for a later snapshot. Any other error means
+/// nothing on offer can be decoded here, and is why the tallest one refused.
 pub(crate) async fn choose_source(video: &Video, decoders: &mut Decoders) -> Result<(String, VideoConfig), Error> {
 	let mut candidates: Vec<_> = video
 		.renditions
@@ -167,21 +179,23 @@ pub(crate) async fn choose_source(video: &Video, decoders: &mut Decoders) -> Res
 	let mut refused = None;
 	for (name, config, codec) in candidates {
 		match decoders.probe(codec, config).await {
-			Ok(()) if dimensions(config).is_some() => return Ok((name.clone(), config.clone())),
+			true if dimensions(config).is_some() => return Ok((name.clone(), config.clone())),
 			// A publisher can advertise its codec before it knows its picture: a capture
 			// whose camera hasn't been opened publishes a rendition with no dimensions,
 			// and the first keyframe fills them in. There is no ladder to derive from
 			// that yet, but it will be usable, so wait for it rather than refuse.
-			Ok(()) => return Err(Error::NoSource),
-			Err(reason) => {
-				refused.get_or_insert_with(|| Error::Undecodable {
-					rendition: name.clone(),
-					reason,
-				});
+			true => return Err(Error::NoSource),
+			false => {
+				refused.get_or_insert((name, config));
 			}
 		}
 	}
-	Err(refused.unwrap_or(Error::NoSource))
+
+	let Some((name, config)) = refused else {
+		return Err(Error::NoSource);
+	};
+	tracing::warn!(rendition = %name, "no source rendition can be decoded on this host");
+	Err(decoders.refusal(config).await)
 }
 
 /// Re-pick the source rendition for a new snapshot, preferring the one already
@@ -202,7 +216,7 @@ pub(crate) async fn follow_source(
 		&& dimensions(config).is_some()
 		&& let Some(codec) = codec(config)
 		// The name can stay while the codec changes under it.
-		&& decoders.probe(codec, config).await.is_ok()
+		&& decoders.probe(codec, config).await
 	{
 		return Ok((current.to_string(), config.clone()));
 	}
@@ -725,20 +739,22 @@ mod tests {
 		assert_eq!(name, "hevc");
 	}
 
-	/// Nothing on offer decodes here: a refusal naming the rendition that would
-	/// have been chosen and why, rather than waiting on a catalog that is complete.
+	/// Nothing on offer decodes here: a refusal carrying why the tallest
+	/// rendition's decoder refused, rather than waiting on a complete catalog.
 	#[tokio::test]
 	async fn refuses_when_no_rendition_decodes() {
 		let mut video = Video::default();
 		video.insert("small", hevc(640, 360)).unwrap();
 		video.insert("large", hevc(1920, 1080)).unwrap();
 
-		match choose_source(&video, &mut Decoders::assume(&[Codec::H264])).await {
-			Err(Error::Undecodable { rendition, reason }) => {
-				assert_eq!(rendition, "large");
-				assert!(reason.contains("H265"), "the reason names the codec: {reason}");
+		let mut config = moq_video::decode::Config::new();
+		config.kind = moq_video::decode::Kind::Named("missing".to_string());
+		match choose_source(&video, &mut Decoders::new(config)).await {
+			Err(Error::Video(moq_video::Error::UnknownDecoder { name, codec, .. })) => {
+				assert_eq!(name, "missing");
+				assert_eq!(codec, Codec::H265);
 			}
-			other => panic!("expected Undecodable, got {other:?}"),
+			other => panic!("expected the decoder's refusal, got {other:?}"),
 		}
 	}
 
@@ -793,17 +809,11 @@ mod tests {
 		config.kind = moq_video::decode::Kind::Named("missing".to_string());
 		let mut decoders = Decoders::new(config);
 
-		let mut video = Video::default();
-		video.insert("large", hevc(1920, 1080)).unwrap();
-		video.insert("small", hevc(640, 360)).unwrap();
-		for _ in 0..3 {
-			assert!(matches!(
-				choose_source(&video, &mut decoders).await,
-				Err(Error::Undecodable { .. })
-			));
+		// Every catalog edit reshapes the rendition; the H.265 verdict stands.
+		for height in [360, 720, 1080] {
+			assert!(!decoders.probe(Codec::H265, &hevc(height * 16 / 9, height)).await);
 		}
-		assert_eq!(decoders.probed.len(), 1);
-		assert!(decoders.probed[0].1.as_ref().unwrap_err().contains("missing"));
+		assert_eq!(decoders.probed, [(Codec::H265, false)]);
 	}
 
 	#[test]

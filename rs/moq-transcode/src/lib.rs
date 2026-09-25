@@ -1452,12 +1452,12 @@ mod tests {
 		.expect("run kept waiting for a source it can never decode");
 
 		match result {
-			// The largest refused rendition is the one named.
-			Err(Error::Undecodable { rendition, reason }) => {
-				assert_eq!(rendition, "hevc");
-				assert!(reason.contains("missing"), "the reason names the decoder: {reason}");
+			// Why the tallest rendition's decoder refused.
+			Err(Error::Video(moq_video::Error::UnknownDecoder { name, codec, .. })) => {
+				assert_eq!(name, "missing");
+				assert_eq!(codec, moq_video::decode::Codec::H265);
 			}
-			other => panic!("expected Undecodable, got {other:?}"),
+			other => panic!("expected the decoder's refusal, got {other:?}"),
 		}
 	}
 

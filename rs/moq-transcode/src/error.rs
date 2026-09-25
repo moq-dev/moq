@@ -9,16 +9,6 @@ pub enum Error {
 	#[error("no transcodable video rendition in the source catalog")]
 	NoSource,
 
-	/// Every source rendition is in a codec the configured decoder can't open on
-	/// this host, e.g. H.265 with only the software decoder.
-	#[error("no decoder for source rendition {rendition:?}: {reason}")]
-	Undecodable {
-		/// The rendition the transcoder would have decoded, the largest refused.
-		rendition: String,
-		/// Why its decoder refused to open.
-		reason: String,
-	},
-
 	/// The chosen source rendition doesn't declare coded dimensions, so rungs
 	/// can't be sized or gated against it.
 	#[error("source rendition {0:?} is missing codedWidth/codedHeight")]
