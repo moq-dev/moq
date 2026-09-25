@@ -116,6 +116,48 @@ pub struct Batch {
 	pub window: Duration,
 }
 
+/// A change to one direction's profile once the run reaches `at`.
+///
+/// A step changes only what it names, so a later step puts one knob back
+/// without restating the rest. It can add or change a rate limit, never remove
+/// one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Step {
+	/// How far into the run the change happens.
+	pub at: Duration,
+	/// The delay from then on.
+	pub delay: Option<Duration>,
+	/// The jitter from then on.
+	pub jitter: Option<Duration>,
+	/// The loss from then on.
+	pub loss: Option<f64>,
+	/// The reorder from then on.
+	pub reorder: Option<f64>,
+	/// The rate limit from then on.
+	pub rate: Option<Rate>,
+}
+
+impl Step {
+	/// Change what this step names in `profile`.
+	fn apply(&self, profile: &mut Profile) {
+		if let Some(delay) = self.delay {
+			profile.delay = delay;
+		}
+		if let Some(jitter) = self.jitter {
+			profile.jitter = jitter;
+		}
+		if let Some(loss) = self.loss {
+			profile.loss = loss;
+		}
+		if let Some(reorder) = self.reorder {
+			profile.reorder = reorder;
+		}
+		if let Some(rate) = &self.rate {
+			profile.rate = Some(rate.clone());
+		}
+	}
+}
+
 /// One direction's opt-in options beyond its [`Profile`]. The default adds nothing.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Options {
@@ -123,15 +165,43 @@ pub struct Options {
 	pub jitter_model: Jitter,
 	/// Hold datagrams and release them together, if at all.
 	pub batch: Option<Batch>,
+	/// Changes to the profile part-way through the run, earliest first.
+	pub steps: Vec<Step>,
 }
 
 impl Options {
-	/// Check the options, and `profile` as they draw it.
+	/// Check the options, and `profile` as they draw it, after every step too.
 	fn validate(&self, profile: &Profile) -> anyhow::Result<()> {
 		profile.validate(self.jitter_model)?;
 		if let Some(batch) = &self.batch {
 			anyhow::ensure!(batch.count > 0, "a batch of zero datagrams never closes");
 			anyhow::ensure!(!batch.window.is_zero(), "a batch with no window never holds anything");
+		}
+
+		let mut profile = profile.clone();
+		let mut previous: Option<Duration> = None;
+		for step in &self.steps {
+			// A link only ever looks at the next step due, so one out of order
+			// would be skipped without a word.
+			anyhow::ensure!(
+				previous.is_none_or(|previous| step.at > previous),
+				"the step at {:?} comes after the one at {previous:?}; steps go in order",
+				step.at
+			);
+			// A step naming nothing is a profile that thinks it changes and does not.
+			anyhow::ensure!(
+				Step {
+					at: step.at,
+					..Step::default()
+				} != *step,
+				"the step at {:?} changes nothing",
+				step.at
+			);
+			step.apply(&mut profile);
+			profile
+				.validate(self.jitter_model)
+				.with_context(|| format!("after the step at {:?}", step.at))?;
+			previous = Some(step.at);
 		}
 		Ok(())
 	}
@@ -447,11 +517,13 @@ async fn run(
 	let mut tasks = JoinSet::new();
 	let mut buf = vec![0u8; u16::MAX as usize];
 
+	// What a step's `at` counts from.
+	let start = Instant::now();
+
 	// A shared path is one link each way, drawing the streams the first flow would.
-	let shared = setup.shared.then(|| {
-		let now = Instant::now();
-		[UP, DOWN].map(|direction| link(&mut tasks, &setup, direction, 0, now, &tally))
-	});
+	let shared = setup
+		.shared
+		.then(|| [UP, DOWN].map(|direction| link(&mut tasks, &setup, direction, 0, start, &tally)));
 
 	loop {
 		let (size, from) = tokio::select! {
@@ -476,7 +548,7 @@ async fn run(
 
 				let [up, down] = match &shared {
 					Some(links) => links.clone(),
-					None => [UP, DOWN].map(|direction| link(&mut tasks, &setup, direction, number, now, &tally)),
+					None => [UP, DOWN].map(|direction| link(&mut tasks, &setup, direction, number, start, &tally)),
 				};
 				tasks.spawn(reply(
 					upstream.clone(),
@@ -509,7 +581,7 @@ fn link(
 	setup: &Setup,
 	direction: usize,
 	flow: u64,
-	now: Instant,
+	start: Instant,
 	tally: &Arc<[Tally; 2]>,
 ) -> Arc<Mutex<Link>> {
 	let (profile, options) = match direction {
@@ -524,7 +596,7 @@ fn link(
 		options,
 		setup.config.seed,
 		stream,
-		now,
+		start,
 		queue,
 	)))
 }
@@ -695,6 +767,10 @@ struct Link {
 	full_at: Instant,
 	/// When the latest in-order datagram leaves, which the next one never beats.
 	floor: Instant,
+	/// When the run started, which a step's `at` counts from.
+	start: Instant,
+	/// The steps still to come, soonest last.
+	steps: Vec<Step>,
 	queue: mpsc::UnboundedSender<Parcel>,
 }
 
@@ -708,19 +784,46 @@ impl Link {
 		options: &Options,
 		seed: u64,
 		stream: u64,
-		now: Instant,
+		start: Instant,
 		queue: mpsc::UnboundedSender<Parcel>,
 	) -> Self {
 		Self {
 			profile: profile.clone(),
 			jitter: options.jitter_model,
 			rng: Xoshiro256PlusPlus::seed_from_u64(seed ^ stream.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
-			// Not the moment the link is built, which is after `now`: that would
-			// make the first datagram queue behind a bucket still refilling.
-			full_at: now,
-			floor: now,
+			// Full since the run started, never since the link was built, which
+			// is after its first datagram arrived: that would make the datagram
+			// queue behind a bucket still refilling.
+			full_at: start,
+			floor: start,
+			start,
+			steps: options.steps.iter().rev().cloned().collect(),
 			queue,
 		}
+	}
+
+	/// Apply every step the run has reached by `now`, in order.
+	fn step(&mut self, now: Instant) {
+		while self.steps.last().is_some_and(|step| self.start + step.at <= now) {
+			let step = self.steps.pop().expect("a step is due");
+			if let Some(rate) = &step.rate {
+				self.full_at = self.refilled(rate, now);
+			}
+			step.apply(&mut self.profile);
+		}
+	}
+
+	/// When `rate`'s bucket would be full again if it took over at `now`.
+	///
+	/// A limit that was not there starts full, the way the run started. One
+	/// that was keeps its credit, or its debt, clipped to the new bucket.
+	fn refilled(&self, rate: &Rate, now: Instant) -> Instant {
+		let Some(old) = &self.profile.rate else {
+			return now;
+		};
+		let owed = self.full_at.saturating_duration_since(now).as_secs_f64() * old.bits_per_second as f64 / 8.0;
+		let credit = (old.burst as f64 - owed).min(rate.burst as f64);
+		now + Duration::from_secs_f64((rate.burst as f64 - credit) * 8.0 / rate.bits_per_second as f64)
 	}
 
 	/// Treat a datagram and queue it to leave by `socket` for `dest`.
@@ -742,6 +845,7 @@ impl Link {
 	/// When a datagram of `size` bytes arriving `now` leaves, and whether it was
 	/// counted as delayed, or `None` when it is dropped.
 	fn treat(&mut self, now: Instant, size: usize, tally: &Tally) -> Option<(Instant, bool)> {
+		self.step(now);
 		bump(&tally.packets);
 
 		// Every draw happens for every datagram, whatever the profile, so one
@@ -1140,6 +1244,7 @@ mod tests {
 	const GAUSSIAN: Options = Options {
 		jitter_model: Jitter::Gaussian,
 		batch: None,
+		steps: Vec::new(),
 	};
 
 	#[tokio::test]
@@ -1561,5 +1666,225 @@ mod tests {
 		let mut held = quiet(10);
 		held.up.delayed = 6;
 		assert!(!unbatched(&setup, &held));
+	}
+
+	/// How long after `at` each of `sizes` leaves one link, fed at the same instant.
+	fn owed(link: &mut Link, at: Instant, sizes: &[usize]) -> Vec<Duration> {
+		let tally = Tally::default();
+		sizes
+			.iter()
+			.map(|&size| link.treat(at, size, &tally).expect("dropped").0 - at)
+			.collect()
+	}
+
+	fn stepped(steps: Vec<Step>) -> Options {
+		Options {
+			steps,
+			..Default::default()
+		}
+	}
+
+	#[test]
+	fn each_step_applies_at_its_own_time() {
+		let ms = Duration::from_millis;
+		let profile = Profile {
+			delay: ms(5),
+			..Default::default()
+		};
+		let options = stepped(vec![
+			Step {
+				at: ms(100),
+				delay: Some(ms(60)),
+				..Default::default()
+			},
+			Step {
+				at: ms(200),
+				delay: Some(ms(5)),
+				..Default::default()
+			},
+		]);
+		let (queue, _) = mpsc::unbounded_channel();
+		let start = Instant::now();
+		let mut link = Link::new(&profile, &options, 7, 0, start, queue);
+
+		assert_eq!(owed(&mut link, start, &[16]), [ms(5)]);
+		assert_eq!(owed(&mut link, start + ms(100), &[16]), [ms(60)]);
+		// The step back restores what the run opened with.
+		assert_eq!(owed(&mut link, start + ms(200), &[16]), [ms(5)]);
+	}
+
+	#[test]
+	fn a_loss_step_turns_the_loss_on_and_off_again() {
+		let secs = Duration::from_secs;
+		let options = stepped(vec![
+			Step {
+				at: secs(30),
+				loss: Some(1.0),
+				..Default::default()
+			},
+			Step {
+				at: secs(60),
+				loss: Some(0.0),
+				..Default::default()
+			},
+		]);
+		let (queue, _) = mpsc::unbounded_channel();
+		let start = Instant::now();
+		let mut link = Link::new(&Profile::default(), &options, 7, 0, start, queue);
+		let tally = Tally::default();
+		let mut lost = |at: Instant| (0..100).filter(|_| link.treat(at, 16, &tally).is_none()).count();
+
+		assert_eq!(lost(start), 0, "the profile opens clean");
+		assert_eq!(lost(start + secs(30)), 100, "the step lost nothing");
+		assert_eq!(lost(start + secs(60)), 0, "the step back never cleared");
+	}
+
+	#[test]
+	fn a_rate_step_narrows_the_bucket_and_widens_it_again() {
+		let secs = Duration::from_secs;
+		let rate = |bytes_per_second: u64| Rate {
+			bits_per_second: bytes_per_second * 8,
+			burst: 100,
+			queue: secs(10),
+		};
+		let profile = Profile {
+			rate: Some(rate(4000)),
+			..Default::default()
+		};
+		let options = stepped(vec![
+			Step {
+				at: secs(30),
+				rate: Some(rate(1000)),
+				..Default::default()
+			},
+			Step {
+				at: secs(60),
+				rate: Some(rate(4000)),
+				..Default::default()
+			},
+		]);
+		let (queue, _) = mpsc::unbounded_channel();
+		let start = Instant::now();
+		let mut link = Link::new(&profile, &options, 7, 0, start, queue);
+
+		// The bucket is full at each stretch, so the first 100 bytes leave at
+		// once and the next 100 owe one bucket's refill at the rate in force.
+		let ms = Duration::from_millis;
+		assert_eq!(owed(&mut link, start, &[100, 100]), [ms(0), ms(25)]);
+		assert_eq!(owed(&mut link, start + secs(30), &[100, 100]), [ms(0), ms(100)]);
+		assert_eq!(owed(&mut link, start + secs(60), &[100, 100]), [ms(0), ms(25)]);
+	}
+
+	#[test]
+	fn a_rate_step_keeps_the_debt_it_takes_over() {
+		let ms = Duration::from_millis;
+		let rate = |bytes_per_second: u64| Rate {
+			bits_per_second: bytes_per_second * 8,
+			burst: 100,
+			queue: Duration::from_secs(10),
+		};
+		let profile = Profile {
+			rate: Some(rate(1000)),
+			..Default::default()
+		};
+		// Halfway through a 300 byte backlog at 1000 bytes a second, the rate doubles.
+		let options = stepped(vec![Step {
+			at: ms(100),
+			rate: Some(rate(2000)),
+			..Default::default()
+		}]);
+		let (queue, _) = mpsc::unbounded_channel();
+		let start = Instant::now();
+		let mut link = Link::new(&profile, &options, 7, 0, start, queue);
+		assert_eq!(owed(&mut link, start, &[100, 100, 100]), [ms(0), ms(100), ms(200)]);
+
+		// 100 bytes of the backlog are still owed, and now drain in 50ms, so
+		// a fresh 100 bytes leave once those and themselves are paid.
+		assert_eq!(owed(&mut link, start + ms(100), &[100]), [ms(100)]);
+	}
+
+	#[tokio::test]
+	async fn a_step_gets_worse_part_way_through() {
+		let ms = Duration::from_millis;
+		let (_shaper, client) = shaped(|config| Setup {
+			up: stepped(vec![Step {
+				at: ms(150),
+				delay: Some(ms(60)),
+				..Default::default()
+			}]),
+			..Config {
+				up: Profile {
+					delay: ms(5),
+					..Default::default()
+				},
+				..config
+			}
+			.into()
+		})
+		.await;
+
+		let (sent, got) = paced(&client, 40, ms(10)).await;
+		assert_eq!(got.len(), 40);
+		let median = |range: std::ops::Range<usize>| {
+			let mut latency: Vec<Duration> = got[range].iter().map(|&(id, at)| at - sent[id as usize]).collect();
+			latency.sort();
+			latency[latency.len() / 2]
+		};
+
+		// The first ten leave well inside the first 150ms, the last fifteen well after.
+		let (before, after) = (median(0..10), median(25..40));
+		assert!(
+			after > before + ms(30),
+			"median latency went from {before:?} to {after:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn steps_that_would_be_skipped_or_do_nothing_are_refused() {
+		let refused = |steps: Vec<Step>, why: &'static str| async move {
+			let config = Config {
+				bind: LOCALHOST,
+				target: LOCALHOST,
+				seed: 0,
+				up: Profile {
+					delay: Duration::from_millis(20),
+					..Default::default()
+				},
+				down: Profile::default(),
+			};
+			let err = Shaper::bind(Setup {
+				down: stepped(steps),
+				..config.into()
+			})
+			.await
+			.err()
+			.unwrap_or_else(|| panic!("accepted steps where {why}"));
+			assert!(format!("{err:#}").contains(why), "{err:#}");
+		};
+		let at = |secs| Step {
+			at: Duration::from_secs(secs),
+			loss: Some(0.1),
+			..Default::default()
+		};
+
+		refused(vec![at(60), at(30)], "steps go in order").await;
+		refused(
+			vec![Step {
+				at: Duration::from_secs(30),
+				..Default::default()
+			}],
+			"changes nothing",
+		)
+		.await;
+		// Uniform jitter past the delay, reached by a step rather than at the start.
+		refused(
+			vec![Step {
+				at: Duration::from_secs(30),
+				jitter: Some(Duration::from_millis(10)),
+				..Default::default()
+			}],
+			"exceeds delay",
+		)
+		.await;
 	}
 }

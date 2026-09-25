@@ -96,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
 			.batch
 			.zip(args.batch_window)
 			.map(|(count, window)| moq_shaper::Batch { count, window }),
+		..Default::default()
 	};
 	let shaper = moq_shaper::Shaper::bind(moq_shaper::Setup {
 		tcp_passthrough: args.tcp_passthrough,
