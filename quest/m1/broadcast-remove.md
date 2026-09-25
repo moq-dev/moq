@@ -19,3 +19,7 @@ This is a published API break, so it targets `dev`.
   so `rs/moq-ffi/uniffi.toml` excludes it. Kotlin's `close()` releases the handle,
   which ends the broadcast only once no `dynamic()` handle remains. Removing
   `finish` leaves Kotlin without a forced end; decide whether it needs one.
+
+## Required
+
+- [Broadcast close](/quest/m1/broadcast-close/README.md) - the deprecations this removes, which must reach `main` and then `dev` first
