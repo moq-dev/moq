@@ -112,7 +112,11 @@ Three operations, on an origin:
   `broadcast.announce(route)`.
 - `broadcast.announce(route)` / `broadcast.unannounce()` own that
   advertisement. Announcing again re-prices the standing route. The route
-  retracts on `unannounce()`, `finish()`, or the last producer dropping.
+  retracts on `unannounce()`, `close()`, or the last producer dropping.
+- `broadcast.close()` ends the broadcast for good: it retracts, leaves local
+  discovery, and answers every later track lookup with `Unroutable`. Tracks
+  already subscribed carry on to their own end. It can never be announced
+  again. Dropping the last producer does the same.
 - `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
   (`""` claims everything). Hold the returned `origin::Dynamic` while the
   claim should stay advertised; drop it to retract. A request beneath it with

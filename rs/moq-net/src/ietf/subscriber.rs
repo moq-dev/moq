@@ -339,24 +339,6 @@ impl TrackState {
 	}
 }
 
-/// How the last source for a path detaches, which decides whether the origin closes
-/// the broadcast now or holds it open for a replacement.
-///
-/// Only the detach that drops the refcount to zero decides, matching the model's rule
-/// for several sources at one path (the front's source selection): an earlier owner that vanished
-/// does not outvote the last one still on the path. That keeps two advertisements on
-/// one session behaving like the same two on separate sessions, where the model sees
-/// two independent sources and the last one out decides.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Detach {
-	/// The peer retracted the path, or we are rolling back an announce we just made.
-	/// Nothing is coming back, so close it now.
-	Graceful,
-	/// The stream carrying the path went away without retracting it. Abort the
-	/// source so viewers observe the loss as an error rather than a clean end.
-	Abrupt,
-}
-
 struct BroadcastState {
 	// The route announced into our origin for this namespace, post-charge.
 	route: crate::origin::Route,
@@ -368,9 +350,8 @@ struct BroadcastState {
 	// active number of PUBLISH_NAMESPACE messages.
 	count: usize,
 
-	// One minted source per requested path under the namespace: finish() on a
-	// deliberate unannounce, dropping (a dying session) aborts them so viewers
-	// observe the loss as an error.
+	// One minted source per requested path under the namespace, each closed
+	// when its guard drops.
 	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
 }
 
@@ -726,14 +707,11 @@ where
 		// ends: a clean close, a decode error, or the peer resetting it. Without this
 		// each namespace keeps its refcount and the source never detaches.
 		//
-		// Abruptly, including on a clean FIN: closing the stream retracts nothing, since
-		// the protocol has NAMESPACE_DONE for that. Whatever is still live here outlived
-		// its channel without being withdrawn, so hold the front open for a reconnect.
 		// This is what moq-lite already does, where the equivalent map is a local whose
 		// guards drop.
 		let res = self.run_namespace_entries(&mut stream, &prefix, &peer, &mut live).await;
 		for path in live {
-			let _ = self.stop_announce(path, Detach::Abrupt);
+			let _ = self.stop_announce(path);
 		}
 		res
 	}
@@ -777,7 +755,7 @@ where
 						// leave subscriptions on a path the peer no longer offers.
 						tracing::debug!(%path, "dropping reflected namespace");
 						if live.remove(&path) {
-							let _ = self.stop_announce(path, Detach::Graceful);
+							let _ = self.stop_announce(path);
 						}
 						continue;
 					};
@@ -807,7 +785,7 @@ where
 					let path = prefix.join(&msg.suffix);
 					tracing::debug!(%path, "namespace_done");
 					if live.remove(&path) {
-						let _ = self.stop_announce(path, Detach::Graceful);
+						let _ = self.stop_announce(path);
 					}
 				}
 				_ => {
@@ -942,7 +920,7 @@ where
 			Ok(_) => {
 				if let Err(err) = self.write_ok(&mut stream, request_id).await {
 					// Local rollback, not a peer unannounce: don't count announce bytes.
-					let _ = self.stop_announce(path, Detach::Graceful);
+					let _ = self.stop_announce(path);
 					return Err(err);
 				}
 			}
@@ -966,15 +944,7 @@ where
 			.await;
 
 		if attached {
-			// Ending cleanly IS the retraction here, unlike a NAMESPACE stream: this stream
-			// carries exactly one advertisement, and withdrawing it is what ends the stream.
-			// Any other ending left the advertisement standing, so the peer never withdrew
-			// it and the loss reads as abrupt (an error, not a clean end).
-			let detach = match res.is_ok() {
-				true => Detach::Graceful,
-				false => Detach::Abrupt,
-			};
-			self.stop_announce(path, detach)?;
+			self.stop_announce(path)?;
 		}
 
 		res
@@ -1086,7 +1056,7 @@ where
 			let Some(advert) = self.route(held.as_ref(), &peer) else {
 				if std::mem::take(attached) {
 					tracing::debug!(%path, "publish_namespace now loops back; detaching");
-					let _ = self.stop_announce(path.clone(), Detach::Graceful);
+					let _ = self.stop_announce(path.clone());
 				}
 				self.write_ok(stream, msg.request_id).await?;
 				continue;
@@ -1355,24 +1325,18 @@ where
 		}
 	}
 
-	fn stop_announce(&mut self, path: PathOwned, detach: Detach) -> Result<(), Error> {
+	/// Release one advertisement of `path`, closing its sources when it was the last.
+	fn stop_announce(&mut self, path: PathOwned) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
 				entry.get_mut().count -= 1;
 				if entry.get().count == 0 {
-					tracing::debug!(route = %self.origin.absolute(&path), ?detach, "unannounced");
-					// Dropping the entry retracts the route (its announcement drops).
-					let removed = entry.remove();
-					for (_, source) in removed.sources {
-						match detach {
-							Detach::Graceful => source.finish(),
-							// Dropping the guard aborts the source, so the loss reads
-							// as an error rather than a clean end.
-							Detach::Abrupt => {}
-						}
-					}
+					tracing::debug!(route = %self.origin.absolute(&path), "unannounced");
+					// Dropping the entry retracts the route (its announcement drops) and
+					// closes its sources (their guards drop).
+					entry.remove();
 				}
 			}
 			Entry::Vacant(_) => return Err(Error::NotFound),
@@ -4097,7 +4061,7 @@ mod tests {
 		subscriber.start_announce(path.clone(), advert).unwrap();
 		settle().await;
 
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path).unwrap();
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
 			"an explicit NAMESPACE_DONE must retract the route",
@@ -4218,7 +4182,7 @@ mod tests {
 
 	/// Several advertisements share one refcounted source, so the detach that empties it
 	/// is the one that counts: the broadcast survives the first stop and closes on the
-	/// last, whatever kind each detach is.
+	/// last.
 	///
 	/// That is the model's own rule for several sources at one path (the front's source
 	/// selection),
@@ -4239,7 +4203,7 @@ mod tests {
 		settle().await;
 
 		// One advertisement's stream dies: the other still holds the source.
-		subscriber.stop_announce(path.clone(), Detach::Abrupt).unwrap();
+		subscriber.stop_announce(path.clone()).unwrap();
 		settle().await;
 		assert!(
 			routed_now(&consumer, "room/host").is_some(),
@@ -4247,7 +4211,7 @@ mod tests {
 		);
 
 		// The last owner retracts: the broadcast closes with it.
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path).unwrap();
 		settle().await;
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
@@ -4314,7 +4278,7 @@ mod tests {
 
 		// One advertisement, so one unannounce detaches it. If the update had bumped the
 		// refcount, this would leave the route stranded.
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -4367,7 +4331,7 @@ mod tests {
 		);
 
 		// One advertisement, so one unannounce detaches it.
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -4396,9 +4360,9 @@ mod tests {
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to retract.
-		subscriber.stop_announce(path.clone(), Detach::Graceful).unwrap();
+		subscriber.stop_announce(path.clone()).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -4425,9 +4389,9 @@ mod tests {
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to retract.
-		subscriber.stop_announce(path.clone(), Detach::Graceful).unwrap();
+		subscriber.stop_announce(path.clone()).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -4464,7 +4428,7 @@ mod tests {
 		);
 
 		// That supersedes the advertisement it repeats, so the old route is retired.
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path).unwrap();
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
 			"the superseded route must not stay attached"
@@ -4924,7 +4888,7 @@ mod tests {
 
 		// What the stream's exit path does with whatever it still holds.
 		for path in live {
-			subscriber.stop_announce(path, Detach::Graceful).unwrap();
+			subscriber.stop_announce(path).unwrap();
 		}
 
 		assert!(routed_now(&consumer, "room/a").is_none(), "room/a leaked a refcount");

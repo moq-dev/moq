@@ -170,9 +170,8 @@ impl Publish {
 			}
 			guard.commit()?;
 		}
-		// Finish the broadcast first so the clean end reaches subscribers even if
-		// finalizing the catalog fails.
-		producer.finish();
+		// Close the broadcast first so it ends even if finalizing the catalog fails.
+		producer.close();
 		catalog.finish()?;
 		Ok(())
 	}

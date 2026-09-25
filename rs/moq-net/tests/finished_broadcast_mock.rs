@@ -90,7 +90,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 	track.finish().unwrap();
 	drop(track);
 	if finish_broadcast {
-		broadcast.finish();
+		broadcast.close();
 	}
 
 	// The session and both origins stay up until the reader is done.

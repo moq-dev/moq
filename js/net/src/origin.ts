@@ -143,7 +143,7 @@ class ServeState {
 			finishRequest(request, err);
 		}
 		for (const [path, front] of this.served) {
-			front.close(abort);
+			front.close();
 			this.onChange(path);
 		}
 		this.served.clear();
@@ -718,7 +718,7 @@ export class Producer implements Table {
 		this.#state.closed.set(abort ?? null);
 		this.#state.local.update((broadcasts) => {
 			for (const front of broadcasts?.values() ?? []) {
-				front.close(abort);
+				front.close();
 			}
 			return undefined;
 		});

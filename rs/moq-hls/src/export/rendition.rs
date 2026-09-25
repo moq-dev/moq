@@ -110,9 +110,8 @@ impl Media {
 		let mut handle = self.handle.lock().expect("media lock poisoned");
 		match handle.binding.poll_broadcast(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(broadcast)) if broadcast.is_closed() => {
-				// The bound sibling ended (a different first hop replaces the publisher with
-				// Dropped). Origin finish()es that spliced front, so is_finished() cannot
-				// tell a rival publisher from a clean VOD end. Rows listed for it must not
+				// The bound sibling ended, and a broadcast end carries no cause, so a rival
+				// publisher looks the same as a clean VOD end. Rows listed for it must not
 				// be served from the replacement.
 				window.clear();
 				if let Ok(next) = source.bind(Some(rel)) {

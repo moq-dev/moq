@@ -18,12 +18,8 @@ Every binding ends a broadcast with `close()`, mirroring Rust, and its
   `Publish.Close()`. Kotlin and Dart only alias the generated type, so they
   pick `close` up from moq-ffi.
 - Move the binding tests over, keeping one test per binding that a second
-  `close` errors or no-ops, whichever Rust settles on.
+  `close` is a no-op, as in Rust.
 - Update `doc/lib/{py,swift,kt,go,dart,c}`, including `doc/lib/go/index.md`'s
   `broadcast.Finish()` sample.
 - Fix the moq-ffi `origin.rs` doc comment that points users at a
   `broadcast.closed()` the bindings don't have.
-
-## Required
-
-- [Rust close](/quest/m1/broadcast-close/rust.md) - the binding forwards to `broadcast::Producer::close`

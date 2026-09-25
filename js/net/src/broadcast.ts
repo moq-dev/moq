@@ -262,7 +262,10 @@ export class Producer {
 		this.#announcer?.unannounce();
 	}
 
-	/** Close the broadcast, optionally with an error to abort waiters. Idempotent. */
+	/** End the broadcast for good: retract it, serve no new tracks, and refuse a later {@link announce}. Idempotent. */
+	close(): void;
+	/** @deprecated A broadcast end carries no cause; call `close()` without one. */
+	close(abort?: Error): void;
 	close(abort?: Error) {
 		this.#announcer?.unannounce();
 		this.#announcer = undefined;
@@ -352,9 +355,12 @@ export class Consumer {
 	}
 
 	/**
-	 * Release this handle. The broadcast is closed (optionally with an error to abort waiters)
-	 * once this was the last live handle; while other {@link clone}s remain open it stays live.
+	 * Release this handle. The broadcast is closed once this was the last live handle;
+	 * while other {@link clone}s remain open it stays live.
 	 */
+	close(): void;
+	/** @deprecated A broadcast end carries no cause; call `close()` without one. */
+	close(abort?: Error): void;
 	close(abort?: Error) {
 		if (this.#closed) return;
 		this.#closed = true;
