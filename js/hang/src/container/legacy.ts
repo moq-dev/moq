@@ -84,7 +84,7 @@ export class Producer {
 	#liveEdge?: Time.Micro;
 	// Gap between consecutive timestamps, used to close the last group when no successor exists.
 	#interval?: Time.Micro;
-	// A cut's marker is the newest group, so another one would say nothing new.
+	// A discontinuity's marker is the newest group, so another one would say nothing new.
 	#marked = false;
 
 	/** Wrap a track to publish legacy-container frames into it. */
@@ -138,7 +138,7 @@ export class Producer {
 	 * joiner lands on. Data tracks only close the group, since an empty payload is data. No marker
 	 * is written until a frame follows the last one. Throws if `end` precedes the last video frame.
 	 */
-	cut(end?: Time.Micro) {
+	discontinuity(end?: Time.Micro) {
 		this.#close(end);
 		// Nothing is measured across the break.
 		this.#interval = undefined;
