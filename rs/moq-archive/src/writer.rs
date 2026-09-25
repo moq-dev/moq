@@ -1044,6 +1044,39 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn accepted_groups_may_complete_out_of_order() {
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+
+		let store = Store::new(InMemory::new(), "rec");
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
+		writer.control().pacing_track("video").await.unwrap();
+		let run = tokio::spawn(writer.run());
+
+		let mut first = video.create_group(group::Info { sequence: 0 }).unwrap();
+		first.write_frame(ms(0), "0@0").unwrap();
+		group(&video, 1, &[1000]);
+		group(&video, 2, &[2000]);
+		tokio::time::sleep(Duration::from_millis(50)).await;
+		assert!(window(&store).await.is_empty(), "group 1 waits for group 0");
+
+		first.write_frame(ms(500), "0@500").unwrap();
+		first.finish().unwrap();
+		video.finish().unwrap();
+		source.finish();
+		run.await.unwrap().unwrap();
+
+		let records = window(&store).await;
+		assert_eq!(ranges(&records, "video"), vec![(0, 0), (1, 1), (2, 2)]);
+		check_objects(&store, &records).await;
+		let object = store.get_groups("video", 0..=0).await.unwrap();
+		let frames: Vec<_> = object.groups[0].frames.iter().map(|f| f.timestamp).collect();
+		assert_eq!(frames, vec![0, 500]);
+	}
+
+	#[tokio::test]
 	async fn decreasing_arrivals_are_refused() {
 		let source = broadcast::Info::new().produce();
 		let video = track(&source, "video");
@@ -1281,6 +1314,86 @@ mod tests {
 		store.get_info("video").await.unwrap();
 		store.get_info(TIMELINE).await.unwrap();
 		store.get_segments(TIMELINE, 0).await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn a_dvr_crash_between_pop_and_delete_is_cleaned_on_restart() {
+		let store = Store::new(InMemory::new(), "rec");
+
+		// A grace longer than the test keeps every expired object past the crash.
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+		let config =
+			Config::default().with_retention(Retention::new(Duration::from_secs(2), Duration::from_secs(3600)));
+		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
+		writer.control().pacing_track("video").await.unwrap();
+		let run = tokio::spawn(writer.run());
+		for sequence in 0..6 {
+			group(&video, sequence, &[sequence * 1000, sequence * 1000 + 500]);
+		}
+		// Segment 5 stays open, so the newest durable timeline object is segment 4.
+		while window(&store).await.last().map(|record| record.segment) != Some(4) {
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		run.abort();
+		let _ = run.await;
+
+		let retained = window(&store).await;
+		assert_eq!(
+			retained.iter().map(|record| record.segment).collect::<Vec<_>>(),
+			vec![3, 4]
+		);
+		let expired: HashSet<_> = (0..3).map(|s| Key::groups("video", s..=s).unwrap()).collect();
+		assert_eq!(stored_groups(&store).await, &referenced(&retained) | &expired);
+		// An upload the crash left uncommitted.
+		store.put_groups("video", &orphan(5)).await.unwrap();
+
+		let grace = Duration::from_millis(200);
+		let config = Config::default().with_retention(Retention::new(Duration::from_secs(2), grace));
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+		let started = Instant::now();
+		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
+		assert!(
+			stored_groups(&store).await.is_superset(&expired),
+			"expired objects outlive the grace, for readers holding the old timeline"
+		);
+
+		writer.control().pacing_track("video").await.unwrap();
+		// The source replays the uncommitted group; it is refused rather than overwritten.
+		for sequence in 5..9 {
+			group(&video, sequence, &[sequence * 1000, sequence * 1000 + 500]);
+		}
+		video.finish().unwrap();
+		source.finish();
+		writer.run().await.unwrap();
+		assert!(started.elapsed() >= grace);
+
+		let records = window(&store).await;
+		assert_eq!(ranges(&records, "video"), vec![(6, 6), (7, 7), (8, 8)]);
+		check_objects(&store, &records).await;
+		assert_eq!(stored_groups(&store).await, referenced(&records));
+		store.get_info("video").await.unwrap();
+		store.get_info(TIMELINE).await.unwrap();
+		for segment in 0..=7 {
+			store.get_segments(TIMELINE, segment).await.unwrap();
+		}
+	}
+
+	#[tokio::test]
+	async fn an_archive_restart_leaves_uncommitted_groups_unadvertised() {
+		let store = Store::new(InMemory::new(), "rec");
+		record(&store, Config::default(), 0..3).await;
+		// Media stored after the last timeline commit: a crash before its record.
+		store.put_groups("video", &orphan(3)).await.unwrap();
+
+		record(&store, Config::default(), 3..6).await;
+		let records = window(&store).await;
+		assert_eq!(ranges(&records, "video"), vec![(0, 0), (1, 1), (2, 2), (4, 4), (5, 5)]);
+		check_objects(&store, &records).await;
+		// An archive deletes nothing; the orphan stays invisible.
+		assert!(stored_groups(&store).await.contains(&Key::groups("video", 3..=3).unwrap()));
+		assert!(!referenced(&records).contains(&Key::groups("video", 3..=3).unwrap()));
 	}
 
 	#[tokio::test]
