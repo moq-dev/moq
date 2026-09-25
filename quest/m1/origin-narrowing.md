@@ -49,7 +49,7 @@ closing the session on a narrowed grant: that is simple, secure, and correct.
   outside the narrowed grant is retracted or aborted.
 - Relay revalidation uses it: a re-checked grant with the same root narrows
   the session's origin handles instead of closing the session
-  (`Lease::ended` reporting "grant narrowed" in `rs/moq-relay/src/auth.rs`),
+  (`Lease::ended` reporting `Reason::Narrowed` in `rs/moq-relay/src/auth.rs`),
   on every accept path (native, WebSocket, io_uring, `moq --listen`). A
   changed root still closes.
 - Prove the deafen case at the model layer: subscribe under a room prefix,

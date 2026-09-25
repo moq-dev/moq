@@ -15,10 +15,7 @@
 //!
 //! Run with `just rs loom`; `cfg(loom)` is never set in a normal build.
 
-use std::{
-	sync::Arc as StdArc,
-	task::{Poll, Wake},
-};
+use std::task::Poll;
 
 use loom::{
 	future::block_on,
@@ -29,20 +26,7 @@ use loom::{
 	thread,
 };
 
-use crate::{Closed, Fan, Lock, Producer, Queue, Ref, Shared, Waiter, WaiterList, wait};
-
-/// Records whether it was woken using Loom's atomic ordering model.
-struct Flag(AtomicBool);
-
-impl Wake for Flag {
-	fn wake(self: StdArc<Self>) {
-		self.wake_by_ref();
-	}
-
-	fn wake_by_ref(self: &StdArc<Self>) {
-		self.0.store(true, Ordering::SeqCst);
-	}
-}
+use crate::{Closed, Lock, Producer, Queue, Ref, Shared, WaiterList, wait};
 
 /// Ready once the value equals `n`.
 fn equals(n: u32) -> impl FnMut(&Ref<'_, u32>) -> Poll<()> + Unpin {
@@ -289,13 +273,19 @@ fn queue_close_wakes_a_parked_pop() {
 	});
 }
 
+/// Drain the list under its lock, then wake it outside, as the channels do.
+fn wake(list: &Lock<WaiterList>) {
+	let mut waiters = list.lock().take();
+	waiters.wake();
+}
+
 /// A partial wake retires the waiter still parked on the quiet list. The new
 /// registration must hear a terminal wake on the drained list or the task hangs.
 #[test]
 fn a_replaced_waiter_hears_the_drained_list_again() {
 	loom::model(|| {
-		let woken = Fan::new();
-		let parked = Fan::new();
+		let woken = Lock::new(WaiterList::new());
+		let parked = Lock::new(WaiterList::new());
 		let done = Arc::new(AtomicBool::new(false));
 
 		let waker = {
@@ -305,19 +295,18 @@ fn a_replaced_waiter_hears_the_drained_list_again() {
 			thread::spawn(move || {
 				// Drains `woken`; a re-poll now re-registers while still parked on
 				// `parked`.
-				woken.wake();
+				wake(&woken);
 				done.store(true, Ordering::SeqCst);
 				// Must reach the re-registered waiter, or the model deadlocks.
-				woken.wake();
+				wake(&woken);
 			})
 		};
 
-		// Register before reading `done`, as in `a_held_wake_is_never_lost`: the
-		// other order has a window where the store and both wakes land between the
-		// read and the registration.
+		// Register before reading `done`: the other order has a window where the
+		// store and both wakes land between the read and the registration.
 		block_on(wait(|waiter| {
-			woken.register(waiter);
-			parked.register(waiter);
+			waiter.register(&mut woken.lock());
+			waiter.register(&mut parked.lock());
 			match done.load(Ordering::SeqCst) {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
@@ -325,93 +314,6 @@ fn a_replaced_waiter_hears_the_drained_list_again() {
 		}));
 
 		waker.join().unwrap();
-	});
-}
-
-/// `Fan` holds wakes back while a guard is out and delivers them when the last
-/// one drops. A wake racing that window must still reach the parked waiter, whichever
-/// side of the hold it lands on.
-#[test]
-fn a_held_wake_is_never_lost() {
-	loom::model(|| {
-		let fan = Fan::new();
-		let ready = Arc::new(AtomicBool::new(false));
-
-		let waker = {
-			let fan = fan.clone();
-			let ready = ready.clone();
-
-			thread::spawn(move || {
-				let hold = fan.hold();
-				ready.store(true, Ordering::SeqCst);
-				fan.wake();
-				// The deferred wake is delivered here.
-				drop(hold);
-			})
-		};
-
-		// Register before reading `ready`: the other order has a window where the store
-		// and the wake both land between the read and the registration.
-		block_on(wait(|waiter| {
-			fan.register(waiter);
-
-			match ready.load(Ordering::SeqCst) {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
-			}
-		}));
-
-		waker.join().unwrap();
-	});
-}
-
-/// A wake blocked on the projected list must recheck the hold after it acquires the
-/// list lock. Otherwise it can pass the deferral check, stall on the list, and deliver
-/// while a hold created in that window is still live.
-#[test]
-fn a_hold_covers_a_wake_waiting_for_the_list() {
-	loom::model(|| {
-		let state = Lock::new(WaiterList::new());
-		let fan = Fan::project(&state, |waiters| waiters);
-		let flag = StdArc::new(Flag(AtomicBool::new(false)));
-		let waiter = Waiter::new(std::task::Waker::from(flag.clone()));
-		waiter.register(&mut state.lock());
-
-		let state_guard = state.lock();
-		let waking = thread::spawn({
-			let fan = fan.clone();
-			move || fan.wake()
-		});
-
-		let hold = fan.hold();
-		drop(state_guard);
-		waking.join().unwrap();
-		assert!(!flag.0.load(Ordering::SeqCst), "wake escaped a live hold");
-
-		drop(hold);
-		assert!(flag.0.load(Ordering::SeqCst), "deferred wake never arrived");
-	});
-}
-
-/// A projected fan must see a hold before it tries to reacquire the projected state.
-/// An inline wake runs on the thread already holding that state lock.
-#[test]
-fn a_projected_hold_defers_before_relocking() {
-	loom::model(|| {
-		let state = Lock::new(WaiterList::new());
-		let fan = Fan::project(&state, |waiters| waiters);
-		let flag = StdArc::new(Flag(AtomicBool::new(false)));
-		let waiter = Waiter::new(std::task::Waker::from(flag.clone()));
-		waiter.register(&mut state.lock());
-
-		let state_guard = state.lock();
-		let hold = fan.hold();
-		fan.wake();
-		assert!(!flag.0.load(Ordering::SeqCst), "wake escaped a live hold");
-
-		drop(state_guard);
-		drop(hold);
-		assert!(flag.0.load(Ordering::SeqCst), "deferred wake never arrived");
 	});
 }
 

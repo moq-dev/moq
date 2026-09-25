@@ -710,7 +710,7 @@ impl Consume {
 		track: &mut moq_net::track::Ordered,
 		waiter: &moq_net::kio::Waiter,
 	) -> bool {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		if Pin::new(close).poll(&mut cx).is_ready() {
 			return true;
 		}

@@ -607,7 +607,7 @@ where
 					if let Poll::Ready(res) = waiter.poll_future(serve.as_mut()) {
 						return Poll::Ready(res);
 					}
-					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					if stream.reader.poll_closed(&mut cx).is_ready() || closed_session.poll_closed(&mut cx).is_ready() {
 						return Poll::Ready(Ok(()));
 					}
@@ -1029,7 +1029,7 @@ where
 			let mut pending = false;
 			let mut deadline = crate::runtime::Deadline::after(&self.runtime, Duration::from_secs(10));
 			kio::wait(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
+				let mut cx = waiter.context();
 				// The request reader is what the subscriber FINs or resets. The writer
 				// on a draft-14-16 virtual stream reports closed immediately, which is
 				// not a cancellation.
@@ -1835,7 +1835,7 @@ where
 			let event = {
 				let Namespaces { target, .. } = &mut ns;
 				kio::wait(|waiter| {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					if let Poll::Ready(res) = target.poll_closed(&mut cx) {
 						return Poll::Ready(NamespaceEvent::Closed(res));
 					}
@@ -2067,6 +2067,8 @@ enum GroupState<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> kio::Task for GroupServe<S> {
+	type Output = ();
+
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		// Errors just drop the writer, whose Drop resets the stream, exactly like
 		// the old future being discarded.
@@ -2101,7 +2103,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 	}
 
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				GroupState::Open => {

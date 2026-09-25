@@ -85,9 +85,9 @@ public final class BroadcastConsumer: Sendable {
     /// Subscribe to a video track and decode it inside the bindings.
     /// `catalogVideo` is the matching rendition from the catalog.
     ///
-    /// `output.format` picks the packed CPU layout every frame arrives in and
-    /// defaults to I420; each frame repeats the layout it was decoded to.
-    /// `output.resize` is best effort, so read each frame's own dimensions.
+    /// Each frame converts to a packed CPU layout on demand via
+    /// `pixels(format:)`. `output.resize` is best effort, so read each frame's
+    /// own dimensions.
     public func decodeVideo(
         name: String,
         catalogVideo: Video,

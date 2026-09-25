@@ -12,15 +12,12 @@ use crate::sync::{Mutex, MutexGuard};
 /// A cloneable mutex wrapper backed by `Arc<Mutex<T>>`.
 ///
 /// Every kio channel keeps its state in one of these, with its [`WaiterList`]s inside,
-/// so a state change and the wake it owes are decided under a single lock. [`Fan`] can
-/// hand out a [`Waker`](std::task::Waker) for one of those lists. See
-/// [`Fan::project`](crate::Fan::project).
+/// so a state change and the wake it owes are decided under a single lock.
 ///
 /// Poisoning is not part of the contract: a panic while the lock is held poisons it, and
 /// every method here panics in turn rather than handing back a `Result`.
 ///
 /// [`WaiterList`]: crate::WaiterList
-/// [`Fan`]: crate::Fan
 pub struct Lock<T> {
 	inner: Arc<Mutex<T>>,
 }
@@ -47,7 +44,7 @@ impl<T> Lock<T> {
 
 	/// Create a handle that doesn't own the value, so it can be stored inside the
 	/// value itself without leaking the allocation.
-	pub fn downgrade(&self) -> WeakLock<T> {
+	pub(crate) fn downgrade(&self) -> WeakLock<T> {
 		WeakLock {
 			inner: Arc::downgrade(&self.inner),
 		}
@@ -55,18 +52,18 @@ impl<T> Lock<T> {
 }
 
 /// A [`Lock`] that doesn't own its value, backed by `Weak<Mutex<T>>`.
-pub struct WeakLock<T> {
+pub(crate) struct WeakLock<T> {
 	inner: Weak<Mutex<T>>,
 }
 
 impl<T> WeakLock<T> {
 	/// A handle that never upgrades, for a placeholder before a value exists.
-	pub fn new() -> Self {
+	pub(crate) fn new() -> Self {
 		Self { inner: Weak::new() }
 	}
 
 	/// Recover the owning [`Lock`], or `None` once the value has been dropped.
-	pub fn upgrade(&self) -> Option<Lock<T>> {
+	pub(crate) fn upgrade(&self) -> Option<Lock<T>> {
 		Some(Lock {
 			inner: self.inner.upgrade()?,
 		})

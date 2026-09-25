@@ -317,7 +317,7 @@ impl Request {
 		let mut deadline = self.conn.owner().after(CLOSE_GRACE);
 		let send = &mut self.send;
 		kio::wait(|waiter| {
-			let mut cx = Context::from_waker(waiter.waker());
+			let mut cx = waiter.context();
 			if web_transport_trait::poll::SendStream::poll_closed(send, &mut cx).is_ready() {
 				return Poll::Ready(());
 			}
@@ -742,7 +742,7 @@ impl web_transport_trait::poll::Session for Session {
 		self.conn.owner().spawn(async move {
 			let mut offset = 0;
 			kio::wait(|waiter| {
-				let mut cx = Context::from_waker(waiter.waker());
+				let mut cx = waiter.context();
 
 				// Stop writing once the connection is gone; the deadline is the
 				// only other thing that ends this.

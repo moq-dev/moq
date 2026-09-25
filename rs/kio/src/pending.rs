@@ -5,31 +5,9 @@ use std::{
 	task::{Context, Poll},
 };
 
-use crate::{Park, Waiter};
+use crate::{Park, Task};
 
-/// A pollable computation backed by kio channels.
-///
-/// Implementors write only [`Self::poll`], registering the [`Waiter`] with the
-/// channels they read. Wrap the value in [`Pending`] to get a real [`Future`].
-///
-/// This exists because a kio [`Waiter`] holds the strong `Arc<Waker>` while the
-/// channel's [`crate::WaiterList`] keeps only a `Weak`. A bare [`Future`] would have
-/// to park the strong `Waiter` in a field for as long as it stays pending (or lose
-/// its wakeup); [`Pending`] does that once so each implementor doesn't have to.
-pub trait Pollable: Unpin {
-	/// The value the computation resolves to.
-	type Output;
-
-	/// Poll for the output, registering `waiter` with the relevant channels if not
-	/// yet ready.
-	///
-	/// Takes `&self`: kio channels poll immutably, so a pollable can be driven
-	/// through a shared borrow (e.g. while it lives inside an `&self`-borrowed enum).
-	/// Carry any per-poll mutable state in a kio channel or a [`std::cell`] type.
-	fn poll(&self, waiter: &Waiter) -> Poll<Self::Output>;
-}
-
-/// Adapts a [`Pollable`] into a [`Future`], parking the strong [`Waiter`] between
+/// Adapts a [`Task`] into a [`Future`], parking the strong [`Waiter`](crate::Waiter) between
 /// polls so its weak registration stays live.
 ///
 /// Derefs to the inner value, so any inherent methods you define on it are
@@ -42,7 +20,7 @@ pub struct Pending<P> {
 }
 
 impl<P> Pending<P> {
-	/// Wrap a [`Pollable`] so it can be `.await`ed.
+	/// Wrap a [`Task`] so it can be `.await`ed.
 	pub fn new(inner: P) -> Self {
 		Self {
 			inner,
@@ -70,21 +48,20 @@ impl<P> DerefMut for Pending<P> {
 	}
 }
 
-impl<P: Pollable> Future for Pending<P> {
+impl<P: Task + Unpin> Future for Pending<P> {
 	type Output = P::Output;
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<P::Output> {
-		// `Pending<P>` is `Unpin` (P is, via the trait bound), so this deref is sound.
 		let this = &mut *self;
 		let waiter = this.park.hold(cx);
-		Pollable::poll(&this.inner, waiter)
+		this.inner.poll(waiter)
 	}
 }
 
 #[cfg(all(test, not(loom)))]
 mod test {
 	use super::*;
-	use crate::Producer;
+	use crate::{Producer, Waiter};
 
 	/// A pollable that waits for the channel value to reach a threshold, with an
 	/// inherent method reachable through `Pending`'s `DerefMut`.
@@ -99,10 +76,10 @@ mod test {
 		}
 	}
 
-	impl Pollable for AtLeast {
+	impl Task for AtLeast {
 		type Output = u64;
 
-		fn poll(&self, waiter: &Waiter) -> Poll<u64> {
+		fn poll(&mut self, waiter: &Waiter) -> Poll<u64> {
 			let threshold = self.threshold;
 			match self.consumer.poll(waiter, |v| {
 				let current = **v;
@@ -132,7 +109,7 @@ mod test {
 		pending.bump_threshold(); // threshold now 6
 
 		// The kio-level poll (reached through Deref) is pending until the value catches up.
-		assert!(Pollable::poll(&*pending, &Waiter::noop()).is_pending());
+		assert!(Task::poll(&mut *pending, &Waiter::noop()).is_pending());
 
 		if let Ok(mut v) = producer.write() {
 			*v = 6;

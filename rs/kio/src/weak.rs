@@ -152,24 +152,21 @@ impl<T> ProducerWeak<T> {
 	///
 	/// Returns `Ok(())` when no consumers remain, or [`Closed`] if the channel closes first.
 	pub async fn unused(&self) -> Result<(), Closed> {
-		match crate::wait(move |waiter| self.poll_unused(waiter)).await {
-			Some(()) => Ok(()),
-			None => Err(Closed),
-		}
+		crate::wait(move |waiter| self.poll_unused(waiter)).await
 	}
 
-	/// Poll-based variant of [`Self::unused`]: `Ready(Some(()))` when no consumers
-	/// remain, `Ready(None)` if the channel closed first, else `Pending`.
-	pub fn poll_unused(&self, waiter: &Waiter) -> Poll<Option<()>> {
+	/// Poll-based variant of [`Self::unused`]: `Ready(Ok(()))` when no consumers
+	/// remain, [`Closed`] if the channel closed first, else `Pending`.
+	pub fn poll_unused(&self, waiter: &Waiter) -> Poll<Result<(), Closed>> {
 		// Closure is checked first, matching `Producer::poll_unused`: a closed channel
-		// with no consumers resolves `None` from either handle.
+		// with no consumers resolves `Closed` from either handle.
 		let mut state = self.state.lock();
 		if state.closed {
-			return Poll::Ready(None);
+			return Poll::Ready(Err(Closed));
 		}
 
 		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
-			return Poll::Ready(Some(()));
+			return Poll::Ready(Ok(()));
 		}
 
 		waiter.register(&mut state.waiters_consumer);
@@ -177,7 +174,7 @@ impl<T> ProducerWeak<T> {
 		// Re-check after registration to avoid TOCTOU race where the last
 		// consumer drops between the initial check and waiter registration.
 		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
-			return Poll::Ready(Some(()));
+			return Poll::Ready(Ok(()));
 		}
 
 		Poll::Pending
@@ -195,30 +192,27 @@ impl<T> ProducerWeak<T> {
 	///
 	/// Returns `Ok(())` when a consumer is created, or [`Closed`] if the channel closes first.
 	pub async fn used(&self) -> Result<(), Closed> {
-		match crate::wait(move |waiter| self.poll_used(waiter)).await {
-			Some(()) => Ok(()),
-			None => Err(Closed),
-		}
+		crate::wait(move |waiter| self.poll_used(waiter)).await
 	}
 
-	/// Poll-based variant of [`Self::used`]: `Ready(Some(()))` once a consumer
-	/// exists, `Ready(None)` if the channel closed first, else `Pending`.
-	pub fn poll_used(&self, waiter: &Waiter) -> Poll<Option<()>> {
+	/// Poll-based variant of [`Self::used`]: `Ready(Ok(()))` once a consumer
+	/// exists, [`Closed`] if the channel closed first, else `Pending`.
+	pub fn poll_used(&self, waiter: &Waiter) -> Poll<Result<(), Closed>> {
 		// Closure is checked first, matching `Producer::poll_used`.
 		let mut state = self.state.lock();
 		if state.closed {
-			return Poll::Ready(None);
+			return Poll::Ready(Err(Closed));
 		}
 
 		if self.counts.consumers.load(Ordering::Relaxed) > 0 {
-			return Poll::Ready(Some(()));
+			return Poll::Ready(Ok(()));
 		}
 
 		waiter.register(&mut state.waiters_consumer);
 
 		// Re-check after registration to avoid TOCTOU race.
 		if self.counts.consumers.load(Ordering::Relaxed) > 0 {
-			return Poll::Ready(Some(()));
+			return Poll::Ready(Ok(()));
 		}
 
 		Poll::Pending
@@ -267,9 +261,9 @@ impl<T> ConsumerWeak<T> {
 	/// Available here so a watcher can register for changes without joining the
 	/// consumer count, which is what [`Producer::unused`](crate::Producer::unused)
 	/// keys off.
-	pub fn poll<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<R, Ref<'_, T>>>
+	pub fn poll<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
-		F: FnMut(&Ref<'_, T>) -> Poll<R>,
+		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
 	{
 		let state = self.state.lock();
 		let consumer_state = Ref { state };

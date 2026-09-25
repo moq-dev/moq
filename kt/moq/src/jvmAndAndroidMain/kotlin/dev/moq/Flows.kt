@@ -72,8 +72,8 @@ fun AudioConsumer.frames(): Flow<AudioFrame> = flow {
 }
 
 /**
- * Stream of decoded video frames in the layout declared by the
- * [VideoDecoderOutput] the consumer was created with.
+ * Stream of decoded video frames. Each owns the decoder's surface: close it
+ * (or `use` it) when done, since held frames stall the decoder.
  */
 fun VideoConsumer.frames(): Flow<VideoDecodedFrame> = flow {
     while (true) {

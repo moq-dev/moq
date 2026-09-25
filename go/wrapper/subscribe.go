@@ -335,8 +335,19 @@ type VideoConsumer struct {
 }
 
 // Next returns the next decoded frame, or (nil, nil) when the track ends.
+// Close each frame when done with it.
 func (v *VideoConsumer) Next(ctx context.Context) (*VideoDecodedFrame, error) {
-	return runCancellable(ctx, v.inner.Cancel, v.inner.Next)
+	res, err := runHandle(ctx, v.inner.Cancel, func(ctx context.Context) (*ffi.MoqVideoDecodedFrame, error) {
+		res, err := v.inner.Next(ctx)
+		if err != nil || res == nil {
+			return nil, err
+		}
+		return *res, nil
+	})
+	if err != nil || res == nil {
+		return nil, err
+	}
+	return &VideoDecodedFrame{inner: res}, nil
 }
 
 // Frames ranges over decoded frames until the track ends or the loop breaks.
@@ -347,6 +358,38 @@ func (v *VideoConsumer) Frames(ctx context.Context) iter.Seq2[*VideoDecodedFrame
 // Cancel stops the stream.
 func (v *VideoConsumer) Cancel() {
 	v.inner.Cancel()
+}
+
+// VideoDecodedFrame is one decoded video frame. It owns the decoder's surface
+// until Close, which returns it to the decoder: holding many frames stalls
+// decoding. It stays valid after its VideoConsumer is cancelled.
+type VideoDecodedFrame struct {
+	inner *ffi.MoqVideoDecodedFrame
+}
+
+// TimestampUs is the presentation timestamp in microseconds.
+func (f *VideoDecodedFrame) TimestampUs() uint64 {
+	return f.inner.TimestampUs()
+}
+
+// Width is the decoded width in pixels.
+func (f *VideoDecodedFrame) Width() uint32 {
+	return f.inner.Width()
+}
+
+// Height is the decoded height in pixels.
+func (f *VideoDecodedFrame) Height() uint32 {
+	return f.inner.Height()
+}
+
+// Pixels converts the frame to tightly packed pixels in format.
+func (f *VideoDecodedFrame) Pixels(format VideoPixelFormat) ([]byte, error) {
+	return f.inner.Pixels(format)
+}
+
+// Close releases the frame's surface back to the decoder.
+func (f *VideoDecodedFrame) Close() {
+	f.inner.Destroy()
 }
 
 // CatalogConsumer is a stream of catalog updates.

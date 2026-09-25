@@ -80,7 +80,7 @@ impl Connection {
 	#[tracing::instrument("conn", skip_all, fields(id = self.id, remote = self.request.remote_addr().map(tracing::field::display), session = tracing::field::Empty))]
 	pub async fn run(self) -> anyhow::Result<()> {
 		let peer_hop = self.request.peer_hop();
-		let (lease, registration) = match self.admit().await {
+		let (admitted, registration) = match self.admit().await {
 			Ok(admitted) => admitted,
 			Err(err) => {
 				let reject = match err.status {
@@ -94,15 +94,12 @@ impl Connection {
 		};
 
 		let transport = self.request.transport();
-		let role = self.request.role();
-		let cluster_peer = self.request.peer_identity().is_some() || cluster::Cluster::is_lan_path(self.request.path());
-		let grants = match authorize(&self.cluster, lease.token(), role, cluster_peer, &transport) {
-			Ok(grants) => grants,
-			Err(err) => {
-				let _ = self.request.reject(moq_tokio::server::Reject::Forbidden).await;
-				return Err(err);
-			}
-		};
+		let cluster::Admitted {
+			lease,
+			publisher,
+			subscriber,
+			stats,
+		} = admitted;
 
 		// Accept the connection.
 		// NOTE: subscribe and publish seem backwards because of how relays work.
@@ -111,13 +108,12 @@ impl Connection {
 		//
 		// moq-net defaults the unset side to a fresh no-op origin, which is fine for a
 		// publish-only or subscribe-only session.
-		let lease = lease.with_stats(grants.stats.clone());
-		let mut request = self.request.with_stats(grants.stats);
-		if let Some(subscribe) = grants.subscribe {
-			request = request.with_publisher(subscribe);
+		let mut request = self.request.with_stats(stats);
+		if let Some(subscriber) = subscriber {
+			request = request.with_publisher(subscriber);
 		}
-		if let Some(publish) = grants.publish {
-			request = request.with_subscriber(publish);
+		if let Some(publisher) = publisher {
+			request = request.with_subscriber(publisher);
 		}
 		let session = request.ok().await?;
 		let _node_connection = peer_hop.map(|origin| self.cluster.nodes.connect_inbound(self.id, origin));
@@ -133,7 +129,7 @@ impl Connection {
 	/// Every transport goes through the same lease; the request the server sees
 	/// carries what the transport knows. A LAN mesh dial is the one exception: its
 	/// credential is a secret the relay minted for itself, checked locally.
-	async fn admit(&self) -> Result<(auth::Lease, Option<crate::session::Registration>), StatusError> {
+	async fn admit(&self) -> Result<(cluster::Admitted, Option<crate::session::Registration>), StatusError> {
 		// Checked first so a `/.cluster` request is never routed through the public
 		// grant, and a relay without LAN discovery refuses it instead of treating the
 		// path as a broadcast root.
@@ -146,13 +142,13 @@ impl Connection {
 		if self.request.peer_identity().is_some() {
 			tracing::debug!("client certificate verified; reported to the auth server");
 		}
-		let lease = self.auth.admit(request.clone()).await?;
+		let admitted = self.cluster.admit(&self.auth, request.clone()).await?;
 		let registration = self.sessions.as_ref().map(|sessions| sessions.register(request));
-		Ok((lease, registration))
+		Ok((admitted, registration))
 	}
 
 	/// Authorize a `/.cluster/<credential>` dial against the live LAN advertisement.
-	fn admit_lan(&self) -> Result<(auth::Lease, Option<crate::session::Registration>), StatusError> {
+	fn admit_lan(&self) -> Result<(cluster::Admitted, Option<crate::session::Registration>), StatusError> {
 		let Some(presented) = cluster::Cluster::lan_credential(self.request.path()) else {
 			return Err(StatusError {
 				status: http::StatusCode::FORBIDDEN,
@@ -162,7 +158,9 @@ impl Connection {
 		match self.cluster.verify_lan_credential(presented) {
 			Some(true) => {
 				tracing::info!("accepted LAN peer");
-				Ok((self.auth.admit_fixed("/", self.cluster.lan_peer_grant()), None))
+				let lease = self.auth.admit_fixed("/", self.cluster.lan_peer_grant());
+				let request = auth::request_for(&self.auth, &self.request);
+				Ok((self.cluster.scope(lease, &request)?, None))
 			}
 			Some(false) => Err(StatusError {
 				status: http::StatusCode::FORBIDDEN,
@@ -174,97 +172,6 @@ impl Connection {
 			}),
 		}
 	}
-}
-
-/// What an authorized session may serve: the token-scoped origin pair, pruned
-/// to the advertised role, plus its stats context.
-pub(crate) struct Grants {
-	/// What the client may publish (we subscribe to it).
-	pub(crate) publish: Option<moq_net::origin::Producer>,
-	/// What the client may subscribe to (we publish it).
-	pub(crate) subscribe: Option<moq_net::origin::Consumer>,
-	/// The session's billing/attribution context.
-	pub(crate) stats: moq_net::stats::Session,
-}
-
-/// Authorize an admitted session and resolve what it may serve, however
-/// its transport is driven (the shared runtime or a QUIC worker).
-///
-/// The client advertises which direction it intends to use in SETUP
-/// (moq-lite-05 and newer). A bidirectional connection (e.g. a cluster peer) advertises
-/// nothing, so the only requirement is that the token grants *something*. But
-/// a gateway that only publishes or only subscribes says so, and a token
-/// missing that direction's scope is rejected here during the handshake,
-/// instead of being accepted and then silently carrying no media (the bug
-/// that motivated the role hint).
-///
-/// `cluster_peer` marks an authenticated cluster peer (a verified client
-/// certificate or the LAN credential), which discovers hidden routes whether
-/// or not it asks. A peer that predates the hidden opt-in (below moq-lite-07-wip,
-/// or moq-transport without MoQ Hidden) would otherwise lose `.internal/origins`
-/// and every other dot path during a rolling upgrade.
-// TODO: drop the exemption once deployed peers all opt in.
-pub(crate) fn authorize(
-	cluster: &cluster::Cluster,
-	token: &auth::Token,
-	role: Option<moq_net::Role>,
-	cluster_peer: bool,
-	transport: &dyn std::fmt::Display,
-) -> anyhow::Result<Grants> {
-	let publish = cluster.publisher(token);
-	let subscribe = cluster.subscriber(token);
-
-	let authorized = match role {
-		Some(moq_net::Role::Publisher) => publish.is_some(),
-		Some(moq_net::Role::Subscriber) => subscribe.is_some(),
-		// Bidirectional or an unrecognized future role: require the token to grant
-		// something, and let the per-direction checks apply once it's used.
-		None | Some(_) => publish.is_some() || subscribe.is_some(),
-	};
-	if !authorized {
-		let wanted = role.map_or("any", moq_net::Role::as_str);
-		anyhow::bail!("grant does not allow {wanted} access to {}", token.root);
-	}
-
-	match (&publish, &subscribe) {
-		(Some(publish), Some(subscribe)) => {
-			tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().iter().map(|pattern| pattern.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().iter().map(|pattern| pattern.as_str()).collect::<Vec<_>>().join(","), "session accepted");
-		}
-		(Some(publish), None) => {
-			tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().iter().map(|pattern| pattern.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
-		}
-		(None, Some(subscribe)) => {
-			tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, subscribe = %subscribe.allowed().iter().map(|pattern| pattern.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted");
-		}
-		_ => unreachable!("authorized above guarantees at least one origin"),
-	}
-
-	// Build this session's stats context under its billing tier and auth root.
-	// The context carries the presence gauge (a client that merely connects to
-	// e.g. `/acme` is counted, even idle) and drives the model-layer counters
-	// once it tags the session's origin pair. It closes when the last clone
-	// drops (the connection ends).
-	let stats = cluster.stats.tier(token.tier.clone()).session(&token.root);
-
-	// Wire only the direction(s) the client will actually use. The token scope
-	// (enforced above) caps what it *may* do; the role caps what it *will* do.
-	// Pruning the unused half means moq-net feeds that side a no-op origin, so a
-	// publish-only ingest isn't announced every cluster broadcast it would ignore,
-	// and a subscribe-only egress issues no announce-interest. A bidirectional
-	// client (and any transport that carries no role) keeps whatever the token grants.
-	let (publish, subscribe) = match role {
-		Some(moq_net::Role::Publisher) => (publish, None),
-		Some(moq_net::Role::Subscriber) => (None, subscribe),
-		// Bidirectional or an unrecognized future role: keep whatever the token grants.
-		None | Some(_) => (publish, subscribe),
-	};
-	let subscribe = subscribe.map(|subscribe| subscribe.consume().with_hidden(cluster_peer));
-
-	Ok(Grants {
-		publish,
-		subscribe,
-		stats,
-	})
 }
 
 /// Hold an accepted session open for as long as its lease allows.
@@ -317,7 +224,7 @@ pub async fn supervise(
 				// machine runs on its own, so the GOAWAY still reaches the wire while
 				// we wait here.
 				shutdown.drain_session(&session).await;
-				lease.close("shutdown", session_bytes(&session));
+				lease.close(moq_auth::lease::Reason::Shutdown, session_bytes(&session));
 				return Ok(());
 			}
 			() = nudged => lease.revalidate(),
