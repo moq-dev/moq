@@ -51,6 +51,7 @@ reads the same release manifest so a release bumps both.
 ## Quests
 
 - [Package](/quest/m1/cpp/package.md) - the `cpp/moq` wrapper, CMake package, release tarball, interop client, and docs
+- [Error messages](/quest/m1/cpp/error-message.md) - a C++ `moq::Error` prints the same message Rust gives
 - [OBS migration](/quest/m1/cpp/obs.md) - the OBS plugin moves from libmoq handles and trampolines to the generated C++
 
 ## Related
