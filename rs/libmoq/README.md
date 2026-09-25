@@ -63,7 +63,7 @@ int32_t moq_origin_announced_cancel(uint32_t announced);
 // Publishing
 int32_t moq_publish_announce(uint32_t broadcast, const moq_route *route);
 int32_t moq_publish_unannounce(uint32_t broadcast);
-int32_t moq_publish_finish(uint32_t broadcast);
+int32_t moq_publish_close(uint32_t broadcast);
 int32_t moq_publish_audio(uint32_t broadcast, const moq_audio_init *config);
 int32_t moq_publish_video(uint32_t broadcast, const moq_video_init *config);
 int32_t moq_publish_container(uint32_t broadcast, const moq_container_init *config);

@@ -59,7 +59,9 @@ For already-encoded live output, call `audio.flush(timestampUs:)` after `writeFr
 
 The three advertising operations: `session.publish.createBroadcast(path:)`
 returns an unannounced producer, invisible to everyone; `broadcast.announce(route:)` /
-`broadcast.unannounce()` own that exact-path advertisement;
+`broadcast.unannounce()` own that exact-path advertisement, and
+`broadcast.close()` ends the broadcast for good (a second call is a no-op;
+`finish()` is its deprecated alias);
 `session.publish.dynamic(prefix:route:)` claims `prefix` and every path
 beneath it (`""` for everything). Hold the returned `OriginDynamic` while the
 claim should stay advertised, and reject the requests you will not serve. A

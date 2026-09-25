@@ -1540,7 +1540,7 @@ pub extern "C" fn moq_origin_create() -> i32 {
 ///
 /// The broadcast is invisible and unroutable, on this origin and its peers
 /// alike, until [moq_publish_announce]. Fill it with the `moq_publish_*`
-/// functions, then announce it. [moq_publish_finish] unpublishes immediately.
+/// functions, then announce it. [moq_publish_close] ends it for good.
 ///
 /// Returns a non-zero broadcast handle on success, or a negative code on failure.
 ///
@@ -1920,18 +1920,27 @@ pub extern "C" fn moq_publish_unannounce(broadcast: u32) -> i32 {
 	})
 }
 
-/// Finish a broadcast and release it, ending its catalog cleanly.
+/// End a broadcast for good and release its handle.
 ///
-/// Subscribers see a normal end of stream rather than an error, and the origin unpublishes
-/// the path immediately.
+/// The origin retracts the path immediately and serves no new tracks; tracks already
+/// subscribed carry on to their own end. The handle is invalid afterwards, so closing
+/// it again fails like any unknown handle.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		State::lock().publish.close(broadcast)
+	})
+}
+
+/// Deprecated: use [moq_publish_close]. A broadcast end carries no cause.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_finish(broadcast: u32) -> i32 {
-	ffi::enter(move || {
-		let broadcast = ffi::parse_id(broadcast)?;
-		State::lock().publish.finish(broadcast)
-	})
+	moq_publish_close(broadcast)
 }
 
 /// Publish one audio codec as a new media track.

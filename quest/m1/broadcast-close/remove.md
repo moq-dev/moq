@@ -15,7 +15,7 @@ This is a published API break, so it targets `dev`.
   `()` rather than an `Error` cause.
 - Remove the deprecated binding `finish` methods, `moq_publish_finish`, and
   JS's `close(abort)` parameter.
-
-## Required
-
-- [Binding close](/quest/m1/broadcast-close/bindings.md) - every binding already has `close()` to move to
+- Kotlin has no generated `close()`: it would collide with `AutoCloseable.close()`,
+  so `rs/moq-ffi/uniffi.toml` excludes it. Kotlin's `close()` releases the handle,
+  which ends the broadcast only once no `dynamic()` handle remains. Removing
+  `finish` leaves Kotlin without a forced end; decide whether it needs one.
