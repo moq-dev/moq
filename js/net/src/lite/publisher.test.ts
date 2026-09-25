@@ -999,6 +999,51 @@ test("lite draft-07: subscribe end counts zero streams when no groups were produ
 	expect([end.group, end.streams]).toEqual([0, 0]);
 });
 
+// finishAt names the end while groups below it are still being produced. The count
+// cannot include a stream that has not opened, so SUBSCRIBE_END waits for them.
+test("lite draft-07: subscribe end waits for groups below a declared finish", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video");
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+	void publisher.runSubscribe(
+		new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
+		server,
+	);
+
+	try {
+		const first = new GroupProducer(0);
+		first.writeString("hello");
+		first.close();
+		track.writeGroup(first);
+		track.finishAt(2);
+
+		const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_07);
+		expect("start" in start).toBe(true);
+		const pending = decodeSubscribeResponse(client.reader, Version.DRAFT_07);
+		const early = await Promise.race([pending, new Promise((resolve) => setTimeout(resolve, IDLE_MS))]);
+		expect(early).toBeUndefined();
+
+		const second = new GroupProducer(1);
+		second.writeString("hello");
+		second.close();
+		track.writeGroup(second);
+		track.close();
+
+		const resp = await pending;
+		if (!("end" in resp)) throw new Error("expected SUBSCRIBE_END");
+		expect([resp.end.group, resp.end.streams]).toEqual([2, 2]);
+	} finally {
+		publisher.close();
+		client.close();
+	}
+});
+
 // Serves one group with its stream open held until `open(ok)`, and returns the pending
 // SUBSCRIBE_END plus the call that lets the open succeed or fail.
 async function heldOpenEnd() {

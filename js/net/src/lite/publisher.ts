@@ -828,9 +828,10 @@ export class Publisher {
 					case "error":
 						throw recv.error;
 					case "idle":
-						// An end declared ahead of the live edge goes out as soon as it is
-						// known, while the remaining groups are still being produced.
-						if (!endSent && track.final() !== undefined) {
+						// Before lite-07, an end declared ahead of the live edge goes out as
+						// soon as it is known, while the remaining groups are still being
+						// produced. The lite-07 count is not final until those groups open.
+						if (!endSent && !countStreams && track.final() !== undefined) {
 							if (!(await sendEnd())) return;
 							continue;
 						}
