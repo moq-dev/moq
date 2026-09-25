@@ -63,6 +63,11 @@ just check
 just test
 ```
 
+These diff the branch against its upstream (or `origin/main`) and run only the
+modules the diff reaches. The map from paths to modules lives in
+`sh/dispatch.sh`; every recipe is one line, and any logic lives in a script
+under `sh/`.
+
 See [CONTRIBUTING.md](https://github.com/moq-dev/moq/blob/main/CONTRIBUTING.md)
 for branch targeting, commit messages, and reviews, and [Agent setup](/setup/agent)
 if an AI coding agent is doing the work.

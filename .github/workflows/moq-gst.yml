@@ -41,7 +41,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: .github/scripts/release.sh parse-version moq-gst
+        run: sh/gh/release.sh parse-version moq-gst
 
       - name: Build and package (tarball)
         shell: bash
@@ -123,7 +123,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: .github/scripts/release.sh parse-version moq-gst
+        run: sh/gh/release.sh parse-version moq-gst
 
       - name: Install GStreamer dev libraries
         shell: bash
@@ -160,7 +160,7 @@ jobs:
           PLUGIN_DIR: /usr/lib/${{ matrix.deb-multiarch }}/gstreamer-1.0
         run: |
           mkdir -p dist
-          rs/scripts/package-nfpm.sh packaging/moq-gst/nfpm.yaml deb dist/
+          sh/rs/package-nfpm.sh packaging/moq-gst/nfpm.yaml deb dist/
 
       - name: Package .rpm
         shell: bash
@@ -172,7 +172,7 @@ jobs:
           PLUGIN_DIR: /usr/lib64/gstreamer-1.0
         run: |
           mkdir -p dist
-          rs/scripts/package-nfpm.sh packaging/moq-gst/nfpm.yaml rpm dist/
+          sh/rs/package-nfpm.sh packaging/moq-gst/nfpm.yaml rpm dist/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -197,11 +197,11 @@ jobs:
 
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version moq-gst
+        run: sh/gh/release.sh parse-version moq-gst
 
       - name: Find previous tag
         id: prev_tag
-        run: .github/scripts/release.sh prev-tag moq-gst
+        run: sh/gh/release.sh prev-tag moq-gst
 
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -215,10 +215,10 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_TITLE: "moq-gst v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
-        run: .github/scripts/release.sh create artifacts
+        run: sh/gh/release.sh create artifacts
 
       - name: Trigger apt/rpm repo publish
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: .github/scripts/trigger-repo-publish.sh
+        run: sh/gh/trigger-repo-publish.sh

@@ -3,7 +3,7 @@
 # served at https://swiftpackageindex.com/moq-dev/moq-swift/documentation.
 #
 # This file is copied into the published moq-dev/moq-swift mirror by
-# swift/scripts/package.sh, since SPI reads it from the package root.
+# sh/swift/package.sh, since SPI reads it from the package root.
 version: 1
 builder:
   configs:

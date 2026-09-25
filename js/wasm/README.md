@@ -29,7 +29,7 @@ The classes (`Moq.Session`, `Moq.Broadcast`, `Moq.Track`, `Moq.Group`) drop the
 `dist/` is generated, not committed. Build it from the repo root:
 
 ```bash
-just wasm
+just js wasm
 ```
 
 That compiles `rs/moq-wasm` for `wasm32-unknown-unknown`, runs `wasm-bindgen`

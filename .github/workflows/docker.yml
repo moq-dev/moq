@@ -53,7 +53,7 @@ jobs:
             exit 1
           fi
           echo "target=${target}" >> "$GITHUB_OUTPUT"
-          .github/scripts/release.sh parse-version "$target"
+          sh/gh/release.sh parse-version "$target"
 
   build:
     name: Build ${{ matrix.platform }}

@@ -3,89 +3,37 @@
 # Tests that span more than one language. Per-language unit tests live in each
 # language's own justfile; this module aggregates them.
 #
-# Shebang recipes read their arguments as $1..$n.
-set positional-arguments
-
 # Two cross-language interop tests exist:
 #   - https://github.com/moq-dev/smoke installs each client from its PUBLIC
 #     package registry to catch packaging breakage in a release.
 #   - `just test interop` (interop/, below) builds every client from THIS checkout
 #     to catch interop regressions before anything is published.
-# Fall back to the root justfile so `just js test` (etc.) resolve from here.
+# Fall back to the root justfile so `just rs test` resolves from here.
 
 set fallback
 set working-directory := '.'
-# `interop` reads its args as `$1`/`$@`; the `positional-arguments` setting above
-# is what lets a shebang recipe see them.
 
 # The `check` sibling: same diff scoping, same BASE resolution, and what CI runs
-# after `just check`. Only js/rs/py appear here. The kt, swift, and go wrappers
-# build, regenerate bindings, and test in a single script, so their tests run as
-# part of `just check` and there is nothing left to dispatch.
-#
-# `just _changed` resolves through `set fallback` to the root justfile, which is
-# also where it runs, so the paths it prints stay repo-relative.
-#
-# BASE has to be passed as `just test default origin/dev`. This is a module, so
-# a bare `just test origin/dev` makes just look for a recipe by that name rather
-# than reaching the default recipe's parameter.
+# after `just check`. Only js/rs/py have tests to scope; the kt, swift, and go
+# wrappers test inside their `check`. BASE has to be passed as `just test
+# default origin/dev`: a bare `just test origin/dev` names a recipe.
 
 # Run unit tests for what the branch changed since BASE, plus its dependents.
 default $BASE="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    files=$(just _changed "$BASE")
-
-    # Mirrors the root `check`: too long for argv means test everything instead.
-    if [[ "$files" == ALL ]]; then
-    	just all
-    	exit 0
-    fi
-
-    just _tools "$files"
-
-    # Mirrors the root `check`: the dispatch below lives in these two files and
-    # matches no language scope, so a change to either has to run everything or
-    # it goes untested.
-    if grep -qE '^(justfile|test/justfile)$' <<< "$files"; then
-    	echo "test: root orchestration changed; testing everything." >&2
-    	just all
-    	exit 0
-    fi
-
-    # An empty list means "force-run" to the per-lang recipes, which is the
-    # wrong semantic here, so don't dispatch at all.
-    if [[ -n "$files" ]]; then
-    	just js test "$files"
-    	just rs test-changed "$files"
-    	just py test "$files"
-    else
-    	echo "test: nothing changed."
-    fi
+    ../sh/dispatch.sh test "$BASE"
 
 # Run every language's unit tests, unscoped.
 all:
-    just js test
-    just rs test --workspace --exclude moq-net-fuzz
-    just py test
+    ../sh/dispatch.sh test --all
 
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
 # sanity check). `interop --all` runs the full matrix: rust + python + go +
 # browser publish; everyone subscribes (incl. native node/bun JS, the C libmoq
-# client, and the GStreamer moqsrc plugin). --timeout 30 gives headless Chromium
-# cold-start headroom. Other flags pass through, e.g.
+# client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
 interop *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ "${1:-}" == --all ]]; then
-        shift
-        ./interop/interop.sh --publishers rust,python,go,js --subscribers rust,python,go,js,js-native-node,js-native-bun,c,gst --timeout 30 "$@"
-    else
-        ./interop/interop.sh "$@"
-    fi
+    ./interop/interop.sh {{ args }}
 
 # Negative control: no publisher, every subscriber must time out (proves the
 

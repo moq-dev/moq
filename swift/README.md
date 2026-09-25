@@ -82,7 +82,7 @@ is an `AsyncSequence` of the decoded type. Pass matching `compression` on both s
 
 ## Local development
 
-`swift/scripts/check.sh` builds `moq-ffi` for the host, regenerates the UniFFI Swift bindings, builds a single-slice `MoqFFI.xcframework`, and runs `swift test`. Requires macOS with `xcodebuild` and `swift` on `$PATH`. Run via `just swift check`; skips cleanly on non-macOS hosts.
+`sh/swift/check.sh` builds `moq-ffi` for the host, regenerates the UniFFI Swift bindings, builds a single-slice `MoqFFI.xcframework`, and runs `swift test`. Requires macOS with `xcodebuild` and `swift` on `$PATH`. Run via `just swift check`; skips cleanly on non-macOS hosts.
 
 Local development uses one **monolithic** `Package.swift` containing both the `Moq` and `MoqFFI` targets plus the path-based XCFramework, so `swift test` and Xcode work against a single package. The split into two packages exists only in the released artifacts, assembled from the two templates below at release time. Because the FFI module is named `MoqFFI` in both layouts, the wrapper sources (`import MoqFFI`) compile identically either way.
 
@@ -98,7 +98,6 @@ swift/
     Moq/                      Ergonomic wrapper (Client, Server, Origin, Broadcast, Track, Media, Audio, …)
     MoqFFI/                   UniFFI-generated swift (populated by check.sh/package-ffi.sh, gitignored)
   Tests/MoqTests/             Smoke tests
-  scripts/                    check.sh, package{,-ffi}.sh, verify{,-ffi}.sh, publish{,-ffi}.sh
 ```
 
 Edit the templates when changing a released manifest; never copy the monolithic dev-mode form into the release path.
@@ -117,8 +116,8 @@ To release a new wrapper version: bump `swift/VERSION` in a PR. On merge, `relea
 To dry-run a publish locally against a staged tarball:
 
 ```bash
-BUILD_VERSION=<v> ./swift/scripts/publish.sh --dry-run        # wrapper -> moq-swift
-BUILD_VERSION=<v> ./swift/scripts/publish-ffi.sh --dry-run    # bindings -> moq-swift-ffi
+BUILD_VERSION=<v> ./sh/swift/publish.sh --dry-run        # wrapper -> moq-swift
+BUILD_VERSION=<v> ./sh/swift/publish-ffi.sh --dry-run    # bindings -> moq-swift-ffi
 ```
 
 No Apple Developer account or App Store Connect setup needed.

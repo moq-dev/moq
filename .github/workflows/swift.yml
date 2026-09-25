@@ -14,6 +14,7 @@ on:
     branches: [main]
     paths:
       - "swift/**"
+      - "sh/swift/**"
       - "rs/moq-ffi/**"
       - "rs/moq-video/**"
       - "Cargo.lock"
@@ -24,6 +25,7 @@ on:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "swift/**"
+      - "sh/swift/**"
       - "rs/moq-ffi/**"
       - "rs/moq-video/**"
       - "Cargo.lock"
@@ -77,4 +79,4 @@ jobs:
           done
 
       - name: Swift check
-        run: ./swift/scripts/check.sh
+        run: ./sh/swift/check.sh

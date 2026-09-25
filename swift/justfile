@@ -9,29 +9,13 @@ default:
     just check
 
 # Skips cleanly on non-macOS hosts, which is why swift.yml runs it on a Mac.
-#
-# This runs the tests too, so there is no separate `just swift test`. Takes an
-# optional newline-separated list of changed files and skips when none are
-# Swift-scoped; `just swift check` (no FILES) always runs.
+# This runs the tests too, so there is no separate `just swift test`.
 
 # Build moq-ffi for the host, regenerate uniffi bindings, run swift test.
-check $FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -n "$FILES" ]] && ! grep -qE '^(swift/|rs/moq-ffi/)' <<< "$FILES"; then
-    	echo "swift: no Swift changes; skipping."
-    	exit 0
-    fi
-    bash scripts/check.sh
+check:
+    bash ../sh/swift/check.sh
 
 # Assemble the released wrapper package from Package.swift.template.
-
 # Used by .github/workflows/release-swift-lib.yml.
 package *args:
-    bash scripts/package.sh {{ args }}
-
-# Remove SwiftPM build output plus the XCFramework and generated bindings
-
-# that scripts/check.sh lays down (see swift/.gitignore).
-clean:
-    rm -rf .build .swiftpm Package.resolved Sources/MoqFFI/Generated.swift MoqFFI.xcframework
+    bash ../sh/swift/package.sh {{ args }}

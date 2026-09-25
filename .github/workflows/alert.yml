@@ -88,4 +88,4 @@ jobs:
           RUN_REF: ${{ github.event.workflow_run.head_branch }}
           RUN_TITLE: ${{ github.event.workflow_run.display_title }}
           RUN_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
-        run: .github/scripts/alert.sh discord
+        run: sh/gh/alert.sh discord

@@ -9,42 +9,20 @@ set working-directory := '.'
 default:
     just check
 
-# Missing tools are errors so wrapper drift cannot slip past a green check.
-#
 # This runs the tests too, so there is no separate `just kt test`: the script
-# builds, generates, and tests as one gradle invocation. Takes an optional
-# newline-separated list of changed files and skips when none are Kotlin-scoped;
-# `just kt check` (no FILES) always runs.
+# builds, generates, and tests as one gradle invocation.
 
 # Build moq-ffi, regenerate the bindings, and run :moq-ffi:jvmTest + :moq:jvmTest.
-check $FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -n "$FILES" ]] && ! grep -qE '^(kt/|rs/moq-ffi/)' <<< "$FILES"; then
-    	echo "kt: no Kotlin changes; skipping."
-    	exit 0
-    fi
-    bash scripts/check.sh
+check:
+    bash ../sh/kt/check.sh
 
 # Regenerate the checked-in uniffi bindings and host native library without
 # compiling or testing. For environments that intentionally lack Gradle.
 generate:
-    bash scripts/generate.sh
+    bash ../sh/kt/generate.sh
 
 # Assemble the KMP module from per-target moq-ffi binaries + bindings.
 # Used by .github/workflows/release-kt-ffi.yml; see kt/README.md for the
-
 # expected --lib-dir layout.
 package *args:
-    bash scripts/package.sh {{ args }}
-
-# Remove gradle output plus the moq-ffi bindings and native libs that
-# scripts/check.sh generates into the source tree (see kt/.gitignore).
-clean:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    find . -name .claude -prune -o -type d \( -name build -o -name .gradle -o -name .kotlin \) -prune -exec rm -rf {} +
-    rm -rf local.properties \
-    	moq/src/jvmAndAndroidMain/kotlin/uniffi \
-    	moq/src/jvmMain/resources \
-    	moq/src/androidMain/jniLibs
+    bash ../sh/kt/package.sh {{ args }}

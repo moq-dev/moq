@@ -36,7 +36,7 @@ jobs:
 
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version moq-ffi
+        run: sh/gh/release.sh parse-version moq-ffi
 
       # Maturin reads the wheel version from rs/moq-ffi/Cargo.toml (via
       # `dynamic = ["version"]` in pyproject.toml). If a tag is pushed by

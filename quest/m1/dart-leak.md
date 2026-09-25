@@ -18,7 +18,7 @@ bound.
   path.
 
 The fix belongs upstream, not here: `dart/moq_ffi/lib/src/uniffi_runtime.dart`
-is generated, and `dart/scripts/check.sh` diffs it against a fresh
+is generated, and `sh/dart/check.sh` diffs it against a fresh
 `generate.sh` run, so an in-tree patch fails the staleness check by design.
 
 That upstream fix is merged as

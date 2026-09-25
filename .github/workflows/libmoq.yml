@@ -55,7 +55,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: .github/scripts/release.sh parse-version libmoq
+        run: sh/gh/release.sh parse-version libmoq
 
       - name: Build and package
         shell: bash
@@ -87,11 +87,11 @@ jobs:
 
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version libmoq
+        run: sh/gh/release.sh parse-version libmoq
 
       - name: Find previous tag
         id: prev_tag
-        run: .github/scripts/release.sh prev-tag libmoq
+        run: sh/gh/release.sh prev-tag libmoq
 
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -105,7 +105,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_TITLE: "libmoq v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
-        run: .github/scripts/release.sh create artifacts
+        run: sh/gh/release.sh create artifacts
 
   # The OBS plugin (cpp/obs) statically links libmoq, so it ships with every
   # libmoq release: rebuild it against the release we just published (no
@@ -140,7 +140,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: .github/scripts/release.sh parse-version libmoq
+        run: sh/gh/release.sh parse-version libmoq
 
       # Native Xcode / Visual Studio; libobs/Qt6/ffmpeg come from the obs-deps
       # bundle and libmoq from the release we just published (--libmoq-release).
@@ -173,7 +173,7 @@ jobs:
 
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version libmoq
+        run: sh/gh/release.sh parse-version libmoq
 
       # Only the obs-moq archives: the libmoq-* artifacts from the build job
       # belong to the libmoq release, not this one.
@@ -208,4 +208,4 @@ jobs:
           RELEASE_TAG: "obs-moq-v${{ steps.parse.outputs.version }}"
           RELEASE_TITLE: "obs-moq v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
-        run: .github/scripts/release.sh create artifacts
+        run: sh/gh/release.sh create artifacts

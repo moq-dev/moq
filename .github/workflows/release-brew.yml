@@ -98,7 +98,7 @@ jobs:
           VERSION: ${{ steps.parse.outputs.version }}
         run: |
           mkdir -p rendered
-          ./.github/scripts/render-formula.sh \
+          ./sh/gh/render-formula.sh \
             --template ".github/homebrew/Formula/${CRATE}.rb.tmpl" \
             --version "$VERSION" \
             --release-dir release-assets \
@@ -156,7 +156,7 @@ jobs:
           EOF
           fi
 
-          python3 ../.github/scripts/install-formula.py "$CRATE" "../rendered/${CRATE}.rb" .
+          python3 ../sh/gh/install-formula.py "$CRATE" "../rendered/${CRATE}.rb" .
 
           if git diff --quiet && [[ -z "$(git status --porcelain)" ]]; then
             echo "No changes to commit (formula already up to date)."

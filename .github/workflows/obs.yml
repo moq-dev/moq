@@ -48,6 +48,7 @@ on:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "cpp/obs/**"
+      - "sh/obs/**"
       - "rs/libmoq/**"
       - "rs/**/Cargo.toml"
       - "rs/**/build.rs"

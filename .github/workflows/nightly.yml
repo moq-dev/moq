@@ -121,7 +121,8 @@ jobs:
       matrix:
         # `rs uring` is a separate feature compile (off the default set) and
         # kernel-gated below 6.12. The embedding tests for io_uring live there.
-        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring"]
+        # `gh test` exercises the release tooling, which no pull request runs.
+        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "gh test"]
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main

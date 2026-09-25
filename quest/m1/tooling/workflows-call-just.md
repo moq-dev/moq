@@ -39,7 +39,3 @@ the swift `package`, `package-ffi`, `publish`, `publish-ffi`, `verify`,
   `workflow_dispatch` of apt-repo.yml, rpm-repo.yml, and release-winget.yml
   where the inputs allow a dry run. The tag-triggered release workflows are
   verified by the next release; say so in the PR.
-
-## Required
-
-- [Thin justfiles](/quest/m1/tooling/justfiles.md) - establishes `sh/` and the module recipes the workflows will call
