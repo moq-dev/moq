@@ -8,8 +8,8 @@
 //! refuses. Both encodings are read; one document never mixes them.
 
 use moq_pattern::{Pattern, Patterns};
-use serde::{Deserialize, Serialize};
-use serde_with::{OneOrMany, TimestampSeconds, formats::PreferMany, serde_as};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_with::{TimestampSeconds, serde_as};
 
 /// The wire form of [`Claims`](crate::Claims).
 #[serde_with::skip_serializing_none]
@@ -19,11 +19,13 @@ use serde_with::{OneOrMany, TimestampSeconds, formats::PreferMany, serde_as};
 pub(crate) struct Claims {
 	#[serde(skip_serializing_if = "String::is_empty")]
 	root: String,
-	#[serde_as(as = "Option<OneOrMany<_, PreferMany>>")]
-	put: Option<Vec<String>>,
-	#[serde_as(as = "Option<OneOrMany<_, PreferMany>>")]
-	get: Option<Vec<String>>,
+	#[serde(deserialize_with = "present")]
+	put: Option<Prefixes>,
+	#[serde(deserialize_with = "present")]
+	get: Option<Prefixes>,
+	#[serde(deserialize_with = "present")]
 	publish: Option<Patterns>,
+	#[serde(deserialize_with = "present")]
 	subscribe: Option<Patterns>,
 	#[serde_as(as = "Option<TimestampSeconds<i64>>")]
 	exp: Option<std::time::SystemTime>,
@@ -36,8 +38,8 @@ impl From<crate::Claims> for Claims {
 		let grants = Grants::encode(claims.publish, claims.subscribe);
 		Self {
 			root: claims.root,
-			put: grants.put,
-			get: grants.get,
+			put: grants.put.map(Prefixes::Many),
+			get: grants.get.map(Prefixes::Many),
 			publish: grants.publish,
 			subscribe: grants.subscribe,
 			exp: claims.expires,
@@ -51,8 +53,8 @@ impl TryFrom<Claims> for crate::Claims {
 
 	fn try_from(wire: Claims) -> Result<Self, Self::Error> {
 		let grants = Grants {
-			put: wire.put,
-			get: wire.get,
+			put: wire.put.map(Prefixes::into_vec),
+			get: wire.get.map(Prefixes::into_vec),
 			publish: wire.publish,
 			subscribe: wire.subscribe,
 		};
@@ -74,9 +76,13 @@ impl TryFrom<Claims> for crate::Claims {
 pub(crate) struct Scope {
 	#[serde(skip_serializing_if = "String::is_empty")]
 	root: String,
+	#[serde(deserialize_with = "present")]
 	put: Option<Vec<String>>,
+	#[serde(deserialize_with = "present")]
 	get: Option<Vec<String>>,
+	#[serde(deserialize_with = "present")]
 	publish: Option<Patterns>,
+	#[serde(deserialize_with = "present")]
 	subscribe: Option<Patterns>,
 }
 
@@ -110,6 +116,29 @@ impl TryFrom<Scope> for crate::Scope {
 			subscribe,
 		})
 	}
+}
+
+/// Legacy claims wrote a single prefix as a bare string.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Prefixes {
+	One(String),
+	Many(Vec<String>),
+}
+
+impl Prefixes {
+	fn into_vec(self) -> Vec<String> {
+		match self {
+			Self::One(prefix) => vec![prefix],
+			Self::Many(prefixes) => prefixes,
+		}
+	}
+}
+
+/// A present field, refusing an explicit `null` rather than reading it as absent,
+/// so a `null` can't hide one encoding from the mixed-encoding check.
+fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
+	T::deserialize(deserializer).map(Some)
 }
 
 /// The grant fields shared by both documents, in whichever encoding they arrived.

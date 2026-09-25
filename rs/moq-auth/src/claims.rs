@@ -392,6 +392,11 @@ mod tests {
 	}
 
 	#[test]
+	fn scope_refuses_null_grants() {
+		assert!(serde_json::from_str::<Scope>(r#"{"put":null,"publish":["room"]}"#).is_err());
+	}
+
+	#[test]
 	fn scope_reads_legacy_prefixes_as_subtrees() {
 		let scope: Scope = serde_json::from_str(r#"{"root":"demo","put":["room"],"get":[""]}"#).unwrap();
 		assert_eq!(scope.publish, patterns(&["room/**"]));
@@ -534,6 +539,8 @@ mod tests {
 			r#"{"root":"test","publish":["pub1"],"get":["sub1"]}"#,
 			r#"{"root":"test","put":[],"subscribe":["sub1"]}"#,
 			r#"{"root":"test","put":["pub1"],"cluster":true}"#,
+			r#"{"root":"test","put":null,"publish":["pub1"]}"#,
+			r#"{"root":"test","publish":null,"subscribe":["sub1"]}"#,
 		] {
 			assert!(serde_json::from_str::<Claims>(json).is_err(), "{json}");
 		}
