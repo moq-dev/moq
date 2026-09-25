@@ -14,7 +14,3 @@ frames remain data. LOC producers are still silent, because a released LOC consu
 submits an empty payload to the decoder. When the bullet below clears, have
 the LOC producers write the marker at `cut` and `finish` exactly as the
 legacy producer does (`Container::finish_group` on `loc::Wire(Kind::Video)`), and extend the same tests.
-
-## Required
-
-- A release of `moq-mux` and `@moq/loc` whose video consumers skip an empty LOC payload has shipped
