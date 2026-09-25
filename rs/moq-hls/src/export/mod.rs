@@ -6,7 +6,8 @@
 //! per-track group ranges), and media bytes move only when an HTTP client requests a segment,
 //! which FETCHes exactly the groups that segment covers from the relay cache and transmuxes
 //! them to CMAF. A broadcast whose catalog advertises no timeline can't be served this way and
-//! is skipped.
+//! is skipped. A `moq-archive` recording replayed onto a broadcast is served the same way: its
+//! playlists read only the stored timeline, and each segment GETs one stored object.
 //!
 //! The same machinery serves two kinds of consumer:
 //!
@@ -18,6 +19,8 @@
 //!   yield every rendition and every finalized segment in order, for mirroring a broadcast to
 //!   storage.
 
+#[cfg(test)]
+mod archive_tests;
 pub mod master;
 mod mpd;
 mod playlist;
