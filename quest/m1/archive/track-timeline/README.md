@@ -9,7 +9,9 @@ edge like `moq-hls` derives HLS and DASH from group timestamps, so a publisher
 never needs to know about HLS.
 
 Nothing on `main` has users yet: break the timeline, catalog `archive` entry,
-and recording format in place, with no compatibility path.
+and recording format in place, with no compatibility path, even though hang
+0.21 released the current shape. The children merge into this line's branch,
+so Rust and JS reach `main` together.
 
 ## Plan
 
