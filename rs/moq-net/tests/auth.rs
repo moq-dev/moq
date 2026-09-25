@@ -472,6 +472,53 @@ async fn a_refused_setup_token_grants_nothing() {
 	.expect("timed out");
 }
 
+/// Dropping the requests refuses tokens already queued, not only later ones.
+#[tokio::test]
+async fn dropping_the_requests_refuses_queued_tokens() {
+	within(async {
+		let mut pair = connect(Options {
+			client_publish: Some(produce_origin(2)),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut requests = pair.requests.take().unwrap();
+		// Wait for the setup token to be queued, then hand it back to the queue's owner.
+		let first = requests.next().await.expect("setup token");
+		drop(first.accept(Grant::default()));
+		let auth = pair.client.auth();
+		let pending = tokio::spawn(async move { auth.add("queued").await.map(drop) });
+		// Give the second token time to reach the queue before dropping it.
+		tokio::time::sleep(Duration::from_millis(50)).await;
+		drop(requests);
+
+		let err = pending.await.unwrap().err().expect("refused");
+		assert!(matches!(err, Error::Session(SessionError::Unauthorized)), "{err:?}");
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A closed session holds no grant: every token ended with it.
+#[tokio::test]
+async fn a_closed_session_holds_no_grant() {
+	within(async {
+		let pair = connect(Options {
+			client_publish: Some(produce_origin(2)),
+			server_subscribe: Some(produce_origin(1)),
+			..Default::default()
+		})
+		.await;
+		assert_ne!(granted(&pair.client).await, Grant::default());
+		let token = pair.client.auth().grant();
+
+		pair.server.abort(Error::Cancel);
+		wait_for(token, |g| g == &Some(Grant::default())).await;
+	})
+	.await
+	.expect("timed out");
+}
+
 /// A peer that takes no tokens in band resets the stream, which reads as
 /// unsupported rather than a refusal: the same as a peer that predates AUTH.
 #[tokio::test]

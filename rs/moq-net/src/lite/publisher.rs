@@ -1293,7 +1293,12 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 					self.absolute = self.shared.origin.absolute(&msg.broadcast).to_owned();
 					self.track = msg.track.to_string();
 					tracing::debug!(broadcast = %self.absolute, track = %self.track, "track info requested");
+					// Checked before anything is resolved, like a subscription.
+					let allowed = self.shared.auth.allows(crate::auth::Direction::Publish, msg.broadcast.as_str());
 					self.state = TrackInfoState::Hop { msg };
+					if !allowed {
+						return Poll::Ready(Err(Error::Unauthorized));
+					}
 				}
 				TrackInfoState::Hop { .. } => {
 					// The peer requested this exact path, so it has already seen an
@@ -1690,7 +1695,12 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 					self.group = msg.group;
 					tracing::info!(broadcast = %self.absolute, track = %self.track, group = %self.group, "fetch started");
 
+					// Checked before anything is resolved, like a subscription.
+					let allowed = self.shared.auth.allows(crate::auth::Direction::Publish, msg.broadcast.as_str());
 					self.state = FetchState::Hop { msg };
+					if !allowed {
+						return Poll::Ready(Err(Error::Unauthorized));
+					}
 				}
 				FetchState::Hop { .. } => {
 					// The peer fetched this exact path, so it has already seen an

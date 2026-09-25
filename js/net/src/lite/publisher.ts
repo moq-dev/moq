@@ -574,6 +574,14 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
+		// Serve only what our grant lets us publish, and stop once it no longer does.
+		// Checked before resolving, so a denied request never reaches the origin.
+		const denied = () => this.#denied(msg.broadcast);
+		if (denied()) {
+			stream.writer.reset(new SessionError(SessionCode.Unauthorized, { reason: msg.broadcast }));
+			return;
+		}
+
 		let front: broadcast.Consumer | undefined;
 		try {
 			front =
@@ -586,16 +594,6 @@ export class Publisher {
 		if (!front) {
 			console.debug(`publish unknown: broadcast=${msg.broadcast}`);
 			stream.writer.reset(new NotFound(`broadcast ${msg.broadcast}`));
-			return;
-		}
-
-		// Serve only what our grant lets us publish, and stop once it no longer does.
-		const denied = () => {
-			const grant = this.#grant?.peek();
-			return grant !== undefined && !grant.publish.matches(msg.broadcast);
-		};
-		if (denied()) {
-			stream.writer.reset(new SessionError(SessionCode.Unauthorized, { reason: msg.broadcast }));
 			return;
 		}
 
@@ -711,6 +709,10 @@ export class Publisher {
 	async runFetch(msg: Fetch, stream: Stream) {
 		if (!supportsTrackStream(this.version)) {
 			stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
+			return;
+		}
+		if (this.#denied(msg.broadcast)) {
+			stream.writer.reset(new SessionError(SessionCode.Unauthorized, { reason: msg.broadcast }));
 			return;
 		}
 
@@ -915,6 +917,10 @@ export class Publisher {
 	 * @internal
 	 */
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
+		if (this.#denied(msg.broadcast)) {
+			stream.writer.reset(new SessionError(SessionCode.Unauthorized, { reason: msg.broadcast }));
+			return;
+		}
 		try {
 			const front =
 				this.#broadcasts.peek()?.get(msg.broadcast) ??
@@ -929,6 +935,12 @@ export class Publisher {
 			console.debug(`track unknown: broadcast=${msg.broadcast} track=${msg.track}`);
 			stream.writer.reset(error(err));
 		}
+	}
+
+	// Whether our grant excludes publishing this broadcast. No grant yet allows it.
+	#denied(broadcast: Path.Valid): boolean {
+		const grant = this.#grant?.peek();
+		return grant !== undefined && !grant.publish.matches(broadcast);
 	}
 
 	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.

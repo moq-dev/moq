@@ -58,6 +58,13 @@ impl Grant {
 		}
 	}
 
+	fn patterns(&self, direction: Direction) -> &Patterns {
+		match direction {
+			Direction::Publish => &self.publish,
+			Direction::Subscribe => &self.subscribe,
+		}
+	}
+
 	/// Fold `other` into this grant: the paths either allows, lapsing at the
 	/// earlier expiry, which is when the union next shrinks.
 	fn union(&mut self, other: &Self) {
@@ -347,6 +354,16 @@ impl Handle {
 		Poll::Ready(state.union.clone())
 	}
 
+	/// Whether the union allows `path` right now. A union that is still `None` (no
+	/// answer yet, or a version without AUTH) allows everything.
+	pub(crate) fn allows(&self, direction: Direction, path: &str) -> bool {
+		let state = self.state.read();
+		state
+			.union
+			.as_ref()
+			.is_none_or(|union| union.patterns(direction).matches(path))
+	}
+
 	/// End the session: fail every pending token, end every watch, and close the
 	/// requests.
 	pub(crate) fn close(&self, err: Error) {
@@ -357,9 +374,11 @@ impl Handle {
 		state.closed = Some(err.clone());
 		state.opening.clear();
 		for slot in state.tokens.values_mut() {
+			slot.grant = None;
 			slot.answered.get_or_insert(Err(err.clone()));
 			slot.ended.get_or_insert(err.clone());
 		}
+		state.recompute();
 		if let Acceptor::App(queue) = &state.acceptor {
 			queue.close();
 		}
@@ -535,6 +554,9 @@ impl Requests {
 impl Drop for Requests {
 	fn drop(&mut self) {
 		self.queue.close();
+		// The session keeps a handle to the queue, so drop what is already queued here:
+		// each request refuses its token as it drops.
+		while let Ok(Some(_)) = self.queue.try_pop() {}
 	}
 }
 
@@ -692,11 +714,7 @@ impl Gate {
 			let Some(union) = ready_or!(self.handle.poll_union(&mut self.epoch, waiter)) else {
 				continue;
 			};
-			let patterns = match self.direction {
-				Direction::Publish => &union.publish,
-				Direction::Subscribe => &union.subscribe,
-			};
-			if !patterns.matches(self.path.as_str()) {
+			if !union.patterns(self.direction).matches(self.path.as_str()) {
 				return Poll::Ready(());
 			}
 		}

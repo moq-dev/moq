@@ -465,14 +465,20 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 					};
 					match reply {
 						super::AuthReply::Ok(ok) => {
-							*answered = true;
 							let now = crate::runtime::Timers::now(&self.runtime);
+							// The expiry is the peer's number: one past the local clock's range
+							// is malformed, not a reason to panic.
+							let expires = match ok.expires.map(|expires| now.checked_add(expires)) {
+								Some(None) => return Poll::Ready(Error::ProtocolViolation),
+								expires => expires.flatten(),
+							};
+							*answered = true;
 							self.handle.granted(
 								self.id,
 								crate::auth::Grant {
 									publish: ok.publish,
 									subscribe: ok.subscribe,
-									expires: ok.expires.map(|expires| now + expires),
+									expires,
 								},
 							);
 						}

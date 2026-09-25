@@ -125,6 +125,9 @@ export class AuthError {
 	}
 
 	async #encode(w: Writer) {
+		if (new TextEncoder().encode(this.reason).byteLength > MAX_REASON) {
+			throw new Error("AUTH_ERROR reason exceeds 8,192 bytes");
+		}
 		await w.u53(this.code);
 		await w.string(this.reason);
 	}
@@ -296,10 +299,13 @@ class IssuedGrant implements Issued {
 		this.#writes = this.#writes
 			.then(() => encodeAuthReply(this.#stream.writer, reply, this.#version))
 			.catch((err: unknown) => {
-				if (!(err instanceof Unsupported)) return;
+				// The peer already closed the stream: nothing left to tell it.
+				if (err instanceof StreamError) return;
 				// This wire carries prefixes only, so a pattern grant cannot be told, only
 				// withheld: reset the stream, which the presenter reads as unsupported rather
-				// than refused. Never widen it.
+				// than refused. Never widen it. Any other reply that fails to encode resets
+				// the same way.
+				if (!(err instanceof Unsupported)) console.warn("auth reply not sent", err);
 				this.#done = true;
 				this.#stream.writer.reset(err);
 			});
