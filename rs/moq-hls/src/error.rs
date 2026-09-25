@@ -108,6 +108,10 @@ pub enum Error {
 		value: u64,
 	},
 
+	/// An export generation had characters a URL path segment can't carry verbatim.
+	#[error("invalid generation {0:?}: expected ASCII letters, digits, '-', or '_'")]
+	InvalidGeneration(String),
+
 	/// A playlist or segment URI could not be resolved against its base.
 	#[error("url parse: {0}")]
 	UrlParse(#[from] url::ParseError),

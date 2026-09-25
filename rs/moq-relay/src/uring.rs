@@ -68,6 +68,8 @@ struct Serve {
 	alpns: Arc<Vec<String>>,
 	/// The negotiated-version restriction, when the operator set one.
 	versions: moq_net::Versions,
+	/// The address every worker socket shares, reported as a session's `local`.
+	local: SocketAddr,
 }
 
 /// A bound group of io_uring QUIC workers sharing one port.
@@ -308,6 +310,7 @@ impl Workers {
 			tokio: tokio::runtime::Handle::current(),
 			alpns: self.alpns.clone(),
 			versions: self.versions.clone(),
+			local: self.addr,
 		};
 
 		let cores = match self.pin {
@@ -604,9 +607,11 @@ async fn serve_connection(
 ) -> anyhow::Result<()> {
 	use web_transport_trait::poll::Session as _;
 
+	// Read the link facts now: the handshake below consumes the connection.
+	let remote = conn.remote_addr();
+	let sni = conn.server_name().map(str::to_owned);
 	// TLS validated this against the configured roots before the connection
-	// existed, so a chain here is an authenticated peer. Read it now: the
-	// handshake below consumes the connection.
+	// existed, so a chain here is an authenticated peer.
 	let identity = conn.peer_chain().map(|chain| {
 		let chain = chain
 			.into_iter()
@@ -691,8 +696,15 @@ async fn serve_connection(
 	} else {
 		let mut auth_request = serve.auth.request(moq_auth::Transport::Quic, path);
 		auth_request.query = query;
-		// moq-uring's connection does not expose the peer address or SNI yet, so
-		// the request carries the protocol alone; see quest/m1/uring-link-facts.md.
+		auth_request.remote = Some(remote);
+		auth_request.local = Some(serve.local);
+		// Like the tokio listener: the SNI, else the host a WebTransport client addressed.
+		auth_request.server_name = sni.or_else(|| {
+			url.as_ref()
+				.and_then(|url| url.host_str())
+				.filter(|host| !host.is_empty())
+				.map(str::to_owned)
+		});
 		auth_request.alpn = alpn.clone();
 		auth_request.role = request.role().map(|role| match role {
 			moq_net::Role::Publisher => moq_auth::Role::Publisher,
@@ -746,6 +758,7 @@ async fn serve_connection(
 		};
 
 	let peer_hop = request.peer_hop();
+	let lease = lease.with_stats(grants.stats.clone());
 	let mut request = request.with_stats(grants.stats);
 	if let Some(subscribe) = grants.subscribe {
 		request = request.with_publisher(&subscribe);

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2](https://github.com/moq-dev/moq/compare/moq-relay-v0.15.1...moq-relay-v0.15.2) - 2026-09-24
+
+### Fixed
+
+- *(relay)* fix the lease deadline on tokio's clock and pause the outage test ([#3969](https://github.com/moq-dev/moq/pull/3969))
+
 ## [0.15.1](https://github.com/moq-dev/moq/compare/moq-relay-v0.15.0...moq-relay-v0.15.1) - 2026-09-23
 
 ### Fixed

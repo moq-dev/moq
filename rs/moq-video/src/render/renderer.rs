@@ -1287,6 +1287,130 @@ mod tests {
 		}
 	}
 
+	/// A decoder that decodes into its surfaces again still has every picture
+	/// drawn as the one just decoded.
+	///
+	/// Each picture is drawn and dropped before the next access unit goes in,
+	/// the way a player draws a picture and moves on, so the decoder gets its
+	/// surfaces back once the renderer's GPU work is done with them. A surface
+	/// handed back too early shows up as a picture with the block where a later
+	/// one has it. The same stream decoded to the CPU is the reference.
+	///
+	/// Ignored: needs a Vulkan GPU and a VA-API device. Run with
+	/// `cargo test -p moq-video --features render,vaapi recycled -- --ignored --nocapture`.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[tokio::test]
+	#[ignore = "needs a Vulkan GPU and a VA-API device"]
+	async fn recycled_decoder_surfaces_draw_the_latest_picture() {
+		use std::os::unix::fs::MetadataExt as _;
+
+		use crate::decode::backend::{self, Codec, vaapi};
+
+		const PICTURES: u64 = 30;
+		let Some((device, queue)) = dmabuf_gpu().await else {
+			eprintln!("skipping: no Vulkan adapter with DMA-BUF external memory");
+			return;
+		};
+		let decode = |output| {
+			backend::open(
+				Codec::H264,
+				&crate::decode::Config {
+					kind: crate::decode::Kind::Named(vaapi::NAME.into()),
+					output,
+					..crate::decode::Config::new()
+				},
+			)
+		};
+		let Ok(mut exporting) = decode(crate::Output::Native) else {
+			eprintln!("skipping: no VA-API H.264 decoder");
+			return;
+		};
+		let mut downloading = decode(crate::Output::Cpu).expect("a second decoder");
+
+		// A block moving across a gradient, so a picture drawn from a stale
+		// import shows the block where an earlier picture had it.
+		let size = Size::new(320, 240);
+		let (width, height) = (size.width, size.height);
+		let picture = |step: u64| {
+			let mut rgba = vec![0u8; (width * height * 4) as usize];
+			let x0 = (step as u32 * 8) % (width / 2);
+			for y in 0..height {
+				for x in 0..width {
+					let index = ((y * width + x) * 4) as usize;
+					let block = (height / 4..height / 2).contains(&y) && (x0..x0 + width / 4).contains(&x);
+					rgba[index] = if block { 240 } else { (x * 255 / width) as u8 };
+					rgba[index + 1] = (y * 255 / height) as u8;
+					rgba[index + 2] = ((x + y) * 255 / (width + height)) as u8;
+					rgba[index + 3] = 255;
+				}
+			}
+			Surface::rgba(&rgba, size).expect("a valid RGBA frame")
+		};
+		let mut encoder = crate::encode::Encoder::new(&crate::encode::Config {
+			kind: crate::encode::Kind::Software,
+			..crate::encode::Config::new(width, height, crate::Rate::new(30, 1).unwrap())
+		})
+		.expect("a software H.264 encoder");
+
+		let config = Config {
+			usage: wgpu::TextureUsages::COPY_SRC,
+			..Config::new()
+		};
+		let mut importing = Renderer::new(&device, &queue, config.clone()).expect("a renderer");
+		let mut uploading = Renderer::new(&device, &queue, config).expect("a renderer");
+
+		let mut buffers = std::collections::HashSet::new();
+		let mut drawn = 0;
+		for index in 0..PICTURES {
+			if index == 0 {
+				encoder.cut().unwrap();
+			}
+			let frame = Frame::new(picture(index), Timestamp::from_micros(index * 33_333).unwrap());
+			for unit in encoder.encode(&frame).expect("encode a picture") {
+				let exported = exporting
+					.decode(unit.payload.clone(), unit.timestamp, index == 0)
+					.expect("decode to the GPU");
+				let downloaded = downloading
+					.decode(unit.payload, unit.timestamp, index == 0)
+					.expect("decode to the CPU");
+				assert_eq!(exported.len(), downloaded.len(), "the two decoders disagreed");
+
+				for (gpu, cpu) in exported.iter().zip(&downloaded) {
+					let Surface::DmaBuf(buffer) = &gpu.surface else {
+						panic!("picture {index} did not come back GPU-resident");
+					};
+					let export = buffer.export().expect("export the decoded surface");
+					let file = std::fs::File::from(export.as_fd().try_clone_to_owned().expect("duplicate"));
+					buffers.insert(file.metadata().expect("stat the DMA-BUF").ino());
+					drop((file, export));
+
+					let texture = importing.render(gpu).expect("draw the imported picture");
+					assert_eq!(importing.strikes, 0, "picture {index} fell back to the CPU");
+					let zero_copy = readback(&device, &queue, &texture).await;
+					let texture = uploading.render(cpu).expect("draw the downloaded picture");
+					let reference = readback(&device, &queue, &texture).await;
+
+					for (pixel, (&imported, &expected)) in zero_copy.iter().zip(&reference).enumerate() {
+						let drift = (0..4).map(|c| imported[c].abs_diff(expected[c])).max().unwrap_or(0);
+						let (x, y) = (pixel % width as usize, pixel / width as usize);
+						assert!(
+							drift <= 2,
+							"picture {index} at ({x}, {y}): imported {imported:?}, downloaded {expected:?}"
+						);
+					}
+					drawn += 1;
+				}
+			}
+		}
+
+		eprintln!("{drawn} pictures drawn from {} buffers", buffers.len());
+		assert!(drawn > 0, "the decoder produced no pictures");
+		assert!(
+			(buffers.len() as u64) < PICTURES,
+			"the decoder decoded every picture into a new buffer, so nothing here is reused"
+		);
+	}
+
 	/// A pool-backed NV12 surface, shaped like a hardware decode's output.
 	#[cfg(target_os = "macos")]
 	fn pooled(size: Size, rgba: [u8; 4]) -> crate::Surface {

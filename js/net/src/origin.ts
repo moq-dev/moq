@@ -14,7 +14,7 @@ import { Derived, type Dispose, type GetPromise, type Getter, getter, Once, Sign
 import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { Route, routesEqual } from "./hop.ts";
+import { isAnonymous, Route, routesEqual } from "./hop.ts";
 import { hooks, scopeCaptures, scopeOverlaps } from "./internal.ts";
 import * as Path from "./path.ts";
 import { type Advertised, registerWire, wireOf } from "./wire.ts";
@@ -54,7 +54,7 @@ export interface RequestSlot {
  * One advertised prefix: hops and cost, plus an optional server that answers
  * requests beneath it.
  *
- * Newest entry per prefix is the one requests resolve through. An originated
+ * The preferred entry per prefix is the one requests resolve through. An originated
  * entry is forwarded by sessions; a received one is not, so a shared origin
  * cannot echo a peer's announcements back to it.
  *
@@ -65,6 +65,37 @@ export interface RouteEntry {
 	readonly route: Signal<Route>;
 	readonly originated: boolean;
 	readonly server?: ServeState;
+}
+
+/** Orders two routes by preference: identified before anonymous, then lower warm cost, then lower cold cost. */
+function compareRoutes(a: Route, b: Route): number {
+	const anonymous = Number(isAnonymous(a)) - Number(isAnonymous(b));
+	if (anonymous !== 0) return anonymous;
+	if (a.cost.warm !== b.cost.warm) return a.cost.warm < b.cost.warm ? -1 : 1;
+	if (a.cost.cold !== b.cost.cold) return a.cost.cold < b.cost.cold ? -1 : 1;
+	return 0;
+}
+
+/** The preferred of `entries` (newest first) not skipped: the best route, then fewest hops, then newest. */
+function preferredEntry(entries: readonly RouteEntry[], skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
+	let best: RouteEntry | undefined;
+	for (const entry of entries) {
+		if (skip?.(entry)) continue;
+		if (!best) {
+			best = entry;
+			continue;
+		}
+		const a = entry.route.peek();
+		const b = best.route.peek();
+		const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
+		if (order < 0) best = entry;
+	}
+	return best;
+}
+
+/** Whether a session received `entry`, so it is never forwarded to a peer. */
+function received(entry: RouteEntry): boolean {
+	return !entry.originated;
 }
 
 function noCapacity(): StreamError {
@@ -173,11 +204,14 @@ class OriginState {
 	// connections serving or feeding it. Undefined once the origin closes, so late
 	// writes fail loudly.
 	//
-	// Local is what this endpoint creates, keyed by exact path: reachable for
-	// subscribes whether or not it is advertised. Routes is the advertisement table:
-	// prefixes a dynamic handle or a received session covers, newest first. They stay
-	// separate so a session can never announce a received entry back to a peer, which
-	// is what makes an origin shared by both directions echo-free.
+	// Created is what this endpoint publishes, keyed by exact path, announced or not.
+	// Local is the announced subset, with its route in advertisedLocal: a broadcast
+	// exists for nobody, here or at a peer, until it announces. Routes is the
+	// advertisement table: prefixes a dynamic handle or a received session covers,
+	// newest first. Local and routes stay separate so a session can never announce a
+	// received entry back to a peer, which is what makes an origin shared by both
+	// directions echo-free.
+	created: Map<Path.Valid, broadcast.Consumer> | undefined = new Map();
 	local = new VersionedSignal<Map<Path.Valid, broadcast.Consumer> | undefined>(new Map());
 	advertisedLocal = new VersionedSignal<Map<Path.Valid, Route> | undefined>(new Map());
 	routes = new VersionedSignal<Map<Path.Valid, RouteEntry[]> | undefined>(new Map());
@@ -203,13 +237,15 @@ class OriginState {
 		const local = new Map<Path.Valid, Advertised>();
 		const available = new Map<Path.Valid, Route>();
 		for (const [path, routes] of this.routes.peek() ?? []) {
-			const entry = routes[0];
+			const entry = preferredEntry(routes);
 			if (!entry) continue;
 			const value = { identity: entry.identity, route: entry.route.peek() };
 			remote.set(path, value);
 			available.set(path, value.route);
 		}
 		for (const [path, front] of this.local.peek() ?? []) {
+			const routes = this.routes.peek()?.get(path);
+			if (!this.localWins(path, routes && preferredEntry(routes))) continue;
 			const value = { identity: front, route: this.advertisedLocal.peek()?.get(path) ?? Route.default };
 			local.set(path, value);
 			available.set(path, value.route);
@@ -277,7 +313,8 @@ class OriginState {
 		const requests = this.requests.peek();
 		for (const [path, cached] of [...this.materialized]) {
 			if (!Path.hasPrefix(prefix, path)) continue;
-			if (cached.entry !== this.bestEntry(path, requests?.get(path)?.refused)) {
+			const refused = requests?.get(path)?.refused;
+			if (cached.entry !== this.bestEntry(path, (entry) => refused?.has(entry) ?? false)) {
 				this.materialized.delete(path);
 				cached.front.close();
 			}
@@ -297,13 +334,17 @@ class OriginState {
 			return;
 		}
 		const next = new Map<Path.Valid, Advertised>();
+		for (const [prefix, entries] of routes ?? []) {
+			const mine = preferredEntry(entries, received);
+			if (mine) next.set(prefix, { identity: mine.identity, route: mine.route.peek() });
+		}
+		// A local broadcast and an originated dynamic at one path compete on cost, as they do for requests.
 		for (const [path, route] of advertised ?? []) {
 			const front = local?.get(path);
-			if (front) next.set(path, { identity: front, route });
-		}
-		for (const [prefix, entries] of routes ?? []) {
-			const mine = entries.find((entry) => entry.originated);
-			if (mine) next.set(prefix, { identity: mine.identity, route: mine.route.peek() });
+			const entries = routes?.get(path);
+			if (front && this.localWins(path, entries && preferredEntry(entries, received))) {
+				next.set(path, { identity: front, route });
+			}
 		}
 		this.originated.set(next);
 	}
@@ -320,14 +361,14 @@ class OriginState {
 		cached.front.close();
 	}
 
-	/** The newest entry on the most specific route covering `path`, skipping `refused`, if any. */
-	bestEntry(path: Path.Valid, refused?: ReadonlySet<RouteEntry>): RouteEntry | undefined {
+	/** The preferred entry on the most specific route covering `path`, ignoring skipped entries, if any. */
+	bestEntry(path: Path.Valid, skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
 		let bestPrefix: Path.Valid | undefined;
 		let best: RouteEntry | undefined;
 		for (const [prefix, entries] of this.routes.peek() ?? []) {
-			const entry = entries.find((candidate) => !refused?.has(candidate));
-			if (!entry) continue;
 			if (!Path.hasPrefix(prefix, path)) continue;
+			const entry = preferredEntry(entries, skip);
+			if (!entry) continue;
 			if (bestPrefix === undefined || prefix.length > bestPrefix.length) {
 				bestPrefix = prefix;
 				best = entry;
@@ -337,18 +378,36 @@ class OriginState {
 	}
 
 	/**
-	 * What `path` resolves to: a local publish, a broadcast materialized from the best
-	 * covering route, or the blind answer.
+	 * Whether the announced local broadcast at `path` wins over `entry`, the best route a
+	 * session or dynamic handle announced there. Cost decides, as for any two routes: an
+	 * identified route strictly cheaper than the local one wins, and the local broadcast
+	 * wins a tie. A route at a shorter prefix never competes, since the most specific
+	 * prefix wins outright. False when nothing is announced locally at `path`.
+	 */
+	localWins(path: Path.Valid, entry: RouteEntry | undefined): boolean {
+		const local = this.advertisedLocal.peek()?.get(path);
+		if (!local || !this.local.peek()?.has(path)) return false;
+		if (!entry || !this.routes.peek()?.get(path)?.includes(entry)) return true;
+		return compareRoutes(local, entry.route.peek()) <= 0;
+	}
+
+	/**
+	 * What `path` resolves to: an announced local publish, a broadcast materialized from
+	 * the best covering route, or the blind answer.
 	 *
 	 * Materialization is lazy and cached per path: the first request under a route opens
 	 * the providing session's subscription, repeats share it, and a provider change (the
 	 * route retracting, a better session taking over) swaps it out.
 	 */
 	route(path: Path.Valid, slot: Pick<RequestSlot, "answer" | "refused">): broadcast.Consumer | undefined {
+		const entry = this.bestEntry(path, (candidate) => slot.refused.has(candidate));
 		const local = this.local.peek()?.get(path);
-		if (local) return local;
+		if (local && this.localWins(path, entry)) {
+			// Nothing reads a remote front the local broadcast replaced, so close its session subscription.
+			this.releaseMaterialized(path);
+			return local;
+		}
 
-		const entry = this.bestEntry(path, slot.refused);
 		const cached = this.materialized.get(path);
 		if (cached && cached.entry === entry) {
 			if (cached.front.closed.peek() === undefined) return cached.front;
@@ -386,7 +445,7 @@ export interface Table {
 	/** Whether every attached session announces into the table; see {@link Consumer.discovery}. */
 	readonly discovery: Getter<boolean | undefined>;
 
-	/** Create a locally announced broadcast at `path`; see {@link Producer.createBroadcast}. */
+	/** Create an unannounced broadcast at `path`; see {@link Producer.createBroadcast}. */
 	createBroadcast(path: Path.Valid): broadcast.Producer;
 
 	/** Resolve `path`, optionally waiting for an announcement; see {@link Consumer.request}. */
@@ -419,7 +478,7 @@ export interface RequestOptions {
  *
  * Create, attach {@link dynamic} for tracks served on demand, populate, then
  * {@link broadcast.Producer.announce}: an exact-path subscribe before the tracks exist is
- * refused, and announcing advertises the path to peers.
+ * refused, and nobody can see or reach a broadcast until it announces.
  *
  * @public
  */
@@ -457,16 +516,20 @@ export class Producer implements Table {
 	/**
 	 * Create a broadcast at `path`, returning its producer.
 	 *
-	 * The broadcast appears on this origin's local announce streams immediately.
-	 * Call {@link broadcast.Producer.announce} to advertise it to peers once its
-	 * tracks exist. Local consumers can discover and request it without that call.
+	 * The broadcast exists for nobody until {@link broadcast.Producer.announce}: announce
+	 * streams skip it and requests for its path find nothing, on this origin exactly as at
+	 * a peer. Announce once its tracks exist; {@link broadcast.Producer.unannounce}
+	 * withdraws it from everyone again.
 	 *
 	 * Close the producer to drop it. Creating a path again supersedes the previous
 	 * broadcast: the origin drops its handle on the old one, which closes it unless the
-	 * application still holds a consumer clone. A local broadcast also shadows any
-	 * remote broadcast at the same path.
+	 * application still holds a consumer clone. An announced local broadcast competes with
+	 * a remote route at the same path on cost, winning ties.
 	 */
 	createBroadcast(path: Path.Valid): broadcast.Producer {
+		const created = this.#state.created;
+		if (!created) throw new Error("origin is closed");
+
 		const producer = new broadcast.Producer();
 		const front = producer.consume();
 
@@ -475,43 +538,43 @@ export class Producer implements Table {
 			unannounce: () => this.#retractExact(path, front),
 		});
 
-		this.#state.local.mutate((broadcasts) => {
-			if (!broadcasts) throw new Error("origin is closed");
-			broadcasts.get(path)?.close();
-			broadcasts.set(path, front);
-		});
-		this.#state.advertisedLocal.mutate((advertised) => {
-			advertised?.delete(path);
-		});
-		this.#state.rebuildOriginated();
-		this.#state.refresh(path);
+		const previous = created.get(path);
+		created.set(path, front);
+		if (previous) {
+			this.#retractExact(path, previous);
+			previous.close();
+		}
 
 		// Drop it when the broadcast closes, unless a recreate already replaced it: a
 		// stale broadcast closing must not unpublish the live one.
 		void front.closed.then(() => {
 			this.#retractExact(path, front);
-			this.#state.local.mutate((broadcasts) => {
-				if (broadcasts?.get(path) === front) broadcasts.delete(path);
-			});
-			this.#state.refresh(path);
+			if (this.#state.created?.get(path) === front) this.#state.created.delete(path);
 		});
 
 		return producer;
 	}
 
 	#advertiseExact(path: Path.Valid, front: broadcast.Consumer, route: Route): void {
+		if (!this.#state.local.peek()) throw new Error("origin is closed");
+		if (this.#state.created?.get(path) !== front) throw new Error("broadcast is closed");
+		// Both maps move together, so every reader sees the broadcast and its route at once.
+		this.#state.local.mutate((broadcasts) => {
+			broadcasts?.set(path, front);
+		});
 		this.#state.advertisedLocal.mutate((advertised) => {
-			if (!advertised) throw new Error("origin is closed");
-			if (this.#state.local.peek()?.get(path) !== front) throw new Error("broadcast is closed");
-			advertised.set(path, route);
+			advertised?.set(path, route);
 		});
 		this.#state.rebuildOriginated();
 		this.#state.refresh(path);
 	}
 
 	#retractExact(path: Path.Valid, front: broadcast.Consumer): void {
+		if (this.#state.local.peek()?.get(path) !== front) return;
+		this.#state.local.mutate((broadcasts) => {
+			broadcasts?.delete(path);
+		});
 		this.#state.advertisedLocal.mutate((advertised) => {
-			if (this.#state.local.peek()?.get(path) !== front) return;
 			advertised?.delete(path);
 		});
 		this.#state.rebuildOriginated();
@@ -527,7 +590,7 @@ export class Producer implements Table {
 	 * consumers narrow with a {@link Path.Pattern} locally. The advertisement is
 	 * visible to {@link Consumer.announced} and forwarded by sessions for as long as
 	 * the returned {@link Dynamic} lives. A consumer resolving a path under it that
-	 * no local broadcast covers is handed to the handle as a {@link Request}.
+	 * no announced local broadcast wins is handed to the handle as a {@link Request}.
 	 */
 	dynamic(
 		prefix: Path.Valid,
@@ -716,12 +779,11 @@ export class Producer implements Table {
 	close(abort?: Error) {
 		if (this.#state.closed.peek() !== undefined) return;
 		this.#state.closed.set(abort ?? null);
-		this.#state.local.update((broadcasts) => {
-			for (const front of broadcasts?.values() ?? []) {
-				front.close(abort);
-			}
-			return undefined;
-		});
+		for (const front of this.#state.created?.values() ?? []) {
+			front.close(abort);
+		}
+		this.#state.created = undefined;
+		this.#state.local.update(() => undefined);
 		this.#state.advertisedLocal.update(() => undefined);
 		this.#state.routes.update((routes) => {
 			for (const entries of routes?.values() ?? []) {
@@ -859,6 +921,7 @@ export class Consumer {
 			get advertised() {
 				return state.originated;
 			},
+			local: (path) => this.#local(path),
 			demand: (path) => this.#demand(path),
 		});
 	}
@@ -890,8 +953,8 @@ export class Consumer {
 	readonly #discovery: Getter<boolean | undefined>;
 
 	/**
-	 * Whether the table routes `path`, by a local publish or an announced route
-	 * covering it.
+	 * Whether the table routes `path`, by an announced local publish or an announced
+	 * route covering it.
 	 *
 	 * Availability, not a handle: {@link request} is the only way to consume by path. A
 	 * request on a routed path resolves to that route and never to a blind answer, which is
@@ -908,9 +971,10 @@ export class Consumer {
 	 * Resolve `path`, optionally waiting for an announcement.
 	 *
 	 * The one way to consume by path. {@link Requesting.active} follows whatever the table
-	 * routes (a local publish, or any feeding session's announcement, swapping on a
-	 * republish); when nothing does, the request stands and whichever attached session
-	 * answers first provides a blind subscription instead, re-answered across reconnects.
+	 * routes (an announced local publish, or any feeding session's announcement, swapping
+	 * on a republish or a retraction); when nothing does, the request stands and whichever
+	 * attached session answers first provides a blind subscription instead, re-answered
+	 * across reconnects.
 	 * With `announced: true`, an unrouted request waits while discovery is supported and
 	 * falls back to that blind behavior only when discovery is unavailable. Close the request
 	 * when done. On a closed origin it never resolves.
@@ -1037,7 +1101,7 @@ export class Consumer {
 
 	/**
 	 * The announced routes matching `scope`, as a live map from covered prefix to route.
-	 * Local broadcasts appear on creation; received and dynamic routes retain their
+	 * Local broadcasts appear once announced; received and dynamic routes retain their
 	 * advertised prefixes. Reads are synchronous, and the getter needs no teardown.
 	 * Unscoped readers share one snapshot; each distinct scope filters the table on changes.
 	 */
@@ -1053,10 +1117,10 @@ export class Consumer {
 	/**
 	 * The announced routes matching `scope`, as a live stream: every currently advertised
 	 * route arrives first as active, then additions and retractions as they happen.
-	 * Any pattern is accepted. A local broadcast appears when it is created;
-	 * {@link broadcast.Producer.announce} only forwards it to peers. A dynamic or
-	 * received route announces the prefix it covers when its subtree overlaps the scope. The
-	 * stream ends when the origin closes or the consumer is closed.
+	 * Any pattern is accepted. A local broadcast appears once it announces, exactly as a
+	 * peer sees it. A dynamic or received route announces the prefix it covers when its
+	 * subtree overlaps the scope. The stream ends when the origin closes or the consumer is
+	 * closed.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
 		const producer = new announce.Producer();
@@ -1145,17 +1209,26 @@ export class Consumer {
 	 * @internal
 	 */
 	/**
-	 * Resolve `path` for serving: a local broadcast, or wait for an originated dynamic
-	 * to accept it. Undefined when nothing here can serve the path.
+	 * The announced local broadcast at `path`, when it beats the originated routes there.
+	 * Resolves through what rebuildOriginated advertised: a peer never sees received routes.
+	 */
+	#local(path: Path.Valid): broadcast.Consumer | undefined {
+		const local = this.#state.local.peek()?.get(path);
+		if (local && this.#state.localWins(path, this.#state.bestEntry(path, received))) return local;
+		return undefined;
+	}
+
+	/**
+	 * Resolve `path` for serving: an announced local broadcast, or wait for an originated
+	 * dynamic to accept it. Undefined when nothing here can serve the path.
 	 *
 	 * @internal
 	 */
 	async #demand(path: Path.Valid): Promise<broadcast.Consumer | undefined> {
-		const local = this.#state.local.peek()?.get(path);
+		const local = this.#local(path);
 		if (local) return local;
-
-		const entry = this.#state.bestEntry(path);
-		if (!entry?.originated || !entry.server) return undefined;
+		const entry = this.#state.bestEntry(path, received);
+		if (!entry?.server) return undefined;
 
 		const server = entry.server;
 		const live = server.served.get(path);

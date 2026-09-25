@@ -38,7 +38,7 @@ widest prefix that covers it (`**` is the root) and the request is the
 authority, so the advertise half of this questline is re-scoped to prefix
 claims resolved against pattern interest. The three workloads above still
 hold: the transcoder claims the root and refuses what it will not serve.
-Resolve and Demand are additive and land on main.
+Spread and Demand are additive and land on main.
 
 ### What already exists, and what does not
 
@@ -58,16 +58,14 @@ this. An announcement carries a `Pattern` covering a set of paths. Rust
 matcher directly, so callers explicitly select prefix-shaped claims when
 they need a concrete broadcast path.
 
-The routing table exists too. `Consumer::request_broadcast` resolves a local
-broadcast first, then `best_server`: the longest covering prefix, filtered by
-the requester's excluded hop, ordered by `route_order`
-(`rs/moq-net/src/model/origin.rs:633`), served on demand by the session that
-announced it and cached per prefix in `ServeState.served` (`:764`). That is the split-horizon-safe
-lookup the old `origin::Dynamic` could not provide, and it is what
-[Resolve](/quest/m1/wildcard/resolve.md) now extends rather than replaces.
-
-Request resolution, by contrast, is still prefix-only (`best_server` in
-`rs/moq-net/src/model/origin.rs`). The pattern matcher itself exists:
+Request resolution exists too. `Consumer::request_broadcast` mints a front per
+path (`rs/moq-net/src/model/front.rs`) that selects through `best_route`: a
+local broadcast first, then the longest covering prefix, filtered by the
+requester's excluded hop and ordered by `route_order`. A refusal from that tier
+is final, a front resumes only through routes sharing its first hop, FETCH
+resolves the same way, and a NO_CAPACITY refusal re-resolves once excluding the
+refusing advertiser. What remains is spreading one prefix's pool across
+requested paths ([Spread](/quest/m1/wildcard/spread.md)). The pattern matcher itself exists:
 `moq_net::{Pattern, Patterns, Segment}` and `Path.Pattern` /
 `Path.Patterns` in `js/net/src/path.ts` own the shared matching, containment,
 specificity, and rebasing advertisements reuse.
@@ -189,11 +187,12 @@ field.
   declare two workers' output interchangeable and splice between them; a service
   that needs that guarantee has to carry it in its own media contract, not in
   routing.
-- **Patterns are independent of clustering.** `draft-lcurley-moq-pattern`
-  owns the matching and authorization semantics tokens and filters share;
+- **Patterns are independent of clustering.** The `moq-pattern` crate owns
+  the matching semantics tokens and filters share, with no draft of its own;
   no announce message carries a pattern on either protocol (AUTH grants on
   lite-06 do, per [Path patterns](/quest/m1/path-patterns.md)). moq-cluster adds hop
-  lists, costs, and pool selection to prefix advertisements.
+  lists, costs, pool selection, and request resolution to prefix
+  advertisements.
 
 ### Where derived output lives
 
@@ -257,8 +256,8 @@ than announce state.
 
 ## Quests
 
-- [Resolve](/quest/m1/wildcard/resolve.md) - a relay resolves a subscribe or
-  FETCH for an unannounced path against the best matching wildcard
+- [Spread](/quest/m1/wildcard/spread.md) - equal-cost advertisers of one
+  prefix share its paths instead of the first one taking them all
 - [Demand](/quest/m1/wildcard/demand.md) - the browser player subscribes to a
   catalog-referenced broadcast a wildcard covers, breaking the lazy-rendition
   deadlock
