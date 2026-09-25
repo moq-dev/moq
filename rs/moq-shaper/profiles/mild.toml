@@ -1,0 +1,15 @@
+# A healthy wired LAN: a few milliseconds of delay with the same spread again,
+# queued in order.
+name = "mild"
+seed = 2
+shared = true
+
+[up]
+delay = "5ms"
+jitter = "5ms"
+jitter_model = "gaussian"
+
+[down]
+delay = "5ms"
+jitter = "5ms"
+jitter_model = "gaussian"

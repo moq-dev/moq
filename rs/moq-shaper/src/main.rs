@@ -1,7 +1,9 @@
 //! Put a seeded, impaired UDP path in front of a server.
 //!
-//! Both directions get the same profile. The seed and profile print at start,
-//! and the counters at exit, which fails if the profile never acted.
+//! Both directions get the same profile from the flags, unless `--profile`
+//! names a profile file, which sets each direction on its own. The seed and
+//! profile print at start, and the counters at exit, which fails if the profile
+//! never acted.
 
 use std::{net::SocketAddr, time::Duration};
 
@@ -16,9 +18,19 @@ struct Args {
 	/// The address every datagram is forwarded to.
 	#[arg(long)]
 	target: SocketAddr,
-	/// Seeds every treatment decision; random when omitted.
+	/// Seeds every treatment decision; the profile's own, or random, when omitted.
 	#[arg(long)]
 	seed: Option<u64>,
+	/// A built-in profile's name, or a profile TOML file, in place of the flags
+	/// that shape the path.
+	#[arg(
+		long,
+		conflicts_with_all = [
+			"delay", "jitter", "jitter_model", "loss", "reorder", "rate", "burst", "queue", "batch", "batch_window",
+			"shared",
+		],
+	)]
+	profile: Option<String>,
 	/// The base one-way delay, e.g. `20ms`.
 	#[arg(long, default_value = "0s", value_parser = humantime::parse_duration)]
 	delay: Duration,
@@ -69,6 +81,46 @@ enum JitterModel {
 async fn main() -> anyhow::Result<()> {
 	let args = Args::parse();
 
+	let (name, mut setup) = match &args.profile {
+		Some(profile) => {
+			let preset = moq_shaper::Preset::load(profile)?;
+			let mut setup = preset.setup(args.listen, args.target);
+			if let Some(seed) = args.seed {
+				setup.config.seed = seed;
+			}
+			(Some(preset.name), setup)
+		}
+		None => (None, flags(&args)),
+	};
+	setup.tcp_passthrough = args.tcp_passthrough;
+
+	let treatment = match &name {
+		Some(name) => format!("profile {name}"),
+		None if setup.shared || setup.up != moq_shaper::Options::default() => format!(
+			"profile {:?}, options {:?}, shared {}",
+			setup.config.up, setup.up, setup.shared
+		),
+		None => format!("profile {:?}", setup.config.up),
+	};
+	let shaper = moq_shaper::Shaper::bind(setup).await?;
+
+	let config = shaper.config();
+	println!(
+		"shaper: {} -> {}, seed {}, {treatment}",
+		shaper.addr(),
+		config.target,
+		config.seed
+	);
+
+	shutdown().await?;
+
+	let stats = shaper.verify()?;
+	println!("shaper: {stats}");
+	Ok(())
+}
+
+/// The setup the flags describe: one profile and one set of options, both ways.
+fn flags(args: &Args) -> moq_shaper::Setup {
 	let profile = moq_shaper::Profile {
 		delay: args.delay,
 		jitter: args.jitter,
@@ -98,32 +150,12 @@ async fn main() -> anyhow::Result<()> {
 			.map(|(count, window)| moq_shaper::Batch { count, window }),
 		..Default::default()
 	};
-	let shaper = moq_shaper::Shaper::bind(moq_shaper::Setup {
-		tcp_passthrough: args.tcp_passthrough,
+	moq_shaper::Setup {
 		shared: args.shared,
 		up: options.clone(),
-		down: options.clone(),
+		down: options,
 		..config.into()
-	})
-	.await?;
-
-	let config = shaper.config();
-	println!(
-		"shaper: {} -> {}, seed {}, profile {:?}",
-		shaper.addr(),
-		config.target,
-		config.seed,
-		config.up
-	);
-	if options != moq_shaper::Options::default() || args.shared {
-		println!("shaper: options {options:?}, shared {}", args.shared);
 	}
-
-	shutdown().await?;
-
-	let stats = shaper.verify()?;
-	println!("shaper: {stats}");
-	Ok(())
 }
 
 /// Wait for Ctrl-C, or SIGTERM where there is one, which is how a harness stops a child.

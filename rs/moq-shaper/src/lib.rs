@@ -26,8 +26,13 @@ use std::{
 	time::Duration,
 };
 
+mod preset;
+
+pub use preset::Preset;
+
 use anyhow::Context;
 use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus};
+use serde::Deserialize;
 use tokio::{
 	net::{TcpListener, TcpStream, UdpSocket},
 	sync::mpsc,
@@ -87,7 +92,8 @@ impl Profile {
 }
 
 /// How a direction draws each datagram's jitter.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Jitter {
 	/// Uniform within `jitter` either way of `delay`, drawn for each datagram on
 	/// its own, so a later datagram can overtake an earlier one.
@@ -108,11 +114,13 @@ pub enum Jitter {
 /// first of them arrived, and everything in it leaves when the latest would.
 /// That clump is what a receiver's jitter estimate sees on such a path, and no
 /// delay or jitter produces it: the datagrams arrive together rather than late.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Batch {
 	/// How many datagrams close a batch early.
 	pub count: usize,
 	/// How long a batch waits for that many.
+	#[serde(with = "humantime_serde")]
 	pub window: Duration,
 }
 
@@ -121,19 +129,26 @@ pub struct Batch {
 /// A step changes only what it names, so a later step puts one knob back
 /// without restating the rest. It can add or change a rate limit, never remove
 /// one.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Step {
 	/// How far into the run the change happens.
+	#[serde(with = "humantime_serde")]
 	pub at: Duration,
 	/// The delay from then on.
+	#[serde(default, with = "humantime_serde")]
 	pub delay: Option<Duration>,
 	/// The jitter from then on.
+	#[serde(default, with = "humantime_serde")]
 	pub jitter: Option<Duration>,
 	/// The loss from then on.
+	#[serde(default)]
 	pub loss: Option<f64>,
 	/// The reorder from then on.
+	#[serde(default)]
 	pub reorder: Option<f64>,
 	/// The rate limit from then on.
+	#[serde(default)]
 	pub rate: Option<Rate>,
 }
 
@@ -254,13 +269,15 @@ fn unbatched(setup: &Setup, stats: &Stats) -> bool {
 }
 
 /// A token-bucket rate limit with a bounded queue behind it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Rate {
 	/// The sustained rate.
 	pub bits_per_second: u64,
 	/// How many bytes may go out ahead of the sustained rate after an idle spell.
 	pub burst: u64,
 	/// The longest a datagram waits for the bucket; one that would wait longer is dropped.
+	#[serde(with = "humantime_serde")]
 	pub queue: Duration,
 }
 

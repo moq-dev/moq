@@ -1,0 +1,15 @@
+# An intercontinental path: 75ms each way with a wide spread on top, queued in
+# order.
+name = "high-rtt"
+seed = 5
+shared = true
+
+[up]
+delay = "75ms"
+jitter = "30ms"
+jitter_model = "gaussian"
+
+[down]
+delay = "75ms"
+jitter = "30ms"
+jitter_model = "gaussian"

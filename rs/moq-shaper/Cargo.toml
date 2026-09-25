@@ -20,5 +20,8 @@ doc = false
 anyhow = { workspace = true }
 clap = { workspace = true }
 humantime = { workspace = true }
+humantime-serde = { workspace = true }
 rand = { workspace = true }
+serde = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+toml = { workspace = true }

@@ -1,0 +1,16 @@
+# A path that loses 2%, and on which 1% of what survives skips the 20ms delay
+# the rest take, arriving ahead of what is still in flight: the loss and the
+# reordering a recovery path has to cope with.
+name = "lossy"
+seed = 6
+shared = true
+
+[up]
+delay = "20ms"
+loss = 0.02
+reorder = 0.01
+
+[down]
+delay = "20ms"
+loss = 0.02
+reorder = 0.01

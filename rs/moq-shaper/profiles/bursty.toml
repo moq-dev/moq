@@ -1,0 +1,16 @@
+# A paced hop that bunches traffic: nothing moves until seven datagrams are
+# waiting or the window closes, and then they all leave together.
+#
+# This is the shape a receiver's jitter estimate has to see, and no delay-and-
+# spread profile produces it: the datagrams arrive together rather than late.
+name = "bursty"
+seed = 3
+shared = true
+
+[up.batch]
+count = 7
+window = "160ms"
+
+[down.batch]
+count = 7
+window = "160ms"

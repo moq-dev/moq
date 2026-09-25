@@ -3037,6 +3037,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
 
 [[package]]
+name = "humantime-serde"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57a3db5ea5923d99402c94e9feb261dc5ee9b4efa158b0315f788cf549cc200c"
+dependencies = [
+ "humantime",
+ "serde",
+]
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4713,8 +4723,11 @@ dependencies = [
  "anyhow",
  "clap",
  "humantime",
+ "humantime-serde",
  "rand 0.10.3",
+ "serde",
  "tokio",
+ "toml 1.1.6+spec-1.1.0",
 ]
 
 [[package]]
