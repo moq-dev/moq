@@ -274,6 +274,12 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 	fn remove(catalog: &mut Catalog<E>, name: &str) {
 		catalog.text.renditions.remove(name);
 	}
+	fn estimate(&self) -> Estimate {
+		Estimate::default().with_jitter(self.jitter)
+	}
+	fn set_estimate(&mut self, estimate: Estimate) {
+		self.jitter = estimate.jitter;
+	}
 }
 
 /// A clonable reservation context handed to importers so they declare their tracks up front.
@@ -666,6 +672,32 @@ mod tests {
 		));
 		assert_eq!(
 			catalog.snapshot().video.renditions["v"].jitter,
+			Some(Duration::from_millis(100))
+		);
+	}
+
+	#[test]
+	fn published_text_jitter_never_decreases() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
+		let reserved = catalog.reserve();
+		let mut rendition = reserved.init::<hang::catalog::TextConfig>("t").unwrap();
+		drop(reserved);
+
+		let text = |jitter| {
+			let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Utf8);
+			config.jitter = jitter;
+			config
+		};
+		rendition.set(text(Some(Duration::from_millis(100)))).unwrap();
+		for smaller in [Some(Duration::from_millis(50)), None] {
+			assert!(matches!(
+				rendition.set(text(smaller)),
+				Err(crate::Error::JitterDecreased)
+			));
+		}
+		assert_eq!(
+			catalog.snapshot().text.renditions["t"].jitter,
 			Some(Duration::from_millis(100))
 		);
 	}
