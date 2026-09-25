@@ -164,10 +164,10 @@ impl Session {
 	/// An encoder-busy result is returned as an error so the caller can retry.
 	/// A need-more-input result is instead represented by the returned
 	/// [`Submission`], which retains both buffers until completion. The facade
-	/// does not reorder B-frames, so configure the session without them
-	/// (`frameIntervalP = 1`, as `moq-video` does); completing such a
-	/// submission waits without sending end-of-stream, leaving the session
-	/// usable for further frames.
+	/// does not drive frames the driver holds back, so configure the session
+	/// without B-frames or lookahead (`frameIntervalP = 1` and low-latency
+	/// tuning, as `moq-video` does): the driver refuses to lock a held frame's
+	/// output, and [`Submission::finish`] fails.
 	///
 	/// Safe code cannot release the input while it is in flight because the
 	/// submission owns it:
@@ -331,17 +331,28 @@ pub struct EncodePictureParams {
 #[derive(Debug)]
 #[must_use = "dropping a submission waits for completion before releasing its resources"]
 pub struct Submission<I> {
-	pending: Pending<SdkDriver, I>,
+	pending: Pending<SdkDriver<I>>,
 }
 
 impl<I> Submission<I> {
-	fn new(input: I, output: Bitstream) -> Self {
+	fn new(input: I, output: Bitstream) -> Self
+	where
+		I: EncoderInput,
+	{
+		let driver = SdkDriver {
+			abandon_input: I::abandon,
+		};
 		Self {
-			pending: Pending::new(SdkDriver, input, output),
+			pending: Pending::new(driver, input, output),
 		}
 	}
 
 	/// Wait for completion, copy the encoded bytes, and return reusable buffers.
+	///
+	/// # Errors
+	///
+	/// Returns the driver's error when the output cannot be locked. Both
+	/// buffers are then abandoned, since the driver may still be using them.
 	pub fn finish(mut self) -> Result<(Vec<u8>, I, Bitstream), EncodeError> {
 		self.pending.finish()
 	}
@@ -352,62 +363,73 @@ fn same_session<T>(input: &Arc<T>, output: &Arc<T>, session: &Arc<T>) -> bool {
 }
 
 trait CompletionDriver {
+	type Input;
 	type Output;
 
 	fn wait(&self, output: &mut Self::Output) -> Result<Vec<u8>, EncodeError>;
+
+	/// Give up both buffers after a failed wait.
+	fn abandon(&self, input: Self::Input, output: Self::Output);
 }
 
 #[derive(Debug)]
-struct SdkDriver;
+struct SdkDriver<I> {
+	// A function rather than an `EncoderInput` bound, which `Submission` would
+	// have to repeat in its public signature.
+	abandon_input: fn(I),
+}
 
-impl CompletionDriver for SdkDriver {
+impl<I> CompletionDriver for SdkDriver<I> {
+	type Input = I;
 	type Output = Bitstream;
 
 	fn wait(&self, output: &mut Self::Output) -> Result<Vec<u8>, EncodeError> {
 		Ok(output.lock()?.data().to_vec())
 	}
+
+	fn abandon(&self, input: I, output: Bitstream) {
+		(self.abandon_input)(input);
+		output.abandon();
+	}
 }
 
 #[derive(Debug)]
-struct Pending<D: CompletionDriver, I> {
+struct Pending<D: CompletionDriver> {
 	driver: D,
-	input: Option<I>,
-	output: Option<D::Output>,
+	/// Both `None` once finished or abandoned.
+	buffers: Option<(D::Input, D::Output)>,
 }
 
-impl<D: CompletionDriver, I> Pending<D, I> {
-	fn new(driver: D, input: I, output: D::Output) -> Self {
+impl<D: CompletionDriver> Pending<D> {
+	fn new(driver: D, input: D::Input, output: D::Output) -> Self {
 		Self {
 			driver,
-			input: Some(input),
-			output: Some(output),
+			buffers: Some((input, output)),
 		}
 	}
 
-	fn finish(&mut self) -> Result<(Vec<u8>, I, D::Output), EncodeError> {
+	fn finish(&mut self) -> Result<(Vec<u8>, D::Input, D::Output), EncodeError> {
+		let (input, mut output) = self.buffers.take().expect("submission buffers");
 		// Wait without sending end-of-stream: flushing here would end the
 		// session, while the caller may still submit further frames.
-		let data = self.driver.wait(self.output.as_mut().expect("submission output"))?;
-		let input = self.input.take().expect("submission input");
-		let output = self.output.take().expect("submission output");
-		Ok((data, input, output))
+		match self.driver.wait(&mut output) {
+			Ok(data) => Ok((data, input, output)),
+			Err(error) => {
+				// A failed wait cannot prove the driver released either buffer, so
+				// leak them rather than permit a use-after-free. Their encoder
+				// reference still goes: a session left open at exit deadlocks the
+				// driver's own exit handler, hanging the process.
+				self.driver.abandon(input, output);
+				Err(error)
+			}
+		}
 	}
 }
 
-impl<D: CompletionDriver, I> Drop for Pending<D, I> {
+impl<D: CompletionDriver> Drop for Pending<D> {
 	fn drop(&mut self) {
-		if self.input.is_none() {
-			return;
-		}
-		let completed = self
-			.driver
-			.wait(self.output.as_mut().expect("submission output"))
-			.is_ok();
-		if !completed {
-			// A failed wait cannot prove the driver released either handle. Leak
-			// them and their encoder rather than permit a use-after-free.
-			std::mem::forget(self.input.take());
-			std::mem::forget(self.output.take());
+		if self.buffers.is_some() {
+			let _ = self.finish();
 		}
 	}
 }
@@ -416,10 +438,21 @@ impl<D: CompletionDriver, I> Drop for Pending<D, I> {
 mod tests {
 	use std::sync::{Arc, Mutex};
 
+	use cudarc::driver::CudaContext;
+
 	use super::*;
+	use crate::{
+		sys::nvEncodeAPI::{
+			NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12, NV_ENC_CODEC_H264_GUID, NV_ENC_PRESET_P7_GUID,
+			NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_HIGH_QUALITY,
+		},
+		EncoderInitParams,
+	};
+
+	type Events = Arc<Mutex<Vec<&'static str>>>;
 
 	#[derive(Debug)]
-	struct Resource(&'static str, Arc<Mutex<Vec<&'static str>>>);
+	struct Resource(&'static str, Events);
 
 	impl Drop for Resource {
 		fn drop(&mut self) {
@@ -428,26 +461,45 @@ mod tests {
 	}
 
 	#[derive(Debug)]
-	struct FakeDriver(Arc<Mutex<Vec<&'static str>>>);
+	struct FakeDriver {
+		events: Events,
+		fail: bool,
+	}
 
 	impl CompletionDriver for FakeDriver {
+		type Input = Resource;
 		type Output = Resource;
 
 		fn wait(&self, _: &mut Self::Output) -> Result<Vec<u8>, EncodeError> {
-			self.0.lock().unwrap().push("wait");
+			self.events.lock().unwrap().push("wait");
+			if self.fail {
+				return Err(EncodeError::new(ErrorKind::InvalidParam, None));
+			}
 			Ok(vec![1, 2, 3])
 		}
+
+		fn abandon(&self, input: Resource, output: Resource) {
+			self.events.lock().unwrap().push("abandon");
+			std::mem::forget((input, output));
+		}
+	}
+
+	fn pending(events: &Events, fail: bool) -> Pending<FakeDriver> {
+		let driver = FakeDriver {
+			events: events.clone(),
+			fail,
+		};
+		Pending::new(
+			driver,
+			Resource("input", events.clone()),
+			Resource("output", events.clone()),
+		)
 	}
 
 	#[test]
 	fn delayed_completion_retains_resources_until_wait() {
-		let events = Arc::new(Mutex::new(Vec::new()));
-		let mut pending = Pending::new(
-			FakeDriver(events.clone()),
-			Resource("input", events.clone()),
-			Resource("output", events.clone()),
-		);
-		let (data, input, output) = pending.finish().unwrap();
+		let events = Events::default();
+		let (data, input, output) = pending(&events, false).finish().unwrap();
 		assert_eq!(data, [1, 2, 3]);
 		assert_eq!(*events.lock().unwrap(), ["wait"]);
 		drop((input, output));
@@ -456,13 +508,20 @@ mod tests {
 
 	#[test]
 	fn cancellation_completes_before_releasing_resources() {
-		let events = Arc::new(Mutex::new(Vec::new()));
-		drop(Pending::new(
-			FakeDriver(events.clone()),
-			Resource("input", events.clone()),
-			Resource("output", events.clone()),
-		));
+		let events = Events::default();
+		drop(pending(&events, false));
 		assert_eq!(*events.lock().unwrap(), ["wait", "input", "output"]);
+	}
+
+	#[test]
+	fn failed_wait_abandons_without_waiting_again() {
+		let events = Events::default();
+		assert!(pending(&events, true).finish().is_err());
+		assert_eq!(*events.lock().unwrap(), ["wait", "abandon"]);
+
+		let events = Events::default();
+		drop(pending(&events, true));
+		assert_eq!(*events.lock().unwrap(), ["wait", "abandon"]);
 	}
 
 	#[test]
@@ -471,5 +530,64 @@ mod tests {
 		let second = Arc::new(());
 		assert!(same_session(&first, &first, &first));
 		assert!(!same_session(&first, &second, &first));
+	}
+
+	/// Whether an NVENC session can run here. Hardware tests return early
+	/// without one, so they pass on GPU-less CI.
+	fn driver_available() -> bool {
+		// cudarc panics while loading a missing libcuda, so probe for it first.
+		// SAFETY: the library is opened only to test presence, never called.
+		let cuda = ["libcuda.so.1", "libcuda.so"]
+			.iter()
+			.any(|name| unsafe { libloading::Library::new(*name) }.is_ok());
+		cuda && Encoder::load().is_ok()
+	}
+
+	/// Lookahead holds frames back, and the driver refuses to lock a held
+	/// frame's output. P7 with high-quality tuning turns lookahead on. The failed
+	/// submissions must not keep the session open: one still open at exit
+	/// deadlocks the driver's exit handler, so the process never exits.
+	#[test]
+	fn failed_submission_releases_the_session() {
+		if !driver_available() {
+			return;
+		}
+		let encoder = Encoder::initialize_with_cuda(CudaContext::new(0).unwrap()).unwrap();
+		let (codec, preset, tuning) = (
+			NV_ENC_CODEC_H264_GUID,
+			NV_ENC_PRESET_P7_GUID,
+			NV_ENC_TUNING_INFO_HIGH_QUALITY,
+		);
+		let mut config = encoder.get_preset_config(codec, preset, tuning).unwrap().presetCfg;
+		assert_eq!(
+			config.rcParams.enableLookahead(),
+			1,
+			"the preset no longer holds frames"
+		);
+		// No B-frames, so lookahead alone holds the frames.
+		config.frameIntervalP = 1;
+
+		let mut init = EncoderInitParams::new(codec, 320, 240);
+		init.preset_guid(preset)
+			.tuning_info(tuning)
+			.enable_picture_type_decision();
+		// SAFETY: the preset config holds no borrowed extension pointers.
+		unsafe { init.encode_config(config) };
+		let session = encoder.start_session(NV_ENC_BUFFER_FORMAT_NV12, init).unwrap();
+		let encoder = Arc::downgrade(&session.encoder);
+
+		let submit = || {
+			let input = session.create_input_buffer().unwrap();
+			let output = session.create_output_bitstream().unwrap();
+			session
+				.encode_picture(input, output, EncodePictureParams::default())
+				.unwrap()
+		};
+		// One submission fails to finish and one is dropped unfinished.
+		assert!(submit().finish().is_err(), "the driver locked a held frame's output");
+		drop(submit());
+
+		drop(session);
+		assert!(encoder.upgrade().is_none(), "failed submissions kept the session open");
 	}
 }

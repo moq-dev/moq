@@ -1,6 +1,6 @@
 //! Defines traits and types for dealing with input and output buffers.
 
-use std::{ffi::c_void, ptr, sync::Arc};
+use std::{ffi::c_void, mem::ManuallyDrop, ptr, sync::Arc};
 
 use cudarc::driver::{DevicePtr, MappedBuffer};
 
@@ -12,8 +12,12 @@ use crate::sys::nvEncodeAPI::{
 	NV_ENC_MAP_INPUT_RESOURCE_VER, NV_ENC_PIC_TYPE, NV_ENC_REGISTER_RESOURCE,
 };
 
-mod sealed {
-	pub trait Input {}
+pub(crate) mod sealed {
+	pub trait Input {
+		/// Give up an input the driver may still be reading: leak its handle, but
+		/// release its encoder reference so the session can still be destroyed.
+		fn abandon(self);
+	}
 }
 
 /// An input buffer created or registered by this crate.
@@ -413,7 +417,14 @@ impl Drop for Buffer {
 	}
 }
 
-impl sealed::Input for Buffer {}
+impl sealed::Input for Buffer {
+	fn abandon(self) {
+		// Skip `Drop`: destroying the buffer could free memory the driver still reads.
+		let this = ManuallyDrop::new(self);
+		// SAFETY: read once from a value whose destructor never runs.
+		drop(unsafe { ptr::read(&this.encoder) });
+	}
+}
 
 impl EncoderInput for Buffer {
 	fn pitch(&self) -> u32 {
@@ -582,6 +593,16 @@ impl Bitstream {
 	}
 }
 
+impl Bitstream {
+	/// Give up a bitstream the driver may still write: leak its handle, but
+	/// release its encoder reference so the session can still be destroyed.
+	pub(crate) fn abandon(self) {
+		let this = ManuallyDrop::new(self);
+		// SAFETY: read once from a value whose destructor never runs.
+		drop(unsafe { ptr::read(&this.encoder) });
+	}
+}
+
 impl Drop for Bitstream {
 	fn drop(&mut self) {
 		let _ =
@@ -707,7 +728,14 @@ impl<A: ResourceApi, T> Drop for Mapping<A, T> {
 	}
 }
 
-impl<T> sealed::Input for RegisteredResource<T> {}
+impl<T> sealed::Input for RegisteredResource<T> {
+	fn abandon(self) {
+		// Skip `Drop`, leaking the registration and the owner of its memory.
+		let this = ManuallyDrop::new(self);
+		// SAFETY: read once from a value whose destructor never runs.
+		drop(unsafe { ptr::read(&this.mapping.api) });
+	}
+}
 
 impl<T> EncoderInput for RegisteredResource<T> {
 	fn pitch(&self) -> u32 {
