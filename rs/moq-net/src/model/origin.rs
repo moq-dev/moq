@@ -1852,8 +1852,13 @@ fn warm_copy(source: &track::Consumer, head: Option<&WarmGroup>) -> Option<WarmC
 	let info = source.cached_info()?;
 	let mut track = track::Producer::new(Arc::new(source.broadcast().clone()), source.name(), info);
 	let head = head.map(|head| &head.0);
-	let latest = source.latest();
 	let groups = source.cached_groups();
+	// Not `source.latest()`: datagrams share the sequence counter and can run past it.
+	let latest = groups
+		.iter()
+		.filter(|(_, visible)| *visible)
+		.map(|(group, _)| group.sequence)
+		.max();
 	let mut edge = None;
 
 	// A spliced copy hides the group it continued (its halves sit in two segments), so
@@ -4872,6 +4877,7 @@ mod tests {
 	/// A group that stays open for good (a JSON log in group 0) survives a park: the
 	/// returning reader gets the frames delivered before it from the warm cache, and the
 	/// re-splice asks the source only for the frames after them, across repeated parks.
+	/// A datagram sequenced past the group does not hide it as the live edge.
 	#[tokio::test]
 	async fn returning_reader_continues_an_open_warm_group() {
 		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
@@ -4905,6 +4911,9 @@ mod tests {
 			}
 			group.write_frame(crate::Timestamp::ZERO, payload).unwrap();
 			expect.push(payload);
+			source
+				.insert_datagram(10, crate::Timestamp::ZERO, b"datagram".as_ref())
+				.unwrap();
 
 			let mut reading = tokio::time::timeout(Duration::from_secs(1), subscription.recv_group())
 				.await

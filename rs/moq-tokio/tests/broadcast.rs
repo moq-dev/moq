@@ -1111,25 +1111,38 @@ async fn broadcast_rejoin_skips_a_stale_warm_cache() {
 }
 
 /// A subscriber returning to a parked track whose newest group is still current gets it
-/// back: the re-splice asks for that group's tail, which the publisher answers at once.
-/// Asking past it would wait for a group that a quiet track (a catalog) may never send.
+/// back, then the live feed resumes: the re-splice asks for that group's tail, which the
+/// publisher answers at once. Asking past it would wait for a group that a quiet track (a
+/// catalog) may never send. Covers a finished newest group (a catalog) and one that stays
+/// open (a JSON log appending frames to group 0), on every version.
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_rejoin_replays_a_current_warm_cache() {
+	for version in moq_net::Version::names() {
+		for open in [false, true] {
+			rejoin_replays_a_current_warm_cache(version, open).await;
+		}
+	}
+}
+
+async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
 	let track = broadcast.create_track("catalog.json", None).expect("create track");
 	let live = track.clone();
-	let mut group = track.append_group().expect("append group");
+	let mut group = live.append_group().expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"snapshot".as_ref())
+		.write_frame(moq_net::Timestamp::ZERO, b"v0".as_ref())
 		.expect("write frame");
-	group.finish().expect("finish group");
+	if !open {
+		group.finish().expect("finish group");
+	}
 
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("[::]:0".parse().unwrap());
 	config.tls.generate = vec!["localhost".into()];
+	config.version = vec![version.parse().unwrap()];
 	let mut server = config
 		.init(Default::default())
 		.expect("init server")
@@ -1151,6 +1164,7 @@ async fn broadcast_rejoin_replays_a_current_warm_cache() {
 	let mut announcements = sub_consumer.announced();
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
+	config.version = vec![version.parse().unwrap()];
 	let client = config.init(Default::default()).expect("init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
 	let (_client, session) = tokio::time::timeout(TIMEOUT, connect_once(client.with_subscriber(sub_origin), url))
@@ -1164,19 +1178,55 @@ async fn broadcast_rejoin_replays_a_current_warm_cache() {
 		.expect("request timeout")
 		.expect("broadcast resolves");
 
-	for round in 0..2 {
+	async fn recv(sub: &mut moq_net::track::Subscriber, ctx: &str) -> moq_net::group::Consumer {
+		tokio::time::timeout(TIMEOUT, sub.recv_group())
+			.await
+			.unwrap_or_else(|_| panic!("{ctx}: recv_group timeout"))
+			.expect("recv_group failed")
+			.expect("track closed")
+	}
+	async fn read(group: &mut moq_net::group::Consumer, ctx: &str) -> String {
+		let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+			.await
+			.unwrap_or_else(|_| panic!("{ctx}: read_frame timeout"))
+			.expect("read_frame failed")
+			.expect("group ended");
+		String::from_utf8(frame.payload.to_vec()).unwrap()
+	}
+
+	for round in 1..=3 {
+		let ctx = format!("{version} open={open} round {round}");
+		let update = format!("v{round}");
 		let mut sub = remote
 			.track("catalog.json")
 			.unwrap()
 			.subscribe(None)
 			.await
 			.expect("subscribe");
-		assert_eq!(read_payloads(&mut sub, 1).await, ["snapshot"], "round {round}");
+		let mut reading = recv(&mut sub, &ctx).await;
+		if open {
+			for frame in 0..round {
+				assert_eq!(read(&mut reading, &ctx).await, format!("v{frame}"), "{ctx}");
+			}
+			group
+				.write_frame(moq_net::Timestamp::ZERO, update.as_bytes())
+				.expect("write frame");
+		} else {
+			assert_eq!(read(&mut reading, &ctx).await, format!("v{}", round - 1), "{ctx}");
+			let mut next = live.append_group().expect("append group");
+			next.write_frame(moq_net::Timestamp::ZERO, update.as_bytes())
+				.expect("write frame");
+			next.finish().expect("finish group");
+			reading = recv(&mut sub, &ctx).await;
+		}
+		// The live feed resumed behind the replayed cache.
+		assert_eq!(read(&mut reading, &ctx).await, update, "{ctx}");
+		drop(reading);
 		drop(sub);
 		// The front parks the track and cancels upstream before the next round rejoins.
 		tokio::time::timeout(TIMEOUT, live.unused())
 			.await
-			.expect("upstream never canceled")
+			.unwrap_or_else(|_| panic!("{ctx}: upstream never canceled"))
 			.expect("track open");
 	}
 
