@@ -28,7 +28,12 @@ use std::{
 
 use anyhow::Context;
 use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus};
-use tokio::{net::UdpSocket, sync::mpsc, task::JoinSet, time::Instant};
+use tokio::{
+	net::{TcpListener, TcpStream, UdpSocket},
+	sync::mpsc,
+	task::JoinSet,
+	time::Instant,
+};
 
 /// How one direction of the path treats each datagram.
 ///
@@ -146,6 +151,32 @@ pub struct Config {
 	pub down: Profile,
 }
 
+/// A [`Config`] plus the opt-in options it has no field for.
+///
+/// Every option defaults to off, so a setup made from a config shapes exactly
+/// as that config does.
+#[derive(Clone, Debug)]
+pub struct Setup {
+	/// Where to listen and forward, the seed, and each direction's profile.
+	pub config: Config,
+	/// Also accept TCP on the listening port and pipe it to the target untouched.
+	///
+	/// A relay serves HTTP on the port number it serves QUIC on, and a browser
+	/// fetches the certificate hash from it before it dials WebTransport. TCP is
+	/// never impaired: a reliable transport cannot shed load, so shaping it
+	/// would measure how TCP retransmits.
+	pub tcp_passthrough: bool,
+}
+
+impl From<Config> for Setup {
+	fn from(config: Config) -> Self {
+		Self {
+			config,
+			tcp_passthrough: false,
+		}
+	}
+}
+
 /// What one direction did, summed over every client.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counters {
@@ -200,7 +231,9 @@ pub struct Shaper {
 
 impl Shaper {
 	/// Bind the listening socket and start forwarding.
-	pub async fn bind(config: Config) -> anyhow::Result<Self> {
+	pub async fn bind(setup: impl Into<Setup>) -> anyhow::Result<Self> {
+		let setup = setup.into();
+		let config = setup.config;
 		config.up.validate().context("invalid up profile")?;
 		config.down.validate().context("invalid down profile")?;
 
@@ -209,6 +242,16 @@ impl Shaper {
 			.with_context(|| format!("bind {}", config.bind))?;
 		let addr = listen.local_addr()?;
 
+		// The port the UDP socket got, since a relay serves HTTP on its QUIC port.
+		let tcp = match setup.tcp_passthrough {
+			true => Some(
+				TcpListener::bind(addr)
+					.await
+					.with_context(|| format!("bind the TCP passthrough on {addr}"))?,
+			),
+			false => None,
+		};
+
 		let tally = Arc::new([Tally::default(), Tally::default()]);
 		let failed = Arc::new(OnceLock::new());
 		let task = tokio::spawn({
@@ -216,7 +259,7 @@ impl Shaper {
 			let tally = tally.clone();
 			let failed = failed.clone();
 			async move {
-				if let Err(err) = run(Arc::new(listen), config, tally).await {
+				if let Err(err) = run(Arc::new(listen), tcp, config, tally).await {
 					let _ = failed.set(format!("{err:#}"));
 				}
 			}
@@ -310,7 +353,12 @@ fn bump(counter: &AtomicU64) {
 ///
 /// A flow is a socket of its own toward the target, so the target sees one
 /// address per client just as it would without the shaper in the way.
-async fn run(listen: Arc<UdpSocket>, config: Config, tally: Arc<[Tally; 2]>) -> anyhow::Result<()> {
+async fn run(
+	listen: Arc<UdpSocket>,
+	tcp: Option<TcpListener>,
+	config: Config,
+	tally: Arc<[Tally; 2]>,
+) -> anyhow::Result<()> {
 	let mut flows = HashMap::<SocketAddr, Link>::new();
 	let mut tasks = JoinSet::new();
 	let mut buf = vec![0u8; u16::MAX as usize];
@@ -320,6 +368,11 @@ async fn run(listen: Arc<UdpSocket>, config: Config, tally: Arc<[Tally; 2]>) -> 
 			res = listen.recv_from(&mut buf) => res.context("receive from a client")?,
 			Some(res) = tasks.join_next() => {
 				res.context("flow task panicked")??;
+				continue;
+			}
+			res = accept(tcp.as_ref()) => {
+				let (stream, _) = res.context("accept a TCP connection")?;
+				tasks.spawn(pipe(stream, config.target));
 				continue;
 			}
 		};
@@ -345,6 +398,23 @@ async fn run(listen: Arc<UdpSocket>, config: Config, tally: Arc<[Tally; 2]>) -> 
 		};
 		link.push(now, buf[..size].to_vec(), &tally[UP]);
 	}
+}
+
+/// The next TCP connection, or never without a passthrough.
+async fn accept(tcp: Option<&TcpListener>) -> std::io::Result<(TcpStream, SocketAddr)> {
+	match tcp {
+		Some(listener) => listener.accept().await,
+		None => std::future::pending().await,
+	}
+}
+
+/// Copy one TCP connection to the target and back, untouched.
+async fn pipe(mut client: TcpStream, target: SocketAddr) -> anyhow::Result<()> {
+	// Either end refusing or hanging up ends that connection, not the shaper.
+	if let Ok(mut server) = TcpStream::connect(target).await {
+		let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+	}
+	Ok(())
 }
 
 /// A socket that can reach `target`: loopback for a loopback target, so the
@@ -723,5 +793,55 @@ mod tests {
 			..Default::default()
 		};
 		refused(undelayed, "needs a delay").await;
+	}
+
+	#[tokio::test]
+	async fn tcp_passes_through_untouched() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		// A relay answering HTTP on its QUIC port, reduced to an echo.
+		let server = TcpListener::bind(LOCALHOST).await.unwrap();
+		let target = server.local_addr().unwrap();
+		tokio::spawn(async move {
+			let (mut stream, _) = server.accept().await.unwrap();
+			let mut buf = [0u8; 64];
+			let size = stream.read(&mut buf).await.unwrap();
+			stream.write_all(&buf[..size]).await.unwrap();
+		});
+
+		// A profile that would lose every datagram, to show TCP skips it.
+		let blackhole = Profile {
+			loss: 1.0,
+			..Default::default()
+		};
+		let config = Config {
+			bind: LOCALHOST,
+			target,
+			seed: 13,
+			up: blackhole.clone(),
+			down: blackhole,
+		};
+		let shaper = Shaper::bind(Setup {
+			tcp_passthrough: true,
+			..config.into()
+		})
+		.await
+		.unwrap();
+
+		let mut client = TcpStream::connect(shaper.addr()).await.unwrap();
+		client.write_all(b"/certificate.sha256").await.unwrap();
+		let mut buf = [0u8; 64];
+		let size = tokio::time::timeout(Duration::from_secs(2), client.read(&mut buf))
+			.await
+			.unwrap()
+			.unwrap();
+		assert_eq!(&buf[..size], b"/certificate.sha256");
+		assert_eq!(shaper.stats(), Stats::default(), "TCP reached the datagram path");
+	}
+
+	#[tokio::test]
+	async fn tcp_is_refused_without_the_passthrough() {
+		let (shaper, _client) = setup(1, Profile::default(), Profile::default()).await;
+		assert!(TcpStream::connect(shaper.addr()).await.is_err());
 	}
 }

@@ -40,6 +40,9 @@ struct Args {
 	/// The longest a datagram waits for the rate limit before it is dropped.
 	#[arg(long, default_value = "100ms", value_parser = humantime::parse_duration, requires = "rate")]
 	queue: Duration,
+	/// Also pipe TCP on the listening port to the target, untouched.
+	#[arg(long)]
+	tcp_passthrough: bool,
 }
 
 #[tokio::main]
@@ -57,12 +60,16 @@ async fn main() -> anyhow::Result<()> {
 			queue: args.queue,
 		}),
 	};
-	let shaper = moq_shaper::Shaper::bind(moq_shaper::Config {
+	let config = moq_shaper::Config {
 		bind: args.listen,
 		target: args.target,
 		seed: args.seed.unwrap_or_else(rand::random),
 		up: profile.clone(),
 		down: profile,
+	};
+	let shaper = moq_shaper::Shaper::bind(moq_shaper::Setup {
+		tcp_passthrough: args.tcp_passthrough,
+		..config.into()
 	})
 	.await?;
 

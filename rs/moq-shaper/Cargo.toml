@@ -21,4 +21,4 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 humantime = { workspace = true }
 rand = { workspace = true }
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
