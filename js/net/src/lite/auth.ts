@@ -375,6 +375,8 @@ export class AuthSession implements AuthApi {
 	#peerGrant: Grant;
 
 	#union = new Signal<Grant | undefined>(undefined);
+	// The peer replied to some token, so the union is known even when empty.
+	#replied = false;
 	#tokens = new Set<Presented>();
 	#setupPending = new Signal(0);
 	#acceptor: "undecided" | "default" | RequestQueue = "undecided";
@@ -480,11 +482,14 @@ export class AuthSession implements AuthApi {
 				if (reply instanceof AuthOk) {
 					const expires = reply.expires === undefined ? undefined : Date.now() + reply.expires;
 					token.grant.set({ publish: reply.publish, subscribe: reply.subscribe, expires });
+					this.#replied = true;
 					this.#answered(token);
 					this.#recompute();
 					continue;
 				}
 				console.warn(`auth token refused: code=${reply.code} reason=${reply.reason}`);
+				// A refused setup token leaves an empty union, not an unknown (unrestricted) one.
+				this.#replied = true;
 				result = new SessionError(reply.code as SessionCode, { reason: reply.reason });
 				stream.close();
 				break;
@@ -522,8 +527,8 @@ export class AuthSession implements AuthApi {
 			const grant = token.grant.peek();
 			if (grant) granted.push(grant);
 		}
-		// None until the first answer; an empty union afterwards grants nothing.
-		if (granted.length === 0 && this.#union.peek() === undefined) return;
+		// Undefined until the first reply; an empty union afterwards grants nothing.
+		if (granted.length === 0 && !this.#replied) return;
 		const next = union(granted);
 		if (!grantsEqual(next, this.#union.peek())) this.#union.set(next);
 	}

@@ -1323,6 +1323,7 @@ A path prefix the opener may subscribe to, with the same rules.
 
 **Expires**:
 The number of milliseconds until the grant lapses, or 0 for never.
+The acceptor revokes a lapsed grant with AUTH_ERROR; the opener uses Expires to present a replacement token in time.
 
 ## AUTH_ERROR {#auth-error}
 AUTH_ERROR refuses a token, or revokes it after an AUTH_OK.

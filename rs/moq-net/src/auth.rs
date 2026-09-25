@@ -82,8 +82,10 @@ pub(crate) struct State {
 	tokens: BTreeMap<u64, Slot>,
 	/// Tokens waiting for the driver to open their stream.
 	opening: VecDeque<u64>,
-	/// The union of every open token's grant, `None` until the first AUTH_OK.
+	/// The union of every open token's grant, `None` until the peer first replies.
 	union: Option<Grant>,
+	/// The peer replied to some token, so the union is known even when empty.
+	replied: bool,
 	/// Bumped whenever the union changes, so the session's per-stream gates can
 	/// skip re-matching paths on every wakeup.
 	epoch: u64,
@@ -120,7 +122,7 @@ enum Acceptor {
 impl State {
 	fn recompute(&mut self) {
 		let mut granted = self.tokens.values().filter_map(|slot| slot.grant.as_ref()).peekable();
-		if granted.peek().is_none() && self.union.is_none() {
+		if granted.peek().is_none() && !self.replied {
 			return;
 		}
 		let mut union = Grant::default();
@@ -159,7 +161,8 @@ impl Handle {
 	}
 
 	/// The union of every grant this side holds: `None` until the peer first
-	/// answers a token, and forever on a version without AUTH.
+	/// answers a token (with a grant or a refusal), and forever on a version
+	/// without AUTH.
 	pub fn grant(&self) -> Watch {
 		Watch::new(self.state.clone(), Selector::Union)
 	}
@@ -289,7 +292,18 @@ impl Handle {
 		};
 		slot.grant = Some(grant);
 		slot.answered.get_or_insert(Ok(()));
+		state.replied = true;
 		state.recompute();
+	}
+
+	/// Record an AUTH_ERROR for the token: a reply that grants nothing, so a refused
+	/// setup token leaves an empty union rather than an unknown (unrestricted) one.
+	/// The driver still ends the token with [`ended`](Self::ended).
+	pub(crate) fn refused(&self, id: u64) {
+		let mut state = self.state.lock();
+		if state.tokens.contains_key(&id) {
+			state.replied = true;
+		}
 	}
 
 	/// End the token: refused or revoked by the peer, withdrawn by us, or its
@@ -572,6 +586,10 @@ impl Request {
 
 	/// Grant the token. The grant holds until the returned [`Issued`] is revoked
 	/// or dropped, or the peer withdraws the token.
+	///
+	/// The session only tells the peer: the origin handles this side serves and
+	/// accepts with are what enforce the grant, and revoking it once `expires`
+	/// passes is the acceptor's job.
 	pub fn accept(mut self, grant: Grant) -> Issued {
 		let issue = self.issue.take().expect("answered once");
 		issue.lock().outbox.push_back(Reply::Grant(grant));

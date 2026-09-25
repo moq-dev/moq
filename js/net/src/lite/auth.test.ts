@@ -214,6 +214,24 @@ test("a refused token surfaces the acceptor's code and reason", async () => {
 	server.close();
 });
 
+test("a refused setup token grants nothing rather than everything", async () => {
+	const { client, server } = await connect({ publish: new OriginProducer() });
+	const requests = server.auth.requests();
+	void (async () => {
+		for (;;) {
+			const request = await requests.next();
+			if (!request) break;
+			request.reject(SessionCode.Unauthorized, "bad credential");
+		}
+	})();
+
+	const empty = await waitFor(client.auth.grant, (g) => g !== undefined);
+	expect(empty?.publish.size).toBe(0);
+	expect(empty?.subscribe.size).toBe(0);
+	client.close();
+	server.close();
+});
+
 test("older versions have no grant", async () => {
 	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_05 });
 	expect(client.auth.grant.peek()).toBeUndefined();

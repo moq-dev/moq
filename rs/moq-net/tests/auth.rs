@@ -448,6 +448,30 @@ async fn a_refused_token_reports_the_code() {
 	.expect("timed out");
 }
 
+/// Refusing the setup token grants nothing: the union becomes empty rather than
+/// staying unknown, which the gates would read as unrestricted.
+#[tokio::test]
+async fn a_refused_setup_token_grants_nothing() {
+	within(async {
+		let mut pair = connect(Options {
+			client_publish: Some(produce_origin(2)),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut requests = pair.requests.take().unwrap();
+		tokio::spawn(async move {
+			while let Some(request) = requests.next().await {
+				request.reject(SessionError::Unauthorized, "bad credential");
+			}
+		});
+
+		assert_eq!(granted(&pair.client).await, Grant::default());
+	})
+	.await
+	.expect("timed out");
+}
+
 /// A peer that takes no tokens in band resets the stream, which reads as
 /// unsupported rather than a refusal: the same as a peer that predates AUTH.
 #[tokio::test]

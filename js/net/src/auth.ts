@@ -55,7 +55,12 @@ export interface Token {
 export interface Request {
 	/** The token the peer presented. Empty means the credential its connection carried. */
 	readonly token: Uint8Array;
-	/** Grant the token until the returned {@link Issued} is revoked or closed. */
+	/**
+	 * Grant the token until the returned {@link Issued} is revoked or closed.
+	 *
+	 * The session only tells the peer; the origins this side serves and accepts are
+	 * what enforce the grant, and revoking before `expires` is the acceptor's job.
+	 */
 	accept(grant: Grant): Issued;
 	/** Refuse the token with a session code and a reason for the peer. */
 	reject(code: SessionCode, reason: string): void;

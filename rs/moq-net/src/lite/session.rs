@@ -480,6 +480,7 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 							let code = u32::try_from(refused.code).unwrap_or(u32::MAX);
 							let err = Error::Session(crate::SessionError::from_code(code));
 							tracing::warn!(%err, reason = %refused.reason, "auth token refused");
+							self.handle.refused(self.id);
 							*answered = true;
 							return Poll::Ready(err);
 						}
