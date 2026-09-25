@@ -14,23 +14,23 @@ Choosing which catalog applies to which media group stays with
 
 ## Plan
 
-Today the reader writes live groups only for the timeline; the recorded catalog
+Today the reader writes live groups only for timelines; the recorded catalog
 is FETCH-only, so a SUBSCRIBE to it on the replay broadcast never sees a group
 and `moq-hls` never finds the `archive` entry. The HLS archive tests work around
 this by hand-building a catalog.
 
-- Republish each recorded catalog group live in timeline order, so the newest
+- Republish each recorded catalog group live in its timeline's order, so the newest
   one is at the live edge and a `--follow` replay picks up catalogs recorded
   after it opened.
 - Stamp `store` with the URL passed to `import archive`, and `version` with the
   recording format. Refuse a URL carrying userinfo so credentials never land in
-  a catalog. `replay` stays unset: the timeline lives on this broadcast.
+  a catalog. `replay` stays unset: the timelines live on this broadcast.
 - Keep the logic in `moq-cli`; `moq-archive` stays catalog-agnostic. Select the
   catalog track with the CLI's catalog format as `export archive` does: hang
   and hang.z are stamped, MSF is refused.
-- The recorded catalog's `archive` entry describes the source's live timeline,
-  not the recording's, so replace it with the timeline the reader replays
-  (track, timescale, duration bound) rather than trusting the recorded one.
+- The recorded catalog's `archive` entry describes the source's live
+  timelines, not the recording's, so replace it with the timelines the reader
+  replays rather than trusting the recorded ones.
 
 Add a CI test that records a broadcast longer than the default window, replays
 it, and asserts the stock exporter lists segment 0 with a durable
@@ -40,10 +40,9 @@ republished catalog instead of their hand-built one.
 Update `doc/bin/cli.md` and `doc/bin/hls.md` inline with an export, import, and
 serve example.
 
-A DVR can expire the only recorded catalog today; import must work once
-[Per-track archive segments](/quest/m1/archive/track-segments.md) keeps one in
-the window, and fail loudly on a recording with none.
+Cover a DVR recording whose catalog outlived its first video segment, and fail
+loudly on a recording with no catalog.
 
 ## Required
 
-- [Per-track archive segments](/quest/m1/archive/track-segments.md) - a DVR keeps a catalog in its window
+- [Rust per-track timelines](/quest/m1/archive/track-timeline/core.md) - a DVR keeps its catalog's newest group

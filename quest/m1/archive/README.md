@@ -63,6 +63,9 @@ DVR expiry recover from the next checkpoint; `Reader::finish` applies out-of-ban
 
 ### Format
 
+[Per-track timelines](/quest/m1/archive/track-timeline/README.md) replaces the
+aligned segments below with one timeline per track.
+
 The format is the draft's
 [Recording section](/drafts/draft-lcurley-moq-hang.md#recording).
 The application chooses the object prefix, selected tracks, retention, and credentials; `moq-archive` owns the
@@ -126,7 +129,7 @@ owned by that prerequisite, not duplicated in archive storage.
 
 ## Quests
 
-- [Per-track archive segments](/quest/m1/archive/track-segments.md) - decide per-track segmenting and expiry so a DVR keeps every track's newest group while HLS stays aligned
+- [Per-track timelines](/quest/m1/archive/track-timeline/README.md) - every track segments and expires on its own timeline, and HLS is derived from group timestamps at the edge
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq import archive` publishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay
 - [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
