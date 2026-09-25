@@ -648,8 +648,12 @@ impl<E: catalog::Catalog> Import<E> {
 			if pes.header.pts.is_some() {
 				let pts = unwrap_pts(&mut self.media_unwrap, pes.header.pts.map(|t| t.as_u64()))?;
 				let video = match self.streams.get(&pid) {
-					Some(Stream::H264 { reanchor, import, .. }) => Some((reanchor, import.floor(false), import.floor(true))),
-					Some(Stream::H265 { reanchor, import, .. }) => Some((reanchor, import.floor(false), import.floor(true))),
+					Some(Stream::H264 { reanchor, import, .. }) => {
+						Some((reanchor, import.floor(false), import.floor(true)))
+					}
+					Some(Stream::H265 { reanchor, import, .. }) => {
+						Some((reanchor, import.floor(false), import.floor(true)))
+					}
 					_ => None,
 				};
 				self.last_pts = match (pts, video) {
@@ -5540,7 +5544,11 @@ mod test {
 		assert_forward(&frames);
 		// A pass keeps its own spacing, and each wrap lands the same distance past the last:
 		// the second wrap grew the shift by one more pass rather than reusing the first.
-		let stamps: Vec<u128> = frames.iter().filter(|f| f.keyframe).map(|f| f.timestamp.as_micros()).collect();
+		let stamps: Vec<u128> = frames
+			.iter()
+			.filter(|f| f.keyframe)
+			.map(|f| f.timestamp.as_micros())
+			.collect();
 		let gop = 4 * 1_000_000 * FRAME as u128 / 90_000;
 		let steps: Vec<u128> = stamps.windows(2).map(|pair| pair[1] - pair[0]).collect();
 		// Within a microsecond: the wire is in microseconds and the source in 90 kHz ticks.
@@ -5618,7 +5626,8 @@ mod test {
 			mux.out
 				.extend_from_slice(&audio_pes_packet(DATA_PID, cc, pts, &[0xDE, 0xAD]));
 		}
-		let (consumer, catalog, _import) = import_all(&mux.out).expect("a verbatim PES below the edge must not end the import");
+		let (consumer, catalog, _import) =
+			import_all(&mux.out).expect("a verbatim PES below the edge must not end the import");
 		let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
 		let frames = read_track(&consumer, &name, crate::container::Kind::Data).await;
 		assert_eq!(frames.len(), 5);
@@ -5707,7 +5716,10 @@ mod test {
 		let cues = read_track(&consumer, cues, crate::container::Kind::Data).await;
 		let video = read_track(&consumer, &video, crate::container::Kind::Video).await;
 		assert_eq!(cues.len(), 2);
-		assert_eq!(cues[1].timestamp, video[8].timestamp, "the cue left its keyframe behind");
+		assert_eq!(
+			cues[1].timestamp, video[8].timestamp,
+			"the cue left its keyframe behind"
+		);
 	}
 
 	/// An adaptation-only clock packet on `pid` carrying `ticks` of the 27 MHz PCR.
