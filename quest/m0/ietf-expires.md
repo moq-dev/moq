@@ -9,11 +9,12 @@ publisher sends is unchanged.
 
 ## Plan
 
-- `SubscribeOk` and `RequestOk` in `rs/moq-net/src/ietf/` decode 0x08 on
-  every draft that uses parameters, then drop it. `PublishOk` does the same
-  only through draft 19; draft 20 moved subscription parameters into PUBLISH
-  and requires PUBLISH_OK's parameter block to be empty. Today
-  `decode_params!` rejects unlisted keys with `InvalidValue`.
+- `SubscribeOk`, `PublishOk`, and `RequestOk` in `rs/moq-net/src/ietf/`
+  decode 0x08 on every draft that uses parameters, then drop it. Today
+  `decode_params!` rejects unlisted keys with `InvalidValue`. `PublishOk`
+  already accepts the subscription parameters on draft 20, where the grammar
+  moved them to PUBLISH; EXPIRES gets the same leniency rather than a
+  draft-20-only rejection.
 - EXPIRES is ignored on purpose. It is the wall-clock time until the publisher
   plans to end the subscription. That end already arrives as PUBLISH_DONE, and
   moq-net never refreshes a subscription through REQUEST_UPDATE. Retention is

@@ -20,9 +20,11 @@ survives an IETF hop the way it already survives moq-lite 05+.
   HLS/DASH egress asks for its window from the publisher; the old 5s was too
   short for it anyway (`moq import` already sends 30s).
 - IETF: MAX_CACHE_DURATION (0x04) is milliseconds, a message parameter through
-  draft 15 and a track property from draft 16. The publisher sends `Some(n)`
-  as n and omits it for `None`. The subscriber reads absent as `None`, which
-  is what the drafts mean by omission. Today Rust drops the property and JS
+  draft 15 and a track property from draft 16. The subscriber reads it on
+  every draft, and absent means `None`, which is what the drafts mean by
+  omission. The publisher sends `Some(n)` as n and omits it for `None`, but
+  only on draft 17+: older moq-net peers reject 0x04 on draft 15 and trailing
+  properties on draft 16, so those drafts stay receive-only. Today Rust drops the property and JS
   parses but never uses it.
 - MAX_CACHE_DURATION is wall-clock and max age is media time with the newest
   group always kept, so the mapping is approximate. Accept that rather than
@@ -37,8 +39,8 @@ survives an IETF hop the way it already survives moq-lite 05+.
   to `dev`. Update `doc/concept/moq-lite.md` and the affected rustdoc and JS
   docs in the same PR.
 - Test: Rust-to-Rust and Rust-to-JS sessions over IETF and lite-07 carry
-  `None`, `Some(0)`, and a non-zero max age end to end, on both sides of the
-  draft 15/16 boundary. Run `just test interop --all`.
+  `None`, `Some(0)`, and a non-zero max age end to end, including through a
+  relay hop, and drafts 15 and 16 decode but never send it. Run `just test interop --all`.
 
 ## Required
 
