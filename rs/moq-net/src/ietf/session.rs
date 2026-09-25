@@ -887,7 +887,11 @@ where
 				tasks.push(subscriber.handle_stream(id, data, stream, peer, declared)?);
 			}
 			auth::Auth::ID if let Some(serve) = &serve => {
-				let msg = auth::Auth::decode_msg(&mut data.clone(), version)?;
+				let mut data = data;
+				let msg = auth::Auth::decode_msg(&mut data, version)?;
+				if !data.is_empty() {
+					return Err(Error::WrongSize);
+				}
 				tasks.push(serve.clone().run(stream, msg, version));
 			}
 			_ => {
