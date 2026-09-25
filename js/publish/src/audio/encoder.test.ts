@@ -54,7 +54,9 @@ describe("resolve", () => {
 	});
 });
 
-// Like Chrome's Opus encoder, it holds the newest chunks until later input pushes them out.
+// Like Chrome's Opus encoder, it holds the newest chunks until later input pushes them out, and
+// stamps each chunk from the first input's timestamp plus the audio encoded since, so a jump in
+// input timestamps never reaches the output.
 class LaggingAudioEncoder {
 	static readonly LAG = 2;
 
@@ -64,6 +66,8 @@ class LaggingAudioEncoder {
 	state: CodecState = "unconfigured";
 	#output: EncodedAudioChunkOutputCallback;
 	#held: { timestamp: number; duration: number }[] = [];
+	#base: number | undefined;
+	#encoded = 0;
 
 	constructor(init: AudioEncoderInit) {
 		this.#output = init.output;
@@ -76,7 +80,9 @@ class LaggingAudioEncoder {
 
 	encode(data: AudioData): void {
 		const duration = Math.round((data.numberOfFrames / data.sampleRate) * 1_000_000);
-		this.#held.push({ timestamp: data.timestamp, duration });
+		this.#base ??= data.timestamp;
+		this.#held.push({ timestamp: this.#base + this.#encoded, duration });
+		this.#encoded += duration;
 		while (this.#held.length > LaggingAudioEncoder.LAG) {
 			const { timestamp, duration } = this.#held.shift() as { timestamp: number; duration: number };
 			const chunk = {
@@ -88,6 +94,13 @@ class LaggingAudioEncoder {
 			};
 			this.#output(chunk as unknown as EncodedAudioChunk);
 		}
+	}
+
+	reset(): void {
+		this.state = "unconfigured";
+		this.#held = [];
+		this.#base = undefined;
+		this.#encoded = 0;
 	}
 
 	close(): void {
@@ -171,24 +184,21 @@ class Feed {
 	}
 }
 
-// The encoder outlives a demand gap, so chunks it held when demand disappeared surface after the
-// resume. Written after the marker, they would put pre-gap media on the live edge, and a rounding
-// step below the marker aborts every subscriber.
-test("a demand gap marks where submitted audio ends and drops the chunks held across it", async () => {
-	using _webcodecs = installFakeWebCodecs();
+// An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes].
+async function setup() {
 	const configured = new Promise<void>((resolve) => {
 		LaggingAudioEncoder.onConfigure = resolve;
 	});
 
 	const track = new Moq.Track.Producer("audio").accept();
 	const written: [number, number][] = [];
-	let onWrite: (() => void) | undefined;
+	const writes = { onWrite: undefined as (() => void) | undefined };
 	const writeFrame = track.writeFrame.bind(track);
 	track.writeFrame = (frame) => {
 		const [timestamp, payload] = Moq.Varint.decode(frame.payload);
 		written.push([timestamp, payload.byteLength]);
 		writeFrame(frame);
-		onWrite?.();
+		writes.onWrite?.();
 	};
 
 	const rendition = {
@@ -212,6 +222,30 @@ test("a demand gap marks where submitted audio ends and drops the chunks held ac
 		capture: capture as never,
 	});
 
+	await configured;
+	LaggingAudioEncoder.onConfigure = undefined;
+
+	return {
+		track,
+		rendition,
+		feed,
+		written,
+		writes,
+		[Symbol.dispose]() {
+			encoder.close();
+		},
+	};
+}
+
+// The encoder outlives a demand gap, so chunks it held when demand disappeared surface after the
+// resume. Written after the marker, they would put pre-gap media on the live edge, and a rounding
+// step below the marker aborts every subscriber. The resumed chunks have to carry the capture clock,
+// not the encoder's gap-blind one, or they trail the next gap's marker and are dropped as pre-gap.
+test("a demand gap marks where submitted audio ends and drops the chunks held across it", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { track, rendition, feed, written, writes } = env;
+
 	// One 20ms Opus frame per push, on a clock with a fractional microsecond origin.
 	let index = 0;
 	const push = async (count: number) => {
@@ -221,30 +255,45 @@ test("a demand gap marks where submitted audio ends and drops the chunks held ac
 		await feed.drain();
 	};
 
-	try {
-		await configured;
-		await push(4); // two written, two held
+	await push(4); // two written, two held
 
-		const marked = new Promise<void>((resolve) => {
-			onWrite = resolve;
-		});
-		rendition.track.set(undefined);
-		await marked;
-		onWrite = undefined;
+	const marked = new Promise<void>((resolve) => {
+		writes.onWrite = resolve;
+	});
+	rendition.track.set(undefined);
+	await marked;
+	writes.onWrite = undefined;
 
-		await push(2); // gated
-		rendition.track.set(track);
-		await push(4); // releases the two held pre-gap chunks, then two resumed ones
+	await push(2); // gated
+	rendition.track.set(track);
+	await push(4); // releases the two held pre-gap chunks, then two resumed ones
 
-		expect(written).toEqual([
-			[18_700, 1],
-			[38_700, 1],
-			[98_700, 0],
-			[138_700, 1],
-			[158_700, 1],
-		]);
-	} finally {
-		LaggingAudioEncoder.onConfigure = undefined;
-		encoder.close();
+	expect(written).toEqual([
+		[18_700, 1],
+		[38_700, 1],
+		[98_700, 0],
+		[138_700, 1],
+		[158_700, 1],
+	]);
+});
+
+// A push that completes several frames is still one continuous stream, so it must not restart the
+// encoder and drop the chunks it holds.
+test("a push completing several frames keeps the encoder running", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { feed, written } = env;
+
+	// Two 20ms Opus frames per push.
+	for (let index = 0; index < 3; index++) {
+		await feed.push({ timestamp: Time.Micro(18_699.6 + index * 40_000), channels: [new Float32Array(1920)] });
 	}
+	await feed.drain();
+
+	expect(written).toEqual([
+		[18_700, 1],
+		[38_700, 1],
+		[58_700, 1],
+		[78_700, 1],
+	]);
 });
