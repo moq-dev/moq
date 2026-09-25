@@ -61,7 +61,7 @@ pub(crate) fn decode_error(code: i32) -> Error {
 	if code == unsafe_libopus::OPUS_INVALID_PACKET {
 		return Error::Decode(format!("libopus rejected the packet (code {code})"));
 	}
-	error(code, "opus_decode_float")
+	error(code, "opus_multistream_decode_float")
 }
 
 /// Classify a packet, preserving DTX across packet loss.

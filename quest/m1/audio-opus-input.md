@@ -22,7 +22,3 @@ real Opus fixtures in CI. Verify timestamps as well as decoded sample counts.
 
 Public API and wire schema: unchanged. Update the existing codec documentation
 with supported/refused cases; header-parser changes stay focused on this path.
-
-## Related
-
-- [Opus surround](/quest/m1/audio-codecs/opus-surround.md) - adds supported mappings separately

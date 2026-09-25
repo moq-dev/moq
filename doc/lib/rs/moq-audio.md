@@ -39,14 +39,16 @@ first, then software. `decode::Config::kind` forces one (`Kind::Software`, or
 
 | Backend | Decodes | Hosts |
 | --- | --- | --- |
-| `libopus` | Opus, mono or stereo | all |
+| `libopus` | Opus, mono or stereo, and surround up to 7.1 (channel mapping family 1) | all |
 | `pcm` | PCM | all |
 | `symphonia` | AAC-LC, mono or stereo (the default-on `aac` feature) | all |
 
 No platform decoder is wired in yet, so multichannel AAC and HE-AAC declared in
 its config are refused at construction on every host. HE-AAC signaled only in
 band plays as its half-rate LC core. Linux has no OS audio decoder, so it will
-stay that way there.
+stay that way there. Surround Opus is pure Rust, so it is the one multichannel
+path every host has. Opus mapping families other than 0 and 1 (ambisonics, and
+255's unpositioned channels) are refused, since they declare no speakers.
 
 `encode` selects the same way, through `encode::Settings::kind`, and
 `Encoder::name()` reports what opened.

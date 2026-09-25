@@ -615,7 +615,8 @@ mod test {
 		head.push(6); // channel_count (5.1)
 		head.extend_from_slice(&0u16.to_le_bytes()); // pre_skip
 		head.extend_from_slice(&24_000u32.to_le_bytes()); // sample_rate
-		head.extend_from_slice(&[0, 0, 0]); // output gain (i16) + channel mapping family (1 byte)
+		head.extend_from_slice(&[0, 0, 1]); // output gain (i16) + channel mapping family 1
+		head.extend_from_slice(&[4, 2, 0, 4, 1, 2, 3, 5]); // streams, coupled, Vorbis 5.1 mapping
 		let init_b64 = base64::engine::general_purpose::STANDARD.encode(&head);
 
 		let mut track = audio_track("audio0", moq_msf::Packaging::Loc);
