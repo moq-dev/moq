@@ -26,7 +26,7 @@ default = ["aac"]
 # AAC-LC decode via symphonia. Pure Rust, so it costs no toolchain: the trade
 # this crate already refused for Opus. Only a subscriber to an ingest-sourced
 # broadcast needs it (RTMP, SRT/TS, fmp4, and gstreamer all publish AAC, while
-# everything this crate encodes is Opus or PCM), so a publish-only build can
+# this crate encodes in software is Opus or PCM), so a publish-only build can
 # drop it and the two crates it pulls.
 aac = ["dep:symphonia-codec-aac", "dep:symphonia-core"]
 # Device capture. Microphones go through cpal (pure-Rust: CoreAudio / WASAPI /

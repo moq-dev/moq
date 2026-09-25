@@ -193,7 +193,7 @@ func (b *BroadcastProducer) PublishContainerStream(format ContainerFormat) (*Con
 
 // EncodeAudio publishes a raw-audio track with an in-process encoder.
 //
-// Select the codec with OpusAudioCodec (currently the only constructor).
+// Select the codec with OpusAudioCodec or AacAudioCodec.
 // Pass bandwidth to reserve this track's bitrate against the session's
 // allocator so a co-resident video encoder sizes itself against what is left.
 func (b *BroadcastProducer) EncodeAudio(name string, input AudioEncoderInput, output AudioEncoderOutput, bandwidth *Bandwidth) (*AudioProducer, error) {

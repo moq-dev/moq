@@ -154,7 +154,7 @@ client = moq.Client(
   - `.publish_audio(format, init, *, label=None, track=None) → MediaProducer`. `init` is required: an OpusHead or AudioSpecificConfig resolves the whole rendition. `track` names the track; otherwise a unique name is derived from the format.
   - `.publish_video(format, init=b"", *, label=None, hint=None, track=None) → MediaProducer`. `init` may be empty for a format that resolves in band; a `VideoHint` pins catalog fields the stream can't reveal (bitrate) or publishes the catalog before the first keyframe. `track` names the track as in `publish_audio`.
   - `.encode_video(input, output, *, bandwidth=None) → VideoProducer`. Encode raw `VideoFrame`s inside the binding; `.write(frame)` each one.
-  - `.encode_audio(name, input, output, *, bandwidth=None) → AudioProducer`. Encode raw PCM `AudioFrame`s; the codec is `output.codec`, e.g. `AudioCodec.opus()`, with `output.frame_duration_us` setting the Opus frame length.
+  - `.encode_audio(name, input, output, *, bandwidth=None) → AudioProducer`. Encode raw PCM `AudioFrame`s; the codec is `output.codec`, e.g. `AudioCodec.opus()` or `AudioCodec.aac()`, with `output.frame_duration_us` setting the Opus frame length (0 takes the codec's own frame, which AAC needs).
   - `.finish()`
 - **`BroadcastDynamic`**. Async source of tracks requested by subscribers.
   - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.

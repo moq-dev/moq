@@ -366,7 +366,12 @@ impl<E: CatalogExt> Producer<E> {
 			let chunk: Vec<f32> = self.pending.drain(..frame_samples).collect();
 			let packet = self.encoder.encode(&chunk)?;
 
-			let timestamp = Self::timestamp(epoch_us, self.frames_produced, self.encoder.codec_rate())?;
+			let timestamp = Self::timestamp(
+				epoch_us,
+				self.frames_produced,
+				self.encoder.folded_delay(),
+				self.encoder.codec_rate(),
+			)?;
 			self.frames_produced += self.encoder.frame_size() as u64;
 			self.activity = packet.activity;
 			Self::publish(&mut self.track, packet, timestamp)?;
@@ -376,10 +381,18 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(())
 	}
 
-	/// PTS of the next frame: the epoch plus the samples emitted since it.
-	fn timestamp(epoch_us: u64, frames_produced: u64, codec_rate: u32) -> Result<Timestamp, Error> {
-		let offset_us = (frames_produced * 1_000_000) / codec_rate as u64;
-		Ok(Timestamp::from_micros(epoch_us + offset_us)?)
+	/// PTS of the frame `frames` samples past the epoch, stamped `delay` samples
+	/// earlier to fold in codec priming the catalog can't signal.
+	///
+	/// Priming that would land before a zero epoch is stamped at zero instead: it
+	/// decodes to the codec's warm-up rather than to input, so only its spacing is
+	/// lost.
+	fn timestamp(epoch_us: u64, frames: u64, delay: usize, codec_rate: u32) -> Result<Timestamp, Error> {
+		let frames = i128::from(frames) - delay as i128;
+		let offset_us = (frames * 1_000_000).div_euclid(i128::from(codec_rate));
+		let micros = (i128::from(epoch_us) + offset_us).max(0);
+		let micros = u64::try_from(micros).map_err(|_| moq_net::TimeOverflow)?;
+		Ok(Timestamp::from_micros(micros)?)
 	}
 
 	fn publish(
@@ -474,8 +487,10 @@ impl<E: CatalogExt> Producer<E> {
 		let codec_rate = self.encoder.codec_rate();
 		let channels = self.encoder.codec_channels() as usize;
 		let source_frames = self.pending.len() / channels;
-		let start = Self::timestamp(epoch_us, self.frames_produced, codec_rate)?;
-		let end = Self::timestamp(epoch_us, self.frames_produced + source_frames as u64, codec_rate)?;
+		let delay = self.encoder.folded_delay();
+		let start = Self::timestamp(epoch_us, self.frames_produced, delay, codec_rate)?;
+		// The source ends where it ends: priming only moves the packets carrying it.
+		let end = Self::timestamp(epoch_us, self.frames_produced + source_frames as u64, 0, codec_rate)?;
 		let finish = self.encoder.drain(&self.pending)?;
 		let discard_padding = finish.discard_padding();
 		let packets = finish.into_packets();
@@ -493,7 +508,7 @@ impl<E: CatalogExt> Producer<E> {
 			)?;
 		} else {
 			for packet in packets {
-				let timestamp = Self::timestamp(epoch_us, self.frames_produced, codec_rate)?;
+				let timestamp = Self::timestamp(epoch_us, self.frames_produced, delay, codec_rate)?;
 				self.activity = packet.activity;
 				Self::publish(&mut self.track, packet, timestamp)?;
 				self.frames_produced += frame_size as u64;
@@ -896,6 +911,51 @@ mod tests {
 		// old code derived PTS purely from the sample count, always near 0).
 		let pts = published_pts(&[full_frame(1_000_000)], None).await;
 		assert_eq!(pts, vec![1_000_000]);
+	}
+
+	/// AAC can't signal its encoder delay, so each packet is stamped that much
+	/// earlier and the first input sample still decodes at the epoch.
+	#[tokio::test]
+	async fn aac_folds_the_encoder_delay_into_timestamps() {
+		async fn pts(epoch_us: u64) -> Vec<u128> {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let consumer = broadcast.consume();
+
+			let input = Input::new(48_000, Layout::Mono);
+			let options = Options {
+				track: Some("audio".to_string()),
+				settings: Settings {
+					kind: crate::encode::Kind::Named(crate::encode::backend::stub::NAME.into()),
+					..Settings::from_input(crate::encode::Codec::Aac, &input)
+				},
+				..Options::default()
+			};
+			let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+
+			let track = consumer
+				.track("audio")
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+				.await
+				.unwrap();
+			let mut reader = moq_mux::container::Consumer::new(
+				track,
+				moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio),
+			);
+
+			producer.write(&pcm_frame(&[0.1; 4 * 1024], epoch_us)).unwrap();
+			let mut pts = Vec::new();
+			for _ in 0..4 {
+				pts.push(reader.read().await.unwrap().expect("a packet").timestamp.as_micros());
+			}
+			pts
+		}
+
+		// 2112 frames of delay at 48 kHz is 44 ms, rounded down per packet.
+		assert_eq!(pts(1_000_000).await, vec![956_000, 977_333, 998_666, 1_020_000]);
+		// Priming before a zero epoch stamps at zero; the input still starts on time.
+		assert_eq!(pts(0).await, vec![0, 0, 0, 20_000]);
 	}
 
 	/// The encoder needs no correction for the resampler's own delay: it anchors

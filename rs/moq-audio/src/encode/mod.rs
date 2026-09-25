@@ -1,6 +1,8 @@
 //! Encode raw PCM and publish it as a moq audio track.
 //!
-//! The output codec is selected via [`Codec`].
+//! The output codec is selected via [`Codec`], and the implementation behind it
+//! via [`Kind`]: a platform encoder when the host has one, software otherwise.
+//! AAC has no software encoder, so a host without a platform one refuses it.
 //!
 //! Entry points, high to low level:
 //! - `publish_capture` captures a microphone (or system audio) and publishes
@@ -15,6 +17,7 @@
 //! `publish_capture` is unlinked above because it only exists with the `capture`
 //! feature, so a default-feature rustdoc build has nothing to link to.
 
+mod backend;
 mod encoded;
 mod encoder;
 mod producer;
@@ -23,7 +26,7 @@ mod producer;
 mod capture;
 
 pub use encoded::Encoded;
-pub use encoder::{Codec, Encoder, Finish, Input, Settings};
+pub use encoder::{Codec, Encoder, Finish, Input, Kind, Settings};
 pub use producer::{Options, Producer};
 
 #[cfg(feature = "capture")]

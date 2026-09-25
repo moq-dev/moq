@@ -512,6 +512,42 @@ async fn raw_audio_frame_durations() {
 	broadcast.finish().unwrap();
 }
 
+/// A frame duration of 0 takes the codec's own frame, and AAC, which encodes only
+/// through a platform encoder, is refused where there is none.
+#[cfg(feature = "audio")]
+#[tokio::test]
+async fn raw_audio_codec_default_frame() {
+	use crate::audio::*;
+
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let input = || MoqAudioEncoderInput {
+		format: MoqAudioSampleFormat::F32,
+		sample_rate: 48_000,
+		channels: 2,
+	};
+	let output = |codec| MoqAudioEncoderOutput {
+		codec,
+		sample_rate: None,
+		channels: None,
+		bitrate: None,
+		frame_duration_us: 0,
+	};
+
+	let opus = broadcast
+		.encode_audio("opus".into(), input(), output(MoqAudioCodec::opus()), None)
+		.unwrap();
+	opus.finish().unwrap();
+
+	assert_eq!(MoqAudioCodec::aac().codec(), moq_audio::encode::Codec::Aac);
+	let aac = broadcast.encode_audio("aac".into(), input(), output(MoqAudioCodec::aac()), None);
+	let Err(MoqError::Audio(message)) = aac else {
+		panic!("no platform AAC encoder on this host");
+	};
+	assert!(message.contains("aac"), "{message}");
+
+	broadcast.finish().unwrap();
+}
+
 #[tokio::test]
 async fn raw_track_datagram_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
