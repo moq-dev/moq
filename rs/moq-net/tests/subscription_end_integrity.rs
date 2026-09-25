@@ -57,7 +57,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let mut options = MockConnectOptions::new("moq-lite-05".parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.clone());
 	options.client_subscribe = Some(subscriber.clone());
-	let MockPair { client, server } = connect_mock(options).await;
+	let MockPair { client, server, .. } = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
 	tokio::time::timeout(TIMEOUT, consumer.routed("bcast"))
@@ -209,7 +209,7 @@ async fn killed(version: &str) -> Option<moq_net::Error> {
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.clone());
 	options.client_subscribe = Some(subscriber.clone());
-	let MockPair { client, server } = connect_mock(options).await;
+	let MockPair { client, server, .. } = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
 	consumer.routed("bcast").await.expect("routed");
