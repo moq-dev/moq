@@ -251,6 +251,8 @@ impl SessionRegistration {
 /// `Session` (or the producers held by the element) tears it down.
 pub(crate) struct Session {
 	join: tokio::task::JoinHandle<()>,
+	/// The reconnect loop, held so [`stop`](Self::stop) can wait for it to end.
+	connection: moq_tokio::Connection,
 	status: Arc<Status>,
 	/// The live send-bitrate estimate, tracked across reconnects by the reconnect loop. Read directly
 	/// by the `estimated-send-rate` getter.
@@ -307,7 +309,7 @@ impl Session {
 		// installing this session, and its bus error would be discarded for belonging to no live one.
 		let gate = Arc::new(tokio::sync::Notify::new());
 		let join = RUNTIME.spawn(forward(
-			reconnect,
+			reconnect.clone(),
 			origin,
 			status.clone(),
 			completion.clone(),
@@ -318,6 +320,7 @@ impl Session {
 		Ok((
 			Self {
 				join,
+				connection: reconnect,
 				status,
 				send_bandwidth,
 				recv_bandwidth,
@@ -360,9 +363,38 @@ impl Session {
 		self.completion.clone()
 	}
 
-	/// Stop the session: a clean local close, never an error. [`Drop`] aborts the task, cancelling the
-	/// in-flight connect or reconnect loop at its next await point and dropping the connection.
-	pub fn stop(self) {}
+	/// Stop the session: a clean local close, never an error. Returns once the reconnect loop has ended.
+	///
+	/// Aborting only cancels the loop at its next await point, and a worker may be mid-dial, generating
+	/// TLS randomness. A process exiting in that window (`gst-launch` right after NULL) races aws-lc's
+	/// exit destructors, which free its seed DRBG and then `abort()` a thread asking for more.
+	pub fn stop(self) {
+		// The status task goes first, so it never reports the loop's end as a failure.
+		self.join.abort();
+		self.connection.abort(moq_net::Error::Cancel);
+		// Parks the thread rather than entering an executor, which would panic under a caller's own.
+		let closed = || {
+			let waiter = moq_net::kio::Waiter::new(Arc::new(Unpark(std::thread::current())).into());
+			while self.connection.poll_closed(&waiter).is_pending() {
+				std::thread::park();
+			}
+		};
+		match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
+			// A state change from a notify or bus sync handler runs on a worker, whose queue may hold the
+			// loop's cancellation. Handing the worker off lets it run while this thread blocks.
+			Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(closed),
+			_ => closed(),
+		}
+	}
+}
+
+/// Wakes a thread parked in [`Session::stop`].
+struct Unpark(std::thread::Thread);
+
+impl std::task::Wake for Unpark {
+	fn wake(self: Arc<Self>) {
+		self.0.unpark();
+	}
 }
 
 impl Drop for Session {
@@ -383,8 +415,8 @@ impl Drop for Session {
 /// presence change notifies `sessions` and `connection-stats`, and a bitrate change notifies just that
 /// bitrate. The loop stops only on a terminal error (a non-retryable auth failure, or a bounded backoff's
 /// give-up), which the `Err` arm posts as a bus error.
-/// [`Session`]'s `Drop` aborts this task, which drops the `Connection` handle and quietly tears the loop
-/// down.
+/// [`Session`] aborts this task on stop or drop, and dropping its own `Connection` handle with it quietly
+/// tears the loop down.
 async fn forward(
 	reconnect: moq_tokio::Connection,
 	origin: moq_net::origin::Producer,
@@ -517,6 +549,59 @@ mod tests {
 		assert_eq!(structure.name(), "moq-sessions");
 		assert_eq!(structure.get::<u64>("started"), Ok(3));
 		assert_eq!(structure.get::<u64>("ended"), Ok(2));
+	}
+
+	fn started() -> (Session, moq_tokio::Connection) {
+		gst::init().unwrap();
+		let settings = ResolvedSettings {
+			url: "https://127.0.0.1:1".parse().unwrap(),
+			broadcast: "test".into(),
+			tls_disable_verify: false,
+			quic_idle_timeout: None,
+			quic_keep_alive: None,
+		};
+		let (session, registration, _, _) = Session::start(settings, glib::WeakRef::new()).unwrap();
+		registration.mark_registered();
+		let connection = session.connection.clone();
+		(session, connection)
+	}
+
+	fn is_closed(connection: &moq_tokio::Connection) -> bool {
+		connection.poll_closed(&moq_net::kio::Waiter::noop()).is_ready()
+	}
+
+	// A dial still running once the element reached NULL can outlive `main`, and aws-lc aborts the
+	// process when a thread asks it for randomness after its exit destructors ran.
+	#[test]
+	fn stop_returns_after_the_reconnect_loop_ends() {
+		let (session, connection) = started();
+		session.stop();
+		assert!(is_closed(&connection));
+	}
+
+	// A notify or bus sync handler can stop the element from a runtime worker. With the loop parked, its
+	// cancellation lands in that worker's own LIFO slot, which no other worker can steal, so blocking the
+	// worker outright would never let it run.
+	#[test]
+	fn stop_from_a_runtime_worker_does_not_deadlock() {
+		let (session, connection) = started();
+		let metrics = RUNTIME.metrics();
+		// An odd count means that worker is parked.
+		while metrics.global_queue_depth() > 0
+			|| (0..metrics.num_workers()).any(|worker| metrics.worker_park_unpark_count(worker).is_multiple_of(2))
+		{
+			std::thread::yield_now();
+		}
+		RUNTIME.block_on(RUNTIME.spawn(async move { session.stop() })).unwrap();
+		assert!(is_closed(&connection));
+	}
+
+	// An application driving its own executor can reach NULL from inside it, and executors refuse to nest.
+	#[test]
+	fn stop_inside_another_executor() {
+		let (session, connection) = started();
+		futures::executor::block_on(async move { session.stop() });
+		assert!(is_closed(&connection));
 	}
 
 	#[tokio::test]
