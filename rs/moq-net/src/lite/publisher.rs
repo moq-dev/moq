@@ -37,6 +37,13 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
 	/// declare one itself. See `Client::with_peer_hop`.
 	pub peer_hop: Option<Hop>,
+	/// Our tokens' grants, which bound what we announce and serve, and the app's
+	/// claim on answering the peer's tokens.
+	pub auth: crate::auth::Handle,
+	/// What the default acceptor grants the peer's connection credential.
+	pub peer_grant: crate::auth::Grant,
+	/// Whether we dialed: only then does a publication outside our grant abort.
+	pub client: bool,
 }
 
 /// Context shared by every control-stream child.
@@ -59,6 +66,9 @@ struct Shared<S: crate::transport::poll::Session> {
 	priority: PriorityQueue,
 	version: Version,
 	goaway: crate::goaway::Protocol,
+	auth: crate::auth::Handle,
+	peer_grant: crate::auth::Grant,
+	runtime: crate::time::Clock,
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
@@ -137,6 +147,8 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	// shared context stays behind the Arc for the per-stream children.
 	accept: S,
 	children: kio::Tasks<Control<S>>,
+	/// Aborts the session on a publication outside our grant (dialing side only).
+	enforce: Option<Enforce>,
 }
 
 impl<S: crate::transport::poll::Session> Publisher<S> {
@@ -146,7 +158,9 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		// across every session, required for cross-session loop detection.
 		let self_origin = config.origin.hop();
 		let accept = config.session.clone();
+		let enforce = (config.client && config.version.has_auth()).then(Enforce::default);
 		Self {
+			enforce,
 			shared: Arc::new(Shared {
 				session: config.session,
 				origin: config.origin,
@@ -157,6 +171,9 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				priority: Default::default(),
 				version: config.version,
 				goaway: config.goaway,
+				auth: config.auth,
+				peer_grant: config.peer_grant,
+				runtime: config.runtime.clone(),
 			}),
 			runtime: config.runtime,
 			accept,
@@ -170,6 +187,13 @@ where
 	S: crate::transport::poll::Session,
 {
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if let Some(enforce) = &mut self.enforce
+			&& let Poll::Ready(res) = enforce.poll(&self.shared, waiter)
+		{
+			res?;
+			self.enforce = None;
+		}
+
 		let _ = self.children.poll(waiter);
 
 		let mut cx = Context::from_waker(waiter.waker());
@@ -230,6 +254,7 @@ enum ControlState<S: crate::transport::poll::Session> {
 	Fetch(FetchServe<S>),
 	TrackInfo(TrackInfoServe<S>),
 	Probe(ProbeServe<S>),
+	Auth(AuthServe<S>),
 	/// Decoding the peer's GOAWAY, surfaced through [`crate::Session::draining`].
 	Goaway {
 		stream: Stream<S, Version>,
@@ -271,6 +296,7 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						lite::ControlType::Probe => {
 							ControlState::Probe(ProbeServe::new(self.shared.clone(), self.runtime.clone(), stream))
 						}
+						lite::ControlType::Auth => ControlState::Auth(AuthServe::new(self.shared.clone(), stream)?),
 						lite::ControlType::Goaway => ControlState::Goaway { stream },
 						lite::ControlType::Session => return Poll::Ready(Err(Error::UnexpectedStream)),
 					};
@@ -280,6 +306,7 @@ impl<S: crate::transport::poll::Session> Control<S> {
 				ControlState::Fetch(serve) => return serve.poll(waiter),
 				ControlState::TrackInfo(serve) => return serve.poll(waiter),
 				ControlState::Probe(serve) => return serve.poll(waiter),
+				ControlState::Auth(serve) => return serve.poll(waiter),
 				ControlState::Goaway { stream } => {
 					// A decode error propagates to the caller, which logs and continues: a
 					// malformed GOAWAY must not tear down the session it is trying to drain.
@@ -308,6 +335,236 @@ impl<S: crate::transport::poll::Session> Control<S> {
 					return Poll::Ready(Ok(()));
 				}
 				ControlState::Done => return Poll::Ready(Ok(())),
+			}
+		}
+	}
+}
+
+/// Answers one of the peer's tokens: the app's verdict when it took the requests,
+/// otherwise the grant our own origin handles allow for the connection's
+/// credential. The stream lives as long as the token.
+struct AuthServe<S: crate::transport::poll::Session> {
+	shared: Arc<Shared<S>>,
+	stream: Option<Stream<S, Version>>,
+	/// Shared with the app's [`crate::auth::Request`] / [`crate::auth::Issued`], or
+	/// filled in by the default acceptor.
+	issue: Option<kio::Shared<crate::auth::Issue>>,
+	/// Our side is finished: FIN sent, waiting for the acknowledgement.
+	finished: bool,
+}
+
+impl<S: crate::transport::poll::Session> AuthServe<S> {
+	fn new(shared: Arc<Shared<S>>, stream: Stream<S, Version>) -> Result<Self, Error> {
+		// The Auth Stream is lite-06+ only.
+		if !shared.version.has_auth() {
+			return Err(Error::UnexpectedStream);
+		}
+		Ok(Self {
+			shared,
+			stream: Some(stream),
+			issue: None,
+			finished: false,
+		})
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let res = ready!(self.poll_serve(waiter));
+		let err = match res {
+			Ok(()) => Error::Cancel,
+			Err(err) => {
+				match &err {
+					Error::Cancel | Error::Unsupported | Error::Stream(_) | Error::Session(_) | Error::Transport(_) => {
+						tracing::debug!(%err, "auth stream ended")
+					}
+					err => tracing::warn!(%err, "auth stream error"),
+				}
+				if let Some(stream) = self.stream.take() {
+					stream.writer.abort(&err);
+				}
+				err
+			}
+		};
+		if let Some(issue) = &self.issue {
+			issue.lock().peer.get_or_insert(err);
+		}
+		Poll::Ready(Ok(()))
+	}
+
+	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let mut cx = Context::from_waker(waiter.waker());
+		let stream = self.stream.as_mut().expect("stream present");
+
+		let issue = match &self.issue {
+			Some(issue) => issue.clone(),
+			None => {
+				let msg = ready!(stream.reader.poll_decode::<lite::Auth>(&mut cx))?;
+				let issue = crate::auth::Issue::shared();
+				match self.shared.auth.acceptor() {
+					Some(requests) => {
+						// A closed queue hands the request back, and dropping it refuses
+						// the token on this stream.
+						let _ = requests.try_push(crate::auth::Request::new(msg.token, issue.clone()));
+					}
+					// Only the connection's own credential has a default answer; a token
+					// needs someone to verify it. Resetting reads as "unsupported" to
+					// the presenter, the same as a peer that predates AUTH.
+					None if !msg.token.is_empty() => return Poll::Ready(Err(Error::Unsupported)),
+					None => {
+						let grant = self.shared.peer_grant.clone();
+						issue.lock().outbox.push_back(crate::auth::Reply::Grant(grant));
+					}
+				}
+				self.issue = Some(issue.clone());
+				issue
+			}
+		};
+
+		loop {
+			ready!(stream.writer.poll_flush(&mut cx))?;
+			if self.finished {
+				return stream.writer.poll_closed(&mut cx);
+			}
+
+			// The presenter withdrew the token, by FIN or by a cancelling reset, or its
+			// stream died.
+			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
+				match res {
+					Ok(()) | Err(Error::Stream(crate::StreamError::Cancel)) => {}
+					Err(err) => return Poll::Ready(Err(err)),
+				}
+				stream.writer.finish()?;
+				self.finished = true;
+				continue;
+			}
+
+			let mut state = match issue.poll(waiter, |issue| match issue.outbox.is_empty() && !issue.done {
+				true => Poll::Pending,
+				false => Poll::Ready(()),
+			}) {
+				Poll::Ready(state) => state,
+				Poll::Pending => return Poll::Pending,
+			};
+			match state.outbox.pop_front() {
+				Some(reply) => {
+					drop(state);
+					Self::write(&self.shared, &issue, stream, reply)?;
+				}
+				// The app is done with the grant, or refused the token: close our side.
+				None => {
+					drop(state);
+					stream.writer.finish()?;
+					self.finished = true;
+				}
+			}
+		}
+	}
+
+	fn write(
+		shared: &Shared<S>,
+		issue: &kio::Shared<crate::auth::Issue>,
+		stream: &mut Stream<S, Version>,
+		reply: crate::auth::Reply,
+	) -> Result<(), Error> {
+		let msg = match reply {
+			crate::auth::Reply::Grant(grant) => {
+				let now = crate::runtime::Timers::now(&shared.runtime);
+				lite::AuthReply::Ok(lite::AuthOk {
+					publish: grant.publish,
+					subscribe: grant.subscribe,
+					expires: grant.expires.map(|at| at.saturating_duration_since(now)),
+				})
+			}
+			crate::auth::Reply::Refuse { code, reason } => lite::AuthReply::Error(lite::AuthError {
+				code: code.to_code().into(),
+				reason,
+			}),
+		};
+		match stream.writer.buffer(&msg) {
+			// This wire carries prefixes only, so a pattern grant cannot be told, only
+			// withheld: reset the stream, which the presenter reads as unsupported
+			// rather than refused. Never widen it. A pattern grant is routine until the
+			// wire carries patterns, so it is not worth a warning.
+			Err(Error::Encode(crate::coding::EncodeError::Unsupported)) => {
+				tracing::debug!("auth grant not representable as prefixes; resetting the token's stream");
+				issue.lock().done = true;
+				Err(Error::Unsupported)
+			}
+			res => res,
+		}
+	}
+}
+
+/// Aborts the session when our origin announces a broadcast our grant does not
+/// cover, instead of leaving it to wait for a subscription that never comes.
+///
+/// Waits until the tokens the session presented at setup are answered, then
+/// checks each broadcast when it is first announced. A grant that later shrinks
+/// withdraws what it no longer covers (see [`AnnounceRun`]) without aborting:
+/// the union is processed before new announcements, so a revocation is never
+/// mistaken for a new unauthorized publication.
+#[derive(Default)]
+struct Enforce {
+	epoch: u64,
+	permit: Option<crate::Patterns>,
+	announced: Option<announce::Consumer>,
+	/// Every broadcast admitted so far, still announced.
+	live: std::collections::HashSet<crate::PathOwned>,
+	setup: bool,
+}
+
+impl Enforce {
+	fn poll<S: crate::transport::poll::Session>(
+		&mut self,
+		shared: &Shared<S>,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<(), Error>> {
+		if !self.setup {
+			ready!(shared.auth.poll_setup_answered(waiter));
+			self.setup = true;
+		}
+		while let Poll::Ready(union) = shared.auth.poll_union(&mut self.epoch, waiter) {
+			self.permit = union.map(|grant| grant.publish);
+		}
+		// No grant yet (the peer never answered with one): nothing to check against.
+		let Some(permit) = &self.permit else {
+			return Poll::Pending;
+		};
+
+		let announced = match &mut self.announced {
+			Some(announced) => announced,
+			None => {
+				let origin = ready!(shared.poll_serving_origin(waiter));
+				self.announced.insert(origin.announced())
+			}
+		};
+
+		loop {
+			let Some(update) = ready!(announced.poll_next(waiter)) else {
+				return Poll::Ready(Ok(()));
+			};
+			match update.kind {
+				announce::Kind::Announced if !self.live.contains(&update.prefix) => {
+					if !permit.matches(update.prefix.as_str()) {
+						tracing::error!(
+							broadcast = %shared.origin.absolute(&update.prefix),
+							"publishing outside our grant; closing the session"
+						);
+						// `Error` carries no payload, so the path travels in the close
+						// reason, in the session's own terms.
+						let err = Error::Unauthorized;
+						let reason = format!("unauthorized: {}", update.prefix);
+						shared
+							.session
+							.clone()
+							.close(SessionError::from(&err).to_code(), &reason);
+						return Poll::Ready(Err(err));
+					}
+					self.live.insert(update.prefix);
+				}
+				announce::Kind::Retracted => {
+					self.live.remove(&update.prefix);
+				}
+				_ => {}
 			}
 		}
 	}
@@ -557,7 +814,10 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		// the source we are currently advertising to that peer.
 		let origin = origin.excluding(Hop::new(exclude_hop).unwrap_or(Hop::UNKNOWN));
 		let announced = origin.announced();
-		let run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
+		let mut run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
+		if self.shared.version.has_auth() {
+			run.auth = Some(self.shared.auth.clone());
+		}
 		self.state = AnnounceState::Run { origin, announced, run };
 	}
 }
@@ -577,6 +837,12 @@ struct AnnounceRun {
 	// prefix. The value is the announce id on versions that assign them.
 	live: HashMap<crate::PathOwned, Option<u64>>,
 	phase: AnnouncePhase,
+	// Our grant, on versions with AUTH: only what it lets us publish is announced,
+	// and a shrink withdraws what it no longer covers.
+	auth: Option<crate::auth::Handle>,
+	epoch: u64,
+	// What the union lets us publish, `None` until the peer first answers.
+	permit: Option<crate::Patterns>,
 }
 
 enum AnnouncePhase {
@@ -596,7 +862,98 @@ impl AnnounceRun {
 			next_announce_id: 0,
 			live: HashMap::new(),
 			phase: AnnouncePhase::Init,
+			auth: None,
+			epoch: 0,
+			permit: None,
 		}
+	}
+
+	/// Whether our grant lets us announce `prefix` (relative to the origin's root).
+	fn permitted(&self, prefix: &crate::Path) -> bool {
+		self.permit
+			.as_ref()
+			.is_none_or(|permit| permit.matches(prefix.as_str()))
+	}
+
+	/// Apply a change to our grant: withdraw what it no longer covers and, when it
+	/// grew, re-read the origin to announce what it now does.
+	fn regrant<S: crate::transport::poll::Session>(
+		&mut self,
+		stream: &mut Stream<S, Version>,
+		origin: &origin::Consumer,
+		announced: &mut announce::Consumer,
+		permit: crate::Patterns,
+	) -> Result<(), Error> {
+		// `None` allowed everything, so any grant only shrinks it.
+		let grew = self.permit.as_ref().is_some_and(|old| !old.covers(&permit));
+		self.permit = Some(permit);
+
+		if !grew {
+			let revoked: Vec<_> = self
+				.live
+				.keys()
+				.filter(|suffix| !self.permitted(&self.prefix.join(*suffix)))
+				.cloned()
+				.collect();
+			for suffix in revoked {
+				let absolute = origin.absolute(self.prefix.join(&suffix));
+				tracing::debug!(route = %absolute, "announce no longer authorized");
+				self.retract(stream, suffix, &absolute)?;
+			}
+			return Ok(());
+		}
+
+		// A route withheld earlier left no trace, so take a fresh cursor: its initial
+		// burst is the origin's current state, which is then diffed against what the
+		// peer holds.
+		*announced = origin.announced();
+		let mut current: HashMap<crate::PathOwned, crate::origin::Route> = HashMap::new();
+		while let Some(update) = announced.try_next() {
+			let suffix = self.suffix(&update);
+			match update.kind.is_active() {
+				true => current.insert(suffix, update.route),
+				false => current.remove(&suffix),
+			};
+		}
+
+		let stale: Vec<_> = self
+			.live
+			.keys()
+			.filter(|suffix| !current.contains_key(*suffix) || !self.permitted(&self.prefix.join(*suffix)))
+			.cloned()
+			.collect();
+		for suffix in stale {
+			let absolute = origin.absolute(self.prefix.join(&suffix));
+			self.retract(stream, suffix, &absolute)?;
+		}
+
+		for (suffix, route) in current {
+			let prefix = self.prefix.join(&suffix);
+			if !self.permitted(&prefix) {
+				continue;
+			}
+			let absolute = origin.absolute(&prefix);
+			let Some((hops, cost)) = self.outgoing(&route, &absolute) else {
+				continue;
+			};
+			match self.live.get(&suffix) {
+				// Still held: bring its metadata up to date in case the old cursor had
+				// an update pending.
+				Some(&Some(id)) => stream
+					.writer
+					.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?,
+				Some(&None) => {}
+				None => {
+					tracing::debug!(route = %absolute, "announce");
+					let id = self.assign_id();
+					self.live.insert(suffix.clone(), id);
+					stream
+						.writer
+						.buffer(&lite::AnnounceBroadcast::Active { suffix, hops, cost })?;
+				}
+			}
+		}
+		Ok(())
 	}
 
 	/// Where an update travels on this stream: its prefix relative to the requested
@@ -718,11 +1075,14 @@ impl AnnounceRun {
 					let suffix = self.suffix(&update);
 
 					if update.kind.is_active() {
+						initial.retain(|(s, ..)| s != &suffix);
+						if !self.permitted(&update.prefix) {
+							continue;
+						}
 						let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
 							continue;
 						};
 						tracing::debug!(route = %absolute, "announce");
-						initial.retain(|(s, ..)| s != &suffix);
 						initial.push((suffix, hops, cost));
 					} else {
 						// A potential race: a just-announced route already retracted.
@@ -766,6 +1126,13 @@ impl AnnounceRun {
 		let mut cx = Context::from_waker(waiter.waker());
 
 		if matches!(self.phase, AnnouncePhase::Init) {
+			// Start from whatever grant we already hold, so the initial set never
+			// advertises something it would withdraw a moment later.
+			if let Some(auth) = &self.auth
+				&& let Poll::Ready(union) = auth.poll_union(&mut self.epoch, waiter)
+			{
+				self.permit = union.map(|grant| grant.publish);
+			}
 			self.init(stream, origin, announced)?;
 			self.phase = AnnouncePhase::Running;
 		}
@@ -776,6 +1143,16 @@ impl AnnounceRun {
 
 			if matches!(self.phase, AnnouncePhase::Closing) {
 				return stream.writer.poll_closed(&mut cx);
+			}
+
+			// A grant change applies before the next update, so a route it no longer
+			// covers is withdrawn rather than re-sent.
+			if let Some(auth) = &self.auth
+				&& let Poll::Ready(Some(grant)) = auth.poll_union(&mut self.epoch, waiter)
+				&& self.permit.as_ref() != Some(&grant.publish)
+			{
+				self.regrant(stream, origin, announced, grant.publish)?;
+				continue;
 			}
 
 			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
@@ -796,7 +1173,7 @@ impl AnnounceRun {
 			let absolute = origin.absolute(&update.prefix);
 			let suffix = self.suffix(&update);
 
-			if !update.kind.is_active() {
+			if !update.kind.is_active() || !self.permitted(&update.prefix) {
 				self.retract(stream, suffix, &absolute)?;
 				continue;
 			}
@@ -916,7 +1293,15 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 					self.absolute = self.shared.origin.absolute(&msg.broadcast).to_owned();
 					self.track = msg.track.to_string();
 					tracing::debug!(broadcast = %self.absolute, track = %self.track, "track info requested");
+					// Checked before anything is resolved, like a subscription.
+					let allowed = self
+						.shared
+						.auth
+						.allows(crate::auth::Direction::Publish, msg.broadcast.as_str());
 					self.state = TrackInfoState::Hop { msg };
+					if !allowed {
+						return Poll::Ready(Err(Error::Unauthorized));
+					}
 				}
 				TrackInfoState::Hop { .. } => {
 					// The peer requested this exact path, so it has already seen an
@@ -969,6 +1354,8 @@ struct SubscribeServe<S: crate::transport::poll::Session> {
 	shared: Arc<Shared<S>>,
 	stream: Option<Stream<S, Version>>,
 	state: SubscribeState<S>,
+	/// Ends the subscription once our grant stops covering its broadcast.
+	gate: Option<crate::auth::Gate>,
 	// Log context, filled in after the decode.
 	id: u64,
 	absolute: crate::PathOwned,
@@ -1010,6 +1397,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 			shared,
 			stream: Some(stream),
 			state: SubscribeState::Decode,
+			gate: None,
 			id: 0,
 			absolute: Default::default(),
 			track: Default::default(),
@@ -1044,6 +1432,11 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 	}
 
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if let Some(gate) = &mut self.gate
+			&& gate.poll_denied(waiter).is_ready()
+		{
+			return Poll::Ready(Err(Error::Unauthorized));
+		}
 		loop {
 			match &mut self.state {
 				SubscribeState::Decode => {
@@ -1055,6 +1448,21 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 					self.absolute = self.shared.origin.absolute(&msg.broadcast).to_owned();
 					self.track = msg.track.to_string();
 					tracing::info!(id = self.id, broadcast = %self.absolute, track = %self.track, "subscribed started");
+
+					if self.shared.version.has_auth() {
+						let mut gate = crate::auth::Gate::new(
+							self.shared.auth.clone(),
+							msg.broadcast.to_owned(),
+							crate::auth::Direction::Publish,
+						);
+						// Checked before anything is resolved, so a broadcast our grant
+						// does not cover is never served, not just cut off later.
+						if gate.poll_denied(waiter).is_ready() {
+							self.state = SubscribeState::Hop { msg };
+							return Poll::Ready(Err(Error::Unauthorized));
+						}
+						self.gate = Some(gate);
+					}
 
 					self.state = SubscribeState::Hop { msg };
 				}
@@ -1290,7 +1698,15 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 					self.group = msg.group;
 					tracing::info!(broadcast = %self.absolute, track = %self.track, group = %self.group, "fetch started");
 
+					// Checked before anything is resolved, like a subscription.
+					let allowed = self
+						.shared
+						.auth
+						.allows(crate::auth::Direction::Publish, msg.broadcast.as_str());
 					self.state = FetchState::Hop { msg };
+					if !allowed {
+						return Poll::Ready(Err(Error::Unauthorized));
+					}
 				}
 				FetchState::Hop { .. } => {
 					// The peer fetched this exact path, so it has already seen an
@@ -3048,6 +3464,9 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: Some(assigned),
+			auth: crate::auth::Handle::new(false),
+			peer_grant: Default::default(),
+			client: false,
 		});
 
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
@@ -3150,6 +3569,9 @@ mod tests {
 			peer_setup: crate::lite::PeerSetup::default(),
 			goaway,
 			peer_hop: None,
+			auth: crate::auth::Handle::new(false),
+			peer_grant: Default::default(),
+			client: false,
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
 	}

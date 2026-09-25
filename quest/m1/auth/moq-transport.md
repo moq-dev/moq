@@ -65,8 +65,8 @@ capability limit in the draft and token-in-band guidance.
 option round trip with the tri-state `from_setup` shape solicit uses, the
 three messages as `Message` impls with IDs from the draft, and negotiation
 recorded on the peer state. `run_dispatch` in `ietf/session.rs` routes an AUTH
-request stream to the shared `auth::Handle` from
-[Lite stream](/quest/m1/auth/lite.md); `ietf::start` opens the empty-token
+request stream to the shared `auth::Handle` the lite wire already uses;
+`ietf::start` opens the empty-token
 stream after SETUP when negotiated and answers the peer's from the origin
 handles exactly as lite does, and `add` opens further ones. The fail-loud
 check moves into the shared handle so the IETF subscriber half consults it
@@ -99,8 +99,3 @@ reference relay) sees no AUTH stream and keeps working. Run
 `just test interop --all`.
 
 On main, additive.
-
-## Required
-
-- [Lite stream](/quest/m1/auth/lite.md) - supplies `moq_net::auth` and the
-  shared handle this binds to the IETF wire

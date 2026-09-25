@@ -4,7 +4,7 @@ use std::{sync::Arc, task::Poll, time::Duration};
 
 use web_transport_trait::Stats as _;
 
-use crate::{Error, SessionError, Version, bandwidth, goaway};
+use crate::{Error, SessionError, Version, auth, bandwidth, goaway};
 
 /// A close requested by a session handle, executed by the driver.
 #[derive(Clone)]
@@ -86,6 +86,7 @@ pub struct Session {
 	send_bandwidth: Option<bandwidth::Consumer>,
 	recv_bandwidth: Option<bandwidth::Consumer>,
 	goaway: Arc<goaway::Handle>,
+	auth: auth::Handle,
 }
 
 impl Session {
@@ -196,6 +197,15 @@ impl Session {
 	pub fn draining(&self) -> goaway::Consumer {
 		self.goaway.consumer()
 	}
+
+	/// The tokens this side presented and the grant they earned, plus the tokens
+	/// the peer presents. See [`auth`].
+	///
+	/// On moq-lite-06 each side presents its connection's credential right after
+	/// setup; on every other version the grant stays `None`.
+	pub fn auth(&self) -> auth::Handle {
+		self.auth.clone()
+	}
 }
 
 impl Session {
@@ -206,6 +216,7 @@ impl Session {
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: crate::driver::Protocol<S>,
 		goaway: goaway::Handle,
+		auth: auth::Handle,
 	) -> (Self, crate::Driver<S>)
 	where
 		S: crate::transport::poll::Session,
@@ -247,6 +258,7 @@ impl Session {
 			send_bandwidth,
 			recv_bandwidth,
 			goaway: Arc::new(goaway),
+			auth,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),

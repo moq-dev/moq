@@ -122,6 +122,8 @@ export interface ConnectProps {
 type SessionProps = {
 	discovery: boolean;
 	publish?: OriginConsumer;
+	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
+	client: boolean;
 };
 
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
@@ -167,6 +169,7 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 	const wiring: SessionProps = {
 		discovery: props.discovery ?? true,
 		publish: props.publish,
+		client: true,
 	};
 
 	if (props.transport) {

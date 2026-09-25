@@ -39,6 +39,5 @@ Additive.
 
 ## Required
 
-- [Lite stream](/quest/m1/auth/lite.md) - supplies `Session::auth()`
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the connection
   accessor and a relay that answers a real token, which the wrapper tests need
