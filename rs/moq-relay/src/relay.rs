@@ -84,6 +84,9 @@ pub struct Relay {
 	addr: Option<std::net::SocketAddr>,
 	shutdown: shutdown::Observer,
 	shutdown_trigger: shutdown::Trigger,
+	/// Whether [`Self::run`] drains on SIGINT/SIGTERM itself, or leaves that to
+	/// the embedder firing [`Self::shutdown_trigger`].
+	signals: bool,
 	/// Replacement for the default public router. `None` serves [`web::Web::routes`].
 	web_routes: Option<Router>,
 	/// Replacement for the default ops router. `None` serves [`internal::Internal::routes`].
@@ -315,6 +318,7 @@ impl Relay {
 			addr,
 			shutdown,
 			shutdown_trigger,
+			signals: true,
 			web_routes: None,
 			internal_routes: None,
 			sessions,
@@ -389,9 +393,9 @@ impl Relay {
 		&self.shutdown
 	}
 
-	/// Starts graceful shutdown: every session drains with a GOAWAY and
-	/// [`Self::run`] returns once the drain window elapses. Clone it before
-	/// `run` consumes the relay.
+	/// Starts graceful shutdown: every session, including any accepted
+	/// afterwards, drains with a GOAWAY and [`Self::run`] returns once the drain
+	/// window elapses. Clone it before `run` consumes the relay.
 	pub fn shutdown_trigger(&self) -> &shutdown::Trigger {
 		&self.shutdown_trigger
 	}
@@ -447,11 +451,20 @@ impl Relay {
 		self
 	}
 
+	/// Whether [`Self::run`] starts the drain on SIGINT/SIGTERM. Defaults to
+	/// `true`; pass `false` when the application owns the signals and fires
+	/// [`Self::shutdown_trigger`] itself, e.g. after withdrawing the node from DNS.
+	#[must_use = "the relay with the signal choice is returned"]
+	pub fn with_signals(mut self, signals: bool) -> Self {
+		self.signals = signals;
+		self
+	}
+
 	/// Serve until something fails or shutdown completes: accept sessions, run
 	/// the cluster, and serve both HTTP surfaces. Notifies systemd once
 	/// everything is up. Returns once the drain window elapses after a signal
-	/// or [`shutdown::Trigger::start`], with every listener released and every
-	/// worker joined.
+	/// (see [`Self::with_signals`]) or [`shutdown::Trigger::start`], with every
+	/// listener released and every worker joined.
 	///
 	/// This is also the embedding loop. Extra routes go on via [`Self::with_web`]
 	/// / [`Self::with_internal`] before calling this; cloned handles outlive it.
@@ -466,6 +479,7 @@ impl Relay {
 			web,
 			shutdown,
 			shutdown_trigger,
+			signals,
 			web_routes,
 			internal_routes,
 			sessions,
@@ -621,7 +635,7 @@ impl Relay {
 			Err(err) = quic_workers => Err(err).context("QUIC workers failed"),
 			err = uring_failed => Err(err).context("io_uring QUIC workers failed"),
 			Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
-			res = drain(shutdown_trigger, shutdown.clone()) => res,
+			res = drain(shutdown_trigger, shutdown.clone(), signals) => res,
 			else => Ok(()),
 		};
 
@@ -643,11 +657,18 @@ impl Relay {
 /// Two-stage shutdown: the first signal, or an embedder firing
 /// [`shutdown::Trigger::start`], starts the drain broadcast (every session sends
 /// GOAWAY and waits for its peer to leave); a second signal, or the drain
-/// window elapsing, returns from [`Relay::run`].
-async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer) -> anyhow::Result<()> {
+/// window elapsing, returns from [`Relay::run`]. Without `signals` only the
+/// trigger and the window count.
+async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, signals: bool) -> anyhow::Result<()> {
 	let window = shutdown.drain_timeout;
+	let signal = || async move {
+		match signals {
+			true => shutdown_signal().await,
+			false => std::future::pending().await,
+		}
+	};
 	tokio::select! {
-		res = shutdown_signal() => {
+		res = signal() => {
 			res?;
 			tracing::info!(
 				?window,
@@ -662,7 +683,7 @@ async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer) -> 
 	// giving every peer a proper GoawayTimeout instead of a dropped transport.
 	let grace = window + std::time::Duration::from_secs(1);
 	tokio::select! {
-		res = shutdown_signal() => {
+		res = signal() => {
 			res?;
 			tracing::warn!("second shutdown signal; exiting immediately");
 		}

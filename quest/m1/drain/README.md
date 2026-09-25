@@ -29,10 +29,9 @@ them (a planned-drain health state, the SIGTERM sequencing and stop timeouts,
 per-PoP serial deploys, a two-node PoP floor, and the gateway drain contract)
 is moq.pro's (downstream) fleet drain work, which consumes these quests.
 
-**relay-drain-api.** A drain hook that GOAWAYs every established session and
-immediately GOAWAYs any new arrival, so an embedding process can enter drain
-on SIGTERM after the DNS window and still bound the total stop time. Expose
-enough phase/session state to prove which bound ended a drain.
+The relay's drain hook has landed: `Relay::with_signals(false)` hands SIGTERM
+to the embedder, and its `shutdown_trigger` GOAWAYs every session, arrivals
+included, against one deadline.
 
 **client-goaway.** The JS reconnector migrates like the Rust one, preserving
 the app-visible session while resolving DNS again before dialing, and the Rust
@@ -43,12 +42,11 @@ by the stop deadline and encoder reconnect.
 
 ## Quests
 
-- [Relay drain api](/quest/m1/drain/relay-drain-api.md) - a drain hook that
-  GOAWAYs every session, including new arrivals, triggered by the embedding
-  process on SIGTERM
 - [Client goaway](/quest/m1/drain/client-goaway.md) - the JavaScript client
   migrates on GOAWAY with a handover and the guarded redirect the Rust client
   already has, and the Rust drain path gets its regression test
+- [Drain exit](/quest/m1/drain/drain-exit.md) - a drain ends as soon as every
+  session has left, and reports whether that or the deadline ended it
 
 ## Related
 

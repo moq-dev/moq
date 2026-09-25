@@ -11,6 +11,14 @@
 //! against the drain future that deliberately waits out the window. SIGTERM was
 //! unaffected (only the drain future watches it), which is how the gap stayed
 //! hidden behind systemd while an operator's ctrl-C dropped every session.
+//!
+//! An embedder draining on its own schedule (withdraw from DNS, wait out the
+//! TTL, then drain) turns the relay's signal handling off and fires the trigger
+//! itself; a session that still arrives mid-drain is sent a GOAWAY at once,
+//! carrying only what is left of the window.
+//!
+//! Each test raises or handles process signals, so they rely on nextest's
+//! process-per-test isolation.
 
 #![cfg(unix)]
 
@@ -23,23 +31,38 @@ use moq_relay::{Config, Relay, auth};
 /// one second before exiting.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
-#[test]
-fn sigint_drains_sessions_before_exiting() {
+/// Run `test` on a current-thread runtime with a large stack.
+fn run_test<F: std::future::Future<Output = ()> + 'static>(test: fn() -> F) {
 	// Same reason as the cluster tests: under `--all-features` a `Connection`
 	// carries every transport backend, and holding one across awaits overflows
 	// libtest's 2 MiB per-test stack in an unoptimized build.
 	std::thread::Builder::new()
 		.stack_size(32 * 1024 * 1024)
-		.spawn(|| {
+		.spawn(move || {
 			tokio::runtime::Builder::new_current_thread()
 				.enable_all()
 				.build()
 				.expect("build test runtime")
-				.block_on(sigint_drains_sessions_before_exiting_inner());
+				.block_on(test());
 		})
 		.expect("spawn test thread")
 		.join()
 		.expect("test thread panicked");
+}
+
+#[test]
+fn sigint_drains_sessions_before_exiting() {
+	run_test(sigint_drains_sessions_before_exiting_inner);
+}
+
+#[test]
+fn an_embedder_owns_the_signals() {
+	run_test(an_embedder_owns_the_signals_inner);
+}
+
+#[test]
+fn a_session_arriving_mid_drain_gets_what_is_left() {
+	run_test(a_session_arriving_mid_drain_gets_what_is_left_inner);
 }
 
 async fn sigint_drains_sessions_before_exiting_inner() {
@@ -55,19 +78,9 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 	let relay = Relay::load(config).await.expect("load relay");
 	let run = tokio::spawn(relay.run());
 	wait_listening(port).await;
+	let client = client(Vec::new());
 
-	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.tls.insecure = Some(true);
-	let client = client_config.init(Default::default()).expect("client init");
-	// One-shot: a reconnecting client would migrate on the GOAWAY and hide whether
-	// the original session outlived the signal.
-	let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().expect("parse url");
-	let connection = client
-		.with_reconnect(false)
-		.connect(url)
-		.established()
-		.await
-		.expect("connect");
+	let connection = connect(&client, port).await;
 	let draining = connection.draining().expect("connected");
 
 	let signalled = std::time::Instant::now();
@@ -104,6 +117,136 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 		"relay exited after {:?}, short of the {DRAIN_TIMEOUT:?} drain window",
 		signalled.elapsed()
 	);
+}
+
+async fn an_embedder_owns_the_signals_inner() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	// The embedder's own handler, which is also what keeps SIGINT from killing
+	// the test process.
+	let mut interrupt =
+		tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).expect("register SIGINT");
+
+	let (port, config) = relay_config();
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let trigger = relay.shutdown_trigger().clone();
+	let run = tokio::spawn(relay.run());
+	wait_listening(port).await;
+	let client = client(Vec::new());
+
+	let connection = connect(&client, port).await;
+	let draining = connection.draining().expect("connected");
+
+	// SAFETY: `raise` is async-signal-safe, and SIGINT's disposition is tokio's
+	// handler, registered above.
+	assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "failed to raise SIGINT");
+	tokio::time::timeout(Duration::from_secs(5), interrupt.recv())
+		.await
+		.expect("the embedder never saw SIGINT");
+
+	// The signal is the embedder's: the relay keeps serving without a GOAWAY.
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), draining.recv())
+			.await
+			.is_err(),
+		"the relay drained on a signal the embedder owns"
+	);
+	assert!(!run.is_finished(), "the relay exited on a signal the embedder owns");
+
+	// Until the embedder decides.
+	let started = std::time::Instant::now();
+	trigger.start();
+	let goaway = tokio::time::timeout(Duration::from_secs(5), draining.recv())
+		.await
+		.expect("no GOAWAY within 5s of the trigger")
+		.expect("session closed without a GOAWAY");
+	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
+
+	tokio::time::timeout(Duration::from_secs(15), run)
+		.await
+		.expect("relay never exited after the drain window")
+		.expect("relay task panicked")
+		.expect("relay exited with an error");
+	assert!(
+		started.elapsed() >= DRAIN_TIMEOUT,
+		"relay exited after {:?}, short of the {DRAIN_TIMEOUT:?} drain window",
+		started.elapsed()
+	);
+}
+
+async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let (port, config) = relay_config();
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let trigger = relay.shutdown_trigger().clone();
+	let run = tokio::spawn(relay.run());
+	wait_listening(port).await;
+	// moq-transport-17 is the first version whose GOAWAY carries its deadline on
+	// the wire, which is what this test reads.
+	let client = client(vec!["moq-transport-17".parse().expect("parse version")]);
+
+	let established = connect(&client, port).await;
+	trigger.start();
+	let deadline = std::time::Instant::now() + DRAIN_TIMEOUT;
+	let goaway = tokio::time::timeout(
+		Duration::from_secs(5),
+		established.draining().expect("connected").recv(),
+	)
+	.await
+	.expect("no GOAWAY within 5s of the trigger")
+	.expect("session closed without a GOAWAY");
+	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
+	let timeout = goaway.timeout().expect("the GOAWAY carries its deadline");
+	assert!(
+		timeout > DRAIN_TIMEOUT / 2 && timeout <= DRAIN_TIMEOUT,
+		"an established session gets the whole window, got {timeout:?}"
+	);
+
+	// A straggler dialing mid-drain (a cached DNS resolve) is still admitted,
+	// then told to leave at once.
+	tokio::time::sleep(DRAIN_TIMEOUT / 2).await;
+	let dialed = std::time::Instant::now();
+	let arrival = connect(&client, port).await;
+	let goaway = tokio::time::timeout(Duration::from_secs(1), arrival.draining().expect("connected").recv())
+		.await
+		.expect("an arrival mid-drain was not sent a GOAWAY")
+		.expect("arrival closed without a GOAWAY");
+	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
+
+	// Only what is left of the window, not a fresh one that would outlive the
+	// relay. The wire rounds up to whole milliseconds.
+	let left = deadline.saturating_duration_since(dialed) + Duration::from_millis(1);
+	let timeout = goaway.timeout().expect("the GOAWAY carries its deadline");
+	assert!(
+		timeout <= left,
+		"an arrival mid-drain got {timeout:?}, past the {left:?} left of the window"
+	);
+
+	tokio::time::timeout(Duration::from_secs(15), run)
+		.await
+		.expect("relay never exited after the drain window")
+		.expect("relay task panicked")
+		.expect("relay exited with an error");
+}
+
+/// A one-shot client offering `version` (every version when empty): a
+/// reconnecting one would migrate on the GOAWAY and hide whether the relay
+/// closed the original session.
+fn client(version: Vec<moq_tokio::moq_net::Version>) -> moq_tokio::Client {
+	let mut client_config = moq_tokio::connect::Config::default();
+	client_config.tls.insecure = Some(true);
+	client_config.version = version;
+	client_config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
+}
+
+/// A session to the relay on `port`.
+async fn connect(client: &moq_tokio::Client, port: u16) -> moq_tokio::Connection {
+	let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().expect("parse url");
+	client.connect(url).established().await.expect("connect")
 }
 
 /// A stream-only relay on a free loopback TCP port, fully public, with a short
