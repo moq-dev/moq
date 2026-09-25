@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use moq_json::snapshot::{self, Decoder, Encoder};
-use moq_stats::{Traffic, TrafficFrame};
+use moq_stats::{Stats, Traffic, TrafficFrame};
 
 struct Counter;
 
@@ -79,7 +79,8 @@ fn frames(broadcasts: usize, tier: usize, changed_percent: usize) -> Vec<(Vec<u8
 			let frame: TrafficFrame = (0..broadcasts)
 				.map(|index| {
 					let path = format!("tier-{tier}/acme/room-{index:06}/camera");
-					(path, traffic(index, tick, changed_percent))
+					let traffic = traffic(index, tick, changed_percent);
+					(path, Stats { traffic, ext: () })
 				})
 				.collect();
 			let encoded = encoder.update(&frame).unwrap().expect("every tick changes something");
