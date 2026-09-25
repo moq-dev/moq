@@ -41,6 +41,8 @@ struct Settings {
 	effective: Option<String>,
 	/// The wire container selected for this pad's media producer.
 	container: MediaContainer,
+	/// Whether a local encoder feeds this pad, so its handoff clock may raise the catalog jitter.
+	encoder: bool,
 	/// What the track is doing, read back through `status`.
 	status: Status,
 	/// The reason the pad was invalidated, read back through `track-error`.
@@ -102,6 +104,11 @@ impl PadLifecycle {
 	/// The wire container configured for this pad's media producer.
 	pub(super) fn container(&self) -> MediaContainer {
 		self.settings.container
+	}
+
+	/// Whether a local encoder feeds this pad.
+	pub(super) fn encoder(&self) -> bool {
+		self.settings.encoder
 	}
 
 	/// Record the name reserved by a successful CAPS event.
@@ -186,6 +193,19 @@ impl ObjectImpl for MoqSinkPadImp {
 					.default_value(MediaContainer::Legacy)
 					.mutable_playing()
 					.build(),
+				// Provenance is not in the caps: `multifilesrc ! parsebin` hands over the same TIME
+				// segment and PTS a live encoder does, so only the application can say which it is.
+				glib::ParamSpecBoolean::builder("encoder")
+					.nick("Local encoder")
+					.blurb(
+						"A local encoder feeds this pad, so the catalog jitter includes how late each \
+						 frame reaches the sink behind its running time. Leave it off for file, demuxed, \
+						 and network media, whose arrival says nothing about the original encoder. Audio \
+						 and video only. Writable in any state until the CAPS event reserves the track",
+					)
+					.default_value(false)
+					.mutable_playing()
+					.build(),
 				glib::ParamSpecEnum::builder::<Status>("track-status")
 					.nick("Status")
 					.blurb(
@@ -219,7 +239,7 @@ impl ObjectImpl for MoqSinkPadImp {
 			);
 			return;
 		}
-		// A producer keeps its reserved name and wire container for its whole life, so a later write
+		// A producer keeps its reserved name, wire container, and provenance for its whole life, so a later write
 		// would read back without ever reaching the broadcast or the catalog.
 		if lifecycle.settings.effective.is_some() {
 			gst::warning!(
@@ -236,6 +256,7 @@ impl ObjectImpl for MoqSinkPadImp {
 				lifecycle.settings.requested = value.get::<Option<String>>().unwrap().filter(|name| !name.is_empty())
 			}
 			"container" => lifecycle.settings.container = value.get().unwrap(),
+			"encoder" => lifecycle.settings.encoder = value.get().unwrap(),
 			_ => unreachable!(),
 		}
 	}
@@ -250,6 +271,7 @@ impl ObjectImpl for MoqSinkPadImp {
 				.or_else(|| lifecycle.settings.requested.clone())
 				.to_value(),
 			"container" => lifecycle.settings.container.to_value(),
+			"encoder" => lifecycle.settings.encoder.to_value(),
 			"track-status" => lifecycle.settings.status.to_value(),
 			"track-error" => lifecycle.settings.error.clone().to_value(),
 			_ => unreachable!(),

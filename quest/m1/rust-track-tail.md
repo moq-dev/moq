@@ -22,24 +22,27 @@ remaining gap is the subscriber's bookkeeping:
   `Error::Cancel` (`ietf/subscriber.rs`, `Alias::Retired`). Retire it only
   once the streams are accounted for or the grace expires.
 - Grace: a group reset before its header arrived can never be accounted for,
-  so give up after the same grace as the JS quest and end cleanly, skipping
-  the missing group as stale: the effective `max_age` as a wall-clock stopgap
-  on moq-lite (with a fallback when none is set), and a bounded wall-clock
-  wait on IETF. The reliable-reset quest removes both.
+  so give up after the same grace as `@moq/net` (`js/net/src/tail.ts`) and end
+  cleanly, skipping the missing group as stale: the effective `max_age` as a
+  wall-clock stopgap on moq-lite, 1s when it is zero, and 1s on IETF. The
+  reliable-reset quest removes both.
 - Only stream-delivered groups are waited for; datagrams are never.
 - IETF publisher: send the real number of data streams opened in PublishDone
   instead of `stream_count: 0`. On receipt, treat the count as a hint: stop
   waiting once that many are accounted for, but accept a late stream below the
   boundary within the grace, so a published peer's 0 keeps working.
-- IETF publisher on drafts 14-22: write the END_OF_TRACK object at the
-  boundary, which moq-net does not send today, and assert the
-  boundary end to end.
+- IETF on drafts 14-22: write the END_OF_TRACK object at the boundary, and
+  decode it. `@moq/net` already sends it on its own stream at object 0 of
+  the group `final`, after the group streams drain; moq-net's subscriber
+  rejects status 0x4 as `Unsupported` today, so it aborts a bogus group
+  `final` at the end of every JS-published IETF track until this lands.
 
-Confirm Stream Count's meaning for the implemented IETF drafts first, and
-where each draft carries the track's end (draft-07's SUBSCRIBE_DONE Final
-Group and Object, or the END_OF_TRACK object on drafts 14-22), as the JS quest
-does; both must agree. A PublishDone with an error status aborts the track
-rather than ending it cleanly.
+`@moq/net` settled the draft reading: on 14-22 Stream Count counts every data
+stream opened, fill streams included (20+), with a 2^62-1 or 2^64-1 unknown
+sentinel. PUBLISH_DONE carries no end location on any of them, so the end is
+the END_OF_TRACK object: at object 0 of group G the track ends at G,
+otherwise at G+1. Only TRACK_ENDED (and SUBSCRIPTION_ENDED before 20) ends a
+track cleanly; an error status aborts it.
 
 Reproduce each case before fixing it: a group header decoded after the
 subscribe stream's FIN, and a late stream after PublishDone, over the mock
@@ -53,6 +56,5 @@ in flight.
 
 ## Related
 
-- [JS track tail](/quest/m1/js-track-tail.md) - the same rule in `@moq/net`
 - [Session death error](/quest/m1/session-death-error.md) - tracks ending wrong when the session dies
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - removes the grace

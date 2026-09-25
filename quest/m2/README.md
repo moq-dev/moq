@@ -39,6 +39,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [NVENC buffer pool](/quest/m2/nvenc-pool.md) - NVENC reuses input and output buffers instead of allocating per frame, if a benchmark shows it wins
 - [Direct3D11 render import](/quest/m2/render-d3d11.md) - Windows presents without downloading every frame to system memory
 - [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - video with periodic intra refresh publishes, imports, and tunes in cleanly with one group per sweep and a catalog `warmup`
+- [Capture multi-plane PipeWire cameras](/quest/m2/pipewire-camera-planes.md) - I420 and NV12 cameras that deliver one memory block per plane
 - [#2819](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: carry PipeWire DMA-BUFs safely into the Vulkan renderer
 - [Unreal prototype](/quest/m2/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
 - [Unity prototype](/quest/m2/unity.md) - the C# package under IL2CPP, playing subscribed audio
@@ -46,6 +47,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [vcpkg registry](/quest/m2/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
 - [Conan remote](/quest/m2/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
 - [Compressed tracks](/quest/m2/flate/README.md) - any track compresses per group from every language, not only the JSON modes
+- [Binary delta stats](/quest/m2/stats-delta.md) - an on-demand varint delta flavor of every stats track, if relay encode CPU still matters after the JSON fixes
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
 - [Redundant ingest](/quest/m2/redundant-ingest.md) - decide whether two publishers sharing one epoch may splice, and who declares the incumbent dead before the keep-alive does
 - [Multipath spike](/quest/m2/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends
@@ -59,7 +61,6 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive by deadline](/quest/m2/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer
 - [noq socket close](/quest/m2/noq-socket-close.md) - noq releases an endpoint's socket on close, so moq-tokio drops its wrapper
-- [Bounded announce prefix table](/quest/m2/announce-prefix-table.md) - compress repeated path tuples on each ordered lite-08 announce stream, with bounded state and measured QUIC-byte savings
 - [Drop the hidden cluster exemption](/quest/m2/hidden-exemption.md) - relays stop forcing hidden broadcasts on cluster peers once every peer opts in on the wire
 - [Routing cost domains](/quest/m2/routing-cost-domains.md) - design operator boundaries and policy without adding incomparable costs
 - [Kernel pacing](/quest/m2/quic-kernel-pacing.md) - whether SO_TXTIME pacing beats a userspace pacer the io_uring driver ignores today

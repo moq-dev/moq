@@ -94,7 +94,7 @@ A Session consists of a connection between a client and a server.
 There is currently no P2P support within QUIC so it's out of scope for moq-lite.
 
 The moq-lite version identifier is `moq-lite-xx` where `xx` is the two-digit draft version.
-The identifier for this draft is `moq-lite-07`.
+The identifier for this draft is `moq-lite-07-wip` while it is a work in progress, and becomes `moq-lite-07` once finalized.
 For bare QUIC, this is negotiated as an ALPN token during the QUIC handshake.
 For WebTransport over HTTP/3, the QUIC ALPN remains `h3` and the moq-lite version is advertised via the `WT-Available-Protocols` and `WT-Protocol` CONNECT headers.
 
@@ -1330,7 +1330,7 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
-- Assigned `moq-lite-07` as this draft's protocol identifier.
+- Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
 - Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
 
 ## moq-lite-06

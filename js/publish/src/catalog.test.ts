@@ -195,3 +195,45 @@ for (const section of ["audio", "video", "text"] as const) {
 		});
 	});
 }
+
+for (const section of ["json", "binary"] as const) {
+	test(`catalog refuses zero or decreasing ${section} jitter without retaining it`, () => {
+		const catalog = new CatalogProducer();
+		const tracks = (value: Catalog.Root) => {
+			const sectionValue = value[section];
+			if (!sectionValue) throw new Error(`expected a retained ${section} section`);
+			return sectionValue.tracks;
+		};
+
+		expect(() =>
+			catalog.mutate((value) => {
+				value[section] = { tracks: { data: { mode: "stream", jitter: Catalog.u53(0) } } };
+			}),
+		).toThrow("omit jitter");
+		catalog.mutate((value) => {
+			expect(value[section]).toBeUndefined();
+		});
+
+		catalog.mutate((value) => {
+			value[section] = { tracks: { data: { mode: "stream", jitter: Catalog.u53(100) } } };
+		});
+		for (const jitter of [Catalog.u53(50), undefined]) {
+			expect(() =>
+				catalog.mutate((value) => {
+					tracks(value).data.jitter = jitter;
+				}),
+			).toThrow("jitter cannot decrease");
+			catalog.mutate((value) => {
+				expect(tracks(value).data.jitter).toBe(Catalog.u53(100));
+			});
+		}
+
+		// A new track under the same name, after the old one is gone, starts over.
+		catalog.mutate((value) => {
+			delete tracks(value).data;
+		});
+		catalog.mutate((value) => {
+			tracks(value).data = { mode: "stream", jitter: Catalog.u53(50) };
+		});
+	});
+}
