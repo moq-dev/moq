@@ -2846,6 +2846,7 @@ dependencies = [
  "moq-json",
  "moq-mux",
  "moq-net",
+ "moq-stats",
  "moq-tokio",
  "regex",
  "serde",
