@@ -44,7 +44,7 @@ use crate::segment::{Frame, Group, Object};
 use crate::{Error, Info, Key, Result, Store};
 
 /// Subscribers ask for every cached group; the publisher clamps this to its own max age.
-const REPLAY: Duration = Duration::from_secs(u32::MAX as u64);
+pub(crate) const REPLAY: Duration = Duration::from_secs(u32::MAX as u64);
 
 /// How a [`Writer`] segments and retains its recording.
 #[derive(Clone, Debug, Default)]
@@ -804,6 +804,7 @@ mod tests {
 
 	use futures::TryStreamExt;
 	use futures::stream::BoxStream;
+	use object_store::ObjectStoreExt;
 	use object_store::memory::InMemory;
 	use object_store::path::Path;
 	use object_store::{
@@ -1363,6 +1364,44 @@ mod tests {
 		store.get_info("video").await.unwrap();
 		store.get_info(TIMELINE).await.unwrap();
 		store.get_segments(TIMELINE, 0).await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn an_archive_continues_a_dvr_without_rewriting_it() {
+		let store = Store::new(InMemory::new(), "rec");
+		let dvr = Config::default().with_retention(Retention::new(Duration::from_secs(2), Duration::ZERO));
+		record(&store, dvr, 0..6).await;
+		let retained = window(&store).await;
+		let mut objects = BTreeMap::new();
+		for key in referenced(&retained) {
+			let path = store.path(&key).unwrap();
+			objects.insert(
+				path.clone(),
+				store.inner().get(&path).await.unwrap().bytes().await.unwrap(),
+			);
+		}
+		for segment in 0..6 {
+			let path = store.path(&Key::segments(TIMELINE, segment).unwrap()).unwrap();
+			objects.insert(
+				path.clone(),
+				store.inner().get(&path).await.unwrap().bytes().await.unwrap(),
+			);
+		}
+
+		// Without retention the restart keeps the DVR's window and never pops again.
+		record(&store, Config::default(), 6..10).await;
+
+		let records = window(&store).await;
+		assert_eq!(
+			records.iter().map(|record| record.segment).collect::<Vec<_>>(),
+			(3..10).collect::<Vec<_>>()
+		);
+		assert_eq!(ranges(&records, "video"), (3..10).map(|s| (s, s)).collect::<Vec<_>>());
+		check_objects(&store, &records).await;
+		for (path, bytes) in objects {
+			let stored = store.inner().get(&path).await.unwrap().bytes().await.unwrap();
+			assert_eq!(stored, bytes, "{path} was rewritten");
+		}
 	}
 
 	#[tokio::test]

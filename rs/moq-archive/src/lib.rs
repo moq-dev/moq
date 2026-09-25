@@ -2,8 +2,8 @@
 //!
 //! The crate owns the portable layout and codecs: percent-encoded track names, `.info` JSON,
 //! the binary segment envelope, and put/get/list/delete. A [`Writer`] records selected tracks of
-//! a broadcast into those objects, and a [`Reader`] serves a recording back through a `moq_net`
-//! broadcast. Callers that need runtime dispatch
+//! a broadcast into those objects, a [`Reader`] serves a recording back through a `moq_net`
+//! broadcast, and a [`Rewind`] seeks a viewer back into it before returning to live. Callers that need runtime dispatch
 //! supply `Arc<dyn ObjectStore>`; the archive API itself stays generic.
 //!
 //! Group bounds are finite inclusive ranges in first-to-last order:
@@ -16,10 +16,12 @@
 pub use object_store;
 
 mod error;
+mod index;
 pub mod info;
 mod path;
 pub mod reader;
 mod recover;
+pub mod rewind;
 pub mod segment;
 pub mod store;
 pub mod writer;
@@ -28,6 +30,7 @@ pub use error::{Error, Result};
 pub use info::Info;
 pub use path::Key;
 pub use reader::Reader;
+pub use rewind::Rewind;
 pub use segment::{Frame, Group, Object};
 pub use store::Store;
 pub use writer::Writer;

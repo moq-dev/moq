@@ -60,6 +60,13 @@ unreferenced group objects one grace period after recovery.
 supplied `broadcast::Producer` and serves FETCH through `track::Dynamic` with a byte-bounded
 object LRU. `Reader::refresh` follows by listing timeline keys after its cursor, so gaps and
 DVR expiry recover from the next checkpoint; `Reader::finish` applies out-of-band finality.
+`moq_archive::Rewind` (`rs/moq-archive/src/rewind/mod.rs`) seeks a viewer's track into the
+replayed timeline, FETCHes each advertised group in order from the replay broadcast, and
+subscribes to the live broadcast from the first group past the recording's head. The
+timeline decides what is requested: expired, unadvertised, or not-found groups are gaps.
+A served group that later expires stays in the replay track's `moq_net` cache until the
+pool reclaims it; no group-eviction API is needed, because no viewer following the
+timeline asks for it and its bytes are immutable under never-reused sequences.
 
 ### Format
 
@@ -127,7 +134,6 @@ owned by that prerequisite, not duplicated in archive storage.
 ## Quests
 
 - [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
-- [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 - [Archive proof](/quest/m1/archive/proof.md) - prove persistence ordering, selective reads, exact FETCH replay, and timeline-only HLS generation
 
 ## Related
