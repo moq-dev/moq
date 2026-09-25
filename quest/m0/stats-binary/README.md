@@ -1,4 +1,4 @@
-# Stats wire contract
+# [XS] Stats wire contract
 
 ## Goal
 
@@ -21,9 +21,8 @@ compressor with a larger window than a browser's `deflate-raw`.
 [Binary delta stats](/quest/m2/stats-delta.md) takes the delta route, outside
 this line.
 
-## Quests
-
-- [Stats format page](/quest/m0/stats-binary/docs.md) - a doc/concept page for every stats track and its encodings
+The contract lives at [doc/concept/stats.md](/doc/concept/stats.md); what
+remains is landing the line on `main`.
 
 ## Related
 

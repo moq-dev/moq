@@ -100,7 +100,7 @@ has landed by then. Share fixtures between Rust and JS so the two stay wire
 identical, and keep the benchmark in-tree, wired into CI at least nightly.
 
 **Docs and spec.** No IETF draft covers stats today. Write the format into
-the stats format page ([stats-binary docs](/quest/m0/stats-binary/docs.md))
+the stats format page ([doc/concept/stats.md](/doc/concept/stats.md))
 and the stats section of `doc/bin/relay/config.md`, plus the moq-stats crate
 docs. Whether stats needs its own `draft-lcurley-moq-stats.md` is the
 maintainer's call; ask before writing one.
@@ -110,6 +110,6 @@ impact: new on-demand tracks; existing tracks unchanged.
 
 ## Related
 
-- [Stats format page](/quest/m0/stats-binary/docs.md) - where the new flavor is documented
+- [Stats format page](/doc/concept/stats.md) - where the new flavor is documented
 - [Client stats](/quest/m1/qos/stats/README.md) - the extension and gauges the format must carry or refuse
 - [Compressed tracks](/quest/m2/flate/README.md) - the group-window discipline this flavor repeats
