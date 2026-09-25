@@ -22,8 +22,10 @@ stats and `moq play` surface.
   AAC-LC mono/stereo only; the platform backends that follow advertise what
   their framework opens and has a fixture for.
 - Move today's Opus, PCM, and symphonia code behind the trait without changing
-  behavior; the HE-AAC sniff from [HE-AAC refusal](/quest/m1/audio-codecs/he-aac-refusal.md)
-  lands in the symphonia backend.
+  behavior. Document per host that symphonia plays implicit-SBR HE-AAC as its
+  half-rate LC core: finding the in-band SBR element needs a full Huffman walk
+  of the channel elements, and symphonia detects it internally without
+  exposing or refusing it.
 - A backend's output rate and layout are what it produced, not what the
   catalog said (HE-AAC doubles the rate); `Consumer` already resamples and
   remixes to the requested output, so that stays the seam's contract.

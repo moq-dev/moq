@@ -30,5 +30,4 @@ Warn-then-continue is banned: supported or refused.
 
 ## Related
 
-- [HE-AAC refusal](/quest/m1/audio-codecs/he-aac-refusal.md) - reads the same first block
 - [Layout](/quest/m1/audio-codecs/layout.md) - what the parsed PCE eventually maps to

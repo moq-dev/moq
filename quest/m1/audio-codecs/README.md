@@ -16,8 +16,10 @@ publisher can produce AAC.
 Platform first, exactly like video: AudioToolbox on macOS and iOS, Media
 Foundation on Windows, MediaCodec on Android, and symphonia (AAC-LC
 mono/stereo) as the software fallback that openh264 is for H.264. Linux has no
-OS audio decoder, so HE-AAC and multichannel AAC stay refused there, stated in
-the docs and rejected at construction. A platform backend claims every catalog
+OS audio decoder, so multichannel AAC stays refused there, stated in the docs
+and rejected at construction. HE-AAC signaled only in band (implicit SBR, as
+over MPEG-TS) plays as its half-rate LC core on symphonia; detecting it needs a
+full element walk, so the docs state it instead of refusing it. A platform backend claims every catalog
 codec its framework opens, so AC-3, E-AC-3, MP3, and FLAC ride along on the
 hosts that have them; each still needs a fixture before the backend advertises
 it.
@@ -37,13 +39,11 @@ mono/stereo.
 
 The core configuration and layout contracts land in main. These quests implement
 surround and backend dispatch on that contract; each platform then lands as
-its own decode and encode quest so verification stays per host. The
-HE-AAC refusal and the PCE parse are defects in what ships today and are
-ready now.
+its own decode and encode quest so verification stays per host. The PCE
+parse is a defect in what ships today and is ready now.
 
 ## Quests
 
-- [HE-AAC refusal](/quest/m1/audio-codecs/he-aac-refusal.md) - implicit-SBR HE-AAC over TS is refused instead of half-decoded as the LC core
 - [AAC PCE](/quest/m1/audio-codecs/aac-pce.md) - a channel_config of 0 parses the program config element instead of guessing stereo
 - [Layout](/quest/m1/audio-codecs/layout.md) - the settled `Layout` carries up to 7.1 through decode, resample, playback, and the FFI
 - [Decode seam](/quest/m1/audio-codecs/decode-backend.md) - `decode::backend` selects a platform decoder before symphonia, mirroring moq-video
