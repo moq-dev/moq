@@ -48,7 +48,7 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
 			let track = state.broadcast.create_track(name, None)?;
-			let producer = state.catalog.binary_snapshot(track, config.into())?;
+			let producer = state.catalog.binary_snapshot(track, moq_mux::binary::Config::from(config))?;
 			Ok(Arc::new(MoqBinarySnapshotProducer {
 				inner: std::sync::Mutex::new(Some(producer)),
 			}))
@@ -66,7 +66,7 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
 			let track = state.broadcast.create_track(name, None)?;
-			let producer = state.catalog.binary_stream(track, config.into())?;
+			let producer = state.catalog.binary_stream(track, moq_mux::binary::Config::from(config))?;
 			Ok(Arc::new(MoqBinaryStreamProducer {
 				inner: std::sync::Mutex::new(Some(producer)),
 			}))
