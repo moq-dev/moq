@@ -14,7 +14,7 @@ import { wireOf } from "../wire.ts";
 import { NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
 import { FetchHeader } from "./fetch.ts";
-import { Group as GroupMessage } from "./object.ts";
+import { Frame, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
@@ -908,6 +908,16 @@ async function readGroup(stream: ReadableStream<Uint8Array>): Promise<ServedGrou
 	return { sequence: header.groupId, firstObject: header.flags.firstObject, objects };
 }
 
+/** Read a stream carrying only an END_OF_TRACK object, returning the group it names. */
+async function readEndOfTrack(stream: ReadableStream<Uint8Array>): Promise<number> {
+	const reader = new Reader(stream, undefined, V20);
+	const header = await GroupMessage.decode(reader, V20);
+	const frame = await Frame.decode(reader, header.flags, undefined, V20);
+	expect(frame.endOfTrack).toBe(true);
+	expect(await reader.done()).toBe(true);
+	return header.groupId;
+}
+
 /**
  * Read a fill's fetch stream to its end, reporting a reset rather than throwing.
  *
@@ -1339,8 +1349,12 @@ test("draft-20: a clean close past a bounded filter's end still sends PUBLISH_DO
 		expect(await client.reader.u53()).toBe(PublishDone.id);
 		const done = await PublishDone.decode(client.reader, V20);
 		expect(done.statusCode).toBe(TRACK_ENDED_STATUS);
+		expect(done.streamCount).toBe(2n);
 
-		// Only the in-range group was ever opened.
+		// Only the in-range group was ever served; the other stream marks the track's end.
+		const end = await nextUni(fx.uni);
+		if (!end) throw new Error("the track's end was never marked");
+		expect(await readEndOfTrack(end)).toBe(2);
 		expect(await nextUni(fx.uni)).toBeUndefined();
 	} finally {
 		fx.close();
@@ -1450,6 +1464,64 @@ test("draft-20: a fill works on a dynamically requested track", async () => {
 		});
 	} finally {
 		group.close();
+		fx.close();
+		client.close();
+	}
+});
+
+// PUBLISH_DONE MUST wait until every stream the subscription will open is closed, so its
+// Stream Count is final. A group still queued for a stream slot when the track ends is one.
+test("draft-20: PUBLISH_DONE waits for a queued group and counts every stream", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+
+	// Park the first stream open, the way a transport at its stream cap does.
+	const slot = Promise.withResolvers<void>();
+	const create = fx.pair.server.createUnidirectionalStream.bind(fx.pair.server);
+	let parked = false;
+	fx.pair.server.createUnidirectionalStream = async (options?: WebTransportSendStreamOptions) => {
+		if (!parked) {
+			parked = true;
+			await slot.promise;
+		}
+		return create(options);
+	};
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 0n },
+		}),
+	);
+
+	try {
+		writeGroup(track, 1);
+		track.close();
+
+		// Nothing ends the subscription while the group waits for its slot.
+		const response = client.reader.u53();
+		const idle = new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 20));
+		expect(await Promise.race([response, idle])).toBe("pending");
+
+		slot.resolve();
+		const served = await nextUni(fx.uni);
+		if (!served) throw new Error("the queued group was never served");
+		expect((await readGroup(served)).sequence).toBe(0);
+
+		expect(await response).toBe(PublishDone.id);
+		const done = await PublishDone.decode(client.reader, V20);
+		expect(done.statusCode).toBe(TRACK_ENDED_STATUS);
+		// The group's stream and the END_OF_TRACK marker's.
+		expect(done.streamCount).toBe(2n);
+
+		const end = await nextUni(fx.uni);
+		if (!end) throw new Error("the track's end was never marked");
+		expect(await readEndOfTrack(end)).toBe(1);
+	} finally {
 		fx.close();
 		client.close();
 	}

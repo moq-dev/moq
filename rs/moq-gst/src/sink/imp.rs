@@ -10,7 +10,7 @@
 //! pad lifecycle, then an object lock. No path takes the element control while holding a pad lifecycle.
 
 use std::sync::{LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -685,7 +685,9 @@ impl MoqSink {
 			if lifecycle.media.is_failed() {
 				return Ok(gst::FlowSuccess::Ok);
 			}
-			let outcome = lifecycle.media.push_buffer(data, pts, duration, current_running_time);
+			let outcome = lifecycle
+				.media
+				.push_buffer(data, pts, duration, current_running_time, Instant::now());
 			let changes = match &outcome {
 				Ok(PushOutcome::Failed(reason)) => Some(lifecycle.fail(reason.clone())),
 				_ => None,
@@ -772,7 +774,9 @@ impl MoqSink {
 							return false;
 						}
 						let requested = lifecycle.requested().map(str::to_owned);
-						let mut options = ProducerOptions::new(&caps).with_container(lifecycle.container().into());
+						let mut options = ProducerOptions::new(&caps)
+							.with_container(lifecycle.container().into())
+							.with_encoder(lifecycle.encoder());
 						if let Some(track) = requested.as_deref() {
 							options = options.with_track(track);
 						}

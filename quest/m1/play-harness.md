@@ -19,7 +19,3 @@ feature, which CI only compiles in the nightly clippy run, so its regressions
   The tune-in burst test moves onto the harness with
   [Play tune-in backpressure](/quest/m1/play-tunein-backpressure.md), which
   owns that fix.
-
-## Required
-
-- The rendition-switch gap fix (#3966) has merged

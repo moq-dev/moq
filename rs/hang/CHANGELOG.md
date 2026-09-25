@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.4](https://github.com/moq-dev/moq/compare/hang-v0.21.3...hang-v0.21.4) - 2026-09-25
+
+### Added
+
+- *(mux)* measure encoder flush jitter per rendition ([#3940](https://github.com/moq-dev/moq/pull/3940))
+
 ## [0.21.3](https://github.com/moq-dev/moq/compare/hang-v0.21.2...hang-v0.21.3) - 2026-09-25
 
 ### Other

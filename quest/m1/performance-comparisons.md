@@ -24,7 +24,7 @@ while extending this harness rather than creating another benchmark runner.
   hardware/kernel, allocator, affinity, workload, and execution order. Preserve
   partial evidence on failure while still cleaning up owned processes/worktrees.
 - Distinguish throughput-window counters from cumulative latency/loss. Today
-  `bench/relay.sh::summarize_load` differences bytes over the last five seconds
+  the load summary in `bench/relay.sh` differences bytes over the last five seconds
   but reads final lifetime latency and group-loss counters. Label that explicitly;
   consume windowed data when the existing latency quest supplies it. Never
   subtract percentiles or call cumulative loss a steady-state sample.

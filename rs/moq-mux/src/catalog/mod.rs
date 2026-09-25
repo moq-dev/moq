@@ -25,6 +25,7 @@ pub mod msf;
 
 mod claim;
 mod consumer;
+mod data;
 mod entry;
 mod estimate;
 mod format;
@@ -35,6 +36,8 @@ pub(crate) mod tracks;
 
 pub(crate) use claim::Claim;
 pub use consumer::Consumer;
+pub use data::IntoRendition;
+pub(crate) use data::{Listing, json_len};
 pub use entry::Entry;
 pub use estimate::{Estimate, Estimator};
 pub use format::*;

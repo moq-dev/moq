@@ -16,7 +16,3 @@ cut-off body.
   call; propose it in the PR.
 - Test: a missing group is a 404 over HTTP and a non-zero `moq fetch` exit
   with no stdout; an existing group is byte-identical to today.
-
-## Required
-
-- `moq fetch` (#3965) has merged

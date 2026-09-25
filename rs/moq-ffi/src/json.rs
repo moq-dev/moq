@@ -14,6 +14,7 @@ use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::producer::MoqBroadcastProducer;
+use moq_mux::catalog::hang::Extra;
 
 /// Options for a JSON snapshot track (lossy latest-value mode).
 ///
@@ -101,10 +102,11 @@ mod tests {
 
 #[uniffi::export]
 impl MoqBroadcastProducer {
-	/// Publish a JSON snapshot track (lossy latest-value) by name.
+	/// Publish a JSON snapshot track (lossy latest-value) by name, advertised in the catalog.
 	///
-	/// Advertise it in the catalog yourself with
-	/// [`set_catalog_section`](Self::set_catalog_section) if consumers should discover it.
+	/// The broadcast's catalog carries `json.tracks.<name>` (`mode: snapshot`, and
+	/// `compression: deflate` when set) for as long as the track lives; finishing or dropping the
+	/// producer retires it. Errors if the catalog already carries an entry under `name`.
 	pub fn publish_json_snapshot(
 		&self,
 		name: String,
@@ -112,16 +114,21 @@ impl MoqBroadcastProducer {
 	) -> Result<Arc<MoqJsonSnapshotProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			let broadcast = state.broadcast.clone();
-			let track = broadcast.create_track(name, None)?;
-			let producer = moq_json::snapshot::Producer::<Value>::new(track, config.into());
+			let track = state.broadcast.create_track(name, None)?;
+			let config = moq_mux::json::Config::default()
+				.with_compression(config.compression)
+				.with_delta_ratio(config.delta_ratio);
+			let producer = state.catalog.json_snapshot::<Value>(track, config)?;
 			Ok(Arc::new(MoqJsonSnapshotProducer {
 				inner: std::sync::Mutex::new(Some(producer)),
 			}))
 		})
 	}
 
-	/// Publish a JSON stream track (lossless append-log) by name.
+	/// Publish a JSON stream track (lossless append-log) by name, advertised in the catalog.
+	///
+	/// The broadcast's catalog carries `json.tracks.<name>` (`mode: stream`) for as long as the
+	/// track lives. Errors if the catalog already carries an entry under `name`.
 	pub fn publish_json_stream(
 		&self,
 		name: String,
@@ -129,9 +136,9 @@ impl MoqBroadcastProducer {
 	) -> Result<Arc<MoqJsonStreamProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			let broadcast = state.broadcast.clone();
-			let track = broadcast.create_track(name, None)?;
-			let producer = moq_json::stream::Producer::<Value>::new(track, config.into());
+			let track = state.broadcast.create_track(name, None)?;
+			let config = moq_mux::json::Config::default().with_compression(config.compression);
+			let producer = state.catalog.json_stream::<Value>(track, config)?;
 			Ok(Arc::new(MoqJsonStreamProducer {
 				inner: std::sync::Mutex::new(Some(producer)),
 			}))
@@ -175,7 +182,7 @@ impl MoqBroadcastConsumer {
 /// Publishes a JSON value that consumers see as a single latest state.
 #[derive(uniffi::Object)]
 pub struct MoqJsonSnapshotProducer {
-	inner: std::sync::Mutex<Option<moq_json::snapshot::Producer<Value>>>,
+	inner: std::sync::Mutex<Option<moq_mux::json::Snapshot<Value, Extra>>>,
 }
 
 #[uniffi::export]
@@ -200,7 +207,7 @@ impl MoqJsonSnapshotProducer {
 	/// Finish the track, closing any open group.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		producer.finish()?;
 		Ok(())
 	}
@@ -247,7 +254,7 @@ impl MoqJsonSnapshotConsumer {
 /// Publishes an ordered log of JSON records, one record per append.
 #[derive(uniffi::Object)]
 pub struct MoqJsonStreamProducer {
-	inner: std::sync::Mutex<Option<moq_json::stream::Producer<Value>>>,
+	inner: std::sync::Mutex<Option<moq_mux::json::Stream<Value, Extra>>>,
 }
 
 #[uniffi::export]
@@ -271,7 +278,7 @@ impl MoqJsonStreamProducer {
 	/// Finish the track, closing the group.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		producer.finish()?;
 		Ok(())
 	}

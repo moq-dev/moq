@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.4](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.3...moq-mux-v0.10.4) - 2026-09-25
+
+### Added
+
+- *(libmoq)* advertise JSON tracks in the catalog, add binary data tracks ([#4073](https://github.com/moq-dev/moq/pull/4073))
+- *(mux)* measure encoder flush jitter per rendition ([#3940](https://github.com/moq-dev/moq/pull/3940))
+
+### Fixed
+
+- *(moq-mux)* order TS export by media time, not arrival ([#4001](https://github.com/moq-dev/moq/pull/4001))
+
 ## [0.10.3](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.2...moq-mux-v0.10.3) - 2026-09-25
 
 ### Fixed
