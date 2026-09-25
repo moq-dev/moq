@@ -451,10 +451,14 @@ export class SharedRingBuffer {
 	 * Used when the target deepens: `setLatency` alone only raises the bar a future refill has to
 	 * clear, so a ring already playing keeps draining at its old depth and audio runs that much
 	 * ahead of video. Parking the playhead spends exactly the deficit as silence and resumes on the
-	 * same timeline, where `reset` would throw the buffer away and re-anchor.
+	 * same timeline, where `reset` would throw the buffer away and re-anchor. A ring that already
+	 * holds the target has no deficit, and parking it would only wait on an insert that may never
+	 * come. Main thread only, like `insert`, so WRITE is exact and a concurrent read only shrinks
+	 * what is buffered.
 	 */
 	stall(): void {
-		Atomics.store(this.#control, STALLED, 1);
+		const buffered = (Atomics.load(this.#control, WRITE) - readOf(Atomics.load(this.#state, 0))) | 0;
+		if (buffered < Atomics.load(this.#control, LATENCY)) Atomics.store(this.#control, STALLED, 1);
 	}
 
 	/**

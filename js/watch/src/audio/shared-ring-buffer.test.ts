@@ -581,6 +581,16 @@ describe("re-buffer", () => {
 		expect(buffer.underruns).toBe(0);
 	});
 
+	it("stall() is a no-op once the ring already holds the target", () => {
+		const buffer = create({ rate: 1000, channels: 1, capacity: 256, latency: 40 });
+		insertChunks(buffer, 0, 60, 20, { channels: 1, value: 1.0 });
+
+		buffer.setLatency(60);
+		buffer.stall();
+		expect(buffer.stalled).toBe(false);
+		expect(read(buffer, 20, 1)[0].length).toBe(20);
+	});
+
 	it("does not count an underrun while parked", () => {
 		const buffer = create({ rate: 1000, channels: 1, capacity: 256, latency: 40 });
 		read(buffer, 20, 1);

@@ -217,10 +217,11 @@ export class AudioRingBuffer {
 	 * Used when the target deepens: `resize` alone only raises the bar a future refill has to clear,
 	 * so a ring already playing keeps draining at its old depth and audio runs that much ahead of
 	 * video. Parking the playhead spends exactly the deficit as silence and resumes on the same
-	 * timeline, where `reset` would throw the buffer away and re-anchor.
+	 * timeline, where `reset` would throw the buffer away and re-anchor. A ring that already holds
+	 * the target has no deficit, and parking it would only wait on an insert that may never come.
 	 */
 	stall(): void {
-		this.#stalled = true;
+		if (this.length < this.#latencySamples) this.#stalled = true;
 	}
 
 	// Flush all buffered samples and re-stall, ready to anchor the next utterance.
