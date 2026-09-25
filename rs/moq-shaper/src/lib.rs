@@ -13,6 +13,10 @@
 //! A profile that silently did nothing would turn an impaired run into an
 //! unimpaired pass, so [`Shaper::verify`] fails when an impairment the profile
 //! configures never acted and the traffic makes that silence implausible.
+//!
+//! A [`Setup`] adds opt-in options to a [`Config`]: a TCP passthrough, a jitter
+//! model that keeps the order, one link shared by every client, batches, steps,
+//! and named profiles loaded as a [`Preset`]. The README says why each exists.
 
 use std::{
 	cmp::Reverse,
