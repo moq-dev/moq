@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/moq-dev/moq/compare/moq-net-v0.3.1...moq-net-v0.3.2) - 2026-09-25
+
+### Added
+
+- *(net)* hide dot-named broadcasts from discovery (moq-lite-07) ([#4060](https://github.com/moq-dev/moq/pull/4060))
+- *(relay)* retag a live session's stats when a re-check moves its tier ([#4057](https://github.com/moq-dev/moq/pull/4057))
+- *(net)* an announce says whether its route entered here or from a peer ([#3972](https://github.com/moq-dev/moq/pull/3972))
+
+### Fixed
+
+- *(net)* keep a lost spliced group lost ([#4077](https://github.com/moq-dev/moq/pull/4077))
+- *(net)* bound the moq-net loom models so the nightly finishes ([#4071](https://github.com/moq-dev/moq/pull/4071))
+- *(net)* a broadcast exists only while announced ([#4021](https://github.com/moq-dev/moq/pull/4021))
+
+### Other
+
+- fold unit tests into `just check`, split CI into `just ci check|test` ([#4078](https://github.com/moq-dev/moq/pull/4078))
+
 ## [0.3.1](https://github.com/moq-dev/moq/compare/moq-net-v0.3.0...moq-net-v0.3.1) - 2026-09-24
 
 ### Fixed

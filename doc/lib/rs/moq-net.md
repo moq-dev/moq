@@ -16,12 +16,12 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 ## What it gives you
 
 - **Origins** scope what a session can see, and merge duplicate subscriptions so a broadcast is pulled upstream once no matter how many local readers.
-- **Broadcasts** appear on local announce cursors when created, then can be advertised to peers as an exact route, or served below a prefix with `dynamic`. Discovery accepts pattern unions; events carry the advertised prefix and captures for a complete match.
+- **Broadcasts** are created unannounced and invisible to everyone, then announced as an exact route, or served below a prefix with `dynamic`. A consumer of the same origin sees exactly what a peer sees. Discovery accepts pattern unions; events carry the advertised prefix and captures for a complete match.
 - **Patterns** (`Pattern`, `Patterns`) are re-exported from [`moq-pattern`](https://docs.rs/moq-pattern). Literal `Path` stays a coordinate.
 - **Tracks** carry groups with a priority, a retention window, and a timescale. Subscribers set their own priority and max age and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.
 - **Datagrams** send a single small frame unreliably on moq-lite 05+.
-- **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one.
+- **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one. `Route::source()` says where a delivered route entered: `Source::Local`, or `Source::Peer(hop)` when a handle marked `origin::Producer::peer()` announced it. `origin::Consumer::local()` sees only the local ones.
 - **Stats** counters per broadcast and session, drained by [`moq-stats`](https://docs.rs/moq-stats).
 
 It runs over anything implementing `web_transport_trait::poll::Session`: noq, the
@@ -108,15 +108,17 @@ Three operations, on an origin:
 
 - `origin.publish(path, route)` creates and advertises a broadcast in one call.
 - `origin.create_broadcast(path)` returns a producer. The broadcast is
-  reachable and visible to local discovery immediately. Peers see it only after
+  invisible and unroutable, for local consumers and peers alike, until
   `broadcast.announce(route)`.
 - `broadcast.announce(route)` / `broadcast.unannounce()` own that
-  advertisement. Announcing again re-prices the standing route. The route
-  retracts on `unannounce()`, `finish()`, or the last producer dropping.
+  advertisement. Announcing again re-prices the standing route, which competes
+  on cost with remote routes at the same path (a tie goes to the local
+  broadcast). The route retracts on `unannounce()`, `finish()`, or the last
+  producer dropping; tracks already in flight carry on to their own end.
 - `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
   (`""` claims everything). Hold the returned `origin::Dynamic` while the
   claim should stay advertised; drop it to retract. A request beneath it with
-  no local broadcast is a `Request` to `accept` or `reject`; reject what you
+  no winning announced local broadcast is a `Request` to `accept` or `reject`; reject what you
   will not serve rather than narrowing the claim, since a route is always a
   prefix on every wire.
 
@@ -133,7 +135,9 @@ most specific matching scope member's wildcards stood for when the prefix
 pins them, and `route` carries hops and cost (on a retraction, its last
 values). The consumer is also a `futures::Stream`. A prefix is not a
 broadcast name; sessions request each scope member's literal head and filter
-locally.
+locally. Routes with a `.`-prefixed segment below that head are [hidden](/concept/moq-lite#hidden-broadcasts)
+unless `with_hidden(true)` opts the consumer in. Sessions always ask the peer
+for hidden routes, so each local consumer decides.
 
 ## Limiting reads
 

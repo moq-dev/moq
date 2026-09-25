@@ -152,13 +152,13 @@ public final class BroadcastProducer: Sendable {
 
     /// Advertise this broadcast's exact path as a route.
     ///
-    /// Announcing again re-prices the route in place. The path is already
-    /// discoverable locally; announce advertises it to peers.
+    /// Announcing again re-prices the route in place. Until announced, the
+    /// broadcast is invisible and unroutable for local consumers and peers alike.
     public func announce(route: Route = Route()) throws {
         try ffi.announce(route: route)
     }
 
-    /// Retract this broadcast's exact-path advertisement, if any.
+    /// Retract this broadcast's advertisement, if any, from local consumers and peers alike.
     public func unannounce() throws {
         try ffi.unannounce()
     }
@@ -172,25 +172,33 @@ public final class BroadcastProducer: Sendable {
     /// are interpreted (e.g. `"opus"`, `"avc3"`). `video` seeds catalog fields
     /// that the stream cannot reveal before its first keyframe.
     /// Publish one audio codec as a new track. `initData` is required: audio resolves its whole
-    /// rendition from those bytes.
+    /// rendition from those bytes. `track` names the track; otherwise a unique name is derived from
+    /// the format.
     public func publishAudio(
         format: AudioFormat,
         initData: Data,
-        label: String? = nil
+        label: String? = nil,
+        track: String? = nil
     ) throws -> MediaProducer {
-        MediaProducer(try ffi.publishAudio(init: MoqAudioInit(format: format, data: initData, label: label)))
+        MediaProducer(
+            try ffi.publishAudio(init: MoqAudioInit(format: format, data: initData, label: label, track: track))
+        )
     }
 
     /// Publish one video codec as a new track. `initData` may be empty for a format that resolves
-    /// in band; `hint` seeds catalog fields the stream can't reveal.
+    /// in band; `hint` seeds catalog fields the stream can't reveal. `track` names the track;
+    /// otherwise a unique name is derived from the format.
     public func publishVideo(
         format: VideoFormat,
         initData: Data = Data(),
         label: String? = nil,
-        hint: VideoHint? = nil
+        hint: VideoHint? = nil,
+        track: String? = nil
     ) throws -> MediaProducer {
         MediaProducer(
-            try ffi.publishVideo(init: MoqVideoInit(format: format, data: initData, label: label, hint: hint))
+            try ffi.publishVideo(
+                init: MoqVideoInit(format: format, data: initData, label: label, hint: hint, track: track)
+            )
         )
     }
 
@@ -240,10 +248,13 @@ public final class BroadcastProducer: Sendable {
     public func publishVideoStream(
         format: VideoFormat,
         label: String? = nil,
-        hint: VideoHint? = nil
+        hint: VideoHint? = nil,
+        track: String? = nil
     ) throws -> MediaStreamProducer {
         MediaStreamProducer(
-            try ffi.publishVideoStream(init: MoqVideoInit(format: format, data: Data(), label: label, hint: hint))
+            try ffi.publishVideoStream(
+                init: MoqVideoInit(format: format, data: Data(), label: label, hint: hint, track: track)
+            )
         )
     }
 

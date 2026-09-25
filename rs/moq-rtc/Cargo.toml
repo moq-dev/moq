@@ -5,18 +5,25 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 rust-version.workspace = true
 
 keywords = ["webrtc", "whip", "whep", "moq", "media"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
+[features]
+default = ["server"]
+# The bundled axum routers and the `pub use axum`. An embedder that owns its HTTP
+# stack and calls `whip::accept` / `whep::accept` drops them with
+# `default-features = false`.
+server = ["dep:axum"]
+
 # Pure library: the WHIP/WHEP <-> MoQ gateway (axum routers + WHEP/WHIP client).
 # The CLI lives in `moq-cli` (the `rtc` subcommand); embedders mount the routers
 # / dial with `Client` against their own origin.
 [dependencies]
-axum = { workspace = true }
+axum = { workspace = true, optional = true }
 bytes = { workspace = true }
 hang = { workspace = true }
 moq-mux = { workspace = true }

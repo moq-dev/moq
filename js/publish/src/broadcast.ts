@@ -15,8 +15,9 @@ export type BroadcastInput = {
 	// Whether to create the broadcast. Defaults to true.
 	enabled: Getter<boolean>;
 
-	// Whether to advertise the broadcast. Defaults to true. The flip rather than a gate on
-	// creating it: tracks can be populated while this is false, then announced once ready.
+	// Whether to announce the broadcast. Defaults to true. Until it is announced nobody can
+	// see or subscribe to it. The flip rather than a gate on creating it: tracks can be
+	// populated while this is false, then announced once ready.
 	announce: Getter<boolean>;
 
 	// The broadcast name.

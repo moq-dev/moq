@@ -44,4 +44,3 @@ Wire: none.
 ## Related
 
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - a new epoch starts each track at sequence 0
-- [Broadcast route](/quest/m1/js-broadcast-route.md) - the JS claim matching the follow logic sits on

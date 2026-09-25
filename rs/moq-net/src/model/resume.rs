@@ -1096,8 +1096,12 @@ impl Group {
 	}
 
 	/// No replacement can arrive: report the loss that stalled us, or a clean end.
-	fn give_up(&mut self) -> Result<bool> {
-		match self.dead.take() {
+	///
+	/// The dead route stays recorded, so every later poll reaches the same verdict.
+	/// Clearing it would re-resolve the route's reclaimed copy as one still to come
+	/// and park, and a reader probing `poll_finished` for the loss would hang.
+	fn give_up(&self) -> Result<bool> {
+		match &self.dead {
 			Some((_, err)) => {
 				// The only place a spliced group's loss becomes visible, so say which
 				// frames went missing rather than leaving a stuck group to explain itself.
@@ -1107,7 +1111,7 @@ impl Group {
 					%err,
 					"no route can serve the rest of this group"
 				);
-				Err(err)
+				Err(err.clone())
 			}
 			None => Ok(false),
 		}
@@ -3693,6 +3697,45 @@ mod test {
 			matches!(reading.read_frame().now_or_never(), Some(Err(_))),
 			"an aborted track must not leave the reader parked"
 		);
+	}
+
+	/// A group the reader gave up on stays lost: every later poll reports the same
+	/// loss. `finished` is how a reader tells a transport loss from a bad payload, so
+	/// it must not park once the route's aborted copy has been reclaimed from its cache.
+	#[tokio::test]
+	async fn lost_group_stays_lost() {
+		let (mut track_a, consumer_a) = track_pair("a");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(replay());
+
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"a0");
+
+		// The relay resets the rest of the group, then moves on. The next write
+		// reclaims the aborted slot, so the route no longer knows the group at all.
+		group.abort(Error::Stream(crate::StreamError::Old)).unwrap();
+		write_group(&mut track_a, 1, "a1");
+
+		assert!(matches!(
+			reading.read_frame().now_or_never(),
+			Some(Err(Error::Stream(crate::StreamError::Old)))
+		));
+		assert!(
+			matches!(
+				reading.finished().now_or_never(),
+				Some(Err(Error::Stream(crate::StreamError::Old)))
+			),
+			"a lost group must not park or change its answer"
+		);
+		assert!(matches!(
+			reading.read_frame().now_or_never(),
+			Some(Err(Error::Stream(crate::StreamError::Old)))
+		));
 	}
 
 	/// A route whose copy of the group is missing the frames the reader needs is treated

@@ -253,6 +253,10 @@ pub struct AnnounceRequest<'a> {
 	// when encoding for another version and decodes as zero; lite-06 carries the
 	// identity session-wide in the SETUP Hop parameter instead.
 	pub exclude_hop: u64,
+	// Lite07+: also announce routes with a `.`-prefixed segment below the prefix.
+	// Not on the wire earlier, so the value set here is ignored when encoding for an
+	// older version and decodes as false.
+	pub hidden: bool,
 }
 
 impl Message for AnnounceRequest<'_> {
@@ -262,13 +266,24 @@ impl Message for AnnounceRequest<'_> {
 			true => u64::decode(r, version)?,
 			false => 0,
 		};
-		Ok(Self { prefix, exclude_hop })
+		let hidden = match version.has_hidden() {
+			true => bool::decode(r, version)?,
+			false => false,
+		};
+		Ok(Self {
+			prefix,
+			exclude_hop,
+			hidden,
+		})
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.prefix.encode(w, version)?;
 		if version.has_exclude_hop() {
 			self.exclude_hop.encode(w, version)?;
+		}
+		if version.has_hidden() {
+			self.hidden.encode(w, version)?;
 		}
 
 		Ok(())
@@ -626,7 +641,34 @@ mod tests {
 		AnnounceRequest {
 			prefix: got.prefix.to_owned(),
 			exclude_hop: got.exclude_hop,
+			hidden: got.hidden,
 		}
+	}
+
+	// Lite07 carries the hidden opt-in; every earlier version decodes as not opted in.
+	#[test]
+	fn announce_request_carries_hidden_from_lite07() {
+		for hidden in [false, true] {
+			let msg = AnnounceRequest {
+				prefix: Path::new("room/"),
+				exclude_hop: 0,
+				hidden,
+			};
+			assert_eq!(request_round_trip(&msg, Version::Lite07).hidden, hidden);
+			assert!(!request_round_trip(&msg, Version::Lite06).hidden);
+		}
+	}
+
+	// A flag byte other than 0 or 1 is malformed, not a future extension.
+	#[test]
+	fn announce_request_rejects_a_bad_hidden_flag() {
+		let mut buf = bytes::BytesMut::new();
+		let mut body = Vec::new();
+		Path::new("room").encode(&mut body, Version::Lite07).unwrap();
+		body.push(2);
+		(body.len() as u64).encode(&mut buf, Version::Lite07).unwrap();
+		buf.extend_from_slice(&body);
+		assert!(AnnounceRequest::decode(&mut &buf[..], Version::Lite07).is_err());
 	}
 
 	// Lite04/05 carry the subscriber's origin id so the publisher can skip reflected
@@ -636,6 +678,7 @@ mod tests {
 		let msg = AnnounceRequest {
 			prefix: Path::new("room/"),
 			exclude_hop: 42,
+			hidden: false,
 		};
 		assert_eq!(request_round_trip(&msg, Version::Lite05).exclude_hop, 42);
 	}
@@ -647,6 +690,7 @@ mod tests {
 		let msg = AnnounceRequest {
 			prefix: Path::new("room/"),
 			exclude_hop: 42,
+			hidden: false,
 		};
 		assert_eq!(request_round_trip(&msg, Version::Lite06).exclude_hop, 0);
 

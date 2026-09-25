@@ -1,4 +1,4 @@
-# drill: cancel_under_backpressure_releases_the_reader
+# drill: cancel_under_backpressure_releases_the_reader::loopback
 # expect: the cancelled subscriber's broadcast never closed
 #
 # Removes the release a subscribing session performs when it ends: each announce

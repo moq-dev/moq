@@ -121,7 +121,7 @@ export class Camera {
 
 			let stream: MediaStream | undefined;
 			try {
-				stream = await Promise.race([media, effect.cancel.then(() => undefined)]);
+				stream = await effect.race(media);
 			} catch (error) {
 				if (effect.abort.aborted) return;
 				this.#out.error.set(error instanceof Error ? error : new Error(String(error)));
