@@ -14,6 +14,10 @@ that needs runtime dispatch passes `Arc<dyn ObjectStore>`. A broadcast
 advertises its recording through the catalog's
 [`archive`](https://doc.moq.dev/concept/hang) entry.
 
+`Writer` records selected tracks of a broadcast, `Reader` serves a recording
+back through a broadcast, and `Rewind` seeks a viewer into a recording before
+splicing it back onto the live broadcast.
+
 ```bash
 cargo add moq-archive
 ```

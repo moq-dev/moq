@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::ops::{Range, RangeInclusive};
+use std::ops::{Bound, Range, RangeInclusive};
 
 use hang::timeline::Record;
 
@@ -7,16 +7,18 @@ use crate::path::check_range;
 
 /// One track's stored object for one record: its filename bounds and the exact runs it holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Span {
+pub(crate) struct Span {
 	/// Inclusive first-to-last group sequence, the object's filename bounds.
 	pub bounds: RangeInclusive<u64>,
 	/// The advertised runs, ascending and nonoverlapping; groups between them never existed.
 	pub runs: Vec<RangeInclusive<u64>>,
+	/// The advertising record's start, in timeline units.
+	pub pts: u64,
 }
 
 impl Span {
 	/// Build from a record's ranges, refusing empty, reversed, out-of-range, or unordered runs.
-	fn new(ranges: &[hang::timeline::Range]) -> Option<Self> {
+	fn new(ranges: &[hang::timeline::Range], pts: u64) -> Option<Self> {
 		let mut runs: Vec<RangeInclusive<u64>> = Vec::with_capacity(ranges.len());
 		for range in ranges {
 			let run = range.start..=range.end;
@@ -29,7 +31,7 @@ impl Span {
 			runs.push(run);
 		}
 		let bounds = *runs.first()?.start()..=*runs.last()?.end();
-		Some(Self { bounds, runs })
+		Some(Self { bounds, runs, pts })
 	}
 
 	fn contains(&self, group: u64) -> bool {
@@ -39,7 +41,7 @@ impl Span {
 
 /// The committed group ranges advertised by the replayed timeline window.
 #[derive(Default)]
-pub(super) struct Index {
+pub(crate) struct Index {
 	/// Per track, each span keyed by its smallest group sequence.
 	tracks: HashMap<String, BTreeMap<u64, Span>>,
 	/// Per window index, the `(track, smallest)` spans that record added, so a pop can evict them.
@@ -54,7 +56,7 @@ impl Index {
 	pub fn push(&mut self, index: u64, record: &Record) {
 		let mut added = Vec::new();
 		for (track, ranges) in &record.tracks {
-			let Some(span) = Span::new(ranges) else {
+			let Some(span) = Span::new(ranges, record.pts) else {
 				tracing::warn!(track, segment = record.segment, "ignoring malformed archive ranges");
 				continue;
 			};
@@ -91,6 +93,32 @@ impl Index {
 	/// Whether any replayed record named this track.
 	pub fn has_track(&self, track: &str) -> bool {
 		self.tracks.contains_key(track)
+	}
+
+	/// The first group at or after `group` that the retained window commits on `track`.
+	pub fn next(&self, track: &str, group: u64) -> Option<u64> {
+		let spans = self.tracks.get(track)?;
+		let within = spans.range(..=group).next_back().and_then(|(_, span)| {
+			let run = span.runs.iter().find(|run| *run.end() >= group)?;
+			Some(group.max(*run.start()))
+		});
+		within.or_else(|| {
+			let (smallest, _) = spans.range((Bound::Excluded(group), Bound::Unbounded)).next()?;
+			Some(*smallest)
+		})
+	}
+
+	/// The first group of the latest `track` span whose record starts at or before `pts`, or of
+	/// the earliest span when every record starts later.
+	pub fn seek(&self, track: &str, pts: u64) -> Option<u64> {
+		let spans = self.tracks.get(track)?;
+		let earliest = spans.values().next()?;
+		let span = spans
+			.values()
+			.take_while(|span| span.pts <= pts)
+			.last()
+			.unwrap_or(earliest);
+		Some(*span.bounds.start())
 	}
 
 	/// The span advertising `group` on `track`, if the retained window commits it.
@@ -131,6 +159,50 @@ mod tests {
 		assert!(index.get("chat", 0).is_none());
 		assert!(index.has_track("video"));
 		assert!(!index.has_track("chat"));
+	}
+
+	#[test]
+	fn next_skips_gaps_and_popped_records() {
+		let mut index = Index::default();
+		index.push(0, &record(0, &[("audio", &[(0, 2), (5, 6)])]));
+		index.push(1, &record(1, &[("audio", &[(9, 9)]), ("video", &[(3, 3)])]));
+
+		assert_eq!(index.next("audio", 0), Some(0));
+		assert_eq!(index.next("audio", 2), Some(2));
+		assert_eq!(index.next("audio", 3), Some(5), "internal gap");
+		assert_eq!(index.next("audio", 7), Some(9), "gap between records");
+		assert_eq!(index.next("audio", 10), None, "past the newest record");
+		assert_eq!(index.next("video", 0), Some(3));
+		assert_eq!(index.next("chat", 0), None);
+
+		index.pop(0..1);
+		assert_eq!(
+			index.next("audio", 1),
+			Some(9),
+			"expired groups skip to the retained window"
+		);
+	}
+
+	#[test]
+	fn seek_picks_the_segment_starting_at_or_before() {
+		let mut index = Index::default();
+		// Records start at segment * 1000.
+		index.push(0, &record(0, &[("video", &[(0, 1)])]));
+		index.push(1, &record(1, &[("audio", &[(0, 0)])]));
+		index.push(2, &record(2, &[("video", &[(4, 5)])]));
+
+		assert_eq!(index.seek("video", 0), Some(0));
+		assert_eq!(index.seek("video", 1999), Some(0), "segment 1 has no video");
+		assert_eq!(index.seek("video", 2000), Some(4));
+		assert_eq!(index.seek("video", u64::MAX), Some(4));
+		assert_eq!(index.seek("chat", 0), None);
+
+		index.pop(0..1);
+		assert_eq!(
+			index.seek("video", 0),
+			Some(4),
+			"before the window starts at its oldest span"
+		);
 	}
 
 	#[test]

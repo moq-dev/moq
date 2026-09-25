@@ -21,8 +21,6 @@
 //! # }
 //! ```
 
-mod index;
-
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
@@ -35,7 +33,7 @@ use moq_json::window;
 use moq_net::{Timescale, Timestamp, broadcast, group, track};
 use object_store::ObjectStore;
 
-use self::index::{Index, Span};
+use crate::index::{Index, Span};
 use crate::store::list::Query;
 use crate::{Error, Key, Object, Result, Store};
 
