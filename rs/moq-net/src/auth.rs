@@ -295,6 +295,14 @@ impl Handle {
 
 	/// Record an AUTH_OK for the token.
 	pub(crate) fn granted(&self, id: u64, grant: Grant) {
+		// One parseable line per AUTH_OK, so the grant the peer actually sent is observable
+		// without an API; the interop harness checks it against the token it minted.
+		let list = |patterns: &Patterns| format!("{:?}", patterns.iter().map(|p| p.to_string()).collect::<Vec<_>>());
+		tracing::debug!(
+			publish = %list(&grant.publish),
+			subscribe = %list(&grant.subscribe),
+			"auth granted"
+		);
 		let mut state = self.state.lock();
 		let Some(slot) = state.tokens.get_mut(&id) else {
 			return;
