@@ -114,6 +114,12 @@ impl Import {
 		self.track.name()
 	}
 
+	/// The lowest timestamp the track accepts next; see
+	/// [`Producer::floor`](crate::container::Producer::floor).
+	pub(crate) fn floor(&self, keyframe: bool) -> Option<moq_net::Timestamp> {
+		self.track.floor(keyframe)
+	}
+
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()

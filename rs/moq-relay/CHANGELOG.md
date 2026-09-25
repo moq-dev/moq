@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.3](https://github.com/moq-dev/moq/compare/moq-relay-v0.15.2...moq-relay-v0.15.3) - 2026-09-25
+
+### Added
+
+- *(net)* hide dot-named broadcasts from discovery (moq-lite-07) ([#4060](https://github.com/moq-dev/moq/pull/4060))
+- *(relay)* retag a live session's stats when a re-check moves its tier ([#4057](https://github.com/moq-dev/moq/pull/4057))
+- *(net)* an announce says whether its route entered here or from a peer ([#3972](https://github.com/moq-dev/moq/pull/3972))
+- *(cli)* add `moq fetch` to read one group of a track ([#3965](https://github.com/moq-dev/moq/pull/3965))
+- *(moq-uring)* report a session's peer address and SNI to auth ([#4056](https://github.com/moq-dev/moq/pull/4056))
+
+### Other
+
+- *(relay)* run the drills over a seeded, impaired UDP path ([#4054](https://github.com/moq-dev/moq/pull/4054))
+
 ## [0.15.2](https://github.com/moq-dev/moq/compare/moq-relay-v0.15.1...moq-relay-v0.15.2) - 2026-09-24
 
 ### Fixed
