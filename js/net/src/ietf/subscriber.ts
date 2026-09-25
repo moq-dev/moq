@@ -541,7 +541,7 @@ export class Subscriber {
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			// A control request that timed out is not late content, so it carries its own code.
-			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
+			const e = err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err);
 			request.reject(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,

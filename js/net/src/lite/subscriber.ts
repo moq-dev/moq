@@ -550,7 +550,7 @@ export class Subscriber {
 		} catch (err) {
 			// The setup outlived its deadline waiting for the first response: a control
 			// timeout, not content that arrived late.
-			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
+			const e = err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err);
 			request.reject(e);
 			this.#subscribes.delete(id);
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
