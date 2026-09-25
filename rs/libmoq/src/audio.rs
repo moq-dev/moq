@@ -79,7 +79,8 @@ pub struct moq_audio_encoder_input {
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_audio_encoder_output {
-	/// Codec id, UTF-8 (currently only "opus").
+	/// Codec id, UTF-8: "opus", "pcm", or "aac". AAC encodes through the
+	/// platform's encoder, so a host without one refuses it.
 	pub codec: *const c_char,
 	pub codec_len: usize,
 	/// 0 = derive from input.
@@ -89,8 +90,8 @@ pub struct moq_audio_encoder_output {
 	/// 0 = libopus default.
 	pub bitrate: u32,
 	/// Encoded frame duration in microseconds. Opus accepts exactly
-	/// 2500/5000/10000/20000/40000/60000 us. 0 = the 20 ms default, which
-	/// matches the JS publish path.
+	/// 2500/5000/10000/20000/40000/60000 us. 0 = the codec's default: 20 ms for
+	/// Opus, which matches the JS publish path, and 1024 samples for AAC.
 	pub frame_duration_us: u32,
 }
 

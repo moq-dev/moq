@@ -28,7 +28,7 @@ policy. Decoding likewise separates low-level `decode::Config`, PCM
 | Module | Does |
 | --- | --- |
 | `capture` | Microphones via CoreAudio, WASAPI, ALSA (and PipeWire/PulseAudio hosts), plus macOS system audio |
-| `encode` | PCM to Opus (with DTX and voice-activity signaling) or raw PCM for the lowest latency |
+| `encode` | PCM to Opus (with DTX and voice-activity signaling), raw PCM for the lowest latency, or AAC-LC through a platform encoder |
 | `decode` | Opus, PCM, and AAC-LC back to PCM, resampled to the rate you want |
 | `playback` | One output device mixing every track in a call, with click-free volume ramps |
 | `aec` | Acoustic echo cancellation (a port of WebRTC's), so a laptop with no headset doesn't feed itself back |
@@ -47,6 +47,25 @@ No platform decoder is wired in yet, so multichannel AAC and HE-AAC declared in
 its config are refused at construction on every host. HE-AAC signaled only in
 band plays as its half-rate LC core. Linux has no OS audio decoder, so it will
 stay that way there.
+
+`encode` selects the same way, through `encode::Settings::kind`, and
+`Encoder::name()` reports what opened.
+
+| Backend | Encodes | Hosts |
+| --- | --- | --- |
+| `libopus` | Opus, mono or stereo | all |
+| `pcm` | PCM | all |
+
+`encode::Codec::Aac` is AAC-LC (`mp4a.40.2`) at the input's rate and layout:
+mono, stereo, 3.0, 4.0, 5.0, 5.1, or 7.1, the layouts with an AAC
+channelConfiguration. Frames are 1024 samples, so `Settings::from_input` sets
+`frame_duration` to match. The catalog's AudioSpecificConfig is built from the
+settings when the track is registered, and since it has no field for the
+encoder's delay, packets are stamped that much earlier so the first input
+sample still lands at the first timestamp. There is no software AAC encoder,
+and no platform encoder is wired in yet, so `Codec::Aac` is refused at
+construction on every host for now. Linux has no OS encoder, so it will stay
+that way there.
 
 Highlights:
 

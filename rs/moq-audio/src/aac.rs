@@ -1,7 +1,7 @@
 //! AAC constraints, the sibling of the `opus` and `pcm` modules.
 //!
-//! Only the decode side exists: there is no Rust AAC encoder, so this crate
-//! publishes Opus or PCM and reads AAC that a gateway produced.
+//! The decode side. There is no Rust AAC encoder, so `encode` produces AAC only
+//! through a platform backend and otherwise reads AAC that a gateway produced.
 
 use crate::Error;
 

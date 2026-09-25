@@ -115,6 +115,12 @@ one: `FetchGroup`/`FetchMediaGroup`, `Dynamic()` with `Requests(ctx)`,
 `AppendDatagram`/`Datagrams(ctx)`, `SetCatalogSection`, `Demand()` for `Used`/`Unused`,
 `Session().Stats()`. `moq.IsAuthError` and `moq.IsShutdown` classify errors. `moq.ProtocolError(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one.
 
+`EncodeAudio` encodes raw PCM inside the binding. Its codec is `OpusAudioCodec()`
+or `AacAudioCodec()`, and `AudioEncoderOutput.FrameDurationUs` sets the Opus
+frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000. 0 takes
+the codec's own frame, which AAC needs. AAC-LC encodes through the platform's
+encoder, so a host without one refuses it.
+
 Audio `Channels` also names the speaker layout, by the WAVE convention: 1 is
 mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1, and 8 7.1, interleaved
 front left, front right, center, LFE, back, then side. Decoding remixes to the

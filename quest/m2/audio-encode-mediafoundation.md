@@ -20,7 +20,6 @@ behind the encode seam on Windows.
 
 ## Required
 
-- [Encode seam](/quest/m1/audio-codecs/encode-backend.md) - the candidate order this backend joins
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - the round-trip regression decodes through it
 
 ## Related

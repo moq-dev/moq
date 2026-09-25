@@ -48,7 +48,7 @@ impl From<MoqAudioSampleFormat> for moq_audio::Format {
 /// Audio codec selection for the encoder.
 ///
 /// An immutable object so adding a codec later does not break callers
-/// switching over a closed enum. Currently only Opus is available.
+/// switching over a closed enum.
 #[derive(uniffi::Object)]
 pub struct MoqAudioCodec {
 	inner: moq_audio::encode::Codec,
@@ -61,6 +61,16 @@ impl MoqAudioCodec {
 	pub fn opus() -> Arc<Self> {
 		Arc::new(Self {
 			inner: moq_audio::encode::Codec::Opus,
+		})
+	}
+
+	/// AAC-LC (`mp4a.40.2`) through the platform's encoder, at the input's rate
+	/// and layout. A host without one refuses it when the producer is built.
+	/// Its frames are 1024 samples, so leave `frame_duration_us` at 0.
+	#[uniffi::constructor]
+	pub fn aac() -> Arc<Self> {
+		Arc::new(Self {
+			inner: moq_audio::encode::Codec::Aac,
 		})
 	}
 }
@@ -96,7 +106,7 @@ pub struct MoqAudioEncoderOutput {
 	pub bitrate: Option<u32>,
 	/// Encoded frame duration in microseconds. Opus accepts exactly
 	/// 2500/5000/10000/20000/40000/60000 us, and the default 20 ms matches the
-	/// JS publish path.
+	/// JS publish path. 0 takes the codec's own frame, which AAC needs.
 	#[uniffi(default = 20000)]
 	pub frame_duration_us: u32,
 }
@@ -290,7 +300,16 @@ impl MoqBroadcastProducer {
 			options.settings.layout = moq_audio::Layout::from_channels(channels)?;
 		}
 		options.settings.bitrate = output.bitrate.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
-		options.settings.frame_duration = Duration::from_micros(output.frame_duration_us.into());
+		if output.frame_duration_us != 0 {
+			options.settings.frame_duration = Duration::from_micros(output.frame_duration_us.into());
+		} else if output.codec.codec() == moq_audio::encode::Codec::Aac {
+			// from_input sized this at the input rate. The codec rate may be the
+			// override above, and AAC's own frame is 1024 samples of that rate.
+			let mut rated = input.clone();
+			rated.sample_rate = options.settings.sample_rate;
+			options.settings.frame_duration =
+				moq_audio::encode::Settings::from_input(moq_audio::encode::Codec::Aac, &rated).frame_duration;
+		}
 		if let Some(bandwidth) = &bandwidth {
 			options.bandwidth = bandwidth.allocator().clone();
 		}
