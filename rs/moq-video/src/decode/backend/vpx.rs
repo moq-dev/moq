@@ -100,7 +100,12 @@ impl Vpx {
 		self.broken = true;
 		self.lost += 1;
 		if self.lost == 1 {
-			tracing::warn!(decoder = NAME, codec = self.codec.label(), reason, "picture lost, waiting for the next keyframe");
+			tracing::warn!(
+				decoder = NAME,
+				codec = self.codec.label(),
+				reason,
+				"picture lost, waiting for the next keyframe"
+			);
 		} else {
 			tracing::trace!(decoder = NAME, reason, "picture lost");
 		}
@@ -384,7 +389,13 @@ mod tests {
 				.unwrap_or_else(|e| panic!("{} frame {index} ended the stream: {e}", vector.name));
 			out.extend(pictures.into_iter().map(|picture| (index, picture)));
 		}
-		out.extend(decoder.flush().unwrap().into_iter().map(|picture| (usize::MAX, picture)));
+		out.extend(
+			decoder
+				.flush()
+				.unwrap()
+				.into_iter()
+				.map(|picture| (usize::MAX, picture)),
+		);
 		out
 	}
 
@@ -392,13 +403,23 @@ mod tests {
 		let Surface::I420(i420) = &frame.surface else {
 			panic!("{} produced a non-I420 surface", vector.name);
 		};
-		assert_eq!((i420.width, i420.height), (vector.width, vector.height), "{}", vector.name);
+		assert_eq!(
+			(i420.width, i420.height),
+			(vector.width, vector.height),
+			"{}",
+			vector.name
+		);
 		assert!(
 			i420.data == reference(vector, index),
 			"{} picture {index} differs from the reference decode",
 			vector.name
 		);
-		assert_eq!(frame.timestamp, at(index), "{} picture {index} mis-stamped", vector.name);
+		assert_eq!(
+			frame.timestamp,
+			at(index),
+			"{} picture {index} mis-stamped",
+			vector.name
+		);
 	}
 
 	#[test]
@@ -539,7 +560,13 @@ mod tests {
 		// Join after the first keyframe: frames 1..3 are deltas, 4 a keyframe.
 		for (index, frame) in frames(VP9_64.ivf).into_iter().enumerate().skip(1) {
 			let key = keyframe(Codec::Vp9, &frame);
-			decoded.extend(decoder.decode(&frame, at(index), key).unwrap().into_iter().map(|f| (index, f)));
+			decoded.extend(
+				decoder
+					.decode(&frame, at(index), key)
+					.unwrap()
+					.into_iter()
+					.map(|f| (index, f)),
+			);
 		}
 		assert_eq!(decoded.len(), 1, "a delta frame was decoded before the keyframe");
 		let (index, frame) = &decoded[0];
