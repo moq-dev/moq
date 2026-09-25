@@ -17,7 +17,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 
 ## Quests
 
-- [Missing fetch group](/quest/m1/fetch-missing-group.md) - HTTP /fetch answers 404 and `moq fetch` fails cleanly for a group the track lacks
 - [JS fetch answer](/quest/m1/js-fetch-answer.md) - js/net's lite fetch settles on the publisher's answer, and a JS publisher's miss resets with NotFound
 - [libmoq hidden opt-in](/quest/m1/libmoq-hidden.md) - `moq_origin_announced` takes a `hidden` flag so C callers can list `.`-named broadcasts
 - [Announce compression](/quest/m1/announce-compression.md) - a lite-07 announce reuses the path head and hop-chain tail of a live announcement on its stream instead of resending them

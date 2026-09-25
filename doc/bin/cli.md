@@ -182,8 +182,8 @@ zero-based `frame` and padded standard base64.
 `<track>` is the literal track name. `/fetch` splits its path on the last `/`,
 so the two agree only for names without one. Fetch only dials `--connect`, and
 refuses a listener or cluster flag. It gives up after 30 seconds, as `/fetch`
-does, and exits non-zero when the broadcast or group is not found, the relay
-refuses, or the deadline passes.
+does, and exits non-zero when the broadcast or group is not found (before
+writing anything), the relay refuses, or the deadline passes.
 
 ## Multiple stages
 

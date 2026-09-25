@@ -3503,6 +3503,12 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 		stream: Stream<S, Version>,
 		frame_start: u64,
 	},
+	/// Flushed; waiting for the publisher to answer before accepting.
+	Answer {
+		request: Option<group::Request>,
+		stream: Stream<S, Version>,
+		frame_start: u64,
+	},
 	Ingest {
 		stream: Stream<S, Version>,
 		producer: group::Producer,
@@ -3613,7 +3619,33 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					else {
 						unreachable!()
 					};
+					self.state = FetchRunState::Answer {
+						request,
+						stream,
+						frame_start,
+					};
+				}
+				FetchRunState::Answer { stream, .. } => {
+					// Lite has no FETCH_OK: a publisher without the group resets the
+					// stream instead. Accepting before the first byte (or a FIN, for an
+					// empty group) would resolve every joined `fetch_group` to a group
+					// that only fails on its first read, so wait for the answer.
+					let answered = ready!(stream.reader.poll_has_more(&mut cx));
+					let FetchRunState::Answer {
+						request,
+						stream,
+						frame_start,
+					} = std::mem::replace(&mut self.state, FetchRunState::Done)
+					else {
+						unreachable!()
+					};
 					let request = request.expect("request pending");
+					if let Err(err) = answered {
+						tracing::debug!(track = %self.serve.name, group = self.group, %err, "fetch refused");
+						stream.writer.abort(&err);
+						request.reject(err);
+						return Poll::Ready(());
+					}
 
 					// Make the group available (resolving the downstream fetch) and fill
 					// it. The track::Info only takes effect if the track isn't accepted yet
