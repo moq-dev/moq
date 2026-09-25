@@ -76,8 +76,12 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [#2924](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every listener on both runtimes shares one reloadable served identity, so rotation is atomic and generate works with workers
 - [#2964](/quest/m1/2964-quic-workers-dropping-one-split-server-resizes-the.md) - integrate the dev worker owner with hardened socket-group formation
 - [Audio quality harness](/quest/m1/audio-quality-harness/README.md) - a playout latency regression fails a run instead of arriving as a bug report
+- [Benchmark regressions in CI](/quest/m1/bench-ci.md) - PRs get a non-blocking comparison of the Criterion benches they affect, and a nightly trend on main alerts on regressions
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - retained evidence, repeated paired runs, and uncertainty for performance claims
 - [#3126](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench reports per-interval latency percentiles so the ramp leaves the steady state
+- [Sans-IO session bench](/quest/m1/bench-session.md) - a moq-net bench drives publisher, relay, and subscribers over the in-memory transport, swept over subscribers and frame size
+- [Relay session bench](/quest/m1/bench-relay.md) - the same scenario through moq-relay's own connection handling
+- [Bench coverage](/quest/m1/bench-coverage.md) - Criterion targets for moq-mux containers, the hang catalog, moq-auth verification, and moq-pattern matching
 - [Relay profiling](/quest/m1/performance-profiles.md) - reproducible CPU and allocation captures under the existing workloads
 - [Browser benchmarks](/quest/m1/browser-benchmarks.md) - measure JS transport, container, decode, and render costs in an identified browser
 - [Plan: watch worker](/quest/m1/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
