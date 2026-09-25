@@ -117,16 +117,6 @@ pub enum Preset {
 	Quality,
 }
 
-impl Preset {
-	/// The packet duration this preset encodes.
-	pub fn frame_duration(self) -> Duration {
-		match self {
-			Self::LowLatency => Duration::from_millis(10),
-			Self::Balanced | Self::Quality => Duration::from_millis(20),
-		}
-	}
-}
-
 /// Audio codec settings shared by [`Encoder`] and [`Producer`](super::Producer).
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -167,7 +157,10 @@ impl Settings {
 
 	/// Apply `preset`'s packetization, keeping every other setting.
 	pub fn with_preset(mut self, preset: Preset) -> Self {
-		self.frame_duration = preset.frame_duration();
+		self.frame_duration = match preset {
+			Preset::LowLatency => Duration::from_millis(10),
+			Preset::Balanced | Preset::Quality => Duration::from_millis(20),
+		};
 		self
 	}
 

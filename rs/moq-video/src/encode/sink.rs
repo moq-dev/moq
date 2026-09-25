@@ -192,14 +192,14 @@ mod threaded {
 		},
 	}
 
-	/// Build an encoder for `config` and serve requests until the channel closes.
-	/// Runs entirely on the encode thread; see [`crate::worker`].
 	/// What the encode thread reports once its encoder is open.
 	pub struct Opened {
 		name: String,
 		applied: Applied,
 	}
 
+	/// Build an encoder for `config` and serve requests until the channel closes.
+	/// Runs entirely on the encode thread; see [`crate::worker`].
 	fn run(config: Config, ready: Ready<Opened>, mut requests: mpsc::UnboundedReceiver<Request>) {
 		let mut encoder = match Encoder::new(&config) {
 			Ok(encoder) => encoder,
@@ -423,14 +423,6 @@ mod tests {
 		);
 	}
 
-	/// Regression: a queued request runs on the encode thread whether or not the
-	/// caller is still waiting, so a cancelled `encode` leaves the codec a step
-	/// ahead of the stream with output nobody received. Carrying on would publish
-	/// a track quietly missing those frames, which is worse than an error: only
-	/// the publisher could ever tell, and only by decoding its own output.
-	///
-	/// macOS is exempt by design: the inline sink encodes on the calling thread,
-	/// so there is nothing to run ahead (see the module docs).
 	/// What the backend applied has to survive the trip off the encode thread,
 	/// since that thread is the only place the encoder can be asked.
 	#[cfg(feature = "openh264")]
@@ -454,6 +446,14 @@ mod tests {
 		assert_eq!(sink.applied().preset, None);
 	}
 
+	/// Regression: a queued request runs on the encode thread whether or not the
+	/// caller is still waiting, so a cancelled `encode` leaves the codec a step
+	/// ahead of the stream with output nobody received. Carrying on would publish
+	/// a track quietly missing those frames, which is worse than an error: only
+	/// the publisher could ever tell, and only by decoding its own output.
+	///
+	/// macOS is exempt by design: the inline sink encodes on the calling thread,
+	/// so there is nothing to run ahead (see the module docs).
 	#[cfg(not(target_os = "macos"))]
 	#[test]
 	fn a_cancelled_call_poisons_the_sink() {
