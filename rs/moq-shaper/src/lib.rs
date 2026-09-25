@@ -38,13 +38,14 @@ use tokio::{
 /// How one direction of the path treats each datagram.
 ///
 /// A datagram is first subject to `loss`, then waits for the `rate` limit, then
-/// takes `delay` plus or minus `jitter` to arrive, unless `reorder` sends it
-/// ahead of everything still in flight.
+/// takes `delay` plus or minus `jitter`, drawn as its [`Jitter`] model says, to
+/// arrive, unless `reorder` sends it ahead of everything still in flight.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Profile {
 	/// The base one-way delay.
 	pub delay: Duration,
-	/// The most a datagram's delay varies from `delay`, uniformly either way.
+	/// How far a datagram's delay varies from `delay`: the most either way when
+	/// [`Jitter::Uniform`], the sigma when [`Jitter::Gaussian`].
 	pub jitter: Duration,
 	/// The probability that a datagram is dropped.
 	pub loss: f64,
@@ -55,7 +56,7 @@ pub struct Profile {
 }
 
 impl Profile {
-	fn validate(&self) -> anyhow::Result<()> {
+	fn validate(&self, model: Jitter) -> anyhow::Result<()> {
 		anyhow::ensure!(
 			(0.0..=1.0).contains(&self.loss),
 			"loss {} is not a probability",
@@ -71,8 +72,9 @@ impl Profile {
 			"reorder {} needs a delay to overtake",
 			self.reorder
 		);
+		// A gaussian clamps its draw at zero instead, as a queue cannot run early.
 		anyhow::ensure!(
-			self.jitter <= self.delay,
+			model == Jitter::Gaussian || self.jitter <= self.delay,
 			"jitter {:?} exceeds delay {:?}, which would need a negative delay",
 			self.jitter,
 			self.delay
@@ -81,6 +83,36 @@ impl Profile {
 			anyhow::ensure!(rate.bits_per_second > 0, "a rate limit of zero passes nothing");
 		}
 		Ok(())
+	}
+}
+
+/// How a direction draws each datagram's jitter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Jitter {
+	/// Uniform within `jitter` either way of `delay`, drawn for each datagram on
+	/// its own, so a later datagram can overtake an earlier one.
+	#[default]
+	Uniform,
+	/// A gaussian with `jitter` as its sigma, clamped at zero, that never leaves
+	/// before the datagram in front: it varies the spacing, never the order.
+	///
+	/// This is queueing delay on a FIFO path. A jitter that overtakes hands QUIC
+	/// a gap it can only read as loss, so the run measures its congestion
+	/// response rather than the jitter.
+	Gaussian,
+}
+
+/// One direction's opt-in options beyond its [`Profile`]. The default adds nothing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Options {
+	/// How the profile's `jitter` is drawn.
+	pub jitter_model: Jitter,
+}
+
+impl Options {
+	/// Check the options, and `profile` as they draw it.
+	fn validate(&self, profile: &Profile) -> anyhow::Result<()> {
+		profile.validate(self.jitter_model)
 	}
 }
 
@@ -166,6 +198,10 @@ pub struct Setup {
 	/// never impaired: a reliable transport cannot shed load, so shaping it
 	/// would measure how TCP retransmits.
 	pub tcp_passthrough: bool,
+	/// The options from a client toward the target.
+	pub up: Options,
+	/// The options from the target back toward a client.
+	pub down: Options,
 }
 
 impl From<Config> for Setup {
@@ -173,6 +209,8 @@ impl From<Config> for Setup {
 		Self {
 			config,
 			tcp_passthrough: false,
+			up: Options::default(),
+			down: Options::default(),
 		}
 	}
 }
@@ -222,7 +260,7 @@ impl fmt::Display for Stats {
 /// A running shaper. Dropping it stops forwarding.
 pub struct Shaper {
 	addr: SocketAddr,
-	config: Config,
+	setup: Setup,
 	tally: Arc<[Tally; 2]>,
 	/// Why forwarding stopped, if it did.
 	failed: Arc<OnceLock<String>>,
@@ -233,9 +271,9 @@ impl Shaper {
 	/// Bind the listening socket and start forwarding.
 	pub async fn bind(setup: impl Into<Setup>) -> anyhow::Result<Self> {
 		let setup = setup.into();
-		let config = setup.config;
-		config.up.validate().context("invalid up profile")?;
-		config.down.validate().context("invalid down profile")?;
+		let config = &setup.config;
+		setup.up.validate(&config.up).context("invalid up profile")?;
+		setup.down.validate(&config.down).context("invalid down profile")?;
 
 		let listen = UdpSocket::bind(config.bind)
 			.await
@@ -255,11 +293,11 @@ impl Shaper {
 		let tally = Arc::new([Tally::default(), Tally::default()]);
 		let failed = Arc::new(OnceLock::new());
 		let task = tokio::spawn({
-			let config = config.clone();
+			let setup = setup.clone();
 			let tally = tally.clone();
 			let failed = failed.clone();
 			async move {
-				if let Err(err) = run(Arc::new(listen), tcp, config, tally).await {
+				if let Err(err) = run(Arc::new(listen), tcp, setup, tally).await {
 					let _ = failed.set(format!("{err:#}"));
 				}
 			}
@@ -267,7 +305,7 @@ impl Shaper {
 
 		Ok(Self {
 			addr,
-			config,
+			setup,
 			tally,
 			failed,
 			task,
@@ -281,7 +319,7 @@ impl Shaper {
 
 	/// The configuration this shaper runs, including its seed.
 	pub fn config(&self) -> &Config {
-		&self.config
+		&self.setup.config
 	}
 
 	/// What the shaper has done so far.
@@ -303,7 +341,7 @@ impl Shaper {
 			anyhow::bail!("the shaper stopped forwarding: {err} ({stats})");
 		}
 
-		let missing = unapplied(&self.config, &stats);
+		let missing = unapplied(&self.setup.config, &stats);
 		anyhow::ensure!(
 			missing.is_empty(),
 			"the profile never applied {} ({stats}), so this run was not impaired as configured",
@@ -356,9 +394,10 @@ fn bump(counter: &AtomicU64) {
 async fn run(
 	listen: Arc<UdpSocket>,
 	tcp: Option<TcpListener>,
-	config: Config,
+	setup: Setup,
 	tally: Arc<[Tally; 2]>,
 ) -> anyhow::Result<()> {
+	let config = &setup.config;
 	let mut flows = HashMap::<SocketAddr, Link>::new();
 	let mut tasks = JoinSet::new();
 	let mut buf = vec![0u8; u16::MAX as usize];
@@ -390,10 +429,10 @@ async fn run(
 				let (down_tx, down_rx) = mpsc::unbounded_channel();
 				tasks.spawn(deliver(down_rx, listen.clone(), from));
 
-				let down = Link::new(&config.down, config.seed, stream + 1, now, down_tx);
+				let down = Link::new(&config.down, &setup.down, config.seed, stream + 1, now, down_tx);
 				tasks.spawn(reply(upstream, config.target, down, tally.clone()));
 
-				entry.insert(Link::new(&config.up, config.seed, stream, now, up_tx))
+				entry.insert(Link::new(&config.up, &setup.up, config.seed, stream, now, up_tx))
 			}
 		};
 		link.push(now, buf[..size].to_vec(), &tally[UP]);
@@ -491,9 +530,12 @@ async fn deliver(
 /// One direction of one flow: the decisions and the state they depend on.
 struct Link {
 	profile: Profile,
+	jitter: Jitter,
 	rng: Xoshiro256PlusPlus,
 	/// When the token bucket would be full again, as in GCRA.
 	full_at: Instant,
+	/// When the latest in-order datagram leaves, which the next one never beats.
+	floor: Instant,
 	queue: mpsc::UnboundedSender<(Instant, Vec<u8>)>,
 }
 
@@ -504,6 +546,7 @@ impl Link {
 	/// client's ephemeral port is no identity across runs.
 	fn new(
 		profile: &Profile,
+		options: &Options,
 		seed: u64,
 		stream: u64,
 		now: Instant,
@@ -511,10 +554,12 @@ impl Link {
 	) -> Self {
 		Self {
 			profile: profile.clone(),
+			jitter: options.jitter_model,
 			rng: Xoshiro256PlusPlus::seed_from_u64(seed ^ stream.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
 			// Not the moment the link is built, which is after `now`: that would
 			// make the first datagram queue behind a bucket still refilling.
 			full_at: now,
+			floor: now,
 			queue,
 		}
 	}
@@ -526,7 +571,10 @@ impl Link {
 		// knob's outcome never shifts the stream another knob draws from.
 		let lose = self.rng.random::<f64>() < self.profile.loss;
 		let skip = self.rng.random::<f64>() < self.profile.reorder;
-		let spread = self.rng.random::<f64>() * 2.0 - 1.0;
+		let spread = match self.jitter {
+			Jitter::Uniform => self.rng.random::<f64>() * 2.0 - 1.0,
+			Jitter::Gaussian => gaussian(&mut self.rng),
+		};
 
 		if lose {
 			bump(&tally.lost);
@@ -554,6 +602,17 @@ impl Link {
 
 		if skip {
 			bump(&tally.reordered);
+		} else if self.jitter == Jitter::Gaussian {
+			// A queue: nothing leaves before the datagram in front of it.
+			let wait = self.profile.delay.as_secs_f64() + self.profile.jitter.as_secs_f64() * spread;
+			let leave = (depart + Duration::from_secs_f64(wait.max(0.0))).max(self.floor);
+			// Counted like the uniform model whenever a delay is configured, so
+			// the chance `verify` holds it to is the same.
+			if !self.profile.delay.is_zero() || leave > depart {
+				bump(&tally.delayed);
+			}
+			self.floor = leave;
+			depart = leave;
 		} else if !self.profile.delay.is_zero() {
 			let jitter = self.profile.jitter.as_secs_f64() * spread;
 			depart += Duration::from_secs_f64(self.profile.delay.as_secs_f64() + jitter);
@@ -563,6 +622,14 @@ impl Link {
 		// The delivery task only ends once this link is dropped.
 		let _ = self.queue.send((depart, datagram));
 	}
+}
+
+/// A standard normal sample by Box-Muller, which always takes exactly two draws,
+/// so the jitter never shifts the stream the next datagram's knobs draw from.
+fn gaussian(rng: &mut Xoshiro256PlusPlus) -> f64 {
+	let u1 = rng.random::<f64>().max(f64::MIN_POSITIVE);
+	let u2 = rng.random::<f64>();
+	(-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
 #[cfg(test)]
@@ -843,5 +910,196 @@ mod tests {
 	async fn tcp_is_refused_without_the_passthrough() {
 		let (shaper, _client) = setup(1, Profile::default(), Profile::default()).await;
 		assert!(TcpStream::connect(shaper.addr()).await.is_err());
+	}
+
+	/// An echo server, a shaper `setup` builds from a config aimed at it, and a
+	/// client dialing the shaper.
+	async fn shaped(setup: impl FnOnce(Config) -> Setup) -> (Shaper, UdpSocket) {
+		let echo = UdpSocket::bind(LOCALHOST).await.unwrap();
+		let target = echo.local_addr().unwrap();
+		tokio::spawn(async move {
+			let mut buf = vec![0u8; u16::MAX as usize];
+			loop {
+				let (size, from) = echo.recv_from(&mut buf).await.unwrap();
+				echo.send_to(&buf[..size], from).await.unwrap();
+			}
+		});
+
+		let config = Config {
+			bind: LOCALHOST,
+			target,
+			seed: 3,
+			up: Profile::default(),
+			down: Profile::default(),
+		};
+		let shaper = Shaper::bind(setup(config)).await.unwrap();
+
+		let client = UdpSocket::bind(LOCALHOST).await.unwrap();
+		client.connect(shaper.addr()).await.unwrap();
+		(shaper, client)
+	}
+
+	/// Push `count` numbered datagrams through one link, `spacing` apart, and
+	/// return each id with its departure, in the order they would be sent.
+	fn departures(
+		profile: &Profile,
+		options: &Options,
+		count: u32,
+		spacing: Duration,
+	) -> (Vec<(u32, Instant)>, Counters) {
+		let (queue, mut queued) = mpsc::unbounded_channel();
+		let now = Instant::now();
+		let mut link = Link::new(profile, options, 7, 0, now, queue);
+		let tally = Tally::default();
+		for id in 0..count {
+			link.push(now + spacing * id, id.to_be_bytes().to_vec(), &tally);
+		}
+
+		let mut sent = Vec::new();
+		while let Ok((at, datagram)) = queued.try_recv() {
+			sent.push((u32::from_be_bytes(datagram[..4].try_into().unwrap()), at));
+		}
+		// Ties leave in arrival order, which is id order here.
+		sent.sort_by_key(|&(id, at)| (at, id));
+		(sent, tally.snapshot())
+	}
+
+	const GAUSSIAN: Options = Options {
+		jitter_model: Jitter::Gaussian,
+	};
+
+	#[tokio::test]
+	async fn only_the_gaussian_model_keeps_the_order() {
+		let jittery = Profile {
+			delay: Duration::from_millis(20),
+			jitter: Duration::from_millis(10),
+			..Default::default()
+		};
+
+		let (_uniform, client) = shaped(|config| {
+			Config {
+				up: jittery.clone(),
+				..config
+			}
+			.into()
+		})
+		.await;
+		let got = round_trip(&client, 100).await;
+		let mut sorted = got.clone();
+		sorted.sort();
+		assert_eq!(sorted, (0..100).collect::<Vec<_>>(), "jitter lost datagrams");
+		assert_ne!(got, sorted, "uniform jitter never overtook, so this proves nothing");
+
+		let (gaussian, client) = shaped(|config| Setup {
+			up: GAUSSIAN,
+			..Config { up: jittery, ..config }.into()
+		})
+		.await;
+		let got = round_trip(&client, 100).await;
+		assert_eq!(got, (0..100).collect::<Vec<_>>(), "gaussian jitter reordered");
+
+		let stats = gaussian.verify().unwrap();
+		assert_eq!(stats.up.reordered, 0, "{stats}");
+		assert_eq!(stats.up.delayed, 100, "{stats}");
+	}
+
+	#[test]
+	fn gaussian_jitter_never_leaves_before_it_arrived() {
+		// A sigma far past the delay, so most draws would be negative unclamped.
+		let wide = Profile {
+			jitter: Duration::from_millis(50),
+			..Default::default()
+		};
+		let now = Instant::now();
+		let (sent, counters) = departures(&wide, &GAUSSIAN, 1000, Duration::ZERO);
+		assert_eq!(sent.len(), 1000);
+		assert!(sent.iter().all(|&(_, at)| at >= now));
+		assert!(counters.delayed > 0, "{counters}");
+	}
+
+	#[test]
+	fn gaussian_jitter_alone_never_changes_the_order() {
+		// Ten times the arrival spacing as sigma, so an independent draw per
+		// datagram would shuffle nearly all of them.
+		let jittery = Profile {
+			delay: Duration::from_millis(5),
+			jitter: Duration::from_millis(50),
+			..Default::default()
+		};
+		let (sent, counters) = departures(&jittery, &GAUSSIAN, 2000, Duration::from_millis(5));
+		let ids: Vec<u32> = sent.iter().map(|&(id, _)| id).collect();
+		assert_eq!(ids, (0..2000).collect::<Vec<_>>(), "gaussian jitter reordered");
+		assert_eq!(counters.reordered, 0);
+	}
+
+	#[test]
+	fn gaussian_jitter_still_varies_the_spacing() {
+		let spacing = Duration::from_millis(20);
+		let jittery = Profile {
+			delay: Duration::from_millis(5),
+			jitter: Duration::from_millis(5),
+			..Default::default()
+		};
+		let (sent, _) = departures(&jittery, &GAUSSIAN, 2000, spacing);
+
+		// Keeping the order is not pacing the path: a datagram that drew more
+		// than the one in front falls further behind, and one that drew less
+		// closes up against it.
+		let gaps: Vec<Duration> = sent.windows(2).map(|pair| pair[1].1 - pair[0].1).collect();
+		assert!(gaps.iter().any(|&gap| gap < spacing), "nothing closed up");
+		assert!(gaps.iter().any(|&gap| gap > spacing), "nothing fell behind");
+	}
+
+	#[test]
+	fn a_reorder_still_overtakes_gaussian_jitter() {
+		let shuffled = Profile {
+			delay: Duration::from_millis(5),
+			jitter: Duration::from_millis(50),
+			reorder: 0.05,
+			..Default::default()
+		};
+		let (sent, counters) = departures(&shuffled, &GAUSSIAN, 2000, Duration::from_millis(5));
+		let overtaken = sent.windows(2).filter(|pair| pair[0].0 > pair[1].0).count();
+		assert!(overtaken > 0, "a reorder never overtook");
+		assert!(counters.reordered > 0, "{counters}");
+	}
+
+	#[test]
+	fn the_seed_reproduces_the_gaussian_decisions() {
+		let everything = Profile {
+			delay: Duration::from_millis(5),
+			jitter: Duration::from_millis(5),
+			loss: 0.05,
+			reorder: 0.05,
+			..Default::default()
+		};
+		let (first, first_counters) = departures(&everything, &GAUSSIAN, 1000, Duration::from_millis(1));
+		let (second, second_counters) = departures(&everything, &GAUSSIAN, 1000, Duration::from_millis(1));
+
+		// The same ids survive and leave at the same offsets from their start.
+		let offsets = |sent: &[(u32, Instant)]| {
+			let start = sent.iter().map(|&(_, at)| at).min().unwrap();
+			sent.iter().map(|&(id, at)| (id, at - start)).collect::<Vec<_>>()
+		};
+		assert_eq!(offsets(&first), offsets(&second));
+		assert_eq!(first_counters, second_counters);
+		assert!(first_counters.lost > 0 && first_counters.reordered > 0);
+	}
+
+	#[tokio::test]
+	async fn a_gaussian_sigma_may_exceed_the_delay() {
+		// The uniform model refuses this; a gaussian clamps its draw at zero.
+		let wide = Profile {
+			delay: Duration::from_millis(5),
+			jitter: Duration::from_millis(10),
+			..Default::default()
+		};
+		let (shaper, client) = shaped(|config| Setup {
+			up: GAUSSIAN,
+			..Config { up: wide, ..config }.into()
+		})
+		.await;
+		assert_eq!(round_trip(&client, 20).await, (0..20).collect::<Vec<_>>());
+		shaper.verify().unwrap();
 	}
 }

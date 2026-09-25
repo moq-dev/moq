@@ -22,9 +22,12 @@ struct Args {
 	/// The base one-way delay, e.g. `20ms`.
 	#[arg(long, default_value = "0s", value_parser = humantime::parse_duration)]
 	delay: Duration,
-	/// The most the delay varies, uniformly either way.
+	/// How far the delay varies: the most either way, or the sigma of a gaussian.
 	#[arg(long, default_value = "0s", value_parser = humantime::parse_duration)]
 	jitter: Duration,
+	/// How the jitter is drawn.
+	#[arg(long, value_enum, default_value_t = JitterModel::Uniform)]
+	jitter_model: JitterModel,
 	/// The probability that a datagram is dropped.
 	#[arg(long, default_value_t = 0.0)]
 	loss: f64,
@@ -43,6 +46,14 @@ struct Args {
 	/// Also pipe TCP on the listening port to the target, untouched.
 	#[arg(long)]
 	tcp_passthrough: bool,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum JitterModel {
+	/// Uniform either way of the delay, per datagram, so datagrams can overtake each other.
+	Uniform,
+	/// A gaussian clamped at zero that never lets a datagram overtake the one in front.
+	Gaussian,
 }
 
 #[tokio::main]
@@ -67,8 +78,16 @@ async fn main() -> anyhow::Result<()> {
 		up: profile.clone(),
 		down: profile,
 	};
+	let options = moq_shaper::Options {
+		jitter_model: match args.jitter_model {
+			JitterModel::Uniform => moq_shaper::Jitter::Uniform,
+			JitterModel::Gaussian => moq_shaper::Jitter::Gaussian,
+		},
+	};
 	let shaper = moq_shaper::Shaper::bind(moq_shaper::Setup {
 		tcp_passthrough: args.tcp_passthrough,
+		up: options.clone(),
+		down: options.clone(),
 		..config.into()
 	})
 	.await?;
@@ -81,6 +100,9 @@ async fn main() -> anyhow::Result<()> {
 		config.seed,
 		config.up
 	);
+	if options != moq_shaper::Options::default() {
+		println!("shaper: options {options:?}");
+	}
 
 	shutdown().await?;
 
