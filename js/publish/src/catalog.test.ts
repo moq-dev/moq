@@ -78,10 +78,11 @@ test("catalog producer advertises the page clock from the first snapshot", async
 	expect(first.archive).toBeUndefined();
 	expect(first.clock.timescale).toBe(1_000_000);
 
-	// A timestamp stamped the way capture does (performance.now() in microseconds) maps to now.
-	const pts = Math.round(performance.now() * 1000);
-	const wall = Catalog.wallClockTime(first.clock, pts, 1_000_000).getTime();
-	expect(Math.abs(wall - Date.now())).toBeLessThan(50);
+	// A timestamp stamped the way capture does (performance.now() in microseconds) maps onto the
+	// page's own wall timeline, not Date.now(), which a system-clock adjustment can move.
+	const now = performance.now();
+	const wall = Catalog.wallClockTime(first.clock, Math.round(now * 1000), 1_000_000).getTime();
+	expect(Math.abs(wall - (performance.timeOrigin + now))).toBeLessThanOrEqual(1);
 
 	// Later edits keep the mapping: it is fixed for the broadcast.
 	catalog.mutate((c) => {
