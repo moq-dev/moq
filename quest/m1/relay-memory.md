@@ -33,6 +33,12 @@ chat-shaped traffic (one broadcast per channel or per chatter) and
 [PoP skipping](/quest/m1/pop-skipping/README.md), which triples average
 degree and adds a second, more specific route per carried broadcast.
 
+Asking peers for announcements only while something watches was considered
+and dropped: every loop-free way to forward coalesced interest through a
+cyclic mesh (a hop budget, an originator set, cost-decreasing interest over
+coarse claims) adds teardown churn or new wire state, for a saving nobody
+has measured. Shrink the table itself instead.
+
 ## Related
 
 - [Perf](/quest/m1/perf/README.md) - the hot-path work that owns the remaining per-cell cost

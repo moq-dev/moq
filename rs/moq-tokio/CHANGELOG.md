@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.14](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.13...moq-tokio-v0.19.14) - 2026-09-25
+
+### Added
+
+- *(net)* hide dot-named broadcasts from discovery (moq-lite-07) ([#4060](https://github.com/moq-dev/moq/pull/4060))
+
+### Other
+
+- *(moq-tokio)* fix websocket_forbidden port-collision flake ([#4055](https://github.com/moq-dev/moq/pull/4055))
+
+## [0.19.13](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.12...moq-tokio-v0.19.13) - 2026-09-24
+
+### Other
+
+- updated the following local packages: moq-net
+
+## [0.19.12](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.11...moq-tokio-v0.19.12) - 2026-09-23
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.19.11](https://github.com/moq-dev/moq/releases/tag/moq-tokio-v0.19.11) - 2026-09-23
 
 ### Added

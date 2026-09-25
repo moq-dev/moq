@@ -70,11 +70,18 @@ pub struct Publish {
 	/// Raw group producers, created from a raw track producer.
 	groups: NonZeroSlab<moq_net::group::Producer>,
 
-	/// JSON snapshot producers (lossy latest-value tracks).
-	json_snapshot: NonZeroSlab<moq_json::snapshot::Producer<serde_json::Value>>,
+	/// JSON snapshot producers (lossy latest-value tracks), each advertised in its broadcast's
+	/// catalog for as long as it lives.
+	json_snapshot: NonZeroSlab<moq_mux::json::Snapshot<serde_json::Value, Extra>>,
 
-	/// JSON stream producers (lossless append-log tracks).
-	json_stream: NonZeroSlab<moq_json::stream::Producer<serde_json::Value>>,
+	/// JSON stream producers (lossless append-log tracks), advertised the same way.
+	json_stream: NonZeroSlab<moq_mux::json::Stream<serde_json::Value, Extra>>,
+
+	/// Binary snapshot producers (lossy latest-value tracks of opaque bytes), advertised the same way.
+	binary_snapshot: NonZeroSlab<moq_mux::binary::Snapshot<Extra>>,
+
+	/// Binary stream producers (lossless append-log tracks of opaque bytes), advertised the same way.
+	binary_stream: NonZeroSlab<moq_mux::binary::Stream<Extra>>,
 
 	/// Demand watchers. Close signals shutdown; the task delivers a final callback, then removes itself.
 	demand: NonZeroSlab<Option<TaskEntry>>,
@@ -108,7 +115,7 @@ impl Publish {
 	}
 
 	/// Advertise the broadcast's exact path as a route. Announcing again re-prices
-	/// in place. The broadcast itself stays reachable by exact path either way.
+	/// in place. Until announced, the broadcast is invisible and unroutable.
 	pub fn announce(&mut self, broadcast: Id, route: moq_net::origin::Route) -> Result<(), Error> {
 		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
 		broadcast.producer.announce(route)?;
@@ -130,6 +137,12 @@ impl Publish {
 	/// The broadcast's catalog producer.
 	fn catalog(&mut self, id: Id) -> Result<&mut moq_mux::catalog::Producer<Extra>, Error> {
 		Ok(&mut self.broadcasts.get_mut(id).ok_or(Error::BroadcastNotFound)?.catalog)
+	}
+
+	/// The broadcast's current catalog, as consumers would receive it next.
+	#[cfg(test)]
+	pub fn catalog_snapshot(&mut self, id: Id) -> Result<moq_mux::catalog::hang::Catalog<Extra>, Error> {
+		Ok(self.catalog(id)?.snapshot())
 	}
 
 	/// Mutable access to both the broadcast and its catalog producer.
@@ -221,6 +234,14 @@ impl Publish {
 	pub fn media_frame(&mut self, media: Id, data: &[u8], timestamp: hang::container::Timestamp) -> Result<(), Error> {
 		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
 		track.decode(data, Some(timestamp))?;
+		Ok(())
+	}
+
+	/// Record a locally encoded frame's transport handoff. Generic imports remain clock-free
+	/// unless their caller explicitly identifies the frame as encoder output.
+	pub fn media_flush(&mut self, media: Id, timestamp: hang::container::Timestamp) -> Result<(), Error> {
+		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
+		track.flush(timestamp, std::time::Instant::now())?;
 		Ok(())
 	}
 
@@ -728,20 +749,26 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Create a JSON snapshot track (lossy latest-value) on a broadcast.
-	///
-	/// Values published via [`Self::json_snapshot_update`] reach subscribers as a single latest
-	/// state; a late joiner only sees the newest value. Advertise the track in the catalog with
-	/// [`Self::catalog_section_set`] if consumers should discover it.
-	pub fn json_snapshot(
+	/// Create a track on a broadcast and hand it, with the broadcast's catalog, to `publish`, which
+	/// wraps it in a data producer that advertises the track in that catalog.
+	fn data_track<T>(
 		&mut self,
 		broadcast: Id,
 		name: &str,
-		config: moq_json::snapshot::Config,
-	) -> Result<Id, Error> {
-		let broadcast = self.producer(broadcast)?;
-		let track = broadcast.create_track(name, None)?;
-		let producer = moq_json::snapshot::Producer::new(track, config);
+		publish: impl FnOnce(&moq_mux::catalog::Producer<Extra>, moq_net::track::Producer) -> moq_mux::Result<T>,
+	) -> Result<T, Error> {
+		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let track = broadcast.producer.create_track(name, None)?;
+		Ok(publish(&broadcast.catalog, track)?)
+	}
+
+	/// Create a JSON snapshot track (lossy latest-value) on a broadcast, advertised in its catalog.
+	///
+	/// Values published via [`Self::json_snapshot_update`] reach subscribers as a single latest
+	/// state; a late joiner only sees the newest value. The catalog entry (`json.tracks.<name>`,
+	/// `mode: snapshot`) is written now and retired when the track finishes or fails.
+	pub fn json_snapshot(&mut self, broadcast: Id, name: &str, config: moq_mux::json::Config) -> Result<Id, Error> {
+		let producer = self.data_track(broadcast, name, |catalog, track| catalog.json_snapshot(track, config))?;
 		self.json_snapshot.insert(producer)
 	}
 
@@ -752,20 +779,19 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Finish a JSON snapshot track. No more values can be published.
+	/// Finish a JSON snapshot track and retire its catalog entry. No more values can be published.
 	pub fn json_snapshot_finish(&mut self, json: Id) -> Result<(), Error> {
-		let mut producer = self.json_snapshot.remove(json).ok_or(Error::TrackNotFound)?;
+		let producer = self.json_snapshot.remove(json).ok_or(Error::TrackNotFound)?;
 		producer.finish()?;
 		Ok(())
 	}
 
-	/// Create a JSON stream track (lossless append-log) on a broadcast.
+	/// Create a JSON stream track (lossless append-log) on a broadcast, advertised in its catalog.
 	///
 	/// Every record appended via [`Self::json_stream_append`] is preserved and delivered in order.
-	pub fn json_stream(&mut self, broadcast: Id, name: &str, config: moq_json::stream::Config) -> Result<Id, Error> {
-		let broadcast = self.producer(broadcast)?;
-		let track = broadcast.create_track(name, None)?;
-		let producer = moq_json::stream::Producer::new(track, config);
+	/// The catalog entry (`json.tracks.<name>`, `mode: stream`) lives as long as the track.
+	pub fn json_stream(&mut self, broadcast: Id, name: &str, config: moq_mux::json::Config) -> Result<Id, Error> {
+		let producer = self.data_track(broadcast, name, |catalog, track| catalog.json_stream(track, config))?;
 		self.json_stream.insert(producer)
 	}
 
@@ -776,9 +802,51 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Finish a JSON stream track. No more records can be appended.
+	/// Finish a JSON stream track and retire its catalog entry. No more records can be appended.
 	pub fn json_stream_finish(&mut self, stream: Id) -> Result<(), Error> {
-		let mut producer = self.json_stream.remove(stream).ok_or(Error::TrackNotFound)?;
+		let producer = self.json_stream.remove(stream).ok_or(Error::TrackNotFound)?;
+		producer.finish()?;
+		Ok(())
+	}
+
+	/// Create a binary snapshot track (lossy latest-value) on a broadcast, advertised in its catalog
+	/// as `binary.tracks.<name>`, `mode: snapshot`.
+	pub fn binary_snapshot(&mut self, broadcast: Id, name: &str, config: moq_mux::binary::Config) -> Result<Id, Error> {
+		let producer = self.data_track(broadcast, name, |catalog, track| catalog.binary_snapshot(track, config))?;
+		self.binary_snapshot.insert(producer)
+	}
+
+	/// Publish a new payload to a binary snapshot track, superseding the last.
+	pub fn binary_snapshot_update(&mut self, binary: Id, payload: &[u8]) -> Result<(), Error> {
+		let producer = self.binary_snapshot.get_mut(binary).ok_or(Error::TrackNotFound)?;
+		producer.update(bytes::Bytes::copy_from_slice(payload))?;
+		Ok(())
+	}
+
+	/// Finish a binary snapshot track and retire its catalog entry.
+	pub fn binary_snapshot_finish(&mut self, binary: Id) -> Result<(), Error> {
+		let producer = self.binary_snapshot.remove(binary).ok_or(Error::TrackNotFound)?;
+		producer.finish()?;
+		Ok(())
+	}
+
+	/// Create a binary stream track (lossless append-log) on a broadcast, advertised in its catalog
+	/// as `binary.tracks.<name>`, `mode: stream`.
+	pub fn binary_stream(&mut self, broadcast: Id, name: &str, config: moq_mux::binary::Config) -> Result<Id, Error> {
+		let producer = self.data_track(broadcast, name, |catalog, track| catalog.binary_stream(track, config))?;
+		self.binary_stream.insert(producer)
+	}
+
+	/// Append one payload to a binary stream track.
+	pub fn binary_stream_append(&mut self, stream: Id, payload: &[u8]) -> Result<(), Error> {
+		let producer = self.binary_stream.get_mut(stream).ok_or(Error::TrackNotFound)?;
+		producer.append(bytes::Bytes::copy_from_slice(payload))?;
+		Ok(())
+	}
+
+	/// Finish a binary stream track and retire its catalog entry.
+	pub fn binary_stream_finish(&mut self, stream: Id) -> Result<(), Error> {
+		let producer = self.binary_stream.remove(stream).ok_or(Error::TrackNotFound)?;
 		producer.finish()?;
 		Ok(())
 	}

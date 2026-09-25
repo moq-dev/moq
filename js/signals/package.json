@@ -1,10 +1,14 @@
 {
 	"name": "@moq/signals",
 	"type": "module",
-	"version": "0.2.3",
+	"version": "0.2.4",
 	"description": "Reactive and safe signals",
 	"license": "(MIT OR Apache-2.0)",
-	"repository": "github:moq-dev/moq",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/moq-dev/moq.git",
+		"directory": "js/signals"
+	},
 	"sideEffects": false,
 	"exports": {
 		".": "./src/index.ts",

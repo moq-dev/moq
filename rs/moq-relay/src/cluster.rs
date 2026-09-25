@@ -1207,9 +1207,14 @@ impl Cluster {
 		self.origin.scope(&token.root, &token.subscribe).ok()
 	}
 
-	/// Returns an [`origin::Producer`] scoped to this session's publish permissions.
+	/// Returns an [`origin::Producer`] scoped to this session's publish permissions,
+	/// marked [`origin::Producer::peer`] when the grant names a cluster peer.
 	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
-		self.origin.scope(&token.root, &token.publish).ok()
+		let publisher = self.origin.scope(&token.root, &token.publish).ok()?;
+		Some(match token.peer {
+			true => publisher.peer(),
+			false => publisher,
+		})
 	}
 
 	/// Resolve whether gossip is on and which URL this relay advertises, from
@@ -1295,6 +1300,7 @@ impl Cluster {
 			[moq_auth::Pattern::all()].into_iter().collect(),
 		);
 		grant.tier = self.config.tier.clone().filter(|tier| !tier.is_empty());
+		grant.peer = true;
 		grant
 	}
 
@@ -1924,8 +1930,12 @@ impl Cluster {
 
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
 		// root, so presence is keyed under the empty root within the cluster tier.
+		// The peer's routes entered the cluster elsewhere. A peer that predates the
+		// hidden opt-in still discovers our hidden routes; see `connection::authorize`.
+		let origin = self.origin.clone().peer();
 		let mut client = client
-			.with_origin(self.origin.clone())
+			.with_publisher(origin.consume().with_hidden(true))
+			.with_subscriber(origin)
 			.with_stats(self.stats.tier(self.cluster_tier()).session(""));
 		if let Some(cost) = cost {
 			client = client.with_cost(cost);
@@ -1990,7 +2000,7 @@ impl Cluster {
 		let addrs = moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")?;
 		let mut client = self
 			.lan_client(target.fingerprint.as_deref())?
-			.with_origin(self.origin.clone());
+			.with_origin(self.origin.clone().peer());
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
 		}
@@ -2999,7 +3009,7 @@ mod tests {
 
 		// Snapshot a consumer on the cluster origin before run() takes ownership of
 		// `cluster` so we can later check that the registration was published.
-		let mut watcher = cluster.origin.consume().announced();
+		let mut watcher = cluster.origin.consume().with_hidden(true).announced();
 
 		let started = cluster.clone().start().await.expect("cluster start");
 		let mut handle = tokio::spawn(async move { started.run().await });
@@ -3594,6 +3604,8 @@ mod tests {
 			.expect("timed out waiting for from-node")
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "from-node");
+		// The dialer marks what the peer forwards: it entered at `node`, not here.
+		assert_eq!(update.route.source(), origin::Source::Peer(node.origin.hop()));
 
 		let _from_fp = fingerprint.origin.create_broadcast("from-fingerprint").expect("create");
 		_from_fp.announce(Default::default()).expect("announce");
@@ -3604,9 +3616,51 @@ mod tests {
 				.expect("timed out waiting for from-fingerprint")
 				.expect("origin closed");
 			if update.prefix.as_str() == "from-fingerprint" {
+				// The acceptor marks a LAN peer the same way.
+				assert_eq!(update.route.source(), origin::Source::Peer(fingerprint.origin.hop()));
 				break;
 			}
 		}
+
+		// Each relay's local view holds only what it ingested itself.
+		let mut local = node.origin.consume().local().announced();
+		let update = local.try_next().expect("from-node is local");
+		assert_eq!(update.prefix.as_str(), "from-node");
+		assert_eq!(update.route.source(), origin::Source::Local);
+		assert!(local.try_next().is_none(), "a peer's broadcast is not local");
+	}
+
+	/// A grant naming a cluster peer marks the session's routes as a peer's, so the
+	/// relay's local view leaves them out; any other grant ingests here.
+	#[tokio::test]
+	async fn peer_grant_marks_the_session_publisher() {
+		let cluster = new_cluster(Config::default()).expect("cluster");
+		let all: moq_net::Patterns = [moq_net::Pattern::all()].into_iter().collect();
+
+		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone(), all.clone()));
+		let mut grant = moq_auth::Grant::new(all.clone(), all);
+		grant.peer = true;
+		let peer = auth::Token::new("/", &grant);
+
+		let _ingest = cluster
+			.publisher(&client)
+			.expect("client")
+			.publish("ingest", Default::default());
+		let _forwarded = cluster
+			.publisher(&peer)
+			.expect("peer")
+			.publish("forwarded", Default::default());
+
+		let mut announced = cluster.origin.consume().announced();
+		let forwarded = announced.try_next().expect("forwarded");
+		assert_eq!(forwarded.prefix.as_str(), "forwarded");
+		assert!(matches!(forwarded.route.source(), origin::Source::Peer(_)));
+		let ingest = announced.try_next().expect("ingest");
+		assert_eq!(ingest.route.source(), origin::Source::Local);
+
+		let mut local = cluster.origin.consume().local().announced();
+		assert_eq!(local.try_next().expect("ingest").prefix.as_str(), "ingest");
+		assert!(local.try_next().is_none());
 	}
 
 	/// A `/.cluster` request on a cluster without LAN discovery is refused.

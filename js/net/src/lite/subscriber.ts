@@ -1,4 +1,4 @@
-import { Signal } from "@moq/signals";
+import { race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
@@ -6,7 +6,7 @@ import { BroadcastCache } from "../consume.ts";
 import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { groupBounds, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -160,21 +160,31 @@ export class Subscriber {
 	 * Reflected announces (those whose hop chain already includes this
 	 * connection) are always dropped: moq-lite-06 has none to keep, and older
 	 * versions stay consistent with that.
+	 *
+	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
+	 * `options.hidden` opts in. The opt-in rides the request on lite-07+; an older peer
+	 * never hides anything, so the rule is also applied here.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
+	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
 		const announced = new announce.Producer();
 		// The wire speaks announce interest by prefix, and echoes suffixes beneath it.
-		void this.#runAnnounced(announced, scopeHead(scope), scope);
+		void this.#runAnnounced(announced, scopeHead(scope), scope, options?.hidden ?? false);
 		return announced.consume();
 	}
 
-	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, scope: Path.Pattern): Promise<void> {
+	async #runAnnounced(
+		announced: announce.Producer,
+		prefix: Path.Valid,
+		scope: Path.Pattern,
+		hidden: boolean,
+	): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
 		// Lite04/05: send our own session-level Hop ID so the peer can skip announces
 		// whose hop chain already passed through us. Encoding drops it on every other
 		// version, where we drop the reflected announce on receipt instead. Matches the
 		// Rust subscriber's `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
-		const msg = new AnnounceRequest(prefix, this.hop);
+		const msg = new AnnounceRequest(prefix, this.hop, hidden);
+		const visible = (path: Path.Valid) => scopeOverlaps(scope, path) && (hidden || !hiddenBelow(prefix, path));
 
 		// Opened outside the try so the catch can reach it: a protocol violation below has
 		// to reset the stream, not just close our side of it.
@@ -240,7 +250,7 @@ export class Subscriber {
 							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
 						const route = { hops: [UNKNOWN_HOP], cost: Cost.zero };
-						const live = scopeOverlaps(scope, path);
+						const live = visible(path);
 						const captures = scopeCaptures(scope, path);
 						advertised.set(path, { publisher: undefined, live, route, captures });
 						if (!live) continue;
@@ -262,7 +272,7 @@ export class Subscriber {
 
 			// Receive announce updates (for Draft03, this includes initial state)
 			for (;;) {
-				const announce = await Promise.race([
+				const announce = await race([
 					decodeAnnounceBroadcastMaybe(stream.reader, this.version),
 					announced.closed,
 				]);
@@ -405,7 +415,7 @@ export class Subscriber {
 				}
 				const route: Route = { hops: fullHops, cost: cost ?? Cost.zero };
 				const captures = scopeCaptures(scope, path);
-				if (!scopeOverlaps(scope, path)) {
+				if (!visible(path)) {
 					advertised.set(path, { publisher, live: false, route, captures });
 					continue;
 				}
@@ -565,14 +575,14 @@ export class Subscriber {
 			// once; race them into one stable promise so the demand loop doesn't re-subscribe each pass.
 			const terminal: PromiseLike<unknown>[] = [closed, producer.closed];
 			if (subscriptionUpdates !== undefined) terminal.push(subscriptionUpdates);
-			const done = Promise.race(terminal);
+			const done = race(terminal);
 
 			// Serve until a terminal condition fires or the last local subscriber leaves. The unused
 			// wake is level-triggered: re-check demand so a subscriber that returns before we tear
 			// down (e.g. a quickly unmuted tile) resumes on the same subscription.
 			const idle = Symbol("idle");
 			for (;;) {
-				const reason = await Promise.race([done, producer.unused().then(() => idle)]);
+				const reason = await race([done, producer.unused().then(() => idle)]);
 				if (reason === idle && producer.closed.peek() === undefined && producer.used.peek()) continue;
 				break;
 			}
@@ -749,14 +759,13 @@ export class Subscriber {
 
 			// Serve until the stream FINs, the group closes, or every reader leaves. A group can
 			// stay open indefinitely (a catalog or JSON stream), so an abandoned fetch is stopped by
-			// demand, not by the stream ending. `closed` and `unused` are watched across frames as
-			// stable promises (not re-subscribed to the signals each frame); the unused check is
-			// level-triggered, so a coalesced fetch that arrives before we cancel re-arms and resumes.
+			// demand, not by the stream ending. `unused` is watched across frames as one stable
+			// promise; the check is level-triggered, so a coalesced fetch that arrives before we
+			// cancel re-arms and resumes.
 			const idle = Symbol("idle");
-			const closed = Promise.resolve<Error | null>(group.closed);
 			let unused = group.unused().then(() => idle);
 			for (;;) {
-				const done = await Promise.race([stream.reader.done(), closed, unused]);
+				const done = await race([stream.reader.done(), group.closed, unused]);
 				if (done === idle) {
 					if (!group.isClosed && group.used.peek()) {
 						unused = group.unused().then(() => idle);
@@ -786,7 +795,7 @@ export class Subscriber {
 	// Drains SUBSCRIBE_START/END/DROP on the subscribe stream until FIN (lite-05+).
 	// The resolved range is informational here; the producer already orders groups.
 	// Resolves (never rejects) on FIN or on the stream being reset out from under it,
-	// so it's safe to drop from a Promise.race without an unhandled rejection.
+	// so it's safe to drop from a race without an unhandled rejection.
 	async #drainResponses(stream: Stream): Promise<void> {
 		try {
 			for (;;) {
@@ -802,7 +811,7 @@ export class Subscriber {
 	 * Send SUBSCRIBE_UPDATE messages whenever the track's aggregate subscription changes.
 	 *
 	 * Resolves cleanly when the stream or track closes, so the caller can include
-	 * this in Promise.race without leaving a dangling pending write that would
+	 * this in a race without leaving a dangling pending write that would
 	 * become an unhandled rejection if the user calls update after close.
 	 *
 	 * Peeks the signal at the top of every iteration so that updates which landed
@@ -816,7 +825,7 @@ export class Subscriber {
 		msg: Subscribe,
 		stream: Stream,
 	): Promise<void> {
-		const stopped: Promise<null> = Promise.race([track.closed, stream.reader.closed]).then(() => null);
+		const stopped: Promise<null> = race([track.closed, stream.reader.closed]).then(() => null);
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
 			maxAge: Time.Milli(msg.maxAge),
@@ -830,7 +839,7 @@ export class Subscriber {
 			const current = track.subscription.peek();
 			if (current === undefined || this.#sameSubscription(current, lastSent)) {
 				// Nothing new to send; wait for a change or termination.
-				const next = await Promise.race([track.subscription.changed(), stopped]);
+				const next = await race([track.subscription.changed(), stopped]);
 				if (next === null) return;
 				continue;
 			}
@@ -907,7 +916,7 @@ export class Subscriber {
 			let prevTs = 0n;
 
 			for (;;) {
-				const done = await Promise.race([stream.done(), track.closed, producer.closed]);
+				const done = await race([stream.done(), track.closed, producer.closed]);
 				if (done !== false) break;
 
 				let timestamp: Time.Timestamp;

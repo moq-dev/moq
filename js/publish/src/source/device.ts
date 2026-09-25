@@ -55,6 +55,20 @@ export class Device<Kind extends "audio" | "video"> {
 		});
 
 		this.#signals.run(this.#runRequested.bind(this));
+
+		// A grant after an explicit denial is new information. The capture source listens to this
+		// permission signal while stopped and reopens without requiring a page reload.
+		this.#signals.run((effect) => {
+			effect.spawn(async () => {
+				const status = await navigator.permissions
+					?.query({ name: (kind === "video" ? "camera" : "microphone") as PermissionName })
+					.catch(() => undefined);
+				if (!status || effect.abort.aborted) return;
+				const update = () => this.#out.permission.set(status.state === "granted");
+				update();
+				effect.event(status, "change", update);
+			});
+		});
 	}
 
 	/**
@@ -78,10 +92,7 @@ export class Device<Kind extends "audio" | "video"> {
 		effect.get(this.out.permission);
 
 		// Ignore permission errors for now.
-		let devices = await Promise.race([
-			navigator.mediaDevices.enumerateDevices().catch(() => undefined),
-			effect.cancel,
-		]);
+		let devices = await effect.race(navigator.mediaDevices.enumerateDevices().catch(() => undefined));
 		if (!devices) return; // cancelled, keep stale values
 
 		devices = devices.filter((d) => d.kind === `${this.kind}input`);

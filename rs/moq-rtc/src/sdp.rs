@@ -5,7 +5,6 @@
 //! parse/serialize is a tiny wrapper to keep the call sites readable.
 
 use std::borrow::Cow;
-use std::str::FromStr;
 
 use crate::{Error, Result};
 
@@ -59,12 +58,14 @@ pub fn new_resource_id() -> String {
 ///
 /// WHIP DELETEs come back to `/<broadcast>/<resource-id>`; this strips
 /// everything but the id so the gateway can look up the session.
+#[cfg(feature = "server")]
 pub fn parse_resource_id(path: &str) -> Result<uuid::Uuid> {
 	let last = path
 		.rsplit('/')
 		.find(|s| !s.is_empty())
 		.ok_or_else(|| Error::InvalidSdp("missing resource id".into()))?;
-	uuid::Uuid::from_str(last).map_err(|err| Error::InvalidSdp(err.to_string()))
+	last.parse::<uuid::Uuid>()
+		.map_err(|err| Error::InvalidSdp(err.to_string()))
 }
 
 #[cfg(test)]

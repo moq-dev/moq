@@ -1,3 +1,4 @@
+import { heapStats } from "bun:jsc";
 import { expect, test } from "bun:test";
 import { DEFAULT_MAX_FRAME_SIZE } from "@moq/flate";
 import { Time, Track } from "@moq/net";
@@ -145,4 +146,33 @@ test("an undecodable payload ends the log for a reader already inside the group"
 
 	// Surfaces the terminal error rather than hanging on the still-open group.
 	await expect(consumer.next()).rejects.toThrow("limit");
+});
+
+// A blocked read races the frame against the track's next group, which stays pending for the whole
+// log. Racing it per payload must not leave a reaction behind on it each time.
+test("blocked reads leave nothing behind on the pending group read", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer({ track });
+	const subscriber = track.subscribe();
+	const consumer = new Consumer({ track: subscriber });
+	const promises = () => {
+		Bun.gc(true);
+		return heapStats().objectTypeCounts.Promise ?? 0;
+	};
+
+	const read = async (from: number, count: number) => {
+		for (let n = from; n < from + count; n++) {
+			const next = consumer.next();
+			producer.append(new Uint8Array([n & 0xff]));
+			expect((await next)?.[0]).toBe(n & 0xff);
+		}
+	};
+
+	await read(0, 50);
+	const before = promises();
+	await read(50, 1000);
+	expect(promises() - before).toBeLessThan(100);
+
+	subscriber.close();
+	producer.finish();
 });

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3](https://github.com/moq-dev/moq/compare/moq-hls-v0.5.2...moq-hls-v0.5.3) - 2026-09-25
+
+### Added
+
+- *(gateway)* expose the loop and handler the gateway binaries run ([#3964](https://github.com/moq-dev/moq/pull/3964))
+- *(moq-hls)* version init URLs by content hash and segment URLs by generation ([#4053](https://github.com/moq-dev/moq/pull/4053))
+
+### Fixed
+
+- *(moq-hls)* stamp discontinuities once in the timeline fanout ([#4075](https://github.com/moq-dev/moq/pull/4075))
+- *(net)* a broadcast exists only while announced ([#4021](https://github.com/moq-dev/moq/pull/4021))
+- *(moq-hls)* align cursor discontinuities across renditions ([#4065](https://github.com/moq-dev/moq/pull/4065))
+
+## [0.5.2](https://github.com/moq-dev/moq/compare/moq-hls-v0.5.1...moq-hls-v0.5.2) - 2026-09-24
+
+### Other
+
+- updated the following local packages: moq-net, hang, moq-mux
+
+## [0.5.1](https://github.com/moq-dev/moq/compare/moq-hls-v0.5.0...moq-hls-v0.5.1) - 2026-09-23
+
+### Other
+
+- updated the following local packages: moq-tokio, hang, moq-mux
+
 ## [0.5.0](https://github.com/moq-dev/moq/compare/moq-hls-v0.4.16...moq-hls-v0.5.0) - 2026-09-23
 
 ### Added
