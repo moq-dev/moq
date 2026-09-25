@@ -222,6 +222,10 @@ export class Connection implements Established {
 			this.#runBidi(stream)
 				.catch((err: unknown) => {
 					stream.writer.reset(err);
+					// A protocol violation on one stream is the peer breaking the session.
+					// Resetting that stream leaves it free to repeat the violation; a duplicate
+					// GOAWAY is the one this dispatcher raises.
+					if (err instanceof ProtocolViolation) this.close();
 				})
 				.finally(() => {
 					stream.writer.close();
