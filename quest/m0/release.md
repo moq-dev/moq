@@ -87,5 +87,4 @@ Public API: none beyond the required quests. Wire: none.
 
 ## Required
 
-- [JS retention](/quest/m0/js-retention.md) - the player no longer grows its heap per frame
 - The merged relay has soaked on moq.pro staging and the maintainer has signed it off
