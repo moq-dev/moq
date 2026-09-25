@@ -420,6 +420,7 @@ where
 					ietf::SubscribeNamespace {
 						request_id: legacy.request_id,
 						namespace: legacy.namespace,
+						hidden: legacy.hidden,
 					}
 				};
 				if !data.is_empty() {
@@ -1723,13 +1724,22 @@ where
 			_ => Target::Inline(stream),
 		};
 
-		// Unless the peer asked to be told only on request, it has already heard all of
-		// this as unsolicited PUBLISH_NAMESPACE. Repeating it here would leave it holding
-		// two sources for one namespace, so this stream carries nothing and simply stays
-		// open until the peer is done with it.
+		// Hidden namespaces are left out unless the peer opted in (MoQ Hidden). A publish
+		// origin that already opted in (the caller's choice for this peer) keeps them.
+		let origin = match msg.hidden {
+			true => origin.with_hidden(true),
+			false => origin,
+		};
+
+		// Unless the peer asked to be told only on request, it has already heard what an
+		// unsolicited PUBLISH_NAMESPACE can say. Repeating it here would leave it holding
+		// two sources for one namespace, so this stream carries only what that loop hid
+		// from the empty prefix and this request may see, and otherwise simply stays open
+		// until the peer is done with it.
 		let origin = match self.requires_solicitation().await {
 			true => origin,
-			false => origin.empty(),
+			false if self.origin.includes_hidden() => origin.empty(),
+			false => origin.beyond(&self.origin),
 		};
 
 		let ns = Namespaces::new(peer, target);
@@ -2540,7 +2550,7 @@ mod serve_tests {
 
 	fn serve(version: Version) -> Serve {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let broadcast = origin.create_broadcast("room").unwrap();
+		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
 		let track = broadcast.create_track("video", None).unwrap();
 
 		let session = ScriptedSession::per_stream(vec![Vec::new()]);
@@ -3630,6 +3640,7 @@ mod tests {
 		let msg = ietf::SubscribeNamespace {
 			request_id: RequestId(1),
 			namespace: crate::Path::new(""),
+			hidden: false,
 		};
 		let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
 
@@ -3808,6 +3819,7 @@ mod tests {
 		let msg = ietf::SubscribeNamespace {
 			request_id: RequestId(1),
 			namespace: crate::Path::new(""),
+			hidden: false,
 		};
 		let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
 
@@ -3911,10 +3923,22 @@ mod tests {
 	/// were opened. One stream means the entry rode the subscription inline; two means
 	/// it went out as its own PUBLISH_NAMESPACE request.
 	async fn advertise_both_ways(solicit: Option<bool>) -> (usize, usize) {
+		let log = advertise_with_hidden(solicit, "", false).await;
+		(occurrences(&log, b"cam"), log.bi_opens())
+	}
+
+	/// [`advertise_both_ways`] with a hidden `.stats/node` beside `cam`, and the peer's
+	/// SUBSCRIBE_NAMESPACE for `prefix` opting in to hidden namespaces or not.
+	async fn advertise_with_hidden(
+		solicit: Option<bool>,
+		prefix: &str,
+		hidden: bool,
+	) -> crate::lite::test_transport::Log {
 		const VERSION: Version = Version::Draft17;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		let _stats = origin.announce(".stats/node", crate::origin::Route::default()).unwrap();
 		settle().await;
 
 		// Stream 1 is the peer's SUBSCRIBE_NAMESPACE; stream 2, if opened at all, is our
@@ -3938,7 +3962,8 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		let msg = ietf::SubscribeNamespace {
 			request_id: RequestId(1),
-			namespace: crate::Path::new(""),
+			namespace: crate::Path::new(prefix),
+			hidden,
 		};
 		let mut solicited = std::pin::pin!(publisher.clone().run_subscribe_namespace_stream(stream, msg));
 		let mut unsolicited = std::pin::pin!(publisher.run_publish_namespaces());
@@ -3956,7 +3981,28 @@ mod tests {
 			settle().await;
 		}
 
-		(occurrences(&log, b"cam"), log.bi_opens())
+		log
+	}
+
+	/// A hidden namespace reaches only a subscription that opted in or named its dot
+	/// segment. With the unsolicited loop live, the subscription stream carries just
+	/// what that loop hid, so nothing is advertised twice.
+	#[tokio::test]
+	async fn hidden_namespaces_need_an_opt_in() {
+		for (solicit, prefix, hidden, cam, stats) in [
+			(Some(false), "", false, 1, 0),
+			(Some(false), "", true, 1, 1),
+			(Some(false), ".stats", false, 1, 1),
+			(Some(true), "", false, 1, 0),
+			(Some(true), "", true, 1, 1),
+			(Some(true), ".stats", false, 0, 1),
+		] {
+			let log = advertise_with_hidden(solicit, prefix, hidden).await;
+			let case = format!("solicit {solicit:?}, prefix {prefix:?}, hidden {hidden}");
+			assert_eq!(occurrences(&log, b"cam"), cam, "{case}");
+			// An inline entry names its suffix, so count the leaf.
+			assert_eq!(occurrences(&log, b"node"), stats, "{case}");
+		}
 	}
 
 	/// The regression that made announces solicited in the first place: a namespace sent
@@ -4167,6 +4213,7 @@ mod tests {
 				cost: None,
 			},
 			solicit,
+			hidden: false,
 		});
 		slot
 	}

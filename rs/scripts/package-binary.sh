@@ -8,7 +8,7 @@ set -euo pipefail
 # --bin overrides the binary/command name when it differs from the crate (e.g.
 # the `moq-cli` crate ships its binary as `moq`); it defaults to the crate name.
 #
-# Builds via `nix build .#<crate>` against the flake-pinned toolchain unless
+# Builds via `nix build .#<bin>` against the flake-pinned toolchain unless
 # --binary supplies an existing build. Produces
 # <output>/<crate>-v<version>-<target>.tar.gz, named after the release tag so
 # a URL rewritten from one tag to the next still resolves; the layout matches
@@ -97,12 +97,13 @@ if [[ -n "$BINARY" ]]; then
     BIN_FILE="$BINARY"
     echo "Packaging prebuilt $CRATE binary for $TARGET..."
 else
-    echo "Building $CRATE for $TARGET via nix (output: $CRATE)..."
+    # The flake names each package after its executable, so `moq-cli` builds as
+    # `.#moq`; `.#moq-cli` is a stub that refuses the old name.
+    echo "Building $CRATE for $TARGET via nix (output: $BIN)..."
     RESULT_LINK="$BUILD_TMP/result"
-    nix build "$WORKSPACE_DIR#$CRATE" --out-link "$RESULT_LINK"
+    nix build "$WORKSPACE_DIR#$BIN" --out-link "$RESULT_LINK"
 
-    # Crane installs to result/bin/<binary>. The binary name is usually the
-    # crate name; the `moq-cli` crate ships as `moq`.
+    # Crane installs to result/bin/<binary>.
     BIN_FILE="$RESULT_LINK/bin/$BIN"
 fi
 

@@ -4,7 +4,11 @@
 	"version": "0.2.3",
 	"description": "Low Overhead Container (LOC) frame encoding for MoQ",
 	"license": "(MIT OR Apache-2.0)",
-	"repository": "github:moq-dev/moq",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/moq-dev/moq.git",
+		"directory": "js/loc"
+	},
 	"exports": {
 		".": "./src/index.ts"
 	},

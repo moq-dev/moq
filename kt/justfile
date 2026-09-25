@@ -20,7 +20,7 @@ default:
 check $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -n "$FILES" ]] && ! grep -qE '^(kt/|rs/moq-ffi/)' <<< "$FILES"; then
+    if [[ -n "$FILES" ]] && ! grep -qE '^(kt/|rs/moq-ffi/|doc/lib/kt/|doc/lib/samples\.sh$)' <<< "$FILES"; then
     	echo "kt: no Kotlin changes; skipping."
     	exit 0
     fi

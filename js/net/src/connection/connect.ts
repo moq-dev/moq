@@ -281,6 +281,8 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
+	} else if (protocol === Lite.ALPN_07) {
+		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_07, ...wiring });
 	} else if (protocol === Lite.ALPN_06) {
 		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_06, ...wiring });
 	} else if (protocol === Lite.ALPN_05) {
@@ -304,6 +306,7 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Ietf.solicitIntoSetup(params);
+	Ietf.hiddenIntoSetup(params);
 
 	const client = new Ietf.ClientSetup({
 		versions:
@@ -342,6 +345,7 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 			maxRequestId,
 			version: server.version as Ietf.IetfVersion,
 			solicit: Ietf.solicitFromSetup(server.parameters),
+			hidden: Ietf.hiddenFromSetup(server.parameters),
 		});
 	} else {
 		throw new Error(`unsupported server version: ${server.version.toString()}`);
@@ -358,7 +362,7 @@ async function handshakeAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, solicit, cluster } = await exchangeSetup(session, version, "moq-lite-js");
+	const { control, solicit, hidden, cluster } = await exchangeSetup(session, version, "moq-lite-js");
 
 	return new Ietf.Connection({
 		...wiring,
@@ -367,6 +371,7 @@ async function handshakeAlpn(
 		quic: session,
 		control,
 		solicit,
+		hidden,
 		cluster,
 		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.
 		maxRequestId: 0n,
@@ -433,6 +438,7 @@ async function connectWebTransport(
 		allowPooling: false,
 		congestionControl: "low-latency",
 		protocols: [
+			Lite.ALPN_07,
 			Lite.ALPN_06,
 			Lite.ALPN_05,
 			Lite.ALPN_04,
@@ -519,6 +525,7 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 	// advertises every QMux draft it knows about and the server picks one.
 	// Insertion order is the negotiation preference on the wire.
 	const versions = {
+		[Lite.ALPN_07]: null,
 		[Lite.ALPN_06]: null,
 		[Lite.ALPN_05]: null,
 		[Lite.ALPN_04]: null,

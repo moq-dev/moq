@@ -31,10 +31,18 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `source` | `camera`, `screen`, or `file`. |
 | `muted`, `invisible` | Disable audio or video capture. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
-| `announce` | When to advertise: once a `source` is live (default), `always`, or `never`. The broadcast is created while connected either way; this only flips discoverability. |
+| `announce` | When to advertise: once a `source` is live (default), `always`, or `never`. A camera source waits for every enabled track. The broadcast is created while connected either way, but nobody can see or subscribe to it until it is announced. |
 
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.
+
+Camera and microphone failures are readable through the element's
+`el.sources.video` and `el.sources.audio` signals. When these hold a
+`Publish.Source.Camera` or `Publish.Source.Microphone`, their `out.error` signal
+contains an `Error`, such as `NotAllowedError` when permission is refused, and
+clears when capture restarts. A refused capture waits for a permission,
+device, constraint, or enabled-state change instead of repeatedly prompting.
+`<moq-publish-ui>` displays the failure in its status badge.
 
 ## Encoding
 
@@ -112,7 +120,9 @@ new Publish.Audio.Encoder("audio", { broadcast, capture: audioCapture, enabled: 
 Standalone components start enabled unless you pass `enabled: false` (or a
 signal). Camera and microphone sources may prompt for permission on
 construction, so build an enabled screen source inside the user gesture that
-authorizes screen capture.
+authorizes screen capture. Audio capture that starts before the page's first
+click or keypress waits for one: browsers suspend Web Audio until then, and the
+audio rendition stays out of the catalog until samples flow.
 
 Every input and output is a signal from [`@moq/signals`](/lib/js/signals).
 Load from a CDN (`https://esm.sh/@moq/publish/element`) for a no-build embed.

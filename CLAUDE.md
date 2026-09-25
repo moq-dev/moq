@@ -48,6 +48,7 @@ This file is split into nested `CLAUDE.md` files based on the language/situation
 - Try to do stuff asynchronously. ex. ask about follow-ups while tests run.
 - Try to recognize when you're stuck, or making minimal progress, and stop early.
 - If the core problem is addressed, ship it instead of spinning your wheels on meaningless revisions.
+- Benchmark any performance optimizations instead of relying on intuition.
 
 # Public API
 
@@ -82,8 +83,7 @@ Use the Nix dev shell so tooling matches CI.
 direnv loads it automatically, but if not: `nix develop --command ...`.
 
 ```bash
-just check        # Lint and compile what the branch changed
-just test         # Test what the branch changed, same scope
+just check        # Lint, compile, and test what the branch changed
 just fix          # Auto-fix lint/formatting, same scope
 ```
 
@@ -108,6 +108,6 @@ These diff the branch against its base and only run the affected packages.
 
 Any wire-format change updates its matching IETF draft in the same PR, including framing, message fields, enum values, and version negotiation. Use the feature-specific draft for extensions and validate with `just drafts check`. See `drafts/CLAUDE.md`.
 
-For wire, `moq-ffi`, or gateway changes, also run `just test smoke --all` for cross-language interop; plain `smoke` is Rust-only.
+For wire, `moq-ffi`, or gateway changes, also run `just test interop --all` for cross-language interop; plain `interop` is Rust-only.
 
 When a CLI interface changes, search the whole repo for the binary name and update every example invocation, including docs and demo recipes. Check examples against `--help`.

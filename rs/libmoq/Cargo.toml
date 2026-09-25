@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>", "Brian Medley <bpm@bmedley.org>"
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.6.0"
+version = "0.6.2"
 edition = "2024"
 rust-version.workspace = true
 
@@ -44,4 +44,4 @@ url = { workspace = true }
 cbindgen = "0.29"
 
 [dev-dependencies]
-moq-loc = { workspace = true }
+moq-loc = { path = "../moq-loc" }

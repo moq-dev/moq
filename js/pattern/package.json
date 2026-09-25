@@ -4,7 +4,11 @@
 	"version": "0.2.0",
 	"description": "Exact path patterns for Media over QUIC: grammar, matching, and set algebra.",
 	"license": "(MIT OR Apache-2.0)",
-	"repository": "github:moq-dev/moq",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/moq-dev/moq.git",
+		"directory": "js/pattern"
+	},
 	"sideEffects": false,
 	"exports": {
 		".": "./src/index.ts"

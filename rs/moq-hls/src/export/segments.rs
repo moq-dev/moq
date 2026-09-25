@@ -46,6 +46,41 @@ struct State {
 	ended: bool,
 }
 
+/// Numbers the broadcast's content timeline: the sequence bumps wherever the timeline breaks.
+///
+/// Held once by the timeline fanout rather than per rendition, so every rendition stamps a
+/// record with the same sequence even when one isn't listing rows (waiting to rebind) or
+/// cleared its own window.
+#[derive(Default)]
+pub(crate) struct Discontinuities {
+	sequence: u64,
+	/// The end of the last stamped record.
+	last_end: Option<Duration>,
+	/// Records were skipped, so the next one can't continue the timeline.
+	broken: bool,
+}
+
+impl Discontinuities {
+	/// The sequence of a record spanning `pts..end`, bumped if it doesn't continue the last one.
+	pub fn stamp(&mut self, pts: Duration, end: Duration) -> u64 {
+		// Tolerate sub-millisecond drift from timescale rounding.
+		let jumped = self
+			.last_end
+			.is_some_and(|last| pts.saturating_sub(last).max(last.saturating_sub(pts)) > Duration::from_millis(1));
+		if self.broken || jumped {
+			self.sequence += 1;
+		}
+		self.broken = false;
+		self.last_end = Some(end);
+		self.sequence
+	}
+
+	/// Records were skipped (or a new run started): the next one starts a new discontinuity.
+	pub fn interrupt(&mut self) {
+		self.broken = true;
+	}
+}
+
 /// One playlist segment: its aligned number, timing, and this rendition's group ranges.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Row {
@@ -63,6 +98,9 @@ pub(crate) struct Row {
 	/// The segment's ending presentation timestamp (`pts + duration`), for window eviction
 	/// and discontinuity detection.
 	pub end: Duration,
+	/// The broadcast's [`Discontinuities`] sequence for this record, shared by every rendition,
+	/// so renditions mark the same breaks however many segments each one skipped.
+	pub discontinuity: u64,
 }
 
 /// A consistent read of the window, for rendering one playlist (the serve path only).
@@ -79,10 +117,8 @@ pub(crate) struct Window {
 
 /// The next segment a [`Consumer`] should emit, resolved from the window.
 enum Next {
-	/// A segment is ready to fetch, along with the segment number that follows it in the
-	/// window (`None` if it's the newest row). The successor lets a cursor notice a gap: if
-	/// the next segment it emits isn't this successor, rows were evicted unseen in between.
-	Ready { row: Row, successor: Option<u64> },
+	/// A segment is ready to fetch.
+	Ready(Row),
 	/// No further segment will ever appear (the timeline ended).
 	Ended,
 	/// Nothing new yet; wait for the next window change.
@@ -106,16 +142,14 @@ impl State {
 	/// window before the cursor reached them are skipped: the cursor resumes at the oldest
 	/// row still in the window.
 	fn next_after(&self, after: Option<u64>) -> Next {
-		let mut iter = self.rows.iter().enumerate().filter(|(_, r)| match after {
+		let next = self.rows.iter().find(|r| match after {
 			Some(after) => r.segment > after,
 			None => true,
 		});
-		let Some((index, row)) = iter.next() else {
-			return if self.ended { Next::Ended } else { Next::Pending };
-		};
-		Next::Ready {
-			row: row.clone(),
-			successor: self.rows.get(index + 1).map(|next| next.segment),
+		match next {
+			Some(row) => Next::Ready(row.clone()),
+			None if self.ended => Next::Ended,
+			None => Next::Pending,
 		}
 	}
 }
@@ -275,9 +309,7 @@ impl Producer {
 		Consumer {
 			state: self.state.consume(),
 			rendition,
-			after: None,
-			expected: None,
-			gap: false,
+			position: Position::default(),
 		}
 	}
 }
@@ -293,9 +325,10 @@ pub struct Segment {
 	pub duration: Duration,
 	/// Wall-clock start time, when the timeline advertises an anchor.
 	pub program_date_time: Option<SystemTime>,
-	/// The media timeline is broken before this segment: one or more segments were skipped
-	/// since the previous one (evicted from the window before they could be fetched, or gaps
-	/// with no content for this rendition). A recorder marks an `EXT-X-DISCONTINUITY` here.
+	/// The content timeline breaks before this segment (the source skipped or restarted), so a
+	/// recorder marks an `EXT-X-DISCONTINUITY` here. Every rendition marks the same breaks, as
+	/// HLS requires. Segments this cursor skipped (evicted, uncached, or gaps with no content
+	/// for this rendition) leave a hole on a continuous timeline, not a discontinuity.
 	pub discontinuity: bool,
 }
 
@@ -307,15 +340,33 @@ pub struct Segment {
 pub struct Consumer {
 	state: kio::Consumer<State>,
 	rendition: Arc<Rendition>,
-	/// The number of the last segment returned; the next call resumes strictly after it. Only
-	/// advanced once a segment is fetched or skipped, so a transient fetch error re-tries the
-	/// same segment on the next call instead of losing it.
+	position: Position,
+}
+
+/// Where a [`Consumer`] is in the timeline. Only advanced once a segment is fetched or
+/// skipped, so a transient fetch error re-tries the same segment instead of losing it.
+#[derive(Default)]
+struct Position {
+	/// The number of the last segment passed; the cursor resumes strictly after it.
 	after: Option<u64>,
-	/// The successor segment recorded when the last one was emitted. If the next segment
-	/// isn't it, rows were evicted unseen in between (a gap).
-	expected: Option<u64>,
-	/// A gap opened since the last emitted segment (a skip); set on the next one's discontinuity.
-	gap: bool,
+	/// The discontinuity sequence of the last segment passed.
+	discontinuity: Option<u64>,
+}
+
+impl Position {
+	/// Pass `row` without returning it. A skipped first row still sets the baseline, so a break
+	/// before this cursor's first fetch is reported, as a sibling that fetched it would.
+	fn skip(&mut self, row: &Row) {
+		self.after = Some(row.segment);
+		self.discontinuity.get_or_insert(row.discontinuity);
+	}
+
+	/// Pass `row` as returned, reporting whether it starts a new discontinuity.
+	fn emit(&mut self, row: &Row) -> bool {
+		self.after = Some(row.segment);
+		let previous = self.discontinuity.replace(row.discontinuity);
+		previous.is_some_and(|previous| previous != row.discontinuity)
+	}
 }
 
 impl Consumer {
@@ -328,50 +379,37 @@ impl Consumer {
 	/// The next segment, with its media; `None` once the rendition ends.
 	///
 	/// Waits for the next segment, then FETCHes and transmuxes its groups. A segment whose
-	/// groups already left the relay cache (or that is a gap for this rendition) is skipped
-	/// (this resumes at the next one, flagging [`Segment::discontinuity`]) rather than
-	/// surfaced as an error; a real fetch/transmux failure is returned, leaving the cursor to
-	/// retry it on the next call.
+	/// groups already left the relay cache (or that is a gap for this rendition) is skipped,
+	/// resuming at the next one, rather than surfaced as an error; a real fetch/transmux
+	/// failure is returned, leaving the cursor to retry it on the next call.
 	pub async fn next(&mut self) -> Result<Option<Segment>> {
 		loop {
-			let Some((row, successor)) = kio::wait(|waiter| self.poll_next(waiter)).await else {
+			let Some(row) = kio::wait(|waiter| self.poll_next(waiter)).await else {
 				return Ok(None);
 			};
-			// A gap opened if the segment we're about to emit isn't the successor the previous
-			// one recorded (rows between them evicted unseen).
-			let gap = discontinuity(self.gap, self.after, self.expected, row.segment);
-
 			match self.rendition.segment(row.segment).await? {
 				Some(media) => {
-					self.after = Some(row.segment);
-					self.expected = successor;
-					self.gap = false;
 					return Ok(Some(Segment {
 						segment: row.segment,
 						media,
 						duration: row.duration,
 						program_date_time: self.rendition.wall_clock(row.pts),
-						discontinuity: gap,
+						discontinuity: self.position.emit(&row),
 					}));
 				}
-				// A gap for this rendition, or its groups aged out of the cache before we
-				// fetched them; skip to the next and carry the gap onto whichever segment we
-				// emit next.
-				None => {
-					self.after = Some(row.segment);
-					self.expected = successor;
-					self.gap = true;
-				}
+				None => self.position.skip(&row),
 			}
 		}
 	}
 
-	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<(Row, Option<u64>)>> {
-		let poll = self.state.poll(waiter, |state| match state.next_after(self.after) {
-			Next::Ready { row, successor } => Poll::Ready(Some((row, successor))),
-			Next::Ended => Poll::Ready(None),
-			Next::Pending => Poll::Pending,
-		});
+	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<Row>> {
+		let poll = self
+			.state
+			.poll(waiter, |state| match state.next_after(self.position.after) {
+				Next::Ready(row) => Poll::Ready(Some(row)),
+				Next::Ended => Poll::Ready(None),
+				Next::Pending => Poll::Pending,
+			});
 		match poll {
 			Poll::Ready(Ok(found)) => Poll::Ready(found),
 			// The producer closed without a clean end (broadcast dropped): no more segments.
@@ -379,12 +417,6 @@ impl Consumer {
 			Poll::Pending => Poll::Pending,
 		}
 	}
-}
-
-fn discontinuity(gap: bool, after: Option<u64>, expected: Option<u64>, segment: u64) -> bool {
-	gap || expected
-		.or_else(|| after.map(|after| after.saturating_add(1)))
-		.is_some_and(|expected| expected != segment)
 }
 
 #[cfg(test)]
@@ -400,6 +432,7 @@ mod tests {
 			duration: Duration::from_millis(duration_ms),
 			pts,
 			end: Duration::from(pts) + Duration::from_millis(duration_ms),
+			discontinuity: 0,
 		}
 	}
 
@@ -474,9 +507,60 @@ mod tests {
 			snapshot.segments.iter().map(|row| row.segment).collect::<Vec<_>>(),
 			vec![10]
 		);
-		assert!(
-			discontinuity(false, Some(4), None, snapshot.segments[0].segment),
-			"a cursor caught up before the skip marks the next segment discontinuous"
+	}
+
+	fn secs(s: u64) -> Duration {
+		Duration::from_secs(s)
+	}
+
+	fn stamped(segment: u64, discontinuity: u64) -> Row {
+		Row {
+			discontinuity,
+			..row(segment, segment, segment * 2_000, 2_000)
+		}
+	}
+
+	#[test]
+	fn skipped_rows_do_not_hide_or_invent_breaks() {
+		// Skipping a row on a continuous timeline is a hole, not a discontinuity.
+		let mut position = Position::default();
+		assert!(!position.emit(&stamped(0, 0)), "a clean start");
+		position.skip(&stamped(1, 0));
+		assert!(!position.emit(&stamped(2, 0)));
+
+		// A break before the first fetch still counts: a sibling that fetched row 0 marks row 1.
+		let mut position = Position::default();
+		position.skip(&stamped(0, 0));
+		assert!(position.emit(&stamped(1, 1)));
+	}
+
+	#[test]
+	fn a_continuous_timeline_keeps_one_discontinuity() {
+		// A cursor that skips a record (uncached, or a gap for its rendition) must not mark the
+		// next one: a sibling that fetched it wouldn't, and players require renditions to agree.
+		let mut timeline = Discontinuities::default();
+		assert_eq!(timeline.stamp(secs(0), secs(2)), 0);
+		assert_eq!(timeline.stamp(secs(2), secs(4)), 0);
+		assert_eq!(timeline.stamp(secs(4), secs(6)), 0);
+	}
+
+	#[test]
+	fn a_content_time_jump_starts_a_new_discontinuity() {
+		let mut timeline = Discontinuities::default();
+		assert_eq!(timeline.stamp(secs(0), secs(2)), 0);
+		assert_eq!(timeline.stamp(secs(10), secs(12)), 1);
+		assert_eq!(timeline.stamp(secs(12), secs(14)), 1);
+	}
+
+	#[test]
+	fn skipped_records_start_a_new_discontinuity() {
+		let mut timeline = Discontinuities::default();
+		assert_eq!(timeline.stamp(secs(0), secs(2)), 0);
+		timeline.interrupt();
+		assert_eq!(
+			timeline.stamp(secs(2), secs(4)),
+			1,
+			"skipped records break the timeline even when the next one lines up"
 		);
 	}
 
@@ -494,6 +578,7 @@ mod tests {
 				duration: Duration::from_secs(1),
 				pts: moq_net::Timestamp::from_millis(1_000).unwrap(),
 				end: Duration::from_millis(2_000),
+				discontinuity: 0,
 			},
 			window,
 		);
@@ -531,20 +616,12 @@ mod tests {
 		live.push(row(0, 0, 0, 2_000), window);
 		live.push(row(1, 1, 2_000, 2_000), window);
 
-		let first = match live.state.read().next_after(None) {
-			Next::Ready { row, successor } => {
-				assert_eq!(successor, Some(1));
-				row
-			}
-			_ => panic!("expected a segment"),
+		let Next::Ready(first) = live.state.read().next_after(None) else {
+			panic!("expected a segment");
 		};
 		assert_eq!(first.segment, 0);
-		let second = match live.state.read().next_after(Some(0)) {
-			Next::Ready { row, successor } => {
-				assert_eq!(successor, None);
-				row
-			}
-			_ => panic!("expected a segment"),
+		let Next::Ready(second) = live.state.read().next_after(Some(0)) else {
+			panic!("expected a segment");
 		};
 		assert_eq!(second.segment, 1);
 		assert!(

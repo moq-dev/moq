@@ -19,6 +19,11 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 ```
 
+`Catalog.watch(broadcast)` iterates validated catalog roots. It throws
+`Catalog.TooManyRenditions` for an update above the 64 rendition limit.
+`Hang.Timeline.Consumer.subscribe(broadcast, root.archive)` reads segment
+`push`, `pop`, and `skip` events when a root advertises an archive.
+
 Most apps never import it directly; the elements and `Broadcast` classes in
 the watch and publish packages do. Reach for it when hand-rolling a catalog
 or building a custom player.

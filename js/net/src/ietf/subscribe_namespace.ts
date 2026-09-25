@@ -30,10 +30,17 @@ export class SubscribeNamespace {
 
 	namespace: Path.Valid;
 	requestId: bigint;
+	/** MoQ Hidden: also advertise hidden namespaces. Only sent to a peer that declared it. */
+	hidden: boolean;
 
-	constructor({ namespace, requestId }: { namespace: Path.Valid; requestId: bigint }) {
+	constructor({
+		namespace,
+		requestId,
+		hidden = false,
+	}: { namespace: Path.Valid; requestId: bigint; hidden?: boolean }) {
 		this.namespace = namespace;
 		this.requestId = requestId;
+		this.hidden = hidden;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -42,7 +49,9 @@ export class SubscribeNamespace {
 		}
 		await w.u62(this.requestId);
 		await Namespace.encode(w, this.namespace);
-		await new Parameters().encode(w, version);
+		const params = new Parameters();
+		params.hidden = this.hidden;
+		await params.encode(w, version);
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -59,9 +68,9 @@ export class SubscribeNamespace {
 		}
 		const requestId = await r.u62();
 		const namespace = await Namespace.decode(r);
-		await Parameters.decode(r, version);
+		const params = await Parameters.decode(r, version);
 
-		return new SubscribeNamespace({ namespace, requestId });
+		return new SubscribeNamespace({ namespace, requestId, hidden: params.hidden });
 	}
 }
 
@@ -77,19 +86,24 @@ export class SubscribeNamespaceLegacy {
 	namespace: Path.Valid;
 	requestId: bigint;
 	subscribeOptions: number; // v16/v17: default 0x01 (NAMESPACE only)
+	/** MoQ Hidden: see {@link SubscribeNamespace.hidden}. */
+	hidden: boolean;
 
 	constructor({
 		namespace,
 		requestId,
 		subscribeOptions = 1,
+		hidden = false,
 	}: {
 		namespace: Path.Valid;
 		requestId: bigint;
 		subscribeOptions?: number;
+		hidden?: boolean;
 	}) {
 		this.namespace = namespace;
 		this.requestId = requestId;
 		this.subscribeOptions = subscribeOptions;
+		this.hidden = hidden;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -104,7 +118,9 @@ export class SubscribeNamespaceLegacy {
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			await w.u53(this.subscribeOptions);
 		}
-		await new Parameters().encode(w, version);
+		const params = new Parameters();
+		params.hidden = this.hidden;
+		await params.encode(w, version);
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -128,9 +144,9 @@ export class SubscribeNamespaceLegacy {
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			subscribeOptions = await r.u53();
 		}
-		await Parameters.decode(r, version);
+		const params = await Parameters.decode(r, version);
 
-		return new SubscribeNamespaceLegacy({ namespace, requestId, subscribeOptions });
+		return new SubscribeNamespaceLegacy({ namespace, requestId, subscribeOptions, hidden: params.hidden });
 	}
 }
 

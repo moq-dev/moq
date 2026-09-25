@@ -543,6 +543,19 @@ impl Surface {
 					Surface::I420(texture.download_i420()?.resize(size)?)
 				}
 			},
+			// Scaled by the VA-API video processor, which also converts packed
+			// RGB to NV12 on the way, so the result is ready for the VAAPI
+			// encoder to import. If VA-API is missing or refuses the buffer,
+			// download and resize on the CPU.
+			#[cfg(all(target_os = "linux", feature = "vaapi"))]
+			Surface::DmaBuf(buffer) if config.output == crate::Output::Native => match vaapi::resize(buffer, size) {
+				Ok(scaled) => Surface::DmaBuf(scaled),
+				Err(err) => {
+					static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+					WARN_ONCE.call_once(|| tracing::warn!(%err, "GPU resize failed; falling back to the CPU"));
+					Surface::I420(buffer.inner.download_i420()?.resize(size)?)
+				}
+			},
 			#[allow(unreachable_patterns)]
 			other => Surface::I420(other.to_i420()?.into_owned().resize(size)?),
 		})
@@ -843,8 +856,7 @@ impl I420 {
 	}
 
 	/// Convert tightly-packed RGB (`width * height * 3` bytes) to I420 in
-	/// [`Color::infer`]'s color space for this size. Used for MJPEG capture
-	/// (Linux V4L2), which decodes to RGB.
+	/// [`Color::infer`]'s color space for this size. Used by [`Self::from_mjpeg`].
 	#[cfg(all(target_os = "linux", feature = "capture"))]
 	pub(crate) fn from_rgb(rgb: &[u8], size: Size) -> Result<Self, Error> {
 		use yuv::rgb_to_yuv420;
@@ -864,9 +876,35 @@ impl I420 {
 		Self::pack(&planar, size, Some(color))
 	}
 
+	/// Decode one Motion-JPEG frame to I420 in [`Color::infer`]'s color space.
+	/// Used by the Linux V4L2 and PipeWire camera paths.
+	///
+	/// The stream reports the negotiated size and the encoder is built from it,
+	/// so a frame that decodes to another size is an error rather than a frame
+	/// published as this stream's.
+	#[cfg(all(target_os = "linux", feature = "capture"))]
+	pub(crate) fn from_mjpeg(jpeg: &[u8], size: Size) -> Result<Self, Error> {
+		use zune_jpeg::zune_core::bytestream::ZCursor;
+
+		// zune-jpeg 0.5 reads through a seekable cursor, not a bare slice.
+		let mut decoder = zune_jpeg::JpegDecoder::new(ZCursor::new(jpeg));
+		let rgb = decoder
+			.decode()
+			.map_err(|e| Error::Codec(anyhow::anyhow!("MJPEG decode: {e:?}")))?;
+		let (w, h) = decoder
+			.dimensions()
+			.ok_or_else(|| Error::Codec(anyhow::anyhow!("MJPEG frame had no dimensions")))?;
+		if w as u32 != size.width || h as u32 != size.height {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"MJPEG frame is {w}x{h}, not the negotiated {size}"
+			)));
+		}
+		Self::from_rgb(&rgb, size)
+	}
+
 	/// Convert packed YUYV (YUV 4:2:2, `stride` bytes per row) to I420. A chroma
 	/// resample (4:2:2 -> 4:2:0), no color-space conversion. Used for the raw
-	/// V4L2 capture path (Linux).
+	/// V4L2 and PipeWire camera capture paths (Linux).
 	#[cfg(all(target_os = "linux", feature = "capture"))]
 	pub(crate) fn from_yuyv(yuyv: &[u8], stride: u32, size: Size) -> Result<Self, Error> {
 		use yuv::{YuvPackedImage, yuyv422_to_yuv420};
@@ -883,7 +921,7 @@ impl I420 {
 		yuyv422_to_yuv420(&mut planar, &packed)
 			.map_err(|e| Error::Codec(anyhow::anyhow!("yuyv422_to_yuv420 failed for {width}x{height}: {e}")))?;
 		// A chroma resample, not a color conversion: these samples are in
-		// whatever space the camera produced, which nothing here names.
+		// whatever space the camera produced, which the caller names if it can.
 		Self::pack(&planar, size, None)
 	}
 
@@ -1890,6 +1928,10 @@ pub mod vulkan;
 #[cfg(all(target_os = "linux", feature = "nvidia"))]
 #[path = "frame/cuda.rs"]
 pub mod cuda;
+
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
+#[path = "frame/vaapi.rs"]
+pub(crate) mod vaapi;
 
 // Compiled for every test build so its policy tests run without a GPU.
 #[cfg(any(test, all(target_os = "linux", feature = "nvidia")))]
