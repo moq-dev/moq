@@ -26,4 +26,12 @@ if [[ -z "$GRADLE_CMD" ]]; then
     exit 1
 fi
 
+# Compile the documentation samples with the tests, beside the inputs Prelude.kt
+# declares, so a doc that drifts from the wrapper fails here.
+DOCS_DIR="$KT_DIR/moq/src/jvmAndAndroidTest/kotlin/dev/moq/docs"
+{
+    echo "package dev.moq.docs"
+    bash "$KT_DIR/../doc/lib/samples.sh" kotlin "$KT_DIR/../doc/lib/kt/index.md" "$KT_DIR/README.md"
+} >"$DOCS_DIR/Samples.kt"
+
 "$GRADLE_CMD" -p "$KT_DIR" -Pmoqffi.version=0.0.0-dev :moq-ffi:jvmTest :moq:jvmTest

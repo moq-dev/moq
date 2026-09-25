@@ -303,17 +303,18 @@
         ];
 
         # uniffi-bindgen-dart renders rs/moq-ffi into dart/moq_ffi. The fork
-        # carries the uniffi 0.32 port and library-mode CLI while those changes
-        # remain open upstream.
+        # carries the uniffi 0.32 port, library-mode CLI, and RustBuffer leak
+        # fixes while those changes remain open upstream. Its tags add a
+        # `-kixelated.N` pre-release so they never collide with upstream's.
         uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-dart";
-          version = "0.3.0+v0.32.0";
+          version = "0.3.1-kixelated.4+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-dart";
             rev = "v${version}";
-            hash = "sha256-jvVEZVZLorj+GPUXL6Y4riCLsbJcWWbQgIIUoK/ZSEo=";
+            hash = "sha256-BCIooajAp0Wqt7LeanFSdmS/GT0uYo+d8Qv2jGWCJD8=";
           };
 
           # The upstream repository ignores Cargo.lock so cargo installs test
@@ -418,14 +419,24 @@
             name = "moq-all";
             paths = [
               moq-relay
-              moq-cli
+              moq
             ];
           };
+
+          # Named after the executable. The overlay keeps `moq-cli` because
+          # nixpkgs already has an unrelated `moq`.
+          moq = overlayPkgs.moq-cli;
+
+          # The package was `moq-cli` through 0.12.2. Refuse with the new name
+          # so `nix run` and `nix profile upgrade` break instead of going stale.
+          moq-cli = pkgs.writeShellScriptBin "moq" ''
+            echo "error: the moq-cli package is now moq: nix run github:moq-dev/moq#moq" >&2
+            exit 1
+          '';
 
           # Inherit packages from the overlay
           inherit (overlayPkgs)
             moq-relay
-            moq-cli
             moq-bench
             moq-boy
             libmoq

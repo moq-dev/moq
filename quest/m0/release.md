@@ -78,14 +78,13 @@ The soak bullet below is cleared by hand: the merged relay serves moq.pro
 staging with `/metrics` watched and a fresh viewer joining a days-old
 `moq import ts` broadcast over HLS at the end; the bounded `moq_json::window`
 timeline (#3240) is what makes that hold, and only a long run proves it. dev
-landed on main as #3793; before cutting, run `just check --all`,
-`just test all`, and `just test interop --all` on the release revision and record
-it. Then cut the release under the existing release-plz and npm workflows; this
+landed on main as #3793; before cutting, run `just check --all` and
+`just test interop --all` on the release revision and record it. Then cut the release under the existing release-plz and npm workflows; this
 quest bumps no versions itself.
 
 Public API: none beyond the required quests. Wire: none.
 
 ## Required
 
-- [Binding docs](/quest/m1/binding-docs.md) - the binding pages compile against the wrappers
+- [JS retention](/quest/m0/js-retention.md) - the player no longer grows its heap per frame
 - The merged relay has soaked on moq.pro staging and the maintainer has signed it off

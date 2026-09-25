@@ -41,8 +41,8 @@ fi
 
 HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
 # Debug by default. This is a compile-and-test gate, not a benchmark, and a
-# release build of moq-ffi shares no artifacts with the debug ones `just check`
-# and `just test` already produce, so it was a third full compile of the
+# release build of moq-ffi shares no artifacts with the debug ones `just ci check`
+# and `just ci test` already produce, so it was a third full compile of the
 # dependency tree (~5 min of CI on its own, plus a whole target/release tree on
 # a runner that was already tight on disk). Set MOQ_FFI_PROFILE=release for an
 # optimized cdylib; the shipped artifacts are built by rs/moq-ffi/build.sh,
@@ -89,6 +89,11 @@ env ${xcode_sdk_env[@]+"${xcode_sdk_env[@]}"} xcodebuild -create-xcframework \
 # Stage generated swift.
 mkdir -p "$SWIFT_DIR/Sources/MoqFFI"
 cp "$BINDGEN_OUT/moq.swift" "$SWIFT_DIR/Sources/MoqFFI/Generated.swift"
+
+# Compile the documentation samples with the tests, beside the inputs
+# Docs/Prelude.swift declares, so a doc that drifts from the wrapper fails here.
+bash "$WORKSPACE_DIR/doc/lib/samples.sh" swift "$WORKSPACE_DIR/doc/lib/swift/index.md" "$SWIFT_DIR/README.md" \
+    >"$SWIFT_DIR/Tests/MoqTests/Docs/Samples.swift"
 
 # swift/Package.swift already declares a path-based MoqFFIBinary pointing
 # at the xcframework laid out above, so no manifest mutation is needed.

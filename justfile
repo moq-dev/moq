@@ -16,7 +16,7 @@ mod go
 mod dart
 # OBS Studio plugin (C++). See doc/bin/obs.md.
 mod obs 'cpp/obs'
-# Unit tests per language (`just test`).
+# Cross-language tests (`just test interop`, `just test drill`, ...).
 mod test
 # Demos and infra.
 mod demo
@@ -56,13 +56,21 @@ install:
     bun install
     cargo install --locked cargo-shear cargo-sort cargo-semver-checks release-plz
 
-# Lints and compiles only the packages the branch changed plus everything
-# depending on them; `check --all` is the unscoped suite. CI runs the same
-# thing with MOQ_STRICT=1. BASE defaults to the branch's upstream.
+# Lints, compiles, and tests only the packages the branch changed plus
+# everything depending on them; `check --all` is the unscoped suite. BASE
+# defaults to the branch's upstream. Rust compiles once: its test build doubles
+# as the clippy gate (see `rs check-test`).
 
-# Lint and compile what the branch changed since BASE, plus its dependents.
+# Lint, compile, and test what the branch changed since BASE, plus its dependents.
 check $BASE="":
     sh/dispatch.sh check "$BASE"
+
+# CI runs `check` as two parallel jobs, since one runner doing both takes about
+# the sum of their times. Same dispatch, with MOQ_STRICT=1.
+
+# Run half of `check` for CI: JOB `check` lints and compiles, `test` runs the tests.
+ci $JOB $BASE="":
+    sh/dispatch.sh "ci-$JOB" "$BASE"
 
 # Auto-fix lint and formatting for what the branch changed since BASE.
 fix $BASE="":

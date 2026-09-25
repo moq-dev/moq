@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Compile and run libmoq's C fixtures (`rs/libmoq/c-tests/*.c`) against
-# libmoq.a, linked the way an embedder does: an external `cc` against the
-# generated `moq.h`, plus the native libraries from `rs/libmoq/native-libs`
-# that cargo can't inject into a link it doesn't drive. Unix only.
+# Compile and run libmoq's C fixtures (`rs/libmoq/c-tests/*.c`), and the C doc
+# samples, against libmoq.a, linked the way an embedder does: an external `cc`
+# against the generated `moq.h`, plus the native libraries from
+# `rs/libmoq/native-libs` that cargo can't inject into a link it doesn't drive.
+# Unix only.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -52,6 +53,19 @@ done <"$native_libs"
 
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
+
+# The C docs compile against this header too: each sample beside the inputs
+# doc-samples.h declares, and every name the prose cites. A `moq_decode_*`
+# wildcard ends in `_` and is skipped.
+bash doc/lib/samples.sh c doc/lib/c/index.md >"$out/doc-samples.c"
+"$cc" -fsyntax-only -Werror=implicit-function-declaration -include rs/libmoq/c-tests/doc-samples.h -I"$include" "$out/doc-samples.c"
+grep -oE '\b(moq|MOQ)_[A-Za-z0-9_]*' doc/lib/c/index.md | grep -v '_$' | sort -u | while read -r name; do
+    if ! grep -qw "$name" "$include/moq.h"; then
+        echo "doc/lib/c/index.md cites $name, which moq.h does not declare" >&2
+        exit 1
+    fi
+done
+
 for source in rs/libmoq/c-tests/*.c; do
     bin="$out/$(basename "$source" .c)"
     "$cc" "$source" -I"$include" -L"$profile" -lmoq "${libs[@]}" -o "$bin"

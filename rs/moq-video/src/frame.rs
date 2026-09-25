@@ -543,6 +543,19 @@ impl Surface {
 					Surface::I420(texture.download_i420()?.resize(size)?)
 				}
 			},
+			// Scaled by the VA-API video processor, which also converts packed
+			// RGB to NV12 on the way, so the result is ready for the VAAPI
+			// encoder to import. If VA-API is missing or refuses the buffer,
+			// download and resize on the CPU.
+			#[cfg(all(target_os = "linux", feature = "vaapi"))]
+			Surface::DmaBuf(buffer) if config.output == crate::Output::Native => match vaapi::resize(buffer, size) {
+				Ok(scaled) => Surface::DmaBuf(scaled),
+				Err(err) => {
+					static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+					WARN_ONCE.call_once(|| tracing::warn!(%err, "GPU resize failed; falling back to the CPU"));
+					Surface::I420(buffer.inner.download_i420()?.resize(size)?)
+				}
+			},
 			#[allow(unreachable_patterns)]
 			other => Surface::I420(other.to_i420()?.into_owned().resize(size)?),
 		})
@@ -1915,6 +1928,10 @@ pub mod vulkan;
 #[cfg(all(target_os = "linux", feature = "nvidia"))]
 #[path = "frame/cuda.rs"]
 pub mod cuda;
+
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
+#[path = "frame/vaapi.rs"]
+pub(crate) mod vaapi;
 
 // Compiled for every test build so its policy tests run without a GPU.
 #[cfg(any(test, all(target_os = "linux", feature = "nvidia")))]

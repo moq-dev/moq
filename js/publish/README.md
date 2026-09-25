@@ -87,7 +87,9 @@ more encoders:
 
 Standalone components start enabled when `enabled` is omitted. Camera and microphone sources may
 request permission immediately. Create an enabled screen source during the user gesture that
-authorizes screen capture, or pass a live input that is false until that gesture.
+authorizes screen capture, or pass a live input that is false until that gesture. Audio capture
+that starts before the page's first click or keypress waits for one: browsers suspend Web Audio
+until then, and the audio rendition stays out of the catalog until samples flow.
 
 ```typescript
 import * as Publish from "@moq/publish";

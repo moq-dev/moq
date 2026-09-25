@@ -15,6 +15,11 @@ cd "$(git rev-parse --show-toplevel)"
 bun install --frozen-lockfile
 cd drafts
 
+if grep -n "$(printf '\t')" draft-*.md; then
+    echo "tabs render unpredictably in xml2rfc; indent with spaces" >&2
+    exit 1
+fi
+
 for f in draft-*.md; do
     echo "checking $f"
     kramdown-rfc --v3 <"$f" >"${f%.md}.xml"

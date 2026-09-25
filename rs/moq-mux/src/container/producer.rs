@@ -376,6 +376,15 @@ where
 		self.live_edge
 	}
 
+	/// The lowest timestamp the next [`write`](Self::write) accepts: the live edge, or for a
+	/// keyframe, the edge once the group it closes is counted too.
+	pub(crate) fn floor(&self, keyframe: bool) -> Option<moq_net::Timestamp> {
+		match (self.live_edge, self.end.filter(|_| keyframe)) {
+			(Some(edge), Some(end)) if timestamp_lt(edge, end) => Some(end),
+			(edge, end) => edge.or(end),
+		}
+	}
+
 	/// Write a frame to the track.
 	///
 	/// A keyframe closes any open group and starts a new one. A non-keyframe extends the current

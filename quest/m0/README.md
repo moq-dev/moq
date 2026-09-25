@@ -15,11 +15,12 @@ dev landed on main as #3793 on 2026-09-20;
 [Release](/quest/m0/release.md) names what gates the release that follows.
 Published API or wire breaks still land on dev; the quest's Plan says so.
 
-The archive, E2EE, socket, and uring crates are 0.0.1 on main after the dev
-merge. Their six API quests gate the release and target main under the 0.0.x
-exception. Inspect transitive public exposure before changing a shared symbol:
-`moq-tokio` publicly re-exports `moq-sock`'s bind module. Keep that re-export
-and its current names.
+The archive, E2EE, and uring crates are 0.0.x; socket, audio, video,
+transcode, and nvenc are 0.1.x so dependents can take compatible patches. Their
+API quests gate the release; a published break to a 0.1.x crate targets dev.
+Inspect transitive public exposure before changing a shared symbol: `moq-tokio`
+publicly re-exports `moq-sock`'s bind module. Keep that re-export and its
+current names.
 
 Keep the useful boundaries: archive owns storage and codecs, E2EE owns
 protection rather than catalogs, sock owns runtime-neutral sockets, and uring
@@ -44,10 +45,9 @@ Their package boundaries are explicit:
 - Published `moq-tokio` keeps its worker signatures and `bind` re-export while
   adapting internal plumbing. Its root names do not move.
 
-The media crates are also 0.0.x, so their changes target main. Adapt callers in
-other packages without breaking their published APIs, C layouts, or wire
-formats. Do not bump versions as part of these quests. The media review
-found the four crates ready for a separately requested 0.1 release.
+The media crates are 0.1.x too, so a published break to them targets dev.
+Adapt callers in other packages without breaking their published APIs, C
+layouts, or wire formats. Do not bump versions as part of these quests.
 
 Their package boundaries are explicit:
 
@@ -93,6 +93,7 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 ## Quests
 
+- [JS retention](/quest/m0/js-retention.md) - no `js/` package retains a listener, reaction, or task per frame, so a long-running player keeps a flat heap
 - [Release](/quest/m0/release.md) - the release moq.pro adopts: binding docs, an upgrade page, and a staging soak gate it rather than the merge
 - [Binary stats](/quest/m0/stats-binary/README.md) - an allocation-free stats tick and an on-demand FlatBuffers `.fb.z` flavor with a checked-in schema
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess

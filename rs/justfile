@@ -28,8 +28,22 @@ default:
 
 # Compile, lint, format-check, doc-check, and verify dependency hygiene.
 check *args:
-    python3 sh/rs/stats-docs.py
     cargo clippy --locked --all-targets {{ args }} -- -D warnings
+    just rs _lint {{ args }}
+
+# `check` with clippy replaced by the `test` build, whose clippy-driver reports
+# the same findings. `build.warnings` turns them into errors without entering
+# cargo's fingerprint, so a later plain `test` reuses the artifacts. A
+# selection can hold nothing testable (moq-wasm has no host tests).
+
+# Compile, lint, and test in one build, plus everything else `check` verifies.
+check-test *args:
+    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ require("clippy-driver") }} cargo nextest run --locked --all-targets --no-tests=pass {{ args }}
+    just rs _lint {{ args }}
+
+# Everything `check` verifies besides clippy.
+_lint *args:
+    python3 sh/rs/stats-docs.py
     cargo fmt --all --check
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps {{ args }}
     cargo shear
@@ -45,6 +59,10 @@ fix *args:
 # Like `check`, but only the crates in a changed-file list plus their dependents.
 check-changed $LIST:
     sh/rs/select.sh check "$LIST"
+
+# Like `check-test`, but only the crates in a changed-file list plus their dependents.
+check-test-changed $LIST:
+    sh/rs/select.sh check-test "$LIST"
 
 # Like `fix`, but only the crates in a changed-file list plus their dependents.
 fix-changed $LIST:
@@ -125,7 +143,7 @@ relay-minimal:
 
 # Outside nextest because the staticlib link alone outlasts its hang budget.
 
-# Compile and run libmoq's C fixtures against libmoq.a. Must run on Unix.
+# Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
 c-tests:
     sh/rs/c-tests.sh
 
@@ -143,6 +161,7 @@ features:
     cargo check --locked -p moq-cli --no-default-features
     cargo check --locked -p moq-bench --no-default-features
     cargo check --locked -p moq-boy --no-default-features
+    cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
     cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
     cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
@@ -154,8 +173,8 @@ media-features:
 
 # nextest kills a wedged test (`.config/nextest.toml` sets the timeout), but
 # skips doctests; `just rs doctest` covers those. clippy-driver as the workspace
-# wrapper reports lint findings from the same compile, as warnings: `check` is
-# the gate. It is part of cargo's fingerprint, and RUSTFLAGS would split the
+# wrapper reports lint findings from the same compile, as warnings: `check-test`
+# is the gate. It is part of cargo's fingerprint, and RUSTFLAGS would split the
 # artifact cache, which is why neither is set any other way.
 
 # Run the test suite, reporting clippy findings from the same compile.
@@ -172,8 +191,10 @@ doctest *args:
 
 # `--cfg loom` swaps kio's primitives for loom's, so it rebuilds the world and
 # stays out of `check`. `--release` because a model check runs the body once
-# per interleaving (411s -> 51s); the assertions are plain `assert!`. kio's own
-# unit tests are `cfg(not(loom))`.
+# per interleaving (411s -> 51s); the assertions are plain `assert!`. kio's
+# models search every interleaving; moq-net's cap preemptions (see
+# `tests/loom.rs`, `LOOM_MAX_PREEMPTIONS`). kio's own unit tests are
+# `cfg(not(loom))`.
 
 # Permutation-test the concurrent handoffs with loom.
 loom *args:

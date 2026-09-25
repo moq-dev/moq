@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# Run `just check`, `just fix`, or `just test` over what the branch changed.
+# Run `just check`, `just fix`, or `just ci check|test` over what the branch
+# changed.
 #
-# Usage: sh/dispatch.sh check|fix|test [BASE|--all]
+# Usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all]
 #
 # The branch diff is resolved once and matched against the impact map below,
-# the one place that says which paths put which module in scope. CI runs the
-# same thing with MOQ_STRICT=1, so there is no second definition of "checked".
+# the one place that says which paths put which module in scope. `check` is
+# `ci-check` plus `ci-test`, which CI runs as parallel jobs with MOQ_STRICT=1,
+# so there is no second definition of "checked".
 set -euo pipefail
 
-usage="usage: sh/dispatch.sh check|fix|test [BASE|--all]"
+usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all]"
 action=${1:?$usage}
 base=${2:-}
 case "$action" in
-    check | fix | test) ;;
+    check | fix | ci-check | ci-test) ;;
     *)
         echo "$usage" >&2
         exit 2
@@ -55,7 +57,7 @@ else
 
     # These files hold the map and the recipes that call it, and match no
     # module, so a change to them would otherwise validate none of it.
-    if grep -qE '^(justfile|test/justfile|sh/dispatch\.sh)$' "$changed"; then
+    if grep -qE '^(justfile|sh/dispatch\.sh)$' "$changed"; then
         echo "$action: root orchestration changed; running everything." >&2
         all=1
     fi
@@ -74,10 +76,10 @@ declare -A scope=(
     # Quest documents form one graph, so any change validates the whole tree.
     [quest]='^(quest/|rs/quest/)'
     # maturin bundles rs/moq-ffi into the moq-ffi wheel, and the other
-    # bindings generate from it.
-    [py]='^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'
-    [kt]='^(kt/|sh/kt/|rs/moq-ffi/)'
-    [swift]='^(swift/|sh/swift/|rs/moq-ffi/)'
+    # bindings generate from it. Each check also compiles its doc samples.
+    [py]='^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/lib/samples\.sh$)'
+    [kt]='^(kt/|sh/kt/|rs/moq-ffi/|doc/lib/kt/|doc/lib/samples\.sh$)'
+    [swift]='^(swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)'
     [go]='^(go/|sh/go/|rs/moq-ffi/)'
     [dart]='^(dart/|sh/dart/|rs/moq-ffi/)'
     # The plugin calls libmoq through its generated header, and flake.nix owns
@@ -123,9 +125,9 @@ declare -A tools=(
 )
 
 case "$action" in
-    check) modules=(js workers drafts rs bench quest py kt swift go dart obs_compile obs flake markdown shell toml nix justfile gh) ;;
+    check | ci-check) modules=(js workers drafts rs bench quest py kt swift go dart obs_compile obs flake markdown shell toml nix justfile gh) ;;
     fix) modules=(js rs py dart obs markdown shell toml nix justfile) ;;
-    test) modules=(js rs py) ;;
+    ci-test) modules=(js rs py) ;;
 esac
 
 selected=()
@@ -163,11 +165,17 @@ files() {
     git ls-files -z --cached --others --exclude-standard -- "$@"
 }
 
+# `check` and `ci-check` share every lint; they differ in how rs compiles and
+# whether the tests run.
+verb=${action#ci-}
+
 for module in "${selected[@]}"; do
-    case "$action:$module" in
+    case "$verb:$module" in
         check:js) just js check ;;
         check:workers) just js workers ;;
-        check:rs) just rs check-changed "$rs_list" ;;
+        # `check` lints Rust through its test build, so the crates compile once;
+        # `ci-check` uses clippy, which is quicker when the tests run elsewhere.
+        check:rs) if [[ "$action" == check ]]; then just rs check-test-changed "$rs_list"; else just rs check-changed "$rs_list"; fi ;;
         check:bench) cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring ;;
         check:quest) cargo run --quiet --locked --package quest -- check ;;
         check:obs_compile) just obs compile ;;
@@ -188,7 +196,17 @@ for module in "${selected[@]}"; do
         fix:nix) files '*.nix' | xargs -0 nixfmt ;;
         fix:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --justfile ;;
         test:rs) just rs test-changed "$rs_list" ;;
-        *:shell) sh/shell.sh "$action" ;;
-        *) just "$module" "$action" ;;
+        *:shell) sh/shell.sh "$verb" ;;
+        *) just "$module" "$verb" ;;
     esac
 done
+
+# The rest of `check`'s tests. rs ran its own above, and the kt, swift, go, and
+# dart checks always run theirs.
+if [[ "$action" == check ]]; then
+    for module in "${selected[@]}"; do
+        case "$module" in
+            js | py) just "$module" test ;;
+        esac
+    done
+fi

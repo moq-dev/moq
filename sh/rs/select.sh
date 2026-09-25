@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Run `just rs check|fix|test` on the crates a diff touches, plus their dependents.
+# Run `just rs check|check-test|fix|test` on the crates a diff touches, plus
+# their dependents.
 #
-# Usage: sh/rs/select.sh check|fix|test LISTFILE|--all
+# Usage: sh/rs/select.sh check|check-test|fix|test LISTFILE|--all
 #
 # LISTFILE holds the changed paths, one per line. `--all` is the whole
 # workspace, as is a change to anything every crate is built or tested by.
 set -euo pipefail
 
-usage="usage: sh/rs/select.sh check|fix|test LISTFILE|--all"
+usage="usage: sh/rs/select.sh check|check-test|fix|test LISTFILE|--all"
 action=${1:?$usage}
 list=${2:?$usage}
 
@@ -85,9 +86,18 @@ wants() {
     [[ "$packages" == ALL ]] || grep -qwE "$1" <<<"$names"
 }
 
+# The media feature contract script is no crate, so its own diff selects
+# nothing and still has to reach the gate below.
+media_script=
+if [[ -f "$list" ]] && grep -qx 'sh/rs/media-features.sh' "$list"; then media_script=1; fi
+
 case "$packages" in
     "")
-        echo "rs: no crates affected; skipping."
+        if [[ "$action" == check* && -n "$media_script" ]]; then
+            just rs media-features
+        else
+            echo "rs: no crates affected; skipping."
+        fi
         exit 0
         ;;
     ALL) echo "rs: selecting the workspace" ;;
@@ -104,8 +114,8 @@ else
 fi
 
 case "$action" in
-    check)
-        just rs check "${flags[@]}"
+    check | check-test)
+        just rs "$action" "${flags[@]}"
         # Workspace feature unification hides a broken moq-tokio feature set
         # whenever any dependent enables a transport.
         if wants moq-tokio; then just rs tokio-features; fi
@@ -117,6 +127,8 @@ case "$action" in
         if wants '(moq-video|moq-audio)'; then just rs capture; fi
         # The relay's io_uring listener, off the default feature set.
         if wants moq-relay; then just rs uring-check; fi
+        # Each media feature shape compiles on its own, about two minutes.
+        if [[ -n "$media_script" ]] || wants '(moq-video|moq-audio|moq-transcode)'; then just rs media-features; fi
         ;;
     fix)
         just rs fix "${flags[@]}"
@@ -127,7 +139,6 @@ case "$action" in
         # nextest exits 4 on that; the whole workspace finding none really is wrong.
         [[ "$packages" == ALL ]] || flags+=(--no-tests=pass)
         just rs test "${flags[@]}"
-        if wants moq-relay; then just rs relay-minimal; fi
         ;;
     *)
         echo "$usage" >&2

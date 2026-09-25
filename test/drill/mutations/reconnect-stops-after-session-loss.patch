@@ -1,4 +1,4 @@
-# drill: relay_killed_mid_group_aborts_then_resumes
+# drill: relay_killed_mid_group_aborts_then_resumes::loopback
 # expect: subscriber: reconnect loop gave up
 #
 # Removes redialing after an established session is lost. The reconnect loop

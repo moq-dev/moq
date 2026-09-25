@@ -21,7 +21,7 @@ _develop:
     cd moq-ffi && uv run --no-sync maturin develop --locked --uv
     uv pip install --no-deps -e moq-rs
 
-# Lint + format + editable build + pyright + docs. `--no-install-workspace`
+# Lint + format + editable build + pyright + doc samples + docs. `--no-install-workspace`
 # installs the root dev group (ruff, maturin, pyright, pytest) without trying to
 # pip-build the workspace members; `_develop` then installs them editable, which
 # is also what `build` does, so there is no separate build gate here.
@@ -29,14 +29,19 @@ _develop:
 # `docs` runs here because a broken autodoc reference otherwise surfaces on Read
 # the Docs after the fact. It mocks the native module, so it costs no Rust build.
 
-# Lint, type-check, editable-build, and render the docs.
+# Lint, type-check, editable-build, check the doc samples, and render the docs.
 check:
     uv sync --locked --no-install-workspace
     uv run --no-sync ruff check .
     uv run --no-sync ruff format --check .
     just _develop
     uv run --no-sync pyright
+    just samples
     just docs
+
+# Type-check every Python sample in the docs against the installed wrapper.
+samples:
+    ../sh/py/samples.sh
 
 # Auto-fix lint and formatting issues.
 fix:

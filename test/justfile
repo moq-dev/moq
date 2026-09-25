@@ -1,30 +1,21 @@
 #!/usr/bin/env just --justfile
 #
-# Tests that span more than one language. Per-language unit tests live in each
-# language's own justfile; this module aggregates them.
+# Tests that span more than one language or need a live relay. Unit tests run
+# in the root `just check`.
 #
 # Two cross-language interop tests exist:
 #   - https://github.com/moq-dev/smoke installs each client from its PUBLIC
 #     package registry to catch packaging breakage in a release.
 #   - `just test interop` (interop/, below) builds every client from THIS checkout
 #     to catch interop regressions before anything is published.
-# Fall back to the root justfile so `just rs test` resolves from here.
+# Fall back to the root justfile so `just rs test` (etc.) resolve from here.
 
 set fallback
 set working-directory := '.'
 
-# The `check` sibling: same diff scoping, same BASE resolution, and what CI runs
-# after `just check`. Only js/rs/py have tests to scope; the kt, swift, and go
-# wrappers test inside their `check`. BASE has to be passed as `just test
-# default origin/dev`: a bare `just test origin/dev` names a recipe.
-
-# Run unit tests for what the branch changed since BASE, plus its dependents.
-default $BASE="":
-    ../sh/dispatch.sh test "$BASE"
-
-# Run every language's unit tests, unscoped.
-all:
-    ../sh/dispatch.sh test --all
+# List the cross-language suites.
+default:
+    @just --justfile {{ justfile() }} --list test
 
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
@@ -52,7 +43,7 @@ media *args:
 
 # Disrupts a real relay over real QUIC three ways: cancel a stalled reader, kill
 # the relay mid-group, and republish an interrupted publisher's name. Ordinary
-# tests, so `just test` runs them whenever moq-relay is selected; this is the
+# tests, so `just check` runs them whenever moq-relay is selected; this is the
 # focused loop. Takes a filter, e.g. `just test drill relay_killed`. Includes the
 # no-publisher negative control. See drill/README.md.
 
