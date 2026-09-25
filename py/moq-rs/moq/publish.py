@@ -92,6 +92,14 @@ class MediaProducer:
         """Write one encoded frame with a presentation timestamp in microseconds."""
         self._inner.write_frame(Frame(payload=payload, timestamp_us=timestamp_us))
 
+    def flush(self, timestamp_us: int) -> None:
+        """Record a local encoder's frame handoff on the broadcast media clock.
+
+        Call this after ``write_frame`` only for encoded live output. File, pipe,
+        and network imports should leave their jitter estimate clock free.
+        """
+        self._inner.flush(timestamp_us)
+
     def cut(self) -> None:
         """Draw a group boundary here.
 

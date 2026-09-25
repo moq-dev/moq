@@ -5,6 +5,7 @@ import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import { RenditionJitter } from "../jitter";
 import type { AudioFrame, Capture, Format } from "./capture";
 import { Gain } from "./gain";
 import { Resampler } from "./resampler";
@@ -168,6 +169,7 @@ export class Encoder {
 	#fatal = new Signal<Error | undefined>(undefined);
 
 	#signals = new Effect();
+	#jitter = new RenditionJitter();
 
 	constructor(name: string, props?: EncoderProps) {
 		// `source` moved to Audio.Capture, which renditions share. TypeScript catches this, but a
@@ -345,7 +347,10 @@ export class Encoder {
 
 		const decoder = effect.get(this.#decoderDescription);
 		const catalog = decoder?.config === config ? { ...config, description: decoder.description } : config;
-		effect.set(this.#out.catalog, catalog);
+		effect.set(this.#out.catalog, {
+			...catalog,
+			jitter: this.#jitter.current ? Catalog.u53(this.#jitter.current) : undefined,
+		});
 	}
 
 	// Collect the encode-only Opus knobs that are set, reading the codec through the effect so the
@@ -417,6 +422,11 @@ export class Encoder {
 							payload: Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro),
 							timestamp: Time.Timestamp.fromMicros(frame.timestamp as Time.Micro),
 						});
+						const jitter = this.#jitter.observe(frame.timestamp);
+						if (jitter !== undefined) {
+							const catalog = this.#out.catalog.peek();
+							if (catalog) this.#out.catalog.set({ ...catalog, jitter: Catalog.u53(jitter) });
+						}
 					},
 					error: (err) => {
 						console.error("encoder error", err);
@@ -542,8 +552,6 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 				container: { kind: "legacy" } as const,
 				// Frames are raw (no ADTS header), so the decoder needs the AudioSpecificConfig to init.
 				description: Util.Hex.fromBytes(Util.Aac.audioSpecificConfig(rate, captured.channelCount)),
-				// Each AAC-LC frame is 1024 samples; report that duration as the jitter hint.
-				jitter: Catalog.u53(Math.ceil((AAC_FRAME_SAMPLES / rate) * 1000)),
 			},
 		};
 	}
@@ -562,9 +570,6 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 			numberOfChannels,
 			bitrate: Catalog.u53(codec.bitrate ?? captured.channelCount * OPUS_BITRATE_PER_CHANNEL),
 			container: { kind: "legacy" } as const,
-			// jitter is an integer upper bound on how long a decoder waits for the next frame, so a
-			// 2.5ms Opus frame rounds up to 3 rather than down. The encoder uses the exact value.
-			jitter: Catalog.u53(Math.ceil(frameDuration)),
 		},
 		frameDuration: Time.Micro.fromMilli(frameDuration),
 	};

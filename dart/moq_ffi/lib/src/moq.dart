@@ -6577,6 +6577,7 @@ abstract class MoqMediaProducerInterface {
   void cut();
   MoqTrackDemand demand();
   void finish();
+  void flush({required int timestampUs});
   String name();
   void seek({required int sequence});
   Future<void> unused();
@@ -6631,6 +6632,16 @@ class MoqMediaProducer implements MoqMediaProducerInterface {
     return rustCall((status) {
       uniffi_moq_ffi_fn_method_moqmediaproducer_finish(
         uniffiClonePointer(),
+        status,
+      );
+    }, moqExceptionErrorHandler);
+  }
+
+  void flush({required int timestampUs}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqmediaproducer_flush(
+        uniffiClonePointer(),
+        FfiConverterUInt64.lower(timestampUs),
         status,
       );
     }, moqExceptionErrorHandler);
@@ -10516,6 +10527,15 @@ external void uniffi_moq_ffi_fn_method_moqmediaproducer_finish(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Void Function(Pointer<Void>, Uint64, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqmediaproducer_flush(
+  Pointer<Void> ptr,
+  int timestamp_us,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -11880,6 +11900,9 @@ external int uniffi_moq_ffi_checksum_method_moqmediaproducer_demand();
 external int uniffi_moq_ffi_checksum_method_moqmediaproducer_finish();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqmediaproducer_flush();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqmediaproducer_name();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -12451,6 +12474,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediaproducer_finish() != 38480) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqmediaproducer_flush() != 10235) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediaproducer_name() != 7199) {

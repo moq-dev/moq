@@ -1,5 +1,4 @@
 import { describe, expect, mock, test } from "bun:test";
-import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
@@ -22,14 +21,14 @@ describe("resolve", () => {
 	test("defaults Opus to 20ms", () => {
 		const resolved = resolve(captured, "opus");
 		expect(resolved.frameDuration).toBe(Time.Micro(20_000));
-		expect(resolved.catalog.jitter).toBe(Catalog.u53(20));
+		expect(resolved.catalog.jitter).toBeUndefined();
 	});
 
-	// The exact frame duration is independent of the catalog's whole-millisecond jitter hint.
-	test("keeps a 2.5ms Opus frame exact and rounds the catalog hint up", () => {
+	// The exact frame duration does not imply encoder flush lateness.
+	test("keeps a 2.5ms Opus frame exact without a catalog hint", () => {
 		const resolved = resolve(captured, { mime: "opus", frameDuration: Time.Milli(2.5) });
 		expect(resolved.frameDuration).toBe(Time.Micro(2_500));
-		expect(resolved.catalog.jitter).toBe(Catalog.u53(3));
+		expect(resolved.catalog.jitter).toBeUndefined();
 	});
 
 	test("carries every Opus frame duration", () => {
@@ -51,7 +50,7 @@ describe("resolve", () => {
 	test("leaves AAC without a frame duration", () => {
 		const resolved = resolve(captured, "aac");
 		expect(resolved.frameDuration).toBeUndefined();
-		expect(resolved.catalog.jitter).toBe(Catalog.u53(Math.ceil((1024 / 48_000) * 1000)));
+		expect(resolved.catalog.jitter).toBeUndefined();
 	});
 });
 

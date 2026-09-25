@@ -30,7 +30,7 @@ import {
 	SubscribeNamespaceEntryDone,
 	SubscribeNamespaceOk,
 } from "./subscribe_namespace.ts";
-import { TrackStatus, type TrackStatusRequest } from "./track.ts";
+import type { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** First wait before re-offering a namespace the peer refused or we couldn't open for. */
@@ -325,7 +325,7 @@ export class Publisher {
 					? // Declaring the timescale is what opts the track into timestamps; every
 						// object Timestamp below is in these units. We serve the newest group
 						// first, matching moq-lite.
-						{ timescale, groupOrder: Properties.DESCENDING }
+						{ timescale, priority: publisherPriority, groupOrder: Properties.DESCENDING }
 					: // INCLUDE_PROPERTIES=0. The block stays present but empty, which also means
 						// the track opts out of timestamps for this subscriber.
 						{},
@@ -1063,25 +1063,22 @@ export class Publisher {
 	 */
 	async runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream) {
 		const version = this.#session.version;
-
+		const errorCode = toRequestCode("not_supported", "track_status", version);
 		if (version === Version.DRAFT_14) {
-			// v14: respond with TrackStatus (0x0E = TRACK_STATUS_OK)
-			await stream.writer.u53(TrackStatus.id);
-			const status = new TrackStatus({
-				trackNamespace: msg.trackNamespace,
-				trackName: msg.trackName,
-				statusCode: TrackStatus.STATUS_NOT_FOUND,
-				lastGroupId: 0n,
-				lastObjectId: 0n,
-			});
-			await status.encode(stream.writer, version);
+			// TRACK_STATUS_ERROR shares the SUBSCRIBE_ERROR body on draft-14.
+			await stream.writer.u53(0x0f);
+			await new SubscribeError({
+				requestId: msg.requestId,
+				errorCode,
+				reasonPhrase: "TRACK_STATUS is not supported",
+			}).encode(stream.writer, version);
 		} else {
-			// v15+: respond with RequestOk (0x07)
-			await stream.writer.u53(RequestOk.id);
-			const ok = new RequestOk({
+			await stream.writer.u53(RequestError.id);
+			await new RequestError({
 				requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
-			});
-			await ok.encode(stream.writer, version);
+				errorCode,
+				reasonPhrase: "TRACK_STATUS is not supported",
+			}).encode(stream.writer, version);
 		}
 		stream.close();
 	}

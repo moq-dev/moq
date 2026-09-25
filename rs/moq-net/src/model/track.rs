@@ -149,6 +149,9 @@ pub(crate) struct TrackState {
 	// Whether a live Producer was minted. A reverse fetch may install `info`
 	// before acceptance, so the two states are deliberately separate.
 	published: bool,
+	// Whether a dynamic handler took the request. Its answer is the handler's call,
+	// so ending the broadcast leaves it pending rather than rejecting it.
+	claimed: bool,
 
 	// The broadcast this track belongs to. Supplies the cache pool its groups charge
 	// into and the `cache_duration` ceiling clamping `Info::max_age`.
@@ -1127,6 +1130,11 @@ pub struct Producer {
 }
 
 impl Producer {
+	/// The immutable publisher priority committed when this track was accepted.
+	pub(crate) fn publisher_priority(&self) -> u8 {
+		self.info.priority
+	}
+
 	/// Build a producer for the given track metadata.
 	///
 	/// Crate-private: tracks are born from their broadcast via
@@ -1987,7 +1995,7 @@ impl TrackWeak {
 	/// Reject a track nothing ever served, resolving its pending subscribes with `err`.
 	///
 	/// A track whose [`Producer`] was minted is left alone and this returns false;
-	/// so is one that already carries an abort reason. Fetched backfill can install
+	/// so is one a handler claimed, and one that already carries an abort reason. Fetched backfill can install
 	/// [`Info`] before acceptance, so metadata alone does not prove a publisher exists.
 	///
 	/// Closes the state like [`Producer::abort`], so a [`Request`] still held by the
@@ -1999,7 +2007,7 @@ impl TrackWeak {
 		let Ok(mut state) = producer.write() else {
 			return false;
 		};
-		if state.published || state.abort.is_some() {
+		if state.published || state.claimed || state.abort.is_some() {
 			return false;
 		}
 		state.abort = Some(err);
@@ -3947,6 +3955,28 @@ impl Request {
 	/// stop serving and drop the request.
 	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state.poll_unused(waiter).map(|_| ())
+	}
+
+	/// Mark this request as taken by a dynamic handler, which alone decides its answer.
+	pub(crate) fn claim(self) -> Self {
+		if let Ok(mut state) = self.state.write() {
+			state.claimed = true;
+		}
+		self
+	}
+
+	/// Reject only while no consumer needs this pending track. Demand and the check
+	/// share one lock, so demand returning after `poll_unused` wins the race, and the
+	/// close under that lock stops a later consumer attaching to a dead request.
+	pub(crate) fn reject_unused(&self, err: Error) -> bool {
+		match self.state.write_unused() {
+			kio::Unused::Idle(guard) => {
+				commit_abort(guard, err);
+				true
+			}
+			kio::Unused::Closed => true,
+			kio::Unused::Used => false,
+		}
 	}
 
 	/// Serve the request with the given track, resolving every waiting subscriber.
