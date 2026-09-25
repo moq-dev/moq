@@ -61,7 +61,6 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive by deadline](/quest/m2/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer
 - [noq socket close](/quest/m2/noq-socket-close.md) - noq releases an endpoint's socket on close, so moq-tokio drops its wrapper
-- [Bounded announce prefix table](/quest/m2/announce-prefix-table.md) - compress repeated path tuples on each ordered lite-08 announce stream, with bounded state and measured QUIC-byte savings
 - [Drop the hidden cluster exemption](/quest/m2/hidden-exemption.md) - relays stop forcing hidden broadcasts on cluster peers once every peer opts in on the wire
 - [Routing cost domains](/quest/m2/routing-cost-domains.md) - design operator boundaries and policy without adding incomparable costs
 - [Kernel pacing](/quest/m2/quic-kernel-pacing.md) - whether SO_TXTIME pacing beats a userspace pacer the io_uring driver ignores today

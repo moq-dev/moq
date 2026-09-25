@@ -23,8 +23,6 @@ fallback settings. moq.pro's Python sidecar reads route sources from here.
 ## Required
 
 - Native decode delay (#3967) has merged
-- Route source (#3972) has merged
-- moq-ffi WebSocket fallback settings (#3961) have merged
 
 ## Related
 
