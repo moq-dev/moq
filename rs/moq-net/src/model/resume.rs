@@ -27,6 +27,7 @@ use std::ops::Bound;
 use std::task::{Poll, ready};
 
 use crate::{Datagram, Error, Result, frame, group, track};
+use track::{Anchor, LiveEdge};
 
 use super::subscription::{Cap, Position, Subscription, max_some, min_some};
 
@@ -194,6 +195,20 @@ impl ResumeState {
 			0 => position.group.checked_sub(1),
 			_ => Some(position.group),
 		}
+	}
+
+	/// The newest live edge across the segments below the exclusive `cap`, each clamped
+	/// to its own range: the edge the logical track measures drift against.
+	fn live_edge(&self, cap: Option<u64>) -> Option<LiveEdge> {
+		self.segments
+			.iter()
+			.filter_map(|segment| {
+				let edge = segment.track.live_edge(min_some(cap, last_group(segment.end)))?;
+				// Out-of-range content below the segment is not its to serve.
+				let start = segment.start.map_or(0, |start| start.group);
+				(edge.sequence >= start).then_some(edge)
+			})
+			.max_by_key(|edge| edge.sequence)
 	}
 
 	/// Append a segment serving the track from `start` onward, capping (or replacing)
@@ -530,8 +545,8 @@ impl Consumer {
 			next_sequence: 0,
 			min_sequence: 0,
 			end_sequence: None,
-			stale_cap: None,
-			drift_cap: kio::Producer::new(None),
+			outer: Anchor::default(),
+			drift_anchor: kio::Producer::new(Anchor::default()),
 		}
 	}
 
@@ -596,6 +611,11 @@ impl Consumer {
 	/// logical track over would resume.
 	pub(crate) fn resume_position(&self) -> Option<Position> {
 		self.state.read().resume_position()
+	}
+
+	/// The newest live edge across the segments; see [`track::Consumer::live_edge`].
+	pub(crate) fn live_edge(&self, cap: Option<u64>) -> Option<LiveEdge> {
+		self.state.read().live_edge(cap)
 	}
 
 	/// The newest cached group across every spliced segment; see
@@ -804,8 +824,8 @@ pub(crate) struct Group {
 	state: kio::Consumer<ResumeState>,
 	/// The logical subscription's live max age budget.
 	subscription: kio::Consumer<Subscription>,
-	/// The logical reader's group cap, used only to bound each route's drift anchor.
-	cap: kio::Consumer<Option<u64>>,
+	/// The logical reader's drift anchor, used only to judge each route's copy.
+	anchor: kio::Consumer<Anchor>,
 
 	/// The logical group being assembled.
 	sequence: u64,
@@ -860,7 +880,7 @@ impl Clone for Group {
 		Self {
 			state: self.state.clone(),
 			subscription: self.subscription.clone(),
-			cap: self.cap.clone(),
+			anchor: self.anchor.clone(),
 			sequence: self.sequence,
 			index: self.index,
 			end: self.end,
@@ -875,14 +895,14 @@ impl Group {
 	fn new(
 		state: kio::Consumer<ResumeState>,
 		subscription: kio::Consumer<Subscription>,
-		cap: kio::Consumer<Option<u64>>,
+		anchor: kio::Consumer<Anchor>,
 		sequence: u64,
 		index: u64,
 	) -> Self {
 		Self {
 			state,
 			subscription,
-			cap,
+			anchor,
 			sequence,
 			index,
 			end: None,
@@ -1075,7 +1095,7 @@ impl Group {
 			// `start_at` clamps up to the first frame the copy still holds, so landing
 			// higher than asked means this route can't cover the seam after all. Treat it
 			// like a dead copy and wait for one that can.
-			let mut group = track.guard_group(group, self.subscription.clone(), self.cap.clone(), bound);
+			let mut group = track.guard_group(group, self.subscription.clone(), self.anchor.clone(), bound);
 			group.set_stale_meter(self.stale_stats.clone());
 			group.start_at(self.index);
 			if group.index() != self.index {
@@ -1234,7 +1254,7 @@ impl Group {
 				// already includes the frames it skipped.
 				Some(continuation) => {
 					let mut continuation =
-						track.guard_group(continuation, self.subscription.clone(), self.cap.clone(), bound);
+						track.guard_group(continuation, self.subscription.clone(), self.anchor.clone(), bound);
 					continuation.set_stale_meter(self.stale_stats.clone());
 					return continuation.poll_finished(waiter);
 				}
@@ -1364,14 +1384,15 @@ pub struct Subscriber {
 	min_sequence: u64,
 	/// Exclusive cap for [`Self::next_group`], set by [`Self::end_at`].
 	end_sequence: Option<u64>,
-	/// A cap imposed by a reader wrapping this subscriber (a nested splice segment),
-	/// folded into every drift anchor pushed onto the segments. Never bounds delivery:
-	/// the outer reader enforces its own window, and an inner cap would hide a
-	/// segment's completion from it.
-	stale_cap: Option<u64>,
-	/// Shared copy of the effective cap ([`Self::end_sequence`] and [`Self::stale_cap`]
-	/// combined) for groups that outlive this cursor poll.
-	drift_cap: kio::Producer<Option<u64>>,
+	/// The anchor imposed by a reader wrapping this subscriber (a nested splice
+	/// segment), folded into every drift anchor pushed onto the segments. Its cap never
+	/// bounds delivery: the outer reader enforces its own window, and an inner cap would
+	/// hide a segment's completion from it.
+	outer: Anchor,
+	/// The logical drift anchor ([`Self::end_sequence`] and [`Self::outer`] combined,
+	/// with the newest edge across the segments), shared with groups that outlive this
+	/// cursor poll. Refreshed on every [`Self::poll_sync`].
+	drift_anchor: kio::Producer<Anchor>,
 }
 
 impl Subscriber {
@@ -1380,6 +1401,7 @@ impl Subscriber {
 	fn poll_sync(&mut self, waiter: &kio::Waiter) {
 		self.sync(waiter);
 		self.reap();
+		self.refresh_anchor();
 	}
 
 	/// Reap retired cursors, then bound the live stragglers: a pruned segment's
@@ -1498,16 +1520,14 @@ impl Subscriber {
 		}
 		self.segments.retain(|s| !s.retired());
 
-		let anchor = self.anchor_end();
 		for segment in segments {
 			match self.segments.iter_mut().find(|s| s.id == segment.id) {
 				Some(existing) => {
 					if existing.end != segment.end {
+						// The boundary bounds the drift anchor as well as the demand; the
+						// anchor follows in `refresh_anchor`.
 						existing.end = segment.end;
-						let cap = Self::stale_cap(existing, anchor);
 						if let Some(sub) = existing.stale_sub_mut() {
-							// The boundary bounds the drift anchor as well as the demand.
-							sub.set_stale_cap(cap);
 							// Shrink the demand so the session can cap upstream. The
 							// read bounds stay on this subscriber (see `poll_recv_group`):
 							// an inner `end_at` would park boundary-crossing groups in the
@@ -1559,7 +1579,7 @@ impl Subscriber {
 		let spliced = Group::new(
 			self.state.clone(),
 			self.prefs.consume(),
-			self.drift_cap.consume(),
+			self.drift_anchor.consume(),
 			sequence,
 			0,
 		)
@@ -1567,39 +1587,64 @@ impl Subscriber {
 		Some(group.into_spliced(spliced))
 	}
 
-	/// The highest sequence a segment could hand its reader: the reader's own cap and
-	/// the segment's boundary, whichever is lower.
+	/// The anchor a segment's cursor measures drift against: the logical `anchor`, with
+	/// its cap lowered to the segment's boundary.
 	///
 	/// A segment's inner cursor is deliberately left uncapped (an inner `end_at` would
 	/// park boundary-crossing groups where its completion can't be seen), so this is how
 	/// both bounds reach the drift anchor. Without them a segment measures staleness
 	/// against groups it will never surface: the route running past the boundary, or the
-	/// reader's own cap holding content back. `anchor_end` is [`Self::anchor_end`], so a
-	/// cap imposed on this subscriber from outside is included.
-	fn stale_cap(seg: &SegmentSub, anchor_end: Option<u64>) -> Option<u64> {
-		min_some(anchor_end, seg.last_group())
+	/// reader's own cap holding content back. The edge is left as is: it is the newest
+	/// content the logical track holds, which a segment's own track never sees.
+	fn segment_anchor(seg: &SegmentSub, anchor: Anchor) -> Anchor {
+		Anchor {
+			cap: min_some(anchor.cap, seg.last_group()),
+			..anchor
+		}
 	}
 
-	/// The tightest cap any reader of this subscriber imposes: its own [`Self::end_at`]
-	/// and whatever a wrapping splice pushed down. What every segment's drift anchor is
-	/// bounded by.
-	fn anchor_end(&self) -> Option<u64> {
-		min_some(self.stale_cap, self.end_sequence)
+	/// The logical drift anchor, as of the last [`Self::refresh_anchor`].
+	fn anchor(&self) -> Anchor {
+		*self.drift_anchor.read()
+	}
+
+	/// Re-derive the logical drift anchor and push it onto every segment cursor.
+	///
+	/// The cap is the tightest any reader of this subscriber imposes: its own
+	/// [`Self::end_at`] and whatever a wrapping splice pushed down. The edge is the
+	/// newest across the producer's segments within that cap, or a wrapping splice's if
+	/// newer. Resolved on every sync, since each segment is a separate track and the
+	/// logical edge moves whenever any of them grows.
+	fn refresh_anchor(&mut self) {
+		let cap = min_some(self.outer.cap, self.end_sequence);
+		let edge = self
+			.state
+			.read()
+			.live_edge(cap)
+			.into_iter()
+			.chain(self.outer.edge)
+			.max_by_key(|edge| edge.sequence);
+		let anchor = Anchor { cap, edge };
+		// Skip a no-op write: every handed-out group's expiry watches this channel.
+		if self.anchor() != anchor
+			&& let Ok(mut current) = self.drift_anchor.write()
+		{
+			*current = anchor;
+		}
+		for seg in &mut self.segments {
+			let anchor = Self::segment_anchor(seg, anchor);
+			if let Some(sub) = seg.stale_sub_mut() {
+				sub.set_anchor(anchor);
+			}
+		}
 	}
 
 	/// Bound every segment's drift anchor from outside; the spliced arm of
-	/// [`track::Subscriber::set_stale_cap`], for this subscriber nested as a segment of
+	/// [`track::Subscriber::set_anchor`], for this subscriber nested as a segment of
 	/// another splice.
-	pub(crate) fn set_stale_cap(&mut self, cap: Option<u64>) {
-		self.stale_cap = cap;
-		self.update_drift_cap();
-		let anchor = self.anchor_end();
-		for seg in &mut self.segments {
-			let cap = Self::stale_cap(seg, anchor);
-			if let Some(sub) = seg.stale_sub_mut() {
-				sub.set_stale_cap(cap);
-			}
-		}
+	pub(crate) fn set_anchor(&mut self, anchor: Anchor) {
+		self.outer = anchor;
+		self.refresh_anchor();
 	}
 
 	/// Count each segment's seek convictions behind the deliverer's `committed`
@@ -1640,13 +1685,6 @@ impl Subscriber {
 		Poll::Ready(Ok(false))
 	}
 
-	/// Publish the effective cap for groups that outlive this cursor poll.
-	fn update_drift_cap(&mut self) {
-		if let Ok(mut cap) = self.drift_cap.write() {
-			*cap = self.anchor_end();
-		}
-	}
-
 	/// Resolve a segment's pending subscription, if any. Ready once the segment is
 	/// `Active` or `Done`; a rejected or closed track becomes `Done` (stall, not
 	/// error). Never consumes groups, so terminal-state pollers can share it.
@@ -1654,7 +1692,7 @@ impl Subscriber {
 		seg: &mut SegmentSub,
 		prefs: &Subscription,
 		min_sequence: u64,
-		anchor_end: Option<u64>,
+		anchor: Anchor,
 		waiter: &kio::Waiter,
 	) -> Poll<()> {
 		if let SubState::Pending(pending) = &mut seg.sub {
@@ -1668,7 +1706,7 @@ impl Subscriber {
 					// assigned: the inner subscription resolved its own start from its
 					// budget and floor, and this must not rewind past it.
 					sub.raise_start_to(seg.first_group().max(min_sequence));
-					sub.set_stale_cap(Self::stale_cap(seg, anchor_end));
+					sub.set_anchor(Self::segment_anchor(seg, anchor));
 					let _ = sub.update(slice(prefs, seg.start, seg.end));
 					seg.sub = SubState::Active(Box::new(sub));
 				}
@@ -1685,13 +1723,13 @@ impl Subscriber {
 		seg: &mut SegmentSub,
 		prefs: &Subscription,
 		min_sequence: u64,
-		anchor_end: Option<u64>,
+		anchor: Anchor,
 		waiter: &kio::Waiter,
 	) -> Poll<Option<group::Consumer>> {
 		loop {
 			match &mut seg.sub {
 				SubState::Pending(_) => {
-					ready!(Self::poll_activate(seg, prefs, min_sequence, anchor_end, waiter));
+					ready!(Self::poll_activate(seg, prefs, min_sequence, anchor, waiter));
 				}
 				SubState::Active(sub) => match ready!(sub.poll_recv_group(waiter)) {
 					Ok(Some(group)) => {
@@ -1757,7 +1795,7 @@ impl Subscriber {
 			self.commit_seek_stale(committed);
 		}
 
-		let anchor = self.anchor_end();
+		let anchor = self.anchor();
 		let mut floor = floor;
 		'retry: loop {
 			let mut all_done = true;
@@ -1864,7 +1902,7 @@ impl Subscriber {
 		self.poll_sync(waiter);
 
 		let end_sequence = self.end_sequence;
-		let anchor = self.anchor_end();
+		let anchor = self.anchor();
 		let min_sequence = self.min_sequence;
 		let beyond_cap = |sequence: u64| !super::subscription::before_end(sequence, end_sequence);
 
@@ -2040,7 +2078,7 @@ impl Subscriber {
 		// datagrams must still resolve the subscription (registering demand) and
 		// be woken when it activates.
 		let mut pending_activation = false;
-		let anchor = self.anchor_end();
+		let anchor = self.anchor();
 		if let Some(seg) = self.segments.last_mut() {
 			if Self::poll_activate(seg, &self.last_prefs, self.min_sequence, anchor, waiter).is_pending() {
 				pending_activation = true;
@@ -2101,7 +2139,7 @@ impl Subscriber {
 	/// completing the segment, would steal them from a `recv_group` caller on the
 	/// same subscriber.
 	fn poll_final(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
-		let anchor = min_some(self.stale_cap, self.end_sequence);
+		let anchor = self.anchor();
 		let Some(seg) = self.segments.last_mut() else {
 			return Poll::Ready(None);
 		};
@@ -2167,16 +2205,9 @@ impl Subscriber {
 	/// re-offers it.
 	pub fn end_at(&mut self, end: impl Into<Cap>) {
 		self.end_sequence = end.into().exclusive();
-		self.update_drift_cap();
 		// The cap bounds each segment's drift anchor as well as this reader's own
 		// delivery: a segment must not measure against groups this cap hides.
-		let anchor = self.anchor_end();
-		for seg in &mut self.segments {
-			let cap = Self::stale_cap(seg, anchor);
-			if let Some(sub) = seg.stale_sub_mut() {
-				sub.set_stale_cap(cap);
-			}
-		}
+		self.refresh_anchor();
 	}
 
 	/// The shared preferences channel, so `track::Control` can wrap it.
@@ -3024,9 +3055,11 @@ mod test {
 			"the arrival path skips straight to the live edge"
 		);
 
-		// Spliced: the same backlog split across a takeover boundary.
-		let (mut track_a, consumer_a) = track_pair("a");
-		let (mut track_b, consumer_b) = track_pair("b");
+		// Spliced: the same backlog split across a takeover boundary. Retained long
+		// enough that the replay budget below is not clamped to the default window.
+		let retain = track::Info::default().with_max_age(Duration::from_secs(60));
+		let (mut track_a, consumer_a) = track_pair_with("a", retain.clone());
+		let (mut track_b, consumer_b) = track_pair_with("b", retain);
 		let mut producer = Producer::new();
 		producer.switch(&consumer_a, None).unwrap();
 		producer.switch(&consumer_b, Position::group(2)).unwrap();
@@ -3045,11 +3078,12 @@ mod test {
 		})
 		.collect();
 
-		// Group 1 survives where the plain cursor drops it: each segment measures drift
-		// against its own boundary, since a segment cannot serve content past it, and
-		// group 1 is the newest thing segment A has. The sequence path inherits that
-		// from the arrival path rather than inventing its own anchor, so the two agree.
-		assert_eq!(spliced, vec![1, 3], "each segment is judged within its own boundary");
+		// Group 1 survives where the plain cursor drops it: every segment measures
+		// against the logical edge (group 3), but a group's reach is bounded only by a
+		// successor in its own track, and group 1's lives in segment B. The sequence
+		// path inherits that from the arrival path rather than inventing its own
+		// anchor, so the two agree.
+		assert_eq!(spliced, vec![1, 3], "each segment is judged against the logical edge");
 
 		let mut arrival = producer.consume().subscribe(None);
 		let arrival: Vec<u64> = std::iter::from_fn(|| {
@@ -3075,9 +3109,50 @@ mod test {
 		assert_eq!(replayed, vec![0, 1, 2, 3], "a backlog inside the budget crosses whole");
 	}
 
+	/// A segment's track never sees the groups of the segments after it, so its own
+	/// edge freezes once a takeover caps it. Both spliced cursors judge its backlog
+	/// against the logical edge instead, the one a single track would have.
+	#[tokio::test]
+	async fn a_capped_segment_is_judged_against_the_newest_segment() {
+		let budget = Subscription::default().with_max_age(Duration::from_millis(100));
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		producer.switch(&consumer_b, Position::group(4)).unwrap();
+		for (sequence, millis) in [(0, 0), (1, 20), (2, 40), (3, 60)] {
+			write_group_at(&mut track_a, sequence, "a", Duration::from_millis(millis));
+		}
+		for (sequence, millis) in [(20, 400), (21, 420), (22, 440)] {
+			write_group_at(&mut track_b, sequence, "b", Duration::from_millis(millis));
+		}
+
+		// Groups 0..=2 reach at most 60ms against an edge at 440ms. Group 3 stays: its
+		// successor lives in segment B, so nothing in its own track bounds its reach.
+		let mut arrival = producer.consume().subscribe(budget.clone());
+		let arrival: Vec<u64> = std::iter::from_fn(|| {
+			kio::wait(|waiter| arrival.poll_recv_group(waiter))
+				.now_or_never()?
+				.expect("should not error")
+				.map(|group| group.sequence)
+		})
+		.collect();
+		assert_eq!(arrival, vec![3, 20, 21, 22]);
+
+		let mut ordered = producer.consume().subscribe(budget);
+		let ordered: Vec<u64> = std::iter::from_fn(|| {
+			kio::wait(|waiter| ordered.poll_next_group(waiter))
+				.now_or_never()?
+				.expect("should not error")
+				.map(|group| group.sequence)
+		})
+		.collect();
+		assert_eq!(ordered, arrival);
+	}
+
 	/// A nested splice's leaves are judged within the *outer* boundary. The outer
 	/// window reaches them two ways, through the seek's own `end` and through
-	/// [`track::Subscriber::set_stale_cap`] recursing into the spliced segment; without
+	/// [`track::Subscriber::set_anchor`] recursing into the spliced segment; without
 	/// either, a leaf anchors drift on a group past the outer boundary and convicts
 	/// everything the outer segment still owes its reader.
 	#[tokio::test]
