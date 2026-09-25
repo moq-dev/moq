@@ -18,6 +18,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [AV1 metadata separation](/quest/m2/av1-metadata.md) - retain metadata OBUs inline while evaluating separate delivery
 - [SEI separation](/quest/m2/sei/README.md) - retain inline SEI until measured savings or a metadata-only consumer justify a split
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - compare immutable track definitions with explicit catalog-to-group binding
+- [Archive S3 wire proof](/quest/m2/archive-s3.md) - the archive proof also runs through the S3 client against an in-process S3-compatible server
 - [Mobile ownership](/quest/m2/mobile-ownership.md) - decide whether Rust or platform code owns mobile capture, codecs, and rendering
 - [iOS capture](/quest/m2/mobile-capture-ios.md) - camera and screen capture if the mobile ownership decision selects Rust
 - [Android capture](/quest/m2/mobile-capture-android.md) - NDK/JNI capture using the existing codecs if mobile ownership selects Rust
