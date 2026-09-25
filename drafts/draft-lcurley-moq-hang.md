@@ -519,7 +519,7 @@ A publisher MUST NOT lower a previously advertised value, since a burst it emitt
 For example:
 
 - A frame flushed without extra delay contributes no `jitter`, regardless of frame rate.
-- A video encoder that consistently flushes 200 milliseconds later than an audio encoder contributes 200 milliseconds to its video rendition.
+- An encoder that consistently flushes 200 milliseconds late contributes no `jitter`; only variation above its own minimum counts.
 - A fragment or packet batch contributes the media span between its earliest timestamp and flush point.
 - Reordered frames contribute the delay they were held before flushing, without treating a decode-order presentation timestamp gap as delay by itself.
 
@@ -1058,7 +1058,7 @@ This document has no IANA actions.
 ## moq-hang-03
 {:numbered="false"}
 
-- Defined encoder `jitter` from flush lateness against a recent broadcast-wide minimum, replacing fixed frame-duration hints; container batches retain media-span estimates.
+- Defined encoder `jitter` as flush lateness above the rendition's own recent minimum, replacing fixed frame-duration hints; container batches retain media-span estimates.
 - Clarified that CMAF audio samples are sync samples independently of publisher group boundaries.
 - Clarified that container importers can estimate jitter from batch media spans without measuring input wait time.
 - Specified the `jitter` field's computation: the publisher's own structure rather than the network, rounded up to whole milliseconds, never `0` (a consumer treats `0` as absent), and never lowered once advertised.

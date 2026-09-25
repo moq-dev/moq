@@ -110,10 +110,11 @@ impl Estimator {
 		self.bitrate.cut(end.map(nanos));
 	}
 
-	/// Discard the open bitrate span, so nothing is measured across a break in the
-	/// timeline. See [`container::Producer::discontinuity`](crate::container::Producer::discontinuity).
+	/// Discard the open bitrate span and the flush baseline, so nothing is measured across a break
+	/// in the timeline. See [`container::Producer::discontinuity`](crate::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) {
 		self.bitrate.discontinuity();
+		self.baseline = Baseline::default();
 	}
 
 	/// Observe a frame's reorder delay (`PTS - DTS`), which raises the jitter to the decode buffer a
@@ -335,6 +336,21 @@ mod tests {
 		estimator.flush(micros(0), anchor + Duration::from_millis(200));
 		estimator.flush(micros(240_000), anchor + Duration::from_millis(440));
 		assert_eq!(estimator.estimate().jitter, None);
+	}
+
+	#[test]
+	fn discontinuity_resets_the_flush_baseline() {
+		let mut estimator = Estimator::new();
+		let anchor = Instant::now();
+		estimator.flush(micros(0), anchor);
+		estimator.flush(micros(40_000), anchor + Duration::from_millis(50));
+		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(10)));
+
+		// Resumed at the previous live edge after a 2 s pause: the pause is not jitter.
+		estimator.discontinuity();
+		estimator.flush(micros(40_000), anchor + Duration::from_millis(2_050));
+		estimator.flush(micros(80_000), anchor + Duration::from_millis(2_090));
+		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(10)));
 	}
 
 	#[test]
