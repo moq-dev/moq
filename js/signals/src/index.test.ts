@@ -1209,9 +1209,14 @@ describe("spawn retention", () => {
 			return heapStats().objectTypeCounts.Promise ?? 0;
 		};
 
+		// Settle each task before the next, like a per-group spawn. Spawning all at once would grow
+		// the task set through rehashes, and JSC leaves the old tables' keys in place: a stale
+		// conservative stack word pointing at one keeps ~8k dead promises alive.
 		const before = promises();
-		for (let i = 0; i < 10000; i++) effect.spawn(async () => {});
-		await settle();
+		for (let i = 0; i < 10000; i++) {
+			effect.spawn(async () => {});
+			await settle();
+		}
 		expect(promises() - before).toBeLessThan(100);
 		effect.close();
 	});
