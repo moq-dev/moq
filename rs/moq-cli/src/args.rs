@@ -1767,8 +1767,12 @@ mod tests {
 			let Command::Play(play) = &cli.stages[0] else {
 				panic!("expected play")
 			};
-			let err = play.validate().unwrap_err().to_string();
-			assert!(err.contains(codec), "{err}");
+			if cfg!(feature = "vpx") {
+				play.validate().unwrap();
+			} else {
+				let err = play.validate().unwrap_err().to_string();
+				assert!(err.contains(codec), "{err}");
+			}
 		}
 
 		let cli = Invocation::try_parse_from([
