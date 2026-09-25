@@ -4846,3 +4846,260 @@ fn server_listen_refuses_bad_config() {
 		MOQ_ERROR_INVALID_CONFIG
 	);
 }
+
+/// Subscribe to `name` on `consume` as a raw track and return the payloads of its first `count`
+/// frames.
+fn read_raw_frames(consume: u32, name: &[u8], count: usize) -> Vec<Vec<u8>> {
+	let frame_cb = Callback::new();
+	let subscription = moq_subscription {
+		priority: 0,
+		max_age_us: 1_000_000,
+		group_start: 0,
+		group_start_present: false,
+		group_end: 0,
+		group_end_present: false,
+	};
+	let track = id(unsafe {
+		moq_consume_track(
+			consume,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			&subscription,
+			Some(channel_callback),
+			frame_cb.ptr,
+		)
+	});
+	let mut payloads = Vec::with_capacity(count);
+	for _ in 0..count {
+		let frame_id = id(frame_cb.recv());
+		let mut frame = moq_frame {
+			payload: std::ptr::null(),
+			payload_size: 0,
+			timestamp_us: 0,
+			keyframe: false,
+		};
+		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+		payloads.push(unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) }.to_vec());
+		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	}
+	assert_eq!(moq_consume_track_cancel(track), 0);
+	// The callback context must outlive libmoq's last call into it: wait for the terminal.
+	assert_eq!(frame_cb.recv_terminal(), 0, "clean cancel delivers terminal 0");
+	payloads
+}
+
+/// The broadcast's current catalog, read on the publish side.
+fn published_catalog(broadcast: u32) -> moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra> {
+	let id = crate::Id::try_from(broadcast).expect("valid broadcast id");
+	crate::State::lock()
+		.publish
+		.catalog_snapshot(id)
+		.expect("broadcast exists")
+}
+
+#[test]
+fn json_tracks_are_advertised_in_the_catalog() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"json-catalog");
+
+	let status = b"status";
+	let snapshot = id(unsafe {
+		moq_publish_json_snapshot(
+			broadcast,
+			status.as_ptr() as *const c_char,
+			status.len(),
+			&moq_json_snapshot_config {
+				delta_ratio: 4,
+				compression: true,
+			},
+		)
+	});
+	let events = b"events";
+	let stream = id(unsafe {
+		moq_publish_json_stream(
+			broadcast,
+			events.as_ptr() as *const c_char,
+			events.len(),
+			&moq_json_stream_config { compression: false },
+		)
+	});
+
+	let catalog = published_catalog(broadcast);
+	let entry = catalog.json.tracks.get("status").expect("snapshot track advertised");
+	assert_eq!(entry.mode, hang::catalog::Mode::Snapshot);
+	assert_eq!(entry.compression, Some(hang::catalog::Compression::Deflate));
+	let entry = catalog.json.tracks.get("events").expect("stream track advertised");
+	assert_eq!(entry.mode, hang::catalog::Mode::Stream);
+	assert_eq!(entry.compression, None);
+
+	// Finishing a track retires its entry; the other stays.
+	assert_eq!(moq_publish_json_snapshot_finish(snapshot), 0);
+	let catalog = published_catalog(broadcast);
+	assert!(
+		!catalog.json.tracks.contains_key("status"),
+		"finished track still advertised"
+	);
+	assert!(catalog.json.tracks.contains_key("events"));
+
+	assert_eq!(moq_publish_json_stream_finish(stream), 0);
+	assert!(published_catalog(broadcast).json.tracks.is_empty());
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn binary_snapshot_is_advertised_and_delivered() {
+	let origin = id(moq_origin_create());
+	let path = b"binary-snapshot";
+	let broadcast = publish_broadcast(origin, path);
+
+	let name = b"thumbnail";
+	let mime = b"image/jpeg";
+	let producer = id(unsafe {
+		moq_publish_binary_snapshot(
+			broadcast,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			&moq_binary_config {
+				compression: false,
+				mime: mime.as_ptr() as *const c_char,
+				mime_len: mime.len(),
+			},
+		)
+	});
+
+	let catalog = published_catalog(broadcast);
+	let entry = catalog.binary.tracks.get("thumbnail").expect("binary track advertised");
+	assert_eq!(entry.mode, hang::catalog::Mode::Snapshot);
+	assert_eq!(entry.mime.as_deref(), Some("image/jpeg"));
+
+	// The payload reaches a raw subscriber of the same track name, untouched.
+	let payload = [0xff_u8, 0xd8, 0xff, 0xe0, 1, 2, 3];
+	assert_eq!(
+		unsafe { moq_publish_binary_snapshot_update(producer, payload.as_ptr(), payload.len()) },
+		0
+	);
+	let consume = request_broadcast(origin, path);
+	let frames = read_raw_frames(consume, name, 1);
+	assert_eq!(frames, vec![payload.to_vec()]);
+
+	assert_eq!(moq_publish_binary_snapshot_finish(producer), 0);
+	assert!(
+		moq_publish_binary_snapshot_finish(producer) < 0,
+		"double-finish should fail"
+	);
+	assert!(published_catalog(broadcast).binary.tracks.is_empty());
+
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn binary_stream_is_advertised_and_delivered() {
+	let origin = id(moq_origin_create());
+	let path = b"binary-stream";
+	let broadcast = publish_broadcast(origin, path);
+
+	// A NULL mime leaves the media type unstated.
+	let name = b"blobs";
+	let producer = id(unsafe {
+		moq_publish_binary_stream(
+			broadcast,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			&moq_binary_config {
+				compression: false,
+				mime: std::ptr::null(),
+				mime_len: 0,
+			},
+		)
+	});
+
+	let catalog = published_catalog(broadcast);
+	let entry = catalog.binary.tracks.get("blobs").expect("binary stream advertised");
+	assert_eq!(entry.mode, hang::catalog::Mode::Stream);
+	assert_eq!(entry.mime, None);
+
+	// Every appended payload is delivered, in order.
+	let payloads: [&[u8]; 2] = [b"first", b"second"];
+	for payload in payloads {
+		assert_eq!(
+			unsafe { moq_publish_binary_stream_append(producer, payload.as_ptr(), payload.len()) },
+			0
+		);
+	}
+	let consume = request_broadcast(origin, path);
+	let frames = read_raw_frames(consume, name, payloads.len());
+	assert_eq!(frames, payloads.map(<[u8]>::to_vec));
+
+	assert_eq!(moq_publish_binary_stream_finish(producer), 0);
+	assert!(published_catalog(broadcast).binary.tracks.is_empty());
+
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn data_track_names_cannot_collide() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"data-collide");
+
+	let name = b"state";
+	let first = id(unsafe {
+		moq_publish_json_snapshot(
+			broadcast,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			&moq_json_snapshot_config {
+				delta_ratio: 0,
+				compression: false,
+			},
+		)
+	});
+	// A second data track under the same name is refused rather than silently replacing the
+	// first entry.
+	assert!(
+		unsafe {
+			moq_publish_binary_stream(
+				broadcast,
+				name.as_ptr() as *const c_char,
+				name.len(),
+				&moq_binary_config {
+					compression: false,
+					mime: std::ptr::null(),
+					mime_len: 0,
+				},
+			)
+		} < 0,
+		"a duplicate data track name should fail"
+	);
+	assert_eq!(
+		published_catalog(broadcast)
+			.json
+			.tracks
+			.get("state")
+			.map(|e| e.mode.clone()),
+		Some(hang::catalog::Mode::Snapshot),
+		"the refused duplicate must leave the first entry in place"
+	);
+
+	// A NULL config is refused.
+	let other = b"other";
+	assert!(
+		unsafe {
+			moq_publish_binary_stream(
+				broadcast,
+				other.as_ptr() as *const c_char,
+				other.len(),
+				std::ptr::null(),
+			)
+		} < 0
+	);
+
+	assert_eq!(moq_publish_json_snapshot_finish(first), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}

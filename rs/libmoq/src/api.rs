@@ -433,6 +433,22 @@ pub struct moq_json_stream_config {
 	pub compression: bool,
 }
 
+/// Options for a binary data track, in either mode.
+///
+/// The mode is fixed by which constructor is called ([moq_publish_binary_snapshot] or
+/// [moq_publish_binary_stream]), so it is not in here.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_binary_config {
+	/// DEFLATE-compress each payload, advertised in the catalog entry.
+	pub compression: bool,
+
+	/// The payloads' media type (e.g. `image/jpeg`), or NULL to leave it unstated.
+	pub mime: *const c_char,
+	/// Length of `mime` in bytes.
+	pub mime_len: usize,
+}
+
 /// A JSON value delivered by a consumer callback.
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -2911,10 +2927,12 @@ pub extern "C" fn moq_publish_group_abort(group: u32, error_code: u16) -> i32 {
 /// Create a JSON snapshot track (lossy latest-value) on a broadcast.
 ///
 /// Values published via [moq_publish_json_snapshot_update] reach subscribers as a single latest
-/// state; a late joiner only sees the newest. Advertise the track in the catalog with
-/// [moq_publish_catalog_section] if consumers should discover it.
+/// state; a late joiner only sees the newest. The track is advertised in the broadcast's catalog
+/// under `json.tracks.<name>` with `mode: snapshot` (and `compression: deflate` when set), and the
+/// entry is retired when the track finishes or fails, so consumers discover it with no extra call.
 ///
-/// Returns a non-zero handle to the JSON producer on success, or a negative code on failure.
+/// Returns a non-zero handle to the JSON producer on success, or a negative code on failure,
+/// including a mux error when the catalog already carries an entry named `name`.
 ///
 /// # Safety
 /// - The caller must ensure `name` is a valid pointer to `name_len` bytes and `config` a valid pointer.
@@ -2929,13 +2947,9 @@ pub unsafe extern "C" fn moq_publish_json_snapshot(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let mut producer = moq_json::snapshot::Config::default();
-		producer.delta_ratio = config.delta_ratio;
-		producer.compression = if config.compression {
-			moq_json::Compression::Deflate
-		} else {
-			moq_json::Compression::None
-		};
+		let producer = moq_mux::json::Config::default()
+			.with_compression(config.compression)
+			.with_delta_ratio(config.delta_ratio);
 		State::lock().publish.json_snapshot(broadcast, name, producer)
 	})
 }
@@ -2971,8 +2985,11 @@ pub extern "C" fn moq_publish_json_snapshot_finish(json: u32) -> i32 {
 /// Create a JSON stream track (lossless append-log) on a broadcast.
 ///
 /// Every record appended via [moq_publish_json_stream_append] is preserved and delivered in order.
+/// The track is advertised in the broadcast's catalog under `json.tracks.<name>` with
+/// `mode: stream`, for as long as the track lives.
 ///
-/// Returns a non-zero handle to the JSON stream producer on success, or a negative code on failure.
+/// Returns a non-zero handle to the JSON stream producer on success, or a negative code on failure,
+/// including a mux error when the catalog already carries an entry named `name`.
 ///
 /// # Safety
 /// - The caller must ensure `name` is a valid pointer to `name_len` bytes and `config` a valid pointer.
@@ -2987,10 +3004,7 @@ pub unsafe extern "C" fn moq_publish_json_stream(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let mut producer = moq_json::stream::Config::default();
-		if config.compression {
-			producer.compression = moq_json::Compression::Deflate;
-		}
+		let producer = moq_mux::json::Config::default().with_compression(config.compression);
 		State::lock().publish.json_stream(broadcast, name, producer)
 	})
 }
@@ -3019,6 +3033,128 @@ pub extern "C" fn moq_publish_json_stream_finish(stream: u32) -> i32 {
 	ffi::enter(move || {
 		let stream = ffi::parse_id(stream)?;
 		State::lock().publish.json_stream_finish(stream)
+	})
+}
+
+/// Parse a [moq_binary_config] into the mux's binary track config.
+///
+/// # Safety
+/// - `config` must be a valid pointer, and its `mime` a valid pointer to `mime_len` bytes when not NULL.
+unsafe fn binary_config(config: *const moq_binary_config) -> Result<moq_mux::binary::Config, Error> {
+	let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+	let mut binary = moq_mux::binary::Config::default().with_compression(config.compression);
+	if let Some(mime) = unsafe { ffi::parse_str_optional(config.mime, config.mime_len)? } {
+		binary = binary.with_mime(mime);
+	}
+	Ok(binary)
+}
+
+/// Create a binary snapshot track (lossy latest-value) on a broadcast: each payload supersedes the
+/// last, and a late joiner only sees the newest, e.g. the latest thumbnail of a camera.
+///
+/// The track is advertised in the broadcast's catalog under `binary.tracks.<name>` with
+/// `mode: snapshot` (plus `mime` and `compression` when set), and the entry is retired when the
+/// track finishes or fails.
+///
+/// Returns a non-zero handle to the binary producer on success, or a negative code on failure,
+/// including a mux error when the catalog already carries an entry named `name`.
+///
+/// # Safety
+/// - The caller must ensure `name` is a valid pointer to `name_len` bytes and `config` a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_binary_snapshot(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	config: *const moq_binary_config,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let config = unsafe { binary_config(config)? };
+		State::lock().publish.binary_snapshot(broadcast, name, config)
+	})
+}
+
+/// Publish a new payload to a binary snapshot track, superseding the last.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `payload` is a valid pointer to `payload_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_binary_snapshot_update(
+	binary: u32,
+	payload: *const u8,
+	payload_len: usize,
+) -> i32 {
+	ffi::enter(move || {
+		let binary = ffi::parse_id(binary)?;
+		let payload = unsafe { ffi::parse_slice(payload, payload_len)? };
+		State::lock().publish.binary_snapshot_update(binary, payload)
+	})
+}
+
+/// Finish a binary snapshot track and retire its catalog entry. No more payloads can be published.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_binary_snapshot_finish(binary: u32) -> i32 {
+	ffi::enter(move || {
+		let binary = ffi::parse_id(binary)?;
+		State::lock().publish.binary_snapshot_finish(binary)
+	})
+}
+
+/// Create a binary stream track (lossless append-log) on a broadcast: every payload is preserved
+/// and delivered in order.
+///
+/// The track is advertised in the broadcast's catalog under `binary.tracks.<name>` with
+/// `mode: stream` (plus `mime` and `compression` when set), for as long as the track lives.
+///
+/// Returns a non-zero handle to the binary stream producer on success, or a negative code on
+/// failure, including a mux error when the catalog already carries an entry named `name`.
+///
+/// # Safety
+/// - The caller must ensure `name` is a valid pointer to `name_len` bytes and `config` a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_binary_stream(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	config: *const moq_binary_config,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let config = unsafe { binary_config(config)? };
+		State::lock().publish.binary_stream(broadcast, name, config)
+	})
+}
+
+/// Append one payload to a binary stream track.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `payload` is a valid pointer to `payload_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_binary_stream_append(stream: u32, payload: *const u8, payload_len: usize) -> i32 {
+	ffi::enter(move || {
+		let stream = ffi::parse_id(stream)?;
+		let payload = unsafe { ffi::parse_slice(payload, payload_len)? };
+		State::lock().publish.binary_stream_append(stream, payload)
+	})
+}
+
+/// Finish a binary stream track and retire its catalog entry. No more payloads can be appended.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_binary_stream_finish(stream: u32) -> i32 {
+	ffi::enter(move || {
+		let stream = ffi::parse_id(stream)?;
+		State::lock().publish.binary_stream_finish(stream)
 	})
 }
 

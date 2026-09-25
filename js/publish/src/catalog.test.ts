@@ -45,7 +45,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 
 	const first = await subscriber.nextGroup();
 	expect(first?.sequence).toBe(0);
-	expect(await first?.readJson()).toEqual({ video: { renditions: {} } });
+	expect(await first?.readJson()).toEqual({ clock: expect.anything(), video: { renditions: {} } });
 	expect(first?.done).toBe(true);
 
 	catalog.mutate((c) => {
@@ -54,8 +54,42 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 
 	const second = await subscriber.nextGroup();
 	expect(second?.sequence).toBe(1);
-	expect(await second?.readJson()).toEqual({ video: { renditions: {} }, scte35: { splices: [] } });
+	expect(await second?.readJson()).toEqual({
+		clock: expect.anything(),
+		video: { renditions: {} },
+		scte35: { splices: [] },
+	});
 	expect(second?.done).toBe(true);
+
+	effect.close();
+});
+
+test("catalog producer advertises the page clock from the first snapshot", async () => {
+	const catalog = new CatalogProducer();
+
+	const effect = new Effect();
+	const track = new Track.Producer("catalog.json");
+	catalog.serve(track, effect);
+	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() });
+
+	// Before any rendition: a live-only publisher exposes its clock without an archive.
+	const first = Catalog.RootSchema.parse(await consumer.next());
+	if (!first.clock) throw new Error("expected a root clock");
+	expect(first.archive).toBeUndefined();
+	expect(first.clock.timescale).toBe(1_000_000);
+
+	// A timestamp stamped the way capture does (performance.now() in microseconds) maps onto the
+	// page's own wall timeline, not Date.now(), which a system-clock adjustment can move.
+	const now = performance.now();
+	const wall = Catalog.wallClockTime(first.clock, Math.round(now * 1000), 1_000_000).getTime();
+	expect(Math.abs(wall - (performance.timeOrigin + now))).toBeLessThanOrEqual(1);
+
+	// Later edits keep the mapping: it is fixed for the broadcast.
+	catalog.mutate((c) => {
+		c.video = { renditions: {} };
+	});
+	const second = Catalog.RootSchema.parse(await consumer.next());
+	expect(second.clock).toEqual(first.clock);
 
 	effect.close();
 });
@@ -105,7 +139,8 @@ test("catalog producer refuses zero jitter before retaining an edit", () => {
 		).toThrow("omit jitter");
 	}
 	catalog.mutate((value) => {
-		expect(value).toEqual({});
+		expect(value.audio).toBeUndefined();
+		expect(value.video).toBeUndefined();
 	});
 });
 
