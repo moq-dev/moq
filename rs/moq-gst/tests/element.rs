@@ -572,6 +572,20 @@ fn a_pipeline_description_selects_loc() {
 	);
 }
 
+#[test]
+fn a_pipeline_description_marks_an_encoder_pad() {
+	init();
+	let sink = gst::parse::launch("moqsink name=publisher url=https://127.0.0.1:1 broadcast=test sink_0::encoder=true")
+		.expect("parse the description");
+	let _pad = sink.request_pad_simple("sink_0").expect("request sink_0");
+	assert!(child_of(&sink, "sink_0").property::<bool>("encoder"));
+	let _other = sink.request_pad_simple("sink_1").expect("request sink_1");
+	assert!(
+		!child_of(&sink, "sink_1").property::<bool>("encoder"),
+		"a pad is an import unless it says otherwise"
+	);
+}
+
 // The acceptance criterion: once CAPS reserves the track, its name and container are fixed; stopping
 // the element makes both configurable again.
 #[test]

@@ -11,7 +11,7 @@ ends immediately in the relay.
 
 ## Plan
 
-- Build on the lease clock auth-embedder introduces: `lease::Producer` sets
+- Build on the lease clock `lease::Producer` owns (#3943): it sets
   its deadline once per grant and measures it on the tokio clock, so the
   client's outage tests run on a paused clock like the relay's (#3969 fixed
   the relay side).
@@ -21,5 +21,4 @@ ends immediately in the relay.
 
 ## Required
 
-- [Auth embedder](/quest/m1/auth-embedder.md) - introduces the lease clock this fixes
 - The relay's fixed expiry deadline (#3969) has merged

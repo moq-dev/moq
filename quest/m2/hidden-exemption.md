@@ -17,4 +17,4 @@ for peers that predate it.
 
 ## Required
 
-- Every deployed relay in the moq.pro mesh speaks moq-lite-07 or MoQ Hidden.
+- Every deployed relay in the moq.pro mesh speaks a finalized moq-lite-07 or MoQ Hidden; `moq-lite-07-wip` is opt-in only.

@@ -8,7 +8,7 @@ Read the /merge, /takeover, and /close skills before starting.
 The goal is to evaluate the open PRs in the repository and decide which ones to merge.
 Each merge is performed in parallel by a sub-agent.
 
-Start by listing all open PRs.
+Start by listing all open PRs that are ready for review (skip drafts).
 An argument can be used to filter the PRs in scope.
 
 One at a time, for each PR, interactively prompt the user if we should /merge, skip, or /close.
