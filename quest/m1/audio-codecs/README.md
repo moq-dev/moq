@@ -42,6 +42,7 @@ its own decode and encode quest so verification stays per host.
 ## Quests
 
 - [HE-AAC refusal](/quest/m1/audio-codecs/he-aac-refusal.md) - implicit-SBR HE-AAC over TS is refused instead of half-decoded as the LC core
+- [TS export PCE](/quest/m1/audio-codecs/ts-export-pce.md) - a TS export of a PCE-described AAC track writes channel_config 0 and the PCE instead of a count-derived config
 - [Layout](/quest/m1/audio-codecs/layout.md) - the settled `Layout` carries up to 7.1 through decode, resample, playback, and the FFI
 - [Decode seam](/quest/m1/audio-codecs/decode-backend.md) - `decode::backend` selects a platform decoder before symphonia, mirroring moq-video
 - [AudioToolbox decode](/quest/m1/audio-codecs/decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
