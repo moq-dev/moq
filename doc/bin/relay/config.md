@@ -92,7 +92,7 @@ three flow-control windows (these workers run fixed ones) are refused under
 `io_uring` rather than quietly ignored. Each worker reports its own counters at
 [`/metrics`](/bin/relay/http#get-metrics). The kernel charges each worker's
 ring (~100 KiB, plus a page per socket) to `RLIMIT_MEMLOCK`, a budget shared by
-every io_uring the user runs; raise it (`LimitMEMLOCK=` under systemd) if
+every io\_uring the user runs; raise it (`LimitMEMLOCK=` under systemd) if
 workers fail to start with a message naming that limit.
 
 ## \[web]
