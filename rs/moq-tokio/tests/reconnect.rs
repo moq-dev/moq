@@ -133,8 +133,7 @@ async fn spawn_server() -> (
 	(port, sessions, handle)
 }
 
-/// A client that redials fast, so a refused redirect lands back on the original
-/// server inside the test's patience.
+/// A client that redials fast, so a migration lands inside the test's patience.
 fn quick_client(redirect: moq_tokio::Redirect) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.backoff.initial = Duration::from_millis(20);
@@ -144,14 +143,15 @@ fn quick_client(redirect: moq_tokio::Redirect) -> moq_tokio::Client {
 	config.init(Default::default()).expect("failed to init client")
 }
 
-/// The default refuses peer-selected host changes and redials the configured URL.
+/// The default refuses a peer-selected host change, and the refusal ends the
+/// connection: the peer is leaving, so redialing the configured URL would ignore it.
 #[tokio::test]
 async fn a_redirect_to_another_host_is_refused_by_default() {
 	let (port_a, mut sessions_a, _task_a) = spawn_server().await;
 	let (port_b, mut sessions_b, _task_b) = spawn_server().await;
 
 	let url: url::Url = format!("tcp://localhost:{port_a}/").parse().expect("parse url");
-	let _connection = quick_client(Default::default()).connect(url);
+	let connection = quick_client(Default::default()).connect(url);
 
 	let first = tokio::time::timeout(Duration::from_secs(10), sessions_a.recv())
 		.await
@@ -163,12 +163,13 @@ async fn a_redirect_to_another_host_is_refused_by_default() {
 		.send(moq_net::goaway::Goaway::redirect(format!("tcp://127.0.0.1:{port_b}/")))
 		.expect("send goaway");
 
-	// Refused, so the redial goes back to A rather than to the host the peer named.
-	tokio::time::timeout(Duration::from_secs(10), sessions_a.recv())
+	let err = tokio::time::timeout(Duration::from_secs(10), connection.closed())
 		.await
-		.expect("never redialed the configured URL")
-		.expect("server A stopped accepting");
+		.expect("the refusal never ended the connection")
+		.expect_err("a refused redirect must end with an error");
+	assert!(matches!(err, moq_tokio::Error::RefusedRedirect(_)), "ended with {err}");
 
+	assert!(sessions_a.try_recv().is_err(), "redialed the configured URL");
 	assert!(
 		sessions_b.try_recv().is_err(),
 		"the peer moved us onto the host it named"
@@ -202,9 +203,42 @@ async fn follow_still_honors_a_cross_host_redirect() {
 		.expect("server B stopped accepting");
 }
 
-/// Refusing a peer-selected host must not discard caller-selected fallbacks.
+/// A refused redirect must not fall through to a caller-selected fallback either.
 #[tokio::test]
-async fn a_refused_redirect_preserves_configured_fallbacks() {
+async fn a_refused_redirect_skips_configured_fallbacks() {
+	let (port_a, mut sessions_a, task_a) = spawn_server().await;
+	let (port_b, mut sessions_b, _task_b) = spawn_server().await;
+	let primary: url::Url = format!("tcp://localhost:{port_a}/").parse().expect("primary URL");
+	let fallback: url::Url = format!("tcp://127.0.0.1:{port_b}/").parse().expect("fallback URL");
+	let addrs = moq_tokio::connect::Addrs::new(primary).or(fallback);
+	let connection = quick_client(Default::default()).connect(addrs);
+	let first = tokio::time::timeout(Duration::from_secs(10), sessions_a.recv())
+		.await
+		.expect("first dial timed out")
+		.expect("server A stopped accepting");
+
+	// Stop accepting before GOAWAY so any redial could only land on the fallback.
+	task_a.abort();
+	assert!(task_a.await.expect_err("listener was aborted").is_cancelled());
+	first
+		.drain()
+		.send(moq_net::goaway::Goaway::redirect("tcp://127.0.0.1:1/"))
+		.expect("send goaway");
+
+	let err = tokio::time::timeout(Duration::from_secs(10), connection.closed())
+		.await
+		.expect("the refusal never ended the connection")
+		.expect_err("a refused redirect must end with an error");
+	assert!(matches!(err, moq_tokio::Error::RefusedRedirect(_)), "ended with {err}");
+	assert!(
+		sessions_b.try_recv().is_err(),
+		"fell through to the configured fallback"
+	);
+}
+
+/// An empty GOAWAY is "reconnect to me", which keeps every caller-selected fallback.
+#[tokio::test]
+async fn an_empty_goaway_preserves_configured_fallbacks() {
 	let (port_a, mut sessions_a, task_a) = spawn_server().await;
 	let (port_b, mut sessions_b, _task_b) = spawn_server().await;
 	let primary: url::Url = format!("tcp://localhost:{port_a}/").parse().expect("primary URL");
@@ -216,13 +250,10 @@ async fn a_refused_redirect_preserves_configured_fallbacks() {
 		.expect("first dial timed out")
 		.expect("server A stopped accepting");
 
-	// Stop accepting before GOAWAY so reconnect must use the configured fallback.
+	// Stop accepting before GOAWAY so the migration must use the configured fallback.
 	task_a.abort();
 	assert!(task_a.await.expect_err("listener was aborted").is_cancelled());
-	first
-		.drain()
-		.send(moq_net::goaway::Goaway::redirect("tcp://127.0.0.1:1/"))
-		.expect("send goaway");
+	first.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
 
 	tokio::time::timeout(Duration::from_secs(10), sessions_b.recv())
 		.await

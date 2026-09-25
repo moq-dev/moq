@@ -1300,6 +1300,52 @@ test("a rejected request is not asked of the same route again", async () => {
 	origin.close();
 });
 
+// A relay migration lands the replacement session's route next to the draining one's. The
+// request must hand over to it, not drop to nothing while the new session answers.
+test("an outranked route keeps serving until its replacement answers", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("migrating");
+
+	const older = new BroadcastProducer();
+	const keepOlder = older.consume();
+	const disposeOlder = serve(origin, path, () => keepOlder.clone());
+
+	const request = consumer.request(path);
+	await settle();
+	const first = request.active.peek();
+	expect(first).toBeDefined();
+
+	let gaps = 0;
+	const stop = request.active.subscribe((active) => {
+		if (active === undefined) gaps++;
+	});
+
+	// The newer route wins the tie but has not answered yet.
+	const newer = wireOf(origin).receive(path);
+	const asked = newer.requested().next();
+	await settle();
+	expect(request.active.peek()).toBe(first);
+
+	// Once it answers, the request swaps straight across.
+	const replacement = new BroadcastProducer();
+	const { value: req } = await asked;
+	req?.accept(replacement.consume());
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(request.active.peek()).not.toBe(first);
+	expect(gaps).toBe(0);
+
+	stop();
+	request.close();
+	newer.close();
+	disposeOlder();
+	keepOlder.close();
+	older.close();
+	replacement.close();
+	origin.close();
+});
+
 test("a rejected request falls through to the next-best route", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

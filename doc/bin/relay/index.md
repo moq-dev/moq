@@ -77,9 +77,12 @@ TLS, and a certificate fingerprint for client pinning.
 
 The accessors borrow and `run` consumes the relay, so clone `cluster`,
 `auth`, `client`, `stats`, `shutdown`, and `shutdown_trigger` for application
-tasks before calling it. `trigger.start()` drains every session with a GOAWAY
-and `run` returns once the drain window elapses, with the listeners released
-and the workers joined. Build routes from `web().routes()` (or
+tasks before calling it. `trigger.start()` drains every session with a GOAWAY,
+including any that connect afterwards, and `run` returns once the drain window
+elapses, with the listeners released and the workers joined. `run` also starts
+the drain on SIGTERM or SIGINT. An application that owns those signals, for
+example to withdraw the node from DNS and wait out the TTL before draining,
+calls `with_signals(false)` and fires the trigger itself. Build routes from `web().routes()` (or
 `internal().routes()`): `with_web` replaces the router, so `Router::new()`
 drops the built-in routes. Extra listeners (RTMP, SRT, ...) sit beside `run`
 in the application's `select!`. `runtime.workers` and `runtime.io_uring` stay

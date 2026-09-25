@@ -58,6 +58,11 @@ pub enum Error {
 	#[error("peer redirect refused for a connection with fixed addresses")]
 	PinnedRedirect,
 
+	/// A peer's GOAWAY named a redirect the connection's policy refuses, or one it
+	/// could not parse. Terminal: the peer is leaving, so redialing is ignoring it.
+	#[error("GOAWAY redirect refused: {0}")]
+	RefusedRedirect(String),
+
 	/// Reading or writing a socket, certificate, or key file failed.
 	#[error(transparent)]
 	Io(Arc<std::io::Error>),

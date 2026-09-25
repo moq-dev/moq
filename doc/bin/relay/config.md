@@ -160,9 +160,11 @@ A draining upstream may name a replacement URI. `same-host` follows it only
 onto the host we already dialed, so a peer moves us between ports and schemes;
 `follow` also lets it choose the host, which means trusting it not to point us
 into the local network, since a name it controls resolves wherever it likes;
-`ignore` keeps the current address list. Empty, malformed, or refused redirects
-also preserve caller-configured fallbacks; only an accepted redirect replaces
-the list with the peer's URI. `handover` is a cap: a shorter deadline on
+`ignore` keeps the current address list. An empty URI also keeps it, including
+caller-configured fallbacks; an accepted redirect replaces the list with the
+peer's URI. A malformed or refused redirect ends the connection with an error
+rather than redialing the old address or a fallback, and so does one leaving
+the host a `tls.fingerprint` pin verifies. `handover` is a cap: a shorter deadline on
 the received GOAWAY wins, a longer one does not extend it.
 
 ## \[cache]
@@ -218,6 +220,22 @@ secret = "./iroh-secret.key"         # Persist the key so the endpoint id surviv
 ```
 
 See [Transport](/concept/transport#iroh-peer-to-peer-experimental).
+
+## Shutdown
+
+```toml
+drain_timeout = "10s"                # Top-level key, as --drain-timeout / MOQ_DRAIN_TIMEOUT.
+```
+
+The first SIGTERM or SIGINT starts a drain: every session is sent a GOAWAY
+asking it to reconnect, and is force-closed if it is still connected when the
+window ends. A session that connects during the drain, such as a client with a
+cached DNS answer, is sent a GOAWAY immediately, with only the time left in
+the window. The relay exits one second after the window ends, or immediately
+on a second signal. `0` skips the GOAWAY and closes every session at once.
+Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are
+closed when the window ends. An embedder can take over the signals and start
+the drain itself; see [Embed](/bin/relay/#embed).
 
 ## \[log]
 

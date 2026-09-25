@@ -249,6 +249,11 @@ impl Candidates {
 			},
 		};
 
+		#[cfg(test)]
+		if let Some(addrs) = hosts::lookup(domain) {
+			return Self::fixed(addrs);
+		}
+
 		Self {
 			full: Query::start(domain, port, Lookup::Full),
 			ipv4: Query::start(domain, port, Lookup::Ipv4),
@@ -546,6 +551,32 @@ impl Candidates {
 			delay: Duration::ZERO,
 			..Default::default()
 		}
+	}
+}
+
+/// A name table tests can repoint, consulted before the system resolver.
+///
+/// DNS is what moves a client off a drained node, so proving a redial resolves
+/// afresh needs a name whose answer changes between dials. Entries carry the
+/// port too, so two servers on one loopback address can stand in for two hosts.
+#[cfg(test)]
+pub(crate) mod hosts {
+	use std::collections::HashMap;
+	use std::net::SocketAddr;
+	use std::sync::Mutex;
+
+	static HOSTS: Mutex<Option<HashMap<String, Vec<SocketAddr>>>> = Mutex::new(None);
+
+	/// Answer every later lookup of `host` with `addrs`, ports included.
+	pub(crate) fn point(host: &str, addrs: impl IntoIterator<Item = SocketAddr>) {
+		let mut hosts = HOSTS.lock().unwrap();
+		hosts
+			.get_or_insert_with(HashMap::new)
+			.insert(host.to_string(), addrs.into_iter().collect());
+	}
+
+	pub(super) fn lookup(host: &str) -> Option<Vec<SocketAddr>> {
+		HOSTS.lock().unwrap().as_ref()?.get(host).cloned()
 	}
 }
 

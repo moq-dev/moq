@@ -1,4 +1,6 @@
-import type { Reader, Writer } from "../stream.ts";
+import type { Drain } from "../connection/goaway.ts";
+import { Reader, type Writer } from "../stream.ts";
+import * as Time from "../time.ts";
 import * as Message from "./message.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -33,6 +35,25 @@ export class GoAway {
 
 	static async decode(r: Reader, version: IetfVersion): Promise<GoAway> {
 		return Message.decode(r, (mr) => GoAway.#decode(mr, version));
+	}
+
+	/**
+	 * Decode a body the caller already unframed, as the draft-14 to -16 control stream
+	 * adapter does before routing a message.
+	 */
+	static async decodeBody(body: Uint8Array, version: IetfVersion): Promise<GoAway> {
+		const r = new Reader(undefined, body, version);
+		const msg = await GoAway.#decode(r, version);
+		if (!(await r.done())) throw new Error("GOAWAY has trailing bytes");
+		return msg;
+	}
+
+	/** The drain signal this message carries. A zero timeout is the wire saying "none". */
+	drain(): Drain {
+		return {
+			uri: this.newSessionUri,
+			timeout: this.timeout > 0n ? Time.Milli(Number(this.timeout)) : undefined,
+		};
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<GoAway> {
