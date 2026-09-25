@@ -300,6 +300,12 @@ export class Decoder {
 			this.#prevTarget = target;
 			return;
 		}
+		// A decrease lands at once: `#runLatency` has already let the ring shrink to it, so a rise
+		// that follows within the debounce has to be measured from there.
+		if (target < this.#prevTarget) {
+			this.#prevTarget = target;
+			return;
+		}
 		// When the timer fires, the target read above is still current: any change would have rerun
 		// this effect (tearing down the timer), so compare it against the pre-change baseline directly.
 		const baseline = this.#prevTarget;
