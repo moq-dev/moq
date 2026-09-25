@@ -756,6 +756,29 @@ mod test {
 		assert_eq!(encoder.value(), Some(&emitted), "the baseline must be what was emitted");
 	}
 
+	/// A root entry the memo has not seen yet is diffed from the bytes the memo recorded, not
+	/// serialized again: a second pass could disagree with the first, leaving the memo describing a
+	/// value the baseline never held.
+	#[test]
+	fn a_delta_serializes_each_entry_once() {
+		let value = std::collections::BTreeMap::from([("row", Ticking(std::cell::Cell::new(0)))]);
+		let mut encoder = Encoder::new(Config::default().with_delta_ratio(100));
+		encoder.update(&value).unwrap().expect("a snapshot").commit();
+
+		let frame = encoder.update(&value).unwrap().expect("a delta");
+		assert!(!frame.keyframe);
+		let emitted: Value = serde_json::from_slice(&frame.payload).unwrap();
+		frame.commit();
+
+		assert_eq!(
+			value["row"].0.get(),
+			2,
+			"each update should serialize the entry exactly once"
+		);
+		assert_eq!(emitted, json!({ "row": { "n": 1 } }));
+		assert_eq!(encoder.value(), Some(&emitted), "the baseline must be what was emitted");
+	}
+
 	/// A root object whose entries serialize in the order given, sorted or not.
 	struct Rows(Vec<(String, Value)>);
 

@@ -697,6 +697,16 @@ impl serde::ser::SerializeTupleStruct for SeqDiff<'_> {
 	}
 }
 
+/// How the [`Memo`] handled a root entry.
+enum Memoized {
+	/// Not at the root, or no memo: diff the value.
+	Off,
+	/// Settled against the last diff's bytes.
+	Hit(Node),
+	/// New, or changed shape: diff the bytes just recorded.
+	Miss,
+}
+
 /// Objects recurse; only changed entries are written into the reusable patch buffer.
 struct MapDiff<'a> {
 	differ: Differ<'a>,
@@ -709,20 +719,43 @@ struct MapDiff<'a> {
 }
 
 impl MapDiff<'_> {
+	/// Diff one entry, through the [`Memo`] when there is one.
+	fn value<T: Serialize + ?Sized>(&mut self, key: &str, value: &T) -> Result<(), Error> {
+		let (node, existed) = match self.memoized(key, value)? {
+			Memoized::Hit(node) => (node, true),
+			Memoized::Off => {
+				let (child, existed) = self.differ.child(key);
+				(value.serialize(child)?, existed)
+			}
+			Memoized::Miss => {
+				// Diff the bytes the memo just recorded rather than serializing `value` again, so the
+				// memo, the patch, and the baseline all come from one serialization.
+				let entry: Value = {
+					let scratch = self.differ.scratch.borrow();
+					let next = &scratch.memo.as_ref().expect("a miss implies a memo").next;
+					let (start, end) = *next.ends.last().expect("a miss records its entry");
+					serde_json::from_slice(&next.bytes[start..end]).map_err(|err| Error(err.to_string()))?
+				};
+				let (child, existed) = self.differ.child(key);
+				(entry.serialize(child)?, existed)
+			}
+		};
+		self.entry(key, existed, node)
+	}
+
 	/// Record a root entry in the [`Memo`] and diff it against the bytes it had in the last diff.
 	///
 	/// Equal bytes mean the baseline holds exactly the value they parse to, so the entry is unchanged
 	/// without walking its subtree. Unequal bytes of the same shape are diffed by [`lockstep`], with
-	/// the patch left in the child buffer like any other [`Node::Diff`]. `None` leaves the entry to
-	/// the value diff: it is not at the root, is new, or changed shape.
-	fn memoized<T: Serialize + ?Sized>(&mut self, key: &str, value: &T) -> Result<Option<Node>, Error> {
+	/// the patch left in the child buffer like any other [`Node::Diff`].
+	fn memoized<T: Serialize + ?Sized>(&mut self, key: &str, value: &T) -> Result<Memoized, Error> {
 		if self.differ.depth != 0 {
-			return Ok(None);
+			return Ok(Memoized::Off);
 		}
 		let mut scratch = self.differ.scratch.borrow_mut();
 		let Scratch { memo, bytes, .. } = &mut *scratch;
 		let Some(Memo { current, next }) = memo.as_mut() else {
-			return Ok(None);
+			return Ok(Memoized::Off);
 		};
 		if let Some(last) = next.ends.len().checked_sub(1)
 			&& next.key(last) >= key.as_bytes()
@@ -735,11 +768,11 @@ impl MapDiff<'_> {
 		next.ends.push((key_end, next.bytes.len()));
 
 		let Some(index) = current.find(key.as_bytes(), &mut self.memo_cursor) else {
-			return Ok(None);
+			return Ok(Memoized::Miss);
 		};
 		let (old, new) = (current.value(index), &next.bytes[key_end..]);
 		if old == new {
-			return Ok(Some(Node::Same));
+			return Ok(Memoized::Hit(Node::Same));
 		}
 		if bytes.len() < 2 {
 			bytes.resize_with(2, Vec::new);
@@ -748,12 +781,12 @@ impl MapDiff<'_> {
 		patch.clear();
 		let mut forced = false;
 		if lockstep(old, new, patch, &mut forced).is_none() {
-			return Ok(None);
+			return Ok(Memoized::Miss);
 		}
 		if forced {
 			self.differ.forced.set(true);
 		}
-		Ok(Some(Node::Diff))
+		Ok(Memoized::Hit(Node::Diff))
 	}
 
 	fn write_entry(&mut self, key: &str, child: Option<usize>) -> Result<(), Error> {
@@ -884,15 +917,9 @@ impl SerializeMap for MapDiff<'_> {
 	fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Error> {
 		let depth = self.differ.depth;
 		let key = std::mem::take(&mut self.differ.scratch.borrow_mut().pending[depth]);
-		if let Some(node) = self.memoized(&key, value)? {
-			self.entry(&key, true, node)?;
-		} else {
-			let (child, existed) = self.differ.child(&key);
-			let node = value.serialize(child)?;
-			self.entry(&key, existed, node)?;
-		}
+		let result = self.value(&key, value);
 		self.differ.scratch.borrow_mut().pending[depth] = key;
-		Ok(())
+		result
 	}
 	fn end(self) -> Result<Node, Error> {
 		self.finish()
@@ -903,13 +930,7 @@ impl SerializeStruct for MapDiff<'_> {
 	type Ok = Node;
 	type Error = Error;
 	fn serialize_field<T: Serialize + ?Sized>(&mut self, key: &'static str, value: &T) -> Result<(), Error> {
-		if let Some(node) = self.memoized(key, value)? {
-			return self.entry(key, true, node);
-		}
-		let (child, existed) = self.differ.child(key);
-		let node = value.serialize(child)?;
-		self.entry(key, existed, node)?;
-		Ok(())
+		self.value(key, value)
 	}
 	// A field skipped via `skip_serializing_if` is simply never offered here, so it stays out of `seen`
 	// and `finish` emits it as a null deletion if the baseline had it (the default `skip_field` suffices).
