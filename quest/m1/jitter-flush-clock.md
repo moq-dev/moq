@@ -26,6 +26,18 @@ media span of each emitted batch and advertise no `delay`.
 
 ## Plan
 
+- **Landed (#3940):** `jitter` measured at encoder flush. `Estimator::flush`,
+  `container::Producer::flush`, and codec importer forwarding; each rendition
+  keeps its own 10 s sliding minimum and advertises the lifetime maximum spread
+  above it. The `moq-video` and `moq-audio` encoders (so `moq import capture`),
+  libmoq (so OBS), moq-ffi and its wrappers, and the `js/publish` encoders call
+  it. The provisional PTS-gap floor is gone, and `moq_mux::Error::JitterDecreased`
+  plus zero-as-absent text jitter enforce never-lower in Rust and JS.
+  `moq-gst` is split into [GStreamer encoder jitter](/quest/m1/gst-encoder-jitter-provenance.md).
+  What remains below is `delay` and the player. libmoq and moq-ffi expose
+  `flush` but no discontinuity, so a binding publisher that pauses and resumes
+  on a re-anchored PTS within the window would count the pause; add one when
+  such a caller appears.
 - **Measurement.** `catalog::Estimator` gains an additive `flush(timestamp,
   now)` observation next to the clock-free `write`. Lateness is
   `now - timestamp`. Each rendition keeps its own baseline, the minimum

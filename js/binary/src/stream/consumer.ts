@@ -1,5 +1,6 @@
 import { Decoder as Flate } from "@moq/flate";
 import type * as Moq from "@moq/net";
+import { race } from "@moq/signals";
 
 import { isDeflate } from "../compression.ts";
 import type { Config as CodecConfig } from "./producer.ts";
@@ -102,7 +103,7 @@ export class Consumer {
 		if (buffered) return buffered;
 
 		const frame = group.readFrame();
-		const winner = await Promise.race([frame.then((frame) => ({ frame }) as const), this.#recvGroup()]);
+		const winner = await race([frame.then((frame) => ({ frame }) as const), this.#recvGroup()]);
 		if ("frame" in winner) return winner.frame;
 
 		if (winner.group) {

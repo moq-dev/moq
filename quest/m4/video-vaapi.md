@@ -48,3 +48,7 @@ already falls back cleanly, since `Encoder::new` returns `Err` and
 - A `moq-dev/vaapi` release exposing an HEVC encoder (H.264 decode is in
   0.0.4; DMA-BUF encode and VPP shipped in 0.1.0) and pre-generated bindings
   instead of a bindgen build script
+
+## Related
+
+- [Pool VAAPI resize surfaces](/quest/m4/vaapi-resize-pool.md) - reuse one VPP output surface per size, a separate moq-vaapi release

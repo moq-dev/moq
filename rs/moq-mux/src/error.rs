@@ -233,6 +233,10 @@ pub enum Error {
 	/// [`Source::subscribe_track`](crate::Source::subscribe_track) reports.
 	#[error("broadcast reference escapes the root: {0}")]
 	EscapingBroadcast(String),
+
+	/// A rendition tried to lower jitter already advertised to subscribers.
+	#[error("catalog jitter cannot decrease for a published rendition")]
+	JitterDecreased,
 }
 
 impl Error {

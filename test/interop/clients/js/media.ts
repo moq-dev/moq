@@ -168,18 +168,16 @@ async function waitFrozen(page: Page, errors: BrowserErrors, assertion: string, 
 	throw new Failure(assertion, `${description}: the presented frame is still advancing, now ${frame}`);
 }
 
-/** How many samples of the failing window to print, so a summary can be traced back to readings. */
-const TRACE_SAMPLES = 40;
-
 // One sample as a line: elapsed time, the frame on the canvas, the tone step heard against the one
-// that frame belongs to, and how far the tone stood above the noise floor.
+// that frame belongs to, how far the tone stood above the noise floor, and whether audio was
+// arriving at all, which separates a silent player from a publisher that stopped sending.
 function traceLine(sample: PlayerState, start: number): string {
 	const step = sample.frameId === undefined ? "?" : Pattern.expectedStep(sample.frameId);
 	const margin = sample.toneDb !== undefined && sample.noiseDb !== undefined ? sample.toneDb - sample.noiseDb : 0;
 	return (
 		`    +${((sample.at - start) / 1000).toFixed(2)}s frame=${sample.frameId ?? "-"} ` +
 		`step=${sample.toneStep ?? "-"}/${step} tone=${margin.toFixed(0)}dB ${sample.toneHz?.toFixed(0) ?? "-"}Hz ` +
-		`paused=${sample.paused}`
+		`paused=${sample.paused} audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}`
 	);
 }
 
@@ -187,16 +185,16 @@ function traceLine(sample: PlayerState, start: number): string {
  * Assert the window shows advancing, audible, synchronized media, and report what it measured.
  *
  * Every number here is read at a sink: the frame counter off the canvas the renderer paints, and
- * the tone off the graph root that feeds the speakers. A failure prints the tail of the window it
- * measured, so the summary can be traced back to the readings behind it.
+ * the tone off the graph root that feeds the speakers. A failure prints every reading in the window,
+ * so the summary can be traced back to the readings behind it.
  */
 function assertMedia(samples: PlayerState[], label: string): void {
 	try {
 		measure(samples, label);
 	} catch (err) {
 		const start = samples[0]?.at ?? 0;
-		console.error(`  ${label}: last ${Math.min(TRACE_SAMPLES, samples.length)} of ${samples.length} samples`);
-		for (const sample of samples.slice(-TRACE_SAMPLES)) console.error(traceLine(sample, start));
+		console.error(`  ${label}: ${samples.length} samples`);
+		for (const sample of samples) console.error(traceLine(sample, start));
 		throw err;
 	}
 }
