@@ -647,12 +647,22 @@ impl<E: catalog::Catalog> Import<E> {
 			// previous one's.
 			if pes.header.pts.is_some() {
 				let pts = unwrap_pts(&mut self.media_unwrap, pes.header.pts.map(|t| t.as_u64()))?;
-				let reanchor = match self.streams.get(&pid) {
-					Some(Stream::H264 { reanchor, .. } | Stream::H265 { reanchor, .. }) => Some(reanchor),
+				let video = match self.streams.get(&pid) {
+					Some(Stream::H264 { reanchor, import, .. }) => Some((reanchor, import.floor(false), import.floor(true))),
+					Some(Stream::H265 { reanchor, import, .. }) => Some((reanchor, import.floor(false), import.floor(true))),
 					_ => None,
 				};
-				self.last_pts = match (pts, reanchor) {
-					(Some(pts), Some(reanchor)) => Some(reanchor.shifted(pts)?),
+				self.last_pts = match (pts, video) {
+					(Some(pts), Some((reanchor, edge, floor))) => {
+						let pts = reanchor.shifted(pts)?;
+						// Below the live edge is a wrap or restart, which only a keyframe re-anchored to
+						// the floor continues. That write waits for this PES to end, so stamp sections
+						// arriving meanwhile there too rather than on the old timeline.
+						match floor {
+							Some(floor) if edge.is_some_and(|edge| pts.as_micros() < edge.as_micros()) => Some(floor),
+							_ => Some(pts),
+						}
+					}
 					(pts, _) => pts,
 				};
 			}
@@ -5472,8 +5482,10 @@ mod test {
 	/// the B-frames before it presented earlier than the P-frame decoded ahead of them.
 	#[tokio::test(start_paused = true)]
 	async fn h264_join_below_a_p_frame_publishes_forward() {
-		let mut mux = Mux::default();
-		mux.out = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
+			..Default::default()
+		};
 		mux.gops(VIDEO, 90_000, 2);
 		// The last P-frame presented at 90_000 + 8 * FRAME; the join lands a frame short.
 		mux.gops(VIDEO, 90_000 + 6 * FRAME, 2);
@@ -5486,8 +5498,10 @@ mod test {
 	/// than the live edge, which the break marker does not lower.
 	#[tokio::test(start_paused = true)]
 	async fn h264_flagged_backward_restart_publishes_forward() {
-		let mut mux = Mux::default();
-		mux.out = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
+			..Default::default()
+		};
 		mux.gops(VIDEO, 45 * 90_000, 2);
 		mux.out.extend_from_slice(&clock_break_packet(VIDEO));
 		mux.gops(VIDEO, 90_000, 2);
@@ -5499,8 +5513,10 @@ mod test {
 	/// The same restart unflagged, as a looping playout wraps to the top of its file.
 	#[tokio::test(start_paused = true)]
 	async fn h264_unflagged_backward_restart_publishes_forward() {
-		let mut mux = Mux::default();
-		mux.out = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
+			..Default::default()
+		};
 		mux.gops(VIDEO, 45 * 90_000, 2);
 		mux.gops(VIDEO, 90_000, 2);
 		let frames = video_frames(&mux.out).await;
@@ -5512,8 +5528,10 @@ mod test {
 	/// one below the edge again unless it grows.
 	#[tokio::test(start_paused = true)]
 	async fn h264_survives_two_loop_wraps() {
-		let mut mux = Mux::default();
-		mux.out = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
+			..Default::default()
+		};
 		for _ in 0..3 {
 			mux.gops(VIDEO, 90_000, 2);
 		}
@@ -5539,8 +5557,10 @@ mod test {
 	#[tokio::test(start_paused = true)]
 	async fn legacy_survives_two_loop_wraps() {
 		const MP2_PID: u16 = 0x0061;
-		let mut mux = Mux::default();
-		mux.out = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false),
+			..Default::default()
+		};
 		// One PES is two 72 ms MP2 frames.
 		const PES_TICKS: u64 = 2 * 72 * 90;
 		for _ in 0..3 {
@@ -5565,8 +5585,10 @@ mod test {
 		const AAC_PID: u16 = 0x0060;
 		// 1024 samples at 48 kHz, in 90 kHz ticks.
 		const AAC_FRAME: u64 = 1024 * 90_000 / 48_000;
-		let mut mux = Mux::default();
-		mux.out = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false),
+			..Default::default()
+		};
 		for pass in 0..3u64 {
 			for i in 0..4u64 {
 				let mut payload = adts_frame(17, 0xA0 | i as u8);
@@ -5587,8 +5609,10 @@ mod test {
 	#[tokio::test(start_paused = true)]
 	async fn verbatim_pes_below_the_edge_publishes_forward() {
 		const DATA_PID: u16 = 0x0052;
-		let mut mux = Mux::default();
-		mux.out = synth_pmt(&[(StreamType::Mpeg2PacketizedData, DATA_PID)], false);
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::Mpeg2PacketizedData, DATA_PID)], false),
+			..Default::default()
+		};
 		for pts in [45 * 90_000, 46 * 90_000, 90_000, 2 * 90_000, 90_000] {
 			let cc = mux.cc(DATA_PID);
 			mux.out
@@ -5606,14 +5630,16 @@ mod test {
 	#[tokio::test(start_paused = true)]
 	async fn section_after_a_b_frame_publishes_forward() {
 		const CUE_PID: u16 = 0x0021;
-		let mut mux = Mux::default();
-		mux.out = synth_pmt(
-			&[
-				(StreamType::H264, VIDEO),
-				(StreamType::Dts8ChannelLosslessAudio, CUE_PID),
-			],
-			true,
-		);
+		let mut mux = Mux {
+			out: synth_pmt(
+				&[
+					(StreamType::H264, VIDEO),
+					(StreamType::Dts8ChannelLosslessAudio, CUE_PID),
+				],
+				true,
+			),
+			..Default::default()
+		};
 		// Twice, the second an unflagged wrap to the top.
 		for _ in 0..2 {
 			for (keyframe, pts, dts) in [
@@ -5640,6 +5666,48 @@ mod test {
 			"the cues after the wrap did not move with the video: {:?}",
 			frames.iter().map(|f| f.timestamp.as_micros()).collect::<Vec<_>>()
 		);
+	}
+
+	/// A cue arriving with the keyframe of an unflagged wrap lands with that keyframe, before
+	/// the write that grows the video shift has run.
+	#[tokio::test(start_paused = true)]
+	async fn section_with_a_wrap_keyframe_follows_it() {
+		const CUE_PID: u16 = 0x0021;
+		let mut mux = Mux {
+			out: synth_pmt(
+				&[
+					(StreamType::H264, VIDEO),
+					(StreamType::Dts8ChannelLosslessAudio, CUE_PID),
+				],
+				true,
+			),
+			..Default::default()
+		};
+		for _ in 0..2 {
+			let cc = mux.cc(VIDEO);
+			let idr = video_pes(VIDEO, cc, 90_000 + FRAME, Some(90_000), &annexb_au(true));
+			mux.out.extend_from_slice(&idr);
+			let cc = mux.cc(CUE_PID);
+			mux.out.extend_from_slice(&packet(true, cc, 0, &CUE));
+			for (pts, dts) in [
+				(90_000 + 4 * FRAME, Some(90_000 + FRAME)),
+				(90_000 + 2 * FRAME, None),
+				(90_000 + 3 * FRAME, None),
+			] {
+				let cc = mux.cc(VIDEO);
+				mux.out
+					.extend_from_slice(&video_pes(VIDEO, cc, pts, dts, &annexb_au(false)));
+			}
+			mux.gops(VIDEO, 90_000 + 4 * FRAME, 1);
+		}
+		let (consumer, catalog, _import) = import_all(&mux.out).expect("the import must survive the wrap");
+		let snapshot = catalog.snapshot();
+		let video = snapshot.video.renditions.keys().next().unwrap().clone();
+		let cues = snapshot.ext.mpegts.tracks.keys().find(|name| **name != video).unwrap();
+		let cues = read_track(&consumer, cues, crate::container::Kind::Data).await;
+		let video = read_track(&consumer, &video, crate::container::Kind::Video).await;
+		assert_eq!(cues.len(), 2);
+		assert_eq!(cues[1].timestamp, video[8].timestamp, "the cue left its keyframe behind");
 	}
 
 	/// An adaptation-only clock packet on `pid` carrying `ticks` of the 27 MHz PCR.
