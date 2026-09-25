@@ -47,6 +47,13 @@ nvidia = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 # Vendored, statically linked software H.264 encode/decode. Enabled by default,
 # but separable from native codecs for hardware-only and minimal builds.
 openh264 = ["dep:openh264", "dep:openh264-sys2"]
+# Software VP8 and VP9 decode through libvpx, on every platform. Off by default
+# because libvpx comes from the build host: libvpx-native-sys finds it through
+# pkg-config (or `VPX_LIB_DIR` + `VPX_VERSION`) and ships pregenerated bindings,
+# so no libclang is needed. Set `VPX_STATIC=1` to link the archive rather than
+# libvpx.so, which is what the Nix dev shell does. Decodes 8-bit 4:2:0 only (VP8,
+# and VP9 profile 0); anything else is refused rather than converted.
+vpx = ["dep:libvpx-native-sys"]
 # Intel/AMD VAAPI hardware codecs (Linux): the H.264 encoder and decoder. Off by
 # default because moq-vaapi's build script runs bindgen over its vendored libva
 # headers, so the build host needs libclang. At runtime libva is dlopen'd: the
@@ -106,6 +113,9 @@ bytes = { workspace = true }
 fast_image_resize = "6"
 # Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
 hang = { workspace = true }
+# libvpx bindings for the `vpx` feature. The library itself comes from the build
+# host; see the feature above.
+libvpx-native-sys = { version = "5.0.17", optional = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Vendored, statically linked software H.264 fallback (no system dependency).

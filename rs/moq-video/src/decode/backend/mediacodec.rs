@@ -160,6 +160,12 @@ impl MediaCodec {
 			Codec::H264 => MIME_H264,
 			Codec::H265 => MIME_H265,
 			Codec::Av1 => MIME_AV1,
+			other => {
+				return Err(Error::Codec(anyhow::anyhow!(
+					"MediaCodec {} decode is not wired",
+					other.label()
+				)));
+			}
 		};
 
 		// `GPU_SAMPLED_IMAGE` is what a consumer importing the buffer as a texture

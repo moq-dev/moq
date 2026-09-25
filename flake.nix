@@ -109,6 +109,10 @@
             glib
             libressl
             ffmpeg
+            # moq-video's `vpx` feature (VP8/VP9 software decode): libvpx-native-sys
+            # finds it through pkg-config, and `VPX_STATIC` below links the archive
+            # so nothing built here needs libvpx.so at runtime.
+            libvpx
             curl
             # MPEG-TS validation (tsp, tsanalyze) for the ts-compliance harness.
             tsduck
@@ -515,6 +519,10 @@
             # Exported rather than read back out of nix, so the guard costs a
             # variable lookup instead of a nested evaluation of this flake.
             OBS_LINKED_VERSION = obs-linked-version;
+
+            # Link libvpx statically for moq-video's `vpx` feature, the shape the
+            # quest ships: no system codec library at runtime.
+            VPX_STATIC = "1";
           }
           // pkgs.lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isDarwin) {
             ALSA_PLUGIN_DIR = "${alsaPlugins}/lib/alsa-lib";

@@ -6,6 +6,7 @@
 //! parameter sets (SPS/PPS for H.264, VPS/SPS/PPS for H.265), matching the
 //! inline avc3 / hev1 mode directly. The codec is chosen by [`Config::codec`];
 //! only the codec GUID differs, the preset / GOP / rate-control setup is shared.
+//! [`Config::preset`] picks the NVENC preset (P1, P4, or P7); see [`nvenc_preset`].
 //!
 //! Three hardware details this backend gets right (all verified on a Linux +
 //! NVIDIA box, see the tests below):
@@ -37,12 +38,12 @@ use bytes::Bytes;
 use cudarc::driver::CudaContext;
 use moq_nvenc::sys::nvEncodeAPI::{
 	GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID, NV_ENC_CODEC_HEVC_GUID, NV_ENC_INPUT_RESOURCE_TYPE,
-	NV_ENC_PARAMS_RC_MODE, NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO, NV_ENC_VUI_COLOR_PRIMARIES,
-	NV_ENC_VUI_MATRIX_COEFFS, NV_ENC_VUI_TRANSFER_CHARACTERISTIC, NV_ENC_VUI_VIDEO_FORMAT,
+	NV_ENC_PARAMS_RC_MODE, NV_ENC_PRESET_P1_GUID, NV_ENC_PRESET_P4_GUID, NV_ENC_PRESET_P7_GUID, NV_ENC_TUNING_INFO,
+	NV_ENC_VUI_COLOR_PRIMARIES, NV_ENC_VUI_MATRIX_COEFFS, NV_ENC_VUI_TRANSFER_CHARACTERISTIC, NV_ENC_VUI_VIDEO_FORMAT,
 };
 use moq_nvenc::{Encoder, EncoderInitParams, Session};
 
-use super::super::encoder::{Codec, Config, Gop};
+use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
 use super::{Backend, Encoded};
 use crate::frame::{Surface, interleave_uv};
 use crate::{Color, Error, Frame};
@@ -58,8 +59,24 @@ fn codec_guid(codec: Codec) -> GUID {
 	}
 }
 
+/// The NVENC preset for each [`Preset`], all under low-latency tuning.
+///
+/// Measured on an RTX 3070 Ti (see `examples/encode-presets.rs`): P1 to P7 moves
+/// 720p H.264 from 1.6 to 3.3 ms of encode per frame for about 0.1 dB of PSNR at
+/// a matched bitrate, and every preset emits each frame's packet before the
+/// next is submitted. Ultra-low-latency tuning was no faster and lost 0.6 dB;
+/// high-quality tuning coded the same stream at P4 and failed to encode at P7.
+fn nvenc_preset(preset: Preset) -> (GUID, &'static str) {
+	match preset {
+		Preset::LowLatency => (NV_ENC_PRESET_P1_GUID, "p1"),
+		Preset::Balanced => (NV_ENC_PRESET_P4_GUID, "p4"),
+		Preset::Quality => (NV_ENC_PRESET_P7_GUID, "p7"),
+	}
+}
+
 pub(crate) struct Nvenc {
 	session: Session,
+	applied: Applied,
 	// Keep the CUDA context alive for as long as the session uses it.
 	_cuda: Arc<CudaContext>,
 	timestamp: u64,
@@ -84,13 +101,11 @@ impl Nvenc {
 		let encoder = Encoder::initialize_with_cuda(cuda.clone())
 			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC init: {e}")))?;
 
-		// Start from the low-latency P4 preset, then set bitrate and GOP.
+		// Start from the preset, then set rate control and GOP.
+		let (preset_guid, label) = nvenc_preset(config.preset);
+		let tuning = NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_LOW_LATENCY;
 		let mut preset = encoder
-			.get_preset_config(
-				codec_guid,
-				NV_ENC_PRESET_P4_GUID,
-				NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_LOW_LATENCY,
-			)
+			.get_preset_config(codec_guid, preset_guid, tuning)
 			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC preset config: {e}")))?;
 
 		let cfg = &mut preset.presetCfg;
@@ -180,8 +195,8 @@ impl Nvenc {
 		// Picture-type decision on: NVENC owns the P/IDR structure and inserts an
 		// IDR every `gopLength`. The low-latency presets are tuned for this mode;
 		// driving picture types by hand (PTD off) misbehaves on these presets.
-		init.preset_guid(NV_ENC_PRESET_P4_GUID)
-			.tuning_info(NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_LOW_LATENCY)
+		init.preset_guid(preset_guid)
+			.tuning_info(tuning)
 			.framerate(config.framerate.numerator(), config.framerate.denominator())
 			.enable_picture_type_decision();
 		// SAFETY: this preset-derived config contains no borrowed extension
@@ -203,6 +218,11 @@ impl Nvenc {
 		);
 		Ok(Box::new(Self {
 			session,
+			// Every control above is checked, so a session that started has them all.
+			applied: Applied::new(
+				config.preset,
+				format!("{label}, low-latency tuning, no B-frames, CBR, 1-frame VBV"),
+			),
 			_cuda: cuda,
 			timestamp: 0,
 		}))
@@ -321,6 +341,10 @@ impl Backend for Nvenc {
 
 	fn name(&self) -> &'static str {
 		NAME
+	}
+
+	fn applied(&self) -> Applied {
+		self.applied.clone()
 	}
 }
 
@@ -479,6 +503,42 @@ mod tests {
 		assert!(types.contains(&5), "forced keyframe is not an IDR: {types:?}");
 		assert!(types.contains(&7), "forced IDR is missing inline SPS: {types:?}");
 		assert!(types.contains(&8), "forced IDR is missing inline PPS: {types:?}");
+	}
+
+	/// Every preset opens a session for both codecs on real hardware, and none
+	/// holds a frame: each packet comes back from the call that submitted it,
+	/// which is what lets the presets differ in effort alone. Same skip rule as
+	/// the other hardware tests.
+	#[test]
+	fn nvenc_every_preset_opens_and_holds_nothing() {
+		if !driver_available() {
+			return;
+		}
+		for codec in [Codec::H264, Codec::H265] {
+			for (preset, guid) in [
+				(Preset::LowLatency, "p1"),
+				(Preset::Balanced, "p4"),
+				(Preset::Quality, "p7"),
+			] {
+				let config = crate::encode::Config {
+					kind: crate::encode::Kind::Named(NAME.into()),
+					codec,
+					preset,
+					..crate::encode::Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
+				};
+				let Ok(mut encoder) = crate::encode::Encoder::new(&config) else {
+					return;
+				};
+				assert_eq!(encoder.applied().preset, Some(preset));
+				assert!(encoder.applied().controls.starts_with(guid), "{:?}", encoder.applied());
+
+				let frame = gray_rgba(320, 240);
+				for i in 0..5 {
+					let encoded = encoder.encode(&gray_frame(&frame, i)).unwrap();
+					assert_eq!(encoded.len(), 1, "{codec:?} {preset:?} held frame {i}");
+				}
+			}
+		}
 	}
 
 	/// Real-hardware H.265 encode through NVENC. Same skip rule as the H.264 test.

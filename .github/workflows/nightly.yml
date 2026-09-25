@@ -327,5 +327,10 @@ jobs:
       - name: Install just
         run: cargo install --locked just@1.52.0
 
+      # `--all-features` includes moq-video's `vpx`, whose build script finds
+      # libvpx through pkg-config. Nix provides it everywhere else.
+      - name: Install libvpx
+        run: brew install libvpx pkgconf
+
       - name: Check
         run: just rs macos

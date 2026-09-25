@@ -74,6 +74,10 @@ vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
 # checks its bindings in. Only applies when `capture`, `transcode`, or `play`
 # pulls in moq-video.
 v4l2 = ["moq-video?/v4l2", "moq-transcode?/v4l2"]
+# Software VP8 / VP9 decode through libvpx, opt-in like the moq-video feature it
+# turns on because libvpx comes from the build host. Only applies when `play`
+# pulls in moq-video.
+vpx = ["moq-video?/vpx"]
 # Screen capture for `capture --display` on Linux (xdg-desktop-portal + PipeWire)
 # and PipeWire cameras for `capture --camera pipewire:<node>`, opt-in like moq-video's own `pipewire` because it links libpipewire-0.3 at
 # build time. Only bites when `capture` pulls in moq-video and moq-audio.
