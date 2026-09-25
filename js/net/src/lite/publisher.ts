@@ -1,4 +1,4 @@
-import { type Dispose, type Getter, Signal } from "@moq/signals";
+import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type * as broadcast from "../broadcast.ts";
 import { closeReason, error, NotFound, reason, SessionCode, SessionError, StreamCode, StreamError } from "../error.ts";
@@ -226,19 +226,23 @@ class SubscriptionControls {
 
 	/** Returns false when peer departure supersedes a blocked response write. */
 	async response(pending: Promise<void>): Promise<boolean> {
-		const result = await Promise.race([
+		// `#ended` lives as long as the stream, so it is raced as-is rather than mapped per call.
+		const result = await race([
 			pending.then(
 				() => ({ kind: "sent" }) as const,
 				(err: unknown) => ({ kind: "error", error: error(err) }) as const,
 			),
-			this.#ended.then((end) => ({ kind: "ended", end }) as const),
+			this.#ended,
 		]);
 
-		if (result.kind === "sent") return true;
-		if (result.kind === "error") throw result.error;
-		// Promise.race leaves the blocked encode running, so reset the writable half too.
-		this.#writer.reset(result.end ?? new StreamError(StreamCode.Cancel, { message: "cancel" }));
-		if (result.end) throw result.end;
+		if (result !== null && !(result instanceof Error)) {
+			if (result.kind === "sent") return true;
+			throw result.error;
+		}
+
+		// The race leaves the blocked encode running, so reset the writable half too.
+		this.#writer.reset(result ?? new StreamError(StreamCode.Cancel, { message: "cancel" }));
+		if (result) throw result;
 		return false;
 	}
 
@@ -533,9 +537,9 @@ export class Publisher {
 			}
 
 			for (;;) {
-				const woke = await Promise.race([changed, stream.reader.closed.then(() => "closed" as const)]);
+				const woke = await race([changed, stream.reader.closed]);
 				dispose();
-				if (woke === "closed") break;
+				if (woke !== "changed") break;
 
 				// Re-arm before reading, so an advertise that lands while we write is not lost.
 				changed = arm();
@@ -1023,14 +1027,14 @@ export class Publisher {
 		// as `startFrame`. Skipping the head here is the only thing keeping those numbers
 		// honest; a group that ends before we reach it can't be served at all.
 		for (let i = 0; i < startFrame; i++) {
-			if (!(await Promise.race([group.readFrame(), stream.closed]))) {
+			if (!(await race([group.readFrame(), stream.closed]))) {
 				throw new Error(`fetch group ended at frame ${i}, before the requested start ${startFrame}`);
 			}
 		}
 
 		let prevTs = 0n;
 		for (let index = startFrame; endFrame === undefined || index <= endFrame; index++) {
-			const frame = await Promise.race([group.readFrame(), stream.closed]);
+			const frame = await race([group.readFrame(), stream.closed]);
 			if (!frame) break;
 
 			const ts = BigInt(Math.round(frame.timestamp.as(timescale)));
@@ -1094,7 +1098,7 @@ export class Publisher {
 				let reached = startFrame === 0;
 
 				for (;;) {
-					const read = await Promise.race([hooks.readGroupFrame(group), stream.closed]);
+					const read = await race([hooks.readGroupFrame(group), stream.closed]);
 					if (!read) {
 						// The group ended before the frame the subscriber asked to start
 						// at, so this publisher can't serve the range at all. FINning here
@@ -1176,7 +1180,7 @@ export class Publisher {
 				const timeout = new Promise<"timeout">((resolve) =>
 					setTimeout(() => resolve("timeout"), PROBE_INTERVAL),
 				);
-				const result = await Promise.race([timeout, stream.reader.closed]);
+				const result = await race([timeout, stream.reader.closed]);
 				if (result !== "timeout") break;
 
 				// The two fields are independent on the wire, each using 0 for

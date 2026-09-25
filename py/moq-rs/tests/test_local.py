@@ -237,6 +237,21 @@ async def test_video_publish_consume():
         break
 
 
+async def test_video_publish_named_track():
+    origin = moq.OriginProducer()
+    broadcast = create_announced(origin, "video-named-test")
+    media = broadcast.publish_video(moq.VideoFormat.AVC3, h264_init(), track="hd")
+    assert media.name == "hd"
+
+    consumer = origin.consume()
+
+    async for announcement in consumer.announced():
+        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
+        catalog = await broadcast_consumer.catalog()
+        assert list(catalog.video.keys()) == ["hd"]
+        break
+
+
 async def test_multiple_frames_ordering():
     origin = moq.OriginProducer()
     broadcast = create_announced(origin, "ordering-test")
