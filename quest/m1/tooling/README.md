@@ -1,4 +1,4 @@
-# [XS] Tooling: thin justfiles and CI that calls them
+# Tooling: thin justfiles and CI that calls them
 
 ## Goal
 
@@ -15,3 +15,7 @@ runs a recipe rather than a script path.
 `just` stays as the entry point because the vocabulary (`just check`, `just
 fix`) is in every doc, skill, and workflow. Its cost was
 self-inflicted: logic inside recipes.
+
+## Quests
+
+- [Nix guard](/quest/m1/tooling/nix-guard.md) - the scoped check, fix, and test refuse to run outside the Nix dev shell unless told to
