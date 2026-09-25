@@ -4984,6 +4984,52 @@ fn binary_snapshot_is_advertised_and_delivered() {
 }
 
 #[test]
+fn binary_stream_is_advertised_and_delivered() {
+	let origin = id(moq_origin_create());
+	let path = b"binary-stream";
+	let broadcast = publish_broadcast(origin, path);
+
+	// A NULL mime leaves the media type unstated.
+	let name = b"blobs";
+	let producer = id(unsafe {
+		moq_publish_binary_stream(
+			broadcast,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			&moq_binary_config {
+				compression: false,
+				mime: std::ptr::null(),
+				mime_len: 0,
+			},
+		)
+	});
+
+	let catalog = published_catalog(broadcast);
+	let entry = catalog.binary.tracks.get("blobs").expect("binary stream advertised");
+	assert_eq!(entry.mode, hang::catalog::Mode::Stream);
+	assert_eq!(entry.mime, None);
+
+	// Every appended payload is delivered, in order.
+	let payloads: [&[u8]; 2] = [b"first", b"second"];
+	for payload in payloads {
+		assert_eq!(
+			unsafe { moq_publish_binary_stream_append(producer, payload.as_ptr(), payload.len()) },
+			0
+		);
+	}
+	let consume = request_broadcast(origin, path);
+	let frames = read_raw_frames(consume, name, payloads.len());
+	assert_eq!(frames, payloads.map(<[u8]>::to_vec));
+
+	assert_eq!(moq_publish_binary_stream_finish(producer), 0);
+	assert!(published_catalog(broadcast).binary.tracks.is_empty());
+
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn data_track_names_cannot_collide() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"data-collide");
@@ -5001,7 +5047,7 @@ fn data_track_names_cannot_collide() {
 		)
 	});
 	// A second data track under the same name is refused rather than silently replacing the
-	// first entry, and a NULL mime is allowed (left unstated).
+	// first entry.
 	assert!(
 		unsafe {
 			moq_publish_binary_stream(
