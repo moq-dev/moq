@@ -28,8 +28,9 @@ this by hand-building a catalog.
 - Keep the logic in `moq-cli`; `moq-archive` stays catalog-agnostic. Select the
   catalog track with the CLI's catalog format as `export archive` does: hang
   and hang.z are stamped, MSF is refused.
-- `import` hardcodes the default timeline name. If the recorded catalog is
-  reachable first, prefer its `archive.track`.
+- The recorded catalog's `archive` entry describes the source's live timeline,
+  not the recording's, so replace it with the timeline the reader replays
+  (track, timescale, duration bound) rather than trusting the recorded one.
 
 Add a CI test that records a broadcast longer than the default window, replays
 it, and asserts the stock exporter lists segment 0 with a durable
