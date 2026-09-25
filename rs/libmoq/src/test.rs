@@ -52,6 +52,26 @@ fn request_broadcast(origin: u32, path: &[u8]) -> u32 {
 	}
 }
 
+/// Request `path` once and return the first callback code: a broadcast handle, or
+/// the negative error that ended the request.
+fn request_once(origin: u32, path: &[u8]) -> i32 {
+	let cb = Callback::new();
+	let _task = id(unsafe {
+		moq_origin_request(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+	let code = cb.recv();
+	if code > 0 {
+		cb.recv_terminal();
+	}
+	code
+}
+
 /// RAII guard that calls a closure on drop.
 struct Guard<F: FnOnce()>(Option<F>);
 impl<F: FnOnce()> Drop for Guard<F> {
@@ -2058,7 +2078,7 @@ fn announced_filters_patterns_and_reports_captures() {
 }
 
 #[test]
-fn local_announcement_survives_unannounce() {
+fn announced_deactivation() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe {
@@ -2088,23 +2108,29 @@ fn local_announcement_survives_unannounce() {
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
 	assert!(info.active);
 
-	// Unannouncing withdraws the peer advertisement, while the local cursor
-	// and exact request remain live until the broadcast finishes.
+	// Going non-live unannounces the broadcast without tearing it down: local
+	// consumers stop reaching it, exactly as peers do, until it announces again.
 	assert_eq!(moq_publish_unannounce(broadcast), 0);
-	let _ = request_broadcast(origin, path);
-	assert_eq!(moq_publish_finish(broadcast), 0);
 
 	let deactivated_id = id(cb.recv());
 	assert_eq!(unsafe { moq_origin_announced_info(deactivated_id, &mut info) }, 0);
-	assert!(!info.active, "broadcast should be inactive after finish");
+	assert!(!info.active, "broadcast should be inactive after unannounce");
+	assert!(request_once(origin, path) < 0, "an unannounced broadcast is unroutable");
+
+	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
+	let reannounced_id = id(cb.recv());
+	assert_eq!(unsafe { moq_origin_announced_info(reannounced_id, &mut info) }, 0);
+	assert!(info.active, "broadcast should be active again after announce");
+	let _ = request_broadcast(origin, path);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
 #[test]
-fn create_broadcast_announces_locally() {
+fn create_broadcast_is_unroutable_until_announced() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe {
@@ -2121,7 +2147,10 @@ fn create_broadcast_announces_locally() {
 
 	let path = b"quiet";
 	let broadcast = id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len()) });
-	// Creation reaches local cursors and exact requests before peer advertising.
+	// Nobody reaches it, locally included, until it announces.
+	assert!(request_once(origin, path) < 0, "an unannounced broadcast is unroutable");
+
+	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
 	let _ = request_broadcast(origin, path);
 	let announced_id = id(cb.recv());
 	let mut info = moq_announce_update {
@@ -4615,4 +4644,192 @@ fn encode_video_bitrate_caps_the_reservation() {
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Listen on an ephemeral loopback port with a generated certificate.
+fn listen(cb: &Callback) -> (u32, String, String) {
+	let bind = "127.0.0.1:0";
+	let generate = [moq_str("localhost")];
+	let mut config: moq_server_config = unsafe { std::mem::zeroed() };
+	config.bind = bind.as_ptr() as *const c_char;
+	config.bind_len = bind.len();
+	config.tls_generate = generate.as_ptr();
+	config.tls_generate_len = generate.len();
+	let server = id(unsafe { moq_server_listen(&config, Some(channel_callback), cb.ptr) });
+
+	let mut addr = moq_str("");
+	assert_eq!(unsafe { moq_server_addr(server, &mut addr) }, 0);
+	let addr = borrowed_string(addr.data, addr.len).unwrap();
+
+	let count = unsafe { moq_server_fingerprints(server, std::ptr::null_mut(), 0) };
+	assert!(count > 0, "a generated certificate has a fingerprint, got {count}");
+	let mut fingerprints = vec![moq_str(""); count as usize];
+	assert_eq!(
+		unsafe { moq_server_fingerprints(server, fingerprints.as_mut_ptr(), fingerprints.len()) },
+		count
+	);
+	let fingerprint = borrowed_string(fingerprints[0].data, fingerprints[0].len).unwrap();
+
+	(server, addr, fingerprint)
+}
+
+/// Dial `url`, pinning `fingerprint`, with `consume` receiving the peer's broadcasts.
+fn dial_pinned(
+	url: &str,
+	fingerprint: &str,
+	consume: u32,
+	on_status: extern "C" fn(*mut c_void, i32),
+	user_data: *mut c_void,
+) -> u32 {
+	let fingerprints = [moq_str(fingerprint)];
+	let mut config = client_config();
+	config.tls_fingerprints = fingerprints.as_ptr();
+	config.tls_fingerprints_len = fingerprints.len();
+	config.tls_host_name = "localhost".as_ptr() as *const c_char;
+	config.tls_host_name_len = "localhost".len();
+	id(unsafe {
+		moq_session_connect(
+			url.as_ptr() as *const c_char,
+			url.len(),
+			&config,
+			0,
+			consume,
+			Some(on_status),
+			user_data,
+		)
+	})
+}
+
+#[test]
+fn server_accepts_a_session() {
+	let served = id(moq_origin_create());
+	let broadcast = publish_broadcast(served, b"demo");
+
+	let server_cb = Callback::new();
+	let (server, addr, fingerprint) = listen(&server_cb);
+
+	let received = id(moq_origin_create());
+	let client_cb = Callback::new();
+	let client = dial_pinned(
+		&format!("https://{addr}/room?jwt=abc"),
+		&fingerprint,
+		received,
+		channel_callback,
+		client_cb.ptr,
+	);
+
+	// The request carries the path and query the client dialed.
+	let request = id(server_cb.recv());
+	let mut path = moq_str("");
+	assert_eq!(unsafe { moq_session_request_path(request, &mut path) }, 0);
+	assert_eq!(borrowed_string(path.data, path.len).as_deref(), Some("/room"));
+	let mut query = moq_str("");
+	assert_eq!(unsafe { moq_session_request_query(request, &mut query) }, 0);
+	assert_eq!(borrowed_string(query.data, query.len).as_deref(), Some("jwt=abc"));
+
+	let session_cb = Callback::new();
+	let session = id(unsafe { moq_session_request_accept(request, served, 0, Some(channel_callback), session_cb.ptr) });
+	assert!(
+		unsafe { moq_session_request_path(request, &mut path) } < 0,
+		"accept consumes the request"
+	);
+
+	// Both sides report the first (and, for the server, only) epoch.
+	assert_eq!(session_cb.recv(), 1);
+	assert_eq!(client_cb.recv(), 1);
+
+	let mut stats: moq_connection_stats = unsafe { std::mem::zeroed() };
+	assert_eq!(unsafe { moq_session_stats(session, &mut stats) }, 0);
+	let bandwidth = id(moq_session_bandwidth(session));
+	assert_eq!(moq_bandwidth_close(bandwidth), 0);
+
+	// The broadcast the server publishes reaches the client.
+	let consumed = request_broadcast(received, b"demo");
+	assert_eq!(moq_consume_close(consumed), 0);
+
+	// Closing the accepted session is a clean terminal close.
+	assert_eq!(moq_session_close(session), 0);
+	assert_eq!(session_cb.recv_terminal(), 0);
+	assert_eq!(moq_session_close(client), 0);
+	client_cb.recv_terminal();
+
+	// Closing the server is terminal too, and releases the address.
+	assert_eq!(moq_server_close(server), 0);
+	assert_eq!(server_cb.recv_terminal(), 0);
+	assert!(
+		moq_server_close(server) < 0,
+		"the server handle is gone after its terminal callback"
+	);
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(served), 0);
+	assert_eq!(moq_origin_close(received), 0);
+}
+
+#[test]
+fn server_rejects_a_session() {
+	let server_cb = Callback::new();
+	let (server, addr, fingerprint) = listen(&server_cb);
+
+	let client_cb = ProtocolCallback::new();
+	let client = dial_pinned(
+		&format!("https://{addr}/"),
+		&fingerprint,
+		0,
+		protocol_callback,
+		client_cb.ptr,
+	);
+
+	let request = id(server_cb.recv());
+	let mut path = moq_str("x");
+	assert_eq!(unsafe { moq_session_request_path(request, &mut path) }, 0);
+	assert_eq!(path.len, 0, "the root is an empty path");
+	let mut query = moq_str("x");
+	assert_eq!(unsafe { moq_session_request_query(request, &mut query) }, 0);
+	assert!(query.data.is_null(), "no query is NULL");
+
+	assert_eq!(moq_session_request_reject(request, 403), 0);
+	assert!(moq_session_request_free(request) < 0, "reject consumes the request");
+
+	// The rejection closes a session the transport already established, so the client
+	// may see it connect first. It then gives up on the auth rejection rather than redialing.
+	let mut status = client_cb.recv();
+	if status.0 == 1 {
+		status = client_cb.recv();
+	}
+	let (code, protocol) = status;
+	assert_eq!(code, MOQ_ERROR_MOQ);
+	let protocol = protocol.expect("the rejection carries a protocol close");
+	assert_eq!(protocol.scope, moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32);
+	assert_eq!(protocol.kind, moq_protocol_kind::MOQ_PROTOCOL_KIND_UNAUTHORIZED as u32);
+	assert!(moq_session_close(client) < 0, "the client session already ended");
+
+	assert_eq!(moq_server_close(server), 0);
+	assert_eq!(server_cb.recv_terminal(), 0);
+}
+
+#[test]
+fn server_listen_refuses_bad_config() {
+	assert_eq!(
+		unsafe { moq_server_listen(std::ptr::null(), Some(ignore_callback), std::ptr::null_mut()) },
+		MOQ_ERROR_INVALID_POINTER
+	);
+
+	let mut config: moq_server_config = unsafe { std::mem::zeroed() };
+	let bind = "not an address";
+	config.bind = bind.as_ptr() as *const c_char;
+	config.bind_len = bind.len();
+	assert_eq!(
+		unsafe { moq_server_listen(&config, Some(ignore_callback), std::ptr::null_mut()) },
+		MOQ_ERROR_INVALID_CONFIG
+	);
+
+	// No certificate at all is refused at bind, not at the first handshake.
+	let bind = "127.0.0.1:0";
+	config.bind = bind.as_ptr() as *const c_char;
+	config.bind_len = bind.len();
+	assert_eq!(
+		unsafe { moq_server_listen(&config, Some(ignore_callback), std::ptr::null_mut()) },
+		MOQ_ERROR_INVALID_CONFIG
+	);
 }

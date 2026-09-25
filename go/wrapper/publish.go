@@ -82,13 +82,14 @@ func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
 
 // Announce advertises this broadcast's exact path as a route.
 //
-// Announcing again re-prices the route in place. The path is already
-// discoverable locally; Announce advertises it to peers.
+// Announcing again re-prices the route in place. Until announced, the
+// broadcast is invisible and unroutable for local consumers and peers alike.
 func (b *BroadcastProducer) Announce(route Route) error {
 	return b.inner.Announce(route)
 }
 
-// Unannounce withdraws peer advertising while preserving local discovery.
+// Unannounce retracts this broadcast's exact-path advertisement, if any, from
+// local consumers and peers alike. Tracks already in flight carry on.
 func (b *BroadcastProducer) Unannounce() error {
 	return b.inner.Unannounce()
 }
@@ -317,12 +318,21 @@ func (m *MediaProducer) Name() (string, error) {
 	return m.inner.Name()
 }
 
-// Used blocks until the track has at least one active subscriber.
+// Demand returns a watch-only handle to whether the track has subscribers.
+func (m *MediaProducer) Demand() (*TrackDemand, error) {
+	inner, err := m.inner.Demand()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDemand{inner: inner}, nil
+}
+
+// Used blocks until the track has at least one active subscriber. Prefer Demand.
 func (m *MediaProducer) Used(ctx context.Context) error {
 	return m.inner.Used(ctx)
 }
 
-// Unused blocks until the track has no active subscribers.
+// Unused blocks until the track has no active subscribers. Prefer Demand.
 func (m *MediaProducer) Unused(ctx context.Context) error {
 	return m.inner.Unused(ctx)
 }
@@ -425,6 +435,35 @@ func (m *MediaStreamProducer) Finish() error {
 	return m.inner.Finish()
 }
 
+// TrackDemand watches whether a published track has subscribers.
+//
+// It is weak: holding it neither keeps the track open nor locks the producer, so
+// a wait can park here while the producer keeps publishing. Waits return
+// ErrClosed once the track is released.
+type TrackDemand struct {
+	inner *ffi.MoqTrackDemand
+}
+
+// Name is the name of the track this watches.
+func (d *TrackDemand) Name() string {
+	return d.inner.Name()
+}
+
+// IsUsed reports whether the track has at least one active subscriber right now.
+func (d *TrackDemand) IsUsed() bool {
+	return d.inner.IsUsed()
+}
+
+// Used blocks until the track has at least one active subscriber.
+func (d *TrackDemand) Used(ctx context.Context) error {
+	return d.inner.Used(ctx)
+}
+
+// Unused blocks until the track has no active subscribers.
+func (d *TrackDemand) Unused(ctx context.Context) error {
+	return d.inner.Unused(ctx)
+}
+
 // TrackProducer writes arbitrary byte payloads with no codec required.
 type TrackProducer struct {
 	inner *ffi.MoqTrackProducer
@@ -435,12 +474,21 @@ func (t *TrackProducer) Name() (string, error) {
 	return t.inner.Name()
 }
 
-// Used blocks until the track has at least one active subscriber.
+// Demand returns a watch-only handle to whether the track has subscribers.
+func (t *TrackProducer) Demand() (*TrackDemand, error) {
+	inner, err := t.inner.Demand()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDemand{inner: inner}, nil
+}
+
+// Used blocks until the track has at least one active subscriber. Prefer Demand.
 func (t *TrackProducer) Used(ctx context.Context) error {
 	return t.inner.Used(ctx)
 }
 
-// Unused blocks until the track has no active subscribers.
+// Unused blocks until the track has no active subscribers. Prefer Demand.
 func (t *TrackProducer) Unused(ctx context.Context) error {
 	return t.inner.Unused(ctx)
 }
@@ -606,12 +654,21 @@ func (a *AudioProducer) Name() (string, error) {
 	return a.inner.Name()
 }
 
-// Used blocks until the audio track has at least one active subscriber.
+// Demand returns a watch-only handle to whether the audio track has subscribers.
+func (a *AudioProducer) Demand() (*TrackDemand, error) {
+	inner, err := a.inner.Demand()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDemand{inner: inner}, nil
+}
+
+// Used blocks until the audio track has at least one active subscriber. Prefer Demand.
 func (a *AudioProducer) Used(ctx context.Context) error {
 	return a.inner.Used(ctx)
 }
 
-// Unused blocks until the audio track has no active subscribers.
+// Unused blocks until the audio track has no active subscribers. Prefer Demand.
 func (a *AudioProducer) Unused(ctx context.Context) error {
 	return a.inner.Unused(ctx)
 }
@@ -652,12 +709,21 @@ func (v *VideoProducer) Name() (string, error) {
 	return v.inner.Name()
 }
 
-// Used blocks until the video track has at least one active subscriber.
+// Demand returns a watch-only handle to whether the video track has subscribers.
+func (v *VideoProducer) Demand() (*TrackDemand, error) {
+	inner, err := v.inner.Demand()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDemand{inner: inner}, nil
+}
+
+// Used blocks until the video track has at least one active subscriber. Prefer Demand.
 func (v *VideoProducer) Used(ctx context.Context) error {
 	return v.inner.Used(ctx)
 }
 
-// Unused blocks until the video track has no active subscribers.
+// Unused blocks until the video track has no active subscribers. Prefer Demand.
 func (v *VideoProducer) Unused(ctx context.Context) error {
 	return v.inner.Unused(ctx)
 }

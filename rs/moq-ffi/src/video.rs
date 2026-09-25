@@ -18,6 +18,7 @@ use tokio::sync::oneshot;
 
 use crate::bandwidth::{MoqBandwidth, MoqReservation};
 use crate::consumer::MoqBroadcastConsumer;
+use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::producer::MoqBroadcastProducer;
 
@@ -246,7 +247,7 @@ pub struct MoqVideoProducer {
 }
 
 impl MoqVideoProducer {
-	fn demand(&self) -> Result<moq_net::track::Demand, MoqError> {
+	fn track_demand(&self) -> Result<moq_net::track::Demand, MoqError> {
 		let guard = self.inner.lock().unwrap();
 		let producer = guard.as_ref().ok_or(MoqError::Closed)?;
 		Ok(producer.producer.demand())
@@ -263,18 +264,27 @@ impl MoqVideoProducer {
 	/// Return the name of this video track.
 	pub fn name(&self) -> Result<String, MoqError> {
 		let _guard = crate::ffi::enter();
-		Ok(self.demand()?.name().to_string())
+		Ok(self.track_demand()?.name().to_string())
+	}
+
+	/// A watch-only handle to whether this video track has subscribers.
+	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
+		Ok(MoqTrackDemand::new(self.track_demand()?))
 	}
 
 	/// Wait until this video track has at least one active consumer.
+	///
+	/// Prefer [`demand`](Self::demand), a handle that can wait without borrowing this producer.
 	pub async fn used(&self) -> Result<(), MoqError> {
-		let demand = self.demand()?;
+		let demand = self.track_demand()?;
 		crate::ffi::detached(async move { demand.used().await }).await
 	}
 
 	/// Wait until this video track has no active consumers.
+	///
+	/// Prefer [`demand`](Self::demand), a handle that can wait without borrowing this producer.
 	pub async fn unused(&self) -> Result<(), MoqError> {
-		let demand = self.demand()?;
+		let demand = self.track_demand()?;
 		crate::ffi::detached(async move { demand.unused().await }).await
 	}
 

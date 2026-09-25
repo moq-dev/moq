@@ -1,11 +1,9 @@
-import type { Broadcast } from "./broadcast";
-
 const WINDOW = 10_000_000; // 10 seconds in microseconds.
 
 type Sample = { at: number; lateness: number };
 
-// The minimum encode lateness across every rendition in one broadcast. The queue is ordered by
-// lateness so its head is the minimum in the last window, and each sample enters/leaves once.
+// One rendition's recent minimum encode lateness. The queue is ordered by lateness so its head is
+// the minimum in the last window, and each sample enters/leaves once.
 export class JitterClock {
 	#samples: Sample[] = [];
 	#head = 0;
@@ -32,27 +30,17 @@ export class JitterClock {
 	}
 }
 
-const clocks = new WeakMap<Broadcast, JitterClock>();
-
-export function observeFlush(broadcast: Broadcast, timestamp: number): number {
-	let clock = clocks.get(broadcast);
-	if (!clock) {
-		clock = new JitterClock();
-		clocks.set(broadcast, clock);
-	}
-	return clock.observe(timestamp, performance.now() * 1000);
-}
-
-// One rendition's advertised maximum. The clock is shared; the maximum is deliberately not.
+// One rendition's advertised maximum spread above its own recent minimum lateness.
 export class RenditionJitter {
+	#clock = new JitterClock();
 	#maximum = 0;
 
 	get current(): number | undefined {
 		return this.#maximum || undefined;
 	}
 
-	observe(broadcast: Broadcast, timestamp: number): number | undefined {
-		const rounded = Math.ceil(observeFlush(broadcast, timestamp) / 1000);
+	observe(timestamp: number): number | undefined {
+		const rounded = Math.ceil(this.#clock.observe(timestamp, performance.now() * 1000) / 1000);
 		if (rounded <= this.#maximum) return undefined;
 		this.#maximum = rounded;
 		return rounded;

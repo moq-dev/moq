@@ -45,11 +45,9 @@ export interface ConnectionProps {
 	linger?: Time.Milli;
 
 	/**
-	 * Share a pooled transport keyed on the URL (default: true).
-	 *
-	 * Options the pool cannot honor (transport options, discovery, delay, a pinned
-	 * certificate, caller-owned origins) require `share: false` and get a private
-	 * reconnect loop with the same handle semantics.
+	 * Share a pooled transport keyed on the URL. By default, options specific to this
+	 * handle use a private reconnect loop; otherwise connections share by URL.
+	 * Explicit `true` refuses options a pool cannot honor.
 	 */
 	share?: boolean;
 
@@ -62,10 +60,10 @@ export interface ConnectionProps {
 	/** Whether the relay supports broadcast discovery. */
 	discovery?: boolean;
 
-	/** The origin whose broadcasts are served, spanning reconnects. Requires {@link ConnectionProps.share} `false`. */
+	/** The origin whose broadcasts are served, spanning reconnects. Implies a private loop. */
 	publish?: Origin.Consumer;
 
-	/** The origin fed with the peer's announced broadcasts, spanning reconnects. Requires {@link ConnectionProps.share} `false`. */
+	/** The origin fed with the peer's announced broadcasts, spanning reconnects. Implies a private loop. */
 	consume?: Origin.Producer;
 
 	/** Backoff settings for the reconnect loop; an unset field uses its default. */
@@ -96,8 +94,8 @@ export interface ConnectionProps {
  * sequence. {@link closed} settles only when this handle is released.
  *
  * Options the pool cannot honor (transport options, discovery, delay, a pinned
- * certificate, caller-owned origins) take `share: false` and get a private loop. A
- * supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
+ * certificate, caller-owned origins) use a private loop. An explicit `share: true`
+ * refuses them. A supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
  * instead.
  *
  * @public
@@ -179,7 +177,7 @@ export class Connection {
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
 	readonly #bandwidth = new Signal<Handle | undefined>(undefined);
 	readonly #error = new Signal<Error | undefined>(undefined);
-	#signals = new Effect();
+	#signals: Effect;
 
 	/**
 	 * Take a handle on the connection for {@link ConnectionProps.url}.
@@ -191,6 +189,7 @@ export class Connection {
 	 */
 	constructor(props?: ConnectionProps) {
 		refuse(props);
+		this.#signals = new Effect();
 
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
@@ -207,7 +206,7 @@ export class Connection {
 		// instance must not release and redial.
 		const href = this.#signals.computed((effect) => effect.get(this.url)?.href);
 
-		if (props?.share === false) {
+		if (props && (props.share === false || requiresPrivate(props))) {
 			this.#runPrivate(props, href);
 			return;
 		}
@@ -266,7 +265,7 @@ export class Connection {
 	 * and URL switches: a switch retracts everything from
 	 * the old relay's origin, then the new one's arrivals stream in.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all()): Announce.Consumer {
+	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
 		const producer = new Announce.Producer();
 		const consumer = producer.consume();
 
@@ -284,7 +283,7 @@ export class Connection {
 			const origin = effect.get(this.#origin);
 			if (!origin) return;
 
-			const upstream = origin.announced(scope);
+			const upstream = origin.announced(scope, options);
 			effect.cleanup(() => upstream.close());
 
 			// Track what this origin announced so a URL switch retracts it; the last
@@ -369,7 +368,7 @@ function refuse(props?: ConnectionProps): void {
 	if (extra.signal) {
 		throw new Error("a Connection owns its abort signal; do not pass one");
 	}
-	if (props.share === false) return;
+	if (props.share !== true || !requiresPrivate(props)) return;
 
 	if (props.publish || props.consume) {
 		throw new Error("caller-owned origins cannot be shared; pass share: false");
@@ -390,6 +389,18 @@ function refuse(props?: ConnectionProps): void {
 	if (props.delay !== undefined) {
 		throw new Error("delay cannot be shared; pass share: false");
 	}
+}
+
+/** Options tied to one handle cannot be represented by a URL-keyed shared entry. */
+function requiresPrivate(props: ConnectionProps): boolean {
+	return (
+		props.webtransport !== undefined ||
+		props.websocket !== undefined ||
+		props.discovery !== undefined ||
+		props.delay !== undefined ||
+		props.publish !== undefined ||
+		props.consume !== undefined
+	);
 }
 
 /** One shared connection and the handles keeping it alive. */

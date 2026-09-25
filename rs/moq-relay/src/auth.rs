@@ -186,6 +186,8 @@ pub struct Token {
 	pub publish: Patterns,
 	/// The tier this session's stats record under.
 	pub tier: Tier,
+	/// Whether the session is a cluster peer, so its routes entered elsewhere.
+	pub peer: bool,
 }
 
 impl Token {
@@ -202,6 +204,7 @@ impl Token {
 			subscribe: grant.subscribe.clone(),
 			publish: grant.publish.clone(),
 			tier: crate::configured_tier(grant.tier.clone()),
+			peer: grant.peer,
 		}
 	}
 
@@ -230,8 +233,12 @@ pub struct Lease {
 	consumer: lease::Consumer,
 	token: Token,
 	/// When the grant runs out, enforced here whoever drives the lease: a fixed
-	/// grant has no driver, and an auth server's may be mid-outage.
-	expires: Option<SystemTime>,
+	/// grant has no driver, and an auth server's may be mid-outage. Fixed on tokio's
+	/// clock when the grant arrives, so re-polling [`ended`](Self::ended) never
+	/// restarts the countdown.
+	expires: Option<tokio::time::Instant>,
+	/// The session's stats context, moved to a re-checked tier.
+	stats: moq_net::stats::Session,
 }
 
 impl Lease {
@@ -241,9 +248,16 @@ impl Lease {
 		let grant = consumer.grant();
 		Self {
 			token: Token::new(path, &grant),
-			expires: grant.expires,
+			expires: deadline(&grant),
 			consumer,
+			stats: Default::default(),
 		}
+	}
+
+	/// Attach the session's stats context, so a re-checked tier retags it live.
+	pub fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {
+		self.stats = stats;
+		self
 	}
 
 	/// The scope the session was admitted under.
@@ -260,14 +274,15 @@ impl Lease {
 	/// revoked, or was re-checked into one that no longer covers the token.
 	///
 	/// A changed root or a narrower grant ends it: origin handles cannot yet narrow
-	/// a live scope in place (tracked by `quest/next/origin-narrowing.md`). A changed
-	/// tier is kept for this session and applies to its next connection, since the
-	/// stats carriers resolved their counters at admission.
+	/// a live scope in place (tracked by `quest/m1/origin-narrowing.md`). A flipped
+	/// `peer` ends it too, since the routes it already announced would be
+	/// misreported as entering here or from a peer. A changed tier keeps the
+	/// session and moves its [stats](Self::with_stats) to the new tier.
 	pub async fn ended(&mut self) -> lease::Reason {
 		loop {
 			let expire = async {
 				match self.expires {
-					Some(at) => tokio::time::sleep(at.duration_since(SystemTime::now()).unwrap_or_default()).await,
+					Some(at) => tokio::time::sleep_until(at).await,
 					None => std::future::pending().await,
 				}
 			};
@@ -278,13 +293,20 @@ impl Lease {
 						if fresh.root != self.token.root {
 							return "root changed".into();
 						}
+						// Routes the session already announced were recorded as
+						// entering here or from a peer; a flip would misreport them.
+						if fresh.peer != self.token.peer {
+							return "peer changed".into();
+						}
 						if !self.token.covered_by(&fresh) {
 							return "grant narrowed".into();
 						}
 						if fresh.tier != self.token.tier {
-							tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed; applies to the next session");
+							tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed");
+							self.stats.set_tier(fresh.tier.clone());
+							self.token.tier = fresh.tier;
 						}
-						self.expires = grant.expires;
+						self.expires = deadline(&grant);
 					},
 					Err(reason) => return reason,
 				},
@@ -299,6 +321,12 @@ impl Lease {
 	pub fn close(self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
 		self.consumer.close(reason, bytes)
 	}
+}
+
+/// The grant's `expires` as a deadline on tokio's clock, counted from now.
+fn deadline(grant: &Grant) -> Option<tokio::time::Instant> {
+	let at = grant.expires?;
+	Some(tokio::time::Instant::now() + at.duration_since(SystemTime::now()).unwrap_or_default())
 }
 
 enum Decider {
@@ -593,6 +621,28 @@ mod tests {
 		assert!(matches!(auth.admit(request).await, Err(Error::Refused)));
 	}
 
+	/// The session supervisor re-polls `ended` on every nudge; that must not
+	/// restart the countdown to `expires`.
+	#[tokio::test(start_paused = true)]
+	async fn re_polling_keeps_the_expiry_deadline() {
+		use std::time::Duration;
+
+		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
+		grant.expires = Some(SystemTime::now() + Duration::from_secs(10));
+		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant));
+		for _ in 0..9 {
+			assert!(
+				tokio::time::timeout(Duration::from_secs(1), lease.ended())
+					.await
+					.is_err()
+			);
+		}
+		let reason = tokio::time::timeout(Duration::from_secs(2), lease.ended())
+			.await
+			.expect("expired at the deadline despite re-polling");
+		assert_eq!(reason, lease::Reason::Expired);
+	}
+
 	#[test]
 	fn token_keeps_every_grant_pattern() {
 		let mut grant = Grant::new(patterns(&["alice/**"]), patterns(&["**"]));
@@ -618,6 +668,21 @@ mod tests {
 		assert!(narrow.covered_by(&wide));
 		assert!(!wide.covered_by(&narrow));
 		assert!(!wide.covered_by(&moved));
+	}
+
+	/// Routes a session announced were recorded as a peer's or not; a re-check that
+	/// flips it closes the session rather than misreport them.
+	#[tokio::test]
+	async fn a_recheck_that_flips_peer_closes() {
+		let grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
+		let (producer, consumer) = lease::Producer::new(grant.clone());
+		let mut lease = Lease::new("/", consumer);
+		assert!(!lease.token().peer);
+
+		let mut peer = grant;
+		peer.peer = true;
+		producer.update(peer);
+		assert_eq!(lease.ended().await.to_string(), "peer changed");
 	}
 
 	#[test]

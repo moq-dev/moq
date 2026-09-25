@@ -35,6 +35,17 @@ int32_t moq_reservation_grant(uint32_t reservation, uint64_t *bps, bool *present
 int32_t moq_reservation_update(uint32_t reservation, uint64_t max_bps);
 int32_t moq_reservation_close(uint32_t reservation);
 
+// Server
+int32_t moq_server_listen(const moq_server_config *config, moq_status_callback on_request, void *user_data);
+int32_t moq_server_addr(uint32_t server, moq_string *dst);
+int32_t moq_server_fingerprints(uint32_t server, moq_string *dst, uintptr_t count);
+int32_t moq_server_close(uint32_t server);
+int32_t moq_session_request_path(uint32_t request, moq_string *dst);
+int32_t moq_session_request_query(uint32_t request, moq_string *dst);
+int32_t moq_session_request_accept(uint32_t request, uint32_t origin_publish, uint32_t origin_consume, moq_status_callback on_status, void *user_data);
+int32_t moq_session_request_reject(uint32_t request, uint16_t code);
+int32_t moq_session_request_free(uint32_t request);
+
 // Origin
 int32_t moq_origin_create(void);
 int32_t moq_origin_close(uint32_t origin);

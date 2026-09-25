@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/moq-dev/moq/compare/moq-net-v0.3.0...moq-net-v0.3.1) - 2026-09-24
+
+### Fixed
+
+- *(relay)* keep only finished groups warm when a track goes idle ([#3977](https://github.com/moq-dev/moq/pull/3977))
+- *(net)* don't end in-flight tracks when their broadcast ends ([#4007](https://github.com/moq-dev/moq/pull/4007))
+
+### Other
+
+- rename in-repo smoke test to interop ([#3963](https://github.com/moq-dev/moq/pull/3963))
+
 ## [0.3.0](https://github.com/moq-dev/moq/compare/moq-net-v0.2.22...moq-net-v0.3.0) - 2026-09-23
 
 ### Added

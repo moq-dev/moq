@@ -12,7 +12,7 @@ consumer, `Sendable` handles, and `Task` cancellation that reaches the native
 side. It depends on `MoqFFI`, which ships a prebuilt XCFramework with arm64
 slices for iOS 15+, the iOS Simulator, and macOS 12.3+.
 
-```swift
+```swift ignore
 dependencies: [
     .package(url: "https://github.com/moq-dev/moq-swift", from: "<version>"),   // latest: see the badge above
 ],
@@ -32,7 +32,7 @@ for try await announcement in try session.consume.announced(prefix: "live/", fil
     // Updates stay origin-relative; captures reports what each wildcard matched.
     print(announcement.captures ?? [])
     let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
-    for try await catalog in try broadcast.subscribeCatalog() {
+    for try await catalog in try await broadcast.subscribeCatalog() {
         print(catalog)
     }
 }
@@ -45,9 +45,9 @@ let broadcast = try session.publish.createBroadcast(path: "my-stream.hang")
 let audio = try broadcast.publishAudio(format: .opus, initData: opusInit)
 try audio.writeFrame(packet, timestampUs: 20_000)
 
-let video = try broadcast.publishVideo(
+let video = try broadcast.encodeVideo(
     input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: 30),
-    output: VideoEncoderOutput(codec: .h264, track: "camera", bitrate: nil, gop: nil, kind: .auto)
+    output: VideoEncoderOutput(codec: .h264, track: "camera", kind: .auto)
 )
 try video.write(VideoFrame(timestampUs: pts, data: rgba))
 try broadcast.announce()
@@ -58,7 +58,7 @@ session.shutdown()
 For already-encoded live output, call `audio.flush(timestampUs:)` after `writeFrame` with the same broadcast-clock PTS. It measures catalog jitter at the transport handoff. File, pipe, and network imports should omit `flush`; built-in encoders observe their own output.
 
 The three advertising operations: `session.publish.createBroadcast(path:)`
-returns a locally discoverable producer; `broadcast.announce(route:)` /
+returns an unannounced producer, invisible to everyone; `broadcast.announce(route:)` /
 `broadcast.unannounce()` own that exact-path advertisement;
 `session.publish.dynamic(prefix:route:)` claims `prefix` and every path
 beneath it (`""` for everything). Hold the returned `OriginDynamic` while the
@@ -66,6 +66,8 @@ claim should stay advertised, and reject the requests you will not serve. A
 route is a capability, not an inventory. `announced(prefix:filter:)` combines a
 literal root with an optional relative pattern; `announcement.prefix` stays
 relative to the origin and `captures` reports what the wildcards matched.
+Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
+`hidden: true`.
 
 For a self-signed relay on your own test network, `try client.setTlsVerify(false)`
 accepts any certificate; prefer `setTlsRoots` or a fingerprint anywhere else.
@@ -76,16 +78,25 @@ broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing
 with `session.status()` to log each reconnect; `client.setBackoff` tunes the
 pacing; and `client.setQuicMaxStreams` raises the peer's inbound stream cap.
 
+The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
+a 200 ms head start. `client.setWebsocketEnabled(false)` turns it off for a
+QUIC-only relay, and `client.setWebsocketDelay(_:)` changes the head start, in
+microseconds.
+
 `Server` binds, generates or loads TLS, and hands you each request to
 `accept()` or `reject(code:)`; `request.transport` is a `Transport` enum. JSON tracks take `Codable` types
 (`publishJsonSnapshot(name:of:)`, `subscribeJsonStream(name:as:)`), and the
 rest of the [shared feature list](/lib/#what-every-binding-can-do) maps one
 to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix:)` for broadcasts, `appendDatagram`/
-`datagrams`, `setCatalogSection`, `used()`/`unused()`. `session.bandwidth()`
+`datagrams`, `setCatalogSection`, `demand()` for `used()`/`unused()`. `session.bandwidth()`
 divides the connection's send estimate; pass it to `encodeVideo` /
 `encodeAudio` or `reserve` a share for an app-owned track. `MoqError.isAuth` and
 `isShutdown` classify errors. `protocolError` is the structured protocol failure
 (scope, verbatim code, kind) when the peer sent one.
+
+`encodeAudio` encodes raw PCM inside the binding. Its codec is an object,
+`AudioCodec.opus()`, and `AudioEncoderOutput.frameDurationUs` sets the Opus
+frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000.
 
 `decodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.format`
 is `.i420` when unset, or `.rgba` for four bytes a pixel, and every frame

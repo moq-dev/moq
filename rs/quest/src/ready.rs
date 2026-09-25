@@ -60,8 +60,8 @@ impl fmt::Display for Blocker {
 /// What blocks `path`, a required questline expanded into the quests it still
 /// holds. Empty means ready.
 ///
-/// `path` is the quest as the tree writes it (`/quest/dev/one.md`), as the shell
-/// completes it (`quest/dev/one.md`), or as an absolute filesystem path.
+/// `path` is the quest as the tree writes it (`/quest/m0/one.md`), as the shell
+/// completes it (`quest/m0/one.md`), or as an absolute filesystem path.
 pub fn blockers(root: &Path, path: &Path) -> Result<Vec<Blocker>> {
 	let docs = crate::load(root)?;
 	let by_path: BTreeMap<&Path, &Doc> = docs.iter().map(|d| (d.path.as_path(), d)).collect();

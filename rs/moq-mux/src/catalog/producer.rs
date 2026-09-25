@@ -169,8 +169,6 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// It also owns the broadcast's wall mapping, published at the catalog root as
 	/// `clock: { wall, timescale }` independently of any archive timeline.
 	clock: crate::Clock,
-	/// Minimum encoder lateness shared by every rendition of this broadcast.
-	pub(crate) jitter_baseline: Arc<Mutex<super::estimate::Baseline>>,
 
 	/// The broadcast's timeline: the shared boundary list every enrolled track's groups map
 	/// onto, and the track those segment records are published on. See
@@ -193,7 +191,6 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			outputs: self.outputs.clone(),
 			current: self.current.clone(),
 			clock: self.clock,
-			jitter_baseline: self.jitter_baseline.clone(),
 			timeline: self.timeline.clone(),
 			max_age: self.max_age,
 			bandwidth: self.bandwidth.clone(),
@@ -342,7 +339,6 @@ impl<E: CatalogExt> Producer<E> {
 				closed: None,
 			})),
 			clock: config.clock,
-			jitter_baseline: Arc::new(Mutex::new(super::estimate::Baseline::default())),
 			timeline,
 			max_age: config.max_age,
 			bandwidth: config.bandwidth,

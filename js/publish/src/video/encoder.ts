@@ -195,7 +195,7 @@ export class Encoder {
 				return;
 			}
 
-			this.#encode(track, broadcast, effect);
+			this.#encode(track, effect);
 		});
 
 		// Reserve against the connection for as long as this track is live. Wait
@@ -226,7 +226,7 @@ export class Encoder {
 	}
 
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
-	#encode(track: Moq.Track.Producer, broadcast: Broadcast, effect: Effect): void {
+	#encode(track: Moq.Track.Producer, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		if (!capture) {
 			this.#observe({ demand: true, idle: true });
@@ -237,9 +237,10 @@ export class Encoder {
 		this.#lastCaptureWall = performance.now();
 
 		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
-		// The broadcast owns this static track across demand gaps. End only the current
-		// group when demand disappears so a later subscriber can resume on the same track.
-		// A fatal encoder error still aborts the track through producer.close(err) below.
+		// The broadcast owns this static track across demand gaps. When demand disappears, cut the
+		// current group, marking the break so a later subscriber resumes on the same track without
+		// the pre-gap group reading as live. A fatal encoder error still aborts the track through
+		// producer.close(err) below.
 		effect.cleanup(() => {
 			if (track.closed.peek() === undefined) producer.cut();
 		});
@@ -262,7 +263,7 @@ export class Encoder {
 					}));
 
 					producer.encode(frame, frame.timestamp as Time.Micro, key);
-					const jitter = this.#jitter.observe(broadcast, frame.timestamp);
+					const jitter = this.#jitter.observe(frame.timestamp);
 					if (jitter !== undefined) {
 						const catalog = this.#out.catalog.peek();
 						if (catalog) this.#out.catalog.set({ ...catalog, jitter: Catalog.u53(jitter) });

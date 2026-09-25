@@ -390,6 +390,32 @@ async def test_json_stream_roundtrip():
     producer.finish()
 
 
+async def test_json_producers_report_demand():
+    broadcast = moq.BroadcastProducer()
+    snapshot = broadcast.publish_json_snapshot("status", compression=True)
+    stream = broadcast.publish_json_stream("events")
+    snapshot_demand = snapshot.demand()
+    stream_demand = stream.demand()
+    assert snapshot_demand.name == "status"
+    assert not snapshot_demand.is_used()
+
+    consumer = broadcast.consume()
+    snapshot_consumer = await consumer.subscribe_json_snapshot("status", compression=True)
+    stream_consumer = await consumer.subscribe_json_stream("events")
+    await asyncio.wait_for(snapshot_demand.used(), timeout=5.0)
+    await asyncio.wait_for(stream_demand.used(), timeout=5.0)
+    assert snapshot_demand.is_used()
+
+    snapshot_consumer.cancel()
+    stream_consumer.cancel()
+    await asyncio.wait_for(snapshot_demand.unused(), timeout=5.0)
+    await asyncio.wait_for(stream_demand.unused(), timeout=5.0)
+
+    snapshot.finish()
+    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+        await asyncio.wait_for(snapshot_demand.used(), timeout=5.0)
+
+
 async def test_dynamic_track_request():
     broadcast = moq.BroadcastProducer()
     dynamic = broadcast.dynamic()
@@ -1091,35 +1117,34 @@ async def test_decode_video_format():
     broadcast.finish()
 
 
-async def test_unannounce_keeps_local_discovery():
+async def test_broadcast_is_reachable_only_while_announced():
     origin = moq.OriginProducer()
     broadcast = origin.create_broadcast("live")
     track = broadcast.publish_track("events")
-
     consumer = origin.consume()
+    with pytest.raises(Exception):
+        await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+
+    broadcast.announce()
     announced = consumer.announced()
     first = await asyncio.wait_for(anext(announced), timeout=5.0)
     assert first.prefix == "live"
     assert first.active
-    assert first.route.cost == 0
-
-    broadcast.announce(moq.Route(cost=3))
-    advertised = await asyncio.wait_for(anext(announced), timeout=5.0)
-    assert advertised.active
-    assert advertised.route.cost == 3
 
     broadcast.unannounce()
-    local = await asyncio.wait_for(anext(announced), timeout=5.0)
-    assert local.prefix == "live"
-    assert local.active
-    assert local.route.cost == 0
+    retracted = await asyncio.wait_for(anext(announced), timeout=5.0)
+    assert retracted.prefix == "live"
+    assert not retracted.active
+    with pytest.raises(Exception):
+        await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
 
+    broadcast.announce()
+    back = await asyncio.wait_for(anext(announced), timeout=5.0)
+    assert back.active
     await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+    announced.cancel()
     track.finish()
     broadcast.finish()
-    ended = await asyncio.wait_for(anext(announced), timeout=5.0)
-    assert not ended.active
-    announced.cancel()
 
 
 async def test_announced_pattern_captures():

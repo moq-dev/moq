@@ -473,10 +473,6 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		self.catalog.timestamp(hint)
 	}
 
-	pub(crate) fn jitter_baseline(&self) -> std::sync::Arc<std::sync::Mutex<super::estimate::Baseline>> {
-		self.catalog.jitter_baseline.clone()
-	}
-
 	/// Validate and publish the rendition, fulfilling its reservation only after the edit succeeds.
 	///
 	/// Whatever [`Estimate`] fields `config` already carries are authoritative and left alone; the

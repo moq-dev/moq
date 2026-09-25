@@ -849,22 +849,25 @@ mod tests {
 
 		let config = Config {
 			kind: Kind::Named("mediafoundation".into()),
-			..Config::new(w, h, camera.framerate().unwrap_or(30))
+			..Config::new(w, h, camera.framerate().unwrap_or(crate::Rate::integer(30)))
 		};
 		let mut encoder = Encoder::new(&config).expect("hardware H.264 encoder available");
 
 		let mut frames = Vec::new();
 		let mut textures = 0;
 		for i in 0..30 {
-			let surface = camera.read().await.expect("read camera frame");
-			if matches!(surface, Some(Surface::Texture(_))) {
+			let frame = camera
+				.read()
+				.await
+				.expect("read camera frame")
+				.expect("frame, not end of stream");
+			if matches!(frame.surface, Surface::Texture(_)) {
 				textures += 1;
 			}
 			if i == 0 {
 				encoder.cut().unwrap();
 			}
-			let surface = surface.expect("frame, not end of stream");
-			frames.extend(encoder.encode(&Frame::new(surface, at(i))).unwrap());
+			frames.extend(encoder.encode(&frame).unwrap());
 		}
 		frames.extend(encoder.finish().unwrap());
 

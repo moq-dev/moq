@@ -40,6 +40,7 @@ const LITE_VERSIONS: &[lite::Version] = &[
 	lite::Version::Lite04,
 	lite::Version::Lite05,
 	lite::Version::Lite06,
+	lite::Version::Lite07,
 ];
 
 /// The moq-transport drafts a target decodes at, selected by the input's first byte.

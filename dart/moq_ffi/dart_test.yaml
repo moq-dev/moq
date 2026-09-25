@@ -1,0 +1,3 @@
+# Suites share one process, so a concurrent suite would add its allocations to
+# the resident memory that leak_test.dart measures.
+concurrency: 1

@@ -173,7 +173,6 @@ where
 		E: crate::catalog::hang::CatalogExt,
 		R: crate::catalog::RenditionConfig<E>,
 	{
-		let baseline = rendition.jitter_baseline();
 		Self {
 			inner: track,
 			container,
@@ -188,7 +187,7 @@ where
 			previous_timestamp: None,
 			cadence: None,
 			reordered: false,
-			estimator: crate::catalog::Estimator::with_baseline(baseline),
+			estimator: crate::catalog::Estimator::new(),
 			bandwidth: None,
 			rendition: Some(Box::new(rendition)),
 		}
@@ -781,7 +780,7 @@ mod tests {
 	}
 
 	#[test]
-	fn catalog_flush_shares_the_baseline_and_publishes_only_the_slower_rendition() {
+	fn catalog_flush_measures_each_rendition_against_its_own_minimum() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut tracks = Vec::new();
@@ -798,16 +797,17 @@ mod tests {
 		}
 
 		let anchor = std::time::Instant::now();
-		let pts = Timestamp::from_micros(0).unwrap();
-		tracks[0].flush(pts, anchor).unwrap();
-		tracks[1]
-			.flush(pts, anchor + std::time::Duration::from_millis(200))
-			.unwrap();
+		let ms = std::time::Duration::from_millis;
+		let pts = |millis| Timestamp::from_micros(millis * 1_000).unwrap();
+		tracks[0].flush(pts(0), anchor).unwrap();
+		// A constant 200ms offset behind the other rendition is not jitter.
+		tracks[1].flush(pts(0), anchor + ms(200)).unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["slow"].jitter, None);
+
+		// A frame flushed 60ms later than the slow rendition's own minimum is.
+		tracks[1].flush(pts(40), anchor + ms(300)).unwrap();
 		assert_eq!(catalog.snapshot().video.renditions["fast"].jitter, None);
-		assert_eq!(
-			catalog.snapshot().video.renditions["slow"].jitter,
-			Some(std::time::Duration::from_millis(200))
-		);
+		assert_eq!(catalog.snapshot().video.renditions["slow"].jitter, Some(ms(60)));
 	}
 
 	/// A passthrough producer claims nothing until the first window closes, then

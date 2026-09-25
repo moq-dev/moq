@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2](https://github.com/moq-dev/moq/compare/moq-relay-v0.15.1...moq-relay-v0.15.2) - 2026-09-24
+
+### Fixed
+
+- *(relay)* fix the lease deadline on tokio's clock and pause the outage test ([#3969](https://github.com/moq-dev/moq/pull/3969))
+
+## [0.15.1](https://github.com/moq-dev/moq/compare/moq-relay-v0.15.0...moq-relay-v0.15.1) - 2026-09-23
+
+### Fixed
+
+- *(ci)* repair nightly builds hidden behind the first failure ([#3956](https://github.com/moq-dev/moq/pull/3956))
+- *(relay)* follow usage-rs 6.11.1 moving env aliases under FlagMeta::extra ([#4006](https://github.com/moq-dev/moq/pull/4006))
+- *(relay)* gate the per-worker accept loop on _quic ([#3968](https://github.com/moq-dev/moq/pull/3968))
+
+### Other
+
+- *(drill)* retarget mutations after the dev merge ([#3953](https://github.com/moq-dev/moq/pull/3953))
+- *(quest)* return to milestones ([#3962](https://github.com/moq-dev/moq/pull/3962))
+
 ## [0.15.0](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.18...moq-relay-v0.15.0) - 2026-09-23
 
 ### Added

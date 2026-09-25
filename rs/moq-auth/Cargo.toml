@@ -34,7 +34,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["base64"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["fs", "rt", "time", "sync"], optional = true }
+tokio = { workspace = true, features = ["fs", "macros", "rt", "time", "sync"], optional = true }
 tracing = { workspace = true, optional = true }
 url = { workspace = true }
 

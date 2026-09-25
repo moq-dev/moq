@@ -44,7 +44,7 @@ impl MoqBandwidth {
 	/// without claiming twice.
 	pub fn reserve(&self, track: &MoqTrackProducer, max_bps: u64) -> Result<Arc<MoqReservation>, MoqError> {
 		let _guard = crate::ffi::enter();
-		Ok(self.reserve_demand(&track.demand()?, max_bps))
+		Ok(self.reserve_demand(&track.track_demand()?, max_bps))
 	}
 }
 

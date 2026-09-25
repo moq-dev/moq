@@ -1,5 +1,4 @@
 import { expect, spyOn, test } from "bun:test";
-import type { Broadcast } from "./broadcast";
 import { JitterClock, RenditionJitter } from "./jitter";
 
 test("a batch flushed at its end counts its full media span", () => {
@@ -9,12 +8,10 @@ test("a batch flushed at its end counts its full media span", () => {
 	expect(clock.observe(40_000, 120_000)).toBe(80_000);
 });
 
-test("a shared baseline exposes the slower encoder's constant offset", () => {
+test("a constant lateness is not jitter", () => {
 	const clock = new JitterClock();
-	expect(clock.observe(0, 0)).toBe(0);
-	expect(clock.observe(0, 200_000)).toBe(200_000);
-	expect(clock.observe(240_000, 240_000)).toBe(0);
-	expect(clock.observe(240_000, 440_000)).toBe(200_000);
+	expect(clock.observe(0, 200_000)).toBe(0);
+	expect(clock.observe(240_000, 440_000)).toBe(0);
 });
 
 test("a sliding minimum bounds slow media clock drift", () => {
@@ -34,21 +31,21 @@ test("a faster-than-real-time source keeps lowering the baseline", () => {
 	}
 });
 
-test("each rendition retains its largest advertised flush delay", () => {
+test("each rendition measures against its own minimum", () => {
 	const now = spyOn(performance, "now").mockReturnValue(0);
 	try {
-		const broadcast = {} as Broadcast;
 		const audio = new RenditionJitter();
 		const video = new RenditionJitter();
-		expect(audio.observe(broadcast, 0)).toBeUndefined();
+		expect(audio.observe(0)).toBeUndefined();
 		now.mockReturnValue(200);
-		expect(video.observe(broadcast, 0)).toBe(200);
-		now.mockReturnValue(240);
-		expect(audio.observe(broadcast, 240_000)).toBeUndefined();
+		// A slower encoder's constant offset is not jitter.
+		expect(video.observe(0)).toBeUndefined();
+		now.mockReturnValue(300);
+		expect(video.observe(40_000)).toBe(60);
 		now.mockReturnValue(440);
-		expect(video.observe(broadcast, 240_000)).toBeUndefined();
+		expect(video.observe(240_000)).toBeUndefined();
 		expect(audio.current).toBeUndefined();
-		expect(video.current).toBe(200);
+		expect(video.current).toBe(60);
 	} finally {
 		now.mockRestore();
 	}

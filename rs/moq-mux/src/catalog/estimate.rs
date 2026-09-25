@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use moq_net::Timestamp;
@@ -77,20 +76,13 @@ impl Estimate {
 pub struct Estimator {
 	jitter: Jitter,
 	bitrate: Bitrate,
-	baseline: Arc<Mutex<Baseline>>,
+	baseline: Baseline,
 }
 
 impl Estimator {
 	/// Create an empty estimator.
 	pub fn new() -> Self {
 		Self::default()
-	}
-
-	pub(crate) fn with_baseline(baseline: Arc<Mutex<Baseline>>) -> Self {
-		Self {
-			baseline,
-			..Self::default()
-		}
 	}
 
 	/// Observe a frame of `bytes` encoded bytes at presentation time `timestamp`, as written by
@@ -101,10 +93,10 @@ impl Estimator {
 	}
 
 	/// Measure when an encoder handed a frame to the transport. Only locally encoded frames should
-	/// call this; imports keep clock-free batch and reorder estimates. The shared baseline cancels
-	/// the constant offset between `Instant` and the broadcast media clock.
+	/// call this; imports keep clock-free batch and reorder estimates. Jitter is the spread above
+	/// this track's own recent minimum lateness, so a constant encoder delay is not jitter.
 	pub fn flush(&mut self, timestamp: Timestamp, now: Instant) {
-		let spread = self.baseline.lock().unwrap().observe(timestamp, now);
+		let spread = self.baseline.observe(timestamp, now);
 		self.jitter.max = self.jitter.max.max(spread);
 	}
 
@@ -265,15 +257,14 @@ impl Jitter {
 	}
 }
 
-/// The minimum encode lateness seen anywhere in one broadcast over the recent window.
+/// One track's minimum encode lateness over the recent window.
 ///
 /// An `Instant` has no public mapping to the broadcast's media epoch. The first observation
-/// chooses a local origin; its unknown offset is common to every rendition and cancels when
-/// subtracting the recent minimum. A monotonic deque makes insertion and expiry amortized O(1).
+/// chooses a local origin; its unknown offset cancels when subtracting the recent minimum. A
+/// monotonic deque makes insertion and expiry amortized O(1).
 #[derive(Default)]
-pub(crate) struct Baseline {
+struct Baseline {
 	epoch: Option<Instant>,
-	last_now: Option<Instant>,
 	samples: VecDeque<Sample>,
 }
 
@@ -285,14 +276,10 @@ struct Sample {
 impl Baseline {
 	fn observe(&mut self, timestamp: Timestamp, now: Instant) -> Duration {
 		let epoch = *self.epoch.get_or_insert(now);
-		// Concurrent encoders can sample `now` in one order and enter this lock in another.
-		// Keep expiry times ordered without changing the lateness sample itself.
-		let at = self.last_now.map_or(now, |last| last.max(now));
-		self.last_now = Some(at);
 		while self
 			.samples
 			.front()
-			.is_some_and(|sample| at.duration_since(sample.at) > JITTER_WINDOW)
+			.is_some_and(|sample| now.duration_since(sample.at) > JITTER_WINDOW)
 		{
 			self.samples.pop_front();
 		}
@@ -305,7 +292,7 @@ impl Baseline {
 		while self.samples.back().is_some_and(|sample| sample.lateness >= lateness) {
 			self.samples.pop_back();
 		}
-		self.samples.push_back(Sample { at, lateness });
+		self.samples.push_back(Sample { at: now, lateness });
 		let minimum = self.samples.front().expect("the current sample was inserted").lateness;
 		let spread = u64::try_from(lateness - minimum).unwrap_or(u64::MAX);
 		Duration::from_nanos(spread)
@@ -342,34 +329,17 @@ mod tests {
 	}
 
 	#[test]
-	fn two_renditions_share_the_minimum_but_keep_separate_maxima() {
-		let baseline = Arc::new(Mutex::new(Baseline::default()));
-		let mut audio = Estimator::with_baseline(baseline.clone());
-		let mut video = Estimator::with_baseline(baseline);
+	fn constant_encoder_delay_is_not_jitter() {
+		let mut estimator = Estimator::new();
 		let anchor = Instant::now();
-		audio.flush(micros(0), anchor);
-		video.flush(micros(0), anchor + Duration::from_millis(200));
-		assert_eq!(audio.estimate().jitter, None);
-		assert_eq!(video.estimate().jitter, Some(Duration::from_millis(200)));
+		estimator.flush(micros(0), anchor + Duration::from_millis(200));
+		estimator.flush(micros(240_000), anchor + Duration::from_millis(440));
+		assert_eq!(estimator.estimate().jitter, None);
 	}
 
 	#[test]
-	fn shared_baseline_exposes_offset_and_expires_drift() {
-		let mut baseline = Baseline::default();
+	fn baseline_expires_drift() {
 		let anchor = Instant::now();
-		assert_eq!(baseline.observe(micros(0), anchor), Duration::ZERO);
-		assert_eq!(
-			baseline.observe(micros(0), anchor + Duration::from_millis(200)),
-			Duration::from_millis(200)
-		);
-		assert_eq!(
-			baseline.observe(micros(240_000), anchor + Duration::from_millis(240)),
-			Duration::ZERO
-		);
-		assert_eq!(
-			baseline.observe(micros(240_000), anchor + Duration::from_millis(440)),
-			Duration::from_millis(200)
-		);
 
 		let mut drift = Baseline::default();
 		let maximum = (0..100u128)
