@@ -737,6 +737,12 @@ impl Listener {
 		self.server.websocket_local_addr()
 	}
 
+	/// The address the plain TCP (qmux) listener bound to, if one was configured.
+	#[cfg(feature = "tcp")]
+	pub fn tcp_local_addr(&self) -> Option<net::SocketAddr> {
+		self.server.streams.tcp_local_addr
+	}
+
 	/// A live handle to the certificates this server is serving.
 	///
 	/// See [`Server::certificates`], which is also readable before listening.
@@ -833,6 +839,9 @@ struct StreamListeners {
 	versions: moq_net::Versions,
 	#[cfg(all(feature = "uds", unix))]
 	unix_allow: Option<crate::unix::Allow>,
+	/// The address the TCP listener bound, once [`Self::start`] has run.
+	#[cfg(feature = "tcp")]
+	tcp_local_addr: Option<net::SocketAddr>,
 	rx: Option<tokio::sync::mpsc::Receiver<Request>>,
 	tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -854,6 +863,8 @@ impl StreamListeners {
 			versions,
 			#[cfg(all(feature = "uds", unix))]
 			unix_allow,
+			#[cfg(feature = "tcp")]
+			tcp_local_addr: None,
 			rx: None,
 			tasks: Vec::new(),
 		}
@@ -886,7 +897,9 @@ impl StreamListeners {
 						.await?
 						.with_protocols(alpns)
 						.with_accept_health(health);
-					tracing::info!(%addr, "listening (tcp)");
+					let local = listener.local_addr()?;
+					tracing::info!(addr = %local, "listening (tcp)");
+					self.tcp_local_addr = Some(local);
 					bound.push(BoundListener::Tcp(listener));
 				}
 				#[cfg(all(feature = "uds", unix))]

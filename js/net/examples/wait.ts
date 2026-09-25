@@ -28,7 +28,7 @@ async function main() {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const group = await Promise.race([effect.cancel, track.recvGroup()]);
+				const group = await effect.race(track.recvGroup());
 				if (!group) break;
 				console.log("received:", await group.readString());
 			}

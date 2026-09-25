@@ -112,7 +112,8 @@ In Rust the catalog owns the lifetime: `catalog.json_stream(track, config)` (or
 `json_snapshot` / `binary_snapshot` / `binary_stream`) writes the entry and
 retracts it when the producer drops. Read the config from `catalog.json.tracks`
 or `catalog.binary.tracks`, then pair its name and config with
-`moq_mux::catalog::Entry::new` to subscribe. In the browser, read the same map,
+`moq_mux::catalog::Entry::new` to subscribe. In C, `moq_publish_json_*` and
+`moq_publish_binary_*` do the same, retracting on `_finish`. In the browser, read the same map,
 subscribe by name, and hand the track to `@moq/json` or `@moq/binary`.
 
 ## Container

@@ -1,4 +1,4 @@
-import { type Dispose, type Getter, Signal } from "@moq/signals";
+import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
@@ -436,7 +436,7 @@ export class Publisher {
 			let publishError: Error | undefined;
 			let unauthorized = false;
 			try {
-				const end = await Promise.race([Promise.all([serving, filling]), stream.reader.closed, revoked]);
+				const end = await race([Promise.all([serving, filling]), stream.reader.closed, revoked]);
 				if (end === "revoked") {
 					console.info(`subscription no longer authorized: broadcast=${name} track=${track.name}`);
 					unauthorized = true;
@@ -548,7 +548,7 @@ export class Publisher {
 
 					// Reading from the filter's start drops the objects below it: they are outside
 					// the requested range, so skipping them is not a gap.
-					const read = await Promise.race([hooks.readGroupFrame(group, slice.skip), stream.closed]);
+					const read = await race([hooks.readGroupFrame(group, slice.skip), stream.closed]);
 					if (!read) break;
 					next = read.sequence + 1;
 					if (slice.until !== undefined && read.sequence >= slice.until) {
@@ -661,11 +661,7 @@ export class Publisher {
 			if (fill.until !== undefined && next >= fill.until) break;
 
 			// Reading from the fill's start drops everything below it; see the same read in #runGroup.
-			const frame = await Promise.race([
-				group.readFrameSequence({ from: Number(fill.skip) }),
-				stream.closed,
-				cancelled,
-			]);
+			const frame = await race([group.readFrameSequence({ from: Number(fill.skip) }), stream.closed, cancelled]);
 			if (left) throw new Error("unsubscribed before the fill finished");
 			if (!frame) break;
 			next = BigInt(frame.sequence) + 1n;
@@ -847,8 +843,8 @@ export class Publisher {
 
 				// Wait for the next change, or for the peer to unsubscribe.
 				const next = await (retry
-					? Promise.race([changed, stream.reader.closed, retryAfter(retry).then(() => advertised)])
-					: Promise.race([changed, stream.reader.closed]));
+					? race([changed, stream.reader.closed, retryAfter(retry).then(() => advertised)])
+					: race([changed, stream.reader.closed]));
 				dispose();
 				if (!next) break;
 			}
@@ -986,8 +982,8 @@ export class Publisher {
 
 				// Wait for the next change, which has already fired if one landed above.
 				const next = await (retry
-					? Promise.race([changed, closed, retryAfter(retry).then(() => advertised)])
-					: Promise.race([changed, closed]));
+					? race([changed, closed, retryAfter(retry).then(() => advertised)])
+					: race([changed, closed]));
 				dispose?.();
 				if (!next) break;
 			}

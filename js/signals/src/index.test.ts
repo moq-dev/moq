@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { Computed, Effect, Once, Signal } from "./index.ts";
+import { Computed, type Dispose, Effect, type GetPromise, Once, race, Signal } from "./index.ts";
 
 const NO_SUBSCRIPTION_WARNING = "Effect did not subscribe to any signals; it will never rerun.";
 
@@ -1047,5 +1047,205 @@ describe("Once", () => {
 		once.set("x");
 		await flush();
 		expect(seen).toEqual(["x"]);
+	});
+});
+
+// A GetPromise over a Once that counts the listeners currently attached to it.
+function counted<T>(once = new Once<T>()): GetPromise<T> & { listeners: number; once: Once<T> } {
+	const wrapper = {
+		once,
+		listeners: 0,
+		peek: () => once.peek(),
+		changed: ((fn?: (value: T | undefined) => void) =>
+			fn ? track(once.changed(fn)) : once.changed()) as GetPromise<T>["changed"],
+		subscribe: (fn: (value: T | undefined) => void) => track(once.subscribe(fn)),
+		// biome-ignore lint/suspicious/noThenProperty: mirrors Once.
+		then: once.then.bind(once) as GetPromise<T>["then"],
+	};
+	function track(dispose: Dispose): Dispose {
+		wrapper.listeners++;
+		let live = true;
+		return () => {
+			if (!live) return;
+			live = false;
+			wrapper.listeners--;
+			dispose();
+		};
+	}
+	return wrapper;
+}
+
+// A thenable that counts how many reactions were attached to it.
+function thenable<T>(): PromiseLike<T> & { reactions: number; resolve: (value: T) => void } {
+	const inner = Promise.withResolvers<T>();
+	return {
+		reactions: 0,
+		resolve: inner.resolve,
+		// biome-ignore lint/suspicious/noThenProperty: a counting thenable.
+		then(onFulfilled, onRejected) {
+			this.reactions++;
+			return inner.promise.then(onFulfilled, onRejected);
+		},
+	};
+}
+
+describe("race", () => {
+	test("settles with the first value to settle", async () => {
+		const slow = new Promise((resolve) => setTimeout(() => resolve("slow"), 20));
+		const fast = new Promise((resolve) => setTimeout(() => resolve("fast"), 1));
+		expect(await race([slow, fast])).toBe("fast");
+	});
+
+	test("rejects with the first rejection", async () => {
+		const pending = new Promise(() => {});
+		await expect(race([pending, Promise.reject(new Error("boom"))])).rejects.toThrow("boom");
+	});
+
+	test("an already settled Once wins at once", async () => {
+		const once = new Once<string>();
+		once.set("done");
+		expect(await race([Promise.resolve("promise"), once])).toBe("done");
+	});
+
+	test("resolves when a pending Once settles", async () => {
+		const once = new Once<number>();
+		const result = race([new Promise(() => {}), once]);
+		once.set(3);
+		expect(await result).toBe(3);
+	});
+
+	test("many races leave a pending Once without listeners", async () => {
+		const closed = counted<Error | null>();
+		for (let i = 0; i < 1000; i++) {
+			expect(await race([Promise.resolve(i), closed])).toBe(i);
+		}
+		expect(closed.listeners).toBe(0);
+	});
+
+	test("many races attach one reaction to a long-lived promise", async () => {
+		const closed = thenable<string>();
+		for (let i = 0; i < 1000; i++) {
+			expect(await race([Promise.resolve(i), closed])).toBe(i);
+		}
+		expect(closed.reactions).toBe(1);
+
+		closed.resolve("closed");
+		expect(await race([new Promise(() => {}), closed])).toBe("closed");
+		expect(closed.reactions).toBe(1);
+	});
+
+	test("many races against a long-lived promise leave it no listeners", async () => {
+		const closed = new Promise(() => {});
+		const add = spyOn(Set.prototype, "add");
+		let sets: Set<unknown>[];
+		try {
+			for (let i = 0; i < 1000; i++) await race([Promise.resolve(i), closed]);
+			sets = [...add.mock.contexts] as Set<unknown>[];
+		} finally {
+			add.mockRestore();
+		}
+
+		// `closed` is the last value each race listens to, so the last set added to is its listeners.
+		const listeners = sets.at(-1);
+		expect(sets.filter((set) => set === listeners).length).toBe(1000);
+		expect(sets.every((set) => set.size === 0)).toBe(true);
+	});
+});
+
+describe("effect.race", () => {
+	test("resolves with the value while the run is live", async () => {
+		const effect = new Effect();
+		expect(await effect.race(Promise.resolve(5))).toBe(5);
+		effect.close();
+	});
+
+	test("resolves undefined when the run is torn down", async () => {
+		const trigger = new Signal(0);
+		let result: Promise<unknown> | undefined;
+		const effect = new Effect((effect) => {
+			if (effect.get(trigger) === 0) result = effect.race(new Promise(() => {}));
+		});
+		await settle();
+		trigger.set(1);
+		expect(await result).toBeUndefined();
+		effect.close();
+	});
+
+	test("resolves undefined on close, and at once after it", async () => {
+		const effect = new Effect();
+		const result = effect.race(new Promise(() => {}));
+		effect.close();
+		expect(await result).toBeUndefined();
+		expect(await effect.race(Promise.resolve(1))).toBeUndefined();
+	});
+
+	test("many races leave neither teardown nor the value with a listener", async () => {
+		const added = spyOn(AbortSignal.prototype, "addEventListener");
+		const removed = spyOn(AbortSignal.prototype, "removeEventListener");
+		try {
+			const closed = counted<Error | null>();
+			const effect = new Effect();
+			for (let i = 0; i < 1000; i++) {
+				expect(await effect.race(Promise.resolve(i), closed)).toBe(i);
+			}
+			expect(closed.listeners).toBe(0);
+			expect(added.mock.calls.length).toBe(removed.mock.calls.length);
+
+			// A teardown that wins releases the value's listener too.
+			const pending = effect.race(closed);
+			expect(closed.listeners).toBe(1);
+			effect.close();
+			expect(await pending).toBeUndefined();
+			expect(closed.listeners).toBe(0);
+		} finally {
+			added.mockRestore();
+			removed.mockRestore();
+		}
+	});
+});
+
+describe("spawn retention", () => {
+	test("an effect that never reruns drops settled tasks", async () => {
+		const effect = new Effect();
+		const add = spyOn(Set.prototype, "add");
+		let sets: Set<unknown>[];
+		try {
+			for (let i = 0; i < 100; i++) effect.spawn(async () => {});
+			sets = [...add.mock.contexts] as Set<unknown>[];
+		} finally {
+			add.mockRestore();
+		}
+
+		// The effect's own task set, found by what spawn added to it.
+		const tasks = sets[0];
+		expect(sets.every((set) => set === tasks)).toBe(true);
+		expect(tasks?.size).toBe(100);
+
+		await settle();
+		expect(tasks?.size).toBe(0);
+		effect.close();
+	});
+
+	test("a rerun still waits for a pending task", async () => {
+		const trigger = new Signal(0);
+		const task = Promise.withResolvers<void>();
+		let runs = 0;
+		const effect = new Effect((effect) => {
+			runs++;
+			effect.get(trigger);
+			if (runs === 1) {
+				effect.spawn(async () => {});
+				effect.spawn(() => task.promise);
+			}
+		});
+		await settle();
+		trigger.set(1);
+		await settle();
+		expect(runs).toBe(1);
+
+		task.resolve();
+		await settle();
+		expect(runs).toBe(2);
+		effect.close();
 	});
 });

@@ -162,6 +162,30 @@ pub struct PublishDone<'a> {
 	pub reason_phrase: Cow<'a, str>,
 }
 
+impl PublishDone<'_> {
+	/// How the publisher ended the subscription: cleanly, or with the error its status names.
+	pub(crate) fn end(&self, version: Version) -> Result<(), crate::Error> {
+		match self.status_code {
+			code if code == PublishDoneStatus::TrackEnded.code(version) => Ok(()),
+			// SUBSCRIPTION_ENDED: the subscription reached the end its filter asked for.
+			// Draft-20 removed it and left 0x3 unassigned.
+			0x3 if matches!(
+				version,
+				Version::Draft14
+					| Version::Draft15
+					| Version::Draft16
+					| Version::Draft17
+					| Version::Draft18
+					| Version::Draft19
+			) =>
+			{
+				Ok(())
+			}
+			code => Err(crate::Error::Remote(u32::try_from(code).unwrap_or(u32::MAX))),
+		}
+	}
+}
+
 impl Message for PublishDone<'_> {
 	const ID: u64 = 0x0b;
 
@@ -693,6 +717,33 @@ mod tests {
 				assert_eq!(decoded.reason_phrase, "done");
 			}
 		}
+	}
+
+	/// A subscriber ends the track the way the publisher said it ended: cleanly for a
+	/// finished track or a reached filter end, with the publisher's code otherwise.
+	#[test]
+	fn publish_done_end_follows_the_status() {
+		let done = |status_code| PublishDone {
+			request_id: None,
+			status_code,
+			stream_count: 0,
+			reason_phrase: "".into(),
+		};
+
+		for version in [Version::Draft14, Version::Draft19, Version::Draft20, Version::Draft22] {
+			assert!(done(0x2).end(version).is_ok(), "{version:?}");
+			assert!(
+				matches!(done(0x0).end(version), Err(crate::Error::Remote(0x0))),
+				"{version:?}"
+			);
+		}
+
+		// SUBSCRIPTION_ENDED is clean until draft-20 unassigned it.
+		assert!(done(0x3).end(Version::Draft19).is_ok());
+		assert!(matches!(
+			done(0x3).end(Version::Draft20),
+			Err(crate::Error::Remote(0x3))
+		));
 	}
 
 	#[test]

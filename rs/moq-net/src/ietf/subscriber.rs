@@ -1762,60 +1762,62 @@ where
 		}
 
 		// One event ends the subscription: the last consumer leaving, or the
-		// subscribe stream closing. The broadcast ending does not: a retraction
+		// publisher's PUBLISH_DONE. The broadcast ending does not: a retraction
 		// does not disturb subscriptions already in flight.
 		enum End {
 			Unused,
 			Revoked,
-			StreamClosed(Result<(), Error>),
+			Done(Result<(), Error>),
 		}
 
 		let mut fetch_done = fetching.is_none();
-		let cancelled = loop {
-			let end = kio::wait(|waiter| {
-				if !fetch_done
-					&& let Some(fut) = fetching.as_mut()
-					&& waiter.poll_future(fut.as_mut()).is_ready()
-				{
-					fetch_done = true;
-				}
-				if gate.poll_denied(waiter).is_ready() {
-					return Poll::Ready(End::Revoked);
-				}
-				if track.poll_unused(waiter).is_ready() {
-					return Poll::Ready(End::Unused);
-				}
-				let mut cx = std::task::Context::from_waker(waiter.waker());
-				stream.reader.poll_closed(&mut cx).map(End::StreamClosed)
-			})
-			.await;
+		let cancelled = {
+			let mut done = std::pin::pin!(Self::read_publish_done(&mut stream.reader, self.version));
+			loop {
+				let end = kio::wait(|waiter| {
+					if !fetch_done
+						&& let Some(fut) = fetching.as_mut()
+						&& waiter.poll_future(fut.as_mut()).is_ready()
+					{
+						fetch_done = true;
+					}
+					if gate.poll_denied(waiter).is_ready() {
+						return Poll::Ready(End::Revoked);
+					}
+					if track.poll_unused(waiter).is_ready() {
+						return Poll::Ready(End::Unused);
+					}
+					waiter.poll_future(done.as_mut()).map(End::Done)
+				})
+				.await;
 
-			match end {
-				End::Unused => match track.abort_unused(Error::Cancel) {
-					Ok(()) => {
-						tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "subscribe cancelled");
+				match end {
+					End::Unused => match track.abort_unused(Error::Cancel) {
+						Ok(()) => {
+							tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "subscribe cancelled");
+							break true;
+						}
+						Err(used) => track = used,
+					},
+					End::Revoked => {
+						tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "subscription no longer authorized");
+						let _ = track.abort(Error::Unauthorized);
 						break true;
 					}
-					Err(used) => track = used,
-				},
-				End::Revoked => {
-					tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "subscription no longer authorized");
-					let _ = track.abort(Error::Unauthorized);
-					break true;
-				}
-				End::StreamClosed(res) => {
-					match res {
-						Ok(()) => {
-							tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "subscribe complete");
-							let _ = track.finish();
+					End::Done(res) => {
+						match res {
+							Ok(()) => {
+								tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "subscribe complete");
+								let _ = track.finish();
+							}
+							Err(err) => {
+								tracing::debug!(%err, "subscribe ended with error");
+								let _ = track.abort(err);
+							}
 						}
-						Err(err) => {
-							tracing::debug!(%err, "subscribe stream closed with error");
-							let _ = track.abort(err);
-						}
+						// The publisher already ended the request, so there is nothing to cancel.
+						break false;
 					}
-					// The publisher already ended the request, so there is nothing to cancel.
-					break false;
 				}
 			}
 		};
@@ -1830,6 +1832,21 @@ where
 				stream.writer.finish().ok();
 			}
 		}
+	}
+
+	/// Read the PUBLISH_DONE that ends an Established subscription, as the end it reports.
+	///
+	/// The publisher must send it before its FIN (draft-19 section 3.3.2), so a FIN
+	/// without one is a failed request, not a clean end.
+	async fn read_publish_done(reader: &mut Reader<S::RecvStream, Version>, version: Version) -> Result<(), Error> {
+		match reader.decode_maybe::<u64>().await? {
+			Some(ietf::PublishDone::ID) => {}
+			Some(_) => return Err(Error::UnexpectedMessage),
+			None => return Err(Error::ProtocolViolation),
+		}
+		let msg: ietf::PublishDone = reader.decode().await?;
+		tracing::debug!(message = ?msg, "received publish done");
+		msg.end(version)
 	}
 
 	/// Tell the publisher to stop serving a subscription we are walking away from.
