@@ -140,6 +140,7 @@ loom = { version = "0.7.2", features = ["futures"] }
 # `async` awaits the event channel instead of blocking a thread on it.
 mdns-sd = { version = "0.21", features = ["async"] }
 moq-audio = { version = "0.1.2", path = "rs/moq-audio", default-features = false }
+moq-archive = { version = "0.0.3", path = "rs/moq-archive" }
 moq-auth = { version = "0.1.1", path = "rs/moq-auth" }
 moq-binary = { version = "0.1.2", path = "rs/moq-binary" }
 moq-flate = { version = "0.2.0", path = "rs/moq-flate" }

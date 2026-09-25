@@ -111,7 +111,6 @@ owned by that prerequisite, not duplicated in archive storage.
 
 ## Quests
 
-- [Archive endpoint](/quest/m1/archive/cli.md) - `moq ... export archive` records and `import archive` replays
 - [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
 - [Offline archive HLS](/quest/m1/archive/hls.md) - render playlists from the archive timeline and fetch segment media lazily
 - [Resume a recording](/quest/m1/archive/recovery.md) - recover the retained timeline on restart and clean up DVR orphans
