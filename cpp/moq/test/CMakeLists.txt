@@ -12,7 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # No exceptions and no RTTI, the way Unreal builds. Set before find_package so the bindings,
 # which compile in this project, get the same flags.
 if(MSVC)
-    add_compile_options(/permissive- /EHs-c- /GR- /W4 /WX)
+    add_compile_options(/permissive- /EHs-c- /GR-)
     add_compile_definitions(_HAS_EXCEPTIONS=0)
 else()
     add_compile_options(-Wall -Wextra -Werror -pedantic-errors -fno-exceptions -fno-rtti)

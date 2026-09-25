@@ -63,7 +63,8 @@ cmake --build "$BUILD_DIR" --config Release
 cmake --install "$BUILD_DIR" --config Release --prefix "$PACKAGE_DIR"
 
 # A placeholder the configure step missed would reach a consumer's linker as a literal.
-if grep -rnE '@[A-Z_]+@' "$PACKAGE_DIR/lib/cmake" "$PACKAGE_DIR/lib/pkgconfig"; then
+# Comments are skipped: configure_package_config_file names @PACKAGE_INIT@ in one.
+if grep -rnE '^[^#]*@[A-Z_]+@' "$PACKAGE_DIR/lib/cmake" "$PACKAGE_DIR/lib/pkgconfig"; then
     echo "Error: unsubstituted placeholder in the package config (see above)" >&2
     exit 1
 fi
