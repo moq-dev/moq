@@ -94,6 +94,11 @@ do not add another media abstraction or a renderer crate during stabilization.
 ## Quests
 
 - [Release](/quest/m0/release.md) - the release moq.pro adopts: binding docs, an upgrade page, and a staging soak gate it rather than the merge
+- [Announce counters](/quest/m0/announce-counters.md) - relay `/metrics` counts announce starts, ends, updates, and wire bytes per tier, so announce traffic is measurable
+- [Skip unchanged announce updates](/quest/m0/announce-update-dedupe.md) - a publisher sends an announce update only when the wire route changed
+- [Wildcard](/quest/m0/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
+- [Babel routing](/quest/m0/babel/README.md) - lite-07 announcements drop the hop list and stay loop-free by source, seqno, and cost, so reroutes stop flooding the mesh
+- [Local origin](/quest/m0/local-origin.md) - localhost workers read only the broadcasts their relay ingested, from the internal listener
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
 - [A/V clock](/quest/m0/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [SD rendition for bbb](/quest/m0/bbb-sd.md) - `just pub bbb` publishes a pre-encoded 360p rung beside the 720p source, for localhost demos and moq.pro's fleet demo

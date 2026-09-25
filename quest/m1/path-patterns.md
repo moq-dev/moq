@@ -98,5 +98,5 @@ matches, containment refusal, and old-version behavior.
 
 ## Related
 
-- [Wildcard advertisements](/quest/m1/wildcard/README.md) - routing adopts the
+- [Wildcard advertisements](/quest/m0/wildcard/README.md) - routing adopts the
   matcher while retaining its own cost, pool, refusal, and resolution work

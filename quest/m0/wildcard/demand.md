@@ -28,7 +28,7 @@ Do not simply delete the gate. It exists so the player does not subscribe to
 absent broadcasts and so renditions appear and disappear reactively with
 announcements. The Rust side needs nothing here: `moq-mux::Source` resolves
 references through `request_broadcast`, which
-[resolve](/quest/m1/wildcard/resolve.md) teaches to consult patterns.
+[resolve](/quest/m0/wildcard/resolve.md) teaches to consult patterns.
 
 Two existing soft spots to not reintroduce: the first evaluation runs before
 the announcement stream has populated, briefly hiding cross-broadcast
@@ -45,5 +45,5 @@ nothing visibly.
 
 ## Required
 
-- [Resolve](/quest/m1/wildcard/resolve.md) - recognizing the wildcard is useless
+- [Resolve](/quest/m0/wildcard/resolve.md) - recognizing the wildcard is useless
   until the relay routes the resulting subscribe through it
