@@ -83,8 +83,7 @@ Use the Nix dev shell so tooling matches CI.
 direnv loads it automatically, but if not: `nix develop --command ...`.
 
 ```bash
-just check        # Lint and compile what the branch changed
-just test         # Test what the branch changed, same scope
+just check        # Lint, compile, and test what the branch changed
 just fix          # Auto-fix lint/formatting, same scope
 ```
 

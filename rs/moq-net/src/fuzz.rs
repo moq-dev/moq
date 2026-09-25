@@ -5,7 +5,7 @@
 //! rather than in `fuzz/fuzz_targets/` because the `lite` and `ietf` modules are
 //! private modules, so an outside harness cannot reach a single decoder. Keeping them
 //! here also lets the tests below replay them on stable, which is what turns a crash
-//! the fuzzer found into a regression `just test` runs.
+//! the fuzzer found into a regression `just check` runs.
 //!
 //! Compiled only under `cfg(test)` or the `fuzz` feature, so none of this is part of
 //! the published API. See `fuzz/README.md` for the workflow.
