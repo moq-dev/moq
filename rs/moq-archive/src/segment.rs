@@ -346,6 +346,35 @@ mod tests {
 		assert!(matches!(Object::decode(bytes.freeze()), Err(Error::Id(_))));
 	}
 
+	/// A table with one frameless group per delta.
+	fn deltas(deltas: &[u64]) -> Bytes {
+		let mut bytes = BytesMut::new();
+		write_varint(&mut bytes, 1).unwrap();
+		write_varint(&mut bytes, deltas.len() as u64).unwrap();
+		for &delta in deltas {
+			write_varint(&mut bytes, delta).unwrap();
+			write_varint(&mut bytes, 0).unwrap();
+		}
+		bytes.freeze()
+	}
+
+	fn sequences(bytes: Bytes) -> Result<Vec<u64>> {
+		Ok(Object::decode(bytes)?.groups.iter().map(|group| group.sequence).collect())
+	}
+
+	#[test]
+	fn delta_extremes() {
+		let varint = (1u64 << 62) - 1;
+		assert_eq!(sequences(deltas(&[0, 0, 0])).unwrap(), vec![0, 1, 2]);
+		assert_eq!(sequences(deltas(&[0, 9, 0])).unwrap(), vec![0, 10, 11]);
+		assert_eq!(sequences(deltas(&[0, ID_MAX - 1])).unwrap(), vec![0, ID_MAX]);
+		assert_eq!(sequences(deltas(&[ID_MAX])).unwrap(), vec![ID_MAX]);
+		assert!(matches!(sequences(deltas(&[0, ID_MAX])), Err(Error::Id(_))));
+		assert!(matches!(sequences(deltas(&[ID_MAX + 1])), Err(Error::Id(_))));
+		assert!(matches!(sequences(deltas(&[varint])), Err(Error::Id(_))));
+		assert!(matches!(sequences(deltas(&[ID_MAX, varint])), Err(Error::Id(_))));
+	}
+
 	#[test]
 	fn timestamp_bounds() {
 		assert!(
@@ -411,6 +440,31 @@ mod tests {
 		assert!(matches!(Object::decode(bytes.freeze()), Err(Error::Table)));
 
 		assert!(matches!(Object::decode(&b"\x01"[..]), Err(Error::Table)));
+	}
+
+	#[test]
+	fn frame_offsets_must_tile_the_payload() {
+		// One group of two frames at (offset, length), followed by `payload` bytes.
+		let table = |frames: [(u64, u64); 2], payload: usize| {
+			let mut bytes = BytesMut::new();
+			for value in [1, 1, 0, 2] {
+				write_varint(&mut bytes, value).unwrap();
+			}
+			for (offset, length) in frames {
+				for value in [0, offset, length] {
+					write_varint(&mut bytes, value).unwrap();
+				}
+			}
+			bytes.extend_from_slice(&vec![b'x'; payload]);
+			Object::decode(bytes.freeze())
+		};
+		assert!(table([(0, 1), (1, 2)], 3).is_ok());
+		assert!(matches!(table([(0, 1), (0, 2)], 3), Err(Error::Table)), "overlap");
+		assert!(matches!(table([(0, 1), (2, 1)], 3), Err(Error::Table)), "gap");
+		assert!(matches!(table([(1, 1), (2, 1)], 3), Err(Error::Table)), "late start");
+		assert!(matches!(table([(0, 1), (1, 3)], 3), Err(Error::Table)), "past the end");
+		let varint = (1u64 << 62) - 1;
+		assert!(matches!(table([(0, 1), (1, varint)], 3), Err(Error::Table)), "huge length");
 	}
 
 	#[test]

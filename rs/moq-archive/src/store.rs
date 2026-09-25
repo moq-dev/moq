@@ -424,6 +424,30 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn malformed_or_unsupported_existing_info_is_refused_and_kept() {
+		let store = memory();
+		let info = Info::new(0, 1_000).unwrap();
+		for (track, existing, check) in [
+			(
+				"v2",
+				&br#"{"version":2,"priority":0,"timescale":1000}"#[..],
+				(|err| matches!(err, Error::Version(2))) as fn(&Error) -> bool,
+			),
+			("junk", b"not json", |err| matches!(err, Error::Json(_))),
+			("zero", br#"{"version":1,"priority":0,"timescale":0}"#, |err| {
+				matches!(err, Error::Timescale(0))
+			}),
+		] {
+			let path = store.path(&Key::info(track).unwrap()).unwrap();
+			store.inner().put(&path, existing.to_vec().into()).await.unwrap();
+			let err = store.put_info(track, &info).await.unwrap_err();
+			assert!(check(&err), "{track}: {err}");
+			let kept = store.inner().get(&path).await.unwrap().bytes().await.unwrap();
+			assert_eq!(&kept[..], existing, "{track} is not rewritten");
+		}
+	}
+
+	#[tokio::test]
 	async fn info_property_mismatch_is_a_hard_error() {
 		let store = memory();
 		store.put_info("video", &Info::new(0, 1_000).unwrap()).await.unwrap();
@@ -796,6 +820,75 @@ mod tests {
 		}
 		assert_eq!(pages, 3);
 		assert_eq!(paged, streamed);
+	}
+
+	/// The first object listed after `groups_from(group)`, one S3 page of one key.
+	async fn lookup(store: &Store<Mock>, group: u64) -> Option<RangeInclusive<u64>> {
+		let query = Query::groups_from("video", group)
+			.unwrap()
+			.page_size(NonZeroUsize::new(1).unwrap());
+		let page = store.list_paginated(&query).await.unwrap();
+		match page.entries.first().map(|entry| &entry.key) {
+			Some(Key::Groups { range, .. }) => Some(range.clone()),
+			Some(key) => panic!("unexpected {key:?}"),
+			None => None,
+		}
+	}
+
+	#[tokio::test]
+	async fn ordered_lookup_finds_the_covering_object() {
+		let store = Store::new(Mock::memory(), "rec");
+		for range in [0..=2, 5..=7, 10..=10, ID_MAX..=ID_MAX] {
+			let groups = range.clone().filter(|sequence| *sequence != 6);
+			let object = Object {
+				groups: groups
+					.map(|sequence| Group {
+						sequence,
+						frames: vec![frame(0, b"g")],
+					})
+					.collect(),
+			};
+			store.put_groups("video", &object).await.unwrap();
+		}
+		// A sibling track sorts after `video/groups/` and must never be returned.
+		store.put_groups("video-alt", &one_group(3, b"a")).await.unwrap();
+
+		// Largest-first filenames make the first key at or past the group its only candidate.
+		for (group, found) in [
+			(0, Some(0..=2)),
+			(1, Some(0..=2)),
+			(2, Some(0..=2)),
+			(3, Some(5..=7)),
+			(5, Some(5..=7)),
+			(6, Some(5..=7)),
+			(7, Some(5..=7)),
+			(8, Some(10..=10)),
+			(10, Some(10..=10)),
+			(11, Some(ID_MAX..=ID_MAX)),
+			(ID_MAX, Some(ID_MAX..=ID_MAX)),
+		] {
+			assert_eq!(lookup(&store, group).await, found, "group {group}");
+		}
+		store.delete(&Key::groups("video", ID_MAX..=ID_MAX).unwrap()).await.unwrap();
+		assert_eq!(lookup(&store, 11).await, None);
+		assert!(Query::groups_from("video", ID_MAX + 1).is_err());
+	}
+
+	#[tokio::test]
+	async fn empty_prefix_lists_the_whole_store() {
+		let store = Store::new(Mock::memory(), "");
+		store.put_info("catalog.json", &Info::new(0, 1).unwrap()).await.unwrap();
+		store.put_groups("video", &one_group(4, b"a")).await.unwrap();
+		assert_eq!(store.paginated_prefix(None), None);
+
+		let expected = std::collections::HashSet::from([Key::info("catalog.json").unwrap(), Key::groups("video", 4..=4).unwrap()]);
+		let streamed: std::collections::HashSet<Key> = store.list(&Query::new()).map_ok(|entry| entry.key).try_collect().await.unwrap();
+		assert_eq!(streamed, expected);
+		let page = store.list_paginated(&Query::new()).await.unwrap();
+		assert_eq!(page.entries.into_iter().map(|entry| entry.key).collect::<std::collections::HashSet<_>>(), expected);
+		assert!(page.next.is_none());
+		let page = store.list_paginated(&Query::groups("video").unwrap()).await.unwrap();
+		assert_eq!(page.entries.len(), 1);
 	}
 
 	#[test]
