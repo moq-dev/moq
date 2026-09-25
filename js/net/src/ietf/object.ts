@@ -3,6 +3,7 @@ import { Timescale, Timestamp } from "../time.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 const GROUP_END = 0x03;
+const END_OF_TRACK = 0x04;
 
 // MOQ Object Property ids, shared with draft-ietf-moq-loc-04.
 const PROP_TIMESCALE = 0x08n;
@@ -259,14 +260,24 @@ export class Group {
 
 /** A moq-transport object inside a group stream. */
 export class Frame {
-	/** The object payload, or `undefined` for the end of group marker. */
+	/** The object payload, or `undefined` for an end of group or end of track marker. */
 	payload?: Uint8Array;
 	/** The presentation timestamp carried in object properties, when present. */
 	timestamp?: Timestamp;
+	/**
+	 * An END_OF_TRACK marker: no object at or past its location exists. At object 0 its group
+	 * does not exist either, so the track ends at that group; later in a group it ends after it.
+	 */
+	endOfTrack: boolean;
 
-	constructor({ payload, timestamp }: { payload?: Uint8Array; timestamp?: Timestamp } = {}) {
+	constructor({
+		payload,
+		timestamp,
+		endOfTrack = false,
+	}: { payload?: Uint8Array; timestamp?: Timestamp; endOfTrack?: boolean } = {}) {
 		this.payload = payload;
 		this.timestamp = timestamp;
+		this.endOfTrack = endOfTrack;
 	}
 
 	/**
@@ -284,7 +295,10 @@ export class Frame {
 			await w.write(extensions);
 		}
 
-		if (this.payload !== undefined) {
+		if (this.endOfTrack) {
+			await w.u53(0); // length = 0
+			await w.u53(END_OF_TRACK);
+		} else if (this.payload !== undefined) {
 			await w.u53(this.payload.byteLength);
 
 			if (this.payload.byteLength === 0) {
@@ -333,6 +347,9 @@ export class Frame {
 		}
 
 		const status = await r.u53();
+
+		// Defined on every implemented draft, whether or not the header marks the group's end.
+		if (status === END_OF_TRACK) return new Frame({ endOfTrack: true });
 
 		if (flags.hasEnd) {
 			// Empty frame
