@@ -653,20 +653,28 @@ impl<E: CatalogExt> Producer<E> {
 	/// Publish `track` as a latest-value JSON track, advertising it in the catalog.
 	///
 	/// The caller creates the track on the broadcast, as it does for a media track; this writes its
-	/// catalog entry and removes the
-	/// entry when the returned handle drops. The catalog key is [`track.name()`](moq_net::track::Producer::name)
-	/// verbatim, with no `.z` suffix even when compressed, since the entry's compression flag is
-	/// what a consumer reads.
+	/// catalog entry and removes the entry when the returned handle drops. The catalog key is
+	/// [`track.name()`](moq_net::track::Producer::name) verbatim, with no `.z` suffix even when
+	/// compressed, since the entry's compression flag is what a consumer reads.
 	///
-	/// Errors if the catalog already carries an entry under that name, for example one seeded
-	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast.
+	/// `config` is a [`json::Config`](crate::json::Config) for the `json` section, or an
+	/// application's own entry embedding a [`JsonConfig`](hang::catalog::JsonConfig) (see
+	/// [`IntoRendition`](super::IntoRendition)). The producer sets its `mode`, encodes the track
+	/// with its `compression`, and fills an absent `bitrate` from what it writes. A
+	/// [`delta_ratio`](crate::json::Config::delta_ratio) on `json::Config` selects the snapshot
+	/// encoder; it is not written into the catalog entry. The config is `'static` so that ratio
+	/// can be read off the builder.
+	///
+	/// Errors if the entry's section already carries that name, for example an entry seeded
+	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, or if the entry
+	/// declares a compression this build can't write or references another broadcast.
 	pub fn json_snapshot<T: serde::Serialize>(
 		&self,
 		track: moq_net::track::Producer,
-		config: crate::json::Config,
+		config: impl super::IntoRendition<E, hang::catalog::JsonConfig> + 'static,
 	) -> crate::Result<crate::json::Snapshot<T, E>> {
 		let rendition = self.data_entry(track.name())?;
-		crate::json::Snapshot::new(track, rendition, &config)
+		crate::json::Snapshot::new(track, rendition, config)
 	}
 
 	/// Publish `track` as an append-log JSON track, advertising it in the catalog.
@@ -676,36 +684,37 @@ impl<E: CatalogExt> Producer<E> {
 	pub fn json_stream<T: serde::Serialize>(
 		&self,
 		track: moq_net::track::Producer,
-		config: crate::json::Config,
+		config: impl super::IntoRendition<E, hang::catalog::JsonConfig>,
 	) -> crate::Result<crate::json::Stream<T, E>> {
 		let rendition = self.data_entry(track.name())?;
-		crate::json::Stream::new(track, rendition, &config)
+		crate::json::Stream::new(track, rendition, config.into_rendition())
 	}
 
 	/// Publish `track` as a latest-value binary track, advertising it in the catalog.
 	///
 	/// See [`json_snapshot`](Self::json_snapshot) for the lifecycle; this differs only in that the
-	/// payloads are opaque bytes.
+	/// payloads are opaque bytes, and `config` is a [`binary::Config`](crate::binary::Config) or an
+	/// entry embedding a [`BinaryConfig`](hang::catalog::BinaryConfig).
 	pub fn binary_snapshot(
 		&self,
 		track: moq_net::track::Producer,
-		config: crate::binary::Config,
+		config: impl super::IntoRendition<E, hang::catalog::BinaryConfig>,
 	) -> crate::Result<crate::binary::Snapshot<E>> {
 		let rendition = self.data_entry(track.name())?;
-		crate::binary::Snapshot::new(track, rendition, &config)
+		crate::binary::Snapshot::new(track, rendition, config.into_rendition())
 	}
 
 	/// Publish `track` as an append-log binary track, advertising it in the catalog.
 	///
-	/// See [`json_snapshot`](Self::json_snapshot) for the lifecycle; this differs only in that the
-	/// payloads are opaque bytes and every one is preserved rather than superseded.
+	/// See [`binary_snapshot`](Self::binary_snapshot); this differs only in that every payload is
+	/// preserved rather than superseded.
 	pub fn binary_stream(
 		&self,
 		track: moq_net::track::Producer,
-		config: crate::binary::Config,
+		config: impl super::IntoRendition<E, hang::catalog::BinaryConfig>,
 	) -> crate::Result<crate::binary::Stream<E>> {
 		let rendition = self.data_entry(track.name())?;
-		crate::binary::Stream::new(track, rendition, &config)
+		crate::binary::Stream::new(track, rendition, config.into_rendition())
 	}
 
 	/// Reserve the catalog entry a data producer owns, keyed by its track name.

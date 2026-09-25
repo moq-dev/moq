@@ -9,7 +9,7 @@ import { hiddenBelow, hooks } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
-import { Milli, type Timescale } from "../time.ts";
+import { Milli, Timescale } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
@@ -22,7 +22,7 @@ import * as Filter from "./filter.ts";
 import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
 import { fromWire, toWire } from "./priority.ts";
 import * as Properties from "./properties.ts";
-import { PublishDone } from "./publish.ts";
+import { PublishDone, PublishDoneStatus } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceDone, PublishNamespaceOk } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { type Subscribe, SubscribeError, SubscribeOk } from "./subscribe.ts";
@@ -53,13 +53,6 @@ function clusterFor(base: Cluster.Advert | undefined, route: Route): Cluster.Adv
 function sameAdvert(a: Advertised | undefined, b: Advertised | undefined): boolean {
 	return a !== undefined && b !== undefined && a.identity === b.identity && routesEqual(a.route, b.route);
 }
-
-/** PUBLISH_DONE statuses this implementation emits. Stable across drafts 14 through 19. */
-const PUBLISH_DONE_STATUS = {
-	INTERNAL_ERROR: 0x0,
-	UNAUTHORIZED: 0x1,
-	TRACK_ENDED: 0x2,
-} as const;
 
 /**
  * How long one advertisement may take to be answered. Matches the Rust publisher, and the
@@ -111,7 +104,13 @@ interface RunGroup {
 
 	/** Settles when the subscriber leaves, dropping a group still queued for a stream slot. */
 	unsubscribed: Promise<void>;
+
+	/** The subscription's data stream count, which PUBLISH_DONE reports. */
+	streams: StreamCount;
 }
+
+/** How many data streams a subscription opened, fill streams included. */
+type StreamCount = { opened: number };
 
 /** What {@link Publisher.runFill} needs to serve one subscription's backfill. */
 interface RunFill {
@@ -144,6 +143,9 @@ interface RunFill {
 
 	/** Settles when the subscriber leaves, releasing a fill still waiting on its group. */
 	unsubscribed: Promise<void>;
+
+	/** The subscription's data stream count, which PUBLISH_DONE reports. */
+	streams: StreamCount;
 }
 
 /**
@@ -379,6 +381,11 @@ export class Publisher {
 				() => unsubscribe(),
 			);
 
+			// Every group started, until its stream finishes or resets, and the data streams
+			// opened for PUBLISH_DONE to report.
+			const groups = new Set<Promise<void>>();
+			const streams: StreamCount = { opened: 0 };
+
 			// Serve track groups, racing with stream close (= Unsubscribe)
 			const serving = (async () => {
 				for (;;) {
@@ -395,7 +402,7 @@ export class Publisher {
 						continue;
 					}
 
-					void this.#runGroup({
+					const task = this.#runGroup({
 						requestId: msg.requestId,
 						group,
 						timescale,
@@ -403,7 +410,10 @@ export class Publisher {
 						stamped: msg.propertiesWanted,
 						slice: groupSlice(range, group.sequence),
 						unsubscribed,
+						streams,
 					});
+					groups.add(task);
+					void task.finally(() => groups.delete(task));
 				}
 			})();
 
@@ -419,6 +429,7 @@ export class Publisher {
 							timescale,
 							stamped: msg.propertiesWanted,
 							unsubscribed,
+							streams,
 						})
 					: Promise.resolve();
 
@@ -435,17 +446,42 @@ export class Publisher {
 
 			let publishError: Error | undefined;
 			let unauthorized = false;
+			let ended = false;
 			try {
-				const end = await race([Promise.all([serving, filling]), stream.reader.closed, revoked]);
+				const served = Symbol("served");
+				const end = await race([
+					Promise.all([serving, filling]).then(() => served),
+					stream.reader.closed,
+					revoked,
+				]);
 				if (end === "revoked") {
 					console.info(`subscription no longer authorized: broadcast=${name} track=${track.name}`);
 					unauthorized = true;
 					unsubscribe();
 				}
+				ended = end === served;
 			} catch (err: unknown) {
 				publishError = error(err);
 			} finally {
 				disposeGrant();
+			}
+
+			// PUBLISH_DONE waits until every stream this subscription will open is closed, as
+			// the draft requires, so its count is final. The subscriber leaving cancels the
+			// ones still queued instead.
+			await race([Promise.all(groups), unsubscribed]);
+
+			// Draft 14 on has no end location in PUBLISH_DONE: an END_OF_TRACK object is what
+			// tells the subscriber where the track ended.
+			const final = track.final();
+			if (ended && !publishError && final !== undefined) {
+				await this.#runEndOfTrack({
+					requestId: msg.requestId,
+					final,
+					publisherPriority,
+					unsubscribed,
+					streams,
+				});
 			}
 
 			console.debug(`publish done: broadcast=${name} track=${track.name}`);
@@ -463,10 +499,11 @@ export class Publisher {
 							? msg.requestId
 							: undefined,
 					statusCode: unauthorized
-						? PUBLISH_DONE_STATUS.UNAUTHORIZED
+						? PublishDoneStatus.UNAUTHORIZED
 						: publishError
-							? PUBLISH_DONE_STATUS.INTERNAL_ERROR
-							: PUBLISH_DONE_STATUS.TRACK_ENDED,
+							? PublishDoneStatus.INTERNAL_ERROR
+							: PublishDoneStatus.TRACK_ENDED,
+					streamCount: BigInt(streams.opened),
 					reasonPhrase: unauthorized ? "not granted" : publishError ? "internal error" : "track ended",
 				});
 				await done.encode(stream.writer, version);
@@ -495,7 +532,7 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, group, timescale, publisherPriority, stamped, slice, unsubscribed } = options;
+		const { requestId, group, timescale, publisherPriority, stamped, slice, unsubscribed, streams } = options;
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
@@ -510,6 +547,7 @@ export class Publisher {
 				group.close(new Error("no stream slot"));
 				return;
 			}
+			streams.opened += 1;
 
 			const header = new GroupMessage({
 				trackAlias: requestId,
@@ -579,6 +617,49 @@ export class Publisher {
 	}
 
 	/**
+	 * Mark the track's end with an END_OF_TRACK object on its own stream, at object 0 of the
+	 * group that will never exist.
+	 *
+	 * The last group's stream has usually finished before the track ends, so the marker cannot
+	 * ride on it. A failure only costs the subscriber the early boundary.
+	 */
+	async #runEndOfTrack(options: {
+		requestId: bigint;
+		final: number;
+		publisherPriority: number;
+		unsubscribed: Promise<void>;
+		streams: StreamCount;
+	}) {
+		const { requestId, final, publisherPriority, unsubscribed, streams } = options;
+		const version = this.#session.version;
+		const stream = await Writer.tryOpen(this.#quic, { cancel: unsubscribed, version }).catch(() => undefined);
+		if (!stream) return;
+		streams.opened += 1;
+
+		try {
+			const header = new GroupMessage({
+				trackAlias: requestId,
+				groupId: final,
+				subGroupId: 0,
+				publisherPriority,
+				flags: {
+					hasExtensions: false,
+					hasSubgroup: false,
+					hasSubgroupObject: false,
+					hasEnd: false,
+					hasPriority: true,
+					firstObject: true,
+				},
+			});
+			await header.encode(stream, version);
+			await new Frame({ endOfTrack: true }).encode(stream, header.flags, Timescale.MILLI, version);
+			stream.close();
+		} catch (err: unknown) {
+			stream.reset(error(err));
+		}
+	}
+
+	/**
 	 * Serve a draft-20 fill on its own fetch stream: the requested range, read from the
 	 * group cache, capped at the Largest Object snapshot.
 	 *
@@ -587,7 +668,7 @@ export class Publisher {
 	 * fill-failure signal. Nothing here touches the subscription either way.
 	 */
 	async #runFill(options: RunFill) {
-		const { requestId, fill, cache, timescale, stamped, unsubscribed } = options;
+		const { requestId, fill, cache, timescale, stamped, unsubscribed, streams } = options;
 		const version = this.#session.version;
 
 		// Everything is inside the try so the cache fork is released on every path out,
@@ -601,6 +682,7 @@ export class Publisher {
 				console.debug(`fill stream failed to open: fill=${requestId}`);
 				return;
 			}
+			streams.opened += 1;
 
 			await stream.u53(FetchHeader.type);
 			await new FetchHeader({ requestId }).encode(stream, version);

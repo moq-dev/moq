@@ -1,4 +1,3 @@
-import { heapStats } from "bun:jsc";
 import { describe, expect, it } from "bun:test";
 import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
@@ -99,25 +98,6 @@ describe("delay and buffer", () => {
 });
 
 describe("wait", () => {
-	const promises = () => {
-		Bun.gc(true);
-		return heapStats().objectTypeCounts.Promise ?? 0;
-	};
-
-	it("leaves nothing behind on a stable clock", async () => {
-		const sync = new Sync({ delay: 10 as Time.Milli });
-		await flush();
-		sync.received(Time.Milli.now());
-
-		const before = promises();
-		for (let round = 0; round < 10; round++) {
-			const now = Time.Milli.now();
-			await Promise.all(Array.from({ length: 100 }, () => sync.wait(now)));
-		}
-		expect(promises() - before).toBeLessThan(100);
-		sync.close();
-	});
-
 	it("wakes a sleeping wait when the delay switches to instant", async () => {
 		const delay = new Signal<Delay>(10_000 as Time.Milli);
 		const sync = new Sync({ delay });

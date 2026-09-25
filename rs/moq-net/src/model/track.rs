@@ -223,6 +223,12 @@ pub(crate) struct TrackState {
 	// fetch can still create them.
 	start_sequence: Option<u64>,
 
+	// Whether `start_sequence` is only the floor a subscription asked for, still
+	// waiting on the serving session to resolve where the live feed begins (a
+	// lite-06+ SUBSCRIBE_START). Readers that must know the resolved start (see
+	// [`Consumer::poll_start`]) wait on it; everything else treats the floor as usual.
+	start_pending: bool,
+
 	// Where production stopped, snapshotted when the cached groups are released (an
 	// abort, or the last producer dropping). Computed live from the cache otherwise;
 	// see [`Self::resume_position`].
@@ -471,9 +477,8 @@ impl TrackState {
 	/// it, so the groups it still wants aren't stale just because the route ran on.
 	/// Fetched backfill is absent from `arrival`, so it cannot age subscription content
 	/// as though it were a live replacement.
-	fn live_edge(&self, cap: Option<u64>) -> Option<Edge> {
-		let presentation = self
-			.lookup
+	fn live_edge(&self, cap: Option<u64>) -> Option<PresentationEdge> {
+		self.lookup
 			.range(..)
 			.rev()
 			.filter(|(seq, _)| super::subscription::before_end(**seq, cap))
@@ -489,9 +494,26 @@ impl TrackState {
 					stamp: slot.stamp,
 					timestamp: slot.group.latest().unwrap_or(timestamp),
 				})
-			});
+			})
+	}
 
-		presentation.map(|presentation| Edge { presentation, cap })
+	/// This track's own edge under the exclusive `cap`, for measuring drift. An outer
+	/// edge and a successor live on other tracks; the caller revalidates those before
+	/// taking this lock and passes them in, so the locks never nest.
+	fn drift_edge(&self, cap: Option<u64>, outer: Option<(u64, Timestamp)>, successor: Option<Timestamp>) -> Edge {
+		Edge {
+			presentation: self.live_edge(cap),
+			outer,
+			cap,
+			successor,
+		}
+	}
+
+	/// Whether `sequence` still holds the servable incarnation `stamp`.
+	fn holds(&self, sequence: u64, stamp: u32) -> bool {
+		self.lookup
+			.get(&sequence)
+			.is_some_and(|slot| slot.stamp == stamp && !slot.group.is_aborted())
 	}
 
 	/// The furthest presentation time the group at `sequence` could still reach: where
@@ -504,14 +526,45 @@ impl TrackState {
 	/// so a later stamped group proves nothing about where an unstamped successor will
 	/// begin, and shrinking the bound is the unsafe direction. An unstamped successor
 	/// therefore leaves the reach unbounded until it presents its first frame.
-	fn reach(&self, sequence: u64, cap: Option<u64>) -> Option<Timestamp> {
-		let successor = self
+	///
+	/// With no servable successor below `cap`, the reader's next group is past the cap,
+	/// and `beyond` is where it starts when another track serves it (a splice's next
+	/// segment; see [`Anchor::successor`]).
+	fn reach(&self, sequence: u64, cap: Option<u64>, beyond: Option<Timestamp>) -> Option<Timestamp> {
+		match self.first_start(sequence.saturating_add(1), cap) {
+			Some(start) => start,
+			None => beyond,
+		}
+	}
+
+	/// Where the first servable group in `from..cap` starts presenting: `None` when no
+	/// such group is cached, `Some(None)` while it has no frame yet.
+	fn first_start(&self, from: u64, cap: Option<u64>) -> Option<Option<Timestamp>> {
+		let slot = self
 			.lookup
-			.range(sequence.saturating_add(1)..)
+			.range(from..)
 			.map(|(_, slot)| slot)
 			.take_while(|slot| super::subscription::before_end(slot.group.sequence, cap))
 			.find(|slot| slot.visible && !slot.group.is_aborted())?;
-		successor.group.timestamp()
+		Some(slot.group.timestamp())
+	}
+
+	/// The first servable group's start in `from..cap`, with the slot identity a later
+	/// judgment needs to tell that group from whatever replaces it. `None` when no such
+	/// group is cached or it has no frame yet: an unstamped successor leaves reach
+	/// unbounded, and this does not skip past it to a later group.
+	fn served_start(&self, from: u64, cap: Option<u64>) -> Option<ServedStart> {
+		let slot = self
+			.lookup
+			.range(from..)
+			.map(|(_, slot)| slot)
+			.take_while(|slot| super::subscription::before_end(slot.group.sequence, cap))
+			.find(|slot| slot.visible && !slot.group.is_aborted())?;
+		Some(ServedStart {
+			sequence: slot.group.sequence,
+			stamp: slot.stamp,
+			timestamp: slot.group.timestamp()?,
+		})
 	}
 
 	/// Whether the group at `sequence` has drifted further behind `edge` than `budget`
@@ -537,11 +590,10 @@ impl TrackState {
 	///
 	/// The edge must sit strictly above the candidate. The live edge is never late
 	/// against itself, and backfill or the tail of a rewound timeline can carry a high
-	/// timestamp on a low sequence without being an edge at all.
-	fn is_stale(&self, sequence: u64, edge: Option<&Edge>, budget: Duration) -> bool {
-		let Some(edge) = edge else {
-			return false;
-		};
+	/// timestamp on a low sequence without being an edge at all. Of the edges that
+	/// qualify, the highest sequence is the newest content, whichever track holds it:
+	/// this one's, or the `outer` edge a splice pushed from another segment.
+	fn is_stale(&self, sequence: u64, edge: &Edge, budget: Duration) -> bool {
 		if !self.lookup.contains_key(&sequence) {
 			return false;
 		}
@@ -549,16 +601,23 @@ impl TrackState {
 		// The anchor was resolved under an earlier lock, so confirm it still names
 		// the same servable incarnation before it convicts a candidate. Failing safe
 		// (delivering) is right, since the next poll resolves fresh anchors.
-		let live_edge = &edge.presentation;
-		let reach = self.reach(sequence, edge.cap);
-		live_edge.sequence > sequence
-			&& self
-				.lookup
-				.get(&live_edge.sequence)
-				.is_some_and(|live| live.stamp == live_edge.stamp && !live.group.is_aborted())
-			&& reach.is_some_and(
-				|reach| matches!(live_edge.timestamp.checked_sub(reach), Ok(age) if Duration::from(age) >= budget),
-			)
+		let local = edge
+			.presentation
+			.filter(|live| self.holds(live.sequence, live.stamp))
+			.map(|live| (live.sequence, live.timestamp));
+		// `outer` and `successor` were revalidated on their own tracks before this lock
+		// was taken ([`LiveEdge::is_live`], [`Successor::start`]). There is no slot for
+		// them here, and taking their locks here would nest.
+		let Some((_, timestamp)) = local
+			.into_iter()
+			.chain(edge.outer)
+			.filter(|(live, _)| *live > sequence)
+			.max_by_key(|(live, _)| *live)
+		else {
+			return false;
+		};
+		self.reach(sequence, edge.cap, edge.successor)
+			.is_some_and(|reach| matches!(timestamp.checked_sub(reach), Ok(age) if Duration::from(age) >= budget))
 	}
 
 	/// Resolve a one-shot fetch from the track side: the cached group, or an [`Error`]
@@ -986,8 +1045,9 @@ impl TrackState {
 	/// declaration: the signal is scoped to the current subscription's demand,
 	/// which may legitimately move in either direction. `None` clears it (the
 	/// demand dropped to the live edge, whose floor is unknown until declared).
-	fn set_start(&mut self, start_sequence: Option<u64>) {
+	fn set_start(&mut self, start_sequence: Option<u64>, pending: bool) {
 		self.start_sequence = start_sequence;
+		self.start_pending = pending;
 	}
 
 	/// Record the exclusive final sequence, rejecting a re-finish or a boundary that
@@ -1381,7 +1441,16 @@ impl Producer {
 	/// still promised. Pass `None` to clear it, for demand at the live edge:
 	/// its floor is unknown until the feed declares one.
 	pub fn start_at(&mut self, sequence: impl Into<Option<u64>>) -> Result<()> {
-		self.modify()?.set_start(sequence.into());
+		self.modify()?.set_start(sequence.into(), false);
+		Ok(())
+	}
+
+	/// Declare the floor a subscription asked for while the serving session has yet to
+	/// resolve its start: nothing below `sequence` arrives, exactly as [`Self::start_at`],
+	/// but [`Consumer::poll_start`] keeps waiting until a later [`Self::start_at`]
+	/// resolves it.
+	pub(crate) fn request_start(&mut self, sequence: Option<u64>) -> Result<()> {
+		self.modify()?.set_start(sequence, true);
 		Ok(())
 	}
 
@@ -1538,7 +1607,7 @@ impl Producer {
 		let min_sequence = floor_of(&preferences);
 		let subscription = kio::Producer::new(preferences);
 		register_subscription(self.state.read(), &subscription);
-		let drift_cap = kio::Producer::new(None);
+		let drift_anchor = kio::Producer::new(Anchor::default());
 
 		// Hoisted: an inline `read()` guard would live to the end of the struct literal,
 		// deadlocking against the `consume()` below.
@@ -1557,7 +1626,7 @@ impl Producer {
 				end_sequence: None,
 				parked: BTreeMap::new(),
 				stale_cap: None,
-				drift_cap,
+				drift_anchor,
 				stale: stats::Content::default(),
 				seek_pending: BTreeMap::new(),
 			}),
@@ -2318,6 +2387,28 @@ impl Consumer {
 		})
 	}
 
+	/// Poll for the first group the live feed serves, once the serving session has
+	/// resolved it: `Some` for a declared start, `None` for none (the live edge, or a
+	/// source that never declares one). Parks while a lite-06+ session still owes its
+	/// SUBSCRIBE_START (see [`Producer::request_start`]); a closed track is ready with
+	/// whatever it last declared, since nothing will resolve it anymore.
+	pub(crate) fn poll_start(&self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => {
+				let res = state.poll(waiter, |state| match state.start_pending && state.abort.is_none() {
+					true => Poll::Pending,
+					false => Poll::Ready(state.start_sequence),
+				});
+				match res {
+					Poll::Ready(Ok(start)) => Poll::Ready(start),
+					Poll::Ready(Err(state)) => Poll::Ready(state.start_sequence),
+					Poll::Pending => Poll::Pending,
+				}
+			}
+			ConsumerKind::Spliced(_) => Poll::Ready(None),
+		}
+	}
+
 	/// The newest group, when it is already cached: resolved synchronously, without
 	/// counting as a fetch or a delivery. The IETF publisher snapshots its frame count to
 	/// resolve Largest Object; a group that is not immediately available reads as no edge.
@@ -2328,6 +2419,40 @@ impl Consumer {
 				self.peek_group(sequence)
 			}
 			ConsumerKind::Spliced(resume) => resume.peek_latest(),
+		}
+	}
+
+	/// The live edge below the exclusive `cap` that drift is measured against; see
+	/// [`TrackState::live_edge`]. A splice reports the newest across its segments.
+	pub(crate) fn live_edge(&self, cap: Option<u64>) -> Option<LiveEdge> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => {
+				let edge = state.read().live_edge(cap)?;
+				Some(LiveEdge {
+					sequence: edge.sequence,
+					timestamp: edge.timestamp,
+					stamp: edge.stamp,
+					track: state.weak(),
+				})
+			}
+			ConsumerKind::Spliced(resume) => resume.live_edge(cap),
+		}
+	}
+
+	/// Where the first servable group in `from..cap` starts, with enough identity to
+	/// revalidate it later. A splice answers from the first segment holding one.
+	pub(crate) fn served_start(&self, from: u64, cap: Option<u64>) -> Option<Successor> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => {
+				let served = state.read().served_start(from, cap)?;
+				Some(Successor {
+					sequence: served.sequence,
+					timestamp: served.timestamp,
+					stamp: served.stamp,
+					track: state.weak(),
+				})
+			}
+			ConsumerKind::Spliced(resume) => resume.served_start(from, cap),
 		}
 	}
 
@@ -2373,7 +2498,7 @@ impl Consumer {
 		&self,
 		group: group::Consumer,
 		subscription: kio::Consumer<Subscription>,
-		cap: kio::Consumer<Option<u64>>,
+		anchor: kio::Consumer<Anchor>,
 		bound: Option<u64>,
 	) -> group::Consumer {
 		let ConsumerKind::Plain(state) = &self.inner else {
@@ -2383,7 +2508,7 @@ impl Consumer {
 		group.with_expiry(Arc::new(GroupExpiry {
 			state: state.weak(),
 			subscription,
-			cap,
+			anchor,
 			bound,
 			sequence,
 		}))
@@ -2634,7 +2759,7 @@ impl Subscribing {
 				let info = ready!(state.poll(waiter, |state| state.poll_info()))
 					.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
 
-				let drift_cap = kio::Producer::new(None);
+				let drift_anchor = kio::Producer::new(Anchor::default());
 				let min_sequence = floor_of(&self.subscription.read());
 				Poll::Ready(Ok(Subscriber {
 					name: self.name.clone(),
@@ -2650,7 +2775,7 @@ impl Subscribing {
 						end_sequence: None,
 						parked: BTreeMap::new(),
 						stale_cap: None,
-						drift_cap,
+						drift_anchor,
 						stale: stats::Content::default(),
 						seek_pending: BTreeMap::new(),
 					}),
@@ -2940,11 +3065,14 @@ enum SubscriberKind {
 
 /// One poll's view of how far this subscription may drift: the clamped budget and the
 /// live edge to measure a candidate group against. Resolved once, then applied to every
-/// group that poll considers.
+/// group that poll considers. `outer` and `successor` are revalidated per candidate,
+/// outside this track's lock.
 #[derive(Clone)]
 struct Drift {
 	budget: Duration,
-	edge: Option<Edge>,
+	edge: Edge,
+	outer: Option<LiveEdge>,
+	successor: Option<Successor>,
 }
 
 /// Keeps one handed-out group tied to the subscription whose cursor selected it.
@@ -2956,7 +3084,7 @@ struct GroupExpiry {
 	/// the last real subscriber.
 	state: kio::ConsumerWeak<TrackState>,
 	subscription: kio::Consumer<Subscription>,
-	cap: kio::Consumer<Option<u64>>,
+	anchor: kio::Consumer<Anchor>,
 	bound: Option<u64>,
 	sequence: u64,
 }
@@ -2969,19 +3097,26 @@ impl group::Expiry for GroupExpiry {
 			Poll::<()>::Pending
 		});
 
-		let mut cap = None;
-		let _ = self.cap.poll(waiter, |current| {
-			cap = **current;
+		let mut anchor = Anchor::default();
+		let _ = self.anchor.poll(waiter, |current| {
+			anchor = (**current).clone();
 			Poll::<()>::Pending
 		});
-		let cap = super::subscription::min_some(cap, self.bound);
+		let anchor = anchor.capped(self.bound);
+		let cap = anchor.cap;
+		// Before this track's lock: both may name another track, and nesting deadlocks.
+		let outer = anchor
+			.edge
+			.filter(LiveEdge::is_live)
+			.map(|live| (live.sequence, live.timestamp));
+		let successor = anchor.successor.as_ref().and_then(Successor::start);
 
 		let mut expired = false;
 		let _ = self.state.poll(waiter, |state| {
 			let budget = clamp_max_age(max_age, state.max_age_bound());
 			loop {
-				let edge = state.live_edge(cap);
-				expired = state.is_stale(self.sequence, edge.as_ref(), budget);
+				let edge = state.drift_edge(cap, outer, successor);
+				expired = state.is_stale(self.sequence, &edge, budget);
 				if expired {
 					break;
 				}
@@ -3035,12 +3170,121 @@ impl group::Expiry for GroupExpiry {
 
 /// The group a poll's drift is measured against, identified well enough to tell it apart
 /// from whatever may occupy its sequence by the time a candidate is judged.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct Edge {
-	presentation: PresentationEdge,
+	/// This track's own edge, revalidated before it convicts anything.
+	presentation: Option<PresentationEdge>,
+	/// A newer edge on another track, already revalidated: its sequence and the newest
+	/// frame it had presented. See [`Anchor::edge`].
+	outer: Option<(u64, Timestamp)>,
 	/// The cap the edge was resolved under, so per-candidate reach lookups measure
 	/// against the same servable window.
 	cap: Option<u64>,
+	/// Where the next group past `cap` starts, already revalidated. See [`Anchor::successor`].
+	successor: Option<Timestamp>,
+}
+
+/// How a reader wrapping a cursor bounds its drift anchor from outside: pushed by a
+/// splice onto each segment's cursor, and shared with the groups a cursor hands out.
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct Anchor {
+	/// The exclusive sequence cap on what the reader could be handed; see [`servable_cap`].
+	pub cap: Option<u64>,
+	/// The newest edge across a splice's segments. Each segment is a separate track
+	/// that only sees its own groups, so without this a parked segment measures against
+	/// its own frozen edge while the logical track has moved on. Revalidated on its own
+	/// track before it convicts anything, since it may be judged long after it was pushed.
+	pub edge: Option<LiveEdge>,
+	/// Where the reader's next group past `cap` starts presenting, when another track
+	/// serves it (a splice's next segment). The last group below the cap has no
+	/// successor in its own track, so without this nothing bounds its reach and it is
+	/// never judged stale. `None` while unknown or unstamped. Revalidated like `edge`:
+	/// a cached start must not convict once that group is gone.
+	pub successor: Option<Successor>,
+}
+
+impl Anchor {
+	/// This anchor under a further `cap`. A lower cap drops the successor: it named
+	/// where the reader continues past the old cap, which is no longer served.
+	pub fn capped(mut self, cap: Option<u64>) -> Self {
+		let capped = servable_cap(cap, self.cap);
+		if capped != self.cap {
+			self.cap = capped;
+			self.successor = None;
+		}
+		self
+	}
+}
+
+/// The newest stamped group of a track: its sequence and the newest frame it presented,
+/// plus enough identity for a reader on another track to revalidate it.
+#[derive(Clone)]
+pub(crate) struct LiveEdge {
+	pub sequence: u64,
+	pub timestamp: Timestamp,
+	stamp: u32,
+	track: kio::ConsumerWeak<TrackState>,
+}
+
+impl LiveEdge {
+	/// Whether the edge still names the same servable group on its own track, the
+	/// check [`TrackState::is_stale`] runs on a local edge. An eviction or abort since
+	/// the splice resolved it must not convict anything. Takes that track's lock, so
+	/// never call it under another's.
+	fn is_live(&self) -> bool {
+		self.track.read().holds(self.sequence, self.stamp)
+	}
+}
+
+impl PartialEq for LiveEdge {
+	fn eq(&self, other: &Self) -> bool {
+		self.sequence == other.sequence
+			&& self.timestamp == other.timestamp
+			&& self.stamp == other.stamp
+			&& self.track.same_channel(&other.track)
+	}
+}
+
+/// The first servable group past a segment boundary: where it starts, and which slot
+/// that start was read from.
+struct ServedStart {
+	sequence: u64,
+	stamp: u32,
+	timestamp: Timestamp,
+}
+
+/// A successor pushed onto another track's cursor. The timestamp alone is not enough:
+/// once the group is evicted, a later group can keep the outer edge valid while this
+/// start is no longer where the track continues.
+#[derive(Clone)]
+pub(crate) struct Successor {
+	sequence: u64,
+	timestamp: Timestamp,
+	stamp: u32,
+	track: kio::ConsumerWeak<TrackState>,
+}
+
+impl Successor {
+	/// The start this still names, re-read from its own track, or `None` once that
+	/// group is gone or no longer stamped. Takes that track's lock, so never call it
+	/// under another's.
+	fn start(&self) -> Option<Timestamp> {
+		let state = self.track.read();
+		let slot = state.lookup.get(&self.sequence)?;
+		if slot.stamp != self.stamp || slot.group.is_aborted() {
+			return None;
+		}
+		slot.group.timestamp()
+	}
+}
+
+impl PartialEq for Successor {
+	fn eq(&self, other: &Self) -> bool {
+		self.sequence == other.sequence
+			&& self.timestamp == other.timestamp
+			&& self.stamp == other.stamp
+			&& self.track.same_channel(&other.track)
+	}
 }
 
 /// The newest servable group that has presented at least one frame.
@@ -3086,8 +3330,9 @@ struct PlainSubscriber {
 	/// segment), folded into the drift anchor only. Delivery is still bounded by
 	/// `end_sequence`, which stays unset on a segment so its completion is visible.
 	stale_cap: Option<u64>,
-	/// Shared effective cap used by groups after this cursor hands them out.
-	drift_cap: kio::Producer<Option<u64>>,
+	/// Shared effective anchor used by groups after this cursor hands them out. The
+	/// only copy of the outer edge a wrapping reader pushed (see [`Anchor::edge`]).
+	drift_anchor: kio::Producer<Anchor>,
 	/// Groups the drift budget skipped since the count was last drained. Accumulated
 	/// here rather than metered in place because the handle that owns the stats scope
 	/// is the outer [`Subscriber`], which may be reading this cursor through a
@@ -3100,9 +3345,20 @@ struct PlainSubscriber {
 }
 
 impl PlainSubscriber {
-	fn update_drift_cap(&mut self) {
-		if let Ok(mut cap) = self.drift_cap.write() {
-			*cap = servable_cap(self.end_sequence, self.stale_cap);
+	/// The drift anchor for a read bounded by `end`. Every read folds `end_sequence`
+	/// into `end`, so capping the shared anchor (which already holds it) is exact.
+	fn anchor(&self, end: Option<u64>) -> Anchor {
+		self.drift_anchor.read().clone().capped(end)
+	}
+
+	/// Publish the `outer` anchor under this cursor's own cap.
+	fn update_drift_anchor(&mut self, outer: Anchor) {
+		let anchor = outer.capped(self.end_sequence);
+		// Skip a no-op write: every handed-out group's expiry watches this channel.
+		if *self.drift_anchor.read() != anchor
+			&& let Ok(mut current) = self.drift_anchor.write()
+		{
+			*current = anchor;
 		}
 	}
 
@@ -3139,16 +3395,23 @@ impl PlainSubscriber {
 	/// discarding a backlog of N groups costs one scan rather than N. Only ever
 	/// [`Poll::Ready`]; the track ending surfaces as the error the caller was going to
 	/// get anyway.
-	fn poll_drift(&self, cap: Option<u64>, waiter: &kio::Waiter) -> Poll<Result<Drift>> {
+	fn poll_drift(&self, anchor: Anchor, waiter: &kio::Waiter) -> Poll<Result<Drift>> {
 		let mut max_age = Duration::default();
 		let _ = self.subscription.poll(waiter, |subscription| {
 			max_age = subscription.max_age;
 			Poll::<()>::Pending
 		});
-		self.poll(waiter, move |state| {
+		let cap = anchor.cap;
+		let outer = anchor.edge;
+		let successor = anchor.successor;
+		self.poll(waiter, |state| {
+			// Local edge only. The pushed edge and successor are revalidated in
+			// [`Self::poll_stale`], outside this lock.
 			Poll::Ready(Ok(Drift {
 				budget: clamp_max_age(max_age, state.max_age_bound()),
-				edge: state.live_edge(cap),
+				edge: state.drift_edge(cap, None, None),
+				outer: outer.clone(),
+				successor: successor.clone(),
 			}))
 		})
 	}
@@ -3156,8 +3419,25 @@ impl PlainSubscriber {
 	/// Whether the drift budget says to skip `group`, against a [`Drift`] already resolved
 	/// for this poll.
 	fn poll_stale(&self, group: &group::Consumer, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<bool>> {
+		// Revalidate before this track's lock. Both can name another track, including
+		// one whose own judgment is waiting on this one.
+		let outer = drift
+			.outer
+			.as_ref()
+			.filter(|live| live.is_live())
+			.map(|live| (live.sequence, live.timestamp));
+		let successor = drift.successor.as_ref().and_then(Successor::start);
+		let presentation = drift.edge.presentation;
+		let cap = drift.edge.cap;
+		let budget = drift.budget;
 		self.poll(waiter, move |state| {
-			Poll::Ready(Ok(state.is_stale(group.sequence, drift.edge.as_ref(), drift.budget)))
+			let edge = Edge {
+				presentation,
+				outer,
+				cap,
+				successor,
+			};
+			Poll::Ready(Ok(state.is_stale(group.sequence, &edge, budget)))
 		})
 	}
 
@@ -3166,7 +3446,7 @@ impl PlainSubscriber {
 		group.with_expiry(Arc::new(GroupExpiry {
 			state: self.state.weak(),
 			subscription: self.subscription.consume(),
-			cap: self.drift_cap.consume(),
+			anchor: self.drift_anchor.consume(),
 			bound: None,
 			sequence,
 		}))
@@ -3194,7 +3474,7 @@ impl PlainSubscriber {
 			.retain(|sequence, group| *sequence >= min_sequence && watch(group));
 
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
-		let drift = ready!(self.poll_drift(servable_cap(self.end_sequence, self.stale_cap), waiter))?;
+		let drift = ready!(self.poll_drift(self.anchor(self.end_sequence), waiter))?;
 
 		loop {
 			// Re-offer the lowest parked group back inside the cap once it rises,
@@ -3293,7 +3573,7 @@ impl PlainSubscriber {
 		let mut floor = floor.max(self.min_sequence);
 		let end = super::subscription::min_some(end, self.end_sequence);
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
-		let drift = ready!(self.poll_drift(servable_cap(end, self.stale_cap), waiter))?;
+		let drift = ready!(self.poll_drift(self.anchor(end), waiter))?;
 
 		loop {
 			let Some(producer) = ready!(self.poll(waiter, |state| state.poll_next_in_range(floor, end))?) else {
@@ -3424,21 +3704,22 @@ impl Subscriber {
 	}
 
 	/// Bound the drift anchor from outside, for a reader that caps this subscriber
-	/// without capping its cursor.
+	/// without capping its cursor, and splices it with other tracks.
 	///
 	/// A [`super::resume::Subscriber`] segment is deliberately left uncapped
 	/// ([`Self::set_groups`] would park boundary-crossing groups where its completion can't
 	/// be seen), so its own cap has to reach the anchor this way or the segment measures
-	/// drift against groups its reader will never be served. A spliced segment folds the
-	/// cap into what it pushes onto its own segments, so the bound reaches the plain
-	/// cursors at the leaves however deep the splices nest.
-	pub(crate) fn set_stale_cap(&mut self, cap: Option<u64>) {
+	/// drift against groups its reader will never be served. The same goes for the edge:
+	/// a segment's track never sees the groups of the segments after it. A spliced
+	/// segment folds the anchor into what it pushes onto its own segments, so it reaches
+	/// the plain cursors at the leaves however deep the splices nest.
+	pub(crate) fn set_anchor(&mut self, anchor: Anchor) {
 		match &mut self.inner {
 			SubscriberKind::Plain(plain) => {
-				plain.stale_cap = cap;
-				plain.update_drift_cap();
+				plain.stale_cap = anchor.cap;
+				plain.update_drift_anchor(anchor);
 			}
-			SubscriberKind::Spliced(spliced) => spliced.set_stale_cap(cap),
+			SubscriberKind::Spliced(spliced) => spliced.set_anchor(anchor),
 		}
 	}
 
@@ -3476,7 +3757,7 @@ impl Subscriber {
 			SubscriberKind::Plain(plain) => plain,
 			SubscriberKind::Spliced(spliced) => return spliced.poll_stale(group, waiter),
 		};
-		let drift = ready!(plain.poll_drift(servable_cap(plain.end_sequence, plain.stale_cap), waiter))?;
+		let drift = ready!(plain.poll_drift(plain.anchor(plain.end_sequence), waiter))?;
 		let stale = ready!(plain.poll_stale(group, &drift, waiter))?;
 		if stale {
 			plain.note_stale(group);
@@ -3703,7 +3984,13 @@ impl Subscriber {
 		match &mut self.inner {
 			SubscriberKind::Plain(plain) => {
 				plain.end_sequence = end.exclusive();
-				plain.update_drift_cap();
+				// A successor dropped by a lower cap stays dropped until the wrapping
+				// reader pushes its anchor again, which it does on every poll.
+				let outer = Anchor {
+					cap: plain.stale_cap,
+					..plain.drift_anchor.read().clone()
+				};
+				plain.update_drift_anchor(outer);
 			}
 			SubscriberKind::Spliced(spliced) => spliced.end_at(end),
 		}
@@ -3908,6 +4195,10 @@ pub struct Request {
 	// Ingress stats scope, threaded into the accepted [`Producer`]. Empty (no-op)
 	// unless this request was reserved on a tagged broadcast.
 	stats: stats::Scope,
+
+	// The serving session resolves the start of each subscription itself, so the
+	// accepted track's start is unknown until it says (see [`Self::resolving_start`]).
+	resolving_start: bool,
 }
 
 impl Request {
@@ -3924,7 +4215,17 @@ impl Request {
 			alive,
 			_dynamic: dynamic,
 			stats: stats::Scope::default(),
+			resolving_start: false,
 		}
+	}
+
+	/// Mark the track as served by a session that resolves each subscription's start
+	/// (lite-06+), so [`Consumer::poll_start`] waits for its declaration instead of
+	/// reading the requested floor as the start. Applied atomically with
+	/// [`Self::accept`], before any reader can see the track.
+	pub(crate) fn resolving_start(mut self) -> Self {
+		self.resolving_start = true;
+		self
 	}
 
 	/// Attach an ingress stats scope, applied to the [`Producer`] on accept. Set by
@@ -3991,6 +4292,7 @@ impl Request {
 		// tolerate it: the Producer we hand back simply can't write.
 		if let Ok(mut state) = self.state.write() {
 			state.accept(info.clone());
+			state.start_pending = self.resolving_start;
 		}
 		// Accepting the request creates the track producer: count it as one ingress
 		// subscription (closed when the last handle drops). No-op when untagged.
@@ -5965,10 +6267,12 @@ mod test {
 		let state = producer.state.read();
 		let drift = Drift {
 			budget: Duration::ZERO,
-			edge: state.live_edge(None),
+			edge: state.drift_edge(None, None, None),
+			outer: None,
+			successor: None,
 		};
 		assert!(
-			state.is_stale(0, drift.edge.as_ref(), drift.budget),
+			state.is_stale(0, &drift.edge, drift.budget),
 			"stale against a live edge"
 		);
 		drop(state);
@@ -5979,9 +6283,92 @@ mod test {
 
 		let state = producer.state.read();
 		assert!(
-			!state.is_stale(0, drift.edge.as_ref(), drift.budget),
+			!state.is_stale(0, &drift.edge, drift.budget),
 			"a vanished edge is no reason to drop what is left"
 		);
+	}
+
+	/// The same holds for an edge a splice pushed from another segment: a handed-out
+	/// group judges it long after the splice resolved it, so it is revalidated on its own
+	/// track before it convicts anything.
+	#[tokio::test]
+	async fn an_evicted_outer_edge_convicts_nothing() {
+		let mut producer = track_producer("a", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(1)));
+		let mut open = producer.append_group().unwrap();
+		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"a"))
+			.unwrap();
+		let mut group = subscriber.recv_group().await.unwrap().expect("group");
+		assert!(group.read_frame().await.unwrap().is_some());
+		// A successor bounds the open group's reach, without being late against it.
+		append_at(&mut producer, 10);
+
+		let mut next = track_producer("b", None);
+		append_at(&mut next, 30_000);
+		let edge = append_at(&mut next, 30_010);
+		subscriber.set_anchor(Anchor {
+			cap: None,
+			edge: next.consume().live_edge(None),
+			successor: None,
+		});
+
+		let mut control = group.clone();
+		assert!(
+			matches!(control.read_frame().now_or_never(), Some(Ok(None))),
+			"the open group ends against the outer edge"
+		);
+
+		// The outer edge dies before the group is judged again.
+		let slot = next.modify().unwrap().lookup.remove(&edge).unwrap();
+		let _ = slot.group.abort(Error::Evicted);
+
+		assert!(
+			group.read_frame().now_or_never().is_none(),
+			"a vanished outer edge is no reason to drop what is left"
+		);
+		assert!(!group.latency_expired());
+		open.finish().unwrap();
+	}
+
+	/// A pushed successor is the same kind of cached fact. Evicting it must not keep
+	/// bounding the previous segment's last group while a later group still anchors the
+	/// outer edge.
+	#[tokio::test]
+	async fn an_evicted_successor_convicts_nothing() {
+		let producer = track_producer("a", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(1)));
+		let mut open = producer.append_group().unwrap();
+		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"a"))
+			.unwrap();
+		let mut group = subscriber.recv_group().await.unwrap().expect("group");
+		assert!(group.read_frame().await.unwrap().is_some());
+
+		let mut next = track_producer("b", None);
+		// Early enough that group 0 is already past the budget, and not itself the edge.
+		let successor = append_at(&mut next, 10);
+		append_at(&mut next, 30_000);
+		let consumer = next.consume();
+		subscriber.set_anchor(Anchor {
+			cap: None,
+			edge: consumer.live_edge(None),
+			successor: consumer.served_start(successor, None),
+		});
+
+		let mut control = group.clone();
+		assert!(
+			matches!(control.read_frame().now_or_never(), Some(Ok(None))),
+			"the open group ends against the successor"
+		);
+
+		let slot = next.modify().unwrap().lookup.remove(&successor).unwrap();
+		let _ = slot.group.abort(Error::Evicted);
+
+		assert!(
+			group.read_frame().now_or_never().is_none(),
+			"a vanished successor is no reason to drop what is left"
+		);
+		assert!(!group.latency_expired());
+		open.finish().unwrap();
 	}
 
 	#[tokio::test]

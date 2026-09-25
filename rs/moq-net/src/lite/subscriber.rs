@@ -2793,8 +2793,13 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		// The floor tracks the requested start until this subscription's own
 		// SUBSCRIBE_START refines it: the peer never serves below the request, a
 		// previous subscription's declaration must not outlive its demand, and
-		// live-edge demand (None) starts with no floor at all.
-		let _ = producer.start_at(subscription.start.map(|start| start.group));
+		// live-edge demand (None) starts with no floor at all. Lite-06+ only resolves
+		// the start with its SUBSCRIBE_START, so until then the floor is just a request.
+		let floor = subscription.start.map(|start| start.group);
+		let _ = match self.subscriber.version.resolves_start() {
+			true => producer.request_start(floor),
+			false => producer.start_at(floor),
+		};
 
 		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
@@ -3252,6 +3257,12 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 		// request's own fetch gate, and a cache-miss fetch queued while TRACK_INFO
 		// was in flight would be drained as NotFound in the gap.
 		let dynamic = request.dynamic();
+		// Lite-06+ resolves each subscription's start from its budget, so the floor
+		// the SUBSCRIBE asks for is not where delivery begins until SUBSCRIBE_START says.
+		let request = match serve.subscriber.version.resolves_start() {
+			true => request.resolving_start(),
+			false => request,
+		};
 		let serving = request.accept(info);
 		Self {
 			serving,

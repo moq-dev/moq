@@ -213,21 +213,54 @@ export class PublishError {
 	}
 }
 
+/** PUBLISH_DONE status codes this implementation distinguishes. Stable across drafts 14 through 22. */
+export const PublishDoneStatus = {
+	INTERNAL_ERROR: 0x0,
+	UNAUTHORIZED: 0x1,
+	TRACK_ENDED: 0x2,
+	/** Removed in draft-20, where 0x3 is unassigned. */
+	SUBSCRIPTION_ENDED: 0x3,
+} as const;
+
+/** Whether a PUBLISH_DONE status ends the track cleanly rather than aborting it. */
+export function publishDoneClean(statusCode: number, version: IetfVersion): boolean {
+	if (statusCode === PublishDoneStatus.TRACK_ENDED) return true;
+	if (statusCode !== PublishDoneStatus.SUBSCRIPTION_ENDED) return false;
+	switch (version) {
+		case Version.DRAFT_14:
+		case Version.DRAFT_15:
+		case Version.DRAFT_16:
+		case Version.DRAFT_17:
+		case Version.DRAFT_18:
+		case Version.DRAFT_19:
+			return true;
+		default:
+			return false;
+	}
+}
+
 // In draft-14, this message is renamed from SUBSCRIBE_DONE to PUBLISH_DONE
 export class PublishDone {
 	static readonly id = 0x0b;
 
 	requestId: bigint | undefined;
 	statusCode: number;
+	/**
+	 * How many data streams the publisher opened for the subscription, fill streams included.
+	 * A hint: a peer may send 0 or the "unknown" sentinel regardless.
+	 */
+	streamCount: bigint;
 	reasonPhrase: string;
 
 	constructor({
 		requestId,
 		statusCode,
+		streamCount = 0n,
 		reasonPhrase,
-	}: { requestId?: bigint; statusCode: number; reasonPhrase: string }) {
+	}: { requestId?: bigint; statusCode: number; streamCount?: bigint; reasonPhrase: string }) {
 		this.requestId = requestId;
 		this.statusCode = statusCode;
+		this.streamCount = streamCount;
 		this.reasonPhrase = reasonPhrase;
 	}
 
@@ -237,7 +270,7 @@ export class PublishDone {
 			await w.u62(this.requestId);
 		}
 		await w.u62(BigInt(this.statusCode));
-		await w.u62(BigInt(0)); // stream_count = 0 (unsupported)
+		await w.u62(this.streamCount);
 		await w.string(this.reasonPhrase);
 	}
 
@@ -255,9 +288,9 @@ export class PublishDone {
 				? await r.u62()
 				: undefined;
 		const statusCode = Number(await r.u62());
-		await r.u62(); // ignore stream_count
+		const streamCount = await r.u62();
 		const reasonPhrase = await r.string();
 
-		return new PublishDone({ requestId, statusCode, reasonPhrase });
+		return new PublishDone({ requestId, statusCode, streamCount, reasonPhrase });
 	}
 }

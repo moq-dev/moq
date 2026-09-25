@@ -21,7 +21,7 @@ before its header arrived is still invisible, so the track-tail grace stays.
   PUBLISH_DONE, so the boundary arrives slightly later than today. Remove
   SUBSCRIBE_DROP and its type from lite-07 and reword the Subscribe Stream
   section: the FIN follows once every counted stream has finished or been
-  reset. lite-07 is unpublished, so this changes it in place; update
+  reset. lite-07 is still work-in-progress (`moq-lite-07-wip`), so this changes it in place; update
   `drafts/draft-lcurley-moq-lite.md` and its changelog.
 - Rust and JS publishers count the streams they open per subscription and
   send the count; a relay counts its own downstream streams, never forwarding
@@ -33,7 +33,7 @@ before its header arrived is still invisible, so the track-tail grace stays.
   that is never counted, a reset stream, and a count of zero. Add a Rust-JS
   interop case.
 
-This lands before lite-07 is published. Rust has never sent or acted on
+This lands before lite-07 is finalized. Rust has never sent or acted on
 SUBSCRIBE_DROP, so [Rust track tail](/quest/m1/rust-track-tail.md) builds its
 lite accounting on the count rather than on drops.
 

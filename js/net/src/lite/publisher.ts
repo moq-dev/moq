@@ -247,6 +247,11 @@ class SubscriptionControls {
 		return false;
 	}
 
+	/** Settles once the stream is over: `null` when it ended cleanly, or the failure. */
+	get ended(): Promise<Error | null> {
+		return this.#ended;
+	}
+
 	#finish(end: Error | null) {
 		if (this.#end !== undefined) return;
 		this.#end = end;
@@ -808,6 +813,9 @@ export class Publisher {
 		// One ranking for the whole subscription, shared by every group it serves.
 		const priority = new Priority(track);
 
+		// Every group this subscription started serving, until its stream finishes or resets.
+		const groups = new Set<Promise<void>>();
+
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
 		// caller FINs the subscribe stream to say so.
@@ -855,6 +863,12 @@ export class Publisher {
 					case "error":
 						throw recv.error;
 					case "idle":
+						// An end declared ahead of the live edge goes out as soon as it is
+						// known, while the remaining groups are still being produced.
+						if (!endSent && track.final() !== undefined) {
+							if (!(await sendEnd())) return;
+							continue;
+						}
 						await waitForSubscription(controls, track);
 						continue;
 					case "boundary":
@@ -866,13 +880,21 @@ export class Publisher {
 						}
 						await waitForSubscription(controls, track);
 						continue;
-					case "done":
+					case "done": {
 						if (!endSent) {
 							if (!(await sendEnd())) return;
 							continue;
 						}
+						// The FIN tells the subscriber every group is accounted for, so it waits
+						// until each group stream finished or reset. The subscriber leaving
+						// instead cancels whatever is still queued.
+						const drained = Symbol("drained");
+						const end = await Promise.race([Promise.all(groups).then(() => drained), controls.ended]);
+						if (end instanceof Error) throw end;
+						if (end !== drained) return;
 						finished = true;
 						return;
+					}
 				}
 
 				const group = recv.group;
@@ -899,7 +921,7 @@ export class Publisher {
 						return;
 				}
 
-				void this.#runGroup({
+				const task = this.#runGroup({
 					sub,
 					group,
 					timescale,
@@ -908,6 +930,8 @@ export class Publisher {
 					start: range.start,
 					end: range.end,
 				});
+				groups.add(task);
+				void task.finally(() => groups.delete(task));
 			}
 		} finally {
 			if (!finished) unsubscribe();

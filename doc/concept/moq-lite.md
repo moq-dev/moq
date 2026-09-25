@@ -29,8 +29,10 @@ implement in an afternoon. The wire spec is
 A dedicated ALPN selects the wire version for moq-lite 03 and newer. The
 legacy `moql` ALPN negotiates moq-lite 01 or 02 via `SETUP`. In moq-lite 05
 and newer, each side also sends a `SETUP` message with its capabilities.
-Rust and TypeScript speak moq-lite 01 through 07 and moq-transport drafts
-14 through 22. Clients offer `moq-lite-07` first by default.
+Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts
+14 through 22. Clients offer `moq-lite-06` first by default. moq-lite 07 is
+still in progress: it negotiates as `moq-lite-07-wip`, and only when both
+sides explicitly enable it.
 
 ## Authorization
 
@@ -103,7 +105,8 @@ let announced = origin.consume().with_hidden(true).announced();
 const announced = connection.announced(Path.Pattern.all(), { hidden: true });
 ```
 
-On the wire, moq-lite 07 carries the opt-in on each announce request, and
+On the wire, moq-lite 07 (`moq-lite-07-wip`, opt-in only) carries the opt-in
+on each announce request, and
 moq-transport carries it as a `SUBSCRIBE_NAMESPACE` parameter once the peer's
 `SETUP` says it understands one ([hidden](/draft/moq-hidden)). An older peer
 never opts in, so it never discovers hidden routes. Rust sessions always opt in
