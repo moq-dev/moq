@@ -1,4 +1,4 @@
-# Broadcast close
+# [S] Broadcast close
 
 ## Goal
 
@@ -34,11 +34,8 @@ object ended", not "the path went offline": announcements say whether a path
 is live, and a path can be announced again by a new object. Caches and moq-hls
 use it to tell a live object from a replaced one at the same path.
 
-Stage the `dev` removal as the child below.
-
-## Quests
-
-- [Remove finish](/quest/m1/broadcast-close/remove.md) - on dev, the deprecated broadcast end APIs are gone and `closed()` carries no cause
+The `dev` removal is [Remove finish](/quest/m1/broadcast-remove.md), which
+waits for this line to reach `main`.
 
 ## Related
 
