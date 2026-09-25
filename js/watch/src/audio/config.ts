@@ -1,10 +1,11 @@
 import type * as Catalog from "@moq/hang/catalog";
+import type * as Container from "@moq/hang/container";
+import * as Util from "@moq/hang/util";
 import { Time } from "@moq/net";
 
-// AudioWorklet always renders in 128-sample quanta.
-const WORKLET_QUANTUM = 128;
-const OPUS_FRAME_DURATION_MS = 20;
+const OPUS_RATE = 48_000;
 const AAC_LC_FRAME_SAMPLES = 1024;
+const AAC_HE_FRAME_SAMPLES = 2048;
 const MP3_MPEG1_FRAME_SAMPLES = 1152;
 const MP3_MPEG2_FRAME_SAMPLES = 576;
 const MP3_MPEG1_MIN_SAMPLE_RATE = 32000;
@@ -40,36 +41,37 @@ export function playbackIdentity(config: Catalog.AudioConfig): PlaybackIdentity 
 	};
 }
 
-/** The jitter to add to the sync buffer for a rendition, in milliseconds. */
-export function playbackJitter(config: Catalog.AudioConfig): Time.Milli {
-	// A publisher advertising 0 is claiming frames are never delayed, which no encoder can do, so
-	// fall back to the codec's frame duration the same way an absent field does.
-	const codecJitter = (config.jitter || defaultJitter(config)) ?? 0;
-
-	// Add the worklet render quantum so the ring buffer has margin between frame arrivals.
-	const overhead = Math.ceil((WORKLET_QUANTUM / config.sampleRate) * 1000);
-	return Time.Milli(codecJitter + overhead);
+/**
+ * A frame's duration as a constant over the catalog's sample rate, for codecs that fix it.
+ *
+ * Undefined for Opus, whose packets state their own duration (see `Util.Opus.packetSamples`), and
+ * for codecs with no constant. Never learned from observed timestamps.
+ */
+export function frameDuration(config: Pick<Catalog.AudioConfig, "codec" | "sampleRate">): Time.Milli | undefined {
+	const samples = frameSamples(config);
+	if (samples === undefined) return undefined;
+	return Time.Milli((samples * 1000) / config.sampleRate);
 }
 
-// Estimate the minimum jitter (frame duration) based on the audio codec.
-// TODO these are defaults; the actual frame duration depends on encoder config.
-function defaultJitter(config: Catalog.AudioConfig): number | undefined {
-	if (config.codec.startsWith("opus")) {
-		// Opus supports 2.5–60ms but 20ms is the real-time default.
-		return OPUS_FRAME_DURATION_MS;
-	}
+/**
+ * A frame's own duration, when it states one: the container's per-sample duration (CMAF), else the
+ * duration an Opus packet declares in its TOC byte (RFC 6716 §3.1), always reckoned at 48 kHz.
+ * CMAF reports an implicit duration as zero, which states nothing.
+ */
+export function packetDuration(codec: string, frame: Container.Frame): Time.Milli | undefined {
+	if (frame.duration) return Time.Milli.fromMicro(frame.duration);
+	if (!codec.startsWith("opus")) return undefined;
+	const samples = Util.Opus.packetSamples(frame.payload);
+	return samples === undefined ? undefined : Time.Milli((samples * 1000) / OPUS_RATE);
+}
 
-	if (config.codec.startsWith("mp4a")) {
-		// 1024 samples for LC-AAC; HE-AAC/AAC-LD use different sizes.
-		return Math.ceil((AAC_LC_FRAME_SAMPLES / config.sampleRate) * 1000);
-	}
-
+function frameSamples(config: Pick<Catalog.AudioConfig, "codec" | "sampleRate">): number | undefined {
+	// HE-AAC (v1 and v2) doubles the output rate of its AAC-LC core.
+	if (config.codec === "mp4a.40.5" || config.codec === "mp4a.40.29") return AAC_HE_FRAME_SAMPLES;
+	if (config.codec.startsWith("mp4a")) return AAC_LC_FRAME_SAMPLES;
 	if (config.codec === "mp3") {
-		// 1152 samples per frame for MPEG-1 Layer III; MPEG-2/2.5 use 576.
-		const samples =
-			config.sampleRate >= MP3_MPEG1_MIN_SAMPLE_RATE ? MP3_MPEG1_FRAME_SAMPLES : MP3_MPEG2_FRAME_SAMPLES;
-		return Math.ceil((samples / config.sampleRate) * 1000);
+		// MPEG-1 Layer III has 1152 samples per frame; MPEG-2/2.5 have 576.
+		return config.sampleRate >= MP3_MPEG1_MIN_SAMPLE_RATE ? MP3_MPEG1_FRAME_SAMPLES : MP3_MPEG2_FRAME_SAMPLES;
 	}
-
 	return undefined;
 }

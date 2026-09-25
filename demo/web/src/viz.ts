@@ -307,7 +307,7 @@ export function bufferBars(parent: Signals.Effect, watch: MoqWatch): HTMLElement
 		const timestamp = watch.sync.now() as number | undefined;
 		const stalled = watch.video.out.stalled.peek();
 		drawRanges(video.canvas, watch.video.out.buffered.peek(), timestamp, stalled);
-		drawRanges(audio.canvas, watch.audio.out.buffered.peek(), timestamp, false);
+		drawRanges(audio.canvas, watch.audio.out.buffered.peek(), timestamp, watch.audio.out.stalled.peek());
 		parent.animate(draw);
 	};
 	parent.animate(draw);

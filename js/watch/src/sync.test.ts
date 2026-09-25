@@ -62,37 +62,60 @@ describe("delay and buffer", () => {
 		expect(sync.out.maxAge.peek()).toBe(0 as Time.Milli);
 		sync.close();
 	});
+});
 
-	it("includes registered decoder jitter until the decoder unregisters", async () => {
-		const media = new Signal<Time.Milli | undefined>(20 as Time.Milli);
-		const sync = new Sync({ delay: 100 as Time.Milli });
-		const unregister = sync.register(media);
+describe("auto delay", () => {
+	it("holds nothing until a decoder registers", async () => {
+		const sync = new Sync();
 		await flush();
-		expect(sync.out.delay.peek()).toBe(120 as Time.Milli);
-
-		media.set(80 as Time.Milli);
-		await flush();
-		expect(sync.out.delay.peek()).toBe(180 as Time.Milli);
-
-		unregister();
-		await flush();
-		expect(sync.out.delay.peek()).toBe(100 as Time.Milli);
+		expect(sync.out.delay.peek()).toBe(0 as Time.Milli);
 		sync.close();
 	});
 
-	it("unregisters duplicate jitter inputs independently", async () => {
+	it("follows the deepest registered target until it unregisters", async () => {
+		const audio = new Signal<Time.Milli | undefined>(120 as Time.Milli);
+		const video = new Signal<Time.Milli | undefined>(40 as Time.Milli);
+		const sync = new Sync();
+		const unregisterAudio = sync.register(audio);
+		sync.register(video);
+		await flush();
+		expect(sync.out.delay.peek()).toBe(120 as Time.Milli);
+		expect(sync.out.jitter.peek()).toBe(120 as Time.Milli);
+
+		// A publisher flushing 250ms at once needs 250ms of buffer, whatever the round trip is.
+		audio.set(270 as Time.Milli);
+		await flush();
+		expect(sync.out.delay.peek()).toBe(270 as Time.Milli);
+
+		unregisterAudio();
+		await flush();
+		expect(sync.out.delay.peek()).toBe(40 as Time.Milli);
+		sync.close();
+	});
+
+	it("unregisters duplicate targets independently", async () => {
 		const media = new Signal<Time.Milli | undefined>(20 as Time.Milli);
-		const sync = new Sync({ delay: 100 as Time.Milli });
+		const sync = new Sync();
 		const unregisterFirst = sync.register(media);
 		const unregisterSecond = sync.register(media);
 
 		unregisterFirst();
 		await flush();
-		expect(sync.out.delay.peek()).toBe(120 as Time.Milli);
+		expect(sync.out.delay.peek()).toBe(20 as Time.Milli);
 
 		unregisterSecond();
 		await flush();
+		expect(sync.out.delay.peek()).toBe(0 as Time.Milli);
+		sync.close();
+	});
+
+	it("takes a fixed delay literally, ignoring the measured targets", async () => {
+		const media = new Signal<Time.Milli | undefined>(250 as Time.Milli);
+		const sync = new Sync({ delay: 100 as Time.Milli });
+		sync.register(media);
+		await flush();
 		expect(sync.out.delay.peek()).toBe(100 as Time.Milli);
+		expect(sync.out.jitter.peek()).toBe(100 as Time.Milli);
 		sync.close();
 	});
 });

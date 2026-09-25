@@ -228,10 +228,8 @@ carry a number the payload already states.
 
 ### What is not in the frame duration
 
-The browser's AudioWorklet renders in fixed 128-sample blocks, and
-`js/watch/src/audio/config.ts` currently adds that block to the per-codec frame
-duration, so 48 kHz Opus reads as 23 ms rather than 20 ms. **That block is not
-part of the target.** It is a property of the render backend, not of the
+The browser's AudioWorklet renders in fixed 128-sample blocks. **That block is
+not part of the target.** It is a property of the render backend, not of the
 network, and native has no worklet at all. If one language's step carried it and
 the other's did not, the two would produce different target series from the same
 trace and the corpus could not hold.
@@ -277,9 +275,6 @@ they are the same quantity measured at different points, and the receiver's
 point strictly contains the publisher's. The floor earns its place by being
 correct *immediately*, before the estimator has seen a full flush cycle, which
 is the one thing a measurement cannot be.
-
-Note that `js/watch` today adds the two rather than taking the maximum, which
-over-buffers a bursty publisher by its own flush span.
 
 ## Rise, fall, startup, and the ceiling
 

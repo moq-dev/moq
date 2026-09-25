@@ -1,21 +1,42 @@
 import { Time } from "@moq/net";
-import type { Delay } from "../sync";
 
-/** The inputs that determine whether audio needs a deeper playback cushion. */
-export interface ReanchorFloor {
-	/** How far playback trails the live edge. */
-	delay: Delay;
-
-	/** Largest additional delay required by the registered media decoders. */
-	media?: Time.Milli;
+/** The terms of the audio playout target, all in milliseconds. */
+export interface Target {
+	/** The arrival estimate from the container consumer. */
+	measured: Time.Milli;
+	/** The flush span the rendition advertises, if any. */
+	advertised?: Time.Milli;
+	/** The codec's frame duration, if known. */
+	frame?: Time.Milli;
 }
 
-/** The stable delay floor whose increase requires the audio ring to refill. */
-export function reanchorFloor(props: ReanchorFloor): Time.Milli {
-	// "auto" and "instant" contribute nothing: the adaptive RTT component is deliberately excluded
-	// so an RTT wiggle doesn't re-anchor, and "instant" holds nothing at all.
-	const target = typeof props.delay === "number" ? props.delay : Time.Milli.zero;
-	return Time.Milli.add(target, props.media ?? Time.Milli.zero);
+/**
+ * The "auto" playout target: the measured term floored by the advertised span, plus one frame.
+ *
+ * A floor rather than a sum, because the receiver's measurement already contains the publisher's
+ * flush delay. See doc/concept/audio-jitter.md.
+ */
+export function target(props: Target): Time.Milli {
+	const floored = Time.Milli.max(props.measured, props.advertised ?? Time.Milli.zero);
+	return Time.Milli.add(floored, props.frame ?? Time.Milli.zero);
+}
+
+/** Whether a deeper target re-stalls the ring, and the baseline the next target is compared against. */
+export interface Reanchor {
+	stall: boolean;
+	baseline: Time.Milli;
+}
+
+/**
+ * Compare a new target against the depth the ring last filled to.
+ *
+ * A rise of more than `step` re-stalls. A smaller one rides through but keeps the old baseline, so a
+ * run of one-bucket rises still re-stalls once they add up. A fall lowers the baseline, since the
+ * ring's latency skip follows the target down on its own.
+ */
+export function reanchor(baseline: Time.Milli, target: Time.Milli, step: Time.Milli): Reanchor {
+	if (target - baseline > step) return { stall: true, baseline: target };
+	return { stall: false, baseline: Time.Milli.min(baseline, target) };
 }
 
 // An AudioWorkletProcessor renders in fixed 128-sample quanta, so a ring shallower than one can

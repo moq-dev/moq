@@ -14,7 +14,9 @@ import {
 /**
  * How far playback trails the live edge.
  *
- * `"auto"` (the default) sizes the jitter buffer from the connection RTT; a `Time.Milli` fixes it.
+ * `"auto"` (the default) holds the largest playout target the registered decoders measure from how
+ * late their frames arrive (see doc/concept/audio-jitter.md). A `Time.Milli` fixes the delay at
+ * exactly that number and disables adaptation.
  *
  * `"instant"` drops the buffer and the pacing together: nothing is held, and {@link Sync.wait}
  * returns without sleeping, so a frame presents as soon as it exists. It also overrides
@@ -23,9 +25,6 @@ import {
  * turn audio off.
  */
 export type Delay = "instant" | "auto" | Time.Milli;
-
-const MIN_JITTER = Time.Milli(20);
-const FALLBACK_JITTER = Time.Milli(100);
 
 export type SyncInput = {
 	/** How far playback trails the live edge. See {@link Delay}. */
@@ -41,10 +40,7 @@ export type SyncInput = {
 	 */
 	buffer: Getter<Time.Milli>;
 
-	/**
-	 * The connection's PROBE estimates, whose RTT drives "auto" jitter. Usually wired
-	 * from a `Connection`'s `probe`.
-	 */
+	/** @internal */
 	probe: Getter<Moq.Connection.Probe | undefined>;
 };
 
@@ -53,12 +49,11 @@ type SyncOutput = {
 	// This will keep being updated as we catch up to the live playhead then will be relatively static.
 	reference: Signal<Time.Milli | undefined>;
 
-	// The resolved delay from the live edge to the playhead: jitter + max(audio, video).
+	// The resolved delay from the live edge to the playhead: the configured number, or in "auto" the
+	// largest registered playout target. Zero for "instant".
 	delay: Signal<Time.Milli>;
 
-	// The jitter component of `delay` (always numeric).
-	// In "auto" mode this is updated automatically from RTT.
-	// When the delay is a number, jitter equals that number.
+	// The jitter buffer, always equal to `delay`.
 	jitter: Signal<Time.Milli>;
 
 	// The media timestamp of the most recently received frame.
@@ -80,7 +75,7 @@ export class Sync {
 	readonly #out: SyncOutput = {
 		reference: new Signal<Time.Milli | undefined>(undefined),
 		delay: new Signal<Time.Milli>(Time.Milli.zero),
-		jitter: new Signal<Time.Milli>(FALLBACK_JITTER),
+		jitter: new Signal<Time.Milli>(Time.Milli.zero),
 		timestamp: new Signal<Time.Milli | undefined>(undefined),
 		buffered: new Signal<boolean>(false),
 		maxAge: new Signal<Time.Milli>(Time.Milli.zero),
@@ -94,10 +89,7 @@ export class Sync {
 	// Per-label late-frame tracking: accumulate count and max lateness, flush on recovery.
 	#late = new Map<string, { count: number; maxMs: number }>();
 
-	// Minimum RTT seen, used as the baseline for jitter calculation.
-	// Avoids inflating jitter due to bufferbloat.
-	#minRtt: number | undefined;
-	#media = new Signal<{ jitter: Getter<Time.Milli | undefined> }[]>([]);
+	#media = new Signal<{ target: Getter<Time.Milli | undefined> }[]>([]);
 
 	#signals = new Effect();
 
@@ -110,14 +102,13 @@ export class Sync {
 
 		this.#update = Promise.withResolvers();
 
-		this.#signals.run(this.#runJitter.bind(this));
 		this.#signals.run(this.#runDelay.bind(this));
 		this.#signals.run(this.#runMaxAge.bind(this));
 	}
 
-	/** Include a decoder's rendition delay in the shared playback clock until disposed. */
-	register(jitter: Getter<Time.Milli | undefined>): Dispose {
-		const registered = { jitter };
+	/** Hold a decoder's "auto" playout target in the shared playback clock until disposed. */
+	register(target: Getter<Time.Milli | undefined>): Dispose {
+		const registered = { target };
 		this.#media.update((media) => [...media, registered]);
 		return () => this.#media.update((media) => media.filter((candidate) => candidate !== registered));
 	}
@@ -132,51 +123,21 @@ export class Sync {
 		this.#out.maxAge.set(Time.Milli.add(delay, buffer));
 	}
 
-	#runJitter(effect: Effect): void {
-		const delay = effect.get(this.in.delay);
-
-		if (delay === "instant") {
-			// Holds nothing at all.
-			this.#minRtt = undefined;
-			this.#out.jitter.set(Time.Milli.zero);
-			return;
-		}
-
-		if (typeof delay === "number") {
-			// Fixed mode: the configured delay is the jitter.
-			this.#minRtt = undefined;
-			this.#out.jitter.set(delay);
-			return;
-		}
-
-		// "auto" mode: compute jitter from the connection's RTT estimate.
-		const rtt = effect.get(this.in.probe)?.rtt;
-		if (rtt !== undefined) {
-			// Track minimum RTT as baseline, ignoring bufferbloat.
-			this.#minRtt = this.#minRtt !== undefined ? Math.min(this.#minRtt, rtt) : rtt;
-
-			// Buffer enough for a retransmit (1 RTT for ACK + retransmit).
-			const jitter = Time.Milli(Math.max(MIN_JITTER, this.#minRtt * 1.25));
-			this.#out.jitter.set(jitter);
-			return;
-		}
-
-		// No RTT available: fall back to static default.
-		this.#minRtt = undefined;
-		this.#out.jitter.set(FALLBACK_JITTER);
-	}
-
+	// A fixed delay is taken literally and "auto" holds the deepest track's target, so every track
+	// plays from one clock. See doc/concept/audio-jitter.md for how a target is measured.
 	#runDelay(effect: Effect): void {
-		const jitter = effect.get(this.#out.jitter);
-		let media = Time.Milli.zero;
-		for (const registered of effect.get(this.#media)) {
-			media = Time.Milli.max(media, effect.get(registered.jitter) ?? Time.Milli.zero);
+		const mode = effect.get(this.in.delay);
+
+		let delay = Time.Milli.zero;
+		if (typeof mode === "number") {
+			delay = mode;
+		} else if (mode === "auto") {
+			for (const registered of effect.get(this.#media)) {
+				delay = Time.Milli.max(delay, effect.get(registered.target) ?? Time.Milli.zero);
+			}
 		}
 
-		// A zero delay still holds the rendition's own delay, which is a frame interval at 60fps.
-		// "instant" holds nothing at all.
-		const instant = effect.get(this.in.delay) === "instant";
-		const delay = instant ? Time.Milli.zero : Time.Milli.add(media, jitter);
+		this.#out.jitter.set(delay);
 		this.#out.delay.set(delay);
 
 		this.#update.resolve();

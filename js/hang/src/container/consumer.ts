@@ -3,6 +3,7 @@ import * as Moq from "@moq/net";
 import { Effect, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
 
 import type { Format } from "./format";
+import { Jitter } from "./jitter";
 import type { BufferedRanges, Frame } from "./types";
 
 /** Options for constructing a {@link Consumer}. */
@@ -100,6 +101,16 @@ export class Consumer {
 	/** The time ranges currently buffered and ready to play. */
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
+	#jitter = new Jitter();
+	#spread = new Signal<Time.Milli>(this.#jitter.measured);
+	/**
+	 * How much buffer late arrivals need, measured as frames come off the transport.
+	 *
+	 * The measured term of doc/concept/audio-jitter.md, excluding the codec frame and any advertised
+	 * floor. Starts at the cold-start estimate before any frame arrives.
+	 */
+	readonly spread: Getter<Time.Milli> = this.#spread;
+
 	#signals = new Effect();
 	#closed = new Once<Error | null>();
 
@@ -172,11 +183,19 @@ export class Consumer {
 				const next = await group.consumer.readFrame();
 				if (!next) break;
 				group.empty = false;
+				const arrival = Moq.Time.Milli.now();
 
 				const decoded = this.#format.decode(next.payload);
 
 				for (const sample of decoded) {
 					const marker = this.#format.end?.(sample) !== undefined;
+
+					// Observed here, before any gap handling or age budget: a target derived from
+					// what survives the budget would only ever confirm the budget it was cut to.
+					if (!marker) {
+						this.#jitter.observe(arrival, Moq.Time.Milli.fromMicro(sample.timestamp));
+						this.#spread.set(this.#jitter.measured);
+					}
 					const frame: Frame = {
 						payload: sample.payload,
 						timestamp: sample.timestamp,

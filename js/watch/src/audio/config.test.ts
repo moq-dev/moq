@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import { Time } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
-import { decoderConfig, playbackIdentity, playbackJitter } from "./config";
+import { decoderConfig, frameDuration, packetDuration, playbackIdentity } from "./config";
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -60,21 +60,27 @@ test("routing and decoder inputs change the playback identity", () => {
 	expect(playbackIdentity(config({ numberOfChannels: 1 }))).not.toEqual(base);
 });
 
-test("an advertised jitter of zero falls back to the codec frame duration", () => {
-	// 48kHz stereo Opus: 20ms frames plus the 128 sample worklet quantum (3ms).
-	const floor = playbackJitter(config());
-	expect(floor).toBe(Time.Milli(23));
-	expect(playbackJitter(config({ jitter: 0 }))).toBe(floor);
-	expect(playbackJitter(config({ jitter: 60 }))).toBe(Time.Milli(63));
+test("AAC and MP3 frame durations follow their codec frame sizes", () => {
+	expect(frameDuration(config({ codec: "mp4a.40.2", sampleRate: 48000 }))).toBeCloseTo(21.333, 3);
+	expect(frameDuration(config({ codec: "mp4a.40.5", sampleRate: 48000 }))).toBeCloseTo(42.667, 3);
+	expect(frameDuration(config({ codec: "mp3", sampleRate: 48000 }))).toBe(Time.Milli(24));
+	expect(frameDuration(config({ codec: "mp3", sampleRate: 24000 }))).toBe(Time.Milli(24));
 });
 
-test("AAC and MP3 jitter follows their codec frame sizes", () => {
-	expect(playbackJitter(config({ codec: "mp4a.40.2", sampleRate: 48000 }))).toBe(Time.Milli(25));
-	expect(playbackJitter(config({ codec: "mp4a.40.2", sampleRate: 24000 }))).toBe(Time.Milli(49));
-	expect(playbackJitter(config({ codec: "mp3", sampleRate: 48000 }))).toBe(Time.Milli(27));
-	expect(playbackJitter(config({ codec: "mp3", sampleRate: 24000 }))).toBe(Time.Milli(30));
+test("Opus and unknown codecs have no constant frame duration", () => {
+	// Opus states its duration per packet, in the TOC byte.
+	expect(frameDuration(config())).toBeUndefined();
+	expect(frameDuration(config({ codec: "flac" }))).toBeUndefined();
 });
 
-test("an unknown codec without advertised jitter only reserves the worklet quantum", () => {
-	expect(playbackJitter(config({ codec: "flac", jitter: 0 }))).toBe(Time.Milli(3));
+test("an implicit CMAF duration falls through to the Opus TOC", () => {
+	// TOC 0x78: config 15 (hybrid fullband, 20 ms), one frame.
+	const frame = {
+		timestamp: Time.Micro(0),
+		keyframe: true,
+		payload: new Uint8Array([0x78, 0]),
+		duration: Time.Micro(0),
+	};
+	expect(packetDuration("opus", frame)).toBe(Time.Milli(20));
+	expect(packetDuration("mp4a.40.2", frame)).toBeUndefined();
 });

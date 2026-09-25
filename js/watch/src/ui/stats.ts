@@ -86,6 +86,7 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const aRate2 = line(audioCard.grid, "Sample rate");
 	const aChannels = line(audioCard.grid, "Channels");
 	const aBitrate = line(audioCard.grid, "Bitrate");
+	const aUnderruns = line(audioCard.grid, "Underruns");
 	track(parent, audioCard, {
 		catalog: watch.audio.source.out.catalog,
 		flag: watch.controls.muted,
@@ -136,6 +137,10 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		const aBitrate2 = aStats ? rate(aPrev, aStats.bytesReceived, now) : undefined;
 		aBitrate.textContent = aBitrate2 !== undefined ? formatBitrate(aBitrate2) : "—";
 		if (aStats) aPrev = { bytes: aStats.bytesReceived, when: now };
+
+		// A non-zero count means the target is below what arrivals actually need.
+		const aUnder = watch.audio.out.underruns.peek();
+		aUnderruns.textContent = watch.audio.out.stalled.peek() ? `${aUnder} (buffering)` : `${aUnder}`;
 
 		// Network. "Estimated max" is the congestion controller / PROBE estimate;
 		// "Actual" is the goodput we measure from the video + audio byte counters.

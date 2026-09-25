@@ -18,9 +18,16 @@ import { nextMedia, subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
-import { type DecoderConfig, decoderConfig, type PlaybackIdentity, playbackIdentity } from "./config";
+import {
+	type DecoderConfig,
+	decoderConfig,
+	frameDuration,
+	type PlaybackIdentity,
+	packetDuration,
+	playbackIdentity,
+} from "./config";
 import { Handover } from "./handover";
-import { reanchorFloor, ringSamples } from "./latency";
+import { reanchor, ringSamples, target } from "./latency";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -63,6 +70,9 @@ type DecoderOutput = {
 	// Whether the audio buffer is stalled (waiting to fill)
 	stalled: Signal<boolean>;
 
+	// How many times the ring ran dry mid-playback, so the UI can show that the target is too low.
+	underruns: Signal<number>;
+
 	// Combined buffered ranges (network jitter + decode buffer)
 	buffered: Signal<Container.BufferedRanges>;
 };
@@ -90,6 +100,7 @@ export class Decoder {
 		stats: new Signal<Stats | undefined>(undefined),
 		timestamp: new Signal<Time.Milli | undefined>(undefined),
 		stalled: new Signal<boolean>(true),
+		underruns: new Signal<number>(0),
 		buffered: new Signal<Container.BufferedRanges>([]),
 	};
 	readonly out = readonlys(this.#out);
@@ -109,9 +120,15 @@ export class Decoder {
 	// Ordered discontinuity and endpoint state from the container consumer.
 	#terminal = new Terminal();
 
-	// The latency floor as of the last settled change, to detect a floor *increase* (needs a deeper
-	// cushion) versus a decrease or a real-time RTT wiggle. See #runLatencyReanchor.
-	#prevFloor?: Time.Milli;
+	// The container consumer's arrival estimate, unset while nothing is subscribed.
+	#measured = new Signal<Time.Milli | undefined>(undefined);
+
+	// The codec's frame duration: the catalog constant, refined by each frame's own duration.
+	#frame = new Signal<Time.Milli | undefined>(undefined);
+
+	// The derived target as of the last settled change, to detect a *deepening* (which needs the
+	// ring to refill) versus a decrease. See #runLatencyReanchor.
+	#prevTarget?: Time.Milli;
 
 	// Which subscription the ring's buffered samples came from. See #runDecoder.
 	#handover = new Handover();
@@ -132,7 +149,13 @@ export class Decoder {
 
 		this.source = props.source;
 		this.sync = props.sync;
-		this.#signals.cleanup(this.sync.register(this.source.out.jitter));
+		// The "auto" playout target this track needs, per doc/concept/audio-jitter.md.
+		const playout = this.#signals.computed((effect) => {
+			const measured = effect.get(this.#measured);
+			if (measured === undefined) return undefined;
+			return target({ measured, advertised: effect.get(this.source.out.jitter), frame: effect.get(this.#frame) });
+		});
+		this.#signals.cleanup(this.sync.register(playout));
 		this.#identity = this.#signals.computed((effect) => {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
@@ -220,6 +243,9 @@ export class Decoder {
 			effect.run((inner) => {
 				this.#out.stalled.set(inner.get(ring.stalled));
 			});
+			effect.run((inner) => {
+				this.#out.underruns.set(inner.get(ring.underruns));
+			});
 
 			effect.set(this.#out.root, worklet);
 		});
@@ -255,32 +281,38 @@ export class Decoder {
 		ring.setLatency(ringSamples(ring.rate, delay));
 	}
 
-	// Re-anchor when the delay floor *increases*. A larger floor needs a deeper cushion: video
-	// rebuilds it implicitly (its per-frame sync.wait() reads the live buffer, so it just holds
-	// longer), but the audio ring keeps draining at its old depth -- resize() (via setLatency) only
-	// re-stalls an *empty* ring, so a mid-playback ring never refills to the new floor and audio runs
-	// ahead of video (the "raise latency, only video re-buffers" desync). reset() re-stalls the ring
-	// so it refills to the new floor. Watch the latency target and media delay, excluding adaptive
-	// RTT jitter, and debounce so a slider drag coalesces into one re-anchor. Decreases are left to
-	// natural catch-up.
+	// Park playback when the target *deepens*, so the ring refills to it. Video rebuilds a deeper
+	// cushion implicitly (its per-frame sync.wait() reads the live buffer, so it just holds longer),
+	// but the audio ring keeps draining at its old depth: setLatency only raises the bar a future
+	// refill has to clear, so a ring already playing never gets deeper and audio runs ahead of video
+	// (the "raise latency, only video re-buffers" desync). Stalling spends the deficit as silence,
+	// once, instead of leaving it to the underrun that the shallow buffer eventually causes anyway.
+	//
+	// The derived delay, not the user's setting, since the arrival estimator moves it too. Only a
+	// deepening worth more than a frame counts, so the estimator's small refinements ride through,
+	// and the debounce coalesces a slider drag or a converging estimate into a single stall.
+	// Decreases are left to natural catch-up.
 	#runLatencyReanchor(effect: Effect): void {
-		const delay = effect.get(this.sync.out.delay);
-		const jitter = effect.get(this.sync.out.jitter);
-		const floor = reanchorFloor({
-			delay: effect.get(this.sync.in.delay),
-			media: Time.Milli.sub(delay, jitter),
-		});
-		if (this.#prevFloor === undefined) {
+		const target = effect.get(this.sync.out.delay);
+		const step = effect.get(this.#frame) ?? Time.Milli.zero;
+		if (this.#prevTarget === undefined) {
 			// Startup: the initial fill already builds the cushion; just record the baseline.
-			this.#prevFloor = floor;
+			this.#prevTarget = target;
 			return;
 		}
-		// When the timer fires, the floor read above is still current: any change would have rerun
+		// A decrease lands at once: `#runLatency` has already let the ring shrink to it, so a rise
+		// that follows within the debounce has to be measured from there.
+		if (target < this.#prevTarget) {
+			this.#prevTarget = target;
+			return;
+		}
+		// When the timer fires, the target read above is still current: any change would have rerun
 		// this effect (tearing down the timer), so compare it against the pre-change baseline directly.
-		const baseline = this.#prevFloor;
+		const baseline = this.#prevTarget;
 		effect.timer(() => {
-			if (floor > baseline) this.reset();
-			this.#prevFloor = floor;
+			const next = reanchor(baseline, target, step);
+			if (next.stall) this.#ring?.stall();
+			this.#prevTarget = next.baseline;
 		}, LATENCY_REANCHOR_DEBOUNCE_MS);
 	}
 
@@ -299,6 +331,7 @@ export class Decoder {
 		if (!identity) return;
 
 		const config = identity.decoder;
+		this.#frame.set(frameDuration(config));
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
 		// broadcast instead of the catalog's own broadcast.
@@ -347,6 +380,11 @@ export class Decoder {
 			const decode = inner.get(this.#decodeBuffered);
 			this.#out.buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
+
+		// Feed the arrival estimate into the playout target. Cleared on teardown so a departed track
+		// stops holding the buffer open.
+		effect.run((inner) => this.#measured.set(inner.get(consumer.spread)));
+		effect.cleanup(() => this.#measured.set(undefined));
 
 		effect.spawn(async () => {
 			const loaded = await Util.Libav.polyfill();
@@ -403,6 +441,9 @@ export class Decoder {
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
 				this.sync.received(timestamp, "audio");
 
+				const duration = packetDuration(config.codec, frame);
+				if (duration !== undefined) this.#frame.set(duration);
+
 				this.#out.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
@@ -455,6 +496,11 @@ export class Decoder {
 			this.#out.buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
 
+		// Feed the arrival estimate into the playout target. Cleared on teardown so a departed track
+		// stops holding the buffer open.
+		effect.run((inner) => this.#measured.set(inner.get(consumer.spread)));
+		effect.cleanup(() => this.#measured.set(undefined));
+
 		effect.spawn(async () => {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
@@ -491,6 +537,9 @@ export class Decoder {
 
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
 				this.sync.received(timestamp, "audio");
+
+				const duration = packetDuration(config.codec, frame);
+				if (duration !== undefined) this.#frame.set(duration);
 
 				this.#out.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
