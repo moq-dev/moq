@@ -1043,11 +1043,12 @@ export class Publisher {
 					}
 
 					try {
+						// A group that ends exactly at the start is a valid, empty range.
+						if (read.sequence + 1 >= startFrame) reached = true;
 						// Frames below the requested start were excluded, and the receiver
 						// numbers what it gets from `startFrame`.
 						if (read.sequence < startFrame) continue;
 						if (endFrame !== undefined && read.sequence > endFrame) break;
-						reached = true;
 
 						if (timestamps) {
 							// Convert each frame to the track's advertised timescale.
