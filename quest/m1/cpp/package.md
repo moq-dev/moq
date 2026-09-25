@@ -23,6 +23,10 @@ A `test/interop/clients/cpp` client joins `just test interop --all`, and
 - Executor: the default dispatcher is fine for scripts; document how a host
   installs its own (`moq::set_executor`) before the first call, and that
   continuations must not block on the moq-ffi runtime thread.
+- Shutdown: `moq::shutdown()` calls `moq_ffi_shutdown` and
+  `uniffi::shutdown_async_dispatcher`, so a host that unloads (a plugin, an
+  engine module) releases the runtime thread's buffers; the generator probe
+  still reports about 72 bytes held at exit under valgrind without it.
 - Build: `cpp/CMakeLists.txt` builds `libmoq_ffi` (staticlib, features
   `video`+`audio`) with the same `cargo build` custom command and
   `BUILD_RUST_LIB` switch `rs/libmoq/CMakeLists.txt` uses (no Corrosion, so
@@ -38,7 +42,3 @@ A `test/interop/clients/cpp` client joins `just test interop --all`, and
   they exist; the future, expected, executor, and coroutine rules) and a row in
   `doc/lib/index.md`. The C row now says libmoq is the plain-C ABI and points
   C++ readers at the new package.
-
-## Required
-
-- [Generator](/quest/m1/cpp/generator.md) - the pinned generator that emits `cpp/ffi`

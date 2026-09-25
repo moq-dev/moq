@@ -1,0 +1,51 @@
+#!/usr/bin/env just --justfile
+#
+# The generated C++ bindings for rs/moq-ffi. Invoked from the repo root as
+# `just cpp <recipe>` via the `mod cpp` import. The OBS plugin has its own
+# module, `just obs`.
+
+set working-directory := '.'
+
+default:
+    just check
+
+# Takes an optional newline-separated list of changed files and skips when none
+# are in scope; `just cpp check` (no FILES) always runs. CXX picks the compiler
+# on Unix; Windows uses MSVC.
+
+# Build moq-ffi, regenerate cpp/ffi/generated, then compile and run the probe.
+check $FILES="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "$FILES" ]] && ! grep -qE '^(cpp/ffi/|cpp/justfile$|rs/moq-ffi/)' <<< "$FILES"; then
+    	echo "cpp: no C++ binding changes; skipping."
+    	exit 0
+    fi
+    if ! command -v uniffi-bindgen-cpp >/dev/null 2>&1; then
+    	echo "cpp check: uniffi-bindgen-cpp not on PATH, skipping" >&2
+    	echo "  install: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.1+v0.32.2" >&2
+    	exit 0
+    fi
+
+    cargo build --locked --package moq-ffi
+    target_dir=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)/debug
+    case "$(uname -s)" in
+    	Darwin) cdylib="$target_dir/libmoq_ffi.dylib" ;;
+    	MINGW* | MSYS* | CYGWIN*) cdylib="$target_dir/moq_ffi.dll" ;;
+    	*) cdylib="$target_dir/libmoq_ffi.so" ;;
+    esac
+
+    rm -rf ffi/generated
+    uniffi-bindgen-cpp --library "$cdylib" --config ffi/uniffi.toml --out-dir ffi/generated
+
+    cmake -S ffi -B ffi/build -DMOQ_FFI_LIB_DIR="$target_dir" -DCMAKE_BUILD_TYPE=Debug
+    cmake --build ffi/build --config Debug
+    if [[ -x ffi/build/probe ]]; then
+    	ffi/build/probe
+    else
+    	ffi/build/Debug/probe.exe
+    fi
+
+# Remove the generated bindings and the probe build.
+clean:
+    rm -rf ffi/generated ffi/build
