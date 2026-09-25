@@ -87,10 +87,6 @@ export class Sync {
 	};
 	readonly out = readonlys(this.#out);
 
-	// A ghetto way to learn when the reference/buffer changes.
-	// There's probably a way to use Effect, but lets keep it simple for now.
-	#update: PromiseWithResolvers<void>;
-
 	// Per-label late-frame tracking: accumulate count and max lateness, flush on recovery.
 	#late = new Map<string, { count: number; maxMs: number }>();
 
@@ -107,8 +103,6 @@ export class Sync {
 			buffer: getter(props?.buffer ?? Time.Milli.zero),
 			probe: getter(props?.probe),
 		};
-
-		this.#update = Promise.withResolvers();
 
 		this.#signals.run(this.#runJitter.bind(this));
 		this.#signals.run(this.#runDelay.bind(this));
@@ -178,9 +172,6 @@ export class Sync {
 		const instant = effect.get(this.in.delay) === "instant";
 		const delay = instant ? Time.Milli.zero : Time.Milli.add(media, jitter);
 		this.#out.delay.set(delay);
-
-		this.#update.resolve();
-		this.#update = Promise.withResolvers();
 	}
 
 	// Fold a newly received frame into the reference. The reference anchors playback to the
@@ -193,7 +184,7 @@ export class Sync {
 
 		// First frame anchors the reference.
 		if (currentRef === undefined) {
-			this.#setReference(ref);
+			this.#out.reference.set(ref);
 			return;
 		}
 
@@ -229,13 +220,7 @@ export class Sync {
 		if (sleep <= cap) return; // within budget: let the buffer grow instead of skipping ahead
 
 		// Over the cap: re-anchor down so the resulting lookahead is exactly the cap.
-		this.#setReference(Time.Milli.add(ref, Time.Milli.sub(cap, delay)));
-	}
-
-	#setReference(ref: Time.Milli): void {
-		this.#out.reference.set(ref);
-		this.#update.resolve();
-		this.#update = Promise.withResolvers();
+		this.#out.reference.set(Time.Milli.add(ref, Time.Milli.sub(cap, delay)));
 	}
 
 	// Re-anchor playback to the next frame received. Call this at an utterance boundary
@@ -244,8 +229,6 @@ export class Sync {
 	reset(): void {
 		this.#out.reference.set(undefined);
 		this.#late.clear();
-		this.#update.resolve();
-		this.#update = Promise.withResolvers();
 	}
 
 	// The PTS that should be rendering right now, derived from the reference + buffer.
@@ -268,7 +251,7 @@ export class Sync {
 		}
 
 		for (;;) {
-			// Switching to "instant" resolves `#update`, so frames parked here wake and leave.
+			// Switching to "instant" wakes the sleep below, so frames parked here leave.
 			if (this.in.delay.peek() === "instant") return;
 
 			// Sleep until it's time to decode the next frame.
@@ -285,11 +268,25 @@ export class Sync {
 			// Skip setTimeout for small sleeps; the timer resolution (~4ms) would overshoot.
 			if (sleep < 5) return;
 
-			const wait = new Promise((resolve) => setTimeout(resolve, sleep)).then(() => true);
-
-			const ok = await Promise.race([this.#update.promise, wait]);
-			if (ok) return;
+			if (await this.#sleep(sleep)) return;
 		}
+	}
+
+	// Sleeps for `ms`, or returns false early once anything the sleep was computed from changes.
+	// Releases every listener either way: frames sleep once each, so a listener left on a signal
+	// that never changes would pile up for the life of the player.
+	#sleep(ms: number): Promise<boolean> {
+		return new Promise((resolve) => {
+			const wake = (ok: boolean) => {
+				clearTimeout(timer);
+				for (const dispose of disposes) dispose();
+				resolve(ok);
+			};
+			const timer = setTimeout(() => wake(true), ms);
+			const disposes = [this.in.delay, this.#out.delay, this.#out.reference].map((signal) =>
+				signal.changed(() => wake(false)),
+			);
+		});
 	}
 
 	static #formatDuration(ms: number): string {
