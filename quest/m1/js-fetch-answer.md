@@ -12,9 +12,10 @@ so a Rust or JS subscriber can tell a miss from a failure.
 ## Plan
 
 - Rust already behaves this way since #4164, which waits in the lite
-  subscriber before accepting and rejects on reset. Mirror it: the lite
-  subscriber's fetch path returns its mirror before the response arrives, and
-  the stream reader can already block until data or FIN and throw on reset.
+  subscriber before accepting and rejects on reset. Mirror it: resolve after
+  the first response byte or an empty-group FIN, and reject on reset. Today
+  the fetch path returns its mirror before the response arrives; the stream
+  reader can already block until data or FIN and throw on reset.
 - The publisher side throws a plain error for a local miss, which reaches the
   wire as a generic reset code. Give it the `NotFound` code the Rust side uses.
 - The IETF JS path refuses `fetchGroup` outright and is out of scope.
@@ -22,7 +23,9 @@ so a Rust or JS subscriber can tell a miss from a failure.
   coalesced second caller rejects too, an existing group is unchanged, and a
   JS publisher's miss reaches a subscriber as `NotFound`.
 
-Public API: none; a behavior change in when `fetchGroup` settles. Wire: none.
+Public API: none; a behavior change in when `fetchGroup` settles. Wire: no
+format change; a miss resets with the existing `NotFound` code instead of a
+generic one.
 
 ## Related
 
