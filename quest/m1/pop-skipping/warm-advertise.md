@@ -52,4 +52,4 @@ is separated by cold.
 
 ## Related
 
-- [Conservative announcement pruning](/quest/m1/announce-tree/README.md) - must validate warm exact-path routes and competing sources before suppressing advertisements
+- [Tree-routed announcements](/quest/m1/announce-tree/README.md) - bounds a warm route to the relays nearer its carrier than any other source

@@ -1,35 +1,47 @@
-# [M] Relay reachability
+# [M] Relay reachability and upstream tables
 
 ## Goal
 
-Relays maintain the validated policy's reachability and readiness evidence over
-the cluster stream, while announcements still flood. The internal HTTP listener
-shows that evidence, its session ownership, and why a route is ineligible for
-pruning. Operators can distinguish a proposed path from a usable retained route.
+Over the [cluster stream](/quest/m1/announce-tree/cluster-stream.md), every
+relay learns its best route and a standby from each neighbour to every other
+relay. From those it computes its upstream table and sends it to each
+neighbour. Broadcast forwarding is unchanged. The internal HTTP listener shows
+reachability, the table, and the sources whose backups are only
+link-protecting or missing, so an operator can see weak spots in the mesh.
 
 ## Plan
 
-Implement the [policy](/quest/m1/announce-tree/policy.md) without adding an
-independent routing order. For path-vector reachability, reuse hop-loop checks
-and accumulated link prices. Select each peer's advertised route after excluding
-that peer, so an alternate can be sent back when the global best came from it.
+- Each relay advertises itself at cost 0 with an empty chain. It forwards its
+  best RELAY entry for each hop to every cluster peer except the one it came
+  from, adding the link price and its own hop, as routes do today. Loop checks
+  use the same chain rule. This is path-vector over `N` entries, flooded, and
+  it changes only when relays or links do.
+- Rank RELAY entries with the same comparator as
+  [rendezvous ranking](/quest/m1/announce-tree/route-order.md), so a relay's
+  parents match what route selection picks.
+- A link counts only after its session has been up continuously for 10 s, the
+  same threshold at which the cluster dial loop resets its backoff. It leaves
+  the moment the session drops, so a flapping peer never becomes anyone's
+  parent. Drive the hold from tokio time so tests pause it.
+- For each source hop `S`, derive:
+  - the tie set `U_S`: neighbours whose entries tie for best on every key
+    before the hash keys;
+  - for each member `u`, the backup `b_u`: the best standby whose chain
+    avoids `u`, else the best on a session other than `u`'s, else none. When
+    `u` is `S` itself, only link protection is possible.
+- Send UPSTREAMS to each peer whenever the table changes. Hop ids stay random
+  per restart when unconfigured; a restarted relay is a new source.
 
-Define prefix-independent comparison keys explicitly. Preserve alternatives
-needed by the policy before any prefix-dependent hash; a single representative
-chain cannot certify every broadcast's backup. A reachability advert is not
-proof that its sender will advertise a particular source for a prefix.
+Test on an in-process four-relay ring with a chord:
 
-Invalidate evidence on link loss, withdrawal, cost/drain changes, session
-replacement, and relay restart. Restored links become eligible through the
-policy's explicit synchronization, not a fixed stability delay. If ordinary
-relay reachability cannot represent a route's scope or identity, leave that
-route in flood mode. Do not advertise unsupported node-protection claims.
-
-Expose proposed and ready state separately. Exercise a weighted ring with a
-chord, equal-cost choices, zero-cost siblings, parallel sessions, mixed versions,
-flaps, and restarted random hop IDs in the simulator. Check actual per-peer
-alternates and readiness transitions, not just shortest-path distances.
+- reachability and tables match the hand-computed parents and backups;
+- cutting a link updates them;
+- a flapping session never enters them;
+- a relay restarting with a new random hop id converges cleanly.
 
 ## Required
 
-- [Cluster stream](/quest/m1/announce-tree/cluster-stream.md) - authenticated control transport and lifecycle
+- [Cluster stream](/quest/m1/announce-tree/cluster-stream.md) - the messages
+  this sends
+- [Rendezvous ranking](/quest/m1/announce-tree/route-order.md) - the order the
+  tie sets come from
