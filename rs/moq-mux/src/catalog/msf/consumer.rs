@@ -615,7 +615,8 @@ mod test {
 		head.push(6); // channel_count (5.1)
 		head.extend_from_slice(&0u16.to_le_bytes()); // pre_skip
 		head.extend_from_slice(&24_000u32.to_le_bytes()); // sample_rate
-		head.extend_from_slice(&[0, 0, 0]); // output gain (i16) + channel mapping family (1 byte)
+		head.extend_from_slice(&[0, 0, 1]); // output gain (i16) + channel mapping family 1
+		head.extend_from_slice(&[4, 2, 0, 4, 1, 2, 3, 5]); // streams, coupled, Vorbis 5.1 mapping
 		let init_b64 = base64::engine::general_purpose::STANDARD.encode(&head);
 
 		let mut track = audio_track("audio0", moq_msf::Packaging::Loc);
@@ -629,6 +630,23 @@ mod test {
 		let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
 		assert_eq!(audio.sample_rate, 24_000);
 		assert_eq!(audio.channel_count, 6);
+	}
+
+	#[test]
+	fn opus_head_with_trailing_bytes_is_error() {
+		let mut head = crate::codec::opus::Config::new(48_000, 2).encode().unwrap().to_vec();
+		head.push(0);
+		let init_b64 = base64::engine::general_purpose::STANDARD.encode(&head);
+
+		let mut track = audio_track("audio0", moq_msf::Packaging::Loc);
+		track.codec = Some("opus".to_string());
+		track.samplerate = None;
+		track.channel_config = None;
+		track.init_data = Some(init_b64);
+		let msf = moq_msf::Catalog::new(vec![track]);
+
+		let err = from_msf::<()>(&msf).expect_err("trailing bytes should error");
+		assert!(err.to_string().contains("trailing bytes"), "unexpected error: {err}");
 	}
 
 	#[test]

@@ -27,6 +27,14 @@ policy. Decoding likewise separates low-level `decode::Config`, PCM
 | `playback` | One output device mixing every track in a call, with click-free volume ramps |
 | `aec` | Acoustic echo cancellation (a port of WebRTC's), so a laptop with no headset doesn't feed itself back |
 
+Opus always decodes at 48 kHz, its own clock, whatever input rate the OpusHead
+records (44.1 kHz and unknown included), and applies the head's pre-skip and
+output gain. A track without a description decodes mono or stereo from the
+catalog with neither. A description that is present but malformed (truncated,
+wrong signature, a new major version, or a channel count its mapping family
+forbids) is refused, as is any channel mapping family other than 0, rather
+than falling back to the catalog's fields.
+
 Highlights:
 
 - **`encode::Publication`** advertises the track and opens the microphone only while someone listens. Stop, swap devices, and restart without changing the track subscribers know; read a level meter for the UI.
