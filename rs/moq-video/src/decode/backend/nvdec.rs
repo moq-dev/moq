@@ -110,6 +110,7 @@ impl Nvdec {
 			Codec::H264 => cudaVideoCodec::cudaVideoCodec_H264,
 			Codec::H265 => cudaVideoCodec::cudaVideoCodec_HEVC,
 			Codec::Av1 => cudaVideoCodec::cudaVideoCodec_AV1,
+			other => return Err(codec_err(format!("NVDEC {} decode is not wired", other.label()))),
 		};
 
 		// `CudaContext::new` retains the device's primary context, the same one

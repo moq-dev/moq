@@ -88,7 +88,9 @@ moq ... play --delay 500ms          # trade latency for a jittery link
 ```
 
 Decodes H.264, H.265, and AV1 video and Opus, PCM, and AAC-LC audio using
-the platform hardware decoder where available. `--video-name` and
+the platform hardware decoder where available. The opt-in `vpx` feature adds
+software VP8 and VP9 (8-bit 4:2:0) through libvpx, which the build host must
+provide. `--video-name` and
 `--audio-name` pick a rendition.
 
 Playback runs on a clock it owns. `--delay` (default 100 ms) is how far it
