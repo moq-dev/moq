@@ -591,9 +591,7 @@ impl Bitstream {
 			picture_type: lock_bitstream_buffer_params.pictureType,
 		})
 	}
-}
 
-impl Bitstream {
 	/// Give up a bitstream the driver may still write: leak its handle, but
 	/// release its encoder reference so the session can still be destroyed.
 	pub(crate) fn abandon(self) {

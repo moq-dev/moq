@@ -396,7 +396,7 @@ impl<I> CompletionDriver for SdkDriver<I> {
 #[derive(Debug)]
 struct Pending<D: CompletionDriver> {
 	driver: D,
-	/// Both `None` once finished or abandoned.
+	/// `None` once finished or abandoned.
 	buffers: Option<(D::Input, D::Output)>,
 }
 
