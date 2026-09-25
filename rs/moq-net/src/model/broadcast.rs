@@ -445,13 +445,7 @@ impl Producer {
 	#[doc(hidden)]
 	#[deprecated(note = "use close(); a broadcast end carries no cause")]
 	pub fn finish(&self) {
-		{
-			let mut state = self.state.lock();
-			if !state.closing {
-				state.finished = true;
-			}
-		}
-		self.close();
+		self.alive.end(true);
 	}
 
 	#[doc(hidden)]
@@ -511,11 +505,18 @@ impl Alive {
 
 	/// End the broadcast. See [`Producer::close`].
 	fn close(&self) {
+		self.end(false);
+	}
+
+	/// End the broadcast, recording the deprecated `finished` flag in the same locked
+	/// transition that claims the end, so a racing `abort` can't win after it's set.
+	fn end(&self, finished: bool) {
 		{
 			let mut state = self.state.lock();
 			if std::mem::replace(&mut state.closing, true) {
 				return;
 			}
+			state.finished = finished;
 			// A name that was reserved or requested but never served can't arrive now,
 			// and `Consumer::track` answers `Unroutable` for one asked about after this
 			// point. Say the same to whoever asked earlier.
