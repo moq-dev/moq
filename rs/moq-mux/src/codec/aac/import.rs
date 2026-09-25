@@ -43,9 +43,19 @@ impl Import {
 		self.track.name()
 	}
 
+	/// The exclusive presentation end earlier groups have reached, if any.
+	pub(crate) fn live_edge(&self) -> Option<moq_net::Timestamp> {
+		self.track.live_edge()
+	}
+
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()
+	}
+
+	/// Record a locally encoded frame's transport handoff for catalog jitter measurement.
+	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
+		self.track.flush(timestamp, now)
 	}
 
 	/// Finish the track, flushing the current group.

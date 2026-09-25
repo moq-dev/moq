@@ -2177,6 +2177,22 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 	})
 }
 
+/// Record the transport handoff of one locally encoded frame for catalog jitter.
+///
+/// `timestamp_us` is the frame's presentation time on the broadcast media clock. Call this
+/// after [moq_publish_media_frame] only for local encoder output; file, pipe, and network imports
+/// must remain clock-free. The monotonic handoff time is sampled inside this process.
+///
+/// Returns zero on success, or a negative code for an invalid handle or timestamp.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_media_flush(media: u32, timestamp_us: u64) -> i32 {
+	ffi::enter(move || {
+		let media = ffi::parse_id(media)?;
+		let timestamp = hang::container::Timestamp::from_micros(timestamp_us)?;
+		State::lock().publish.media_flush(media, timestamp)
+	})
+}
+
 /// Replace the catalog properties shared by every video rendition.
 ///
 /// Rotation is clockwise and normalized to the nearest quarter turn. A field whose matching `has_*` flag is false is removed from the next catalog update.

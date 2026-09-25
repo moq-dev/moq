@@ -83,7 +83,7 @@ export class Screen {
 		}
 
 		effect.spawn(async () => {
-			const media = await Promise.race([
+			const media = await effect.race(
 				navigator.mediaDevices
 					.getDisplayMedia({
 						video,
@@ -97,8 +97,7 @@ export class Screen {
 						// systemAudio: "exclude",
 					})
 					.catch(() => undefined),
-				effect.cancel,
-			]);
+			);
 			if (!media) return;
 
 			const v = media.getVideoTracks().at(0) as Video.StreamTrack | undefined;

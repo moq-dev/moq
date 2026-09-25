@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3](https://github.com/moq-dev/moq/compare/libmoq-v0.6.2...libmoq-v0.6.3) - 2026-09-25
+
+### Added
+
+- *(libmoq)* accept sessions as a server ([#4046](https://github.com/moq-dev/moq/pull/4046))
+
+### Fixed
+
+- *(net)* a broadcast exists only while announced ([#4021](https://github.com/moq-dev/moq/pull/4021))
+
+### Other
+
+- *(bindings)* compile every binding doc sample against its wrapper ([#4049](https://github.com/moq-dev/moq/pull/4049))
+
 ## [0.6.2](https://github.com/moq-dev/moq/compare/libmoq-v0.6.1...libmoq-v0.6.2) - 2026-09-24
 
 ### Other

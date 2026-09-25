@@ -13,6 +13,7 @@ The spine of the JS code; read `signals/src/index.ts` before touching reactive c
 - `Signal<T>` writes coalesce per microtask and notify only on change. Equality is deep for plain data but identity for class instances; `set(v, true)` forces a notify. `peek` reads without subscribing.
 - `Computed<T>`: derived, `undefined` until first run and after `close()`. Standalone ones must be closed; `effect.computed()` closes with its parent.
 - `Effect`: reruns when a signal read via `effect.get(signal)` changes. Register teardown with `effect.cleanup(fn)`; it runs before the next run and on `close()`. A rerun waits for every `effect.spawn` task from the previous run to settle, so register teardown unconditionally.
+- Never `Promise.race` a value that outlives the call, such as a `closed`; use `race` or `effect.race`, which release their listeners.
 - Use the scoped helpers (`effect.interval`, `timer`, `timeout`, `animate`, `event`, `subscribe`, `set`, `proxy`, `run`) instead of raw timers or listeners, so cleanup is automatic. Prefer nested `effect.run` over one giant effect.
 
 # Producer / consumer

@@ -10,15 +10,13 @@ real hardware get run on it, and what breaks gets fixed.
 Every item here is blocked on a physical machine rather than on code, which is
 why they sit together and why they sit in m3.
 
-- **VAAPI encode on an Intel or AMD box**: low-power against full entrypoint,
-  the NV12 upload round trip, and `cargo deny` license resolution. The
-  backend's own comment says NOT YET VALIDATED ON HARDWARE. The opt-in `vaapi`
-  feature still dlopens libva, so this run either clears that comment or
-  records what still blocks it. It covers the
-  Intel-based ground robots and NUC companions the teleoperation line needs.
-- **VAAPI zero-copy dmabuf input**: the backend uses an NV12 surface upload
-  today. Exercise the `Surface::DmaBuf` path with a V4L2 `VIDIOC_EXPBUF`
-  source instead.
+- **VAAPI low-power entrypoint and a second GPU.** H.264 encode, DMA-BUF
+  input, and VPP resize ran on Intel Meteor Lake with iHD (moq-vaapi 0.1.0).
+  Still unrun: the low-power encode entrypoint, which that device does not
+  expose, and `MOQ_VAAPI_DEVICE` naming a node other than the first render
+  node.
+- **VAAPI input from V4L2 `VIDIOC_EXPBUF`.** DMA-BUF encode ran from a VA-API
+  decode and from PipeWire. A V4L2 export has not been the source.
 - **Windows Media Foundation capture**: on-demand open and close, so the
   camera LED is off when nobody is watching, and NV12 delivery from MJPEG and
   YUY2 cameras.
@@ -31,4 +29,5 @@ come from plain `cuMemAlloc`. That is not a bug any amount of review finds.
 
 ## Related
 
-- [PipeWire DMA-BUF on KDE](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - the same kind of gate, for the capture side
+- [Validate PipeWire cameras on a portal and a Pi](/quest/m3/pipewire-camera-hardware.md) - the camera portal and a Pi CSI node, which are a different machine from this list
+- [PipeWire DMA-BUF on KDE](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - the same kind of gate, for screen capture

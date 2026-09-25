@@ -1,4 +1,5 @@
 import type * as Moq from "@moq/net";
+import { race } from "@moq/signals";
 import { Decoder } from "./decoder.ts";
 import type { Config as CodecConfig } from "./encoder.ts";
 
@@ -101,7 +102,7 @@ export class Consumer<T> {
 		if (buffered) return buffered;
 
 		const frame = group.readFrame();
-		const winner = await Promise.race([frame.then((frame) => ({ frame }) as const), this.#recvGroup()]);
+		const winner = await race([frame.then((frame) => ({ frame }) as const), this.#recvGroup()]);
 		if ("frame" in winner) return winner.frame;
 
 		if (winner.group) {
