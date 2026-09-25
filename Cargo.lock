@@ -4162,6 +4162,7 @@ dependencies = [
  "hang",
  "kio 0.6.0",
  "moq-json",
+ "moq-mux",
  "moq-net",
  "object_store",
  "percent-encoding",

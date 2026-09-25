@@ -77,6 +77,26 @@ pub enum Error {
 	/// Publishing the replayed archive failed.
 	#[error("moq: {0}")]
 	Moq(String),
+
+	/// The prefix already holds a recording timeline; resuming is unsupported.
+	#[error("prefix already holds a recording: {0}")]
+	Occupied(String),
+
+	/// The track was already enrolled, or is the recording's own timeline.
+	#[error("track already enrolled: {0}")]
+	Enrolled(String),
+
+	/// The source broadcast or one of its tracks failed.
+	#[error("source: {0}")]
+	Source(String),
+
+	/// The recording's timeline could not be segmented or published.
+	#[error("timeline: {0}")]
+	Timeline(String),
+
+	/// The writer stopped accepting commands.
+	#[error("writer closed")]
+	Closed,
 }
 
 impl From<object_store::Error> for Error {

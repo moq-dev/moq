@@ -70,6 +70,14 @@ impl<T> Producer<T> {
 		self.inner.lock().unwrap().pop(count)
 	}
 
+	/// Finish the open group, leaving the next edit to open a replacement with a header.
+	///
+	/// Idempotent: cutting when no group is open does nothing. A caller that stores complete groups
+	/// cuts after its edits, so every edit so far sits in a group no later frame can extend.
+	pub fn cut(&mut self) -> Result<()> {
+		self.inner.lock().unwrap().cut()
+	}
+
 	/// Finish the track, closing any open group.
 	///
 	/// Borrows rather than consumes, matching snapshot and stream, so the handle stays
@@ -112,6 +120,17 @@ impl<T> Inner<T> {
 		track.write(&frame)?;
 		frame.commit();
 
+		Ok(())
+	}
+
+	fn cut(&mut self) -> Result<()> {
+		let Some(group) = self.track.group.take() else {
+			return Ok(());
+		};
+		// The group closes either way, so reset first: a `finish` error must not leave the encoder
+		// appending ops to a group that is gone.
+		self.encoder.reset();
+		group.finish()?;
 		Ok(())
 	}
 

@@ -34,5 +34,3 @@ remains downstream (moq.pro) work.
 ## Required
 
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - generic on-demand group serving and IETF FETCH support
-
-- [Recording writer](/quest/m1/archive/writer.md)
