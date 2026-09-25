@@ -55,6 +55,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [QUIC GCC](/quest/m2/quic-gcc.md) - a measured verdict on delay-based congestion control for media egress, shipping as `RealTime`
 - [QUIC FEC](/quest/m2/quic-fec.md) - a measured verdict on transport-level FEC vs retransmission
 - [Google BBR comparison](/quest/m2/quic-bbr-google.md) - measure growth detection and precautionary probing after the correctness fixes
+- [WHEP ABR](/quest/m2/whep-abr.md) - a WHEP viewer switches renditions from its own congestion feedback
 - [Natural media drains](/quest/m2/quic-bbr-app-limited.md) - whether bounded drain credit avoids ProbeRTT deadline interference
 - [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [L4S on the backbone](/quest/m2/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
