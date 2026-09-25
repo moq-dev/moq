@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use moq_mux::binary::Config;
 use moq_mux::catalog::hang::Extra;
 
 use crate::error::MoqError;
@@ -25,9 +26,9 @@ pub struct MoqBinaryConfig {
 	pub mime: Option<String>,
 }
 
-impl From<MoqBinaryConfig> for moq_mux::binary::Config {
+impl From<MoqBinaryConfig> for Config {
 	fn from(config: MoqBinaryConfig) -> Self {
-		let mut out = moq_mux::binary::Config::default().with_compression(config.compression);
+		let mut out = Config::default().with_compression(config.compression);
 		if let Some(mime) = config.mime {
 			out = out.with_mime(mime);
 		}
@@ -48,7 +49,7 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
 			let track = state.broadcast.create_track(name, None)?;
-			let producer = state.catalog.binary_snapshot(track, config.into())?;
+			let producer = state.catalog.binary_snapshot(track, Config::from(config))?;
 			Ok(Arc::new(MoqBinarySnapshotProducer {
 				inner: std::sync::Mutex::new(Some(producer)),
 			}))
@@ -66,7 +67,7 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
 			let track = state.broadcast.create_track(name, None)?;
-			let producer = state.catalog.binary_stream(track, config.into())?;
+			let producer = state.catalog.binary_stream(track, Config::from(config))?;
 			Ok(Arc::new(MoqBinaryStreamProducer {
 				inner: std::sync::Mutex::new(Some(producer)),
 			}))
