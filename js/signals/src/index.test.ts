@@ -1,4 +1,3 @@
-import { heapStats } from "bun:jsc";
 import { describe, expect, spyOn, test } from "bun:test";
 import { Computed, type Dispose, Effect, type GetPromise, Once, race, Signal } from "./index.ts";
 
@@ -1135,17 +1134,21 @@ describe("race", () => {
 		expect(closed.reactions).toBe(1);
 	});
 
-	test("many races against a long-lived promise keep the heap flat", async () => {
+	test("many races against a long-lived promise leave it no listeners", async () => {
 		const closed = new Promise(() => {});
-		const measure = () => {
-			Bun.gc(true);
-			return heapStats().objectCount;
-		};
+		const add = spyOn(Set.prototype, "add");
+		let sets: Set<unknown>[];
+		try {
+			for (let i = 0; i < 1000; i++) await race([Promise.resolve(i), closed]);
+			sets = [...add.mock.contexts] as Set<unknown>[];
+		} finally {
+			add.mockRestore();
+		}
 
-		for (let i = 0; i < 1000; i++) await race([Promise.resolve(i), closed]);
-		const before = measure();
-		for (let i = 0; i < 10000; i++) await race([Promise.resolve(i), closed]);
-		expect(measure() - before).toBeLessThan(1000);
+		// `closed` is the last value each race listens to, so the last set added to is its listeners.
+		const listeners = sets.at(-1);
+		expect(sets.filter((set) => set === listeners).length).toBe(1000);
+		expect(sets.every((set) => set.size === 0)).toBe(true);
 	});
 });
 
@@ -1204,15 +1207,22 @@ describe("effect.race", () => {
 describe("spawn retention", () => {
 	test("an effect that never reruns drops settled tasks", async () => {
 		const effect = new Effect();
-		const promises = () => {
-			Bun.gc(true);
-			return heapStats().objectTypeCounts.Promise ?? 0;
-		};
+		const add = spyOn(Set.prototype, "add");
+		let sets: Set<unknown>[];
+		try {
+			for (let i = 0; i < 100; i++) effect.spawn(async () => {});
+			sets = [...add.mock.contexts] as Set<unknown>[];
+		} finally {
+			add.mockRestore();
+		}
 
-		const before = promises();
-		for (let i = 0; i < 10000; i++) effect.spawn(async () => {});
+		// The effect's own task set, found by what spawn added to it.
+		const tasks = sets[0];
+		expect(sets.every((set) => set === tasks)).toBe(true);
+		expect(tasks?.size).toBe(100);
+
 		await settle();
-		expect(promises() - before).toBeLessThan(100);
+		expect(tasks?.size).toBe(0);
 		effect.close();
 	});
 

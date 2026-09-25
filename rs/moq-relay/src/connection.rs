@@ -200,7 +200,7 @@ pub(crate) struct Grants {
 ///
 /// `cluster_peer` marks an authenticated cluster peer (a verified client
 /// certificate or the LAN credential), which discovers hidden routes whether
-/// or not it asks. A peer that predates the hidden opt-in (below moq-lite-07,
+/// or not it asks. A peer that predates the hidden opt-in (below moq-lite-07-wip,
 /// or moq-transport without MoQ Hidden) would otherwise lose `.internal/origins`
 /// and every other dot path during a rolling upgrade.
 // TODO: drop the exemption once deployed peers all opt in.
