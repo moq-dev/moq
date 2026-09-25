@@ -13,7 +13,7 @@ mod go
 mod dart
 # OBS Studio plugin (C++). See doc/bin/obs.md.
 mod obs 'cpp/obs'
-# Unit tests per language (`just test`).
+# Cross-language tests (`just test interop`, `just test drill`, ...).
 mod test
 # Demos and infra.
 mod demo
@@ -442,8 +442,8 @@ _tools $FILES="":
     tools=(actionlint bun jq nix nixfmt shellcheck shfmt taplo python3 nfpm dpkg-deb envsubst rpm)
     scoped '^(drafts/|doc/\.vitepress/drafts\.ts$)' && tools+=(kramdown-rfc xml2rfc)
     scoped '^(bench/|quest/|rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo envsubst)
-    scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'     && tools+=(uv)
-    scoped '^(kt/|rs/moq-ffi/)'                                && tools+=(gradle java)
+    scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/lib/samples\.sh$)' && tools+=(uv)
+    scoped '^(kt/|rs/moq-ffi/|doc/lib/kt/|doc/lib/samples\.sh$)' && tools+=(gradle java)
     # cargo because `go check` builds moq-ffi for the host, and skips on a
     # missing cargo the same way it skips on a missing go. rsync because the
     # publish scripts stage the mirror tree with it, so the publisher test skips
@@ -477,13 +477,38 @@ _tools $FILES="":
     	exit 1
     fi
 
-# Lints and compiles only the packages the branch changed plus everything
-# depending on them, so several worktrees can build at once. This is also what
-# CI runs (with MOQ_STRICT=1), so there is no second, drifting definition of
-# "checked". Tests are the sibling `just test`; `check --all` is the unscoped suite.
+# Lints, compiles, and tests only the packages the branch changed plus
+# everything depending on them, so several worktrees can build at once. Rust
+# compiles once: the test build doubles as the clippy gate (see `rs check-test`).
+# `check --all` is the unscoped suite.
 
-# Lint and compile what the branch changed since BASE, plus its dependents.
-check $BASE="" *args:
+# Lint, compile, and test what the branch changed since BASE, plus its dependents.
+check $BASE="":
+    just _check "$BASE" true
+
+# CI splits `check` into two parallel jobs, since one runner doing both takes
+# about the sum of their times. Both share `check`'s scoping (and CI adds
+# MOQ_STRICT=1), so there is no second, drifting definition of "checked".
+
+# Run half of `check` for CI: `check` lints and compiles, `test` runs the tests.
+ci $JOB $BASE="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$JOB" in
+    	check) just _check "$BASE" false ;;
+    	test) just _test "$BASE" ;;
+    	*)
+    		echo "ci: unknown job '$JOB', want check or test" >&2
+    		exit 2
+    		;;
+    esac
+
+# TEST=false is `ci check`: Rust lints through `cargo clippy`, which only
+# emits metadata and so finishes sooner than the test build it stands in for.
+
+# Lint and compile what the branch changed since BASE, and test it when TEST=true.
+[private]
+_check $BASE $TEST:
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -495,10 +520,10 @@ check $BASE="" *args:
 
     # `_changed` says ALL when the list outgrew what argv can carry. The unscoped
     # suite is the path that passes no list at all, so it is the one that works.
-    # The dispatch below lives in these two files, and neither matches any
+    # The dispatch below lives in this file, which matches no
     # language scope, so a PR that rewrites how CI dispatches would otherwise
     # validate none of it. Widen to the unscoped suite instead.
-    if [[ "$files" != ALL ]] && grep -qE '^(justfile|test/justfile)$' <<< "$files"; then
+    if [[ "$files" != ALL ]] && grep -qE '^justfile$' <<< "$files"; then
         echo "check: root orchestration changed; checking everything." >&2
         files=ALL
     fi
@@ -508,7 +533,11 @@ check $BASE="" *args:
     if [[ "$files" == ALL ]]; then
         just js check
         just drafts check
-        just rs check --workspace --exclude moq-net-fuzz {{ args }}
+        if [[ "$TEST" == true ]]; then
+            just rs check-test --workspace --exclude moq-net-fuzz
+        else
+            just rs check --workspace --exclude moq-net-fuzz
+        fi
         just rs tokio-features
         just rs media-features
         just --justfile bench/justfile check
@@ -525,7 +554,7 @@ check $BASE="" *args:
         just _flake
     elif [[ -n "$files" ]]; then
         just js check "$files"
-        just rs check-changed "$files"
+        just rs check-changed "$files" "$TEST"
         if echo "$files" | grep -q '^bench/'; then
             just --justfile bench/justfile check
         fi
@@ -572,7 +601,53 @@ check $BASE="" *args:
     	echo "check: nothing changed."
     fi
 
+    # Rust already ran its tests above, from the build that linted it. The kt,
+    # swift, go, and dart checks always run theirs, so only js and py remain.
+    # An empty list means "everything" to the per-language recipes.
+    if [[ "$TEST" == true && -n "$files" ]]; then
+    	scope=$files
+    	[[ "$scope" == ALL ]] && scope=
+    	just js test "$scope"
+    	just py test "$scope"
+    fi
+
     just _check-common
+
+# `ci test`'s half of `_check`: the same scoping, but only the languages whose
+# tests are separate from their check (js, rs, py).
+
+# Run unit tests for what the branch changed since BASE, plus its dependents.
+[private]
+_test $BASE:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [[ "$BASE" == --all ]]; then
+    	files=ALL
+    else
+    	files=$(just _changed "$BASE")
+    fi
+
+    # Mirrors `_check`: widen to everything when the list outgrew argv or the
+    # dispatch itself changed.
+    if [[ "$files" != ALL ]] && grep -qE '^justfile$' <<< "$files"; then
+    	echo "test: root orchestration changed; testing everything." >&2
+    	files=ALL
+    fi
+
+    just _tools "$files"
+
+    if [[ "$files" == ALL ]]; then
+    	just js test
+    	just rs test --workspace --exclude moq-net-fuzz
+    	just py test
+    elif [[ -n "$files" ]]; then
+    	just js test "$files"
+    	just rs test-changed "$files"
+    	just py test "$files"
+    else
+    	echo "test: nothing changed."
+    fi
 
 # Skips when nix is absent: the flake is not a precondition for working on the
 # repo, and `_tools` already makes it required under MOQ_STRICT.

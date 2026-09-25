@@ -1943,6 +1943,7 @@ fn media_cut_bounds_audio_groups() {
 			unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), i * 20_000) },
 			0
 		);
+		assert_eq!(moq_publish_media_flush(media, i * 20_000), 0);
 		assert_eq!(moq_publish_media_cut(media), 0, "each packet is its own group");
 	}
 
@@ -1954,6 +1955,8 @@ fn media_cut_bounds_audio_groups() {
 	assert_eq!(moq_publish_media_seek(media, 42), 0);
 
 	// Both report a missing importer rather than panicking on an unknown id.
+	assert!(moq_publish_media_flush(9999, 0) < 0);
+	assert!(moq_publish_media_flush(media, u64::MAX) < 0);
 	assert!(moq_publish_media_cut(9999) < 0);
 	assert!(moq_publish_media_seek(9999, 0) < 0);
 

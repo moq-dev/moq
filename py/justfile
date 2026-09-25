@@ -12,12 +12,13 @@ set working-directory := '.'
 
 # Paths a Python check depends on. `rs/moq-ffi` is in scope because maturin
 # bundles it into the moq-ffi wheel. `check`, `fix`, and `test` all skip
-# themselves when a diff misses this; no FILES at all means force-run.
+# themselves when a diff misses this; no FILES at all means force-run. The docs
+# are in scope because `check` type-checks their samples against the wrapper.
 #
 # They also skip when uv is absent, matching the kt/swift/go check scripts: an
 # incomplete local toolchain should check less rather than fail. The root
 # `_tools` preflight makes uv a hard requirement under MOQ_STRICT.
-scope := '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'
+scope := '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/lib/samples\.sh$)'
 
 default:
     just check
@@ -30,7 +31,7 @@ _develop:
     cd moq-ffi && uv run --no-sync maturin develop --locked --uv
     uv pip install --no-deps -e moq-rs
 
-# Lint + format + editable build + pyright + docs. `--no-install-workspace`
+# Lint + format + editable build + pyright + doc samples + docs. `--no-install-workspace`
 # installs the root dev group (ruff, maturin, pyright, pytest) without trying to
 # pip-build the workspace members; `_develop` then installs them editable, which
 # is also what `build` does, so there is no separate build gate here.
@@ -38,7 +39,7 @@ _develop:
 # `docs` runs here because a broken autodoc reference otherwise surfaces on Read
 # the Docs after the fact. It mocks the native module, so it costs no Rust build.
 
-# Lint, type-check, editable-build, and render the docs.
+# Lint, type-check, editable-build, check the doc samples, and render the docs.
 check $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -55,7 +56,24 @@ check $FILES="":
     uv run --no-sync ruff format --check .
     just _develop
     uv run --no-sync pyright
+    just samples
     just docs
+
+# Samples leave their inputs (`payload`, `pts`) to the reader, so they follow
+# the declarations in moq-rs/tests/doc_prelude.py.
+
+# Type-check every Python sample in the docs against the installed wrapper.
+samples:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=$(mktemp -d)
+    trap 'rm -rf "$out"' EXIT
+    {
+    	cat moq-rs/tests/doc_prelude.py
+    	bash ../doc/lib/samples.sh python ../doc/lib/py/index.md moq-rs/README.md moq-rs/docs/index.md
+    } > "$out/samples.py"
+    echo '{"pythonVersion": "3.10"}' > "$out/pyrightconfig.json"
+    uv run --no-sync pyright --project "$out" "$out/samples.py"
 
 # Auto-fix lint and formatting issues. Skips on the same terms as `check`.
 fix $FILES="":

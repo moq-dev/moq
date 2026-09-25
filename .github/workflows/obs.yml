@@ -15,7 +15,8 @@ name: OBS
 # libmoq's own C fixtures (`just rs c-tests`) run here too. They link libmoq.a
 # from outside cargo the same way, which is too slow for nextest's hang budget
 # and needs the debug staticlib this job has just built, so this is the one
-# PR gate that already has everything they need.
+# PR gate that already has everything they need. They also compile the C doc
+# samples, hence `doc/lib/c/**` in the trigger.
 #
 # The manifests and Cargo.lock are in there for the one way a crate the plugin
 # never names can break it: linking libmoq.a from outside cargo needs the native
@@ -49,6 +50,8 @@ on:
     paths:
       - "cpp/obs/**"
       - "rs/libmoq/**"
+      - "doc/lib/c/**"
+      - "doc/lib/samples.sh"
       - "rs/**/Cargo.toml"
       - "rs/**/build.rs"
       - "Cargo.toml"

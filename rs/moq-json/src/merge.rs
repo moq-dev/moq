@@ -5,11 +5,16 @@ use serde_json::{Map, Value};
 /// Validate the complete frame before changing the retained value, then apply its patch in place.
 /// Existing object keys and numeric values are reused instead of building a patch tree.
 pub(crate) fn apply_bytes(target: &mut Value, bytes: &[u8], scratch: &RefCell<CheckScratch>) -> serde_json::Result<()> {
-	use serde::de::DeserializeSeed;
-	let mut check = serde_json::Deserializer::from_slice(bytes);
-	Check { scratch, depth: 0 }.deserialize(&mut check)?;
-	check.end()?;
+	check(bytes, scratch)?;
 	apply_generated_bytes(target, bytes)
+}
+
+/// Validate one JSON value's syntax, rejecting any object that repeats a key.
+pub(crate) fn check(bytes: &[u8], scratch: &RefCell<CheckScratch>) -> serde_json::Result<()> {
+	use serde::de::DeserializeSeed;
+	let mut decoder = serde_json::Deserializer::from_slice(bytes);
+	Check { scratch, depth: 0 }.deserialize(&mut decoder)?;
+	decoder.end()
 }
 
 /// Apply a patch emitted by our serializer, whose keys and syntax were already checked.

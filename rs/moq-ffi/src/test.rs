@@ -155,6 +155,7 @@ fn audio_init(format: MoqAudioFormat, data: Vec<u8>) -> MoqAudioInit {
 		format,
 		data,
 		label: None,
+		track: None,
 	}
 }
 
@@ -164,6 +165,7 @@ fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
 		data,
 		label: None,
 		hint: None,
+		track: None,
 	}
 }
 
@@ -1240,6 +1242,65 @@ async fn requested_track_dynamic_survives_accept() {
 }
 
 #[tokio::test]
+async fn video_publish_named_track() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
+
+	let named = |track: &str| MoqVideoInit {
+		track: Some(track.into()),
+		..video_init(MoqVideoFormat::Avc3, h264_init())
+	};
+	let hd = broadcast.publish_video(named("hd")).unwrap();
+	assert_eq!(hd.name().unwrap(), "hd");
+	let sd = broadcast.publish_video_stream(named("sd")).unwrap();
+	drop(sd);
+
+	// A name is the caller's contract, so a duplicate fails rather than being made unique.
+	assert!(matches!(broadcast.publish_video(named("hd")), Err(MoqError::Codec(_))));
+
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out waiting for catalog")
+		.unwrap()
+		.expect("expected a catalog");
+	assert!(catalog.video.contains_key("hd"), "catalog: {:?}", catalog.video.keys());
+}
+
+#[tokio::test]
+async fn requested_track_refuses_a_name() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let subscribe = tokio::spawn(async move {
+		consumer
+			.subscribe_media("requested".into(), crate::media::MoqContainer::Legacy, None)
+			.await
+	});
+
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for requested track")
+		.unwrap();
+
+	let named = MoqVideoInit {
+		track: Some("other".into()),
+		..video_init(MoqVideoFormat::Avc3, h264_init())
+	};
+	assert!(matches!(
+		broadcast.publish_video_on_track(&request, named),
+		Err(MoqError::Codec(_))
+	));
+
+	// The refusal leaves the request unaccepted, so it still publishes under its own name.
+	let media = broadcast
+		.publish_video_on_track(&request, video_init(MoqVideoFormat::Avc3, h264_init()))
+		.unwrap();
+	assert_eq!(media.name().unwrap(), "requested");
+	subscribe.abort();
+}
+
+#[tokio::test]
 async fn dynamic_track_request_can_publish_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();
@@ -1295,6 +1356,8 @@ async fn dynamic_track_request_can_publish_media() {
 			timestamp_us: 20_000,
 		})
 		.unwrap();
+	media.flush(20_000).unwrap();
+	assert!(media.flush(u64::MAX).is_err(), "unrepresentable PTS must fail");
 
 	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
 		.await
@@ -1500,6 +1563,7 @@ async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
 		.announced(MoqAnnounceConfig {
 			prefix: "a/".into(),
 			filter: None,
+			hidden: false,
 		})
 		.unwrap();
 
@@ -1552,6 +1616,7 @@ async fn announced_filters_patterns_and_reports_captures() {
 		.announced(MoqAnnounceConfig {
 			prefix: "room".into(),
 			filter: Some("*/chat".into()),
+			hidden: false,
 		})
 		.unwrap();
 
@@ -1577,6 +1642,36 @@ async fn announced_filters_patterns_and_reports_captures() {
 	assert!(update.active());
 
 	chat.finish().unwrap();
+}
+
+/// A `.`-named broadcast is listed only when the config opts in or the prefix names it.
+#[tokio::test]
+async fn announced_hides_dot_paths_unless_asked() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let _stats = create_announced(&origin, ".stats/node");
+	let _cam = create_announced(&origin, "cam");
+
+	for (prefix, hidden, expected) in [
+		("", false, "cam"),
+		("", true, ".stats/node"),
+		(".stats", false, ".stats/node"),
+	] {
+		let announced = consumer
+			.announced(MoqAnnounceConfig {
+				prefix: prefix.into(),
+				filter: None,
+				hidden,
+			})
+			.unwrap();
+		// Updates arrive in path order, and `.` sorts before letters.
+		let update = tokio::time::timeout(TIMEOUT, announced.next())
+			.await
+			.expect("timed out waiting for an announcement")
+			.unwrap()
+			.expect("the origin should keep announcing");
+		assert_eq!(update.prefix(), expected, "prefix {prefix:?}, hidden {hidden}");
+	}
 }
 
 /// A broadcast consumed straight from a local producer has no origin, so a rendition naming a

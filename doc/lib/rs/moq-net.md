@@ -21,7 +21,7 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 - **Tracks** carry groups with a priority, a retention window, and a timescale. Subscribers set their own priority and max age and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.
 - **Datagrams** send a single small frame unreliably on moq-lite 05+.
-- **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one.
+- **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one. `Route::source()` says where a delivered route entered: `Source::Local`, or `Source::Peer(hop)` when a handle marked `origin::Producer::peer()` announced it. `origin::Consumer::local()` sees only the local ones.
 - **Stats** counters per broadcast and session, drained by [`moq-stats`](https://docs.rs/moq-stats).
 
 It runs over anything implementing `web_transport_trait::poll::Session`: noq, the
@@ -135,7 +135,9 @@ most specific matching scope member's wildcards stood for when the prefix
 pins them, and `route` carries hops and cost (on a retraction, its last
 values). The consumer is also a `futures::Stream`. A prefix is not a
 broadcast name; sessions request each scope member's literal head and filter
-locally.
+locally. Routes with a `.`-prefixed segment below that head are [hidden](/concept/moq-lite#hidden-broadcasts)
+unless `with_hidden(true)` opts the consumer in. Sessions always ask the peer
+for hidden routes, so each local consumer decides.
 
 ## Limiting reads
 

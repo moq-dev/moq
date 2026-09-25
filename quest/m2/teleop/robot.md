@@ -62,10 +62,10 @@ The framing is where the guarantee lives, not the subscription flags:
 ### Contents
 
 - The catalog section, through `moq-mux`'s `CatalogExt` and
-  `RenditionConfig<E>`. hang stays media-only; the `CatalogExt` doc example is
-  already a `telemetry` section (`rs/moq-mux/src/catalog/tracks.rs`, with a
-  `gps` rendition in its tests), so this is the designed seam and needs no hang
-  schema change.
+  `RenditionConfig<E>`: a namespaced root section whose entries embed a
+  `JsonConfig` or `BinaryConfig` beside the robot's own fields, published
+  through the data producers ([data sections](/quest/m1/data-sections.md)).
+  No hang schema change.
 - Announce-prefix fan-in, generalised from `rs/moq-boy/src/input.rs`.
 - The two delivery classes, as `moq-json`'s snapshot and stream modes with
   the group structure and `Info::latency_max` each one needs.
@@ -80,6 +80,10 @@ The framing is where the guarantee lives, not the subscription flags:
 Port `moq-boy` onto the crate in the same change, as the no-arbitration case.
 It is the only existing consumer, and if the abstraction cannot express crowd
 control then it is the wrong abstraction.
+
+## Required
+
+- [Data sections](/quest/m1/data-sections.md) - publishes the telemetry section's data tracks
 
 ## Related
 

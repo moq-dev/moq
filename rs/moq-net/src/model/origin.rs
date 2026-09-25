@@ -470,6 +470,9 @@ pub struct Route {
 	/// route is never advertised back to the session it came from even when that
 	/// session withheld an identity (hop 0). Never forwarded.
 	pub(crate) via: Hop,
+
+	/// Where the route entered this origin; see [`Self::source`]. Never forwarded.
+	pub(crate) source: Source,
 }
 
 impl Default for Route {
@@ -478,8 +481,24 @@ impl Default for Route {
 			hops: Hops::new(),
 			cost: Cost::default(),
 			via: Hop::UNKNOWN,
+			source: Source::Local,
 		}
 	}
+}
+
+/// Where a route entered an origin: here, or from a cluster peer.
+///
+/// Origin bookkeeping, not a chain fact: the hop chain cannot say it, since a
+/// client and a peer relay each append one hop. The origin records it from the
+/// handle that announced the route; see [`Producer::peer`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Source {
+	/// Announced on this origin: by an in-process producer or a client session.
+	#[default]
+	Local,
+	/// Learned from a cluster peer, named by the announcing session's declared or
+	/// assigned identity.
+	Peer(Hop),
 }
 
 impl Route {
@@ -516,6 +535,14 @@ impl Route {
 	/// enters the table.
 	pub fn is_anonymous(&self) -> bool {
 		self.hops.iter().any(|hop| *hop == Hop::UNKNOWN)
+	}
+
+	/// Where the route entered this origin, as delivered by [`Consumer::announced`].
+	///
+	/// Set by the origin, not the announcer: a route handed to
+	/// [`Producer::dynamic`] reports [`Source::Local`] until the origin delivers it.
+	pub fn source(&self) -> Source {
+		self.source
 	}
 }
 
@@ -573,8 +600,8 @@ fn route_order(prefix: &Path, entry: &RouteEntry) -> (bool, Cost, bool, usize, u
 	)
 }
 
-/// The `(hops, cost)` metadata an announce cursor delivers alongside a prefix.
-type RouteMeta = (Hops, Cost);
+/// The `(hops, cost, source)` metadata an announce cursor delivers alongside a prefix.
+type RouteMeta = (Hops, Cost, Source);
 
 /// One coalesced update queued for an `AnnounceConsumer`.
 ///
@@ -671,6 +698,7 @@ impl OriginConsumerState {
 				hops: meta.0,
 				cost: meta.1,
 				via: Hop::UNKNOWN,
+				source: meta.2,
 			},
 			kind,
 		})
@@ -693,6 +721,9 @@ struct RouteEntry {
 	/// Whether this is a broadcast published on this origin: a front that
 	/// starts from one only fails over to another local publisher.
 	local: bool,
+	/// Whether a handle marked [`Producer::peer`] inserted the entry, so it
+	/// entered from a cluster peer rather than here.
+	peer: bool,
 	/// The queue requests under this route are served from, when the announcer
 	/// serves content on demand (a [`Dynamic`]). `None` for an advertise-only
 	/// announcement ([`Producer::announce`]) and for a local broadcast.
@@ -716,6 +747,14 @@ struct RouteEntry {
 impl RouteEntry {
 	fn is_anonymous(&self) -> bool {
 		self.hops.iter().any(|hop| *hop == Hop::UNKNOWN)
+	}
+
+	/// Where the entry entered this origin.
+	fn entered(&self) -> Source {
+		match self.peer {
+			true => Source::Peer(self.via),
+			false => Source::Local,
+		}
 	}
 
 	/// Whether a request for `path` can be served through this entry. A served
@@ -788,10 +827,28 @@ struct ServeState {
 }
 
 /// Key of a remotely-served front: the absolute path and the requester's
-/// split-horizon exclusion. Requesters excluding different peers get separate
-/// fronts, so a front's failover never adopts a route flowing back through one
-/// of its own readers.
-type FrontKey = (PathOwned, Option<Hop>);
+/// [`Horizon`]. Requesters excluding different peers get separate fronts, so a
+/// front's failover never adopts a route flowing back through one of its own
+/// readers, nor a local view a peer's route.
+type FrontKey = (PathOwned, Horizon);
+
+/// Which routes a reader sees: the split-horizon exclusion and the local-only view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+struct Horizon {
+	/// Routes whose hop chain or announcing session (`via`) is this peer are
+	/// hidden. `Some(UNKNOWN)` marks an anonymous peer: no hop is excluded, but
+	/// local-only broadcasts are not advertised. `None` is a local reader.
+	exclude: Option<Hop>,
+	/// Hide the routes that entered from a cluster peer ([`Consumer::local`]).
+	local: bool,
+}
+
+impl Horizon {
+	/// Whether `entry` may be observed or served through this horizon.
+	fn admits(&self, entry: &RouteEntry) -> bool {
+		!(self.local && entry.peer) && entry.visible_to(self.exclude)
+	}
+}
 
 /// One remotely-served front in [`OriginState::fronts`]: the shared spliced
 /// broadcast at a path plus the channel requesters resolve through.
@@ -833,9 +890,10 @@ struct TableCursor {
 	/// `allowed`. A route the cursor can see sits at or under one of them, or on
 	/// the walk down to one.
 	heads: Vec<PathOwned>,
-	/// Skip routes whose hop chain or announcing session (`via`) is this peer
-	/// (control-plane split horizon).
-	exclude: Option<Hop>,
+	/// The routes this cursor may see (control-plane split horizon).
+	horizon: Horizon,
+	/// Which routes beneath a hidden segment are reported.
+	hidden: Hidden,
 	/// The delivery buffer, drained by the cursor's `poll_next`.
 	state: kio::Producer<OriginConsumerState>,
 	/// The last delivered best route per presented (relative) prefix, for change
@@ -880,7 +938,13 @@ impl TableCursor {
 	/// Whether this cursor may observe `entry` at all: advertised, not behind
 	/// the excluded peer (split horizon), and within the cursor's patterns.
 	fn visible(&self, entry: &RouteEntry) -> bool {
-		entry.advertised && entry.visible_to(self.exclude) && entry.overlaps(&self.allowed)
+		entry.advertised && self.horizon.admits(entry) && entry.overlaps(&self.allowed) && self.discovers(&entry.prefix)
+	}
+
+	/// Whether the hidden rule lets this cursor discover a route at `prefix`.
+	fn discovers(&self, prefix: &Path) -> bool {
+		(self.hidden.include || !hides(&self.heads, prefix))
+			&& self.hidden.beyond.as_ref().is_none_or(|outer| hides(outer, prefix))
 	}
 }
 
@@ -940,6 +1004,29 @@ pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<PathOwned> {
 	let covered = heads.clone();
 	heads.retain(|head| !covered.iter().any(|other| other != head && head.has_prefix(other)));
 	heads
+}
+
+/// Which routes beneath a hidden segment an announce cursor reports.
+///
+/// A route is hidden when a segment below the cursor's requested prefix (its
+/// interest head) starts with `.`; a prefix that names the dot segment itself
+/// lists what is under it. Only discovery is affected: a request by exact path
+/// resolves either way.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Hidden {
+	/// Report hidden routes too.
+	include: bool,
+	/// Report only what a feed scoped to these heads hides, for a stream that tops
+	/// up a feed already carrying everything visible from them.
+	beyond: Option<Vec<PathOwned>>,
+}
+
+/// Whether a segment of `prefix` below the head it sits under starts with `.`.
+/// A route at or above a head has nothing below it, so it never hides.
+fn hides(heads: &[PathOwned], prefix: &Path) -> bool {
+	heads
+		.iter()
+		.any(|head| prefix.strip_prefix(head).is_some_and(|below| below.is_hidden()))
 }
 
 /// What an [`AnnounceUpdate`] reports about its path.
@@ -1015,6 +1102,10 @@ pub struct Producer {
 	// session tagged this handle via [`Self::with_stats`].
 	stats: stats::Session,
 
+	// Whether routes announced through this handle entered from a cluster peer
+	// (see [`Self::peer`]).
+	peer: bool,
+
 	// Submission handle to the origin's [`Driver`]: source watchers, fronts, and
 	// serve tasks queued here run when the driver is polled. Closed once the
 	// driver drops, which is what makes later mutations fail with `Closed`.
@@ -1046,6 +1137,7 @@ impl Producer {
 			cache_duration: config.cache_duration,
 			default_max_age: config.default_max_age,
 			stats: stats::Session::default(),
+			peer: false,
 			tasks,
 			timers: timers.clone(),
 		};
@@ -1066,6 +1158,18 @@ impl Producer {
 	/// (ingress) side. Pass [`stats::Session::default`] to opt out.
 	pub fn with_stats(mut self, session: stats::Session) -> Self {
 		self.stats = session;
+		self
+	}
+
+	/// Mark this handle (and any handle derived from it) as a cluster peer's:
+	/// every route it announces reports [`Source::Peer`], and
+	/// [`Consumer::local`] hides it.
+	///
+	/// Hand it to a session with another relay, so this origin can tell what
+	/// entered here from what a peer forwarded. The hop chain cannot: a client
+	/// and a peer each append one hop.
+	pub fn peer(mut self) -> Self {
+		self.peer = true;
 		self
 	}
 
@@ -1107,6 +1211,7 @@ impl Producer {
 			cache_duration: Duration::MAX,
 			default_max_age: track::DEFAULT_MAX_AGE,
 			stats: stats::Session::default(),
+			peer: false,
 			tasks,
 			timers: Clock::default(),
 		}
@@ -1175,6 +1280,7 @@ impl Producer {
 			prefixes: vec![(full.clone(), claim)],
 			scope: self.scope.allowed.clone(),
 			local: true,
+			peer: self.peer,
 			stats: self.stats.clone(),
 		};
 		let info = broadcast::Info {
@@ -1301,6 +1407,7 @@ impl Producer {
 			cache_duration: self.cache_duration,
 			default_max_age: self.default_max_age,
 			stats: self.stats.clone(),
+			peer: self.peer,
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
 		})
@@ -1347,6 +1454,8 @@ struct Announcing {
 	/// The absolute paths the producer is authorized to serve.
 	scope: Patterns,
 	local: bool,
+	/// Whether the producer was marked [`Producer::peer`].
+	peer: bool,
 	stats: stats::Session,
 }
 
@@ -1368,6 +1477,7 @@ impl Announcing {
 			prefixes: vec![(requested, claim)],
 			scope: producer.scope.allowed.clone(),
 			local: false,
+			peer: producer.peer,
 			stats: producer.stats.clone(),
 		})
 	}
@@ -1379,7 +1489,6 @@ impl Announcing {
 		);
 
 		let via = route.via;
-		let meta: RouteMeta = (route.hops, route.cost);
 
 		let mut shared = self.shared.lock();
 		if shared.closed {
@@ -1394,10 +1503,11 @@ impl Announcing {
 				id,
 				prefix: prefix.clone(),
 				scope: self.scope.clone(),
-				hops: meta.0.clone(),
-				cost: meta.1,
+				hops: route.hops.clone(),
+				cost: route.cost,
 				via,
 				local: self.local,
+				peer: self.peer,
 				server: serving.server.clone(),
 				source: serving.source.clone(),
 				advertised: serving.advertised,
@@ -1740,8 +1850,8 @@ struct FrontTask {
 	broadcast: broadcast::Producer,
 	/// Absolute path of the front.
 	path: PathOwned,
-	/// The requesters' split-horizon exclusion, applied to every (re)selection.
-	exclude: Option<Hop>,
+	/// The requesters' horizon, applied to every (re)selection.
+	horizon: Horizon,
 	/// Wakes the front when a route covering its path changes.
 	watch: Watch,
 	/// Resolves the requesters parked on the front's channel.
@@ -1781,7 +1891,7 @@ async fn run_front(task: FrontTask) {
 		shared,
 		broadcast,
 		path,
-		exclude,
+		horizon,
 		watch,
 		request,
 		pin,
@@ -1822,7 +1932,7 @@ async fn run_front(task: FrontTask) {
 		*seen = watch.seen();
 		front.retain_routes(|route| table.routes.covers(&path.as_path(), route));
 		let best = table
-			.best_route(&path.as_path(), exclude, front.pin(), front.refused_routes())
+			.best_route(&path.as_path(), horizon, front.pin(), front.refused_routes())
 			.map(|entry| Candidate {
 				route: entry.id,
 				first: entry.hops.iter().next().copied(),
@@ -2632,7 +2742,7 @@ impl OriginState {
 
 		match best {
 			Some(entry) => {
-				let meta = (entry.hops.clone(), entry.cost);
+				let meta = (entry.hops.clone(), entry.cost, entry.entered());
 				let served = entry.server.is_some();
 				let captures = cursor.captures(&entry.prefix);
 				let previous = cursor
@@ -2698,8 +2808,8 @@ impl OriginState {
 		self.cursors.insert(id, cursor);
 	}
 
-	/// The best served route covering `path` (absolute) for a requester excluding
-	/// `exclude`, skipping the `refused` entry ids.
+	/// The best served route covering `path` (absolute) for a requester seeing
+	/// `horizon`, skipping the `refused` entry ids.
 	///
 	/// The most specific covering prefix wins outright, so a narrow advertise-only
 	/// announcement shadows a broad served one: requests under it resolve
@@ -2712,7 +2822,7 @@ impl OriginState {
 	/// else is different content rather than an alternate path (see [`Front`]).
 	/// A broadcast published on this origin competes on cost like any other
 	/// route and wins a tie.
-	fn best_route(&self, path: &Path, exclude: Option<Hop>, pin: Pin, refused: &HashSet<u64>) -> Option<&RouteEntry> {
+	fn best_route(&self, path: &Path, horizon: Horizon, pin: Pin, refused: &HashSet<u64>) -> Option<&RouteEntry> {
 		// Covering prefixes of one path form a chain, so the deepest node with a
 		// candidate holds the unique longest prefix; walking down, the last such
 		// node decides.
@@ -2724,7 +2834,7 @@ impl OriginState {
 				.iter()
 				.filter(|entry| entry.advertised)
 				.filter(|entry| entry.scope.matches(path.as_str()))
-				.filter(|entry| entry.visible_to(exclude))
+				.filter(|entry| horizon.admits(entry))
 				.filter(|entry| entry.qualifies(pin))
 				.filter(|entry| !refused.contains(&entry.id))
 				.peekable();
@@ -3097,11 +3207,14 @@ pub struct Consumer {
 	// publisher/egress side). Empty (no-op) unless a session tagged this handle.
 	stats: stats::Session,
 
-	// Split horizon: routes whose hop chain or announcing session (`via`) is this
-	// peer are invisible to `announced` and skipped by `request_broadcast`, so a
-	// peer is never served (or advertised) its own content back. `Some(UNKNOWN)`
-	// marks an anonymous peer, which excludes no hop. `None` filters nothing.
-	exclude: Option<Hop>,
+	// Split horizon: routes whose hop chain or announcing session (`via`) is the
+	// excluded peer are invisible to `announced` and skipped by
+	// `request_broadcast`, so a peer is never served (or advertised) its own
+	// content back. A local view (`Self::local`) hides peer routes the same way.
+	horizon: Horizon,
+
+	// Which routes beneath a hidden (`.`-prefixed) segment `announced` reports.
+	hidden: Hidden,
 
 	// The cache policy remote fronts inherit, mirroring what
 	// `create_broadcast` gives a local front.
@@ -3126,7 +3239,8 @@ impl Consumer {
 			root: producer.root.clone(),
 			shared: producer.shared.clone(),
 			stats,
-			exclude: None,
+			horizon: Horizon::default(),
+			hidden: Hidden::default(),
 			pool: producer.pool.clone(),
 			cache_duration: producer.cache_duration,
 			tasks: producer.tasks.downgrade(),
@@ -3147,8 +3261,40 @@ impl Consumer {
 	/// anonymous route from echoing back. Pass [`Hop::UNKNOWN`] for an anonymous
 	/// peer.
 	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
-		self.exclude = Some(peer);
+		self.horizon.exclude = Some(peer);
 		self
+	}
+
+	/// A view of the routes that entered here: every route a handle marked
+	/// [`Producer::peer`] announced is hidden from [`Self::announced`] and never
+	/// resolved by [`Self::request_broadcast`].
+	///
+	/// On a relay, this is what the relay ingests itself, from clients and
+	/// in-process producers, as opposed to what its cluster peers forward.
+	pub fn local(mut self) -> Self {
+		self.horizon.local = true;
+		self
+	}
+
+	/// A clone whose [`announced`](Self::announced) also reports hidden routes:
+	/// those with a segment starting with `.` below the requested prefix.
+	/// Hidden routes are left out by default, so a platform can add `.`-named
+	/// broadcasts without them turning up in apps that list everything.
+	pub fn with_hidden(mut self, hidden: bool) -> Self {
+		self.hidden.include = hidden;
+		self
+	}
+
+	/// A clone whose [`announced`](Self::announced) reports only the routes a feed
+	/// from `outer` hides, for a stream topping up that feed.
+	pub(crate) fn beyond(mut self, outer: &Consumer) -> Self {
+		self.hidden.beyond = Some(interest_prefixes(&outer.scope.allowed));
+		self
+	}
+
+	/// Whether [`announced`](Self::announced) reports hidden routes too.
+	pub(crate) fn includes_hidden(&self) -> bool {
+		self.hidden.include
 	}
 
 	/// Attach an egress stats context: broadcasts handed out through this handle (and
@@ -3185,13 +3331,16 @@ impl Consumer {
 	/// Allocates a per-cursor coalescing buffer and replays the currently
 	/// announced routes as initial updates. Routes stay prefixes and are named
 	/// relative to this consumer's root; its patterns only filter visibility.
+	/// Routes with a segment starting with `.` below the literal head of those
+	/// patterns are hidden unless [`with_hidden`](Self::with_hidden) opted in.
 	/// Drop the returned [`AnnounceConsumer`] to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
 		AnnounceConsumer::new(
 			self.root.clone(),
 			self.scope.allowed.clone(),
 			self.stats.clone(),
-			self.exclude,
+			self.horizon,
+			self.hidden.clone(),
 			&self.shared,
 		)
 	}
@@ -3248,8 +3397,9 @@ impl Consumer {
 		}
 
 		// Use an untagged stream: this is a lookup, not egress announce
-		// forwarding, so it must not drive the announce guards.
-		let mut announced = consumer.untagged().announced();
+		// forwarding, so it must not drive the announce guards. Hiding narrows
+		// discovery, not lookup, so a hidden path resolves like any other.
+		let mut announced = consumer.untagged().with_hidden(true).announced();
 		loop {
 			let update = announced.next().await?;
 			if update.kind.is_active() && path.has_prefix(&update.prefix) {
@@ -3378,7 +3528,7 @@ impl Consumer {
 		// Checked before joining a front, so a front still draining after its
 		// route retracted takes no newcomers.
 		if state
-			.best_route(&absolute.as_path(), self.exclude, Pin::Any, &HashSet::new())
+			.best_route(&absolute.as_path(), self.horizon, Pin::Any, &HashSet::new())
 			.is_none()
 		{
 			return kio::Pending::new(Requesting::failed(Error::Unroutable));
@@ -3391,11 +3541,11 @@ impl Consumer {
 		// content, though: once a different publisher wins (a cheaper route), a
 		// newcomer gets a fresh front from it, and the old front keeps serving the
 		// readers it has, since other content can't be spliced into it.
-		let key = (absolute.clone(), self.exclude);
+		let key = (absolute.clone(), self.horizon);
 		if let Some(front) = state.fronts.get(&key) {
 			let pin = *front.pin.lock();
 			let current = state
-				.best_route(&absolute.as_path(), self.exclude, Pin::Any, &HashSet::new())
+				.best_route(&absolute.as_path(), self.horizon, Pin::Any, &HashSet::new())
 				.is_some_and(|entry| entry.qualifies(pin));
 			if current {
 				let pending = Requesting::queued(front.request.consume())
@@ -3434,7 +3584,7 @@ impl Consumer {
 			shared: self.shared.clone(),
 			broadcast,
 			path: absolute,
-			exclude: self.exclude,
+			horizon: self.horizon,
 			watch,
 			request,
 			pin,
@@ -3491,7 +3641,8 @@ impl AnnounceConsumer {
 		root: PathOwned,
 		allowed: Patterns,
 		stats: stats::Session,
-		exclude: Option<Hop>,
+		horizon: Horizon,
+		hidden: Hidden,
 		shared: &kio::Shared<OriginState>,
 	) -> Self {
 		let state = kio::Producer::<OriginConsumerState>::default();
@@ -3511,7 +3662,8 @@ impl AnnounceConsumer {
 						root: root.clone(),
 						heads: interest_prefixes(&allowed),
 						allowed,
-						exclude,
+						horizon,
+						hidden,
 						state: state.clone(),
 						current: HashMap::new(),
 					},
@@ -3799,6 +3951,86 @@ mod tests {
 		drop(announcement);
 		announced.assert_next_ended("room/alice");
 		announced.assert_next_wait();
+	}
+
+	/// A `.`-prefixed segment below the requested prefix hides a route from
+	/// discovery unless the reader opts in; one inside the prefix does not.
+	#[tokio::test]
+	async fn hidden_routes_need_an_opt_in() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let _visible = producer.announce("room/alice", Route::default()).unwrap();
+		let _stats = producer.announce(".stats/node", Route::default()).unwrap();
+		let _nested = producer.announce("room/.internal", Route::default()).unwrap();
+		// Only a leading dot hides: a suffix is part of the name.
+		let _suffix = producer.announce("room/catalog.pro", Route::default()).unwrap();
+
+		let mut announced = consumer.announced();
+		announced.assert_next_active("room/alice");
+		announced.assert_next_active("room/catalog.pro");
+		announced.assert_next_wait();
+
+		let mut announced = consumer.clone().with_hidden(true).announced();
+		announced.assert_next_active(".stats/node");
+		announced.assert_next_active("room/.internal");
+		announced.assert_next_active("room/alice");
+		announced.assert_next_active("room/catalog.pro");
+		announced.assert_next_wait();
+
+		// Naming the dot segment lists what is under it, by root or by pattern.
+		let mut announced = consumer
+			.scope(".stats", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.announced();
+		announced.assert_next_active("node");
+		announced.assert_next_wait();
+		let mut announced = consumer.scope("", &scopes(&["room/.internal"])).unwrap().announced();
+		announced.assert_next_active("room/.internal");
+		announced.assert_next_wait();
+
+		// A top-up feed reports only what a feed from the root hid, filtered by its own
+		// prefix and opt-in.
+		let mut announced = consumer.clone().with_hidden(true).beyond(&consumer).announced();
+		announced.assert_next_active(".stats/node");
+		announced.assert_next_active("room/.internal");
+		announced.assert_next_wait();
+		let room = consumer.scope("", &scopes(&["room"])).unwrap().beyond(&consumer);
+		let mut announced = room.announced();
+		announced.assert_next_wait();
+		let stats = consumer.scope("", &scopes(&[".stats"])).unwrap().beyond(&consumer);
+		let mut announced = stats.announced();
+		announced.assert_next_active(".stats/node");
+		announced.assert_next_wait();
+	}
+
+	/// Hiding narrows discovery only: an exact request resolves without an opt-in.
+	#[tokio::test]
+	async fn hidden_broadcast_resolves_by_path() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let broadcast = producer.create_broadcast(".stats/node").unwrap();
+		broadcast.announce(Route::default()).unwrap();
+
+		consumer.announced().assert_next_wait();
+		let resolved = consumer.request_broadcast(".stats/node").await.expect("resolves");
+		assert_eq!(resolved.info().path.as_str(), ".stats/node");
+	}
+
+	/// A route that turns up later is filtered the same way as the replay.
+	#[tokio::test]
+	async fn hidden_route_announced_later_stays_hidden() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let mut announced = consumer.announced();
+		let mut opted = consumer.clone().with_hidden(true).announced();
+
+		let hidden = producer.announce(".stats/node", Route::default()).unwrap();
+		announced.assert_next_wait();
+		opted.assert_next_active(".stats/node");
+
+		drop(hidden);
+		announced.assert_next_wait();
+		opted.assert_next_ended(".stats/node");
 	}
 
 	#[tokio::test]
@@ -4783,6 +5015,105 @@ mod tests {
 		let clean = producer.consume().excluding(origin(8));
 		let pending = clean.request_broadcast("room/alice");
 		assert!(pending.now_or_never().is_none());
+	}
+
+	#[tokio::test]
+	async fn routes_report_where_they_entered() {
+		let producer = origin(1).produce();
+		let peer = producer.clone().peer();
+		let mut announced = producer.consume().announced();
+
+		let _ingest = producer
+			.dynamic("client", Route::default().with_hops(hops(&[5])).with_via(origin(5)))
+			.unwrap();
+		let _gateway = producer.publish("gateway", Route::default()).unwrap();
+		let _forwarded = peer
+			.dynamic(
+				"forwarded",
+				Route::default().with_hops(hops(&[5, 7])).with_via(origin(7)),
+			)
+			.unwrap();
+
+		assert_eq!(announced.assert_next_active("client").source(), Source::Local);
+		assert_eq!(
+			announced.assert_next_active("forwarded").source(),
+			Source::Peer(origin(7))
+		);
+		assert_eq!(announced.assert_next_active("gateway").source(), Source::Local);
+
+		// The mark survives narrowing the handle.
+		let scoped = peer.scope("room", &Patterns::from(Pattern::all())).unwrap();
+		let _nested = scoped.dynamic("x", Route::default().with_via(origin(8))).unwrap();
+		assert_eq!(announced.assert_next_active("room/x").source(), Source::Peer(origin(8)));
+	}
+
+	/// A change of source alone is delivered: the same chain and cost arriving
+	/// from a peer instead of a client is a different fact for the consumer.
+	#[tokio::test]
+	async fn source_change_is_an_update() {
+		let producer = origin(1).produce();
+		let peer = producer.clone().peer();
+		let mut announced = producer.consume().announced();
+
+		let route = Route::default().with_hops(hops(&[7])).with_via(origin(7));
+		let _forwarded = peer.dynamic("room", route.clone()).unwrap();
+		assert_eq!(announced.assert_next_active("room").source(), Source::Peer(origin(7)));
+
+		// The newest identical route wins, so the local twin takes over.
+		let local = producer.dynamic("room", route).unwrap();
+		let update = announced.next().now_or_never().expect("next blocked").expect("no next");
+		assert_eq!(update.kind, AnnounceKind::Updated);
+		assert_eq!(update.route.source(), Source::Local);
+
+		drop(local);
+		assert_eq!(announced.assert_next_active("room").source(), Source::Peer(origin(7)));
+	}
+
+	#[tokio::test]
+	async fn local_view_hides_peer_routes() {
+		let producer = origin(1).produce();
+		let peer = producer.clone().peer();
+		let mut local = producer.consume().local().announced();
+
+		let _forwarded = peer
+			.dynamic("remote", Route::default().with_hops(hops(&[7])).with_via(origin(7)))
+			.unwrap();
+		local.assert_next_wait();
+
+		// A path both ingested here and forwarded by a peer shows the local route,
+		// and retracts from the local view when the local route goes, even though
+		// the peer's still covers it.
+		let _shadow = peer
+			.dynamic("both", Route::default().with_hops(hops(&[7])).with_via(origin(7)))
+			.unwrap();
+		let ingest = producer
+			.dynamic(
+				"both",
+				Route::default().with_hops(hops(&[5])).with_via(origin(5)).with_cost(9),
+			)
+			.unwrap();
+		assert_eq!(local.assert_next_active("both").source(), Source::Local);
+		drop(ingest);
+		local.assert_next_ended("both");
+
+		// Resolution agrees with the cursor: a peer-only path is unroutable here,
+		// while the full view queues the request on the peer's route.
+		let err = producer
+			.consume()
+			.local()
+			.request_broadcast("remote/alice")
+			.now_or_never()
+			.expect("unroutable")
+			.err()
+			.unwrap();
+		assert!(matches!(err, Error::Unroutable));
+		assert!(
+			producer
+				.consume()
+				.request_broadcast("remote/alice")
+				.now_or_never()
+				.is_none()
+		);
 	}
 
 	/// A handler that rejects a path with `Unroutable` while its route stands

@@ -8,9 +8,13 @@ final class AnnounceOptions {
   /// Pattern relative to [prefix], or null for every path beneath it.
   final String? filter;
 
-  const AnnounceOptions({this.prefix = '', this.filter});
+  /// Also list paths with a segment starting with `.` below [prefix].
+  final bool hidden;
 
-  AnnounceConfig get _ffi => AnnounceConfig(prefix: prefix, filter: filter);
+  const AnnounceOptions({this.prefix = '', this.filter, this.hidden = false});
+
+  AnnounceConfig get _ffi =>
+      AnnounceConfig(prefix: prefix, filter: filter, hidden: hidden);
 }
 
 /// Everything [Moq.connect] can be told beyond the URL.
@@ -41,6 +45,14 @@ final class ConnectOptions {
   /// tracks may want this raised.
   final int? maxStreams;
 
+  /// Set false to stop the WebSocket fallback racing QUIC, e.g. against a
+  /// relay that only serves QUIC. On by default.
+  final bool? websocketEnabled;
+
+  /// Head start QUIC gets before the WebSocket fallback joins the race; 200ms
+  /// by default, and zero races both at once.
+  final Duration? websocketDelay;
+
   /// Set false for a one-shot dial. By default the session redials with
   /// backoff whenever the transport drops.
   final bool? reconnect;
@@ -63,6 +75,8 @@ final class ConnectOptions {
     this.tlsKey,
     this.bind,
     this.maxStreams,
+    this.websocketEnabled,
+    this.websocketDelay,
     this.reconnect,
     this.backoff,
     this.publish,
@@ -89,6 +103,15 @@ final class Moq {
     String url, {
     ConnectOptions options = const ConnectOptions(),
   }) async {
+    final websocketDelay = options.websocketDelay;
+    if (websocketDelay != null && websocketDelay.isNegative) {
+      throw ArgumentError.value(
+        websocketDelay,
+        'websocketDelay',
+        'must not be negative',
+      );
+    }
+
     final client = Client();
     try {
       if (!options.tlsVerify) client.setTlsVerify(verify: false);
@@ -106,6 +129,12 @@ final class Moq {
       if (options.bind != null) client.setBind(addr: options.bind!);
       if (options.maxStreams != null) {
         client.setQuicMaxStreams(maxStreams: options.maxStreams!);
+      }
+      if (options.websocketEnabled != null) {
+        client.setWebsocketEnabled(enabled: options.websocketEnabled!);
+      }
+      if (websocketDelay != null) {
+        client.setWebsocketDelay(delayUs: websocketDelay.inMicroseconds);
       }
       if (options.reconnect != null) {
         client.setReconnect(enabled: options.reconnect!);

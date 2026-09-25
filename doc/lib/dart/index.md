@@ -71,7 +71,8 @@ every path beneath it (`''` for everything; Dart spells the origin method
 claim should stay advertised, and reject the requests you will not serve. A
 route is a capability, not an inventory. `announcements(options:)` takes a
 literal prefix plus an optional relative pattern; `announcement.prefix()`
-stays origin-relative and `captures()` reports the wildcard matches.
+stays origin-relative and `captures()` reports the wildcard matches. Paths with
+a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless `hidden: true`.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `Moq.connect` and `Server.listen` take a `ConnectOptions` /
@@ -79,6 +80,10 @@ broadcasts. `Moq.connect` and `Server.listen` take a `ConnectOptions` /
 and `backoff:` re-paces the retries. `moq.epoch` counts the connections, 1 on the first, pairing with
 `session.status()` to log each reconnect; `maxStreams` raises the peer's
 inbound stream cap for a subscriber to many tracks.
+
+The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
+a 200 ms head start. `websocketEnabled: false` turns it off for a QUIC-only
+relay, and a `websocketDelay` `Duration` changes the head start.
 
 Types are spelled without the `Moq` prefix (`Session`, `BroadcastProducer`,
 `Backoff`); the generated names stay valid, since these are aliases rather than
@@ -101,6 +106,8 @@ Unlike the other bindings, the published Dart binaries carry **no codecs**:
 catalog and container types are there, so already-encoded frames flow through
 `MoqMediaProducer`/`MoqMediaConsumer`, but encoding is up to
 `package:camera`, platform channels, or another codec package.
+
+`MediaProducer.flush(timestampUs: ...)` records the handoff of a locally encoded frame on the broadcast media clock. Call it after `writeFrame` only for live encoder output; file, pipe, and network imports stay clock-free. `MediaProducer` aliases the generated FFI object, so its method is available directly.
 
 ## Connection stats
 

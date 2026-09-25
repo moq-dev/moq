@@ -54,6 +54,11 @@ framerate, and bitrate are tunable through `el.video.config`; the audio
 encoder exposes its codec and volume. For simulcast or several renditions,
 drop the element and register your own encoders on a `Publish.Broadcast`.
 
+The video and audio encoders measure how far their output falls behind the media
+clock when they flush frames. Catalog jitter is the spread above each
+rendition's own recent minimum lateness, so a constant encoder delay is not jitter.
+The advertised value only rises; frame duration alone does not set it.
+
 ## Custom tracks
 
 `broadcast.net` is the underlying `Moq.Broadcast.Producer`, so an application
@@ -120,7 +125,9 @@ new Publish.Audio.Encoder("audio", { broadcast, capture: audioCapture, enabled: 
 Standalone components start enabled unless you pass `enabled: false` (or a
 signal). Camera and microphone sources may prompt for permission on
 construction, so build an enabled screen source inside the user gesture that
-authorizes screen capture.
+authorizes screen capture. Audio capture that starts before the page's first
+click or keypress waits for one: browsers suspend Web Audio until then, and the
+audio rendition stays out of the catalog until samples flow.
 
 Every input and output is a signal from [`@moq/signals`](/lib/js/signals).
 Load from a CDN (`https://esm.sh/@moq/publish/element`) for a no-build embed.

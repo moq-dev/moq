@@ -104,7 +104,9 @@ match (otherwise `undefined`), `kind` is `"announced"`, `"updated"` (a
 reprice in place), or `"retracted"`, and `route` carries hops and cost (on a
 retraction, its last values). The consumer is an async iterable. A prefix is
 not a broadcast name; the scope filters locally while sessions request its
-literal head on the wire.
+literal head on the wire. Paths with a `.`-prefixed segment below that head
+are [hidden](/concept/moq-lite#hidden-broadcasts) unless `announced(scope, { hidden: true })` opts in;
+`broadcasts(scope, { hidden: true })` takes the same option.
 
 Examples in
 [`js/net/examples/`](https://github.com/moq-dev/moq/tree/main/js/net/examples).

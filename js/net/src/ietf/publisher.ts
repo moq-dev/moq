@@ -3,7 +3,7 @@ import type * as broadcast from "../broadcast.ts";
 import { controlTimeout, error, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { type Route, routesEqual } from "../hop.ts";
-import { hooks } from "../internal.ts";
+import { hiddenBelow, hooks } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
@@ -30,7 +30,7 @@ import {
 	SubscribeNamespaceEntryDone,
 	SubscribeNamespaceOk,
 } from "./subscribe_namespace.ts";
-import { TrackStatus, type TrackStatusRequest } from "./track.ts";
+import type { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** First wait before re-offering a namespace the peer refused or we couldn't open for. */
@@ -325,7 +325,7 @@ export class Publisher {
 					? // Declaring the timescale is what opts the track into timestamps; every
 						// object Timestamp below is in these units. We serve the newest group
 						// first, matching moq-lite.
-						{ timescale, groupOrder: Properties.DESCENDING }
+						{ timescale, priority: publisherPriority, groupOrder: Properties.DESCENDING }
 					: // INCLUDE_PROPERTIES=0. The block stays present but empty, which also means
 						// the track opts out of timestamps for this subscriber.
 						{},
@@ -632,10 +632,10 @@ export class Publisher {
 	/**
 	 * Handles an incoming SUBSCRIBE_NAMESPACE on a bidi stream.
 	 *
-	 * This carries the advertisements only when the peer asked to be told on request
-	 * (MoQ Solicit); otherwise {@link runPublishNamespaces} has already announced
-	 * everything and repeating it here would leave the peer holding two sources for one
-	 * broadcast. Draft-16+ streams Namespace entries inline; draft-14/15 predate those
+	 * This carries the advertisements when the peer asked to be told on request (MoQ
+	 * Solicit); otherwise {@link runPublishNamespaces} has already announced everything
+	 * visible and repeating it here would leave the peer holding two sources for one
+	 * broadcast, so only the hidden namespaces it may see ride here (MoQ Hidden). Draft-16+ streams Namespace entries inline; draft-14/15 predate those
 	 * messages, so each advertisement is a PUBLISH_NAMESPACE request of its own.
 	 *
 	 * @internal
@@ -662,12 +662,12 @@ export class Publisher {
 				await ok.encode(stream.writer, version);
 			}
 
-			if (!this.#requiresSolicitation) {
-				// Already announced, unasked. Hold the stream open until the peer is done.
-				await stream.reader.closed;
-				stream.close();
-				return;
-			}
+			// Hidden namespaces are left out unless the peer opted in (MoQ Hidden). Unless the
+			// peer asked to be told only on request, it has already heard everything visible
+			// from the empty prefix unasked, so this stream carries only what that hid.
+			const carries = (covered: Path.Valid) =>
+				(msg.hidden || !hiddenBelow(prefix, covered)) &&
+				(this.#requiresSolicitation || hiddenBelow(Path.empty(), covered));
 
 			// Reports whether the peer now holds the namespace: an inline entry always
 			// lands, but a PUBLISH_NAMESPACE request can be declined.
@@ -718,7 +718,7 @@ export class Publisher {
 				const updated = new Map<Path.Valid, Advertised>();
 				for (const [covered, snap] of advertised) {
 					const suffix = Path.stripPrefix(prefix, covered);
-					if (suffix === null) continue;
+					if (suffix === null || !carries(covered)) continue;
 					updated.set(suffix, snap);
 				}
 
@@ -847,6 +847,8 @@ export class Publisher {
 
 				const updated = new Map<Path.Valid, Advertised>();
 				for (const [covered, snap] of advertised) {
+					// Unasked, a hidden namespace stays off the wire (MoQ Hidden).
+					if (hiddenBelow(Path.empty(), covered)) continue;
 					updated.set(covered, snap);
 				}
 
@@ -1061,25 +1063,22 @@ export class Publisher {
 	 */
 	async runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream) {
 		const version = this.#session.version;
-
+		const errorCode = toRequestCode("not_supported", "track_status", version);
 		if (version === Version.DRAFT_14) {
-			// v14: respond with TrackStatus (0x0E = TRACK_STATUS_OK)
-			await stream.writer.u53(TrackStatus.id);
-			const status = new TrackStatus({
-				trackNamespace: msg.trackNamespace,
-				trackName: msg.trackName,
-				statusCode: TrackStatus.STATUS_NOT_FOUND,
-				lastGroupId: 0n,
-				lastObjectId: 0n,
-			});
-			await status.encode(stream.writer, version);
+			// TRACK_STATUS_ERROR shares the SUBSCRIBE_ERROR body on draft-14.
+			await stream.writer.u53(0x0f);
+			await new SubscribeError({
+				requestId: msg.requestId,
+				errorCode,
+				reasonPhrase: "TRACK_STATUS is not supported",
+			}).encode(stream.writer, version);
 		} else {
-			// v15+: respond with RequestOk (0x07)
-			await stream.writer.u53(RequestOk.id);
-			const ok = new RequestOk({
+			await stream.writer.u53(RequestError.id);
+			await new RequestError({
 				requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
-			});
-			await ok.encode(stream.writer, version);
+				errorCode,
+				reasonPhrase: "TRACK_STATUS is not supported",
+			}).encode(stream.writer, version);
 		}
 		stream.close();
 	}
