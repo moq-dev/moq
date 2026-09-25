@@ -61,8 +61,9 @@ pub(crate) struct Manifest {
 	pub availability_start: Option<SystemTime>,
 	/// When this render happened (`MPD@publishTime`, dynamic only).
 	pub publish: SystemTime,
-	/// The playlist window (`MPD@timeShiftBufferDepth`, dynamic only).
-	pub window: Duration,
+	/// The playlist window (`MPD@timeShiftBufferDepth`, dynamic only), or `None` when the
+	/// timeline bounds itself and the depth is the span it lists.
+	pub window: Option<Duration>,
 	/// The broadcast ended: render a `static` presentation instead of a `dynamic` one.
 	pub finished: bool,
 	/// Video representations, in catalog order.
@@ -103,6 +104,23 @@ fn frame_rate(rate: f64) -> Option<String> {
 	} else {
 		Some(format!("{}/1000", (rate * 1000.0).round() as u64))
 	}
+}
+
+/// `units` of `timescale` as a [`Duration`].
+fn duration(units: u64, timescale: u32) -> Duration {
+	Duration::from_nanos((u128::from(units) * 1_000_000_000 / u128::from(timescale.max(1))) as u64)
+}
+
+/// The longest span any representation lists, oldest segment start to newest segment end.
+fn listed_span<'a>(representations: impl Iterator<Item = &'a Representation>) -> Duration {
+	representations
+		.filter_map(|rep| {
+			let (first, _) = rep.segments.first()?;
+			let (last, d) = rep.segments.last()?;
+			Some(duration(last + d - first, rep.timescale))
+		})
+		.max()
+		.unwrap_or_default()
 }
 
 /// The largest listed segment duration in whole seconds, for `MPD@maxSegmentDuration` (and the
@@ -225,10 +243,7 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 		let duration = representations()
 			.filter_map(|rep| {
 				let (t, d) = rep.segments.last()?;
-				let timescale = rep.timescale.max(1) as u64;
-				Some(Duration::from_nanos(
-					((t + d) as u128 * 1_000_000_000 / timescale as u128) as u64,
-				))
+				Some(duration(t + d, rep.timescale))
 			})
 			.max()
 			.unwrap_or_default();
@@ -242,14 +257,15 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 		// Reload cadence and live delay follow HLS conventions: players refresh about once
 		// per segment and sit a few segments behind the live edge (bounded by the window).
 		let update = Duration::from_secs(target);
-		let delay = Duration::from_secs(3 * target).min(manifest.window.max(update));
+		let window = manifest.window.unwrap_or_else(|| listed_span(representations()));
+		let delay = Duration::from_secs(3 * target).min(window.max(update));
 		let _ = write!(
 			out,
 			" type=\"dynamic\" availabilityStartTime=\"{}\" publishTime=\"{}\" minimumUpdatePeriod=\"{}\" timeShiftBufferDepth=\"{}\" suggestedPresentationDelay=\"{}\"",
 			humantime::format_rfc3339_millis(availability),
 			humantime::format_rfc3339_millis(manifest.publish),
 			xs_duration(update),
-			xs_duration(manifest.window),
+			xs_duration(window),
 			xs_duration(delay),
 		);
 	}
@@ -315,7 +331,7 @@ mod tests {
 		let manifest = Manifest {
 			availability_start: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
 			publish: SystemTime::UNIX_EPOCH + Duration::from_millis(1_751_846_410_000),
-			window: Duration::from_secs(16),
+			window: Some(Duration::from_secs(16)),
 			finished: false,
 			video: vec![video(vec![(0, 2_000), (2_000, 2_000)], false)],
 			audio: vec![audio(vec![(0, 2_000), (2_000, 2_000)], false)],
@@ -355,7 +371,7 @@ mod tests {
 		let manifest = Manifest {
 			availability_start: None,
 			publish: SystemTime::UNIX_EPOCH,
-			window: Duration::from_secs(16),
+			window: Some(Duration::from_secs(16)),
 			finished: true,
 			// The window starts mid-broadcast: presentation time stays anchored at pts 0 (no
 			// presentationTimeOffset), so the duration spans the lead-in and a live session
@@ -379,7 +395,7 @@ mod tests {
 		let manifest = Manifest {
 			availability_start: Some(SystemTime::UNIX_EPOCH),
 			publish: SystemTime::UNIX_EPOCH,
-			window: Duration::from_secs(16),
+			window: Some(Duration::from_secs(16)),
 			finished: false,
 			video: vec![video(vec![(0, 2_000)], false)],
 			audio: Vec::new(),
@@ -397,7 +413,7 @@ mod tests {
 		let manifest = Manifest {
 			availability_start: Some(SystemTime::UNIX_EPOCH),
 			publish: SystemTime::UNIX_EPOCH,
-			window: Duration::from_secs(16),
+			window: Some(Duration::from_secs(16)),
 			finished: false,
 			video: vec![rep],
 			audio: Vec::new(),
@@ -420,7 +436,7 @@ mod tests {
 		let manifest = Manifest {
 			availability_start: Some(SystemTime::UNIX_EPOCH),
 			publish: SystemTime::UNIX_EPOCH,
-			window: Duration::from_secs(16),
+			window: Some(Duration::from_secs(16)),
 			finished: false,
 			video: vec![video(vec![(0, 2_000)], false)],
 			audio: vec![audio(Vec::new(), false)],

@@ -196,11 +196,19 @@ fn record(segment: u64, pts: u64, duration: u64, tracks: &[(&str, u64, u64)]) ->
 	record
 }
 
-/// The catalog an exporter is handed: every rendition's config, plus the archive entry naming
-/// the recording's timeline. Out-of-band configs, so no init needs media.
-fn catalog() -> hang::Catalog {
+/// The archive entry a replay advertises: the recording's timeline, durable in its store.
+fn durable() -> hang::catalog::Archive {
+	let mut archive = hang::catalog::Archive::new(TIMELINE);
+	archive.store = Some("memory:///rec/".parse().unwrap());
+	archive.version = Some(hang::catalog::Archive::VERSION);
+	archive
+}
+
+/// The catalog an exporter is handed: every rendition's config, plus `archive`. Out-of-band
+/// configs, so no init needs media.
+fn catalog(archive: hang::catalog::Archive) -> hang::Catalog {
 	let mut catalog = hang::Catalog::default();
-	catalog.archive = Some(hang::catalog::Archive::new(TIMELINE));
+	catalog.archive = Some(archive);
 	for (name, width, height) in [("360p", 640, 360), ("1080p", 1920, 1080)] {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.coded_width = Some(width);
@@ -224,7 +232,7 @@ struct Replay {
 }
 
 impl Replay {
-	async fn open(recording: &Recording, cache: u64) -> Self {
+	async fn open(recording: &Recording, cache: u64, archive: hang::catalog::Archive) -> Self {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
 		let broadcast = origin.create_broadcast("rec").unwrap();
@@ -235,7 +243,7 @@ impl Replay {
 		let mut json = moq_json::snapshot::Config::default();
 		json.delta_ratio = 0;
 		let mut catalog = moq_json::snapshot::Producer::new(track, json);
-		catalog.update(&self::catalog()).unwrap();
+		catalog.update(&self::catalog(archive)).unwrap();
 
 		let config = reader::Config::new(TIMELINE).with_cache(cache);
 		let reader = moq_archive::Reader::open(recording.store.clone(), &broadcast, config)
@@ -296,8 +304,13 @@ fn is_media(path: &str) -> bool {
 
 /// Three aligned 2s segments: one keyframe group per video rendition, four audio groups each.
 async fn three_segments() -> Recording {
+	segments(3).await
+}
+
+/// `count` aligned 2s segments, laid out like [`three_segments`].
+async fn segments(count: u64) -> Recording {
 	let mut recording = Recording::new(&["360p", "1080p", "audio"]).await;
-	for segment in 0..3u64 {
+	for segment in 0..count {
 		let pts = segment * 2_000_000;
 		for video in ["360p", "1080p"] {
 			recording.media(video, &[(segment, &[pts, pts + 1_000_000])]).await;
@@ -324,7 +337,7 @@ async fn three_segments() -> Recording {
 #[tokio::test]
 async fn playlists_read_only_the_timeline_and_segments_one_object() {
 	let recording = three_segments().await;
-	let replay = Replay::open(&recording, 64 * 1024 * 1024).await;
+	let replay = Replay::open(&recording, 64 * 1024 * 1024, durable()).await;
 
 	let master = replay.broadcaster.master_playlist(None);
 	assert!(master.contains("video/360p/media.m3u8") && master.contains("video/1080p/media.m3u8"));
@@ -396,7 +409,7 @@ async fn playlists_read_only_the_timeline_and_segments_one_object() {
 async fn a_bounded_cache_rereads_evicted_objects() {
 	let recording = three_segments().await;
 	// Too small for any object, so nothing stays cached.
-	let replay = Replay::open(&recording, 1).await;
+	let replay = Replay::open(&recording, 1, durable()).await;
 	replay.playlist(Kind::Audio, "audio").await;
 	recording.gets();
 
@@ -433,7 +446,7 @@ async fn missing_track_segments_are_gaps_and_time_jumps_are_discontinuities() {
 		.commit(&record(2, 10_000, 2000, &[("360p", 2, 2), ("1080p", 1, 1)]), 0)
 		.await;
 
-	let replay = Replay::open(&recording, 64 * 1024 * 1024).await;
+	let replay = Replay::open(&recording, 64 * 1024 * 1024, durable()).await;
 	let high = replay.playlist(Kind::Video, "1080p").await;
 	let expected = concat!(
 		"#EXTINF:2.00000,\nseg/0.m4s\n",
@@ -460,7 +473,7 @@ async fn missing_track_segments_are_gaps_and_time_jumps_are_discontinuities() {
 #[tokio::test]
 async fn a_growing_recording_ends_only_on_caller_finality() {
 	let mut recording = three_segments().await;
-	let mut replay = Replay::open(&recording, 64 * 1024 * 1024).await;
+	let mut replay = Replay::open(&recording, 64 * 1024 * 1024, durable()).await;
 	replay.playlist(Kind::Video, "360p").await;
 
 	// A DVR commit: segment 3 arrives and segment 0 expires.
@@ -490,4 +503,34 @@ async fn a_growing_recording_ends_only_on_caller_finality() {
 		.playlist_until(Kind::Video, "360p", |playlist| playlist.contains("#EXT-X-ENDLIST"))
 		.await;
 	assert!(playlist.contains("seg/3.m4s\n#EXT-X-ENDLIST\n"), "{playlist}");
+}
+
+/// A durable timeline lists the whole recording past the default 16s window, and DASH offers
+/// the whole listed span. A live-style entry, or a `replay` path that moves the durable ranges
+/// to another broadcast, keeps the window.
+#[tokio::test]
+async fn a_durable_timeline_lists_past_the_window() {
+	let recording = segments(12).await;
+	let replay = Replay::open(&recording, 64 * 1024 * 1024, durable()).await;
+	let playlist = replay
+		.playlist_until(Kind::Video, "360p", |playlist| playlist.contains("seg/11.m4s\n"))
+		.await;
+	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0\n"), "{playlist}");
+	assert!(playlist.contains("seg/0.m4s\n"), "{playlist}");
+
+	for (kind, name) in [(Kind::Video, "360p"), (Kind::Video, "1080p"), (Kind::Audio, "audio")] {
+		replay.rendition(kind, name).init().await.unwrap();
+	}
+	let manifest = replay.broadcaster.manifest(None).expect("manifest renders");
+	assert!(manifest.contains("timeShiftBufferDepth=\"PT24.000S\""), "{manifest}");
+
+	let mut elsewhere = durable();
+	elsewhere.replay = Some(moq_net::path::RelativeOwned::new("./recording"));
+	for archive in [hang::catalog::Archive::new(TIMELINE), elsewhere] {
+		let live = Replay::open(&recording, 64 * 1024 * 1024, archive).await;
+		let playlist = live
+			.playlist_until(Kind::Video, "360p", |playlist| playlist.contains("seg/11.m4s\n"))
+			.await;
+		assert!(!playlist.contains("seg/0.m4s\n"), "{playlist}");
+	}
 }
