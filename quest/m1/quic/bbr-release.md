@@ -13,6 +13,10 @@ MoQ's manifest and lockfile pins. Record the parent commit, carried patches,
 and upstream status. Follow the existing fork packaging rules; no mutable
 branch or workspace-only patch may stand in for a release.
 
+Fixes merged in the fork and awaiting release:
+
+- [moq-dev/noq#3](https://github.com/moq-dev/noq/pull/3) - BBR packet identity across QUIC spaces
+
 Verify the fork's regression suite and MoQ's default and supported runtime
 builds against the released artifacts, including compatibility of controller
 consumers if a callback API changed. Run a media-shaped transfer through the
@@ -22,7 +26,6 @@ and Google comparison do not gate these bug fixes.
 
 ## Required
 
-- [moq-dev/noq#3](https://github.com/moq-dev/noq/pull/3) merged: BBR packet identity across QUIC spaces
 - [Finish each BBR ACK sample before using it](/quest/m1/quic/bbr-ack-sampling.md)
 - [Mark application starvation before the next BBR send](/quest/m1/quic/bbr-app-limited.md)
 - [Finish BBR bandwidth-probe feedback once](/quest/m1/quic/bbr-probe-feedback.md)
