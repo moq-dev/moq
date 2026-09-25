@@ -608,11 +608,7 @@ export class Publisher {
 			if (fill.until !== undefined && next >= fill.until) break;
 
 			// Reading from the fill's start drops everything below it; see the same read in #runGroup.
-			const frame = await race([
-				group.readFrameSequence({ from: Number(fill.skip) }),
-				stream.closed,
-				cancelled,
-			]);
+			const frame = await race([group.readFrameSequence({ from: Number(fill.skip) }), stream.closed, cancelled]);
 			if (left) throw new Error("unsubscribed before the fill finished");
 			if (!frame) break;
 			next = BigInt(frame.sequence) + 1n;

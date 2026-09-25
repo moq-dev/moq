@@ -1057,7 +1057,8 @@ function counted<T>(once = new Once<T>()): GetPromise<T> & { listeners: number; 
 		once,
 		listeners: 0,
 		peek: () => once.peek(),
-		changed: ((fn?: (value: T | undefined) => void) => (fn ? track(once.changed(fn)) : once.changed())) as GetPromise<T>["changed"],
+		changed: ((fn?: (value: T | undefined) => void) =>
+			fn ? track(once.changed(fn)) : once.changed()) as GetPromise<T>["changed"],
 		subscribe: (fn: (value: T | undefined) => void) => track(once.subscribe(fn)),
 		// biome-ignore lint/suspicious/noThenProperty: mirrors Once.
 		then: once.then.bind(once) as GetPromise<T>["then"],
