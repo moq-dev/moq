@@ -54,6 +54,10 @@ framerate, and bitrate are tunable through `el.video.config`; the audio
 encoder exposes its codec and volume. For simulcast or several renditions,
 drop the element and register your own encoders on a `Publish.Broadcast`.
 
+`el.video.cut()` asks for a keyframe on top of the `keyframeInterval` cadence,
+for a resume, a recording cut, or a known tune-in moment. Requests coalesce into
+the next keyframe, and forced keyframes land at least 500ms apart.
+
 The video and audio encoders measure how far their output falls behind the media
 clock when they flush frames. Catalog jitter is the spread above each
 rendition's own recent minimum lateness, so a constant encoder delay is not jitter.

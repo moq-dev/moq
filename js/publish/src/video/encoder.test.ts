@@ -537,3 +537,101 @@ test.each(["encoder lag", "quiet startup"])("marks a rendition stalled for %s", 
 		else Reflect.deleteProperty(globalThis, "VideoEncoder");
 	}
 });
+
+test("cut forces a keyframe, coalescing requests and spacing them at least 500ms apart", async () => {
+	const keys: number[] = [];
+	class RecordingVideoEncoder {
+		state: CodecState = "unconfigured";
+
+		static async isConfigSupported(config: VideoEncoderConfig): Promise<{ supported: boolean }> {
+			return { supported: config.codec.startsWith("avc1") };
+		}
+
+		configure(): void {
+			this.state = "configured";
+		}
+
+		encode(frame: VideoFrame, options?: VideoEncoderEncodeOptions): void {
+			if (options?.keyFrame) keys.push(frame.timestamp / 1000);
+		}
+
+		close(): void {
+			this.state = "closed";
+		}
+	}
+
+	const original = Object.getOwnPropertyDescriptor(globalThis, "VideoEncoder");
+	Object.defineProperty(globalThis, "VideoEncoder", {
+		configurable: true,
+		value: RecordingVideoEncoder,
+		writable: true,
+	});
+
+	class Frame {
+		constructor(readonly timestamp: number) {}
+		clone(): Frame {
+			return new Frame(this.timestamp);
+		}
+		close(): void {}
+	}
+
+	const { Fanout } = await import("../fanout");
+	let controller!: ReadableStreamDefaultController<VideoFrame>;
+	const fanout = new Fanout(
+		new ReadableStream<VideoFrame>({
+			start: (c) => {
+				controller = c;
+			},
+		}),
+		{ clone: (frame) => frame.clone(), release: (frame) => frame.close() },
+	);
+
+	const track = new Moq.Track.Producer("video").accept();
+	const rendition = {
+		config: new Signal(undefined),
+		track: new Signal<Moq.Track.Producer | undefined>(track),
+		close: () => track.close(),
+	};
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) } as never) },
+		out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(fanout) },
+	};
+	const encoder = new Encoder("video", {
+		enabled: true,
+		broadcast: { video: () => rendition } as never,
+		capture: capture as never,
+	});
+
+	// One frame per 100ms of media time, after calling cut() when `cut` says so.
+	const send = async (millis: number, cut = false) => {
+		if (cut) encoder.cut();
+		controller.enqueue(new Frame(millis * 1000) as unknown as VideoFrame);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	};
+
+	try {
+		await settle();
+
+		// The opening keyframe serves a request made before it.
+		await send(0, true);
+		await send(100);
+		// Several requests before one frame produce one keyframe.
+		encoder.cut();
+		encoder.cut();
+		await send(600, true);
+		await send(700);
+		// Too soon after the last: deferred until 500ms have passed, not dropped.
+		await send(800, true);
+		await send(1000);
+		await send(1100);
+		await send(1200);
+
+		expect(keys).toEqual([0, 600, 1100]);
+	} finally {
+		encoder.close();
+		fanout.close();
+		track.close();
+		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
+		else Reflect.deleteProperty(globalThis, "VideoEncoder");
+	}
+});

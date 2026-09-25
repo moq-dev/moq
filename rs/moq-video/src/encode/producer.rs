@@ -30,6 +30,8 @@ use super::Sink;
 use super::encoder;
 #[cfg(feature = "capture")]
 use super::encoder::Codec;
+#[cfg(feature = "capture")]
+use super::trigger::{Cuts, Trigger};
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
 #[cfg(feature = "capture")]
@@ -277,6 +279,9 @@ pub struct Options {
 	/// want when the estimate isn't meaningful (a local file, a test harness) or
 	/// unavailable (a publisher that only accepts inbound sessions).
 	pub bandwidth: moq_net::bandwidth::Allocator,
+	/// Lets the caller ask for a keyframe while the publish runs. Keep a clone and
+	/// call [`Trigger::cut`] on it; the default is a trigger nobody else holds.
+	pub trigger: Trigger,
 }
 
 /// Capture a webcam and publish it as an on-demand video track.
@@ -554,6 +559,8 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		// reopened camera starts optimistic again rather than inheriting the
 		// backed-off rate from whatever the link was doing last time.
 		let mut rate = Some((reservation.consumer(), Control::new(Policy::new(ceiling))));
+		// Per encoder, so a reopen forgets the old encoder's last keyframe along with it.
+		let mut cuts = Some(Cuts::new(&encode.trigger));
 
 		loop {
 			// Race the next frame against the last viewer leaving so we release the
@@ -589,6 +596,17 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 
 			let Some(mut frame) = frame else { break };
 			frame.timestamp = map_capture_timestamp(capture_epoch, frame.timestamp)?;
+			if cuts.as_mut().is_some_and(|cuts| cuts.due(frame.timestamp)) {
+				match encoder.cut().await {
+					Ok(()) => {}
+					// Keep capturing on the GOP cadence and stop asking this encoder.
+					Err(Error::CutUnsupported(name)) => {
+						tracing::warn!(encoder = name, "encoder cannot force a keyframe on request");
+						cuts = None;
+					}
+					Err(err) => return Err(err),
+				}
+			}
 			let started = Instant::now();
 			let Some(encoded) = wait_capture(producer, demand, encoder.encode(frame)).await? else {
 				break;

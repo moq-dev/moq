@@ -31,6 +31,9 @@ mod encoded;
 mod encoder;
 mod producer;
 mod sink;
+// Compiled without `capture` so its tests stay in the default merge gate.
+#[cfg_attr(not(feature = "capture"), allow(dead_code))]
+mod trigger;
 
 pub use backend::NAMES;
 pub use encoded::Encoded;
@@ -39,6 +42,8 @@ pub use producer::Producer;
 #[cfg(feature = "capture")]
 pub use producer::{Options, publish_capture};
 pub use sink::Sink;
+#[cfg(feature = "capture")]
+pub use trigger::Trigger;
 
 #[cfg(test)]
 mod tests {
