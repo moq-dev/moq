@@ -9,13 +9,15 @@ publisher sends is unchanged.
 
 ## Plan
 
-- `SubscribeOk`, `PublishOk`, and `RequestOk` in `rs/moq-net/src/ietf/`
-  decode 0x08 on every draft that uses parameters, then drop it. Today
+- `SubscribeOk` and `RequestOk` in `rs/moq-net/src/ietf/` decode 0x08 on
+  every draft that uses parameters, then drop it. `PublishOk` does the same
+  only through draft 19; draft 20 moved subscription parameters into PUBLISH
+  and requires PUBLISH_OK's parameter block to be empty. Today
   `decode_params!` rejects unlisted keys with `InvalidValue`.
 - EXPIRES is ignored on purpose. It is the wall-clock time until the publisher
   plans to end the subscription. That end already arrives as PUBLISH_DONE, and
   moq-net never refreshes a subscription through REQUEST_UPDATE. Retention is
-  MAX_CACHE_DURATION's job; see [Max age over MAX_CACHE_DURATION](/quest/m1/ietf-max-age.md).
+  MAX_CACHE_DURATION's job; see [Optional max age](/quest/m1/ietf-max-age.md).
 - Draft 14 carries expires as a fixed SUBSCRIBE_OK field and rejects non-zero
   values with `Unsupported` in Rust and in `js/net/src/ietf/subscribe.ts`.
   Accept and ignore it in both, and replace the rejection tests.

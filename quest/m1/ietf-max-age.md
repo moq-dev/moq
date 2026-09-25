@@ -1,36 +1,44 @@
-# [M] Max age defaults to zero and travels as MAX_CACHE_DURATION
+# [M] Max age is optional and travels as MAX_CACHE_DURATION
 
 ## Goal
 
-A track's max age is set by its publisher alone, defaults to 0 (live edge
-only), and crosses moq-transport as MAX_CACHE_DURATION, so it survives a
-Rust-to-Rust IETF hop the way it already survives moq-lite 05+.
+A track's max age is set only by its publisher. `None` means the publisher set
+no limit, and the value crosses moq-transport as MAX_CACHE_DURATION, so it
+survives an IETF hop the way it already survives moq-lite 05+.
 `origin::Config::default_max_age` goes away.
 
 ## Plan
 
-- Remove `origin::Config::default_max_age`. A track whose protocol carries no
-  max age (moq-lite 01-04, or an IETF publisher that omits
-  MAX_CACHE_DURATION) gets 0.
-- `track::DEFAULT_MAX_AGE` and JS `DEFAULT_MAX_AGE_MS` become 0. Audit every
-  caller that relies on the 5s default (moq-rtmp, moq-gst, moq-mux, hang, JS
-  lite tests) and give each an explicit max age wherever history matters.
-  HLS/DASH egress needs a window the publisher asks for, since the old 5s
-  default was too short for it anyway (`moq import` already sends 30s).
-- MAX_CACHE_DURATION (0x04) is the track's retention in milliseconds: a
-  message parameter through draft 16 and a track property afterwards. The IETF
-  publisher writes `Info::max_age` there in SUBSCRIBE_OK and PUBLISH, and the
-  subscriber reads it back into `Info::max_age`. Today Rust drops the property
-  and JS parses but never uses it. Before choosing the encoding, confirm what
-  the drafts say absent and 0 mean. libquicr sends 0.
+- `track::Info::max_age` becomes `Option<Duration>`, defaulting to `None`.
+  `None` retains groups until the cache pool or `origin::Config::cache_duration`
+  evicts them. `Some(0)` keeps only the live edge. Mirror this in JS
+  (`maxAge` optional, drop `DEFAULT_MAX_AGE_MS`).
+- Remove `track::DEFAULT_MAX_AGE` and `origin::Config::default_max_age`. A
+  track whose wire carries no max age gets `None`, never a local fallback.
+  Audit the callers that rely on the 5s default (moq-rtmp, moq-gst, moq-mux,
+  hang, JS lite tests) and give each an explicit value wherever it matters.
+  HLS/DASH egress asks for its window from the publisher; the old 5s was too
+  short for it anyway (`moq import` already sends 30s).
+- IETF: MAX_CACHE_DURATION (0x04) is milliseconds, a message parameter through
+  draft 15 and a track property from draft 16. The publisher sends `Some(n)`
+  as n and omits it for `None`. The subscriber reads absent as `None`, which
+  is what the drafts mean by omission. Today Rust drops the property and JS
+  parses but never uses it.
+- MAX_CACHE_DURATION is wall-clock and max age is media time with the newest
+  group always kept, so the mapping is approximate. Accept that rather than
+  modeling a second clock.
+- moq-lite-07 (still WIP, off by default) makes TRACK_INFO's Max Age
+  optional: the value plus one, with 0 meaning none. Lite05/06 map `None` to
+  the largest varint in both directions. Update
+  `drafts/draft-lcurley-moq-lite.md` in the same PR.
 - EXPIRES stays 0 on send and ignored on receive. It is subscription lifetime,
   not retention.
-- Mirror the encode and decode in `js/net`'s IETF path.
-- Breaks the published `origin::Config` and changes default retention, so the
-  PR retargets to `dev`. Update `doc/concept/moq-lite.md` and the
-  `origin::Config` and `track::Info` docs in the same PR.
-- Test: a Rust-to-Rust and a Rust-to-JS IETF session carry a non-zero max age
-  end to end, and a default track sends 0. Run `just test interop --all`.
+- Breaks the published `track::Info` and `origin::Config`, so the PR retargets
+  to `dev`. Update `doc/concept/moq-lite.md` and the affected rustdoc and JS
+  docs in the same PR.
+- Test: Rust-to-Rust and Rust-to-JS sessions over IETF and lite-07 carry
+  `None`, `Some(0)`, and a non-zero max age end to end, on both sides of the
+  draft 15/16 boundary. Run `just test interop --all`.
 
 ## Required
 
