@@ -277,6 +277,114 @@ export class Once<T> implements GetPromise<T> {
 	}
 }
 
+// Every promise a race has watched, mapped to the listeners of the races still waiting on it. A
+// native reaction can never be removed, so each promise gets exactly one, shared by every race:
+// racing a long-lived promise per frame then costs a removable listener, not a reaction per call.
+type Settled = { ok: true; value: unknown } | { ok: false; error: unknown };
+type Listener = (settled: Settled) => void;
+type Watched = { settled?: Settled; listeners: Set<Listener> };
+const watched = new WeakMap<object, Watched>();
+
+function isThenable(value: unknown): value is PromiseLike<unknown> & object {
+	return (
+		(typeof value === "object" || typeof value === "function") &&
+		value !== null &&
+		typeof (value as PromiseLike<unknown>).then === "function"
+	);
+}
+
+// Calls `fn` once when `value` settles, synchronously if it already has. Returns a disposer.
+function listen(value: unknown, fn: Listener): Dispose {
+	if (!isThenable(value)) {
+		fn({ ok: true, value });
+		return noop;
+	}
+
+	if (getterShaped(value)) {
+		const readable = value as GetPromise<unknown>;
+		const current = readable.peek();
+		if (current !== undefined) {
+			fn({ ok: true, value: current });
+			return noop;
+		}
+
+		const dispose = readable.subscribe((next) => {
+			if (next === undefined) return;
+			dispose();
+			fn({ ok: true, value: next });
+		});
+		return dispose;
+	}
+
+	let entry = watched.get(value);
+	if (!entry) {
+		const created: Watched = { listeners: new Set() };
+		Promise.resolve(value).then(
+			(value) => settle(created, { ok: true, value }),
+			(error: unknown) => settle(created, { ok: false, error }),
+		);
+		watched.set(value, created);
+		entry = created;
+	}
+
+	if (entry.settled) {
+		fn(entry.settled);
+		return noop;
+	}
+
+	const listeners = entry.listeners;
+	listeners.add(fn);
+	return () => listeners.delete(fn);
+}
+
+function settle(entry: Watched, settled: Settled): void {
+	entry.settled = settled;
+	const listeners = [...entry.listeners];
+	entry.listeners.clear();
+	for (const fn of listeners) fn(settled);
+}
+
+// Settles with the first of `values`, or `undefined` once `abort` fires, then drops every listener.
+function raceUntil<T>(values: readonly unknown[], abort?: AbortSignal): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const disposes: Dispose[] = [];
+		let done = false;
+		const finish = (settled: Settled) => {
+			if (done) return;
+			done = true;
+			for (const dispose of disposes) dispose();
+			if (settled.ok) resolve(settled.value as T);
+			else reject(settled.error);
+		};
+
+		if (abort) {
+			if (abort.aborted) return finish({ ok: true, value: undefined });
+			const stop = () => finish({ ok: true, value: undefined });
+			abort.addEventListener("abort", stop);
+			disposes.push(() => abort.removeEventListener("abort", stop));
+		}
+
+		for (const value of values) {
+			const dispose = listen(value, finish);
+			if (done) return dispose();
+			disposes.push(dispose);
+		}
+	});
+}
+
+/**
+ * Settles with the first of `values` to settle, like `Promise.race`, then drops every listener it
+ * registered.
+ *
+ * Accepts promises and {@link GetPromise} values such as a {@link Once}. Racing a value that
+ * outlives the call (a `closed` pending for the whole track) once per frame therefore leaks nothing,
+ * where `Promise.race` would leave a listener or reaction behind on every call. An already settled
+ * value wins at once.
+ */
+export function race<const T extends readonly unknown[]>(values: T): Promise<Awaited<T[number]>> {
+	return raceUntil(values);
+}
+
 type SetterType<S> = S extends Setter<infer T> ? T : never;
 
 /** The value type a {@link Getter} yields, e.g. `number` for `Getter<number>`. */
@@ -405,7 +513,7 @@ export class Effect {
 	#draining?: Dispose[];
 	#drained = 0;
 	#unwatch: Dispose[] = [];
-	#async: Promise<void>[] = [];
+	#async = new Set<Promise<void>>();
 
 	#stack?: string;
 	#scheduled = false;
@@ -479,7 +587,7 @@ export class Effect {
 		// would hand that task's cleanup registrations, and its `abort` signal, to a run it never
 		// belonged to. The dispose functions above already closed whatever the task was awaiting,
 		// so anything that observes cancellation unwinds from here.
-		if (this.#async.length > 0) {
+		if (this.#async.size > 0) {
 			// Diagnostic only: a task that ignores cancellation stalls the rerun, so name it.
 			const warn = DEV
 				? setTimeout(() => {
@@ -496,9 +604,9 @@ export class Effect {
 
 			try {
 				// A task can spawn another as it unwinds, so drain until nothing new is queued.
-				while (this.#dispose !== undefined && this.#async.length > 0) {
+				while (this.#dispose !== undefined && this.#async.size > 0) {
 					const pending = this.#async;
-					this.#async = [];
+					this.#async = new Set();
 
 					// close() has to release the wait rather than wait behind it. It already ran
 					// every dispose function, and there is no next run left to protect, so a task
@@ -534,7 +642,7 @@ export class Effect {
 				this.#dispose !== undefined &&
 				this.#unwatch.length === 0 &&
 				this.#dispose.length === 0 &&
-				this.#async.length === 0 &&
+				this.#async.size === 0 &&
 				!this.#abortUsed
 			) {
 				console.warn("Effect did not subscribe to any signals; it will never rerun.", this.#stack);
@@ -604,7 +712,10 @@ export class Effect {
 		// rerun path drains it, so pushing now would pin the task on an effect that can never rerun.
 		if (this.#dispose === undefined) return;
 
-		this.#async.push(promise);
+		// A settled task has nothing left for a rerun to wait on. Dropping it matters for an effect
+		// that never reruns (`new Effect()` spawning per group), which would otherwise keep every one.
+		this.#async.add(promise);
+		void promise.then(() => this.#async.delete(promise));
 	}
 
 	/** Runs `fn` after `ms` milliseconds, unless the effect reruns or closes first. */
@@ -920,7 +1031,7 @@ export class Effect {
 		for (const signal of this.#unwatch) signal();
 		this.#unwatch.length = 0;
 
-		this.#async.length = 0;
+		this.#async.clear();
 
 		if (DEV) {
 			Effect.#finalizer.unregister(this);
@@ -932,9 +1043,21 @@ export class Effect {
 		return this.#closed.promise;
 	}
 
-	/** Resolves when the current run is about to be torn down, by a rerun or close. */
+	/**
+	 * Resolves when the current run is about to be torn down, by a rerun or close.
+	 *
+	 * @internal Racing it adds a reaction per call that lives until the run ends; use {@link race}.
+	 */
 	get cancel(): Promise<void> {
 		return this.#stopped.promise;
+	}
+
+	/**
+	 * Settles with the first of `values`, like the free {@link race}, or resolves `undefined` once the
+	 * current run is torn down. Either way it drops every listener it registered.
+	 */
+	race<const T extends readonly unknown[]>(...values: T): Promise<Awaited<T[number]> | undefined> {
+		return raceUntil(values, this.#abort.signal);
 	}
 
 	/** An AbortSignal that fires when the current run is torn down. */
