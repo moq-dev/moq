@@ -87,7 +87,7 @@ async function acceptInner(
 		return acceptSetup(transport, url, Ietf.Version.DRAFT_16, wiring);
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		return acceptSetup(transport, url, Ietf.Version.DRAFT_15, wiring);
-	} else if (protocol === Lite.ALPN_07) {
+	} else if (protocol === Lite.ALPN_07_WIP) {
 		return new Lite.Connection({ url, quic: transport, version: Lite.Version.DRAFT_07, ...wiring });
 	} else if (protocol === Lite.ALPN_06) {
 		return new Lite.Connection({ url, quic: transport, version: Lite.Version.DRAFT_06, ...wiring });

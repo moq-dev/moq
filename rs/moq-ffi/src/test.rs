@@ -2,6 +2,7 @@ use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
 use super::session::{MoqClient, MoqSession};
+use crate::binary::MoqBinaryConfig;
 use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqSubscription;
@@ -4499,4 +4500,126 @@ async fn shutdown_cancels_and_drops_cleanly() {
 	drop(server);
 	drop(client_origin);
 	drop(server_origin);
+}
+
+/// The broadcast's current catalog, read on the publish side.
+fn published_catalog(
+	broadcast: &MoqBroadcastProducer,
+) -> moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra> {
+	broadcast.with_state(|state| Ok(state.catalog.snapshot())).unwrap()
+}
+
+/// JSON tracks are advertised in the catalog (no `set_catalog_section` needed) and retired on finish.
+#[tokio::test]
+async fn json_tracks_are_advertised_in_the_catalog() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let snapshot = broadcast
+		.publish_json_snapshot(
+			"status".into(),
+			MoqJsonSnapshotConfig {
+				delta_ratio: 4,
+				compression: true,
+			},
+		)
+		.unwrap();
+	let stream = broadcast
+		.publish_json_stream("events".into(), MoqJsonStreamConfig { compression: false })
+		.unwrap();
+
+	let catalog = published_catalog(&broadcast);
+	let entry = catalog.json.tracks.get("status").expect("snapshot track advertised");
+	assert_eq!(entry.mode, hang::catalog::Mode::Snapshot);
+	assert_eq!(entry.compression, Some(hang::catalog::Compression::Deflate));
+	let entry = catalog.json.tracks.get("events").expect("stream track advertised");
+	assert_eq!(entry.mode, hang::catalog::Mode::Stream);
+	assert_eq!(entry.compression, None);
+
+	snapshot.finish().unwrap();
+	let catalog = published_catalog(&broadcast);
+	assert!(
+		!catalog.json.tracks.contains_key("status"),
+		"finished track still advertised"
+	);
+	assert!(catalog.json.tracks.contains_key("events"));
+	stream.finish().unwrap();
+	assert!(published_catalog(&broadcast).json.tracks.is_empty());
+}
+
+/// Binary tracks carry their mode and (optional) media type in the catalog.
+#[tokio::test]
+async fn binary_tracks_are_advertised_in_the_catalog() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let thumb = broadcast
+		.publish_binary_snapshot(
+			"thumbnail".into(),
+			MoqBinaryConfig {
+				compression: false,
+				mime: Some("image/jpeg".into()),
+			},
+		)
+		.unwrap();
+	let log = broadcast
+		.publish_binary_stream(
+			"log".into(),
+			MoqBinaryConfig {
+				compression: false,
+				mime: None,
+			},
+		)
+		.unwrap();
+	thumb.update(vec![0xff, 0xd8, 0xff]).unwrap();
+	log.append(vec![1, 2, 3]).unwrap();
+
+	let catalog = published_catalog(&broadcast);
+	let entry = catalog
+		.binary
+		.tracks
+		.get("thumbnail")
+		.expect("binary snapshot advertised");
+	assert_eq!(entry.mode, hang::catalog::Mode::Snapshot);
+	assert_eq!(entry.mime.as_deref(), Some("image/jpeg"));
+	let entry = catalog.binary.tracks.get("log").expect("binary stream advertised");
+	assert_eq!(entry.mode, hang::catalog::Mode::Stream);
+	assert_eq!(entry.mime, None);
+
+	thumb.finish().unwrap();
+	assert!(matches!(thumb.update(vec![0]), Err(MoqError::Closed)));
+	log.finish().unwrap();
+	assert!(published_catalog(&broadcast).binary.tracks.is_empty());
+}
+
+/// A second data track under a name the catalog already carries is refused, leaving the first.
+#[tokio::test]
+async fn data_track_names_cannot_collide() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let first = broadcast
+		.publish_json_snapshot(
+			"state".into(),
+			MoqJsonSnapshotConfig {
+				delta_ratio: 0,
+				compression: false,
+			},
+		)
+		.unwrap();
+	assert!(
+		broadcast
+			.publish_binary_stream(
+				"state".into(),
+				MoqBinaryConfig {
+					compression: false,
+					mime: None,
+				},
+			)
+			.is_err(),
+		"a duplicate data track name should fail"
+	);
+	assert_eq!(
+		published_catalog(&broadcast)
+			.json
+			.tracks
+			.get("state")
+			.map(|e| e.mode.clone()),
+		Some(hang::catalog::Mode::Snapshot)
+	);
+	first.finish().unwrap();
 }

@@ -134,6 +134,7 @@ type Catalog = {
 ~~~
 
 Additional fields MAY be added based on the application.
+An application SHOULD name its own root sections with a namespaced key, such as a reverse-DNS name (`com.example.telemetry`), so they cannot collide with a section a later version of this specification defines.
 The catalog SHOULD be mostly static, delegating any dynamic content to other tracks.
 
 For example, a chat entry should name a chat track, not carry individual chat messages.
@@ -388,6 +389,8 @@ type JsonSchema = {
   "compression": Compression | undefined,
   "schema": string | undefined,
   "broadcast": string | undefined,
+  "bitrate": number | undefined,
+  "jitter": number | undefined,
 }
 ~~~
 
@@ -401,6 +404,8 @@ type BinarySchema = {
   "compression": Compression | undefined,
   "mime": string | undefined,
   "broadcast": string | undefined,
+  "bitrate": number | undefined,
+  "jitter": number | undefined,
 }
 ~~~
 
@@ -455,6 +460,10 @@ A `snapshot` group covers a single value (plus any deltas), so its window spans 
 
 ### broadcast {#data-shared}
 The `broadcast` field carries the same meaning here as it does for a media rendition ({{field-broadcast}}).
+
+### bitrate and jitter {#data-estimates}
+The optional `bitrate` field is the track's maximum bitrate in bits per second.
+The optional `jitter` field carries the same meaning and rules as it does for a media rendition ({{field-jitter}}), with a payload in place of a frame.
 
 ## Binary Fields {#binary}
 A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
@@ -1075,6 +1084,8 @@ A publisher MAY estimate an unknown final duration from the frame cadence, but M
 - A publisher that stops producing and may resume on the same track SHOULD publish a discontinuity marker when it stops.
 - An audio endpoint bounds only the terminal packets that follow it in its own group.
 - Replaced the archive timeline `wall` field with a root `clock` section (`wall` plus `timescale`): one fixed broadcast mapping every track and the archive index convert into, independent of any archive. Zero timescales and walls past the JSON-safe integer range are refused.
+- Added optional `bitrate` and `jitter` fields to `json` and `binary` track entries.
+- Recommended namespaced keys for application root sections.
 
 # Acknowledgments
 {:numbered="false"}

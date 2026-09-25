@@ -890,6 +890,9 @@ static VERSION_NAMES: std::sync::LazyLock<Vec<String>> =
 /// first. Each name borrows a static string valid for the life of the process, so a
 /// caller building a menu can hold them indefinitely.
 ///
+/// Work-in-progress versions are omitted, since they are not advertised unless pinned;
+/// a dial still accepts them by name.
+///
 /// Returns the total count on success, or a negative code on failure.
 ///
 /// # Safety

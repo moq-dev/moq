@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/moq-dev/moq/compare/moq-video-v0.1.2...moq-video-v0.1.3) - 2026-09-25
+
+### Added
+
+- *(mux)* measure encoder flush jitter per rendition ([#3940](https://github.com/moq-dev/moq/pull/3940))
+
 ## [0.1.2](https://github.com/moq-dev/moq/compare/moq-video-v0.1.1...moq-video-v0.1.2) - 2026-09-25
 
 ### Other
