@@ -53,7 +53,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Audio codecs](/quest/m1/audio-codecs/README.md) - platform audio codecs, explicit unsupported cases, and channel layouts up to 7.1
 - [CMAF Opus](/quest/m1/cmaf-opus-dops.md) - fMP4 import and export keep the Opus pre-skip and gain
 - [Capture formats](/quest/m1/audio-capture-format.md) - unsupported overrides refuse before device open and channel counts cannot wrap
-- [NVENC teardown](/quest/m1/nvenc-teardown.md) - a rejected NVENC encode no longer hangs process shutdown
 - [NVENC recovery](/quest/m1/nvenc-recovery.md) - partial initialization and rejected rate changes preserve valid state
 - [GPU pool reservation](/quest/m1/gpu-pool-reservation.md) - a full GPU frame pool is a `None` reservation the caller drops on, not an error to match
 - [Transcode source](/quest/m1/transcode-source.md) - select a rendition the chosen backend can actually decode

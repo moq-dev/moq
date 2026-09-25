@@ -8,7 +8,9 @@ panic, and a rejected rate change leaves the last accepted settings intact.
 ## Plan
 
 Registration rollback and non-panicking destructors landed with the ownership
-work (#3834, #3835, #3838). Session::reconfigure still mutates retained
+work (#3834, #3835, #3838). A submission whose wait fails abandons its
+buffers: the raw handles leak, but the encoder reference is released so the
+session is still destroyed. Session::reconfigure still mutates retained
 bitrate/VBV fields before the driver accepts the change; a rejected zero-rate
 update can corrupt the basis of the next proportional update.
 
