@@ -63,13 +63,17 @@ impl Header {
 pub(super) fn write_header(
 	object_type: u8,
 	sample_rate: u32,
-	channel_count: u32,
+	channel_config: u8,
 	raw_len: usize,
 ) -> anyhow::Result<[u8; 7]> {
 	// ADTS `profile` is the 2-bit audioObjectType - 1.
 	let profile = object_type.saturating_sub(1) & 0x03;
 	let freq_index = freq_index_from_rate(sample_rate)?;
-	let channel_config = channel_config_from_count(channel_count);
+	// ADTS has 3 bits for it; the higher configurations only fit an AudioSpecificConfig.
+	anyhow::ensure!(
+		channel_config < 8,
+		"channelConfiguration {channel_config} not representable in ADTS"
+	);
 
 	let frame_len = raw_len + 7;
 	anyhow::ensure!(frame_len < (1 << 13), "AAC frame too large for ADTS framing");
@@ -98,7 +102,7 @@ fn freq_index_from_rate(sample_rate: u32) -> anyhow::Result<u8> {
 }
 
 /// Map a channel count to an AAC `channel_config` (ISO 14496-3 Table 1.19).
-fn channel_config_from_count(channel_count: u32) -> u8 {
+pub(super) fn channel_config_from_count(channel_count: u32) -> u8 {
 	match channel_count {
 		1..=6 => channel_count as u8,
 		8 => 7,

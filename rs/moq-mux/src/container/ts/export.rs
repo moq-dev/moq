@@ -254,10 +254,14 @@ impl Track {
 enum Kind {
 	/// Video carries its TS stream type (H.264 = 0x1B, H.265 = 0x24).
 	Video(StreamType),
+	/// AAC, framed as ADTS. A `channel_config` of 0 defers the layout to a program config
+	/// element, which leads the next raw data block written and is then taken. A catalog update
+	/// rebuilds the kind and so repeats it once, which a decoder tuning in mid-stream welcomes.
 	Aac {
 		object_type: u8,
 		sample_rate: u32,
-		channel_count: u32,
+		channel_config: u8,
+		program_config: Option<Bytes>,
 	},
 	/// Opus (private stream_type 0x06). Each frame is one Opus packet, prefixed with
 	/// the Opus-in-TS access-unit control header and announced with the 'Opus'
@@ -1341,9 +1345,12 @@ impl<E: catalog::Catalog> Export<E> {
 		if self.span_counters.is_none() {
 			self.span_counters = Some(self.counters.clone());
 		}
-		let track = self.tracks.get(name).context("missing track")?;
+		let track = self.tracks.get_mut(name).context("missing track")?;
 		let pid = track.pid;
 		let kind = track.kind.clone();
+		if let Kind::Aac { program_config, .. } = &mut track.kind {
+			program_config.take();
+		}
 		let is_video = matches!(kind, Kind::Video(_));
 		let timestamp = frame.timestamp;
 		let keyframe = frame.keyframe;
@@ -1356,11 +1363,15 @@ impl<E: catalog::Catalog> Export<E> {
 			Kind::Aac {
 				object_type,
 				sample_rate,
-				channel_count,
+				channel_config,
+				program_config,
 			} => {
-				let header = adts::write_header(*object_type, *sample_rate, *channel_count, frame.payload.len())?;
-				let mut framed = Vec::with_capacity(7 + frame.payload.len());
+				let pce = program_config.as_deref().unwrap_or_default();
+				let raw_len = pce.len() + frame.payload.len();
+				let header = adts::write_header(*object_type, *sample_rate, *channel_config, raw_len)?;
+				let mut framed = Vec::with_capacity(header.len() + raw_len);
 				framed.extend_from_slice(&header);
+				framed.extend_from_slice(pce);
 				framed.extend_from_slice(&frame.payload);
 				Some(framed)
 			}
@@ -2086,11 +2097,19 @@ fn video_es_payload(stream_type: StreamType, description: Option<&Bytes>, frame:
 fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 	ensure_raw(&config.container, "audio", name)?;
 	match &config.codec {
-		AudioCodec::AAC(aac) => Ok(Kind::Aac {
-			object_type: aac.profile,
-			sample_rate: config.sample_rate,
-			channel_count: config.channel_count,
-		}),
+		AudioCodec::AAC(aac) => {
+			// The description names the layout exactly; without one, the count is all there is.
+			let (channel_config, program_config) = match &config.description {
+				Some(asc) => crate::codec::aac::in_band_channels(asc)?,
+				None => (adts::channel_config_from_count(config.channel_count), None),
+			};
+			Ok(Kind::Aac {
+				object_type: aac.profile,
+				sample_rate: config.sample_rate,
+				channel_config,
+				program_config,
+			})
+		}
 		AudioCodec::Mp2 => Ok(Kind::Mp2 {
 			sample_rate: config.sample_rate,
 		}),

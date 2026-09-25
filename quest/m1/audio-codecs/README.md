@@ -43,7 +43,6 @@ its own decode and encode quest so verification stays per host.
 
 ## Quests
 
-- [TS export PCE](/quest/m1/audio-codecs/ts-export-pce.md) - a TS export of a PCE-described AAC track writes channel_config 0 and the PCE instead of a count-derived config
 - [AudioToolbox decode](/quest/m1/audio-codecs/decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
 - [Opus surround](/quest/m1/audio-codecs/opus-surround.md) - mapping family 1 decodes on every host through the multistream decoder
 - [Encode seam](/quest/m1/audio-codecs/encode-backend.md) - `encode::backend` and `Codec::Aac`, so a native publisher can produce AAC-LC
