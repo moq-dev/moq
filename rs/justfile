@@ -236,3 +236,38 @@ release:
 # Build a .deb or .rpm locally: `just rs package moq-relay deb`.
 package crate packager:
     sh/rs/package.sh {{ crate }} {{ packager }}
+
+# Build and package a workspace binary as a release tarball.
+[positional-arguments]
+package-binary *args:
+    sh/rs/package-binary.sh "$@"
+
+# Build and package a workspace binary as a Windows .zip.
+[positional-arguments]
+package-windows *args:
+    sh/rs/package-windows.sh "$@"
+
+# Render an nfpm config from the environment and build a .deb or .rpm: CONFIG PACKAGER OUTPUT.
+[positional-arguments]
+package-nfpm *args:
+    sh/rs/package-nfpm.sh "$@"
+
+# Build and package the moq-ffi native libraries, or only its bindings.
+[positional-arguments]
+package-ffi *args:
+    rs/moq-ffi/build.sh "$@"
+
+# Build and package libmoq.
+[positional-arguments]
+package-libmoq *args:
+    rs/libmoq/build.sh "$@"
+
+# Build and package the moq-gst GStreamer plugin.
+[positional-arguments]
+package-gst *args:
+    rs/moq-gst/build.sh "$@"
+
+# Load a packaged moq-gst plugin into the host's GStreamer and find its elements.
+[positional-arguments]
+gst-smoke *args:
+    rs/moq-gst/smoke.sh "$@"

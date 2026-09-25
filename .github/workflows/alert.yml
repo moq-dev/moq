@@ -78,6 +78,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Post to Discord
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
@@ -88,4 +90,4 @@ jobs:
           RUN_REF: ${{ github.event.workflow_run.head_branch }}
           RUN_TITLE: ${{ github.event.workflow_run.display_title }}
           RUN_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
-        run: sh/gh/alert.sh discord
+        run: just gh alert discord

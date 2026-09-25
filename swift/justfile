@@ -15,7 +15,41 @@ default:
 check:
     bash ../sh/swift/check.sh
 
+# Release recipes run in the caller's directory, so a relative `--output` or
+# `--tarball` means what it would to the script itself.
+
 # Assemble the released wrapper package from Package.swift.template.
-# Used by .github/workflows/release-swift-lib.yml.
+[no-cd]
+[positional-arguments]
 package *args:
-    bash ../sh/swift/package.sh {{ args }}
+    {{ quote(justfile_directory() / "sh/swift/package.sh") }} "$@"
+
+# Assemble the MoqFFI package from per-target static libs and the generated bindings.
+[no-cd]
+[positional-arguments]
+package-ffi *args:
+    {{ quote(justfile_directory() / "sh/swift/package-ffi.sh") }} "$@"
+
+# Build a throwaway consumer of a staged wrapper package.
+[no-cd]
+[positional-arguments]
+verify *args:
+    {{ quote(justfile_directory() / "sh/swift/verify.sh") }} "$@"
+
+# Build a throwaway consumer of a staged MoqFFI package.
+[no-cd]
+[positional-arguments]
+verify-ffi *args:
+    {{ quote(justfile_directory() / "sh/swift/verify-ffi.sh") }} "$@"
+
+# Push the staged wrapper package to the moq-dev/moq-swift mirror.
+[no-cd]
+[positional-arguments]
+publish *args:
+    {{ quote(justfile_directory() / "sh/swift/publish.sh") }} "$@"
+
+# Push the staged MoqFFI package to the moq-dev/moq-swift-ffi mirror.
+[no-cd]
+[positional-arguments]
+publish-ffi *args:
+    {{ quote(justfile_directory() / "sh/swift/publish-ffi.sh") }} "$@"

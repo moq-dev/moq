@@ -45,6 +45,10 @@ For each finding:
 - If you don't agree with it, reply to the finding and move on.
 - If it's a relatively easy improvement, fix it and push. Update the summary if needed.
 
+# CI
+
+Workflow steps run `just` recipes, never a script path; `just gh check` enforces it.
+
 # Follow-ups
 
 If you encounter issues, or findings that are out of scope, create follow-up quests.

@@ -41,6 +41,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Parse crate and version
         id: parse
         env:
@@ -98,7 +100,7 @@ jobs:
           VERSION: ${{ steps.parse.outputs.version }}
         run: |
           mkdir -p rendered
-          ./sh/gh/render-formula.sh \
+          just gh formula \
             --template ".github/homebrew/Formula/${CRATE}.rb.tmpl" \
             --version "$VERSION" \
             --release-dir release-assets \
@@ -156,7 +158,7 @@ jobs:
           EOF
           fi
 
-          python3 ../sh/gh/install-formula.py "$CRATE" "../rendered/${CRATE}.rb" .
+          just gh install-formula "$CRATE" "rendered/${CRATE}.rb" homebrew-tap
 
           if git diff --quiet && [[ -z "$(git status --porcelain)" ]]; then
             echo "No changes to commit (formula already up to date)."

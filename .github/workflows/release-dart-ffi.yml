@@ -46,9 +46,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Parse version
         id: parse
-        run: sh/gh/release.sh parse-version moq-ffi
+        run: just gh release parse-version moq-ffi
 
   build:
     name: Build Native Asset (${{ matrix.target }})
@@ -87,6 +89,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -114,7 +118,7 @@ jobs:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
           IPHONEOS_DEPLOYMENT_TARGET: ${{ contains(matrix.target, 'apple-ios') && '16.0' || '' }}
         run: |
-          ./rs/moq-ffi/build.sh \
+          just rs package-ffi \
             --target "$BUILD_TARGET" \
             --version "$BUILD_VERSION" \
             --output dist \
@@ -151,13 +155,15 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
 
       - name: Stage and check package
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
-          ./sh/dart/package.sh \
+          just dart package \
             --package moq_ffi \
             --version "$BUILD_VERSION" \
             --output release-out
@@ -186,9 +192,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Find previous tag
         id: prev_tag
-        run: sh/gh/release.sh prev-tag moq-ffi
+        run: just gh release prev-tag moq-ffi
 
       - name: Download Native Assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -204,7 +212,7 @@ jobs:
           RELEASE_TITLE: "moq-ffi v${{ needs.parse-version.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
           RELEASE_CHECKSUMS: SHA256SUMS-dart
-        run: sh/gh/release.sh create artifacts
+        run: just gh release create artifacts
 
   publish:
     name: Publish moq_ffi to pub.dev

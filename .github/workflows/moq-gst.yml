@@ -34,6 +34,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
@@ -41,7 +43,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: sh/gh/release.sh parse-version moq-gst
+        run: just gh release parse-version moq-gst
 
       - name: Build and package (tarball)
         shell: bash
@@ -49,7 +51,7 @@ jobs:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ steps.parse.outputs.version }}
         run: |
-          ./rs/moq-gst/build.sh \
+          just rs package-gst \
             --target "$TARGET" \
             --version "$VERSION" \
             --output dist
@@ -80,7 +82,7 @@ jobs:
         run: |
           set -euo pipefail
           tar -xzf "dist/moq-gst-v${VERSION}-${TARGET}.tar.gz" -C dist/
-          ./rs/moq-gst/smoke.sh "dist/moq-gst-v${VERSION}-${TARGET}/lib/gstreamer-1.0"
+          just rs gst-smoke "dist/moq-gst-v${VERSION}-${TARGET}/lib/gstreamer-1.0"
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -112,6 +114,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -123,7 +127,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: sh/gh/release.sh parse-version moq-gst
+        run: just gh release parse-version moq-gst
 
       - name: Install GStreamer dev libraries
         shell: bash
@@ -160,7 +164,7 @@ jobs:
           PLUGIN_DIR: /usr/lib/${{ matrix.deb-multiarch }}/gstreamer-1.0
         run: |
           mkdir -p dist
-          sh/rs/package-nfpm.sh packaging/moq-gst/nfpm.yaml deb dist/
+          just rs package-nfpm packaging/moq-gst/nfpm.yaml deb dist/
 
       - name: Package .rpm
         shell: bash
@@ -172,7 +176,7 @@ jobs:
           PLUGIN_DIR: /usr/lib64/gstreamer-1.0
         run: |
           mkdir -p dist
-          sh/rs/package-nfpm.sh packaging/moq-gst/nfpm.yaml rpm dist/
+          just rs package-nfpm packaging/moq-gst/nfpm.yaml rpm dist/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -195,13 +199,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Parse version
         id: parse
-        run: sh/gh/release.sh parse-version moq-gst
+        run: just gh release parse-version moq-gst
 
       - name: Find previous tag
         id: prev_tag
-        run: sh/gh/release.sh prev-tag moq-gst
+        run: just gh release prev-tag moq-gst
 
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -215,10 +221,10 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_TITLE: "moq-gst v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
-        run: sh/gh/release.sh create artifacts
+        run: just gh release create artifacts
 
       - name: Trigger apt/rpm repo publish
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: sh/gh/trigger-repo-publish.sh
+        run: just gh trigger-repo-publish

@@ -73,9 +73,7 @@ jobs:
       # over independent observers of the new live broadcast map.
       - name: JS origin broadcast map benchmark
         if: ${{ !cancelled() }}
-        run: |
-          nix develop --command bun install --frozen-lockfile
-          nix develop --command bun js/net/bench/broadcasts.ts
+        run: nix develop --command just js bench
 
       - name: Audit
         if: ${{ !cancelled() }}
@@ -286,11 +284,7 @@ jobs:
           choco install nasm -y --no-progress
           "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      # Pinned: `--locked` fixes just's own dependencies, not which version of
-      # just cargo selects.
-      - name: Install just
-        shell: bash
-        run: cargo install --locked just@1.52.0
+      - uses: ./.github/actions/just
 
       - name: Check
         shell: bash
@@ -323,10 +317,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      # Pinned: `--locked` fixes just's own dependencies, not which version of
-      # just cargo selects.
-      - name: Install just
-        run: cargo install --locked just@1.52.0
+      - uses: ./.github/actions/just
 
       - name: Check
         run: just rs macos
