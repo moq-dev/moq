@@ -34,11 +34,10 @@ object ended", not "the path went offline": announcements say whether a path
 is live, and a path can be announced again by a new object. Caches and moq-hls
 use it to tell a live object from a replaced one at the same path.
 
-Stage it as the children below: the bindings, then the `dev` removal.
+Stage the `dev` removal as the child below.
 
 ## Quests
 
-- [Binding close](/quest/m1/broadcast-close/bindings.md) - moq-ffi, libmoq, and every wrapper expose `close()` and deprecate `finish`
 - [Remove finish](/quest/m1/broadcast-close/remove.md) - on dev, the deprecated broadcast end APIs are gone and `closed()` carries no cause
 
 ## Related

@@ -170,7 +170,7 @@ impl MoqBroadcastProducer {
 	}
 
 	/// Run `f` against the open broadcast and catalog. Errors with
-	/// [`MoqError::Closed`] if `finish()` has already run. Used by
+	/// [`MoqError::Closed`] if `close()` has already run. Used by
 	/// sibling modules (e.g. `audio`) that need joint access.
 	pub(crate) fn with_state<R>(
 		&self,
@@ -470,16 +470,24 @@ impl MoqBroadcastProducer {
 		}))
 	}
 
-	/// Finish this publisher, finalizing the catalog stream and cleanly closing the
-	/// broadcast so subscribers see a normal end rather than `Error::Dropped`.
-	pub fn finish(&self) -> Result<(), MoqError> {
+	/// End the broadcast for good: retract it, serve no new tracks, and finalize the catalog.
+	///
+	/// Tracks already subscribed carry on to their own end. Every later call on this
+	/// producer fails with `Closed`; closing again is a no-op.
+	pub fn close(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let mut guard = self.state.lock().unwrap();
-		let mut state = guard.take().ok_or(MoqError::Closed)?;
+		let Some(mut state) = self.state.lock().unwrap().take() else {
+			return Ok(());
+		};
 		// Close the broadcast first so it ends even if finalizing the catalog fails.
 		state.broadcast.close();
 		state.catalog.finish()?;
 		Ok(())
+	}
+
+	/// Deprecated: use `close()`. A broadcast end carries no cause.
+	pub fn finish(&self) -> Result<(), MoqError> {
+		self.close()
 	}
 }
 

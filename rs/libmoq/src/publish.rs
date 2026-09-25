@@ -149,9 +149,8 @@ impl Publish {
 		Ok((&mut broadcast.producer, &mut broadcast.catalog))
 	}
 
-	/// Cleanly finish the broadcast and finalize the catalog stream, so subscribers
-	/// see a normal end rather than [`moq_net::Error::Dropped`].
-	pub fn finish(&mut self, broadcast: Id) -> Result<(), Error> {
+	/// End the broadcast for good and release it, finalizing the catalog stream.
+	pub fn close(&mut self, broadcast: Id) -> Result<(), Error> {
 		let Broadcast {
 			producer,
 			mut catalog,

@@ -66,7 +66,7 @@ video, _ := broadcast.EncodeVideo(
 )
 _ = video.Write(moq.VideoFrame{TimestampUs: pts, Data: rgba})
 _ = broadcast.Announce(moq.Route{})
-broadcast.Finish()   // keep the producer reachable while publishing, then finish explicitly
+broadcast.Close()    // keep the producer reachable while publishing, then close explicitly
 ```
 
 For locally encoded media, call `MediaProducer.Flush(timestampUs)` after `WriteFrame` with the same broadcast-clock PTS. It measures catalog jitter at the transport handoff. File, pipe, and network imports should omit `Flush`; built-in encoders observe their own output.
@@ -74,7 +74,8 @@ For locally encoded media, call `MediaProducer.Flush(timestampUs)` after `WriteF
 The three advertising operations: `client.CreateBroadcast(path)` (or
 `origin.CreateBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.Announce(route)` / `broadcast.Unannounce()` own that exact-path
-advertisement; `origin.Dynamic(prefix, route)` claims `prefix` and every
+advertisement, and `broadcast.Close()` ends the broadcast for good (a second
+call is a no-op; `Finish` is its deprecated alias); `origin.Dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
 serve. A route is a capability, not an inventory. `Announced(options)` combines
