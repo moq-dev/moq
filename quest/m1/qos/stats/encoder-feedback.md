@@ -38,7 +38,6 @@ prefix. Keyframe requests stay out.
 
 ## Required
 
-- [Schema and library](/quest/m1/qos/stats/schema.md) - the feedback it reads
 - [Rust reporters](/quest/m1/qos/stats/rust.md) - the viewers that report and
   the CLI it wires
 

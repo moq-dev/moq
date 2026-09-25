@@ -215,6 +215,13 @@ arbitrary **tier** label chosen by the auth server's grant or `--cluster-tier`,
 which is what makes billing per customer or per region possible. Read them with
 the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
+A subscriber that wants one broadcast rather than all of them requests
+`<path>/publisher.json` or `<path>/subscriber.json` (plus `.z`), or
+`<tier>/<path>/...` on a named tier: the same track filtered to that one entry,
+served while subscribed. The tier is matched against the labels the relay has
+seen, longest first, so a default-tier broadcast whose path starts with a tier
+label (`rtmp/cam` beside an `rtmp` tier) cannot be named and is refused.
+
 ## \[iroh]
 
 ```toml

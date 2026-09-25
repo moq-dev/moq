@@ -19,6 +19,7 @@ kio = { workspace = true }
 lazy_static = { workspace = true }
 moq-json = { workspace = true }
 moq-net = { workspace = true }
+moq-stats = { workspace = true }
 regex = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }

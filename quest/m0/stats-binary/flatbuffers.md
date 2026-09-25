@@ -24,7 +24,7 @@ does not clearly win, abandon the quest and report the numbers.
   `.json.z` does today, with a full snapshot per frame and no deltas.
 - `.fb.z` is a flavor suffix: it applies to every track name that takes
   `.json.z` (default and named tiers, sessions, and the per-broadcast tracks
-  if [schema](/quest/m1/qos/stats/schema.md) lands first) and nothing
+  if [client stats](/quest/m1/qos/stats/README.md) lands first) and nothing
   else. Extend `requested_track_shape` and the track-name helpers for it. Decide whether the helpers take a flavor enum instead of
   `compressed: bool`, and weigh that break while the release is still pending.
 - `Consumer` reads either flavor into the same frame types; decoding views

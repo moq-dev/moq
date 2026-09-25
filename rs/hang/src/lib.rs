@@ -13,6 +13,9 @@
 //! - **Legacy**: A timestamp followed by the codec payload.
 //! - **CMAF**: Fragmented MP4 container (moof+mdat pair)
 //!
+//! A client reports on a broadcast in its own `.stats` broadcast, with [`Stats`] as the media half of
+//! each [`moq_stats`] entry.
+//!
 //! See the [moq-mux](https://crates.io/crates/moq-mux) crate for importing existing media formats into hang broadcasts.
 mod error;
 
@@ -23,6 +26,8 @@ pub mod catalog;
 pub mod container;
 
 /// The timeline indexes the broadcast's aligned segments.
+pub mod stats;
+
 pub mod timeline;
 
 /// Export the moq-net version we use.
@@ -30,3 +35,4 @@ pub use moq_net;
 
 pub use catalog::Catalog;
 pub use error::*;
+pub use stats::Stats;

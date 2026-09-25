@@ -1,9 +1,11 @@
 //! The consuming half: typed readers over one published stats broadcast.
 
-use moq_net::broadcast;
-use moq_net::stats::{Role, Tier};
+use std::marker::PhantomData;
 
-use crate::{Result, SessionsFrame, TrafficFrame, sessions_track, traffic_track};
+use moq_net::stats::{Role, Tier};
+use moq_net::{AsPath, broadcast};
+
+use crate::{COMPRESSED_SUFFIX, Ext, Result, SessionsFrame, TrafficFrame, sessions_track, traffic_track};
 
 /// Configuration for a [`Consumer`]. Construct with [`Config::new`]
 /// and chain the `with_*` setters.
@@ -29,29 +31,52 @@ impl Config {
 	}
 }
 
-/// Reads one published stats broadcast (a `<prefix>/node/<node>` announce),
-/// yielding typed frames per track.
+/// Reads one published stats broadcast (a relay's `<prefix>/node/<node>` or a
+/// client's `<path>.stats`), yielding typed frames per track.
 ///
 /// Subscribe to the traffic and session tracks you care about with
 /// [`Self::traffic`] / [`Self::sessions`]; a track that the producer never
 /// created (e.g. a named tier that saw no traffic) fails to subscribe or ends
 /// immediately, so callers typically subscribe the tiers they know exist.
-pub struct Consumer {
+///
+/// `E` is the producer's extension, `()` to read only the [`Traffic`](crate::Traffic)
+/// half of any producer's entries.
+pub struct Consumer<E: Ext = ()> {
 	broadcast: broadcast::Consumer,
 	config: Config,
+	ext: PhantomData<fn() -> E>,
 }
 
-impl Consumer {
+impl<E: Ext> Consumer<E> {
 	/// Wrap a stats broadcast. The broadcast is whatever the announce at a
-	/// stats path resolved to; parse the path with [`crate::parse_node_path`].
+	/// stats path resolved to; parse a relay's path with [`crate::parse_node_path`].
 	pub fn new(broadcast: broadcast::Consumer, config: Config) -> Self {
-		Self { broadcast, config }
+		Self {
+			broadcast,
+			config,
+			ext: PhantomData,
+		}
 	}
 
 	/// Subscribe to the traffic track for `(tier, role)`, awaiting the
 	/// subscription handshake.
-	pub async fn traffic(&self, tier: &Tier, role: Role) -> Result<Traffic> {
+	pub async fn traffic(&self, tier: &Tier, role: Role) -> Result<Traffic<E>> {
 		let name = traffic_track(tier, role, self.config.compression);
+		Ok(Traffic {
+			inner: self.subscribe(&name).await?,
+		})
+	}
+
+	/// Subscribe to the traffic track for `(tier, role)` filtered to one
+	/// broadcast `path`, awaiting the subscription handshake. Each frame holds
+	/// at most that one entry. The producer refuses a default-tier `path` that
+	/// starts with one of its tier labels, since the name would be ambiguous.
+	pub async fn traffic_for(&self, tier: &Tier, role: Role, path: impl AsPath) -> Result<Traffic<E>> {
+		let path = path.as_path();
+		let mut name = tier.track_name(&format!("{}/{}.json", path.as_str(), role.as_str()));
+		if self.config.compression {
+			name.push_str(COMPRESSED_SUFFIX);
+		}
 		Ok(Traffic {
 			inner: self.subscribe(&name).await?,
 		})
@@ -79,13 +104,13 @@ impl Consumer {
 /// A typed reader over one traffic track. Yields the latest [`TrafficFrame`];
 /// intermediate frames a slow reader missed are collapsed, which is safe
 /// because the counters are cumulative.
-pub struct Traffic {
-	inner: moq_json::snapshot::Consumer<TrafficFrame>,
+pub struct Traffic<E: Ext = ()> {
+	inner: moq_json::snapshot::Consumer<TrafficFrame<E>>,
 }
 
-impl Traffic {
+impl<E: Ext> Traffic<E> {
 	/// The next frame, or `None` once the track ends (the producer went away).
-	pub async fn next(&mut self) -> Result<Option<TrafficFrame>> {
+	pub async fn next(&mut self) -> Result<Option<TrafficFrame<E>>> {
 		Ok(self.inner.next().await?)
 	}
 }
@@ -127,7 +152,7 @@ mod tests {
 
 	fn test_producer() -> (Producer, origin::Producer) {
 		let origin = produce_origin();
-		let producer = Producer::new(
+		let producer = Producer::<()>::new(
 			produce::Config::new()
 				.with_origin(origin.clone())
 				.with_node(PathOwned::from("sjc")),
@@ -213,8 +238,8 @@ mod tests {
 		drive_tick().await;
 
 		let broadcast = announced(&origin).await;
-		let plain = Consumer::new(broadcast.consume(), Config::new());
-		let compressed = Consumer::new(broadcast.consume(), Config::new().with_compression(true));
+		let plain = Consumer::<()>::new(broadcast.consume(), Config::new());
+		let compressed = Consumer::<()>::new(broadcast.consume(), Config::new().with_compression(true));
 
 		let mut plain_traffic = plain.traffic(&tier, Role::Publisher).await.expect("subscribe plain");
 		let mut z_traffic = compressed
@@ -225,18 +250,47 @@ mod tests {
 		let plain_frame = plain_traffic.next().await.expect("read").expect("frame");
 		let z_frame = z_traffic.next().await.expect("read").expect("frame");
 		assert_eq!(plain_frame, z_frame, "both flavors carry the same data");
-		assert_eq!(plain_frame.get("foo/bar").expect("entry").bytes, 42);
+		assert_eq!(plain_frame.get("foo/bar").expect("entry").traffic.bytes, 42);
 
 		// A later drain updates both flavors; the compressed one rides a delta.
 		fed.write(8).await;
 		drive_tick().await;
 		let plain_frame = plain_traffic.next().await.expect("read").expect("frame");
 		let z_frame = z_traffic.next().await.expect("read").expect("frame");
-		assert_eq!(plain_frame.get("foo/bar").expect("entry").bytes, 50);
+		assert_eq!(plain_frame.get("foo/bar").expect("entry").traffic.bytes, 50);
 		assert_eq!(plain_frame, z_frame, "delta reconstructs the same frame");
 
 		let mut sessions = compressed.sessions(&tier).await.expect("subscribe sessions");
 		let frame = sessions.next().await.expect("read").expect("frame");
 		assert_eq!(frame.get("acme").expect("root").active(), 1);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn traffic_for_reads_one_broadcast() {
+		let (producer, origin) = test_producer();
+		let tier = Tier::default();
+		let mut foo = feed(&producer, tier.clone(), "acme", "foo/bar").await;
+		let mut baz = feed(&producer, tier.clone(), "acme", "baz").await;
+		foo.write(42).await;
+		baz.write(8).await;
+		drive_tick().await;
+
+		let broadcast = announced(&origin).await;
+		let consumer = Consumer::<()>::new(broadcast, Config::new().with_compression(true));
+		// Paused time auto-advances to the next drain, which adopts the request.
+		let mut traffic = consumer
+			.traffic_for(&tier, Role::Publisher, "foo/bar")
+			.await
+			.expect("subscribe");
+
+		loop {
+			let frame = traffic.next().await.expect("read").expect("frame");
+			if let Some(stats) = frame.get("foo/bar") {
+				assert_eq!(stats.traffic.bytes, 42);
+				assert_eq!(frame.len(), 1, "only the requested path");
+				break;
+			}
+			drive_tick().await;
+		}
 	}
 }

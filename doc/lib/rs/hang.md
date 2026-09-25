@@ -16,6 +16,7 @@ that carry a timestamp with every frame.
 - **Containers.** `legacy`, `cmaf`, and `loc`, decoded for you; unknown kinds pass through untouched.
 - **`Ordered`** reads a media track as timestamped frames, reorders groups, and skips ones that fall past your max age.
 - **Codecs described**: H.264, H.265, VP8, VP9, AV1, AAC, Opus, PCM.
+- **`Stats`**, the media half of a client's [`moq-stats`](https://docs.rs/moq-stats) report: per audio and video, what a publisher sent and what a subscriber received and played, plus the publisher's connection.
 
 ```bash
 cargo add hang

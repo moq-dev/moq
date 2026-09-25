@@ -31,7 +31,7 @@ Settled while planning:
   no uncompressed `.fb`.
 - **Extension-ready:** the schema leaves room for the client-stats extension
   (a nested table on each entry), which
-  [schema](/quest/m1/qos/stats/schema.md) fills in when it lands.
+  [client stats](/quest/m1/qos/stats/README.md) fills in when it lands.
 - **The line lands on main:** the maintainer approved `Registry::report(&mut
   Report)` as a published API break before the pending moq-net release. Merge
   this line before #3928, the last breaking change before that release.

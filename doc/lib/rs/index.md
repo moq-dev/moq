@@ -31,7 +31,7 @@ The reference implementation. Every crate is on
 | [moq-e2ee](https://docs.rs/moq-e2ee) | End-to-end encryption of groups, datagrams, and track names, scoped to a publisher epoch. |
 | [moq-flate](https://docs.rs/moq-flate) | Group-scoped DEFLATE for any track. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
-| [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
+| [moq-stats](https://docs.rs/moq-stats) | Publish and consume traffic counters as tracks: a relay under the `.stats/` prefix, a client (with `hang::Stats` media counters) at its own `<path>.stats` broadcast. |
 | [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtc](https://docs.rs/moq-rtc) | The [gateways](/bin/), as libraries you can embed with your own auth. |
 | [moq-ffi](https://docs.rs/moq-ffi), [libmoq](/lib/c/) | The UniFFI core behind the language bindings, and the C ABI. |
 | [moq-relay](/bin/relay/), [moq-cli](/bin/cli) | The binaries, also usable as crates. |
