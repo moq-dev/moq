@@ -103,11 +103,17 @@ impl Scratch {
 /// and `-0.0` equals `0.0`, so the memo resends that change and the value diff does not. Both are
 /// no-ops to a consumer.
 #[derive(Default)]
+///
+/// No memoized entry repeats a key at any depth, which the value diff would refuse. [`lockstep`]
+/// only walks keys that match an entry's last bytes position by position, so it inherits that, and
+/// everything else it writes is checked.
 pub(crate) struct Memo {
 	/// Matches the baseline: each entry is that key's value in the baseline, serialized.
 	current: Entries,
 	/// Filled by the diff in progress, and swapped in once its frame is committed.
 	next: Entries,
+	/// Reused by the repeated-key check.
+	check: RefCell<crate::merge::CheckScratch>,
 }
 
 #[derive(Default)]
@@ -270,9 +276,15 @@ impl<'a> Differ<'a> {
 /// that differs is replaced by its new bytes, which is what the value diff emits for it. `None`
 /// when the keys differ, or a replacement object holds a null the value diff would have to judge,
 /// leaving the entry to the value diff.
-fn lockstep(old: &[u8], new: &[u8], patch: &mut Vec<u8>, forced: &mut bool) -> Option<()> {
+fn lockstep(
+	old: &[u8],
+	new: &[u8],
+	patch: &mut Vec<u8>,
+	forced: &mut bool,
+	check: &RefCell<crate::merge::CheckScratch>,
+) -> Option<()> {
 	if old.first() != Some(&b'{') || new.first() != Some(&b'{') {
-		return replace(new, patch, forced);
+		return replace(new, patch, forced, check);
 	}
 	// An empty object on either side means the keys changed.
 	if old.get(1) == Some(&b'}') || new.get(1) == Some(&b'}') {
@@ -292,7 +304,7 @@ fn lockstep(old: &[u8], new: &[u8], patch: &mut Vec<u8>, forced: &mut bool) -> O
 			patch.push(if first { b'{' } else { b',' });
 			first = false;
 			patch.extend_from_slice(&new[j..=new_key]);
-			lockstep(old_value, new_value, patch, forced)?;
+			lockstep(old_value, new_value, patch, forced, check)?;
 		}
 		match (old.get(old_end), new.get(new_end)) {
 			(Some(b','), Some(b',')) => (i, j) = (old_end + 1, new_end + 1),
@@ -309,11 +321,18 @@ fn lockstep(old: &[u8], new: &[u8], patch: &mut Vec<u8>, forced: &mut bool) -> O
 ///
 /// A null is a deletion in a merge patch, so the value diff forces a snapshot for one written as an
 /// object value. A top-level null is caught here, and a replacement object holding one anywhere is
-/// left to the value diff rather than parsed (inside an array, or a string, it would be data).
-fn replace(new: &[u8], patch: &mut Vec<u8>, forced: &mut bool) -> Option<()> {
+/// left to the value diff rather than parsed (inside an array, or a string, it would be data). So is
+/// a replacement that repeats a key, for the value diff to refuse.
+fn replace(
+	new: &[u8],
+	patch: &mut Vec<u8>,
+	forced: &mut bool,
+	check: &RefCell<crate::merge::CheckScratch>,
+) -> Option<()> {
 	match new {
 		b"null" => *forced = true,
 		[b'{', ..] if new.windows(4).any(|window| window == b"null") => return None,
+		[b'{' | b'[', ..] if crate::merge::check(new, check).is_err() => return None,
 		_ => {}
 	}
 	patch.extend_from_slice(new);
@@ -729,12 +748,16 @@ impl MapDiff<'_> {
 			}
 			Memoized::Miss => {
 				// Diff the bytes the memo just recorded rather than serializing `value` again, so the
-				// memo, the patch, and the baseline all come from one serialization.
+				// memo, the patch, and the baseline all come from one serialization. Checked first,
+				// since a parse keeps the last of a repeated key where the value diff refuses it.
 				let entry: Value = {
 					let scratch = self.differ.scratch.borrow();
-					let next = &scratch.memo.as_ref().expect("a miss implies a memo").next;
-					let (start, end) = *next.ends.last().expect("a miss records its entry");
-					serde_json::from_slice(&next.bytes[start..end]).map_err(|err| Error(err.to_string()))?
+					let memo = scratch.memo.as_ref().expect("a miss implies a memo");
+					let (start, end) = *memo.next.ends.last().expect("a miss records its entry");
+					let bytes = &memo.next.bytes[start..end];
+					crate::merge::check(bytes, &memo.check)
+						.and_then(|()| serde_json::from_slice(bytes))
+						.map_err(|err| Error(err.to_string()))?
 				};
 				let (child, existed) = self.differ.child(key);
 				(entry.serialize(child)?, existed)
@@ -754,7 +777,7 @@ impl MapDiff<'_> {
 		}
 		let mut scratch = self.differ.scratch.borrow_mut();
 		let Scratch { memo, bytes, .. } = &mut *scratch;
-		let Some(Memo { current, next }) = memo.as_mut() else {
+		let Some(Memo { current, next, check }) = memo.as_mut() else {
 			return Ok(Memoized::Off);
 		};
 		if let Some(last) = next.ends.len().checked_sub(1)
@@ -780,7 +803,7 @@ impl MapDiff<'_> {
 		let patch = &mut bytes[1];
 		patch.clear();
 		let mut forced = false;
-		if lockstep(old, new, patch, &mut forced).is_none() {
+		if lockstep(old, new, patch, &mut forced, check).is_none() {
 			return Ok(Memoized::Miss);
 		}
 		if forced {

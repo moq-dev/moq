@@ -779,6 +779,63 @@ mod test {
 		assert_eq!(encoder.value(), Some(&emitted), "the baseline must be what was emitted");
 	}
 
+	/// A key repeated below the root is refused whether the memo meets it in a new entry or in a
+	/// value replaced wholesale, as the value diff refuses it. Letting one into the memo would pair
+	/// the repeats by position, where the consumer keeps the last.
+	#[test]
+	fn a_repeated_nested_key_is_refused_through_the_memo() {
+		use serde::ser::SerializeMap;
+
+		/// `{"row": {"o": ..}}`, where `o` is `1` or an object that repeats a key.
+		struct Doc {
+			repeat: bool,
+		}
+		struct Row<'a>(&'a Doc);
+		struct Repeat;
+
+		impl Serialize for Repeat {
+			fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+				let mut map = serializer.serialize_map(Some(2))?;
+				map.serialize_entry("x", &1)?;
+				map.serialize_entry("x", &2)?;
+				map.end()
+			}
+		}
+		impl Serialize for Row<'_> {
+			fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+				let mut map = serializer.serialize_map(Some(1))?;
+				match self.0.repeat {
+					true => map.serialize_entry("o", &Repeat)?,
+					false => map.serialize_entry("o", &1)?,
+				}
+				map.end()
+			}
+		}
+		impl Serialize for Doc {
+			fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+				let mut map = serializer.serialize_map(Some(1))?;
+				map.serialize_entry("row", &Row(self))?;
+				map.end()
+			}
+		}
+
+		let config = Config::default().with_delta_ratio(100);
+		let (plain, repeat) = (Doc { repeat: false }, Doc { repeat: true });
+
+		// A new entry: the first diff after a snapshot has nothing memoized yet.
+		let mut encoder = Encoder::<Doc>::new(config.clone());
+		encoder.update(&plain).unwrap().expect("a snapshot").commit();
+		let err = encoder.encode(&repeat).unwrap_err();
+		assert!(err.to_string().contains("duplicate JSON object key"), "{err}");
+
+		// A memoized entry whose scalar becomes an object.
+		let mut encoder = Encoder::<Doc>::new(config);
+		encoder.update(&plain).unwrap().expect("a snapshot").commit();
+		assert!(encoder.update(&plain).unwrap().is_none(), "unchanged, now memoized");
+		let err = encoder.encode(&repeat).unwrap_err();
+		assert!(err.to_string().contains("duplicate JSON object key"), "{err}");
+	}
+
 	/// A root object whose entries serialize in the order given, sorted or not.
 	struct Rows(Vec<(String, Value)>);
 
