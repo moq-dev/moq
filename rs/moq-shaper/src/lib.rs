@@ -32,7 +32,7 @@ pub use preset::Preset;
 
 use anyhow::Context;
 use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::{
 	net::{TcpListener, TcpStream, UdpSocket},
 	sync::mpsc,
@@ -344,7 +344,7 @@ impl From<Config> for Setup {
 }
 
 /// What one direction did, summed over every client.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Counters {
 	/// Datagrams received.
 	pub packets: u64,
@@ -371,7 +371,7 @@ impl fmt::Display for Counters {
 }
 
 /// What both directions did.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Stats {
 	/// From clients toward the target.
 	pub up: Counters,

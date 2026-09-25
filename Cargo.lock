@@ -4726,6 +4726,7 @@ dependencies = [
  "humantime-serde",
  "rand 0.10.3",
  "serde",
+ "serde_json",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
 ]

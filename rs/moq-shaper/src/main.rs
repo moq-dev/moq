@@ -5,8 +5,9 @@
 //! profile print at start, and the counters at exit, which fails if the profile
 //! never acted.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
+use anyhow::Context;
 use clap::Parser;
 
 #[derive(Parser)]
@@ -67,6 +68,12 @@ struct Args {
 	/// Also pipe TCP on the listening port to the target, untouched.
 	#[arg(long)]
 	tcp_passthrough: bool,
+	/// Write the profile, seed and counters to this file as JSON at exit.
+	#[arg(long)]
+	report: Option<PathBuf>,
+	/// Print the same JSON as one line on stdout this often.
+	#[arg(long, value_parser = humantime::parse_duration)]
+	report_interval: Option<Duration>,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -112,7 +119,32 @@ async fn main() -> anyhow::Result<()> {
 		config.seed
 	);
 
-	shutdown().await?;
+	let report = || Report {
+		profile: name.as_deref(),
+		seed: config.seed,
+		stats: shaper.stats(),
+	};
+
+	// The first tick is a full period in, so a line reports traffic, not the start.
+	let mut interval = args
+		.report_interval
+		.map(|period| tokio::time::interval_at(tokio::time::Instant::now() + period, period));
+	let shutdown = shutdown();
+	tokio::pin!(shutdown);
+	loop {
+		tokio::select! {
+			res = &mut shutdown => {
+				res?;
+				break;
+			}
+			_ = tick(&mut interval) => println!("{}", serde_json::to_string(&report())?),
+		}
+	}
+
+	// Before the verdict, so a run that fails it still leaves its counters behind.
+	if let Some(path) = &args.report {
+		std::fs::write(path, serde_json::to_vec(&report())?).with_context(|| format!("write {}", path.display()))?;
+	}
 
 	let stats = shaper.verify()?;
 	println!("shaper: {stats}");
@@ -155,6 +187,26 @@ fn flags(args: &Args) -> moq_shaper::Setup {
 		up: options.clone(),
 		down: options,
 		..config.into()
+	}
+}
+
+/// What a run did, as the JSON a harness reads back.
+#[derive(serde::Serialize)]
+struct Report<'a> {
+	/// The profile's name, or null when the flags built it.
+	profile: Option<&'a str>,
+	seed: u64,
+	#[serde(flatten)]
+	stats: moq_shaper::Stats,
+}
+
+/// The next report tick, or never without an interval.
+async fn tick(interval: &mut Option<tokio::time::Interval>) {
+	match interval {
+		Some(interval) => {
+			interval.tick().await;
+		}
+		None => std::future::pending().await,
 	}
 }
 

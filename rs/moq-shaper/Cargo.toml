@@ -23,5 +23,6 @@ humantime = { workspace = true }
 humantime-serde = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = { workspace = true }
