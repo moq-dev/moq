@@ -1,0 +1,174 @@
+name: release-ffi
+
+# Builds rs/moq-ffi for each requested target and generates its UniFFI
+# bindings. The release-{dart,go,kt,swift}-ffi.yml callers package and publish;
+# they keep the moq-ffi-v* tag trigger and the workflow name that alert.yml and
+# the workflow_run chains match on.
+#
+# Uploads, all prefixed by `language` so callers sharing one nightly run never
+# collide:
+#   <language>-lib-<target>  the target's native libraries (the lib/ directory)
+#   <language>-bindings      dist/bindings/<language>/, when `bindings` is set
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: "Binding language and artifact prefix, e.g. kotlin"
+        required: true
+        type: string
+      targets:
+        description: "JSON array of Rust targets to build"
+        required: true
+        type: string
+      bindings:
+        description: "Generate and upload the bindings for `language`"
+        type: boolean
+        default: true
+      default-features:
+        description: "Build moq-ffi with its default features (audio and video)"
+        type: boolean
+        default: true
+    outputs:
+      version:
+        description: "moq-ffi version, from the tag or (off a tag) rs/moq-ffi/Cargo.toml"
+        value: ${{ jobs.parse-version.outputs.version }}
+
+permissions:
+  contents: read
+
+# Pinned rather than "latest": `--locked` only fixes the tool's own
+# dependencies, not which version of the tool cargo selects.
+env:
+  CARGO_NDK_VERSION: 4.1.2
+
+jobs:
+  parse-version:
+    name: Parse version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/just
+
+      - name: Parse version
+        id: parse
+        run: just gh release parse-version moq-ffi
+
+  build:
+    name: Build moq-ffi (${{ matrix.target }})
+    needs: [parse-version]
+    runs-on: ${{ contains(matrix.target, '-apple-') && 'macos-latest' || contains(matrix.target, '-windows-') && 'windows-latest' || 'ubuntu-latest' }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(inputs.targets) }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/just
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          # Don't let untrusted PR builds populate caches reused by trusted runs.
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          # g++ as well as gcc: moq-video's openh264 fallback is C++, and
+          # cc-rs looks for aarch64-linux-gnu-g++ by name.
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Install cargo-ndk (Android)
+        if: contains(matrix.target, 'android')
+        run: cargo install --locked "cargo-ndk@$CARGO_NDK_VERSION"
+
+      - name: Build
+        shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          DEFAULT_FEATURES: ${{ inputs.default-features }}
+          # Set iOS deployment target to avoid ___chkstk_darwin linker errors.
+          IPHONEOS_DEPLOYMENT_TARGET: ${{ contains(matrix.target, 'apple-ios') && '16.0' || '' }}
+        run: |
+          args=(--target "$BUILD_TARGET" --version "$BUILD_VERSION" --output dist)
+          if [[ "$DEFAULT_FEATURES" == false ]]; then
+            args+=(--no-default-features)
+          fi
+          just rs package-ffi "${args[@]}"
+
+      - name: Upload lib
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ inputs.language }}-lib-${{ matrix.target }}
+          # Only the lib/ contents, so a caller's download is <target>/<libname>.
+          path: dist/moq-ffi-${{ needs.parse-version.outputs.version }}-${{ matrix.target }}/lib/
+
+  bindings:
+    name: Generate bindings
+    needs: [parse-version]
+    if: inputs.bindings
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/just
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          # Don't let untrusted PR builds populate caches reused by trusted runs.
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      # Go uses a third-party generator; build.sh skips Go when it is absent.
+      - name: Install uniffi-bindgen-go
+        if: inputs.language == 'go'
+        env:
+          # A fork until NordSecurity ships a uniffi 0.32 generator; see flake.nix.
+          UNIFFI_BINDGEN_GO_REPO: https://github.com/kixelated/uniffi-bindgen-go
+          UNIFFI_BINDGEN_GO_REV: v0.9.0+v0.32.0
+        run: |
+          cargo install --locked uniffi-bindgen-go \
+            --git "$UNIFFI_BINDGEN_GO_REPO" \
+            --rev "$UNIFFI_BINDGEN_GO_REV"
+
+      - name: Generate bindings
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          just rs package-ffi \
+            --bindings-only \
+            --version "$BUILD_VERSION" \
+            --output dist
+
+      - name: Upload bindings
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ inputs.language }}-bindings
+          path: dist/bindings/${{ inputs.language }}/
+          # A language build.sh does not generate would otherwise upload nothing.
+          if-no-files-found: error
