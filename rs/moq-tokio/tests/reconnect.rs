@@ -6,7 +6,6 @@
 
 #![cfg(feature = "tcp")]
 
-use std::net::TcpListener;
 use std::time::Duration;
 
 use moq_tokio::moq_net;
@@ -103,45 +102,35 @@ async fn monitor_is_cloneable_without_keeping_the_connection_alive() {
 	assert!(monitor.snapshot().is_none());
 }
 
-/// A stream-only moq server on a free loopback TCP port.
+/// A stream-only moq server on an ephemeral loopback TCP port.
 ///
 /// Returns the port, a receiver yielding every accepted session (so a test can
-/// drain one), and the listener task. The free-port probe can lose a race with
-/// another test between the probe closing and the real bind, so retry rather
-/// than panicking in `listen`.
+/// drain one), and the listener task.
 async fn spawn_server() -> (
 	u16,
 	tokio::sync::mpsc::UnboundedReceiver<moq_net::Session>,
 	tokio::task::JoinHandle<()>,
 ) {
-	for _ in 0..20 {
-		let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-		let port = probe.local_addr().expect("local addr").port();
-		drop(probe);
+	let mut config = moq_tokio::listen::Config::default();
+	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	let server = config.init(Default::default()).expect("init server");
+	let mut server = server.listen().await.expect("bind tcp listener");
+	let port = server.tcp_local_addr().expect("tcp listener bound").port();
 
-		let mut config = moq_tokio::listen::Config::default();
-		config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
-		let server = config.init(Default::default()).expect("init server");
-		let Ok(mut server) = server.listen().await else {
-			continue;
-		};
-
-		let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
-		let handle = tokio::spawn(async move {
-			while let Some(request) = server.accept().await {
-				let origin = moq_tokio::origin::spawn();
-				match request.with_publisher(&origin).ok().await {
-					Ok(session) => {
-						let _ = accepted.send(session);
-					}
-					Err(err) => tracing::warn!(%err, "accept failed"),
+	let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
+	let handle = tokio::spawn(async move {
+		while let Some(request) = server.accept().await {
+			let origin = moq_tokio::origin::spawn();
+			match request.with_publisher(&origin).ok().await {
+				Ok(session) => {
+					let _ = accepted.send(session);
 				}
+				Err(err) => tracing::warn!(%err, "accept failed"),
 			}
-		});
+		}
+	});
 
-		return (port, sessions, handle);
-	}
-	panic!("could not bind a free TCP port after 20 attempts");
+	(port, sessions, handle)
 }
 
 /// A client that redials fast, so a refused redirect lands back on the original

@@ -201,19 +201,12 @@ node = "sjc/1"                       # Disambiguates relays sharing a cluster.
 depth = 1                            # Also bucket by the first N path segments (per tenant).
 ```
 
-Each stats broadcast carries `publisher.json`, `subscriber.json`, and
-`sessions.json` tracks (plus compressed `.z` twins) with cumulative counters
-per broadcast. Every counter pair is `*_started` / `*_ended`:
-`announces_started` / `announces_ended`, `broadcasts_started` /
-`broadcasts_ended`, `subscriptions_started` / `subscriptions_ended`, and
-`sessions_started` / `sessions_ended`. A live count is started minus ended.
-This release also writes the previous `announced` / `*_closed` spellings beside
-the new names so an older consumer still reads a new relay; a new consumer
-accepts either spelling, with the canonical name winning. Payload counters
-(bytes, frames, groups, datagrams) are unchanged. Traffic is split by an
-arbitrary **tier** label chosen by the auth server's grant or `--cluster-tier`,
-which is what makes billing per customer or per region possible. Read them with
-the [`moq-stats`](https://docs.rs/moq-stats) crate.
+Each node publishes `publisher.json`, `subscriber.json`, and `sessions.json`
+tracks (plus compressed `.json.z` twins) of cumulative counters per broadcast
+and auth root, split by a **tier** label chosen by the auth server's grant or
+`--cluster-tier`, which is what makes billing per customer or per region
+possible. [Stats](/concept/stats) describes the paths, tracks, and encodings;
+read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]
 

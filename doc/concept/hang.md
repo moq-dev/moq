@@ -104,7 +104,8 @@ document would silently discard everything but the last payload:
 
 The rest is descriptive: `compression` (`deflate`, the same group-scoped
 `deflate-raw` the catalog uses), `schema` on a JSON track, `mime` on a binary
-one, plus the optional `broadcast` reference. A
+one, `bitrate` and `jitter` with the same meaning as for media, plus the
+optional `broadcast` reference. A
 consumer that doesn't recognize a `mode` or `compression` ignores that track and
 round-trips it verbatim.
 
@@ -115,6 +116,12 @@ or `catalog.binary.tracks`, then pair its name and config with
 `moq_mux::catalog::Entry::new` to subscribe. In C, `moq_publish_json_*` and
 `moq_publish_binary_*` do the same, retracting on `_finish`. In the browser, read the same map,
 subscribe by name, and hand the track to `@moq/json` or `@moq/binary`.
+
+An application with its own per-track fields can list a data track in its own
+root section instead, flattening the JSON or binary entry beside those fields
+so there is one entry per track. Name the section with a namespaced key such as
+`com.example.mavlink`. A generic consumer only finds tracks in `json` and
+`binary`.
 
 ## Container
 

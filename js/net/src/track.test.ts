@@ -1568,3 +1568,69 @@ test("malformed group bounds do not partially advance the cursor", () => {
 	expect(track.tryRecvGroup()?.sequence).toBe(0);
 	track.close();
 });
+
+test("finishAt refuses an end at or below a produced sequence", () => {
+	const producer = new TrackProducer("test");
+	producer.writeGroup(new GroupProducer(5));
+
+	// Exclusive, so it must be above the highest produced sequence.
+	expect(() => producer.finishAt(5)).toThrow();
+	expect(() => producer.finishAt(4)).toThrow();
+	producer.finishAt(6);
+
+	// A second end is refused, as is any group at or past the first.
+	expect(() => producer.finishAt(7)).toThrow();
+	expect(() => producer.writeGroup(new GroupProducer(6))).toThrow();
+	expect(() => producer.appendGroup()).toThrow();
+	expect(() => producer.insertDatagram(6, Timestamp.now(), new Uint8Array(1))).toThrow();
+	producer.close();
+});
+
+test("finishAt declares an end ahead of the live edge without ending the track", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe({ maxAge: Milli(60_000) });
+	producer.writeGroup(new GroupProducer(5));
+	const first = await track.recvGroup();
+	expect(first?.sequence).toBe(5);
+
+	producer.finishAt(8);
+	expect(track.final()).toBe(8);
+	expect(await track.finished()).toBe(8);
+
+	// Not terminal: groups below the end still arrive, including a straggler.
+	const late = new GroupProducer(7);
+	late.close();
+	producer.writeGroup(late);
+	const straggler = new GroupProducer(6);
+	straggler.close();
+	producer.writeGroup(straggler);
+	expect((await track.recvGroup())?.sequence).toBe(6);
+	expect((await track.recvGroup())?.sequence).toBe(7);
+
+	// A clean close keeps the declared end rather than the live edge.
+	producer.close();
+	expect(await track.recvGroup()).toBeUndefined();
+	expect(track.final()).toBe(8);
+
+	// A late subscriber sees the same end.
+	expect(producer.subscribe().final()).toBe(8);
+});
+
+test("finished rejects when the track aborts or closes without an end", async () => {
+	const aborted = new TrackProducer("test");
+	const pending = aborted.subscribe().finished();
+	aborted.close(new Error("boom"));
+	await expect(pending).rejects.toThrow("boom");
+
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+	track.close();
+	await expect(track.finished()).rejects.toThrow();
+
+	// A clean close is an end, so it resolves.
+	const clean = new TrackProducer("test");
+	const reader = clean.subscribe();
+	clean.appendGroup().close();
+	clean.close();
+	expect(await reader.finished()).toBe(1);
+});
