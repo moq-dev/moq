@@ -200,6 +200,11 @@ pub enum Error {
 	#[error("timeline segment {0} was not yielded for deferred publication")]
 	TimelineDeferredRecord(u64),
 
+	/// [`timeline::Producer::resume`](crate::timeline::Producer::resume) received a checkpoint
+	/// whose record at this window index is a different segment.
+	#[error("timeline checkpoint record at index {0} is a different segment")]
+	TimelineCheckpoint(u64),
+
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently MPEG-TS).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]

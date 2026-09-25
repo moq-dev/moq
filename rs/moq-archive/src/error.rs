@@ -78,10 +78,6 @@ pub enum Error {
 	#[error("moq: {0}")]
 	Moq(String),
 
-	/// The prefix already holds a recording timeline; resuming is unsupported.
-	#[error("prefix already holds a recording: {0}")]
-	Occupied(String),
-
 	/// The track was already enrolled, or is the recording's own timeline.
 	#[error("track already enrolled: {0}")]
 	Enrolled(String),
@@ -90,7 +86,7 @@ pub enum Error {
 	#[error("source: {0}")]
 	Source(String),
 
-	/// The recording's timeline could not be segmented or published.
+	/// The recording's timeline could not be recovered, segmented, or published.
 	#[error("timeline: {0}")]
 	Timeline(String),
 

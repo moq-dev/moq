@@ -7,10 +7,9 @@ same timeline and group-range objects as an unbounded archive.
 
 ## Plan
 
-The recording writer owns retention and deletion grace, and
-[Resume a recording](/quest/m1/archive/recovery.md) owns checkpoint recovery
-and restart cleanup. This quest consumes that contract and owns viewer
-seek and return-to-live behavior, not a second writer implementation.
+The recording writer owns retention, deletion grace, checkpoint recovery, and
+restart cleanup. This quest consumes that contract and owns viewer seek and
+return-to-live behavior, not a second writer implementation.
 
 The player reads the archive timeline, FETCHes old groups through the normal
 miss chain, and splices back to SUBSCRIBE at the live edge without opening a
@@ -26,10 +25,6 @@ Use the writer/reader fixtures; a retention defect is fixed in its owning layer.
 The reader evicts popped spans from its object cache, but a group it already
 served stays in `moq_net`'s track cache until the pool reclaims it. Decide
 whether expiry during a seek needs a group eviction API in `moq-net`.
-
-## Required
-
-- [Resume a recording](/quest/m1/archive/recovery.md)
 
 ## Closes
 
