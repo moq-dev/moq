@@ -22,5 +22,5 @@ end or start, and the group is withdrawn once the linger passes.
 
 ## Related
 
-- [Tree-routed announcements](/quest/m1/announce-tree/README.md) - cuts each
+- [Conservative announcement pruning](/quest/m1/announce-tree/README.md) - cuts each
   announce's fanout, where this cuts the announces

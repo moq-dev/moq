@@ -23,7 +23,10 @@ length), since downstream billing reads it.
 
 Test the Prometheus rendering. Also test, through two origins joined by a
 session, that one start, a re-price, and an end move each counter once and
-that the wire bytes match the encoded messages.
+that the wire bytes match the encoded messages, for Lite and IETF. Keep
+send and receive roles separate so fleet-wide totals do not double-count a
+message. Cluster-control bytes added later are a separate metric and must be
+included in the optimization's total cost.
 
 ## Related
 

@@ -1,113 +1,65 @@
-# Tree-routed announcements
+# Conservative announcement pruning
 
 ## Goal
 
-A route change in a relay cluster costs announces in proportion to the relays
-that need the route, not the links between them. Today every relay forwards
-its best route to every neighbour but the one it came from, so one broadcast
-start or stop sends about `2E - (N - 1)` announces and every relay holds one
-copy per neighbour. On moq.pro's 34-relay, 140-link mesh that is ~247 per
-event, and [PoP skipping](/quest/m1/pop-skipping/README.md) roughly doubles
-`E`. After this line, once every relay speaks lite-07, a relay hears each
-broadcast from at most two neighbours,
-a parent and a backup that it chose itself. A relay whose backup avoids its
-parent keeps the broadcast through that parent's failure with no round trip.
-This applies on lite-07 cluster links. IETF and older links keep flooding,
-and customer sessions are unchanged.
+Relays avoid sending announcements that are strictly worse than usable routes
+already available to the receiver. Reduce total cluster control traffic and
+held route copies without changing route selection, losing reachable prefixes,
+or breaking an existing subscription's source identity. Unknown or unsupported
+cases keep today's flooding.
 
-Non-goals: a relay still learns every route in the cluster (pull or scoped
-interest was dropped in [relay memory](/quest/m1/relay-memory.md)), and bytes
-per announce belong to the [prefix table](/quest/m2/announce-prefix-table.md).
+Measure starts, ends, updates, bytes, and held copies against flooding on the
+same workload. Include reachability, pruning control, and reconvergence costs.
+There is no fixed two-copy or per-event message bound: equal-ranked paths,
+multiple sources, retained backups, mixed versions, and handoffs can require
+more copies. A retained announcement does not imply an active media path or
+gapless playback.
 
 ## Plan
 
-### Receivers choose
+Amortizing reachability over all broadcasts from a source relay is the preferred
+starting point. Relay reachability alone does not prove that a neighbor holds
+or will send a particular prefix. Prototype the pruning and recovery policy in
+the simulator before committing to its wire representation.
 
-No relay needs the cluster graph. Relays speaking lite-07 open a
-[cluster stream](/quest/m1/announce-tree/cluster-stream.md) to each other. On it
-each relay advertises itself, and forwards its best reachability to every other
-relay, path-vector style with costs and hop chains. That gives each relay its
-best route, by the same ranking as `route_order`, to every other relay, plus
-the standby its neighbours offered. From those, relay `P` derives for each
-source relay `S`:
+The first version preserves the existing ranking and equal-ranked alternatives.
+It prunes only with evidence valid for the receiver's scope, source identity,
+and current sessions. It retains routes needed by the chosen backup policy.
+If that evidence is missing, invalidated, or cannot represent a route, forward
+normally. Healthy handoffs establish replacement announcements before retiring
+old ones; temporary overlap is allowed.
 
-- the tie set `U_S`: the neighbours whose routes to `S` tie for best;
-- for each member `u` of `U_S`, a backup `b_u`: its best standby route to `S`
-  whose chain avoids `u` (node-protecting). Failing that, the best route over
-  a session other than `u`'s (link-protecting). Failing that, none.
+Backup availability must be checked against actual prefix routes. A neighbor
+may prefer another source, or choose a different equal-cost path for a
+broadcast than it advertised for relay reachability. Neither a different
+neighbor nor a reachability chain avoiding the primary proves node protection.
+Preserving all failure-path behavior is not implied by preserving the current
+best route: the policy quest must state which standbys remain and how others
+are rediscovered. Any recovery tradeoff needs a maintainer decision before
+shipping; do not hide it behind a copy target.
 
-`P` sends that table to each neighbour on the same stream and replaces it when
-it changes. For a route with prefix `X` from source `S`, the parent is the
-member of `U_S` that ranks highest by rendezvous hash of `(X, member)`, and
-the backup is that member's `b`. A neighbour sends the route to `P` only if it
-is that parent or that backup. The source is the first hop in the route's
-chain that is a known relay. Broadcast announcements and ANNOUNCE_REQUEST are
-unchanged, and no `.internal` path is added.
+Start with authenticated lite-07 cluster sessions. Customers, older Lite
+versions, and IETF sessions keep flooding. A mixed mesh must remain complete,
+including upgraded components connected through an older relay. Broadcast
+announcements and ANNOUNCE_REQUEST need not change unless the validated policy
+requires it; the cluster-stream quest owns the precise wire impact.
 
-The neighbour floods, exactly as today, in these cases:
-
-- `P` has no cluster stream or table (a customer, an older relay, or an IETF
-  link);
-- the source has no entry in `P`'s table (unreachable, still converging, or a
-  chain with an anonymous hop).
-
-So a split mesh, say two new relays joined only through an old one, floods
-across the gap instead of dropping routes.
-
-### Consistent ranking
-
-A cursor carries one route per path, so completeness needs every relay to rank
-competing sources for the same prefix the same way. For example, a warm carrier
-and the origin.
-
-[Rendezvous ranking](/quest/m1/announce-tree/route-order.md) makes the
-tie-breaks consistent: cost and hop count add up per link, then ties rank by
-rendezvous hash of `(prefix, source)`, then of `(prefix, next hop)`.
-
-With additive keys and a tie-break that depends only on the source, if
-`P` prefers `S` to `C`, so does `P`'s parent toward `S`. So each relay's
-chosen upstream holds the route it expects, and a warm route stops at the edge
-of its carrier's catchment.
-
-### Failover and change
-
-When `P`'s parent fails, `P` already holds the backup's route. It promotes it
-and sends downstream an in-place update (lite-06 `ANNOUNCE_RESTART`, IETF
-`PublishNamespaceUpdate`), then sends its neighbours the updated table.
-
-A relay with only a link-protecting backup, or none, loses the route when its
-parent relay dies, until reachability reconverges.
-
-Table changes take effect at once: each neighbour re-syncs `P`'s cursors
-against the new table.
+Non-goals: interest-based discovery, a new global tie-break order, and guaranteed
+gapless media failover. Every relay still learns the cluster's reachable
+prefixes. The [prefix table](/quest/m2/announce-prefix-table.md) reduces bytes
+per message independently.
 
 ## Quests
 
-- [Announce counters](/quest/m1/announce-tree/counters.md) - relay `/metrics`
-  exports per-tier announce starts, ends, updates, and encoded announce bytes
-- [Rendezvous ranking](/quest/m1/announce-tree/route-order.md) - `route_order`
-  breaks cost ties per prefix by rendezvous hash of the source, then of the
-  next hop, identically at every relay
-- [Cluster stream](/quest/m1/announce-tree/cluster-stream.md) - a lite-07
-  relay-only stream carrying RELAY reachability adverts and the UPSTREAMS
-  table
-- [Relay reachability and upstream tables](/quest/m1/announce-tree/reachability.md) -
-  relays learn routes to every relay over the cluster stream and send their
-  chosen parents and backups, with forwarding unchanged
-- [Cluster simulator](/quest/m1/announce-tree/simulator.md) - seeded random
-  meshes, failures, and version mixes check route completeness and copy
-  bounds after every step
-- [Tree forwarding](/quest/m1/announce-tree/forward.md) - cluster peers send a
-  route only to the receivers that chose them, flooding whatever a receiver
-  has no choice for
+- [Announce counters](/quest/m1/announce-tree/counters.md) - establish the flooding baseline
+- [Cluster simulator](/quest/m1/announce-tree/simulator.md) - exercise real origins and adversarial delivery before choosing a wire format
+- [Pruning policy](/quest/m1/announce-tree/policy.md) - validate the suppression evidence, standby policy, and recovery transitions
+- [Cluster stream](/quest/m1/announce-tree/cluster-stream.md) - encode the validated control state on authenticated cluster sessions
+- [Relay reachability](/quest/m1/announce-tree/reachability.md) - maintain and expose the evidence without suppressing announcements
+- [Pruned forwarding](/quest/m1/announce-tree/forward.md) - apply the policy and measure its total cost against flooding
 
 ## Related
 
-- [Relay memory](/quest/m1/relay-memory.md) - route copies per relay fall from
-  degree to at most two
-- [PoP skipping](/quest/m1/pop-skipping/README.md) - its skip links and warm
-  routes need no special case
-- [Prefix table](/quest/m2/announce-prefix-table.md) - fewer bytes per
-  announce, orthogonal to fewer announces
-- [Stats linger](/quest/m1/stats-linger.md) - removes a churn source rather
-  than its fanout
+- [Relay memory](/quest/m1/relay-memory.md) - remeasure held copies and their allocation cost
+- [PoP skipping](/quest/m1/pop-skipping/README.md) - weighted links and warm exact-path routes are policy test cases
+- [Stats linger](/quest/m1/stats-linger.md) - removes a churn source independently of forwarding
