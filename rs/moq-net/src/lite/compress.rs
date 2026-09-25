@@ -7,9 +7,13 @@
 //! decoder here resolves them against the stream's live announcements, which the
 //! subscriber has to track anyway, and the encoder picks them.
 
-use std::{cmp::Ordering, collections::BTreeSet, collections::HashMap};
+use std::{
+	borrow::Borrow,
+	collections::{BTreeSet, HashMap},
+	hash::Hash,
+};
 
-use crate::{Error, Hops, Path, PathOwned, coding::Encode, coding::Sizer};
+use crate::{Error, Hop, Hops, Path, PathOwned, coding::Encode, coding::Sizer};
 
 use super::{HopsRef, PathRef, Version};
 
@@ -119,52 +123,91 @@ impl AnnounceDecoder {
 	}
 }
 
-/// Orders paths segment by segment, so the path sharing the most leading segments
-/// with a query is always one of its two neighbours. Byte order would not do:
-/// `a-b` sorts between `a` and `a/x`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Segments(PathOwned);
+/// The live ids under a run of keys: path segments from the head, or hop ids from
+/// the tail. Every node holds the ids of the entries beneath it, so the entry sharing
+/// the longest run with a query is found by walking the query down once, at a cost
+/// that grows with its length rather than with the number of entries.
+#[derive(Debug)]
+struct Trie<K> {
+	children: HashMap<K, Node<K>>,
+}
 
-impl Ord for Segments {
-	fn cmp(&self, other: &Self) -> Ordering {
-		// A normalized path has no empty segments, so segment order is byte order with
-		// the separator ranked below every other byte, which avoids splitting.
-		let (a, b) = (self.0.as_str().as_bytes(), other.0.as_str().as_bytes());
-		// Paths under one prefix share long heads, so skip them in chunks.
-		let skip = (a.chunks(16).zip(b.chunks(16)).take_while(|(x, y)| x == y).count() * 16).min(a.len().min(b.len()));
-		let common = skip + a[skip..].iter().zip(&b[skip..]).take_while(|(x, y)| x == y).count();
-		let rank = |byte: u8| if byte == b'/' { 0 } else { u16::from(byte) + 1 };
-		match (a.get(common), b.get(common)) {
-			(Some(&x), Some(&y)) => rank(x).cmp(&rank(y)),
-			_ => a.len().cmp(&b.len()),
+#[derive(Debug)]
+struct Node<K> {
+	ids: BTreeSet<u64>,
+	children: HashMap<K, Node<K>>,
+}
+
+impl<K: Hash + Eq> Default for Trie<K> {
+	fn default() -> Self {
+		Self {
+			children: HashMap::new(),
 		}
 	}
 }
 
-impl PartialOrd for Segments {
-	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-		Some(self.cmp(other))
+impl<K: Hash + Eq> Trie<K> {
+	fn insert<'a, Q>(&mut self, keys: impl Iterator<Item = &'a Q>, id: u64)
+	where
+		Q: ?Sized + ToOwned<Owned = K> + 'a,
+	{
+		let mut children = &mut self.children;
+		for key in keys {
+			let node = children.entry(key.to_owned()).or_insert_with(|| Node {
+				ids: BTreeSet::new(),
+				children: HashMap::new(),
+			});
+			node.ids.insert(id);
+			children = &mut node.children;
+		}
 	}
-}
 
-/// Orders hop chains from the last hop back, so the chain sharing the longest tail
-/// with a query is always one of its two neighbours.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Tail(Hops);
-
-impl Ord for Tail {
-	fn cmp(&self, other: &Self) -> Ordering {
-		self.0
-			.iter()
-			.rev()
-			.map(|hop| hop.id())
-			.cmp(other.0.iter().rev().map(|hop| hop.id()))
+	fn remove<'a, Q>(&mut self, keys: impl Iterator<Item = &'a Q>, id: u64)
+	where
+		Q: ?Sized + Hash + Eq + 'a,
+		K: Borrow<Q>,
+	{
+		Self::remove_from(&mut self.children, keys, id);
 	}
-}
 
-impl PartialOrd for Tail {
-	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-		Some(self.cmp(other))
+	fn remove_from<'a, Q>(children: &mut HashMap<K, Node<K>>, mut keys: impl Iterator<Item = &'a Q>, id: u64)
+	where
+		Q: ?Sized + Hash + Eq + 'a,
+		K: Borrow<Q>,
+	{
+		let Some(key) = keys.next() else {
+			return;
+		};
+		let Some(node) = children.get_mut(key) else {
+			return;
+		};
+		node.ids.remove(&id);
+		// Nothing else passes through here, so nothing else is beneath it either.
+		if node.ids.is_empty() {
+			children.remove(key);
+			return;
+		}
+		Self::remove_from(&mut node.children, keys, id);
+	}
+
+	/// How many leading keys the query shares with its closest entry, and that entry's
+	/// id, preferring the newest (the smallest distance to encode).
+	fn longest<'a, Q>(&self, keys: impl Iterator<Item = &'a Q>) -> Option<(usize, u64)>
+	where
+		Q: ?Sized + Hash + Eq + 'a,
+		K: Borrow<Q>,
+	{
+		let mut children = &self.children;
+		let mut best = None;
+		for (depth, key) in keys.enumerate() {
+			let Some(node) = children.get(key) else {
+				break;
+			};
+			let newest = *node.ids.last().expect("a node without ids is pruned");
+			best = Some((depth + 1, newest));
+			children = &node.children;
+		}
+		best
 	}
 }
 
@@ -172,15 +215,20 @@ impl PartialOrd for Tail {
 /// versions that have them. Only lite-07 keeps the live set, since nothing earlier
 /// can name a base.
 ///
-/// Two ordered indexes over the live announcements, one by path segments and one by
-/// reversed hop chain, make the longest shared head or tail a neighbour lookup. A base
-/// is used only when it encodes smaller than the literal.
+/// One trie over the live paths by segment, and one over the live hop chains from the
+/// last hop back, find the longest shared head and tail. A base is used only when it
+/// encodes smaller than the literal.
 #[derive(Debug)]
 pub(crate) struct AnnounceEncoder {
 	version: Version,
 	live: Live,
-	paths: BTreeSet<(Segments, u64)>,
-	tails: BTreeSet<(Tail, u64)>,
+	heads: Trie<String>,
+	tails: Trie<Hop>,
+}
+
+/// A hop chain from the last hop back.
+fn reversed(hops: &Hops) -> impl Iterator<Item = &Hop> {
+	hops.as_slice().iter().rev()
 }
 
 impl AnnounceEncoder {
@@ -188,8 +236,8 @@ impl AnnounceEncoder {
 		Self {
 			version,
 			live: Live::default(),
-			paths: BTreeSet::new(),
-			tails: BTreeSet::new(),
+			heads: Trie::default(),
+			tails: Trie::default(),
 		}
 	}
 
@@ -209,7 +257,9 @@ impl AnnounceEncoder {
 		// Distances count back from the id this START takes.
 		let path = self.path_ref(&suffix, id);
 		let chain = self.hops_ref(&hops, id);
-		self.insert(id, suffix, hops);
+		self.heads.insert(suffix.parts(), id);
+		self.tails.insert(reversed(&hops), id);
+		self.live.entries.insert(id, Entry { suffix, hops });
 		(Some(id), path, chain)
 	}
 
@@ -221,9 +271,9 @@ impl AnnounceEncoder {
 		// The decoder resolves against the chain this replaces, so it is a valid base.
 		let chain = self.hops_ref(&hops, self.live.next);
 		let entry = self.live.entries.get_mut(&id).expect("update for a live id");
-		let old = std::mem::replace(&mut entry.hops, hops.clone());
-		self.tails.remove(&(Tail(old), id));
-		self.tails.insert((Tail(hops), id));
+		self.tails.remove(reversed(&entry.hops), id);
+		self.tails.insert(reversed(&hops), id);
+		entry.hops = hops;
 		chain
 	}
 
@@ -233,14 +283,8 @@ impl AnnounceEncoder {
 			return;
 		}
 		let entry = self.live.entries.remove(&id).expect("end for a live id");
-		self.paths.remove(&(Segments(entry.suffix), id));
-		self.tails.remove(&(Tail(entry.hops), id));
-	}
-
-	fn insert(&mut self, id: u64, suffix: PathOwned, hops: Hops) {
-		self.paths.insert((Segments(suffix.clone()), id));
-		self.tails.insert((Tail(hops.clone()), id));
-		self.live.entries.insert(id, Entry { suffix, hops });
+		self.heads.remove(entry.suffix.parts(), id);
+		self.tails.remove(reversed(&entry.hops), id);
 	}
 
 	fn size<T: Encode<Version>>(&self, value: &T) -> usize {
@@ -253,71 +297,41 @@ impl AnnounceEncoder {
 
 	fn path_ref(&self, suffix: &PathOwned, next: u64) -> PathRef<'static> {
 		let literal = PathRef::literal(suffix.clone());
-		let query = (Segments(suffix.clone()), u64::MAX);
-		let before = self.paths.range(..&query).next_back();
-		let after = self.paths.range(&query..).next();
-
-		let mut best = literal;
-		let mut best_size = self.size(&best);
-		for (Segments(path), id) in before.into_iter().chain(after) {
-			let keep = path.parts().zip(suffix.parts()).take_while(|(a, b)| a == b).count();
-			if keep == 0 {
-				continue;
-			}
-			let rest = suffix.parts().skip(keep).collect::<Vec<_>>().join("/");
-			let candidate = PathRef {
-				base: next - id,
-				keep: keep as u64,
-				rest: Path::from(rest),
-			};
-			let size = self.size(&candidate);
-			if size < best_size {
-				best = candidate;
-				best_size = size;
-			}
+		let Some((keep, id)) = self.heads.longest(suffix.parts()) else {
+			return literal;
+		};
+		let candidate = PathRef {
+			base: next - id,
+			keep: keep as u64,
+			rest: Path::from(suffix.parts().skip(keep).collect::<Vec<_>>().join("/")),
+		};
+		match self.size(&candidate) < self.size(&literal) {
+			true => candidate,
+			false => literal,
 		}
-		best
 	}
 
 	fn hops_ref(&self, hops: &Hops, next: u64) -> HopsRef {
 		let literal = HopsRef::literal(hops.clone());
-		let query = (Tail(hops.clone()), u64::MAX);
-		let before = self.tails.range(..&query).next_back();
-		let after = self.tails.range(&query..).next();
-
-		let mut best = literal;
-		let mut best_size = self.size(&best);
-		for (Tail(chain), id) in before.into_iter().chain(after) {
-			let keep = chain
-				.iter()
-				.rev()
-				.zip(hops.iter().rev())
-				.take_while(|(a, b)| a == b)
-				.count();
-			if keep == 0 {
-				continue;
-			}
-			let literal = Hops::try_from(hops.as_slice()[..hops.len() - keep].to_vec())
-				.expect("a prefix of a valid chain is valid");
-			let candidate = HopsRef {
-				base: next - id,
-				literal,
-				keep: keep as u64,
-			};
-			let size = self.size(&candidate);
-			if size < best_size {
-				best = candidate;
-				best_size = size;
-			}
+		let Some((keep, id)) = self.tails.longest(reversed(hops)) else {
+			return literal;
+		};
+		let candidate = HopsRef {
+			base: next - id,
+			literal: Hops::try_from(hops.as_slice()[..hops.len() - keep].to_vec())
+				.expect("a prefix of a valid chain is valid"),
+			keep: keep as u64,
+		};
+		match self.size(&candidate) < self.size(&literal) {
+			true => candidate,
+			false => literal,
 		}
-		best
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::Hop;
 
 	const VERSION: Version = Version::Lite07;
 
@@ -524,27 +538,12 @@ mod tests {
 		let mut encoder = AnnounceEncoder::new(VERSION);
 		let mut decoder = AnnounceDecoder::default();
 		start(&mut encoder, &mut decoder, "a/b/c", &[1u64 << 50, 1u64 << 51]);
-		// Byte order puts `a/b-z` between `a/b` and `a/b/...`; segment order must not.
+		// Shares a byte prefix with `a/b/d`, but no second segment.
 		start(&mut encoder, &mut decoder, "a/b-z", &[3]);
 
 		let (_, wire_path, wire_hops) = encoder.start(Path::new("a/b/d").to_owned(), hops(&[5, 1u64 << 51]));
 		assert_eq!(wire_path, path(2, 2, "d"));
 		assert_eq!(wire_hops, chain(2, &[5], 1));
-	}
-
-	// The byte-level comparison must agree with comparing segment lists.
-	#[test]
-	fn segments_order_matches_segment_lists() {
-		let paths = [
-			"", "a", "a/b", "a-b", "a/b-z", "a/b/c", "ab", "a/ba", "b", "a.b/c", "a\u{0}b",
-		];
-		for x in paths {
-			for y in paths {
-				let (px, py) = (Path::new(x).to_owned(), Path::new(y).to_owned());
-				let expected = px.parts().cmp(py.parts());
-				assert_eq!(Segments(px).cmp(&Segments(py)), expected, "{x:?} vs {y:?}");
-			}
-		}
 	}
 
 	#[test]
