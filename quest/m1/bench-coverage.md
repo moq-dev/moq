@@ -17,7 +17,7 @@ and update, `moq-auth` token verification, and `moq-pattern` path matching.
   size. The in-band token path gets its bench with
   [In-band token](/quest/m1/auth/token-in-band.md), not here.
 - `moq-pattern`: matching swept over pattern count and path depth. Coordinate
-  with [Path patterns](/quest/m1/path-patterns.md) so the matcher gets one
+  with [Path patterns](/quest/m1/auth/patterns.md) so the matcher gets one
   bench, not two.
 
 Anything that fans out gets a sweep over both axes. Name each target after

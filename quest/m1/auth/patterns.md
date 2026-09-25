@@ -82,11 +82,16 @@ keeps patterns off the announce wire, so ANNOUNCE_REQUEST and
 SUBSCRIBE_NAMESPACE carry the prefix the caller asked for and a wildcard is
 an optional filter on the consume side.
 
-Replace lite-06 AUTH grant prefixes with patterns in Rust and JavaScript in
-the same change. Update the lite draft and version-gated fixtures together.
-Authorize by exact containment in the subscriber's v1 grant. Older moq-lite
-versions keep their existing prefix wire and behavior; a grant they cannot
-represent is refused, not narrowed. Cluster peers adopt nothing as a side
+AUTH has not shipped in a release yet: it lives on this line. Land patterns
+here, before the line merges, so AUTH_OK carries pattern grants (wildcards and
+literals alike) from its first release and never ships a prefix-only encoding.
+Today's encoder refuses any grant that is not a subtree
+(`rs/moq-net/src/lite/auth.rs`), so a literal grant such as `b1.hang` reaches
+the client as no grant at all while the relay's origin enforces it correctly;
+this quest removes that gap rather than widening the grant to a covering
+prefix. Replace the AUTH grant prefixes with patterns in Rust and JavaScript in
+the same change, and update the lite draft and fixtures together. Authorize by
+exact containment in the subscriber's v1 grant. Cluster peers adopt nothing as a side
 effect of this wire work.
 
 Test Rust and JavaScript interop, leading wildcards, `**` zero-segment

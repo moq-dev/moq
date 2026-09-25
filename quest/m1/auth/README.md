@@ -47,7 +47,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   root, and every token in a union shares the connection's root. Unscoped
   permission is `**`; an empty union grants nothing. Legacy AUTH wire codecs
   explicitly convert representable prefix unions, where `[""]` means all,
-  and refuse patterns they cannot represent. [Pattern interest](/quest/m1/path-patterns.md)
+  and refuse patterns they cannot represent. [Pattern interest](/quest/m1/auth/patterns.md)
   upgrades AUTH and ANNOUNCE_REQUEST wire fields together without changing
   the public pattern-valued grant type.
 - **Fail loud by aborting the session.** A publisher whose origin announces a
@@ -93,6 +93,8 @@ existing lite-06 ALPN.
   each AUTH cell's grant and that a publish outside it fails loud
 - [Unauthorized reset](/quest/m1/auth/unauthorized.md) - a subscription that
   loses access resets with a dedicated UNAUTHORIZED stream code
+- [Path patterns](/quest/m1/auth/patterns.md) - one matcher for every path
+  predicate, and AUTH_OK carries pattern grants from AUTH's first release
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
@@ -107,7 +109,6 @@ existing lite-06 ALPN.
 
 - [Origin narrowing](/quest/m1/origin-narrowing.md) - resizes a live session
   when the union shrinks, for revalidation and token expiry alike
-- [Pattern interest](/quest/m1/path-patterns.md) - moves AUTH's legacy wire prefixes to patterns along with ANNOUNCE_REQUEST
 - [Expiring media grants](/quest/m1/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token
 - [P2P](/quest/m1/p2p/README.md) - the first consumer of hop-bound peer grants

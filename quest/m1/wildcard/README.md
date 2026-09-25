@@ -47,7 +47,7 @@ production cost: zero for a live publish, something large for a standby that
 would have to start working (a cold transcoder)"
 (`drafts/draft-lcurley-moq-lite.md`). `moq_auth::Claims.publish` and
 `origin::Producer` gain versioned patterns through
-[Path patterns](/quest/m1/path-patterns.md), so advertisements reuse the
+[Path patterns](/quest/m1/auth/patterns.md), so advertisements reuse the
 same exact containment check. `Cost { warm, cold }`
 (`rs/moq-net/src/model/origin.rs:426`) is the route cost since
 [#2925](https://github.com/moq-dev/moq/pull/2925).
@@ -84,7 +84,7 @@ field.
 ### Decisions
 
 - **One prefix on the wire, one pattern in the token and the filter.** An
-  advertisement is a path prefix; the [path-patterns](/quest/m1/path-patterns.md)
+  advertisement is a path prefix; the [path-patterns](/quest/m1/auth/patterns.md)
   dialect is what tokens and the consume-side filter use, matched by the
   shared matcher, so nothing resembles a second grammar and nothing on the
   wire spells a wildcard.
@@ -192,7 +192,7 @@ field.
 - **Patterns are independent of clustering.** The `moq-pattern` crate owns
   the matching semantics tokens and filters share, with no draft of its own;
   no announce message carries a pattern on either protocol (AUTH grants on
-  lite-06 do, per [Path patterns](/quest/m1/path-patterns.md)). moq-cluster adds hop
+  lite-06 do, per [Path patterns](/quest/m1/auth/patterns.md)). moq-cluster adds hop
   lists, costs, pool selection, and request resolution to prefix
   advertisements.
 
@@ -266,7 +266,7 @@ than announce state.
 
 ## Related
 
-- [path-patterns](/quest/m1/path-patterns.md) - owns the pattern dialect
+- [path-patterns](/quest/m1/auth/patterns.md) - owns the pattern dialect
   and the shared matcher advertisements reuse
 - [archive](/quest/m1/archive/README.md) - an archive advertises the catch-all
   pattern, and its catalog names the generations a wildcard cannot
