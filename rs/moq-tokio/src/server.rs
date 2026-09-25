@@ -222,13 +222,13 @@ pub struct Server {
 	websocket: Option<crate::websocket::Listener>,
 }
 
-/// A clone of a worker member's QUIC endpoint, keeping its socket in the
-/// reuseport group after the serving [`Server`] is gone.
+/// A worker member's QUIC socket, kept in the reuseport group after the serving
+/// [`Server`] is gone.
 ///
-/// Dropping a serving server closes its socket, which renumbers the survivors.
-/// The worker group holds one of these per member until serving has stopped,
-/// so a dropped or finished member leaves the steering intact. The fields are
-/// never read: holding the endpoint clones is what keeps the sockets open.
+/// Dropping or closing a serving server closes its socket, which renumbers the
+/// survivors. The worker group holds one of these per member until serving has
+/// stopped, so a dropped or finished member leaves the steering intact. The
+/// fields are never read: holding the sockets is what keeps them open.
 ///
 /// Only compiled with a QUIC backend, matching the worker group that is its
 /// only caller.
@@ -237,7 +237,7 @@ pub struct Server {
 #[cfg(feature = "noq")]
 pub(crate) struct SocketRetainer {
 	#[cfg(feature = "noq")]
-	noq: Option<web_transport_moq::noq::Endpoint>,
+	noq: Option<std::sync::Arc<tokio::net::UdpSocket>>,
 }
 
 impl Server {
@@ -445,7 +445,7 @@ impl Server {
 	pub(crate) fn retain(&self) -> SocketRetainer {
 		SocketRetainer {
 			#[cfg(feature = "noq")]
-			noq: self.noq.as_ref().map(|server| server.quic.clone()),
+			noq: self.noq.as_ref().and_then(|server| server.retain()),
 		}
 	}
 
@@ -665,11 +665,9 @@ impl Server {
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		self.streams.shutdown().await;
 
-		self.close();
-
 		#[cfg(feature = "noq")]
-		if self.noq.is_some() {
-			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+		if let Some(noq) = self.noq.take() {
+			noq.shutdown().await;
 		}
 		#[cfg(feature = "iroh")]
 		if let Some(iroh) = self.iroh.take() {
@@ -681,10 +679,10 @@ impl Server {
 		}
 	}
 
-	/// Start the synchronous half of listener shutdown.
+	/// Close the QUIC connections without waiting for the socket, as a drop must.
 	fn close(&mut self) {
 		#[cfg(feature = "noq")]
-		if let Some(noq) = self.noq.as_mut() {
+		if let Some(noq) = self.noq.as_ref() {
 			noq.close();
 		}
 	}
@@ -714,10 +712,12 @@ impl Listener {
 		self.server.accept_next().await
 	}
 
-	/// Close every listener, giving in-flight connections a moment to see the
-	/// shutdown.
+	/// Close every listener and connection, once each QUIC peer has been sent the
+	/// close.
 	///
-	/// Consumes the listener so its bound sockets are released before this returns.
+	/// Returns once every bound socket is released, even if accepted sessions are
+	/// still held, so the address can be bound again at once. A worker group
+	/// member's socket stays in its group until the group is gone.
 	pub async fn close(mut self) {
 		self.server.shutdown().await;
 	}
@@ -1638,6 +1638,39 @@ mod tests {
 		let _rebound = tokio::net::TcpListener::bind(addr)
 			.await
 			.expect("close must release the listener socket");
+	}
+
+	/// Closing a listener must release its UDP socket before returning, even while
+	/// an accepted session still holds its QUIC connection, so a restart can rebind
+	/// the port at once.
+	#[cfg(feature = "noq")]
+	#[tokio::test]
+	async fn close_releases_quic_socket() {
+		let config = crate::listen::Config {
+			bind: Some("[::]:0".parse().unwrap()),
+			tls: crate::tls::Listen {
+				generate: vec!["localhost".into()],
+				..Default::default()
+			},
+			..Default::default()
+		};
+		let server = config.init(Default::default()).expect("server");
+		let mut listener = server.listen().await.expect("listen");
+		let addr = listener.local_addr().expect("local addr");
+
+		let origin = crate::origin::spawn();
+		let mut client = crate::connect::Config::default();
+		client.tls.insecure = Some(true);
+		let client = client.init(Default::default()).expect("client").with_publisher(&origin);
+		let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+		let connection = client.with_reconnect(false).connect(url);
+
+		let request = listener.accept().await.expect("no incoming connection");
+		let session = request.with_publisher(&origin).ok().await.expect("server handshake");
+
+		listener.close().await;
+		std::net::UdpSocket::bind(addr).expect("close must release the QUIC socket");
+		drop((session, connection));
 	}
 
 	/// An explicit QUIC bind cannot be honored without a QUIC backend.

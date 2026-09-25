@@ -16,6 +16,8 @@ export const SetupOption = {
 	RelayCost: 0x40b56n,
 	/** SOLICIT, from the MoQ Solicit extension. See `solicit.ts`. */
 	Solicit: 0x40b5an,
+	/** HIDDEN, from the MoQ Hidden extension. See `hidden.ts`. */
+	Hidden: 0x40b5cn,
 } as const;
 
 /// Setup Options — used in SETUP messages.
@@ -202,6 +204,8 @@ const MSG_PARAM_SUBSCRIBER_PRIORITY = 0x20n;
 const MSG_PARAM_GROUP_ORDER = 0x22n;
 /// ROUTE_COST, from the MoQ Cluster extension. See `cluster.ts`.
 const MSG_PARAM_ROUTE_COST = 0x40b58n;
+/// HIDDEN, from the MoQ Hidden extension. See `hidden.ts`.
+const MSG_PARAM_HIDDEN = 0x40b5en;
 
 // Bytes parameter IDs (odd)
 const MSG_PARAM_LARGEST_OBJECT = 0x09n;
@@ -225,6 +229,7 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_MAX_CACHE_DURATION:
 		case MSG_PARAM_EXPIRES:
 		case MSG_PARAM_ROUTE_COST:
+		case MSG_PARAM_HIDDEN:
 			return "varint";
 		case MSG_PARAM_PUBLISHER_PRIORITY:
 		case MSG_PARAM_SUBSCRIBER_PRIORITY:
@@ -339,6 +344,19 @@ export class Parameters {
 
 	set maxCacheDuration(v: bigint) {
 		this.vars.set(MSG_PARAM_MAX_CACHE_DURATION, v);
+	}
+
+	/** HIDDEN (MoQ Hidden): also advertise hidden namespaces. Absent and 0 both mean no. */
+	get hidden(): boolean {
+		const v = this.vars.get(MSG_PARAM_HIDDEN);
+		if (v === undefined || v === 0n) return false;
+		if (v === 1n) return true;
+		throw new Error(`invalid HIDDEN parameter: ${v}`);
+	}
+
+	set hidden(v: boolean) {
+		if (v) this.vars.set(MSG_PARAM_HIDDEN, 1n);
+		else this.vars.delete(MSG_PARAM_HIDDEN);
 	}
 
 	// --- Bytes accessors ---

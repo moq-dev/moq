@@ -237,6 +237,21 @@ async def test_video_publish_consume():
         break
 
 
+async def test_video_publish_named_track():
+    origin = moq.OriginProducer()
+    broadcast = create_announced(origin, "video-named-test")
+    media = broadcast.publish_video(moq.VideoFormat.AVC3, h264_init(), track="hd")
+    assert media.name == "hd"
+
+    consumer = origin.consume()
+
+    async for announcement in consumer.announced():
+        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
+        catalog = await broadcast_consumer.catalog()
+        assert list(catalog.video.keys()) == ["hd"]
+        break
+
+
 async def test_multiple_frames_ordering():
     origin = moq.OriginProducer()
     broadcast = create_announced(origin, "ordering-test")
@@ -1117,35 +1132,34 @@ async def test_decode_video_format():
     broadcast.finish()
 
 
-async def test_unannounce_keeps_local_discovery():
+async def test_broadcast_is_reachable_only_while_announced():
     origin = moq.OriginProducer()
     broadcast = origin.create_broadcast("live")
     track = broadcast.publish_track("events")
-
     consumer = origin.consume()
+    with pytest.raises(Exception):
+        await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+
+    broadcast.announce()
     announced = consumer.announced()
     first = await asyncio.wait_for(anext(announced), timeout=5.0)
     assert first.prefix == "live"
     assert first.active
-    assert first.route.cost == 0
-
-    broadcast.announce(moq.Route(cost=3))
-    advertised = await asyncio.wait_for(anext(announced), timeout=5.0)
-    assert advertised.active
-    assert advertised.route.cost == 3
 
     broadcast.unannounce()
-    local = await asyncio.wait_for(anext(announced), timeout=5.0)
-    assert local.prefix == "live"
-    assert local.active
-    assert local.route.cost == 0
+    retracted = await asyncio.wait_for(anext(announced), timeout=5.0)
+    assert retracted.prefix == "live"
+    assert not retracted.active
+    with pytest.raises(Exception):
+        await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
 
+    broadcast.announce()
+    back = await asyncio.wait_for(anext(announced), timeout=5.0)
+    assert back.active
     await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+    announced.cancel()
     track.finish()
     broadcast.finish()
-    ended = await asyncio.wait_for(anext(announced), timeout=5.0)
-    assert not ended.active
-    announced.cancel()
 
 
 async def test_announced_pattern_captures():

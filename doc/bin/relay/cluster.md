@@ -183,5 +183,12 @@ the relay minted for itself and checks locally, and never receive
 `cluster.token`. Dials retry forever with capped backoff, so a rejected peer
 is loud in the logs rather than fatal. See [Authentication](/bin/relay/auth#mtls).
 
+A relay records whether each route entered here or came from a peer, which the
+hop list alone cannot say: a client and a peer each add one hop. Routes over a
+dial this relay made, and over an accepted LAN peer, count as a peer's. An
+accepted peer counts only when its grant sets `peer: true`; otherwise it looks
+like a client ingesting here. An embedder reads this as `Route::source()` and
+filters with `origin::Consumer::local()`.
+
 The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) shows the cluster
 as this relay sees it.

@@ -8,3 +8,4 @@ local.properties
 moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/
 moq-ffi/src/jvmMain/resources/
 moq-ffi/src/androidMain/jniLibs/
+moq/src/jvmAndAndroidTest/kotlin/dev/moq/docs/Samples.kt

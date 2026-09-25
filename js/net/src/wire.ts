@@ -42,6 +42,8 @@ export interface OriginConsumer {
 	routes(path: Path.Valid): boolean;
 	readonly broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
 	readonly advertised: Getter<ReadonlyMap<Path.Valid, Advertised> | undefined>;
+	/** The announced local broadcast at `path`, when it is the route peers are offered there. */
+	local(path: Path.Valid): broadcast.Consumer | undefined;
 	demand(path: Path.Valid): Promise<broadcast.Consumer | undefined>;
 }
 

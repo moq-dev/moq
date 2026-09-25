@@ -2,9 +2,9 @@
 //! per-source:
 //! - macOS camera -> AVFoundation, screen -> ScreenCaptureKit, both yielding
 //!   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
-//! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420), X11 display and
-//!   window -> X11, Wayland display -> xdg-desktop-portal + PipeWire
-//!   (`pipewire` feature).
+//! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420), or a PipeWire
+//!   camera node (`pipewire` feature), X11 display and window -> X11, Wayland
+//!   display -> xdg-desktop-portal + PipeWire (`pipewire` feature).
 //! - Windows camera -> native Media Foundation (`IMFSourceReader`), screen ->
 //!   DXGI Desktop Duplication, window -> GDI (BGRA -> CPU I420).
 //!
@@ -39,11 +39,14 @@ mod surface;
 // Native V4L2 camera capture on Linux.
 #[cfg(target_os = "linux")]
 mod v4l2;
+// The mode choice V4L2 and PipeWire cameras share.
+#[cfg(target_os = "linux")]
+mod mode;
 // Native X11 display and window capture, including the portal fallback.
 #[cfg(target_os = "linux")]
 mod x11;
 
-// Portal + PipeWire screen capture on Linux.
+// Portal + PipeWire screen capture and PipeWire camera capture on Linux.
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pipewire;
 
@@ -82,6 +85,14 @@ pub enum Source {
 	/// The identifiers from [`cameras`] are an AVFoundation `uniqueID` on macOS,
 	/// a `/dev/videoN` path on Linux, and a Media Foundation symbolic link on
 	/// Windows. Bare numeric indices remain accepted on Linux and Windows.
+	///
+	/// With the `pipewire` feature, Linux also lists PipeWire camera nodes as
+	/// `pipewire:<node name>`, and `pipewire` alone opens the camera with the
+	/// highest session priority, which the session manager treats as default.
+	/// The id picks the backend: a `/dev/videoN` path always opens V4L2, and a
+	/// `pipewire` id always opens PipeWire. `None` opens `/dev/video0`, except
+	/// inside a sandbox (Flatpak or Snap), where it opens PipeWire's default
+	/// camera through the camera portal.
 	Camera(Option<String>),
 
 	/// A whole display. `None` opens the main display.
@@ -364,7 +375,15 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 			}
 			#[cfg(target_os = "linux")]
 			{
-				v4l2::open(config, device.as_deref()).await
+				match LinuxCamera::select(device.as_deref(), sandboxed()) {
+					LinuxCamera::V4l2(device) => v4l2::open(config, device).await,
+					#[cfg(feature = "pipewire")]
+					LinuxCamera::PipeWire(node) => pipewire::camera::open(config, node).await,
+					#[cfg(not(feature = "pipewire"))]
+					LinuxCamera::PipeWire(_) => Err(Error::Unsupported(
+						"PipeWire camera capture without the `pipewire` feature".to_string(),
+					)),
+				}
 			}
 			#[cfg(target_os = "windows")]
 			{
@@ -436,6 +455,12 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 }
 
 /// List the available cameras and the identifiers [`Source::Camera`] accepts.
+///
+/// On Linux with the `pipewire` feature, V4L2 devices come first and PipeWire
+/// camera nodes follow, so a webcam that PipeWire also serves appears once per
+/// backend. A session without PipeWire lists V4L2 alone. Inside a sandbox the
+/// PipeWire nodes come through the camera portal, which may ask the user for
+/// camera access.
 pub async fn cameras() -> Result<Vec<Camera>, Error> {
 	#[cfg(target_os = "macos")]
 	{
@@ -443,7 +468,10 @@ pub async fn cameras() -> Result<Vec<Camera>, Error> {
 	}
 	#[cfg(target_os = "linux")]
 	{
-		blocking(v4l2::cameras).await
+		let cameras = blocking(v4l2::cameras).await?;
+		#[cfg(feature = "pipewire")]
+		let cameras = [cameras, pipewire::camera::cameras().await?].concat();
+		Ok(cameras)
 	}
 	#[cfg(target_os = "windows")]
 	{
@@ -462,9 +490,10 @@ pub async fn cameras() -> Result<Vec<Camera>, Error> {
 /// are ones [`open`] could negotiate rather than everything the driver
 /// advertises.
 ///
-/// Linux only; other backends return [`Error::Unsupported`].
+/// Linux only (V4L2, and PipeWire cameras with the `pipewire` feature); other
+/// platforms return [`Error::Unsupported`].
 /// Rates are exact device reports and [`Config::framerate`] accepts the same type.
-/// V4L2 prefers the closest geometry, then the accepted rate
+/// Both Linux backends prefer the closest geometry, then the accepted rate
 /// nearest that request, then the cheaper conversion format.
 ///
 /// An empty list is not a failure: it means the driver enumerated nothing this
@@ -473,8 +502,18 @@ pub async fn camera_modes(camera: Option<&str>) -> Result<Vec<Mode>, Error> {
 	let _ = camera;
 	#[cfg(target_os = "linux")]
 	{
-		let camera = camera.map(str::to_string);
-		blocking(move || v4l2::modes(camera.as_deref())).await
+		match LinuxCamera::select(camera, sandboxed()) {
+			LinuxCamera::V4l2(camera) => {
+				let camera = camera.map(str::to_string);
+				blocking(move || v4l2::modes(camera.as_deref())).await
+			}
+			#[cfg(feature = "pipewire")]
+			LinuxCamera::PipeWire(node) => pipewire::camera::modes(node).await,
+			#[cfg(not(feature = "pipewire"))]
+			LinuxCamera::PipeWire(_) => Err(Error::Unsupported(
+				"PipeWire camera modes without the `pipewire` feature".to_string(),
+			)),
+		}
 	}
 	#[cfg(not(target_os = "linux"))]
 	{
@@ -538,6 +577,52 @@ pub async fn apps() -> Result<Vec<App>, Error> {
 	}
 }
 
+/// The id prefix of a PipeWire camera, and on its own the default one.
+#[cfg(any(target_os = "linux", test))]
+const PIPEWIRE: &str = "pipewire";
+
+/// The Linux backend a [`Source::Camera`] selector names.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum LinuxCamera<'a> {
+	/// A V4L2 device, by path or index. `None` opens `/dev/video0`.
+	V4l2(Option<&'a str>),
+	/// A PipeWire camera, by `node.name`. `None` picks the camera with the
+	/// highest session priority, the one the session manager links by default.
+	PipeWire(Option<&'a str>),
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl<'a> LinuxCamera<'a> {
+	/// Parse a camera selector. A sandbox has no V4L2 devices to open by
+	/// default, so its default camera is PipeWire's, reached through the portal.
+	fn select(selector: Option<&'a str>, sandboxed: bool) -> Self {
+		match selector {
+			None if sandboxed => Self::PipeWire(None),
+			None => Self::V4l2(None),
+			Some(PIPEWIRE) => Self::PipeWire(None),
+			Some(selector) => match selector.strip_prefix(PIPEWIRE).and_then(|rest| rest.strip_prefix(':')) {
+				Some(name) => Self::PipeWire(Some(name)),
+				None => Self::V4l2(Some(selector)),
+			},
+		}
+	}
+}
+
+/// Whether this process runs in a Flatpak or Snap sandbox. Without the
+/// `pipewire` feature there is no portal to use, so it never matters.
+#[cfg(target_os = "linux")]
+fn sandboxed() -> bool {
+	#[cfg(feature = "pipewire")]
+	{
+		ashpd::is_sandboxed()
+	}
+	#[cfg(not(feature = "pipewire"))]
+	{
+		false
+	}
+}
+
 /// Run synchronous platform enumeration off the async runtime's worker threads.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 async fn blocking<T, F>(f: F) -> Result<T, Error>
@@ -548,4 +633,35 @@ where
 	tokio::task::spawn_blocking(f)
 		.await
 		.map_err(|err| Error::Codec(anyhow::anyhow!("capture enumeration thread failed: {err}")))?
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn camera_selectors_name_their_backend() {
+		assert_eq!(LinuxCamera::select(None, false), LinuxCamera::V4l2(None));
+		assert_eq!(LinuxCamera::select(None, true), LinuxCamera::PipeWire(None));
+		for sandboxed in [false, true] {
+			assert_eq!(
+				LinuxCamera::select(Some("/dev/video2"), sandboxed),
+				LinuxCamera::V4l2(Some("/dev/video2"))
+			);
+			assert_eq!(LinuxCamera::select(Some("1"), sandboxed), LinuxCamera::V4l2(Some("1")));
+			assert_eq!(
+				LinuxCamera::select(Some("pipewire"), sandboxed),
+				LinuxCamera::PipeWire(None)
+			);
+			assert_eq!(
+				LinuxCamera::select(Some("pipewire:v4l2_input.pci-0000_00_14.0-usb-0_4_1.0"), sandboxed),
+				LinuxCamera::PipeWire(Some("v4l2_input.pci-0000_00_14.0-usb-0_4_1.0"))
+			);
+		}
+		// Only the whole prefix selects PipeWire; anything else is a device path.
+		assert_eq!(
+			LinuxCamera::select(Some("pipewired"), false),
+			LinuxCamera::V4l2(Some("pipewired"))
+		);
+	}
 }
