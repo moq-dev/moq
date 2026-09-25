@@ -323,6 +323,14 @@ pub enum Error {
 	#[error("not found")]
 	NotFound,
 
+	/// A joining FETCH named a request that is not an active subscription.
+	#[error("invalid joining request ID")]
+	InvalidJoiningRequestId,
+
+	/// A FETCH range is empty or lies beyond the published objects.
+	#[error("invalid fetch range")]
+	InvalidRange,
+
 	/// A broadcast was requested that is neither announced nor served by a dynamic
 	/// router, so there is no route to it.
 	#[error("unroutable")]

@@ -41,7 +41,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Full history so `just check` can diff against origin/$GITHUB_BASE_REF.
+          # Full history so `just ci check` can diff against origin/$GITHUB_BASE_REF.
           fetch-depth: 0
 
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
@@ -77,7 +77,7 @@ jobs:
         run: bash .claude/hooks/direnv.test.sh
 
       - name: Check
-        run: nix develop --command just check
+        run: nix develop --command just ci check
         env:
           MOQ_STRICT: 1
 
@@ -97,7 +97,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Full history so `just test` can diff against origin/$GITHUB_BASE_REF.
+          # Full history so `just ci test` can diff against origin/$GITHUB_BASE_REF.
           fetch-depth: 0
 
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
@@ -120,7 +120,7 @@ jobs:
       # NEXTEST_PROFILE picks up the longer hang timeout in .config/nextest.toml;
       # without it a runner under load could trip the local one.
       - name: Test
-        run: nix develop --command just test
+        run: nix develop --command just ci test
         env:
           MOQ_STRICT: 1
           NEXTEST_PROFILE: ci

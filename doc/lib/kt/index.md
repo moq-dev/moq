@@ -51,6 +51,8 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
+`MediaProducer.flush(timestampUs)` records a locally encoded frame's transport handoff on the broadcast media clock. Call it after `writeFrame` for live encoder output; omit it for file, pipe, and network imports. `MediaProducer` is a typealias, so the generated method is available directly.
+
 The three advertising operations: `moq.createBroadcast(path)` (or
 `origin.createBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.announce(route)` / `broadcast.unannounce()` own that exact-path

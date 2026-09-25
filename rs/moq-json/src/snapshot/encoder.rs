@@ -197,7 +197,8 @@ pub struct Encoder<T> {
 	/// snapshot, which is what makes that first [`update`](Self::update) a keyframe.
 	last: Option<Baseline>,
 
-	/// Reused key buffers for comparing unchanged fields without per-update allocations.
+	/// Reused key buffers for comparing unchanged fields without per-update allocations, and the
+	/// memoized root entries that let an unchanged entry skip the baseline walk.
 	scratch: RefCell<crate::diff::Scratch>,
 
 	/// The current group's DEFLATE encoder (one window per group), `Some` while compressing.
@@ -229,7 +230,7 @@ impl<T> Encoder<T> {
 		Self {
 			config,
 			last: None,
-			scratch: RefCell::new(crate::diff::Scratch::default()),
+			scratch: RefCell::new(crate::diff::Scratch::memoized()),
 			flate: None,
 			delta_bytes: 0,
 			snapshot_len: 0,
@@ -317,6 +318,7 @@ impl<T: Serialize> Encoder<T> {
 
 		// An empty object patch with no forced null means the value is unchanged: encode nothing.
 		if !forced_snapshot && patch.is_empty() {
+			self.scratch.get_mut().commit_memo();
 			return Ok(None);
 		}
 
@@ -363,6 +365,7 @@ impl<T: Serialize> Encoder<T> {
 			unreachable!("a parsed snapshot precedes any delta")
 		};
 		crate::merge::apply_generated_bytes(last, &bytes)?;
+		self.scratch.get_mut().commit_memo();
 
 		Ok(Some(Encoded {
 			payload,
@@ -445,6 +448,8 @@ impl<T: Serialize> Encoder<T> {
 		self.flate = flate;
 		self.last = Some(last);
 		self.resync = false;
+		// Seeded from the snapshot rather than a diff, so no root entry is memoized against it yet.
+		self.scratch.get_mut().clear_memo();
 
 		Ok(Encoded {
 			payload,
@@ -749,6 +754,216 @@ mod test {
 		let emitted: Value = serde_json::from_slice(&payload).unwrap();
 		assert_eq!(emitted, json!({ "n": 0 }));
 		assert_eq!(encoder.value(), Some(&emitted), "the baseline must be what was emitted");
+	}
+
+	/// A root entry the memo has not seen yet is diffed from the bytes the memo recorded, not
+	/// serialized again: a second pass could disagree with the first, leaving the memo describing a
+	/// value the baseline never held.
+	#[test]
+	fn a_delta_serializes_each_entry_once() {
+		let value = std::collections::BTreeMap::from([("row", Ticking(std::cell::Cell::new(0)))]);
+		let mut encoder = Encoder::new(Config::default().with_delta_ratio(100));
+		encoder.update(&value).unwrap().expect("a snapshot").commit();
+
+		let frame = encoder.update(&value).unwrap().expect("a delta");
+		assert!(!frame.keyframe);
+		let emitted: Value = serde_json::from_slice(&frame.payload).unwrap();
+		frame.commit();
+
+		assert_eq!(
+			value["row"].0.get(),
+			2,
+			"each update should serialize the entry exactly once"
+		);
+		assert_eq!(emitted, json!({ "row": { "n": 1 } }));
+		assert_eq!(encoder.value(), Some(&emitted), "the baseline must be what was emitted");
+	}
+
+	/// A key repeated below the root is refused whether the memo meets it in a new entry or in a
+	/// value replaced wholesale, as the value diff refuses it. Letting one into the memo would pair
+	/// the repeats by position, where the consumer keeps the last.
+	#[test]
+	fn a_repeated_nested_key_is_refused_through_the_memo() {
+		use serde::ser::SerializeMap;
+
+		/// `{"row": {"o": ..}}`, where `o` is `1` or an object that repeats a key.
+		struct Doc {
+			repeat: bool,
+		}
+		struct Row<'a>(&'a Doc);
+		struct Repeat;
+
+		impl Serialize for Repeat {
+			fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+				let mut map = serializer.serialize_map(Some(2))?;
+				map.serialize_entry("x", &1)?;
+				map.serialize_entry("x", &2)?;
+				map.end()
+			}
+		}
+		impl Serialize for Row<'_> {
+			fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+				let mut map = serializer.serialize_map(Some(1))?;
+				match self.0.repeat {
+					true => map.serialize_entry("o", &Repeat)?,
+					false => map.serialize_entry("o", &1)?,
+				}
+				map.end()
+			}
+		}
+		impl Serialize for Doc {
+			fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+				let mut map = serializer.serialize_map(Some(1))?;
+				map.serialize_entry("row", &Row(self))?;
+				map.end()
+			}
+		}
+
+		let config = Config::default().with_delta_ratio(100);
+		let (plain, repeat) = (Doc { repeat: false }, Doc { repeat: true });
+
+		// A new entry: the first diff after a snapshot has nothing memoized yet.
+		let mut encoder = Encoder::<Doc>::new(config.clone());
+		encoder.update(&plain).unwrap().expect("a snapshot").commit();
+		let err = encoder.encode(&repeat).unwrap_err();
+		assert!(err.to_string().contains("duplicate JSON object key"), "{err}");
+
+		// A memoized entry whose scalar becomes an object.
+		let mut encoder = Encoder::<Doc>::new(config);
+		encoder.update(&plain).unwrap().expect("a snapshot").commit();
+		assert!(encoder.update(&plain).unwrap().is_none(), "unchanged, now memoized");
+		let err = encoder.encode(&repeat).unwrap_err();
+		assert!(err.to_string().contains("duplicate JSON object key"), "{err}");
+	}
+
+	/// A root object whose entries serialize in the order given, sorted or not.
+	struct Rows(Vec<(String, Value)>);
+
+	impl Serialize for Rows {
+		fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+			serializer.collect_map(self.0.iter().map(|(key, value)| (key, value)))
+		}
+	}
+
+	/// A deterministic xorshift, so a failure replays.
+	struct Rng(u64);
+
+	impl Rng {
+		fn below(&mut self, n: u64) -> u64 {
+			self.0 ^= self.0 << 13;
+			self.0 ^= self.0 >> 7;
+			self.0 ^= self.0 << 17;
+			self.0 % n
+		}
+
+		/// A row value covering what the memo has to get right: nested objects that gain and lose
+		/// keys, values that change type, nulls in and out of arrays, and strings that look like JSON.
+		fn row(&mut self) -> Value {
+			let strings = ["plain", "q\"uote", "back\\slash", "},{\"x\":1", "null", "a:b,c"];
+			let mut row = serde_json::Map::new();
+			row.insert(
+				"n".into(),
+				match self.below(30) {
+					0 => Value::Null,
+					n => json!(n % 4),
+				},
+			);
+			if self.below(4) > 0 {
+				row.insert("s".into(), json!(strings[self.below(strings.len() as u64) as usize]));
+			}
+			let mut nested = serde_json::Map::new();
+			nested.insert("a".into(), json!(self.below(3)));
+			if self.below(3) == 0 {
+				nested.insert("b".into(), json!([self.below(2), null]));
+			}
+			if self.below(40) == 0 {
+				nested.insert("c".into(), Value::Null);
+			}
+			row.insert("o".into(), Value::Object(nested));
+			row.insert(
+				"t".into(),
+				match self.below(5) {
+					0 => json!({ "k": self.below(2) }),
+					1 => json!({}),
+					2 => json!([{ "k": null }]),
+					3 => json!(1.5 + self.below(2) as f64),
+					_ => json!("t"),
+				},
+			);
+			if self.below(60) == 0 {
+				row.insert("z".into(), Value::Null);
+			}
+			Value::Object(row)
+		}
+	}
+
+	/// The memo is a shortcut past the value diff, so it must never change a frame: every payload and
+	/// keyframe has to match an encoder diffing without it, through inserts, deletions, reorders,
+	/// shape changes, forced snapshots, and group rolls.
+	#[test]
+	fn memo_matches_the_value_diff() {
+		for (seed, compression) in [
+			(1, Compression::None),
+			(2, Compression::Deflate),
+			(3, Compression::None),
+		] {
+			let mut config = Config::default().with_delta_ratio(2);
+			config.compression = compression;
+			let mut memoized = Encoder::<Rows>::new(config.clone());
+			let mut plain = Encoder::<Rows>::new(config);
+			plain.scratch = RefCell::new(crate::diff::Scratch::default());
+
+			let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ seed);
+			let mut rows: Vec<(String, Value)> = (0..40).map(|i| (format!("row-{i:03}"), rng.row())).collect();
+			let mut emitted = 0;
+			for tick in 0..400 {
+				for row in rows.iter_mut() {
+					if rng.below(4) == 0 {
+						row.1 = rng.row();
+					}
+				}
+				if rng.below(3) == 0 {
+					let index = rng.below(rows.len() as u64) as usize;
+					rows.remove(index);
+				}
+				if rng.below(3) == 0 {
+					rows.push((format!("row-{:03}", 40 + rng.below(40)), rng.row()));
+				}
+				rows.sort_by(|a, b| a.0.cmp(&b.0));
+				rows.dedup_by(|a, b| a.0 == b.0);
+				// Now and then, a root that stops ascending.
+				if seed == 3 && rng.below(10) == 0 {
+					let (a, b) = (
+						rng.below(rows.len() as u64) as usize,
+						rng.below(rows.len() as u64) as usize,
+					);
+					rows.swap(a, b);
+				}
+
+				let value = Rows(rows.clone());
+				let want = plain.update(&value).unwrap().map(|frame| {
+					let encoded = (*frame).clone();
+					frame.commit();
+					encoded
+				});
+				let got = memoized.update(&value).unwrap().map(|frame| {
+					let encoded = (*frame).clone();
+					frame.commit();
+					encoded
+				});
+				match (want, got) {
+					(None, None) => {}
+					(Some(want), Some(got)) => {
+						assert_eq!(got.keyframe, want.keyframe, "seed {seed} tick {tick}: keyframe");
+						assert_eq!(got.payload, want.payload, "seed {seed} tick {tick}: payload");
+						emitted += usize::from(!got.keyframe);
+					}
+					(want, got) => panic!("seed {seed} tick {tick}: {want:?} vs {got:?}"),
+				}
+				assert_eq!(memoized.value(), plain.value(), "seed {seed} tick {tick}: baseline");
+			}
+			assert!(emitted > 100, "seed {seed}: only {emitted} deltas exercised the memo");
+		}
 	}
 
 	#[test]

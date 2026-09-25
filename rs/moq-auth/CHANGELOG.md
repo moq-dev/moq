@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/moq-dev/moq/compare/moq-auth-v0.1.0...moq-auth-v0.1.1) - 2026-09-25
+
+### Added
+
+- *(net)* an announce says whether its route entered here or from a peer ([#3972](https://github.com/moq-dev/moq/pull/3972))
+
 ## [0.1.0](https://github.com/moq-dev/moq/releases/tag/moq-auth-v0.1.0) - 2026-09-23
 
 ### Added
