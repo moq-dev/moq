@@ -798,7 +798,7 @@ mod tests {
 
 		let anchor = std::time::Instant::now();
 		let ms = std::time::Duration::from_millis;
-		let pts = |millis| Timestamp::from_micros(millis * 1_000).unwrap();
+		let pts = |millis: u64| Timestamp::from_micros(millis * 1_000).unwrap();
 		tracks[0].flush(pts(0), anchor).unwrap();
 		// A constant 200ms offset behind the other rendition is not jitter.
 		tracks[1].flush(pts(0), anchor + ms(200)).unwrap();

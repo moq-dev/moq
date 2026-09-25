@@ -1,5 +1,4 @@
 import { describe, expect, mock, test } from "bun:test";
-import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
