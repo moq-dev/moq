@@ -1117,7 +1117,7 @@ struct PrefixRun {
 impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 	fn new(subscriber: Subscriber<S>, prefix: PathOwned) -> Self {
 		Self {
-			replaying: Some(subscriber.origin.replaying()),
+			replaying: Some(subscriber.origin.replaying(&prefix)),
 			subscriber,
 			prefix,
 			state: PrefixState::Open,
@@ -1263,13 +1263,18 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					// request that arrives in between: its wake finds no waiter, and
 					// nothing else re-polls this machine.
 					loop {
+						// Land before decoding past the boundary, so no live update
+						// enters the origin ahead of the marker.
+						Self::poll_landing(&mut self.replaying, &mut run.landing, waiter);
 						match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(&mut cx) {
 							Poll::Ready(Ok(Some(announce))) => {
+								// The count is of ANNOUNCE_STARTs, not every message.
+								let start = matches!(announce, lite::AnnounceBroadcast::Active { .. });
 								self.subscriber.handle_announce(&self.prefix, announce, run)?;
 								match &mut run.landing {
-									Landing::Count(remaining) => *remaining = remaining.saturating_sub(1),
+									Landing::Count(remaining) if start => *remaining = remaining.saturating_sub(1),
 									Landing::Quiet(quiet) => quiet.heard(),
-									Landing::Landed => {}
+									Landing::Count(_) | Landing::Landed => {}
 								}
 							}
 							Poll::Ready(Ok(None)) => {
@@ -1289,7 +1294,6 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					// Materialize requested paths under the attached routes; leaves the
 					// waiter registered on every route's request queue.
 					run.announced.poll_serve(&self.subscriber, waiter);
-					Self::poll_landing(&mut self.replaying, &mut run.landing, waiter);
 					return Poll::Pending;
 				}
 			}
@@ -2456,6 +2460,54 @@ mod tests {
 		assert!(announced.contains(&path.clone()), "the announce was not recorded");
 		announced.retire(&path.clone());
 		cursor.assert_next_ended("room/host");
+	}
+
+	/// ANNOUNCE_OK's count lands the initial set at exactly that many
+	/// ANNOUNCE_STARTs: an unknown message does not count toward it, and a live
+	/// update buffered right behind the set does not enter the origin before the
+	/// marker.
+	#[tokio::test(start_paused = true)]
+	async fn the_count_lands_at_the_last_initial_start() {
+		const VERSION: Version = Version::Lite06;
+		let start = |suffix| lite::AnnounceBroadcast::Active {
+			suffix: Path::new(suffix),
+			hops: crate::Hops::new(),
+			cost: crate::origin::Cost::default(),
+		};
+		let mut script = Vec::new();
+		lite::AnnounceOk {
+			origin: crate::Hop::new(9).unwrap(),
+			active: 1,
+		}
+		.encode(&mut script, VERSION)
+		.unwrap();
+		// An unknown announce type with an empty body, which decodes as `Skipped`.
+		script.extend([0x3f, 0x00]);
+		start("a").encode(&mut script, VERSION).unwrap();
+		start("b").encode(&mut script, VERSION).unwrap();
+
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
+			session: crate::lite::test_transport::ScriptedSession::new(script),
+			origin,
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			cost: Some(1),
+			peer_hop: None,
+			going_away: Default::default(),
+		});
+		let mut prefix = AnnouncePrefix::new(subscriber, Path::new("").to_owned());
+		let mut cursor = consumer.announced();
+
+		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		cursor.assert_next_active("a");
+		cursor.assert_next_live();
+		cursor.assert_next_active("b");
 	}
 }
 

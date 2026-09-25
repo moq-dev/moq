@@ -1286,19 +1286,26 @@ impl Producer {
 		)
 	}
 
-	/// Register a remote announce source that is replaying its initial set.
+	/// Register a remote announce source replaying its initial set under
+	/// `prefix`, relative to this producer's root.
 	///
-	/// Every announce cursor registered while the guard lives withholds its
-	/// [`AnnounceEvent::Live`] marker until the guard drops, so a session drops it
-	/// once the peer's initial routes are in the table (or the session dies).
-	pub(crate) fn replaying(&self) -> Replaying {
+	/// Every announce cursor overlapping that prefix and registered while the
+	/// guard lives withholds its [`AnnounceEvent::Live`] marker until the guard
+	/// drops, so a session drops it once the peer's initial routes are in the
+	/// table (or the session dies).
+	pub(crate) fn replaying(&self, prefix: impl AsPath) -> Replaying {
+		// A subtree too complex to intersect waits on the whole scope instead.
+		let scope = Pattern::subtree(self.absolute(prefix).as_str())
+			.ok()
+			.and_then(|subtree| self.scope.allowed.intersect(&subtree.into()).ok())
+			.unwrap_or_else(|| self.scope.allowed.clone());
 		let mut state = self.shared.lock();
 		let id = state.next_replaying;
 		state.next_replaying += 1;
 		state.replaying.insert(
 			id,
 			ReplayingSource {
-				scope: self.scope.allowed.clone(),
+				scope,
 				waiting: Vec::new(),
 			},
 		);
@@ -3998,12 +4005,19 @@ mod tests {
 	async fn a_replaying_source_withholds_live_until_it_lands() {
 		let producer = origin(1).produce();
 		let room = producer.scope("", &scopes(&["room"])).unwrap();
-		let replaying = room.replaying();
+		let replaying = room.replaying("room/alice");
 
 		let mut announced = producer.consume().announced();
 		// Out of the source's scope: nothing to wait for.
 		let mut elsewhere = producer.consume().scope("", &scopes(&["other"])).unwrap().announced();
 		elsewhere.assert_next_live();
+		// In its scope but beside the prefix it replays: nothing to wait for either.
+		let mut bob = producer
+			.consume()
+			.scope("", &scopes(&["room/bob"]))
+			.unwrap()
+			.announced();
+		bob.assert_next_live();
 
 		// Routes the source lands arrive before the marker.
 		let _alice = room.announce("room/alice", Route::default()).unwrap();

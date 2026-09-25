@@ -433,7 +433,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 pub(super) fn subscribe_prefixes(origin: &origin::Producer) -> Vec<(PathOwned, crate::model::Replaying)> {
 	crate::model::interest_prefixes(&origin.allowed())
 		.into_iter()
-		.map(|prefix| (prefix, origin.replaying()))
+		.map(|prefix| (prefix.clone(), origin.replaying(prefix)))
 		.collect()
 }
 
@@ -4032,7 +4032,7 @@ mod tests {
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		subscriber
-			.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), subscriber.origin.replaying())
+			.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), subscriber.origin.replaying(""))
 			.await
 			.expect("a clean FIN is not an error");
 		settle().await;
@@ -4102,7 +4102,7 @@ mod tests {
 		);
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
-		let replaying = subscriber.origin.replaying();
+		let replaying = subscriber.origin.replaying("");
 		let mut run =
 			std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), replaying));
 		for _ in 0..100 {
