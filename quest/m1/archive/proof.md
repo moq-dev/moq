@@ -58,9 +58,5 @@ objects survive. Failed or incomplete recovery/listing must delete nothing;
 restart must finish this cleanup before accepting new groups.
 
 Finally render and reload HLS playlists while rejecting every media-object GET
-until a segment URI is requested. The range-bearing URI must resolve one
-object directly without any listing or separate index object.
-
-## Required
-
-- [Offline archive HLS](/quest/m1/archive/hls.md)
+until a segment URI is requested. A segment request must resolve one object
+from the replayed timeline without any listing or separate index object.

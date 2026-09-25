@@ -34,6 +34,12 @@ The segment engine is in `rs/moq-mux/src/timeline.rs`:
 - `moq-hls` renders live playlists from the timeline alone and FETCHes media
   per HTTP request (`rs/moq-hls/src/export/mod.rs:3-8`). A clean timeline
   finish ends every window with `EXT-X-ENDLIST` (:325-327).
+- The same exporter serves a recording replayed through `moq_archive::Reader`
+  with no archive-specific code (`rs/moq-hls/src/export/archive_tests.rs`):
+  playlists read only the timeline (an inline parameter set also GETs one
+  keyframe group to build its init), and a segment GETs one object of its
+  rendition. The caller supplies the catalog, and `--window` must cover the
+  recording.
 
 `rs/moq-archive` stores the versioned objects on any `object_store::ObjectStore`:
 percent-encoded track names, `.info` JSON, the binary envelope, and put/get/list/delete.
@@ -114,8 +120,8 @@ owned by that prerequisite, not duplicated in archive storage.
 
 ## Quests
 
+- [Archive HLS window](/quest/m1/archive/hls-window.md) - serve a replayed recording's whole retained timeline without a server-wide `--window`
 - [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
-- [Offline archive HLS](/quest/m1/archive/hls.md) - render playlists from the archive timeline and fetch segment media lazily
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 - [Archive proof](/quest/m1/archive/proof.md) - prove persistence ordering, selective reads, exact FETCH replay, and timeline-only HLS generation
 
