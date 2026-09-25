@@ -5,6 +5,7 @@
 //! pin the storage traffic that composition produces: playlists read only the timeline, and a
 //! segment GETs exactly one object of the requested rendition.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,17 +25,29 @@ use super::*;
 
 const TIMELINE: &str = hang::timeline::DEFAULT_NAME;
 
-/// In-memory store that records every GET path.
+/// In-memory store that records every GET path and counts listings.
 #[derive(Debug, Clone, Default)]
 struct Counting {
 	inner: Arc<InMemory>,
 	gets: Arc<Mutex<Vec<String>>>,
+	lists: Arc<AtomicUsize>,
+	/// Fail every media GET, so nothing can quietly depend on one.
+	reject_media: Arc<AtomicBool>,
 }
 
 impl Counting {
 	/// Every GET since the last call.
 	fn take(&self) -> Vec<String> {
 		std::mem::take(&mut *self.gets.lock().unwrap())
+	}
+
+	/// Listings since the store was created.
+	fn lists(&self) -> usize {
+		self.lists.load(Ordering::SeqCst)
+	}
+
+	fn reject_media(&self, reject: bool) {
+		self.reject_media.store(reject, Ordering::SeqCst);
 	}
 }
 
@@ -65,6 +78,12 @@ impl ObjectStore for Counting {
 
 	async fn get_opts(&self, location: &Path, options: GetOptions) -> object_store::Result<GetResult> {
 		self.gets.lock().unwrap().push(location.to_string());
+		if self.reject_media.load(Ordering::SeqCst) && is_media(location.as_ref()) {
+			return Err(object_store::Error::NotImplemented {
+				operation: "media GET".into(),
+				implementer: "Counting".into(),
+			});
+		}
 		self.inner.get_opts(location, options).await
 	}
 
@@ -76,6 +95,7 @@ impl ObjectStore for Counting {
 	}
 
 	fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+		self.lists.fetch_add(1, Ordering::SeqCst);
 		self.inner.list(prefix)
 	}
 
@@ -342,7 +362,9 @@ async fn playlists_read_only_the_timeline_and_segments_one_object() {
 	let master = replay.broadcaster.master_playlist(None);
 	assert!(master.contains("video/360p/media.m3u8") && master.contains("video/1080p/media.m3u8"));
 
-	// Render and reload every playlist: aligned numbering, and not one media GET.
+	// Render and reload every playlist with media GETs refused: aligned numbering, and not one
+	// media GET.
+	recording.store.inner().reject_media(true);
 	for _ in 0..2 {
 		for (kind, name) in [(Kind::Video, "360p"), (Kind::Video, "1080p"), (Kind::Audio, "audio")] {
 			let playlist = replay.playlist(kind, name).await;
@@ -358,6 +380,9 @@ async fn playlists_read_only_the_timeline_and_segments_one_object() {
 		!gets.iter().any(|path| is_media(path)),
 		"playlists must not GET media: {gets:?}"
 	);
+	recording.store.inner().reject_media(false);
+	// A range-bearing segment URI resolves its object directly: no listing, no index object.
+	let lists = recording.store.inner().lists();
 
 	// Switching renditions downloads only the selected rendition's object.
 	let low = replay.rendition(Kind::Video, "360p").segment(1).await.unwrap().unwrap();
@@ -400,10 +425,10 @@ async fn playlists_read_only_the_timeline_and_segments_one_object() {
 		]
 	);
 
-	// A repeated request hits the reader's object cache. The parked track re-subscribes
-	// upstream to confirm its warm cache, which re-reads only the small `.info`.
+	// A repeated request hits the reader's cache, including the immutable `.info`.
 	replay.rendition(Kind::Video, "360p").segment(1).await.unwrap().unwrap();
-	assert_eq!(recording.gets(), ["rec/360p/.info"]);
+	assert_eq!(recording.gets(), Vec::<String>::new());
+	assert_eq!(recording.store.inner().lists(), lists, "segments never list");
 }
 
 #[tokio::test]
