@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { RefusedRedirect } from "../error.ts";
 import * as Time from "../time.ts";
-import { dialed, handover, isLocal, type Redirect, target } from "./goaway.ts";
+import { dialed, handover, isLocal, pinnedTransport, type Redirect, target } from "./goaway.ts";
 
 const current = new URL("https://relay.example/room?jwt=secret");
 
@@ -92,6 +92,12 @@ test("a WebSocket fallback that connected is the host a redirect is judged again
 	expect(dialed(primary, "websocket", socket).href).toBe(socket.href);
 	expect(dialed(primary, "webtransport", socket).href).toBe(primary.href);
 	expect(dialed(primary, "websocket").href).toBe(primary.href);
+});
+
+test("a certificate pin holds only the WebTransport session that used it", () => {
+	expect(pinnedTransport("webtransport", true)).toBe(true);
+	expect(pinnedTransport("websocket", true)).toBe(false);
+	expect(pinnedTransport("webtransport", false)).toBe(false);
 });
 
 test("the handover is the cap, lowered only by a positive peer deadline", () => {

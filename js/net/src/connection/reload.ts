@@ -8,7 +8,7 @@ import * as Time from "../time.ts";
 import { wireOf } from "../wire.ts";
 import { type ConnectProps, connect, type WebSocketProps, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
-import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, target } from "./goaway.ts";
+import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
 import type { Probe, Stats } from "./stats.ts";
 
 /**
@@ -442,7 +442,9 @@ export class Reload {
 	 */
 	#migrate(connection: Established, dialing: URL, drain: Drain): boolean {
 		const hashes = this.webtransport?.serverCertificateHashes?.length ?? 0;
-		const pinned = hashes > 0 || this.webtransport?.serverCertificate !== undefined;
+		const configured = hashes > 0 || this.webtransport?.serverCertificate !== undefined;
+		// The pin is a WebTransport option. A WebSocket that won the race never used it.
+		const pinned = pinnedTransport(connection.transport, configured);
 
 		let next: URL | undefined;
 		try {

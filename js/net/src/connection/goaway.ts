@@ -65,6 +65,16 @@ export function dialed(primary: URL, transport: "webtransport" | "websocket", we
 }
 
 /**
+ * Whether a certificate pin constrains this session. The pin is a WebTransport option, so it
+ * holds the host only when that transport is the one that connected.
+ *
+ * @internal
+ */
+export function pinnedTransport(transport: "webtransport" | "websocket", configured: boolean): boolean {
+	return configured && transport === "webtransport";
+}
+
+/**
  * The URL a GOAWAY assigns: `undefined` keeps the current URL (the peer named none, or the
  * policy ignores it), and a URL replaces it. Throws {@link RefusedRedirect} for an explicit
  * URI the policy will not follow.
