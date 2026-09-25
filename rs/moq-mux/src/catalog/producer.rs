@@ -182,6 +182,9 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// Connection allocator passthrough tracks claim their peak-hold bitrate on.
 	/// See [`Config::with_bandwidth`].
 	bandwidth: moq_net::bandwidth::Allocator,
+	/// The minimum flush lateness across this catalog's renditions, which each rendition's
+	/// advertised `delay` is measured against.
+	baseline: super::estimate::Baseline,
 }
 
 // Manual Clone so a producer is cheaply clonable regardless of whether `E` is.
@@ -194,6 +197,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			timeline: self.timeline.clone(),
 			max_age: self.max_age,
 			bandwidth: self.bandwidth.clone(),
+			baseline: self.baseline.clone(),
 		}
 	}
 }
@@ -342,6 +346,7 @@ impl<E: CatalogExt> Producer<E> {
 			timeline,
 			max_age: config.max_age,
 			bandwidth: config.bandwidth,
+			baseline: Default::default(),
 		})
 	}
 
@@ -613,6 +618,11 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(crate::container::Producer::new(track, container)
 			.with_recorder(recorder)
 			.with_bandwidth(self.bandwidth.clone()))
+	}
+
+	/// A fresh estimator whose `delay` is measured against this catalog's other renditions.
+	pub(crate) fn estimator(&self) -> super::Estimator {
+		super::Estimator::with_broadcast(self.baseline.clone())
 	}
 
 	/// The allocator passthrough tracks claim on. fMP4 writes groups by hand, so it reads this itself.

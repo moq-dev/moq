@@ -92,7 +92,8 @@ export class Decoder {
 
 	// The current track running, held so we can cancel it when the new track is ready.
 	#active = new Signal<DecoderTrack | undefined>(undefined);
-	#pendingJitter = new Signal<Time.Milli | undefined>(undefined);
+	// The track preparing to replace the active one, if a switch is in flight.
+	#pending = new Signal<string | undefined>(undefined);
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
 
 	#signals = new Effect();
@@ -125,9 +126,15 @@ export class Decoder {
 		this.#signals.run(this.#runBuffering.bind(this));
 	}
 
+	// Read from the full catalog entry, which the decoder config omits, so a rising entry resizes Sync.
 	#runJitter(effect: Effect): void {
-		const active = effect.get(this.#active)?.jitter;
-		const pending = effect.get(this.#pendingJitter);
+		const renditions = effect.get(this.source.out.catalog)?.renditions;
+		const jitter = (track: string | undefined) => {
+			const config = track === undefined ? undefined : renditions?.[track];
+			return config && renditionJitter(config);
+		};
+		const active = jitter(effect.get(this.#active)?.track);
+		const pending = jitter(effect.get(this.#pending));
 		effect.set(this.#out.jitter, switchJitter({ active, pending }));
 	}
 
@@ -165,7 +172,7 @@ export class Decoder {
 			config: identity.decoder,
 			stats: this.#out.stats,
 		});
-		effect.set(this.#pendingJitter, pending.jitter);
+		effect.set(this.#pending, track);
 
 		effect.cleanup(() => pending?.close());
 
@@ -185,7 +192,7 @@ export class Decoder {
 			// Upgrade the pending track to active.
 			// #runActive will be in charge of it now.
 			this.#active.set(pending);
-			this.#pendingJitter.set(undefined);
+			this.#pending.set(undefined);
 			pending = undefined;
 
 			// This effect is done; close it to avoid a useless re-run.
@@ -277,7 +284,6 @@ class DecoderTrack {
 	track: string;
 	config: DecoderConfig;
 	stats: Signal<Stats | undefined>;
-	jitter: Time.Milli | undefined;
 
 	timestamp = new Signal<Time.Milli | undefined>(undefined);
 	frame = new Signal<VideoFrame | undefined>(undefined);
@@ -300,7 +306,6 @@ class DecoderTrack {
 		this.track = props.track;
 		this.config = props.config;
 		this.stats = props.stats;
-		this.jitter = renditionJitter(props.config);
 
 		this.#signals.run(this.#run.bind(this));
 	}
