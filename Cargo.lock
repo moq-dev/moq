@@ -4322,6 +4322,7 @@ dependencies = [
  "moq-audio",
  "moq-auth",
  "moq-hls",
+ "moq-json",
  "moq-msf",
  "moq-mux",
  "moq-relay",

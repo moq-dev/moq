@@ -31,7 +31,7 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use hang::timeline::Record;
-use moq_mux::timeline::{self, Deferred, DeferredDrain, Pending, Recorder};
+use moq_mux::timeline::{self, Deferred, DeferredDrain, Pending, Recorder, Reserved};
 use moq_net::{Timescale, Timestamp, broadcast, group, track};
 use object_store::ObjectStore;
 use tokio::sync::{mpsc, watch};
@@ -114,6 +114,11 @@ impl<S> Clone for Control<S> {
 			commands: self.commands.clone(),
 		}
 	}
+}
+
+/// Withholds segment commits until dropped.
+pub struct Reservation {
+	_inner: Reserved,
 }
 
 struct Shared<S> {
@@ -338,6 +343,14 @@ impl<S: ObjectStore> Control<S> {
 	pub fn cut(&self, pts: Timestamp) -> Result<()> {
 		self.deferred.cut(pts).map_err(timeline_error)?;
 		self.send(Command::Poke)
+	}
+
+	/// Hold segment commits back until this guard drops, so a batch of tracks can enroll first.
+	#[must_use = "dropping the reservation releases segment commits"]
+	pub fn reserve(&self) -> Reservation {
+		Reservation {
+			_inner: self.deferred.reserve(),
+		}
 	}
 
 	/// Stop recording `name`, dropping its incomplete groups. The name cannot be enrolled again.

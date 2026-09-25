@@ -154,6 +154,10 @@ async fn enroll<S: ObjectStore>(
 ) -> anyhow::Result<()> {
 	let mut tracks = Tracks::default();
 	while let Some(snapshot) = catalog.next().await? {
+		// One rendition's subscription can outrun the rest of this snapshot. Without the
+		// hold, the writer closes a segment from that rendition alone and the others never
+		// enter the record.
+		let _hold = control.reserve();
 		for change in tracks.update(&snapshot)? {
 			match change {
 				Change::Pacing(name) => control.pacing_track(&name).await?,
@@ -379,5 +383,92 @@ mod tests {
 		}
 
 		serving.abort();
+	}
+
+	/// Renditions already live in the opening catalog all land in its first segment.
+	///
+	/// Groups are published before export starts, so the writer can drain the first rendition
+	/// while the next subscription is still in flight.
+	#[tokio::test]
+	async fn an_opening_snapshot_records_every_rendition() {
+		let _env = crate::test_env::EnvGuard::clear(&[]);
+		let dir = tempfile::tempdir().unwrap();
+		let url = Url::from_directory_path(dir.path()).unwrap();
+
+		let origin = moq_tokio::origin::spawn();
+		let mut broadcast = origin.create_broadcast("live.hang").unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let info = track::Info::default()
+			.with_timescale(Timescale::MILLI)
+			.with_max_age(Duration::from_secs(3600));
+		let first = broadcast.create_track("audio", info.clone()).unwrap();
+		let second = broadcast.create_track("audio2", info).unwrap();
+		for track in [&first, &second] {
+			for sequence in 0..3 {
+				let mut group = track.create_group(group::Info { sequence }).unwrap();
+				for offset in [0, 500] {
+					let timestamp = Timestamp::from_millis(sequence * 1000 + offset).unwrap();
+					group.write_frame(timestamp, format!("{sequence}+{offset}")).unwrap();
+				}
+				group.finish().unwrap();
+			}
+		}
+		catalog
+			.mutate(|catalog| {
+				catalog.audio.renditions.insert("audio".into(), audio());
+				catalog.audio.renditions.insert("audio2".into(), audio());
+			})
+			.unwrap();
+		broadcast.announce(Default::default()).unwrap();
+
+		let args = ExportArgs {
+			store: url.clone(),
+			retention: None,
+			retention_grace: None,
+		};
+		let recording = tokio::spawn(export(origin.consume(), "live.hang".into(), CatalogFormat::Hang, args));
+
+		tokio::time::timeout(Duration::from_secs(10), async {
+			while !dir.path().join("audio/.info").exists() || !dir.path().join("audio2/.info").exists() {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("both renditions are enrolled");
+		first.finish().unwrap();
+		second.finish().unwrap();
+		catalog.finish().unwrap();
+		broadcast.finish();
+
+		tokio::time::timeout(Duration::from_secs(10), recording)
+			.await
+			.expect("the export ends with its broadcast")
+			.unwrap()
+			.expect("the recording succeeds");
+
+		let store = super::open(&url).unwrap();
+		let object = store
+			.get_segments(hang::timeline::DEFAULT_NAME, 0)
+			.await
+			.expect("segment 0");
+		let config = moq_json::window::ConsumerConfig::default().with_compression(true);
+		let mut decoder = moq_json::window::Decoder::<hang::timeline::Record>::new(config);
+		for stored in object.groups {
+			let mut group = decoder.group();
+			for frame in stored.frames {
+				group.decode(&frame.payload).unwrap();
+			}
+		}
+		let mut opening = None;
+		while let Some(event) = decoder.next_event() {
+			if let moq_json::window::Event::Push { value, .. } = event
+				&& value.segment == 0
+			{
+				opening = Some(value);
+			}
+		}
+		let opening = opening.expect("segment 0 has a record");
+		assert!(opening.tracks.contains_key("audio"), "{opening:?}");
+		assert!(opening.tracks.contains_key("audio2"), "{opening:?}");
 	}
 }
