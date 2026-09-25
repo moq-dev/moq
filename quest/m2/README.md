@@ -27,12 +27,16 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Audio loss recovery](/quest/m2/audio-loss-recovery.md) - prove a useful Opus recovery policy before exposing another option
 - [Opus implementation](/quest/m2/audio-opus-backend.md) - compare current codec quality, CPU, and optional build costs
 - [Latency ledger](/quest/m2/latency-ledger.md) - a session reports where its end-to-end audio delay went, stage by stage
+- [JS discontinuity](/quest/m2/js-discontinuity.md) - JS names its timeline break `discontinuity()` like Rust, so `cut` means the same group close in both
+- [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
 - [Media Foundation encode](/quest/m2/audio-encode-mediafoundation.md) - Windows encodes AAC-LC
 - [MediaCodec decode](/quest/m2/audio-decode-mediacodec.md) - Android decodes HE-AAC, multichannel AAC, and what else the device offers
 - [MediaCodec encode](/quest/m2/audio-encode-mediacodec.md) - Android encodes AAC-LC
+- [AAC encode refusal](/quest/m2/aac-encode-refusal.md) - AAC config encode refuses channel counts it cannot name, on dev
 - [Video codec coverage](/quest/m2/video-codec-coverage.md) - prioritize remaining native AV1 and portable decoder gaps
 - [#2147](/quest/m2/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - moq-video: 10-bit HEVC and AV1 support in the NVIDIA codec path
+- [NVENC buffer pool](/quest/m2/nvenc-pool.md) - NVENC reuses input and output buffers instead of allocating per frame, if a benchmark shows it wins
 - [Direct3D11 render import](/quest/m2/render-d3d11.md) - Windows presents without downloading every frame to system memory
 - [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - video with periodic intra refresh publishes, imports, and tunes in cleanly with one group per sweep and a catalog `warmup`
 - [#2819](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: carry PipeWire DMA-BUFs safely into the Vulkan renderer
@@ -54,7 +58,9 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [L4S on the backbone](/quest/m2/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive by deadline](/quest/m2/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer
-- [Bounded announce prefix table](/quest/m2/announce-prefix-table.md) - compress repeated path tuples on each ordered lite-07 announce stream, with bounded state and measured QUIC-byte savings
+- [noq socket close](/quest/m2/noq-socket-close.md) - noq releases an endpoint's socket on close, so moq-tokio drops its wrapper
+- [Bounded announce prefix table](/quest/m2/announce-prefix-table.md) - compress repeated path tuples on each ordered lite-08 announce stream, with bounded state and measured QUIC-byte savings
+- [Drop the hidden cluster exemption](/quest/m2/hidden-exemption.md) - relays stop forcing hidden broadcasts on cluster peers once every peer opts in on the wire
 - [Routing cost domains](/quest/m2/routing-cost-domains.md) - design operator boundaries and policy without adding incomparable costs
 - [Kernel pacing](/quest/m2/quic-kernel-pacing.md) - whether SO_TXTIME pacing beats a userspace pacer the io_uring driver ignores today
 - [Send batching](/quest/m2/quic-send-batching.md) - whether sendmmsg across connections pays on the tokio path

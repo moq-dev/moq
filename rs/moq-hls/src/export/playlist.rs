@@ -7,6 +7,7 @@
 //! directory.
 
 use std::fmt::Write;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// fMP4 segments via `EXT-X-MAP` require protocol version 6.
@@ -29,6 +30,8 @@ pub(crate) struct Snapshot {
 	/// Wall-clock time of the first listed segment (`EXT-X-PROGRAM-DATE-TIME`), when the
 	/// catalog advertises its root broadcast clock.
 	pub program_date_time: Option<SystemTime>,
+	/// The publisher run every segment URL carries (`seg/{generation}.{segment}.m4s`).
+	pub generation: Option<Arc<str>>,
 }
 
 /// One listed segment.
@@ -44,13 +47,18 @@ pub(crate) struct Segment {
 	pub discontinuity: bool,
 }
 
-/// Render a media playlist for one rendition from a [`Snapshot`].
+/// Render a media playlist for one rendition from a [`Snapshot`], mapping `init.{init}.mp4`.
 ///
 /// `query` is an optional query string (without the leading `?`, e.g. `jwt=<token>`)
 /// appended to every child URL (the init map and each segment), so a stock player that
 /// does not replay request headers still carries a credential on its follow-up requests.
-pub(crate) fn render_media(snapshot: &Snapshot, query: Option<&str>) -> String {
+pub(crate) fn render_media(snapshot: &Snapshot, init: &str, query: Option<&str>) -> String {
 	let suffix = query.map(|q| format!("?{q}")).unwrap_or_default();
+	let generation = snapshot
+		.generation
+		.as_deref()
+		.map(|g| format!("{g}."))
+		.unwrap_or_default();
 
 	// EXT-X-GAP needs a newer protocol version; only require it when actually used.
 	let version = if snapshot.segments.iter().any(|s| s.gap) {
@@ -64,7 +72,7 @@ pub(crate) fn render_media(snapshot: &Snapshot, query: Option<&str>) -> String {
 	let _ = writeln!(out, "#EXT-X-VERSION:{version}");
 	let _ = writeln!(out, "#EXT-X-TARGETDURATION:{}", snapshot.target_duration);
 	let _ = writeln!(out, "#EXT-X-MEDIA-SEQUENCE:{}", snapshot.media_sequence);
-	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.mp4{suffix}\"");
+	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.{init}.mp4{suffix}\"");
 
 	for (index, segment) in snapshot.segments.iter().enumerate() {
 		if index == 0
@@ -83,7 +91,7 @@ pub(crate) fn render_media(snapshot: &Snapshot, query: Option<&str>) -> String {
 			let _ = writeln!(out, "#EXT-X-GAP");
 		}
 		let _ = writeln!(out, "#EXTINF:{:.5},", segment.duration.as_secs_f64());
-		let _ = writeln!(out, "seg/{}.m4s{suffix}", segment.segment);
+		let _ = writeln!(out, "seg/{generation}{}.m4s{suffix}", segment.segment);
 	}
 
 	if snapshot.finished {
@@ -120,23 +128,45 @@ mod tests {
 			],
 			finished: false,
 			program_date_time: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
+			generation: None,
 		};
 
-		let out = render_media(&snapshot, None);
+		let out = render_media(&snapshot, "0123abcd", None);
 		assert!(out.starts_with("#EXTM3U\n#EXT-X-VERSION:6\n"));
 		assert!(out.contains("#EXT-X-TARGETDURATION:2\n"));
 		assert!(out.contains("#EXT-X-MEDIA-SEQUENCE:10\n"));
-		assert!(out.contains("#EXT-X-MAP:URI=\"init.mp4\"\n"));
+		assert!(out.contains("#EXT-X-MAP:URI=\"init.0123abcd.mp4\"\n"));
 		assert!(out.contains("#EXT-X-PROGRAM-DATE-TIME:2025-07-07T00:00:00.123Z\n"));
 		assert!(out.contains("#EXTINF:2.00000,\nseg/10.m4s\n"));
 		assert!(out.contains("#EXTINF:1.96000,\nseg/11.m4s\n"));
 		assert!(!out.contains("#EXT-X-ENDLIST"));
 
 		// A credential rides every child URL so a header-less player keeps sending it.
-		let signed = render_media(&snapshot, Some("jwt=abc.def"));
-		assert!(signed.contains("#EXT-X-MAP:URI=\"init.mp4?jwt=abc.def\"\n"));
+		let signed = render_media(&snapshot, "0123abcd", Some("jwt=abc.def"));
+		assert!(signed.contains("#EXT-X-MAP:URI=\"init.0123abcd.mp4?jwt=abc.def\"\n"));
 		assert!(signed.contains("\nseg/10.m4s?jwt=abc.def\n"));
 		assert!(signed.contains("\nseg/11.m4s?jwt=abc.def\n"));
+	}
+
+	#[test]
+	fn generation_rides_every_segment_url() {
+		let snapshot = Snapshot {
+			target_duration: 2,
+			media_sequence: 0,
+			segments: vec![Segment {
+				segment: 0,
+				duration: Duration::from_secs(2),
+				gap: false,
+				discontinuity: false,
+			}],
+			finished: false,
+			program_date_time: None,
+			generation: Some("run-7".into()),
+		};
+
+		let out = render_media(&snapshot, "0123abcd", Some("jwt=x"));
+		assert!(out.contains("#EXT-X-MAP:URI=\"init.0123abcd.mp4?jwt=x\"\n"));
+		assert!(out.contains("\nseg/run-7.0.m4s?jwt=x\n"));
 	}
 
 	#[test]
@@ -152,9 +182,10 @@ mod tests {
 			}],
 			finished: true,
 			program_date_time: None,
+			generation: None,
 		};
 
-		let out = render_media(&snapshot, None);
+		let out = render_media(&snapshot, "0123abcd", None);
 		assert!(out.contains("#EXT-X-ENDLIST\n"));
 		assert!(!out.contains("PROGRAM-DATE-TIME"));
 	}

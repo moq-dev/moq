@@ -1,9 +1,9 @@
-import { type Dispose, type Getter, Signal } from "@moq/signals";
+import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
 import { error, NotFound, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { type Hop, type Route, routesEqual } from "../hop.ts";
-import { hooks } from "../internal.ts";
+import { hiddenBelow, hooks } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
@@ -32,7 +32,11 @@ import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, resolvesStart,
 // Where each originated route lands under the requested prefix: its suffix beneath
 // the prefix, or the empty suffix for a route above it, where the most specific
 // such route wins the way a request through the prefix would resolve.
-function presented(prefix: Path.Valid, table: ReadonlyMap<Path.Valid, Advertised>): Map<Path.Valid, Advertised> {
+function presented(
+	prefix: Path.Valid,
+	table: ReadonlyMap<Path.Valid, Advertised>,
+	hidden: boolean,
+): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
 	let rootLen = -1;
 	for (const [covered, snap] of table) {
@@ -42,6 +46,8 @@ function presented(prefix: Path.Valid, table: ReadonlyMap<Path.Valid, Advertised
 			out.set(Path.empty(), snap);
 			continue;
 		}
+		// A hidden route stays off the wire unless the request opted in.
+		if (!hidden && hiddenBelow(prefix, covered)) continue;
 		const suffix = Path.stripPrefix(prefix, covered);
 		if (suffix !== null) out.set(suffix, snap);
 	}
@@ -219,19 +225,23 @@ class SubscriptionControls {
 
 	/** Returns false when peer departure supersedes a blocked response write. */
 	async response(pending: Promise<void>): Promise<boolean> {
-		const result = await Promise.race([
+		// `#ended` lives as long as the stream, so it is raced as-is rather than mapped per call.
+		const result = await race([
 			pending.then(
 				() => ({ kind: "sent" }) as const,
 				(err: unknown) => ({ kind: "error", error: error(err) }) as const,
 			),
-			this.#ended.then((end) => ({ kind: "ended", end }) as const),
+			this.#ended,
 		]);
 
-		if (result.kind === "sent") return true;
-		if (result.kind === "error") throw result.error;
-		// Promise.race leaves the blocked encode running, so reset the writable half too.
-		this.#writer.reset(result.end ?? new StreamError(StreamCode.Cancel, { message: "cancel" }));
-		if (result.end) throw result.end;
+		if (result !== null && !(result instanceof Error)) {
+			if (result.kind === "sent") return true;
+			throw result.error;
+		}
+
+		// The race leaves the blocked encode running, so reset the writable half too.
+		this.#writer.reset(result ?? new StreamError(StreamCode.Cancel, { message: "cancel" }));
+		if (result) throw result;
 		return false;
 	}
 
@@ -341,13 +351,7 @@ export class Publisher {
 	// subscriptions share it, since a second getWriter on the same stream would throw.
 	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
 
-	// The published broadcasts, borrowed from the origin this session serves. The origin
-	// outlives the session, so this is read-only here: subscribe/fetch look it up, and
-	// closing the session leaves the broadcasts alone.
-	#broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
-
-	// Originated advertisements this session forwards. Unadvertised local broadcasts
-	// stay reachable by exact path without appearing here.
+	// Originated advertisements this session forwards.
 	#advertised: Getter<ReadonlyMap<Path.Valid, Advertised> | undefined>;
 
 	#publish?: OriginConsumer;
@@ -374,7 +378,6 @@ export class Publisher {
 		this.version = version;
 		this.hop = hop;
 		const origin = publish && wireOf(publish);
-		this.#broadcasts = origin?.broadcasts ?? new Signal(new Map());
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
 		this.#publish = publish;
 
@@ -467,7 +470,7 @@ export class Publisher {
 			const initial = this.#advertised.peek();
 			if (!initial) return; // closed
 
-			for (const [name, snap] of presented(msg.prefix, initial)) {
+			for (const [name, snap] of presented(msg.prefix, initial, msg.hidden)) {
 				active.set(name, snap);
 			}
 
@@ -499,7 +502,7 @@ export class Publisher {
 			}
 
 			for (;;) {
-				const advertised = await Promise.race([changed, stream.reader.closed]);
+				const advertised = await race([changed, stream.reader.closed]);
 				dispose();
 				if (!advertised) break;
 
@@ -512,7 +515,7 @@ export class Publisher {
 				if (!latest) break;
 
 				const updated = new Map<Path.Valid, Advertised>();
-				for (const [name, snap] of presented(msg.prefix, latest)) {
+				for (const [name, snap] of presented(msg.prefix, latest, msg.hidden)) {
 					updated.set(name, snap);
 				}
 
@@ -547,8 +550,8 @@ export class Publisher {
 		let front: broadcast.Consumer | undefined;
 		try {
 			front =
-				this.#broadcasts.peek()?.get(msg.broadcast) ??
-				(this.#publish && (await wireOf(this.#publish).demand(msg.broadcast)));
+				this.#publish &&
+				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -667,8 +670,8 @@ export class Publisher {
 		let front: broadcast.Consumer | undefined;
 		try {
 			front =
-				this.#broadcasts.peek()?.get(msg.broadcast) ??
-				(this.#publish && (await wireOf(this.#publish).demand(msg.broadcast)));
+				this.#publish &&
+				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -867,8 +870,8 @@ export class Publisher {
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
 		try {
 			const front =
-				this.#broadcasts.peek()?.get(msg.broadcast) ??
-				(this.#publish && (await wireOf(this.#publish).demand(msg.broadcast)));
+				this.#publish &&
+				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track);
@@ -962,14 +965,14 @@ export class Publisher {
 		// as `startFrame`. Skipping the head here is the only thing keeping those numbers
 		// honest; a group that ends before we reach it can't be served at all.
 		for (let i = 0; i < startFrame; i++) {
-			if (!(await Promise.race([group.readFrame(), stream.closed]))) {
+			if (!(await race([group.readFrame(), stream.closed]))) {
 				throw new Error(`fetch group ended at frame ${i}, before the requested start ${startFrame}`);
 			}
 		}
 
 		let prevTs = 0n;
 		for (let index = startFrame; endFrame === undefined || index <= endFrame; index++) {
-			const frame = await Promise.race([group.readFrame(), stream.closed]);
+			const frame = await race([group.readFrame(), stream.closed]);
 			if (!frame) break;
 
 			const ts = BigInt(Math.round(frame.timestamp.as(timescale)));
@@ -1033,7 +1036,7 @@ export class Publisher {
 				let reached = startFrame === 0;
 
 				for (;;) {
-					const read = await Promise.race([hooks.readGroupFrame(group), stream.closed]);
+					const read = await race([hooks.readGroupFrame(group), stream.closed]);
 					if (!read) {
 						// The group ended before the frame the subscriber asked to start
 						// at, so this publisher can't serve the range at all. FINning here
@@ -1044,11 +1047,12 @@ export class Publisher {
 					}
 
 					try {
+						// A group that ends exactly at the start is a valid, empty range.
+						if (read.sequence + 1 >= startFrame) reached = true;
 						// Frames below the requested start were excluded, and the receiver
 						// numbers what it gets from `startFrame`.
 						if (read.sequence < startFrame) continue;
 						if (endFrame !== undefined && read.sequence > endFrame) break;
-						reached = true;
 
 						if (timestamps) {
 							// Convert each frame to the track's advertised timescale.
@@ -1114,7 +1118,7 @@ export class Publisher {
 				const timeout = new Promise<"timeout">((resolve) =>
 					setTimeout(() => resolve("timeout"), PROBE_INTERVAL),
 				);
-				const result = await Promise.race([timeout, stream.reader.closed]);
+				const result = await race([timeout, stream.reader.closed]);
 				if (result !== "timeout") break;
 
 				// The two fields are independent on the wire, each using 0 for

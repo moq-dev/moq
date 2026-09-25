@@ -131,10 +131,10 @@ impl BroadcastState {
 	/// Resolve every name the broadcast never filled, so subscribers waiting on a
 	/// [`track::Info`] that can no longer arrive fail with `err` instead of parking.
 	///
-	/// Covers a reservation nobody accepted, a request handed to a [`Dynamic`] that
-	/// never answered it, and one still queued for a handler. A track that carries
-	/// its info has a publisher and is left alone: an end there is that publisher's
-	/// call, and its cache stays readable.
+	/// Covers a reservation nobody accepted and a request still queued for a handler.
+	/// A request a [`Dynamic`] already took is left alone: it may be in flight to a peer
+	/// still serving it, and the handler answers or drops it. So is a track that carries
+	/// its info: an end there is that publisher's call, and its cache stays readable.
 	fn reject_unserved(&mut self, err: Error) {
 		for request in self.requests.drain_queued() {
 			request.reject(err.clone());
@@ -237,11 +237,12 @@ impl Producer {
 	/// Advertise this broadcast's exact path as a route, or re-price the standing
 	/// advertisement in place.
 	///
-	/// Call it once the tracks a subscriber needs first (a catalog) exist, so the
-	/// advertisement lands with them in place: peers act on it immediately.
-	/// The origin's local cursor already enumerates the path from creation.
-	/// The peer route retracts on [`unannounce`](Self::unannounce), [`close`](Self::close),
-	/// or the last producer dropping.
+	/// Until this is called the broadcast exists for nobody: announce cursors do
+	/// not list it and requests for its path fail with [`Error::Unroutable`], for
+	/// local consumers and peers alike. Call it once the tracks a subscriber needs
+	/// first (a catalog) exist, so the advertisement lands with them in place:
+	/// consumers act on it immediately. The route retracts on [`unannounce`](Self::unannounce),
+	/// [`close`](Self::close), or the last producer dropping.
 	///
 	/// Fails with [`Error::Closed`] on a standalone broadcast (one not created
 	/// through an origin, so there is nothing to announce into), once the broadcast
@@ -252,8 +253,11 @@ impl Producer {
 		announcer.announce(route)
 	}
 
-	/// Retract this broadcast's peer advertisement, if any. Local consumers
-	/// still discover and request the path until the broadcast ends.
+	/// Retract this broadcast's advertisement, if any, from local consumers and
+	/// peers alike. New requests for the path fail with [`Error::Unroutable`] and
+	/// the broadcast the origin served from it ends, while tracks already in
+	/// flight carry on to their own end. [`announce`](Self::announce) brings it
+	/// back.
 	pub fn unannounce(&self) {
 		self.alive.unannounce();
 	}
@@ -433,9 +437,10 @@ impl Producer {
 	///
 	/// Retracts its announcement and local discovery; a later [`Self::announce`] fails
 	/// with [`Error::Closed`]. Tracks already handed out carry on and end with their
-	/// own finish or abort. Every later [`Consumer::track`], and every request still
-	/// waiting on a name nothing served, answers [`Error::Unroutable`]: the same answer
-	/// an origin gives for a path nobody publishes.
+	/// own finish or abort. Every later [`Consumer::track`], and every name reserved or
+	/// still queued for a handler, answers [`Error::Unroutable`]: the same answer an
+	/// origin gives for a path nobody publishes. A request a [`Dynamic`] already took is
+	/// left for that handler to answer.
 	///
 	/// Dropping the last producer does the same. Closing twice is a no-op.
 	pub fn close(&self) {
@@ -496,7 +501,7 @@ impl Alive {
 		})
 	}
 
-	/// Withdraw peer advertising while leaving the path discoverable locally.
+	/// Withdraw the path's advertisement, if any; the broadcast stays alive.
 	fn unannounce(&self) {
 		if let Some(announcer) = self.announcer.lock().as_mut() {
 			announcer.withdraw();
@@ -517,7 +522,7 @@ impl Alive {
 				return;
 			}
 			state.finished = finished;
-			// A name that was reserved or requested but never served can't arrive now,
+			// A name that was reserved or queued but never served can't arrive now,
 			// and `Consumer::track` answers `Unroutable` for one asked about after this
 			// point. Say the same to whoever asked earlier.
 			state.reject_unserved(Error::Unroutable);
@@ -668,7 +673,7 @@ impl Dynamic {
 		// holds the name (a publish raced the request), `insert` keeps it rather than shadowing it.
 		let _ = state.tracks.insert(name, pending.weak());
 		// Attribute the served track to this broadcast's ingress scope (no-op untagged).
-		Poll::Ready(Ok(pending.with_stats(self.stats.clone())))
+		Poll::Ready(Ok(pending.claim().with_stats(self.stats.clone())))
 	}
 
 	/// Block until a consumer requests a track, returning a [`track::Request`] to serve.
@@ -1559,19 +1564,34 @@ mod test {
 		producer.close();
 	}
 
-	/// A request a handler already took parks the same way if the handler never answers
-	/// it, so the sweep has to reach that one too.
+	/// A request a handler already took is the handler's to answer: it may be in flight
+	/// to a peer, and a retraction does not disturb subscriptions already in flight.
+	/// Whatever the handler decides still reaches the consumer.
 	#[tokio::test]
-	async fn close_resolves_a_request_a_handler_never_answered() {
+	async fn close_leaves_a_claimed_request_to_its_handler() {
 		let producer = Info::new().produce();
 		let mut dynamic = producer.dynamic();
 		let consumer = dynamic.consume();
 
-		let pending = subscribe_pending!(consumer, "track1");
-		let _request = dynamic.requested_track().await.unwrap();
+		let accepted = subscribe_pending!(consumer, "track1");
+		let request = dynamic.requested_track().await.unwrap();
+		let dropped = subscribe_pending!(consumer, "track2");
+		let abandoned = dynamic.requested_track().await.unwrap();
 
 		producer.close();
-		assert!(matches!(pending.await, Err(Error::Unroutable)));
+		assert!(
+			accepted.poll_ok(&kio::Waiter::noop()).is_pending(),
+			"close rejected a claimed request"
+		);
+		assert!(
+			dropped.poll_ok(&kio::Waiter::noop()).is_pending(),
+			"close rejected a claimed request"
+		);
+
+		let _track = request.accept(None);
+		assert!(accepted.await.is_ok(), "the handler's accept reaches the consumer");
+		drop(abandoned);
+		assert!(dropped.await.is_err(), "the handler dropping it rejects the consumer");
 		drop(dynamic);
 	}
 

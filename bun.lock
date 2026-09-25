@@ -99,6 +99,7 @@
       "dependencies": {
         "@moq/flate": "workspace:^",
         "@moq/net": "workspace:^",
+        "@moq/signals": "workspace:^",
       },
       "devDependencies": {
         "@types/bun": "^1.4.2",
@@ -655,6 +656,10 @@
 
     "@moq/hang": ["@moq/hang@workspace:js/hang"],
 
+    "@moq/interop-browser": ["@moq/interop-browser@workspace:test/interop/clients/js"],
+
+    "@moq/interop-native": ["@moq/interop-native@workspace:test/interop/clients/js-native"],
+
     "@moq/json": ["@moq/json@workspace:js/json"],
 
     "@moq/loc": ["@moq/loc@workspace:js/loc"],
@@ -672,10 +677,6 @@
     "@moq/room": ["@moq/room@workspace:js/room"],
 
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
-
-    "@moq/interop-browser": ["@moq/interop-browser@workspace:test/interop/clients/js"],
-
-    "@moq/interop-native": ["@moq/interop-native@workspace:test/interop/clients/js-native"],
 
     "@moq/wasm": ["@moq/wasm@workspace:js/wasm"],
 

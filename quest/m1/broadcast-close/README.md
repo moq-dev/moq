@@ -43,5 +43,4 @@ Stage it as the children below: the bindings, then the `dev` removal.
 
 ## Related
 
-- [Announce to serve](/quest/m1/announce-to-serve.md) - `unannounce()` retracts locally too, so `close()` is its permanent form
 - [#4002](https://github.com/moq-dev/moq/issues/4002) - broadcast end aborted in-flight tracks; fixed by #4007, which made ending a front retract without touching its tracks

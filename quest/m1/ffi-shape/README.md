@@ -59,4 +59,3 @@ work no child does:
 ## Related
 
 - [Track demand](/quest/m1/track-demand.md) - the same `demand()` cleanup in Rust and JS
-- [Binding docs](/quest/m1/binding-docs.md) - its nightly sample check guards the rewritten pages

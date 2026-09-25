@@ -19,11 +19,12 @@ export async function exchangeSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
 	implementation: string,
-): Promise<{ control: Stream; solicit: boolean | undefined; cluster: Ietf.Cluster.Hops }> {
+): Promise<{ control: Stream; solicit: boolean | undefined; hidden: boolean; cluster: Ietf.Cluster.Hops }> {
 	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode(implementation));
 	Ietf.solicitIntoSetup(params);
+	Ietf.hiddenIntoSetup(params);
 
 	// One id per session, like the moq-lite connection: nothing in this process forwards
 	// between sessions, so there is nothing for a shared id to detect.
@@ -40,6 +41,7 @@ export async function exchangeSetup(
 	return {
 		control: new Stream({ writer, reader: received.reader }),
 		solicit: received.solicit,
+		hidden: received.hidden,
 		cluster: { self, peer: received.cluster },
 	};
 }
@@ -56,7 +58,7 @@ async function sendSetup(transport: WebTransport, version: Ietf.IetfVersion, set
 async function receiveSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
-): Promise<{ reader: Reader; solicit: boolean | undefined; cluster: Hop | undefined }> {
+): Promise<{ reader: Reader; solicit: boolean | undefined; hidden: boolean; cluster: Hop | undefined }> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
 	>;
@@ -75,6 +77,7 @@ async function receiveSetup(
 	return {
 		reader,
 		solicit: Ietf.solicitFromSetup(setup.parameters),
+		hidden: Ietf.hiddenFromSetup(setup.parameters),
 		cluster: Ietf.Cluster.fromSetup(setup.parameters, version),
 	};
 }

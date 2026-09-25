@@ -21,7 +21,7 @@ When pushing additional commits to an existing PR, update the title and descript
 When taking over someone else's PR, push commits on top of theirs so they keep credit.
 
 Create a draft PR.
-Switch it to "Ready for review" when you're finished and local `just check` and `just test` pass.
+Switch it to "Ready for review" when you're finished and local `just check` passes.
 Fix any merge conflicts and failing CI checks.
 
 # AI

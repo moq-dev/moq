@@ -71,11 +71,11 @@ void checkCallStatus(
   if (status.ref.code == CALL_SUCCESS) {
     return;
   } else if (status.ref.code == CALL_ERROR) {
-    throw errorHandler.lift(status.ref.errorBuf);
+    throw liftAndFree(status.ref.errorBuf, errorHandler.lift);
   } else if (status.ref.code == CALL_UNEXPECTED_ERROR) {
     if (status.ref.errorBuf.len > 0) {
       throw UniffiInternalError.panicked(
-        FfiConverterString.lift(status.ref.errorBuf),
+        liftAndFree(status.ref.errorBuf, FfiConverterString.lift),
       );
     } else {
       throw UniffiInternalError.panicked("Rust panic");
@@ -101,6 +101,16 @@ T rustCall<T>(
   }
 }
 
+T liftAndFree<T, F>(F raw, T Function(F) lifter) {
+  try {
+    return lifter(raw);
+  } finally {
+    if (raw is RustBuffer) {
+      raw.free();
+    }
+  }
+}
+
 T rustCallWithLifter<T, F>(
   F Function(Pointer<RustCallStatus>) ffiCall,
   T Function(F) lifter, [
@@ -110,7 +120,7 @@ T rustCallWithLifter<T, F>(
   try {
     final rawResult = ffiCall(status);
     checkCallStatus(errorHandler ?? NullRustCallStatusErrorHandler(), status);
-    return lifter(rawResult);
+    return liftAndFree(rawResult, lifter);
   } finally {
     calloc.free(status);
   }
@@ -119,7 +129,6 @@ T rustCallWithLifter<T, F>(
 class NullRustCallStatusErrorHandler extends UniffiRustCallStatusErrorHandler {
   @override
   Exception lift(RustBuffer errorBuf) {
-    errorBuf.free();
     return UniffiInternalError.panicked("Unexpected CALL_ERROR");
   }
 }
@@ -175,7 +184,12 @@ RustBuffer toRustBuffer(Uint8List data) {
   final bytes = calloc<ForeignBytes>();
   bytes.ref.len = length;
   bytes.ref.data = frameData;
-  return RustBuffer.fromBytes(bytes.ref);
+  try {
+    return RustBuffer.fromBytes(bytes.ref);
+  } finally {
+    calloc.free(frameData);
+    calloc.free(bytes);
+  }
 }
 
 ForeignBytes lowerForeignBytes(Uint8List data) {
@@ -306,7 +320,7 @@ Future<T> uniffiRustCallAsync<T, F>(
     try {
       final result = completeFunc(rustFuture, status);
       checkCallStatus(errorHandler ?? NullRustCallStatusErrorHandler(), status);
-      return liftFunc(result);
+      return liftAndFree<T, F>(result, liftFunc);
     } finally {
       calloc.free(status);
     }

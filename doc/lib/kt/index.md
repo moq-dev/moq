@@ -13,7 +13,7 @@ cancellation that reaches the native consumer. It pulls in `dev.moq:moq-ffi`,
 which carries the native binaries for Android (arm64-v8a, armeabi-v7a,
 x86\_64) and desktop JVM (Linux x86\_64/aarch64, macOS arm64, Windows x64).
 
-```kotlin
+```kotlin ignore
 dependencies {
     implementation("dev.moq:moq:<version>")   // latest: see the badge above
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
@@ -42,7 +42,7 @@ Moq.connect("https://relay.example.com").use { moq ->
     val audio = broadcast.publishAudio(AudioInit(format = AudioFormat.OPUS, data = opusInit))
     audio.writeFrame(Frame(payload = packet, timestampUs = 20_000u))
 
-    val video = broadcast.publishVideo(
+    val video = broadcast.encodeVideo(
         VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 1280u, height = 720u, framerate = 30u),
         VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", bitrate = null, gop = null, kind = autoEncoder),
     )
@@ -51,21 +51,28 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
+`MediaProducer.flush(timestampUs)` records a locally encoded frame's transport handoff on the broadcast media clock. Call it after `writeFrame` for live encoder output; omit it for file, pipe, and network imports. `MediaProducer` is a typealias, so the generated method is available directly.
+
 The three advertising operations: `moq.createBroadcast(path)` (or
-`origin.createBroadcast`) returns a locally discoverable producer;
+`origin.createBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.announce(route)` / `broadcast.unannounce()` own that exact-path
 advertisement; `origin.dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
 serve. A route is a capability, not an inventory. `announcements(config)` takes
 a literal prefix plus an optional relative pattern; `announcement.prefix()`
-stays origin-relative and `captures()` reports the wildcard matches.
+stays origin-relative and `captures()` reports the wildcard matches. Paths with
+a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless `hidden = true`.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `moq.epoch()` counts the connections, 1 on the first, pairing with
 `MoqSession.status` to log each reconnect; the `backoff` argument tunes the
 pacing (`timeoutUs = 0` retries forever); and `maxStreams` raises the peer's
 inbound stream cap.
+
+The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
+a 200 ms head start. `Moq.connect(websocketEnabled = false)` turns it off for a
+QUIC-only relay, and a `websocketDelay` `Duration` changes the head start.
 
 `Server.listen(bind, tlsGenerate = ...)` accepts sessions with per-request
 `accept()`/`reject()`. Generated configuration setters, including
@@ -82,6 +89,10 @@ connection's send estimate; pass it to `encodeVideo` / `encodeAudio` or
 `kotlin.time.Duration`: `stats.rtt`, `backoff.initial`, `frame.timestamp`. `protocolError` is the structured protocol failure
 (scope, verbatim code, kind) when the peer sent one. Cancelling the collecting coroutine cancels the
 native side.
+
+`encodeAudio` encodes raw PCM inside the binding. Its codec is an object,
+`AudioCodec.opus()`, and `AudioEncoderOutput.frameDurationUs` sets the Opus
+frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000.
 
 `decodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.format`
 is `VideoPixelFormat.I420` when null, or `VideoPixelFormat.RGBA` for four bytes
