@@ -56,24 +56,46 @@ Release steps, in order:
 
 The media check sends one 4.8 Mbps track (30 fps, 20 kB frames, 1 s groups)
 to two subscribers through `moq-relay` over QUIC with the default Delay
-family (BBR). The loopback runs in a rootless network namespace shaped by
-netem. The WebSocket fallback is off, since it wins the race under loss, and
-the relay log must show three QUIC sessions and none over WebSocket:
+family (BBR). From the repository root, the loopback runs in a rootless
+network namespace shaped by netem. The relay config is
+`test/interop/interop.toml`: bind `127.0.0.1:4443`, `tls.generate`, public
+auth, no iroh. The client disables the WebSocket fallback, since it wins the
+race under loss, and the relay log must show three QUIC sessions and none
+over WebSocket.
+
+`moq-bench` exits 0 whenever any group arrives, which the broken 1.3.0
+release still does. The shell keeps that exit status, so a successful `kill`
+cannot hide a failed benchmark, and then refuses the 1.3.0 shape on this
+path: under 60 MB received, p50 over 150 ms, or p99 over 400 ms. Those
+cutoffs sit between the columns below.
 
 ```bash
 unshare -rn bash -c '
 ip link set lo up
 tc qdisc add dev lo root netem delay 20ms loss 2% rate 40mbit
-moq-relay relay.toml &  # bind 127.0.0.1:4443, tls.generate, public auth, no iroh
+moq-relay test/interop/interop.toml &
 sleep 1
 moq-bench --connect http://localhost:4443 --connect-websocket-enabled=false \
   --fanout media --connections 3 --startup 1s --duration 60s --report 5s \
   --fps 30 --frame-size 20000 --group-size 29 --output stats.jsonl
-kill %1'
+status=$?
+kill %1
+exit "$status"' &&
+python3 -c '
+import json, sys
+snap = json.loads(open("stats.jsonl", encoding="utf-8").read().splitlines()[-1])
+recv, p50, p99 = snap["bytes_recv"], snap["latency_p50_ms"], snap["latency_p99_ms"]
+if recv < 60_000_000 or p50 > 150 or p99 > 400:
+    sys.exit(f"media check looks like 1.3.0, not 1.3.1: bytes_recv={recv} p50={p50} p99={p99}")
+'
 ```
 
-Run it again with `delay 20ms loss 1% rate 16mbit`, just above the offered
-load. Local runs against the fork through a `[patch.crates-io]` on
+Repeat only the `unshare` with `delay 20ms loss 1% rate 16mbit`, just above
+the offered load, and compare that run to the table. Do not reuse the python
+cutoffs there: 1.3.0 already delivers most of the bytes and the latency
+ranges overlap, so that row is a capacity check, not a pass/fail gate.
+
+Local runs against the fork through a `[patch.crates-io]` on
 2026-09-25, two per cell, of about 71 MB offered:
 
 | Path | 1.3.0 received | 1.3.0 latency p50 / p99 | 1.3.1 received | 1.3.1 latency p50 / p99 |
