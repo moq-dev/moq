@@ -762,10 +762,7 @@ mod tests {
 		drop(session);
 		assert!(fake.state.close_events.read().is_empty());
 		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
-		assert_eq!(
-			fake.state.close_events.read()[0].0,
-			SessionError::Cancel.to_code()
-		);
+		assert_eq!(fake.state.close_events.read()[0].0, SessionError::Cancel.to_code());
 	}
 
 	// Clones share the connection: the transport closes on the LAST drop, and
@@ -788,10 +785,7 @@ mod tests {
 
 		clone.abort(Error::Cancel);
 		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
-		assert_eq!(
-			fake.state.close_events.read()[0].0,
-			SessionError::Cancel.to_code()
-		);
+		assert_eq!(fake.state.close_events.read()[0].0, SessionError::Cancel.to_code());
 
 		// And the machine publishes the transport's terminal error, which is
 		// what `closed()` reports.
@@ -985,10 +979,7 @@ mod tests {
 
 		session.abort(Error::Cancel);
 		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
-		assert_eq!(
-			fake.state.close_events.read()[0].0,
-			SessionError::Cancel.to_code()
-		);
+		assert_eq!(fake.state.close_events.read()[0].0, SessionError::Cancel.to_code());
 	}
 
 	// The server-side twin: a `!Send` transport accepts a lite session whose
@@ -1010,10 +1001,7 @@ mod tests {
 		drop(session);
 		assert!(fake.state.close_events.read().is_empty());
 		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
-		assert_eq!(
-			fake.state.close_events.read()[0].0,
-			SessionError::Cancel.to_code()
-		);
+		assert_eq!(fake.state.close_events.read()[0].0, SessionError::Cancel.to_code());
 	}
 
 	// The lite-only entry refuses everything that still needs the boxed ietf
