@@ -802,7 +802,13 @@ mod tests {
 		published.subscriptions_started = 4;
 		published.subscriptions_ended = 1;
 		published.bytes = 100;
-		node_a.frame.insert("acme/room".to_string(), Stats { traffic: published, ext: () });
+		node_a.frame.insert(
+			"acme/room".to_string(),
+			Stats {
+				traffic: published,
+				ext: (),
+			},
+		);
 		node_a.traffic.update(&node_a.frame).expect("publish");
 
 		let agg = Consumer::<()>::new(origin.consume(), Config::new().with_depth(1));

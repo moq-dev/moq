@@ -19,9 +19,12 @@ publisher of a `.hang` broadcast can learn whether its viewers played it.
 - `moq-cli` attaches a `moq_net::stats::Session` to its client through
   `Client::with_stats`, folds the codec counters into `hang::Stats` per
   broadcast on the stats interval, and publishes through
-  `moq_stats::Producer<hang::Stats>` in exact-path mode at the flag's path.
+  `moq_stats::Producer<hang::Stats>` built with `produce::Config::at` at the
+  flag's path, setting each broadcast's value on a `Producer::entry` handle.
   A path that does not end in `.stats` is refused at parse time. The transport section comes from
-  the connection's `ConnectionStats`.
+  the connection's `ConnectionStats` through `hang::stats::Transport::from`;
+  `Session::stats` exposes no sample age, so add one there if staleness
+  matters to a reader.
 - `moq export stats <path>` is a new sink: subscribe the stats broadcast and
   print each `publisher.json`, `subscriber.json`, and `sessions.json` frame
   as one JSON line tagged with its track, with `--track` selecting one and
@@ -31,11 +34,6 @@ publisher of a `.hang` broadcast can learn whether its viewers played it.
   publishes with `--stats`, plays with `--stats`, and reads both with
   `moq export stats`, asserting the subscriber's liveness advances and the
   publisher's frame count matches what was sent.
-
-## Required
-
-- [Schema and library](/quest/m1/qos/stats/schema.md) - the producer and the
-  media types
 
 ## Closes
 

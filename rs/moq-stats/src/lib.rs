@@ -206,7 +206,10 @@ pub fn sessions_track(tier: &Tier, compressed: bool) -> String {
 /// ends in `.stats`, as in a client's `room/alice.stats` or anything under a
 /// relay's `.stats/` prefix.
 pub fn is_stats(path: impl AsPath) -> bool {
-	path.as_path().as_str().split('/').any(|segment| segment.ends_with(STATS_SUFFIX))
+	path.as_path()
+		.as_str()
+		.split('/')
+		.any(|segment| segment.ends_with(STATS_SUFFIX))
 }
 
 /// The suffix marking a stats broadcast path. See [`is_stats`].

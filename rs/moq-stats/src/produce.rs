@@ -242,7 +242,11 @@ impl<E: Ext> Clone for Entry<E> {
 	fn clone(&self) -> Self {
 		if let Some(exts) = &self.exts {
 			let mut table = exts.lock().expect("stats extensions poisoned");
-			table.slots.get_mut(&self.key).expect("held entries stay in the table").handles += 1;
+			table
+				.slots
+				.get_mut(&self.key)
+				.expect("held entries stay in the table")
+				.handles += 1;
 		}
 		Self {
 			exts: self.exts.clone(),
@@ -2081,7 +2085,10 @@ mod tests {
 			Config::at("room/alice"),
 			Err(crate::Error::NotStats(path)) if path.as_str() == "room/alice"
 		));
-		assert!(Config::at("room.stats/alice").is_err(), "the last segment must carry it");
+		assert!(
+			Config::at("room.stats/alice").is_err(),
+			"the last segment must carry it"
+		);
 	}
 
 	/// The exact-path mode advertises the path itself, with no `node` segment,
@@ -2193,9 +2200,15 @@ mod tests {
 		drive_tick().await;
 		let (_, broadcast) = announced(&origin).await;
 
-		let subscribing = broadcast.track("rtmp/cam/publisher.json").expect("track").subscribe(None);
+		let subscribing = broadcast
+			.track("rtmp/cam/publisher.json")
+			.expect("track")
+			.subscribe(None);
 		drive_tick().await;
-		assert!(subscribing.await.is_err(), "ambiguous between tier rtmp and path rtmp/cam");
+		assert!(
+			subscribing.await.is_err(),
+			"ambiguous between tier rtmp and path rtmp/cam"
+		);
 	}
 
 	/// The newest buffered frame on a track, waiting for the first.

@@ -2,8 +2,8 @@
 
 use std::marker::PhantomData;
 
-use moq_net::{AsPath, broadcast};
 use moq_net::stats::{Role, Tier};
+use moq_net::{AsPath, broadcast};
 
 use crate::{COMPRESSED_SUFFIX, Ext, Result, SessionsFrame, TrafficFrame, sessions_track, traffic_track};
 

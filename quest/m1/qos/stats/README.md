@@ -50,8 +50,6 @@ Decisions settled while planning:
 
 ## Quests
 
-- [Schema and library](/quest/m1/qos/stats/schema.md) - moq-stats takes an
-  extension, serves per-broadcast tracks, and hang defines the media stats
 - [Rust reporters](/quest/m1/qos/stats/rust.md) - the CLI, players, and
   encoders publish and read `.stats` broadcasts
 - [Browser reporters](/quest/m1/qos/stats/js.md) - `@moq/stats` mirrors the

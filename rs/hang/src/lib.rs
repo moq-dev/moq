@@ -34,5 +34,5 @@ pub mod timeline;
 pub use moq_net;
 
 pub use catalog::Catalog;
-pub use stats::Stats;
 pub use error::*;
+pub use stats::Stats;
