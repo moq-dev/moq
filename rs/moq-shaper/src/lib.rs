@@ -699,20 +699,8 @@ async fn deliver(
 				}
 			}
 			_ = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {
-				let now = Instant::now();
-				while let Some(&Reverse((at, id))) = pending.peek() {
-					if at > now {
-						break;
-					}
-					pending.pop();
-					let parcel = parcels.remove(&id).expect("queued datagram");
-					// A send error is the path losing the datagram, the way a
-					// network does when the far end is gone (a killed relay, say),
-					// so it is not the shaper failing.
-					let _ = parcel.socket.send_to(&parcel.datagram, parcel.dest).await;
-				}
 				// The window closes a batch that never filled.
-				if let Some(closes) = held.closes.filter(|&closes| closes <= now) {
+				if let Some(closes) = held.closes.filter(|&closes| closes <= Instant::now()) {
 					held.release(closes, &mut ready, &tally[direction]);
 				}
 			}
@@ -721,6 +709,21 @@ async fn deliver(
 			pending.push(Reverse((parcel.at, sequence)));
 			parcels.insert(sequence, parcel);
 			sequence += 1;
+		}
+
+		// Whatever is due leaves now. The timer rounds up to the next
+		// millisecond, which would delay even a datagram given no delay.
+		let now = Instant::now();
+		while let Some(&Reverse((at, id))) = pending.peek() {
+			if at > now {
+				break;
+			}
+			pending.pop();
+			let parcel = parcels.remove(&id).expect("queued datagram");
+			// A send error is the path losing the datagram, the way a network
+			// does when the far end is gone (a killed relay, say), so it is not
+			// the shaper failing.
+			let _ = parcel.socket.send_to(&parcel.datagram, parcel.dest).await;
 		}
 	}
 }
@@ -986,6 +989,22 @@ mod tests {
 		let stats = shaper.verify().expect("an empty profile has nothing to apply");
 		assert_eq!(stats.up.packets, 50);
 		assert_eq!(stats.down.packets, 50);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_undelayed_datagram_waits_for_no_timer() {
+		let (_shaper, client) = setup(1, Profile::default(), Profile::default()).await;
+
+		// Off a millisecond boundary, where a timer would round up to the next one.
+		tokio::time::advance(Duration::from_micros(500)).await;
+		let start = Instant::now();
+		client.send(b"ping").await.unwrap();
+		let mut buf = [0u8; 4];
+		client.recv(&mut buf).await.unwrap();
+
+		// A paused clock only moves when every task waits on a timer, so a round
+		// trip that took any time slept on one.
+		assert_eq!(start.elapsed(), Duration::ZERO);
 	}
 
 	#[tokio::test]
