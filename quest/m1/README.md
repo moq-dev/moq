@@ -33,7 +33,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
 - [Broadcast close](/quest/m1/broadcast-close/README.md) - `close()` is the one way to end a broadcast in every language, a permanent retraction that leaves in-flight tracks alone
 - [Relay peer set](/quest/m1/relay-peer-set.md) - a wire consumer tells a client hop from a peer hop, and every mesh credential can mark a peer
-- [CLI import clock](/quest/m1/cli-import-clock.md) - fMP4, TS, and FLV imports publish on the shared broadcast clock across restarts
 - [CLI inspection](/quest/m1/cli-inspect/README.md) - `moq ls` lists what is live and `moq fetch` reads a group over MoQ, and a guide shows how to inspect a relay
 - [JS caught up](/quest/m1/js-announce-caught-up.md) - @moq/net's announce consumer says when the initial set has landed, like Rust
 - [Bindings caught up](/quest/m1/announce-live-bindings.md) - moq-ffi, libmoq, and every wrapper yield the same flat announce event, `Live` included
