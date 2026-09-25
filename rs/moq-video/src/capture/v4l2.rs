@@ -6,8 +6,6 @@
 //! the pure-Rust [`zune_jpeg`], then converted). This is the CPU path feeding
 //! NVENC / VAAPI / openh264; there's no GPU surface here.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use moq_v4l::buffer::Type as BufType;
 use moq_v4l::capability::Flags;
 use moq_v4l::frameinterval::FrameIntervalEnum;
@@ -17,9 +15,9 @@ use moq_v4l::io::traits::CaptureStream;
 use moq_v4l::video::Capture;
 use moq_v4l::video::capture::Parameters;
 use moq_v4l::{Device, Format, FourCC};
-use zune_jpeg::zune_core::bytestream::ZCursor;
 
 use super::channel::FrameChannel;
+use super::mode::{self, Request};
 use super::pump::{self, Geometry};
 use super::{Config, Mode, Rate, Stream};
 use crate::frame::{I420, Surface};
@@ -75,34 +73,19 @@ pub(super) fn cameras() -> Result<Vec<super::Camera>, Error> {
 /// on.
 pub(super) fn modes(selector: Option<&str>) -> Result<Vec<Mode>, Error> {
 	let (device, _) = open_device(selector)?;
-	let mut sizes: BTreeMap<(u32, u32), BTreeSet<Rate>> = BTreeMap::new();
+	let mut reported = Vec::new();
 
 	for candidate in Source::ALL {
 		let fourcc = candidate.fourcc();
 		let enumerated = frame_sizes(&device, fourcc)?;
 		for size in enumerated {
 			for (width, height) in reported_sizes(size) {
-				sizes.entry((width, height)).or_default().extend(framerates(
-					&device,
-					fourcc,
-					Size::new(width, height),
-				)?);
+				let size = Size::new(width, height);
+				reported.push((size, framerates(&device, fourcc, size)?));
 			}
 		}
 	}
-
-	let mut modes: Vec<Mode> = sizes
-		.into_iter()
-		.map(|((width, height), framerates)| Mode {
-			width,
-			height,
-			// Highest first, so the rate a caller most often wants is the one it
-			// reads without scanning.
-			framerates: framerates.into_iter().rev().collect(),
-		})
-		.collect();
-	modes.sort_by_key(|mode| std::cmp::Reverse(u64::from(mode.width) * u64::from(mode.height)));
-	Ok(modes)
+	Ok(mode::modes(reported))
 }
 
 /// The sizes worth reporting from one `VIDIOC_ENUM_FRAMESIZES` entry.
@@ -138,7 +121,7 @@ fn reported_sizes(size: FrameSizeEnum) -> Vec<(u32, u32)> {
 }
 
 /// First and last nonzero even values on the driver's step grid.
-fn bounds(min: u32, max: u32, step: u32) -> Option<(u32, u32)> {
+pub(super) fn bounds(min: u32, max: u32, step: u32) -> Option<(u32, u32)> {
 	if min == max {
 		return (min != 0 && min.is_multiple_of(2)).then_some((min, min));
 	}
@@ -260,9 +243,9 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 }
 
 /// Fallback geometry when the caller doesn't pin a resolution; the driver picks
-/// the nearest mode it supports.
-const DEFAULT_WIDTH: u32 = 1280;
-const DEFAULT_HEIGHT: u32 = 720;
+/// the nearest mode it supports. PipeWire cameras default to the same size.
+pub(super) const DEFAULT_WIDTH: u32 = 1280;
+pub(super) const DEFAULT_HEIGHT: u32 = 720;
 
 /// Driver buffers to keep in flight; a small ring lets capture overlap encode.
 const BUFFER_COUNT: u32 = 4;
@@ -359,25 +342,7 @@ impl Camera {
 			Source::Mjpeg => {
 				// Only `bytesused` of the buffer holds the JPEG; the rest is stale.
 				let jpeg = buf.get(..meta.bytesused as usize).unwrap_or(buf);
-				// zune-jpeg 0.5 reads through a seekable cursor, not a bare slice.
-				let mut decoder = zune_jpeg::JpegDecoder::new(ZCursor::new(jpeg));
-				let rgb = decoder
-					.decode()
-					.map_err(|e| Error::Codec(anyhow::anyhow!("MJPEG decode: {e:?}")))?;
-				let (w, h) = decoder
-					.dimensions()
-					.ok_or_else(|| Error::Codec(anyhow::anyhow!("MJPEG frame had no dimensions")))?;
-				// The stream reports the negotiated size and the encoder is built
-				// from it, so a frame that decodes to another one can't be published
-				// as this stream's.
-				if w as u32 != self.width || h as u32 != self.height {
-					return Err(Error::Codec(anyhow::anyhow!(
-						"MJPEG frame is {w}x{h}, not the negotiated {}x{}",
-						self.width,
-						self.height
-					)));
-				}
-				I420::from_rgb(&rgb, crate::Size::new(self.width, self.height))?
+				I420::from_mjpeg(jpeg, crate::Size::new(self.width, self.height))?
 			}
 		};
 		let timestamp = u64::try_from(meta.timestamp.sec)
@@ -423,11 +388,6 @@ fn open_error(device: &str, error: std::io::Error) -> Error {
 		std::io::ErrorKind::PermissionDenied => Error::PermissionDenied(format!("{device}: {error}")),
 		_ => Error::SourceUnavailable(format!("{device}: {error}")),
 	}
-}
-
-struct Request {
-	size: Size,
-	framerate: Option<Rate>,
 }
 
 /// Negotiate the format we can convert to I420 that lands closest to `want`.
@@ -524,39 +484,11 @@ fn closest(
 	replies: impl IntoIterator<Item = (Format, Source, Option<Rate>)>,
 	want: Request,
 ) -> Option<(Format, Source, Option<Rate>)> {
-	replies
-		.into_iter()
-		.filter(|(format, _, _)| {
-			Size::new(format.width, format.height)
-				.validate("camera resolution")
-				.is_ok()
-		})
-		.min_by(|(left, left_source, left_rate), (right, right_source, right_rate)| {
-			distance(*left, want.size)
-				.cmp(&distance(*right, want.size))
-				.then_with(|| rate_distance(*left_rate, *right_rate, want.framerate))
-				.then_with(|| left_source.cost().cmp(&right_source.cost()))
-		})
-}
-
-fn rate_distance(left: Option<Rate>, right: Option<Rate>, want: Option<Rate>) -> std::cmp::Ordering {
-	let Some(want) = want else {
-		return std::cmp::Ordering::Equal;
-	};
-	match (left, right) {
-		(Some(left), Some(right)) => (left.as_f64() - want.as_f64())
-			.abs()
-			.total_cmp(&(right.as_f64() - want.as_f64()).abs()),
-		(Some(_), None) => std::cmp::Ordering::Less,
-		(None, Some(_)) => std::cmp::Ordering::Greater,
-		(None, None) => std::cmp::Ordering::Equal,
-	}
-}
-
-/// How far a negotiated mode lands from the requested geometry, summed over both
-/// dimensions. Zero is an exact match.
-fn distance(format: Format, want: Size) -> u64 {
-	u64::from(format.width.abs_diff(want.width)) + u64::from(format.height.abs_diff(want.height))
+	mode::nearest(replies, want, |(format, source, rate)| mode::Candidate {
+		size: Size::new(format.width, format.height),
+		framerate: *rate,
+		cost: source.cost(),
+	})
 }
 
 fn set_format(device: &Device, format: Format) -> Result<Format, Error> {
@@ -625,6 +557,8 @@ mod tests {
 
 	#[test]
 	fn equivalent_rates_deduplicate_and_sort_numerically() {
+		use std::collections::BTreeSet;
+
 		let rates: BTreeSet<_> = [(1001, 30000), (1, 30), (2, 60), (2, 1)]
 			.into_iter()
 			.map(|(n, d)| rate(moq_v4l::Fraction::new(n, d)).unwrap())
@@ -666,16 +600,6 @@ mod tests {
 			formats,
 			[Source::Yuyv.fourcc(), Source::Mjpeg.fourcc(), Source::Mjpeg.fourcc()]
 		);
-	}
-
-	#[test]
-	fn rate_scoring_preserves_fractional_precision_and_handles_unknown_rates() {
-		let ntsc = Some(rate(moq_v4l::Fraction::new(1001, 60000)).unwrap());
-		let thirty = Some(rate(moq_v4l::Fraction::new(1, 30)).unwrap());
-		assert!(rate_distance(ntsc, thirty, Some(Rate::new(60, 1).unwrap())).is_lt());
-		assert!(rate_distance(thirty, ntsc, Some(Rate::new(30, 1).unwrap())).is_lt());
-		assert!(rate_distance(ntsc, None, Some(Rate::new(60, 1).unwrap())).is_lt());
-		assert!(rate_distance(ntsc, thirty, None).is_eq());
 	}
 
 	/// A one-pixel step over a 4K range is 8 million modes, and reporting them
@@ -795,16 +719,6 @@ mod tests {
 	fn no_usable_reply_is_none() {
 		let replies = [reply(0, 720, Source::Yuyv), reply(1279, 719, Source::Mjpeg)];
 		assert!(closest(replies, request(1280, 720)).is_none());
-	}
-
-	/// Distance is symmetric in the two dimensions and zero only on an exact hit,
-	/// so a mode that overshoots is no better than one that undershoots by as much.
-	#[test]
-	fn distance_is_zero_only_on_an_exact_match() {
-		let want = Size::new(1280, 720);
-		assert_eq!(distance(Format::new(1280, 720, Source::Yuyv.fourcc()), want), 0);
-		assert_eq!(distance(Format::new(1280, 600, Source::Yuyv.fourcc()), want), 120);
-		assert_eq!(distance(Format::new(1280, 840, Source::Yuyv.fourcc()), want), 120);
 	}
 
 	/// Every format we advertise round-trips through its fourcc, which is what

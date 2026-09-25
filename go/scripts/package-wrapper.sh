@@ -158,7 +158,7 @@ See [moq-dev/moq/go/wrapper/README.md](https://github.com/moq-dev/moq/blob/main/
 Licensed under MIT OR Apache-2.0.
 EOF
 
-# --- 4. Resolve go.sum (skipped for dry-runs against an unpublished ffi tag) ---
+# --- 4. Resolve go.sum and compile (skipped for dry-runs against an unpublished ffi tag) ---
 # GOPROXY=direct fetches the freshly-pushed ffi tag straight from its mirror,
 # dodging proxy.golang.org caching lag right after a release.
 if [[ "$TIDY" == true ]]; then
@@ -166,6 +166,10 @@ if [[ "$TIDY" == true ]]; then
         cd "$PKG_STAGE"
         # GOWORK=off so an ambient parent go.work can't influence the staged go.sum.
         GOWORK=off GOFLAGS=-mod=mod GOPROXY="${GOPROXY:-direct}" go mod tidy
+        # Compile against the pinned ffi. tidy never type-checks, so a wrapper that
+        # calls ffi API newer than the published release (merged after the ffi tag,
+        # before its version bump) would otherwise ship uncompilable.
+        GOWORK=off GOPROXY="${GOPROXY:-direct}" CGO_ENABLED=1 go build ./...
     )
 else
     echo "  skipping go mod tidy (no go.sum staged)"

@@ -18,7 +18,7 @@ default:
 check $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -n "$FILES" ]] && ! grep -qE '^(swift/|rs/moq-ffi/)' <<< "$FILES"; then
+    if [[ -n "$FILES" ]] && ! grep -qE '^(swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)' <<< "$FILES"; then
     	echo "swift: no Swift changes; skipping."
     	exit 0
     fi

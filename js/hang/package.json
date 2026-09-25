@@ -4,7 +4,11 @@
 	"version": "0.5.0",
 	"description": "WebCodecs-based media format for MoQ",
 	"license": "(MIT OR Apache-2.0)",
-	"repository": "github:moq-dev/moq",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/moq-dev/moq.git",
+		"directory": "js/hang"
+	},
 	"sideEffects": false,
 	"exports": {
 		".": "./src/index.ts",

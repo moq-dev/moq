@@ -11,9 +11,8 @@ Each merge is performed in parallel by a sub-agent.
 Start by listing all open PRs.
 An argument can be used to filter the PRs in scope.
 
-For each PR, interactively prompt the user if we should /merge, skip, or /close.
+One at a time, for each PR, interactively prompt the user if we should /merge, skip, or /close.
 Include a short summary and your recommendation.
-Do this one at a time and open each PR in the browser for the user to review.
 
 If the user chooses to merge the PR, run the /merge command using a sub-agent.
 There can be at most N concurrent merge operations, where N is half the number of physical CPU cores.

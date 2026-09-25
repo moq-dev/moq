@@ -18,6 +18,7 @@
  * @module
  */
 
+export { Desync } from "../error.ts";
 export { Consumer, Rolled } from "./consumer.ts";
 export { Decoder } from "./decoder.ts";
 export { type Config, Encoder, type Pending } from "./encoder.ts";

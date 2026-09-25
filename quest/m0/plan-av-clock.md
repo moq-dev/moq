@@ -48,3 +48,4 @@ Recommendations for the implementation:
 
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the estimator this sits on
 - [Time stretch](/quest/m1/watch-audio-time-stretch.md) - stretching needs a clock to converge toward
+- [Watch worker](/quest/m1/watch-worker.md) - moves `Sync` into a worker afterwards; keep the handles free of main-thread assumptions

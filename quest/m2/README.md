@@ -27,6 +27,8 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Audio loss recovery](/quest/m2/audio-loss-recovery.md) - prove a useful Opus recovery policy before exposing another option
 - [Opus implementation](/quest/m2/audio-opus-backend.md) - compare current codec quality, CPU, and optional build costs
 - [Latency ledger](/quest/m2/latency-ledger.md) - a session reports where its end-to-end audio delay went, stage by stage
+- [JS discontinuity](/quest/m2/js-discontinuity.md) - JS names its timeline break `discontinuity()` like Rust, so `cut` means the same group close in both
+- [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
 - [Media Foundation encode](/quest/m2/audio-encode-mediafoundation.md) - Windows encodes AAC-LC
 - [MediaCodec decode](/quest/m2/audio-decode-mediacodec.md) - Android decodes HE-AAC, multichannel AAC, and what else the device offers
@@ -43,6 +45,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Conan remote](/quest/m2/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
 - [Compressed tracks](/quest/m2/flate/README.md) - any track compresses per group from every language, not only the JSON modes
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
+- [Redundant ingest](/quest/m2/redundant-ingest.md) - decide whether two publishers sharing one epoch may splice, and who declares the incumbent dead before the keep-alive does
 - [Multipath spike](/quest/m2/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends
 - [Receive timestamps](/quest/m2/quic-receive-ts.md) - per-packet arrival times in ACKs, the feedback GCC and deadlines need
 - [QUIC GCC](/quest/m2/quic-gcc.md) - a measured verdict on delay-based congestion control for media egress, shipping as `RealTime`
@@ -53,7 +56,8 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [L4S on the backbone](/quest/m2/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive by deadline](/quest/m2/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer
-- [Bounded announce prefix table](/quest/m2/announce-prefix-table.md) - compress repeated path tuples on each ordered lite-07 announce stream, with bounded state and measured QUIC-byte savings
+- [Bounded announce prefix table](/quest/m2/announce-prefix-table.md) - compress repeated path tuples on each ordered lite-08 announce stream, with bounded state and measured QUIC-byte savings
+- [Drop the hidden cluster exemption](/quest/m2/hidden-exemption.md) - relays stop forcing hidden broadcasts on cluster peers once every peer opts in on the wire
 - [Routing cost domains](/quest/m2/routing-cost-domains.md) - design operator boundaries and policy without adding incomparable costs
 - [Kernel pacing](/quest/m2/quic-kernel-pacing.md) - whether SO_TXTIME pacing beats a userspace pacer the io_uring driver ignores today
 - [Send batching](/quest/m2/quic-send-batching.md) - whether sendmmsg across connections pays on the tokio path

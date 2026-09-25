@@ -4,7 +4,11 @@
 	"version": "0.3.0",
 	"description": "MSF (MOQT Streaming Format) catalog types for MoQ",
 	"license": "(MIT OR Apache-2.0)",
-	"repository": "github:moq-dev/moq",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/moq-dev/moq.git",
+		"directory": "js/msf"
+	},
 	"exports": {
 		".": "./src/index.ts"
 	},

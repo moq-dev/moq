@@ -43,7 +43,7 @@ work no child does:
   each language's module, linked from every binding page.
 - The bindings section of the following release's upgrade page: old call to
   new call per language.
-- `just test smoke --all` green on the finished line.
+- `just test interop --all` green on the finished line.
 
 ## Quests
 
@@ -59,4 +59,3 @@ work no child does:
 ## Related
 
 - [Track demand](/quest/m1/track-demand.md) - the same `demand()` cleanup in Rust and JS
-- [Binding docs](/quest/m1/binding-docs.md) - its nightly sample check guards the rewritten pages

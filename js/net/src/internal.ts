@@ -37,6 +37,15 @@ export function scopeHead(scope: Path.Pattern): Path.Valid {
 	return Path.from(scope.head);
 }
 
+/**
+ * Whether a segment of `path` below `prefix` starts with `.`, which hides it from announce
+ * discovery unless the request opts in. A path at or above the prefix never hides.
+ */
+export function hiddenBelow(prefix: Path.Valid, path: Path.Valid): boolean {
+	const below = Path.stripPrefix(prefix, path);
+	return below !== null && Path.parts(below).some((part) => part.startsWith("."));
+}
+
 /** Whether the announced prefix's subtree overlaps `scope`. */
 export function scopeOverlaps(scope: Path.Pattern, prefix: Path.Valid): boolean {
 	return scope.overlaps(Path.Pattern.subtree(prefix));

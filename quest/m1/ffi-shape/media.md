@@ -13,7 +13,12 @@ producers, and the container consumers, each constructed from a broadcast.
 
 Mirror moq-mux's import names and hang's catalog. The catalog setters
 (`set_video_properties`, `set_catalog_section`, `remove_catalog_section`)
-belong on a catalog type, not the broadcast. The `_on_track` variants take a
+belong on a catalog type, not the broadcast. #3959 prototyped one
+(`MoqCatalogProducer` with `set_video_properties`, `set_section`, and
+`remove_section`, wrapped and tested in every language) behind a rejected
+`BroadcastProducer::catalog()` accessor; crib the type, not the accessor. It
+held the broadcast weakly so the handle keeps nothing open and writes fail
+with `Closed` once the broadcast finishes. The `_on_track` variants take a
 `TrackRequest`; decide whether that is a second constructor or an argument
 once the shape is in front of you, and prefer one path. Go's
 `FetchMediaGroup` takes an options struct. Media producers watch subscribers
