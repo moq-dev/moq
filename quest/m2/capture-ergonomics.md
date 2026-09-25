@@ -25,7 +25,3 @@ validation already has its own quest.
   the combination the `System` source makes newly reachable.
   Preserve exclusive AEC microphone ownership and define clock alignment
   before sharing processed microphone input.
-
-## Related
-
-- [Capture format validation](/quest/m1/audio-capture-format.md) - independent validation work already scoped
