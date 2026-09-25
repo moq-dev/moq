@@ -37,6 +37,10 @@ The segment engine is in `rs/moq-mux/src/timeline.rs`:
 
 `rs/moq-archive` stores the versioned objects on any `object_store::ObjectStore`:
 percent-encoded track names, `.info` JSON, the binary envelope, and put/get/list/delete.
+`moq_archive::Writer` (`rs/moq-archive/src/writer.rs`) records enrolled tracks
+through `Deferred`, omits failed tracks with `Pending::omit`, stores each
+segment's timeline groups after `Producer::flush`, and expires DVR segments
+with a deletion grace. It refuses a prefix that already holds a timeline.
 
 ### Format
 
@@ -103,10 +107,11 @@ owned by that prerequisite, not duplicated in archive storage.
 
 ## Quests
 
-- [Recording writer](/quest/m1/archive/writer.md) - feed the segmenter from a `broadcast::Consumer`, store each segment, then commit its record
+- [Archive endpoint](/quest/m1/archive/cli.md) - `moq ... export archive` records and `import archive` replays
 - [Recording reader](/quest/m1/archive/reader.md) - serve archived FETCH through a supplied `broadcast::Producer`
 - [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
 - [Offline archive HLS](/quest/m1/archive/hls.md) - render playlists from the archive timeline and fetch segment media lazily
+- [Resume a recording](/quest/m1/archive/recovery.md) - recover the retained timeline on restart and clean up DVR orphans
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 - [Archive proof](/quest/m1/archive/proof.md) - prove persistence ordering, selective reads, exact FETCH replay, and timeline-only HLS generation
 
