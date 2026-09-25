@@ -94,7 +94,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 ## Quests
 
 - [Release](/quest/m0/release.md) - the release moq.pro adopts: binding docs, an upgrade page, and a staging soak gate it rather than the merge
-- [Stats wire contract](/quest/m0/stats-binary/README.md) - every stats track documented as a wire contract other languages can read
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
 - [A/V clock](/quest/m0/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 

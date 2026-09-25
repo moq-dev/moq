@@ -26,10 +26,6 @@ hop-id bit prefix (`agent/moq_agent/matching.py`).
 Public API: additive on moq-stats and moq-auth. Wire: the stats broadcast gains
 a peer-set frame; the JWT claims may gain a field.
 
-## Required
-
-- [Stats wire contract](/quest/m0/stats-binary/README.md) - settles the stats track layout the frame joins
-
 ## Related
 
 - [Route cost](/quest/m1/route-cost.md) - the other route fact JS lacks
