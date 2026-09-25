@@ -1,6 +1,7 @@
 //! `snapshot::Encoder::update` on a keyed table shaped like a moq-stats traffic frame, swept over
-//! total rows and the share of rows that change per tick. A cost that grows with the table rather
-//! than the changed rows shows up as a slope across `rows` at a fixed small `changed`.
+//! total rows and the share of rows that change per tick. Cases that change the same number of rows
+//! (100 rows at 100%, 10k at 1%) separate a cost that grows with the table from one that grows with
+//! the changed rows.
 //!
 //! Each iteration is one tick against a long-lived encoder, so the periodic snapshots the delta
 //! budget forces are amortized in, as they are in production.
