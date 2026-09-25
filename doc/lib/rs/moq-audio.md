@@ -27,6 +27,10 @@ policy. Decoding likewise separates low-level `decode::Config`, PCM
 | `playback` | One output device mixing every track in a call, with click-free volume ramps |
 | `aec` | Acoustic echo cancellation (a port of WebRTC's), so a laptop with no headset doesn't feed itself back |
 
+AAC decoding refuses HE-AAC its config declares. HE-AAC signaled only in band
+(implicit SBR, as over MPEG-TS) goes undetected and plays as its half-rate
+AAC-LC core.
+
 Highlights:
 
 - **`encode::Publication`** advertises the track and opens the microphone only while someone listens. Stop, swap devices, and restart without changing the track subscribers know; read a level meter for the UI.
