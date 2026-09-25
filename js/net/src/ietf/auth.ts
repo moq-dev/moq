@@ -71,12 +71,15 @@ export class AuthMessage {
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
 		guard(version);
-		await w.u53(AuthMessage.id);
-		return Message.encode(w, async (wr) => {
-			await wr.u62(this.requestId);
-			await wr.u53(this.token.byteLength);
-			if (this.token.byteLength > 0) await wr.write(this.token);
-		});
+		return Message.encode(
+			w,
+			async (wr) => {
+				await wr.u62(this.requestId);
+				await wr.u53(this.token.byteLength);
+				if (this.token.byteLength > 0) await wr.write(this.token);
+			},
+			AuthMessage.id,
+		);
 	}
 
 	static async decode(r: Reader, version: IetfVersion): Promise<AuthMessage> {
@@ -133,17 +136,20 @@ export class AuthOk {
 		// half-sent.
 		const publish = prefixes(this.publish);
 		const subscribe = prefixes(this.subscribe);
-		await w.u53(AuthOk.id);
-		return Message.encode(w, async (wr) => {
-			await encodePrefixes(wr, publish);
-			await encodePrefixes(wr, subscribe);
-			// 0 means never, so a lapsed grant rounds up to the smallest real expiry.
-			const expires =
-				this.expires === undefined
-					? 0
-					: Math.min(Math.max(Math.ceil(this.expires), 1), Number.MAX_SAFE_INTEGER);
-			await wr.u53(expires);
-		});
+		return Message.encode(
+			w,
+			async (wr) => {
+				await encodePrefixes(wr, publish);
+				await encodePrefixes(wr, subscribe);
+				// 0 means never, so a lapsed grant rounds up to the smallest real expiry.
+				const expires =
+					this.expires === undefined
+						? 0
+						: Math.min(Math.max(Math.ceil(this.expires), 1), Number.MAX_SAFE_INTEGER);
+				await wr.u53(expires);
+			},
+			AuthOk.id,
+		);
 	}
 
 	static async decode(r: Reader, version: IetfVersion): Promise<AuthOk> {
@@ -175,11 +181,14 @@ export class AuthError {
 		if (new TextEncoder().encode(this.reason).byteLength > MAX_REASON) {
 			throw new Error("AUTH_ERROR reason exceeds 8,192 bytes");
 		}
-		await w.u53(AuthError.id);
-		return Message.encode(w, async (wr) => {
-			await wr.u53(this.code);
-			await wr.string(this.reason);
-		});
+		return Message.encode(
+			w,
+			async (wr) => {
+				await wr.u53(this.code);
+				await wr.string(this.reason);
+			},
+			AuthError.id,
+		);
 	}
 
 	static async decode(r: Reader, version: IetfVersion): Promise<AuthError> {

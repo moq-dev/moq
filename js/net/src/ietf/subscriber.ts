@@ -606,6 +606,8 @@ export class Subscriber {
 			disposeGrant = this.#grant?.subscribe(() => {
 				if (this.#denied(broadcast)) revoke();
 			});
+			// The grant may have shrunk during setup, before this watcher existed.
+			if (this.#denied(broadcast)) revoke();
 
 			// Terminal conditions settle at most once (stream close = PublishDone, track close =
 			// local unsubscribe, a revoked grant); race them once so the demand loop doesn't

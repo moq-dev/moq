@@ -430,6 +430,8 @@ export class Publisher {
 			const disposeGrant = this.#grant.subscribe(() => {
 				if (this.#denied(name)) revoke();
 			});
+			// The grant may have shrunk during setup, before this watcher existed.
+			if (this.#denied(name)) revoke();
 
 			let publishError: Error | undefined;
 			let unauthorized = false;

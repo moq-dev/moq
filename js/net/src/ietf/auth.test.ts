@@ -107,6 +107,23 @@ test("a grant the prefix wire cannot express is refused before anything is writt
 	}
 });
 
+test("a grant too large for one message is refused before anything is written", async () => {
+	const huge = new AuthOk(patterns(...Array.from({ length: 20 }, (_, i) => `${i}${"x".repeat(4000)}`)), patterns());
+	let written = 0;
+	const writer = new Writer(
+		new WritableStream({
+			write(chunk) {
+				written += chunk.byteLength;
+			},
+		}),
+		Version.DRAFT_17,
+	);
+	await expect(huge.encode(writer, Version.DRAFT_17)).rejects.toThrow("Message too large");
+	writer.close();
+	await writer.closed;
+	expect(written).toBe(0);
+});
+
 test("NOT_SUPPORTED is unsupported, every other code a refusal", async () => {
 	const r = await afterType((w) => new AuthError(0x3, "prefixes only").encode(w, Version.DRAFT_17));
 	expect((await AuthError.decode(r, Version.DRAFT_17)).toError()).toBeInstanceOf(Unsupported);
