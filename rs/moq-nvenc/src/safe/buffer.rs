@@ -687,8 +687,8 @@ struct Mapping<A: ResourceApi, T> {
 	reg_ptr: *mut c_void,
 	map_ptr: *mut c_void,
 	api: A,
-	// Dropped after the resource is unregistered.
-	_marker: T,
+	// Dropped only once the resource is unregistered.
+	marker: ManuallyDrop<T>,
 }
 
 impl<A: ResourceApi, T> Mapping<A, T> {
@@ -712,7 +712,7 @@ impl<A: ResourceApi, T> Mapping<A, T> {
 			reg_ptr,
 			map_ptr,
 			api,
-			_marker: marker,
+			marker: ManuallyDrop::new(marker),
 		})
 	}
 }
@@ -721,8 +721,17 @@ impl<A: ResourceApi, T> Mapping<A, T> {
 /// when it goes out of scope.
 impl<A: ResourceApi, T> Drop for Mapping<A, T> {
 	fn drop(&mut self) {
-		let _ = self.api.unmap_input_resource(self.map_ptr);
-		let _ = self.api.unregister_resource(self.reg_ptr);
+		// A failed unmap leaves the resource mapped. Unregistering or freeing
+		// it could release memory NVENC still holds, so leak the owner instead.
+		if self.api.unmap_input_resource(self.map_ptr).is_err() {
+			return;
+		}
+		// As in `new`: NVENC may still refer to an allocation it failed to
+		// unregister, so leak its owner rather than free it.
+		if self.api.unregister_resource(self.reg_ptr).is_ok() {
+			// SAFETY: dropped once, here, and never touched again.
+			unsafe { ManuallyDrop::drop(&mut self.marker) };
+		}
 	}
 }
 
@@ -771,8 +780,10 @@ mod tests {
 	#[derive(Debug)]
 	struct TestApi {
 		calls: RefCell<Calls>,
+		mapped: Cell<bool>,
 		owner_alive: Rc<Cell<bool>>,
 		map_error: Option<ErrorKind>,
+		unmap_error: Option<ErrorKind>,
 		unregister_error: Option<ErrorKind>,
 	}
 
@@ -780,8 +791,10 @@ mod tests {
 		fn new(owner_alive: Rc<Cell<bool>>) -> Self {
 			Self {
 				calls: RefCell::new(Calls::default()),
+				mapped: Cell::new(false),
 				owner_alive,
 				map_error: None,
+				unmap_error: None,
 				unregister_error: None,
 			}
 		}
@@ -810,18 +823,28 @@ mod tests {
 			self.calls.borrow_mut().map += 1;
 			match self.map_error {
 				Some(kind) => Err(EncodeError::new(kind, None)),
-				None => Ok(TestApi::handle()),
+				None => {
+					self.mapped.set(true);
+					Ok(TestApi::handle())
+				}
 			}
 		}
 
 		fn unmap_input_resource(&self, _mapped: *mut c_void) -> Result<(), EncodeError> {
 			self.assert_owner_alive();
 			self.calls.borrow_mut().unmap += 1;
-			Ok(())
+			match self.unmap_error {
+				Some(kind) => Err(EncodeError::new(kind, None)),
+				None => {
+					self.mapped.set(false);
+					Ok(())
+				}
+			}
 		}
 
 		fn unregister_resource(&self, _registered: *mut c_void) -> Result<(), EncodeError> {
 			self.assert_owner_alive();
+			assert!(!self.mapped.get(), "unregistered a resource that is still mapped");
 			self.calls.borrow_mut().unregister += 1;
 			match self.unregister_error {
 				Some(kind) => Err(EncodeError::new(kind, None)),
@@ -921,6 +944,46 @@ mod tests {
 		drop(resource);
 
 		assert!(!alive.get(), "owner should be released after destruction");
+		assert_eq!(
+			*api.calls.borrow(),
+			Calls {
+				register: 1,
+				map: 1,
+				unmap: 1,
+				unregister: 1,
+			}
+		);
+	}
+
+	#[test]
+	fn failed_unmap_on_drop_retains_the_owner() {
+		let (owner, alive) = setup();
+		let mut api = TestApi::new(alive.clone());
+		api.unmap_error = Some(ErrorKind::ResourceNotMapped);
+
+		drop(register(&api, owner).expect("mapping should succeed"));
+
+		assert!(alive.get(), "a possibly mapped allocation must remain owned");
+		assert_eq!(
+			*api.calls.borrow(),
+			Calls {
+				register: 1,
+				map: 1,
+				unmap: 1,
+				unregister: 0,
+			}
+		);
+	}
+
+	#[test]
+	fn failed_unregister_on_drop_retains_the_owner() {
+		let (owner, alive) = setup();
+		let mut api = TestApi::new(alive.clone());
+		api.unregister_error = Some(ErrorKind::ResourceNotRegistered);
+
+		drop(register(&api, owner).expect("mapping should succeed"));
+
+		assert!(alive.get(), "a possibly registered allocation must remain owned");
 		assert_eq!(
 			*api.calls.borrow(),
 			Calls {
