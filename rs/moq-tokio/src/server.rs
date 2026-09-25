@@ -8,9 +8,9 @@ use std::net;
 #[cfg(any(test, all(feature = "uds", unix)))]
 use std::path::PathBuf;
 
-use crate::Error;
 #[cfg(feature = "iroh")]
 use crate::iroh;
+use crate::{Error, Transport};
 use moq_net::Session;
 use url::Url;
 
@@ -587,7 +587,9 @@ impl Server {
 							let Accepted { session, url, identity, authority, mut link } = super::noq::accept(_conn, alpns).await?;
 							link.local = local;
 							let request = server.accept_request(tokio::time::Instant::now().into_std(), crate::transport::Session::new(session)).await?;
-							Ok(Request { transport: Transport::Quic, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)) })
+							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
+							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
+							Ok(Request { transport, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)) })
 						}.boxed());
 					}
 				}
@@ -1096,41 +1098,6 @@ pub struct Link {
 	/// The negotiated application protocol: the TLS ALPN on raw QUIC, the chosen
 	/// sub-protocol on WebTransport and WebSocket.
 	pub alpn: Option<String>,
-}
-
-/// The network transport carrying an incoming MoQ session.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Transport {
-	/// QUIC, either directly or through WebTransport over HTTP/3.
-	Quic,
-	/// An Iroh QUIC connection.
-	Iroh,
-	/// A WebSocket connection using qmux framing.
-	WebSocket,
-	/// A plaintext TCP connection using qmux framing.
-	Tcp,
-	/// A Unix domain socket using qmux framing.
-	Unix,
-}
-
-impl Transport {
-	/// Returns the stable lowercase name used in logs and external metadata.
-	pub const fn as_str(self) -> &'static str {
-		match self {
-			Self::Quic => "quic",
-			Self::Iroh => "iroh",
-			Self::WebSocket => "websocket",
-			Self::Tcp => "tcp",
-			Self::Unix => "unix",
-		}
-	}
-}
-
-impl std::fmt::Display for Transport {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.write_str(self.as_str())
-	}
 }
 
 /// An incoming MoQ session that can be accepted or rejected.
@@ -1723,6 +1690,7 @@ mod tests {
 		assert_eq!(Transport::WebSocket.as_str(), "websocket");
 		assert_eq!(Transport::Tcp.as_str(), "tcp");
 		assert_eq!(Transport::Unix.as_str(), "unix");
+		assert_eq!(Transport::WebTransport.as_str(), "webtransport");
 	}
 
 	/// Building the endpoint needs a runtime, and `certificates()` must stay

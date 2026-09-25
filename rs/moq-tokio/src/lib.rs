@@ -75,6 +75,7 @@ pub use error::{Error, Result};
 pub use log::{Log, RedactedUrl};
 #[cfg(feature = "_transport")]
 pub use server::{Listener, Server};
+pub use transport::Transport;
 
 // Re-export these crates.
 pub use moq_net;

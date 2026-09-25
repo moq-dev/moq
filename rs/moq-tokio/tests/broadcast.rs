@@ -1928,7 +1928,7 @@ async fn broadcast_websocket() {
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		assert_eq!(request.transport(), moq_tokio::server::Transport::WebSocket);
+		assert_eq!(request.transport(), moq_tokio::Transport::WebSocket);
 		assert_eq!(request.path(), "");
 		// The dialed host reaches the server as the authority, like the QUIC transports.
 		assert_eq!(request.authority(), Some("localhost"));
@@ -2050,7 +2050,7 @@ async fn broadcast_websocket_fallback() {
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		assert_eq!(request.transport(), moq_tokio::server::Transport::WebSocket);
+		assert_eq!(request.transport(), moq_tokio::Transport::WebSocket);
 		assert_eq!(request.path(), "/admin");
 		assert_eq!(request.query(), Some("jwt=test"));
 		assert_eq!(request.url().and_then(url::Url::query), Some("jwt=test"));
@@ -2167,7 +2167,7 @@ async fn broadcast_websocket_uses_newest_version() {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		assert_eq!(request.transport(), moq_tokio::server::Transport::WebSocket);
+		assert_eq!(request.transport(), moq_tokio::Transport::WebSocket);
 		let session = request.with_publisher(&pub_origin).ok().await?;
 		assert_eq!(session.version(), expected_version, "server negotiated stale version");
 		let _broadcast = broadcast;
@@ -2245,7 +2245,7 @@ async fn broadcast_race_quic_wins() {
 		let request = server.accept().await.expect("no incoming connection");
 		assert_eq!(
 			request.transport(),
-			moq_tokio::server::Transport::Quic,
+			moq_tokio::Transport::WebTransport,
 			"QUIC lost the race to WebSocket with both reachable",
 		);
 		let session = request.with_publisher(&pub_origin).ok().await?;

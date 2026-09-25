@@ -40,12 +40,13 @@ requires it.
 Shared decisions:
 
 - The race returns the winner plus the still-pending QUIC dial when WebSocket
-  wins. The QUIC handshake timeout bounds that dial; no extra deadline.
+  wins. The deadline that already bounds the race attempt (the connect
+  timeout in Rust) bounds that dial too; no extra deadline.
 - On a successful upgrade the "WebSocket won" memo (`WEBSOCKET_WON` in
   `moq-tokio`, `websocketWon` in `js/net`) forgets the URL: QUIC works on this
   network, so the head start comes back. Otherwise a network where WebSocket
   narrowly beats QUIC would open two connections on every reconnect.
-- The old session gets `Goaway::same()` with the configured handover cap before
+- The old session gets `Goaway::new()` with the configured handover cap before
   it enters draining. The relay refuses new requests on it from then on; the
   splice ends its subscriptions at the boundary.
 - One-shot `connect()` returns one session and never upgrades; every
@@ -57,7 +58,6 @@ Shared decisions:
 
 ## Quests
 
-- [Rust](/quest/m1/transport-upgrade/rust.md) - moq-tokio keeps the QUIC dial after WebSocket wins and migrates through the existing Draining path
 - [JavaScript](/quest/m1/transport-upgrade/js.md) - js/net keeps the WebTransport dial after WebSocket wins and migrates through the client-goaway handover
 
 ## Related

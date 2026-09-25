@@ -610,7 +610,7 @@ async fn iroh_connect() {
 		assert_eq!(request.role(), Some(moq_tokio::moq_net::Role::Subscriber));
 		// iroh offers the moq ALPNs ahead of H3, so this lands on raw QUIC: no request
 		// URL, leaving the SETUP as the only place for the request target.
-		assert_eq!(request.transport(), moq_tokio::server::Transport::Iroh);
+		assert_eq!(request.transport(), moq_tokio::Transport::Iroh);
 		assert_eq!(request.url(), None);
 		assert_eq!(request.path(), "/room");
 		assert_eq!(request.query(), Some("jwt=abc"));

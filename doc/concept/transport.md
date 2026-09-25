@@ -42,7 +42,8 @@ connection (`wss://`) and keep whichever wins. A small multiplexer,
 [qmux](/draft/qmux-websocket), carries MoQ streams over the socket. It works
 everywhere but cannot escape TCP head-of-line blocking, so priority and resets
 only help once bytes leave the TCP queue. The fallback is automatic in every
-client; the relay enables it with `[web.https]`.
+client; the relay enables it with `[web.https]`. A native Rust client that lands on
+WebSocket keeps dialing QUIC and moves the session onto it if that dial completes.
 
 ## Raw QUIC (native)
 
