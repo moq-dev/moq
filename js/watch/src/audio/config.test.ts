@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import { Time } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
-import { decoderConfig, frameDuration, playbackIdentity } from "./config";
+import { decoderConfig, frameDuration, packetDuration, playbackIdentity } from "./config";
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -71,4 +71,16 @@ test("Opus and unknown codecs have no constant frame duration", () => {
 	// Opus states its duration per packet, in the TOC byte.
 	expect(frameDuration(config())).toBeUndefined();
 	expect(frameDuration(config({ codec: "flac" }))).toBeUndefined();
+});
+
+test("an implicit CMAF duration falls through to the Opus TOC", () => {
+	// TOC 0x78: config 15 (hybrid fullband, 20 ms), one frame.
+	const frame = {
+		timestamp: Time.Micro(0),
+		keyframe: true,
+		payload: new Uint8Array([0x78, 0]),
+		duration: Time.Micro(0),
+	};
+	expect(packetDuration("opus", frame)).toBe(Time.Milli(20));
+	expect(packetDuration("mp4a.40.2", frame)).toBeUndefined();
 });

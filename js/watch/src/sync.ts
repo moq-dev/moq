@@ -40,11 +40,7 @@ export type SyncInput = {
 	 */
 	buffer: Getter<Time.Milli>;
 
-	/**
-	 * Ignored: "auto" is measured from arrivals, which the round trip does not describe.
-	 *
-	 * @deprecated Nothing reads it; omit it.
-	 */
+	/** @internal */
 	probe: Getter<Moq.Connection.Probe | undefined>;
 };
 

@@ -56,9 +56,10 @@ export function frameDuration(config: Pick<Catalog.AudioConfig, "codec" | "sampl
 /**
  * A frame's own duration, when it states one: the container's per-sample duration (CMAF), else the
  * duration an Opus packet declares in its TOC byte (RFC 6716 §3.1), always reckoned at 48 kHz.
+ * CMAF reports an implicit duration as zero, which states nothing.
  */
 export function packetDuration(codec: string, frame: Container.Frame): Time.Milli | undefined {
-	if (frame.duration !== undefined) return Time.Milli.fromMicro(frame.duration);
+	if (frame.duration) return Time.Milli.fromMicro(frame.duration);
 	if (!codec.startsWith("opus")) return undefined;
 	const samples = Util.Opus.packetSamples(frame.payload);
 	return samples === undefined ? undefined : Time.Milli((samples * 1000) / OPUS_RATE);
