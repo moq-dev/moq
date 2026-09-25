@@ -4384,6 +4384,7 @@ version = "0.4.3"
 dependencies = [
  "anyhow",
  "bytes",
+ "futures",
  "gst-plugin-version-helper",
  "gstreamer",
  "hang",
