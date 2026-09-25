@@ -512,7 +512,7 @@ An endpoint's scope is the union of the grants of its open Auth Streams, and a s
 When the union shrinks, an endpoint SHOULD withdraw its announcements and cancel its subscriptions that the union no longer covers, keeping the session and everything still covered.
 An endpoint that announces a broadcast outside the union once its own setup tokens are answered SHOULD close the session with UNAUTHORIZED, rather than wait for a subscription that will never come.
 
-An acceptor that does not verify a token in band resets the stream, the same as a peer that does not support the Auth Stream (see [STREAM_TYPE](#stream_type)).
+An acceptor that does not verify a token in band, or cannot express its grant in AUTH_OK, resets the stream, the same as a peer that does not support the Auth Stream (see [STREAM_TYPE](#stream_type)).
 An opener that sees the stream reset before any reply treats the token as unsupported rather than refused.
 
 ### Goaway

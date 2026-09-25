@@ -373,7 +373,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 			Ok(()) => Error::Cancel,
 			Err(err) => {
 				match &err {
-					Error::Cancel | Error::Stream(_) | Error::Session(_) | Error::Transport(_) => {
+					Error::Cancel | Error::Unsupported | Error::Stream(_) | Error::Session(_) | Error::Transport(_) => {
 						tracing::debug!(%err, "auth stream ended")
 					}
 					err => tracing::warn!(%err, "auth stream error"),
@@ -480,17 +480,14 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 			}),
 		};
 		match stream.writer.buffer(&msg) {
-			// This wire carries prefixes only: refuse what it cannot express rather
-			// than widen it. The presenter logs the refusal; a pattern grant is routine
-			// until the wire carries patterns, so it is not worth a warning here too.
+			// This wire carries prefixes only, so a pattern grant cannot be told, only
+			// withheld: reset the stream, which the presenter reads as unsupported
+			// rather than refused. Never widen it. A pattern grant is routine until the
+			// wire carries patterns, so it is not worth a warning.
 			Err(Error::Encode(crate::coding::EncodeError::Unsupported)) => {
-				tracing::debug!("auth grant not representable as prefixes; refusing the token");
-				stream.writer.buffer(&lite::AuthReply::Error(lite::AuthError {
-					code: crate::SessionError::Internal.to_code().into(),
-					reason: "grant not representable".to_string(),
-				}))?;
+				tracing::debug!("auth grant not representable as prefixes; resetting the token's stream");
 				issue.lock().done = true;
-				Ok(())
+				Err(Error::Unsupported)
 			}
 			res => res,
 		}

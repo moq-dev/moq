@@ -297,13 +297,11 @@ class IssuedGrant implements Issued {
 			.then(() => encodeAuthReply(this.#stream.writer, reply, this.#version))
 			.catch((err: unknown) => {
 				if (!(err instanceof Unsupported)) return;
-				// Refuse what this wire cannot express rather than widen it.
-				console.warn("auth grant not representable; refusing the token", err);
+				// This wire carries prefixes only, so a pattern grant cannot be told, only
+				// withheld: reset the stream, which the presenter reads as unsupported rather
+				// than refused. Never widen it.
 				this.#done = true;
-				const refusal = new AuthError(SessionCode.Internal, "grant not representable");
-				return encodeAuthReply(this.#stream.writer, refusal, this.#version)
-					.then(() => this.#stream.writer.close())
-					.catch(() => void 0);
+				this.#stream.writer.reset(err);
 			});
 	}
 
