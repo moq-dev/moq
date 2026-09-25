@@ -80,7 +80,7 @@ export class Room {
 
 	async #run(announced: Moq.Announce.Consumer, prefix: Moq.Path.Valid, effect: Effect): Promise<void> {
 		for (;;) {
-			const update = await Promise.race([effect.cancel, announced.next()]);
+			const update = await effect.race(announced.next());
 			if (!update) break;
 
 			// The scope's `**` captures what lies beneath the prefix. A broad route

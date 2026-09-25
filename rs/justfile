@@ -37,13 +37,34 @@ default:
 
 # Compile, lint, format-check, doc-check, and verify dependency hygiene.
 check *args:
+    cargo clippy --locked --all-targets {{ args }} -- -D warnings
+    just rs _lint {{ args }}
+
+# `check` with the clippy pass replaced by `test`, whose clippy-driver build
+# reports the same findings. `build.warnings` turns them into errors without
+# entering cargo's fingerprint, so a later plain `test` reuses the artifacts.
+# `--no-tests=pass` because a selection can hold nothing testable (see
+# `test-changed`).
+
+# Compile, lint, and test in one build, plus everything else `check` verifies.
+check-test *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v clippy-driver >/dev/null 2>&1; then
+    	echo "rs: check-test needs clippy-driver to lint" >&2
+    	exit 1
+    fi
+    CARGO_BUILD_WARNINGS=deny just rs test --no-tests=pass {{ args }}
+    just rs _lint {{ args }}
+
+# Everything `check` verifies besides clippy.
+_lint *args:
     just rs _select-test
     just rs _publish-test
     just rs _doc-names-test
     # A new MoqConnectionStats field has to reach every binding's doc page.
     python3 rs/scripts/stats-docs.py
     rs/scripts/package-nfpm.test.sh
-    cargo clippy --locked --all-targets {{ args }} -- -D warnings
     cargo fmt --all --check
     just rs _doc-names
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps {{ args }}
@@ -279,6 +300,16 @@ _wants-uring $PACKAGES:
     set -euo pipefail
     grep -qw 'moq-relay' <<< "$(just rs _names "$PACKAGES")"
 
+# True when the media feature contracts have to run. The contract script is not
+# a crate, so `_select` drops it; a diff that only edits the script must still
+# reach the gate, or a broken command merges on shell lint alone.
+[private]
+_wants-media-features $PACKAGES $FILES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    grep -qwE '(moq-video|moq-audio|moq-transcode)' <<< "$(just rs _names "$PACKAGES")" \
+    	|| grep -qx 'rs/scripts/media-features.sh' <<< "$FILES"
+
 # Print the crate names behind a list of `--package` flags.
 [private]
 _names $PACKAGES:
@@ -351,6 +382,24 @@ _select-test:
     [[ -z "$(just rs _select "rs/scripts/package-binary.sh")" ]] \
     	|| fail "a non-crate seed must select nothing"
 
+    # The contract script is that same kind of seed, so selection stays empty.
+    # The gate still has to run it: this is the diff that can break the commands.
+    [[ -z "$(just rs _select "rs/scripts/media-features.sh")" ]] \
+    	|| fail "the media contract script must not select a crate"
+    just rs _wants-media-features "" "rs/scripts/media-features.sh" \
+    	|| fail "a media-features.sh diff must drive the contract"
+    if just rs _wants-media-features "" "rs/scripts/package-binary.sh"; then
+    	fail "an unrelated script must not drive the media contract"
+    fi
+    video=$(just rs _select "rs/moq-video/src/lib.rs")
+    just rs _wants-media-features "$video" "" \
+    	|| fail "a moq-video diff must drive the media contract: $(just rs _names "$video")"
+    just rs _wants-media-features "--package file:///tmp/rs/moq-transcode#0" "" \
+    	|| fail "moq-transcode alone must drive the media contract"
+    if just rs _wants-media-features "$relay" ""; then
+    	fail "a moq-relay diff must not drive the media contract: $(just rs _names "$relay")"
+    fi
+
     # A crate nested inside another crate's directory is covered by its parent's
     # seed. Selecting it directly would compile libFuzzer on every moq-net diff,
     # and its directory name is not its crate name, so it would also mis-report.
@@ -415,14 +464,17 @@ _publish-test:
 # would resolve to the root recipe of that name.
 
 # Like `check`, but only the crates a diff touches plus their dependents.
-check-changed $FILES:
+# TEST=true runs `check-test` in place of `check`.
+check-changed $FILES $TEST="false":
     #!/usr/bin/env bash
     set -euo pipefail
+    recipe=check
+    [[ "$TEST" == true ]] && recipe=check-test
     packages=$(just rs _select "$FILES")
     case "$packages" in
     	"")    echo "rs: no crates affected; skipping." ;;
-    	ALL)   just rs check --workspace {{ no_fuzz }} ;;
-    	*)     echo "rs: checking $(just rs _names "$packages")"; just rs check $packages ;;
+    	ALL)   just rs "$recipe" --workspace {{ no_fuzz }} ;;
+    	*)     echo "rs: checking $(just rs _names "$packages")"; just rs "$recipe" $packages ;;
     esac
 
     if [[ "$packages" == "ALL" ]] || just rs _wants-tokio-features "$packages"; then
@@ -454,6 +506,13 @@ check-changed $FILES:
     # land on the nightly.
     if [[ "$packages" == "ALL" ]] || just rs _wants-uring "$packages"; then
     	just rs uring-check
+    fi
+
+    # Each media feature shape compiles on its own (see rs/scripts/media-features.sh),
+    # about two minutes, so only a diff that reaches the media crates, or the
+    # contract script itself, pays for it.
+    if [[ "$packages" == "ALL" ]] || just rs _wants-media-features "$packages" "$FILES"; then
+    	just rs media-features
     fi
 
 # Compile moq-tokio by itself at the feature extremes and with each crypto provider.
@@ -652,7 +711,7 @@ relay-minimal:
 # Unix only: linking a Rust staticlib from MSVC spells the flags and the
 # archive (`moq.lib`) differently, and this recipe doesn't model that.
 
-# Compile and run libmoq's C fixtures against libmoq.a. Must run on Unix.
+# Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
 c-tests:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -684,7 +743,7 @@ c-tests:
         exit 1
     fi
 
-    # Same list build.rs (moq.pc), CMakeLists.txt, and test/smoke/smoke.sh read:
+    # Same list build.rs (moq.pc), CMakeLists.txt, and test/interop/interop.sh read:
     # `framework:Foo` is a linker framework flag, anything else a plain library.
     case "$(uname -s)" in
         Darwin) native_libs=rs/libmoq/native-libs/apple.txt ;;
@@ -701,6 +760,19 @@ c-tests:
 
     out=$(mktemp -d)
     trap 'rm -rf "$out"' EXIT
+
+    # The C docs compile against this header too: each sample beside the inputs
+    # doc-samples.h declares, and every name the prose cites. A `moq_decode_*`
+    # wildcard ends in `_` and is skipped.
+    bash doc/lib/samples.sh c doc/lib/c/index.md >"$out/doc-samples.c"
+    "$cc" -fsyntax-only -Werror=implicit-function-declaration -include rs/libmoq/c-tests/doc-samples.h -I"$include" "$out/doc-samples.c"
+    for name in $(grep -oE '\b(moq|MOQ)_[A-Za-z0-9_]*' doc/lib/c/index.md | grep -v '_$' | sort -u); do
+        if ! grep -qw "$name" "$include/moq.h"; then
+            echo "doc/lib/c/index.md cites $name, which moq.h does not declare" >&2
+            exit 1
+        fi
+    done
+
     for source in rs/libmoq/c-tests/*.c; do
         bin="$out/$(basename "$source" .c)"
         "$cc" "$source" -I"$include" -L"$profile" -lmoq "${libs[@]}" -o "$bin"
@@ -736,6 +808,7 @@ features:
     cargo check --locked -p moq-cli --no-default-features
     cargo check --locked -p moq-bench --no-default-features
     cargo check --locked -p moq-boy --no-default-features
+    cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
     cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
     cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
@@ -750,14 +823,14 @@ media-features:
 # doctests, which nextest does not execute; `just rs doctest` covers those.
 #
 # Takes cargo arguments, so `just rs test -p moq-net` works. `test-changed` is
-# the diff-scoped variant that `just test` dispatches to.
+# the diff-scoped variant that `just ci test` dispatches to.
 #
 # clippy-driver as the compiler wrapper is rustc plus the lint passes, so this
 # one compilation both builds the test binaries and reports clippy findings.
 # `cargo clippy` can't be reused here: it asks cargo for metadata only, and a
 # metadata build and a codegen build have different fingerprints, so running
-# both compiles the dependency tree twice. Linting here is free, which makes
-# `just test` a single-compile substitute for `check` + `test` on a laptop.
+# both compiles the dependency tree twice. Linting here is free, which is what
+# lets `check-test` (and so the root `just check`) compile Rust once.
 #
 # RUSTC_WORKSPACE_WRAPPER, not RUSTC_WRAPPER, for two reasons. Cargo folds it
 # into the fingerprint, so a crate already built by a plain `cargo test` is
@@ -766,8 +839,8 @@ media-features:
 # artifacts they share with plain cargo instead of duplicating the whole tree.
 # It is also what `cargo clippy` sets internally.
 #
-# Findings stay warnings rather than errors. `check` is the gate (it runs
-# `clippy -D warnings`), and a hard failure here would block running the tests
+# Findings stay warnings rather than errors. `check-test` is the gate (it sets
+# `build.warnings=deny`), and a hard failure here would block running the tests
 # over an unused import while you are mid-edit.
 #
 # No RUSTFLAGS: it is part of cargo's fingerprint too, so setting it here would
@@ -813,10 +886,6 @@ test-changed $FILES:
     	*)     echo "rs: testing $(just rs _names "$packages")"; just rs test --no-tests=pass $packages ;;
     esac
 
-    if [[ "$packages" == "ALL" ]] || just rs _names "$packages" | grep -qw moq-relay; then
-        just rs relay-minimal
-    fi
-
 # Compile and run the `/// ```` examples, which nextest skips.
 doctest *args:
     cargo test --locked --doc {{ args }}
@@ -832,8 +901,10 @@ doctest *args:
 # Our assertions are plain `assert!`, not `debug_assert!`, so nothing is
 # compiled out (verified by re-running the mutation check in release).
 #
-# The search is deliberately unbounded (no `preemption_bound`), so it covers
-# every interleaving rather than just the short ones.
+# kio's models search every interleaving. moq-net's compose far more operations
+# per path, so they cap preemptions (see `tests/loom.rs`) to stop the search
+# growing exponentially with each lock the model layer adds. Set
+# `LOOM_MAX_PREEMPTIONS` to search deeper.
 #
 # kio's own unit tests are `cfg(not(loom))`: they'd construct loom primitives
 # outside `loom::model`, which panics.

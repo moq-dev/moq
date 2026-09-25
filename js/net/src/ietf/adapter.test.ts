@@ -8,6 +8,18 @@ import { PublishNamespace, PublishNamespaceCancel, PublishNamespaceDone } from "
 import { RequestError } from "./request.ts";
 import { ALPN, Version } from "./version.ts";
 
+test("draft-14 TRACK_STATUS_OK cannot be routed as NAMESPACE_DONE", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_14);
+	const control = await Stream.open(pair.server, { version: Version.DRAFT_14 });
+	const adapter = new ControlStreamAdapter(pair.server, control, Version.DRAFT_14, 100n, true);
+	const running = adapter.run();
+	const peer = await Stream.accept(pair.client, Version.DRAFT_14);
+	if (!peer) throw new Error("no control stream");
+	await peer.writer.u53(0x0e);
+	await peer.writer.u16(0);
+	await expect(running).rejects.toThrow("unexpected message 0x0e");
+});
+
 // Draft-15 is the interesting one: it names its namespace withdrawals instead of
 // numbering them, so the adapter has to resolve them through a map it keeps itself.
 const VERSION = Version.DRAFT_15;

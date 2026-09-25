@@ -407,6 +407,61 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 	server.close();
 });
 
+/** Collect announced prefixes until `until` arrives. */
+async function announcedUntil(announced: { next(): Promise<{ prefix: Path.Valid } | undefined> }, until: string) {
+	const seen: string[] = [];
+	while (!seen.includes(until)) {
+		const entry = await withTimeout(announced.next(), 1000, `waiting for ${until}`);
+		if (!entry) throw new Error("announcements ended");
+		seen.push(entry.prefix);
+	}
+	return seen;
+}
+
+// A `.`-named broadcast is left out of discovery unless the request opts in or names the
+// dot segment. lite-06 cannot carry the opt-in, so its peer never lists the hidden path.
+for (const [protocol, carriesOptIn] of [
+	[Lite.ALPN_07, true],
+	[Lite.ALPN_06, false],
+	[Ietf.ALPN.DRAFT_19, true],
+	[Ietf.ALPN.DRAFT_16, true],
+] as const) {
+	test(`integration: ${protocol} hides dot paths from discovery`, async () => {
+		const pair = createMockTransportPair(protocol);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+
+		// Published first, so a reader that may see it lists it before `visible`.
+		const hidden = publish(origin, Path.from(".x/y"));
+		const visible = publish(origin, Path.from("visible"));
+
+		const plain = client.announced();
+		expect(await announcedUntil(plain, "visible")).toEqual(["visible"]);
+
+		// An IETF reader shares the session's table, so `visible` may land before the
+		// opted-in request's own answer; wait on the hidden path itself where it is due.
+		const opted = client.announced(undefined, { hidden: true });
+		if (carriesOptIn) await announcedUntil(opted, ".x/y");
+		else expect(await announcedUntil(opted, "visible")).toEqual(["visible"]);
+
+		if (carriesOptIn) {
+			const named = client.announced(Path.Pattern.parse(".x/**"));
+			expect(await announcedUntil(named, ".x/y")).toEqual([".x/y"]);
+			named.close();
+		}
+
+		plain.close();
+		opted.close();
+		hidden.close();
+		visible.close();
+		client.close();
+		server.close();
+	});
+}
+
 test("integration: lite draft-05 datagram delivery", async () => {
 	const enc = new TextEncoder();
 	const dec = new TextDecoder();
@@ -741,6 +796,33 @@ test("integration: subscribing to an unserved broadcast is refused as NotFound",
 	remote.close();
 	client.close();
 	server.close();
+});
+
+test("integration: a peer is served the cheaper route it was offered, not the local broadcast", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06);
+	const origin = new OriginProducer();
+	const path = Path.from("test");
+	const local = origin.createBroadcast(path);
+	local.announce({ cost: 5n });
+	const dynamic = origin.dynamic(path, { cost: 1n });
+
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const remote = wireOf(client).consume(path);
+	const track = remote.track("video").subscribe();
+	const { value: request } = await withTimeout(dynamic.requested().next(), 1000, "the cheaper route was never asked");
+	expect(request?.path).toBe(path);
+
+	track.close();
+	remote.close();
+	client.close();
+	server.close();
+	dynamic.close();
+	local.close();
+	origin.close();
 });
 
 test("integration: lite draft-05 fetches a cached group", async () => {

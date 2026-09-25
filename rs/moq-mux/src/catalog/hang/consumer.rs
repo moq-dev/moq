@@ -206,16 +206,20 @@ mod test {
 		let dynamic = origin.dynamic("", Default::default()).unwrap();
 		let requesting = origin.consume().request_broadcast("a/pub");
 		let served = broadcast.consume();
-		tokio::spawn(async move {
+		// The handler hands its route back: dropping it would retract the route and end
+		// the broadcast it just served.
+		let handler = tokio::spawn(async move {
 			dynamic
 				.requested_broadcast()
 				.await
 				.expect("handler should be asked for the path")
 				.accept(&served);
+			dynamic
 		});
 
-		let subscriber = requesting
-			.await
+		let resolved = requesting.await;
+		let _dynamic = handler.await.expect("handler task");
+		let subscriber = resolved
 			.expect("the handler served it")
 			.track(hang::Catalog::DEFAULT_NAME)
 			.expect("catalog track should resolve")

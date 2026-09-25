@@ -23,7 +23,8 @@ or Docker; see [Install](/setup/install).
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
 | `play` | | Decode and play in a native window with sound. |
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
-| `token` | | Generate, sign, and verify relay JWTs. |
+| `fetch` | `<track>` | Write one group of a track to stdout. |
+| `auth` | | Generate, sign, and verify relay JWTs. |
 | `devices` | | List capture sources and their ids. |
 
 ## Grammar
@@ -32,6 +33,7 @@ or Docker; see [Install](/setup/install).
 moq <MoQ side> import <source> [options]
 moq <MoQ side> export <sink> [options]
 moq <MoQ side> play [options]
+moq <MoQ side> fetch <track> [options]
 ```
 
 The **MoQ side** goes first and attaches the process to the network:
@@ -100,7 +102,9 @@ behind it. Once the speaker owns the clock, video follows the speaker instead.
 Each role follows the catalog for as long as it lasts. Each decoder starts at
 the newest cached group, including when a rendition is reopened, so playback
 does not replay the retained backlog. A publisher that retires the rendition
-being played ends that track and the role picks a replacement. Playback is
+being played ends that track and the role picks a replacement. A retired audio
+rendition plays out what the speaker holds while its replacement fills, so the
+switch does not cost a delay of silence. Playback is
 behind the `play` feature, since it pulls in windowing and audio-device
 dependencies:
 
@@ -124,8 +128,8 @@ audio is Opus. The camera is opened only while someone is watching, and
 `--bitrate` is the opening ceiling. Backends with live bitrate control lower it
 to fit the connection's bandwidth estimate. `moq devices` prints every source
 id. Requires the `capture` feature; on Linux that needs the ALSA headers for
-the microphone, and `--display` also needs the `pipewire` feature (links
-libpipewire).
+the microphone, and `--display` and `pipewire:` cameras also need the
+`pipewire` feature (links libpipewire).
 
 ## Transcode
 
@@ -152,6 +156,27 @@ Custom `--rung` values may be supplied in any order. Heights round down to even;
 heights and bitrates must then increase strictly together. Duplicate heights or
 bitrates, inverted rankings, and zero-sized or zero-bitrate rungs are rejected
 before connecting.
+
+## Fetch
+
+```bash
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang fetch catalog.json | jq
+moq ... fetch video/hd --group 42 --json
+```
+
+Writes one group of a track to stdout over MoQ, with the session's own auth:
+the counterpart of the relay's HTTP `/fetch/<broadcast>/<track>?group=N`. Without
+`--group` it reads the newest group. By default stdout carries the frame
+payloads back to back, byte for byte what `curl` gets from `/fetch`. `--json`
+prints one line per frame instead:
+`{"group": 42, "frame": 0, "size": 1234, "payload": "<base64>"}`, with a
+zero-based `frame` and padded standard base64.
+
+`<track>` is the literal track name. `/fetch` splits its path on the last `/`,
+so the two agree only for names without one. Fetch only dials `--connect`, and
+refuses a listener or cluster flag. It gives up after 30 seconds, as `/fetch`
+does, and exits non-zero when the broadcast or group is not found, the relay
+refuses, or the deadline passes.
 
 ## Multiple stages
 
@@ -244,6 +269,12 @@ See [Authentication](/bin/relay/auth).
 `import --max-age` (default 30 s) tells relays how long to keep old
 groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-age` (default 500 ms) is how long *this* consumer waits for a
 stalled group before skipping. Raising the first never delays playback.
+
+For `export ts`, `--max-age` also bounds how long the muxer holds a leading
+track for a lagging one. Frames go out in media-time order across all tracks,
+not arrival order, so two exporters of one broadcast emit them in one order. A
+track quiet for longer is muxed around until it catches up; a sparse track
+(SCTE-35) costs that wait once per cue. `--max-age 0` keeps arrival order.
 
 ## Debugging
 

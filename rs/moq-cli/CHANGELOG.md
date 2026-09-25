@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3](https://github.com/moq-dev/moq/compare/moq-cli-v0.12.2...moq-cli-v0.12.3) - 2026-09-25
+
+### Added
+
+- *(cli)* add `moq fetch` to read one group of a track ([#3965](https://github.com/moq-dev/moq/pull/3965))
+
+### Fixed
+
+- *(net)* a broadcast exists only while announced ([#4021](https://github.com/moq-dev/moq/pull/4021))
+
+### Other
+
+- ship the moq-cli crate as moq on Docker, Nix, and winget ([#4030](https://github.com/moq-dev/moq/pull/4030))
+
+## [0.12.2](https://github.com/moq-dev/moq/compare/moq-cli-v0.12.1...moq-cli-v0.12.2) - 2026-09-24
+
+### Added
+
+- *(moq-video)* capture cameras through PipeWire ([#4022](https://github.com/moq-dev/moq/pull/4022))
+
+### Fixed
+
+- *(cli)* play a retired audio rendition's tail alongside its replacement ([#3966](https://github.com/moq-dev/moq/pull/3966))
+
 ## [0.12.1](https://github.com/moq-dev/moq/compare/moq-cli-v0.12.0...moq-cli-v0.12.1) - 2026-09-23
 
 ### Fixed

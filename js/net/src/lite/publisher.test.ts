@@ -1088,6 +1088,14 @@ test("lite draft-06: a subscription starting mid-group skips the head", async ()
 	expect(served).toEqual([{ sequence: 0, frameStart: 2, payloads: ["c", "d"] }]);
 });
 
+// A start at the group's final frame count is a valid, empty range: FIN, don't reset.
+// A relay resuming a parked track asks for exactly this.
+test("lite draft-06: a subscription starting at the end of a group serves it empty", async () => {
+	const { start, served } = await serve({ 0: ["a", "b"] }, { startGroup: 0, startFrame: 2 });
+	expect(start).toBe(0);
+	expect(served).toEqual([{ sequence: 0, frameStart: 2, payloads: [] }]);
+});
+
 // The end bound is inclusive.
 test("lite draft-06: a subscription capped mid-group stops at the end frame", async () => {
 	const { served } = await serve(

@@ -162,11 +162,13 @@ impl<E: CatalogExt> Producer<E> {
 					let mut frames = split.decode(&frame.payload, timestamp)?;
 					frames.extend(split.flush(timestamp)?);
 					import.decode(frames)?;
+					import.flush(frame.timestamp, std::time::Instant::now())?;
 				}
 				Codecs::H265 { split, import } => {
 					let mut frames = split.decode(&frame.payload, timestamp)?;
 					frames.extend(split.flush(timestamp)?);
 					import.decode(frames)?;
+					import.flush(frame.timestamp, std::time::Instant::now())?;
 				}
 			}
 		}

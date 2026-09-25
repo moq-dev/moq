@@ -37,6 +37,15 @@ export function scopeHead(scope: Path.Pattern): Path.Valid {
 	return Path.from(scope.head);
 }
 
+/**
+ * Whether a segment of `path` below `prefix` starts with `.`, which hides it from announce
+ * discovery unless the request opts in. A path at or above the prefix never hides.
+ */
+export function hiddenBelow(prefix: Path.Valid, path: Path.Valid): boolean {
+	const below = Path.stripPrefix(prefix, path);
+	return below !== null && Path.parts(below).some((part) => part.startsWith("."));
+}
+
 /** Whether the announced prefix's subtree overlaps `scope`. */
 export function scopeOverlaps(scope: Path.Pattern, prefix: Path.Valid): boolean {
 	return scope.overlaps(Path.Pattern.subtree(prefix));
@@ -97,6 +106,8 @@ export interface TrackRequestOptions {
 export const hooks: {
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
+	/** Access the existing producer while a request awaits immutable wire metadata. */
+	pendingTrackProducer: (request: Request) => Producer;
 	/**
 	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
 	 *
@@ -139,6 +150,9 @@ export const hooks: {
 	) => void;
 } = {
 	makeRequest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	pendingTrackProducer: () => {
 		throw new Error("track.ts not loaded");
 	},
 	tryRecvGroup: () => {

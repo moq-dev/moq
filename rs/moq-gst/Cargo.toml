@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.4.1"
+version = "0.4.3"
 edition = "2024"
 rust-version.workspace = true
 publish = true
@@ -32,4 +32,5 @@ url = { workspace = true }
 gst-plugin-version-helper = "0.8"
 
 [dev-dependencies]
+futures = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

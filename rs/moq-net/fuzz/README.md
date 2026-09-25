@@ -22,7 +22,7 @@ module (`src/fuzz.rs`), and the files here are one-line shims. Two reasons:
 
 - `lite` and `ietf` are private modules, so an outside crate cannot reach a single
   decoder.
-- `just test` replays the same bodies on the pinned stable toolchain, so a crash found
+- `just check` replays the same bodies on the pinned stable toolchain, so a crash found
   here becomes a regression test that CI runs without anyone installing cargo-fuzz.
 
 `just rs fuzz` regenerates `seeds/` from `moq_net::fuzz::seeds()` before each run, so

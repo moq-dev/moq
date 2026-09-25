@@ -18,12 +18,12 @@ or moving the demo dashboard off JSON.
 **Gate first.** Bandwidth is small in absolute terms (about 0.8 Mbps per
 stats subscriber in the worst scenario below), so bytes alone do not justify
 a new format. The motivation is relay encode CPU at 10k+ broadcasts and
-aggregator fan-in. Proceed only if that still matters once
-[JSON snapshot decode](/quest/m1/perf/json-decode.md) has landed and the
-separate profile of the moq-json snapshot encoder (about 100 ms per tick at
-10k broadcasts today) has landed or been ruled out. Re-run the benchmark
-against the new baseline; if JSON is close enough, abandon this quest with the
-numbers.
+aggregator fan-in. #4019 already cut `.json.z` decode allocations about 42x
+(time 2.5-4x) by dropping per-key path tracking; `rs/moq-stats/benches/decode.rs`
+measures it. Proceed only if CPU still matters after a profile of the
+moq-json snapshot encoder (about 100 ms per tick at 10k broadcasts) has fixed
+or ruled out its cost. Re-run the benchmark against that baseline; if JSON is
+close enough, abandon this quest with the numbers.
 
 **Evidence.** A prototype benchmark on top of #3955's commit `d86496be2`
 simulated relay traffic from how `moq_net::stats` counts and how
@@ -41,11 +41,11 @@ ground truth every tick. Only the traffic tracks were modelled, not
 | custom varint delta | 3754 | 9494 | 25616 | 364 |
 
 At 10k broadcasts x 3 tiers, per tick: `.json.z` encodes in 98 ms and
-decodes in 76 ms with 1M decode allocations; a typed `.json.z` decode
-(same wire) already cuts decode to 5.7 ms and 445 allocations; the varint
-delta encodes in 10 ms and decodes in 0.8 ms with 12 and 167 allocations.
-So after the typed decode lands, the remaining wins are encode CPU (7-13x),
-bytes (2.4-5.8x), and a smaller decode margin (3-9x).
+decodes in 76 ms with 1M decode allocations (before #4019); a typed
+`.json.z` merge patch (same wire, not landed) cut decode to 5.7 ms and 445
+allocations; the varint delta encodes in 10 ms and decodes in 0.8 ms with 12
+and 167 allocations. Against the best JSON decode, the remaining wins are
+encode CPU (7-13x), bytes (2.4-5.8x), and a smaller decode margin (3-9x).
 
 What the numbers taught, so the design does not relearn it:
 
@@ -104,10 +104,6 @@ maintainer's call; ask before writing one.
 
 Public API impact: additive on moq-stats unless the helpers change. Wire
 impact: new on-demand tracks; existing tracks unchanged.
-
-## Required
-
-- [JSON snapshot decode](/quest/m1/perf/json-decode.md) - the cheap win this is measured against
 
 ## Related
 

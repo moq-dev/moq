@@ -19,7 +19,7 @@ driver, the beacon sink, the analyzer, the ring replay, `bench.sh`'s five
 scenarios, and `compare.mjs`. What it does not have is a home in `test/`, a
 budget, or a schedule.
 
-- Land the driver and analyzer under `test/`, alongside the existing `smoke`
+- Land the driver and analyzer under `test/`, alongside the existing `interop`
   and `drill` lanes, wired into the `justfile` the way they are. Playwright is
   already in the tree for the harness quests, so prefer it over a bespoke CDP
   driver if the switch is cheap; if it is not, say so and keep CDP.
@@ -47,11 +47,11 @@ budget, or a schedule.
     network, jitter buffer, decode, render). The ledger's sum-to-end-to-end
     identity is unimplementable if two stages can claim the same milliseconds,
     and an unaccounted remainder is the finding, so give it a name too.
-- Run the seeded shaper binary from [Impaired
-  path](/quest/m1/transport-impairment-profile.md) in front of the relay, so
-  this harness and the drills share one impairment implementation. Assert the
-  shaper actually treated traffic: a profile that silently did nothing turns
-  an impaired run into an unimpaired pass.
+- Run the `moq-shaper` binary (`rs/moq-shaper`, see `test/drill/README.md`)
+  in front of the relay, so this harness and the drills share one impairment
+  implementation. It exits nonzero when the profile never acted, which the
+  harness must treat as a failed run: a profile that silently did nothing
+  turns an impaired run into an unimpaired pass.
 - Profiles: near-zero, mild, bursty (the flush-span shape from #3477), and a
   step change that forces the target to move mid-run. Fixed seeds, recorded
   with the results.
@@ -69,7 +69,3 @@ budget, or a schedule.
   next to the synthetic profiles.
 - Add the lane to `nightly.yml`, and extend its header comment with why this
   one is not a PR gate.
-
-## Required
-
-- [Impaired path](/quest/m1/transport-impairment-profile.md) - the seeded shaper this puts in front of the relay
