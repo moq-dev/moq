@@ -125,13 +125,11 @@ fn describe(err: vpx_codec_err_t, detail: Option<String>) -> String {
 /// Whether `err` describes the frame rather than the decoder.
 ///
 /// A truncated or damaged frame is ordinary on a lossy path, and libvpx stays
-/// usable after it: the next keyframe restores the picture. Anything else (out
-/// of memory, a bad argument) says the decoder itself is in trouble.
+/// usable after it: the next keyframe restores the picture. Anything else says
+/// the stream or the decoder is in trouble, including `UNSUP_BITSTREAM`, which
+/// libvpx documents as a stream it cannot parse at all and so cannot proceed on.
 fn describes_frame(err: vpx_codec_err_t) -> bool {
-	matches!(
-		err,
-		vpx_codec_err_t::VPX_CODEC_CORRUPT_FRAME | vpx_codec_err_t::VPX_CODEC_UNSUP_BITSTREAM
-	)
+	err == vpx_codec_err_t::VPX_CODEC_CORRUPT_FRAME
 }
 
 /// The color space libvpx reports for a picture, when [`Color`] can name it.
@@ -481,6 +479,26 @@ mod tests {
 			assert_eq!(indices, [0, 4], "{} decoded across the damage", vector.name);
 			for (index, frame) in &pictures {
 				assert_reference(vector, *index, frame);
+			}
+		}
+	}
+
+	/// A frame libvpx cannot parse at all ends the stream, rather than blanking
+	/// the picture while each later keyframe fails the same way.
+	#[test]
+	fn an_unparseable_frame_is_fatal() {
+		for vector in [&VP8_64, &VP9_64] {
+			let mut frame = frames(vector.ivf)[0].to_vec();
+			match vector.codec {
+				// The keyframe start code (RFC 6386 section 9.1).
+				Codec::Vp8 => frame[3] = 0,
+				// The two-bit frame marker (VP9 section 6.2).
+				_ => frame[0] = 0,
+			}
+			match open(vector.codec).decode(Bytes::from(frame), at(0), true) {
+				Err(Error::Codec(_)) => {}
+				Err(other) => panic!("{}: expected Codec, got {other:?}", vector.name),
+				Ok(frames) => panic!("{}: decoded {} pictures", vector.name, frames.len()),
 			}
 		}
 	}
