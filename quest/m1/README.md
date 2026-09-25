@@ -49,7 +49,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Tooling](/quest/m1/tooling/README.md) - justfiles become a one-line menu over `sh/`, one impact map scopes CI, and every workflow step runs a recipe
 - [Path patterns](/quest/m1/path-patterns.md) - one matcher for every predicate over broadcast paths: tokens, origins, interest
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
-- [Listener close](/quest/m1/listener-close.md) - closing a listener releases its UDP socket before returning, so a restart can rebind the port
 - [Test ports](/quest/m1/tokio-test-ports.md) - moq-tokio tests bind QUIC and WebSocket on independent ephemeral ports, so a parallel run cannot collide
 - [Decoded frame ownership](/quest/m1/decoded-frames.md) - retain moq-video Frames across bindings, with native views or CPU conversion as needed
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - generated C++ over moq-ffi with futures and expected-style errors, shipped as a tarball, vcpkg, and Conan, and adopted by the OBS plugin
