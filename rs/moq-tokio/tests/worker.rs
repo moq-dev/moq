@@ -5,7 +5,7 @@
 //! the group.
 #![cfg(all(target_os = "linux", feature = "noq"))]
 
-use std::net::{SocketAddr, UdpSocket};
+use std::net::UdpSocket;
 
 use moq_tokio::worker::{self, Workers};
 
@@ -13,8 +13,8 @@ const WORKERS: u16 = 4;
 
 /// A UDP port nothing is bound to.
 ///
-/// Named rather than ephemeral because these tests rebind the port, or probe it
-/// while the group holds it, which needs a port known before the group starts.
+/// Only for the port-lock tests: an ephemeral group takes no lock, so the first
+/// group has to name its port. Everything else binds `:0` and reads it back.
 fn free_udp_port() -> u16 {
 	let probe = UdpSocket::bind("127.0.0.1:0").expect("bind probe");
 	let port = probe.local_addr().expect("local addr").port();
@@ -70,10 +70,9 @@ async fn dropping_the_workers_releases_the_port() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-
 	let workers =
-		bind_workers(listen_config(&cert, &key, port), Default::default(), config(WORKERS)).expect("bind workers");
+		bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS)).expect("bind workers");
+	let addr = workers.local_addr();
 	assert_eq!(workers.len(), usize::from(WORKERS));
 
 	// Serving first is the case that used to strand the threads. The accept
@@ -89,7 +88,6 @@ async fn dropping_the_workers_releases_the_port() {
 
 	// A plain bind refuses a port any socket still holds, reuseport or not, so this
 	// succeeds only if every worker's socket is really gone.
-	let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
 	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("workers left the port bound");
 }
 
@@ -226,13 +224,11 @@ async fn dropping_unserved_workers_releases_the_port() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-
 	let workers =
-		bind_workers(listen_config(&cert, &key, port), Default::default(), config(WORKERS)).expect("bind workers");
+		bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS)).expect("bind workers");
+	let addr = workers.local_addr();
 	drop(workers);
 
-	let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
 	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("workers left the port bound");
 }
 
@@ -397,7 +393,7 @@ async fn generated_certificates_are_refused() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let mut listen = moq_tokio::listen::Config::default();
-	listen.bind = Some(format!("127.0.0.1:{}", free_udp_port()).parse().unwrap());
+	listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	listen.tls.generate = vec!["localhost".to_string()];
 
 	let err =
@@ -446,9 +442,8 @@ async fn dropping_a_server_keeps_its_socket() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-
-	let workers = bind_workers(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
+	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
+	let port = workers.local_addr().port();
 	let mut group = workers.split();
 	let sockets = udp_sockets_on(port);
 	assert!(sockets >= 2, "every member holds at least one socket");
@@ -489,9 +484,8 @@ async fn completing_a_member_stops_its_siblings() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-
-	let workers = bind_workers(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
+	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
+	let addr = workers.local_addr();
 	let mut group = workers.split();
 	let mut members = group.members();
 	assert_eq!(members.len(), 2);
@@ -529,7 +523,6 @@ async fn completing_a_member_stops_its_siblings() {
 		.expect("a stopped sibling must not hang");
 
 	group.shutdown().await;
-	let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
 	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("the group must release its port");
 }
 
@@ -540,9 +533,8 @@ async fn cancelling_a_member_stops_its_siblings() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-
-	let workers = bind_workers(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
+	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
+	let addr = workers.local_addr();
 	let mut group = workers.split();
 	let mut members = group.members();
 
@@ -574,7 +566,6 @@ async fn cancelling_a_member_stops_its_siblings() {
 		.expect("a cancelled sibling must not hang");
 
 	group.shutdown().await;
-	let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
 	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("the group must release its port");
 }
 
@@ -586,9 +577,8 @@ async fn a_panicking_member_stops_its_siblings() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-
-	let workers = bind_workers(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
+	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
+	let addr = workers.local_addr();
 	let mut group = workers.split();
 	let mut members = group.members();
 
@@ -620,7 +610,6 @@ async fn a_panicking_member_stops_its_siblings() {
 		.expect("a panicking sibling must not hang");
 
 	group.shutdown().await;
-	let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
 	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("the group must release its port");
 }
 
@@ -631,9 +620,8 @@ async fn shutdown_with_work_in_flight_joins() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-
-	let workers = bind_workers(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
+	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
+	let addr = workers.local_addr();
 	let mut group = workers.split();
 	let mut tasks = Vec::new();
 	for member in group.members() {
@@ -650,7 +638,6 @@ async fn shutdown_with_work_in_flight_joins() {
 			.expect("shutdown must stop every member");
 	}
 
-	let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
 	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("shutdown must release the port");
 }
 
@@ -662,9 +649,8 @@ async fn dropping_the_group_with_work_in_flight_stops() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-
-	let workers = bind_workers(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
+	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
+	let addr = workers.local_addr();
 	let mut group = workers.split();
 	let mut tasks = Vec::new();
 	{
@@ -684,6 +670,5 @@ async fn dropping_the_group_with_work_in_flight_stops() {
 			.expect("dropping the group must stop every member");
 	}
 
-	let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
 	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("dropping the group must release the port");
 }
