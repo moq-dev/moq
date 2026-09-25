@@ -41,6 +41,10 @@ percent-encoded track names, `.info` JSON, the binary envelope, and put/get/list
 through `Deferred`, omits failed tracks with `Pending::omit`, stores each
 segment's timeline groups after `Producer::flush`, and expires DVR segments
 with a deletion grace. It refuses a prefix that already holds a timeline.
+`moq_archive::Reader` (`rs/moq-archive/src/reader/mod.rs`) replays the timeline onto a
+supplied `broadcast::Producer` and serves FETCH through `track::Dynamic` with a byte-bounded
+object LRU. `Reader::refresh` follows by listing timeline keys after its cursor, so gaps and
+DVR expiry recover from the next checkpoint; `Reader::finish` applies out-of-band finality.
 
 ### Format
 
@@ -108,7 +112,6 @@ owned by that prerequisite, not duplicated in archive storage.
 ## Quests
 
 - [Archive endpoint](/quest/m1/archive/cli.md) - `moq ... export archive` records and `import archive` replays
-- [Recording reader](/quest/m1/archive/reader.md) - serve archived FETCH through a supplied `broadcast::Producer`
 - [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
 - [Offline archive HLS](/quest/m1/archive/hls.md) - render playlists from the archive timeline and fetch segment media lazily
 - [Resume a recording](/quest/m1/archive/recovery.md) - recover the retained timeline on restart and clean up DVR orphans
