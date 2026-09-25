@@ -612,7 +612,7 @@ mod tests {
 		})
 		.await;
 
-		let mut consumer = client(&server).connect(request()).await.unwrap();
+		let consumer = client(&server).connect(request()).await.unwrap();
 		consumer.revalidate();
 		tokio::time::timeout(
 			Duration::from_secs(2),
@@ -623,13 +623,14 @@ mod tests {
 
 		consumer.revalidate();
 		consumer.revalidate();
-		// Each re-check reply updates the grant; the second is the burst's one extra POST.
-		for _ in 0..2 {
-			tokio::time::timeout(Duration::from_secs(3), consumer.changed())
-				.await
-				.expect("the in-flight nudge POSTs once more when the reply lands")
-				.unwrap();
-		}
+		// `changed` jumps to the latest grant epoch, so two replies can arrive as one
+		// observation. The request log does not coalesce.
+		tokio::time::timeout(
+			Duration::from_secs(3),
+			log.until(|log| log.iter().filter(|r| r.event == Event::Revalidate).count() >= 2),
+		)
+		.await
+		.expect("the in-flight nudge POSTs once more when the reply lands");
 		consumer.close("disconnected", Bytes::default());
 		log.end().await;
 		assert_eq!(
