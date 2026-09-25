@@ -250,7 +250,7 @@ export class Connection implements Established {
 			await this.#publisher.runProbe(stream);
 		} else if (typ === StreamId.Goaway) {
 			const msg = await Goaway.decode(stream.reader, this.#version);
-			// A peer sends at most one; a second is a violation worth closing over.
+			// A peer sends at most one; a second is a protocol violation.
 			if (this.#goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
 			this.#goaway.set({ uri: msg.uri });
 		} else {
