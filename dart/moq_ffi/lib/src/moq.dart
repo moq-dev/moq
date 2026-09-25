@@ -500,7 +500,13 @@ class MoqAudioInit {
   final MoqAudioFormat format;
   final Uint8List data;
   final String? label;
-  MoqAudioInit({required this.format, required this.data, this.label = null});
+  final String? track;
+  MoqAudioInit({
+    required this.format,
+    required this.data,
+    this.label = null,
+    this.track = null,
+  });
 }
 
 class FfiConverterMoqAudioInit {
@@ -525,8 +531,13 @@ class FfiConverterMoqAudioInit {
     );
     final label = label_lifted.value;
     new_offset += label_lifted.bytesRead;
+    final track_lifted = FfiConverterOptionalString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final track = track_lifted.value;
+    new_offset += track_lifted.bytesRead;
     return LiftRetVal(
-      MoqAudioInit(format: format, data: data, label: label),
+      MoqAudioInit(format: format, data: data, label: label, track: track),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -536,6 +547,7 @@ class FfiConverterMoqAudioInit {
         FfiConverterMoqAudioFormat.allocationSize(value.format) +
         FfiConverterUint8List.allocationSize(value.data) +
         FfiConverterOptionalString.allocationSize(value.label) +
+        FfiConverterOptionalString.allocationSize(value.track) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -556,6 +568,10 @@ class FfiConverterMoqAudioInit {
       value.label,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalString.write(
+      value.track,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -563,6 +579,7 @@ class FfiConverterMoqAudioInit {
     return FfiConverterMoqAudioFormat.allocationSize(value.format) +
         FfiConverterUint8List.allocationSize(value.data) +
         FfiConverterOptionalString.allocationSize(value.label) +
+        FfiConverterOptionalString.allocationSize(value.track) +
         0;
   }
 }
@@ -1308,11 +1325,13 @@ class MoqVideoInit {
   final Uint8List data;
   final String? label;
   final MoqVideoHint? hint;
+  final String? track;
   MoqVideoInit({
     required this.format,
     required this.data,
     this.label = null,
     this.hint = null,
+    this.track = null,
   });
 }
 
@@ -1343,8 +1362,19 @@ class FfiConverterMoqVideoInit {
     );
     final hint = hint_lifted.value;
     new_offset += hint_lifted.bytesRead;
+    final track_lifted = FfiConverterOptionalString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final track = track_lifted.value;
+    new_offset += track_lifted.bytesRead;
     return LiftRetVal(
-      MoqVideoInit(format: format, data: data, label: label, hint: hint),
+      MoqVideoInit(
+        format: format,
+        data: data,
+        label: label,
+        hint: hint,
+        track: track,
+      ),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -1355,6 +1385,7 @@ class FfiConverterMoqVideoInit {
         FfiConverterUint8List.allocationSize(value.data) +
         FfiConverterOptionalString.allocationSize(value.label) +
         FfiConverterOptionalMoqVideoHint.allocationSize(value.hint) +
+        FfiConverterOptionalString.allocationSize(value.track) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -1379,6 +1410,10 @@ class FfiConverterMoqVideoInit {
       value.hint,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalString.write(
+      value.track,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -1387,6 +1422,7 @@ class FfiConverterMoqVideoInit {
         FfiConverterUint8List.allocationSize(value.data) +
         FfiConverterOptionalString.allocationSize(value.label) +
         FfiConverterOptionalMoqVideoHint.allocationSize(value.hint) +
+        FfiConverterOptionalString.allocationSize(value.track) +
         0;
   }
 }
@@ -6577,6 +6613,7 @@ abstract class MoqMediaProducerInterface {
   void cut();
   MoqTrackDemand demand();
   void finish();
+  void flush({required int timestampUs});
   String name();
   void seek({required int sequence});
   Future<void> unused();
@@ -6631,6 +6668,16 @@ class MoqMediaProducer implements MoqMediaProducerInterface {
     return rustCall((status) {
       uniffi_moq_ffi_fn_method_moqmediaproducer_finish(
         uniffiClonePointer(),
+        status,
+      );
+    }, moqExceptionErrorHandler);
+  }
+
+  void flush({required int timestampUs}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqmediaproducer_flush(
+        uniffiClonePointer(),
+        FfiConverterUInt64.lower(timestampUs),
         status,
       );
     }, moqExceptionErrorHandler);
@@ -10516,6 +10563,15 @@ external void uniffi_moq_ffi_fn_method_moqmediaproducer_finish(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Void Function(Pointer<Void>, Uint64, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqmediaproducer_flush(
+  Pointer<Void> ptr,
+  int timestamp_us,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -11880,6 +11936,9 @@ external int uniffi_moq_ffi_checksum_method_moqmediaproducer_demand();
 external int uniffi_moq_ffi_checksum_method_moqmediaproducer_finish();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqmediaproducer_flush();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqmediaproducer_name();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -12350,7 +12409,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_audio() !=
-      47444) {
+      31691) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_audio_on_track() !=
@@ -12451,6 +12510,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediaproducer_finish() != 38480) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqmediaproducer_flush() != 10235) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediaproducer_name() != 7199) {

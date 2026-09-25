@@ -155,6 +155,7 @@ fn audio_init(format: MoqAudioFormat, data: Vec<u8>) -> MoqAudioInit {
 		format,
 		data,
 		label: None,
+		track: None,
 	}
 }
 
@@ -164,6 +165,7 @@ fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
 		data,
 		label: None,
 		hint: None,
+		track: None,
 	}
 }
 
@@ -1240,6 +1242,65 @@ async fn requested_track_dynamic_survives_accept() {
 }
 
 #[tokio::test]
+async fn video_publish_named_track() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
+
+	let named = |track: &str| MoqVideoInit {
+		track: Some(track.into()),
+		..video_init(MoqVideoFormat::Avc3, h264_init())
+	};
+	let hd = broadcast.publish_video(named("hd")).unwrap();
+	assert_eq!(hd.name().unwrap(), "hd");
+	let sd = broadcast.publish_video_stream(named("sd")).unwrap();
+	drop(sd);
+
+	// A name is the caller's contract, so a duplicate fails rather than being made unique.
+	assert!(matches!(broadcast.publish_video(named("hd")), Err(MoqError::Codec(_))));
+
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out waiting for catalog")
+		.unwrap()
+		.expect("expected a catalog");
+	assert!(catalog.video.contains_key("hd"), "catalog: {:?}", catalog.video.keys());
+}
+
+#[tokio::test]
+async fn requested_track_refuses_a_name() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let subscribe = tokio::spawn(async move {
+		consumer
+			.subscribe_media("requested".into(), crate::media::MoqContainer::Legacy, None)
+			.await
+	});
+
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for requested track")
+		.unwrap();
+
+	let named = MoqVideoInit {
+		track: Some("other".into()),
+		..video_init(MoqVideoFormat::Avc3, h264_init())
+	};
+	assert!(matches!(
+		broadcast.publish_video_on_track(&request, named),
+		Err(MoqError::Codec(_))
+	));
+
+	// The refusal leaves the request unaccepted, so it still publishes under its own name.
+	let media = broadcast
+		.publish_video_on_track(&request, video_init(MoqVideoFormat::Avc3, h264_init()))
+		.unwrap();
+	assert_eq!(media.name().unwrap(), "requested");
+	subscribe.abort();
+}
+
+#[tokio::test]
 async fn dynamic_track_request_can_publish_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();
@@ -1295,6 +1356,8 @@ async fn dynamic_track_request_can_publish_media() {
 			timestamp_us: 20_000,
 		})
 		.unwrap();
+	media.flush(20_000).unwrap();
+	assert!(media.flush(u64::MAX).is_err(), "unrepresentable PTS must fail");
 
 	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
 		.await

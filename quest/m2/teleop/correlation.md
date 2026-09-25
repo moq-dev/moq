@@ -30,4 +30,4 @@ the same property that makes an MCAP recording valuable.
 ## Required
 
 - [Robot teleoperation primitive](/quest/m2/teleop/robot.md)
-- [Publisher clocks](/quest/m1/publisher-clock.md) - publishers populate the fixed broadcast mapping used to join tracks
+- [CLI import clock](/quest/m1/cli-import-clock.md) - publishers populate the fixed broadcast mapping used to join tracks
