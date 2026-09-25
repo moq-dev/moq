@@ -21,8 +21,10 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Missing fetch group](/quest/m1/fetch-missing-group.md) - HTTP /fetch answers 404 and `moq fetch` fails cleanly for a group the track lacks
 - [libmoq hidden opt-in](/quest/m1/libmoq-hidden.md) - `moq_origin_announced` takes a `hidden` flag so C callers can list `.`-named broadcasts
 - [JS track tail](/quest/m1/js-track-tail.md) - a `@moq/net` subscriber delivers every group up to the declared end over lite and IETF, and JS publishers drain their groups before ending a subscription
+- [lite-07 stream count](/quest/m1/lite-stream-count.md) - moq-lite-07 replaces SUBSCRIBE_DROP with a group-stream count in SUBSCRIBE_END, like moq-transport
 - [Rust track tail](/quest/m1/rust-track-tail.md) - a moq-net subscriber accepts groups that arrive after the subscription's end, and PublishDone carries the real stream count
 - [Session death error](/quest/m1/session-death-error.md) - a dying session ends its tracks with its own error in Rust and JS, never a clean end, `Dropped`, or `Cancel`
+- [Signal.race cleanup](/quest/m1/signal-race.md) - `Signal.race` releases its signal listeners when its result loses a race
 - [Origin narrowing](/quest/m1/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
 - [Auth embedder](/quest/m1/auth-embedder.md) - the lease owns its re-check clock, a gateway session holds a lease, and `Cluster::admit` scopes and tags origins in one call
 - [Auth expiry clock](/quest/m1/auth-expiry-clock.md) - moq-auth and the relay hold one fixed expiry deadline and honour the same skew allowance
@@ -51,12 +53,14 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [Listener close](/quest/m1/listener-close.md) - closing a listener releases its UDP socket before returning, so a restart can rebind the port
 - [Test ports](/quest/m1/tokio-test-ports.md) - moq-tokio tests bind QUIC and WebSocket on independent ephemeral ports, so a parallel run cannot collide
+- [Reconnect test ports](/quest/m1/tokio-reconnect-ports.md) - moq-tokio reconnect and worker tests bind their own ports, with a `tcp_local_addr()` accessor
 - [Decoded frame ownership](/quest/m1/decoded-frames.md) - retain moq-video Frames across bindings, with native views or CPU conversion as needed
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - generated C++ over moq-ffi with futures and expected-style errors, shipped as a tarball, vcpkg, and Conan, and adopted by the OBS plugin
 - [OBS native codecs](/quest/m1/obs-moq-video/README.md) - remove FFmpeg decoding dependencies, deliver GPU frames, and use native audio/video encoders
 - [Audio codecs](/quest/m1/audio-codecs/README.md) - platform audio codecs, explicit unsupported cases, and channel layouts up to 7.1
 - [Opus descriptions](/quest/m1/audio-opus-input.md) - validate headers and honor codec clock, pre-skip, and gain
 - [Capture formats](/quest/m1/audio-capture-format.md) - unsupported overrides refuse before device open and channel counts cannot wrap
+- [NVENC teardown](/quest/m1/nvenc-teardown.md) - a rejected NVENC encode no longer hangs process shutdown
 - [NVENC recovery](/quest/m1/nvenc-recovery.md) - partial initialization and rejected rate changes preserve valid state
 - [GPU pool reservation](/quest/m1/gpu-pool-reservation.md) - a full GPU frame pool is a `None` reservation the caller drops on, not an error to match
 - [Transcode source](/quest/m1/transcode-source.md) - select a rendition the chosen backend can actually decode
