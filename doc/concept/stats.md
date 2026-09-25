@@ -69,7 +69,9 @@ with its final counters and is then dropped. A track with no entries holds `{}`.
 
 The producer drains its counters every interval (one second by default) and
 writes only when a track's frame changed, so silence means nothing moved, not
-that the producer is gone. The track ends when it is.
+that the producer is gone. The track ends when the producer does, or at
+depth 1 or more when its group's broadcast is unannounced; the group may
+return later as a new broadcast.
 
 ### Traffic
 
