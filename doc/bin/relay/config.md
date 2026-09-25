@@ -226,6 +226,22 @@ secret = "./iroh-secret.key"         # Persist the key so the endpoint id surviv
 
 See [Transport](/concept/transport#iroh-peer-to-peer-experimental).
 
+## Shutdown
+
+```toml
+drain_timeout = "10s"                # Top-level key, as --drain-timeout / MOQ_DRAIN_TIMEOUT.
+```
+
+The first SIGTERM or SIGINT starts a drain: every session is sent a GOAWAY
+asking it to reconnect, and is force-closed if it is still connected when the
+window ends. A session that connects during the drain, such as a client with a
+cached DNS answer, is sent a GOAWAY immediately, with only the time left in
+the window. The relay exits one second after the window ends, or immediately
+on a second signal. `0` skips the GOAWAY and closes every session at once.
+Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are
+closed when the window ends. An embedder can take over the signals and start
+the drain itself; see [Embed](/bin/relay/#embed).
+
 ## \[log]
 
 ```toml
