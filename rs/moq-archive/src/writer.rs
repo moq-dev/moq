@@ -6,6 +6,8 @@
 //! failed, commits the record through its own timeline encoder, and stores that segment's timeline
 //! groups before starting the next one. The timeline therefore only advertises durable objects.
 //!
+//! A writer started on a prefix that already holds a recording resumes it: see [`Writer::new`].
+//!
 //! ```no_run
 //! # async fn example(source: moq_net::broadcast::Consumer) -> moq_archive::Result<()> {
 //! use moq_archive::object_store::memory::InMemory;
@@ -37,8 +39,8 @@ use object_store::ObjectStore;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
+use crate::recover::recover;
 use crate::segment::{Frame, Group, Object};
-use crate::store::list::Query;
 use crate::{Error, Info, Key, Result, Store};
 
 /// Subscribers ask for every cached group; the publisher clamps this to its own max age.
@@ -95,6 +97,8 @@ pub struct Writer<S> {
 	commands: mpsc::UnboundedReceiver<Command>,
 	committer: Committer<S>,
 	grace: Option<Duration>,
+	/// Deadlines for deleting expired or orphaned objects, oldest first.
+	deletions: VecDeque<(Instant, Vec<Key>)>,
 	// Owns the recording's timeline track.
 	_timeline: broadcast::Producer,
 }
@@ -128,6 +132,8 @@ struct Shared<S> {
 	timeline: String,
 	/// Every name ever enrolled. A name is never reused, so its object ranges stay increasing.
 	enrolled: Mutex<HashSet<String>>,
+	/// Per track, the largest group a resumed recording already stored.
+	floors: HashMap<String, u64>,
 }
 
 enum Command {
@@ -143,20 +149,27 @@ enum Command {
 }
 
 impl<S: ObjectStore> Writer<S> {
-	/// Start a recording under `store`'s prefix, reading tracks from `source`.
+	/// Start a recording under `store`'s prefix, reading tracks from `source`, or resume the one
+	/// already there.
 	///
-	/// Refuses a prefix that already holds a timeline: resuming a recording is unsupported.
+	/// Resuming replays the retained timeline and continues at the next segment. A track refuses
+	/// any group at or below the largest one stored for it, so a source whose group sequences
+	/// restarted needs a new prefix. A DVR also deletes, one grace period after recovery, every
+	/// group object its retained records do not reference, such as interrupted expirations and
+	/// uploads. The writer must own the prefix exclusively. Fails, deleting nothing, when the
+	/// recording cannot be listed or its timeline cannot be replayed.
 	pub async fn new(store: Store<S>, source: broadcast::Consumer, config: Config) -> Result<Self> {
-		let broadcast = broadcast::Info::new().produce();
-		let timeline = timeline::Producer::new(&broadcast, config.timeline);
-		let deferred = timeline.deferred().map_err(timeline_error)?;
-		let section = timeline.section();
+		let section = timeline::Segmenter::new(config.timeline.clone()).section();
+		let recovery = recover(&store, &section.track, config.retention.is_some()).await?;
 
-		let mut existing = store.list(&Query::segments(&section.track)?);
-		if let Some(entry) = existing.next().await {
-			return Err(Error::Occupied(store.path(&entry?.key)?.to_string()));
-		}
-		drop(existing);
+		let broadcast = broadcast::Info::new().produce();
+		let timeline = match &recovery.checkpoint {
+			Some(checkpoint) => {
+				timeline::Producer::resume(&broadcast, config.timeline, checkpoint).map_err(timeline_error)?
+			}
+			None => timeline::Producer::new(&broadcast, config.timeline),
+		};
+		let deferred = timeline.deferred().map_err(timeline_error)?;
 
 		let replay = track::Subscription::default().with_max_age(REPLAY);
 		let groups = broadcast
@@ -175,9 +188,16 @@ impl<S: ObjectStore> Writer<S> {
 			source,
 			timeline: section.track,
 			enrolled: Mutex::new(HashSet::new()),
+			floors: recovery.floors,
 		});
 		let (commands, receiver) = mpsc::unbounded_channel();
 		let retention = config.retention;
+		let mut deletions = VecDeque::new();
+		if let Some(retention) = &retention
+			&& !recovery.orphans.is_empty()
+		{
+			deletions.push_back((Instant::now() + retention.grace, recovery.orphans));
+		}
 		Ok(Self {
 			control: Control {
 				shared: shared.clone(),
@@ -191,9 +211,11 @@ impl<S: ObjectStore> Writer<S> {
 				groups,
 				timescale: section.timescale.into(),
 				retention: retention.as_ref().map(|r| r.window),
-				window: VecDeque::new(),
+				window: recovery.checkpoint.map(|c| c.records.into()).unwrap_or_default(),
+				sequence: recovery.sequence,
 			},
 			grace: retention.map(|r| r.grace),
+			deletions,
 			_timeline: broadcast,
 		})
 	}
@@ -215,6 +237,7 @@ impl<S: ObjectStore> Writer<S> {
 			mut commands,
 			committer,
 			grace,
+			mut deletions,
 			_timeline,
 		} = self;
 		let shared = control.shared.clone();
@@ -228,7 +251,6 @@ impl<S: ObjectStore> Writer<S> {
 		let mut reads = FuturesUnordered::new();
 		let mut committer = Some(committer);
 		let mut commit: Option<Commit<S>> = None;
-		let mut deletions: VecDeque<(Instant, Vec<Key>)> = VecDeque::new();
 		let mut closed = false;
 		// Cleared once the channel yields nothing more: every sender dropped, or it closed and drained.
 		let mut accepting = true;
@@ -263,11 +285,12 @@ impl<S: ObjectStore> Writer<S> {
 					None => accepting = false,
 					Some(Command::Enroll { name, subscriber, recorder, timescale }) => {
 						let (cancel, cancelled) = watch::channel(());
+						let largest = shared.floors.get(&name).copied();
 						reads.push(guard(cancelled.clone(), recv(name.clone(), subscriber)).boxed());
 						tracks.insert(name, TrackState {
 							recorder,
 							timescale,
-							largest: None,
+							largest,
 							reported: None,
 							accepted: BTreeMap::new(),
 							subscribed: true,
@@ -406,7 +429,7 @@ impl<S: ObjectStore> Control<S> {
 struct TrackState {
 	recorder: Recorder,
 	timescale: Timescale,
-	/// The newest group accepted; later arrivals must exceed it.
+	/// The newest group accepted or already stored; later arrivals must exceed it.
 	largest: Option<u64>,
 	/// The first-frame timestamp of the newest reported group; later groups must not precede it.
 	reported: Option<u64>,
@@ -652,6 +675,8 @@ struct Committer<S> {
 	retention: Option<Duration>,
 	/// Committed records still in the timeline window, oldest first.
 	window: VecDeque<Record>,
+	/// Added to the timeline track's group sequences, continuing a resumed recording's numbering.
+	sequence: u64,
 }
 
 impl<S: ObjectStore> Committer<S> {
@@ -741,7 +766,8 @@ impl<S: ObjectStore> Committer<S> {
 					Poll::Pending => return Err(Error::Timeline("timeline group is still open".into())),
 				}
 			}
-			groups.push(convert(group.sequence, frames, timescale)?);
+			let sequence = group.sequence.checked_add(self.sequence).ok_or(Error::Overflow)?;
+			groups.push(convert(sequence, frames, timescale)?);
 		}
 		Ok(Object { groups })
 	}
@@ -786,12 +812,14 @@ mod tests {
 	};
 
 	use super::*;
+	use crate::store::list::Query;
 
-	/// An in-memory store whose group PUTs fail for one track.
+	/// An in-memory store whose group PUTs fail for one track, and whose listings fail at the end.
 	#[derive(Debug, Clone)]
 	struct Failing {
 		inner: Arc<InMemory>,
 		track: &'static str,
+		list: bool,
 	}
 
 	impl std::fmt::Display for Failing {
@@ -837,7 +865,18 @@ mod tests {
 		}
 
 		fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-			self.inner.list(prefix)
+			let listed = self.inner.list(prefix);
+			match self.list {
+				true => listed
+					.chain(futures::stream::once(async {
+						Err(object_store::Error::NotImplemented {
+							operation: "list".into(),
+							implementer: "Failing".into(),
+						})
+					}))
+					.boxed(),
+				false => listed,
+			}
 		}
 
 		async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
@@ -995,6 +1034,7 @@ mod tests {
 		let failing = Failing {
 			inner: Arc::new(InMemory::new()),
 			track: "audio",
+			list: false,
 		};
 		let store = Store::new(failing, "rec");
 		let writer = Writer::new(store.clone(), source.consume(), Config::default())
@@ -1229,25 +1269,162 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
-	async fn an_existing_recording_is_refused() {
+	/// Record `video` groups `sequences`, one per second, until the source ends.
+	async fn record<S: ObjectStore + Clone>(store: &Store<S>, config: Config, sequences: std::ops::Range<u64>) {
 		let source = broadcast::Info::new().produce();
 		let video = track(&source, "video");
-
-		let store = Store::new(InMemory::new(), "rec");
-		let writer = Writer::new(store.clone(), source.consume(), Config::default())
-			.await
-			.unwrap();
+		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
 		writer.control().pacing_track("video").await.unwrap();
-		group(&video, 0, &[0]);
+		for sequence in sequences {
+			group(&video, sequence, &[sequence * 1000, sequence * 1000 + 500]);
+		}
 		video.finish().unwrap();
 		source.finish();
 		writer.run().await.unwrap();
+	}
 
-		let again = broadcast::Info::new().produce();
-		assert!(matches!(
-			Writer::new(store, again.consume(), Config::default()).await,
-			Err(Error::Occupied(_))
-		));
+	/// Every stored group object, across all tracks.
+	async fn stored_groups<S: ObjectStore>(store: &Store<S>) -> HashSet<Key> {
+		store
+			.list(&Query::new())
+			.try_filter_map(|entry| async move { Ok(matches!(entry.key, Key::Groups { .. }).then_some(entry.key)) })
+			.try_collect()
+			.await
+			.unwrap()
+	}
+
+	/// The group objects the retained records advertise.
+	fn referenced(records: &[Record]) -> HashSet<Key> {
+		records
+			.iter()
+			.flat_map(|record| &record.tracks)
+			.map(|(name, ranges)| Key::groups(name.clone(), ranges[0].start..=ranges.last().unwrap().end).unwrap())
+			.collect()
+	}
+
+	fn orphan(sequence: u64) -> Object {
+		Object {
+			groups: vec![Group {
+				sequence,
+				frames: vec![Frame {
+					timestamp: sequence * 1000,
+					payload: "orphan".into(),
+				}],
+			}],
+		}
+	}
+
+	#[tokio::test]
+	async fn a_restarted_writer_resumes_the_recording() {
+		let store = Store::new(InMemory::new(), "rec");
+		record(&store, Config::default(), 0..3).await;
+		// The source's cache replays groups the recording already holds.
+		record(&store, Config::default(), 0..6).await;
+
+		let records = window(&store).await;
+		assert_eq!(
+			records.iter().map(|record| record.segment).collect::<Vec<_>>(),
+			(0..6).collect::<Vec<_>>()
+		);
+		assert_eq!(ranges(&records, "video"), (0..6).map(|s| (s, s)).collect::<Vec<_>>());
+		check_objects(&store, &records).await;
+
+		// The resumed timeline groups continue the stored numbering.
+		let mut sequences = Vec::new();
+		for segment in 0..6 {
+			let object = store.get_segments(TIMELINE, segment).await.unwrap();
+			sequences.extend(object.groups.iter().map(|group| group.sequence));
+		}
+		assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]), "{sequences:?}");
+	}
+
+	#[tokio::test]
+	async fn a_restarted_dvr_deletes_unreferenced_groups() {
+		let store = Store::new(InMemory::new(), "rec");
+		let config = Config::default().with_retention(Retention::new(Duration::from_secs(2), Duration::ZERO));
+		record(&store, config.clone(), 0..6).await;
+
+		// An interrupted expiration, an uncommitted upload, and a track no retained record names.
+		store.put_groups("video", &orphan(1)).await.unwrap();
+		store.put_groups("video", &orphan(7)).await.unwrap();
+		store.put_groups("audio", &orphan(0)).await.unwrap();
+
+		// Groups at or below the uncommitted upload are refused, so nothing overlaps it.
+		record(&store, config, 6..10).await;
+
+		let records = window(&store).await;
+		assert_eq!(
+			records.iter().map(|record| record.segment).collect::<Vec<_>>(),
+			vec![5, 6, 7]
+		);
+		assert_eq!(ranges(&records, "video"), vec![(5, 5), (8, 8), (9, 9)]);
+		check_objects(&store, &records).await;
+		assert_eq!(stored_groups(&store).await, referenced(&records));
+		store.get_info("video").await.unwrap();
+		store.get_info(TIMELINE).await.unwrap();
+		store.get_segments(TIMELINE, 0).await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn a_failed_recovery_deletes_nothing() {
+		let inner = Arc::new(InMemory::new());
+		let store = Store::new(inner.clone(), "rec");
+		let config = Config::default().with_retention(Retention::new(Duration::from_secs(2), Duration::ZERO));
+		record(&store, config.clone(), 0..6).await;
+		store.put_groups("video", &orphan(1)).await.unwrap();
+		let before = stored_groups(&store).await;
+
+		let failing = Failing {
+			inner: inner.clone(),
+			track: "",
+			list: true,
+		};
+		let source = broadcast::Info::new().produce();
+		let result = Writer::new(Store::new(failing, "rec"), source.consume(), config.clone()).await;
+		assert!(matches!(result, Err(Error::Store(_))));
+
+		// A missing timeline object leaves the retained window unrecoverable.
+		store.delete(&Key::segments(TIMELINE, 3).unwrap()).await.unwrap();
+		let result = Writer::new(store.clone(), source.consume(), config).await;
+		assert!(matches!(result, Err(Error::Timeline(_))));
+
+		assert_eq!(stored_groups(&store).await, before);
+	}
+
+	#[tokio::test]
+	async fn a_dvr_window_longer_than_one_checkpoint_is_recovered() {
+		let store = Store::new(InMemory::new(), "rec");
+		let config = Config::default().with_retention(Retention::new(Duration::from_secs(280), Duration::ZERO));
+		record(&store, config, 0..300).await;
+
+		let recovery = recover(&store, TIMELINE, true).await.unwrap();
+		let checkpoint = recovery.checkpoint.unwrap();
+		let records = window(&store).await;
+		assert!(records.len() > 256, "the window outgrows one checkpoint");
+		assert_eq!(checkpoint.records, records);
+		assert_eq!(checkpoint.range.end, 300);
+		assert!(recovery.orphans.is_empty());
+		assert_eq!(recovery.floors["video"], 299);
+	}
+
+	#[tokio::test]
+	async fn a_timeline_that_does_not_end_at_the_next_segment_fails_recovery() {
+		let store = Store::new(InMemory::new(), "rec");
+		record(&store, Config::default(), 0..6).await;
+		let before = stored_groups(&store).await;
+
+		// `segments/5` still decodes, but it restates an earlier window, so resuming
+		// would write the next segment on top of it.
+		let older = store.get_segments(TIMELINE, 0).await.unwrap();
+		store.delete(&Key::segments(TIMELINE, 5).unwrap()).await.unwrap();
+		store.put_segments(TIMELINE, 5, &older).await.unwrap();
+
+		let source = broadcast::Info::new().produce();
+		match Writer::new(store.clone(), source.consume(), Config::default()).await {
+			Err(Error::Timeline(message)) => assert!(message.contains("not segment 6"), "{message}"),
+			Err(err) => panic!("expected a timeline error, got {err}"),
+			Ok(_) => panic!("expected recovery to fail"),
+		}
+		assert_eq!(stored_groups(&store).await, before);
 	}
 }

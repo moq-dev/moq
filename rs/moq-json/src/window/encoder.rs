@@ -86,6 +86,15 @@ impl ProducerConfig {
 	}
 }
 
+/// A retained window to continue, such as one replayed from stored groups.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Checkpoint<T> {
+	/// Absolute index of the oldest retained record, and of the next to be pushed.
+	pub range: std::ops::Range<u64>,
+	/// The newest retained records, oldest first, ending just before `range.end`.
+	pub records: Vec<T>,
+}
+
 /// One encoded frame, and the group boundary it implies.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -407,6 +416,30 @@ impl<T> Encoder<T> {
 }
 
 impl<T: Serialize> Encoder<T> {
+	/// Create an encoder continuing `checkpoint`, so the first edit opens a group restating it.
+	///
+	/// Fails when the records outnumber the range, or the range exceeds the safe integer range.
+	pub fn resume(config: ProducerConfig, checkpoint: &Checkpoint<T>) -> Result<Self> {
+		let Checkpoint { range, records } = checkpoint;
+		if range.start > range.end || range.end > MAX_INDEX || records.len() as u64 > range.end - range.start {
+			return Err(Error::Json("invalid window checkpoint".into()));
+		}
+
+		let mut encoder = Self::new(config);
+		let skip = encoder
+			.config
+			.checkpoint_records
+			.map(|limit| records.len().saturating_sub(limit))
+			.unwrap_or_default();
+		encoder.window = records[skip..]
+			.iter()
+			.map(serde_json::to_value)
+			.collect::<std::result::Result<_, _>>()?;
+		encoder.offset = range.start;
+		encoder.start = range.end - encoder.window.len() as u64;
+		Ok(encoder)
+	}
+
 	/// Append one record to the back of the window.
 	///
 	/// Emits a push into the open group, or a header restating the window (the new record included)

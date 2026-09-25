@@ -63,5 +63,4 @@ object directly without any listing or separate index object.
 
 ## Required
 
-- [Resume a recording](/quest/m1/archive/recovery.md)
 - [Offline archive HLS](/quest/m1/archive/hls.md)

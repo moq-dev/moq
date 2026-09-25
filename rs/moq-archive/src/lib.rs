@@ -19,6 +19,7 @@ mod error;
 pub mod info;
 mod path;
 pub mod reader;
+mod recover;
 pub mod segment;
 pub mod store;
 pub mod writer;

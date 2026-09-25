@@ -55,7 +55,7 @@ mod producer;
 
 pub use consumer::Consumer;
 pub use decoder::{ConsumerConfig, Decoder, Event, Group};
-pub use encoder::{Encoded, Encoder, Pending, ProducerConfig};
+pub use encoder::{Checkpoint, Encoded, Encoder, Pending, ProducerConfig};
 pub use producer::Producer;
 
 #[cfg(test)]
@@ -289,6 +289,53 @@ mod test {
 				},
 			]
 		);
+	}
+
+	#[test]
+	fn a_resumed_encoder_continues_the_window() {
+		let config = ProducerConfig::default().with_op_ratio(0).with_checkpoint_records(2);
+		let mut original = Encoder::<Value>::new(config.clone());
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		for n in 0..4 {
+			let frame = original.push(&rec(n)).unwrap();
+			decoder.group().decode(&frame.payload).unwrap();
+			frame.commit();
+		}
+		let frame = original.pop(1).unwrap().unwrap();
+		decoder.group().decode(&frame.payload).unwrap();
+		frame.commit();
+		std::iter::from_fn(|| decoder.next_event()).for_each(drop);
+
+		let checkpoint = Checkpoint {
+			range: 1..4,
+			records: vec![rec(1), rec(2), rec(3)],
+		};
+		let mut resumed = Encoder::resume(config, &checkpoint).unwrap();
+		assert_eq!(resumed.range(), 1..4);
+		assert_eq!(
+			resumed.window(),
+			vec![rec(2), rec(3)],
+			"trimmed to the checkpoint bound"
+		);
+
+		let frame = resumed.push(&rec(4)).unwrap();
+		assert!(frame.keyframe, "the first edit restates the window");
+		decoder.group().decode(&frame.payload).unwrap();
+		frame.commit();
+		assert_eq!(
+			std::iter::from_fn(|| decoder.next_event()).collect::<Vec<_>>(),
+			vec![Event::Push {
+				index: 4,
+				value: rec(4)
+			}],
+			"a reader that kept up sees only the new record"
+		);
+
+		let invalid = Checkpoint {
+			range: 3..4,
+			records: vec![rec(2), rec(3)],
+		};
+		assert!(Encoder::resume(ProducerConfig::default(), &invalid).is_err());
 	}
 
 	#[test]

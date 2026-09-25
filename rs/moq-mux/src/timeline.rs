@@ -57,6 +57,7 @@ use std::time::Duration;
 
 use hang::catalog::Archive;
 use hang::timeline::{DEFAULT_NAME, Range, Record, RecordExt};
+use moq_json::window::Checkpoint;
 
 use moq_net::{Timescale, Timestamp};
 
@@ -739,14 +740,28 @@ struct Output {
 impl Output {
 	fn prepare(&mut self) -> crate::Result<()> {
 		if self.sink.is_none() && !self.closed {
-			let info = moq_net::track::Info::default().with_priority(hang::catalog::PRIORITY.catalog);
-			let net = self.broadcast.create_track(DEFAULT_NAME, info)?;
-			let config = moq_json::window::ProducerConfig::default()
-				.with_compression(true)
-				.with_checkpoint_records(CHECKPOINT_RECORDS);
-			self.sink = Some(moq_json::window::Producer::new(net, config));
+			let net = self.create_track()?;
+			self.sink = Some(moq_json::window::Producer::new(net, Self::config()));
 		}
 		Ok(())
+	}
+
+	/// Create the timeline track now, continuing `checkpoint`.
+	fn resume(&mut self, checkpoint: &Checkpoint<Record>) -> crate::Result<()> {
+		let net = self.create_track()?;
+		self.sink = Some(moq_json::window::Producer::resume(net, Self::config(), checkpoint)?);
+		Ok(())
+	}
+
+	fn create_track(&self) -> crate::Result<moq_net::track::Producer> {
+		let info = moq_net::track::Info::default().with_priority(hang::catalog::PRIORITY.catalog);
+		Ok(self.broadcast.create_track(DEFAULT_NAME, info)?)
+	}
+
+	fn config() -> moq_json::window::ProducerConfig {
+		moq_json::window::ProducerConfig::default()
+			.with_compression(true)
+			.with_checkpoint_records(CHECKPOINT_RECORDS)
 	}
 
 	fn push(&mut self, record: &Record) -> crate::Result<()> {
@@ -822,6 +837,31 @@ impl Producer {
 			segmenter: Segmenter::new(config),
 			output,
 		}
+	}
+
+	/// A timeline for `broadcast` continuing `checkpoint`, such as a window recovered from storage.
+	///
+	/// A timeline's window index is its segment number, so the next record is segment
+	/// `checkpoint.range.end`. Creates the timeline track immediately; its first group restates the
+	/// checkpoint. Fails when a checkpoint record is not the segment at its index, the checkpoint
+	/// is malformed, or the track cannot be created.
+	pub fn resume(
+		broadcast: &moq_net::broadcast::Producer,
+		config: Config,
+		checkpoint: &Checkpoint<Record>,
+	) -> crate::Result<Self> {
+		let producer = Self::new(broadcast, config);
+		producer.output.lock().unwrap().resume(checkpoint)?;
+
+		// The encoder accepted the checkpoint, so the records fit before `range.end`.
+		let start = checkpoint.range.end - checkpoint.records.len() as u64;
+		for (index, record) in (start..).zip(&checkpoint.records) {
+			if record.segment != index {
+				return Err(crate::Error::TimelineCheckpoint(index));
+			}
+		}
+		producer.segmenter.state.lock().unwrap().next_segment = checkpoint.range.end;
+		Ok(producer)
 	}
 
 	/// Enroll `name` without letting it influence segmentation, returning its [`Recorder`].
@@ -1320,6 +1360,46 @@ mod test {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let timeline = Producer::new(&broadcast, config);
 		(broadcast, timeline)
+	}
+
+	#[tokio::test]
+	async fn a_resumed_timeline_continues_the_checkpoint() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let checkpoint = Checkpoint {
+			range: 1..3,
+			records: vec![Record::new(1, 1_000, 1_000), Record::new(2, 2_000, 1_000)],
+		};
+		let mut timeline = Producer::resume(&broadcast, Config::default(), &checkpoint).unwrap();
+
+		let mut video = timeline.pacing_track("video0").unwrap();
+		video.record(10, ms(3_000), true);
+		video.record(11, ms(4_000), true);
+		video.end(ms(5_000));
+		drop(video);
+		timeline.finish().unwrap();
+
+		assert_eq!(
+			drain(&broadcast, &timeline).await,
+			vec![
+				entry(1, 1_000, 1_000, &[]),
+				entry(2, 2_000, 1_000, &[]),
+				entry(3, 3_000, 1_000, &[("video0", &[(10, 10)])]),
+				entry(4, 4_000, 1_000, &[("video0", &[(11, 11)])]),
+			]
+		);
+	}
+
+	#[test]
+	fn a_checkpoint_record_must_be_the_segment_at_its_index() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let checkpoint = Checkpoint {
+			range: 0..1,
+			records: vec![Record::new(5, 0, 1_000)],
+		};
+		assert!(matches!(
+			Producer::resume(&broadcast, Config::default(), &checkpoint),
+			Err(crate::Error::TimelineCheckpoint(0))
+		));
 	}
 
 	#[tokio::test]
