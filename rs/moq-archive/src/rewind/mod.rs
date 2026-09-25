@@ -99,6 +99,8 @@ pub struct Track {
 	source: Source,
 }
 
+// One per track, moved between states in place, so the variants' sizes don't matter.
+#[allow(clippy::large_enum_variant)]
 enum Source {
 	Archive(Archive),
 	Subscribing(Subscribing),
