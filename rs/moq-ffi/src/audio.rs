@@ -302,6 +302,13 @@ impl MoqBroadcastProducer {
 		options.settings.bitrate = output.bitrate.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
 		if output.frame_duration_us != 0 {
 			options.settings.frame_duration = Duration::from_micros(output.frame_duration_us.into());
+		} else if output.codec.codec() == moq_audio::encode::Codec::Aac {
+			// from_input sized this at the input rate. The codec rate may be the
+			// override above, and AAC's own frame is 1024 samples of that rate.
+			let mut rated = input.clone();
+			rated.sample_rate = options.settings.sample_rate;
+			options.settings.frame_duration =
+				moq_audio::encode::Settings::from_input(moq_audio::encode::Codec::Aac, &rated).frame_duration;
 		}
 		if let Some(bandwidth) = &bandwidth {
 			options.bandwidth = bandwidth.allocator().clone();

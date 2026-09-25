@@ -543,7 +543,25 @@ async fn raw_audio_codec_default_frame() {
 	let Err(MoqError::Audio(message)) = aac else {
 		panic!("no platform AAC encoder on this host");
 	};
-	assert!(message.contains("aac"), "{message}");
+	assert!(message.contains("no aac audio encoder"), "{message}");
+
+	// 0 still means 1024 samples after an output-rate override, not the input rate.
+	let mut resampled = output(MoqAudioCodec::aac());
+	resampled.sample_rate = Some(48_000);
+	let aac = broadcast.encode_audio(
+		"aac-rate".into(),
+		MoqAudioEncoderInput {
+			format: MoqAudioSampleFormat::F32,
+			sample_rate: 44_100,
+			channels: 2,
+		},
+		resampled,
+		None,
+	);
+	let Err(MoqError::Audio(message)) = aac else {
+		panic!("no platform AAC encoder on this host");
+	};
+	assert!(message.contains("no aac audio encoder"), "{message}");
 
 	broadcast.finish().unwrap();
 }
