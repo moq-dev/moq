@@ -272,6 +272,12 @@ See [Authentication](/bin/relay/auth).
 groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-age` (default 500 ms) is how long *this* consumer waits for a
 stalled group before skipping. Raising the first never delays playback.
 
+For `export ts`, `--max-age` also bounds how long the muxer holds a leading
+track for a lagging one. Frames go out in media-time order across all tracks,
+not arrival order, so two exporters of one broadcast emit them in one order. A
+track quiet for longer is muxed around until it catches up; a sparse track
+(SCTE-35) costs that wait once per cue. `--max-age 0` keeps arrival order.
+
 ## Debugging
 
 `RUST_LOG=debug` prints the negotiated version and every subscription.

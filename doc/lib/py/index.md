@@ -69,6 +69,8 @@ async def main():
 asyncio.run(main())
 ```
 
+For already-encoded live output, call `audio.flush(timestamp_us)` after each `audio.write_frame` with the same broadcast-clock PTS. It samples the transport handoff for catalog jitter. File, pipe, and network imports should omit `flush`; raw-pixel and PCM encoders inside the binding measure their own output.
+
 The three advertising operations, as the other bindings spell them:
 `client.create_broadcast(path)` (or `OriginProducer.create_broadcast`) returns
 an unannounced producer, invisible to everyone; `broadcast.announce(route)` /

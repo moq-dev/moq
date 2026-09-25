@@ -24,6 +24,7 @@ Highlights:
 - **Publish on demand.** `encode::publish_capture` advertises the track up front and opens the camera only while someone subscribes.
 - **GPU ownership where the platform allows.** Matching codec backends consume their native GPU surfaces directly. The renderer imports `CVPixelBuffer` and supported DMA-BUF formats. Linux/NVIDIA producers can import dedicated Vulkan RGBA8 slots into CUDA with timeline-semaphore ordering and completion-driven slot return. Vulkan/CUDA surfaces deliberately have no CPU pixel fallback; other surfaces use the typed `Surface::into_i420()` and configured `Surface::to_rgba(config)` when needed.
 - **Live bitrate control** where the selected backend supports it, without forcing a keyframe. An unsupported backend keeps its opening rate.
+- **Latency presets.** `encode::Config::preset` picks `Preset::LowLatency` (the default), `Balanced`, or `Quality`, with bitrate set separately. `Encoder::applied()` and `Sink::applied()` report the preset whose controls actually took effect and names them for display. See [Encoder presets](#encoder-presets).
 - **Typed group structure.** `encode::Config::gop` is a `Gop` enum (`Keyframe { interval }` today), so a later mode adds a variant instead of replacing the field. `cut()` opens a group at the next frame on both `Encoder` and `Sink`, and refuses with `Error::CutUnsupported` on a backend that cannot force one rather than letting the boundary silently slip to the interval.
 - **Device enumeration** for cameras, displays, windows, and apps, matching `moq devices`.
 
@@ -116,6 +117,61 @@ and the same `encode::Config::color`: `Kind::Auto` could fall back to a software
 encoder that reads the frame back, and the portable `Surface::resize` downloads
 when the GPU scaler fails. Everything under `frame::cuda` and `frame::vulkan`
 runs on the device or returns an error.
+
+## Encoder presets
+
+A preset trades per-frame encode time for compression at the configured
+bitrate. None reorders frames, and none describes keyframe join time, transport
+delay, or viewer playout. Each backend maps a preset onto the controls it has,
+and reports what it applied rather than echoing the request:
+
+| Backend | Low latency | Balanced | Quality |
+| --- | --- | --- | --- |
+| NVENC | P1 | P4 | P7 |
+| openh264 | low complexity | medium complexity | medium complexity, reported as Balanced |
+| VAAPI | IDR/P only, one frame in flight | same, reported as Low latency | same, reported as Low latency |
+| VideoToolbox | real-time, no reordering | same, reported as Low latency | same, reported as Low latency |
+| Media Foundation, MediaCodec, V4L2 | unconfirmed, no preset reported | unconfirmed | unconfirmed |
+
+NVENC always uses low-latency tuning, CBR, and a one-frame VBV. Only NVENC and
+openh264 were measured. VAAPI and VideoToolbox report the one set of controls
+their code applies. Media Foundation and MediaCodec only request low latency,
+and V4L2 leaves frame reordering to the driver, so they report no preset until
+someone measures that hardware.
+
+Measured on an RTX 3070 Ti and a 32-thread x86 host under load from other jobs,
+encoding Big Buck Bunny at 720p30 and 1.5 Mbps. Frame-to-packet is the time
+from `encode` to the packet stamped with that frame, including the CPU upload.
+Encode is NVENC's submit and output lock alone, timed with temporary
+instrumentation. Quality is PSNR and SSIM against the source.
+
+| Backend | Preset | Frame-to-packet p50 | Encode p50 | PSNR | SSIM |
+| --- | --- | --- | --- | --- | --- |
+| NVENC H.264 | Low latency | 4.6 ms | 1.6 ms | 39.19 dB | 0.9787 |
+| NVENC H.264 | Balanced | 5.7 ms | 2.1 ms | 39.22 dB | 0.9789 |
+| NVENC H.264 | Quality | 6.3 ms | 3.3 ms | 39.26 dB | 0.9792 |
+| NVENC H.265 | Low latency | 5.7 to 8.0 ms | 1.9 to 2.2 ms | 39.62 dB | 0.9809 |
+| NVENC H.265 | Balanced | 7.2 to 8.2 ms | 2.9 to 3.3 ms | 39.72 dB | 0.9815 |
+| NVENC H.265 | Quality | 7.6 to 8.1 ms | 3.1 to 3.4 ms | 39.73 dB | 0.9816 |
+| openh264 | Low latency | 10.6 ms | | 39.87 dB | 0.9818 |
+| openh264 | Balanced | 12.2 ms | | 39.92 dB | 0.9823 |
+
+Ranges span two runs. About half of NVENC's frame-to-packet time is allocating
+input and output buffers per frame, the same cost for every preset.
+
+At 1080p30 and 4 Mbps on synthetic moving content, NVENC H.264 encode rises from
+3.2 ms (P1) to 3.8 ms (P4) and 6.7 ms (P7), and openh264 frame-to-packet from
+20.8 to 22.4 ms. No backend measured here held a frame: each packet came back
+from the call that submitted it. openh264 skips frames to hold its rate (11 of
+300 at 720p). p95 frame-to-packet ranged 6 to 25 ms and tracked host load, not
+the preset. Other backends need their own run:
+`cargo run --release -p moq-video --example encode-presets` reports
+frame-to-packet latency, throughput, CPU time, held and skipped frames, and
+bitrate per preset, and writes each stream for scoring with ffmpeg.
+
+An `Encoder` or `Sink` takes one frame per call and queues none of its own. A
+source that outruns the codec should drop raw frames it has not submitted,
+never encoded packets.
 
 `just rs vulkan-cuda` runs the opt-in native Vulkan/CUDA/NVENC hardware
 exercise, including a three-view 1280x720 workload that reports per-stage

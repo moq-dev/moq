@@ -1,4 +1,4 @@
-import { type Dispose, type Getter, Signal } from "@moq/signals";
+import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
 import { controlTimeout, error, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
@@ -30,7 +30,7 @@ import {
 	SubscribeNamespaceEntryDone,
 	SubscribeNamespaceOk,
 } from "./subscribe_namespace.ts";
-import { TrackStatus, type TrackStatusRequest } from "./track.ts";
+import type { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** First wait before re-offering a namespace the peer refused or we couldn't open for. */
@@ -325,7 +325,7 @@ export class Publisher {
 					? // Declaring the timescale is what opts the track into timestamps; every
 						// object Timestamp below is in these units. We serve the newest group
 						// first, matching moq-lite.
-						{ timescale, groupOrder: Properties.DESCENDING }
+						{ timescale, priority: publisherPriority, groupOrder: Properties.DESCENDING }
 					: // INCLUDE_PROPERTIES=0. The block stays present but empty, which also means
 						// the track opts out of timestamps for this subscriber.
 						{},
@@ -394,7 +394,7 @@ export class Publisher {
 
 			let publishError: Error | undefined;
 			try {
-				await Promise.race([Promise.all([serving, filling]), stream.reader.closed]);
+				await race([Promise.all([serving, filling]), stream.reader.closed]);
 			} catch (err: unknown) {
 				publishError = error(err);
 			}
@@ -495,7 +495,7 @@ export class Publisher {
 
 					// Reading from the filter's start drops the objects below it: they are outside
 					// the requested range, so skipping them is not a gap.
-					const read = await Promise.race([hooks.readGroupFrame(group, slice.skip), stream.closed]);
+					const read = await race([hooks.readGroupFrame(group, slice.skip), stream.closed]);
 					if (!read) break;
 					next = read.sequence + 1;
 					if (slice.until !== undefined && read.sequence >= slice.until) {
@@ -608,11 +608,7 @@ export class Publisher {
 			if (fill.until !== undefined && next >= fill.until) break;
 
 			// Reading from the fill's start drops everything below it; see the same read in #runGroup.
-			const frame = await Promise.race([
-				group.readFrameSequence({ from: Number(fill.skip) }),
-				stream.closed,
-				cancelled,
-			]);
+			const frame = await race([group.readFrameSequence({ from: Number(fill.skip) }), stream.closed, cancelled]);
 			if (left) throw new Error("unsubscribed before the fill finished");
 			if (!frame) break;
 			next = BigInt(frame.sequence) + 1n;
@@ -767,8 +763,8 @@ export class Publisher {
 
 				// Wait for the next change, or for the peer to unsubscribe.
 				const next = await (retry
-					? Promise.race([changed, stream.reader.closed, retryAfter(retry).then(() => advertised)])
-					: Promise.race([changed, stream.reader.closed]));
+					? race([changed, stream.reader.closed, retryAfter(retry).then(() => advertised)])
+					: race([changed, stream.reader.closed]));
 				dispose();
 				if (!next) break;
 			}
@@ -895,8 +891,8 @@ export class Publisher {
 
 				// Wait for the next change, which has already fired if one landed above.
 				const next = await (retry
-					? Promise.race([changed, closed, retryAfter(retry).then(() => advertised)])
-					: Promise.race([changed, closed]));
+					? race([changed, closed, retryAfter(retry).then(() => advertised)])
+					: race([changed, closed]));
 				dispose?.();
 				if (!next) break;
 			}
@@ -1063,25 +1059,22 @@ export class Publisher {
 	 */
 	async runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream) {
 		const version = this.#session.version;
-
+		const errorCode = toRequestCode("not_supported", "track_status", version);
 		if (version === Version.DRAFT_14) {
-			// v14: respond with TrackStatus (0x0E = TRACK_STATUS_OK)
-			await stream.writer.u53(TrackStatus.id);
-			const status = new TrackStatus({
-				trackNamespace: msg.trackNamespace,
-				trackName: msg.trackName,
-				statusCode: TrackStatus.STATUS_NOT_FOUND,
-				lastGroupId: 0n,
-				lastObjectId: 0n,
-			});
-			await status.encode(stream.writer, version);
+			// TRACK_STATUS_ERROR shares the SUBSCRIBE_ERROR body on draft-14.
+			await stream.writer.u53(0x0f);
+			await new SubscribeError({
+				requestId: msg.requestId,
+				errorCode,
+				reasonPhrase: "TRACK_STATUS is not supported",
+			}).encode(stream.writer, version);
 		} else {
-			// v15+: respond with RequestOk (0x07)
-			await stream.writer.u53(RequestOk.id);
-			const ok = new RequestOk({
+			await stream.writer.u53(RequestError.id);
+			await new RequestError({
 				requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
-			});
-			await ok.encode(stream.writer, version);
+				errorCode,
+				reasonPhrase: "TRACK_STATUS is not supported",
+			}).encode(stream.writer, version);
 		}
 		stream.close();
 	}

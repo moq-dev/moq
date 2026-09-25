@@ -44,7 +44,7 @@ use ndk::media::media_codec::{
 use ndk::media::media_format::MediaFormat;
 use ndk::media_error::MediaError;
 
-use super::super::encoder::{Codec, Config, Gop};
+use super::super::encoder::{Applied, Codec, Config, Gop};
 use super::{Backend, Encoded};
 use crate::{Color, Error, Frame, I420};
 
@@ -419,6 +419,11 @@ impl Backend for MediaCodec {
 
 	fn name(&self) -> &'static str {
 		NAME
+	}
+
+	fn applied(&self) -> Applied {
+		// Hints an older device drops silently, and the NDK does not say which.
+		Applied::unconfirmed("low-latency and no-B-frame hints requested, unconfirmed; CBR")
 	}
 }
 

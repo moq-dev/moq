@@ -441,4 +441,4 @@ import outside this directory rather than leaving it to review.
 longer match it, which is what stops a file being edited by hand to make a
 failing implementation pass. It compares rather than rewrites; regenerating is
 the `bun doc/concept/audio-jitter/corpus.ts` command above. It runs in
-`just test` and `just check`.
+`just check`.

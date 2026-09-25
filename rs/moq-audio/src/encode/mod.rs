@@ -23,7 +23,7 @@ mod producer;
 mod capture;
 
 pub use encoded::Encoded;
-pub use encoder::{Codec, Encoder, Finish, Input, Settings};
+pub use encoder::{Codec, Encoder, Finish, Input, Preset, Settings};
 pub use producer::{Options, Producer};
 
 #[cfg(feature = "capture")]

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import {
 	FrameTooLarge,
 	GroupTooLarge,
@@ -561,6 +561,22 @@ test("tryOpen gives up when cancelled, resetting a stream that opens afterwards"
 	await aborted;
 });
 
+test("tryOpen rethrows a rejected cancel, resetting a stream that opens afterwards", async () => {
+	const { quic, freeSlot, aborted } = stalledTransport();
+
+	let fail!: (err: Error) => void;
+	const cancelled = new Promise<void>((_, reject) => {
+		fail = reject;
+	});
+
+	const opening = Writer.tryOpen(quic, { cancel: cancelled });
+	fail(new Error("stop sending"));
+	await expect(opening).rejects.toThrow("stop sending");
+
+	freeSlot();
+	await aborted;
+});
+
 // Without a deadline a peer that withholds stream credit while keeping the subscription
 // open queues work forever, since waitUntilAvailable never rejects.
 test("tryOpen gives up when the peer never frees a slot", async () => {
@@ -579,6 +595,21 @@ test("tryOpen returns the stream when a slot is available", async () => {
 	freeSlot();
 
 	expect(await opening).toBeInstanceOf(Writer);
+});
+
+// A subscription hands the same `cancel` to every group it opens, so each open must not leave a
+// reaction behind on it for the life of the subscription.
+test("tryOpen shares one reaction on a cancel reused across opens", async () => {
+	const quic = {
+		createUnidirectionalStream: async () => new WritableStream<Uint8Array>(),
+	} as unknown as WebTransport;
+
+	const cancel = new Promise<void>(() => {});
+	const reactions = spyOn(cancel, "then");
+	for (let i = 0; i < 100; i++) {
+		expect(await Writer.tryOpen(quic, { cancel })).toBeInstanceOf(Writer);
+	}
+	expect(reactions).toHaveBeenCalledTimes(1);
 });
 
 test("open waits for a stream slot instead of rejecting once the peer's limit is full", async () => {

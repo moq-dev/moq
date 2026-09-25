@@ -21,27 +21,29 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Missing fetch group](/quest/m1/fetch-missing-group.md) - HTTP /fetch answers 404 and `moq fetch` fails cleanly for a group the track lacks
 - [libmoq hidden opt-in](/quest/m1/libmoq-hidden.md) - `moq_origin_announced` takes a `hidden` flag so C callers can list `.`-named broadcasts
 - [JS track tail](/quest/m1/js-track-tail.md) - a `@moq/net` subscriber delivers every group up to the declared end over lite and IETF, and JS publishers drain their groups before ending a subscription
+- [lite-07 stream count](/quest/m1/lite-stream-count.md) - moq-lite-07 replaces SUBSCRIBE_DROP with a group-stream count in SUBSCRIBE_END, like moq-transport
 - [Rust track tail](/quest/m1/rust-track-tail.md) - a moq-net subscriber accepts groups that arrive after the subscription's end, and PublishDone carries the real stream count
 - [Session death error](/quest/m1/session-death-error.md) - a dying session ends its tracks with its own error in Rust and JS, never a clean end, `Dropped`, or `Cancel`
+- [Signal.race cleanup](/quest/m1/signal-race.md) - `Signal.race` releases its signal listeners when its result loses a race
 - [Origin narrowing](/quest/m1/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
 - [Auth embedder](/quest/m1/auth-embedder.md) - the lease owns its re-check clock, a gateway session holds a lease, and `Cluster::admit` scopes and tags origins in one call
 - [Auth expiry clock](/quest/m1/auth-expiry-clock.md) - moq-auth and the relay hold one fixed expiry deadline and honour the same skew allowance
 - [Binding surface](/quest/m1/binding-surface.md) - moq-ffi, libmoq, and every wrapper expose the decode delay, route source, and connection timing
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, audio, and video namespaces built from the handle below
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
-- [IETF subscriptions end cleanly](/quest/m1/ietf-publish-done.md) - a finished moq-transport track ends cleanly for its subscriber instead of reading PUBLISH_DONE as an error
 - [Data sections](/quest/m1/data-sections.md) - an application lists JSON and binary tracks in its own catalog section with its own per-track fields, published in one moq-mux call; data entries gain `bitrate` and `jitter`
 - [Broadcast close](/quest/m1/broadcast-close/README.md) - `close()` is the one way to end a broadcast in every language, a permanent retraction that leaves in-flight tracks alone
 - [Relay peer set](/quest/m1/relay-peer-set.md) - a wire consumer tells a client hop from a peer hop, and every mesh credential can mark a peer
-- [Publisher clocks](/quest/m1/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
+- [CLI import clock](/quest/m1/cli-import-clock.md) - fMP4, TS, and FLV imports publish on the shared broadcast clock across restarts
+- [Native clock fixtures](/quest/m1/native-clock-fixtures.md) - CI drives native capture through clock edge cases and asserts the published timestamps
 - [CLI inspection](/quest/m1/cli-inspect/README.md) - `moq ls` lists what is live and `moq fetch` reads a group over MoQ, and a guide shows how to inspect a relay
 - [JS caught up](/quest/m1/js-announce-caught-up.md) - @moq/net's announce consumer says when the initial set has landed, like Rust
 - [Bindings caught up](/quest/m1/announce-live-bindings.md) - moq-ffi, libmoq, and every wrapper yield the same flat announce event, `Live` included
 - [IETF announce count](/quest/m1/ietf-announce-count.md) - an opt-in moq-transport extension carries the replay count, so IETF announce consumers go live without a timer
 
 - [Jitter clock](/quest/m1/jitter-flush-clock.md) - renditions advertise `delay` (lag behind the earliest track) and `jitter` (spread), measured at encoder flush, never lowered; js/watch sizes playout over what it subscribes
+- [GStreamer encoder jitter](/quest/m1/gst-encoder-jitter-provenance.md) - only opted-in local encoder pads feed the flush clock
 - [Data jitter](/quest/m1/data-jitter.md) - JSON and binary tracks with a capture time advertise a detected `delay` and `jitter`
-- [IETF leftovers](/quest/m1/ietf-leftovers.md) - moq-net: the 0x21 priority property, a NOT_SUPPORTED reply to TRACK_STATUS, and the two FETCH refusal codes come from the registry
 - [Play tune-in backpressure](/quest/m1/play-tunein-backpressure.md) - moq play: a tune-in burst larger than the video queue parks the decoder, so the clock never reaches live at a wide `--delay`
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - generic on-demand group serving and IETF FETCH for browser publishers
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS, on the catalog and store the release ships
@@ -49,14 +51,15 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Tooling](/quest/m1/tooling/README.md) - justfiles become a one-line menu over `sh/`, one impact map scopes CI, and every workflow step runs a recipe
 - [Path patterns](/quest/m1/path-patterns.md) - one matcher for every predicate over broadcast paths: tokens, origins, interest
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
-- [Listener close](/quest/m1/listener-close.md) - closing a listener releases its UDP socket before returning, so a restart can rebind the port
 - [Test ports](/quest/m1/tokio-test-ports.md) - moq-tokio tests bind QUIC and WebSocket on independent ephemeral ports, so a parallel run cannot collide
+- [Reconnect test ports](/quest/m1/tokio-reconnect-ports.md) - moq-tokio reconnect and worker tests bind their own ports, with a `tcp_local_addr()` accessor
 - [Decoded frame ownership](/quest/m1/decoded-frames.md) - retain moq-video Frames across bindings, with native views or CPU conversion as needed
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - generated C++ over moq-ffi with futures and expected-style errors, shipped as a tarball, vcpkg, and Conan, and adopted by the OBS plugin
 - [OBS native codecs](/quest/m1/obs-moq-video/README.md) - remove FFmpeg decoding dependencies, deliver GPU frames, and use native audio/video encoders
 - [Audio codecs](/quest/m1/audio-codecs/README.md) - platform audio codecs, explicit unsupported cases, and channel layouts up to 7.1
 - [Opus descriptions](/quest/m1/audio-opus-input.md) - validate headers and honor codec clock, pre-skip, and gain
 - [Capture formats](/quest/m1/audio-capture-format.md) - unsupported overrides refuse before device open and channel counts cannot wrap
+- [NVENC teardown](/quest/m1/nvenc-teardown.md) - a rejected NVENC encode no longer hangs process shutdown
 - [NVENC recovery](/quest/m1/nvenc-recovery.md) - partial initialization and rejected rate changes preserve valid state
 - [GPU pool reservation](/quest/m1/gpu-pool-reservation.md) - a full GPU frame pool is a `None` reservation the caller drops on, not an error to match
 - [Transcode source](/quest/m1/transcode-source.md) - select a rendition the chosen backend can actually decode
@@ -114,9 +117,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Catalog warmup](/quest/m1/catalog-warmup.md) - `warmup` on video and audio renditions, in the catalog and the draft
 - [Audio warmup](/quest/m1/audio-warmup.md) - a viewer joining an Opus rendition mid-stream never hears the unconverged first 80 ms
 - [#3021](/quest/m1/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - GStreamer maps every pad onto one continuous broadcast clock across source restarts
-- [TS import re-anchor](/quest/m1/ts-import-reanchor.md) - moq import ts survives a content join, loop wrap, or flagged restart on every elementary stream, not only legacy audio
 - [Export linger](/quest/m1/export-linger.md) - every `moq export` waits `--linger` for a broadcast to return, and exits 0 on a clean end and 1 on a drop
-- [#2829](/quest/m1/2829-moq-export-ts-the-audio-video-interleave-is-decided-by.md) - moq export ts: the interleave is a media-time watermark bounded by `--max-age` and unchanged SI repeats sit on a media-time grid, so two exporters render one broadcast in one order
 - [TS byte schedule](/quest/m1/ts-export-byte-schedule.md) - moq export ts places PCRs and padding on the byte grid `mpegts.muxRate` implies, so a receiver can clock off arrival
 - [#3489](/quest/m1/3489-ts-import-stream-liveness.md) - moq import ts: every elementary stream reports its access units and how long it has been quiet
 - [SRT import stats](/quest/m1/srt-import-stats.md) - the SRT gateway reports the same per-stream counters instead of nothing
