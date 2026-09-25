@@ -203,3 +203,71 @@ async fn pcm_round_trip_is_lossless() {
 	assert_eq!(decoded, samples);
 	assert!(consumer.read().await.unwrap().is_none());
 }
+
+/// A 5.1 broadcast carries only its channel count in the catalog, which reads
+/// back as 5.1 in canonical order and remixes to whatever the subscriber asks
+/// for.
+#[tokio::test]
+async fn pcm_five_one_reads_back_at_any_layout() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+	let mut catalog_consumer = catalog.consume().unwrap();
+	let broadcast_consumer = broadcast.consume();
+
+	let input = encode::Input::new(48_000, Layout::FivePointOne);
+	let mut options = encode::Options::default();
+	options.track = Some("pcm".to_string());
+	options.settings = encode::Settings::new(48_000, Layout::FivePointOne);
+	options.settings.codec = encode::Codec::Pcm;
+
+	// A level per speaker: left, right, center, LFE, side left, side right.
+	let speakers = [0.1f32, 0.2, 0.3, 0.4, 0.05, 0.06];
+	let mut producer = encode::Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
+	producer
+		.write(&Frame::new(
+			f32_bytes(&speakers.repeat(960)),
+			Timestamp::from_micros(0).unwrap(),
+		))
+		.unwrap();
+
+	let snapshot = catalog_consumer.next().await.unwrap().unwrap();
+	let rendition = snapshot.audio.renditions.get("pcm").unwrap();
+	assert_eq!(rendition.channel_count, 6);
+
+	let h = std::f32::consts::FRAC_1_SQRT_2;
+	let left = 0.1 + h * 0.3 + h * 0.05;
+	let right = 0.2 + h * 0.3 + h * 0.06;
+	let cases = [
+		(None, Layout::FivePointOne, speakers.to_vec()),
+		(Some(Layout::Stereo), Layout::Stereo, vec![left, right]),
+		(Some(Layout::Mono), Layout::Mono, vec![(left + right) * 0.5]),
+	];
+
+	let mut consumers = Vec::new();
+	for (output, _, _) in &cases {
+		let mut options = decode::Options::default();
+		options.output.layout = *output;
+		consumers.push(
+			decode::Consumer::new(&broadcast_consumer, rendition, "pcm", options)
+				.await
+				.unwrap(),
+		);
+	}
+	producer.finish().unwrap();
+
+	for (mut consumer, (_, layout, frame)) in consumers.into_iter().zip(cases) {
+		assert_eq!(consumer.layout(), layout);
+		let decoded = consumer.read().await.unwrap().unwrap();
+		let samples: Vec<f32> = decoded
+			.data
+			.as_chunks::<4>()
+			.0
+			.iter()
+			.map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
+			.collect();
+		assert_eq!(samples.len(), 960 * frame.len(), "{layout:?}");
+		for (got, want) in samples.iter().zip(frame.iter().cycle()) {
+			assert!((got - want).abs() < 1e-6, "{layout:?}: got {got}, want {want}");
+		}
+	}
+}

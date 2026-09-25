@@ -21,5 +21,4 @@ behind the `mediacodec` feature and the encode seam.
 ## Required
 
 - [Encode seam](/quest/m1/audio-codecs/encode-backend.md) - the candidate order this backend joins
-- [Layout](/quest/m1/audio-codecs/layout.md) - the input layout the encoder accepts
 - [MediaCodec decode](/quest/m2/audio-decode-mediacodec.md) - the round-trip regression decodes through it

@@ -19,4 +19,3 @@ every count from 1 to 8 and one beyond.
 ## Related
 
 - [AAC PCE](https://github.com/moq-dev/moq/pull/4093) - the parse half
-- [Layout](/quest/m1/audio-codecs/layout.md) - the layout a PCE would be derived from

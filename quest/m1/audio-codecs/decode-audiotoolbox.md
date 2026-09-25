@@ -32,7 +32,6 @@ binding, alongside the `objc2-core-audio-types` the crate already carries.
 ## Required
 
 - [Decode seam](/quest/m1/audio-codecs/decode-backend.md) - the candidate order this backend joins
-- [Layout](/quest/m1/audio-codecs/layout.md) - what a multichannel frame is delivered as
 
 ## Related
 

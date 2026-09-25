@@ -1,6 +1,5 @@
 //! [`Sink`]: one stream of PCM on its way to the speaker.
 
-use std::borrow::Cow;
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,8 +7,8 @@ use std::time::Duration;
 use fixed_resample::{PushStatus, ResamplingChannelConfig, ResamplingCons, ResamplingProd, resampling_channel};
 
 use super::driver::Shared;
-use super::mixer::{self, BUS_CHANNELS, Gain};
-use crate::resample::remix;
+use super::mixer::{self, Gain};
+use crate::resample::Remix;
 use crate::{Error, Format, Layout};
 
 /// Default for [`Input::latency`]: audio buffered between [`Sink::write`] and
@@ -28,7 +27,7 @@ const HEADROOM: f64 = 3.0;
 ///
 /// The playback counterpart to [`encode::Input`](crate::encode::Input): it
 /// describes the buffers you hand in, not the device, which is free to run at
-/// its own rate and channel count.
+/// its own rate and layout.
 ///
 /// `#[non_exhaustive]`: construct via [`Input::default`] and set fields, so new
 /// options can be added without breaking callers.
@@ -40,7 +39,8 @@ pub struct Input {
 	/// Samples per second per channel. Resampled to the device rate if they
 	/// differ.
 	pub sample_rate: u32,
-	/// Speaker meaning and channel order.
+	/// Speaker meaning and channel order. Remixed to the device's layout, so it
+	/// must name speaker positions rather than be [`Layout::Discrete`].
 	pub layout: Layout,
 
 	/// How much audio to hold between [`Sink::write`] and the speaker (default:
@@ -77,9 +77,9 @@ impl Input {
 		if self.sample_rate == 0 {
 			return Err(Error::Unsupported("sample rate must be > 0".into()));
 		}
-		if !matches!(self.layout, Layout::Mono | Layout::Stereo) {
+		if self.layout.speakers().is_none() {
 			return Err(Error::Unsupported(format!(
-				"playback accepts named mono or stereo input (got {:?})",
+				"playback needs speaker positions to remix (got {:?})",
 				self.layout
 			)));
 		}
@@ -120,13 +120,13 @@ impl Write {
 /// One stream of PCM being played, mixed with every other sink on the device.
 ///
 /// Write decoded samples with [`write`](Self::write) and drop the sink to stop.
-/// Writes are cheap and never block on the device: they hand samples to a ring
-/// buffer that the audio thread drains on its own clock, resampling to the
-/// device rate on the way.
+/// Writes are cheap and never block on the device: they remix to the device's
+/// layout and hand samples to a ring buffer that the audio thread drains on its
+/// own clock, resampling to the device rate on the way.
 pub struct Sink {
 	id: u64,
 	input: Input,
-	prod: Arc<Mutex<ResamplingProd<f32>>>,
+	channel: Arc<Mutex<Channel>>,
 	control: Control,
 	/// Whether the last write overflowed, so a writer that stays ahead of the
 	/// device logs once rather than on every write.
@@ -151,17 +151,21 @@ impl Sink {
 	/// The returned [`Write`] counts input sample frames accepted and dropped;
 	/// dropped live audio should be observed for telemetry, not retried.
 	pub fn write(&mut self, samples: &[u8]) -> Result<Write, Error> {
-		let pcm = self
-			.input
-			.format
-			.as_interleaved_f32(samples, self.input.layout.channels())?;
-		let pcm = match self.input.layout.channels() as usize {
-			BUS_CHANNELS => pcm,
-			_ => Cow::Owned(remix(&pcm, self.input.layout, Layout::Stereo)?),
-		};
-		let requested_sample_frames = pcm.len() / BUS_CHANNELS;
+		let channels = self.input.layout.channels();
+		let pcm = self.input.format.as_interleaved_f32(samples, channels)?;
+		let requested_sample_frames = pcm.len() / channels as usize;
 
-		let accepted_sample_frames = match self.prod.lock().unwrap().push_interleaved(&pcm) {
+		let mut channel = self.channel.lock().unwrap();
+		let mixed;
+		let pcm = match &channel.remix {
+			Some(remix) => {
+				mixed = remix.process(&pcm);
+				&mixed
+			}
+			None => pcm.as_ref(),
+		};
+
+		let accepted_sample_frames = match channel.prod.push_interleaved(pcm) {
 			// OutputNotReady means the device has not read yet, so these samples
 			// are dropped rather than queued to play late.
 			PushStatus::Ok => {
@@ -201,7 +205,7 @@ impl Sink {
 	/// climbs when the writer runs ahead, and falls toward zero when it falls
 	/// behind.
 	pub fn buffered(&self) -> Duration {
-		Duration::from_secs_f64(self.prod.lock().unwrap().occupied_seconds().max(0.0))
+		Duration::from_secs_f64(self.channel.lock().unwrap().prod.occupied_seconds().max(0.0))
 	}
 
 	/// The PCM layout this sink was built with.
@@ -278,15 +282,21 @@ impl Control {
 	}
 }
 
+/// The ring into the mixer and the remix that fills it, swapped together when
+/// the device changes rate or layout.
+struct Channel {
+	prod: ResamplingProd<f32>,
+	/// Converts the sink's layout to the device's, when they differ.
+	remix: Option<Remix>,
+}
+
 /// A sink as the driver sees it: enough to rebuild its channel when the device
 /// changes underneath it.
 pub(super) struct Registration {
 	pub(super) id: u64,
-	/// The caller's rate, which is the input side of the channel.
-	rate: u32,
-	/// The depth the rebuilt channel has to keep, from the caller's [`Input`].
-	latency: Duration,
-	prod: Arc<Mutex<ResamplingProd<f32>>>,
+	/// The caller's rate, layout, and latency: the input side of the channel.
+	input: Input,
+	channel: Arc<Mutex<Channel>>,
 	gain: Arc<Gain>,
 	/// The consumer waiting to be handed to a mixer. Taken once it is attached,
 	/// and refilled by [`rebuild`](Self::rebuild).
@@ -319,34 +329,36 @@ impl Registration {
 		}
 	}
 
-	/// Re-create the channel for a device now running at `rate`, swapping the
-	/// producer the caller's [`Sink`] writes into.
-	pub(super) fn rebuild(&mut self, rate: u32) {
-		let (prod, cons) = channel(self.rate, rate, self.latency);
-		*self.prod.lock().unwrap() = prod;
+	/// Re-create the channel for a device now running at `rate` in `bus`,
+	/// swapping the producer the caller's [`Sink`] writes into.
+	pub(super) fn rebuild(&mut self, rate: u32, bus: Layout) {
+		let (channel, cons) = channel(&self.input, rate, bus);
+		*self.channel.lock().unwrap() = channel;
 		self.pending = Some(cons);
 	}
 }
 
 /// Build a sink and its registration. The device may not be open yet, in which
-/// case `rate` is a placeholder the driver replaces on the next rebuild.
+/// case `rate` and `bus` are placeholders the driver replaces on the next
+/// rebuild.
 pub(super) fn new(
 	id: u64,
 	rate: u32,
+	bus: Layout,
 	input: Input,
 	shared: Arc<Shared>,
 	engine: Arc<super::Handle>,
 ) -> Result<(Sink, Registration), Error> {
 	input.validate()?;
 
-	let (prod, cons) = channel(input.sample_rate, rate, input.latency);
-	let prod = Arc::new(Mutex::new(prod));
+	let (channel, cons) = self::channel(&input, rate, bus);
+	let channel = Arc::new(Mutex::new(channel));
 	let gain = Arc::new(Gain::new());
 
 	let sink = Sink {
 		id,
 		input,
-		prod: prod.clone(),
+		channel: channel.clone(),
 		control: Control { gain: gain.clone() },
 		overflowing: false,
 		shared,
@@ -355,9 +367,8 @@ pub(super) fn new(
 
 	let registration = Registration {
 		id,
-		rate: sink.input.sample_rate,
-		latency: sink.input.latency,
-		prod,
+		input: sink.input.clone(),
+		channel,
 		gain,
 		pending: Some(cons),
 	};
@@ -365,14 +376,17 @@ pub(super) fn new(
 	Ok((sink, registration))
 }
 
-/// The ring buffer between a writer and the audio thread, resampling the
-/// caller's rate to the device's.
-fn channel(from: u32, to: u32, latency: Duration) -> (ResamplingProd<f32>, ResamplingCons<f32>) {
-	let latency = latency.as_secs_f64();
-	resampling_channel::<f32>(
-		BUS_CHANNELS,
-		from,
-		to,
+/// The ring buffer between a writer and the audio thread, remixing the caller's
+/// layout to the device's and resampling its rate to the device's.
+fn channel(input: &Input, rate: u32, bus: Layout) -> (Channel, ResamplingCons<f32>) {
+	let remix =
+		(input.layout != bus).then(|| Remix::new(input.layout, bus).expect("sink and bus layouts name their speakers"));
+
+	let latency = input.latency.as_secs_f64();
+	let (prod, cons) = resampling_channel::<f32>(
+		bus.channels() as usize,
+		input.sample_rate,
+		rate,
 		// We only ever push interleaved, which lets the channel skip its planar
 		// staging buffer.
 		true,
@@ -385,7 +399,9 @@ fn channel(from: u32, to: u32, latency: Duration) -> (ResamplingProd<f32>, Resam
 			overflow_autocorrect_percent_threshold: Some(75.0),
 			..Default::default()
 		},
-	)
+	);
+
+	(Channel { prod, remix }, cons)
 }
 
 #[cfg(test)]
@@ -393,12 +409,57 @@ mod tests {
 	use super::*;
 
 	fn sink(input: Input, output_rate: u32) -> (Sink, ResamplingCons<f32>) {
+		sink_into(input, output_rate, Layout::Stereo)
+	}
+
+	fn sink_into(input: Input, output_rate: u32, bus: Layout) -> (Sink, ResamplingCons<f32>) {
 		let shared = Arc::new(Shared::default());
 		let engine = Arc::new(super::super::Handle {
 			commands: super::super::driver::Commands::default(),
 		});
-		let (sink, mut registration) = new(0, output_rate, input, shared, engine).unwrap();
+		let (sink, mut registration) = new(0, output_rate, bus, input, shared, engine).unwrap();
 		(sink, registration.pending.take().unwrap())
+	}
+
+	/// Write `frame` repeated as `input` and read back what the bus got.
+	fn mix(input: Layout, bus: Layout, frame: &[f32]) -> Vec<f32> {
+		let input = Input {
+			layout: input,
+			..Default::default()
+		};
+		let (mut sink, mut cons) = sink_into(input, 48_000, bus);
+		let channels = bus.channels() as usize;
+		cons.read_interleaved(&mut vec![0.0; channels], false);
+
+		let pcm: Vec<u8> = frame.repeat(4800).iter().flat_map(|s| s.to_le_bytes()).collect();
+		assert_eq!(sink.write(&pcm).unwrap().dropped_sample_frames, 0);
+
+		let mut out = vec![0.0; 4800 * channels];
+		cons.read_interleaved(&mut out, false);
+		out[out.len() - channels..].to_vec()
+	}
+
+	fn close(got: &[f32], want: &[f32]) {
+		assert_eq!(got.len(), want.len(), "{got:?} vs {want:?}");
+		for (g, w) in got.iter().zip(want) {
+			assert!((g - w).abs() < 1e-4, "{got:?} vs {want:?}");
+		}
+	}
+
+	/// A 5.1 track on a stereo device plays its downmix, center and surrounds
+	/// folded into the front pair at -3 dB.
+	#[test]
+	fn a_surround_sink_downmixes_into_a_stereo_bus() {
+		let h = std::f32::consts::FRAC_1_SQRT_2;
+		let got = mix(Layout::FivePointOne, Layout::Stereo, &[0.1, 0.2, 0.3, 0.4, 0.05, 0.06]);
+		close(&got, &[0.1 + h * 0.3 + h * 0.05, 0.2 + h * 0.3 + h * 0.06]);
+	}
+
+	/// A stereo track on a 5.1 device plays from the front pair alone.
+	#[test]
+	fn a_stereo_sink_fills_the_front_of_a_surround_bus() {
+		let got = mix(Layout::Stereo, Layout::FivePointOne, &[0.25, 0.75]);
+		close(&got, &[0.25, 0.75, 0.0, 0.0, 0.0, 0.0]);
 	}
 
 	fn s16(frames: usize, channels: usize) -> Vec<u8> {
@@ -406,7 +467,7 @@ mod tests {
 	}
 
 	fn ready(cons: &mut ResamplingCons<f32>) {
-		cons.read_interleaved(&mut [0.0; BUS_CHANNELS], false);
+		cons.read_interleaved(&mut [0.0; 2], false);
 	}
 
 	#[test]
@@ -495,7 +556,7 @@ mod tests {
 
 	#[test]
 	fn rejects_layouts_it_cannot_mix() {
-		for layout in [Layout::Discrete(0), Layout::Discrete(6)] {
+		for layout in [Layout::Discrete(0), Layout::Discrete(2), Layout::Discrete(6)] {
 			let input = Input {
 				layout,
 				..Default::default()
@@ -511,8 +572,13 @@ mod tests {
 	}
 
 	#[test]
-	fn accepts_mono_and_stereo() {
-		for layout in [Layout::Mono, Layout::Stereo] {
+	fn accepts_named_layouts() {
+		for layout in [
+			Layout::Mono,
+			Layout::Stereo,
+			Layout::FivePointOne,
+			Layout::SevenPointOne,
+		] {
 			let input = Input {
 				layout,
 				..Default::default()

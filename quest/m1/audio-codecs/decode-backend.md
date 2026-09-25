@@ -39,7 +39,3 @@ stats and `moq play` surface.
   backend like the video seam's `probe`.
 
 The FFI does not expose `Kind` until a consumer asks.
-
-## Related
-
-- [Layout](/quest/m1/audio-codecs/layout.md) - independent; the platform backends need both

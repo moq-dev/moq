@@ -10,7 +10,7 @@ use moq_net::Timestamp;
 
 use super::encoded::Encoded;
 use super::encoder::{Encoder, Input, Settings};
-use crate::resample::{Resampler, remix, validate_remix};
+use crate::resample::{Remix, Resampler};
 use crate::{Activity, Error, Frame};
 
 /// Encode and publication policy for [`Producer`].
@@ -64,6 +64,8 @@ impl Default for Options {
 pub struct Producer<E: CatalogExt = ()> {
 	encoder: Encoder,
 	input: Input,
+	/// Converts the input layout to the codec's, when they differ.
+	remix: Option<Remix>,
 	resampler: Option<Resampler>,
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
 	_ext: std::marker::PhantomData<fn() -> E>,
@@ -140,7 +142,9 @@ impl<E: CatalogExt> Reserved<E> {
 	/// Separate from [`encode`](Self::encode), which cannot fail, so a layout the
 	/// codec rejects leaves the reservation intact for another input.
 	pub(crate) fn register(&mut self, input: Input, options: &Options) -> Result<Registered, Error> {
-		validate_remix(input.layout, options.settings.layout)?;
+		let remix = (input.layout != options.settings.layout)
+			.then(|| Remix::new(input.layout, options.settings.layout))
+			.transpose()?;
 		let encoder = Encoder::new(&options.settings)?;
 
 		let resampler = if input.sample_rate == encoder.codec_rate() {
@@ -163,6 +167,7 @@ impl<E: CatalogExt> Reserved<E> {
 		Ok(Registered {
 			encoder,
 			input,
+			remix,
 			resampler,
 		})
 	}
@@ -172,6 +177,7 @@ impl<E: CatalogExt> Reserved<E> {
 		Producer {
 			encoder: registered.encoder,
 			input: registered.input,
+			remix: registered.remix,
 			resampler: registered.resampler,
 			track: self.track,
 			_ext: self._ext,
@@ -193,6 +199,7 @@ impl<E: CatalogExt> Reserved<E> {
 pub(crate) struct Registered {
 	encoder: Encoder,
 	input: Input,
+	remix: Option<Remix>,
 	resampler: Option<Resampler>,
 }
 
@@ -337,7 +344,10 @@ impl<E: CatalogExt> Producer<E> {
 		let input = &self.input;
 		let (format, channels) = (input.format, input.layout.channels());
 		let pcm = format.as_interleaved_f32(frame.data.as_ref(), channels)?;
-		let pcm = remix(&pcm, input.layout, self.encoder.settings().layout)?;
+		let pcm = match &self.remix {
+			Some(remix) => remix.process(&pcm),
+			None => pcm.into_owned(),
+		};
 		let pcm: Vec<f32> = match self.resampler.as_mut() {
 			Some(r) => r.process(&pcm, frame.timestamp)?,
 			None => pcm,

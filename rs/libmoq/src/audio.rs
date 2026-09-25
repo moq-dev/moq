@@ -67,6 +67,9 @@ pub struct moq_audio_encoder_input {
 	/// `moq_audio_sample_format` discriminant.
 	pub format: u32,
 	pub sample_rate: u32,
+	/// Interleaved channel count, which also names the speaker layout by the
+	/// WAVE convention: 1 mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1,
+	/// 8 7.1, in front left, front right, center, LFE, back, side order.
 	pub channels: u32,
 }
 
@@ -98,7 +101,9 @@ pub struct moq_audio_decoder_output {
 	pub format: u32,
 	/// 0 = deliver at the codec's native sample rate.
 	pub sample_rate: u32,
-	/// 0 = deliver at the codec's native channel count.
+	/// 0 = deliver at the codec's native channel count. A count names its
+	/// layout as `moq_audio_encoder_input.channels` describes, and the decoder
+	/// remixes to it.
 	pub channels: u32,
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// microseconds. Same congestion-control knob as
