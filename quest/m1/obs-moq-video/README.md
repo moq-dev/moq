@@ -23,7 +23,6 @@ The quests separate portable decoding, platform GPU delivery, audio, and publish
 - [Windows decoded frames](/quest/m1/obs-moq-video/decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
 - [Linux decoded frames](/quest/m1/obs-moq-video/decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Linux bundle](/quest/m1/obs-moq-video/linux-bundle.md) - attach a portable Linux x86_64 tarball to every obs-moq release once FFmpeg is gone
-- [Encoder presets](/quest/m1/obs-moq-video/presets.md) - define and measure shared low-latency, balanced, and quality policies
 - [Audio publishing](/quest/m1/obs-moq-video/audio-publish.md) - back an internal OBS Opus encoder with moq-audio
 - [Video publishing](/quest/m1/obs-moq-video/adapter.md) - back an internal OBS video encoder with moq-video and expose the combined opt-in mode
 - [Rate control](/quest/m1/obs-moq-video/rate-control.md) - the plugin reserves its bitrate and retunes the OBS encoder to the grant

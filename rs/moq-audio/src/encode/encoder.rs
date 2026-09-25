@@ -92,6 +92,41 @@ impl Default for Input {
 	}
 }
 
+/// How an encoder trades latency for compression, applied with
+/// [`Settings::with_preset`].
+///
+/// Mirrors `moq_video::encode::Preset`. A preset sets packetization only:
+/// codec, sample rate, layout, bitrate, and DTX stay as configured. The
+/// packet duration is a packetization setting, not a delay guarantee: Opus adds
+/// its own 6.5 ms lookahead, and transport and playout buffering are separate.
+///
+/// `#[non_exhaustive]` so a later policy can be added without breaking a
+/// `match`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Preset {
+	/// 10 ms packets: the shortest packetization Opus codes with its full
+	/// toolset, at twice the packet rate.
+	#[default]
+	LowLatency,
+	/// 20 ms packets, the Opus default.
+	Balanced,
+	/// 20 ms packets. Identical to [`Balanced`](Self::Balanced) today:
+	/// libopus already runs at full complexity, and a longer packet would only
+	/// add delay.
+	Quality,
+}
+
+impl Preset {
+	/// The packet duration this preset encodes.
+	pub fn frame_duration(self) -> Duration {
+		match self {
+			Self::LowLatency => Duration::from_millis(10),
+			Self::Balanced | Self::Quality => Duration::from_millis(20),
+		}
+	}
+}
+
 /// Audio codec settings shared by [`Encoder`] and [`Producer`](super::Producer).
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -128,6 +163,12 @@ impl Settings {
 			dtx: false,
 			frame_duration: Duration::from_millis(20),
 		}
+	}
+
+	/// Apply `preset`'s packetization, keeping every other setting.
+	pub fn with_preset(mut self, preset: Preset) -> Self {
+		self.frame_duration = preset.frame_duration();
+		self
 	}
 
 	/// Derive concrete codec settings from source PCM.
@@ -653,6 +694,33 @@ mod tests {
 			..Settings::default()
 		});
 		assert!(matches!(err, Err(Error::Unsupported(_))));
+	}
+
+	/// A preset has to reach the codec as its packet duration, read back off the
+	/// packet's TOC rather than our own settings, and leave everything else alone.
+	#[test]
+	fn preset_sets_the_packet_duration_and_keeps_the_rest() {
+		for (preset, samples) in [
+			(Preset::LowLatency, 480),
+			(Preset::Balanced, 960),
+			(Preset::Quality, 960),
+		] {
+			let settings = Settings {
+				bitrate: Some(moq_net::bandwidth::Rate::from_bps(96_000)),
+				layout: Layout::Mono,
+				..Settings::default()
+			}
+			.with_preset(preset);
+			let mut enc = Encoder::new(&settings).unwrap();
+			assert_eq!(enc.settings().layout, Layout::Mono);
+			assert_eq!(enc.bitrate().as_bps(), 96_000);
+			assert_eq!(enc.frame_size(), samples);
+
+			let packet = enc.encode(&vec![0.0f32; samples]).unwrap();
+			// SAFETY: a non-empty packet from the encoder above; the TOC is its first byte.
+			let coded = unsafe { unsafe_libopus::opus_packet_get_samples_per_frame(packet.payload.as_ptr(), 48_000) };
+			assert_eq!(coded as usize, samples, "{preset:?} packet");
+		}
 	}
 
 	#[test]
