@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from moq_ffi import MoqClient
 
 from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, OriginProducer
@@ -26,6 +28,12 @@ class Client:
         origin = OriginProducer()
         client = Client("https://relay.example.com", publish=origin, subscribe=origin)
 
+    The WebSocket fallback races QUIC for ``http(s)`` URLs after a 200 ms head start.
+    Pass ``websocket_enabled=False`` against a QUIC-only relay, or a ``websocket_delay``
+    to change the head start:
+
+        client = Client("https://relay.example.com", websocket_delay=timedelta(milliseconds=50))
+
     For a relay that requires mTLS, pass a paired client certificate and key:
 
         client = Client("https://relay.example.com", tls_cert="client.pem", tls_key="client.key")
@@ -48,6 +56,8 @@ class Client:
         tls_key: str | None = None,
         bind: str | None = None,
         max_streams: int | None = None,
+        websocket_enabled: bool | None = None,
+        websocket_delay: timedelta | None = None,
         reconnect: bool = True,
         backoff: Backoff | None = None,
         publish: OriginProducer | None = None,
@@ -62,6 +72,10 @@ class Client:
         self._tls_key = tls_key
         self._bind = bind
         self._max_streams = max_streams
+        self._websocket_enabled = websocket_enabled
+        if websocket_delay is not None and websocket_delay < timedelta(0):
+            raise ValueError(f"websocket_delay must not be negative: {websocket_delay}")
+        self._websocket_delay = websocket_delay
         self._reconnect = reconnect
         self._backoff = backoff
 
@@ -94,6 +108,10 @@ class Client:
             self._inner.set_bind(self._bind)
         if self._max_streams is not None:
             self._inner.set_quic_max_streams(self._max_streams)
+        if self._websocket_enabled is not None:
+            self._inner.set_websocket_enabled(self._websocket_enabled)
+        if self._websocket_delay is not None:
+            self._inner.set_websocket_delay(self._websocket_delay // timedelta(microseconds=1))
         if not self._reconnect:
             self._inner.set_reconnect(False)
         if self._backoff is not None:
@@ -125,7 +143,7 @@ class Client:
         self._session = None
 
     def create_broadcast(self, path: str) -> BroadcastProducer:
-        """Create a locally announced broadcast at ``path``. Advertise it to peers after populating tracks.
+        """Create an unannounced broadcast at ``path``, invisible until announced. Announce it after populating tracks.
 
         See :meth:`OriginProducer.create_broadcast`.
         """
@@ -176,6 +194,8 @@ def connect(
     tls_key: str | None = None,
     bind: str | None = None,
     max_streams: int | None = None,
+    websocket_enabled: bool | None = None,
+    websocket_delay: timedelta | None = None,
     reconnect: bool = True,
     backoff: Backoff | None = None,
     publish: OriginProducer | None = None,
@@ -198,6 +218,8 @@ def connect(
         tls_key=tls_key,
         bind=bind,
         max_streams=max_streams,
+        websocket_enabled=websocket_enabled,
+        websocket_delay=websocket_delay,
         reconnect=reconnect,
         backoff=backoff,
         publish=publish,

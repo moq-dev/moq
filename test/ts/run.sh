@@ -264,7 +264,7 @@ if harness_probe "$URL/certificate.sha256"; then
 fi
 
 echo "### starting relay on 127.0.0.1:${PORT}"
-sed "s/4443/${PORT}/g" "$DIR/../smoke/smoke.toml" >"$HARNESS_RUN/relay.toml"
+sed "s/4443/${PORT}/g" "$DIR/../interop/interop.toml" >"$HARNESS_RUN/relay.toml"
 harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$HARNESS_RUN/relay.toml"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "error: relay never became ready" >&2

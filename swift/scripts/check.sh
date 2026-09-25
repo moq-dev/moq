@@ -90,6 +90,11 @@ env ${xcode_sdk_env[@]+"${xcode_sdk_env[@]}"} xcodebuild -create-xcframework \
 mkdir -p "$SWIFT_DIR/Sources/MoqFFI"
 cp "$BINDGEN_OUT/moq.swift" "$SWIFT_DIR/Sources/MoqFFI/Generated.swift"
 
+# Compile the documentation samples with the tests, beside the inputs
+# Docs/Prelude.swift declares, so a doc that drifts from the wrapper fails here.
+bash "$WORKSPACE_DIR/doc/lib/samples.sh" swift "$WORKSPACE_DIR/doc/lib/swift/index.md" "$SWIFT_DIR/README.md" \
+    >"$SWIFT_DIR/Tests/MoqTests/Docs/Samples.swift"
+
 # swift/Package.swift already declares a path-based MoqFFIBinary pointing
 # at the xcframework laid out above, so no manifest mutation is needed.
 cd "$SWIFT_DIR"

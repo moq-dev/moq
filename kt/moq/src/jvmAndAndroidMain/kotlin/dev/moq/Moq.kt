@@ -1,6 +1,7 @@
 package dev.moq
 
 import kotlinx.coroutines.flow.Flow
+import kotlin.time.Duration
 
 /**
  * A connected MoQ session with publish/subscribe conveniences.
@@ -19,7 +20,7 @@ class Moq internal constructor(
     private val client: Client,
 ) : AutoCloseable {
     /**
-     * Create a locally announced broadcast at [path].
+     * Create an unannounced broadcast at [path], invisible to everyone until announced.
      *
      * Advertise it with `announce` after populating tracks. `finish()` unpublishes immediately.
      */
@@ -96,6 +97,10 @@ class Moq internal constructor(
          *   with backoff whenever the transport drops; watch [Session.status] for the
          *   transitions.
          * @param backoff retry pacing for the automatic reconnect.
+         * @param websocketEnabled set false to stop the WebSocket fallback racing QUIC,
+         *   e.g. against a relay that only serves QUIC. On by default.
+         * @param websocketDelay head start QUIC gets before the WebSocket fallback joins
+         *   the race; 200ms by default, and zero races both at once.
          * @param publish origin to announce broadcasts through; auto-created when null.
          * @param subscribe origin to discover broadcasts through; auto-created when null.
          *
@@ -117,7 +122,12 @@ class Moq internal constructor(
             publish: OriginProducer? = null,
             subscribe: OriginProducer? = null,
             maxStreams: ULong? = null,
+            websocketEnabled: Boolean? = null,
+            websocketDelay: Duration? = null,
         ): Moq {
+            require(websocketDelay == null || !websocketDelay.isNegative()) {
+                "websocketDelay must not be negative: $websocketDelay"
+            }
             val client = Client()
             try {
 				if (!tlsVerify) client.setTlsVerify(false)
@@ -128,6 +138,10 @@ class Moq internal constructor(
                 if (tlsKey != null) client.setTlsKey(tlsKey)
                 if (bind != null) client.setBind(bind)
                 if (maxStreams != null) client.setQuicMaxStreams(maxStreams)
+                if (websocketEnabled != null) client.setWebsocketEnabled(websocketEnabled)
+                if (websocketDelay != null) {
+                    client.setWebsocketDelay(websocketDelay.inWholeMicroseconds.toULong())
+                }
                 if (reconnect != null) client.setReconnect(reconnect)
                 if (backoff != null) client.setBackoff(backoff)
                 if (publish != null) client.setPublish(publish)

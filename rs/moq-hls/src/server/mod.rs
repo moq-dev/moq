@@ -6,7 +6,7 @@
 //! GET /{broadcast}/master.m3u8
 //! GET /{broadcast}/manifest.mpd
 //! GET /{broadcast}/{kind}/{rendition}/media.m3u8
-//! GET /{broadcast}/{kind}/{rendition}/init.mp4
+//! GET /{broadcast}/{kind}/{rendition}/init.{hash}.mp4
 //! GET /{broadcast}/{kind}/{rendition}/seg/{segment}.m4s
 //! GET /{broadcast}/{kind}/{rendition}/seg/t{pts}.m4s
 //! ```
@@ -14,7 +14,11 @@
 //! `{kind}` is `video` or `audio`, so a video and an audio rendition that share a
 //! name address distinct resources. The two `seg/` forms name the same bytes: HLS
 //! playlists address a segment by its aligned number, the DASH manifest by its
-//! timeline `pts` (`$Time$`).
+//! timeline `pts` (`$Time$`). `{hash}` is a hash of the init segment's bytes, so a
+//! reconfigured rendition gets a new init URL. A broadcaster given a generation
+//! ([`Broadcaster::set_generation`](crate::export::Broadcaster::set_generation))
+//! prefixes every segment file with it (`seg/{generation}.{segment}.m4s`), and
+//! refuses segment URLs carrying any other.
 //!
 //! Every request is served. To gate access, wrap [`Server::router`] in your own
 //! [`axum`] middleware. It runs before routing, so a rejected request never reaches
@@ -23,6 +27,12 @@
 //! suffix, still percent-encoded: `/project/li%76e/master.m3u8` serves the broadcast
 //! `project/live`. Decode each segment before matching it against a policy, or a
 //! name can be encoded past the check.
+//!
+//! An embedder that authorizes each request itself (a token scoping the broadcast, a
+//! stats-metered origin per tenant) skips the router instead: parse the path with
+//! [`Route::parse`], check [`Route::broadcast`], rewrite it relative to the scope, and
+//! answer with [`Server::respond`] on a `Server` built from that scope's origin. The
+//! decoded broadcast is what a policy should check.
 //!
 //! ```no_run
 //! use axum::http::StatusCode;
@@ -43,6 +53,8 @@
 //! ```
 
 mod routes;
+
+pub use routes::{Resource, Route};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

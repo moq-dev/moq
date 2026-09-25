@@ -10,7 +10,8 @@
 //!   broadcast's catalog and timeline tracks; media bytes are FETCHed from
 //!   the relay one group at a time, only when a segment is actually requested.
 //!   It serves every request; gate access by layering your own middleware onto
-//!   [`Server::router`](server::Server::router).
+//!   [`Server::router`](server::Server::router), or parse and authorize each request
+//!   yourself and answer it with [`Server::respond`](server::Server::respond).
 //!
 //! All CMAF byte handling (import via [`moq_mux::container::fmp4::Import`],
 //! export via [`moq_mux::container::fmp4::Muxer`]) lives in `moq-mux`; this

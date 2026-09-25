@@ -9,7 +9,7 @@ measured and which APIs each one lacked.
 
 ## Plan
 
-`just test smoke-media` measures presented frame progress, tone presence,
+`just test media` measures presented frame progress, tone presence,
 and audio/video skew against a deterministic fixture, but `harness.ts`
 launches only Playwright's Chromium and nothing installs another engine. Its
 capability probe already enumerates what the player needs (WebTransport,

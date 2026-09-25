@@ -1,4 +1,4 @@
-# drill: interrupted_publisher_republishes_new_content
+# drill: interrupted_publisher_republishes_new_content::loopback
 # expect: the interrupted publisher: no announcement change
 #
 # Removes the relay's withdrawal of a publisher it lost. Each announced route

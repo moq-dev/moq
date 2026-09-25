@@ -69,6 +69,7 @@ pub(crate) async fn serve_ws(
 		// Bad token, we can't publish or subscribe.
 		return Err(StatusCode::UNAUTHORIZED.into());
 	}
+	let lease = lease.with_stats(stats.clone());
 
 	Ok(ws.on_upgrade(async move |socket| {
 		let id = state.conn_id.fetch_add(1, Ordering::Relaxed);

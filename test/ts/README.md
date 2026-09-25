@@ -356,7 +356,7 @@ exporter re-emits SI on its own repetition cadence rather than the source's.
 
 ## CI
 
-`.github/workflows/smoke.yml` runs `just test ts` and then `just test ts-eit`
+`.github/workflows/interop.yml` runs `just test ts` and then `just test ts-eit`
 after the interop matrix (nightly, on demand, and on PRs touching `test/ts/`).
 The second recipe is `eit-roundtrip.sh`: it builds the sparse-schedule and
 pending-version fixtures from a generated clip, round-trips them through a

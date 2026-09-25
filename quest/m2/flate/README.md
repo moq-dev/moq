@@ -29,7 +29,3 @@ a compressed track is announced, routed, and cached like any other.
 
 - [Track wrapper](/quest/m2/flate/track.md) - `moq-flate` and `@moq/flate` wrap a track so each group is one compression window without caller bookkeeping
 - [Bindings](/quest/m2/flate/bindings.md) - moq-ffi and libmoq publish and subscribe compressed tracks, mirrored through every wrapper
-
-## Related
-
-- [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - the libmoq catch-up this line adds one more symbol family to
