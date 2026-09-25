@@ -158,7 +158,7 @@ jobs:
           EOF
           fi
 
-          python3 ../sh/gh/install-formula.py "$CRATE" "../rendered/${CRATE}.rb" .
+          just gh install-formula "$CRATE" "rendered/${CRATE}.rb" homebrew-tap
 
           if git diff --quiet && [[ -z "$(git status --porcelain)" ]]; then
             echo "No changes to commit (formula already up to date)."

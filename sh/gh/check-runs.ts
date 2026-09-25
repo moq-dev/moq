@@ -1,4 +1,4 @@
-// Fail when a workflow `run:` step names a `.sh` file. Workflows call `just`
+// Fail when a workflow `run:` step names a script file. Workflows call `just`
 // recipes, so a script can move or change its arguments without touching them,
 // and the same command works locally.
 import { Glob } from "bun";
@@ -13,7 +13,7 @@ for await (const path of new Glob(".github/workflows/*.{yml,yaml}").scan({ dot: 
 	for (const [name, job] of Object.entries(workflow.jobs ?? {})) {
 		for (const step of job.steps ?? []) {
 			for (const line of step.run?.split("\n") ?? []) {
-				if (/\.sh\b/.test(line)) violations.push(`${path} (${name}): ${line.trim()}`);
+				if (/\.(sh|py|ts|js|mjs)\b/.test(line)) violations.push(`${path} (${name}): ${line.trim()}`);
 			}
 		}
 	}

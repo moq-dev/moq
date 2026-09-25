@@ -30,7 +30,7 @@ on:
       - "kt/build.gradle.kts"
       - "kt/settings.gradle.kts"
       - ".github/workflows/release-kt-lib.yml"
-      - "just gh release"
+      - "sh/gh/release.sh"
   pull_request:
     paths:
       - "kt/moq/**"
@@ -38,8 +38,8 @@ on:
       - "kt/build.gradle.kts"
       - "kt/settings.gradle.kts"
       - ".github/workflows/release-kt-lib.yml"
-      - "just gh release"
-      - "just rs package-ffi"
+      - "sh/gh/release.sh"
+      - "rs/moq-ffi/build.sh"
   # Manual trigger so a wrapper bump can be published once the bindings it
   # depends on land on Maven Central (the guard below skips otherwise).
   workflow_dispatch:

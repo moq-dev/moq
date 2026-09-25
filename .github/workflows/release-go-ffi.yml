@@ -16,11 +16,11 @@ on:
   pull_request:
     paths:
       - ".github/workflows/release-go-ffi.yml"
-      - "just gh release"
+      - "sh/gh/release.sh"
       - "go/ffi/**"
-      - "just go package-ffi"
-      - "just go publish-ffi"
-      - "just rs package-ffi"
+      - "sh/go/package-ffi.sh"
+      - "sh/go/publish-ffi.sh"
+      - "rs/moq-ffi/build.sh"
 
 permissions:
   contents: read

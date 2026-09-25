@@ -43,6 +43,11 @@ test:
     bun test common/deps.test.ts
     bun run --filter='*' --elide-lines=0 test
 
+# Benchmark re-pricing the origin broadcast map as routes and observers grow.
+bench:
+    bun install --frozen-lockfile
+    bun net/bench/broadcasts.ts
+
 # Build all packages.
 build:
     bun run --filter='*' build

@@ -22,22 +22,22 @@ on:
       - "swift/Package.swift.template"
       - "swift/Sources/Moq/**"
       - "swift/Tests/**"
-      - "just swift package"
-      - "just swift publish"
-      - "just swift verify"
+      - "sh/swift/package.sh"
+      - "sh/swift/publish.sh"
+      - "sh/swift/verify.sh"
       - ".github/workflows/release-swift-lib.yml"
-      - "just gh release"
+      - "sh/gh/release.sh"
   pull_request:
     paths:
       - "swift/VERSION"
       - "swift/Package.swift.template"
       - "swift/Sources/Moq/**"
       - "swift/Tests/**"
-      - "just swift package"
-      - "just swift publish"
-      - "just swift verify"
+      - "sh/swift/package.sh"
+      - "sh/swift/publish.sh"
+      - "sh/swift/verify.sh"
       - ".github/workflows/release-swift-lib.yml"
-      - "just gh release"
+      - "sh/gh/release.sh"
   workflow_run:
     workflows: ["Release Swift FFI"]
     types:

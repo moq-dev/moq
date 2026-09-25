@@ -19,7 +19,7 @@ on:
     paths:
       - "py/moq-rs/**"
       - ".github/workflows/release-py.yml"
-      - "just gh release"
+      - "sh/gh/release.sh"
   workflow_run:
     workflows: ["Release Py FFI"]
     types:

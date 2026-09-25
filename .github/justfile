@@ -12,7 +12,7 @@ test:
     sh/gh/release.test.sh
     python3 sh/rs/package-rename.test.py
     sh/go/publish-wrapper.test.sh
-    .claude/hooks/direnv.test.sh
+    bash .claude/hooks/direnv.test.sh
 
 # Release workflow helpers, e.g. `just gh release parse-version moq-cli`.
 [positional-arguments]
@@ -28,6 +28,11 @@ alert *args:
 [positional-arguments]
 formula *args:
     sh/gh/render-formula.sh "$@"
+
+# Copy a rendered formula into a Homebrew tap checkout, migrating renamed formulae.
+[positional-arguments]
+install-formula *args:
+    python3 sh/gh/install-formula.py "$@"
 
 # Trigger the apt-repo and rpm-repo workflows for a release tag.
 [positional-arguments]

@@ -73,9 +73,7 @@ jobs:
       # over independent observers of the new live broadcast map.
       - name: JS origin broadcast map benchmark
         if: ${{ !cancelled() }}
-        run: |
-          nix develop --command bun install --frozen-lockfile
-          nix develop --command bun js/net/bench/broadcasts.ts
+        run: nix develop --command just js bench
 
       - name: Audit
         if: ${{ !cancelled() }}
