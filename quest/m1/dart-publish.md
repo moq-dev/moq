@@ -39,12 +39,11 @@ hand-edited before tagging. Verify the published `moq_ffi` resolves its native
 asset from a clean machine with no monorepo checkout, since that download path
 is the one CI never exercises.
 
-Both blockers below are about not publishing a claim we cannot support: the
+The blocker below is about not publishing a claim we cannot support: the
 first release is the one that reaches strangers, and pub.dev packages generally
 cannot be unpublished or deleted. A version may be retracted within seven days,
 but retraction does not erase it.
 
 ## Required
 
-- [Dart binding memory leaks](/quest/m1/dart-leak.md) - publishing a leaking runtime is worse than not publishing
 - [Dart on iOS](/quest/m1/dart-ios.md) - the package advertises iOS, which nobody has run

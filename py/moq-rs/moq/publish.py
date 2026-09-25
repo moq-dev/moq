@@ -92,6 +92,14 @@ class MediaProducer:
         """Write one encoded frame with a presentation timestamp in microseconds."""
         self._inner.write_frame(Frame(payload=payload, timestamp_us=timestamp_us))
 
+    def flush(self, timestamp_us: int) -> None:
+        """Record a local encoder's frame handoff on the broadcast media clock.
+
+        Call this after ``write_frame`` only for encoded live output. File, pipe,
+        and network imports should leave their jitter estimate clock free.
+        """
+        self._inner.flush(timestamp_us)
+
     def cut(self) -> None:
         """Draw a group boundary here.
 
@@ -638,13 +646,13 @@ class BroadcastProducer:
     def announce(self, route: Route | None = None) -> None:
         """Advertise this broadcast's exact path as a route.
 
-        Announcing again re-prices the route in place. The path is already
-        discoverable locally; announce advertises it to peers.
+        Announcing again re-prices the route in place. Until announced, the
+        broadcast is invisible and unroutable for local consumers and peers alike.
         """
         self._inner.announce(route if route is not None else Route())
 
     def unannounce(self) -> None:
-        """Retract this broadcast's exact-path advertisement, if any."""
+        """Retract this broadcast's advertisement, if any, from local consumers and peers alike."""
         self._inner.unannounce()
 
     def set_video_properties(self, properties: VideoProperties) -> None:

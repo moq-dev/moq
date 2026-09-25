@@ -31,14 +31,22 @@ broadcast by path:
 
 ```text
 /{broadcast}/master.m3u8
+/{broadcast}/manifest.mpd
 /{broadcast}/{video|audio}/{rendition}/media.m3u8
-/{broadcast}/{video|audio}/{rendition}/init.mp4
+/{broadcast}/{video|audio}/{rendition}/init.{hash}.mp4
 /{broadcast}/{video|audio}/{rendition}/seg/{segment}.m4s
+/{broadcast}/{video|audio}/{rendition}/seg/t{pts}.m4s
 ```
+
+The init URL carries a hash of its bytes, so a reconfigured rendition gets a
+new one. An embedder of the library can also label the publisher's run with
+`Broadcaster::set_generation`. Every segment URL then carries it
+(`seg/{generation}.{segment}.m4s`), since a restarted publisher reuses segment
+numbers for different media.
 
 `--window` sets the playlist duration (default 16 s),
 `--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,
 and `--cors-origin` opens it to browsers.
 H.264/H.265 and AAC/Opus renditions are served. Import handles classic HLS;
-LL-HLS parts and DASH output are not implemented yet. The library is
+LL-HLS parts are not implemented yet. The library is
 [`moq-hls`](https://docs.rs/moq-hls).

@@ -718,6 +718,46 @@ mod tests {
 		assert!(decoded.forward);
 	}
 
+	#[test]
+	fn publish_priority_property_bytes_on_every_draft() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			let mut msg = Publish {
+				request_id: RequestId(1),
+				track_namespace: Path::new("ns"),
+				track_name: "video".into(),
+				track_alias: 42,
+				largest_location: None,
+				forward: true,
+				properties: Properties::default(),
+			};
+			let baseline = encode_message(&msg, version);
+			msg.properties.priority = Some(37);
+			let encoded = encode_message(&msg, version);
+			if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+				assert_eq!(encoded, baseline, "{version}");
+			} else {
+				assert_eq!(encoded, [baseline, vec![0x0e, 37]].concat(), "{version}");
+				assert_eq!(
+					decode_message::<Publish>(&encoded, version)
+						.unwrap()
+						.properties
+						.priority,
+					Some(37)
+				);
+			}
+		}
+	}
+
 	/// GROUP_ORDER (0x22) is only a legal PUBLISH *message parameter* through draft-15; a
 	/// draft-16+ peer closes the session with PROTOCOL_VIOLATION when it sees one. The
 	/// publisher's preference belongs in the DEFAULT_PUBLISHER_GROUP_ORDER track property,
@@ -733,6 +773,7 @@ mod tests {
 			forward: true,
 			properties: Properties {
 				timescale: None,
+				priority: None,
 				group_order: Some(GroupOrder::Descending),
 			},
 		};
@@ -767,6 +808,7 @@ mod tests {
 			forward: true,
 			properties: Properties {
 				timescale: None,
+				priority: None,
 				group_order: Some(GroupOrder::Descending),
 			},
 		};

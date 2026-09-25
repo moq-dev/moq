@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.2...moq-ffi-v0.4.3) - 2026-09-25
+
+### Added
+
+- *(net)* hide dot-named broadcasts from discovery (moq-lite-07) ([#4060](https://github.com/moq-dev/moq/pull/4060))
+- *(ffi)* disable or delay the WebSocket fallback ([#3961](https://github.com/moq-dev/moq/pull/3961))
+
+### Fixed
+
+- *(net)* a broadcast exists only while announced ([#4021](https://github.com/moq-dev/moq/pull/4021))
+
+## [0.4.2](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.1...moq-ffi-v0.4.2) - 2026-09-24
+
+### Other
+
+- rename in-repo smoke test to interop ([#3963](https://github.com/moq-dev/moq/pull/3963))
+
 ## [0.4.1](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.0...moq-ffi-v0.4.1) - 2026-09-23
 
 ### Added
