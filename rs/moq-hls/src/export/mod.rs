@@ -8,6 +8,8 @@
 //! them to CMAF. A broadcast whose catalog advertises no timeline can't be served this way and
 //! is skipped. A `moq-archive` recording replayed onto a broadcast is served the same way: its
 //! playlists read only the stored timeline, and each segment GETs one stored object.
+//! An inline-parameter-set codec with no catalog `description` GETs one keyframe
+//! group on the first playlist render to build its init, then caches it.
 //!
 //! The same machinery serves two kinds of consumer:
 //!

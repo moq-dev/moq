@@ -41,7 +41,10 @@ broadcast by path:
 A [`moq-archive`](https://docs.rs/moq-archive) recording replayed through its
 `Reader` is served the same way, with no second stored copy. Playlists come
 from the replayed timeline alone, and a segment GETs exactly one stored object
-of its rendition, so switching renditions never downloads both. Set `--window`
+of its rendition, so switching renditions never downloads both. An
+inline-parameter-set codec with no catalog `description` is the exception:
+the first playlist render GETs one keyframe group to build the init segment,
+then caches it. Out-of-band configs need no media GET. Set `--window`
 to cover the recording. The playlist ends with `EXT-X-ENDLIST` only once the
 reader's caller declares the recording finished; the store holds no completion
 marker.

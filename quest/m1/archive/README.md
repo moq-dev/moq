@@ -36,7 +36,8 @@ The segment engine is in `rs/moq-mux/src/timeline.rs`:
   finish ends every window with `EXT-X-ENDLIST` (:325-327).
 - The same exporter serves a recording replayed through `moq_archive::Reader`
   with no archive-specific code (`rs/moq-hls/src/export/archive_tests.rs`):
-  playlists read only the timeline, and a segment GETs one object of its
+  playlists read only the timeline (an inline parameter set also GETs one
+  keyframe group to build its init), and a segment GETs one object of its
   rendition. The caller supplies the catalog, and `--window` must cover the
   recording.
 
