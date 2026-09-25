@@ -90,8 +90,6 @@ existing lite-06 ALPN.
 
 ## Quests
 
-- [Unauthorized reset](/quest/m1/auth/unauthorized.md) - a subscription that
-  loses access resets with a dedicated UNAUTHORIZED stream code
 - [Path patterns](/quest/m1/auth/patterns.md) - one matcher for every path
   predicate, and AUTH_OK carries pattern grants from AUTH's first release
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens

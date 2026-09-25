@@ -2,7 +2,7 @@ import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
-import { error, NotFound, reason, SessionCode, SessionError, StreamCode, StreamError } from "../error.ts";
+import { error, NotFound, reason, StreamCode, StreamError, unauthorized } from "../error.ts";
 import type * as group from "../group.ts";
 import { type Hop, type Route, routesEqual } from "../hop.ts";
 import { hiddenBelow, hooks } from "../internal.ts";
@@ -587,7 +587,7 @@ export class Publisher {
 		// Checked before resolving, so a denied request never reaches the origin.
 		const denied = () => this.#denied(msg.broadcast);
 		if (denied()) {
-			stream.writer.reset(new SessionError(SessionCode.Unauthorized, { reason: msg.broadcast }));
+			stream.writer.reset(unauthorized(msg.broadcast));
 			return;
 		}
 
@@ -624,7 +624,7 @@ export class Publisher {
 		let datagrams = Promise.resolve();
 		let controls: SubscriptionControls | undefined;
 
-		const revoked = new SessionError(SessionCode.Unauthorized, { reason: msg.broadcast });
+		const revoked = unauthorized(msg.broadcast);
 		const disposeGrant = this.#grant?.subscribe(() => {
 			if (!denied()) return;
 			console.debug(`publish revoked: broadcast=${msg.broadcast} track=${track.name}`);
@@ -721,7 +721,7 @@ export class Publisher {
 			return;
 		}
 		if (this.#denied(msg.broadcast)) {
-			stream.writer.reset(new SessionError(SessionCode.Unauthorized, { reason: msg.broadcast }));
+			stream.writer.reset(unauthorized(msg.broadcast));
 			return;
 		}
 
@@ -946,7 +946,7 @@ export class Publisher {
 	 */
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
 		if (this.#denied(msg.broadcast)) {
-			stream.writer.reset(new SessionError(SessionCode.Unauthorized, { reason: msg.broadcast }));
+			stream.writer.reset(unauthorized(msg.broadcast));
 			return;
 		}
 		try {

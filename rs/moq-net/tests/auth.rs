@@ -7,7 +7,7 @@ mod support;
 use std::time::Duration;
 
 use moq_net::{
-	Client, Error, Hop, Pattern, Patterns, Server, Session, SessionError, Version,
+	Client, Error, Hop, Pattern, Patterns, Server, Session, SessionError, StreamError, Version,
 	auth::{self, Grant},
 	origin,
 };
@@ -654,7 +654,12 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 		up_sub.recv_group().await.unwrap().unwrap();
 
 		setup.revoke(SessionError::Unauthorized, "expired");
-		assert!(down_sub.recv_group().await.is_err(), "subscription outlived its grant");
+		let err = down_sub
+			.recv_group()
+			.await
+			.err()
+			.expect("subscription outlived its grant");
+		assert!(matches!(err, Error::Unauthorized), "{err:?}");
 		// The served side ends too: the client stops serving what it may no longer publish.
 		loop {
 			match up_sub.recv_group().await {
@@ -664,6 +669,17 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 			}
 		}
 		assert_eq!(pair.client_transport.close_reason(), None);
+
+		// Neither stream claims the session closed. moq-lite resets both with UNAUTHORIZED;
+		// moq-transport has no such stream code and reports it on the request instead.
+		let resets = pair.client_transport.resets();
+		let closed = StreamError::Session(SessionError::Unauthorized).to_code();
+		assert!(!resets.contains(&closed), "{resets:x?}");
+		if version == LITE_06 {
+			let unauthorized = StreamError::Unauthorized.to_code();
+			let count = resets.iter().filter(|&&code| code == unauthorized).count();
+			assert_eq!(count, 2, "both subscriptions reset with UNAUTHORIZED: {resets:x?}");
+		}
 	})
 	.await
 	.expect("timed out");

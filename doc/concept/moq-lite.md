@@ -43,7 +43,9 @@ certificate, or nothing), so a publisher learns before anyone subscribes
 whether its broadcasts can reach the peer. More tokens can be presented later
 without reconnecting; the session's scope is the union of every open token's
 grant, and withdrawing, revoking, or narrowing one withdraws only what it alone
-covered.
+covered. A subscription or fetch that loses access resets with the
+`UNAUTHORIZED` stream code, so the peer can tell it apart from the session
+closing.
 
 A client that publishes a broadcast outside its grant closes the session with
 `UNAUTHORIZED` and names the path in the close reason, rather than waiting

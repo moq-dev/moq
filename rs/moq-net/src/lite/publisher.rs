@@ -1391,6 +1391,9 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 					| Error::Transport(_) => {
 						tracing::info!(id = self.id, broadcast = %self.absolute, track = %self.track, "subscribed cancelled")
 					}
+					Error::Unauthorized | Error::Stream(crate::StreamError::Unauthorized) => {
+						tracing::info!(id = self.id, broadcast = %self.absolute, track = %self.track, "subscribed unauthorized")
+					}
 					err => {
 						tracing::warn!(id = self.id, broadcast = %self.absolute, track = %self.track, %err, "subscribed error")
 					}

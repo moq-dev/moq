@@ -84,5 +84,3 @@ Additive.
 
 - [Origin narrowing](/quest/m1/origin-narrowing.md) - the live re-scope a shrinking token union needs, so no temporary close-on-shrink policy ships
 - [Pattern interest](/quest/m1/auth/patterns.md) - AUTH can represent the complete grants relay revalidation returns
-- [Unauthorized reset](/quest/m1/auth/unauthorized.md) - the code this
-  relay's revocations reset with

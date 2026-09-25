@@ -3,7 +3,7 @@ import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
-import { controlTimeout, error, ProtocolViolation, reason, SessionCode, SessionError } from "../error.ts";
+import { controlTimeout, error, ProtocolViolation, reason, unauthorized } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
@@ -495,9 +495,9 @@ export class Subscriber {
 	}
 
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
-		const unauthorized = new SessionError(SessionCode.Unauthorized, { reason: broadcast });
+		const refused = unauthorized(broadcast);
 		if (this.#denied(broadcast)) {
-			request.reject(unauthorized);
+			request.reject(refused);
 			return;
 		}
 
@@ -646,7 +646,7 @@ export class Subscriber {
 			// straight out of its loop for the same reason.
 			if (terminal === revokedEnded) {
 				console.info(`subscription no longer authorized: broadcast=${broadcast} track=${request.name}`);
-				producer.close(unauthorized);
+				producer.close(refused);
 			} else {
 				producer.close();
 			}
