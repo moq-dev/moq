@@ -1187,7 +1187,7 @@ async def test_announced_pattern_captures():
 
     announced.cancel()
     dynamic.cancel()
-    audio.finish()
+    audio.close()
     chat.close()
 
 
