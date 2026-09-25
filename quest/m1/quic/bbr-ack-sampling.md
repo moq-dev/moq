@@ -23,13 +23,14 @@ samples are consumed once, with the correct labels and post-ACK inflight.
 Cover batched ACKs, reordered ACKs, invalid/too-short intervals, loss-only
 events, and idle restart. Preserve the transport's RTT and loss event
 ordering while fixing the source of stale state. Reuse the existing
-controller simulations and add regressions to the fork's CI. Coordinate
-with packet identity work if the callback contract changes; settle the API
-with the maintainer and update its consumers and docs in the same PR.
+controller simulations and add regressions to the fork's CI. Build on
+[moq-dev/noq#3](https://github.com/moq-dev/noq/pull/3), which added the
+space-aware `PacketId` callbacks as defaulted trait methods. Settle any
+further callback change with the maintainer and update its consumers and
+docs in the same PR.
 
 ## Related
 
 - [Release BBR fixes](/quest/m1/quic/bbr-release.md) - deliver the corrected controller to MoQ
 - [Upstream the fork](/quest/m1/quic/upstream.md) - offer general fixes upstream
 - [BBR3 app-limited](/quest/m2/quic-bbr-app-limited.md) - measure the corrected controller on media traffic
-- [Packet identity](/quest/m1/quic/bbr-packet-identity.md) - shares the controller boundary
