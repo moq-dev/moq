@@ -2666,10 +2666,13 @@ async fn discontinuity_flags_the_break_once_across_tracks() {
 		.unwrap();
 	video.cut(None).unwrap();
 	// Audio stays quiet through the marker, so video waits for it and then goes
-	// out around it once the wait lapses.
+	// out around it once the wait lapses. The rewind restarts that wait for the new
+	// generation, so it lapses twice.
 	let mut marked = drain_frames(&mut export).await;
-	tokio::time::sleep(RECORDING_MAX_AGE).await;
-	marked.extend(drain_frames(&mut export).await);
+	for _ in 0..2 {
+		tokio::time::sleep(RECORDING_MAX_AGE).await;
+		marked.extend(drain_frames(&mut export).await);
+	}
 	assert_eq!(export.discontinuity(), 1, "local marker counts are not program epochs");
 	let epoch = export.discontinuity();
 
@@ -3536,7 +3539,7 @@ impl Interleave {
 			.video
 			.renditions
 			.insert(track.name().to_string(), cfg);
-		let video = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+		let video = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Video));
 
 		let track = broadcast
 			.create_track(
@@ -3552,7 +3555,7 @@ impl Interleave {
 			.audio
 			.renditions
 			.insert(track.name().to_string(), cfg);
-		let audio = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+		let audio = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Audio));
 
 		Self {
 			source: crate::source::announced(&consumer),
@@ -3742,6 +3745,52 @@ async fn quiet_track_is_emitted_around_then_rejoins() {
 	let pts = pts.split_off(resumed);
 	assert!(pts.len() > 100, "too little output to judge: {}", pts.len());
 	assert!(pts.is_sorted(), "the interleave did not resume: {pts:?}");
+}
+
+/// A rewind taken while going around a quiet track gives the new generation a
+/// fresh hold rather than the one that already expired.
+#[tokio::test(start_paused = true)]
+async fn rewind_restarts_the_stall() {
+	let max_age = Duration::from_millis(500);
+	let mut rig = Interleave::new();
+	let mut export = rig.export(max_age).await;
+	let mut out = Vec::new();
+
+	rig.video(0);
+	rig.audio_until(1, &mut export, &mut out);
+	for tick in 1..=5 {
+		rig.video(tick);
+	}
+	assert!(poll_frames(&mut export).is_empty(), "video waits for the quiet audio");
+	tokio::time::advance(max_age).await;
+	out.extend(poll_frames(&mut export));
+	assert!(!out.is_empty(), "video went out around the quiet audio");
+
+	rig.video.discontinuity().unwrap();
+	for tick in 0..=5 {
+		rig.video(GOP + tick);
+	}
+	// Well inside `max_age`: the new generation must still be waiting on the audio.
+	while let Ok(frame) = tokio::time::timeout(max_age / 5, export.next()).await {
+		out.extend(frame.expect("exporter error"));
+	}
+	let after = |out: &[Frame]| {
+		pes_pts_in_order(out)
+			.into_iter()
+			.filter(|&pts| pts > GOP * VIDEO_US * 90 / 1_000)
+			.count()
+	};
+	assert_eq!(
+		after(&out),
+		0,
+		"the new generation went around the audio without waiting"
+	);
+
+	// Once its own wait lapses, it goes around the audio too.
+	tokio::time::advance(max_age).await;
+	out.extend(poll_frames(&mut export));
+	assert!(after(&out) > 0, "the new generation never went out");
+	assert_eq!(export.discontinuity(), 1);
 }
 
 /// A section lost before the cycle wraps commits an observed subset; the next

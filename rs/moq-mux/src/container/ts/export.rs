@@ -1086,6 +1086,8 @@ impl<E: catalog::Catalog> Export<E> {
 		self.keyframes.clear();
 		self.queue.clear();
 		self.watermark = None;
+		// The new generation waits for every track again, with a fresh budget.
+		self.stall = None;
 		self.clock = None;
 		self.low = None;
 		self.last_pcr = None;
