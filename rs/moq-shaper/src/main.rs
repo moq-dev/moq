@@ -43,6 +43,9 @@ struct Args {
 	/// The longest a datagram waits for the rate limit before it is dropped.
 	#[arg(long, default_value = "100ms", value_parser = humantime::parse_duration, requires = "rate")]
 	queue: Duration,
+	/// Every client shares one link each way, instead of each getting its own.
+	#[arg(long)]
+	shared: bool,
 	/// Also pipe TCP on the listening port to the target, untouched.
 	#[arg(long)]
 	tcp_passthrough: bool,
@@ -86,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
 	};
 	let shaper = moq_shaper::Shaper::bind(moq_shaper::Setup {
 		tcp_passthrough: args.tcp_passthrough,
+		shared: args.shared,
 		up: options.clone(),
 		down: options.clone(),
 		..config.into()
@@ -100,8 +104,8 @@ async fn main() -> anyhow::Result<()> {
 		config.seed,
 		config.up
 	);
-	if options != moq_shaper::Options::default() {
-		println!("shaper: options {options:?}");
+	if options != moq_shaper::Options::default() || args.shared {
+		println!("shaper: options {options:?}, shared {}", args.shared);
 	}
 
 	shutdown().await?;

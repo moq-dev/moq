@@ -20,7 +20,7 @@ use std::{
 	fmt,
 	net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 	sync::{
-		Arc, OnceLock,
+		Arc, Mutex, OnceLock,
 		atomic::{AtomicU64, Ordering},
 	},
 	time::Duration,
@@ -198,6 +198,13 @@ pub struct Setup {
 	/// never impaired: a reliable transport cannot shed load, so shaping it
 	/// would measure how TCP retransmits.
 	pub tcp_passthrough: bool,
+	/// Every client shares one link each way, the way clients behind one access
+	/// link do, rather than each getting its own.
+	///
+	/// Shared, a jitter that keeps the order keeps it across clients, and one
+	/// seeded stream and one rate limit serve them all, so a client's treatment
+	/// depends on how its datagrams interleave with the others'.
+	pub shared: bool,
 	/// The options from a client toward the target.
 	pub up: Options,
 	/// The options from the target back toward a client.
@@ -209,6 +216,7 @@ impl From<Config> for Setup {
 		Self {
 			config,
 			tcp_passthrough: false,
+			shared: false,
 			up: Options::default(),
 			down: Options::default(),
 		}
@@ -390,7 +398,8 @@ fn bump(counter: &AtomicU64) {
 /// Accept datagrams from clients, giving each client its own flow.
 ///
 /// A flow is a socket of its own toward the target, so the target sees one
-/// address per client just as it would without the shaper in the way.
+/// address per client just as it would without the shaper in the way. Each
+/// flow takes a link of its own each way, unless the path is shared.
 async fn run(
 	listen: Arc<UdpSocket>,
 	tcp: Option<TcpListener>,
@@ -398,9 +407,18 @@ async fn run(
 	tally: Arc<[Tally; 2]>,
 ) -> anyhow::Result<()> {
 	let config = &setup.config;
-	let mut flows = HashMap::<SocketAddr, Link>::new();
+	let mut flows = HashMap::<SocketAddr, Flow>::new();
 	let mut tasks = JoinSet::new();
 	let mut buf = vec![0u8; u16::MAX as usize];
+
+	// A shared path is one link each way, drawing the streams the first flow would.
+	let shared = setup.shared.then(|| {
+		let now = Instant::now();
+		[
+			link(&mut tasks, &config.up, &setup.up, config.seed, 0, now),
+			link(&mut tasks, &config.down, &setup.down, config.seed, 1, now),
+		]
+	});
 
 	loop {
 		let (size, from) = tokio::select! {
@@ -418,25 +436,54 @@ async fn run(
 		let now = Instant::now();
 
 		let stream = 2 * flows.len() as u64;
-		let link = match flows.entry(from) {
+		let flow = match flows.entry(from) {
 			hash_map::Entry::Occupied(entry) => entry.into_mut(),
 			hash_map::Entry::Vacant(entry) => {
 				let upstream = Arc::new(bind_toward(config.target).await?);
 
-				let (up_tx, up_rx) = mpsc::unbounded_channel();
-				tasks.spawn(deliver(up_rx, upstream.clone(), config.target));
+				let [up, down] = match &shared {
+					Some(links) => links.clone(),
+					None => [
+						link(&mut tasks, &config.up, &setup.up, config.seed, stream, now),
+						link(&mut tasks, &config.down, &setup.down, config.seed, stream + 1, now),
+					],
+				};
+				tasks.spawn(reply(
+					upstream.clone(),
+					config.target,
+					down,
+					listen.clone(),
+					from,
+					tally.clone(),
+				));
 
-				let (down_tx, down_rx) = mpsc::unbounded_channel();
-				tasks.spawn(deliver(down_rx, listen.clone(), from));
-
-				let down = Link::new(&config.down, &setup.down, config.seed, stream + 1, now, down_tx);
-				tasks.spawn(reply(upstream, config.target, down, tally.clone()));
-
-				entry.insert(Link::new(&config.up, &setup.up, config.seed, stream, now, up_tx))
+				entry.insert(Flow { upstream, up })
 			}
 		};
-		link.push(now, buf[..size].to_vec(), &tally[UP]);
+		let datagram = buf[..size].to_vec();
+		let mut up = flow.up.lock().expect("link poisoned");
+		up.push(now, datagram, &flow.upstream, config.target, &tally[UP]);
 	}
+}
+
+/// One client: its socket toward the target, and the link it sends through.
+struct Flow {
+	upstream: Arc<UdpSocket>,
+	up: Arc<Mutex<Link>>,
+}
+
+/// A link, and the task delivering what it treats.
+fn link(
+	tasks: &mut JoinSet<anyhow::Result<()>>,
+	profile: &Profile,
+	options: &Options,
+	seed: u64,
+	stream: u64,
+	now: Instant,
+) -> Arc<Mutex<Link>> {
+	let (queue, queued) = mpsc::unbounded_channel();
+	tasks.spawn(deliver(queued));
+	Arc::new(Mutex::new(Link::new(profile, options, seed, stream, now, queue)))
 }
 
 /// The next TCP connection, or never without a passthrough.
@@ -470,11 +517,13 @@ async fn bind_toward(target: SocketAddr) -> anyhow::Result<UdpSocket> {
 		.with_context(|| format!("bind a socket toward {target}"))
 }
 
-/// Feed what the target sends a flow into that flow's return link.
+/// Feed what the target sends a flow into the link back toward its client.
 async fn reply(
 	socket: Arc<UdpSocket>,
 	target: SocketAddr,
-	mut link: Link,
+	link: Arc<Mutex<Link>>,
+	listen: Arc<UdpSocket>,
+	client: SocketAddr,
 	tally: Arc<[Tally; 2]>,
 ) -> anyhow::Result<()> {
 	let mut buf = vec![0u8; u16::MAX as usize];
@@ -484,19 +533,17 @@ async fn reply(
 		if from != target {
 			continue;
 		}
-		link.push(Instant::now(), buf[..size].to_vec(), &tally[DOWN]);
+		let datagram = buf[..size].to_vec();
+		let mut down = link.lock().expect("link poisoned");
+		down.push(Instant::now(), datagram, &listen, client, &tally[DOWN]);
 	}
 }
 
 /// Send each treated datagram at its departure time.
-async fn deliver(
-	mut queue: mpsc::UnboundedReceiver<(Instant, Vec<u8>)>,
-	socket: Arc<UdpSocket>,
-	dest: SocketAddr,
-) -> anyhow::Result<()> {
+async fn deliver(mut queue: mpsc::UnboundedReceiver<Parcel>) -> anyhow::Result<()> {
 	// Ordered by departure, then by arrival, so ties keep their order.
 	let mut pending = BinaryHeap::<Reverse<(Instant, u64)>>::new();
-	let mut datagrams = HashMap::<u64, Vec<u8>>::new();
+	let mut parcels = HashMap::<u64, Parcel>::new();
 	let mut sequence = 0u64;
 
 	loop {
@@ -504,9 +551,9 @@ async fn deliver(
 		tokio::select! {
 			item = queue.recv() => {
 				// The link is gone, so the flow is too.
-				let Some((at, datagram)) = item else { return Ok(()) };
-				pending.push(Reverse((at, sequence)));
-				datagrams.insert(sequence, datagram);
+				let Some(parcel) = item else { return Ok(()) };
+				pending.push(Reverse((parcel.at, sequence)));
+				parcels.insert(sequence, parcel);
 				sequence += 1;
 			}
 			_ = tokio::time::sleep_until(next.unwrap_or_else(Instant::now)), if next.is_some() => {
@@ -516,18 +563,27 @@ async fn deliver(
 						break;
 					}
 					pending.pop();
-					let datagram = datagrams.remove(&id).expect("queued datagram");
+					let parcel = parcels.remove(&id).expect("queued datagram");
 					// A send error is the path losing the datagram, the way a
 					// network does when the far end is gone (a killed relay, say),
 					// so it is not the shaper failing.
-					let _ = socket.send_to(&datagram, dest).await;
+					let _ = parcel.socket.send_to(&parcel.datagram, parcel.dest).await;
 				}
 			}
 		}
 	}
 }
 
-/// One direction of one flow: the decisions and the state they depend on.
+/// A treated datagram: when it leaves, and the socket and address it leaves by.
+struct Parcel {
+	at: Instant,
+	datagram: Vec<u8>,
+	socket: Arc<UdpSocket>,
+	dest: SocketAddr,
+}
+
+/// One direction of one flow, or of every flow on a shared path: the decisions
+/// and the state they depend on.
 struct Link {
 	profile: Profile,
 	jitter: Jitter,
@@ -536,21 +592,21 @@ struct Link {
 	full_at: Instant,
 	/// When the latest in-order datagram leaves, which the next one never beats.
 	floor: Instant,
-	queue: mpsc::UnboundedSender<(Instant, Vec<u8>)>,
+	queue: mpsc::UnboundedSender<Parcel>,
 }
 
 impl Link {
-	/// Each direction of each flow draws from its own stream of the one seed,
-	/// so a flow's decisions do not depend on how its datagrams interleave with
-	/// anyone else's. Flows are numbered in the order they first send, since a
-	/// client's ephemeral port is no identity across runs.
+	/// Each link draws from its own stream of the one seed, so a flow's
+	/// decisions do not depend on how its datagrams interleave with anyone
+	/// else's, unless the path is shared. Flows are numbered in the order they
+	/// first send, since a client's ephemeral port is no identity across runs.
 	fn new(
 		profile: &Profile,
 		options: &Options,
 		seed: u64,
 		stream: u64,
 		now: Instant,
-		queue: mpsc::UnboundedSender<(Instant, Vec<u8>)>,
+		queue: mpsc::UnboundedSender<Parcel>,
 	) -> Self {
 		Self {
 			profile: profile.clone(),
@@ -564,7 +620,23 @@ impl Link {
 		}
 	}
 
-	fn push(&mut self, now: Instant, datagram: Vec<u8>, tally: &Tally) {
+	/// Treat a datagram and queue it to leave by `socket` for `dest`.
+	fn push(&mut self, now: Instant, datagram: Vec<u8>, socket: &Arc<UdpSocket>, dest: SocketAddr, tally: &Tally) {
+		let Some(at) = self.treat(now, datagram.len(), tally) else {
+			return;
+		};
+		// The delivery task only ends once this link is dropped.
+		let _ = self.queue.send(Parcel {
+			at,
+			datagram,
+			socket: socket.clone(),
+			dest,
+		});
+	}
+
+	/// When a datagram of `size` bytes arriving `now` leaves, or `None` when it
+	/// is dropped.
+	fn treat(&mut self, now: Instant, size: usize, tally: &Tally) -> Option<Instant> {
 		bump(&tally.packets);
 
 		// Every draw happens for every datagram, whatever the profile, so one
@@ -578,20 +650,20 @@ impl Link {
 
 		if lose {
 			bump(&tally.lost);
-			return;
+			return None;
 		}
 
 		let mut depart = now;
 		if let Some(rate) = &self.profile.rate {
 			// GCRA: a datagram may leave once the backlog, itself included, is
 			// within the burst allowance.
-			let full_at = self.full_at.max(now) + rate.cost(datagram.len() as u64);
+			let full_at = self.full_at.max(now) + rate.cost(size as u64);
 			let start = full_at
 				.checked_sub(rate.cost(rate.burst))
 				.map_or(now, |start| start.max(now));
 			if start - now > rate.queue {
 				bump(&tally.overflowed);
-				return;
+				return None;
 			}
 			if start > now {
 				bump(&tally.throttled);
@@ -619,8 +691,7 @@ impl Link {
 			bump(&tally.delayed);
 		}
 
-		// The delivery task only ends once this link is dropped.
-		let _ = self.queue.send((depart, datagram));
+		Some(depart)
 	}
 }
 
@@ -947,18 +1018,13 @@ mod tests {
 		count: u32,
 		spacing: Duration,
 	) -> (Vec<(u32, Instant)>, Counters) {
-		let (queue, mut queued) = mpsc::unbounded_channel();
+		let (queue, _) = mpsc::unbounded_channel();
 		let now = Instant::now();
 		let mut link = Link::new(profile, options, 7, 0, now, queue);
 		let tally = Tally::default();
-		for id in 0..count {
-			link.push(now + spacing * id, id.to_be_bytes().to_vec(), &tally);
-		}
-
-		let mut sent = Vec::new();
-		while let Ok((at, datagram)) = queued.try_recv() {
-			sent.push((u32::from_be_bytes(datagram[..4].try_into().unwrap()), at));
-		}
+		let mut sent: Vec<(u32, Instant)> = (0..count)
+			.filter_map(|id| Some((id, link.treat(now + spacing * id, 4, &tally)?)))
+			.collect();
 		// Ties leave in arrival order, which is id order here.
 		sent.sort_by_key(|&(id, at)| (at, id));
 		(sent, tally.snapshot())
@@ -1101,5 +1167,64 @@ mod tests {
 		.await;
 		assert_eq!(round_trip(&client, 20).await, (0..20).collect::<Vec<_>>());
 		shaper.verify().unwrap();
+	}
+
+	/// Two clients take turns sending numbered datagrams up one gaussian path,
+	/// and the target's arrival order comes back.
+	async fn two_clients(shared: bool) -> Vec<u32> {
+		let target = UdpSocket::bind(LOCALHOST).await.unwrap();
+		let config = Config {
+			bind: LOCALHOST,
+			target: target.local_addr().unwrap(),
+			seed: 5,
+			up: Profile {
+				delay: Duration::from_millis(20),
+				jitter: Duration::from_millis(10),
+				..Default::default()
+			},
+			down: Profile::default(),
+		};
+		let shaper = Shaper::bind(Setup {
+			shared,
+			up: GAUSSIAN,
+			..config.into()
+		})
+		.await
+		.unwrap();
+
+		let clients = [
+			UdpSocket::bind(LOCALHOST).await.unwrap(),
+			UdpSocket::bind(LOCALHOST).await.unwrap(),
+		];
+		for id in 0..200u32 {
+			let client = &clients[id as usize % 2];
+			client.send_to(&id.to_be_bytes(), shaper.addr()).await.unwrap();
+		}
+
+		let mut got = Vec::new();
+		let mut buf = [0u8; 4];
+		while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(200), target.recv_from(&mut buf)).await {
+			got.push(u32::from_be_bytes(buf));
+		}
+		got
+	}
+
+	#[tokio::test]
+	async fn a_shared_path_keeps_the_order_across_clients() {
+		// Separate links keep each client's order, but not the order between them.
+		let apart = two_clients(false).await;
+		let mut sorted = apart.clone();
+		sorted.sort();
+		assert_eq!(sorted, (0..200).collect::<Vec<_>>(), "a client lost datagrams");
+		assert_ne!(
+			apart, sorted,
+			"separate links kept the order anyway, so this proves nothing"
+		);
+		for parity in 0..2 {
+			assert!(apart.iter().filter(|&&id| id % 2 == parity).is_sorted());
+		}
+
+		let together = two_clients(true).await;
+		assert_eq!(together, (0..200).collect::<Vec<_>>(), "a shared path reordered");
 	}
 }
