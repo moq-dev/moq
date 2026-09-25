@@ -70,6 +70,37 @@ Cache activity is dated lazily: reads and writes mark a group active without
 reading a clock, and the next `gc` pass stamps it with the supplied instant.
 Expiry is therefore approximate; a late `gc` extends retention.
 
+## Authorization
+
+`session.auth()` is the session's `auth::Handle`. On moq-lite 06, and on
+moq-transport draft-17+ when both sides negotiate the
+[MoQ Auth extension](/draft/moq-auth), each side presents its connection's
+credential right after setup, and `grant()` watches the union of every grant
+this side holds: `None` until the peer answers, forever otherwise. `add(token)` presents another token and resolves
+once the peer answers; drop the returned `auth::Token` to withdraw it.
+
+```rust
+let mut grant = session.auth().grant();
+while grant.peek().is_none() {
+    grant.changed().await?;
+}
+let refreshed = session.auth().add(jwt).await?;
+```
+
+By default a session answers the peer's connection credential with what its own
+origin handles allow and refuses any other token as unsupported. To verify
+tokens yourself, take `handshake.auth().requests()` on the `server::Handshake`
+before `ok()` (or `session.auth().requests()` before first polling the driver)
+and answer every `auth::Request` with `accept(grant)`, which returns an
+`auth::Issued` you can `update` or `revoke`, or `reject`. Both wires carry
+prefix grants for now, so a grant that is not a union of subtrees is refused
+and the presenter sees `Unsupported`; after a grant, such an update revokes it.
+
+A client whose origin publishes a broadcast outside its grant closes the
+session with `Unauthorized`, naming the path in the close reason. A grant that
+shrinks withdraws the announcements and cancels the subscriptions it no longer
+covers, and leaves the session up.
+
 ## Patterns
 
 `Pattern` describes a set of paths; `Patterns` is a union reduced by

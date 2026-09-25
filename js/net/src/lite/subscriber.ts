@@ -1,9 +1,20 @@
-import { race, Signal } from "@moq/signals";
+import { type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
+import type { Grant } from "../auth.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
-import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
+import {
+	closeReason,
+	controlTimeout,
+	error,
+	ProtocolViolation,
+	reason,
+	SessionCode,
+	SessionError,
+	StreamCode,
+	StreamError,
+} from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
@@ -91,20 +102,6 @@ interface SubscribeEntry {
 // two report the same thing, where the default 0 would tell the peer it closed cleanly.
 const PROTOCOL_VIOLATION_CODE = 15;
 
-// WebTransport rejects a close reason over 1024 bytes of UTF-8 by throwing, so a reason
-// built from peer-supplied data has to be bounded before it gets there. A broadcast path
-// is peer-supplied and long enough to reach this on its own.
-const MAX_CLOSE_REASON = 1024;
-
-// The longest prefix of `text` that fits a close reason. `encodeInto` stops on a whole
-// code point, so `read` never lands mid-character the way slicing bytes would.
-function closeReason(text: string): string {
-	const encoder = new TextEncoder();
-	const buf = new Uint8Array(MAX_CLOSE_REASON);
-	const { read } = encoder.encodeInto(text, buf);
-	return text.slice(0, read);
-}
-
 export class Subscriber {
 	#quic: WebTransport;
 
@@ -137,6 +134,11 @@ export class Subscriber {
 
 	// Distinguishes failures from streams torn down by Subscriber.close().
 	#closed = new AbortController();
+
+	// Our grant: a subscription it stops covering is cancelled. Undefined until the peer
+	// answers, and forever on a version without AUTH, which allows everything.
+	#grant?: Getter<Grant | undefined>;
+
 	/**
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
@@ -144,6 +146,7 @@ export class Subscriber {
 	 * @param origin - Hop id shared with the Publisher
 	 * @param probe - Optional sink for the peer's PROBE estimates
 	 * @param peerSetup - Optional peer SETUP slot for capability gating (lite-05+)
+	 * @param grant - The union of our tokens' grants, which bounds what we subscribe to
 	 *
 	 * @internal
 	 */
@@ -153,12 +156,20 @@ export class Subscriber {
 		hop: Hop,
 		probe?: Signal<ProbeStats>,
 		peerSetup?: Signal<Setup | undefined>,
+		grant?: Getter<Grant | undefined>,
 	) {
 		this.#quic = quic;
 		this.version = version;
 		this.hop = hop;
 		this.#probe = probe;
 		this.#peerSetup = peerSetup;
+		this.#grant = grant;
+	}
+
+	// Whether our grant no longer lets us subscribe to `broadcast`.
+	#denied(broadcast: Path.Valid): boolean {
+		const grant = this.#grant?.peek();
+		return grant !== undefined && !grant.subscribe.matches(broadcast);
 	}
 
 	/**
@@ -516,6 +527,11 @@ export class Subscriber {
 			request.reject(new Error(EMPTY_RANGE));
 			return;
 		}
+		const unauthorized = new SessionError(SessionCode.Unauthorized, { reason: broadcast });
+		if (this.#denied(broadcast)) {
+			request.reject(unauthorized);
+			return;
+		}
 
 		// `timescale` stays undefined until TRACK_INFO (or, on older drafts,
 		// implicit defaults) resolves it; runGroup blocks on it before decoding.
@@ -566,6 +582,13 @@ export class Subscriber {
 
 		const { stream, entry } = opened;
 		const producer = entry.track;
+		// Losing the grant ends the subscription, leaving the session alone.
+		const disposeGrant = this.#grant?.subscribe(() => {
+			if (!this.#denied(broadcast)) return;
+			console.debug(`subscribe revoked: id=${id} broadcast=${broadcast} track=${request.name}`);
+			producer.close(unauthorized);
+			stream.abort(unauthorized);
+		});
 		try {
 			// Watch for subscription changes and send SUBSCRIBE_UPDATE. Lite01/Lite02
 			// don't carry SUBSCRIBE_UPDATE on the wire, so skip the watcher there
@@ -610,6 +633,7 @@ export class Subscriber {
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
 			stream.abort(e);
 		} finally {
+			disposeGrant?.();
 			this.#subscribes.delete(id);
 		}
 	}

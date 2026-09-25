@@ -1,15 +1,18 @@
 import { type Getter, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
+import type * as Auth from "../auth.ts";
+import { AuthSession } from "../auth_session.ts";
 import type { Established } from "../connection/established.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { error, fromClose, StreamCode, StreamError } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
-import type * as Path from "../path.ts";
+import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import { registerWire } from "../wire.ts";
 import { AnnounceRequest } from "./announce.ts";
+import { LiteAuthWire } from "./auth.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
@@ -20,7 +23,7 @@ import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Track as TrackMessage } from "./track.ts";
-import { hasDatagrams, hasProbeRtt, hasSetupStream, type Version, versionName } from "./version.ts";
+import { hasAuth, hasDatagrams, hasProbeRtt, hasSetupStream, type Version, versionName } from "./version.ts";
 
 /**
  * Constructor options for {@link Connection}.
@@ -40,6 +43,12 @@ export interface ConnectionProps {
 	discovery?: boolean;
 	/** The origin whose broadcasts are served to the peer. Omit to publish nothing. */
 	publish?: OriginConsumer;
+	/**
+	 * Whether this side dialed. Only the dialing side aborts on a publication its grant does
+	 * not cover: a server publishes whatever the peer may read, not what it intends to push.
+	 * Defaults to true.
+	 */
+	client?: boolean;
 }
 
 /**
@@ -78,6 +87,9 @@ export class Connection implements Established {
 	/** The peer's PROBE estimates; see {@link Established.probe}. */
 	readonly probe: Getter<Probe>;
 
+	// Our tokens and grants, and the answers to the peer's; see {@link Established.auth}.
+	#auth: AuthSession;
+
 	/** Random per-connection Hop ID. Shared by Publisher (for outbound hop
 	 * chains) and Subscriber (available for optional self-filtering on announces). */
 	readonly hop: Hop;
@@ -93,6 +105,9 @@ export class Connection implements Established {
 
 	// Written by the Subscriber as PROBE messages arrive.
 	#probe = new Signal<Probe>({});
+
+	// Whether we dialed; see {@link ConnectionProps.client}.
+	#client: boolean;
 
 	/**
 	 * The {@link Role} the peer advertised in its SETUP, for a server deciding whether the
@@ -112,7 +127,7 @@ export class Connection implements Established {
 	 *
 	 * @internal
 	 */
-	constructor({ url, quic, version, session, discovery = true, publish }: ConnectionProps) {
+	constructor({ url, quic, version, session, discovery = true, publish, client = true }: ConnectionProps) {
 		this.url = url;
 		this.#quic = quic;
 		this.#session = session;
@@ -124,8 +139,25 @@ export class Connection implements Established {
 		this.probe = this.#probe;
 
 		this.hop = randomHop();
-		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish);
-		this.#subscriber = new Subscriber(this.#quic, this.#version, this.hop, this.#probe, this.#peerSetup);
+		// What the peer's connection credential earns by default: publishing anything to us,
+		// since we consume on demand, and subscribing to whatever we publish.
+		this.#auth = new AuthSession({
+			wire: hasAuth(version) ? new LiteAuthWire(quic, version) : undefined,
+			peerGrant: {
+				publish: new Path.Patterns([Path.Pattern.all()]),
+				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
+			},
+		});
+		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish, this.#auth.grant);
+		this.#subscriber = new Subscriber(
+			this.#quic,
+			this.#version,
+			this.hop,
+			this.#probe,
+			this.#peerSetup,
+			this.#auth.grant,
+		);
+		this.#client = client;
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path) });
 
 		void this.#run();
@@ -134,7 +166,13 @@ export class Connection implements Established {
 	/**
 	 * Closes the connection.
 	 */
+	/** Our tokens and grants; see {@link Established.auth}. */
+	get auth(): Auth.Auth {
+		return this.#auth;
+	}
+
 	close() {
+		this.#auth.close();
 		this.#publisher.close();
 		this.#subscriber.close();
 
@@ -154,6 +192,12 @@ export class Connection implements Established {
 		}
 
 		tasks.push(this.#subscriber.runProbe());
+
+		// Fail loud on a publication our grant never covers, once the peer has answered the
+		// credential we presented at setup.
+		if (this.#client && hasAuth(this.#version)) {
+			tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered()));
+		}
 
 		// Route incoming QUIC datagrams into their subscriptions (lite-05+; runDatagrams
 		// no-ops on a transport that doesn't carry them).
@@ -244,6 +288,8 @@ export class Connection implements Established {
 			await this.#publisher.runTrackInfo(msg, stream);
 		} else if (typ === StreamId.Probe) {
 			await this.#publisher.runProbe(stream);
+		} else if (typ === StreamId.Auth) {
+			await this.#auth.serve(stream);
 		} else if (typ === StreamId.Goaway) {
 			const msg = await Goaway.decode(stream.reader, this.#version);
 			console.info("received goaway:", msg.uri);

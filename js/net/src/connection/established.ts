@@ -1,5 +1,6 @@
 import type { Getter } from "@moq/signals";
 import type * as announce from "../announced.ts";
+import type * as Auth from "../auth.ts";
 import type * as Path from "../path.ts";
 import type { Probe, Stats } from "./stats.ts";
 import type { Transport } from "./transport.ts";
@@ -25,6 +26,14 @@ export interface Established {
 	 * versions without PROBE. See {@link Stats} for what the local transport counts.
 	 */
 	readonly probe: Getter<Probe>;
+
+	/**
+	 * The tokens this side presented and the grant they earned, plus the tokens the peer
+	 * presents. On moq-lite-06, and on moq-transport draft-17+ when both sides negotiate
+	 * MoQ Auth, each side presents its connection's credential right after setup.
+	 * Otherwise the grant stays undefined.
+	 */
+	readonly auth: Auth.Auth;
 
 	/**
 	 * Whether the relay supports broadcast discovery: announcing which broadcasts exist under a

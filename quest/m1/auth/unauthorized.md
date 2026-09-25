@@ -19,7 +19,3 @@ tests. Map it to the existing `Unauthorized` protocol kind in
 `stream_kind` in `rs/moq-ffi/src/error.rs` and `rs/libmoq/src/error.rs`,
 whose wildcard arms would otherwise report `Unknown`, with a test for each.
 Update `drafts/draft-lcurley-moq-lite.md` and run `just drafts check`.
-
-## Required
-
-- [Lite stream](/quest/m1/auth/lite.md) - the revocation paths that send it

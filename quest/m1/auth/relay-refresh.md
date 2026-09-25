@@ -13,8 +13,10 @@ expiry, an expiry that leaves the union intact ends only that token, and
 ## Plan
 
 - `Connection::run` in `rs/moq-relay/src/connection.rs` takes `requests()`
-  from the `moq_net::Request` builder before `.ok()`, so the relay owns the
-  initial empty AUTH too and the driver's fallback never races it. An empty
+  from `moq_net::server::Handshake::auth()` before `.ok()`, so the relay owns
+  the initial empty AUTH too and the driver's fallback never races it.
+  `moq_tokio::server::Request::ok` spawns the driver itself, so it needs the
+  same `auth()` passthrough first. An empty
   token is answered from the origin handles as the default does, plus
   the admitted grant's `expires`. A non-empty token is presented through
   `Client::attach(&connection_lease, request)`, a method this quest adds:
@@ -82,7 +84,5 @@ Additive.
 
 - [Origin narrowing](/quest/m1/origin-narrowing.md) - the live re-scope a shrinking token union needs, so no temporary close-on-shrink policy ships
 - [Pattern interest](/quest/m1/path-patterns.md) - AUTH can represent the complete grants relay revalidation returns
-- [Lite stream](/quest/m1/auth/lite.md) - supplies the AUTH stream and
-  `auth::Request` this consumes
 - [Unauthorized reset](/quest/m1/auth/unauthorized.md) - the code this
   relay's revocations reset with

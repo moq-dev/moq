@@ -25,6 +25,9 @@ use web_transport_trait::poll;
 pub struct MockError {
 	code: Option<u32>,
 	reason: String,
+	/// A stream reset rather than a session close: reported through the stream
+	/// registry alone, the way a real transport keeps the two apart.
+	stream: bool,
 }
 
 impl MockError {
@@ -32,6 +35,7 @@ impl MockError {
 		Self {
 			code: Some(0),
 			reason: "session closed".into(),
+			stream: false,
 		}
 	}
 
@@ -39,6 +43,7 @@ impl MockError {
 		Self {
 			code: Some(code),
 			reason: "stream reset".into(),
+			stream: true,
 		}
 	}
 }
@@ -53,7 +58,10 @@ impl std::error::Error for MockError {}
 
 impl web_transport_trait::Error for MockError {
 	fn session_error(&self) -> Option<(u32, String)> {
-		self.code.map(|c| (c, self.reason.clone()))
+		match self.stream {
+			true => None,
+			false => self.code.map(|c| (c, self.reason.clone())),
+		}
 	}
 
 	fn stream_error(&self) -> Option<u32> {
@@ -430,6 +438,7 @@ impl poll::Session for MockSession {
 			Some((code, reason)) => Poll::Ready(MockError {
 				code: Some(code),
 				reason,
+				stream: false,
 			}),
 			None => Poll::Pending,
 		}
@@ -441,6 +450,13 @@ impl poll::Session for MockSession {
 }
 
 impl MockSession {
+	/// The code and reason the connection was closed with, once either side closed it.
+	// Only some test binaries inspect the reason.
+	#[allow(dead_code)]
+	pub fn close_reason(&self) -> Option<(u32, String)> {
+		self.side.conn.close_state.lock().unwrap().clone()
+	}
+
 	fn close_error(&self) -> MockError {
 		self.side
 			.conn
@@ -451,6 +467,7 @@ impl MockSession {
 			.map(|(code, reason)| MockError {
 				code: Some(*code),
 				reason: reason.clone(),
+				stream: false,
 			})
 			.unwrap_or_else(MockError::closed)
 	}

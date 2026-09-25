@@ -181,6 +181,7 @@ impl Client {
 
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
+			client: true,
 			session: session.clone(),
 			setup_stream: None,
 			publish,
@@ -189,6 +190,7 @@ impl Client {
 			version,
 			our_setup,
 			peer_setup: None,
+			auth: crate::auth::Handle::new(version.has_auth()),
 		})?;
 
 		Ok(Session::new(
@@ -198,6 +200,7 @@ impl Client {
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			start.goaway,
+			start.auth,
 		))
 	}
 
@@ -254,6 +257,8 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
+				// The peer's SETUP decides whether AUTH is negotiated.
+				let auth = crate::auth::Handle::new(true);
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					session: session.clone(),
@@ -268,6 +273,7 @@ impl Client {
 					path: self.setup_path.clone(),
 					peer_setup_stream: None,
 					peer_declared: None,
+					auth: auth.clone(),
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -278,6 +284,7 @@ impl Client {
 					None,
 					crate::driver::Protocol::Ietf(protocol),
 					goaway,
+					auth,
 				));
 			}
 			Some(ALPN_16) => {
@@ -360,11 +367,12 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let (recv_bw, protocol, goaway) = match version {
+		let (recv_bw, protocol, goaway, auth) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
 					runtime: runtime.clone(),
+					client: true,
 					session: session.clone(),
 					setup_stream: Some(stream),
 					publish: publish.clone(),
@@ -375,12 +383,15 @@ impl Client {
 					// (pre-lite-05), which have no Setup Stream.
 					our_setup: lite::Setup::default(),
 					peer_setup: None,
+					// Negotiated over the bidi SETUP: lite 01/02, which carry no AUTH.
+					auth: crate::auth::Handle::new(v.has_auth()),
 				})?;
 
 				(
 					start.recv_bandwidth,
 					crate::driver::Protocol::Lite(Box::new(start.driver)),
 					start.goaway,
+					start.auth,
 				)
 			}
 			Version::Ietf(v) => {
@@ -412,12 +423,18 @@ impl Client {
 					path: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
+					auth: crate::auth::Handle::new(false),
 				})?;
-				(None, crate::driver::Protocol::Ietf(protocol), goaway)
+				(
+					None,
+					crate::driver::Protocol::Ietf(protocol),
+					goaway,
+					crate::auth::Handle::new(false),
+				)
 			}
 		};
 
-		Ok(Session::new(runtime, session, version, recv_bw, protocol, goaway))
+		Ok(Session::new(runtime, session, version, recv_bw, protocol, goaway, auth))
 	}
 }
 

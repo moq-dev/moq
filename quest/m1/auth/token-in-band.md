@@ -75,5 +75,3 @@ Additive.
   widen path the configured tokens reuse
 - [Bindings](/quest/m1/auth/bindings.md) - supplies the client surface the new
   token setters sit beside
-- [moq-transport](/quest/m1/auth/moq-transport.md) - supplies the IETF AUTH
-  exchange the setup-option token pairs with

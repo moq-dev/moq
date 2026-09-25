@@ -61,7 +61,6 @@ Additive.
 
 ## Required
 
-- [Lite stream](/quest/m1/auth/lite.md) - the AUTH stream the grant rides
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay owns AUTH and knows the session's paths
 
 ## Related

@@ -424,6 +424,24 @@ export function fromClose(info: WebTransportCloseInfo): Session | null {
 	return new Session(code, { reason: info.reason });
 }
 
+// WebTransport rejects a close reason over 1024 bytes of UTF-8 by throwing, so a reason
+// built from peer-supplied data has to be bounded before it gets there. A broadcast path
+// is peer-supplied and long enough to reach this on its own.
+const MAX_CLOSE_REASON = 1024;
+
+/**
+ * The longest prefix of `text` that fits a session close reason. `encodeInto` stops on a
+ * whole code point, so `read` never lands mid-character the way slicing bytes would.
+ *
+ * @internal
+ */
+export function closeReason(text: string): string {
+	const encoder = new TextEncoder();
+	const buf = new Uint8Array(MAX_CLOSE_REASON);
+	const { read } = encoder.encodeInto(text, buf);
+	return text.slice(0, read);
+}
+
 /**
  * Coerce an unknown thrown value into an `Error`.
  *

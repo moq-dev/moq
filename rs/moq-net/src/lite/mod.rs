@@ -5,6 +5,7 @@
 //! Specification: [<https://github.com/moq-dev/drafts>]
 
 mod announce;
+mod auth;
 mod datagram;
 mod fetch;
 mod goaway;
@@ -26,6 +27,7 @@ mod track;
 mod version;
 
 pub use announce::*;
+pub use auth::*;
 #[allow(unused_imports)]
 pub use datagram::*;
 #[allow(unused_imports)]

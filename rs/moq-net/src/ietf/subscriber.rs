@@ -426,6 +426,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// Set once the peer sends a GOAWAY; new SUBSCRIBEs are then rejected with
 	// Error::GoingAway (the peer told us to stop opening streams).
 	going_away: crate::goaway::GoingAway,
+	// Our grant (MoQ Auth): a subscription it stops covering is cancelled.
+	auth: crate::auth::Handle,
 }
 
 /// Resolve the subscription a data stream belongs to.
@@ -491,7 +493,14 @@ where
 			tasks,
 			version,
 			going_away,
+			auth: crate::auth::Handle::new(false),
 		}
+	}
+
+	/// Bound what we subscribe to by the grant this session's tokens earn (MoQ Auth).
+	pub fn with_auth(mut self, auth: crate::auth::Handle) -> Self {
+		self.auth = auth;
+		self
 	}
 
 	/// Leave `alias` in the state a cancelled subscription leaves behind: bound to a
@@ -1563,6 +1572,21 @@ where
 			return;
 		}
 
+		// Subscribe only to what our grant covers (MoQ Auth), and cancel once it no longer
+		// does, leaving the rest of the session alone.
+		if !self
+			.auth
+			.allows(crate::auth::Direction::Subscribe, broadcast_path.as_str())
+		{
+			request.reject(Error::Unauthorized);
+			return;
+		}
+		let mut gate = crate::auth::Gate::new(
+			self.auth.clone(),
+			broadcast_path.to_owned(),
+			crate::auth::Direction::Subscribe,
+		);
+
 		let subscription = request.subscription();
 		let join = match subscribe_join(
 			subscription.as_ref().and_then(|s| s.start),
@@ -1742,6 +1766,7 @@ where
 		// does not disturb subscriptions already in flight.
 		enum End {
 			Unused,
+			Revoked,
 			Done(Result<(), Error>),
 		}
 
@@ -1755,6 +1780,9 @@ where
 						&& waiter.poll_future(fut.as_mut()).is_ready()
 					{
 						fetch_done = true;
+					}
+					if gate.poll_denied(waiter).is_ready() {
+						return Poll::Ready(End::Revoked);
 					}
 					if track.poll_unused(waiter).is_ready() {
 						return Poll::Ready(End::Unused);
@@ -1771,6 +1799,11 @@ where
 						}
 						Err(used) => track = used,
 					},
+					End::Revoked => {
+						tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "subscription no longer authorized");
+						let _ = track.abort(Error::Unauthorized);
+						break true;
+					}
 					End::Done(res) => {
 						match res {
 							Ok(()) => {
