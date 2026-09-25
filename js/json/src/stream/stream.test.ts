@@ -1,3 +1,4 @@
+import { heapStats } from "bun:jsc";
 import { expect, test } from "bun:test";
 import { Time, Track } from "@moq/net";
 import { Consumer, Producer, Rolled } from "./index.ts";
@@ -109,4 +110,33 @@ test("a second concurrent read is refused rather than served the first one's gro
 	const first = consumer.next();
 	expect(() => consumer.next()).toThrow("multiple calls to next not supported");
 	expect(await first).toEqual({ n: 0 });
+});
+
+// A blocked read races the frame against the track's next group, which stays pending for the whole
+// log. Racing it per record must not leave a reaction behind on it each time.
+test("blocked reads leave nothing behind on the pending group read", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Rec>({ track });
+	const subscriber = track.subscribe();
+	const consumer = new Consumer<Rec>({ track: subscriber });
+	const promises = () => {
+		Bun.gc(true);
+		return heapStats().objectTypeCounts.Promise ?? 0;
+	};
+
+	const read = async (from: number, count: number) => {
+		for (let n = from; n < from + count; n++) {
+			const next = consumer.next();
+			producer.append({ n });
+			expect((await next)?.n).toBe(n);
+		}
+	};
+
+	await read(0, 50);
+	const before = promises();
+	await read(50, 1000);
+	expect(promises() - before).toBeLessThan(100);
+
+	subscriber.close();
+	producer.finish();
 });
