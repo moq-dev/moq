@@ -124,12 +124,21 @@ impl Decoders {
 
 	/// Why `rendition`'s decoder refused to open. Only the verdict is cached, so
 	/// this opens it once more, on a path that has nothing left to serve.
-	async fn refusal(&self, rendition: &VideoConfig) -> Error {
+	///
+	/// `Ok(())` means that reopen succeeded. The first failure was transient, so
+	/// the cached refusal is cleared and the caller selects this rendition
+	/// instead of waiting on a catalog that will not change.
+	async fn refusal(&mut self, rendition: &VideoConfig) -> Result<(), Error> {
 		match self.open(rendition).await {
-			Err(err) => err.into(),
-			// It opened this time: whatever refused was transient, and a later
-			// transcoder will probe afresh.
-			Ok(()) => Error::NoSource,
+			Err(err) => Err(err.into()),
+			Ok(()) => {
+				if let Some(codec) = codec(rendition)
+					&& let Some((_, decodes)) = self.probed.iter_mut().find(|(probed, _)| *probed == codec)
+				{
+					*decodes = true;
+				}
+				Ok(())
+			}
 		}
 	}
 
@@ -194,8 +203,16 @@ pub(crate) async fn choose_source(video: &Video, decoders: &mut Decoders) -> Res
 	let Some((name, config)) = refused else {
 		return Err(Error::NoSource);
 	};
-	tracing::warn!(rendition = %name, "no source rendition can be decoded on this host");
-	Err(decoders.refusal(config).await)
+	match decoders.refusal(config).await {
+		Err(err) => {
+			tracing::warn!(rendition = %name, "no source rendition can be decoded on this host");
+			Err(err)
+		}
+		// The picture is known, so this is the source. A missing size still has
+		// to wait, but the codec is cached as decodable for the next snapshot.
+		Ok(()) if dimensions(config).is_some() => Ok((name.clone(), config.clone())),
+		Ok(()) => Err(Error::NoSource),
+	}
 }
 
 /// Re-pick the source rendition for a new snapshot, preferring the one already
@@ -756,6 +773,23 @@ mod tests {
 			}
 			other => panic!("expected the decoder's refusal, got {other:?}"),
 		}
+	}
+
+	/// A probe can fail once and succeed when the refusal path opens the decoder
+	/// again. That rendition is the source. Returning `NoSource` would leave
+	/// `run` waiting on a catalog a static source never updates, with the stale
+	/// refusal still cached.
+	#[tokio::test]
+	async fn a_reopen_that_succeeds_is_the_source() {
+		let mut video = Video::default();
+		video.insert("avc", source(640, 360, None)).unwrap();
+
+		// Cached as refused without opening, the shape of a probe that failed once.
+		let mut decoders = Decoders::assume(&[]);
+		decoders.config.kind = moq_video::decode::Kind::Software;
+		let (name, _) = choose_source(&video, &mut decoders).await.unwrap();
+		assert_eq!(name, "avc");
+		assert!(decoders.probe(Codec::H264, &source(640, 360, None)).await);
 	}
 
 	/// A decodable rendition still waiting on its first keyframe will be usable,
