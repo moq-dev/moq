@@ -13,8 +13,9 @@ and update, `moq-auth` token verification, and `moq-pattern` path matching.
   generation out of the timed region.
 - `hang`: catalog encode and decode swept over rendition count, plus the
   per-update cost a publisher pays.
-- `moq-auth`: token verification per connection and per in-band token, swept
-  over claim size.
+- `moq-auth`: JWT verification per connection, swept over algorithm and claim
+  size. The in-band token path gets its bench with
+  [In-band token](/quest/m1/auth/token-in-band.md), not here.
 - `moq-pattern`: matching swept over pattern count and path depth. Coordinate
   with [Path patterns](/quest/m1/path-patterns.md) so the matcher gets one
   bench, not two.
