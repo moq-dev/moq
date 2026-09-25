@@ -535,6 +535,7 @@ _check $BASE $TEST:
         just drafts check
         if [[ "$TEST" == true ]]; then
             just rs check-test --workspace --exclude moq-net-fuzz
+            just rs play
         else
             just rs check --workspace --exclude moq-net-fuzz
         fi
@@ -640,6 +641,7 @@ _test $BASE:
     if [[ "$files" == ALL ]]; then
     	just js test
     	just rs test --workspace --exclude moq-net-fuzz
+    	just rs play
     	just py test
     elif [[ -n "$files" ]]; then
     	just js test "$files"

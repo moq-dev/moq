@@ -1564,6 +1564,8 @@ where
 		}
 
 		let subscription = request.subscription();
+		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest.
+		let live = subscription.as_ref().and_then(|s| s.start).is_none();
 		let join = match subscribe_join(
 			subscription.as_ref().and_then(|s| s.start),
 			subscription.as_ref().and_then(|s| s.end),
@@ -1700,7 +1702,16 @@ where
 			.with_timescale(Timescale::MICRO)
 			.with_max_age(self.origin.default_max_age())
 			.with_priority(super::priority::from_wire(priority.unwrap_or(128)));
+		// Declared before the track is released to readers, so a warm cache waiting on
+		// this copy judges itself against where the live feed actually starts.
+		let request = match live {
+			true => request.resolving_start(),
+			false => request,
+		};
 		let mut track = request.accept(info);
+		if live {
+			let _ = track.start_at(largest.map(|largest| largest.group));
+		}
 		let mut fetching: Option<MaybeSendBox<'static, ()>> = None;
 		{
 			let mut state = self.state.lock();

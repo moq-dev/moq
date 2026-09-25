@@ -35,9 +35,10 @@ the decoder at frame 31, leaving the newest frame due 990ms late. Port it onto
 the harness, and also cover video-only and speaker-owned anchors, delayed
 drains, reordering, discontinuity, and the decoder's tail flush.
 
-## Required
-
-- [Play harness](/quest/m1/play-harness.md) - the regression test runs on it
+The harness (`play::fake::Recorder`, driving `Media` on a paused tokio clock)
+records the speaker and the window's wakes, but nothing presents video yet: a
+test drains the shared queue itself, so add a fake presenter that pops frames
+as `Presentation::due` allows, mirroring `window.rs`.
 
 ## Related
 

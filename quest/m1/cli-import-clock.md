@@ -30,5 +30,4 @@ archive playback. Update the import docs.
 
 ## Related
 
-- [Native clock fixtures](/quest/m1/native-clock-fixtures.md) - the same scenarios through native capture
 - [GStreamer clock](/quest/m1/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - separate source adapter

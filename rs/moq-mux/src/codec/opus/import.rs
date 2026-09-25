@@ -114,7 +114,10 @@ impl Import {
 /// Build a catalog config from an OpusHead. Errors on a malformed or empty buffer.
 pub fn config(init: &[u8]) -> crate::Result<hang::catalog::AudioConfig> {
 	let mut buf = init;
-	Ok(Config::parse(&mut buf)?.into())
+	let mut config: hang::catalog::AudioConfig = Config::parse(&mut buf)?.into();
+	// Publish the head as given: re-encoding it would drop a channel mapping table.
+	config.description = Some(bytes::Bytes::copy_from_slice(init));
+	Ok(config)
 }
 
 impl From<Config> for hang::catalog::AudioConfig {
