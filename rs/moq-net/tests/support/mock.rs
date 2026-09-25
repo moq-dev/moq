@@ -132,7 +132,10 @@ impl poll::SendStream for MockSendStream {
 	type Error = MockError;
 
 	fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
-		Poll::Ready(self.push(StreamChunk::Data(Bytes::copy_from_slice(buf))).map(|()| buf.len()))
+		Poll::Ready(
+			self.push(StreamChunk::Data(Bytes::copy_from_slice(buf)))
+				.map(|()| buf.len()),
+		)
 	}
 
 	fn set_priority(&mut self, _order: u8) {}
@@ -334,7 +337,9 @@ impl ConnectionState {
 	/// The close every stream and accept fails with, once the connection closed.
 	fn error(&self) -> Option<MockError> {
 		let state = self.close_state.lock().unwrap();
-		state.as_ref().map(|(code, reason)| MockError::session(*code, reason.clone()))
+		state
+			.as_ref()
+			.map(|(code, reason)| MockError::session(*code, reason.clone()))
 	}
 }
 
