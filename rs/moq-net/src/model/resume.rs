@@ -26,8 +26,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound;
 use std::task::{Poll, ready};
 
-use crate::{Datagram, Error, Result, Timestamp, frame, group, track};
-use track::{Anchor, LiveEdge};
+#[cfg(test)]
+use crate::Timestamp;
+use crate::{Datagram, Error, Result, frame, group, track};
+use track::{Anchor, LiveEdge, Successor};
 
 use super::subscription::{Cap, Position, Subscription, max_some, min_some};
 
@@ -142,12 +144,15 @@ fn slice(prefs: &Subscription, start: Option<Position>, end: Option<Position>) -
 	}
 }
 
-/// Where the first servable group in `from..cap` starts presenting, from the first of
-/// `segments` holding one in its range; see [`track::Consumer::first_start`].
-fn first_start(segments: &[Segment], from: u64, cap: Option<u64>) -> Option<Option<Timestamp>> {
+/// The first servable group in `from..cap` across `segments`, with the slot identity a
+/// later judgment needs. An unstamped group stops the search: skipping it for a later
+/// start would shrink a reach that is not yet proven.
+fn served_start(segments: &[Segment], from: u64, cap: Option<u64>) -> Option<Successor> {
 	segments.iter().find_map(|segment| {
 		let start = segment.start.map_or(0, |start| start.group).max(from);
-		segment.track.first_start(start, min_some(cap, last_group(segment.end)))
+		segment
+			.track
+			.served_start(start, min_some(cap, last_group(segment.end)))
 	})
 }
 
@@ -246,9 +251,9 @@ impl ResumeState {
 	/// Where the logical track continues past the exclusive group `boundary` of segment
 	/// `id`, below the reader's `cap`: the start of the first group the later segments
 	/// serve there. `None` while none is cached, or it has no frame yet.
-	fn successor(&self, id: u64, boundary: u64, cap: Option<u64>) -> Option<Timestamp> {
+	fn successor(&self, id: u64, boundary: u64, cap: Option<u64>) -> Option<Successor> {
 		let index = self.segments.iter().position(|segment| segment.id == id)?;
-		first_start(&self.segments[index + 1..], boundary, cap)?
+		served_start(&self.segments[index + 1..], boundary, cap)
 	}
 
 	/// Append a segment serving the track from `start` onward, capping (or replacing)
@@ -696,10 +701,10 @@ impl Consumer {
 		self.state.read().live_edge(cap)
 	}
 
-	/// Where the first servable group in `from..cap` starts presenting across the
-	/// segments; see [`track::Consumer::first_start`].
-	pub(crate) fn first_start(&self, from: u64, cap: Option<u64>) -> Option<Option<Timestamp>> {
-		first_start(&self.state.read().segments, from, cap)
+	/// Where the first servable group in `from..cap` starts, with the identity to
+	/// revalidate it; see [`track::Consumer::served_start`].
+	pub(crate) fn served_start(&self, from: u64, cap: Option<u64>) -> Option<Successor> {
+		served_start(&self.state.read().segments, from, cap)
 	}
 
 	/// The newest cached group across every spliced segment; see
@@ -1714,16 +1719,17 @@ impl Subscriber {
 		let Some(boundary) = seg.last_group() else {
 			return anchor;
 		};
+		let cap = anchor.cap;
 		let mut capped = anchor.capped(Some(boundary));
-		if capped.cap != anchor.cap {
-			capped.successor = state.successor(seg.id, boundary, anchor.cap);
+		if capped.cap != cap {
+			capped.successor = state.successor(seg.id, boundary, cap);
 		}
 		capped
 	}
 
 	/// The logical drift anchor, as of the last [`Self::refresh_anchor`].
 	fn anchor(&self) -> Anchor {
-		*self.drift_anchor.read()
+		self.drift_anchor.read().clone()
 	}
 
 	/// Re-derive the logical drift anchor and push it onto every segment cursor.
@@ -1734,23 +1740,23 @@ impl Subscriber {
 	/// newer. Resolved on every sync, since each segment is a separate track and the
 	/// logical edge moves whenever any of them grows.
 	fn refresh_anchor(&mut self) {
-		let outer = self.outer.capped(self.end_sequence);
+		let outer = self.outer.clone().capped(self.end_sequence);
 		let state = self.state.read();
 		let edge = state
 			.live_edge(outer.cap)
 			.into_iter()
-			.chain(outer.edge)
+			.chain(outer.edge.clone())
 			.max_by_key(|edge| edge.sequence);
 		let anchor = Anchor { edge, ..outer };
 		// Skip a no-op write: every handed-out group's expiry watches this channel.
 		if self.anchor() != anchor
 			&& let Ok(mut current) = self.drift_anchor.write()
 		{
-			*current = anchor;
+			*current = anchor.clone();
 		}
 		for seg in &mut self.segments {
-			let anchor = Self::segment_anchor(seg, anchor, &state);
-			seg.anchor = anchor;
+			let anchor = Self::segment_anchor(seg, anchor.clone(), &state);
+			seg.anchor = anchor.clone();
 			if let Some(sub) = seg.stale_sub_mut() {
 				sub.set_anchor(anchor);
 			}
@@ -1837,8 +1843,7 @@ impl Subscriber {
 					// assigned: the inner subscription resolved its own start from its
 					// budget and floor, and this must not rewind past it.
 					sub.raise_start_to(seg.first_group().max(min_sequence));
-					let anchor = seg.anchor;
-					sub.set_anchor(anchor);
+					sub.set_anchor(seg.anchor.clone());
 					let _ = sub.update(slice(prefs, seg.ask, seg.end));
 					seg.sub = SubState::Active(Box::new(sub));
 				}
