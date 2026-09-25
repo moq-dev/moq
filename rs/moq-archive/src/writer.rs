@@ -705,6 +705,11 @@ impl<S: ObjectStore> Committer<S> {
 
 		let segment = pending.segment;
 		let record = (*pending).clone();
+		let pts = Timestamp::new(
+			record.pts,
+			Timescale::new(self.timescale).map_err(|_| Error::Timescale(self.timescale))?,
+		)
+		.map_err(|_| Error::Id(record.pts))?;
 		self.timeline.push(pending).map_err(timeline_error)?;
 		self.window.push_back(record);
 
@@ -714,7 +719,7 @@ impl<S: ObjectStore> Committer<S> {
 		}
 		self.timeline.flush().map_err(timeline_error)?;
 
-		let object = self.read_timeline()?;
+		let object = self.read_timeline(pts)?;
 		store.put_segments(&shared.timeline, segment, &object).await?;
 
 		let mut keys = Vec::new();
@@ -747,8 +752,11 @@ impl<S: ObjectStore> Committer<S> {
 		expired
 	}
 
-	/// Collect the timeline groups completed since the last segment.
-	fn read_timeline(&mut self) -> Result<Object> {
+	/// Collect the timeline groups completed since the last segment, stamped at `pts`.
+	///
+	/// The live timeline track stamps frames with the wall clock; storing the segment's content
+	/// time instead keeps a recording's bytes a function of its content alone.
+	fn read_timeline(&mut self, pts: Timestamp) -> Result<Object> {
 		let waiter = kio::Waiter::noop();
 		let timescale = self.groups.info().timescale;
 		let mut groups = Vec::new();
@@ -759,7 +767,10 @@ impl<S: ObjectStore> Committer<S> {
 			let mut frames = Vec::new();
 			loop {
 				match group.poll_read_frame(&waiter) {
-					Poll::Ready(Ok(Some(frame))) => frames.push(frame),
+					Poll::Ready(Ok(Some(mut frame))) => {
+						frame.timestamp = pts;
+						frames.push(frame);
+					}
 					Poll::Ready(Ok(None)) => break,
 					Poll::Ready(Err(err)) => return Err(timeline_error_net(err)),
 					// Flushing closed every group, so an open one is a bug.
@@ -803,90 +814,11 @@ fn malformed(track: &str, sequence: u64, err: impl std::fmt::Display) -> Error {
 mod tests {
 
 	use futures::TryStreamExt;
-	use futures::stream::BoxStream;
 	use object_store::memory::InMemory;
-	use object_store::path::Path;
-	use object_store::{
-		CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, PutMultipartOptions, PutOptions,
-		PutPayload, PutResult,
-	};
 
 	use super::*;
+	use crate::mock::Mock;
 	use crate::store::list::Query;
-
-	/// An in-memory store whose group PUTs fail for one track, and whose listings fail at the end.
-	#[derive(Debug, Clone)]
-	struct Failing {
-		inner: Arc<InMemory>,
-		track: &'static str,
-		list: bool,
-	}
-
-	impl std::fmt::Display for Failing {
-		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-			write!(f, "Failing")
-		}
-	}
-
-	#[async_trait::async_trait]
-	impl ObjectStore for Failing {
-		async fn put_opts(
-			&self,
-			location: &Path,
-			payload: PutPayload,
-			opts: PutOptions,
-		) -> object_store::Result<PutResult> {
-			if location.as_ref().contains(&format!("/{}/groups/", self.track)) {
-				return Err(object_store::Error::NotImplemented {
-					operation: "put".into(),
-					implementer: "Failing".into(),
-				});
-			}
-			self.inner.put_opts(location, payload, opts).await
-		}
-
-		async fn put_multipart_opts(
-			&self,
-			location: &Path,
-			opts: PutMultipartOptions,
-		) -> object_store::Result<Box<dyn MultipartUpload>> {
-			self.inner.put_multipart_opts(location, opts).await
-		}
-
-		async fn get_opts(&self, location: &Path, options: GetOptions) -> object_store::Result<GetResult> {
-			self.inner.get_opts(location, options).await
-		}
-
-		fn delete_stream(
-			&self,
-			locations: BoxStream<'static, object_store::Result<Path>>,
-		) -> BoxStream<'static, object_store::Result<Path>> {
-			self.inner.delete_stream(locations)
-		}
-
-		fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-			let listed = self.inner.list(prefix);
-			match self.list {
-				true => listed
-					.chain(futures::stream::once(async {
-						Err(object_store::Error::NotImplemented {
-							operation: "list".into(),
-							implementer: "Failing".into(),
-						})
-					}))
-					.boxed(),
-				false => listed,
-			}
-		}
-
-		async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
-			self.inner.list_with_delimiter(prefix).await
-		}
-
-		async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> object_store::Result<()> {
-			self.inner.copy_opts(from, to, options).await
-		}
-	}
 
 	const TIMELINE: &str = hang::timeline::DEFAULT_NAME;
 
@@ -1031,12 +963,9 @@ mod tests {
 		let video = track(&source, "video");
 		let audio = track(&source, "audio");
 
-		let failing = Failing {
-			inner: Arc::new(InMemory::new()),
-			track: "audio",
-			list: false,
-		};
-		let store = Store::new(failing, "rec");
+		let mock = Mock::memory();
+		mock.fail_puts("/audio/groups/");
+		let store = Store::new(mock, "rec");
 		let writer = Writer::new(store.clone(), source.consume(), Config::default())
 			.await
 			.unwrap();
@@ -1123,6 +1052,39 @@ mod tests {
 		assert!(!run.is_finished());
 		assert_eq!(control.remove("video"), Err(Error::Closed));
 		run.abort();
+	}
+
+	#[tokio::test]
+	async fn accepted_groups_may_complete_out_of_order() {
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+
+		let store = Store::new(InMemory::new(), "rec");
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
+		writer.control().pacing_track("video").await.unwrap();
+		let run = tokio::spawn(writer.run());
+
+		let mut first = video.create_group(group::Info { sequence: 0 }).unwrap();
+		first.write_frame(ms(0), "0@0").unwrap();
+		group(&video, 1, &[1000]);
+		group(&video, 2, &[2000]);
+		tokio::time::sleep(Duration::from_millis(50)).await;
+		assert!(window(&store).await.is_empty(), "group 1 waits for group 0");
+
+		first.write_frame(ms(500), "0@500").unwrap();
+		first.finish().unwrap();
+		video.finish().unwrap();
+		source.finish();
+		run.await.unwrap().unwrap();
+
+		let records = window(&store).await;
+		assert_eq!(ranges(&records, "video"), vec![(0, 0), (1, 1), (2, 2)]);
+		check_objects(&store, &records).await;
+		let object = store.get_groups("video", 0..=0).await.unwrap();
+		let frames: Vec<_> = object.groups[0].frames.iter().map(|f| f.timestamp).collect();
+		assert_eq!(frames, vec![0, 500]);
 	}
 
 	#[tokio::test]
@@ -1366,19 +1328,100 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn a_dvr_crash_between_pop_and_delete_is_cleaned_on_restart() {
+		let store = Store::new(InMemory::new(), "rec");
+
+		// A grace longer than the test keeps every expired object past the crash.
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+		let config =
+			Config::default().with_retention(Retention::new(Duration::from_secs(2), Duration::from_secs(3600)));
+		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
+		writer.control().pacing_track("video").await.unwrap();
+		let run = tokio::spawn(writer.run());
+		for sequence in 0..6 {
+			group(&video, sequence, &[sequence * 1000, sequence * 1000 + 500]);
+		}
+		// Segment 5 stays open, so the newest durable timeline object is segment 4.
+		while window(&store).await.last().map(|record| record.segment) != Some(4) {
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		run.abort();
+		let _ = run.await;
+
+		let retained = window(&store).await;
+		assert_eq!(
+			retained.iter().map(|record| record.segment).collect::<Vec<_>>(),
+			vec![3, 4]
+		);
+		let expired: HashSet<_> = (0..3).map(|s| Key::groups("video", s..=s).unwrap()).collect();
+		assert_eq!(stored_groups(&store).await, &referenced(&retained) | &expired);
+		// An upload the crash left uncommitted.
+		store.put_groups("video", &orphan(5)).await.unwrap();
+
+		let grace = Duration::from_millis(200);
+		let config = Config::default().with_retention(Retention::new(Duration::from_secs(2), grace));
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+		let started = Instant::now();
+		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
+		assert!(
+			stored_groups(&store).await.is_superset(&expired),
+			"expired objects outlive the grace, for readers holding the old timeline"
+		);
+
+		writer.control().pacing_track("video").await.unwrap();
+		// The source replays the uncommitted group; it is refused rather than overwritten.
+		for sequence in 5..9 {
+			group(&video, sequence, &[sequence * 1000, sequence * 1000 + 500]);
+		}
+		video.finish().unwrap();
+		source.finish();
+		writer.run().await.unwrap();
+		assert!(started.elapsed() >= grace);
+
+		let records = window(&store).await;
+		assert_eq!(ranges(&records, "video"), vec![(6, 6), (7, 7), (8, 8)]);
+		check_objects(&store, &records).await;
+		assert_eq!(stored_groups(&store).await, referenced(&records));
+		store.get_info("video").await.unwrap();
+		store.get_info(TIMELINE).await.unwrap();
+		for segment in 0..=7 {
+			store.get_segments(TIMELINE, segment).await.unwrap();
+		}
+	}
+
+	#[tokio::test]
+	async fn an_archive_restart_leaves_uncommitted_groups_unadvertised() {
+		let store = Store::new(InMemory::new(), "rec");
+		record(&store, Config::default(), 0..3).await;
+		// Media stored after the last timeline commit: a crash before its record.
+		store.put_groups("video", &orphan(3)).await.unwrap();
+
+		record(&store, Config::default(), 3..6).await;
+		let records = window(&store).await;
+		assert_eq!(ranges(&records, "video"), vec![(0, 0), (1, 1), (2, 2), (4, 4), (5, 5)]);
+		check_objects(&store, &records).await;
+		// An archive deletes nothing; the orphan stays invisible.
+		assert!(
+			stored_groups(&store)
+				.await
+				.contains(&Key::groups("video", 3..=3).unwrap())
+		);
+		assert!(!referenced(&records).contains(&Key::groups("video", 3..=3).unwrap()));
+	}
+
+	#[tokio::test]
 	async fn a_failed_recovery_deletes_nothing() {
-		let inner = Arc::new(InMemory::new());
-		let store = Store::new(inner.clone(), "rec");
+		let mock = Mock::memory();
+		let store = Store::new(mock.clone(), "rec");
 		let config = Config::default().with_retention(Retention::new(Duration::from_secs(2), Duration::ZERO));
 		record(&store, config.clone(), 0..6).await;
 		store.put_groups("video", &orphan(1)).await.unwrap();
 		let before = stored_groups(&store).await;
 
-		let failing = Failing {
-			inner: inner.clone(),
-			track: "",
-			list: true,
-		};
+		let failing = mock.fork();
+		failing.fail_lists();
 		let source = broadcast::Info::new().produce();
 		let result = Writer::new(Store::new(failing, "rec"), source.consume(), config.clone()).await;
 		assert!(matches!(result, Err(Error::Store(_))));

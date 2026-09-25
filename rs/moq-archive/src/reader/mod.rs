@@ -23,6 +23,7 @@
 
 mod index;
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
@@ -79,6 +80,8 @@ struct Shared<T> {
 	store: Store<T>,
 	index: Mutex<Index>,
 	cache: quick_cache::sync::Cache<Key, Arc<Object>, Weight>,
+	/// Each track's `.info`, which is immutable, so a re-requested track costs no GET.
+	infos: Mutex<HashMap<String, track::Info>>,
 }
 
 impl<T: ObjectStore> Reader<T> {
@@ -97,6 +100,7 @@ impl<T: ObjectStore> Reader<T> {
 			store,
 			index: Mutex::default(),
 			cache: quick_cache::sync::Cache::with_weighter(items, config.cache, Weight),
+			infos: Mutex::default(),
 		});
 
 		let mut reader = Self {
@@ -237,13 +241,20 @@ async fn serve_track<T: ObjectStore>(shared: Arc<Shared<T>>, request: track::Req
 		return;
 	}
 
-	let info = match shared.store.get_info(&name).await.and_then(|info| track_info(&info)) {
-		Ok(info) => info,
-		Err(err) => {
-			tracing::warn!(track = name, %err, "archived track has no usable .info");
-			request.reject(moq_net::Error::NotFound);
-			return;
-		}
+	let cached = shared.infos.lock().unwrap().get(&name).cloned();
+	let info = match cached {
+		Some(info) => info,
+		None => match shared.store.get_info(&name).await.and_then(|info| track_info(&info)) {
+			Ok(info) => {
+				shared.infos.lock().unwrap().insert(name.clone(), info.clone());
+				info
+			}
+			Err(err) => {
+				tracing::warn!(track = name, %err, "archived track has no usable .info");
+				request.reject(moq_net::Error::NotFound);
+				return;
+			}
+		},
 	};
 
 	let timescale = info.timescale;

@@ -343,112 +343,15 @@ mod tests {
 	use std::num::NonZeroUsize;
 
 	use futures::TryStreamExt;
-	use object_store::list::{PaginatedListOptions, PaginatedListResult, PaginatedListStore};
+	use object_store::ObjectStoreExt;
 	use object_store::memory::InMemory;
 	use object_store::path::Path;
-	use object_store::{
-		CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions,
-		PutOptions, PutPayload, PutResult,
-	};
 
 	use super::*;
 	use crate::ID_MAX;
+	use crate::mock::Mock;
 	use crate::path::encode_track;
 	use crate::segment::{Frame, Group};
-
-	/// In-memory store with a trivial offset-based paginated listing implementation.
-	/// Page tokens are decimal indexes into the filtered, sorted key list.
-	#[derive(Debug, Clone)]
-	struct PaginatedMemory {
-		inner: InMemory,
-	}
-
-	impl std::fmt::Display for PaginatedMemory {
-		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-			write!(f, "PaginatedMemory")
-		}
-	}
-
-	#[async_trait::async_trait]
-	impl ObjectStore for PaginatedMemory {
-		async fn put_opts(
-			&self,
-			location: &Path,
-			payload: PutPayload,
-			opts: PutOptions,
-		) -> object_store::Result<PutResult> {
-			self.inner.put_opts(location, payload, opts).await
-		}
-
-		async fn put_multipart_opts(
-			&self,
-			location: &Path,
-			opts: PutMultipartOptions,
-		) -> object_store::Result<Box<dyn MultipartUpload>> {
-			self.inner.put_multipart_opts(location, opts).await
-		}
-
-		async fn get_opts(&self, location: &Path, options: GetOptions) -> object_store::Result<GetResult> {
-			self.inner.get_opts(location, options).await
-		}
-
-		fn delete_stream(
-			&self,
-			locations: BoxStream<'static, object_store::Result<Path>>,
-		) -> BoxStream<'static, object_store::Result<Path>> {
-			self.inner.delete_stream(locations)
-		}
-
-		fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-			self.inner.list(prefix)
-		}
-
-		async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
-			self.inner.list_with_delimiter(prefix).await
-		}
-
-		async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> object_store::Result<()> {
-			self.inner.copy_opts(from, to, options).await
-		}
-	}
-
-	#[async_trait::async_trait]
-	impl PaginatedListStore for PaginatedMemory {
-		async fn list_paginated(
-			&self,
-			prefix: Option<&str>,
-			opts: PaginatedListOptions,
-		) -> object_store::Result<PaginatedListResult> {
-			let mut metas: Vec<ObjectMeta> = self.inner.list(None).try_collect().await?;
-			metas.sort_by(|a, b| a.location.as_ref().cmp(b.location.as_ref()));
-			if let Some(prefix) = prefix {
-				metas.retain(|meta| meta.location.as_ref().starts_with(prefix));
-			}
-			if let Some(offset) = opts.offset.as_deref() {
-				metas.retain(|meta| meta.location.as_ref() > offset);
-			}
-			let start: usize = match opts.page_token {
-				Some(token) => token.parse().map_err(|err| object_store::Error::Generic {
-					store: "PaginatedMemory",
-					source: Box::new(err),
-				})?,
-				None => 0,
-			};
-			let remaining = &metas[start.min(metas.len())..];
-			let take = opts.max_keys.unwrap_or(remaining.len()).min(remaining.len());
-			let objects = remaining[..take].to_vec();
-			let next = start.saturating_add(take);
-			let page_token = (next < metas.len()).then(|| next.to_string());
-			Ok(PaginatedListResult {
-				result: ListResult {
-					objects,
-					common_prefixes: Vec::new(),
-					extensions: Default::default(),
-				},
-				page_token,
-			})
-		}
-	}
 
 	fn memory() -> Store<InMemory> {
 		Store::new(InMemory::new(), "rec")
@@ -518,6 +421,30 @@ mod tests {
 			.await
 			.unwrap();
 		assert_eq!(&kept[..], br#"{ "timescale": 1000, "priority": 1, "version": 1 }"#);
+	}
+
+	#[tokio::test]
+	async fn malformed_or_unsupported_existing_info_is_refused_and_kept() {
+		let store = memory();
+		let info = Info::new(0, 1_000).unwrap();
+		for (track, existing, check) in [
+			(
+				"v2",
+				&br#"{"version":2,"priority":0,"timescale":1000}"#[..],
+				(|err| matches!(err, Error::Version(2))) as fn(&Error) -> bool,
+			),
+			("junk", b"not json", |err| matches!(err, Error::Json(_))),
+			("zero", br#"{"version":1,"priority":0,"timescale":0}"#, |err| {
+				matches!(err, Error::Timescale(0))
+			}),
+		] {
+			let path = store.path(&Key::info(track).unwrap()).unwrap();
+			store.inner().put(&path, existing.to_vec().into()).await.unwrap();
+			let err = store.put_info(track, &info).await.unwrap_err();
+			assert!(check(&err), "{track}: {err}");
+			let kept = store.inner().get(&path).await.unwrap().bytes().await.unwrap();
+			assert_eq!(&kept[..], existing, "{track} is not rewritten");
+		}
 	}
 
 	#[tokio::test]
@@ -818,7 +745,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn paginated_listing_walks_pages_and_excludes_siblings() {
-		let store = Store::new(PaginatedMemory { inner: InMemory::new() }, "rec");
+		let store = Store::new(Mock::memory(), "rec");
 		for segment in 0..3 {
 			store
 				.put_segments("timeline.z", segment, &one_group(segment, b"t"))
@@ -827,7 +754,6 @@ mod tests {
 		}
 		store
 			.inner()
-			.inner
 			.put(
 				&Path::from("rec-other/video/.info"),
 				Bytes::from_static(b"sibling").into(),
@@ -894,6 +820,90 @@ mod tests {
 		}
 		assert_eq!(pages, 3);
 		assert_eq!(paged, streamed);
+	}
+
+	/// The first object listed after `groups_from(group)`, one S3 page of one key.
+	async fn lookup(store: &Store<Mock>, group: u64) -> Option<RangeInclusive<u64>> {
+		let query = Query::groups_from("video", group)
+			.unwrap()
+			.page_size(NonZeroUsize::new(1).unwrap());
+		let page = store.list_paginated(&query).await.unwrap();
+		match page.entries.first().map(|entry| &entry.key) {
+			Some(Key::Groups { range, .. }) => Some(range.clone()),
+			Some(key) => panic!("unexpected {key:?}"),
+			None => None,
+		}
+	}
+
+	#[tokio::test]
+	async fn ordered_lookup_finds_the_covering_object() {
+		let store = Store::new(Mock::memory(), "rec");
+		for range in [0..=2, 5..=7, 10..=10, ID_MAX..=ID_MAX] {
+			let groups = range.clone().filter(|sequence| *sequence != 6);
+			let object = Object {
+				groups: groups
+					.map(|sequence| Group {
+						sequence,
+						frames: vec![frame(0, b"g")],
+					})
+					.collect(),
+			};
+			store.put_groups("video", &object).await.unwrap();
+		}
+		// A sibling track sorts after `video/groups/` and must never be returned.
+		store.put_groups("video-alt", &one_group(3, b"a")).await.unwrap();
+
+		// Largest-first filenames make the first key at or past the group its only candidate.
+		for (group, found) in [
+			(0, Some(0..=2)),
+			(1, Some(0..=2)),
+			(2, Some(0..=2)),
+			(3, Some(5..=7)),
+			(5, Some(5..=7)),
+			(6, Some(5..=7)),
+			(7, Some(5..=7)),
+			(8, Some(10..=10)),
+			(10, Some(10..=10)),
+			(11, Some(ID_MAX..=ID_MAX)),
+			(ID_MAX, Some(ID_MAX..=ID_MAX)),
+		] {
+			assert_eq!(lookup(&store, group).await, found, "group {group}");
+		}
+		store
+			.delete(&Key::groups("video", ID_MAX..=ID_MAX).unwrap())
+			.await
+			.unwrap();
+		assert_eq!(lookup(&store, 11).await, None);
+		assert!(Query::groups_from("video", ID_MAX + 1).is_err());
+	}
+
+	#[tokio::test]
+	async fn empty_prefix_lists_the_whole_store() {
+		let store = Store::new(Mock::memory(), "");
+		store.put_info("catalog.json", &Info::new(0, 1).unwrap()).await.unwrap();
+		store.put_groups("video", &one_group(4, b"a")).await.unwrap();
+		assert_eq!(store.paginated_prefix(None), None);
+
+		let expected =
+			std::collections::HashSet::from([Key::info("catalog.json").unwrap(), Key::groups("video", 4..=4).unwrap()]);
+		let streamed: std::collections::HashSet<Key> = store
+			.list(&Query::new())
+			.map_ok(|entry| entry.key)
+			.try_collect()
+			.await
+			.unwrap();
+		assert_eq!(streamed, expected);
+		let page = store.list_paginated(&Query::new()).await.unwrap();
+		assert_eq!(
+			page.entries
+				.into_iter()
+				.map(|entry| entry.key)
+				.collect::<std::collections::HashSet<_>>(),
+			expected
+		);
+		assert!(page.next.is_none());
+		let page = store.list_paginated(&Query::groups("video").unwrap()).await.unwrap();
+		assert_eq!(page.entries.len(), 1);
 	}
 
 	#[test]
