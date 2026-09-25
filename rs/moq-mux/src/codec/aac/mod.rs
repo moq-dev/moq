@@ -28,18 +28,23 @@ pub enum Error {
 	#[error("unsupported sample rate index: {0}")]
 	UnsupportedSampleRateIndex(u8),
 
+	/// The channelConfiguration is a reserved value (8, 9, 10, or 15).
 	#[error("reserved channelConfiguration: {0}")]
 	ReservedChannelConfig(u8),
 
+	/// A program config element is used with an object type that has no GASpecificConfig.
 	#[error("channelConfiguration 0 is unsupported for audioObjectType {0}")]
 	ProgramConfigUnsupported(u8),
 
+	/// ADTS signals a program config element, but none leads the first raw data block.
 	#[error("channelConfiguration 0 without a program config element leading the first raw data block")]
 	ProgramConfigMissing,
 
+	/// The program config element ends before its declared fields.
 	#[error("program config element truncated")]
 	ProgramConfigTruncated,
 
+	/// The program config element declares zero channels.
 	#[error("program config element declares no channels")]
 	ProgramConfigEmpty,
 }
