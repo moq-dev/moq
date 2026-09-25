@@ -1058,7 +1058,7 @@ async fn broadcast_rejoin_skips_a_stale_warm_cache() {
 		.expect("connect timeout")
 		.expect("connect failed");
 
-	assert!(next_announce(&mut announcements).await.kind.is_active());
+	assert!(next_announce(&mut announcements).await.1);
 	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
 		.expect("request timeout")
@@ -1175,7 +1175,7 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 		.expect("connect timeout")
 		.expect("connect failed");
 
-	assert!(next_announce(&mut announcements).await.kind.is_active());
+	assert!(next_announce(&mut announcements).await.1);
 	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
 		.expect("request timeout")
