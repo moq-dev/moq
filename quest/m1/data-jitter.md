@@ -34,6 +34,10 @@ meaningless zero.
   the lower producer reports whether it emitted, and a repeated value must not
   move the baseline (cover it in tests). Publish the result through the embedded config's
   `Estimate`, as the data producers already do for bitrate.
+- Have the lower producers also report each emitted frame's encoded size, and
+  measure bitrate from that instead of the pre-compression payload or
+  serialized value: today an unchanged snapshot `update` still counts, and
+  DEFLATE can slightly expand an incompressible payload.
 - Mirror the capture timestamp in the published `js/binary` and `js/json`
   producers, so browser publishers can produce the same timed tracks.
 

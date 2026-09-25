@@ -102,9 +102,13 @@ impl<E: CatalogExt> IntoRendition<E, BinaryConfig> for Config {
 
 /// Fix `config`'s mode and return whether its frames are compressed.
 ///
-/// Errors on a compression this build can't write, rather than advertising one the frames don't use.
+/// Errors on a compression this build can't write, rather than advertising one the frames don't use,
+/// and on a `broadcast` reference, which would point consumers away from the track this publishes.
 fn prepare(config: &mut impl AsMut<BinaryConfig>, mode: Mode) -> crate::Result<bool> {
 	let binary = config.as_mut();
+	if binary.broadcast.is_some() {
+		return Err(crate::Error::ForeignBroadcast);
+	}
 	binary.mode = mode;
 	crate::compression(binary.compression.as_ref())
 }
@@ -596,6 +600,21 @@ mod test {
 			assert!(matches!(
 				catalog.binary_stream(track(&mut broadcast, "telemetry"), entry),
 				Err(crate::Error::UnsupportedCompression(_))
+			));
+			assert!(catalog.snapshot().ext.mavlink.is_empty());
+		}
+
+		/// The producer publishes locally, so an entry pointing at another broadcast is refused rather
+		/// than advertised: consumers would resolve it there and never reach the published payloads.
+		#[test]
+		fn a_broadcast_reference_is_refused() {
+			let (mut broadcast, catalog) = catalog();
+			let mut entry = mavlink(1);
+			entry.binary.broadcast = Some(moq_net::path::RelativeOwned::new("source"));
+
+			assert!(matches!(
+				catalog.binary_stream(track(&mut broadcast, "telemetry"), entry),
+				Err(crate::Error::ForeignBroadcast)
 			));
 			assert!(catalog.snapshot().ext.mavlink.is_empty());
 		}

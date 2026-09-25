@@ -120,9 +120,13 @@ impl<E: CatalogExt> IntoRendition<E, JsonConfig> for Config {
 
 /// Fix `config`'s mode and return whether its frames are compressed.
 ///
-/// Errors on a compression this build can't write, rather than advertising one the frames don't use.
+/// Errors on a compression this build can't write, rather than advertising one the frames don't use,
+/// and on a `broadcast` reference, which would point consumers away from the track this publishes.
 fn prepare(config: &mut impl AsMut<JsonConfig>, mode: Mode) -> crate::Result<bool> {
 	let json = config.as_mut();
+	if json.broadcast.is_some() {
+		return Err(crate::Error::ForeignBroadcast);
+	}
 	json.mode = mode;
 	crate::compression(json.compression.as_ref())
 }

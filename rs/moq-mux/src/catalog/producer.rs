@@ -664,7 +664,7 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// Errors if the entry's section already carries that name, for example an entry seeded
 	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, or if the entry
-	/// declares a compression this build can't write.
+	/// declares a compression this build can't write or references another broadcast.
 	pub fn json_snapshot<T: serde::Serialize>(
 		&self,
 		track: moq_net::track::Producer,
