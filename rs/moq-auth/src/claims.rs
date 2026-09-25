@@ -1,7 +1,6 @@
 use crate::path;
 use moq_pattern::Patterns;
 use serde::{Deserialize, Serialize};
-use serde_with::{TimestampSeconds, serde_as};
 
 /// The immutable ceiling on what a key may grant, embedded in its JWK.
 ///
@@ -13,19 +12,19 @@ use serde_with::{TimestampSeconds, serde_as};
 /// is the point: a leaked scoped key can never be talked into signing more than it
 /// already could. A key with no scope at all is unrestricted, so keys minted before
 /// scopes existed keep working.
+///
+/// Legacy `put`/`get` prefix scopes load as subtree patterns, and a scope that only
+/// grants subtrees is written that way so older readers load it too.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(try_from = "crate::wire::Scope", into = "crate::wire::Scope")]
 pub struct Scope {
 	/// The root for the publish/subscribe patterns below.
-	#[serde(skip_serializing_if = "String::is_empty")]
 	pub root: String,
 
 	/// Patterns this key may grant to publishers.
-	#[serde(skip_serializing_if = "Patterns::is_empty")]
 	pub publish: Patterns,
 
 	/// Patterns this key may grant to subscribers.
-	#[serde(skip_serializing_if = "Patterns::is_empty")]
 	pub subscribe: Patterns,
 }
 
@@ -103,37 +102,30 @@ impl Permissions {
 ///     .with_subscribe(["**".parse().unwrap()]);
 /// ```
 ///
-/// Any other field, including the retired `put` and `get` prefix lists, fails
-/// verification: a token either speaks patterns or it is not one of ours.
-#[serde_with::skip_serializing_none]
-#[serde_as]
+/// Legacy `moq-token` claims are read too: each `put`/`get` prefix `p` is the subtree
+/// `p/**`. Claims that only grant subtrees are written that way, so every published
+/// verifier accepts them; anything else is written as `publish`/`subscribe`, which an
+/// older verifier refuses rather than misreads. Any other field fails verification.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
-#[serde(default, deny_unknown_fields)]
+#[serde(try_from = "crate::wire::Claims", into = "crate::wire::Claims")]
 #[non_exhaustive]
 pub struct Claims {
 	/// The root for the publish/subscribe patterns below.
 	/// It's mostly for compression and is optional, defaulting to the empty string.
-	#[serde(skip_serializing_if = "String::is_empty")]
 	pub root: String,
 
 	/// If specified, the user can publish any matching broadcasts.
 	/// If not specified, the user will not publish any broadcasts.
-	#[serde(skip_serializing_if = "Patterns::is_empty")]
 	pub publish: Patterns,
 
 	/// If specified, the user can subscribe to any matching broadcasts.
 	/// If not specified, the user will not receive announcements and cannot subscribe to any broadcasts.
-	#[serde(skip_serializing_if = "Patterns::is_empty")]
 	pub subscribe: Patterns,
 
-	/// The expiration time of the token as a unix timestamp.
-	#[serde(rename = "exp")]
-	#[serde_as(as = "Option<TimestampSeconds<i64>>")]
+	/// The expiration time of the token as a unix timestamp (`exp`).
 	pub expires: Option<std::time::SystemTime>,
 
-	/// The issued time of the token as a unix timestamp.
-	#[serde(rename = "iat")]
-	#[serde_as(as = "Option<TimestampSeconds<i64>>")]
+	/// The issued time of the token as a unix timestamp (`iat`).
 	pub issued: Option<std::time::SystemTime>,
 }
 
@@ -400,9 +392,33 @@ mod tests {
 	}
 
 	#[test]
-	fn scope_refuses_the_old_prefix_fields() {
-		let err = serde_json::from_str::<Scope>(r#"{"root":"demo","put":["room"]}"#).unwrap_err();
-		assert!(err.to_string().contains("unknown field `put`"), "{err}");
+	fn scope_reads_legacy_prefixes_as_subtrees() {
+		let scope: Scope = serde_json::from_str(r#"{"root":"demo","put":["room"],"get":[""]}"#).unwrap();
+		assert_eq!(scope.publish, patterns(&["room/**"]));
+		assert_eq!(scope.subscribe, patterns(&["**"]));
+	}
+
+	#[test]
+	fn scope_writes_legacy_prefixes_only_when_faithful() {
+		let subtrees = Scope {
+			root: "demo".into(),
+			publish: patterns(&["room/**"]),
+			subscribe: patterns(&["**"]),
+		};
+		assert_eq!(
+			serde_json::to_string(&subtrees).unwrap(),
+			r#"{"root":"demo","put":["room"],"get":[""]}"#
+		);
+
+		let exact = Scope {
+			root: "demo".into(),
+			publish: patterns(&["room"]),
+			subscribe: Patterns::new(),
+		};
+		assert_eq!(
+			serde_json::to_string(&exact).unwrap(),
+			r#"{"root":"demo","publish":["room"]}"#
+		);
 	}
 
 	#[test]
@@ -476,15 +492,57 @@ mod tests {
 	}
 
 	#[test]
-	fn test_claims_refuse_the_old_prefix_fields() {
+	fn test_claims_read_legacy_prefixes_as_subtrees() {
+		let claims: Claims =
+			serde_json::from_str(r#"{"root":"test","put":["pub1","/a//b/"],"get":"","exp":1700000000}"#).unwrap();
+		assert_eq!(claims.publish, patterns(&["pub1/**", "a/b/**"]));
+		assert_eq!(claims.subscribe, patterns(&["**"]));
+		assert!(claims.expires.is_some());
+	}
+
+	#[test]
+	fn test_claims_write_legacy_prefixes_only_when_faithful() {
+		// Every grant is a subtree, so the legacy form says exactly the same thing.
+		let subtrees = Claims {
+			root: "live".into(),
+			publish: patterns(&["camera1/**"]),
+			subscribe: patterns(&["**"]),
+			..Default::default()
+		};
+		let json = serde_json::to_string(&subtrees).unwrap();
+		assert_eq!(json, r#"{"root":"live","put":["camera1"],"get":[""]}"#);
+		let back: Claims = serde_json::from_str(&json).unwrap();
+		assert_eq!(back.publish, subtrees.publish);
+		assert_eq!(back.subscribe, subtrees.subscribe);
+
+		// One grant a prefix can't say moves the whole document to patterns.
+		let mixed = Claims {
+			root: "live".into(),
+			publish: patterns(&["camera1/**"]),
+			subscribe: patterns(&["*/chat"]),
+			..Default::default()
+		};
+		assert_eq!(
+			serde_json::to_string(&mixed).unwrap(),
+			r#"{"root":"live","publish":["camera1/**"],"subscribe":["*/chat"]}"#
+		);
+	}
+
+	#[test]
+	fn test_claims_refuse_mixed_or_unknown_fields() {
 		for json in [
-			r#"{"root":"test","put":["pub1"]}"#,
-			r#"{"root":"test","get":"sub1"}"#,
 			r#"{"root":"test","publish":["pub1"],"get":["sub1"]}"#,
+			r#"{"root":"test","put":[],"subscribe":["sub1"]}"#,
+			r#"{"root":"test","put":["pub1"],"cluster":true}"#,
 		] {
-			let err = serde_json::from_str::<Claims>(json).unwrap_err();
-			assert!(err.to_string().contains("unknown field"), "{json}: {err}");
+			assert!(serde_json::from_str::<Claims>(json).is_err(), "{json}");
 		}
+	}
+
+	#[test]
+	fn test_claims_refuse_a_wildcard_in_a_legacy_prefix() {
+		// Legacy prefixes had no wildcards; a `*` would silently widen the grant.
+		assert!(serde_json::from_str::<Claims>(r#"{"put":["a/*"]}"#).is_err());
 	}
 
 	#[test]

@@ -66,10 +66,12 @@ Other changes to a deployment:
   `anon`; write `anon/**` for the subtree. This applies to `--auth-public`,
   TOML `public`, and the `[auth.public]` table, which is now
   `public_subscribe` / `public_publish`.
-- **Re-mint tokens.** JWT `publish` and `subscribe` claims are patterns, so a
-  token granting `alice` covers only `alice`; sign `alice/**` instead. Tokens
-  carrying the retired `put` or `get` claims fail verification, so re-mint
-  them when the relay and auth server upgrade.
+- **Token grants are patterns.** JWT `publish` and `subscribe` claims are
+  patterns, so a token granting `alice` covers only `alice`; sign `alice/**`
+  instead. Existing `put`/`get` tokens and key scopes keep working as subtrees,
+  and subtree-only grants are still signed in that form, so issuers and
+  verifiers can upgrade in either order. Grants only a pattern can express
+  need an upgraded verifier.
 - **mTLS admits nothing on its own.** A verified client certificate is reported
   to the auth server, which grants it. `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` restores the old full access for every certificate
   the relay's client CA verifies, so keep that CA to cluster peers.

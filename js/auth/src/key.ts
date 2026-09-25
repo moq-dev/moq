@@ -3,6 +3,7 @@ import * as z from "@zod/mini";
 import * as jose from "jose";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
 import { type Claims, ClaimsSchema, ScopeSchema, scopeAllows } from "./claims.ts";
+import { encodeGrants } from "./wire.ts";
 
 /**
  * A validated key identifier (kid). Only alphanumeric, hyphens, and underscores.
@@ -194,7 +195,8 @@ async function sign(key: Key, claims: Claims): Promise<string> {
 	ensureClaimsWithinScope(key, claims);
 
 	const joseKey = await importJoseKey(key);
-	const jwt = await new jose.SignJWT(claims)
+	// Written the legacy way when that says the same thing, so older verifiers accept it.
+	const jwt = await new jose.SignJWT(encodeGrants(claims))
 		.setProtectedHeader({
 			alg: key.alg,
 			typ: "JWT",

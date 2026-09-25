@@ -6,6 +6,7 @@ import { Command, Option } from "commander";
 import type { Algorithm } from "./algorithm.ts";
 import { authorize, type Claims, type Scope, ScopeSchema } from "./claims.ts";
 import { Key } from "./key.ts";
+import { encodeGrants } from "./wire.ts";
 
 const program = new Command();
 
@@ -37,8 +38,9 @@ program
 				key = { ...key, scope };
 			}
 
-			const encodeKey = (k: object): string => {
-				const json = JSON.stringify(k, null, 2);
+			const encodeKey = (k: { scope?: Scope }): string => {
+				// Written the legacy way when that says the same thing, so older readers load it.
+				const json = JSON.stringify(k.scope ? { ...k, scope: encodeGrants(k.scope) } : k, null, 2);
 				if (options.base64) {
 					return base64.fromArrayBuffer(new TextEncoder().encode(json).buffer, true);
 				}

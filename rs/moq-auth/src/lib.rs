@@ -27,6 +27,7 @@ mod key_id;
 mod path;
 mod request;
 mod set;
+mod wire;
 
 pub mod lease;
 #[cfg(feature = "serve")]
