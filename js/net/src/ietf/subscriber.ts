@@ -2,7 +2,7 @@ import { race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
-import { controlTimeout, error, ProtocolViolation, reason, sessionCause } from "../error.ts";
+import { closeError, controlTimeout, error, ProtocolViolation, reason, sessionCause } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
@@ -487,10 +487,22 @@ export class Subscriber {
 		return consumer;
 	}
 
+	// The adapter is gone. If the transport has already closed, that close is the
+	// error. A still-open transport, such as a GOAWAY drain, has no peer code yet,
+	// so this does not wait for it.
+	async #closedSession(): Promise<Error> {
+		const quic = this.#quic;
+		if (!quic) return new Error("session closed");
+		return Promise.race([
+			closeError(quic),
+			new Promise<Error>((resolve) => queueMicrotask(() => resolve(new Error("session closed")))),
+		]);
+	}
+
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) {
-			request.reject(new Error("session closed"));
+			request.reject(await this.#closedSession());
 			return;
 		}
 
