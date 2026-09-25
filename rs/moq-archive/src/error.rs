@@ -90,7 +90,7 @@ pub enum Error {
 	#[error("timeline: {0}")]
 	Timeline(String),
 
-	/// The writer stopped running.
+	/// The writer stopped accepting commands.
 	#[error("writer closed")]
 	Closed,
 }

@@ -224,6 +224,8 @@ impl<S: ObjectStore> Writer<S> {
 		let mut commit: Option<Commit<S>> = None;
 		let mut deletions: VecDeque<(Instant, Vec<Key>)> = VecDeque::new();
 		let mut closed = false;
+		// Cleared once the channel yields nothing more: every sender dropped, or it closed and drained.
+		let mut accepting = true;
 
 		loop {
 			if commit.is_none()
@@ -234,23 +236,26 @@ impl<S: ObjectStore> Writer<S> {
 				commit = Some(committer.commit(pending, objects).boxed());
 			}
 
-			if commit.is_none() && closed && tracks.is_empty() && commands.is_empty() {
-				match segments {
-					Segments::Live(deferred) => {
-						segments = Segments::Drain(deferred.finish());
-						continue;
+			if commit.is_none() && closed && tracks.is_empty() {
+				// Refuse late commands, so an enrollment racing the end fails instead of vanishing.
+				commands.close();
+				if !accepting {
+					match segments {
+						Segments::Live(deferred) => {
+							segments = Segments::Drain(deferred.finish());
+							continue;
+						}
+						Segments::Drain(_) => break,
 					}
-					Segments::Drain(_) => break,
 				}
 			}
 
 			let deadline = deletions.front().map(|(deadline, _)| *deadline);
 			tokio::select! {
 				biased;
-				Some(command) = commands.recv() => match command {
-					// The segmenter already finished, so a late track has nowhere to go.
-					Command::Enroll { .. } if matches!(segments, Segments::Drain(_)) => {}
-					Command::Enroll { name, subscriber, recorder, timescale } => {
+				command = commands.recv(), if accepting => match command {
+					None => accepting = false,
+					Some(Command::Enroll { name, subscriber, recorder, timescale }) => {
 						let (cancel, cancelled) = watch::channel(());
 						reads.push(guard(cancelled.clone(), recv(name.clone(), subscriber)).boxed());
 						tracks.insert(name, TrackState {
@@ -263,10 +268,10 @@ impl<S: ObjectStore> Writer<S> {
 							cancelled,
 						});
 					}
-					Command::Remove(name) => {
+					Some(Command::Remove(name)) => {
 						tracks.remove(&name);
 					}
-					Command::Poke => {}
+					Some(Command::Poke) => {}
 				},
 				Some(read) = reads.next(), if !reads.is_empty() => {
 					handle(read, &mut tracks, &mut buffered, &mut reads);
@@ -1014,6 +1019,34 @@ mod tests {
 			.unwrap();
 		let expected: HashSet<_> = (3..6).map(|s| Key::groups("video", s..=s).unwrap()).collect();
 		assert_eq!(stored, expected);
+	}
+
+	#[tokio::test]
+	async fn commands_are_refused_once_the_recording_ends() {
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+
+		let store = Store::new(InMemory::new(), "rec");
+		// A long grace keeps `run` waiting on deletions after the timeline finishes.
+		let config =
+			Config::default().with_retention(Retention::new(Duration::from_secs(2), Duration::from_secs(3600)));
+		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
+		let control = writer.control();
+		control.pacing_track("video").await.unwrap();
+
+		for sequence in 0..6 {
+			group(&video, sequence, &[sequence * 1000]);
+		}
+		video.finish().unwrap();
+		source.finish();
+
+		let run = tokio::spawn(writer.run());
+		while window(&store).await.last().map(|record| record.segment) != Some(5) {
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		assert!(!run.is_finished());
+		assert_eq!(control.remove("video"), Err(Error::Closed));
+		run.abort();
 	}
 
 	#[tokio::test]
