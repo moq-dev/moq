@@ -13,7 +13,7 @@
 use bytes::Buf;
 
 use crate::{
-	Path, Pattern,
+	Hops, Path, PathOwned, Pattern,
 	coding::{Decode, Encode, VarInt},
 	ietf, lite,
 	path::Relative,
@@ -26,6 +26,7 @@ pub type Target = fn(&[u8]) -> bool;
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
 pub const TARGETS: &[(&str, Target)] = &[
 	("lite", lite_wire),
+	("announce", announce_stream),
 	("ietf", ietf_wire),
 	("varint", varint),
 	("path", path),
@@ -152,6 +153,93 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		20 => roundtrip::<lite::Parameters, _>(rest, version, stable),
 		_ => unreachable!("kind is taken modulo LITE_KINDS"),
 	}
+}
+
+/// One announcement on an announce stream, resolved: what the application sees.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Announced {
+	/// ANNOUNCE_START: a route's suffix and wire hop chain, taking the next id.
+	Start(PathOwned, Hops),
+	/// ANNOUNCE_UPDATE: a live id's new wire hop chain.
+	Update(u64, Hops),
+	/// ANNOUNCE_END: a live id retired.
+	End(u64),
+}
+
+fn announce_version(compress: bool) -> lite::Version {
+	match compress {
+		true => lite::Version::Lite07,
+		false => lite::Version::Lite06,
+	}
+}
+
+/// Encode `announced` as a publisher's announce stream: lite-07 with compression, or
+/// lite-06 literal framing. Every update and end must name a live id.
+pub fn encode_announces(announced: &[Announced], compress: bool) -> Vec<u8> {
+	let version = announce_version(compress);
+	let mut encoder = lite::AnnounceEncoder::new(version);
+	let mut data = Vec::new();
+	for announced in announced {
+		let msg = match announced {
+			Announced::Start(suffix, hops) => {
+				let (_, suffix, hops) = encoder.start(suffix.clone(), hops.clone());
+				lite::AnnounceBroadcast::Active {
+					suffix,
+					hops,
+					cost: Default::default(),
+				}
+			}
+			Announced::Update(id, hops) => lite::AnnounceBroadcast::Restart {
+				id: *id,
+				hops: encoder.update(*id, hops.clone()),
+				cost: Default::default(),
+			},
+			Announced::End(id) => {
+				encoder.end(*id);
+				lite::AnnounceBroadcast::EndedId { id: *id }
+			}
+		};
+		msg.encode(&mut data, version)
+			.expect("could not encode an announcement");
+	}
+	data
+}
+
+/// Decode and resolve an announce stream, as [`encode_announces`] writes it, stopping
+/// at the first message that fails to decode or resolve: a subscriber closes the
+/// session there.
+pub fn decode_announces(mut data: &[u8], compress: bool) -> Vec<Announced> {
+	let version = announce_version(compress);
+	let mut decoder = lite::AnnounceDecoder::default();
+	let mut resolved = Vec::new();
+	while let Ok(msg) = lite::AnnounceBroadcast::decode(&mut data, version) {
+		let announced = match msg {
+			lite::AnnounceBroadcast::Active { suffix, hops, .. } => decoder
+				.start(suffix, hops)
+				.map(|(suffix, hops)| Announced::Start(suffix, hops)),
+			lite::AnnounceBroadcast::Restart { id, hops, .. } => {
+				decoder.update(id, hops).map(|(_, hops)| Announced::Update(id, hops))
+			}
+			lite::AnnounceBroadcast::EndedId { id } => decoder.end(id).map(|_| Announced::End(id)),
+			_ => continue,
+		};
+		let Ok(announced) = announced else {
+			break;
+		};
+		resolved.push(announced);
+	}
+	resolved
+}
+
+/// Feed a lite-07 announce stream through the stateful decoder, then check that our
+/// encoder's compression of what it resolved reads back as the same announcements.
+///
+/// Returns whether anything resolved.
+pub fn announce_stream(data: &[u8]) -> bool {
+	let resolved = decode_announces(data, true);
+	let echo = decode_announces(&encode_announces(&resolved, true), true);
+	assert_eq!(echo, resolved, "compression did not survive a round trip");
+	!resolved.is_empty()
 }
 
 /// Decode one IETF moq-transport wire object from arbitrary bytes.
@@ -514,6 +602,28 @@ pub fn seeds() -> Vec<Seed> {
 			target: "ietf",
 			kind: 19,
 			data,
+		});
+	}
+
+	// Announce streams from our own encoder: routes sharing path heads and relay tails,
+	// with retractions and updates moving the bases around.
+	let mut announced = Vec::new();
+	let hop = |id: u64| crate::Hop::new(id).expect("a valid hop");
+	for n in 0..12u64 {
+		let suffix = PathOwned::from(format!("pid{}/private/channel_{}/health-{n}", n % 3, n % 2));
+		let hops = Hops::try_from(vec![hop(100 + n % 3), hop(1 << 40), hop(1 << 41)]).expect("valid hops");
+		announced.push(Announced::Start(suffix, hops));
+		if n % 4 == 3 {
+			let hops = Hops::try_from(vec![hop(200), hop(1 << 41)]).expect("valid hops");
+			announced.push(Announced::Update(n, hops));
+		}
+		if n % 5 == 4 {
+			announced.push(Announced::End(n));
+		}
+		seeds.push(Seed {
+			target: "announce",
+			kind: 0,
+			data: encode_announces(&announced, true),
 		});
 	}
 

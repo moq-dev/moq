@@ -160,12 +160,13 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	) -> Result<(), Error> {
 		match announce {
 			lite::AnnounceBroadcast::Active { suffix, hops, cost } => {
-				let path = prefix.join(&suffix);
-				if self.version.has_announce_id() {
+				let (suffix, hops) = match self.version.has_announce_id() {
 					// Every `active` assigns the next ordinal, even ones we drop locally.
-					run.announced_by_id.insert(run.next_announce_id, path.clone());
-					run.next_announce_id += 1;
-				}
+					true => run.decoder.start(suffix, hops)?,
+					// Nothing references an announcement here, so there are no bases.
+					false => (suffix.rest.into_owned(), hops.literal),
+				};
+				let path = prefix.join(&suffix);
 				if lite::restart_supported(self.version)
 					&& !self.version.has_announce_id()
 					&& run.announced.contains(&path)
@@ -201,18 +202,15 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			lite::AnnounceBroadcast::EndedId { id } => {
 				// Resolve and retire the id; an unknown or already-retired id is a
 				// protocol violation.
-				let Some(path) = run.announced_by_id.remove(&id) else {
-					return Err(Error::ProtocolViolation);
-				};
+				let path = prefix.join(&run.decoder.end(id)?);
 				tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 				run.announced.retire(&path);
 			}
 			lite::AnnounceBroadcast::Restart { id, hops, cost } => {
 				// Resolve the id; it stays live (the replacement reuses it). An unknown
 				// or retired id is a protocol violation.
-				let Some(path) = run.announced_by_id.get(&id).cloned() else {
-					return Err(Error::ProtocolViolation);
-				};
+				let (suffix, hops) = run.decoder.update(id, hops)?;
+				let path = prefix.join(&suffix);
 				self.restart_announce(
 					path,
 					hops,
@@ -1090,11 +1088,9 @@ struct PrefixRun {
 	announced: Announced,
 	// Lite06+: announce ids. Each received `active` implicitly assigns the next
 	// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
-	// path. Tracked even for announces we drop locally (reflected loops), since
-	// the sender doesn't know we dropped them. We never send a restart ourselves,
-	// but a peer may.
-	next_announce_id: u64,
-	announced_by_id: HashMap<u64, PathOwned>,
+	// path, and lite-07 bases name it too. Tracked even for announces we drop
+	// locally (reflected loops), since the sender doesn't know we dropped them.
+	decoder: lite::AnnounceDecoder,
 }
 
 impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
@@ -1180,8 +1176,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						responder_origin,
 						link_cost,
 						announced: Announced::default(),
-						next_announce_id: 0,
-						announced_by_id: HashMap::new(),
+						decoder: lite::AnnounceDecoder::default(),
 					};
 
 					// Lite01/02 send the initial set as one ANNOUNCE_INIT message, so they

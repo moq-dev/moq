@@ -5,9 +5,11 @@ import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import {
 	type AnnounceBroadcast,
+	AnnounceHistory,
 	AnnounceOk,
 	AnnounceRequest,
 	decodeAnnounceBroadcast,
+	decodeAnnounceBroadcastMaybe,
 	encodeAnnounceBroadcast,
 } from "./announce.ts";
 import { Version } from "./version.ts";
@@ -211,4 +213,140 @@ test("a hop chain that revisits a hop is refused in both directions", async () =
 		hops: [unknown, four, unknown],
 	};
 	expect(await roundTrip(anonymous, Version.DRAFT_05)).toEqual(anonymous);
+});
+
+function hex(data: Uint8Array): string {
+	return Array.from(data, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function unhex(text: string): Uint8Array {
+	return new Uint8Array(text.match(/../g)?.map((b) => Number.parseInt(b, 16)) ?? []);
+}
+
+// Resolve every announcement on a lite-07 stream, as the subscriber does.
+async function resolveStream(data: Uint8Array) {
+	const reader = new Reader(undefined, data);
+	const history = new AnnounceHistory();
+	const out: unknown[] = [];
+	for (;;) {
+		const msg = await decodeAnnounceBroadcastMaybe(reader, Version.DRAFT_07);
+		if (!msg) return out;
+		switch (msg.status) {
+			case "active":
+				out.push({ start: history.start(msg) });
+				break;
+			case "restart":
+				out.push({ update: msg.id, hops: history.update(msg).hops });
+				break;
+			case "endedId":
+				out.push({ end: msg.id, suffix: history.end(msg.id) });
+				break;
+			default:
+				throw new Error(`unexpected ${msg.status}`);
+		}
+	}
+}
+
+const hop = (id: bigint) => HopSchema.parse(id);
+const relay = hop(0x2222n);
+const GOLDEN_RESOLVED = [
+	{ start: { suffix: Path.from("room/a/cam"), hops: [hop(0x1111n), relay] } },
+	{ start: { suffix: Path.from("room/a/mic"), hops: [hop(0x3333n), relay] } },
+	{ update: 0n, hops: [hop(0x4444n), relay] },
+	{ end: 1n, suffix: Path.from("room/a/mic") },
+	{ start: { suffix: Path.from("room/b"), hops: [hop(0x5555n), relay] } },
+];
+
+// Pinned from the Rust encoder (`lite::compress::tests::golden_stream_is_pinned`), so the
+// JS decoder is checked against real compressed output.
+const GOLDEN =
+	"001600000a726f6f6d2f612f63616d000251116222000000000d0102036d696301017333010000020a00010180004444010000010101000d02010162020180005555010000";
+
+test("AnnounceHistory resolves the Rust encoder's compressed stream", async () => {
+	expect(await resolveStream(unhex(GOLDEN))).toEqual(GOLDEN_RESOLVED);
+});
+
+// JS always encodes literally; Rust decodes these bytes too (`js_literal_stream_decodes`).
+const JS_LITERAL =
+	"001600000a726f6f6d2f612f63616d000251116222000000001600000a726f6f6d2f612f6d6963000273336222000000020c0000028000444462220000000101010014000006726f6f6d2f620002800055556222000000";
+
+test("the literal draft-07 stream matches what Rust decodes", async () => {
+	const wire = await bytes(async (w) => {
+		const v = Version.DRAFT_07;
+		const cost = { warm: 0n, cold: 0n };
+		await encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room/a/cam"), hops: [hop(0x1111n), relay], cost },
+			v,
+		);
+		await encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room/a/mic"), hops: [hop(0x3333n), relay], cost },
+			v,
+		);
+		await encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [hop(0x4444n), relay], cost }, v);
+		await encodeAnnounceBroadcast(w, { status: "endedId", id: 1n }, v);
+		await encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room/b"), hops: [hop(0x5555n), relay], cost },
+			v,
+		);
+	});
+	expect(hex(wire)).toBe(JS_LITERAL);
+	expect(await resolveStream(wire)).toEqual(GOLDEN_RESOLVED);
+});
+
+test("AnnounceHistory rejects a base that is not live", () => {
+	const history = new AnnounceHistory();
+	const base = { distance: 1n, keep: 0 };
+	// A new stream has nothing to copy from.
+	expect(() => history.start({ suffix: Path.from("a"), hops: [], pathBase: base })).toThrow(ProtocolViolation);
+
+	const fresh = new AnnounceHistory();
+	fresh.start({ suffix: Path.from("a/b"), hops: [hop(1n)] });
+	fresh.start({ suffix: Path.from("c"), hops: [] });
+	fresh.end(0n);
+	// Id 0 is two back, and retired.
+	expect(() => fresh.start({ suffix: Path.from("x"), hops: [], pathBase: { distance: 2n, keep: 1 } })).toThrow(
+		ProtocolViolation,
+	);
+});
+
+test("AnnounceHistory rejects a keep longer than the base", () => {
+	const history = new AnnounceHistory();
+	history.start({ suffix: Path.from("a/b"), hops: [hop(1n)] });
+	expect(() => history.start({ suffix: Path.from("x"), hops: [], pathBase: { distance: 1n, keep: 3 } })).toThrow(
+		ProtocolViolation,
+	);
+	expect(() => history.update({ id: 0n, hops: [], hopBase: { distance: 1n, keep: 2 } })).toThrow(ProtocolViolation);
+});
+
+test("AnnounceHistory rejects a resolved chain that repeats a hop", () => {
+	const history = new AnnounceHistory();
+	history.start({ suffix: Path.from("a"), hops: [hop(1n), hop(2n)] });
+	expect(() =>
+		history.start({ suffix: Path.from("b"), hops: [hop(2n)], hopBase: { distance: 1n, keep: 1 } }),
+	).toThrow(ProtocolViolation);
+});
+
+test("a keep without a base is a violation on draft-07", async () => {
+	// ANNOUNCE_START: type, length, path base 0, path keep 1, empty suffix, empty hops, cost.
+	const wire = await bytes(async (w) => {
+		await w.u53(0);
+		await w.u53(8);
+		for (const b of [0, 1, 0, 0, 0, 0, 0, 0]) await w.u8(b);
+	});
+	await expect(decodeAnnounceBroadcast(new Reader(undefined, wire), Version.DRAFT_07)).rejects.toThrow(
+		ProtocolViolation,
+	);
+});
+
+test("draft-06 has no room for a base", async () => {
+	const msg: AnnounceBroadcast = {
+		status: "active",
+		suffix: Path.from("x"),
+		hops: [],
+		pathBase: { distance: 1n, keep: 1 },
+	};
+	await expect(bytes((w) => encodeAnnounceBroadcast(w, msg, Version.DRAFT_06))).rejects.toThrow();
 });

@@ -28,6 +28,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "announce"
+path = "fuzz_targets/announce.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ietf"
 path = "fuzz_targets/ietf.rs"
 test = false

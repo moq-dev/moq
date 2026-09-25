@@ -383,6 +383,14 @@ A route covers a path when its prefix is a leading run of the path's segments; m
 A publisher answering a request stream presents each of its routes clamped to the intersection with the requested prefix: a route above the request's prefix appears as the request prefix itself (an empty suffix), which is exactly the covered set the subscriber may see.
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK + announcements.
 
+#### Compression {#announce-compression}
+An ANNOUNCE_START or ANNOUNCE_UPDATE MAY copy the head of a path or the tail of a Hop ID list from a live advertisement on the same stream, its base.
+A `Base` field names it by distance: the base's Announce ID is the next unassigned Announce ID minus `Base`, so 1 names the latest ANNOUNCE_START, and 0 names no base.
+The receiver resolves every base against the advertisements live when the message arrives, and the result is identical to the literal encoding: a base ending later changes nothing.
+A publisher MAY always send a `Base` of 0.
+
+The subscriber MUST close the session with a PROTOCOL_VIOLATION if a non-zero `Base` names an Announce ID that was never assigned or already retired, a `Keep` is non-zero with a `Base` of 0 or exceeds what the base has, or the resolved path or Hop ID list breaks its own rules.
+
 #### Hidden Paths {#hidden}
 A route is hidden from a request when a segment of its path below the requested prefix starts with `.` (0x2E).
 A segment inside the prefix never hides anything, so a request that names the hidden segment itself (`.stats`) lists what is under it, and a route at or above the prefix has no segment below it.
@@ -861,24 +869,40 @@ Only the suffix is encoded on the wire, as the full route prefix can be construc
 ANNOUNCE_START Message {
   Type (i) = 0x0
   Message Length (i)
+  Path Base (i),
+  Path Keep (i),
   Route Prefix Suffix (s),
-  Hop Count (i),
-  Hop ID (i) ...,
+  Hops (..),
   Warm Route Cost (i),
   Cold Route Cost (i),
+}
+
+Hops {
+  Hop Base (i),
+  Hop Count (i),
+  Hop ID (i) ...,
+  Hop Keep (i),
 }
 ~~~
 
 **Type**:
 Set to 0x0 to indicate an ANNOUNCE_START message.
 
+**Path Base** and **Path Keep**:
+The suffix begins with the first `Path Keep` segments of the suffix advertised by the base that `Path Base` names (see [Compression](#announce-compression)).
+
 **Route Prefix Suffix**:
-This is combined with the requested prefix to form the route's full prefix.
+The remaining segments of the suffix, which is combined with the requested prefix to form the route's full prefix.
 An empty suffix advertises the requested prefix itself, which is how a route covering more than the request presents (see [Announce](#announce)).
 
+**Hop Base** and **Hop Keep**:
+The Hop ID list ends with the last `Hop Keep` entries of the list advertised by the base that `Hop Base` names (see [Compression](#announce-compression)), following the literal `Hop ID` entries.
+The two bases are independent.
+
 **Hop Count**:
-The number of Hop ID entries that follow, NOT including the publisher's own `Hop ID` from ANNOUNCE_OK.
-A value of 0 means no Hop ID entries are present, indicating either that the announcement originated locally on the publisher (the publisher itself is the origin) or that the upstream peer does not support hop tracking.
+The number of literal Hop ID entries that follow.
+The resolved list does NOT include the publisher's own `Hop ID` from ANNOUNCE_OK.
+An empty list indicates either that the announcement originated locally on the publisher (the publisher itself is the origin) or that the upstream peer does not support hop tracking.
 A receiver MUST close the stream with a PROTOCOL_VIOLATION if the Hop Count does not match the number of subsequent Hop ID entries.
 
 **Hop ID**:
@@ -891,7 +915,7 @@ A received 0 is forwarded unchanged.
 When bridging an announcement from an upstream that sent no hop list, a relay writes 0 for that hop.
 An identity a receiver assigned that upstream is local selection state and MUST NOT be forwarded as a Hop ID.
 
-A receiver MUST close the session with a PROTOCOL_VIOLATION if a non-zero Hop ID appears twice in this list.
+A receiver MUST close the session with a PROTOCOL_VIOLATION if a non-zero Hop ID appears twice in the resolved list.
 Duplicate values of 0 are not a violation, since 0 identifies nothing and any number of hops may be unknown.
 
 **Warm Route Cost** and **Cold Route Cost**:
@@ -937,8 +961,7 @@ ANNOUNCE_UPDATE Message {
   Type (i) = 0x2
   Message Length (i)
   Announce ID (i),
-  Hop Count (i),
-  Hop ID (i) ...,
+  Hops (..),
   Warm Route Cost (i),
   Cold Route Cost (i),
 }
@@ -951,8 +974,9 @@ Set to 0x2 to indicate an ANNOUNCE_UPDATE message.
 The ordinal implicitly assigned by a prior ANNOUNCE_START on this stream.
 Referencing an id that was never assigned, or one already retired by an ANNOUNCE_END, is a protocol violation.
 
-**Hop Count**, **Hop ID**, **Warm Route Cost**, and **Cold Route Cost**:
+**Hops**, **Warm Route Cost**, and **Cold Route Cost**:
 As defined for [ANNOUNCE_START](#announce-start).
+`Hop Base` may name this advertisement itself, which resolves against the list being replaced.
 An update whose only change is a Route Cost is valid: it is how a relay re-prices a route without disturbing it.
 
 
@@ -1332,6 +1356,7 @@ The `Message Length` describes the payload size on the wire.
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
 - Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
+- Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 
 ## moq-lite-06
 

@@ -230,6 +230,22 @@ export function hasHidden(version: Version): boolean {
 	}
 }
 
+/** Whether ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail from a live announcement. Added in lite-07. */
+export function hasAnnounceCompression(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /// The WebTransport subprotocol identifier for moq-lite.
 /// Version negotiation still happens via SETUP when this is used.
 export const ALPN = "moql";

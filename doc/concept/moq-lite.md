@@ -56,6 +56,11 @@ anonymous mark and travels the chain unchanged. A route that passed through an
 anonymous hop at any depth ranks below every fully identified route, whatever
 the costs say; among anonymous routes, cost keeps ordering.
 
+On moq-lite 07, an announcement may copy the head of its path and the tail of
+its relay chain from one still live on the same stream, so many broadcasts
+from a few origins behind the same relays stop repeating those bytes. Rust
+compresses when it helps; TypeScript decodes it but always sends literally.
+
 A broadcast exists only while it is announced, for consumers in the same
 process and across a session alike: one that is created but never announced
 can be neither discovered nor requested. A broadcast published locally

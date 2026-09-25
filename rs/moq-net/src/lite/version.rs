@@ -18,7 +18,9 @@ pub enum Version {
 	/// as `moq-lite-06` and preferred by the default version sets.
 	Lite06,
 	/// Lite-07. Adds the hidden opt-in to ANNOUNCE_REQUEST: without it, a route with
-	/// a `.`-prefixed segment below the requested prefix is left out. The wire format is
+	/// a `.`-prefixed segment below the requested prefix is left out. ANNOUNCE_START and
+	/// ANNOUNCE_UPDATE may copy a path head or hop-chain tail from a live announcement
+	/// on the same stream. The wire format is
 	/// still work-in-progress, so it is advertised over ALPN as `moq-lite-07-wip` and
 	/// only when explicitly requested; the default version sets leave it out.
 	Lite07,
@@ -174,6 +176,17 @@ impl Version {
 	/// requests decode as not opted in.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_hidden(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail
+	/// from a live announcement on the same stream. Added in lite-07.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_announce_compression(self) -> bool {
 		// Match form so future versions default forward (CLAUDE.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
