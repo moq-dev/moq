@@ -253,19 +253,28 @@ mod tests {
 
 		let err = pick(Kind::Auto, &[REFUSING], &[ALSO_REFUSING]).unwrap_err();
 		let message = err.to_string();
-		assert!(message.contains("refusing: ") && message.contains("also-refusing: "), "{message}");
+		assert!(
+			message.contains("refusing: ") && message.contains("also-refusing: "),
+			"{message}"
+		);
 	}
 
 	/// An unknown name says what this build has for the codec instead.
 	#[test]
 	fn unknown_name_lists_the_alternatives() {
-		let err = open(&opus(), &Config {
-			kind: Kind::Named("opus".into()),
-		})
+		let err = open(
+			&opus(),
+			&Config {
+				kind: Kind::Named("opus".into()),
+			},
+		)
 		.err()
 		.expect("no backend is named after its codec");
 		let message = err.to_string();
-		assert!(message.contains("\"opus\"") && message.contains(libopus::NAME), "{message}");
+		assert!(
+			message.contains("\"opus\"") && message.contains(libopus::NAME),
+			"{message}"
+		);
 	}
 
 	/// Asking for a real backend that does not decode the codec is refused, not
