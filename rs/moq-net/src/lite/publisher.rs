@@ -1294,7 +1294,10 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 					self.track = msg.track.to_string();
 					tracing::debug!(broadcast = %self.absolute, track = %self.track, "track info requested");
 					// Checked before anything is resolved, like a subscription.
-					let allowed = self.shared.auth.allows(crate::auth::Direction::Publish, msg.broadcast.as_str());
+					let allowed = self
+						.shared
+						.auth
+						.allows(crate::auth::Direction::Publish, msg.broadcast.as_str());
 					self.state = TrackInfoState::Hop { msg };
 					if !allowed {
 						return Poll::Ready(Err(Error::Unauthorized));
@@ -1696,7 +1699,10 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 					tracing::info!(broadcast = %self.absolute, track = %self.track, group = %self.group, "fetch started");
 
 					// Checked before anything is resolved, like a subscription.
-					let allowed = self.shared.auth.allows(crate::auth::Direction::Publish, msg.broadcast.as_str());
+					let allowed = self
+						.shared
+						.auth
+						.allows(crate::auth::Direction::Publish, msg.broadcast.as_str());
 					self.state = FetchState::Hop { msg };
 					if !allowed {
 						return Poll::Ready(Err(Error::Unauthorized));
