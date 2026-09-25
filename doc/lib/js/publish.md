@@ -54,6 +54,11 @@ framerate, and bitrate are tunable through `el.video.config`; the audio
 encoder exposes its codec and volume. For simulcast or several renditions,
 drop the element and register your own encoders on a `Publish.Broadcast`.
 
+The video and audio encoders measure how far their output falls behind the media
+clock when they flush frames. Catalog jitter is the spread above each
+rendition's own recent minimum lateness, so a constant encoder delay is not jitter.
+The advertised value only rises; frame duration alone does not set it.
+
 ## Clock
 
 Every timestamp the publisher writes is `performance.now()` in microseconds,

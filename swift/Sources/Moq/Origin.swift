@@ -113,8 +113,9 @@ public final class OriginConsumer: Sendable {
     }
 
     /// Stream routes under a literal prefix matching an optional pattern filter.
-    public func announced(prefix: String = "", filter: String? = nil) throws -> AnnounceConsumer {
-        AnnounceConsumer(try ffi.announced(config: MoqAnnounceConfig(prefix: prefix, filter: filter)))
+    /// Paths with a segment starting with `.` below the prefix are left out unless `hidden`.
+    public func announced(prefix: String = "", filter: String? = nil, hidden: Bool = false) throws -> AnnounceConsumer {
+        AnnounceConsumer(try ffi.announced(config: MoqAnnounceConfig(prefix: prefix, filter: filter, hidden: hidden)))
     }
 
     /// Wait for a route covering an exact path, then resolve the broadcast there.

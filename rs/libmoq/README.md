@@ -71,6 +71,7 @@ int32_t moq_publish_container_write(uint32_t container, const uint8_t *payload, 
 int32_t moq_publish_container_finish(uint32_t container);
 int32_t moq_publish_media_finish(uint32_t media);
 int32_t moq_publish_media_frame(uint32_t media, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
+int32_t moq_publish_media_flush(uint32_t media, uint64_t timestamp_us);
 int32_t moq_publish_track(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_track_info *info);
 int32_t moq_publish_track_group(uint32_t track);
 int32_t moq_publish_track_frame(uint32_t track, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);

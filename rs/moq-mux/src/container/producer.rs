@@ -81,8 +81,8 @@ pub struct Producer<C: Container, R = ()> {
 	/// A presentation endpoint cannot bound the decode-order tail after reordering.
 	reordered: bool,
 
-	/// Measures the jitter and bitrate of what gets written, for the catalog. Always on: it costs
-	/// two counters, and a caller who doesn't publish a rendition simply never reads it.
+	/// Measures bitrate, reorder, batch, and explicit encoder flush observations for the catalog.
+	/// A caller without a published rendition simply never reads the estimate.
 	estimator: crate::catalog::Estimator,
 
 	/// Peak-hold claim on the connection allocator, when one was supplied.
@@ -201,8 +201,8 @@ where
 	/// Modify the published catalog config.
 	///
 	/// Estimate fields the config left to detection at [`set`](Self::set) stay owned by detection:
-	/// an edit to them here is published but replaced by the next measurement. Call `set` with the
-	/// field filled in to pin it.
+	/// an edit to them here is published but replaced by the next measurement, except that jitter
+	/// never drops below the published value. Call `set` with the field filled in to pin it.
 	pub fn modify(&mut self) -> crate::Result<Guard<'_, R>> {
 		let rendition = self.rendition.as_mut().ok_or(crate::Error::NotPublished)?;
 		let config = rendition.config()?;
@@ -225,6 +225,13 @@ where
 			rendition.estimate(self.estimator.estimate())?;
 		}
 		Ok(())
+	}
+
+	/// Record when a locally encoded frame reached the transport. Imported media must leave
+	/// this clock observation out and rely on its container batch and reorder measurements.
+	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
+		self.estimator.flush(timestamp, now);
+		self.publish_estimate()
 	}
 
 	/// The catalog key owned by this producer.
@@ -376,6 +383,15 @@ where
 		self.live_edge
 	}
 
+	/// The lowest timestamp the next [`write`](Self::write) accepts: the live edge, or for a
+	/// keyframe, the edge once the group it closes is counted too.
+	pub(crate) fn floor(&self, keyframe: bool) -> Option<moq_net::Timestamp> {
+		match (self.live_edge, self.end.filter(|_| keyframe)) {
+			(Some(edge), Some(end)) if timestamp_lt(edge, end) => Some(end),
+			(edge, end) => edge.or(end),
+		}
+	}
+
 	/// Write a frame to the track.
 	///
 	/// A keyframe closes any open group and starts a new one. A non-keyframe extends the current
@@ -456,7 +472,7 @@ where
 				let first = iter.next().unwrap();
 				let (min, max) = iter.fold((first, first), |(min, max), d| (min.min(d), max.max(d)));
 				if max.saturating_sub(min) >= self.buffer_duration {
-					self.flush(None)?;
+					self.flush_buffer(None)?;
 				}
 			}
 		}
@@ -498,7 +514,7 @@ where
 		}
 
 		let tail_end = marker_at.filter(|_| !self.reordered);
-		self.flush(tail_end)?;
+		self.flush_buffer(tail_end)?;
 		if let Some(group) = self.group.as_mut() {
 			self.container.finish_group(group, tail_end)?;
 		}
@@ -642,7 +658,7 @@ where
 	/// stays exact in native ticks; a micros round-trip would quantize scales like
 	/// 90 kHz (3003 ticks is not a whole number of micros) and fMP4 would refuse
 	/// the inexact `trun` conversion.
-	fn flush(&mut self, next: Option<moq_net::Timestamp>) -> crate::Result<()> {
+	fn flush_buffer(&mut self, next: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		if self.buffer.is_empty() {
 			return Ok(());
 		}
@@ -757,7 +773,7 @@ mod tests {
 	/// The catalog estimate falls out of the writes themselves: a publisher never records anything
 	/// by hand, it just hands `estimate()` to its rendition.
 	#[tokio::test]
-	async fn writes_measure_the_catalog_estimate() {
+	async fn writes_measure_bitrate_without_inventing_jitter() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
@@ -768,8 +784,39 @@ mod tests {
 		producer.finish().unwrap();
 
 		let estimate = producer.estimate();
-		assert_eq!(estimate.jitter, Some(std::time::Duration::from_millis(25)));
+		assert_eq!(estimate.jitter, None, "PTS spacing alone is not flush delay");
 		assert_eq!(estimate.bitrate, Some(1_600_000));
+	}
+
+	#[test]
+	fn catalog_flush_measures_each_rendition_against_its_own_minimum() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut tracks = Vec::new();
+		for name in ["fast", "slow"] {
+			let net = broadcast
+				.create_track(name, catalog.track_info(hang::catalog::PRIORITY.video))
+				.unwrap();
+			let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			let mut track = catalog
+				.video(net, Container::Legacy(crate::container::Kind::Video), config)
+				.unwrap();
+			track.write(frame(0, true)).unwrap();
+			tracks.push(track);
+		}
+
+		let anchor = std::time::Instant::now();
+		let ms = std::time::Duration::from_millis;
+		let pts = |millis: u64| Timestamp::from_micros(millis * 1_000).unwrap();
+		tracks[0].flush(pts(0), anchor).unwrap();
+		// A constant 200ms offset behind the other rendition is not jitter.
+		tracks[1].flush(pts(0), anchor + ms(200)).unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["slow"].jitter, None);
+
+		// A frame flushed 60ms later than the slow rendition's own minimum is.
+		tracks[1].flush(pts(40), anchor + ms(300)).unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["fast"].jitter, None);
+		assert_eq!(catalog.snapshot().video.renditions["slow"].jitter, Some(ms(60)));
 	}
 
 	/// A passthrough producer claims nothing until the first window closes, then
@@ -941,7 +988,7 @@ mod tests {
 
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(16_000, false)).unwrap();
-		assert_eq!(producer.estimate().jitter, Some(std::time::Duration::from_millis(16)));
+		assert_eq!(producer.estimate().jitter, None, "PTS spacing alone is not flush delay");
 
 		producer.reorder(Timestamp::from_micros(48_000).unwrap());
 		assert_eq!(

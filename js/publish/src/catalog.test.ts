@@ -118,7 +118,7 @@ test("a reconnecting subscriber is seeded with the full current catalog", async 
 
 test("catalog producer refuses zero jitter before retaining an edit", () => {
 	const catalog = new CatalogProducer();
-	for (const section of ["audio", "video"] as const) {
+	for (const section of ["audio", "video", "text"] as const) {
 		expect(() =>
 			catalog.mutate((value) => {
 				Object.assign(value, {
@@ -143,7 +143,7 @@ test("catalog producer refuses zero jitter before retaining an edit", () => {
 	});
 });
 
-for (const section of ["audio", "video"] as const) {
+for (const section of ["audio", "video", "text"] as const) {
 	test(`catalog refuses ${section} jitter decreases without retaining them`, () => {
 		const catalog = new CatalogProducer();
 		catalog.mutate((value) => {

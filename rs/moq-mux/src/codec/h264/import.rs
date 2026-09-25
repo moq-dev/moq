@@ -114,6 +114,12 @@ impl Import {
 		self.track.name()
 	}
 
+	/// The lowest timestamp the track accepts next; see
+	/// [`Producer::floor`](crate::container::Producer::floor).
+	pub(crate) fn floor(&self, keyframe: bool) -> Option<moq_net::Timestamp> {
+		self.track.floor(keyframe)
+	}
+
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()
@@ -149,6 +155,11 @@ impl Import {
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;
 		Ok(())
+	}
+
+	/// Record a locally encoded frame's transport handoff for catalog jitter measurement.
+	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
+		self.track.flush(timestamp, now)
 	}
 
 	/// Record a frame's reorder delay (`PTS - DTS`) so the catalog `jitter` reflects the

@@ -3,7 +3,7 @@ import type * as broadcast from "../broadcast.ts";
 import { error, NotFound, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { type Hop, type Route, routesEqual } from "../hop.ts";
-import { hooks } from "../internal.ts";
+import { hiddenBelow, hooks } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
@@ -32,7 +32,11 @@ import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, resolvesStart,
 // Where each originated route lands under the requested prefix: its suffix beneath
 // the prefix, or the empty suffix for a route above it, where the most specific
 // such route wins the way a request through the prefix would resolve.
-function presented(prefix: Path.Valid, table: ReadonlyMap<Path.Valid, Advertised>): Map<Path.Valid, Advertised> {
+function presented(
+	prefix: Path.Valid,
+	table: ReadonlyMap<Path.Valid, Advertised>,
+	hidden: boolean,
+): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
 	let rootLen = -1;
 	for (const [covered, snap] of table) {
@@ -42,6 +46,8 @@ function presented(prefix: Path.Valid, table: ReadonlyMap<Path.Valid, Advertised
 			out.set(Path.empty(), snap);
 			continue;
 		}
+		// A hidden route stays off the wire unless the request opted in.
+		if (!hidden && hiddenBelow(prefix, covered)) continue;
 		const suffix = Path.stripPrefix(prefix, covered);
 		if (suffix !== null) out.set(suffix, snap);
 	}
@@ -460,7 +466,7 @@ export class Publisher {
 			const initial = this.#advertised.peek();
 			if (!initial) return; // closed
 
-			for (const [name, snap] of presented(msg.prefix, initial)) {
+			for (const [name, snap] of presented(msg.prefix, initial, msg.hidden)) {
 				active.set(name, snap);
 			}
 
@@ -505,7 +511,7 @@ export class Publisher {
 				if (!latest) break;
 
 				const updated = new Map<Path.Valid, Advertised>();
-				for (const [name, snap] of presented(msg.prefix, latest)) {
+				for (const [name, snap] of presented(msg.prefix, latest, msg.hidden)) {
 					updated.set(name, snap);
 				}
 
@@ -1037,11 +1043,12 @@ export class Publisher {
 					}
 
 					try {
+						// A group that ends exactly at the start is a valid, empty range.
+						if (read.sequence + 1 >= startFrame) reached = true;
 						// Frames below the requested start were excluded, and the receiver
 						// numbers what it gets from `startFrame`.
 						if (read.sequence < startFrame) continue;
 						if (endFrame !== undefined && read.sequence > endFrame) break;
-						reached = true;
 
 						if (timestamps) {
 							// Convert each frame to the track's advertised timescale.

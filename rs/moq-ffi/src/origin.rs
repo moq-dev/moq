@@ -22,6 +22,9 @@ pub struct MoqAnnounceConfig {
 	/// Pattern relative to `prefix`, or `None` for every path beneath it.
 	#[uniffi(default = None)]
 	pub filter: Option<String>,
+	/// Also list hidden paths: those with a segment starting with `.` below the prefix.
+	#[uniffi(default = false)]
+	pub hidden: bool,
 }
 
 /// A path-prefix route: hops and costs for an advertisement.
@@ -321,7 +324,10 @@ impl MoqOriginConsumer {
 			None => moq_net::Pattern::all(),
 		};
 		let filter = filter.rooted(&config.prefix)?;
-		let origin = self.inner.scope("", &moq_net::Patterns::from(filter))?;
+		let origin = self
+			.inner
+			.scope("", &moq_net::Patterns::from(filter))?
+			.with_hidden(config.hidden);
 		Ok(Arc::new(MoqAnnounceConsumer {
 			task: Task::new(Announced {
 				inner: origin.announced(),

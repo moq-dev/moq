@@ -1124,9 +1124,13 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					// through us, so the reflected ones never hit the wire. Encoding drops
 					// this on every other version, where start_announce below is the only
 					// filter.
+					// Hidden routes are requested too: the session mirrors the peer into
+					// the origin, and each local reader opts in on its own
+					// (`origin::Consumer::with_hidden`).
 					stream.writer.buffer(&lite::AnnounceRequest {
 						prefix: self.prefix.as_path(),
 						exclude_hop: self.subscriber.self_origin.id(),
+						hidden: true,
 					})?;
 					self.state = PrefixState::Send { stream };
 				}
