@@ -57,6 +57,9 @@ pub struct Client {
 	pub(crate) reconnect: bool,
 	pub(crate) backoff: Backoff,
 	pub(crate) goaway: Goaway,
+	/// Whether the TLS config pins a certificate fingerprint, which only verifies
+	/// the configured host, so a GOAWAY may not redirect elsewhere.
+	pub(crate) pinned: bool,
 	/// The resolved Happy Eyeballs timings, used by the `tcp://` dial here; the
 	/// QUIC backend captures its own copy from the config.
 	#[cfg(feature = "tcp")]
@@ -135,6 +138,7 @@ impl Client {
 			reconnect: !config.once.unwrap_or(false),
 			backoff: config.backoff,
 			goaway: config.goaway,
+			pinned: !config.tls.fingerprint.is_empty(),
 			#[cfg(feature = "tcp")]
 			failover_delay,
 			#[cfg(feature = "tcp")]

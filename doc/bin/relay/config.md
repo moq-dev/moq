@@ -160,9 +160,11 @@ A draining upstream may name a replacement URI. `same-host` follows it only
 onto the host we already dialed, so a peer moves us between ports and schemes;
 `follow` also lets it choose the host, which means trusting it not to point us
 into the local network, since a name it controls resolves wherever it likes;
-`ignore` keeps the current address list. Empty, malformed, or refused redirects
-also preserve caller-configured fallbacks; only an accepted redirect replaces
-the list with the peer's URI. `handover` is a cap: a shorter deadline on
+`ignore` keeps the current address list. An empty URI also keeps it, including
+caller-configured fallbacks; an accepted redirect replaces the list with the
+peer's URI. A malformed or refused redirect ends the connection with an error
+rather than redialing the old address or a fallback, and so does one leaving
+the host a `tls.fingerprint` pin verifies. `handover` is a cap: a shorter deadline on
 the received GOAWAY wins, a longer one does not extend it.
 
 ## \[cache]

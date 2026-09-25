@@ -209,27 +209,38 @@ pub enum Redirect {
 impl Redirect {
 	/// Resolve the URL to dial after a GOAWAY, falling back to `current` when the
 	/// redirect is empty ("reconnect to me"), malformed, or refused by policy.
+	///
+	/// Lenient on purpose, for a caller that only wants somewhere to dial. A
+	/// [`Connection`] is stricter: it ends with [`Error::RefusedRedirect`] rather
+	/// than redialing after a malformed or refused URI.
 	pub fn resolve(&self, uri: &str, current: &Url) -> Url {
-		self.target(uri, current).unwrap_or_else(|| current.clone())
+		self.target(uri, current, false)
+			.ok()
+			.flatten()
+			.unwrap_or_else(|| current.clone())
 	}
 
-	// Absence keeps the caller's address list; only an accepted URI replaces it.
-	fn target(&self, uri: &str, current: &Url) -> Option<Url> {
+	/// The URL a GOAWAY assigns. `Ok(None)` keeps the current address list (the
+	/// peer named no URI, or the policy ignores it), `Ok(Some)` replaces it, and
+	/// `Err` is an explicit URI this policy refuses.
+	///
+	/// `pinned` is a certificate pin on the connection, which can only verify the
+	/// host it was configured for, so it refuses a host change even under
+	/// [`Self::Follow`].
+	fn target(&self, uri: &str, current: &Url, pinned: bool) -> crate::Result<Option<Url>> {
 		if uri.is_empty() || matches!(self, Self::Ignore) {
-			return None;
+			return Ok(None);
 		}
 
-		let Ok(target) = uri.parse::<Url>() else {
-			tracing::warn!(uri, "malformed GOAWAY URI; keeping the current addresses");
-			return None;
-		};
+		// The URI can carry credentials, so the error names the reason, never the URI.
+		let refuse = |reason: &str| Error::RefusedRedirect(reason.to_string());
+
+		let target = uri
+			.parse::<Url>()
+			.map_err(|_| refuse("the GOAWAY URI is malformed"))?;
 
 		if scheme_tier(target.scheme()) < scheme_tier(current.scheme()) {
-			tracing::warn!(
-				uri,
-				"GOAWAY redirect downgrades the scheme; keeping the current addresses"
-			);
-			return None;
+			return Err(refuse("the GOAWAY redirect downgrades the scheme"));
 		}
 
 		// Only as far as the URL itself says: a name is dialed, never resolved here,
@@ -237,24 +248,20 @@ impl Redirect {
 		// nothing about one that hides the same address behind a hostname. That gap
 		// is why [`Self::SameHost`] is the default; see [`is_local`].
 		if is_local(&target) && !is_local(current) {
-			tracing::warn!(
-				uri,
-				"GOAWAY redirect widens reachability; keeping the current addresses"
-			);
-			return None;
+			return Err(refuse("the GOAWAY redirect widens reachability to a local address"));
 		}
 
 		// Host only, not the full authority: the port is what a peer legitimately
 		// moves us across when it hands off to a sibling process on the same box.
-		if matches!(self, Self::SameHost) && target.host_str() != current.host_str() {
-			tracing::warn!(
-				uri,
-				"GOAWAY redirect leaves the current host; keeping the current addresses"
-			);
-			return None;
+		let same_host = target.host_str() == current.host_str();
+		if matches!(self, Self::SameHost) && !same_host {
+			return Err(refuse("the GOAWAY redirect leaves the current host"));
+		}
+		if pinned && !same_host {
+			return Err(refuse("the GOAWAY redirect leaves the host a certificate pin verifies"));
 		}
 
-		Some(target)
+		Ok(Some(target))
 	}
 }
 
@@ -762,11 +769,14 @@ impl Connection {
 					// ended sooner counts as a failed attempt however it ended.
 					let healthy = connected.elapsed() >= initial;
 
-					// The connected target owns the policy, including in one-shot mode.
-					if let Ended::Goaway(msg) = &ended
-						&& addr.addresses().is_some()
-						&& goaway.redirect.target(msg.uri(), &url).is_some()
-					{
+					// The connected target owns the policy, including in one-shot mode. A
+					// refused redirect is terminal: the peer is leaving and named somewhere we
+					// won't go, so redialing the old address or a fallback would ignore it.
+					let assigned = match &ended {
+						Ended::Goaway(msg) => goaway.redirect.target(msg.uri(), &url, client.pinned)?,
+						Ended::Closed(_) => None,
+					};
+					if assigned.is_some() && addr.addresses().is_some() {
 						return Err(Error::PinnedRedirect);
 					}
 
@@ -784,7 +794,7 @@ impl Connection {
 						// An accepted redirect is an assignment: keep dialing it from here on, and
 						// only it. The peer named exactly one place to go, which retires
 						// whatever other addresses got us to this session.
-						let url = if let Some(target) = goaway.redirect.target(msg.uri(), &url) {
+						let url = if let Some(target) = assigned {
 							addrs = Addrs::new(target.clone());
 							target
 						} else {
@@ -1495,8 +1505,8 @@ mod tests {
 		assert_eq!(Redirect::Follow.resolve("https://other.example/", &plain), same);
 	}
 
-	/// The three ways a redirect resolves to "redial what we already had": the peer
-	/// naming no URI, a URI we cannot parse, and a policy that ignores it outright.
+	/// `resolve` is the lenient form: every way a redirect can fail to assign a
+	/// new URL, refusals included, lands back on the current one.
 	#[test]
 	fn resolve_falls_back_to_the_current_url() {
 		let current: Url = "https://relay.example/".parse().unwrap();
@@ -1506,11 +1516,7 @@ mod tests {
 			current,
 			"empty means 'reconnect to me'"
 		);
-		assert_eq!(
-			Redirect::Follow.resolve("not a url", &current),
-			current,
-			"a malformed URI is not a reason to stop reconnecting"
-		);
+		assert_eq!(Redirect::Follow.resolve("not a url", &current), current);
 		assert_eq!(
 			Redirect::Ignore.resolve("https://other.example/", &current),
 			current,
@@ -1575,26 +1581,60 @@ mod tests {
 		);
 	}
 
+	/// Only an explicit URI can assign, and one the policy will not follow is an
+	/// error rather than a quiet fallback: the loop ends on it instead of redialing.
 	#[test]
 	fn only_an_accepted_redirect_replaces_the_address_list() {
 		let current: Url = "https://relay.example/".parse().unwrap();
+
+		// No URI, or a policy that ignores it: keep the current address list.
+		assert_eq!(Redirect::Follow.target("", &current, false).unwrap(), None);
+		assert_eq!(
+			Redirect::Ignore
+				.target("https://relay.example:5443/", &current, false)
+				.unwrap(),
+			None
+		);
+
+		// An explicit URI the policy will not follow is refused.
 		for (policy, uri) in [
 			(Redirect::SameHost, "https://other.example/"),
-			(Redirect::Follow, ""),
 			(Redirect::Follow, "not a url"),
-			(Redirect::Ignore, "https://relay.example:5443/"),
 			(Redirect::Follow, "http://relay.example/"),
 			(Redirect::Follow, "https://127.0.0.1/"),
 		] {
-			assert_eq!(policy.target(uri, &current), None, "{policy:?}: {uri}");
+			assert!(
+				matches!(policy.target(uri, &current, false), Err(Error::RefusedRedirect(_))),
+				"{policy:?}: {uri}"
+			);
 		}
+
 		// An explicit assignment remains an assignment even if its URL is unchanged.
 		assert_eq!(
-			Redirect::SameHost.target(current.as_str(), &current),
+			Redirect::SameHost.target(current.as_str(), &current, false).unwrap(),
 			Some(current.clone())
 		);
 		let moved = "https://relay.example:5443/";
-		assert_eq!(Redirect::SameHost.target(moved, &current), Some(moved.parse().unwrap()));
+		assert_eq!(
+			Redirect::SameHost.target(moved, &current, false).unwrap(),
+			Some(moved.parse().unwrap())
+		);
+	}
+
+	/// A certificate pin verifies only the host it was configured for, so it
+	/// refuses a host change even when the policy would follow one.
+	#[test]
+	fn a_certificate_pin_holds_the_host() {
+		let current: Url = "https://relay.example/".parse().unwrap();
+		assert!(matches!(
+			Redirect::Follow.target("https://other.example/", &current, true),
+			Err(Error::RefusedRedirect(_))
+		));
+		let moved = "https://relay.example:5443/";
+		assert_eq!(
+			Redirect::Follow.target(moved, &current, true).unwrap(),
+			Some(moved.parse().unwrap())
+		);
 	}
 
 	/// `SameHost` lets a peer move us between ports or schemes on the endpoint we
@@ -1949,5 +1989,121 @@ mod tests {
 		assert_eq!(attempt_timeout(1, 2), None, "the last of two");
 		assert_eq!(attempt_timeout(1, 3), Some(CONNECT_ATTEMPT), "still one more");
 		assert_eq!(attempt_timeout(2, 3), None, "the last of three");
+	}
+
+	/// A stream-only server on a free loopback port, publishing `origin`.
+	///
+	/// Returns its address, a receiver yielding each accepted session (so the test
+	/// can drain it), and the listener task. Probing for a free port races other
+	/// tests between the probe closing and the real bind, so this retries.
+	#[cfg(feature = "tcp")]
+	async fn serve(
+		origin: moq_net::origin::Producer,
+	) -> (
+		std::net::SocketAddr,
+		tokio::sync::mpsc::UnboundedReceiver<moq_net::Session>,
+		tokio::task::JoinHandle<()>,
+	) {
+		for _ in 0..20 {
+			let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+			let addr = probe.local_addr().unwrap();
+			drop(probe);
+
+			let mut config = crate::listen::Config::default();
+			config.tcp.bind = Some(addr);
+			let Ok(mut server) = config.init(Default::default()).unwrap().listen().await else {
+				continue;
+			};
+
+			let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
+			let task = tokio::spawn(async move {
+				while let Some(request) = server.accept().await {
+					if let Ok(session) = request.with_publisher(&origin).ok().await {
+						let _ = accepted.send(session);
+					}
+				}
+			});
+			return (addr, sessions, task);
+		}
+		panic!("could not bind a free TCP port after 20 attempts");
+	}
+
+	/// The fleet drain: a relay withdrawn from DNS sends an empty-URI GOAWAY with a
+	/// deadline, and the client lands on a healthy relay by resolving the configured
+	/// name again. The drained relay still accepts, so a cached resolve would land
+	/// right back on it. The live track hands over at a group boundary, and the old
+	/// session closes at our handover cap, well before the peer's own deadline.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_fleet_drain_redials_through_a_fresh_resolve() {
+		const WAIT: Duration = Duration::from_secs(10);
+		const HANDOVER: Duration = Duration::from_millis(500);
+		const DEADLINE: Duration = Duration::from_secs(30);
+
+		// Two relays of one fleet, serving the same live broadcast.
+		let origin = crate::origin::spawn();
+		let broadcast = origin.create_broadcast("cam").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
+		let (addr_a, mut accepted_a, _task_a) = serve(origin.clone()).await;
+		let (addr_b, mut accepted_b, _task_b) = serve(origin.clone()).await;
+
+		// Unique to this test: the table is process-wide.
+		const HOST: &str = "fleet-drain.test";
+		crate::resolve::hosts::point(HOST, [addr_a]);
+
+		let subscriber = crate::origin::spawn();
+		let mut config = crate::connect::Config::default();
+		config.goaway.handover = HANDOVER;
+		// A session younger than the initial delay counts as redirected immediately and
+		// waits out a backoff, which this test is not about.
+		config.backoff.initial = MIN_BACKOFF;
+		let client = config.init(Default::default()).unwrap().with_subscriber(subscriber.clone());
+		let url: Url = format!("tcp://{HOST}:1/").parse().unwrap();
+		let _connection = client.connect(url);
+
+		let session_a = tokio::time::timeout(WAIT, accepted_a.recv()).await.unwrap().unwrap();
+
+		let consumer = subscriber.consume();
+		let cam = tokio::time::timeout(WAIT, consumer.routed_broadcast("cam"))
+			.await
+			.unwrap()
+			.unwrap();
+		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(moq_net::Timestamp::ZERO, b"g0".as_ref()).unwrap();
+		group.finish().unwrap();
+		let g0 = tokio::time::timeout(WAIT, sub.recv_group()).await.unwrap().unwrap().unwrap();
+		assert_eq!(g0.sequence, 0);
+
+		// Withdraw A from DNS, then drain it.
+		crate::resolve::hosts::point(HOST, [addr_b]);
+		let drained = tokio::time::Instant::now();
+		session_a
+			.drain()
+			.send(moq_net::goaway::Goaway::new().with_timeout(DEADLINE))
+			.unwrap();
+
+		let _session_b = tokio::time::timeout(WAIT, accepted_b.recv())
+			.await
+			.expect("never redialed through the fresh resolve")
+			.unwrap();
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(moq_net::Timestamp::ZERO, b"g1".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut g1 = tokio::time::timeout(WAIT, sub.recv_group()).await.unwrap().unwrap().unwrap();
+		assert_eq!(g1.sequence, 1, "delivery resumes at the next group after the swap");
+		assert_eq!(g1.read_frame().await.unwrap().unwrap().payload[..], b"g1"[..]);
+
+		tokio::time::timeout(WAIT, session_a.closed())
+			.await
+			.expect("the drained session never closed");
+		assert!(
+			drained.elapsed() < DEADLINE,
+			"the old session outlived the handover cap and waited for the peer's deadline"
+		);
+		assert!(accepted_a.try_recv().is_err(), "a cached resolve redialed the drained relay");
 	}
 }
