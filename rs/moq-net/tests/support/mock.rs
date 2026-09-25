@@ -142,11 +142,14 @@ impl poll::SendStream for MockSendStream {
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		if self.tx.is_some() {
-			let _ = self.push(StreamChunk::Fin);
-			if self.ack_fin {
+			// A FIN that never left must not look acknowledged: poll_closed
+			// trusts this signal ahead of the connection error.
+			let pushed = self.push(StreamChunk::Fin);
+			if pushed.is_ok() && self.ack_fin {
 				self.closed.set(Ok(()));
 			}
 			self.tx = None;
+			pushed?;
 		}
 		Ok(())
 	}

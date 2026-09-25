@@ -2205,8 +2205,18 @@ impl Subscriber {
 		if let Some(err) = &self.abort {
 			return Poll::Ready(Err(err.clone()));
 		}
+		// The producer finished, so this channel ends now. A final segment that
+		// already died is that death: the datagram read above drops a Ready(Err)
+		// on the floor, and a clean Ok(None) here would hide it. A segment that
+		// has not activated yet has no end to report.
 		if self.finished {
-			return Poll::Ready(Ok(None));
+			if pending_activation {
+				return Poll::Ready(Ok(None));
+			}
+			return match ready!(self.poll_final(waiter)) {
+				Some(end) => Poll::Ready(end.map(|_| None)),
+				None => Poll::Ready(Ok(None)),
+			};
 		}
 		// The producer is gone: no takeover is coming, so the track ends when
 		// its newest segment does, and the way it did.
@@ -4912,6 +4922,33 @@ mod test {
 		track_a.abort(Error::Timeout).unwrap();
 
 		let result = sub.recv_group().now_or_never().expect("must not stall forever");
+		assert!(matches!(result, Err(Error::Timeout)));
+	}
+
+	/// A datagram-only reader of a finished logical track ends with the final
+	/// segment's error. The datagram poll drops a segment error that is not
+	/// `Ok(Some)`, so the finished path has to ask the segment itself.
+	#[tokio::test]
+	async fn finished_producer_ends_datagrams_with_a_dead_final_segment() {
+		let (track_a, consumer_a) = track_pair("a");
+
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		assert!(
+			kio::wait(|waiter| sub.poll_recv_datagram(waiter))
+				.now_or_never()
+				.is_none(),
+			"no datagram yet"
+		);
+
+		producer.finish().unwrap();
+		track_a.abort(Error::Timeout).unwrap();
+
+		let result = kio::wait(|waiter| sub.poll_recv_datagram(waiter))
+			.now_or_never()
+			.expect("must not stall forever");
 		assert!(matches!(result, Err(Error::Timeout)));
 	}
 
