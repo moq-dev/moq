@@ -41,7 +41,3 @@ survives an IETF hop the way it already survives moq-lite 05+.
 - Test: Rust-to-Rust and Rust-to-JS sessions over IETF and lite-07 carry
   `None`, `Some(0)`, and a non-zero max age end to end, including through a
   relay hop, and drafts 15 and 16 decode but never send it. Run `just test interop --all`.
-
-## Required
-
-- [IETF EXPIRES](/quest/m0/ietf-expires.md) - the decoders accept EXPIRES first

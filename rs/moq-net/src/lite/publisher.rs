@@ -3,7 +3,10 @@ use crate::{SessionError, announce, frame, group, origin, track};
 use std::{
 	collections::HashMap,
 	ops::Bound,
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
 	task::{Context, Poll, ready},
 	time::Duration,
 };
@@ -1160,6 +1163,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 						track_priority_seen: msg.priority,
 						version: self.shared.version,
 						timescale,
+						opens: Default::default(),
 					};
 
 					let run = TrackRun::new(sub, track, Bounds::from(&msg), track_priority_tx);
@@ -2127,6 +2131,18 @@ struct Subscription<S: crate::transport::poll::Session> {
 	/// Negotiated timestamp scale for this track. `Some(_)` on lite-05+ after
 	/// TRACK_INFO; used to validate per-frame timestamps before encoding.
 	timescale: Option<crate::Timescale>,
+	/// The group streams this subscription opened, shared by every group it serves.
+	opens: Arc<Opens>,
+}
+
+/// Counts a subscription's group streams for lite-07's SUBSCRIBE_END.
+///
+/// A group is pending from the moment it is queued until its stream opens, or it gives
+/// up first (expired, or the open failed) and is never counted.
+#[derive(Default)]
+struct Opens {
+	pending: AtomicU64,
+	opened: AtomicU64,
 }
 
 impl<S: crate::transport::poll::Session> Subscription<S> {
@@ -2209,6 +2225,9 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	emit_range: bool,
 	start_sent: bool,
 	end_sent: bool,
+	// Lite07+ sends SUBSCRIBE_END with the stream count instead of as soon as the
+	// boundary is known, once every group below it has opened its stream.
+	count_streams: bool,
 	// Serve datagrams off this same subscriber, but only on lite-05+ over a
 	// datagram-capable transport (qmux/WebSocket/TCP/UDS report size 0). No group
 	// fallback: otherwise off.
@@ -2230,6 +2249,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		track.end_at(bounds.end_group.map_or(Bound::Unbounded, Bound::Included));
 
 		let emit_range = ctx.version.has_track_stream();
+		let count_streams = ctx.version.has_stream_count();
 		let datagrams = ctx.version.has_datagrams() && ctx.session.max_datagram_size() > 0;
 
 		Self {
@@ -2241,6 +2261,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			emit_range,
 			start_sent: false,
 			end_sent: false,
+			count_streams,
 			datagrams,
 			children: kio::Tasks::new(),
 		}
@@ -2293,7 +2314,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			// group and, when enabled, the next best-effort datagram. Groups are polled
 			// first so a datagram burst can't starve them; datagrams flow whenever no
 			// group is ready (including while groups are parked above the cap).
-			let emit_boundary = self.emit_range && !self.end_sent;
+			let emit_boundary = self.emit_range && !self.end_sent && !self.count_streams;
 			if let Poll::Ready(res) = poll_recv_next(&mut self.track, self.datagrams, emit_boundary, waiter) {
 				match res? {
 					Recv::Group(mut group) => {
@@ -2345,7 +2366,22 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 						self.end_sent = true;
 						stream
 							.writer
-							.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group }))?;
+							.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams: 0 }))?;
+					}
+					Recv::Finished if self.count_streams && !self.end_sent => {
+						// The count is final only once no served group is still waiting to
+						// open its stream. A group that gives up first is never counted, so
+						// the subscriber is not left waiting for it. The child's wake
+						// re-polls this loop.
+						if self.ctx.opens.pending.load(Ordering::Relaxed) > 0 {
+							return Poll::Pending;
+						}
+						let group = ready!(self.track.poll_finished(waiter))?;
+						let streams = self.ctx.opens.opened.load(Ordering::Relaxed);
+						self.end_sent = true;
+						stream
+							.writer
+							.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams }))?;
 					}
 					Recv::Finished => return Poll::Ready(Ok(TrackEnd::Finished)),
 				}
@@ -2403,6 +2439,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		priority: PriorityHandle,
 		group: group::Consumer,
 	) -> Self {
+		ctx.opens.pending.fetch_add(1, Ordering::Relaxed);
 		Self {
 			ctx,
 			priority,
@@ -2411,6 +2448,14 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			frame_start,
 			prev_ts: 0,
 			state: GroupState::Open,
+		}
+	}
+
+	/// Leave [`GroupState::Open`], counting the stream if it opened.
+	fn settle_open(&mut self, opened: bool) {
+		self.ctx.opens.pending.fetch_sub(1, Ordering::Relaxed);
+		if opened {
+			self.ctx.opens.opened.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 
@@ -2423,6 +2468,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			match &mut self.state {
 				GroupState::Open => {
 					if self.group.poll_expired(waiter) {
+						self.settle_open(false);
 						self.state = GroupState::Done;
 						return Poll::Ready(Err(Error::Old));
 					}
@@ -2430,10 +2476,12 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					let stream = match ready!(self.ctx.session.poll_open_uni(&mut cx)) {
 						Ok(stream) => stream,
 						Err(err) => {
+							self.settle_open(false);
 							self.state = GroupState::Done;
 							return Poll::Ready(Err(Error::from_transport(err)));
 						}
 					};
+					self.settle_open(true);
 					let mut writer = Writer::new(stream, self.ctx.version);
 					writer.set_priority(self.priority.send_order());
 
@@ -2761,6 +2809,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			opens: Default::default(),
 		};
 
 		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
@@ -2801,6 +2850,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			opens: Default::default(),
 		};
 
 		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
@@ -2845,6 +2895,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			opens: Default::default(),
 		};
 
 		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
@@ -2907,6 +2958,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			opens: Default::default(),
 		};
 
 		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
@@ -2976,6 +3028,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			opens: Default::default(),
 		};
 
 		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
@@ -2999,6 +3052,108 @@ mod serve_group_test {
 			priorities.iter().all(|&p| p == 255),
 			"rank 0 must reach the transport as send order 255: {priorities:?}",
 		);
+	}
+
+	/// A lite-07 subscription's run loop, from group 0, and the log of its subscribe stream.
+	fn lite07_run(
+		session: SinkSession,
+		track: track::Subscriber,
+	) -> (TrackRun<SinkSession>, Stream<SinkSession, Version>, Log) {
+		let log = Log::default();
+		let stream = Stream {
+			writer: Writer::new(SinkSend::new(log.clone()), Version::Lite07),
+			reader: crate::coding::Reader::new(PendingRecv, Version::Lite07),
+		};
+		let track_priority = kio::Producer::new(0u8);
+		let ctx = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			version: Version::Lite07,
+			timescale: Some(crate::Timescale::default()),
+			opens: Default::default(),
+		};
+		let bounds = Bounds {
+			start_group: Some(0),
+			start_frame: 0,
+			end_group: None,
+			end_frame: None,
+		};
+		(TrackRun::new(ctx, track, bounds, track_priority), stream, log)
+	}
+
+	fn write_group(track: &mut track::Producer, sequence: u64, millis: u64) {
+		let mut group = track.create_group(group::Info { sequence }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
+			.unwrap();
+		group.finish().unwrap();
+	}
+
+	/// SUBSCRIBE_END counts the group streams opened, not the groups below the end: a
+	/// group the track never produced has no stream and is not counted.
+	#[tokio::test]
+	async fn lite07_end_counts_the_streams_opened() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscriber = track.subscribe(None);
+		let (mut run, mut stream, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		let mut run = std::pin::pin!(kio::wait(move |waiter| run.poll(&mut stream, waiter)));
+
+		write_group(&mut track, 0, 0);
+		assert!(futures::poll!(run.as_mut()).is_pending());
+		write_group(&mut track, 2, 2);
+		track.finish().unwrap();
+		assert!(matches!(run.await.unwrap(), TrackEnd::Finished));
+
+		// SUBSCRIBE_START at 0, then SUBSCRIBE_END at 3 with 2 streams.
+		assert_eq!(*log.writes.lock().unwrap(), [0, 1, 0, 1, 2, 3, 2]);
+	}
+
+	/// A track that ends without a group still ends the subscription, with no stream owed.
+	#[tokio::test]
+	async fn lite07_end_counts_zero_streams() {
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscriber = track.subscribe(None);
+		track.finish().unwrap();
+
+		let (mut run, mut stream, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		kio::wait(|waiter| run.poll(&mut stream, waiter)).await.unwrap();
+		assert_eq!(*log.writes.lock().unwrap(), [1, 2, 0, 0]);
+	}
+
+	/// The count is sent once every served group has opened its stream or given up, so a
+	/// group still waiting for stream credit holds SUBSCRIBE_END back, and one that expires
+	/// first is never counted.
+	#[tokio::test]
+	async fn lite07_end_waits_for_every_stream_to_open() {
+		tokio::time::pause();
+
+		let gate = kio::Producer::new(false);
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscriber = track.subscribe(None);
+		write_group(&mut track, 0, 0);
+
+		let (mut run, mut stream, log) = lite07_run(SinkSession::gated_open_uni(gate.consume()), subscriber);
+		let mut run = std::pin::pin!(kio::wait(move |waiter| run.poll(&mut stream, waiter)));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		// Group 1 lands a second later, expiring group 0 before it ever opened.
+		tokio::time::advance(Duration::from_secs(1)).await;
+		write_group(&mut track, 1, 1000);
+		track.finish().unwrap();
+		assert!(futures::poll!(run.as_mut()).is_pending(), "group 1 is still opening");
+		assert_eq!(*log.writes.lock().unwrap(), [0, 1, 0], "only SUBSCRIBE_START so far");
+
+		let Ok(mut open) = gate.write() else {
+			panic!("transport gate closed");
+		};
+		*open = true;
+		drop(open);
+		run.await.unwrap();
+		assert_eq!(*log.writes.lock().unwrap(), [0, 1, 0, 1, 2, 2, 1]);
 	}
 }
 
