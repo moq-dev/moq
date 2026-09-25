@@ -6295,14 +6295,19 @@ mod tests {
 	/// edge, not the parked segment's own frozen one: groups the fresh source
 	/// has left behind by more than the budget are skipped, exactly as they would
 	/// be on one unspliced track.
+	///
+	/// A local source is released rather than parked (it keeps its own cache), so
+	/// this goes through a served front, which is what actually holds the warm copy.
+	/// The copy resolves at the cached edge, not past it: resolving past it drops
+	/// the cache outright, which is a different case.
 	#[tokio::test]
 	async fn resumed_reader_skips_warm_groups_behind_the_new_edge() {
+		let ms = |v: u64| crate::Timestamp::from_millis(v).unwrap();
+		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
 		let budget = track::Subscription::default().with_max_age(Duration::from_millis(100));
 		let write = |source: &track::Producer, sequence: u64, millis: u64| {
 			let mut group = source.create_group(sequence.into()).unwrap();
-			group
-				.write_frame(crate::Timestamp::from_millis(millis).unwrap(), b"x".as_ref())
-				.unwrap();
+			group.write_frame(ms(millis), b"x".as_ref()).unwrap();
 			group.finish().unwrap();
 		};
 		let drain = |subscription: &mut track::Subscriber| {
@@ -6313,12 +6318,6 @@ mod tests {
 			sequences
 		};
 
-		let producer = origin(1).produce();
-		let consumer = producer.consume();
-		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let mut dynamic = broadcast.dynamic();
-		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
-
 		let track = resolved.track("video").unwrap();
 		let first = budget.clone();
 		let subscribing = tokio::spawn(async move { track.subscribe(first).await });
@@ -6326,7 +6325,7 @@ mod tests {
 			.await
 			.expect("the front asked the source")
 			.expect("request");
-		let source = request.accept(None);
+		let source = request.resolving_start().accept(None);
 		for (sequence, millis) in [(0, 0), (1, 20), (2, 40), (3, 60)] {
 			write(&source, sequence, millis);
 		}
@@ -6335,7 +6334,6 @@ mod tests {
 		drain(&mut subscription);
 		drop(subscription);
 
-		// Parked: groups 0..=3 stay warm while the source goes idle.
 		tokio::time::timeout(Duration::from_secs(1), source.unused())
 			.await
 			.expect("parked")
@@ -6349,14 +6347,18 @@ mod tests {
 			.await
 			.expect("the front asked the source again")
 			.expect("request");
-		let source = request.accept(None);
+		let mut source = request.resolving_start().accept(None);
 		for (sequence, millis) in [(20, 400), (21, 420), (22, 440)] {
 			write(&source, sequence, millis);
 		}
+		// At the cached edge, not past it, so the warm copy stays and the budget
+		// decides. Past it, the copy has already judged the cache stale.
+		source.start_at(3).unwrap();
 		let mut subscription = subscribing.await.unwrap().expect("resubscribe");
 		settle(|| subscription.latest() == Some(22)).await;
 
-		// Groups 0..=2 reach at most 60ms against an edge at 440ms.
+		// Groups 0..=2 reach at most 60ms against an edge at 440ms. Group 3 reaches
+		// where group 20 starts, 40ms behind that edge, inside the 100ms budget.
 		assert_eq!(drain(&mut subscription), [3, 20, 21, 22]);
 	}
 
