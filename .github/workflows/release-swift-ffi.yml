@@ -23,106 +23,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  parse-version:
-    name: Parse version
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.parse.outputs.version }}
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: ./.github/actions/just
-
-      - name: Parse version
-        id: parse
-        run: just gh release parse-version moq-ffi
-
-  build:
-    name: Build moq-ffi (${{ matrix.target }})
-    needs: [parse-version]
-    runs-on: macos-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - aarch64-apple-ios
-          - aarch64-apple-ios-sim
-          - aarch64-apple-darwin
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: ./.github/actions/just
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-
-      - name: Build
-        shell: bash
-        env:
-          BUILD_TARGET: ${{ matrix.target }}
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-          # Set iOS deployment target to avoid ___chkstk_darwin linker errors.
-          IPHONEOS_DEPLOYMENT_TARGET: ${{ contains(matrix.target, 'apple-ios') && '16.0' || '' }}
-        run: |
-          just rs package-ffi \
-            --target "$BUILD_TARGET" \
-            --version "$BUILD_VERSION" \
-            --output dist
-
-      - name: Upload lib
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: swift-lib-${{ matrix.target }}
-          path: dist/moq-ffi-${{ needs.parse-version.outputs.version }}-${{ matrix.target }}/lib/
-
-  bindings:
-    name: Generate bindings
-    needs: [parse-version]
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: ./.github/actions/just
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-
-      - name: Generate bindings
-        env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-        run: |
-          just rs package-ffi \
-            --bindings-only \
-            --version "$BUILD_VERSION" \
-            --output dist
-
-      - name: Upload bindings
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: swift-bindings
-          path: dist/bindings/swift/
+  ffi:
+    name: moq-ffi
+    uses: ./.github/workflows/release-ffi.yml
+    with:
+      language: swift
+      targets: '["aarch64-apple-ios", "aarch64-apple-ios-sim", "aarch64-apple-darwin"]'
 
   package:
     name: Package
-    needs: [parse-version, build, bindings]
+    needs: [ffi]
     runs-on: macos-latest
 
     steps:
@@ -155,7 +65,7 @@ jobs:
 
       - name: Package
         env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          BUILD_VERSION: ${{ needs.ffi.outputs.version }}
         run: |
           just swift package-ffi \
             --version "$BUILD_VERSION" \
@@ -175,7 +85,7 @@ jobs:
     # points at this asset, so it must exist before any consumer resolves the
     # SPM tag.
     name: Attach assets to GitHub release
-    needs: [package, parse-version]
+    needs: [ffi, package]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
@@ -205,7 +115,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-          RELEASE_TITLE: "moq-ffi v${{ needs.parse-version.outputs.version }}"
+          RELEASE_TITLE: "moq-ffi v${{ needs.ffi.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
         run: just gh release create artifacts
 
@@ -215,7 +125,7 @@ jobs:
     # fine but SPM cannot resolve (e.g. a path-based binaryTarget slipping in
     # where a URL+checksum is expected).
     name: Verify staged package resolves
-    needs: [release, parse-version]
+    needs: [ffi, release]
     runs-on: macos-latest
 
     steps:
@@ -233,13 +143,13 @@ jobs:
 
       - name: Resolve and build smoke consumer
         env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          BUILD_VERSION: ${{ needs.ffi.outputs.version }}
         run: |
           just swift verify-ffi --tarball "artifacts/moq-ffi-${BUILD_VERSION}-swift-ffi.tar.gz"
 
   publish:
     name: Publish to Swift Package mirror
-    needs: [verify, parse-version]
+    needs: [ffi, verify]
     runs-on: ubuntu-latest
 
     steps:
@@ -268,7 +178,7 @@ jobs:
 
       - name: Publish to moq-dev/moq-swift-ffi mirror
         env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          BUILD_VERSION: ${{ needs.ffi.outputs.version }}
           # Token is minted fresh per run, expires in 1 hour, never at rest.
           SWIFT_MIRROR_TOKEN: ${{ steps.token.outputs.token }}
           GIT_AUTHOR_NAME: moq-bot

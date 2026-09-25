@@ -16,6 +16,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/release-go-ffi.yml"
+      - ".github/workflows/release-ffi.yml"
       - "sh/gh/release.sh"
       - "go/ffi/**"
       - "sh/go/package-ffi.sh"
@@ -33,141 +34,27 @@ concurrency:
   group: release-go-ffi-${{ github.ref_type == 'tag' && 'publish' || github.ref }}
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
-env:
-  # A fork until NordSecurity ships a uniffi 0.32 generator; see flake.nix.
-  # The revision is v0.9.0+v0.32.0.
-  UNIFFI_BINDGEN_GO_REPO: https://github.com/kixelated/uniffi-bindgen-go
-  UNIFFI_BINDGEN_GO_REV: v0.9.0+v0.32.0
-
 jobs:
-  parse-version:
-    name: Parse version
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.parse.outputs.version }}
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          persist-credentials: false
-
-      - uses: ./.github/actions/just
-
-      - name: Parse version
-        id: parse
-        run: just gh release parse-version moq-ffi
-
-  build:
-    name: Build moq-ffi (${{ matrix.target }})
-    needs: [parse-version]
-    runs-on: ${{ matrix.os }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          persist-credentials: false
-
-      - uses: ./.github/actions/just
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          # Don't let untrusted PR builds populate caches reused by trusted runs.
-          save-if: ${{ github.event_name != 'pull_request' }}
-
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          # g++ as well as gcc: moq-video's openh264 fallback is C++, and
-          # cc-rs looks for aarch64-linux-gnu-g++ by name.
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
-      - name: Build
-        shell: bash
-        env:
-          BUILD_TARGET: ${{ matrix.target }}
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-        run: |
-          just rs package-ffi \
-            --target "$BUILD_TARGET" \
-            --version "$BUILD_VERSION" \
-            --output dist
-
-      - name: Upload lib
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: go-lib-${{ matrix.target }}
-          # package.sh expects <target>/<libname>; upload just lib/ contents.
-          path: dist/moq-ffi-${{ needs.parse-version.outputs.version }}-${{ matrix.target }}/lib/
-
-  bindings:
-    name: Generate bindings
-    needs: [parse-version]
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          persist-credentials: false
-
-      - uses: ./.github/actions/just
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          # Don't let untrusted PR builds populate caches reused by trusted runs.
-          save-if: ${{ github.event_name != 'pull_request' }}
-
-      - name: Install uniffi-bindgen-go
-        run: |
-          cargo install --locked uniffi-bindgen-go \
-            --git "$UNIFFI_BINDGEN_GO_REPO" \
-            --rev "$UNIFFI_BINDGEN_GO_REV"
-
-      - name: Generate bindings
-        env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-        run: |
-          just rs package-ffi \
-            --bindings-only \
-            --version "$BUILD_VERSION" \
-            --output dist
-
-      - name: Upload bindings
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: go-bindings
-          path: dist/bindings/go/
+  ffi:
+    name: moq-ffi
+    uses: ./.github/workflows/release-ffi.yml
+    with:
+      language: go
+      targets: >-
+        [
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "aarch64-apple-darwin",
+          "x86_64-pc-windows-msvc"
+        ]
 
   package:
     name: Package
-    needs: [parse-version, build, bindings]
+    needs: [ffi]
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -214,7 +101,7 @@ jobs:
 
       - name: Package
         env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          BUILD_VERSION: ${{ needs.ffi.outputs.version }}
         run: |
           just go package-ffi \
             --version "$BUILD_VERSION" \
@@ -231,12 +118,12 @@ jobs:
 
   publish:
     name: Publish to Go module mirror
-    needs: [package, parse-version]
+    needs: [ffi, package]
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -261,7 +148,7 @@ jobs:
 
       - name: Publish to moq-dev/moq-go-ffi mirror
         env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          BUILD_VERSION: ${{ needs.ffi.outputs.version }}
           # Token is minted fresh per run, expires in 1 hour, never at rest.
           GO_FFI_MIRROR_TOKEN: ${{ steps.token.outputs.token }}
           GIT_AUTHOR_NAME: moq-bot
@@ -270,12 +157,12 @@ jobs:
 
   publish-dry-run:
     name: Publish dry-run
-    needs: [package, parse-version]
+    needs: [ffi, package]
     runs-on: ubuntu-latest
     if: github.ref_type != 'tag'
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -289,5 +176,5 @@ jobs:
 
       - name: Dry-run publish to mirror
         env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          BUILD_VERSION: ${{ needs.ffi.outputs.version }}
         run: just go publish-ffi --dry-run

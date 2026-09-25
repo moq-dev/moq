@@ -1,4 +1,4 @@
-# Tooling: thin justfiles and CI that calls them
+# [XS] Tooling: thin justfiles and CI that calls them
 
 ## Goal
 
@@ -14,9 +14,4 @@ runs a recipe rather than a script path.
 
 `just` stays as the entry point because the vocabulary (`just check`, `just
 fix`) is in every doc, skill, and workflow. Its cost was
-self-inflicted: logic inside recipes. The quests below are ordered and each
-requires the one before it, so they land as one line of pull requests.
-
-## Quests
-
-- [FFI release workflow](/quest/m1/tooling/release-ffi.md) - the five `release-*-ffi.yml` share the moq-ffi target matrix and artifact staging
+self-inflicted: logic inside recipes.
