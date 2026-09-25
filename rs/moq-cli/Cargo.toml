@@ -134,7 +134,7 @@ sd-notify = { workspace = true }
 
 [dev-dependencies]
 # Decodes the timeline the archive round-trip test checks.
-moq-json = { workspace = true }
+moq-json = { path = "../moq-json" }
 # `test_relay` stands up a real relay for the `fetch` tests to read through.
 moq-relay = { path = "../moq-relay", default-features = false, features = ["test-support"] }
 tempfile = { workspace = true }
