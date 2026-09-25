@@ -31,6 +31,11 @@ it, and fixes only what the measurement shows.
 - `demo/web` no longer pins each tile to a fixed 100 ms delay, which is why a
   fresh session came up on the 100 ms chip. Confirm auto is what the demo now
   exercises.
+- In auto mode the subscription's `maxAge` follows the target, so a group
+  staler than the current target is dropped before `Container.Consumer`
+  observes it, and the estimate cannot rise past what it already allows.
+  Native gives auto a separate 2 s budget (`AUTO_MAX_AGE` in `moq play`).
+  Decide from the run whether the browser needs the same.
 
 ## Related
 
