@@ -88,7 +88,7 @@ check_coverage() {
     return 1
 }
 
-# Names of workflows carrying at least one non-pull_request trigger.
+# Names of workflows with a trigger that starts a run outside a pull request.
 #
 # The YAML is parsed rather than pattern-matched. GitHub accepts `on:` as a
 # block map, block sequence, flow sequence or bare scalar, any of which may wrap
@@ -113,9 +113,10 @@ non_pr_workflow_names() {
 
     printf "%s\n" "${files[@]}" | bun -e '
 const files = (await Bun.stdin.text()).split("\n").filter(Boolean);
-// Both report their failure as a check on the PR itself, so alert.yml skips
-// them at runtime and a workflow triggered only by these needs no entry.
-const PR_EVENTS = new Set(["pull_request", "pull_request_target"]);
+// The PR events report their failure as a check on the PR itself, and
+// workflow_call runs inside the run that called it, so a workflow triggered
+// only by these needs no entry.
+const UNWATCHED = new Set(["pull_request", "pull_request_target", "workflow_call"]);
 const names = [];
 for (const file of files) {
     const doc = Bun.YAML.parse(await Bun.file(file).text());
@@ -132,7 +133,7 @@ for (const file of files) {
         console.error("alert.sh: cannot read the on: value of " + file);
         process.exit(2);
     }
-    if (!triggers.some((t) => !PR_EVENTS.has(t))) continue;
+    if (!triggers.some((t) => !UNWATCHED.has(t))) continue;
 
     const name = doc.name;
     if (typeof name !== "string" || name.trim() === "") {

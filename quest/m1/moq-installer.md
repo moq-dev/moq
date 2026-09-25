@@ -76,8 +76,6 @@ service setup, Windows support, or new release targets.
 
 ## Related
 
-- [Binary release workflow](/quest/m1/tooling/release-binary.md) - reuse its
-  artifacts without requiring workflow consolidation
 - [`moq relay`](/quest/m1/moq-relay-subcommand.md) - relay functionality joins
   the same executable independently of its installation method
 - [Install URL](/quest/m1/moq-install-url.md) - exposes this installer through
