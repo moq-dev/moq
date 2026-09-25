@@ -339,8 +339,7 @@ class DecoderTrack {
 					}
 
 					// Returns immediately when the latency is "instant".
-					const wait = this.sync.wait(timestamp).then(() => true);
-					const ok = await Promise.race([wait, effect.cancel]);
+					const ok = await effect.race(this.sync.wait(timestamp).then(() => true));
 					if (!ok) return;
 					if (generation !== this.#discontinuity) return; // a rewind happened while waiting
 

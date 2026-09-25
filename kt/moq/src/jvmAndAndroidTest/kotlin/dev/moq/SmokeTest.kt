@@ -72,6 +72,27 @@ class SmokeTest {
     }
 
     /**
+     * The WebSocket fallback knobs reach the native client: a QUIC-only dial with
+     * no head start still fails fast, and a negative delay is refused up front
+     * rather than wrapping into an enormous one.
+     */
+    @Test
+    fun `connect accepts the websocket fallback knobs`() = runTest {
+        assertFailsWith<MoqException> {
+            Moq.connect(
+                "https://localhost:0/test",
+                tlsVerify = false,
+                reconnect = false,
+                websocketEnabled = false,
+                websocketDelay = 0.milliseconds,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Moq.connect("https://localhost:0/test", websocketDelay = (-1).milliseconds)
+        }
+    }
+
+    /**
      * The `dev.moq` typealiases resolve to the FFI objects, and the wrapper
      * extensions apply to them. Constructing through an alias is enough to
      * confirm both at compile time + lib load at runtime.
@@ -299,32 +320,28 @@ class SmokeTest {
     }
 
     @Test
-    fun `local discovery survives unannounce until finish`() = runTest {
+    fun `a broadcast is reachable only while announced`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.createBroadcast("live").use { broadcast ->
                 broadcast.publishTrack("events", null)
                 val consumer = origin.consume()
-                val announced = consumer.announced(AnnounceConfig())
-                val created = announced.next()!!
-                assertEquals("live", created.prefix())
-                assertTrue(created.active())
-                assertEquals(0uL, created.route().cost)
+                assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
 
-                broadcast.announce(Route(cost = 3uL))
-                val advertised = announced.next()!!
-                assertTrue(advertised.active())
-                assertEquals(3uL, advertised.route().cost)
+                broadcast.announce(Route())
+                val announced = consumer.announced(AnnounceConfig())
+                val first = announced.next()!!
+                assertEquals("live", first.prefix())
+                assertTrue(first.active())
 
                 broadcast.unannounce()
-                val local = announced.next()!!
-                assertTrue(local.active())
-                assertEquals(0uL, local.route().cost)
-                consumer.requestBroadcast("live")
-
-                broadcast.finish()
                 val retracted = announced.next()!!
                 assertEquals("live", retracted.prefix())
                 assertTrue(!retracted.active())
+                assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
+
+                broadcast.announce(Route())
+                assertTrue(announced.next()!!.active())
+                consumer.requestBroadcast("live")
             }
         }
     }

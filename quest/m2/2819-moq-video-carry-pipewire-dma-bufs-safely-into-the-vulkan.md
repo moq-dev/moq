@@ -46,7 +46,7 @@ The PipeWire producer must therefore retain the dequeued buffer until the last `
 - \[x] Document the wgpu device feature required for DMA-BUF import. A custom device-creation helper is unnecessary with wgpu 30.
 - \[ ] Import multi-plane NV12 with explicit DRM modifier plane layouts.
 - \[ ] Copy imported NV12 Y/UV planes into wgpu-sampleable R8/RG8 textures without touching the CPU.
-- \[ ] Handle unsupported Intel tiling with a VAAPI VPP re-tile path. The current `moq-vaapi` API does not expose VPP yet.
+- \[ ] Handle unsupported Intel tiling with a VAAPI VPP re-tile path. `Processor` blits exist (moq-vaapi 0.1.0); this item is the renderer using one when a modifier will not import.
 
 #### Validation gates
 
@@ -75,4 +75,5 @@ into VAAPI or NVENC.
 
 ## Related
 
+- [Capture multi-plane PipeWire cameras](/quest/m2/pipewire-camera-planes.md) - separate memory blocks from a camera, which is the capture offer rather than this renderer import
 - [#2893: video: validate PipeWire DMA-BUF capture on KDE hardware](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - related open work

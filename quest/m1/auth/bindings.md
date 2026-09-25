@@ -24,6 +24,9 @@ mid-stream can be handed a new one without the plugin reconnecting.
   async calls use, in `rs/libmoq/src/api.rs` and the session table;
   regenerate `moq.h`, and update `cpp/obs/src` only if the plugin surfaces a
   token field, otherwise leave it.
+- Interop: the Python, Go, and C interop clients print their grant and join
+  the assertion [Interop grants](/quest/m1/auth/interop.md) adds for Rust
+  and JS.
 - Wrappers: `py/moq-rs/moq/session.py`, `swift/Sources/Moq`,
   `kt/.../Flows.kt` (a `Flow` over `grant_changed`), `go/wrapper/moq/session.go`
   (context-cancellable like the rest), and `dart/moq/lib/moq.dart`. Kotlin

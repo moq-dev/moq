@@ -62,13 +62,15 @@ pub struct Config {
 	pub import_max_age: Option<Duration>,
 
 	/// TLS configuration for RTMPS (RTMP over TLS). When set, the
-	/// [`listen`](Self::listen) address speaks RTMPS instead of plaintext RTMP,
-	/// so clients connect with `rtmps://`. Build it with
+	/// [`listen`](Self::listen) address serves both: a client that opens with a
+	/// TLS ClientHello (`rtmps://`) is TLS-terminated, any other is served as
+	/// plaintext (`rtmp://`). Build it with
 	/// `moq_tokio::tls::Listen::server_config` (pass an empty ALPN list) or
-	/// any [`rustls::ServerConfig`]. Leave `None` for plaintext.
+	/// any [`rustls::ServerConfig`]. Leave `None` for plaintext only.
 	///
-	/// To serve both RTMP and RTMPS, clone one base config and call [`run`] for
-	/// each listener against a cloned origin.
+	/// To serve RTMP and RTMPS on separate ports instead, clone one base config
+	/// and call [`run`] for each listener against a cloned origin; the clones
+	/// share one [`ActivePaths`].
 	#[cfg(feature = "tls")]
 	pub tls: Option<std::sync::Arc<rustls::ServerConfig>>,
 
@@ -205,25 +207,34 @@ pub(crate) fn resolve_path(prefix: &Path, app: &str, key: &str) -> Option<PathOw
 	Some(prefix.join(name))
 }
 
-/// The set of broadcast paths with a live ingest, used to reject duplicate
-/// stream keys. Cheap to clone (shared `Arc`).
+/// The broadcast paths with a live ingest, so a second publisher on a stream key
+/// is rejected (first publisher wins) instead of clobbering the live one.
+///
+/// [`run`] keeps one per [`Config`], shared by its clones. An embedder driving
+/// [`Server`] claims the absolute path it resolved before calling
+/// [`Publish::accept`](crate::Publish::accept), and holds the guard for the
+/// connection's lifetime. Cheap to clone (shared `Arc`).
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ActivePaths(Arc<Mutex<HashSet<String>>>);
+pub struct ActivePaths(Arc<Mutex<HashSet<String>>>);
 
 impl ActivePaths {
 	/// Claim `path`, returning a guard that releases it on drop, or `None` if it
-	/// is already claimed.
-	pub(crate) fn claim(&self, path: &str) -> Option<PathGuard> {
+	/// is already claimed. Paths compare after normalization, as
+	/// [`Publish::accept`](crate::Publish::accept) resolves them, so `live//cam`
+	/// and `/live/cam` are one claim.
+	pub fn claim(&self, path: impl moq_net::AsPath) -> Option<PathGuard> {
+		let path = path.as_path().as_str().to_string();
 		let mut set = self.0.lock().expect("active paths mutex poisoned");
-		set.insert(path.to_string()).then(|| PathGuard {
+		set.insert(path.clone()).then(|| PathGuard {
 			paths: self.0.clone(),
-			path: path.to_string(),
+			path,
 		})
 	}
 }
 
 /// Releases a claimed [`ActivePaths`] entry when dropped.
-pub(crate) struct PathGuard {
+#[must_use = "dropping the guard releases the path"]
+pub struct PathGuard {
 	paths: Arc<Mutex<HashSet<String>>>,
 	path: String,
 }
@@ -281,6 +292,7 @@ mod tests {
 
 		let guard = active.claim("live/cam0").expect("first claim succeeds");
 		assert!(active.claim("live/cam0").is_none());
+		assert!(active.claim("/live//cam0/").is_none(), "claims compare normalized");
 		let other = active.claim("live/cam1").expect("distinct path claims");
 
 		drop(guard);

@@ -74,6 +74,10 @@ pub enum Error {
 	#[error("json: {0}")]
 	Json(String),
 
+	/// Publishing the replayed archive failed.
+	#[error("moq: {0}")]
+	Moq(String),
+
 	/// The prefix already holds a recording timeline; resuming is unsupported.
 	#[error("prefix already holds a recording: {0}")]
 	Occupied(String),
@@ -101,6 +105,12 @@ impl From<object_store::Error> for Error {
 			object_store::Error::NotFound { path, .. } => Self::NotFound(path),
 			other => Self::Store(other.to_string()),
 		}
+	}
+}
+
+impl From<moq_net::Error> for Error {
+	fn from(err: moq_net::Error) -> Self {
+		Self::Moq(err.to_string())
 	}
 }
 

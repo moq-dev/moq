@@ -38,10 +38,6 @@ timeline or keeps following a growing archive.
 
 Update `doc/bin/cli.md` and every example invocation.
 
-## Required
-
-- [Recording reader](/quest/m1/archive/reader.md) - serves `import archive`
-
 ## Closes
 
 - [#2281](https://github.com/moq-dev/moq/issues/2281) - close this issue when the quest finishes

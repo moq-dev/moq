@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.1.3"
+version = "0.2.0"
 edition = "2024"
 rust-version.workspace = true
 
@@ -14,5 +14,7 @@ categories = ["compression"]
 
 [dependencies]
 bytes = { workspace = true }
-flate2 = { workspace = true }
+# zlib-rs, not the default miniz_oxide: miniz_oxide 0.9.1 can return from a sync flush with output
+# space left but the flush unfinished, silently truncating the frame.
+flate2 = { workspace = true, features = ["zlib-rs", "runtime_detection"] }
 thiserror = { workspace = true }

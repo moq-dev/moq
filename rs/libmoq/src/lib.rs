@@ -4,7 +4,7 @@
 //!
 //! ## Concepts
 //!
-//! - **Session**: Network connection to a MoQ relay
+//! - **Session**: Network connection to a MoQ relay, or one accepted by a server
 //! - **Origin**: Collection of broadcasts
 //! - **Broadcast**: Container for tracks
 //! - **Track**: Named stream of groups
@@ -26,6 +26,7 @@ mod ffi;
 mod id;
 mod origin;
 mod publish;
+mod server;
 mod session;
 mod state;
 mod video;
@@ -42,6 +43,7 @@ pub(crate) use client::*;
 pub(crate) use consume::*;
 pub(crate) use origin::*;
 pub(crate) use publish::*;
+pub(crate) use server::*;
 pub(crate) use session::*;
 pub(crate) use state::*;
 

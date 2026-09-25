@@ -106,7 +106,7 @@ const dispose = el.signals.run((effect) => {
     const consumer = new Json.Snapshot.Consumer<unknown>({ track });
     effect.spawn(async () => {
         for (;;) {
-            const value = await Promise.race([effect.cancel, consumer.next()]);
+            const value = await effect.race(consumer.next());
             if (value === undefined) break;
             console.log("metadata", value);
         }

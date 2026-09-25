@@ -61,6 +61,18 @@ public final class Client: Sendable {
         try ffi.setQuicMaxStreams(maxStreams: maxStreams)
     }
 
+    /// Enable or disable the WebSocket fallback (on by default), which races QUIC
+    /// for `http(s)` URLs. Disable it against a relay that only serves QUIC.
+    public func setWebsocketEnabled(_ enabled: Bool) throws {
+        try ffi.setWebsocketEnabled(enabled: enabled)
+    }
+
+    /// Set the head start, in microseconds, QUIC gets before the WebSocket
+    /// fallback joins the race (defaults to 200ms). Zero races both at once.
+    public func setWebsocketDelay(_ delayUs: UInt64) throws {
+        try ffi.setWebsocketDelay(delayUs: delayUs)
+    }
+
     /// Wire the origin whose local broadcasts get advertised to the remote. If
     /// left unset, `connect` auto-creates one, reachable via `Session.publish`.
     public func setPublish(_ origin: OriginProducer?) throws {

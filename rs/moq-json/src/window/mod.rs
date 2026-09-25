@@ -641,6 +641,18 @@ mod test {
 	}
 
 	#[test]
+	fn trailing_data_after_a_frame_is_rejected() {
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut group = decoder.group();
+		assert!(group.decode(br#"{"offset":0,"records":[]} {}"#).is_err());
+
+		group.decode(br#"{"offset":0,"records":[]}"#).unwrap();
+		assert!(group.decode(br#"{"push":1}junk"#).is_err());
+		assert!(group.decode(br#"{"pop":0}{"pop":0}"#).is_err());
+		assert_eq!(group.range(), 0..0);
+	}
+
+	#[test]
 	fn rolling_is_invisible_to_the_consumer() {
 		// The same edits, framed two ways: one group for everything, versus a roll per edit.
 		let edits = |ratio: u32| {

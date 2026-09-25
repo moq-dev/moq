@@ -31,7 +31,7 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `source` | `camera`, `screen`, or `file`. |
 | `muted`, `invisible` | Disable audio or video capture. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
-| `announce` | When to advertise: once a `source` is live (default), `always`, or `never`. A camera source waits for every enabled track. The broadcast is created while connected either way; this only flips discoverability. |
+| `announce` | When to advertise: once a `source` is live (default), `always`, or `never`. A camera source waits for every enabled track. The broadcast is created while connected either way, but nobody can see or subscribe to it until it is announced. |
 
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.
@@ -53,6 +53,21 @@ video's share is honest, and keeps encoding at that rate. Codec, resolution,
 framerate, and bitrate are tunable through `el.video.config`; the audio
 encoder exposes its codec and volume. For simulcast or several renditions,
 drop the element and register your own encoders on a `Publish.Broadcast`.
+
+The video and audio encoders measure how far their output falls behind the media
+clock when they flush frames. Catalog jitter is the spread above each
+rendition's own recent minimum lateness, so a constant encoder delay is not jitter.
+The advertised value only rises; frame duration alone does not set it.
+
+## Clock
+
+Every timestamp the publisher writes is `performance.now()` in microseconds,
+so camera, microphone, screen, and file sources share one timeline. The catalog
+advertises that mapping as its root `clock` from the first snapshot, with PTS
+zero at `performance.timeOrigin`, so a viewer or an HLS export can name any
+frame's wall time. The mapping is fixed for the page: a system-clock
+adjustment never retimes the broadcast. Stamp your own tracks (e.g. text cues)
+on the same timeline to stay in sync.
 
 ## Custom tracks
 
@@ -120,7 +135,9 @@ new Publish.Audio.Encoder("audio", { broadcast, capture: audioCapture, enabled: 
 Standalone components start enabled unless you pass `enabled: false` (or a
 signal). Camera and microphone sources may prompt for permission on
 construction, so build an enabled screen source inside the user gesture that
-authorizes screen capture.
+authorizes screen capture. Audio capture that starts before the page's first
+click or keypress waits for one: browsers suspend Web Audio until then, and the
+audio rendition stays out of the catalog until samples flow.
 
 Every input and output is a signal from [`@moq/signals`](/lib/js/signals).
 Load from a CDN (`https://esm.sh/@moq/publish/element`) for a no-build embed.

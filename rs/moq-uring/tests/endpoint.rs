@@ -49,6 +49,7 @@ fn dial_config(peer: std::net::SocketAddr) -> quic::client::Config {
 /// One socket carries dials and accepts at once: two endpoints dial each
 /// other, and each also accepts the other's dial. This is the relay cluster
 /// shape (a worker's socket serves inbound sessions and upstream dials).
+/// Every connection names its peer's socket, and an accepted one the SNI.
 #[test]
 fn dial_and_accept_share_one_socket() {
 	let Some(mut worker) = worker() else { return };
@@ -68,6 +69,8 @@ fn dial_and_accept_share_one_socket() {
 	let a = endpoint(&handle);
 	let b = endpoint(&handle);
 
+	let (a_addr, b_addr) = (a.local_addr(), b.local_addr());
+
 	worker
 		.block_on(async move {
 			let a_to_b = a.connect(&dial_config(b.local_addr())).await.expect("a dials b");
@@ -81,6 +84,15 @@ fn dial_and_accept_share_one_socket() {
 					Some(ALPN),
 					"negotiated ALPN"
 				);
+			}
+			for (conn, peer) in [(&a_to_b, b_addr), (&b_in, a_addr), (&b_to_a, a_addr), (&a_in, b_addr)] {
+				assert_eq!(conn.remote_addr(), peer, "peer address");
+			}
+			for conn in [&b_in, &a_in] {
+				assert_eq!(conn.server_name(), Some("localhost"), "accepted SNI");
+			}
+			for conn in [&a_to_b, &b_to_a] {
+				assert_eq!(conn.server_name(), None, "a dial has no SNI of its own");
 			}
 		})
 		.expect("worker");

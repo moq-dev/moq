@@ -23,10 +23,13 @@ Test seeks within the retained window, expiry during a seek, missing groups,
 restart recovery, and return to live without duplicated or rewound playback.
 Use the writer/reader fixtures; a retention defect is fixed in its owning layer.
 
+The reader evicts popped spans from its object cache, but a group it already
+served stays in `moq_net`'s track cache until the pool reclaims it. Decide
+whether expiry during a seek needs a group eviction API in `moq-net`.
+
 ## Required
 
 - [Resume a recording](/quest/m1/archive/recovery.md)
-- [Recording reader](/quest/m1/archive/reader.md)
 
 ## Closes
 

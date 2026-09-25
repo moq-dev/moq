@@ -103,20 +103,17 @@ export class Fixture {
 		});
 		this.#signals.cleanup(() => video.close());
 
-		// Handed to the capture only once this page has user activation. The capture builds its own
-		// AudioContext the moment a source appears and never resumes it, so one built before the
-		// first gesture stays suspended and no audio is ever captured. See
-		// /quest/m1/publish-audio-unlock.md; until that lands, giving it the source late is what keeps
-		// this fixture measuring the player rather than that gap.
-		const audioSource = new Signal<Publish.Audio.Source | undefined>(undefined);
-
+		// Handed the source at page load, before any gesture, like a pre-granted microphone. Readiness
+		// then requires an audio catalog after the click, which covers the capture resuming its own
+		// suspended graph.
+		//
 		// No sampleRate or channelCount override: the graph already runs at SAMPLE_RATE, and asking
 		// the capture for one channel puts the AudioWorklet behind an explicit Web Audio downmix
 		// whose output drops PCM under load, which reaches the player as gaps of silence. Publishing
 		// the destination node's own format costs nothing here, since the tone is the same in both
 		// channels.
 		const audioCapture = new Publish.Audio.Capture({
-			source: audioSource,
+			source: { track: audioTrack, kind: "music" },
 		});
 		this.#signals.cleanup(() => audioCapture.close());
 
@@ -139,7 +136,6 @@ export class Fixture {
 			oscillator.start(start);
 			this.#runTone(oscillator, start, fault);
 			this.#runPicture(ctx, videoTrack, start, fault);
-			audioSource.set({ track: audioTrack, kind: "music" });
 		};
 		const unlock = () => void this.#audio.resume().catch(() => {});
 
