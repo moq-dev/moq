@@ -146,8 +146,14 @@ impl Media {
 					let mut decode = moq_video::decode::Options::new();
 					decode.start = moq_video::decode::Start::Latest;
 					// Nothing older than the playhead is worth presenting, so the delay
-					// doubles as the staleness budget on the wire.
-					decode.max_age = self.args.max_age();
+					// doubles as the staleness budget on the wire. With no speaker to
+					// follow, the playhead is video's own, so waiting on the audio
+					// estimate's budget would only freeze the picture.
+					decode.max_age = if snapshot.audio.renditions.is_empty() {
+						self.args.video_delay()
+					} else {
+						self.args.max_age()
+					};
 					match moq_video::decode::Consumer::new(&rendition, &config, &name, decode).await {
 						Ok(consumer) => {
 							tracing::info!(track = name, decoder = consumer.name(), "playing video rendition");
@@ -200,6 +206,7 @@ impl Media {
 							let audio = AudioPlayback {
 								presentation: self.presentation.clone(),
 								proxy: self.proxy.clone(),
+								latency: self.args.fixed_delay().unwrap_or_default().max(AUDIO_BUFFER_MIN),
 							};
 							tasks.spawn(async move { (Kind::Audio, play_audio(consumer, audio).await) });
 							playback.started(Kind::Audio);
@@ -259,10 +266,16 @@ async fn play_video(
 struct AudioPlayback {
 	presentation: Arc<Mutex<Presentation>>,
 	proxy: EventLoopProxy<Event>,
+	/// The depth the sink opens on, which also sizes its ring.
+	latency: Duration,
 }
 
 async fn play_audio(mut consumer: moq_audio::decode::Consumer, playback: AudioPlayback) -> anyhow::Result<()> {
-	let AudioPlayback { presentation, proxy } = playback;
+	let AudioPlayback {
+		presentation,
+		proxy,
+		latency,
+	} = playback;
 
 	// The playout delay is the consumer's to size, from how unevenly packets arrive,
 	// and the sink is where it lives: a sample handed over now sounds that much
@@ -279,9 +292,11 @@ async fn play_audio(mut consumer: moq_audio::decode::Consumer, playback: AudioPl
 	input.format = moq_audio::Format::F32;
 	input.sample_rate = sample_rate;
 	input.layout = layout;
-	// Only the floor the sink opens on and pads an underflow back to. The target
-	// it holds moves, and `fit` steers it there on every write.
-	input.latency = AUDIO_BUFFER_MIN;
+	// The floor the sink opens on and pads an underflow back to, and what sizes
+	// its ring, so a fixed delay has to be it or the ring could not hold it. An
+	// estimated target moves, so it gets the floor, and `fit` steers the sink
+	// onto the target on every write.
+	input.latency = latency;
 	let mut sink = engine.sink(input.clone())?;
 	let mut dry = true;
 
@@ -345,7 +360,13 @@ async fn play_audio(mut consumer: moq_audio::decode::Consumer, playback: AudioPl
 		// of the frame, and the pair is fitted to the target as one write.
 		let buffered = samples(sink.buffered());
 		dry |= buffered == 0;
-		let target = samples(consumer.delay().max(AUDIO_BUFFER_MIN));
+		// Capped at the most a sink accepts: the advertised floor is a number the
+		// publisher declared, unbounded, and padding up to it would never return.
+		let target = samples(
+			consumer
+				.delay()
+				.clamp(AUDIO_BUFFER_MIN, moq_audio::playback::Input::LATENCY_MAX),
+		);
 		let fit = fit(dry, buffered, target, slack, timing.silence + length as u64);
 		dry = false;
 

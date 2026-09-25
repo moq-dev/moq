@@ -95,7 +95,8 @@ unevenly audio arrives and sizes the speaker's buffer to match, using the same
 [algorithm](/concept/audio-jitter) as the browser player, so a publisher that
 flushes 100 ms at a time gets a buffer deep enough to play through the next
 flush. It waits up to 2 s on a stalled group before skipping it, since a budget
-any shorter would hide the very lateness it measures. A duration fixes the delay
+any shorter would hide the very lateness it measures; a broadcast with no audio
+has nothing to measure, so video trails by 100 ms and skips past that. A duration fixes the delay
 instead, and doubles as the point past which a stalled group is skipped. The
 speaker holds the delay, with a 50 ms floor under it: it pads back up to the
 delay after running dry and skips back down onto it after a burst. The picture
