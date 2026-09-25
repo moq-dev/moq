@@ -202,7 +202,7 @@ struct RequestState {
 /// The network transport carrying an incoming session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum MoqTransport {
-	/// QUIC, either directly or through WebTransport over HTTP/3.
+	/// Raw QUIC, negotiating a MoQ ALPN directly.
 	Quic,
 	/// An Iroh QUIC connection.
 	Iroh,
@@ -212,18 +212,21 @@ pub enum MoqTransport {
 	Tcp,
 	/// A Unix domain socket using qmux framing.
 	Unix,
+	/// WebTransport over HTTP/3 on QUIC.
+	WebTransport,
 }
 
-impl TryFrom<moq_tokio::server::Transport> for MoqTransport {
+impl TryFrom<moq_tokio::Transport> for MoqTransport {
 	type Error = MoqError;
 
-	fn try_from(value: moq_tokio::server::Transport) -> Result<Self, Self::Error> {
+	fn try_from(value: moq_tokio::Transport) -> Result<Self, Self::Error> {
 		Ok(match value {
-			moq_tokio::server::Transport::Quic => Self::Quic,
-			moq_tokio::server::Transport::Iroh => Self::Iroh,
-			moq_tokio::server::Transport::WebSocket => Self::WebSocket,
-			moq_tokio::server::Transport::Tcp => Self::Tcp,
-			moq_tokio::server::Transport::Unix => Self::Unix,
+			moq_tokio::Transport::Quic => Self::Quic,
+			moq_tokio::Transport::Iroh => Self::Iroh,
+			moq_tokio::Transport::WebSocket => Self::WebSocket,
+			moq_tokio::Transport::Tcp => Self::Tcp,
+			moq_tokio::Transport::Unix => Self::Unix,
+			moq_tokio::Transport::WebTransport => Self::WebTransport,
 			_ => return Err(MoqError::Unsupported),
 		})
 	}
@@ -232,7 +235,7 @@ impl TryFrom<moq_tokio::server::Transport> for MoqTransport {
 #[cfg(test)]
 mod transport_tests {
 	use super::MoqTransport;
-	use moq_tokio::server::Transport;
+	use moq_tokio::Transport;
 
 	#[test]
 	fn converts_supported_transports() {
@@ -244,6 +247,10 @@ mod transport_tests {
 		);
 		assert_eq!(MoqTransport::try_from(Transport::Tcp).unwrap(), MoqTransport::Tcp);
 		assert_eq!(MoqTransport::try_from(Transport::Unix).unwrap(), MoqTransport::Unix);
+		assert_eq!(
+			MoqTransport::try_from(Transport::WebTransport).unwrap(),
+			MoqTransport::WebTransport
+		);
 	}
 }
 

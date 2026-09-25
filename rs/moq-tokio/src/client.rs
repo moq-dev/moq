@@ -418,7 +418,7 @@ impl Client {
 			{
 				let session = quic_handle.await?;
 				let session = connect_session(&moq, session).await?;
-				return Ok(Dialed::new(session, crate::Transport::Quic));
+				return Ok(Dialed::new(session, quic_transport(&url)));
 			}
 		}
 
@@ -462,6 +462,7 @@ impl Client {
 		Q: Future<Output = crate::Result<S>> + Unpin + Send + 'static,
 		S: moq_net::transport::poll::Boxable,
 	{
+		let transport = quic_transport(addr.url());
 		let alpns = self.versions.alpns();
 		let ws_config = self.websocket.clone();
 		let ws_tls = self.tls.clone();
@@ -473,16 +474,17 @@ impl Client {
 		};
 
 		match race_transport_connect(quic, websocket).await? {
-			TransportRace::Quic(quic) => Ok(Dialed::new(connect_session(moq, quic).await?, crate::Transport::Quic)),
+			TransportRace::Quic(quic) => Ok(Dialed::new(connect_session(moq, quic).await?, transport)),
 			TransportRace::WebSocket { session, quic } => {
 				let session = connect_session(&self.moq, crate::transport::Session::new(session)).await?;
 				let mut dialed = Dialed::new(session, crate::Transport::WebSocket);
 				dialed.upgrade = quic.map(|quic| {
 					let moq = moq.clone();
-					Upgrade::new(Box::pin(async move {
+					let dial = Box::pin(async move {
 						let quic = quic.await?;
 						Ok(Box::pin(async move { Ok(connect_session(&moq, quic).await?) }) as Handshake)
-					}))
+					});
+					Upgrade::new(dial, transport)
 				});
 				Ok(dialed)
 			}
@@ -546,6 +548,16 @@ fn setup_path(url: &Url) -> Option<String> {
 	}
 }
 
+/// What a noq dial to `url` runs on: WebTransport for `https://` (and the `http://`
+/// bootstrap), raw QUIC for `moqt://` and `moql://`.
+#[cfg(feature = "noq")]
+fn quic_transport(url: &Url) -> crate::Transport {
+	match url.scheme() {
+		"moqt" | "moql" => crate::Transport::Quic,
+		_ => crate::Transport::WebTransport,
+	}
+}
+
 /// A session [`Client::dial`] brought up.
 pub(crate) struct Dialed {
 	pub session: moq_net::Session,
@@ -584,6 +596,8 @@ pub(crate) type Handshake = BoxFuture<'static, crate::Result<moq_net::Session>>;
 /// once both stages complete. Dropping it cancels the dial.
 pub(crate) struct Upgrade {
 	stage: Stage,
+	/// What the upgraded session runs on.
+	transport: crate::Transport,
 	/// The connect deadline of the attempt this dial belongs to, and its length for
 	/// the error.
 	deadline: Option<(std::pin::Pin<Box<tokio::time::Sleep>>, std::time::Duration)>,
@@ -601,15 +615,16 @@ enum Stage {
 pub(crate) enum Step {
 	/// The QUIC transport is up; the MoQ handshake has started on it.
 	Handshaking,
-	/// The MoQ session over QUIC is ready to take over.
-	Done(moq_net::Session),
+	/// The MoQ session over QUIC is ready to take over, running on this transport.
+	Done(moq_net::Session, crate::Transport),
 }
 
 #[cfg_attr(not(all(feature = "websocket", feature = "noq")), allow(dead_code))]
 impl Upgrade {
-	pub(crate) fn new(dial: BoxFuture<'static, crate::Result<Handshake>>) -> Self {
+	pub(crate) fn new(dial: BoxFuture<'static, crate::Result<Handshake>>, transport: crate::Transport) -> Self {
 		Self {
 			stage: Stage::Dialing(dial),
+			transport,
 			deadline: None,
 		}
 	}
@@ -637,7 +652,8 @@ impl Upgrade {
 				Poll::Ready(Ok(Step::Handshaking))
 			}
 			Stage::Handshaking(handshake) => {
-				Poll::Ready(Ok(Step::Done(ready!(waiter.poll_future(handshake.as_mut()))?)))
+				let session = ready!(waiter.poll_future(handshake.as_mut()))?;
+				Poll::Ready(Ok(Step::Done(session, self.transport)))
 			}
 		}
 	}
@@ -1364,7 +1380,7 @@ mod tests {
 		.expect("client connect timed out")
 		.expect("a fallback refused on auth must not end a connect whose QUIC arm succeeds");
 
-		assert_eq!(dialed.transport, crate::Transport::Quic);
+		assert_eq!(dialed.transport, crate::Transport::WebTransport);
 		drop(dialed);
 		accepted.await.unwrap().expect("server handshake failed");
 	}

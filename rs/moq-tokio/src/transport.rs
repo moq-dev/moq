@@ -20,7 +20,7 @@ use web_transport_trait::poll as wt_poll;
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Transport {
-	/// QUIC, either directly or through WebTransport over HTTP/3.
+	/// Raw QUIC, negotiating a MoQ ALPN directly.
 	Quic,
 	/// An Iroh QUIC connection.
 	Iroh,
@@ -30,6 +30,8 @@ pub enum Transport {
 	Tcp,
 	/// A Unix domain socket using qmux framing.
 	Unix,
+	/// WebTransport over HTTP/3 on QUIC.
+	WebTransport,
 }
 
 impl Transport {
@@ -41,6 +43,7 @@ impl Transport {
 			Self::WebSocket => "websocket",
 			Self::Tcp => "tcp",
 			Self::Unix => "unix",
+			Self::WebTransport => "webtransport",
 		}
 	}
 }

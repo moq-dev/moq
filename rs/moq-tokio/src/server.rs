@@ -8,9 +8,9 @@ use std::net;
 #[cfg(any(test, all(feature = "uds", unix)))]
 use std::path::PathBuf;
 
-use crate::Error;
 #[cfg(feature = "iroh")]
 use crate::iroh;
+use crate::{Error, Transport};
 use moq_net::Session;
 use url::Url;
 
@@ -587,7 +587,9 @@ impl Server {
 							let Accepted { session, url, identity, authority, mut link } = super::noq::accept(_conn, alpns).await?;
 							link.local = local;
 							let request = server.accept_request(tokio::time::Instant::now().into_std(), crate::transport::Session::new(session)).await?;
-							Ok(Request { transport: Transport::Quic, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)) })
+							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
+							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
+							Ok(Request { transport, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)) })
 						}.boxed());
 					}
 				}
@@ -1097,9 +1099,6 @@ pub struct Link {
 	/// sub-protocol on WebTransport and WebSocket.
 	pub alpn: Option<String>,
 }
-
-/// Re-exported here too, where the accept side first named it.
-pub use crate::Transport;
 
 /// An incoming MoQ session that can be accepted or rejected.
 ///
@@ -1691,6 +1690,7 @@ mod tests {
 		assert_eq!(Transport::WebSocket.as_str(), "websocket");
 		assert_eq!(Transport::Tcp.as_str(), "tcp");
 		assert_eq!(Transport::Unix.as_str(), "unix");
+		assert_eq!(Transport::WebTransport.as_str(), "webtransport");
 	}
 
 	/// Building the endpoint needs a runtime, and `certificates()` must stay

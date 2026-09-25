@@ -251,9 +251,9 @@ async fn serve_client(
 }
 
 /// Whether ordinary clients may use this transport on the shared LAN server.
-fn is_public_transport(transport: moq_tokio::server::Transport, public_quic: bool) -> bool {
+fn is_public_transport(transport: moq_tokio::Transport, public_quic: bool) -> bool {
 	match transport {
-		moq_tokio::server::Transport::Tcp | moq_tokio::server::Transport::Unix => true,
+		moq_tokio::Transport::Tcp | moq_tokio::Transport::Unix => true,
 		_ => public_quic,
 	}
 }
@@ -949,9 +949,9 @@ mod tests {
 
 	#[test]
 	fn explicit_stream_listeners_are_public_without_exposing_mesh_quic() {
-		assert!(is_public_transport(moq_tokio::server::Transport::Tcp, false));
-		assert!(is_public_transport(moq_tokio::server::Transport::Unix, false));
-		assert!(!is_public_transport(moq_tokio::server::Transport::Quic, false));
-		assert!(is_public_transport(moq_tokio::server::Transport::Quic, true));
+		assert!(is_public_transport(moq_tokio::Transport::Tcp, false));
+		assert!(is_public_transport(moq_tokio::Transport::Unix, false));
+		assert!(!is_public_transport(moq_tokio::Transport::Quic, false));
+		assert!(is_public_transport(moq_tokio::Transport::Quic, true));
 	}
 }

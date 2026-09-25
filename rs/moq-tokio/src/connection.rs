@@ -781,8 +781,8 @@ impl Connection {
 					let ended = loop {
 						match run_session(shared, &session, &mut draining, &mut upgrade).await {
 							Next::Ended(ended) => break ended,
-							Next::Upgraded(next) => {
-								tracing::info!(peer = %Endpoint(&url), "upgraded from WebSocket to QUIC");
+							Next::Upgraded(next, transport) => {
+								tracing::info!(peer = %Endpoint(&url), %transport, "upgraded from WebSocket");
 								// UDP gets through after all, so the next dial gives QUIC its head start.
 								#[cfg(feature = "websocket")]
 								crate::websocket::forget(&url);
@@ -791,7 +791,7 @@ impl Connection {
 								// is live, and the old one serves until its routes splice over at a group
 								// boundary or the cap closes it.
 								let old = std::mem::replace(&mut session, next);
-								shared.connected(&session, crate::Transport::Quic);
+								shared.connected(&session, transport);
 								// An empty URI is legal from either endpoint on every version; the old
 								// session's driver closes it at the deadline if the peer lingers.
 								let msg = moq_net::goaway::Goaway::new().with_timeout(goaway.handover);
@@ -1215,9 +1215,9 @@ fn retry_wait(delay: Duration, retry_start: tokio::time::Instant, timeout: Durat
 enum Next {
 	/// The session stopped being the live one.
 	Ended(Ended),
-	/// The pending QUIC dial finished its handshake; this session replaces the
-	/// WebSocket one.
-	Upgraded(moq_net::Session),
+	/// The pending QUIC dial finished its handshake; this session, on this
+	/// transport, replaces the WebSocket one.
+	Upgraded(moq_net::Session, crate::Transport),
 }
 
 /// Why a session stopped being the live one.
@@ -1360,7 +1360,7 @@ async fn run_session(
 			return Poll::Ready(Next::Ended(Ended::Closed(Err(err))));
 		}
 
-		poll_upgrade(shared, upgrade, waiter).map(Next::Upgraded)
+		poll_upgrade(shared, upgrade, waiter).map(|(session, transport)| Next::Upgraded(session, transport))
 	})
 	.await
 }
@@ -1370,13 +1370,13 @@ fn poll_upgrade(
 	shared: &Shared,
 	upgrade: &mut Option<crate::client::Upgrade>,
 	waiter: &kio::Waiter,
-) -> Poll<moq_net::Session> {
+) -> Poll<(moq_net::Session, crate::Transport)> {
 	while let Some(pending) = upgrade.as_mut() {
 		match ready!(pending.poll(waiter)) {
 			Ok(crate::client::Step::Handshaking) => shared.migrating(),
-			Ok(crate::client::Step::Done(session)) => {
+			Ok(crate::client::Step::Done(session, transport)) => {
 				*upgrade = None;
-				return Poll::Ready(session);
+				return Poll::Ready((session, transport));
 			}
 			Err(err) => {
 				// Only the Handshaking stage moved the status, but restoring it is harmless
@@ -2224,7 +2224,10 @@ mod tests {
 			let _ = failed.await;
 			Err(Error::ConnectFailed)
 		});
-		let mut upgrade = Some(crate::client::Upgrade::new(Box::pin(async move { Ok(handshake) })));
+		let mut upgrade = Some(crate::client::Upgrade::new(
+			Box::pin(async move { Ok(handshake) }),
+			crate::Transport::WebTransport,
+		));
 
 		assert!(poll_upgrade(&shared, &mut upgrade, &waiter).is_pending());
 		assert_eq!(shared.state.consume().read().status, Some(Status::Migrating));
@@ -2306,10 +2309,10 @@ mod tests {
 			"the WebSocket session was not counted as ended"
 		);
 		assert!(connection.connected());
-		assert_eq!(connection.transport(), Some(crate::Transport::Quic));
+		assert_eq!(connection.transport(), Some(crate::Transport::WebTransport));
 		assert_eq!(connection.epoch(), 2);
 		let (transport, _quic) = fallback.accept().await;
-		assert_eq!(transport, crate::Transport::Quic);
+		assert_eq!(transport, crate::Transport::WebTransport);
 		// QUIC works on this network, so the next dial gives it the head start again.
 		assert!(
 			!crate::websocket::won(&fallback.url),
@@ -2333,7 +2336,7 @@ mod tests {
 		tokio::time::timeout(UPGRADE_WAIT, websocket.closed())
 			.await
 			.expect("the WebSocket session outlived the handover cap");
-		assert_eq!(connection.transport(), Some(crate::Transport::Quic));
+		assert_eq!(connection.transport(), Some(crate::Transport::WebTransport));
 	}
 
 	/// When QUIC wins the race nothing changes: one session, over QUIC, and no
@@ -2359,9 +2362,9 @@ mod tests {
 			.await
 			.expect("never connected")
 			.unwrap();
-		assert_eq!(connection.transport(), Some(crate::Transport::Quic));
+		assert_eq!(connection.transport(), Some(crate::Transport::WebTransport));
 		let (transport, _session) = fallback.accept().await;
-		assert_eq!(transport, crate::Transport::Quic);
+		assert_eq!(transport, crate::Transport::WebTransport);
 
 		let cam = tokio::time::timeout(UPGRADE_WAIT, subscriber.consume().routed_broadcast("cam"))
 			.await
