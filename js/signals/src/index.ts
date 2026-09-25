@@ -611,7 +611,7 @@ export class Effect {
 					// close() has to release the wait rather than wait behind it. It already ran
 					// every dispose function, and there is no next run left to protect, so a task
 					// that never settles must not pin this loop (or the timer below) forever.
-					await Promise.race([Promise.all(pending), this.#closed.promise]);
+					await race([Promise.all(pending), this.#closed.promise]);
 				}
 			} catch (error) {
 				console.error("async effect error", error);

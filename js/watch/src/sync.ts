@@ -283,9 +283,11 @@ export class Sync {
 				resolve(ok);
 			};
 			const timer = setTimeout(() => wake(true), ms);
-			const disposes = [this.in.delay, this.#out.delay, this.#out.reference].map((signal) =>
-				signal.changed(() => wake(false)),
-			);
+			const disposes = [
+				this.in.delay.changed(() => wake(false)),
+				this.#out.delay.changed(() => wake(false)),
+				this.#out.reference.changed(() => wake(false)),
+			];
 		});
 	}
 

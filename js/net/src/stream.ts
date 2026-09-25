@@ -1,3 +1,4 @@
+import { race } from "@moq/signals";
 import { fromTransport, StreamCode, StreamError, toStreamCode, toTransport } from "./error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
@@ -100,8 +101,8 @@ export interface OpenOptions {
 
 /** Options for {@link Writer.tryOpen}. */
 export interface TryOpenOptions extends OpenOptions {
-	/** Give up once this settles, however it settles. */
-	cancel: Promise<unknown>;
+	/** Give up once this resolves. */
+	cancel: Promise<void>;
 }
 
 export class Stream {
@@ -523,18 +524,13 @@ export class Writer {
 	 * an over-limit open instead of rejecting it.
 	 */
 	static async tryOpen(quic: WebTransport, options: TryOpenOptions): Promise<Writer | undefined> {
-		// A rejected `cancel` (STOP_SENDING) means the peer is gone too, so both settle
-		// paths mean "give up" and neither is left unhandled. Built before the open, and
-		// raced ahead of it, so an already-cancelled caller wins even against a slot that
-		// is free right now.
-		const cancelled = options.cancel.then(
-			() => undefined,
-			() => undefined,
-		);
+		// Raced ahead of the open, so an already-cancelled caller wins even against a slot
+		// that is free right now. `race` rather than `Promise.race`: the caller shares one
+		// `cancel` across every group of a subscription, which must not gain a reaction per call.
 		const open = Writer.open(quic, options);
 
 		try {
-			const stream = await Promise.race([cancelled, open]);
+			const stream = await race([options.cancel, open]);
 			if (stream) return stream;
 		} catch (err: unknown) {
 			// open already discarded the late stream on its way out.
