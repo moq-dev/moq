@@ -3330,12 +3330,8 @@ fn video_raw_publish_consume() {
 		data: std::ptr::null(),
 		data_size: 0,
 	};
-	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
-	assert_eq!(frame.width, 320);
-	assert_eq!(frame.height, 240);
-	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
-
-	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
+	// Hold the frame across cancellation: its id owns the decoded picture, so it
+	// stays readable after the terminal callback and until it is freed.
 	assert_eq!(moq_decode_video_cancel(consumer), 0);
 	loop {
 		let code = frame_cb.recv();
@@ -3346,6 +3342,24 @@ fn video_raw_publish_consume() {
 			break;
 		}
 	}
+
+	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(frame.width, 320);
+	assert_eq!(frame.height, 240);
+	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
+
+	// Pixels are produced once per id, so a second read hands back the same buffer.
+	let first = frame.data;
+	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(frame.data, first, "the pixel pointer is stable until the id is freed");
+
+	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
+	assert_eq!(
+		unsafe { moq_decode_video_frame(frame_id, &mut frame) },
+		Error::FrameNotFound.code(),
+		"a freed id is released, not left readable"
+	);
+	assert_eq!(moq_decode_video_frame_free(frame_id), Error::FrameNotFound.code());
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);

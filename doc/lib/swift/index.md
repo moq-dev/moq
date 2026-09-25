@@ -94,11 +94,12 @@ divides the connection's send estimate; pass it to `encodeVideo` /
 `AudioCodec.opus()`, and `AudioEncoderOutput.frameDurationUs` sets the Opus
 frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000.
 
-`decodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.format`
-is `.i420` when unset, or `.rgba` for four bytes a pixel, and every frame
-repeats the layout it was decoded to. `resize` is best effort: only NVDEC has a
-built-in scaler, and VideoToolbox is not it, so read each frame's own `width`
-and `height` rather than assuming it took.
+Each frame from `decodeVideo` owns its decoded picture until it is released,
+including after the consumer is cancelled. `frame.pixels(format:)` converts it
+on demand: `.i420`, or `.rgba` for four bytes a pixel. Release frames promptly,
+since held frames hold decoder buffers. `resize` is best effort: only NVDEC has
+a built-in scaler, and VideoToolbox is not it, so read each frame's own
+`width()` and `height()` rather than assuming it took.
 
 ## Connection stats
 
