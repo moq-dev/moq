@@ -31,7 +31,9 @@ of track T through record N).
   agrees, including after DVR pops. Every other video rendition snaps each
   boundary to its nearest group start within a tolerance (around 1s); a
   segment with no start in range becomes a gap (`EXT-X-GAP` in HLS), so a
-  player switching renditions lands on the next real segment. Audio and other
+  player switching renditions lands on the next real segment. Gaps are a
+  best-effort fallback: the draft and HLS docs say a publisher wanting HLS
+  export SHOULD align video GOPs across renditions. Audio and other
   renditions take the groups and frames whose timestamps fall in each span,
   possibly from more than one object. The reader's cache absorbs the overlap.
 
