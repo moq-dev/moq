@@ -26,9 +26,9 @@ of track T through record N).
   ranges so a never-closing group is recorded. Bump the recording `version` and
   refuse the old one. Recovery, grace deletion, and FETCH replay follow the
   per-track index.
-- **HLS and DASH:** take segment boundaries from a reference video rendition,
-  near a target duration, and number them so every edge and every reload
-  agrees, including after DVR pops. Every other video rendition snaps each
+- **HLS and DASH:** take segment boundaries from a reference video rendition
+  (an audio one when the broadcast has no video), near a target duration, and
+  number them so every edge and every reload agrees, including after DVR pops. Every other video rendition snaps each
   boundary to its nearest group start within a tolerance (around 1s); a
   segment with no start in range becomes a gap (`EXT-X-GAP` in HLS), so a
   player switching renditions lands on the next real segment. Gaps are a
@@ -40,7 +40,7 @@ of track T through record N).
 Carry over the existing tests (DVR trim, durable listing, archive replay) and
 add a static catalog outliving its first video segment, an append-only group
 spanning several objects, audio cut independently of video, renditions that
-start at different times, and video renditions whose group starts never
-coincide.
+start at different times, video renditions whose group starts never
+coincide, and an audio-only broadcast.
 
 Update `doc/concept/hang.md` and the HLS and CLI docs this makes stale.
