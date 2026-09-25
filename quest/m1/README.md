@@ -24,6 +24,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Announce compression](/quest/m1/announce-compression.md) - a lite-07 announce reuses the path head and hop-chain tail of a live announcement on its stream instead of resending them
 - [Rust track tail](/quest/m1/rust-track-tail.md) - a moq-net subscriber accepts groups that arrive after the subscription's end, and PublishDone carries the real stream count
 - [Session death error](/quest/m1/session-death-error.md) - a dying session ends its tracks with its own error in Rust and JS, never a clean end, `Dropped`, or `Cancel`
+- [JS bare FIN](/quest/m1/js-bare-fin.md) - a `@moq/net` subscriber aborts a track whose subscribe stream FINs before its declared end, like Rust
 - [Signal.race cleanup](/quest/m1/signal-race.md) - `Signal.race` releases its signal listeners when its result loses a race
 - [Origin narrowing](/quest/m1/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
 - [Auth expiry clock](/quest/m1/auth-expiry-clock.md) - moq-auth and the relay hold one fixed expiry deadline and honour the same skew allowance
@@ -39,6 +40,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [IETF announce count](/quest/m1/ietf-announce-count.md) - an opt-in moq-transport extension carries the replay count, so IETF announce consumers go live without a timer
 
 - [Jitter clock](/quest/m1/jitter-flush-clock.md) - renditions advertise `delay` (lag behind the earliest track) and `jitter` (spread), measured at encoder flush, never lowered; js/watch sizes playout over what it subscribes
+- [Import discontinuity](/quest/m1/import-discontinuity.md) - a seek or pause resets the flush jitter baseline, from moqsink, libmoq, and moq-ffi
 - [Data jitter](/quest/m1/data-jitter.md) - JSON and binary tracks with a capture time advertise a detected `delay` and `jitter`
 - [Play tune-in backpressure](/quest/m1/play-tunein-backpressure.md) - moq play: a tune-in burst larger than the video queue parks the decoder, so the clock never reaches live at a wide `--delay`
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - generic on-demand group serving and IETF FETCH for browser publishers
@@ -47,6 +49,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Tooling](/quest/m1/tooling/README.md) - justfiles become a one-line menu over `sh/`, one impact map scopes CI, and every workflow step runs a recipe
 - [Path patterns](/quest/m1/path-patterns.md) - one matcher for every predicate over broadcast paths: tokens, origins, interest
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
+- [Tests under load](/quest/m1/test-flakes.md) - three tests that time out or run out of file descriptors under `just check` are fixed at the cause
 - [Decoded frame ownership](/quest/m1/decoded-frames.md) - retain moq-video Frames across bindings, with native views or CPU conversion as needed
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - generated C++ over moq-ffi with futures and expected-style errors, shipped as a tarball, vcpkg, and Conan, and adopted by the OBS plugin
 - [OBS native codecs](/quest/m1/obs-moq-video/README.md) - remove FFmpeg decoding dependencies, deliver GPU frames, and use native audio/video encoders
