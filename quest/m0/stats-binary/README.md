@@ -17,8 +17,9 @@ deltas. It did win on decode CPU (about 10x) and on allocations on both
 sides; the numbers and the prototype are in the PR that abandoned it.
 
 A typed binary contract still needs deltas to compete on bytes, or a
-compressor with a larger window than a browser's `deflate-raw`. Either is new
-scope for a later quest, not this line.
+compressor with a larger window than a browser's `deflate-raw`.
+[Binary delta stats](/quest/m2/stats-delta.md) takes the delta route, outside
+this line.
 
 ## Quests
 
