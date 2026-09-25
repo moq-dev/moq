@@ -1098,40 +1098,8 @@ pub struct Link {
 	pub alpn: Option<String>,
 }
 
-/// The network transport carrying an incoming MoQ session.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Transport {
-	/// QUIC, either directly or through WebTransport over HTTP/3.
-	Quic,
-	/// An Iroh QUIC connection.
-	Iroh,
-	/// A WebSocket connection using qmux framing.
-	WebSocket,
-	/// A plaintext TCP connection using qmux framing.
-	Tcp,
-	/// A Unix domain socket using qmux framing.
-	Unix,
-}
-
-impl Transport {
-	/// Returns the stable lowercase name used in logs and external metadata.
-	pub const fn as_str(self) -> &'static str {
-		match self {
-			Self::Quic => "quic",
-			Self::Iroh => "iroh",
-			Self::WebSocket => "websocket",
-			Self::Tcp => "tcp",
-			Self::Unix => "unix",
-		}
-	}
-}
-
-impl std::fmt::Display for Transport {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.write_str(self.as_str())
-	}
-}
+/// Re-exported here too, where the accept side first named it.
+pub use crate::Transport;
 
 /// An incoming MoQ session that can be accepted or rejected.
 ///

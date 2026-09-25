@@ -7,12 +7,49 @@
 //! closed-watch emulation is weaker than a native implementation (see
 //! [`Session`]), so a backend that implements the poll interface itself is
 //! handed to moq-net directly.
+//!
+//! It also names the [`Transport`] a session runs on, for the accept and dial sides alike.
 
 use std::task::{Context, Poll, ready};
 
 use bytes::Bytes;
 use futures::FutureExt;
 use web_transport_trait::poll as wt_poll;
+
+/// The network transport carrying a MoQ session, on either side of it.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Transport {
+	/// QUIC, either directly or through WebTransport over HTTP/3.
+	Quic,
+	/// An Iroh QUIC connection.
+	Iroh,
+	/// A WebSocket connection using qmux framing.
+	WebSocket,
+	/// A plaintext TCP connection using qmux framing.
+	Tcp,
+	/// A Unix domain socket using qmux framing.
+	Unix,
+}
+
+impl Transport {
+	/// Returns the stable lowercase name used in logs and external metadata.
+	pub const fn as_str(self) -> &'static str {
+		match self {
+			Self::Quic => "quic",
+			Self::Iroh => "iroh",
+			Self::WebSocket => "websocket",
+			Self::Tcp => "tcp",
+			Self::Unix => "unix",
+		}
+	}
+}
+
+impl std::fmt::Display for Transport {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(self.as_str())
+	}
+}
 
 /// A stored in-flight operation future. Native transports are Send, so the
 /// plain boxed flavor suffices.
