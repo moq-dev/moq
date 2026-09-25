@@ -75,6 +75,11 @@ impl Observer {
 		}
 	}
 
+	/// When the drain window ends, if [`Trigger::start`] has fired.
+	pub(crate) fn deadline(&self) -> Option<Instant> {
+		*self.rx.borrow()
+	}
+
 	/// Drain `session` with an empty-URI GOAWAY ("reconnect to me"), waiting for
 	/// the peer to leave.
 	///

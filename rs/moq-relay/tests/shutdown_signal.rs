@@ -17,8 +17,9 @@
 //! itself; a session that still arrives mid-drain is sent a GOAWAY at once,
 //! carrying only what is left of the window.
 //!
-//! Each test raises or handles process signals, so they rely on nextest's
-//! process-per-test isolation.
+//! Each signal test raises or handles process signals, so they rely on
+//! nextest's process-per-test isolation. `a_trigger_before_run_keeps_the_deadline`
+//! fires the trigger before `run` instead of a signal.
 
 #![cfg(unix)]
 
@@ -63,6 +64,11 @@ fn an_embedder_owns_the_signals() {
 #[test]
 fn a_session_arriving_mid_drain_gets_what_is_left() {
 	run_test(a_session_arriving_mid_drain_gets_what_is_left_inner);
+}
+
+#[test]
+fn a_trigger_before_run_keeps_the_deadline() {
+	run_test(a_trigger_before_run_keeps_the_deadline_inner);
 }
 
 async fn sigint_drains_sessions_before_exiting_inner() {
@@ -228,6 +234,32 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 		.expect("relay never exited after the drain window")
 		.expect("relay task panicked")
 		.expect("relay exited with an error");
+}
+
+async fn a_trigger_before_run_keeps_the_deadline_inner() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let (_port, config) = relay_config();
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let trigger = relay.shutdown_trigger().clone();
+
+	// Fired while `run` is still starting. The session deadline is this instant;
+	// `drain` must not open a fresh window when it finally observes the watch.
+	trigger.start();
+	let deadline = std::time::Instant::now() + DRAIN_TIMEOUT;
+	tokio::time::sleep(DRAIN_TIMEOUT / 2).await;
+
+	let run = tokio::spawn(relay.run());
+	tokio::time::timeout(Duration::from_secs(15), run)
+		.await
+		.expect("relay never exited")
+		.expect("relay task panicked")
+		.expect("relay exited with an error");
+	let over = std::time::Instant::now().saturating_duration_since(deadline);
+	assert!(
+		over <= Duration::from_secs(2),
+		"run returned {over:?} past the recorded deadline, not the one-second grace"
+	);
 }
 
 /// A one-shot client offering `version` (every version when empty): a

@@ -656,9 +656,9 @@ impl Relay {
 
 /// Two-stage shutdown: the first signal, or an embedder firing
 /// [`shutdown::Trigger::start`], starts the drain broadcast (every session sends
-/// GOAWAY and waits for its peer to leave); a second signal, or the drain
-/// window elapsing, returns from [`Relay::run`]. Without `signals` only the
-/// trigger and the window count.
+/// GOAWAY and waits for its peer to leave); a second signal, or that recorded
+/// deadline plus one second, returns from [`Relay::run`]. Without `signals`
+/// only the trigger and that deadline count.
 async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, signals: bool) -> anyhow::Result<()> {
 	let window = shutdown.drain_timeout;
 	let signal = || async move {
@@ -679,9 +679,13 @@ async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, sig
 		_ = shutdown.started() => tracing::info!(?window, "shutdown requested; draining sessions"),
 	}
 
-	// One extra second past the window so per-session force-closes fire first,
-	// giving every peer a proper GoawayTimeout instead of a dropped transport.
-	let grace = window + std::time::Duration::from_secs(1);
+	// One extra second past the deadline fixed when the trigger fired, so
+	// per-session force-closes fire first. That instant may be earlier than
+	// this future was polled (the embedder can start the drain during startup),
+	// and a fresh window here would keep the process up past the time sessions
+	// were told.
+	let deadline = shutdown.deadline().context("drain started without a deadline")?;
+	let grace = (deadline + std::time::Duration::from_secs(1)).saturating_duration_since(std::time::Instant::now());
 	tokio::select! {
 		res = signal() => {
 			res?;
