@@ -1172,7 +1172,7 @@ mod tests {
 
 		let listener = tokio::net::TcpListener::bind("[::]:0").await.unwrap();
 		let ws_port = listener.local_addr().unwrap().port();
-		let forbid = tokio::spawn(async move {
+		let mut forbid = tokio::spawn(async move {
 			let (mut stream, _) = listener.accept().await?;
 			let mut buf = [0; 1024];
 			let _ = stream.read(&mut buf).await?;
@@ -1201,7 +1201,7 @@ mod tests {
 
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		// No head start, so the 403 lands before the QUIC handshake completes.
+		// No head start, so the fallback dials while QUIC waits on the 403.
 		config.websocket.delay = std::time::Duration::ZERO;
 		let client = config.init(Default::default()).unwrap();
 
@@ -1210,7 +1210,9 @@ mod tests {
 		let noq = client.noq.as_ref().unwrap();
 		let quic_addr: crate::connect::Addr = Url::parse(&format!("https://localhost:{quic_port}")).unwrap().into();
 		let ws_addr: crate::connect::Addr = Url::parse(&format!("http://localhost:{ws_port}")).unwrap().into();
+		// Hold QUIC until the fallback has been refused, so the 403 is always exercised.
 		let quic = async {
+			(&mut forbid).await.unwrap().expect("fallback listener failed");
 			noq.connect(&client.tls, quic_addr, &client.versions)
 				.await
 				.map(crate::transport::Session::new)
@@ -1227,8 +1229,6 @@ mod tests {
 
 		drop(session);
 		accepted.await.unwrap().expect("server handshake failed");
-		// QUIC may win before the fallback ever dials, leaving the listener waiting.
-		forbid.abort();
 	}
 
 	#[cfg(all(feature = "websocket", feature = "noq"))]
