@@ -47,7 +47,7 @@ export class Consumer<T> {
 	// carries is taken, so a second group stays resolved here and every later read fails on it again.
 	#pending?: Promise<{ group: Moq.Group.Consumer | undefined }>;
 
-	constructor(config: Consumer.Config) {
+	constructor(config: Consumer.Config<T>) {
 		this.#track = config.track;
 		this.#decoder = new Decoder(config);
 	}
@@ -140,5 +140,5 @@ export class Consumer<T> {
 
 export namespace Consumer {
 	/** Stream consumer options, including the source track. */
-	export type Config = CodecConfig & { track: Moq.Track.Subscriber };
+	export type Config<T> = CodecConfig<T> & { track: Moq.Track.Subscriber };
 }

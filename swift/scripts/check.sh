@@ -70,7 +70,7 @@ STATIC="$TARGET_BASE/$PROFILE/libmoq_ffi.a"
 # Generate bindings.
 BINDGEN_OUT=$(mktemp -d)
 trap 'rm -rf "$BINDGEN_OUT"' EXIT
-cargo run --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi --bin uniffi-bindgen \
+cargo run --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package uniffi-bindgen \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml" -- \
     generate --library "$CDYLIB" --language swift --out-dir "$BINDGEN_OUT"
 
@@ -89,6 +89,11 @@ env ${xcode_sdk_env[@]+"${xcode_sdk_env[@]}"} xcodebuild -create-xcframework \
 # Stage generated swift.
 mkdir -p "$SWIFT_DIR/Sources/MoqFFI"
 cp "$BINDGEN_OUT/moq.swift" "$SWIFT_DIR/Sources/MoqFFI/Generated.swift"
+
+# Compile the documentation samples with the tests, beside the inputs
+# Docs/Prelude.swift declares, so a doc that drifts from the wrapper fails here.
+bash "$WORKSPACE_DIR/doc/lib/samples.sh" swift "$WORKSPACE_DIR/doc/lib/swift/index.md" "$SWIFT_DIR/README.md" \
+    >"$SWIFT_DIR/Tests/MoqTests/Docs/Samples.swift"
 
 # swift/Package.swift already declares a path-based MoqFFIBinary pointing
 # at the xcframework laid out above, so no manifest mutation is needed.

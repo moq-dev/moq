@@ -40,6 +40,8 @@ check *args:
     just rs _select-test
     just rs _publish-test
     just rs _doc-names-test
+    # A new MoqConnectionStats field has to reach every binding's doc page.
+    python3 rs/scripts/stats-docs.py
     rs/scripts/package-nfpm.test.sh
     cargo clippy --locked --all-targets {{ args }} -- -D warnings
     cargo fmt --all --check
@@ -268,6 +270,25 @@ _wants-capture $PACKAGES:
     set -euo pipefail
     grep -qwE '(moq-video|moq-audio)' <<< "$(just rs _names "$PACKAGES")"
 
+# True when the selection includes moq-relay, whose io_uring listener is off the
+# default feature set. Selection pulls in dependents, so a diff to any crate the
+# relay is built from (moq-uring, moq-sock, moq-tokio) lands here too.
+[private]
+_wants-uring $PACKAGES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    grep -qw 'moq-relay' <<< "$(just rs _names "$PACKAGES")"
+
+# True when the media feature contracts have to run. The contract script is not
+# a crate, so `_select` drops it; a diff that only edits the script must still
+# reach the gate, or a broken command merges on shell lint alone.
+[private]
+_wants-media-features $PACKAGES $FILES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    grep -qwE '(moq-video|moq-audio|moq-transcode)' <<< "$(just rs _names "$PACKAGES")" \
+    	|| grep -qx 'rs/scripts/media-features.sh' <<< "$FILES"
+
 # Print the crate names behind a list of `--package` flags.
 [private]
 _names $PACKAGES:
@@ -318,6 +339,16 @@ _select-test:
         fail "a moq-relay diff must not drive the capture gate: $(just rs _names "$relay")"
     fi
 
+    # The break the uring gate was added for: a change that breaks moq-relay's
+    # io_uring listener, which the default pass above never compiles. A moq-relay
+    # diff has to reach it, and a diff that cannot affect the relay must not.
+    just rs _wants-uring "$relay" \
+        || fail "a moq-relay diff must drive the uring gate: $(just rs _names "$relay")"
+    hls=$(just rs _select "rs/moq-hls/src/lib.rs")
+    if just rs _wants-uring "$hls"; then
+        fail "a moq-hls diff must not drive the uring gate: $(just rs _names "$hls")"
+    fi
+
     tokio=$(just rs _select "rs/moq-tokio/src/lib.rs")
     just rs _wants-tokio-features "$tokio" \
         || fail "a moq-tokio diff must drive its feature matrix: $(just rs _names "$tokio")"
@@ -329,6 +360,24 @@ _select-test:
     # select nothing rather than reach cargo as a bogus spec.
     [[ -z "$(just rs _select "rs/scripts/package-binary.sh")" ]] \
     	|| fail "a non-crate seed must select nothing"
+
+    # The contract script is that same kind of seed, so selection stays empty.
+    # The gate still has to run it: this is the diff that can break the commands.
+    [[ -z "$(just rs _select "rs/scripts/media-features.sh")" ]] \
+    	|| fail "the media contract script must not select a crate"
+    just rs _wants-media-features "" "rs/scripts/media-features.sh" \
+    	|| fail "a media-features.sh diff must drive the contract"
+    if just rs _wants-media-features "" "rs/scripts/package-binary.sh"; then
+    	fail "an unrelated script must not drive the media contract"
+    fi
+    video=$(just rs _select "rs/moq-video/src/lib.rs")
+    just rs _wants-media-features "$video" "" \
+    	|| fail "a moq-video diff must drive the media contract: $(just rs _names "$video")"
+    just rs _wants-media-features "--package file:///tmp/rs/moq-transcode#0" "" \
+    	|| fail "moq-transcode alone must drive the media contract"
+    if just rs _wants-media-features "$relay" ""; then
+    	fail "a moq-relay diff must not drive the media contract: $(just rs _names "$relay")"
+    fi
 
     # A crate nested inside another crate's directory is covered by its parent's
     # seed. Selecting it directly would compile libFuzzer on every moq-net diff,
@@ -342,6 +391,10 @@ _select-test:
 # Published crates need the current workspace version as the lower bound for
 # internal dependencies. The workspace only tests that version set, and a looser
 # bound lets package verification combine incompatible older releases.
+#
+# Internal dev-dependencies must be path-only. `cargo publish` keeps a versioned
+# dev-dependency and requires it on crates.io, but release-plz orders publishes
+# by normal dependencies only, so a bumped dev-dependency is often not there yet.
 [private]
 _publish-test:
     #!/usr/bin/env bash
@@ -363,6 +416,22 @@ _publish-test:
     if [[ -n "$stale" ]]; then
         echo "rs: published workspace dependency lower bounds are stale:" >&2
         echo "$stale" >&2
+        exit 1
+    fi
+
+    versioned=$(jq -r '
+        .packages[]
+        | select(.publish != [])
+        | .name as $package
+        | .dependencies[]
+        | select(.source == null and .path != null and .kind == "dev" and .req != "*")
+        | "\($package): \(.name) \(.req)"
+    ' <<< "$metadata")
+
+    if [[ -n "$versioned" ]]; then
+        echo "rs: published crates have versioned workspace dev-dependencies:" >&2
+        echo "$versioned" >&2
+        echo "use { path = \"../<crate>\" } instead of { workspace = true }." >&2
         exit 1
     fi
 
@@ -405,6 +474,21 @@ check-changed $FILES:
     # `--all-features` did, and a break there lands on main.
     if [[ "$packages" == "ALL" ]] || just rs _wants-capture "$packages"; then
     	just rs capture
+    fi
+
+    # moq-relay's io_uring listener is behind `io-uring`, off by default, so the
+    # pass above never compiles it. `check --all` reaches it through `bench
+    # check`, but only for a diff under `bench/`; a relay change would otherwise
+    # land on the nightly.
+    if [[ "$packages" == "ALL" ]] || just rs _wants-uring "$packages"; then
+    	just rs uring-check
+    fi
+
+    # Each media feature shape compiles on its own (see rs/scripts/media-features.sh),
+    # about two minutes, so only a diff that reaches the media crates, or the
+    # contract script itself, pays for it.
+    if [[ "$packages" == "ALL" ]] || just rs _wants-media-features "$packages" "$FILES"; then
+    	just rs media-features
     fi
 
 # Compile moq-tokio by itself at the feature extremes and with each crypto provider.
@@ -479,10 +563,16 @@ windows *args:
 # `qlog` is a second axis, and the traces are what a debugging run depends on,
 # so it gets a separate pass.
 uring *args:
-    cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
+    just rs uring-check {{ args }}
     cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }}
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets {{ args }} -- -D warnings
     cargo nextest run --locked -p moq-uring --features qlog --all-targets {{ args }}
+
+# Compile the io_uring relay path, off the default feature set. `check-changed`
+# runs this whenever moq-relay is selected, so a change that breaks the ring
+# listener fails its own PR rather than landing on the nightly.
+uring-check *args:
+    cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
 
 # Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
 # VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,
@@ -597,7 +687,7 @@ relay-minimal:
 # Unix only: linking a Rust staticlib from MSVC spells the flags and the
 # archive (`moq.lib`) differently, and this recipe doesn't model that.
 
-# Compile and run libmoq's C fixtures against libmoq.a. Must run on Unix.
+# Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
 c-tests:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -629,7 +719,7 @@ c-tests:
         exit 1
     fi
 
-    # Same list build.rs (moq.pc), CMakeLists.txt, and test/smoke/smoke.sh read:
+    # Same list build.rs (moq.pc), CMakeLists.txt, and test/interop/interop.sh read:
     # `framework:Foo` is a linker framework flag, anything else a plain library.
     case "$(uname -s)" in
         Darwin) native_libs=rs/libmoq/native-libs/apple.txt ;;
@@ -646,6 +736,19 @@ c-tests:
 
     out=$(mktemp -d)
     trap 'rm -rf "$out"' EXIT
+
+    # The C docs compile against this header too: each sample beside the inputs
+    # doc-samples.h declares, and every name the prose cites. A `moq_decode_*`
+    # wildcard ends in `_` and is skipped.
+    bash doc/lib/samples.sh c doc/lib/c/index.md >"$out/doc-samples.c"
+    "$cc" -fsyntax-only -Werror=implicit-function-declaration -include rs/libmoq/c-tests/doc-samples.h -I"$include" "$out/doc-samples.c"
+    for name in $(grep -oE '\b(moq|MOQ)_[A-Za-z0-9_]*' doc/lib/c/index.md | grep -v '_$' | sort -u); do
+        if ! grep -qw "$name" "$include/moq.h"; then
+            echo "doc/lib/c/index.md cites $name, which moq.h does not declare" >&2
+            exit 1
+        fi
+    done
+
     for source in rs/libmoq/c-tests/*.c; do
         bin="$out/$(basename "$source" .c)"
         "$cc" "$source" -I"$include" -L"$profile" -lmoq "${libs[@]}" -o "$bin"
@@ -675,7 +778,7 @@ c-tests:
 # Compile the workspace at the feature extremes.
 features:
     cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
-    cargo hack check --locked -p moq-tokio --each-feature --features aws-lc-rs
+    cargo hack check --locked -p moq-tokio --each-feature --exclude-features _transport --features aws-lc-rs
     cargo check --locked -p moq-relay --no-default-features
     just rs relay-minimal
     cargo check --locked -p moq-cli --no-default-features
@@ -758,10 +861,6 @@ test-changed $FILES:
     	*)     echo "rs: testing $(just rs _names "$packages")"; just rs test --no-tests=pass $packages ;;
     esac
 
-    if [[ "$packages" == "ALL" ]] || just rs _names "$packages" | grep -qw moq-relay; then
-        just rs relay-minimal
-    fi
-
 # Compile and run the `/// ```` examples, which nextest skips.
 doctest *args:
     cargo test --locked --doc {{ args }}
@@ -777,8 +876,10 @@ doctest *args:
 # Our assertions are plain `assert!`, not `debug_assert!`, so nothing is
 # compiled out (verified by re-running the mutation check in release).
 #
-# The search is deliberately unbounded (no `preemption_bound`), so it covers
-# every interleaving rather than just the short ones.
+# kio's models search every interleaving. moq-net's compose far more operations
+# per path, so they cap preemptions (see `tests/loom.rs`) to stop the search
+# growing exponentially with each lock the model layer adds. Set
+# `LOOM_MAX_PREEMPTIONS` to search deeper.
 #
 # kio's own unit tests are `cfg(not(loom))`: they'd construct loom primitives
 # outside `loom::model`, which panics.

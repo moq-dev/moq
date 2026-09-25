@@ -56,6 +56,7 @@ impl<E: CatalogExt> Consumer<E> {
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
 		let catalog = ready!(self.inner.poll_next(waiter))?;
 		if let Some(catalog) = catalog.as_ref() {
+			catalog.check_renditions()?;
 			check_resolvable(&self.base, catalog)?;
 		}
 		Poll::Ready(Ok(catalog))
@@ -205,16 +206,20 @@ mod test {
 		let dynamic = origin.dynamic("", Default::default()).unwrap();
 		let requesting = origin.consume().request_broadcast("a/pub");
 		let served = broadcast.consume();
-		tokio::spawn(async move {
+		// The handler hands its route back: dropping it would retract the route and end
+		// the broadcast it just served.
+		let handler = tokio::spawn(async move {
 			dynamic
 				.requested_broadcast()
 				.await
 				.expect("handler should be asked for the path")
 				.accept(&served);
+			dynamic
 		});
 
-		let subscriber = requesting
-			.await
+		let resolved = requesting.await;
+		let _dynamic = handler.await.expect("handler task");
+		let subscriber = resolved
 			.expect("the handler served it")
 			.track(hang::Catalog::DEFAULT_NAME)
 			.expect("catalog track should resolve")
@@ -241,6 +246,21 @@ mod test {
 			.renditions
 			.insert("sibling".to_string(), referencing(reference));
 		publish_catalog_served(published).await
+	}
+
+	#[test]
+	fn refuses_oversized_catalog_before_reconciling_renditions() {
+		let mut published = Catalog::<()>::default();
+		for i in 0..=hang::catalog::MAX_RENDITIONS {
+			published.audio.renditions.insert(format!("audio{i}"), opus());
+		}
+		assert!(matches!(
+			publish_catalog(published),
+			Err(crate::Error::Hang(hang::Error::TooManyRenditions {
+				count: 65,
+				max: 64
+			}))
+		));
 	}
 
 	/// A reference that stops at or below the root names a broadcast, so the catalog stands.

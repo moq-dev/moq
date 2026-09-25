@@ -153,11 +153,19 @@ impl Decoder {
 	/// the configured cap (checked as output is produced, not from any declared size), and
 	/// [`Error::Decompress`] on malformed input.
 	pub fn frame(&mut self, slice: &[u8]) -> Result<Bytes> {
-		if slice.is_empty() {
-			return Ok(Bytes::new());
-		}
-
 		let mut out = Vec::new();
+		self.frame_into(slice, &mut out)?;
+		Ok(Bytes::from(out))
+	}
+
+	/// Inflate the next frame into a reusable buffer, replacing its previous contents.
+	///
+	/// A caller that consumes frames immediately can keep one buffer for the whole stream.
+	pub fn frame_into(&mut self, slice: &[u8], out: &mut Vec<u8>) -> Result<()> {
+		out.clear();
+		if slice.is_empty() {
+			return Ok(());
+		}
 		let mut tmp = [0u8; CHUNK];
 
 		// Feed the wire slice followed by the re-appended sync-flush marker, which delimits the frame
@@ -191,7 +199,7 @@ impl Decoder {
 			}
 		}
 
-		Ok(Bytes::from(out))
+		Ok(())
 	}
 }
 
@@ -221,6 +229,22 @@ mod test {
 		for (a, b) in frames.iter().zip(&got) {
 			assert_eq!(*a, b.as_slice());
 		}
+	}
+
+	#[test]
+	fn frame_into_reuses_its_output_buffer() {
+		let mut encoder = Encoder::new();
+		let frames = [b"first payload".as_slice(), b"second payload".as_slice()];
+		let mut decoder = Decoder::new();
+		let mut out = Vec::with_capacity(64);
+		let ptr = out.as_ptr();
+		for frame in frames {
+			decoder.frame_into(&encoder.frame(frame), &mut out).unwrap();
+			assert_eq!(out, frame);
+			assert_eq!(out.as_ptr(), ptr);
+		}
+		decoder.frame_into(b"", &mut out).unwrap();
+		assert!(out.is_empty());
 	}
 
 	#[test]

@@ -63,6 +63,8 @@ struct Feed {
 	/// once so reloads see a stable presentation, and reset with the window when the
 	/// timeline restarts.
 	anchor: Option<SystemTime>,
+	/// The publisher run every segment URL carries; late-created renditions inherit it.
+	generation: Option<Arc<str>>,
 }
 
 /// The producing side of a broadcast's rendition set.
@@ -101,6 +103,7 @@ impl Producer {
 					ended: false,
 					closed: false,
 					anchor: None,
+					generation: None,
 				})),
 				window,
 			},
@@ -235,6 +238,36 @@ impl Fanout {
 		});
 	}
 
+	/// List every rendition under `generation` from now on.
+	///
+	/// Replacing a generation drops what was listed under it and the inits built from it: those
+	/// belong to the run it named. The first one only labels the run already flowing, so an embedder that supplies
+	/// it right after construction loses nothing to a race with the first records.
+	pub fn set_generation(&self, generation: Option<Arc<str>>) {
+		let mut feed = self.feed.lock().unwrap();
+		if feed.generation == generation {
+			return;
+		}
+		let restart = feed.generation.is_some();
+		feed.generation = generation.clone();
+		if restart {
+			feed.history.clear();
+			feed.discontinuities.interrupt();
+			feed.anchor = None;
+		}
+		feed.targets.retain(|target| {
+			let Some(rendition) = target.upgrade() else {
+				return false;
+			};
+			if restart {
+				rendition.restart(generation.clone());
+			} else {
+				rendition.label(generation.clone());
+			}
+			true
+		});
+	}
+
 	/// Clear stale rows after source records were skipped before this reader saw them.
 	pub fn skip(&self) {
 		let mut feed = self.feed.lock().unwrap();
@@ -300,6 +333,7 @@ impl Producer {
 	/// (and the ended/closed markers) so its window matches its siblings'.
 	fn register(&self, rendition: &Arc<Rendition>) {
 		let mut feed = self.fanout.feed.lock().unwrap();
+		rendition.label(feed.generation.clone());
 		for (index, entry, discontinuity) in &feed.history {
 			rendition.push(*index, entry, *discontinuity, self.fanout.window);
 		}

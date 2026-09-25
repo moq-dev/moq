@@ -263,7 +263,7 @@ export class Reload {
 			};
 
 			void sample();
-			effect.interval(sample, BANDWIDTH_POLL);
+			effect.interval(() => void sample(), BANDWIDTH_POLL);
 		});
 
 		this.#url = this.#signals.computed((effect) => effect.get(this.url)?.href);

@@ -12,7 +12,7 @@ use crate::Range;
 #[derive(usage::Cli, Clone, Debug, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
-#[usage(name = "moq-bench", version = env!("VERSION"))]
+#[usage(name = "moq-bench", version = env!("CARGO_PKG_VERSION"))]
 #[usage(completion, settings)]
 #[non_exhaustive]
 pub struct Config {

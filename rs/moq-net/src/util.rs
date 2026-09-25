@@ -53,20 +53,27 @@ pub(crate) async fn err_only<E>(fut: impl Future<Output = Result<(), E>>) -> E {
 }
 
 /// Cloneable handle for submitting futures to a driver-owned [`TaskSet`].
+#[derive(Clone)]
 pub(crate) struct Tasks {
 	state: kio::Shared<Submissions>,
+	/// The set's lifetime: it finishes once every owning handle, [`Tasks`] or
+	/// [`Keepalive`], is gone. A kio token rather than a count under the queue's
+	/// lock, so a claim on the lifetime is `Send` even where the queued futures
+	/// are not (wasm).
+	alive: kio::Producer<()>,
 }
 
-/// The submission queue between [`Tasks`] handles and their [`TaskSet`],
-/// following kio's convention for [`kio::Shared`] liveness: the handle count
-/// and the set's closure are plain fields maintained under the same lock that
-/// queues the work.
+/// A claim on a [`TaskSet`]'s lifetime with no submission queue: what a
+/// broadcast published on an origin holds, so the driver outlives the producer
+/// handles a session was given and dropped.
+pub(crate) struct Keepalive {
+	_alive: kio::Producer<()>,
+}
+
+/// The submission queue between [`Tasks`] handles and their [`TaskSet`].
 #[derive(Default)]
 struct Submissions {
 	queued: VecDeque<MaybeSendBox<'static, ()>>,
-	/// Live [`Tasks`] handles; the set finishes once this reaches zero and the
-	/// remaining work drains.
-	senders: usize,
 	/// The set dropped: submissions are discarded, as the driver that would
 	/// have polled them has torn down.
 	closed: bool,
@@ -87,20 +94,19 @@ impl Tasks {
 
 impl Tasks {
 	/// A non-owning submission handle: pushes work while the driver lives, but
-	/// neither keeps the set from finishing nor counts as a sender. For read
+	/// neither keeps the set from finishing nor counts as an owner. For read
 	/// handles, whose existence must not extend the origin's lifecycle.
 	pub fn downgrade(&self) -> TasksWeak {
 		TasksWeak {
 			state: self.state.clone(),
+			alive: self.alive.consume(),
 		}
 	}
-}
 
-impl Clone for Tasks {
-	fn clone(&self) -> Self {
-		self.state.lock().senders += 1;
-		Self {
-			state: self.state.clone(),
+	/// A claim on the set's lifetime alone; see [`Keepalive`].
+	pub fn keepalive(&self) -> Keepalive {
+		Keepalive {
+			_alive: self.alive.clone(),
 		}
 	}
 }
@@ -110,23 +116,17 @@ impl Clone for Tasks {
 #[derive(Clone)]
 pub(crate) struct TasksWeak {
 	state: kio::Shared<Submissions>,
+	alive: kio::Consumer<()>,
 }
 
 impl TasksWeak {
 	/// Queue a future for polling by the associated [`TaskSet`], dropped if the
-	/// set (or every owning [`Tasks`] handle) is already gone.
+	/// set (or every owning handle) is already gone.
 	pub fn push(&self, task: impl MaybeBoxedExt<'static, Output = ()>) {
 		let mut state = self.state.lock();
-		if !state.closed && state.senders > 0 {
+		if !state.closed && !self.alive.is_closed() {
 			state.queued.push_back(task.maybe_boxed());
 		}
-	}
-}
-
-impl Drop for Tasks {
-	fn drop(&mut self) {
-		// The mutation wakes a parked set, which may be what lets it finish.
-		self.state.lock().senders -= 1;
 	}
 }
 
@@ -139,24 +139,21 @@ impl Drop for Tasks {
 pub(crate) struct TaskSet {
 	state: kio::Shared<Submissions>,
 	active: kio::Tasks<MaybeSendTask>,
+	/// Closed once every owning handle is gone; see [`Tasks::alive`].
+	alive: kio::Consumer<()>,
 }
 
 impl TaskSet {
 	/// Create a task submission handle and its driver-owned set.
 	pub fn new() -> (Tasks, Self) {
-		let state = kio::Shared::new(Submissions {
-			queued: VecDeque::new(),
-			senders: 1,
-			closed: false,
-		});
-		let tasks = Tasks { state: state.clone() };
-		(
-			tasks,
-			Self {
-				state,
-				active: kio::Tasks::new(),
-			},
-		)
+		let state = kio::Shared::<Submissions>::default();
+		let alive = kio::Producer::<()>::default();
+		let set = Self {
+			state: state.clone(),
+			active: kio::Tasks::new(),
+			alive: alive.consume(),
+		};
+		(Tasks { state, alive }, set)
 	}
 
 	/// Create a set that only its owner can push to, for a loop that accepts streams
@@ -165,6 +162,8 @@ impl TaskSet {
 		Self {
 			state: kio::Shared::default(),
 			active: kio::Tasks::new(),
+			// No owning handle ever exists, so the set finishes when its children drain.
+			alive: kio::Producer::<()>::default().consume(),
 		}
 	}
 
@@ -183,19 +182,24 @@ impl TaskSet {
 		// children run below: a child pushing through a `Tasks` clone mid-pass
 		// wakes whoever is registered, and without it that push would be lost.
 		let mut submissions_done = false;
-		while let Poll::Ready(mut state) = self.state.poll(waiter, |state| {
-			if state.queued.is_empty() && state.senders > 0 {
-				Poll::Pending
-			} else {
-				Poll::Ready(())
-			}
-		}) {
+		loop {
+			// Registers `waiter` for the last owning handle dropping, which may be
+			// what lets the set finish.
+			let orphaned = self.alive.poll_closed(waiter).is_ready();
+			let Poll::Ready(mut state) = self.state.poll(waiter, |state| {
+				if state.queued.is_empty() && !orphaned {
+					Poll::Pending
+				} else {
+					Poll::Ready(())
+				}
+			}) else {
+				break;
+			};
 			while let Some(task) = state.queued.pop_front() {
 				self.active.push(future_task(task));
 			}
-			// No handles left: nothing can ever submit again, so no
-			// registration is needed.
-			if state.senders == 0 {
+			// No handles left: nothing can ever submit again.
+			if orphaned {
 				submissions_done = true;
 				break;
 			}

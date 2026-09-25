@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2](https://github.com/moq-dev/moq/compare/moq-relay-v0.15.1...moq-relay-v0.15.2) - 2026-09-24
+
+### Fixed
+
+- *(relay)* fix the lease deadline on tokio's clock and pause the outage test ([#3969](https://github.com/moq-dev/moq/pull/3969))
+
+## [0.15.1](https://github.com/moq-dev/moq/compare/moq-relay-v0.15.0...moq-relay-v0.15.1) - 2026-09-23
+
+### Fixed
+
+- *(ci)* repair nightly builds hidden behind the first failure ([#3956](https://github.com/moq-dev/moq/pull/3956))
+- *(relay)* follow usage-rs 6.11.1 moving env aliases under FlagMeta::extra ([#4006](https://github.com/moq-dev/moq/pull/4006))
+- *(relay)* gate the per-worker accept loop on _quic ([#3968](https://github.com/moq-dev/moq/pull/3968))
+
+### Other
+
+- *(drill)* retarget mutations after the dev merge ([#3953](https://github.com/moq-dev/moq/pull/3953))
+- *(quest)* return to milestones ([#3962](https://github.com/moq-dev/moq/pull/3962))
+
+## [0.15.0](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.18...moq-relay-v0.15.0) - 2026-09-23
+
+### Added
+
+- *(relay)* expose reusable embedding lifecycle and test fixture ([#3927](https://github.com/moq-dev/moq/pull/3927))
+- *(moq-net)* add moq-transport draft-22 (moqt-22) ([#3858](https://github.com/moq-dev/moq/pull/3858))
+- *(gateway)* [**breaking**] align embedding APIs ([#3818](https://github.com/moq-dev/moq/pull/3818))
+- *(net)* [**breaking**] simplify origin scoping ([#3804](https://github.com/moq-dev/moq/pull/3804))
+- *(net)* [**breaking**] scope origins with any pattern union and report announce matches ([#3746](https://github.com/moq-dev/moq/pull/3746))
+- *(relay)* push a re-check to live sessions ([#3778](https://github.com/moq-dev/moq/pull/3778))
+- *(auth)* [**breaking**] one type per contract concept ([#3776](https://github.com/moq-dev/moq/pull/3776))
+- *(net)* [**breaking**] slim the moq-net public surface ([#3779](https://github.com/moq-dev/moq/pull/3779))
+- *(net)* [**breaking**] announce prefixes on every wire; consumers read paths ([#3770](https://github.com/moq-dev/moq/pull/3770))
+- *(tokio)* [**breaking**] settle moq-tokio names under their modules ([#3745](https://github.com/moq-dev/moq/pull/3745))
+- *(native)* default the QUIC backend to noq ([#3757](https://github.com/moq-dev/moq/pull/3757))
+
+### Fixed
+
+- tighten release APIs and preserve Lite compatibility ([#3933](https://github.com/moq-dev/moq/pull/3933))
+- *(relay)* match the uring driver's terminal error ([#3860](https://github.com/moq-dev/moq/pull/3860))
+- *(ci)* repair nightly and meta-review failures ([#3799](https://github.com/moq-dev/moq/pull/3799))
+- *(auth)* end a session when a re-check no longer grants ([#3774](https://github.com/moq-dev/moq/pull/3774))
+- *(net)* drop origin source track when last reader leaves
+
+### Other
+
+- *(rs)* report the crate version, drop the git-describe build scripts ([#3912](https://github.com/moq-dev/moq/pull/3912))
+- pin rust 1.98.1 so macOS 27 loads our stripped dylibs ([#3904](https://github.com/moq-dev/moq/pull/3904))
+- *(uring)* [**breaking**] derive worker and steering identity from the socket ([#3865](https://github.com/moq-dev/moq/pull/3865))
+- *(quest)* mirror branches in the quest tree ([#3855](https://github.com/moq-dev/moq/pull/3855))
+- *(moq-sock)* [**breaking**] complete groups before serving ([#3832](https://github.com/moq-dev/moq/pull/3832))
+- *(net)* [**breaking**] name path roles without new types ([#3826](https://github.com/moq-dev/moq/pull/3826))
+- *(net)* [**breaking**] return the next deadline from driver polls ([#3828](https://github.com/moq-dev/moq/pull/3828))
+- *(net)* [**breaking**] drive time and cache cleanup explicitly ([#3825](https://github.com/moq-dev/moq/pull/3825))
+- *(quic)* [**breaking**] keep only the noq backend ([#3811](https://github.com/moq-dev/moq/pull/3811))
+- *(tokio)* make API shapes type-safe ([#3816](https://github.com/moq-dev/moq/pull/3816))
+- *(relay)* route auth through admissions ([#3800](https://github.com/moq-dev/moq/pull/3800))
+- *(relay)* port the drills to moq-tokio and the closed-with-source semantics
+- Merge origin/main into dev
+
 ### Breaking
 
 - `serve` takes the node's `session::Registry`; `supervise` takes an optional `session::Registration` so a push can re-check the lease.

@@ -25,23 +25,14 @@ type relay struct {
 }
 
 // startRelay binds a relay at addr (an ephemeral loopback port when addr is
-// host:0) and accepts sessions until ctx ends. Binding is retried so a restart
-// can reuse the port the old process just released.
+// host:0) and accepts sessions until ctx ends. Close releases the socket before
+// it returns, so a restart reuses the port with no retry.
 func startRelay(t *testing.T, ctx context.Context, addr string) *relay {
 	t.Helper()
 
-	var server *moq.Server
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		var err error
-		server, err = moq.Listen(ctx, addr, moq.WithTLSGenerate("localhost"))
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("relay did not bind %s: %v", addr, err)
-		}
-		time.Sleep(10 * time.Millisecond)
+	server, err := moq.Listen(ctx, addr, moq.WithTLSGenerate("localhost"))
+	if err != nil {
+		t.Fatalf("relay did not bind %s: %v", addr, err)
 	}
 
 	r := &relay{server: server, addr: server.LocalAddr()}
@@ -129,6 +120,30 @@ func awaitAnnouncement(t *testing.T, ctx context.Context, announced *moq.Announc
 			return
 		}
 	}
+}
+
+// Close releases the listening socket before it returns, so the same address
+// binds again on the first try. A retry here would hide the async teardown the
+// restart above relies on.
+func TestServerCloseReleasesPort(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), reconnectTimeout)
+	defer cancel()
+
+	first, err := moq.Listen(ctx, "127.0.0.1:0", moq.WithTLSGenerate("localhost"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := first.LocalAddr()
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// No retry: the port is already free.
+	second, err := moq.Listen(ctx, addr, moq.WithTLSGenerate("localhost"))
+	if err != nil {
+		t.Fatalf("rebind %s: %v", addr, err)
+	}
+	defer func() { _ = second.Close() }()
 }
 
 // A Go worker survives a relay restart the way a libmoq worker does: the session
@@ -234,5 +249,31 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	}
 	if frame == nil {
 		t.Fatal("frame after restart: nil")
+	}
+}
+
+// The WebSocket fallback knobs reach the native client: a QUIC-only dial with
+// no head start still connects, and a negative delay fails Dial instead of
+// wrapping into an enormous one.
+func TestDialWebSocketOptions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), reconnectTimeout)
+	defer cancel()
+
+	r := startRelay(t, ctx, "127.0.0.1:0")
+	defer r.server.Close()
+
+	url := "https://" + r.addr
+	client, err := moq.Dial(ctx, url,
+		moq.WithTLSVerify(false),
+		moq.WithWebSocketEnabled(false),
+		moq.WithWebSocketDelay(0),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+
+	if _, err := moq.Dial(ctx, url, moq.WithWebSocketDelay(-time.Millisecond)); err == nil {
+		t.Fatal("negative websocket delay dialed")
 	}
 }

@@ -325,7 +325,9 @@ impl Decoder {
 				}
 
 				let out = packet
-					.chunks_exact(pcm::BYTES_PER_SAMPLE)
+					.as_chunks::<{ pcm::BYTES_PER_SAMPLE }>()
+					.0
+					.iter()
 					.map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
 					.collect();
 				Ok(Decoded {

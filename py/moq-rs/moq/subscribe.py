@@ -304,10 +304,17 @@ class JsonSnapshotConsumer:
 
     Built via :meth:`BroadcastConsumer.subscribe_json_snapshot`. Each item is a parsed Python object.
     A consumer that has fallen behind collapses the backlog and yields only the latest value.
+    Usable as an async context manager that cancels on exit.
     """
 
     def __init__(self, inner: MoqJsonSnapshotConsumer) -> None:
         self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
 
     def __aiter__(self):
         return self
@@ -327,10 +334,17 @@ class JsonStreamConsumer:
     """Async iterator over a JSON stream track, yielding every record in order (lossless).
 
     Built via :meth:`BroadcastConsumer.subscribe_json_stream`. Each item is a parsed Python object.
+    Usable as an async context manager that cancels on exit.
     """
 
     def __init__(self, inner: MoqJsonStreamConsumer) -> None:
         self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
 
     def __aiter__(self):
         return self

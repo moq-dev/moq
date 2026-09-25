@@ -1,13 +1,7 @@
 package dev.moq
 
 import kotlinx.coroutines.flow.Flow
-import uniffi.moq.MoqAnnounceConsumer
-import uniffi.moq.MoqAnnouncedBroadcast
-import uniffi.moq.MoqAnnounceUpdate
-import uniffi.moq.MoqBroadcastConsumer
-import uniffi.moq.MoqClient
-import uniffi.moq.MoqOriginProducer
-import uniffi.moq.MoqSession
+import kotlin.time.Duration
 
 /**
  * A connected MoQ session with publish/subscribe conveniences.
@@ -15,18 +9,18 @@ import uniffi.moq.MoqSession
  * Build one with [Moq.connect]. The underlying [session] always exposes a
  * publisher and a subscriber (wired from the origins you pass to [connect], or
  * auto-created), so you can [createBroadcast] and iterate [announcements]
- * without touching the raw [MoqClient] handle.
+ * without touching the raw [Client] handle.
  *
  * [Moq] is [AutoCloseable]; `use { ... }` (or [close]) gracefully shuts down
  * the session and cancels the client.
  */
 class Moq internal constructor(
     /** The established session. Use it for [Session.closed]/[Session.shutdown]. */
-    val session: MoqSession,
-    private val client: MoqClient,
+    val session: Session,
+    private val client: Client,
 ) : AutoCloseable {
     /**
-     * Create an unadvertised broadcast at [path].
+     * Create an unannounced broadcast at [path], invisible to everyone until announced.
      *
      * Advertise it with `announce` after populating tracks. `finish()` unpublishes immediately.
      */
@@ -37,11 +31,11 @@ class Moq internal constructor(
      * to the origin. The subscription is acquired on
      * collection and cancelled when collection ends. Use [announced] for the raw handle.
      */
-    fun announcements(config: AnnounceConfig = AnnounceConfig()): Flow<MoqAnnounceUpdate> =
+    fun announcements(config: AnnounceConfig = AnnounceConfig()): Flow<AnnounceUpdate> =
         session.consume().announcements(config)
 
     /** Raw announcement handle for [config]; update prefixes stay relative to the origin. */
-    fun announced(config: AnnounceConfig = AnnounceConfig()): MoqAnnounceConsumer =
+    fun announced(config: AnnounceConfig = AnnounceConfig()): AnnounceConsumer =
         session.consume().announced(config)
 
     /**
@@ -50,7 +44,7 @@ class Moq internal constructor(
      * Unlike [requestBroadcast] this waits indefinitely for a future
      * announcement. Cancel the returned handle to stop waiting.
      */
-    fun announcedBroadcast(path: String): MoqAnnouncedBroadcast = session.consume().announcedBroadcast(path)
+    fun announcedBroadcast(path: String): AnnouncedBroadcast = session.consume().announcedBroadcast(path)
 
     /**
      * Resolve the broadcast at [path] as soon as it can be served: a local
@@ -60,13 +54,13 @@ class Moq internal constructor(
      * Unlike [announcedBroadcast] this does not wait for a future announcement;
      * it throws when neither can serve the path.
      */
-    suspend fun requestBroadcast(path: String): MoqBroadcastConsumer = session.consume().requestBroadcast(path)
+    suspend fun requestBroadcast(path: String): BroadcastConsumer = session.consume().requestBroadcast(path)
 
     /**
      * The connection epoch: 1 for the connect that built this session, one more on
      * each reconnect. A server-accepted session stays at 1.
      *
-     * Pair it with [MoqSession.status] to log each reconnect by number.
+     * Pair it with [Session.status] to log each reconnect by number.
      */
     fun epoch(): ULong = session.epoch()
 
@@ -100,9 +94,13 @@ class Moq internal constructor(
          *   this connection; MoQ opens one stream per group, and for a subscriber those
          *   arrive from the relay, so subscribing to many tracks may want this raised.
          * @param reconnect set false for a one-shot dial. By default the session redials
-         *   with backoff whenever the transport drops; watch [MoqSession.status] for the
+         *   with backoff whenever the transport drops; watch [Session.status] for the
          *   transitions.
          * @param backoff retry pacing for the automatic reconnect.
+         * @param websocketEnabled set false to stop the WebSocket fallback racing QUIC,
+         *   e.g. against a relay that only serves QUIC. On by default.
+         * @param websocketDelay head start QUIC gets before the WebSocket fallback joins
+         *   the race; 200ms by default, and zero races both at once.
          * @param publish origin to announce broadcasts through; auto-created when null.
          * @param subscribe origin to discover broadcasts through; auto-created when null.
          *
@@ -121,11 +119,16 @@ class Moq internal constructor(
             bind: String? = null,
             reconnect: Boolean? = null,
             backoff: Backoff? = null,
-            publish: MoqOriginProducer? = null,
-            subscribe: MoqOriginProducer? = null,
+            publish: OriginProducer? = null,
+            subscribe: OriginProducer? = null,
             maxStreams: ULong? = null,
+            websocketEnabled: Boolean? = null,
+            websocketDelay: Duration? = null,
         ): Moq {
-            val client = MoqClient()
+            require(websocketDelay == null || !websocketDelay.isNegative()) {
+                "websocketDelay must not be negative: $websocketDelay"
+            }
+            val client = Client()
             try {
 				if (!tlsVerify) client.setTlsVerify(false)
                 if (tlsRoots != null) client.setTlsRoots(tlsRoots)
@@ -135,6 +138,10 @@ class Moq internal constructor(
                 if (tlsKey != null) client.setTlsKey(tlsKey)
                 if (bind != null) client.setBind(bind)
                 if (maxStreams != null) client.setQuicMaxStreams(maxStreams)
+                if (websocketEnabled != null) client.setWebsocketEnabled(websocketEnabled)
+                if (websocketDelay != null) {
+                    client.setWebsocketDelay(websocketDelay.inWholeMicroseconds.toULong())
+                }
                 if (reconnect != null) client.setReconnect(reconnect)
                 if (backoff != null) client.setBackoff(backoff)
                 if (publish != null) client.setPublish(publish)

@@ -6,30 +6,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onCompletion
-import uniffi.moq.MoqAnnounceUpdate
-import uniffi.moq.MoqAudioConsumer
-import uniffi.moq.MoqAudioFrame
-import uniffi.moq.MoqBroadcastConsumer
-import uniffi.moq.MoqBroadcastDynamic
-import uniffi.moq.MoqBroadcastRequest
-import uniffi.moq.MoqCatalog
-import uniffi.moq.MoqCatalogConsumer
-import uniffi.moq.MoqDatagram
 import uniffi.moq.MoqException
-import uniffi.moq.MoqFrame
-import uniffi.moq.MoqGroupConsumer
-import uniffi.moq.MoqGroupRequest
-import uniffi.moq.MoqJsonSnapshotConsumer
-import uniffi.moq.MoqJsonStreamConsumer
-import uniffi.moq.MoqMediaConsumer
-import uniffi.moq.MoqMediaFrame
-import uniffi.moq.MoqMediaGroupConsumer
-import uniffi.moq.MoqOriginConsumer
-import uniffi.moq.MoqOriginDynamic
-import uniffi.moq.MoqRoute
-import uniffi.moq.MoqTrackConsumer
-import uniffi.moq.MoqTrackDynamic
-import uniffi.moq.MoqTrackRequest
 
 /**
  * Stream of catalog updates. Terminates when the underlying track ends.
@@ -38,7 +15,7 @@ import uniffi.moq.MoqTrackRequest
  * native consumer's `cancel()` so structured concurrency propagates through
  * to the QUIC stream.
  */
-fun MoqCatalogConsumer.updates(): Flow<MoqCatalog> = flow {
+fun CatalogConsumer.updates(): Flow<Catalog> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
@@ -52,7 +29,7 @@ fun MoqCatalogConsumer.updates(): Flow<MoqCatalog> = flow {
  * subscription before returning. Convenience for callers that only need the
  * current catalog rather than a stream of updates (use [updates] for that).
  */
-suspend fun MoqBroadcastConsumer.catalog(): MoqCatalog {
+suspend fun BroadcastConsumer.catalog(): Catalog {
     val consumer = subscribeCatalog()
     try {
         return consumer.next() ?: throw MoqException.Closed()
@@ -62,7 +39,7 @@ suspend fun MoqBroadcastConsumer.catalog(): MoqCatalog {
 }
 
 /** Stream of decoded media frames in decode order. */
-fun MoqMediaConsumer.frames(): Flow<MoqMediaFrame> = flow {
+fun MediaConsumer.frames(): Flow<MediaFrame> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
@@ -72,7 +49,7 @@ fun MoqMediaConsumer.frames(): Flow<MoqMediaFrame> = flow {
 }
 
 /** Stream of decoded frames from one finite, fetched media group. */
-fun MoqMediaGroupConsumer.frames(): Flow<MoqMediaFrame> = flow {
+fun MediaGroupConsumer.frames(): Flow<MediaFrame> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
@@ -83,9 +60,22 @@ fun MoqMediaGroupConsumer.frames(): Flow<MoqMediaFrame> = flow {
 
 /**
  * Stream of decoded audio frames in the layout declared by the
- * `MoqAudioDecoderConfig` the consumer was created with.
+ * [AudioDecoderOutput] the consumer was created with.
  */
-fun MoqAudioConsumer.frames(): Flow<MoqAudioFrame> = flow {
+fun AudioConsumer.frames(): Flow<AudioFrame> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(next() ?: break)
+    }
+}.onCompletion { cause ->
+    if (cause is CancellationException) cancel()
+}
+
+/**
+ * Stream of decoded video frames in the layout declared by the
+ * [VideoDecoderOutput] the consumer was created with.
+ */
+fun VideoConsumer.frames(): Flow<VideoDecodedFrame> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
@@ -98,7 +88,7 @@ fun MoqAudioConsumer.frames(): Flow<MoqAudioFrame> = flow {
  * Stream of JSON values (as strings) from a snapshot track, yielding the latest reconstructed
  * value. A consumer that has fallen behind collapses the backlog to the latest.
  */
-fun MoqJsonSnapshotConsumer.values(): Flow<String> = flow {
+fun JsonSnapshotConsumer.values(): Flow<String> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
@@ -108,7 +98,7 @@ fun MoqJsonSnapshotConsumer.values(): Flow<String> = flow {
 }
 
 /** Stream of JSON records (as strings) from a stream track, in order. */
-fun MoqJsonStreamConsumer.values(): Flow<String> = flow {
+fun JsonStreamConsumer.values(): Flow<String> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
@@ -118,7 +108,7 @@ fun MoqJsonStreamConsumer.values(): Flow<String> = flow {
 }
 
 /** Stream of groups in sequence order, skipping forward if the reader falls behind. */
-fun MoqTrackConsumer.groups(): Flow<MoqGroupConsumer> = flow {
+fun TrackConsumer.groups(): Flow<GroupConsumer> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(nextGroup() ?: break)
@@ -128,7 +118,7 @@ fun MoqTrackConsumer.groups(): Flow<MoqGroupConsumer> = flow {
 }
 
 /** Stream of groups in arrival order, including out-of-sequence deliveries. */
-fun MoqTrackConsumer.groupsAsArrived(): Flow<MoqGroupConsumer> = flow {
+fun TrackConsumer.groupsAsArrived(): Flow<GroupConsumer> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(recvGroup() ?: break)
@@ -142,7 +132,7 @@ fun MoqTrackConsumer.groupsAsArrived(): Flow<MoqGroupConsumer> = flow {
  *
  * Completed empty groups are skipped. The flow ends when the track ends.
  */
-fun MoqTrackConsumer.frames(): Flow<MoqFrame> = flow {
+fun TrackConsumer.frames(): Flow<Frame> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(readFrame() ?: break)
@@ -152,7 +142,7 @@ fun MoqTrackConsumer.frames(): Flow<MoqFrame> = flow {
 }
 
 /** Stream of best-effort datagrams in arrival order. */
-fun MoqTrackConsumer.datagrams(): Flow<MoqDatagram> = flow {
+fun TrackConsumer.datagrams(): Flow<Datagram> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(recvDatagram() ?: break)
@@ -163,7 +153,7 @@ fun MoqTrackConsumer.datagrams(): Flow<MoqDatagram> = flow {
 
 
 /** Stream of tracks requested by subscribers. */
-fun MoqBroadcastDynamic.requestedTracks(): Flow<MoqTrackRequest> = flow {
+fun BroadcastDynamic.requestedTracks(): Flow<TrackRequest> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(requestedTrack())
@@ -173,7 +163,7 @@ fun MoqBroadcastDynamic.requestedTracks(): Flow<MoqTrackRequest> = flow {
 }
 
 /** Stream of uncached group requests for one track. */
-fun MoqTrackDynamic.requestedGroups(): Flow<MoqGroupRequest> = flow {
+fun TrackDynamic.requestedGroups(): Flow<GroupRequest> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(requestedGroup())
@@ -183,7 +173,7 @@ fun MoqTrackDynamic.requestedGroups(): Flow<MoqGroupRequest> = flow {
 }
 
 /** Stream of broadcasts requested by consumers. */
-fun MoqOriginDynamic.requestedBroadcasts(): Flow<MoqBroadcastRequest> = flow {
+fun OriginDynamic.requestedBroadcasts(): Flow<BroadcastRequest> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(requestedBroadcast())
@@ -193,7 +183,7 @@ fun MoqOriginDynamic.requestedBroadcasts(): Flow<MoqBroadcastRequest> = flow {
 }
 
 /** Stream of timestamped raw frames within a group. */
-fun MoqGroupConsumer.frames(): Flow<MoqFrame> = flow {
+fun GroupConsumer.frames(): Flow<Frame> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(readFrame() ?: break)
@@ -209,7 +199,7 @@ fun MoqGroupConsumer.frames(): Flow<MoqFrame> = flow {
  * ends, so callers never touch the underlying handle. Use the raw
  * `announced(config)` if you need to hold and cancel the handle yourself.
  */
-fun MoqOriginConsumer.announcements(config: AnnounceConfig = AnnounceConfig()): Flow<MoqAnnounceUpdate> {
+fun OriginConsumer.announcements(config: AnnounceConfig = AnnounceConfig()): Flow<AnnounceUpdate> {
     val consumer = this
     return flow {
         val announced = consumer.announced(config)

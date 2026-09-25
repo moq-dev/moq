@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.0.25"
+version = "0.1.1"
 edition = "2024"
 rust-version.workspace = true
 
@@ -16,10 +16,10 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 # On by default: everything that costs the build nothing beyond cargo. Off by
 # default: every feature that needs libclang or a system library on the build
 # host, however cheap it is on other platforms, since a default is one setting
-# for every host. `capture` and `v4l2` run bindgen over the kernel's videodev2.h
-# (the `v4l` crate), `vaapi` runs it over its vendored libva headers, and
+# for every host. `vaapi` runs bindgen over its vendored libva headers and
 # `pipewire` links libpipewire; a consumer whose build host has those turns them
-# on. The features exist so a consumer can pick what it wants, not to hide code
+# on. `capture` and `v4l2` no longer cost anything on Linux (moq-v4l checks its
+# bindings in) and stay opt-in only until every distribution ships them. The features exist so a consumer can pick what it wants, not to hide code
 # from the default compile (`just check` lints default features only, so the
 # opt-in ones are compiled by nightly's `just rs features` and `just rs macos`).
 # OpenH264 remains the default software fallback, but is optional so a hardware-
@@ -27,11 +27,11 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 # at the root manifest (`default-features = false`) and pick per crate, so the
 # relay and the language bindings never build device or rendering stacks.
 default = ["mediacodec", "nvidia", "openh264"]
-# Native camera and screen capture. Off by default because the Linux camera path
-# (the `v4l` crate) runs bindgen over the kernel's videodev2.h, so the build host
-# needs libclang and the Linux headers; macOS and Windows use OS frameworks and
-# would pay nothing. moq-cli's `capture` turns it on.
-capture = ["dep:libc", "dep:v4l", "dep:x11rb", "dep:zune-jpeg"]
+# Native camera and screen capture. Costs the build nothing on any platform:
+# Linux goes through moq-v4l (bindings checked in), macOS and Windows use OS
+# frameworks. Still off by default until every distribution ships it, which is
+# a packaging decision rather than a build cost. moq-cli's `capture` turns it on.
+capture = ["dep:libc", "dep:moq-v4l", "dep:x11rb", "dep:zune-jpeg"]
 # Android MediaCodec encode/decode and its AHardwareBuffer frame surface. Kept
 # behind a feature because these NDK entry points require API 26, while the
 # language-binding artifacts still support API 24 and disable default features.
@@ -51,8 +51,8 @@ openh264 = ["dep:openh264", "dep:openh264-sys2"]
 # default because moq-vaapi's build script runs bindgen over its vendored libva
 # headers, so the build host needs libclang. At runtime libva is dlopen'd: the
 # binary carries no NEEDED libva and still starts on a libva-less host, where
-# automatic backend selection falls back to the next candidate. The decoder is
-# hardware-validated, while the encoder is not yet.
+# automatic backend selection falls back to the next candidate. Both are
+# validated on Intel Meteor Lake.
 vaapi = ["dmabuf", "dep:moq-vaapi"]
 # The V4L2 stateful memory-to-memory hardware codecs on Linux: the H.264 encoder
 # and decoder most ARM SoCs expose (a Raspberry Pi's VideoCore, and the
@@ -62,14 +62,13 @@ vaapi = ["dmabuf", "dep:moq-vaapi"]
 # run on a Raspberry Pi 4 (bcm2835-codec, Raspberry Pi OS Bookworm): the encoder
 # on `/dev/video11` produced Constrained Baseline 640x360 that plays back
 # correctly, and the decoder played a 640x360 stream for a minute without a
-# failure and is what automatic selection picks on that board. Off by default
-# because the `v4l` crate runs bindgen over the kernel's videodev2.h, so the
-# build host needs libclang and the Linux headers (the same cost `capture` pays
-# for the camera on Linux, so a build with both pays it once). A host with no M2M
-# codec node fails at open, so automatic backend selection falls through to the
-# next encoder or decoder; `Kind::Named("openh264")` sidesteps it on a board
-# whose driver misbehaves.
-v4l2 = ["dep:v4l", "dep:libc"]
+# failure and is what automatic selection picks on that board. Costs the build
+# nothing (moq-v4l checks its bindings in) and shares that dependency with
+# `capture`; still off by default alongside it. A host with no M2M codec node
+# fails at open, so automatic backend selection falls through to the next
+# encoder or decoder; `Kind::Named("openh264")` sidesteps it on a board whose
+# driver misbehaves.
+v4l2 = ["dep:moq-v4l", "dep:libc"]
 # Linux DMA-BUF surface vocabulary and CPU fallback support. Enabled by every
 # backend that can produce or consume one. It pulls no graphics API by itself.
 dmabuf = ["dep:libc", "dep:linux-raw-sys"]
@@ -87,10 +86,12 @@ render = [
     "objc2-core-video/CVMetalTextureCache",
     "objc2-core-video/objc2-metal",
 ]
-# Screen capture on Linux via xdg-desktop-portal + PipeWire (Wayland and X11).
-# Off by default because the `pipewire` crate links libpipewire-0.3 via pkg-config
-# at build time (and its bindgen needs libclang), so it only belongs in builds
-# that actually capture displays. Camera capture (V4L2) needs only what
+# Screen capture on Linux via xdg-desktop-portal + PipeWire (Wayland and X11),
+# and camera capture from PipeWire camera nodes: libcamera sensors such as a
+# Raspberry Pi CSI camera, and any camera from inside a Flatpak or Snap sandbox
+# through the camera portal. Off by default because the `pipewire` crate links
+# libpipewire-0.3 via pkg-config at build time (and its bindgen needs libclang),
+# so it only belongs in builds that use it. V4L2 camera capture needs only what
 # `capture` already does.
 pipewire = ["capture", "dmabuf", "dep:pipewire", "dep:ashpd"]
 
@@ -137,10 +138,12 @@ yuv = "0.8.14"
 ndk = { version = "0.9", optional = true, default-features = false, features = ["media", "api-level-26"] }
 
 [target.'cfg(target_os="linux")'.dependencies]
-# xdg-desktop-portal ScreenCast negotiation for the `pipewire` feature (pure Rust,
-# zbus over DBus). The portal owns source selection: the user picks a monitor in a
-# compositor dialog, and we get back a PipeWire fd + node id to stream from.
-ashpd = { version = "0.13", optional = true, default-features = false, features = ["tokio", "screencast"] }
+# xdg-desktop-portal ScreenCast and Camera negotiation for the `pipewire` feature
+# (pure Rust, zbus over DBus). The ScreenCast portal owns source selection: the
+# user picks a monitor in a compositor dialog, and we get back a PipeWire fd +
+# node id to stream from. The Camera portal grants a sandboxed app a PipeWire
+# remote that exposes the cameras.
+ashpd = { version = "0.13", optional = true, default-features = false, features = ["tokio", "screencast", "camera"] }
 # The NVIDIA codecs, behind the default-on `nvidia` feature. Everything is
 # dlopen'd at runtime: cudarc loads CUDA, and moq-nvenc (an in-tree fork of
 # nvidia-video-codec-sdk, see rs/moq-nvenc) loads libnvidia-encode. So the binary
@@ -162,6 +165,14 @@ libloading = { workspace = true, optional = true }
 # Architecture-correct DMA_BUF_IOCTL_SYNC request values for CPU access.
 linux-raw-sys = { workspace = true, optional = true }
 moq-nvenc = { workspace = true, optional = true }
+# Native V4L2 webcam capture and, behind the `v4l2` feature, the M2M hardware
+# codecs. An in-tree fork of `v4l` (see rs/moq-v4l) with the videodev2.h
+# bindings checked in, so the build needs no libclang or kernel headers. It
+# streams MMAP buffers; MJPEG cameras are decoded with the pure-Rust `zune-jpeg`
+# (no libjpeg/IJG). The codec backends use its raw layer (`moq_v4l::sys` for the
+# videodev2.h structs, `moq_v4l::v4l2::vidioc` for the request codes) rather
+# than a second V4L2 crate, so no ioctl struct is hand-rolled.
+moq-v4l = { workspace = true, optional = true }
 # Intel/AMD VAAPI hardware H.264 encoder and decoder, behind the opt-in `vaapi`
 # feature. As of moq-vaapi 0.0.3 libva is dlopen'd at runtime, so the binary carries
 # no NEEDED libva: the build needs no libva-dev (its build script's bindgen still
@@ -169,16 +180,10 @@ moq-nvenc = { workspace = true, optional = true }
 # then falls back to the next candidate instead of failing at load, matching the
 # NVENC and NVDEC backends.
 moq-vaapi = { workspace = true, optional = true }
-# PipeWire video stream for the portal's node, behind the `pipewire` feature.
+# PipeWire video stream for a portal's node or a camera node, behind the
+# `pipewire` feature.
 # Links libpipewire-0.3 via pkg-config at build time; bindgen needs libclang.
 pipewire = { version = "0.10", optional = true }
-# Native V4L2 webcam capture (replaces nokhwa) and, behind the `v4l2` feature,
-# the M2M hardware codecs. `v4l` streams MMAP buffers; MJPEG cameras are decoded
-# with the pure-Rust `zune-jpeg` (no libjpeg/IJG). The codec backends use its raw
-# layer (`v4l::v4l_sys` for the videodev2.h structs, `v4l::v4l2::vidioc` for the
-# request codes) rather than a second V4L2 crate, so no ioctl struct is
-# hand-rolled and the dependency is one the tree already carries.
-v4l = { version = "0.14", optional = true }
 # X11 display/window enumeration and capture. Pure Rust and used when no
 # Wayland session is active, so Linux screen capture still works without a
 # portal and callers can select a stable monitor or window id.
@@ -234,7 +239,7 @@ windows = { version = "0.62", features = [
 ash = { workspace = true }
 # `poll!`, to cancel an `encode::Sink` request exactly where a `select!` would.
 futures = { workspace = true }
-h264-reader = "0.8.0"
+h264-reader = "0.9.0"
 # `clock_gettime`, so the GPU workload test can report CPU time next to wall
 # latency. std has no CPU clock and the dependency is optional at build time.
 libc = { workspace = true }

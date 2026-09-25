@@ -127,21 +127,28 @@ for (const section of ["audio", "video"] as const) {
 				},
 			});
 		});
+
+		// The section is optional on the loose root type, so re-read it through a guard.
+		const retained = (value: Catalog.Root) => {
+			const sectionValue = value[section];
+			if (!sectionValue) throw new Error(`expected a retained ${section} section`);
+			return sectionValue;
+		};
 		for (const jitter of [Catalog.u53(50), undefined]) {
 			expect(() =>
 				catalog.mutate((value) => {
-					value[section]!.renditions.media.jitter = jitter;
+					retained(value).renditions.media.jitter = jitter;
 				}),
 			).toThrow("jitter cannot decrease");
 			catalog.mutate((value) => {
-				expect(value[section]!.renditions.media.jitter).toBe(Catalog.u53(100));
+				expect(retained(value).renditions.media.jitter).toBe(Catalog.u53(100));
 			});
 		}
 		catalog.mutate((value) => {
-			delete value[section]!.renditions.media;
+			delete retained(value).renditions.media;
 		});
 		catalog.mutate((value) => {
-			Object.assign(value[section]!.renditions, {
+			Object.assign(retained(value).renditions, {
 				media: {
 					codec: "opus",
 					container: { kind: "legacy" },

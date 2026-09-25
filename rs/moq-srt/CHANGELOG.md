@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/moq-dev/moq/compare/moq-srt-v0.3.1...moq-srt-v0.3.2) - 2026-09-24
+
+### Other
+
+- updated the following local packages: moq-net, moq-mux
+
+## [0.3.1](https://github.com/moq-dev/moq/compare/moq-srt-v0.3.0...moq-srt-v0.3.1) - 2026-09-23
+
+### Other
+
+- updated the following local packages: hang, moq-mux
+
+## [0.3.0](https://github.com/moq-dev/moq/compare/moq-srt-v0.2.11...moq-srt-v0.3.0) - 2026-09-23
+
+### Added
+
+- *(gateway)* [**breaking**] align embedding APIs ([#3818](https://github.com/moq-dev/moq/pull/3818))
+- *(net)* [**breaking**] simplify origin scoping ([#3804](https://github.com/moq-dev/moq/pull/3804))
+- *(hang)* [**breaking**] unify catalog APIs ([#3813](https://github.com/moq-dev/moq/pull/3813))
+- *(net)* [**breaking**] slim the moq-net public surface ([#3779](https://github.com/moq-dev/moq/pull/3779))
+- *(hang)* [**breaking**] timelines only move forward ([#3711](https://github.com/moq-dev/moq/pull/3711))
+
+### Fixed
+
+- *(srt)* keep the listener alive until a rejected caller sees the verdict ([#3887](https://github.com/moq-dev/moq/pull/3887))
+
+### Other
+
+- *(rs)* read constant-size chunks with as_chunks ([#3899](https://github.com/moq-dev/moq/pull/3899))
+- *(net)* [**breaking**] return the next deadline from driver polls ([#3828](https://github.com/moq-dev/moq/pull/3828))
+- *(net)* [**breaking**] drive time and cache cleanup explicitly ([#3825](https://github.com/moq-dev/moq/pull/3825))
+- Merge origin/main into dev
+- Merge remote-tracking branch 'origin/main' into merge-main-into-dev-20260914
+
 ## [0.2.11](https://github.com/moq-dev/moq/compare/moq-srt-v0.2.10...moq-srt-v0.2.11) - 2026-09-17
 
 ### Other

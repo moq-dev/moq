@@ -199,7 +199,7 @@ func (s *Server) CertFingerprints() ([]string, error) {
 	return s.inner.CertFingerprints()
 }
 
-// CreateBroadcast creates an unadvertised broadcast at path. Announce it after populating tracks.
+// CreateBroadcast creates an unannounced broadcast at path, invisible to everyone until announced. Announce it after populating tracks.
 //
 // See [OriginProducer.CreateBroadcast].
 func (s *Server) CreateBroadcast(path string) (*BroadcastProducer, error) {
@@ -291,9 +291,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 }
 
-// Close stops accepting new sessions. In-flight sessions stay alive until their
-// handles are dropped or cancelled. Safe to call more than once and from
-// multiple goroutines (Serve calls it on ctx-driven shutdown).
+// Close stops accepting new sessions and releases the listening socket before
+// it returns, so the same address can be bound again immediately. In-flight
+// sessions stay alive until their handles are dropped or cancelled. Safe to call
+// more than once and from multiple goroutines (Serve calls it on ctx-driven
+// shutdown).
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		if s.inner != nil {

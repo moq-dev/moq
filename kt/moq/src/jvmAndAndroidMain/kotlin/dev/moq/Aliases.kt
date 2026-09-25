@@ -50,6 +50,8 @@ typealias TrackProducer = uniffi.moq.MoqTrackProducer
 typealias TrackRequest = uniffi.moq.MoqTrackRequest
 /** A stream of uncached group requests for one track, for serving fetches on demand. */
 typealias TrackDynamic = uniffi.moq.MoqTrackDynamic
+/** A watch-only handle to whether a published track has subscribers; holding it keeps nothing open. */
+typealias TrackDemand = uniffi.moq.MoqTrackDemand
 /** The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind. */
 typealias TrackConsumer = uniffi.moq.MoqTrackConsumer
 /** A request to produce one uncached group for a fetch consumer. */

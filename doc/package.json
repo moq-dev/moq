@@ -6,18 +6,18 @@
 	"scripts": {
 		"dev": "vitepress dev --open",
 		"build": "vitepress build",
-		"check": "tsc --noEmit && bun test ./.vitepress && vitepress build",
-		"test": "bun test ./.vitepress",
+		"check": "tsc --noEmit && bun test ./.vitepress ./concept/audio-jitter && vitepress build",
+		"test": "bun test ./.vitepress ./concept/audio-jitter",
 		"preview": "vitepress preview",
 		"deploy": "vitepress build && wrangler deploy"
 	},
 	"devDependencies": {
-		"@types/bun": "^1.4.1",
-		"@types/node": "^26.4.1",
+		"@types/bun": "^1.4.2",
+		"@types/node": "^26.5.1",
 		"typescript": "7.0.2",
 		"vitepress": "^1.6.4",
 		"vitepress-plugin-llms": "^1.14.0",
-		"wrangler": "^4.129.0",
-		"yaml": "^2.9.0"
+		"wrangler": "^4.131.2",
+		"yaml": "^2.9.1"
 	}
 }

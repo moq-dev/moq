@@ -40,9 +40,10 @@ plugins {
 
 version = providers.gradleProperty("moq.version").get()
 
-// Compatible-patch range for the bindings: any 0.3.x, never 0.4.0. Published
-// into the wrapper's POM so consumers float to the newest bindings patch.
-val MOQ_FFI_RANGE = "[0.3,0.4)"
+// Compatible-patch range for the bindings: 0.4.3 (the WebSocket fallback
+// setters) or newer, never 0.5.0. Published into the wrapper's POM so consumers
+// float to the newest bindings patch.
+val MOQ_FFI_RANGE = "[0.4.3,0.5)"
 
 val androidEnabled = providers.gradleProperty("android.enabled").orNull == "true"
 

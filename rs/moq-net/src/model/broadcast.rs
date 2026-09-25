@@ -245,13 +245,13 @@ impl Producer {
 	/// Advertise this broadcast's exact path as a route, or re-price the standing
 	/// advertisement in place.
 	///
-	/// Call it once the tracks a subscriber needs first (a catalog) exist, so the
-	/// advertisement lands with them in place: an announced path is what
-	/// [`origin::Consumer::announced`](super::origin::Consumer::announced)
-	/// enumerates, and a subscriber acts on it immediately. The broadcast is
-	/// reachable by exact path either way; announcing only makes it discoverable.
-	/// The route retracts on [`unannounce`](Self::unannounce), [`finish`](Self::finish),
-	/// [`abort`](Self::abort), or the last producer dropping.
+	/// Until this is called the broadcast exists for nobody: announce cursors do
+	/// not list it and requests for its path fail with [`Error::Unroutable`], for
+	/// local consumers and peers alike. Call it once the tracks a subscriber needs
+	/// first (a catalog) exist, so the advertisement lands with them in place:
+	/// consumers act on it immediately. The route retracts on [`unannounce`](Self::unannounce),
+	/// [`finish`](Self::finish), [`abort`](Self::abort), or the last producer
+	/// dropping.
 	///
 	/// Fails with [`Error::Closed`] on a standalone broadcast (one not created
 	/// through an origin, so there is nothing to announce into) or once the
@@ -262,9 +262,11 @@ impl Producer {
 		announcer.announce(route)
 	}
 
-	/// Retract the advertisement of this broadcast's path, if any. The broadcast
-	/// stays reachable by exact path; this is how a publisher goes off the air
-	/// without ending the broadcast.
+	/// Retract this broadcast's advertisement, if any, from local consumers and
+	/// peers alike. New requests for the path fail with [`Error::Unroutable`] and
+	/// the broadcast the origin served from it ends, while tracks already in
+	/// flight carry on to their own end. [`announce`](Self::announce) brings it
+	/// back.
 	pub fn unannounce(&self) {
 		self.alive.unannounce();
 	}
@@ -411,15 +413,18 @@ impl Producer {
 		Poll::Ready((name, producer))
 	}
 
-	/// Abort every spliced track, releasing their subscribers with `err`. Called
-	/// when the broadcast closes for good.
-	pub(crate) fn abort_spliced(&self, err: Error) {
+	/// Let go of every spliced track, aborting with `err` the ones never handed
+	/// out by [`Self::poll_spliced_assigned`]. Called when the broadcast ends:
+	/// whoever took the others decides how they end.
+	pub(crate) fn release_spliced(&self, err: Error) {
 		let mut state = self.state.lock();
 		if let Some(spliced) = state.spliced.as_mut() {
-			spliced.pending.clear();
-			for producer in spliced.tracks.values_mut() {
-				let _ = producer.abort(err.clone());
+			for name in std::mem::take(&mut spliced.pending) {
+				if let Some(producer) = spliced.tracks.get_mut(&name) {
+					let _ = producer.abort(err.clone());
+				}
 			}
+			spliced.tracks.clear();
 		}
 	}
 
@@ -524,19 +529,19 @@ impl Alive {
 		})
 	}
 
-	/// Retract the path's advertisement, if any.
+	/// Withdraw the path's advertisement, if any; the broadcast stays alive.
 	fn unannounce(&self) {
-		let announcement = self.announcer.lock().as_mut().and_then(Announcer::take);
-		// Retracted outside the announcer lock: the retraction re-syncs the origin's
-		// announce cursors under the origin's own lock.
-		drop(announcement);
+		if let Some(announcer) = self.announcer.lock().as_mut() {
+			announcer.withdraw();
+		}
 	}
 
 	/// End the broadcast's advertising for good: retract the standing advertisement
 	/// and drop the announcer, so a later `announce` fails with `Closed`.
 	fn retire(&self) {
 		let announcer = self.announcer.lock().take();
-		// Dropped outside the announcer lock, like `unannounce`.
+		// Dropped outside the announcer lock: the entry's removal re-syncs the
+		// origin's cursors under the origin's own lock.
 		drop(announcer);
 	}
 }

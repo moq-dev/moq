@@ -75,6 +75,42 @@ mod test {
 		out
 	}
 
+	/// A snapshot group the transport can no longer serve -- `Old` when the relay reclaims a
+	/// superseded group, `Evicted` under memory pressure, `Lagged` past the drift budget -- is not
+	/// fatal. A snapshot reader only wants the newest value, so it drops the group and takes the
+	/// replacement rather than ending the reader.
+	#[test]
+	fn a_lost_group_waits_for_its_replacement() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let mut consumer = consume(track.subscribe(None), false);
+		let waiter = kio::Waiter::noop();
+
+		// Group 0 delivers a value, then stays open with the reader parked on its next frame.
+		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"one"))
+			.unwrap();
+		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(v))) if v == "one"));
+		assert!(consumer.poll_next(&waiter).is_pending());
+
+		// The relay reclaims the group out from under the reader.
+		group.abort(moq_net::Error::Old).unwrap();
+		assert!(
+			consumer.poll_next(&waiter).is_pending(),
+			"a lost group must not end the reader"
+		);
+
+		// The replacement arrives and the reader picks up where the value now lives.
+		let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"two"))
+			.unwrap();
+		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(v))) if v == "two"));
+	}
+
 	#[test]
 	fn one_group_per_update() {
 		let (mut producer, track) = producer(false);

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/moq-dev/moq/compare/moq-e2ee-v0.0.1...moq-e2ee-v0.0.2) - 2026-09-24
+
+### Other
+
+- updated the following local packages: moq-net
+
 ### Changed
 
 - Profile `moq-e2ee-00`: every derivation is scoped to a publisher-minted `Epoch`, the last segment of the opaque broadcast path from `Credential::path`

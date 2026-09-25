@@ -5,7 +5,7 @@ description: Idiomatic Go over cgo via moq.dev/moq
 
 # Go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/moq-dev/moq-go.svg)](https://pkg.go.dev/github.com/moq-dev/moq-go)
+[![Go Reference](https://pkg.go.dev/badge/moq.dev/moq.svg)](https://pkg.go.dev/moq.dev/moq)
 
 `moq.dev/moq`: `context.Context` cancellation, `error`
 returns, and Go 1.23 range-over-func iterators for live streams. The native
@@ -18,7 +18,7 @@ go get moq.dev/moq@latest
 ```
 
 ```go
-import "github.com/moq-dev/moq-go"
+import "moq.dev/moq"
 
 // Subscribe. The iterator is live, so run it in its own goroutine.
 client, err := moq.Dial(ctx, "https://relay.example.com", moq.WithTLSRoots("ca.pem"))
@@ -70,7 +70,7 @@ broadcast.Finish()   // keep the producer reachable while publishing, then finis
 ```
 
 The three advertising operations: `client.CreateBroadcast(path)` (or
-`origin.CreateBroadcast`) returns an unadvertised producer;
+`origin.CreateBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.Announce(route)` / `broadcast.Unannounce()` own that exact-path
 advertisement; `origin.Dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
@@ -95,6 +95,10 @@ each reconnect by number; `moq.WithBackoff` tunes the pacing, with
 `moq.RetryForever` as the timeout; and `moq.WithQUICMaxStreams` raises the
 peer's inbound stream cap for a subscriber to many tracks.
 
+The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
+a 200 ms head start. `moq.WithWebSocketEnabled(false)` turns it off for a
+QUIC-only relay, and `moq.WithWebSocketDelay` changes the head start.
+
 `moq.Listen` accepts sessions with per-request `Accept`/`Reject`; `Request.Transport()`
 returns the closed `moq.Transport` enum.
 `Request.SetPublish`/`SetConsume` return an error if the request is already
@@ -104,7 +108,7 @@ take anything `encoding/json` handles and return `json.RawMessage`. The rest
 of the [shared feature list](/lib/#what-every-binding-can-do) maps one to
 one: `FetchGroup`/`FetchMediaGroup`, `Dynamic()` with `Requests(ctx)`,
 `Session.Bandwidth()` to divide the send estimate,
-`AppendDatagram`/`Datagrams(ctx)`, `SetCatalogSection`, `Used`/`Unused`,
+`AppendDatagram`/`Datagrams(ctx)`, `SetCatalogSection`, `Demand()` for `Used`/`Unused`,
 `Session().Stats()`. `moq.IsAuthError` and `moq.IsShutdown` classify errors. `moq.ProtocolError(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one.
 
 `DecodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.Format`
@@ -113,6 +117,25 @@ is I420 when nil, or `VideoPixelFormatRgba` for four bytes a pixel, and every
 effort: only NVDEC has a built-in scaler, so read each frame's own `Width` and
 `Height` rather than assuming it took.
 
-- API reference: [pkg.go.dev/github.com/moq-dev/moq-go](https://pkg.go.dev/github.com/moq-dev/moq-go)
+## Connection stats
+
+`Session().Stats()` returns a `ConnectionStats` snapshot. Each field is a
+pointer, nil when the transport backend does not report it (native QUIC reports
+all of them; browser WebTransport reports few or none) or before it is
+available, which is not the same as zero.
+
+| Field | Unit | Meaning |
+| --- | --- | --- |
+| `RttUs` | microseconds | Smoothed round-trip time. |
+| `EstimatedSendRateBps` | bits per second | Send bandwidth from the congestion controller. |
+| `EstimatedRecvRateBps` | bits per second | Receive bandwidth from MoQ PROBE. |
+| `BytesSent` | bytes | Total sent, including retransmissions and overhead. |
+| `BytesReceived` | bytes | Total received, including duplicates and overhead. |
+| `BytesLost` | bytes | Total lost, detected via retransmission or acknowledgement. |
+| `PacketsSent` | datagrams | Total datagrams sent. |
+| `PacketsReceived` | datagrams | Total datagrams received. |
+| `PacketsLost` | datagrams | Total datagrams detected as lost. |
+
+- API reference: [pkg.go.dev/moq.dev/moq](https://pkg.go.dev/moq.dev/moq)
 - Source: [`go/`](https://github.com/moq-dev/moq/tree/main/go); `just go check` builds and tests locally
 - Mirrors the vanity path resolves to: [moq-dev/moq-go](https://github.com/moq-dev/moq-go) (wrapper), [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) (raw bindings and static libraries)

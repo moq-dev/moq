@@ -19,8 +19,7 @@
 //!   Windows, plus portal/PipeWire on Wayland and X11 capture on Linux. Use
 //!   `capture::open` for an embeddable raw-frame stream or
 //!   `encode::publish_capture` for turnkey publication. It requires the opt-in
-//!   `capture` feature: on Linux the camera path's bindgen needs libclang and
-//!   the V4L2 headers on the build host.
+//!   `capture` feature, which costs the build host nothing on any platform.
 //! - [`encode`] encodes frames with a native backend and publishes them through
 //!   the matching `moq_mux::codec` importer, which handles catalog registration
 //!   and framing. The codec is chosen via [`encode::Codec`]: H.264 (openh264 /

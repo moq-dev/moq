@@ -2482,12 +2482,20 @@ async fn reconnect_stops_on_websocket_unauthorized() {
 async fn websocket_forbidden_does_not_end_a_quic_connect() {
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-	let (mut server, addr) = test_server().await;
-
-	// The same port over TCP, where the fallback dials.
-	let listener = tokio::net::TcpListener::bind(("::", addr.port()))
-		.await
-		.expect("failed to bind TCP listener");
+	// The fallback dials the same port over TCP. Nothing reserves a port for both
+	// UDP and TCP at once, and the ephemeral UDP port may already be taken over TCP,
+	// so pick again until both bind.
+	let (mut server, addr, listener) = 'bind: {
+		for _ in 0..20 {
+			let (server, addr) = test_server().await;
+			match tokio::net::TcpListener::bind(("::", addr.port())).await {
+				Ok(listener) => break 'bind (server, addr, listener),
+				Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => continue,
+				Err(err) => panic!("failed to bind TCP listener: {err}"),
+			}
+		}
+		panic!("no port was free over both UDP and TCP");
+	};
 	let forbid = tokio::spawn(async move {
 		let (mut stream, _) = listener.accept().await?;
 		let mut buf = [0; 1024];
@@ -3182,16 +3190,16 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 		.await
 		.expect("goaway timed out")
 		.expect("session closed before GOAWAY");
-	assert_eq!(&*goaway.uri, "https://elsewhere.example/");
+	assert_eq!(goaway.uri(), "https://elsewhere.example/");
 	assert!(draining.peek().is_some());
 	if expect_wire_timeout {
 		assert_eq!(
-			goaway.timeout,
+			goaway.timeout(),
 			Some(Duration::from_secs(5)),
 			"draft-17+ carries the deadline"
 		);
 	} else {
-		assert_eq!(goaway.timeout, None, "no wire timeout on this version");
+		assert_eq!(goaway.timeout(), None, "no wire timeout on this version");
 	}
 
 	// Honor the GOAWAY: leave, letting the server's drain complete cleanly.
@@ -3275,7 +3283,7 @@ async fn goaway_timeout_force_close_moq_transport_19_quic() {
 		.await
 		.expect("goaway timed out")
 		.expect("session closed before GOAWAY");
-	assert_eq!(goaway.timeout, Some(Duration::from_millis(200)));
+	assert_eq!(goaway.timeout(), Some(Duration::from_millis(200)));
 
 	// The server force-closes after the 200ms deadline. Assert the enforcement:
 	// the session ends promptly despite the client overstaying. The close

@@ -94,20 +94,20 @@ impl Format {
 
 		match self {
 			Self::F32 => {
-				for (i, chunk) in data.chunks_exact(4).enumerate() {
+				for (i, chunk) in data.as_chunks::<4>().0.iter().enumerate() {
 					out[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
 				}
 			}
 			Self::F32Planar => {
 				for ch in 0..channels {
 					let plane = &data[ch * frames * 4..(ch + 1) * frames * 4];
-					for (frame, chunk) in plane.chunks_exact(4).enumerate() {
+					for (frame, chunk) in plane.as_chunks::<4>().0.iter().enumerate() {
 						out[frame * channels + ch] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
 					}
 				}
 			}
 			Self::S16 => {
-				for (i, chunk) in data.chunks_exact(2).enumerate() {
+				for (i, chunk) in data.as_chunks::<2>().0.iter().enumerate() {
 					let v = i16::from_le_bytes([chunk[0], chunk[1]]);
 					out[i] = (v as f32) / 32768.0;
 				}
@@ -115,14 +115,14 @@ impl Format {
 			Self::S16Planar => {
 				for ch in 0..channels {
 					let plane = &data[ch * frames * 2..(ch + 1) * frames * 2];
-					for (frame, chunk) in plane.chunks_exact(2).enumerate() {
+					for (frame, chunk) in plane.as_chunks::<2>().0.iter().enumerate() {
 						let v = i16::from_le_bytes([chunk[0], chunk[1]]);
 						out[frame * channels + ch] = (v as f32) / 32768.0;
 					}
 				}
 			}
 			Self::S32 => {
-				for (i, chunk) in data.chunks_exact(4).enumerate() {
+				for (i, chunk) in data.as_chunks::<4>().0.iter().enumerate() {
 					let v = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
 					out[i] = (v as f32) / (i32::MAX as f32 + 1.0);
 				}
@@ -130,7 +130,7 @@ impl Format {
 			Self::S32Planar => {
 				for ch in 0..channels {
 					let plane = &data[ch * frames * 4..(ch + 1) * frames * 4];
-					for (frame, chunk) in plane.chunks_exact(4).enumerate() {
+					for (frame, chunk) in plane.as_chunks::<4>().0.iter().enumerate() {
 						let v = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
 						out[frame * channels + ch] = (v as f32) / (i32::MAX as f32 + 1.0);
 					}
@@ -181,7 +181,7 @@ impl Format {
 			Self::F32Planar => {
 				for ch in 0..channels {
 					let plane = &mut out[ch * frames * 4..(ch + 1) * frames * 4];
-					for (frame, chunk) in plane.chunks_exact_mut(4).enumerate() {
+					for (frame, chunk) in plane.as_chunks_mut::<4>().0.iter_mut().enumerate() {
 						chunk.copy_from_slice(&samples[frame * channels + ch].to_le_bytes());
 					}
 				}
@@ -195,7 +195,7 @@ impl Format {
 			Self::S16Planar => {
 				for ch in 0..channels {
 					let plane = &mut out[ch * frames * 2..(ch + 1) * frames * 2];
-					for (frame, chunk) in plane.chunks_exact_mut(2).enumerate() {
+					for (frame, chunk) in plane.as_chunks_mut::<2>().0.iter_mut().enumerate() {
 						let v = (samples[frame * channels + ch].clamp(-1.0, 1.0) * 32767.0).round() as i16;
 						chunk.copy_from_slice(&v.to_le_bytes());
 					}
@@ -210,7 +210,7 @@ impl Format {
 			Self::S32Planar => {
 				for ch in 0..channels {
 					let plane = &mut out[ch * frames * 4..(ch + 1) * frames * 4];
-					for (frame, chunk) in plane.chunks_exact_mut(4).enumerate() {
+					for (frame, chunk) in plane.as_chunks_mut::<4>().0.iter_mut().enumerate() {
 						let v =
 							(samples[frame * channels + ch].clamp(-1.0, 1.0) as f64 * i32::MAX as f64).round() as i32;
 						chunk.copy_from_slice(&v.to_le_bytes());

@@ -4,7 +4,11 @@
 	"version": "0.1.0",
 	"description": "MoQ clock example with publish/subscribe functionality",
 	"license": "(MIT OR Apache-2.0)",
-	"repository": "github:moq-dev/moq",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/moq-dev/moq.git",
+		"directory": "js/clock"
+	},
 	"private": true,
 	"files": [
 		"./src",
@@ -22,7 +26,7 @@
 		"@fails-components/webtransport-transport-http3-quiche": "^1.6.8"
 	},
 	"devDependencies": {
-		"@types/node": "^26.4.1",
+		"@types/node": "^26.5.1",
 		"typescript": "7.0.2"
 	}
 }

@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use moq_net::Timestamp;
-use v4l::v4l_sys::{V4L2_CID_MIN_BUFFERS_FOR_CAPTURE, V4L2_DEC_CMD_START, V4L2_DEC_CMD_STOP};
+use moq_v4l::sys::{V4L2_CID_MIN_BUFFERS_FOR_CAPTURE, V4L2_DEC_CMD_START, V4L2_DEC_CMD_STOP};
 
 use super::{Backend, Codec, Config};
 use crate::v4l2::{self, Dequeue, Device, Dir, Format, Planes, Queue, Rect, Request, Role};

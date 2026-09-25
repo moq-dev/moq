@@ -637,6 +637,101 @@ async fn json_snapshot_roundtrip() {
 	assert!(matches!(producer.update(r#"{"a":3}"#.into()), Err(MoqError::Closed)));
 }
 
+/// JSON producers report subscriber demand through a handle, like the media and raw track producers.
+#[tokio::test]
+async fn json_demand() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let snapshot_config = MoqJsonSnapshotConfig {
+		delta_ratio: 8,
+		compression: true,
+	};
+	let stream_config = MoqJsonStreamConfig { compression: true };
+	let snapshot = broadcast
+		.publish_json_snapshot("status".into(), snapshot_config.clone())
+		.unwrap();
+	let stream = broadcast
+		.publish_json_stream("events".into(), stream_config.clone())
+		.unwrap();
+	let snapshot_demand = snapshot.demand().unwrap();
+	let stream_demand = stream.demand().unwrap();
+	assert_eq!(snapshot_demand.name(), "status");
+	assert_eq!(stream_demand.name(), "events");
+	assert!(!snapshot_demand.is_used());
+
+	let consumer = broadcast.consume().unwrap();
+	let snapshot_consumer = consumer
+		.subscribe_json_snapshot("status".into(), snapshot_config)
+		.await
+		.unwrap();
+	let stream_consumer = consumer
+		.subscribe_json_stream("events".into(), stream_config)
+		.await
+		.unwrap();
+
+	tokio::time::timeout(TIMEOUT, snapshot_demand.used())
+		.await
+		.expect("timed out waiting for the json snapshot to become used")
+		.unwrap();
+	tokio::time::timeout(TIMEOUT, stream_demand.used())
+		.await
+		.expect("timed out waiting for the json stream to become used")
+		.unwrap();
+	assert!(snapshot_demand.is_used());
+
+	drop(snapshot_consumer);
+	drop(stream_consumer);
+	tokio::time::timeout(TIMEOUT, snapshot_demand.unused())
+		.await
+		.expect("timed out waiting for the json snapshot to become unused")
+		.unwrap();
+	tokio::time::timeout(TIMEOUT, stream_demand.unused())
+		.await
+		.expect("timed out waiting for the json stream to become unused")
+		.unwrap();
+
+	snapshot.finish().unwrap();
+	stream.finish().unwrap();
+	assert!(matches!(snapshot.demand(), Err(MoqError::Closed)));
+	assert!(matches!(stream.demand(), Err(MoqError::Closed)));
+	assert!(matches!(snapshot_demand.used().await, Err(MoqError::Closed)));
+	assert!(matches!(stream_demand.used().await, Err(MoqError::Closed)));
+}
+
+/// A demand handle waits without the producer, and fails once the track is gone.
+///
+/// A raw track's `finish` keeps its handle open for a later `abort`, so its track ends when the
+/// handle is released; a media producer's `finish` releases it.
+#[tokio::test]
+async fn demand_handle_outlives_finish() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("status".into(), None).unwrap();
+	let media = broadcast
+		.publish_audio(audio_init(MoqAudioFormat::Opus, opus_head()))
+		.unwrap();
+	let track_demand = track.demand().unwrap();
+	let media_demand = media.demand().unwrap();
+	assert_eq!(media_demand.name(), media.name().unwrap());
+
+	let consumer = track.consume(None).unwrap();
+	tokio::time::timeout(TIMEOUT, track_demand.used())
+		.await
+		.expect("timed out waiting for the raw track to become used")
+		.unwrap();
+	drop(consumer);
+
+	track.finish().unwrap();
+	drop(track);
+	media.finish().unwrap();
+	let track_err = tokio::time::timeout(TIMEOUT, track_demand.used())
+		.await
+		.expect("timed out waiting for the finished raw track");
+	let media_err = tokio::time::timeout(TIMEOUT, media_demand.used())
+		.await
+		.expect("timed out waiting for the finished media track");
+	assert!(matches!(track_err, Err(MoqError::Closed)), "{track_err:?}");
+	assert!(matches!(media_err, Err(MoqError::Closed)), "{media_err:?}");
+}
+
 #[tokio::test]
 async fn json_stream_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -1287,31 +1382,42 @@ fn audio_rejects_bad_init_bytes() {
 	);
 }
 
-/// Creating a broadcast does not advertise it. `announced_broadcast` waits until
-/// `announce` makes the exact path discoverable; `request_broadcast` can still
-/// resolve it by exact path in the meantime.
+/// Creating a broadcast does not make it exist for anyone: nothing crosses the
+/// announce cursor and nothing resolves until `announce`, locally exactly as for a
+/// peer. `announced_broadcast` waits for the announcement.
 #[tokio::test]
-async fn create_broadcast_does_not_announce() {
+async fn create_broadcast_is_invisible_until_announced() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let broadcast = origin.create_broadcast("live".into()).unwrap();
 
-	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
+	let unroutable = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
 		.await
-		.expect("timed out requesting the unannounced broadcast")
-		.expect("an unannounced broadcast stays reachable by exact path");
+		.expect("an unroutable request answers at once");
+	assert!(unroutable.is_err(), "an unannounced broadcast is unroutable");
 
-	let announced = consumer.announced_broadcast("live".into()).unwrap();
-	let pending = tokio::spawn(async move { announced.available().await });
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let pending = tokio::spawn(async move { announced.next().await });
+	let waiting = consumer.announced_broadcast("live".into()).unwrap();
+	let waited = tokio::spawn(async move { waiting.available().await });
 	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 	assert!(!pending.is_finished(), "create_broadcast must not advertise the path");
+	assert!(!waited.is_finished(), "an unannounced broadcast must not resolve");
 
 	broadcast.announce(MoqRoute::default()).unwrap();
-	tokio::time::timeout(TIMEOUT, pending)
+	tokio::time::timeout(TIMEOUT, waited)
+		.await
+		.expect("timed out waiting for the announced broadcast")
+		.expect("task")
+		.expect("the announced broadcast resolves");
+	let update = tokio::time::timeout(TIMEOUT, pending)
 		.await
 		.expect("timed out waiting for announce")
 		.expect("task")
-		.expect("announce makes the path discoverable");
+		.expect("announce reaches the cursor")
+		.expect("the cursor is still open");
+	assert_eq!(update.prefix(), "live");
+	assert!(update.active());
 	broadcast.finish().unwrap();
 }
 
@@ -1560,11 +1666,19 @@ async fn announce_and_unannounce_toggles_discovery() {
 	broadcast.unannounce().unwrap();
 	wait_live(&announced, false).await;
 
-	// Unannounced, but still reachable by exact path.
+	// Unannounced for local consumers exactly as for peers.
+	let unroutable = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
+		.await
+		.expect("an unroutable request answers at once");
+	assert!(unroutable.is_err(), "an unannounced broadcast is unroutable");
+
+	// Announcing again brings it back.
+	broadcast.announce(MoqRoute::default()).unwrap();
+	wait_live(&announced, true).await;
 	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
 		.await
-		.expect("timed out requesting the unannounced broadcast")
-		.expect("an unannounced broadcast stays reachable by exact path");
+		.expect("timed out requesting the reannounced broadcast")
+		.expect("a reannounced broadcast resolves");
 
 	broadcast.finish().unwrap();
 }
@@ -1928,7 +2042,7 @@ async fn video_decode_format() {
 	assert_eq!(frame.data.len(), frame.width as usize * frame.height as usize * 4);
 	// Every fourth byte is alpha, so an opaque frame proves the conversion ran rather than handing back planes.
 	assert!(
-		frame.data.chunks_exact(4).all(|px| px[3] == 0xFF),
+		frame.data.as_chunks::<4>().0.iter().all(|px| px[3] == 0xFF),
 		"RGBA output should be opaque"
 	);
 
@@ -3290,14 +3404,50 @@ async fn server_cert_fingerprints_rejected_after_cancel() {
 		.expect("listen failed");
 	server.cert_fingerprints().expect("fingerprints available");
 
-	// The listener is dropped off-thread, so this must not depend on that landing first:
-	// cancel is terminal the moment it returns. `Cancelled`, not `Bind`: the wrappers'
+	// Cancel is terminal the moment it returns. `Cancelled`, not `Bind`: the wrappers'
 	// `is_shutdown` helpers read the variant to tell a teardown from a real bind failure.
 	server.cancel();
 	assert!(matches!(
 		server.cert_fingerprints(),
 		Err(crate::error::MoqError::Cancelled)
 	));
+}
+
+/// Cancelling a listening server releases its socket before it returns, so the
+/// same address binds again without a retry. The accept is parked first, so
+/// cancel has to unwind an in-flight run rather than an idle state.
+#[tokio::test]
+async fn server_cancel_releases_the_bound_port() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let addr = server.listen().await.expect("listen failed");
+
+	// Park an accept on the server lock, the state a live server is closed in.
+	let accepting = server.clone();
+	let accept = tokio::spawn(async move { accepting.accept().await });
+	wait_for_config_error(|| server.set_publish(None), |err| matches!(err, MoqError::Busy)).await;
+
+	server.cancel();
+
+	// A raw bind from this thread races the teardown directly rather than
+	// queueing behind it on the FFI runtime, so it only succeeds if cancel
+	// released the socket before returning.
+	std::net::UdpSocket::bind(&addr).expect("cancel should release the socket before it returns");
+
+	// No retry: the socket is already closed, so this must succeed on the first try.
+	let rebound = MoqServer::new();
+	rebound.set_bind(addr.clone()).unwrap();
+	rebound.set_tls_generate(vec!["localhost".into()]).unwrap();
+	rebound.listen().await.expect("the port should rebind immediately");
+
+	let accept = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("accept task timed out")
+		.expect("accept task panicked");
+	assert!(matches!(accept, Err(MoqError::Cancelled)));
+
+	rebound.cancel();
 }
 
 #[tokio::test]

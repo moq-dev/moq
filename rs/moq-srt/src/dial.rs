@@ -253,22 +253,32 @@ mod tests {
 		assert!(is_subscribe, "m=request should route to a server Subscribe request");
 	}
 
+	/// Reject a caller server-side and hand back the error it saw.
+	///
+	/// The server is driven inline rather than on its own task: [`Publish::reject`]
+	/// only hands the verdict to the listener, so dropping the [`Server`] before the
+	/// caller's handshake completes stops the listener that still owes it the
+	/// rejection packet, and the caller times out instead.
 	async fn rejected(mode: Mode, reason: Reject, code: i32) {
 		let addr = free_udp_addr().await;
 		let mut server = Server::bind(addr, None).await.unwrap();
-		let server_task = tokio::spawn(async move {
-			match (mode, server.accept().await.expect("a request")) {
-				(Mode::Publish, Request::Publish(request)) => request.reject(reason).await.unwrap(),
-				(Mode::Request, Request::Subscribe(request)) => request.reject(reason).await.unwrap(),
-				_ => panic!("request routed in the wrong direction"),
-			}
-		});
+		let client = Client::new(addr, "cam0");
 
-		let err = match Client::new(addr, "cam0").call(mode).await {
+		let (_, err) = tokio::join!(
+			async {
+				match (mode, server.accept().await.expect("a request")) {
+					(Mode::Publish, Request::Publish(request)) => request.reject(reason).await.unwrap(),
+					(Mode::Request, Request::Subscribe(request)) => request.reject(reason).await.unwrap(),
+					_ => panic!("request routed in the wrong direction"),
+				}
+			},
+			client.call(mode),
+		);
+
+		let err = match err {
 			Ok(_) => panic!("rejected SRT caller connected"),
 			Err(err) => err,
 		};
-		server_task.await.unwrap();
 		let crate::Error::Io(err) = err else {
 			panic!("SRT rejection was not an I/O error: {err}");
 		};

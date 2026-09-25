@@ -138,13 +138,21 @@ import * as Watch from "@moq/watch";
 // Shared with every other component pointed at the same relay; the broadcast
 // handle reads from its origin and spans reconnects.
 const connection = new Moq.Connection({ url: new URL("https://relay.example.com/anon") });
-const broadcast = new Watch.Broadcast({ origin: connection.origin, name: Moq.Path.from("alice.hang") });
+const player = new Watch.Player({
+    origin: connection.origin,
+    probe: connection.probe,
+    name: Moq.Path.from("alice.hang"),
+    canvas,
+});
+// player.broadcast, player.video, player.audio, player.text, player.sync,
+// player.renderer, and player.emitter expose the pipeline.
+// Call player.close() when playback ends.
 ```
 
-`Watch.Broadcast`, `Video.Decoder`, `Video.Renderer`, `Audio.Decoder`, and
-`Audio.Emitter` are the pieces the element assembles. Their constructors take
-one properties object, and every input and output
-is a signal from [`@moq/signals`](/lib/js/signals). Load from a CDN
+Pass a signal from [`@moq/signals`](/lib/js/signals) for any control you want
+to change later, such as `muted` or `delay`. `Player` owns the same pipeline as
+`<moq-watch>`; `Watch.Broadcast`, `Sync`, and the per-track components remain
+available for custom composition. Load the element from a CDN
 (`https://esm.sh/@moq/watch/element`) for a no-build embed.
 
 ## Buffered playback

@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.11.2"
+version = "0.12.2"
 edition = "2024"
 # Depends on moq-relay, whose sysinfo 0.39 needs 1.95, above the 1.91 workspace
 # floor. This binary is an application, so the bump stays here rather than
@@ -38,9 +38,9 @@ noq = ["moq-tokio/noq"]
 qlog = ["moq-tokio/qlog"]
 websocket = ["moq-tokio/websocket"]
 # Device capture (camera + microphone) + encode/publish. Off by default because
-# it pulls in moq-video + moq-audio capture, which add system build deps on Linux
-# (camera: `v4l`/v4l2-sys-mit needs libclang + V4L2 headers via bindgen; mic: cpal
-# needs ALSA/libasound), plus binary size. macOS/Windows use OS frameworks, no
+# it pulls in moq-video + moq-audio capture: on Linux the microphone needs
+# ALSA/libasound at build time through cpal (the camera needs nothing, moq-v4l
+# checks its bindings in), plus binary size. macOS/Windows use OS frameworks, no
 # extra install. H.264 is vendored static (openh264), so no system ffmpeg/libav.
 # Enable with `cargo build -p moq-cli --features capture`, adding `pipewire` for
 # display capture on Linux.
@@ -70,13 +70,12 @@ nvdec = ["nvidia"]
 # pulls in moq-video.
 vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
 # The V4L2 M2M codecs of an ARM SoC (a Raspberry Pi's VideoCore and the like),
-# opt-in like the moq-video feature it turns on: the `v4l` crate's bindgen needs
-# libclang and the kernel headers on the build host. `capture` already pays that
-# for the camera, so a capture build adds it for free. Only bites when `capture`,
-# `transcode`, or `play` pulls in moq-video.
+# opt-in like the moq-video feature it turns on. Costs the build nothing: moq-v4l
+# checks its bindings in. Only applies when `capture`, `transcode`, or `play`
+# pulls in moq-video.
 v4l2 = ["moq-video?/v4l2", "moq-transcode?/v4l2"]
-# Screen capture for `capture --display` on Linux (xdg-desktop-portal + PipeWire),
-# opt-in like moq-video's own `pipewire` because it links libpipewire-0.3 at
+# Screen capture for `capture --display` on Linux (xdg-desktop-portal + PipeWire)
+# and PipeWire cameras for `capture --camera pipewire:<node>`, opt-in like moq-video's own `pipewire` because it links libpipewire-0.3 at
 # build time. Only bites when `capture` pulls in moq-video and moq-audio.
 # Also reaches audio, so `devices`, microphone capture and playback go through
 # the sound server rather than its ALSA plugin on a machine running one.
@@ -90,6 +89,7 @@ pulseaudio = ["moq-audio?/pulseaudio"]
 anyhow = { workspace = true, features = ["backtrace"] }
 axum = { workspace = true }
 axum-server = { workspace = true }
+base64 = { workspace = true }
 bytes = { workspace = true }
 hang = { workspace = true }
 humantime = { workspace = true }
@@ -127,7 +127,9 @@ sd-notify = { workspace = true }
 # Authors an MSF-only catalog, which is the one shape that tells a completer reading
 # the wrong catalog track apart from one reading the right one: `moq-mux`'s producer
 # publishes hang and MSF from the same source, so both answer for an ordinary broadcast.
-moq-msf = { workspace = true }
+moq-msf = { path = "../moq-msf" }
+# `test_relay` stands up a real relay for the `fetch` tests to read through.
+moq-relay = { path = "../moq-relay", default-features = false, features = ["test-support"] }
 tempfile = { workspace = true }
 # `test-util` enables `tokio::time::pause` so the TS round-trip test simulates the
 # exporter drain timeouts instantly instead of waiting on the wall clock.

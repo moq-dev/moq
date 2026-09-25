@@ -95,6 +95,7 @@ class Server:
 
         async with Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
             broadcast = server.create_broadcast("live")
+            broadcast.announce()  # unannounced broadcasts are invisible
             await server.serve()
 
     Or hand-roll the accept loop if you need per-request control::
@@ -106,9 +107,10 @@ class Server:
                     continue
                 session = await request.accept()  # hold to keep the connection alive
 
-    Exiting the context manager stops accepting new sessions but does not
-    close in-flight sessions; those stay alive until their handles are
-    dropped or `Session.cancel()` is called.
+    Exiting the context manager stops accepting new sessions and releases the
+    listening socket before it returns, so the address can be bound again
+    immediately. In-flight sessions stay alive until their handles are dropped
+    or `Session.cancel()` is called.
 
     In advanced mode, provide your own origins for full control::
 

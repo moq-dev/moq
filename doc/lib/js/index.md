@@ -55,8 +55,8 @@ React and Solid adapters for the reactive state.
 
 ## JavaScript API
 
-Below the elements, `Watch.Broadcast` and `Publish.Broadcast` are the same
-pipelines without DOM, and `@moq/net` is the protocol itself. Examples:
+Below the elements, `Watch.Player` owns a headless playback pipeline,
+`Publish.Broadcast` owns a headless publisher, and `@moq/net` is the protocol itself. Examples:
 [`js/net/examples/`](https://github.com/moq-dev/moq/tree/main/js/net/examples)
 covers connecting, publishing, subscribing, and discovery.
 

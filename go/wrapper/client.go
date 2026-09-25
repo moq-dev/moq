@@ -2,6 +2,7 @@ package moq
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -23,6 +24,8 @@ type clientConfig struct {
 	tlsKey             *string
 	bind               *string
 	quicMaxStreams     *uint64
+	websocketEnabled   *bool
+	websocketDelay     *time.Duration
 	reconnect          *bool
 	backoff            *Backoff
 	publish            *OriginProducer
@@ -151,6 +154,20 @@ func WithQUICMaxStreams(maxStreams uint64) ClientOption {
 	return func(c *clientConfig) { c.quicMaxStreams = &maxStreams }
 }
 
+// WithWebSocketEnabled toggles the WebSocket fallback, which races QUIC for
+// http(s) URLs. It is on by default; pass false against a relay that only
+// serves QUIC.
+func WithWebSocketEnabled(enabled bool) ClientOption {
+	return func(c *clientConfig) { c.websocketEnabled = &enabled }
+}
+
+// WithWebSocketDelay sets the head start QUIC gets before the WebSocket
+// fallback joins the race (default 200ms). Zero races both at once, and a
+// negative delay fails Dial.
+func WithWebSocketDelay(delay time.Duration) ClientOption {
+	return func(c *clientConfig) { c.websocketDelay = &delay }
+}
+
 // WithReconnect toggles automatic reconnecting. It is on by default: the
 // session redials with backoff whenever the transport drops, and broadcasts
 // consumed through it ride out the gap. Pass false for a one-shot dial whose
@@ -225,6 +242,16 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	if err == nil && cfg.quicMaxStreams != nil {
 		err = inner.SetQuicMaxStreams(*cfg.quicMaxStreams)
 	}
+	if err == nil && cfg.websocketEnabled != nil {
+		err = inner.SetWebsocketEnabled(*cfg.websocketEnabled)
+	}
+	if err == nil && cfg.websocketDelay != nil {
+		if *cfg.websocketDelay < 0 {
+			err = fmt.Errorf("negative websocket delay: %v", *cfg.websocketDelay)
+		} else {
+			err = inner.SetWebsocketDelay(uint64(cfg.websocketDelay.Microseconds()))
+		}
+	}
 	if err == nil && cfg.reconnect != nil {
 		err = inner.SetReconnect(*cfg.reconnect)
 	}
@@ -260,7 +287,7 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	return c, nil
 }
 
-// CreateBroadcast creates an unadvertised broadcast at path. Announce it after populating tracks.
+// CreateBroadcast creates an unannounced broadcast at path, invisible to everyone until announced. Announce it after populating tracks.
 //
 // See [OriginProducer.CreateBroadcast].
 func (c *Client) CreateBroadcast(path string) (*BroadcastProducer, error) {

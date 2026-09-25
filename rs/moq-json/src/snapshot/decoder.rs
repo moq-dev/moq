@@ -1,5 +1,6 @@
 //! The track-free half of snapshot consuming: frame payloads in, values out.
 
+use std::cell::RefCell;
 use std::marker::PhantomData;
 
 use serde::de::DeserializeOwned;
@@ -34,6 +35,12 @@ pub struct Decoder<T> {
 	/// The current group's DEFLATE decoder (one window per group), rebuilt at each snapshot.
 	flate: Option<moq_flate::Decoder>,
 
+	/// Reused output for inflated delta frames.
+	plain: Vec<u8>,
+
+	/// Reused key buffers for validating remote patches before changing the baseline.
+	check: RefCell<crate::merge::CheckScratch>,
+
 	/// The reconstructed value, `None` until the first snapshot.
 	current: Option<Value>,
 
@@ -46,6 +53,8 @@ impl<T> Decoder<T> {
 		Self {
 			compression: config.compression.is_deflate(),
 			flate: None,
+			plain: Vec::new(),
+			check: RefCell::new(crate::merge::CheckScratch::default()),
 			current: None,
 			_marker: PhantomData,
 		}
@@ -75,12 +84,18 @@ impl<T> Decoder<T> {
 			return Err(Error::MissingSnapshot);
 		}
 
-		let patch: Value = match self.flate.as_mut() {
-			Some(flate) => serde_json::from_slice(&flate.frame(payload)?)?,
-			None => serde_json::from_slice(payload)?,
+		let plain = match self.flate.as_mut() {
+			Some(flate) => {
+				flate.frame_into(payload, &mut self.plain)?;
+				self.plain.as_slice()
+			}
+			None => payload,
 		};
-
-		json_patch::merge(self.current.as_mut().expect("a snapshot precedes any delta"), &patch);
+		crate::merge::apply_bytes(
+			self.current.as_mut().expect("a snapshot precedes any delta"),
+			plain,
+			&self.check,
+		)?;
 		Ok(())
 	}
 
@@ -101,6 +116,12 @@ impl<T: DeserializeOwned> Decoder<T> {
 		let Some(current) = self.current.as_ref() else {
 			return Ok(None);
 		};
+
+		// Tracking the path allocates for every key walked, which dwarfed the decode itself on large
+		// documents, so it only runs again to explain a failure.
+		if let Ok(value) = T::deserialize(current) {
+			return Ok(Some(value));
+		}
 
 		let value = serde_path_to_error::deserialize(current).map_err(|err| {
 			let path = err.path().to_string();

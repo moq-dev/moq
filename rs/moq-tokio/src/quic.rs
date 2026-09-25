@@ -80,7 +80,7 @@ impl std::str::FromStr for CongestionControl {
 }
 
 /// Default maximum number of concurrent QUIC streams (bidi and uni) per connection.
-pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
+pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 
 /// Default idle timeout before an inactive connection is dropped.
 pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -95,7 +95,7 @@ pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(5);
 #[non_exhaustive]
 pub struct Config {
 	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
-	/// Defaults to 1024. MoQ opens a stream per group, so busy endpoints want this high.
+	/// Defaults to 10,000. MoQ opens a stream per group, so busy endpoints want this high.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-max-streams",

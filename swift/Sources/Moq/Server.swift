@@ -66,6 +66,9 @@ public final class Server: Sendable {
     }
 
     /// Cancel any in-flight `listen()` or `accept()` call.
+    ///
+    /// Returns once the listening socket is closed, so the address can be bound
+    /// again immediately.
     public func cancel() {
         ffi.cancel()
     }

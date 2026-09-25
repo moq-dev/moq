@@ -21,6 +21,11 @@ public final class JsonSnapshotProducer<Value: Encodable>: Sendable {
         try ffi.update(value: encodeJson(value))
     }
 
+    /// A watch-only handle to whether the track has subscribers.
+    public func demand() throws -> TrackDemand {
+        TrackDemand(try ffi.demand())
+    }
+
     /// Finish the track, closing any open group.
     public func finish() throws {
         try ffi.finish()
@@ -74,6 +79,11 @@ public final class JsonStreamProducer<Value: Encodable>: Sendable {
     /// Append one record to the log.
     public func append(_ value: Value) throws {
         try ffi.append(value: encodeJson(value))
+    }
+
+    /// A watch-only handle to whether the track has subscribers.
+    public func demand() throws -> TrackDemand {
+        TrackDemand(try ffi.demand())
     }
 
     /// Finish the track, closing the group.

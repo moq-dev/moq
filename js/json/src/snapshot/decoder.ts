@@ -2,6 +2,7 @@ import { Decoder as Flate } from "@moq/flate";
 
 import { isDeflate } from "../compression.ts";
 import { merge } from "../diff.ts";
+import { MissingSnapshot } from "../error.ts";
 import type { Config } from "./encoder.ts";
 
 /**
@@ -49,7 +50,7 @@ export class Decoder<T> {
 	 * Throws when no snapshot has been applied yet, since a patch has nothing to apply to.
 	 */
 	delta(payload: Uint8Array): void {
-		if (this.#current === undefined) throw new Error("delta before snapshot");
+		if (this.#current === undefined) throw new MissingSnapshot();
 		this.#current = merge(this.#current, this.#parse(payload));
 	}
 

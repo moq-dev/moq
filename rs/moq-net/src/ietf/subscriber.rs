@@ -343,7 +343,7 @@ impl TrackState {
 /// the broadcast now or holds it open for a replacement.
 ///
 /// Only the detach that drops the refcount to zero decides, matching the model's rule
-/// for several sources at one path (`detach_source`): an earlier owner that vanished
+/// for several sources at one path (the front's source selection): an earlier owner that vanished
 /// does not outvote the last one still on the path. That keeps two advertisements on
 /// one session behaving like the same two on separate sessions, where the model sees
 /// two independent sources and the last one out decides.
@@ -1381,9 +1381,26 @@ where
 		Ok(())
 	}
 
+	/// Run `tasks` to their own end, or until the session dies.
+	///
+	/// A retraction does not disturb subscriptions already in flight: what ended
+	/// takes no new work, but the work it started finishes.
+	async fn drain(&self, tasks: &mut TaskSet) {
+		let mut session = self.session.clone();
+		kio::wait(|waiter| {
+			let mut cx = std::task::Context::from_waker(waiter.waker());
+			if session.poll_closed(&mut cx).is_ready() {
+				return Poll::Ready(());
+			}
+			tasks.poll(waiter)
+		})
+		.await
+	}
+
 	/// Serve materialization requests for one announced namespace: mint a source
 	/// per requested path and serve its track requests until the route is
-	/// retracted or the session dies.
+	/// retracted or the session dies. Tracks in flight at a retraction run to
+	/// their own end.
 	async fn run_route(&self, path: PathOwned) {
 		let mut broadcasts = TaskSet::owned();
 		let mut closed_session = self.session.clone();
@@ -1413,8 +1430,12 @@ where
 
 			let request = match next {
 				Some(Ok(request)) => request,
-				// Retracted or torn down: no request will ever arrive again.
-				Some(Err(_)) | None => break,
+				// Retracted or torn down: no request will ever arrive again, but
+				// the broadcasts already served keep their tracks in flight.
+				Some(Err(_)) | None => {
+					self.drain(&mut broadcasts).await;
+					break;
+				}
 			};
 
 			// The request path is absolute; the wire (and our origin handle) speak
@@ -1428,15 +1449,21 @@ where
 			request.accept(&source);
 
 			// Retain the source so a retraction can finish it. If the route was
-			// retracted since, the guard drops here and consumers observe the abort.
-			{
+			// retracted since the accept, finish it here as that retraction would
+			// have, and still serve what it took on: tracks subscribed since carry on.
+			let guard = crate::model::broadcast::SourceGuard::new(source);
+			let retracted = {
 				let mut state = self.state.lock();
-				let Some(entry) = state.broadcasts.get_mut(&path) else {
-					continue;
-				};
-				entry
-					.sources
-					.insert(requested.clone(), crate::model::broadcast::SourceGuard::new(source));
+				match state.broadcasts.get_mut(&path) {
+					Some(entry) => {
+						entry.sources.insert(requested.clone(), guard);
+						None
+					}
+					None => Some(guard),
+				}
+			};
+			if let Some(guard) = retracted {
+				guard.finish();
 			}
 
 			let this = self.clone();
@@ -1481,6 +1508,8 @@ where
 				Some(Ok(request)) => request,
 				Some(Err(err)) => {
 					tracing::debug!(%err, "broadcast closed");
+					// No new tracks, but those in flight run to their own end.
+					self.drain(&mut subscribes).await;
 					break;
 				}
 				// Session gone.
@@ -1502,7 +1531,9 @@ where
 	async fn run_subscribe(
 		&mut self,
 		broadcast_path: Path<'_>,
-		broadcast: broadcast::Dynamic,
+		// Held for the subscription's lifetime but never watched: the broadcast ending
+		// is a retraction, which does not disturb a subscription already in flight.
+		_broadcast: broadcast::Dynamic,
 		request: track::Request,
 	) {
 		// Accept right away: IETF group data can arrive before SubscribeOk, so we
@@ -1588,11 +1619,12 @@ where
 		// A publisher can be serving before its SUBSCRIBE_OK reaches us, since the data
 		// streams are independent of the request stream. Waiting for the response alone would
 		// miss the local side going away in that window and leave the publisher serving a
-		// track nobody reads, which is the leak this whole path exists to close.
+		// track nobody reads, which is the leak this whole path exists to close. The broadcast
+		// ending is not a local side going away: a retraction does not disturb subscriptions
+		// already in flight, and this one is.
 		enum Setup {
 			Response(Result<Option<Accepted>, Error>),
 			Unused,
-			BroadcastClosed(Error),
 		}
 
 		let track_name = track.name().to_owned();
@@ -1610,9 +1642,6 @@ where
 					if track.poll_unused(waiter).is_ready() {
 						return Poll::Ready(Setup::Unused);
 					}
-					if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
-						return Poll::Ready(Setup::BroadcastClosed(err));
-					}
 					Poll::Pending
 				})
 				.await;
@@ -1623,10 +1652,6 @@ where
 						Ok(()) => break None,
 						Err(used) => track = used,
 					},
-					Setup::BroadcastClosed(err) => {
-						let _ = track.abort(err);
-						break None;
-					}
 				}
 			}
 		};
@@ -1709,11 +1734,11 @@ where
 			}
 		};
 
-		// One event ends the subscription: the last consumer leaving, the broadcast
-		// dying, or the subscribe stream closing.
+		// One event ends the subscription: the last consumer leaving, or the
+		// subscribe stream closing. The broadcast ending does not: a retraction
+		// does not disturb subscriptions already in flight.
 		enum End {
 			Unused,
-			BroadcastClosed(Error),
 			StreamClosed(Result<(), Error>),
 		}
 
@@ -1729,9 +1754,6 @@ where
 				if track.poll_unused(waiter).is_ready() {
 					return Poll::Ready(End::Unused);
 				}
-				if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
-					return Poll::Ready(End::BroadcastClosed(err));
-				}
 				let mut cx = std::task::Context::from_waker(waiter.waker());
 				stream.reader.poll_closed(&mut cx).map(End::StreamClosed)
 			})
@@ -1745,11 +1767,6 @@ where
 					}
 					Err(used) => track = used,
 				},
-				End::BroadcastClosed(err) => {
-					tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "broadcast closed");
-					let _ = track.abort(err);
-					break true;
-				}
 				End::StreamClosed(res) => {
 					match res {
 						Ok(()) => {
@@ -3341,6 +3358,70 @@ mod tests {
 		);
 	}
 
+	/// A retraction does not disturb subscriptions already in flight, and one whose
+	/// SUBSCRIBE_OK has not arrived yet is in flight too: the publisher may already be
+	/// serving it. The broadcast ending in that window must not abort the track or cancel
+	/// the subscription.
+	#[tokio::test(start_paused = true)]
+	async fn a_retraction_before_subscribe_ok_keeps_the_subscription() {
+		const VERSION: Version = Version::Draft16;
+
+		// A peer that accepts the stream and then says nothing at all.
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let log = session.log.clone();
+
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::Clock::tokio(),
+			session,
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+
+		let request = dynamic.requested_track().await.expect("no track requested");
+
+		let serving = tokio::spawn(async move {
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+		});
+
+		// Let the SUBSCRIBE go out, then retract the broadcast before any response.
+		settle().await;
+		producer.finish();
+		settle().await;
+
+		assert!(
+			!serving.is_finished(),
+			"a retraction ended a subscription still in flight"
+		);
+		assert_eq!(
+			occurrences(&log, &[ietf::Unsubscribe::ID as u8]),
+			0,
+			"a retraction must not cancel a subscription still in flight",
+		);
+
+		// The reader leaving is still what ends it.
+		drop(subscription);
+		drop(track);
+		drop(consumer);
+		tokio::time::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.expect("run_subscribe parked after its reader left")
+			.unwrap();
+	}
+
 	/// The control messages that actually reached the wire, by type id.
 	///
 	/// Decoding the framing rather than scanning for a byte: a type id is one varint among
@@ -4220,7 +4301,8 @@ mod tests {
 	/// is the one that counts: the broadcast survives the first stop and closes on the
 	/// last, whatever kind each detach is.
 	///
-	/// That is the model's own rule for several sources at one path (`detach_source`),
+	/// That is the model's own rule for several sources at one path (the front's source
+	/// selection),
 	/// which is what these advertisements would be had they arrived on two sessions. The
 	/// refcount is a detail of sharing one `SourceGuard` per session; it must not change
 	/// what the origin sees.

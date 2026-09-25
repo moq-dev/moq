@@ -1,10 +1,14 @@
 {
 	"name": "@moq/msf",
 	"type": "module",
-	"version": "0.2.2",
+	"version": "0.3.0",
 	"description": "MSF (MOQT Streaming Format) catalog types for MoQ",
 	"license": "(MIT OR Apache-2.0)",
-	"repository": "github:moq-dev/moq",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/moq-dev/moq.git",
+		"directory": "js/msf"
+	},
 	"exports": {
 		".": "./src/index.ts"
 	},
@@ -17,8 +21,8 @@
 	},
 	"dependencies": {
 		"@moq/net": "workspace:^",
-		"@zod/mini": "^4.5.4",
-		"zod": "^4.5.4"
+		"@zod/mini": "^4.6.5",
+		"zod": "^4.6.5"
 	},
 	"devDependencies": {
 		"rimraf": "^6.1.3",

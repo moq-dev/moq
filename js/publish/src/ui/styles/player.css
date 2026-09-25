@@ -108,9 +108,9 @@
 	z-index: 2147483647;
 }
 
+.player--pseudo-fullscreen ::slotted(moq-publish),
 .player:fullscreen ::slotted(moq-publish),
 /* stylelint-disable-next-line selector-no-vendor-prefix -- Safari/iPadOS fallback */
-.player:-webkit-full-screen ::slotted(moq-publish),
-.player--pseudo-fullscreen ::slotted(moq-publish) {
+.player:-webkit-full-screen ::slotted(moq-publish) {
 	max-height: 100%;
 }

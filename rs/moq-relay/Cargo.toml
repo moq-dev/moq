@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.14.18"
+version = "0.15.2"
 edition = "2024"
 # sysinfo 0.39 (cache governor cgroup limits) needs 1.95, above the 1.91
 # workspace floor. moq-relay is lib+bin, so this applies to its library target
@@ -23,6 +23,8 @@ path = "src/main.rs"
 doc = false
 
 [features]
+# A programmatic relay fixture with generated TLS and ephemeral ports.
+test-support = []
 default = ["iroh", "cluster-lan", "noq", "websocket", "uds"]
 iroh = ["moq-tokio/iroh"]
 # Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
@@ -73,7 +75,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
 toml = { workspace = true }
-tower-http = { workspace = true }
 tower-service = "0.3"
 tracing = { workspace = true }
 url = { workspace = true, features = ["serde"] }
@@ -88,7 +89,9 @@ moq-uring = { workspace = true, optional = true }
 sd-notify = { workspace = true }
 
 [dev-dependencies]
-moq-auth = { workspace = true, features = ["client", "serve"] }
+moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
+moq-shaper = { path = "../moq-shaper" }
+rand = { workspace = true }
 rcgen = "0.14"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

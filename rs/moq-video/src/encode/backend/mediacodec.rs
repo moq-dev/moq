@@ -500,7 +500,7 @@ fn fill_nv12(buffer: &mut [MaybeUninit<u8>], i420: &I420, width: usize, height: 
 	}
 
 	// NV12 interleaves the two chroma planes into one.
-	for ((pair, u), v) in chroma.chunks_exact_mut(2).zip(i420.u()).zip(i420.v()) {
+	for ((pair, u), v) in chroma.as_chunks_mut::<2>().0.iter_mut().zip(i420.u()).zip(i420.v()) {
 		pair[0].write(*u);
 		pair[1].write(*v);
 	}

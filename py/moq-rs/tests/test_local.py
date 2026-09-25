@@ -390,6 +390,32 @@ async def test_json_stream_roundtrip():
     producer.finish()
 
 
+async def test_json_producers_report_demand():
+    broadcast = moq.BroadcastProducer()
+    snapshot = broadcast.publish_json_snapshot("status", compression=True)
+    stream = broadcast.publish_json_stream("events")
+    snapshot_demand = snapshot.demand()
+    stream_demand = stream.demand()
+    assert snapshot_demand.name == "status"
+    assert not snapshot_demand.is_used()
+
+    consumer = broadcast.consume()
+    snapshot_consumer = await consumer.subscribe_json_snapshot("status", compression=True)
+    stream_consumer = await consumer.subscribe_json_stream("events")
+    await asyncio.wait_for(snapshot_demand.used(), timeout=5.0)
+    await asyncio.wait_for(stream_demand.used(), timeout=5.0)
+    assert snapshot_demand.is_used()
+
+    snapshot_consumer.cancel()
+    stream_consumer.cancel()
+    await asyncio.wait_for(snapshot_demand.unused(), timeout=5.0)
+    await asyncio.wait_for(stream_demand.unused(), timeout=5.0)
+
+    snapshot.finish()
+    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+        await asyncio.wait_for(snapshot_demand.used(), timeout=5.0)
+
+
 async def test_dynamic_track_request():
     broadcast = moq.BroadcastProducer()
     dynamic = broadcast.dynamic()
@@ -420,7 +446,7 @@ async def test_dynamic_track_request_can_publish_media():
     consumer = broadcast.consume()
     catalog_consumer = await consumer.subscribe_catalog()
 
-    # publish_media_on_track accepts the request (at the media timescale), which is what
+    # publish_audio_on_track accepts the request (at the media timescale), which is what
     # unblocks subscribe_media, so run the subscribe concurrently until then.
     subscribe = asyncio.create_task(
         consumer.subscribe_media("requested-audio", cast(moq.Container, moq.Container.LEGACY()))
@@ -1091,13 +1117,15 @@ async def test_decode_video_format():
     broadcast.finish()
 
 
-async def test_announce_then_unannounce_is_visible():
+async def test_broadcast_is_reachable_only_while_announced():
     origin = moq.OriginProducer()
     broadcast = origin.create_broadcast("live")
     track = broadcast.publish_track("events")
-    broadcast.announce()
-
     consumer = origin.consume()
+    with pytest.raises(Exception):
+        await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+
+    broadcast.announce()
     announced = consumer.announced()
     first = await asyncio.wait_for(anext(announced), timeout=5.0)
     assert first.prefix == "live"
@@ -1107,7 +1135,12 @@ async def test_announce_then_unannounce_is_visible():
     retracted = await asyncio.wait_for(anext(announced), timeout=5.0)
     assert retracted.prefix == "live"
     assert not retracted.active
+    with pytest.raises(Exception):
+        await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
 
+    broadcast.announce()
+    back = await asyncio.wait_for(anext(announced), timeout=5.0)
+    assert back.active
     await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
     announced.cancel()
     track.finish()
@@ -1149,3 +1182,42 @@ async def test_dynamic_serves_a_request_under_a_prefix():
     await asyncio.wait_for(pending, timeout=5.0)
     dynamic.cancel()
     served.finish()
+
+
+async def test_dynamic_and_json_handles_are_async_context_managers():
+    """Every handle whose only cleanup is cancel() releases it on `async with` exit."""
+
+    async def assert_cancelled(awaitable) -> None:
+        with pytest.raises(Exception) as excinfo:
+            await asyncio.wait_for(awaitable, timeout=5.0)
+        assert moq.is_shutdown(excinfo.value)
+
+    origin = moq.OriginProducer()
+    async with origin.dynamic("live") as origin_dynamic:
+        pass
+    await assert_cancelled(origin_dynamic.requested_broadcast())
+
+    broadcast = moq.BroadcastProducer()
+    async with broadcast.dynamic() as broadcast_dynamic:
+        pass
+    await assert_cancelled(broadcast_dynamic.requested_track())
+
+    track = broadcast.publish_track("events")
+    async with track.dynamic() as track_dynamic:
+        pass
+    await assert_cancelled(track_dynamic.requested_group())
+
+    snapshot = broadcast.publish_json_snapshot("state")
+    async with await broadcast.consume().subscribe_json_snapshot("state") as snapshot_consumer:
+        pass
+    await assert_cancelled(anext(snapshot_consumer))
+
+    stream = broadcast.publish_json_stream("log")
+    async with await broadcast.consume().subscribe_json_stream("log") as stream_consumer:
+        pass
+    await assert_cancelled(anext(stream_consumer))
+
+    snapshot.finish()
+    stream.finish()
+    track.finish()
+    broadcast.finish()

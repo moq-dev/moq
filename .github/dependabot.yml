@@ -101,8 +101,14 @@ updates:
       - dependency-name: "dev.moq:moq-ffi"
 
   - package-ecosystem: "pub"
+    # /dart/moq is deliberately absent. It reaches moq_ffi through a
+    # `dependency_overrides` path, and Dependabot resolves manifests without
+    # overrides, so `moq_ffi: ^x.y.z` sends it to pub.dev where moq_ffi is not
+    # published yet. Solving fails and it emits nothing for the directory, even
+    # for unrelated dev dependencies. Listing it here only looks like coverage.
+    # Add it back once moq_ffi is on pub.dev; until then `just dart fix`
+    # refreshes that lock.
     directories:
-      - "/dart/moq"
       - "/dart/moq_ffi"
     schedule:
       interval: "weekly"
@@ -112,6 +118,3 @@ updates:
       pub:
         patterns:
           - "*"
-    ignore:
-      # The published bindings floor is maintained alongside the wrapper API.
-      - dependency-name: "moq_ffi"

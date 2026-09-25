@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.1...moq-gst-v0.4.2) - 2026-09-24
+
+### Other
+
+- updated the following local packages: moq-net, hang, moq-mux, moq-tokio
+
+## [0.4.1](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.0...moq-gst-v0.4.1) - 2026-09-23
+
+### Other
+
+- updated the following local packages: moq-tokio, hang, moq-mux
+
+## [0.4.0](https://github.com/moq-dev/moq/compare/moq-gst-v0.3.12...moq-gst-v0.4.0) - 2026-09-23
+
+### Added
+
+- *(net)* [**breaking**] simplify origin scoping ([#3804](https://github.com/moq-dev/moq/pull/3804))
+- *(hang)* [**breaking**] unify catalog APIs ([#3813](https://github.com/moq-dev/moq/pull/3813))
+- *(net)* [**breaking**] slim the moq-net public surface ([#3779](https://github.com/moq-dev/moq/pull/3779))
+- [**breaking**] name every rate estimate estimated_*_rate
+- *(net)* [**breaking**] name stats counter edges started and ended ([#3712](https://github.com/moq-dev/moq/pull/3712))
+- *(tokio)* [**breaking**] rename ConnectionStatsReader to connection::Monitor ([#3705](https://github.com/moq-dev/moq/pull/3705))
+
+### Fixed
+
+- *(moq-gst)* Drain subscriptions whose track was removed from catalog ([#3864](https://github.com/moq-dev/moq/pull/3864))
+
+### Other
+
+- *(moq-gst)* decide the cancelled pump race instead of sleeping on it ([#3898](https://github.com/moq-dev/moq/pull/3898))
+- Unify mux track and rendition ownership ([#3857](https://github.com/moq-dev/moq/pull/3857))
+- *(quic)* [**breaking**] keep only the noq backend ([#3811](https://github.com/moq-dev/moq/pull/3811))
+- *(tokio)* make API shapes type-safe ([#3816](https://github.com/moq-dev/moq/pull/3816))
+- Merge origin/main into dev
+- Merge remote-tracking branch 'origin/main' into merge-main-into-dev-20260914
+
 ### Changed
 
 - Track suffixes derive from the typed import format, so the suffix and the codec cannot disagree.

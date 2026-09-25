@@ -68,9 +68,13 @@ const browser = await chromium.launch({
 	headless: true,
 });
 
+// A failing run keeps its directory, and this trace lands in it. Unset outside the harness.
+const run = process.env.MOQ_TEST_RUN;
+
 let code = 1;
 try {
 	const page = await browser.newPage();
+	if (run) await page.context().tracing.start({ screenshots: true, snapshots: true });
 
 	// A Rust panic reaches the console through `console_error_panic_hook` rather
 	// than rejecting anything, so it can leave every case green. Fail on it, and
@@ -128,6 +132,17 @@ try {
 } catch (err) {
 	console.log(`  FAIL  ${err instanceof Error ? err.message : String(err)}`);
 } finally {
+	if (run) {
+		for (const context of browser.contexts()) {
+			try {
+				// `path` is what writes the trace; without it, stop only frees the buffers.
+				if (code !== 0) await context.tracing.stop({ path: join(run, "wasm.trace.zip") });
+				else await context.tracing.stop();
+			} catch {
+				// A trace is evidence, never the verdict: a broken context must not mask the failure.
+			}
+		}
+	}
 	await browser.close().catch(() => {});
 	server.stop(true);
 }

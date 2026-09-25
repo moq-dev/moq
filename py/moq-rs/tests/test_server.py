@@ -2,6 +2,7 @@
 
 import asyncio
 import struct
+from datetime import timedelta
 
 import moq
 import moq_ffi
@@ -135,6 +136,17 @@ async def test_client_reconnects_and_resumes_announcements():
                 pass
 
 
+async def test_server_close_releases_port():
+    """Exiting the context manager releases the listening socket before it
+    returns, so the same address binds again with no retry."""
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
+        addr = server.local_addr
+
+    # No retry: __aexit__ closed the socket, so this binds on the first try.
+    async with moq.Server(addr, tls_generate=["localhost"]) as rebound:
+        assert rebound.local_addr == addr
+
+
 async def test_server_request_close():
     """A session reports when the server rejects its request."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
@@ -168,6 +180,36 @@ async def test_server_request_close():
                 await reject_task
             except asyncio.CancelledError:
                 pass
+
+
+async def test_client_websocket_fallback_options():
+    """The fallback knobs reach the native client, and QUIC alone still connects."""
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
+        sessions: list = []
+
+        async def accept_loop() -> None:
+            async for request in server:
+                sessions.append(await request.accept())
+
+        accept_task = asyncio.create_task(accept_loop())
+        try:
+            async with moq.Client(
+                f"https://{server.local_addr}",
+                tls_verify=False,
+                bind="127.0.0.1:0",
+                websocket_enabled=False,
+                websocket_delay=timedelta(0),
+            ) as client:
+                assert client.session is not None
+        finally:
+            accept_task.cancel()
+            try:
+                await accept_task
+            except asyncio.CancelledError:
+                pass
+
+    with pytest.raises(ValueError):
+        moq.Client("https://localhost", websocket_delay=timedelta(milliseconds=-1))
 
 
 async def test_client_setters_fail_after_cancel():

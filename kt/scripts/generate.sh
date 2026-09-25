@@ -77,7 +77,7 @@ cp "$CDYLIB" "$RES_DIR/"
 
 BINDGEN_OUT=$(mktemp -d)
 trap 'rm -rf "$BINDGEN_OUT"' EXIT
-cargo run --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi --bin uniffi-bindgen \
+cargo run --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package uniffi-bindgen \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml" -- \
     generate --library "$CDYLIB" --language kotlin --no-format --out-dir "$BINDGEN_OUT"
 

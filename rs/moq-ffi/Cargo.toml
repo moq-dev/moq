@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>", "Brian Medley <bpm@bmedley.org>"
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.3.19"
+version = "0.4.2"
 edition = "2024"
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
@@ -18,10 +18,6 @@ ignored = ["getrandom"]
 [lib]
 name = "moq_ffi"
 crate-type = ["staticlib", "cdylib"]
-
-[[bin]]
-name = "uniffi-bindgen"
-path = "./uniffi-bindgen.rs"
 
 [features]
 # On by default so every existing consumer (the language wrappers, `build.sh`)
@@ -55,8 +51,8 @@ url = { workspace = true }
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
 moq-tokio = { workspace = true, default-features = true }
 # `openh264`, `nvidia`, and `vaapi` back on, matching rs/libmoq: the workspace turns
-# moq-video's defaults off for `capture` (V4L2, libclang), and the codecs are
-# collateral rather than the goal. Nothing is paid for them off Linux, since
+# moq-video's defaults off for `capture` (device code the bindings don't
+# expose), and the codecs are collateral rather than the goal. Nothing is paid for them off Linux, since
 # cudarc / moq-nvenc / libloading / moq-vaapi sit behind
 # `cfg(target_os = "linux")` and Android is `target_os = "android"`. On Linux
 # both dlopen the driver, so the wrappers still link GPU-less and start
@@ -67,7 +63,9 @@ moq-video = { workspace = true, optional = true, features = ["nvidia", "openh264
 # `video::block_on` for why not a tokio helper.
 pollster = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
-uniffi = { version = "0.32", features = ["cli"] }
+# The bindgen CLI lives in the `uniffi-bindgen` package, so a library build
+# never compiles `uniffi_bindgen` and its dependencies.
+uniffi = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Enables the `wasm_js` backend for rand-via-moq-net; the cfg flag lives in
@@ -76,12 +74,12 @@ getrandom = { workspace = true }
 # `wasm-unstable-single-threaded` drops the `Send`/`Sync` bounds on
 # `UniffiCompatibleFuture` and `FfiConverterArc`, which moq-net's wasm futures
 # (LocalBoxFuture) and Rc-backed handles cannot satisfy.
-uniffi = { version = "0.32", features = ["wasm-unstable-single-threaded"] }
+uniffi = { workspace = true, features = ["wasm-unstable-single-threaded"] }
 web-async = { workspace = true }
 web-transport-wasm = { workspace = true }
 
 [build-dependencies]
-uniffi = { version = "0.32", features = ["build"] }
+uniffi = { workspace = true, features = ["build"] }
 
 [dev-dependencies]
 # One non-codec test blocks on a future; the main dep is `video`-only.

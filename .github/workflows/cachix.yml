@@ -11,7 +11,7 @@ on:
 
 jobs:
   # Build and push only the package the tag names. The tag prefix
-  # (e.g. moq-relay) maps 1:1 to a flake attribute.
+  # (e.g. moq-relay) is the flake attribute, except moq-cli ships as moq.
   release:
     name: Release (${{ matrix.os }})
     runs-on: ${{ matrix.runs-on }}
@@ -48,7 +48,9 @@ jobs:
             echo "Tag format not recognized: $REF_NAME" >&2
             exit 1
           fi
-          echo "name=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          name="${BASH_REMATCH[1]}"
+          [[ "$name" == moq-cli ]] && name=moq
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
 
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:

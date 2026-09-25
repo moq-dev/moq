@@ -454,7 +454,9 @@ mod tests {
 		let ramp = (RATE as f32 * RAMP) as usize;
 		assert!(ramp < out.len() / 2, "test buffer is shorter than the ramp");
 		for frame in out[..ramp * BUS_CHANNELS]
-			.chunks_exact(BUS_CHANNELS)
+			.as_chunks::<BUS_CHANNELS>()
+			.0
+			.iter()
 			.collect::<Vec<_>>()
 			.windows(2)
 		{
@@ -674,7 +676,7 @@ mod tests {
 
 		// Hard left, so a mono device should hear half of it.
 		let mut samples = vec![0.0f32; FRAMES * BUS_CHANNELS];
-		for frame in samples.chunks_exact_mut(BUS_CHANNELS) {
+		for frame in samples.as_chunks_mut::<BUS_CHANNELS>().0.iter_mut() {
 			frame[0] = 1.0;
 		}
 		prod.push_interleaved(&samples);

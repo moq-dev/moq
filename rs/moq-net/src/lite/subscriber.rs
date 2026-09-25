@@ -1254,8 +1254,10 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 }
 
 /// Serves the origin's track requests for one announced source until the peer
-/// unannounces (the source is finished) or the session dies. Dropping it drops
-/// the in-flight track machines with it.
+/// unannounces it (the source is finished) or the session dies. An unannounce
+/// takes no new tracks but lets those in flight run to their own end (moq-lite:
+/// retraction does not disturb subscriptions already in flight); the session
+/// dying drops them.
 struct SourceServe<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	path: PathOwned,
@@ -1263,6 +1265,8 @@ struct SourceServe<S: crate::transport::poll::Session> {
 	// A dedicated close-watch handle, since each pending operation needs its own.
 	closed: S,
 	tracks: kio::Tasks<TrackServeRun<S>>,
+	// The source ended: no more track requests will arrive.
+	ended: bool,
 }
 
 impl<S: crate::transport::poll::Session> SourceServe<S> {
@@ -1274,6 +1278,7 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 			dynamic,
 			closed,
 			tracks: kio::Tasks::new(),
+			ended: false,
 		}
 	}
 }
@@ -1287,6 +1292,10 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 			if self.closed.poll_closed(&mut cx).is_ready() {
 				// Session gone.
 				return Poll::Ready(());
+			}
+			if self.ended {
+				// Done once the tracks in flight are.
+				return self.tracks.poll(waiter);
 			}
 			match self.dynamic.poll_requested_track(waiter) {
 				Poll::Ready(Ok(request)) => {
@@ -1302,7 +1311,7 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 				// The source was finished (unannounced) or aborted.
 				Poll::Ready(Err(err)) => {
 					tracing::debug!(%err, "source closed");
-					return Poll::Ready(());
+					self.ended = true;
 				}
 				Poll::Pending => break,
 			}
@@ -2112,7 +2121,7 @@ mod tests {
 		let origin = origin::Config::new(relay).produce();
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let local = origin.create_broadcast("room/host").unwrap();
+		let local = origin.publish("room/host", origin::Route::default()).unwrap();
 		let track = local.create_track("video", None).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"local".as_ref()).unwrap();
@@ -2121,11 +2130,7 @@ mod tests {
 		// The peer's own subscription, excluding the hop the server minted for
 		// it, is served from the local front before anything is announced back.
 		let peer = origin.consume().excluding(assigned);
-		let resolved = peer
-			.request_broadcast("room/host")
-			.now_or_never()
-			.expect("local lookup is synchronous")
-			.expect("resolves");
+		let resolved = peer.request_broadcast("room/host").await.expect("resolves");
 		let mut sub = resolved
 			.track("video")
 			.unwrap()
@@ -2166,10 +2171,11 @@ mod tests {
 			.unwrap();
 		assert!(!accepted, "an announce that already names this origin must be dropped");
 
-		// The local front is still the one at the path, and still serving.
-		let still = origin
-			.consume()
-			.get_broadcast("room/host")
+		// The local front is still the one at the path, and still serving: the
+		// peer's next request joins it rather than minting another.
+		let still = peer
+			.request_broadcast("room/host")
+			.await
 			.expect("the local front keeps serving");
 		assert!(
 			still.is_clone(&resolved),
