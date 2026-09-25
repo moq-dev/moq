@@ -1,4 +1,4 @@
-# Stats wire contract
+# [XS] Stats wire contract
 
 ## Goal
 
@@ -20,9 +20,8 @@ A typed binary contract still needs deltas to compete on bytes, or a
 compressor with a larger window than a browser's `deflate-raw`. Either is new
 scope for a later quest, not this line.
 
-## Quests
-
-- [Stats format page](/quest/m0/stats-binary/docs.md) - a doc/concept page for every stats track and its encodings
+The contract lives at [doc/concept/stats.md](/doc/concept/stats.md); what
+remains is landing the line on `main`.
 
 ## Related
 
