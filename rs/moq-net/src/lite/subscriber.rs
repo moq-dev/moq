@@ -15,6 +15,7 @@ use crate::{
 };
 
 use super::Version;
+use crate::tail::{self, Settle, Tail};
 
 use kio::Lock;
 
@@ -87,6 +88,8 @@ struct TrackEntry {
 	/// Timestamp scale from this track's TRACK_INFO, known before the SUBSCRIBE is
 	/// even opened, so group streams decode frames without blocking.
 	timescale: Option<Timescale>,
+	/// The groups received so far, so the subscription's end can wait for the ones owed.
+	tail: kio::Producer<Tail>,
 }
 
 impl<S: crate::transport::poll::Session> Subscriber<S> {
@@ -438,6 +441,10 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		let timestamp =
 			Timestamp::new(dg.timestamp, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 
+		// A datagram is never owed a stream, so it never holds the subscription's end open.
+		if let Ok(mut tail) = entry.tail.write() {
+			tail.account(dg.sequence..dg.sequence.saturating_add(1));
+		}
 		entry.producer.insert_datagram(dg.sequence, timestamp, dg.payload)?;
 		Ok(())
 	}
@@ -719,6 +726,9 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					let (group, track, timescale) = {
 						let mut subs = self.subscriber.subscribes.lock();
 						let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
+						if let Ok(mut tail) = entry.tail.write() {
+							tail.open(hdr.sequence);
+						}
 
 						let group_info = group::Info { sequence: hdr.sequence };
 						// Stats (groups/frames/bytes) are counted in the model as the group
@@ -1365,6 +1375,7 @@ mod tests {
 			TrackEntry {
 				producer,
 				timescale: Some(Timescale::default()),
+				tail: Default::default(),
 			},
 		);
 
@@ -2485,6 +2496,24 @@ struct SubStream<S: crate::transport::poll::Session> {
 	/// start sits elsewhere the request-tracked floor stands instead, and demand
 	/// returning here makes the declaration valid again.
 	requested: Option<Position>,
+	/// The groups received for this subscription, shared with its [`TrackEntry`].
+	tail: kio::Producer<Tail>,
+	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
+	served: Option<u64>,
+	/// The track's exclusive end (SUBSCRIBE_END), once declared.
+	end: Option<u64>,
+}
+
+impl<S: crate::transport::poll::Session> SubStream<S> {
+	/// The groups the publisher still owes once it has ended the subscription.
+	///
+	/// `None` when nothing says which: drafts before SUBSCRIBE_END only have the FIN.
+	/// Without a SUBSCRIBE_START the publisher served no group at all.
+	fn owed(&self, requested_end: Option<u64>) -> Option<std::ops::Range<u64>> {
+		let end = self.end?;
+		let end = requested_end.map_or(end, |requested| requested.min(end));
+		Some(self.served.unwrap_or(end)..end)
+	}
 }
 
 enum Sub<S: crate::transport::poll::Session> {
@@ -2787,11 +2816,13 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
+		let tail = kio::Producer::new(Tail::default());
 		self.subscriber.subscribes.lock().insert(
 			id,
 			TrackEntry {
 				producer: producer.clone(),
 				timescale,
+				tail: tail.clone(),
 			},
 		);
 
@@ -2802,6 +2833,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			session,
 			id,
 			subscription,
+			tail,
 			state: EstablishState::Open,
 		}
 	}
@@ -2901,6 +2933,7 @@ struct Establish<S: crate::transport::poll::Session> {
 	closed: S,
 	id: u64,
 	subscription: Subscription,
+	tail: kio::Producer<Tail>,
 	state: EstablishState<S>,
 }
 
@@ -2985,6 +3018,9 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 			start: self.subscription.start,
 			priority: self.subscription.priority,
 			requested: self.subscription.start,
+			tail: self.tail.clone(),
+			served: None,
+			end: None,
 		}
 	}
 }
@@ -3197,6 +3233,13 @@ enum ServeMode<S: crate::transport::poll::Session> {
 	/// Driving an upstream SUBSCRIBE open. The demand arms wait meanwhile,
 	/// exactly like the old inline await.
 	Establish(Establish<S>),
+	/// The upstream FIN'd, so the track is over, but QUIC does not order streams: keep
+	/// the subscription routable until every group it owes is accounted for (a stream's
+	/// header or a SUBSCRIBE_DROP), or the grace gives up on one reset before its header.
+	Tail {
+		settle: Settle,
+		owed: Option<std::ops::Range<u64>>,
+	},
 }
 
 impl<S: crate::transport::poll::Session> ServeLoop<S> {
@@ -3241,6 +3284,23 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 							return Poll::Ready(ServeEnd::GiveBack(err));
 						}
 					}
+				}
+				ServeMode::Tail { settle, owed } => {
+					let _ = self.fetches.poll(waiter);
+					if settle
+						.poll(waiter, |tail| owed.clone().is_some_and(|owed| tail.covers(owed)))
+						.is_ready()
+					{
+						return Poll::Ready(ServeEnd::Finished);
+					}
+					if self.fetches.is_empty() && self.serving.poll_unused(waiter).is_ready() {
+						return Poll::Ready(ServeEnd::Idle);
+					}
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if self.closed.poll_closed(&mut cx).is_ready() {
+						return Poll::Ready(ServeEnd::GiveBack(Error::Dropped));
+					}
+					return Poll::Pending;
 				}
 				ServeMode::Select => {
 					let mut cx = std::task::Context::from_waker(waiter.waker());
@@ -3341,6 +3401,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 										if let Err(err) = self.serving.finish_at(end.group) {
 											tracing::warn!(track = %serve.name, group = end.group, %err, "invalid subscribe end");
 										}
+										active.end = Some(end.group);
 									}
 									// SUBSCRIBE_START names the first group this feed serves:
 									// the publisher skipped everything below it (e.g. it could
@@ -3357,21 +3418,50 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 										if active.start == active.requested {
 											let _ = self.serving.start_at(start.group);
 										}
+										active.served = Some(start.group);
 									}
-									// OK/DROP just resolve the range (the producer already
-									// orders groups).
-									_ => tracing::debug!(track = %serve.name, ?msg, "subscribe response"),
+									// The publisher will never send these groups, so they
+									// are accounted for without a stream.
+									lite::SubscribeResponse::Drop(dropped) => {
+										if let Ok(mut tail) = active.tail.write() {
+											tail.account(dropped.start..dropped.end.saturating_add(1));
+										}
+									}
+									// OK just resolves the range (the producer already orders
+									// groups).
+									lite::SubscribeResponse::Ok(_) => {
+										tracing::debug!(track = %serve.name, ?msg, "subscribe response")
+									}
 								}
 								continue;
 							}
 							Ok(None) => {
 								tracing::info!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "subscribe complete");
 								// Upstream FIN'd the subscription: the publisher only FINs
-								// once the track's final sequence is known and delivered, so
-								// the logical track is over for good (bounded downstream
-								// demand alone never FINs; the publisher parks, since a cap
-								// can be raised).
-								return Poll::Ready(ServeEnd::Finished);
+								// once the track's final sequence is known and every group
+								// stream finished, so the logical track is over for good
+								// (bounded downstream demand alone never FINs; the publisher
+								// parks, since a cap can be raised). Those streams can still
+								// be in flight, so wait for the tail before finishing.
+								let subscription = self.serving.subscription();
+								let requested_end = subscription.as_ref().and_then(|sub| sub.end).map(|end| match end
+									.frame
+								{
+									0 => end.group,
+									_ => end.group.saturating_add(1),
+								});
+								// The effective max age is the stopgap grace: the wrong clock
+								// (it bounds presentation-time drift), but it is how long the
+								// subscriber was willing to wait for a late group anyway.
+								let grace = subscription
+									.map(|sub| sub.max_age)
+									.filter(|max_age| !max_age.is_zero())
+									.unwrap_or(tail::GRACE);
+								self.mode = ServeMode::Tail {
+									settle: Settle::new(&serve.subscriber.runtime, active.tail.consume(), grace),
+									owed: active.owed(requested_end),
+								};
+								continue;
 							}
 							Err(err) => {
 								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
