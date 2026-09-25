@@ -66,6 +66,10 @@ pub struct Config {
 	/// Minimum duration of media listed in each rendition's playlist window. Older timeline
 	/// records are evicted once the remaining segments still cover this span; keep it within
 	/// the relay's group-cache retention, since segments are fetched from there on request.
+	///
+	/// A durable timeline (its catalog `archive` entry names a `store` and no `replay` path)
+	/// lists everything it retains instead, since its own retention already bounds it. The
+	/// window still caps segment `Cache-Control: max-age` for every broadcast.
 	pub window: Duration,
 }
 
@@ -347,6 +351,9 @@ async fn watch_catalog(
 				// records out to every rendition.
 				if !timeline_started && let Some(archive) = catalog.archive.clone() {
 					timeline_started = true;
+					if durable(&archive) {
+						renditions.fanout().unbound();
+					}
 					let watcher = tokio::spawn(watch_timeline(broadcast.clone(), archive, renditions.fanout()));
 					*timeline_watcher.lock().unwrap() = Some(watcher);
 				}
@@ -361,6 +368,14 @@ async fn watch_catalog(
 
 	// The source is done (or errored): let recording cursors finish.
 	renditions.close();
+}
+
+/// Whether every range `archive` advertises stays FETCHable from this broadcast until the
+/// timeline pops it: a store makes the ranges durable, and no `replay` path means this
+/// broadcast serves them. The catalog states this, so the playlists follow the timeline's own
+/// retention rather than a window sized for relay caches.
+fn durable(archive: &hang::catalog::Archive) -> bool {
+	archive.store.is_some() && archive.replay.is_none()
 }
 
 /// The broadcast's timeline watcher: read the single timeline track and fan each record out

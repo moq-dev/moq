@@ -38,8 +38,14 @@ The segment engine is in `rs/moq-mux/src/timeline.rs`:
   with no archive-specific code (`rs/moq-hls/src/export/archive_tests.rs`):
   playlists read only the timeline (an inline parameter set also GETs one
   keyframe group to build its init), and a segment GETs one object of its
-  rendition. The caller supplies the catalog, and `--window` must cover the
-  recording.
+  rendition. The caller supplies the catalog.
+- A catalog `archive` entry with a `store` and no `replay` path declares its
+  ranges durable on that broadcast, so the exporter lists the whole retained
+  timeline and only its pops trim it (`durable` in
+  `rs/moq-hls/src/export/mod.rs`). DASH `timeShiftBufferDepth` becomes the
+  listed span, and `--window` still bounds live playlists and caps segment
+  `max-age`. The catalog already states durability, so no per-broadcast
+  option or separate server is needed.
 
 `rs/moq-archive` stores the versioned objects on any `object_store::ObjectStore`:
 percent-encoded track names, `.info` JSON, the binary envelope, and put/get/list/delete.
@@ -127,7 +133,6 @@ owned by that prerequisite, not duplicated in archive storage.
 
 ## Quests
 
-- [Archive HLS window](/quest/m1/archive/hls-window.md) - serve a replayed recording's whole retained timeline without a server-wide `--window`
 - [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
 - [Archive proof](/quest/m1/archive/proof.md) - prove persistence ordering, selective reads, exact FETCH replay, and timeline-only HLS generation
 
