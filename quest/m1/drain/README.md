@@ -1,4 +1,4 @@
-# Graceful relay drains (GOAWAY)
+# [M] Graceful relay drains (GOAWAY)
 
 ## Goal
 
@@ -30,7 +30,9 @@ is moq.pro's (downstream) fleet drain work, which consumes these quests.
 
 The relay's drain hook has landed: `Relay::with_signals(false)` hands SIGTERM
 to the embedder, and its `shutdown_trigger` GOAWAYs every session, arrivals
-included, against one deadline.
+included, against one deadline. `Relay::run` returns as soon as every session
+has left, logging whether the deadline force-closed any, and
+`moq_relay_draining_sessions` shows the drain's progress.
 
 **Clients (landed).** The JS reconnector migrates like the Rust one,
 preserving the app-visible session while resolving DNS again before dialing.
@@ -42,11 +44,6 @@ by the stop deadline and encoder reconnect.
 **End to end.** The line's own remaining work: a JS client watching a live
 track through an in-tree relay drained with the drain hook migrates to a
 second relay behind the same name without a dropped group.
-
-## Quests
-
-- [Drain exit](/quest/m1/drain/drain-exit.md) - a drain ends as soon as every
-  session has left, and reports whether that or the deadline ended it
 
 ## Related
 

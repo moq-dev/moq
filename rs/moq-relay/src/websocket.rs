@@ -197,6 +197,7 @@ where
 	// The handshake is done, so this is a MoQ session now: only now can a push
 	// be serviced, and only now does the session appear in the live table.
 	let registration = pending.map(|(sessions, request)| sessions.register(request));
+	let _serving = shutdown.serve();
 
 	loop {
 		let nudged = async {

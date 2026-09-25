@@ -17,6 +17,9 @@
 //! itself; a session that still arrives mid-drain is sent a GOAWAY at once,
 //! carrying only what is left of the window.
 //!
+//! The drain ends as soon as every session has left rather than waiting out the
+//! window, which a stop-time budget depends on.
+//!
 //! Each signal test raises or handles process signals, so they rely on
 //! nextest's process-per-test isolation. `a_trigger_before_run_keeps_the_deadline`
 //! fires the trigger before `run` instead of a signal.
@@ -28,8 +31,8 @@ use std::{net::TcpListener, time::Duration};
 use moq_relay::{Config, Relay, auth};
 
 /// Long enough that "exited immediately" and "waited out the window" cannot be
-/// confused, short enough to keep the test quick: `Relay::run` sleeps this plus
-/// one second before exiting.
+/// confused, short enough to keep the test quick: a session that never leaves
+/// keeps `Relay::run` up this long.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Run `test` on a current-thread runtime with a large stack.
@@ -67,6 +70,11 @@ fn a_session_arriving_mid_drain_gets_what_is_left() {
 }
 
 #[test]
+fn a_drain_ends_once_every_session_leaves() {
+	run_test(a_drain_ends_once_every_session_leaves_inner);
+}
+
+#[test]
 fn a_trigger_before_run_keeps_the_deadline() {
 	run_test(a_trigger_before_run_keeps_the_deadline_inner);
 }
@@ -88,6 +96,9 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 
 	let connection = connect(&client, port).await;
 	let draining = connection.draining().expect("connected");
+	// The one-shot client leaves on the GOAWAY; this peer is what keeps the drain
+	// open for its whole window.
+	let _straggler = straggler(port).await;
 
 	let signalled = std::time::Instant::now();
 	// SAFETY: `raise` is async-signal-safe, and SIGINT's disposition is tokio's
@@ -142,6 +153,7 @@ async fn an_embedder_owns_the_signals_inner() {
 
 	let connection = connect(&client, port).await;
 	let draining = connection.draining().expect("connected");
+	let _straggler = straggler(port).await;
 
 	// SAFETY: `raise` is async-signal-safe, and SIGINT's disposition is tokio's
 	// handler, registered above.
@@ -193,15 +205,15 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	let client = client(vec!["moq-transport-17".parse().expect("parse version")]);
 
 	let established = connect(&client, port).await;
+	let draining = established.draining().expect("connected");
+	// Keeps the relay up for the arrival below once `established` leaves.
+	let _straggler = straggler(port).await;
 	trigger.start();
 	let deadline = std::time::Instant::now() + DRAIN_TIMEOUT;
-	let goaway = tokio::time::timeout(
-		Duration::from_secs(5),
-		established.draining().expect("connected").recv(),
-	)
-	.await
-	.expect("no GOAWAY within 5s of the trigger")
-	.expect("session closed without a GOAWAY");
+	let goaway = tokio::time::timeout(Duration::from_secs(5), draining.recv())
+		.await
+		.expect("no GOAWAY within 5s of the trigger")
+		.expect("session closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 	let timeout = goaway.timeout().expect("the GOAWAY carries its deadline");
 	assert!(
@@ -232,6 +244,39 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	tokio::time::timeout(Duration::from_secs(15), run)
 		.await
 		.expect("relay never exited after the drain window")
+		.expect("relay task panicked")
+		.expect("relay exited with an error");
+}
+
+async fn a_drain_ends_once_every_session_leaves_inner() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	// A window the test would time out long before, so only an early exit passes.
+	let (port, mut config) = relay_config();
+	config.drain_timeout = Duration::from_secs(600);
+	let internal = free_port();
+	config.internal.listen = Some(format!("127.0.0.1:{internal}").parse().expect("parse addr"));
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let trigger = relay.shutdown_trigger().clone();
+	let run = tokio::spawn(relay.run());
+	wait_listening(port).await;
+
+	let left = connect(&client(Vec::new()), port).await;
+	let straggler = straggler(port).await;
+	trigger.start();
+
+	// The one-shot client leaves on its GOAWAY; the straggler is still draining.
+	tokio::time::timeout(Duration::from_secs(5), left.closed())
+		.await
+		.expect("the one-shot client did not leave on the GOAWAY")
+		.expect("the one-shot client failed");
+	wait_metric(internal, "moq_relay_draining_sessions 1").await;
+	assert!(!run.is_finished(), "the relay exited with a session still draining");
+
+	drop(straggler);
+	tokio::time::timeout(Duration::from_secs(5), run)
+		.await
+		.expect("relay kept running after every session left")
 		.expect("relay task panicked")
 		.expect("relay exited with an error");
 }
@@ -275,20 +320,30 @@ fn client(version: Vec<moq_tokio::moq_net::Version>) -> moq_tokio::Client {
 		.with_reconnect(false)
 }
 
+/// A session that stays until the drain deadline closes it: moq-lite-03 has no
+/// GOAWAY message, so the relay drains it without the peer ever knowing.
+async fn straggler(port: u16) -> moq_tokio::Connection {
+	connect(&client(vec!["moq-lite-03".parse().expect("parse version")]), port).await
+}
+
 /// A session to the relay on `port`.
 async fn connect(client: &moq_tokio::Client, port: u16) -> moq_tokio::Connection {
 	let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().expect("parse url");
 	client.connect(url).established().await.expect("connect")
 }
 
+/// A free loopback TCP port. The listener is bound by `Relay::run`, not here,
+/// so this leaves the usual probe/bind gap; on loopback it is not worth
+/// retrying around.
+fn free_port() -> u16 {
+	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
+	probe.local_addr().expect("local addr").port()
+}
+
 /// A stream-only relay on a free loopback TCP port, fully public, with a short
 /// drain window. Returns the port and the config to hand [`Relay::load`].
 fn relay_config() -> (u16, Config) {
-	// The listener is bound by `Relay::run`, not here, so this leaves the usual
-	// probe/bind gap; on loopback it is not worth retrying around.
-	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-	let port = probe.local_addr().expect("local addr").port();
-	drop(probe);
+	let port = free_port();
 
 	// Fully public auth: any no-JWT stream client gets the whole root.
 	let mut auth = auth::Config::default();
@@ -300,6 +355,24 @@ fn relay_config() -> (u16, Config) {
 	config.drain_timeout = DRAIN_TIMEOUT;
 
 	(port, config)
+}
+
+/// Wait until the internal listener on `port` reports `line` at `/metrics`.
+async fn wait_metric(port: u16, line: &str) {
+	let deadline = std::time::Instant::now() + Duration::from_secs(5);
+	loop {
+		let metrics = reqwest::get(format!("http://127.0.0.1:{port}/metrics"))
+			.await
+			.expect("scrape metrics")
+			.text()
+			.await
+			.expect("read metrics");
+		if metrics.lines().any(|l| l == line) {
+			break;
+		}
+		assert!(std::time::Instant::now() < deadline, "never saw {line} in:\n{metrics}");
+		tokio::time::sleep(Duration::from_millis(25)).await;
+	}
 }
 
 async fn wait_listening(port: u16) {

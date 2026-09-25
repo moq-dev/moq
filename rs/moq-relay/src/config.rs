@@ -91,8 +91,9 @@ pub struct Config {
 
 	/// How long accepted sessions may keep running after a shutdown signal, e.g.
 	/// "10s" or "500ms". The first signal sends every session a GOAWAY and waits
-	/// this long for clients to reconnect elsewhere before force-closing them; a
-	/// second signal exits immediately. Zero closes them at once, with no GOAWAY
+	/// up to this long for clients to reconnect elsewhere before force-closing
+	/// them, exiting as soon as they have all left; a second signal exits
+	/// immediately. Zero closes them at once, with no GOAWAY
 	/// they would have no time to act on. Defaults to 10 seconds.
 	#[usage(skip)]
 	#[serde(with = "crate::duration::serde_duration")]
