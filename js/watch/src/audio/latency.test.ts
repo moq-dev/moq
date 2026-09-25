@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Time } from "@moq/net";
-import { ringSamples, target } from "./latency";
+import { reanchor, ringSamples, target } from "./latency";
 
 const ms = (value: number) => value as Time.Milli;
 
@@ -33,5 +33,23 @@ describe("ringSamples", () => {
 
 	it("leaves a delay above the floor alone", () => {
 		expect(ringSamples(48_000, ms(100))).toBe(4_800);
+	});
+});
+
+describe("reanchor", () => {
+	it("re-stalls once a run of one-frame rises adds up to more than a frame", () => {
+		let baseline = ms(40);
+		const stalls = [60, 80, 100].map((next) => {
+			const result = reanchor(baseline, ms(next), ms(20));
+			baseline = result.baseline;
+			return result.stall;
+		});
+		expect(stalls).toEqual([false, true, false]);
+		expect(baseline).toBe(ms(80));
+	});
+
+	it("follows a fall down, so the next rise is measured from there", () => {
+		expect(reanchor(ms(100), ms(60), ms(20))).toEqual({ stall: false, baseline: ms(60) });
+		expect(reanchor(ms(60), ms(100), ms(20))).toEqual({ stall: true, baseline: ms(100) });
 	});
 });

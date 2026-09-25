@@ -21,6 +21,24 @@ export function target(props: Target): Time.Milli {
 	return Time.Milli.add(floored, props.frame ?? Time.Milli.zero);
 }
 
+/** Whether a deeper target re-stalls the ring, and the baseline the next target is compared against. */
+export interface Reanchor {
+	stall: boolean;
+	baseline: Time.Milli;
+}
+
+/**
+ * Compare a new target against the depth the ring last filled to.
+ *
+ * A rise of more than `step` re-stalls. A smaller one rides through but keeps the old baseline, so a
+ * run of one-bucket rises still re-stalls once they add up. A fall lowers the baseline, since the
+ * ring's latency skip follows the target down on its own.
+ */
+export function reanchor(baseline: Time.Milli, target: Time.Milli, step: Time.Milli): Reanchor {
+	if (target - baseline > step) return { stall: true, baseline: target };
+	return { stall: false, baseline: Time.Milli.min(baseline, target) };
+}
+
 // An AudioWorkletProcessor renders in fixed 128-sample quanta, so a ring shallower than one can
 // never be read from.
 const RENDER_QUANTUM = 128;

@@ -27,7 +27,7 @@ import {
 	playbackIdentity,
 } from "./config";
 import { Handover } from "./handover";
-import { ringSamples, target } from "./latency";
+import { reanchor, ringSamples, target } from "./latency";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -304,8 +304,9 @@ export class Decoder {
 		// this effect (tearing down the timer), so compare it against the pre-change baseline directly.
 		const baseline = this.#prevTarget;
 		effect.timer(() => {
-			if (target - baseline > step) this.#ring?.stall();
-			this.#prevTarget = target;
+			const next = reanchor(baseline, target, step);
+			if (next.stall) this.#ring?.stall();
+			this.#prevTarget = next.baseline;
 		}, LATENCY_REANCHOR_DEBOUNCE_MS);
 	}
 
