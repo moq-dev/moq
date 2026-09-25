@@ -242,6 +242,10 @@ pub struct MoqAudioInit {
 	/// Human-readable rendition name for a track picker.
 	#[uniffi(default = None)]
 	pub label: Option<String>,
+	/// Track name. `None` derives a unique name from the format. Refused on a requested track,
+	/// which already carries its name.
+	#[uniffi(default = None)]
+	pub track: Option<String>,
 }
 
 /// What a video publish needs: a format, optional init bytes, a label, and hints.
@@ -260,6 +264,10 @@ pub struct MoqVideoInit {
 	/// Catalog fields the stream cannot reveal itself.
 	#[uniffi(default = None)]
 	pub hint: Option<MoqVideoHint>,
+	/// Track name. `None` derives a unique name from the format. Refused on a requested track,
+	/// which already carries its name.
+	#[uniffi(default = None)]
+	pub track: Option<String>,
 }
 
 /// What a container publish needs: a format and its leading bytes.

@@ -1,9 +1,9 @@
-import { type Dispose, type Getter, Signal } from "@moq/signals";
+import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
 import { error, NotFound, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { type Hop, type Route, routesEqual } from "../hop.ts";
-import { hooks } from "../internal.ts";
+import { hiddenBelow, hooks } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
@@ -32,7 +32,11 @@ import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, resolvesStart,
 // Where each originated route lands under the requested prefix: its suffix beneath
 // the prefix, or the empty suffix for a route above it, where the most specific
 // such route wins the way a request through the prefix would resolve.
-function presented(prefix: Path.Valid, table: ReadonlyMap<Path.Valid, Advertised>): Map<Path.Valid, Advertised> {
+function presented(
+	prefix: Path.Valid,
+	table: ReadonlyMap<Path.Valid, Advertised>,
+	hidden: boolean,
+): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
 	let rootLen = -1;
 	for (const [covered, snap] of table) {
@@ -42,6 +46,8 @@ function presented(prefix: Path.Valid, table: ReadonlyMap<Path.Valid, Advertised
 			out.set(Path.empty(), snap);
 			continue;
 		}
+		// A hidden route stays off the wire unless the request opted in.
+		if (!hidden && hiddenBelow(prefix, covered)) continue;
 		const suffix = Path.stripPrefix(prefix, covered);
 		if (suffix !== null) out.set(suffix, snap);
 	}
@@ -219,20 +225,29 @@ class SubscriptionControls {
 
 	/** Returns false when peer departure supersedes a blocked response write. */
 	async response(pending: Promise<void>): Promise<boolean> {
-		const result = await Promise.race([
+		// `#ended` lives as long as the stream, so it is raced as-is rather than mapped per call.
+		const result = await race([
 			pending.then(
 				() => ({ kind: "sent" }) as const,
 				(err: unknown) => ({ kind: "error", error: error(err) }) as const,
 			),
-			this.#ended.then((end) => ({ kind: "ended", end }) as const),
+			this.#ended,
 		]);
 
-		if (result.kind === "sent") return true;
-		if (result.kind === "error") throw result.error;
-		// Promise.race leaves the blocked encode running, so reset the writable half too.
-		this.#writer.reset(result.end ?? new StreamError(StreamCode.Cancel, { message: "cancel" }));
-		if (result.end) throw result.end;
+		if (result !== null && !(result instanceof Error)) {
+			if (result.kind === "sent") return true;
+			throw result.error;
+		}
+
+		// The race leaves the blocked encode running, so reset the writable half too.
+		this.#writer.reset(result ?? new StreamError(StreamCode.Cancel, { message: "cancel" }));
+		if (result) throw result;
 		return false;
+	}
+
+	/** Settles once the stream is over: `null` when it ended cleanly, or the failure. */
+	get ended(): Promise<Error | null> {
+		return this.#ended;
 	}
 
 	#finish(end: Error | null) {
@@ -460,7 +475,7 @@ export class Publisher {
 			const initial = this.#advertised.peek();
 			if (!initial) return; // closed
 
-			for (const [name, snap] of presented(msg.prefix, initial)) {
+			for (const [name, snap] of presented(msg.prefix, initial, msg.hidden)) {
 				active.set(name, snap);
 			}
 
@@ -492,7 +507,7 @@ export class Publisher {
 			}
 
 			for (;;) {
-				const advertised = await Promise.race([changed, stream.reader.closed]);
+				const advertised = await race([changed, stream.reader.closed]);
 				dispose();
 				if (!advertised) break;
 
@@ -505,7 +520,7 @@ export class Publisher {
 				if (!latest) break;
 
 				const updated = new Map<Path.Valid, Advertised>();
-				for (const [name, snap] of presented(msg.prefix, latest)) {
+				for (const [name, snap] of presented(msg.prefix, latest, msg.hidden)) {
 					updated.set(name, snap);
 				}
 
@@ -745,6 +760,9 @@ export class Publisher {
 		// One ranking for the whole subscription, shared by every group it serves.
 		const priority = new Priority(track);
 
+		// Every group this subscription started serving, until its stream finishes or resets.
+		const groups = new Set<Promise<void>>();
+
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
 		// caller FINs the subscribe stream to say so.
@@ -792,6 +810,12 @@ export class Publisher {
 					case "error":
 						throw recv.error;
 					case "idle":
+						// An end declared ahead of the live edge goes out as soon as it is
+						// known, while the remaining groups are still being produced.
+						if (!endSent && track.final() !== undefined) {
+							if (!(await sendEnd())) return;
+							continue;
+						}
 						await waitForSubscription(controls, track);
 						continue;
 					case "boundary":
@@ -803,13 +827,21 @@ export class Publisher {
 						}
 						await waitForSubscription(controls, track);
 						continue;
-					case "done":
+					case "done": {
 						if (!endSent) {
 							if (!(await sendEnd())) return;
 							continue;
 						}
+						// The FIN tells the subscriber every group is accounted for, so it waits
+						// until each group stream finished or reset. The subscriber leaving
+						// instead cancels whatever is still queued.
+						const drained = Symbol("drained");
+						const end = await Promise.race([Promise.all(groups).then(() => drained), controls.ended]);
+						if (end instanceof Error) throw end;
+						if (end !== drained) return;
 						finished = true;
 						return;
+					}
 				}
 
 				const group = recv.group;
@@ -836,7 +868,7 @@ export class Publisher {
 						return;
 				}
 
-				void this.#runGroup({
+				const task = this.#runGroup({
 					sub,
 					group,
 					timescale,
@@ -845,6 +877,8 @@ export class Publisher {
 					start: range.start,
 					end: range.end,
 				});
+				groups.add(task);
+				void task.finally(() => groups.delete(task));
 			}
 		} finally {
 			if (!finished) unsubscribe();
@@ -955,14 +989,14 @@ export class Publisher {
 		// as `startFrame`. Skipping the head here is the only thing keeping those numbers
 		// honest; a group that ends before we reach it can't be served at all.
 		for (let i = 0; i < startFrame; i++) {
-			if (!(await Promise.race([group.readFrame(), stream.closed]))) {
+			if (!(await race([group.readFrame(), stream.closed]))) {
 				throw new Error(`fetch group ended at frame ${i}, before the requested start ${startFrame}`);
 			}
 		}
 
 		let prevTs = 0n;
 		for (let index = startFrame; endFrame === undefined || index <= endFrame; index++) {
-			const frame = await Promise.race([group.readFrame(), stream.closed]);
+			const frame = await race([group.readFrame(), stream.closed]);
 			if (!frame) break;
 
 			const ts = BigInt(Math.round(frame.timestamp.as(timescale)));
@@ -1026,7 +1060,7 @@ export class Publisher {
 				let reached = startFrame === 0;
 
 				for (;;) {
-					const read = await Promise.race([hooks.readGroupFrame(group), stream.closed]);
+					const read = await race([hooks.readGroupFrame(group), stream.closed]);
 					if (!read) {
 						// The group ended before the frame the subscriber asked to start
 						// at, so this publisher can't serve the range at all. FINning here
@@ -1037,11 +1071,12 @@ export class Publisher {
 					}
 
 					try {
+						// A group that ends exactly at the start is a valid, empty range.
+						if (read.sequence + 1 >= startFrame) reached = true;
 						// Frames below the requested start were excluded, and the receiver
 						// numbers what it gets from `startFrame`.
 						if (read.sequence < startFrame) continue;
 						if (endFrame !== undefined && read.sequence > endFrame) break;
-						reached = true;
 
 						if (timestamps) {
 							// Convert each frame to the track's advertised timescale.
@@ -1107,7 +1142,7 @@ export class Publisher {
 				const timeout = new Promise<"timeout">((resolve) =>
 					setTimeout(() => resolve("timeout"), PROBE_INTERVAL),
 				);
-				const result = await Promise.race([timeout, stream.reader.closed]);
+				const result = await race([timeout, stream.reader.closed]);
 				if (result !== "timeout") break;
 
 				// The two fields are independent on the wire, each using 0 for

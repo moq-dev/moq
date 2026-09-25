@@ -9,6 +9,9 @@ export const Version = {
 	/// ordinal, and ended/restart reference that id instead of repeating the path.
 	/// Also adds frame-precise subscribe/fetch bounds and a GROUP frame offset.
 	DRAFT_06: 0xff0dad06,
+	/// Work-in-progress lite-07, only negotiated when explicitly offered.
+	/// Adds the ANNOUNCE_REQUEST hidden opt-in.
+	DRAFT_07: 0xff0dad07,
 } as const;
 
 export type Version = (typeof Version)[keyof typeof Version];
@@ -211,6 +214,22 @@ export function resolvesStart(version: Version): boolean {
 	}
 }
 
+/** Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07. */
+export function hasHidden(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /// The WebTransport subprotocol identifier for moq-lite.
 /// Version negotiation still happens via SETUP when this is used.
 export const ALPN = "moql";
@@ -227,6 +246,11 @@ export const ALPN_05 = "moq-lite-05";
 /// The ALPN string for Draft06.
 export const ALPN_06 = "moq-lite-06";
 
+/// The ALPN string for the work-in-progress Draft07. It is NOT in the default
+/// WebTransport `protocols` list, so lite-07 is never advertised or negotiated by
+/// default; a peer only reaches it when both sides explicitly offer this ALPN.
+export const ALPN_07_WIP = "moq-lite-07-wip";
+
 const VERSION_NAMES: Record<number, string> = {
 	[Version.DRAFT_01]: "moq-lite-01",
 	[Version.DRAFT_02]: "moq-lite-02",
@@ -234,6 +258,7 @@ const VERSION_NAMES: Record<number, string> = {
 	[Version.DRAFT_04]: "moq-lite-04",
 	[Version.DRAFT_05]: "moq-lite-05",
 	[Version.DRAFT_06]: "moq-lite-06",
+	[Version.DRAFT_07]: "moq-lite-07-wip",
 };
 
 export function versionName(v: Version): string {

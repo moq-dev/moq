@@ -1,9 +1,11 @@
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use moq_net::Timestamp;
 
 /// The window over which bitrate is averaged before it is reported.
 const BITRATE_WINDOW: Duration = Duration::from_secs(1);
+const JITTER_WINDOW: Duration = Duration::from_secs(10);
 
 /// The catalog fields an [`Estimator`] can measure from the frames fed to it.
 ///
@@ -36,7 +38,8 @@ impl Estimate {
 /// Measures the catalog jitter and bitrate of one track from the frames written to it.
 ///
 /// A [`container::Producer`](crate::container::Producer) created through the catalog owns one,
-/// feeds it as you write, and publishes the result automatically:
+/// feeds it as you write, and publishes the result automatically. Local encoders also call
+/// `flush` for each frame they hand to the transport:
 ///
 /// ```no_run
 /// # fn example<E: moq_mux::catalog::hang::CatalogExt>(
@@ -73,6 +76,7 @@ impl Estimate {
 pub struct Estimator {
 	jitter: Jitter,
 	bitrate: Bitrate,
+	baseline: Baseline,
 }
 
 impl Estimator {
@@ -86,7 +90,14 @@ impl Estimator {
 	pub fn write(&mut self, timestamp: Timestamp, bytes: usize) {
 		let timestamp = nanos(timestamp);
 		self.bitrate.write(timestamp, bytes);
-		self.jitter.write(timestamp);
+	}
+
+	/// Measure when an encoder handed a frame to the transport. Only locally encoded frames should
+	/// call this; imports keep clock-free batch and reorder estimates. Jitter is the spread above
+	/// this track's own recent minimum lateness, so a constant encoder delay is not jitter.
+	pub fn flush(&mut self, timestamp: Timestamp, now: Instant) {
+		let spread = self.baseline.observe(timestamp, now);
+		self.jitter.max = self.jitter.max.max(spread);
 	}
 
 	/// Close the current span at `end`, as [`container::Producer::cut`](crate::container::Producer::cut)
@@ -99,11 +110,11 @@ impl Estimator {
 		self.bitrate.cut(end.map(nanos));
 	}
 
-	/// Discard the open span and the last frame time, so nothing is measured across a break in the
-	/// timeline. See [`container::Producer::discontinuity`](crate::container::Producer::discontinuity).
+	/// Discard the open bitrate span and the flush baseline, so nothing is measured across a break
+	/// in the timeline. See [`container::Producer::discontinuity`](crate::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) {
 		self.bitrate.discontinuity();
-		self.jitter.discontinuity();
+		self.baseline = Baseline::default();
 	}
 
 	/// Observe a frame's reorder delay (`PTS - DTS`), which raises the jitter to the decode buffer a
@@ -235,57 +246,57 @@ fn bits_per_second(bytes: u64, duration: Duration) -> u64 {
 	bits_per_second.min(u64::MAX as u128) as u64
 }
 
-/// Tracks the catalog `jitter` for a video/audio track: the maximum delay between a frame being
-/// ready and the publisher flushing it, so a player sizes its buffer to at least this much.
-///
-/// The reported value is the largest contribution ever seen:
-/// - the media span of a container batch,
-/// - the reorder delay (`max(PTS - DTS)`), non-zero only for reordered (B-frame) streams and
-///   which a transmuxer also reuses as the decode-clock reserve, and
-/// - the steady inter-frame spacing, the floor for a track that flushes each write on its own.
-///
-/// So a non-reordered, frame-at-a-time track reports the frame duration, and a B-frame stream
-/// reports the deeper reorder delay (e.g. up to 3 consecutive B-frames is 3x the frame duration).
-///
-/// It never shrinks. A publisher that held frames back once can do it again, so walking the
-/// advertised value back on a later, tighter measurement would just hand the player a buffer too
-/// small for the next time.
-///
-/// Contributions are kept as [`Duration`]s, since the inputs are independently scaled (frame PTS
-/// vs a 90 kHz reorder delay) and only compare once normalized. See [`nanos`].
+/// The largest measured flush delay, batch span, or reorder delay. Once advertised it never falls.
 #[derive(Default)]
 struct Jitter {
-	/// Scale-free nanoseconds, per [`nanos`].
-	last: Option<u128>,
-	/// The steady inter-frame spacing: the smallest gap seen, so a stall or an ad break isn't
-	/// mistaken for the cadence.
-	min_duration: Option<Duration>,
-	/// The largest contribution seen so far, which is what gets reported.
 	max: Duration,
 }
 
 impl Jitter {
-	/// Record a frame's presentation timestamp (decode order), updating the minimum frame duration.
-	/// The first observation and non-monotonic timestamps (B-frames) only update state.
-	fn write(&mut self, ts: u128) {
-		if let Some(last) = self.last.replace(ts)
-			&& let Some(duration) = elapsed(last, ts)
-		{
-			let min = match self.min_duration {
-				Some(min) => min.min(duration),
-				None => duration,
-			};
-			self.min_duration = Some(min);
-			self.max = self.max.max(min);
-		}
-	}
-
-	fn discontinuity(&mut self) {
-		self.last = None;
-	}
-
 	fn current(&self) -> Option<Duration> {
 		(!self.max.is_zero()).then_some(self.max)
+	}
+}
+
+/// One track's minimum encode lateness over the recent window.
+///
+/// An `Instant` has no public mapping to the broadcast's media epoch. The first observation
+/// chooses a local origin; its unknown offset cancels when subtracting the recent minimum. A
+/// monotonic deque makes insertion and expiry amortized O(1).
+#[derive(Default)]
+struct Baseline {
+	epoch: Option<Instant>,
+	samples: VecDeque<Sample>,
+}
+
+struct Sample {
+	at: Instant,
+	lateness: i128,
+}
+
+impl Baseline {
+	fn observe(&mut self, timestamp: Timestamp, now: Instant) -> Duration {
+		let epoch = *self.epoch.get_or_insert(now);
+		while self
+			.samples
+			.front()
+			.is_some_and(|sample| now.duration_since(sample.at) > JITTER_WINDOW)
+		{
+			self.samples.pop_front();
+		}
+
+		let elapsed = match now.checked_duration_since(epoch) {
+			Some(duration) => duration.as_nanos() as i128,
+			None => -(epoch.duration_since(now).as_nanos() as i128),
+		};
+		let lateness = elapsed - timestamp.as_nanos() as i128;
+		while self.samples.back().is_some_and(|sample| sample.lateness >= lateness) {
+			self.samples.pop_back();
+		}
+		self.samples.push_back(Sample { at: now, lateness });
+		let minimum = self.samples.front().expect("the current sample was inserted").lateness;
+		let spread = u64::try_from(lateness - minimum).unwrap_or(u64::MAX);
+		Duration::from_nanos(spread)
 	}
 }
 
@@ -298,48 +309,80 @@ mod tests {
 	}
 
 	#[test]
-	fn reports_the_frame_spacing() {
+	fn decode_order_pts_gap_never_becomes_provisional_jitter() {
 		let mut estimator = Estimator::new();
-
-		estimator.write(micros(1_000), 1);
-		assert_eq!(estimator.estimate().jitter, None, "one frame has no spacing");
-		estimator.write(micros(41_000), 1);
-		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(40)));
-		estimator.write(micros(81_000), 1);
-		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(40)));
-		estimator.write(micros(101_000), 1);
-		assert_eq!(
-			estimator.estimate().jitter,
-			Some(Duration::from_millis(40)),
-			"a tighter pair never lowers what was already advertised"
-		);
-	}
-
-	#[test]
-	fn reorder_delay_wins_over_frame_spacing() {
-		let mut estimator = Estimator::new();
-
-		estimator.write(micros(0), 1);
-		estimator.write(micros(16_000), 1);
-		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(16)));
-
-		estimator.reorder(micros(48_000));
-		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(48)));
-
-		// A B-frame presenting earlier than its predecessor contributes no spacing.
-		estimator.write(micros(32_000), 1);
-		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(48)));
-	}
-
-	#[test]
-	fn ignores_non_monotonic_presentation_spacing() {
-		let mut estimator = Estimator::new();
-
-		estimator.write(micros(100_000), 1);
-		estimator.write(micros(80_000), 1);
+		for pts in [0, 120_000, 40_000, 80_000] {
+			estimator.write(micros(pts), 1);
+		}
 		assert_eq!(estimator.estimate().jitter, None);
-		estimator.write(micros(120_000), 1);
-		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(40)));
+		estimator.reorder(micros(80_000));
+		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(80)));
+	}
+
+	#[test]
+	fn batch_flush_at_its_end_reports_its_media_span() {
+		let mut estimator = Estimator::new();
+		let anchor = Instant::now();
+		estimator.flush(micros(0), anchor);
+		estimator.flush(micros(0), anchor + Duration::from_millis(120));
+		estimator.flush(micros(40_000), anchor + Duration::from_millis(120));
+		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(120)));
+	}
+
+	#[test]
+	fn constant_encoder_delay_is_not_jitter() {
+		let mut estimator = Estimator::new();
+		let anchor = Instant::now();
+		estimator.flush(micros(0), anchor + Duration::from_millis(200));
+		estimator.flush(micros(240_000), anchor + Duration::from_millis(440));
+		assert_eq!(estimator.estimate().jitter, None);
+	}
+
+	#[test]
+	fn discontinuity_resets_the_flush_baseline() {
+		let mut estimator = Estimator::new();
+		let anchor = Instant::now();
+		estimator.flush(micros(0), anchor);
+		estimator.flush(micros(40_000), anchor + Duration::from_millis(50));
+		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(10)));
+
+		// Resumed at the previous live edge after a 2 s pause: the pause is not jitter.
+		estimator.discontinuity();
+		estimator.flush(micros(40_000), anchor + Duration::from_millis(2_050));
+		estimator.flush(micros(80_000), anchor + Duration::from_millis(2_090));
+		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(10)));
+	}
+
+	#[test]
+	fn baseline_expires_drift() {
+		let anchor = Instant::now();
+
+		let mut drift = Baseline::default();
+		let maximum = (0..100u128)
+			.map(|second| {
+				drift.observe(
+					micros((second * 1_000_000) as u64),
+					anchor + Duration::from_millis((second * 1_001) as u64),
+				)
+			})
+			.max()
+			.unwrap();
+		assert!(maximum <= Duration::from_millis(10), "{maximum:?}");
+	}
+
+	#[test]
+	fn early_flush_keeps_lowering_the_baseline() {
+		let mut baseline = Baseline::default();
+		let anchor = Instant::now();
+		for second in 0..100u128 {
+			assert_eq!(
+				baseline.observe(
+					micros((second * 2_000_000) as u64),
+					anchor + Duration::from_secs(second as u64)
+				),
+				Duration::ZERO
+			);
+		}
 	}
 
 	#[test]
@@ -399,7 +442,7 @@ mod tests {
 
 		let estimate = estimator.estimate();
 		assert_eq!(estimate.bitrate, Some(1_000_000));
-		assert_eq!(estimate.jitter, Some(Duration::from_millis(40)));
+		assert_eq!(estimate.jitter, None);
 	}
 
 	/// A break in the timeline discards the open span rather than timing it across the gap, and

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Effect } from "@moq/signals";
-import { unlockOnGesture } from "./unlock";
+import { unlock } from "./gesture";
 
 // Minimal AudioContext stand-in: an EventTarget with a mutable `state` and a counting
 // `resume()`. `transition` mirrors a real context firing `statechange` when its state moves.
@@ -38,7 +38,7 @@ const asContext = (ctx: MockContext) => ctx as unknown as AudioContext;
 test("retries resume() on a user gesture until the context is running", async () => {
 	const ctx = new MockContext();
 	const effect = new Effect();
-	unlockOnGesture(effect, asContext(ctx));
+	unlock(effect, asContext(ctx));
 	await flush();
 
 	// The at-load attempt fires once. Browsers requiring a gesture reject it, but we still
@@ -53,11 +53,15 @@ test("retries resume() on a user gesture until the context is running", async ()
 	document.dispatchEvent(new Event("keydown"));
 	expect(ctx.resumeCalls).toBe(3);
 
+	// Touch and pen only grant activation on pointerup, so a tap must retry there too.
+	document.dispatchEvent(new Event("pointerup"));
+	expect(ctx.resumeCalls).toBe(4);
+
 	// Once the context is actually running, stop retrying: further gestures are no-ops.
 	ctx.transition("running");
 	await flush();
 	document.dispatchEvent(new Event("pointerdown"));
-	expect(ctx.resumeCalls).toBe(3);
+	expect(ctx.resumeCalls).toBe(4);
 
 	effect.close();
 });
@@ -65,7 +69,7 @@ test("retries resume() on a user gesture until the context is running", async ()
 test("re-arms when Safari drops the context to interrupted", async () => {
 	const ctx = new MockContext();
 	const effect = new Effect();
-	unlockOnGesture(effect, asContext(ctx));
+	unlock(effect, asContext(ctx));
 	await flush();
 
 	ctx.transition("running");
@@ -87,7 +91,7 @@ test("re-arms when Safari drops the context to interrupted", async () => {
 test("stops resuming after the effect closes", async () => {
 	const ctx = new MockContext();
 	const effect = new Effect();
-	unlockOnGesture(effect, asContext(ctx));
+	unlock(effect, asContext(ctx));
 	await flush();
 
 	effect.close();

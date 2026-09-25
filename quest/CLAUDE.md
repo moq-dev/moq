@@ -92,7 +92,7 @@ Current decisions, open questions, or implementation guidance.
   that base, then push the quest's branch with an empty commit. The remote
   branch is the claim; continue only if an existing one is stale (old, no open
   PR).
-- Set the upstream to the base so `just check` and `just test` scope against
+- Set the upstream to the base so `just check` scopes against
   it. Keep a line current by merging its base in; never rebase a shared branch.
 - Update the quest as the plan changes. Complete it when no work remains, and
   suggest follow-ups as new quests.

@@ -6,6 +6,7 @@ use crate::{Path, coding::*, ietf::RequestId};
 
 use super::Message;
 use super::cluster;
+use super::hidden::HIDDEN_PARAM;
 use super::namespace::{decode_namespace, encode_namespace};
 
 use super::Version;
@@ -37,6 +38,23 @@ fn is_legacy_version(version: Version) -> bool {
 pub struct SubscribeNamespace<'a> {
 	pub request_id: RequestId,
 	pub namespace: Path<'a>,
+	/// MoQ Hidden: also advertise hidden namespaces. Only sent to a peer that declared
+	/// the extension; absent means false.
+	pub hidden: bool,
+}
+
+/// The HIDDEN parameter value to write: absent unless opted in.
+fn hidden_param(hidden: bool) -> Option<u64> {
+	hidden.then_some(1)
+}
+
+/// Read the HIDDEN parameter value. 0 and absent both mean not opted in.
+fn hidden_from_param(value: Option<u64>) -> Result<bool, DecodeError> {
+	match value {
+		None | Some(0) => Ok(false),
+		Some(1) => Ok(true),
+		Some(_) => Err(DecodeError::InvalidValue),
+	}
 }
 
 impl Message for SubscribeNamespace<'_> {
@@ -48,7 +66,7 @@ impl Message for SubscribeNamespace<'_> {
 		}
 		self.request_id.encode(w, version)?;
 		encode_namespace(w, &self.namespace, version)?;
-		encode_params!(w, version,);
+		encode_params!(w, version, HIDDEN_PARAM => hidden_param(self.hidden));
 		Ok(())
 	}
 
@@ -58,9 +76,13 @@ impl Message for SubscribeNamespace<'_> {
 		}
 		let request_id = RequestId::decode(r, version)?;
 		let namespace = decode_namespace(r, version)?;
-		decode_params!(r, version,);
+		decode_params!(r, version, HIDDEN_PARAM => hidden: Option<u64>);
 
-		Ok(Self { request_id, namespace })
+		Ok(Self {
+			request_id,
+			namespace,
+			hidden: hidden_from_param(hidden)?,
+		})
 	}
 }
 
@@ -76,6 +98,8 @@ pub struct SubscribeNamespaceLegacy<'a> {
 	pub namespace: Path<'a>,
 	/// v16/v17: Subscribe Options (default 0x01 = NAMESPACE only).
 	pub subscribe_options: u64,
+	/// MoQ Hidden: see [`SubscribeNamespace::hidden`].
+	pub hidden: bool,
 }
 
 impl Message for SubscribeNamespaceLegacy<'_> {
@@ -93,7 +117,7 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 		if matches!(version, Version::Draft16 | Version::Draft17) {
 			self.subscribe_options.encode(w, version)?;
 		}
-		encode_params!(w, version,);
+		encode_params!(w, version, HIDDEN_PARAM => hidden_param(self.hidden));
 		Ok(())
 	}
 
@@ -111,13 +135,13 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 			_ => 0x01,
 		};
 
-		// Ignore parameters
-		decode_params!(r, version,);
+		decode_params!(r, version, HIDDEN_PARAM => hidden: Option<u64>);
 
 		Ok(Self {
 			request_id,
 			namespace,
 			subscribe_options,
+			hidden: hidden_from_param(hidden)?,
 		})
 	}
 }
@@ -417,6 +441,7 @@ mod tests {
 		let modern = SubscribeNamespace {
 			request_id: RequestId(0),
 			namespace: Path::default(),
+			hidden: false,
 		};
 		assert_eq!(body(&modern, Version::Draft18), vec![0x00, 0x00, 0x00]);
 
@@ -425,6 +450,7 @@ mod tests {
 			request_id: RequestId(0),
 			namespace: Path::default(),
 			subscribe_options: 0x01,
+			hidden: false,
 		};
 		assert!(body(&legacy, Version::Draft17).len() > body(&modern, Version::Draft18).len());
 	}
@@ -434,12 +460,44 @@ mod tests {
 		let msg = SubscribeNamespace {
 			request_id: RequestId(4),
 			namespace: Path::new("example/meeting"),
+			hidden: false,
 		};
 		let mut buf = bytes::Bytes::from(body(&msg, Version::Draft18));
 		let decoded = SubscribeNamespace::decode_msg(&mut buf, Version::Draft18).unwrap();
 		assert!(buf.is_empty());
 		assert_eq!(decoded.request_id, RequestId(4));
 		assert_eq!(decoded.namespace.as_str(), "example/meeting");
+	}
+
+	/// The opt-in round trips on every draft, and absent decodes as not opted in.
+	#[test]
+	fn hidden_round_trips() {
+		for hidden in [false, true] {
+			let msg = SubscribeNamespace {
+				request_id: RequestId(4),
+				namespace: Path::new("example"),
+				hidden,
+			};
+			let mut buf = bytes::Bytes::from(body(&msg, Version::Draft18));
+			assert_eq!(
+				SubscribeNamespace::decode_msg(&mut buf, Version::Draft18)
+					.unwrap()
+					.hidden,
+				hidden
+			);
+
+			for version in [Version::Draft14, Version::Draft16, Version::Draft17] {
+				let msg = SubscribeNamespaceLegacy {
+					request_id: RequestId(4),
+					namespace: Path::new("example"),
+					subscribe_options: 0x01,
+					hidden,
+				};
+				let mut buf = bytes::Bytes::from(body(&msg, version));
+				let decoded = SubscribeNamespaceLegacy::decode_msg(&mut buf, version).unwrap();
+				assert_eq!(decoded.hidden, hidden, "{version:?}");
+			}
+		}
 	}
 
 	#[test]
@@ -449,6 +507,7 @@ mod tests {
 				request_id: RequestId(4),
 				namespace: Path::new("example/meeting"),
 				subscribe_options: 0x01,
+				hidden: false,
 			};
 			let mut buf = bytes::Bytes::from(body(&msg, version));
 			let decoded = SubscribeNamespaceLegacy::decode_msg(&mut buf, version).unwrap();

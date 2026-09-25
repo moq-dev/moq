@@ -1088,6 +1088,14 @@ test("lite draft-06: a subscription starting mid-group skips the head", async ()
 	expect(served).toEqual([{ sequence: 0, frameStart: 2, payloads: ["c", "d"] }]);
 });
 
+// A start at the group's final frame count is a valid, empty range: FIN, don't reset.
+// A relay resuming a parked track asks for exactly this.
+test("lite draft-06: a subscription starting at the end of a group serves it empty", async () => {
+	const { start, served } = await serve({ 0: ["a", "b"] }, { startGroup: 0, startFrame: 2 });
+	expect(start).toBe(0);
+	expect(served).toEqual([{ sequence: 0, frameStart: 2, payloads: [] }]);
+});
+
 // The end bound is inclusive.
 test("lite draft-06: a subscription capped mid-group stops at the end frame", async () => {
 	const { served } = await serve(
@@ -1317,22 +1325,27 @@ test("lite draft-05: a group waiting for a stream slot is dropped when the subsc
 
 // The publisher FINs the subscribe stream itself once a track ends, which must not be
 // mistaken for the subscriber leaving: SUBSCRIBE_END counts those queued groups as
-// delivered, so dropping them here would strand the tail of every finite track.
+// delivered, so dropping them here would strand the tail of every finite track. The FIN
+// tells the subscriber every group is accounted for, so it waits for the queued group.
 test("lite draft-05: a group waiting for a stream slot survives the track finishing", async () => {
 	const { client, track, freeSlot, outcome, close } = await saturatedGroup();
 
 	track.close();
 
-	// Read to the FIN the publisher sends after SUBSCRIBE_END. That FIN is the moment a
-	// cancel keyed on our own close would fire, so the slot must not free up before it.
+	// SUBSCRIBE_END goes out while the group is still waiting for its slot.
 	for (;;) {
 		const resp = await decodeSubscribeResponse(client.reader, Version.DRAFT_05);
 		if ("end" in resp) break;
 	}
-	await client.reader.closed;
+
+	// The FIN holds until the queued group is on the wire.
+	const fin = client.reader.closed.then(() => "fin" as const);
+	const idle = new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 20));
+	expect(await Promise.race([fin, idle])).toBe("pending");
 
 	freeSlot();
 	expect(await outcome).toBe("sent");
+	expect(await fin).toBe("fin");
 
 	close();
 });

@@ -38,11 +38,47 @@ Each catalog track constructor returns one `container::Producer` that owns the
 media stream and its catalog entry. `set` publishes or replaces its config,
 `modify` edits the published config through a guard, and dropping the producer
 retires the entry. Calling `modify` before the first `set` returns
-`Error::NotPublished`. Container writes measure bitrate and jitter and publish
-the estimate automatically when groups are cut or finished. Invalid jitter is
-rejected before the edit is retained, including while the initial catalog is
-reserved. Codec importers propagate catalog and media errors through their
-configuration and frame-writing methods.
+`Error::NotPublished`. Container writes measure bitrate; importers can also
+measure batch span or reorder delay for jitter. Locally encoded frames call
+`container::Producer::flush(timestamp, Instant::now())`; jitter is the spread
+above that track's own recent minimum lateness, published as soon as it rises.
+Generic imports remain clock-free. Invalid or decreasing jitter is rejected
+before the edit is retained, including while the initial catalog is reserved.
+Codec importers propagate catalog and media errors through their configuration
+and frame-writing methods.
+
+Data tracks go through the catalog too. `catalog.json_stream(track, config)`
+(or `json_snapshot`, `binary_snapshot`, `binary_stream`) writes the track's
+`json` or `binary` entry, measures an absent `bitrate` from the writes, and
+retires the entry when the producer drops. To list the track in your own
+section beside application fields, pass that section's entry instead of a
+`json::Config` or `binary::Config`: any `RenditionConfig` that embeds the data
+config through `AsMut`.
+
+```rust
+#[derive(Serialize, Deserialize, Clone)]
+struct Mavlink {
+    #[serde(flatten)]
+    binary: hang::catalog::BinaryConfig, // mode, compression, bitrate, ...
+    sysid: u8,
+}
+
+impl AsMut<hang::catalog::BinaryConfig> for Mavlink {
+    fn as_mut(&mut self) -> &mut hang::catalog::BinaryConfig {
+        &mut self.binary
+    }
+}
+
+// Plus `RenditionConfig<Ext>` writing to `catalog.ext.mavlink`, a map
+// serialized under the `com.example.mavlink` root key.
+let binary = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Stream);
+let mut telemetry = catalog.binary_stream(track, Mavlink { binary, sysid: 1 })?;
+telemetry.append(packet)?;
+```
+
+The producer sets the entry's `mode` and encodes the track with its
+`compression`. Read it back from `Catalog<Ext>` and subscribe with
+`catalog::Entry::new(name, &entry.binary)`.
 
 ```bash
 cargo add moq-mux

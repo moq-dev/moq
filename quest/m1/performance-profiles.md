@@ -8,7 +8,7 @@ cost. Profiling is opt-in and has no production overhead when disabled.
 
 ## Plan
 
-`rs/scripts/bench.sh` already owns the builds, relay PID, workload, and host
+`bench/run.sh` already owns the builds, relay PID, workload, and host
 samples, but has no profiler integration. Reuse that lifecycle instead
 of adding a second launcher. `Cargo.toml` already has a `profiling` profile and
 `rs/moq-native/src/jemalloc.rs` already supports on-demand heap dumps.

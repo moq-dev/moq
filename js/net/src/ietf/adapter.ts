@@ -58,7 +58,7 @@ export class NativeSession implements Session {
 const Route = {
 	NewRequest: 0, // Create virtual bidi stream, push initial message
 	Response: 1, // Push message to existing stream (keep open)
-	ErrorResponse: 2, // Push message to existing stream, then close
+	ErrorResponse: 2, // Push a final message to existing stream, then close
 	CloseStream: 3, // Close stream recv (no bytes pushed)
 	FollowUp: 4, // Push follow-up message to existing stream
 	MaxRequestId: 5, // Update flow control
@@ -636,7 +636,10 @@ export class ControlStreamAdapter implements Session {
 				return { route: Route.FollowUp, requestId: subNs08 };
 			}
 			case 0x0e: {
-				// v15: NamespaceDone entry (no requestId) — route to SubscribeNamespace stream
+				if (this.version === Version.DRAFT_14 || this.version === Version.DRAFT_15) {
+					throw new Error("unexpected message 0x0e");
+				}
+				// v16+: NamespaceDone entry (no requestId) — route to SubscribeNamespace stream
 				const subNs0e = this.#subscribeNamespaces.values().next().value;
 				if (subNs0e === undefined) throw new Error("unexpected message 0x0e: no SubscribeNamespace stream");
 				return { route: Route.FollowUp, requestId: subNs0e };
@@ -655,9 +658,9 @@ export class ControlStreamAdapter implements Session {
 				return { route: Route.CloseStream, requestId };
 			}
 			case 0x0b: {
-				// PublishDone
+				// PublishDone: the subscriber reads its status and stream count before the end.
 				const requestId = await readRequestId();
-				return { route: Route.CloseStream, requestId };
+				return { route: Route.ErrorResponse, requestId };
 			}
 			case 0x17: {
 				// FetchCancel

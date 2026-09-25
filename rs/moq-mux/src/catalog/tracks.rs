@@ -7,52 +7,74 @@ use super::hang::{Catalog, CatalogExt};
 
 /// A catalog config that can be published as a named rendition.
 ///
-/// Implement it on your own config type to get the full catalog lifecycle through
-/// [`Reserved::track`]: reservation gating, removal on drop, and optional jitter/bitrate detection.
-/// [`VideoConfig`](hang::catalog::VideoConfig) and [`AudioConfig`](hang::catalog::AudioConfig)
-/// implement it for every extension; a custom config implements it for the one [`CatalogExt`] that
-/// holds it:
+/// Implement it on your own config type to get the full catalog lifecycle: reservation gating,
+/// removal on drop, and optional jitter/bitrate detection. [`VideoConfig`](hang::catalog::VideoConfig)
+/// and [`AudioConfig`](hang::catalog::AudioConfig) implement it for every extension; a custom
+/// config implements it for the one [`CatalogExt`] that holds it. Publish a media track under it
+/// with [`Reserved::track`], or a data track with [`Producer::binary_stream`] and the like when it
+/// embeds a data config (see [`IntoRendition`](super::IntoRendition)):
 ///
 /// ```
+/// # use std::collections::BTreeMap;
+/// # use hang::catalog::{BinaryConfig, Mode};
 /// # use moq_mux::catalog::{Estimate, RenditionConfig};
 /// # use moq_mux::catalog::hang::{Catalog, CatalogExt};
 /// # use serde::{Deserialize, Serialize};
-/// # use std::collections::BTreeMap;
 /// #[derive(Serialize, Deserialize, Clone, Default)]
-/// struct MyExt {
-///     telemetry: BTreeMap<String, Telemetry>,
+/// struct Ext {
+///     #[serde(rename = "com.example.mavlink", default)]
+///     mavlink: BTreeMap<String, Mavlink>,
 /// }
-/// impl CatalogExt for MyExt {}
+/// impl CatalogExt for Ext {}
 ///
-/// #[derive(Serialize, Deserialize, Clone, Default)]
-/// struct Telemetry {
-///     schema: String,
-///     bitrate: Option<u64>,
+/// #[derive(Serialize, Deserialize, Clone)]
+/// struct Mavlink {
+///     #[serde(flatten)]
+///     binary: BinaryConfig,
+///     sysid: u8,
 /// }
 ///
-/// impl RenditionConfig<MyExt> for Telemetry {
+/// impl AsMut<BinaryConfig> for Mavlink {
+///     fn as_mut(&mut self) -> &mut BinaryConfig {
+///         &mut self.binary
+///     }
+/// }
+///
+/// impl RenditionConfig<Ext> for Mavlink {
+///     fn insert(self, catalog: &mut Catalog<Ext>, name: &str) {
+///         catalog.ext.mavlink.insert(name.to_string(), self);
+///     }
+///     fn get_mut<'a>(catalog: &'a mut Catalog<Ext>, name: &str) -> Option<&'a mut Self> {
+///         catalog.ext.mavlink.get_mut(name)
+///     }
+///     fn remove(catalog: &mut Catalog<Ext>, name: &str) {
+///         catalog.ext.mavlink.remove(name);
+///     }
+///
+///     // Opt into bitrate detection through the embedded config.
 ///     fn detects() -> bool {
 ///         true
 ///     }
-///
-///     fn insert(self, catalog: &mut Catalog<MyExt>, name: &str) {
-///         catalog.ext.telemetry.insert(name.to_string(), self);
-///     }
-///     fn get_mut<'a>(catalog: &'a mut Catalog<MyExt>, name: &str) -> Option<&'a mut Self> {
-///         catalog.ext.telemetry.get_mut(name)
-///     }
-///     fn remove(catalog: &mut Catalog<MyExt>, name: &str) {
-///         catalog.ext.telemetry.remove(name);
-///     }
-///
-///     // Opt into bitrate detection; jitter is left undetected.
 ///     fn estimate(&self) -> Estimate {
-///         Estimate::default().with_bitrate(self.bitrate)
+///         Estimate::default().with_bitrate(self.binary.bitrate).with_jitter(self.binary.jitter)
 ///     }
 ///     fn set_estimate(&mut self, estimate: Estimate) {
-///         self.bitrate = estimate.bitrate;
+///         self.binary.bitrate = estimate.bitrate;
+///         self.binary.jitter = estimate.jitter;
 ///     }
 /// }
+///
+/// # fn example(
+/// #     broadcast: &mut moq_net::broadcast::Producer,
+/// #     catalog: &moq_mux::catalog::Producer<Ext>,
+/// # ) -> moq_mux::Result<()> {
+/// let track = broadcast.create_track("telemetry", None)?;
+/// // The producer fixes the mode, so the one passed here is only a placeholder.
+/// let entry = Mavlink { binary: BinaryConfig::new(Mode::Stream), sysid: 1 };
+/// let mut telemetry = catalog.binary_stream(track, entry)?;
+/// telemetry.append(&b"\xfd..."[..])?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// Note that `insert` takes the whole [`Catalog`], not just the extension, so the built-in media
@@ -62,7 +84,7 @@ use super::hang::{Catalog, CatalogExt};
 /// [`Reserved::track`] and [`Producer::track`](super::Producer::track) enroll the track in the
 /// broadcast timeline, measure it, and keep its estimate current automatically.
 pub trait RenditionConfig<E: CatalogExt>: Clone + Send + 'static {
-	/// Whether container writes should update this config's estimate fields.
+	/// Whether container or data-track writes should update this config's estimate fields.
 	fn detects() -> bool {
 		false
 	}
@@ -95,6 +117,17 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::JsonConfig {
 	fn remove(catalog: &mut Catalog<E>, name: &str) {
 		catalog.json.tracks.remove(name);
 	}
+
+	fn detects() -> bool {
+		true
+	}
+	fn estimate(&self) -> Estimate {
+		Estimate::default().with_jitter(self.jitter).with_bitrate(self.bitrate)
+	}
+	fn set_estimate(&mut self, estimate: Estimate) {
+		self.jitter = estimate.jitter;
+		self.bitrate = estimate.bitrate;
+	}
 }
 
 impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::BinaryConfig {
@@ -106,6 +139,17 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::BinaryConfig {
 	}
 	fn remove(catalog: &mut Catalog<E>, name: &str) {
 		catalog.binary.tracks.remove(name);
+	}
+
+	fn detects() -> bool {
+		true
+	}
+	fn estimate(&self) -> Estimate {
+		Estimate::default().with_jitter(self.jitter).with_bitrate(self.bitrate)
+	}
+	fn set_estimate(&mut self, estimate: Estimate) {
+		self.jitter = estimate.jitter;
+		self.bitrate = estimate.bitrate;
 	}
 }
 
@@ -273,6 +317,12 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 	}
 	fn remove(catalog: &mut Catalog<E>, name: &str) {
 		catalog.text.renditions.remove(name);
+	}
+	fn estimate(&self) -> Estimate {
+		Estimate::default().with_jitter(self.jitter)
+	}
+	fn set_estimate(&mut self, estimate: Estimate) {
+		self.jitter = estimate.jitter;
 	}
 }
 
@@ -483,6 +533,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	pub(crate) fn set(&mut self, mut config: C) -> crate::Result<()> {
 		let supplied = config.estimate();
 		let resolved = Self::resolved(&supplied, &self.detected);
+		self.check_jitter(&resolved)?;
 		config.set_estimate(resolved.clone());
 		{
 			let mut guard = self.catalog.modify()?;
@@ -525,16 +576,31 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if !C::detects() {
 			return Ok(());
 		}
-		self.detected = estimate.clone();
 		if !self.present {
+			self.detected = estimate;
 			return Ok(());
 		}
-		let resolved = Self::resolved(&self.supplied, &estimate);
+		let mut resolved = Self::resolved(&self.supplied, &estimate);
+		// A measurement never lowers the published jitter, including one raised through `modify`.
+		if let Some(published) = self.config()?.estimate().jitter {
+			resolved.jitter = Some(resolved.jitter.map_or(published, |jitter| jitter.max(published)));
+		}
+		self.detected = estimate;
 		if self.published.as_ref() != Some(&resolved) {
 			let mut config = self.config()?;
 			config.set_estimate(resolved.clone());
 			self.replace(config)?;
 			self.published = Some(resolved);
+		}
+		Ok(())
+	}
+
+	fn check_jitter(&self, next: &Estimate) -> crate::Result<()> {
+		if self.present
+			&& let Some(previous) = self.config()?.estimate().jitter
+			&& next.jitter.is_none_or(|jitter| jitter < previous)
+		{
+			return Err(crate::Error::JitterDecreased);
 		}
 		Ok(())
 	}
@@ -554,6 +620,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if !self.present {
 			return Err(crate::Error::NotPublished);
 		}
+		self.check_jitter(&config.estimate())?;
 		let mut guard = self.catalog.modify()?;
 		let mut next = (*guard).clone();
 		config.insert(&mut next, &self.name);
@@ -627,6 +694,89 @@ mod tests {
 	}
 
 	#[test]
+	fn published_jitter_never_decreases() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		rendition.set(config(None, Some(Duration::from_millis(100)))).unwrap();
+		let smaller = config(None, Some(Duration::from_millis(50)));
+		assert!(matches!(
+			rendition.set(smaller.clone()),
+			Err(crate::Error::JitterDecreased)
+		));
+		assert!(matches!(rendition.replace(smaller), Err(crate::Error::JitterDecreased)));
+		assert_eq!(
+			catalog.snapshot().video.renditions["v"].jitter,
+			Some(Duration::from_millis(100))
+		);
+
+		let (_broadcast, catalog, mut detected) = video_track();
+		detected.set(config(None, None)).unwrap();
+		detected
+			.estimate(Estimate::default().with_jitter(Duration::from_millis(100)))
+			.unwrap();
+		// A lower measurement holds the published value rather than failing the write path.
+		detected
+			.estimate(Estimate::default().with_jitter(Duration::from_millis(50)))
+			.unwrap();
+		assert_eq!(
+			catalog.snapshot().video.renditions["v"].jitter,
+			Some(Duration::from_millis(100))
+		);
+	}
+
+	#[test]
+	fn measurement_keeps_a_jitter_raised_by_modify() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		rendition.set(config(None, None)).unwrap();
+		rendition
+			.estimate(Estimate::default().with_jitter(Duration::from_millis(60)))
+			.unwrap();
+		let mut raised = rendition.config().unwrap();
+		raised.jitter = Some(Duration::from_millis(200));
+		rendition.replace(raised).unwrap();
+
+		rendition
+			.estimate(Estimate::default().with_jitter(Duration::from_millis(80)))
+			.unwrap();
+		assert_eq!(
+			catalog.snapshot().video.renditions["v"].jitter,
+			Some(Duration::from_millis(200))
+		);
+		rendition
+			.estimate(Estimate::default().with_jitter(Duration::from_millis(300)))
+			.unwrap();
+		assert_eq!(
+			catalog.snapshot().video.renditions["v"].jitter,
+			Some(Duration::from_millis(300))
+		);
+	}
+
+	#[test]
+	fn published_text_jitter_never_decreases() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
+		let reserved = catalog.reserve();
+		let mut rendition = reserved.init::<hang::catalog::TextConfig>("t").unwrap();
+		drop(reserved);
+
+		let text = |jitter| {
+			let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Utf8);
+			config.jitter = jitter;
+			config
+		};
+		rendition.set(text(Some(Duration::from_millis(100)))).unwrap();
+		for smaller in [Some(Duration::from_millis(50)), None] {
+			assert!(matches!(
+				rendition.set(text(smaller)),
+				Err(crate::Error::JitterDecreased)
+			));
+		}
+		assert_eq!(
+			catalog.snapshot().text.renditions["t"].jitter,
+			Some(Duration::from_millis(100))
+		);
+	}
+
+	#[test]
 	fn importer_returns_rejected_jitter() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
@@ -664,10 +814,11 @@ mod tests {
 		assert_eq!(config.container, hang::catalog::Container::Loc);
 	}
 
-	/// Feed ~40ms 100 kB frames (one per group) over more than the bitrate window, as a
-	/// [`container::Producer`](crate::container::Producer) would.
+	/// Feed ~40ms 100 kB frames over more than the bitrate window, with a measured
+	/// 40ms container batch span. PTS spacing alone says nothing about flush delay.
 	fn feed<E: CatalogExt, C: RenditionConfig<E>>(rendition: &mut Rendition<E, C>) {
 		let mut estimator = super::super::Estimator::new();
+		estimator.burst(Duration::from_millis(40));
 		for i in 0..60u64 {
 			let t = ts(i * 40_000);
 			estimator.cut(Some(t));

@@ -840,6 +840,82 @@ async function subscribeTrack(): Promise<{ subscriber: Subscriber; track: track.
 	return { subscriber, track };
 }
 
+test("older peer without priority property inherits wire priority 128", async () => {
+	const { subscriber, track } = await subscribeTrack();
+	expect((await track.info()).priority).toBe(0xff - 128);
+	const group = new GroupMessage({
+		trackAlias: ALIAS,
+		groupId: 3,
+		subGroupId: 0,
+		publisherPriority: 0,
+		flags: { ...groupFlags(true), hasPriority: false },
+	});
+	await subscriber.handleGroup(group, new Reader(undefined, encodeObjects([0]), VERSION));
+	expect(group.publisherPriority).toBe(128);
+	track.close();
+});
+
+test("an info-only lookup waits for SUBSCRIBE_OK instead of abandoning", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+	const info = subscriber.consume(Path.from("room")).track("video").info();
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("missing SUBSCRIBE stream");
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	const request = await Subscribe.decode(peer.reader, VERSION);
+
+	await peer.writer.u53(SubscribeOk.id);
+	await new SubscribeOk({
+		requestId: request.requestId,
+		trackAlias: ALIAS,
+		properties: { priority: 37 },
+	}).encode(peer.writer, VERSION);
+	expect((await info).priority).toBe(0xff - 37);
+});
+
+test("early group waits for SUBSCRIBE_OK priority before track acceptance", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("missing SUBSCRIBE stream");
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	const request = await Subscribe.decode(peer.reader, VERSION);
+
+	const flags = { ...groupFlags(true), hasPriority: false };
+	const group = new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags });
+	const arriving = subscriber.handleGroup(group, new Reader(undefined, encodeObjects([0]), VERSION));
+	const pending = await Promise.race([arriving.then(() => false), Promise.resolve(true)]);
+	expect(pending).toBe(true);
+
+	await peer.writer.u53(SubscribeOk.id);
+	await new SubscribeOk({
+		requestId: request.requestId,
+		trackAlias: ALIAS,
+		properties: { priority: 37 },
+	}).encode(peer.writer, VERSION);
+	await arriving;
+	expect((await track.info()).priority).toBe(0xff - 37);
+	expect(group.publisherPriority).toBe(37);
+	const ordered = track.ordered();
+	expect((await ordered.nextGroup())?.sequence).toBe(3);
+	const explicit = new GroupMessage({
+		trackAlias: ALIAS,
+		groupId: 4,
+		subGroupId: 0,
+		publisherPriority: 9,
+		flags: groupFlags(true),
+	});
+	await subscriber.handleGroup(explicit, new Reader(undefined, encodeObjects([0]), VERSION));
+	expect(explicit.publisherPriority).toBe(9);
+	expect((await track.info()).priority).toBe(0xff - 37);
+	expect((await ordered.nextGroup())?.sequence).toBe(4);
+	ordered.close();
+	track.close();
+});
+
 /**
  * A group is the unit an application resyncs on, so one served from partway through is
  * unusable: the objects on the stream do not decode without the head the filter excluded,

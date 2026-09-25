@@ -69,6 +69,8 @@ async def main():
 asyncio.run(main())
 ```
 
+For already-encoded live output, call `audio.flush(timestamp_us)` after each `audio.write_frame` with the same broadcast-clock PTS. It samples the transport handoff for catalog jitter. File, pipe, and network imports should omit `flush`; raw-pixel and PCM encoders inside the binding measure their own output.
+
 The three advertising operations, as the other bindings spell them:
 `client.create_broadcast(path)` (or `OriginProducer.create_broadcast`) returns
 an unannounced producer, invisible to everyone; `broadcast.announce(route)` /
@@ -79,6 +81,8 @@ advertised, and reject the requests you will not serve. A route is a
 capability, not an inventory. `announced(prefix, filter=...)` combines a literal
 root with an optional relative pattern; each announcement `.prefix` stays
 relative to the origin and `.captures` reports what the pattern wildcards matched.
+Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
+`hidden=True`.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing

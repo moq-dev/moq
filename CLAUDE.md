@@ -48,7 +48,7 @@ This file is split into nested `CLAUDE.md` files based on the language/situation
 - Try to do stuff asynchronously. ex. ask about follow-ups while tests run.
 - Try to recognize when you're stuck, or making minimal progress, and stop early.
 - If the core problem is addressed, ship it instead of spinning your wheels on meaningless revisions.
-- Benchmark any performance optimizations instead of relying on intuition.
+- Add or extend a benchmark for any performance-sensitive change so later regressions show up, and measure optimizations instead of relying on intuition.
 
 # Public API
 
@@ -83,8 +83,7 @@ Use the Nix dev shell so tooling matches CI.
 direnv loads it automatically, but if not: `nix develop --command ...`.
 
 ```bash
-just check        # Lint and compile what the branch changed
-just test         # Test what the branch changed, same scope
+just check        # Lint, compile, and test what the branch changed
 just fix          # Auto-fix lint/formatting, same scope
 ```
 

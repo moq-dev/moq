@@ -16,6 +16,10 @@ pub(crate) const NEGOTIATED: [Version; 3] = [
 
 /// ALPN strings for supported versions, most-preferred first. `ALPNS[0]` is the
 /// newest moq-lite ALPN that both sides converge on.
+///
+/// `ALPN_LITE_07_WIP` is deliberately absent: lite-07's wire format is still
+/// work-in-progress, so it is never advertised or negotiated by default. It is only
+/// reachable when both peers explicitly opt in (e.g. `--version moq-lite-07-wip`).
 pub const ALPNS: &[&str] = &[
 	ALPN_LITE_06,
 	ALPN_LITE_05,
@@ -39,6 +43,7 @@ pub(crate) const ALPN_LITE_03: &str = "moq-lite-03";
 pub(crate) const ALPN_LITE_04: &str = "moq-lite-04";
 pub(crate) const ALPN_LITE_05: &str = "moq-lite-05";
 pub(crate) const ALPN_LITE_06: &str = "moq-lite-06";
+pub(crate) const ALPN_LITE_07_WIP: &str = "moq-lite-07-wip";
 pub(crate) const ALPN_14: &str = "moq-00";
 pub(crate) const ALPN_15: &str = "moqt-15";
 pub(crate) const ALPN_16: &str = "moqt-16";
@@ -49,7 +54,8 @@ pub(crate) const ALPN_20: &str = "moqt-20";
 pub(crate) const ALPN_21: &str = "moqt-21";
 pub(crate) const ALPN_22: &str = "moqt-22";
 
-const ALL: [Version; 15] = [
+const ALL: [Version; 16] = [
+	Version::Lite(lite::Version::Lite07),
 	Version::Lite(lite::Version::Lite06),
 	Version::Lite(lite::Version::Lite05),
 	Version::Lite(lite::Version::Lite04),
@@ -92,6 +98,7 @@ impl Version {
 			Self::Lite(lite::Version::Lite04) => "moq-lite-04",
 			Self::Lite(lite::Version::Lite05) => "moq-lite-05",
 			Self::Lite(lite::Version::Lite06) => "moq-lite-06",
+			Self::Lite(lite::Version::Lite07) => "moq-lite-07-wip",
 			Self::Ietf(ietf::Version::Draft14) => "moq-transport-14",
 			Self::Ietf(ietf::Version::Draft15) => "moq-transport-15",
 			Self::Ietf(ietf::Version::Draft16) => "moq-transport-16",
@@ -113,6 +120,7 @@ impl Version {
 			0xff0dad04 => Some(Self::Lite(lite::Version::Lite04)),
 			0xff0dad05 => Some(Self::Lite(lite::Version::Lite05)),
 			0xff0dad06 => Some(Self::Lite(lite::Version::Lite06)),
+			0xff0dad07 => Some(Self::Lite(lite::Version::Lite07)),
 			0xff00000e => Some(Self::Ietf(ietf::Version::Draft14)),
 			0xff00000f => Some(Self::Ietf(ietf::Version::Draft15)),
 			0xff000010 => Some(Self::Ietf(ietf::Version::Draft16)),
@@ -135,6 +143,7 @@ impl Version {
 			Self::Lite(lite::Version::Lite04) => 0xff0dad04,
 			Self::Lite(lite::Version::Lite05) => 0xff0dad05,
 			Self::Lite(lite::Version::Lite06) => 0xff0dad06,
+			Self::Lite(lite::Version::Lite07) => 0xff0dad07,
 			Self::Ietf(ietf::Version::Draft14) => 0xff00000e,
 			Self::Ietf(ietf::Version::Draft15) => 0xff00000f,
 			Self::Ietf(ietf::Version::Draft16) => 0xff000010,
@@ -158,6 +167,7 @@ impl Version {
 			ALPN_LITE_04 => Some(Self::Lite(lite::Version::Lite04)),
 			ALPN_LITE_05 => Some(Self::Lite(lite::Version::Lite05)),
 			ALPN_LITE_06 => Some(Self::Lite(lite::Version::Lite06)),
+			ALPN_LITE_07_WIP => Some(Self::Lite(lite::Version::Lite07)),
 			ALPN_14 => Some(Self::Ietf(ietf::Version::Draft14)),
 			ALPN_15 => Some(Self::Ietf(ietf::Version::Draft15)),
 			ALPN_16 => Some(Self::Ietf(ietf::Version::Draft16)),
@@ -174,6 +184,7 @@ impl Version {
 	/// Returns the ALPN string for this version.
 	pub fn alpn(&self) -> &'static str {
 		match self {
+			Self::Lite(lite::Version::Lite07) => ALPN_LITE_07_WIP,
 			Self::Lite(lite::Version::Lite06) => ALPN_LITE_06,
 			Self::Lite(lite::Version::Lite05) => ALPN_LITE_05,
 			Self::Lite(lite::Version::Lite04) => ALPN_LITE_04,
@@ -286,8 +297,17 @@ pub struct Versions(Vec<Version>);
 
 impl Versions {
 	/// All versions exposed by default.
+	///
+	/// `Lite07` is intentionally excluded: its wire format is still work-in-progress,
+	/// so it is not advertised until a caller opts in explicitly (e.g. a pinned
+	/// `version = ["moq-lite-07-wip"]`). An opt-in set that includes it negotiates normally.
 	pub fn all() -> Self {
-		Self(ALL.to_vec())
+		Self(
+			ALL.iter()
+				.filter(|version| !matches!(version, Version::Lite(lite::Version::Lite07)))
+				.copied()
+				.collect(),
+		)
 	}
 
 	/// Compute the unique ALPN strings needed for these versions.
@@ -372,5 +392,20 @@ mod tests {
 		assert_eq!(Versions::all().iter().next(), Some(&newest));
 		assert_eq!(Versions::all().alpns().first(), Some(&newest.alpn()));
 		assert_eq!(ALPNS.first(), Some(&newest.alpn()));
+	}
+
+	#[test]
+	fn lite_07_wip_is_opt_in_only() {
+		let wip = Version::Lite(lite::Version::Lite07);
+		assert_eq!(wip.alpn(), "moq-lite-07-wip");
+		assert_eq!(wip.to_string(), "moq-lite-07-wip");
+		assert_eq!("moq-lite-07-wip".parse::<Version>(), Ok(wip));
+		assert_eq!(Version::from_alpn("moq-lite-07-wip"), Some(wip));
+		assert!("moq-lite-07".parse::<Version>().is_err());
+		assert_eq!(Version::from_alpn("moq-lite-07"), None);
+
+		assert!(!Versions::all().contains(&wip));
+		assert!(!ALPNS.contains(&wip.alpn()));
+		assert_eq!(Versions::from(wip).alpns(), [wip.alpn()]);
 	}
 }

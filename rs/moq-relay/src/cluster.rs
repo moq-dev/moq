@@ -1930,9 +1930,12 @@ impl Cluster {
 
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
 		// root, so presence is keyed under the empty root within the cluster tier.
-		// The peer's routes entered the cluster elsewhere.
+		// The peer's routes entered the cluster elsewhere. A peer that predates the
+		// hidden opt-in still discovers our hidden routes; see `connection::authorize`.
+		let origin = self.origin.clone().peer();
 		let mut client = client
-			.with_origin(self.origin.clone().peer())
+			.with_publisher(origin.consume().with_hidden(true))
+			.with_subscriber(origin)
 			.with_stats(self.stats.tier(self.cluster_tier()).session(""));
 		if let Some(cost) = cost {
 			client = client.with_cost(cost);
@@ -3006,7 +3009,7 @@ mod tests {
 
 		// Snapshot a consumer on the cluster origin before run() takes ownership of
 		// `cluster` so we can later check that the registration was published.
-		let mut watcher = cluster.origin.consume().announced();
+		let mut watcher = cluster.origin.consume().with_hidden(true).announced();
 
 		let started = cluster.clone().start().await.expect("cluster start");
 		let mut handle = tokio::spawn(async move { started.run().await });

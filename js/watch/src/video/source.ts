@@ -289,11 +289,6 @@ export class Source {
 		effect.spawn(async () => {
 			const available: Record<string, Catalog.VideoConfig> = {};
 
-			// `supported` comes from the consumer, so we cannot assume it ever settles. A rerun
-			// waits for the tasks it spawned, so an unraced probe would hold the next run shut
-			// for good. Captured here so it stays this run's promise once we start awaiting.
-			const cancelled = effect.cancel.then(() => undefined);
-
 			for (const [name, config] of Object.entries(renditions)) {
 				const cacheKey = (supported as CacheableSupported)[supportCacheKey];
 				const key = cacheKey ? cacheKey(config) : JSON.stringify(config);
@@ -304,7 +299,9 @@ export class Source {
 				} else {
 					let failed = false;
 					try {
-						isSupported = await Promise.race([supported(config), cancelled]);
+						// `supported` comes from the consumer, so we cannot assume it ever settles. A
+						// rerun waits for the tasks it spawned, so an unraced probe would hold it shut.
+						isSupported = await effect.race(supported(config));
 					} catch (err) {
 						failed = true;
 						console.warn(

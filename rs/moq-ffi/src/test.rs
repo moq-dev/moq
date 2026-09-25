@@ -2,6 +2,7 @@ use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
 use super::session::{MoqClient, MoqSession};
+use crate::binary::MoqBinaryConfig;
 use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqSubscription;
@@ -155,6 +156,7 @@ fn audio_init(format: MoqAudioFormat, data: Vec<u8>) -> MoqAudioInit {
 		format,
 		data,
 		label: None,
+		track: None,
 	}
 }
 
@@ -164,6 +166,7 @@ fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
 		data,
 		label: None,
 		hint: None,
+		track: None,
 	}
 }
 
@@ -1240,6 +1243,65 @@ async fn requested_track_dynamic_survives_accept() {
 }
 
 #[tokio::test]
+async fn video_publish_named_track() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
+
+	let named = |track: &str| MoqVideoInit {
+		track: Some(track.into()),
+		..video_init(MoqVideoFormat::Avc3, h264_init())
+	};
+	let hd = broadcast.publish_video(named("hd")).unwrap();
+	assert_eq!(hd.name().unwrap(), "hd");
+	let sd = broadcast.publish_video_stream(named("sd")).unwrap();
+	drop(sd);
+
+	// A name is the caller's contract, so a duplicate fails rather than being made unique.
+	assert!(matches!(broadcast.publish_video(named("hd")), Err(MoqError::Codec(_))));
+
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out waiting for catalog")
+		.unwrap()
+		.expect("expected a catalog");
+	assert!(catalog.video.contains_key("hd"), "catalog: {:?}", catalog.video.keys());
+}
+
+#[tokio::test]
+async fn requested_track_refuses_a_name() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let subscribe = tokio::spawn(async move {
+		consumer
+			.subscribe_media("requested".into(), crate::media::MoqContainer::Legacy, None)
+			.await
+	});
+
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for requested track")
+		.unwrap();
+
+	let named = MoqVideoInit {
+		track: Some("other".into()),
+		..video_init(MoqVideoFormat::Avc3, h264_init())
+	};
+	assert!(matches!(
+		broadcast.publish_video_on_track(&request, named),
+		Err(MoqError::Codec(_))
+	));
+
+	// The refusal leaves the request unaccepted, so it still publishes under its own name.
+	let media = broadcast
+		.publish_video_on_track(&request, video_init(MoqVideoFormat::Avc3, h264_init()))
+		.unwrap();
+	assert_eq!(media.name().unwrap(), "requested");
+	subscribe.abort();
+}
+
+#[tokio::test]
 async fn dynamic_track_request_can_publish_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();
@@ -1295,6 +1357,8 @@ async fn dynamic_track_request_can_publish_media() {
 			timestamp_us: 20_000,
 		})
 		.unwrap();
+	media.flush(20_000).unwrap();
+	assert!(media.flush(u64::MAX).is_err(), "unrepresentable PTS must fail");
 
 	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
 		.await
@@ -1500,6 +1564,7 @@ async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
 		.announced(MoqAnnounceConfig {
 			prefix: "a/".into(),
 			filter: None,
+			hidden: false,
 		})
 		.unwrap();
 
@@ -1552,6 +1617,7 @@ async fn announced_filters_patterns_and_reports_captures() {
 		.announced(MoqAnnounceConfig {
 			prefix: "room".into(),
 			filter: Some("*/chat".into()),
+			hidden: false,
 		})
 		.unwrap();
 
@@ -1577,6 +1643,36 @@ async fn announced_filters_patterns_and_reports_captures() {
 	assert!(update.active());
 
 	chat.finish().unwrap();
+}
+
+/// A `.`-named broadcast is listed only when the config opts in or the prefix names it.
+#[tokio::test]
+async fn announced_hides_dot_paths_unless_asked() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let _stats = create_announced(&origin, ".stats/node");
+	let _cam = create_announced(&origin, "cam");
+
+	for (prefix, hidden, expected) in [
+		("", false, "cam"),
+		("", true, ".stats/node"),
+		(".stats", false, ".stats/node"),
+	] {
+		let announced = consumer
+			.announced(MoqAnnounceConfig {
+				prefix: prefix.into(),
+				filter: None,
+				hidden,
+			})
+			.unwrap();
+		// Updates arrive in path order, and `.` sorts before letters.
+		let update = tokio::time::timeout(TIMEOUT, announced.next())
+			.await
+			.expect("timed out waiting for an announcement")
+			.unwrap()
+			.expect("the origin should keep announcing");
+		assert_eq!(update.prefix(), expected, "prefix {prefix:?}, hidden {hidden}");
+	}
 }
 
 /// A broadcast consumed straight from a local producer has no origin, so a rendition naming a
@@ -4399,4 +4495,126 @@ async fn shutdown_cancels_and_drops_cleanly() {
 	drop(server);
 	drop(client_origin);
 	drop(server_origin);
+}
+
+/// The broadcast's current catalog, read on the publish side.
+fn published_catalog(
+	broadcast: &MoqBroadcastProducer,
+) -> moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra> {
+	broadcast.with_state(|state| Ok(state.catalog.snapshot())).unwrap()
+}
+
+/// JSON tracks are advertised in the catalog (no `set_catalog_section` needed) and retired on finish.
+#[tokio::test]
+async fn json_tracks_are_advertised_in_the_catalog() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let snapshot = broadcast
+		.publish_json_snapshot(
+			"status".into(),
+			MoqJsonSnapshotConfig {
+				delta_ratio: 4,
+				compression: true,
+			},
+		)
+		.unwrap();
+	let stream = broadcast
+		.publish_json_stream("events".into(), MoqJsonStreamConfig { compression: false })
+		.unwrap();
+
+	let catalog = published_catalog(&broadcast);
+	let entry = catalog.json.tracks.get("status").expect("snapshot track advertised");
+	assert_eq!(entry.mode, hang::catalog::Mode::Snapshot);
+	assert_eq!(entry.compression, Some(hang::catalog::Compression::Deflate));
+	let entry = catalog.json.tracks.get("events").expect("stream track advertised");
+	assert_eq!(entry.mode, hang::catalog::Mode::Stream);
+	assert_eq!(entry.compression, None);
+
+	snapshot.finish().unwrap();
+	let catalog = published_catalog(&broadcast);
+	assert!(
+		!catalog.json.tracks.contains_key("status"),
+		"finished track still advertised"
+	);
+	assert!(catalog.json.tracks.contains_key("events"));
+	stream.finish().unwrap();
+	assert!(published_catalog(&broadcast).json.tracks.is_empty());
+}
+
+/// Binary tracks carry their mode and (optional) media type in the catalog.
+#[tokio::test]
+async fn binary_tracks_are_advertised_in_the_catalog() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let thumb = broadcast
+		.publish_binary_snapshot(
+			"thumbnail".into(),
+			MoqBinaryConfig {
+				compression: false,
+				mime: Some("image/jpeg".into()),
+			},
+		)
+		.unwrap();
+	let log = broadcast
+		.publish_binary_stream(
+			"log".into(),
+			MoqBinaryConfig {
+				compression: false,
+				mime: None,
+			},
+		)
+		.unwrap();
+	thumb.update(vec![0xff, 0xd8, 0xff]).unwrap();
+	log.append(vec![1, 2, 3]).unwrap();
+
+	let catalog = published_catalog(&broadcast);
+	let entry = catalog
+		.binary
+		.tracks
+		.get("thumbnail")
+		.expect("binary snapshot advertised");
+	assert_eq!(entry.mode, hang::catalog::Mode::Snapshot);
+	assert_eq!(entry.mime.as_deref(), Some("image/jpeg"));
+	let entry = catalog.binary.tracks.get("log").expect("binary stream advertised");
+	assert_eq!(entry.mode, hang::catalog::Mode::Stream);
+	assert_eq!(entry.mime, None);
+
+	thumb.finish().unwrap();
+	assert!(matches!(thumb.update(vec![0]), Err(MoqError::Closed)));
+	log.finish().unwrap();
+	assert!(published_catalog(&broadcast).binary.tracks.is_empty());
+}
+
+/// A second data track under a name the catalog already carries is refused, leaving the first.
+#[tokio::test]
+async fn data_track_names_cannot_collide() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let first = broadcast
+		.publish_json_snapshot(
+			"state".into(),
+			MoqJsonSnapshotConfig {
+				delta_ratio: 0,
+				compression: false,
+			},
+		)
+		.unwrap();
+	assert!(
+		broadcast
+			.publish_binary_stream(
+				"state".into(),
+				MoqBinaryConfig {
+					compression: false,
+					mime: None,
+				},
+			)
+			.is_err(),
+		"a duplicate data track name should fail"
+	);
+	assert_eq!(
+		published_catalog(&broadcast)
+			.json
+			.tracks
+			.get("state")
+			.map(|e| e.mode.clone()),
+		Some(hang::catalog::Mode::Snapshot)
+	);
+	first.finish().unwrap();
 }

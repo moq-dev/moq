@@ -242,6 +242,119 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	web_handle.abort();
 }
 
+/// Read announcements until `until` shows up, returning every active prefix seen.
+async fn announced_until(announcements: &mut moq_net::announce::Consumer, until: &str) -> Vec<String> {
+	let mut seen = Vec::new();
+	while !seen.iter().any(|prefix| prefix == until) {
+		let update = tokio::time::timeout(TIMEOUT, announcements.next())
+			.await
+			.expect("announcement timeout")
+			.expect("origin closed");
+		if update.kind.is_active() {
+			seen.push(update.prefix.as_str().to_owned());
+		}
+	}
+	seen
+}
+
+/// A `.`-named broadcast stays out of discovery unless the reader opts in, and
+/// a client that predates the opt-in (moq-lite-06) never discovers it. Subscribing
+/// by exact path needs no opt-in.
+#[tokio::test]
+async fn hidden_broadcasts_need_a_lite07_opt_in() {
+	// lite-07 is work-in-progress and off by default, so the relay must enable it.
+	let lite07: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+	let lite06: moq_net::Version = "moq-lite-06".parse().unwrap();
+	let (port, web_handle) = spawn_versioned_relay(vec![lite07, lite06]).await;
+	let url: url::Url = format!("ws://127.0.0.1:{port}/hidden").parse().expect("parse url");
+
+	let pub_origin = moq_tokio::origin::spawn();
+	let hidden = pub_origin.create_broadcast(".x/y").expect("create hidden");
+	hidden.announce(Default::default()).expect("announce hidden");
+	let track = hidden.create_track("video", None).expect("create track");
+	track
+		.append_group()
+		.expect("append group")
+		.write_frame(moq_net::Timestamp::ZERO, b"hidden".as_ref())
+		.expect("write frame");
+	// The relay's announce request carries the opt-in only on lite-07, so the publisher
+	// must speak it too for the hidden route to reach the relay.
+	let (_pub_client, pub_connection) = tokio::time::timeout(
+		TIMEOUT,
+		connect_once(client_version(Some(lite07)).with_publisher(&pub_origin), url.clone()),
+	)
+	.await
+	.expect("publisher connect timeout")
+	.expect("publisher connect failed");
+
+	// An opted-in lite-07 client discovers the hidden broadcast.
+	let opted_origin = moq_tokio::origin::spawn();
+	let mut opted = opted_origin.consume().with_hidden(true).announced();
+	let (_opted_client, opted_connection) = tokio::time::timeout(
+		TIMEOUT,
+		connect_once(client_version(Some(lite07)).with_subscriber(opted_origin), url.clone()),
+	)
+	.await
+	.expect("opted connect timeout")
+	.expect("opted connect failed");
+	assert_eq!(announced_until(&mut opted, ".x/y").await, [".x/y"]);
+
+	// Announced after the hidden one, so any client that could see both lists the
+	// hidden one first (the relay drains its table in path order).
+	let visible = pub_origin.create_broadcast("visible").expect("create visible");
+	visible.announce(Default::default()).expect("announce visible");
+	assert_eq!(announced_until(&mut opted, "visible").await, ["visible"]);
+
+	// A lite-07 client that did not opt in, and a lite-06 client that cannot even
+	// when its local reader asks, see only the visible broadcast.
+	for (version, local_hidden) in [(lite07, false), (lite06, true)] {
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume().with_hidden(local_hidden);
+		let mut announcements = consumer.announced();
+		let (_client, connection) = tokio::time::timeout(
+			TIMEOUT,
+			connect_once(client_version(Some(version)).with_subscriber(origin), url.clone()),
+		)
+		.await
+		.expect("connect timeout")
+		.expect("connect failed");
+		assert_eq!(connection.version(), Some(version));
+		assert_eq!(
+			announced_until(&mut announcements, "visible").await,
+			["visible"],
+			"{version} discovered a hidden broadcast"
+		);
+
+		// Hiding narrows discovery only: the lite-07 session still mirrors the route,
+		// so a subscription by exact path reaches the broadcast. A lite-06 session never
+		// learns the route, so it has nothing to resolve through.
+		if version == lite06 {
+			continue;
+		}
+		let bc = consumer
+			.request_broadcast(".x/y")
+			.await
+			.expect("hidden broadcast resolves");
+		let mut sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
+		let mut group = tokio::time::timeout(TIMEOUT, sub.recv_group())
+			.await
+			.expect("recv_group timeout")
+			.expect("recv_group failed")
+			.expect("track closed");
+		let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("read_frame timeout")
+			.expect("read frame")
+			.expect("frame");
+		assert_eq!(&frame.payload[..], b"hidden");
+		drop(connection);
+	}
+
+	drop((track, hidden, visible));
+	drop((pub_connection, opted_connection));
+	web_handle.abort();
+}
+
 /// `--server-version` applies to the WebSocket fallback as well as QUIC.
 #[tokio::test]
 async fn relay_websocket_honors_server_version() {

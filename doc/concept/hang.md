@@ -54,7 +54,7 @@ A few things the catalog can express beyond decoder config:
 
 - **Labels.** Any rendition may carry a human-readable `label` for a track picker. The map key stays the track name used to subscribe, so labels need not be unique and renaming one doesn't rename the track.
 - **Renditions in another broadcast.** A rendition may point at a relative broadcast path, so a transcoder can publish a ladder that adds low rungs and references the source's original rendition without re-publishing its bytes. The path resolves against where the consumer found the catalog, so a reference that escapes above the root names nothing and the catalog is rejected.
-- **Jitter.** A rendition can say how long the publisher holds a frame before flushing it, in whole milliseconds rounded up: one frame for a track flushed immediately, the B-frame depth for a reordered one, the fragment for a segmented one. It describes the publisher, never the network, only grows over the life of a stream, and a player sizes its buffer to at least this much. A `0` is read as absent.
+- **Jitter.** A rendition can say how far its frames fell behind the media clock before the publisher flushed them, in whole milliseconds rounded up. Encoders report the spread of lateness above each rendition's own recent minimum, so a constant encoder delay is not jitter; container imports estimate batch spans without counting ingest delay. It describes the publisher, never the network, only grows over the life of a stream, and a player sizes its buffer to at least this much. A `0` is read as absent.
 - **Stalled renditions.** A publisher can flag a rendition as temporarily bad so players prefer another one without the track disappearing. First-party video publishers set this flag after more than three frame intervals of source silence or encoding lag while subscribed, and clear it after three on-time completed frames or when idle. Browser and native capture poll while waiting; FLV and MPEG-TS importers observe video silence as container data arrives. The shared detector is `hang::catalog::stalled::Detector` in Rust and `Catalog.Stalled.Detector` in JavaScript. It is a playback diagnostic, not an authorization or routing signal.
 - **Archive.** A broadcast may advertise an `archive` entry naming its timeline track (a small index of each complete aligned segment) and, if recorded, the replay MoQ path, object-store URL, and format version. The timeline is what lets the [HLS gateway](/bin/hls) build playlists without subscribing to media.
 - **Clock.** The optional root `clock` maps PTS zero to wall time so every media track and the archive index share one fixed epoch after timescale conversion. It is independent of `archive`, so a live-only publisher can expose wall-clock timing without creating a segment index.
@@ -104,7 +104,8 @@ document would silently discard everything but the last payload:
 
 The rest is descriptive: `compression` (`deflate`, the same group-scoped
 `deflate-raw` the catalog uses), `schema` on a JSON track, `mime` on a binary
-one, plus the optional `broadcast` reference. A
+one, `bitrate` and `jitter` with the same meaning as for media, plus the
+optional `broadcast` reference. A
 consumer that doesn't recognize a `mode` or `compression` ignores that track and
 round-trips it verbatim.
 
@@ -112,8 +113,15 @@ In Rust the catalog owns the lifetime: `catalog.json_stream(track, config)` (or
 `json_snapshot` / `binary_snapshot` / `binary_stream`) writes the entry and
 retracts it when the producer drops. Read the config from `catalog.json.tracks`
 or `catalog.binary.tracks`, then pair its name and config with
-`moq_mux::catalog::Entry::new` to subscribe. In the browser, read the same map,
+`moq_mux::catalog::Entry::new` to subscribe. In C, `moq_publish_json_*` and
+`moq_publish_binary_*` do the same, retracting on `_finish`. In the browser, read the same map,
 subscribe by name, and hand the track to `@moq/json` or `@moq/binary`.
+
+An application with its own per-track fields can list a data track in its own
+root section instead, flattening the JSON or binary entry beside those fields
+so there is one entry per track. Name the section with a namespaced key such as
+`com.example.mavlink`. A generic consumer only finds tracks in `json` and
+`binary`.
 
 ## Container
 
