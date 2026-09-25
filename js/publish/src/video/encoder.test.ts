@@ -568,7 +568,10 @@ test("cut forces a keyframe, coalescing requests and spacing them at least 500ms
 	});
 
 	class Frame {
-		constructor(readonly timestamp: number) {}
+		readonly timestamp: number;
+		constructor(timestamp: number) {
+			this.timestamp = timestamp;
+		}
 		clone(): Frame {
 			return new Frame(this.timestamp);
 		}
