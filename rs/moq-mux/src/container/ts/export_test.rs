@@ -3808,6 +3808,39 @@ async fn rewind_restarts_the_stall() {
 	assert_eq!(export.discontinuity(), 1);
 }
 
+/// A frame held across a rewind starts the new generation's hold afresh rather than
+/// from when it first arrived.
+#[tokio::test(start_paused = true)]
+async fn rewind_restarts_a_held_frame() {
+	let max_age = Duration::from_millis(500);
+	let mut rig = Interleave::new();
+	let mut export = rig.export(max_age).await;
+	let mut out = Vec::new();
+
+	rig.video(0);
+	rig.audio_until(1, &mut export, &mut out);
+	for tick in 1..=5 {
+		rig.video(tick);
+	}
+	// Audio jumps past the coming break, so it is held waiting on the video.
+	rig.audio_index = (GOP + 3) * VIDEO_US / AUDIO_US;
+	rig.audio_until(rig.audio_index * AUDIO_US + 1, &mut export, &mut out);
+	tokio::time::advance(max_age).await;
+
+	rig.video.discontinuity().unwrap();
+	rig.video(GOP);
+	out.extend(poll_frames(&mut export));
+	assert_eq!(
+		export.discontinuity(),
+		0,
+		"the held audio went around the video at once"
+	);
+
+	tokio::time::advance(max_age).await;
+	out.extend(poll_frames(&mut export));
+	assert_eq!(export.discontinuity(), 1, "the new generation never went out");
+}
+
 /// A section lost before the cycle wraps commits an observed subset; the next
 /// cycle must *converge* to the full set rather than flip-flop between subsets.
 /// The repetition fast-path skips sections already active, so without the

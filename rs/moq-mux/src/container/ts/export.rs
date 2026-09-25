@@ -1088,7 +1088,8 @@ impl<E: catalog::Catalog> Export<E> {
 		self.keyframes.clear();
 		self.queue.clear();
 		self.watermark = None;
-		// The new generation waits for every track again, with a fresh budget.
+		// The new generation waits for every track again, with a fresh budget: a
+		// frame held across the break restarts its `arrived` below.
 		self.stall = None;
 		self.clock = None;
 		self.low = None;
@@ -1107,7 +1108,8 @@ impl<E: catalog::Catalog> Export<E> {
 			if let Some(pending) = track.pending.as_ref() {
 				track.discontinuity = pending.discontinuity;
 			}
-			if let Some(pending) = track.pending.take() {
+			if let Some(mut pending) = track.pending.take() {
+				pending.arrived = web_async::time::Instant::now();
 				track.pending = track.admit(pending, self.epoch);
 			}
 		}
