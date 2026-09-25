@@ -230,12 +230,19 @@ async fn remote_lite_consumer_sees_what_a_local_one_does() {
 #[tokio::test]
 async fn remote_ietf_consumer_sees_what_a_local_one_does() {
 	tokio::time::pause();
-	let mut seen = lifecycle(Observer::Remote("moq-transport-19")).await;
-	// Every IETF subscription ends in error today, announced or not: the subscriber
-	// reads the publisher's PUBLISH_DONE as trailing bytes (/quest/m1/ietf-publish-done.md).
-	// The track still carries on across the retraction; only its end differs.
-	assert_eq!(seen.remove(4), "draining: after then error dropped");
-	let mut expected = EXPECTED.to_vec();
-	expected.remove(4);
-	assert_eq!(seen, expected);
+	// Drafts 14 to 16 carry each request over the control stream; 17 and later give it
+	// its own stream. Both have to end a finished track the way moq-lite does.
+	for version in [
+		"moq-transport-14",
+		"moq-transport-15",
+		"moq-transport-16",
+		"moq-transport-17",
+		"moq-transport-18",
+		"moq-transport-19",
+		"moq-transport-20",
+		"moq-transport-21",
+		"moq-transport-22",
+	] {
+		assert_eq!(lifecycle(Observer::Remote(version)).await, EXPECTED, "{version}");
+	}
 }
