@@ -36,12 +36,14 @@ impl<E: CatalogExt, D, C: RenditionConfig<E> + AsMut<D>> IntoRendition<E, D> for
 pub(crate) struct Listing {
 	rendition: Box<dyn Owned>,
 	estimator: Estimator,
+	/// Whether writes are measured: only when the entry detects its estimate and the publisher
+	/// didn't supply a bitrate, which detection never overrides.
+	measures: bool,
 }
 
 /// The parts of a [`Rendition`] a [`Listing`] uses, without its config type.
 trait Owned: Send + Sync {
 	fn name(&self) -> &str;
-	fn detects(&self) -> bool;
 	fn timestamp(&self) -> crate::Result<moq_net::Timestamp>;
 	fn estimate(&mut self, estimate: super::Estimate) -> crate::Result<()>;
 }
@@ -49,9 +51,6 @@ trait Owned: Send + Sync {
 impl<E: CatalogExt, C: RenditionConfig<E>> Owned for Rendition<E, C> {
 	fn name(&self) -> &str {
 		Rendition::name(self)
-	}
-	fn detects(&self) -> bool {
-		C::detects()
 	}
 	fn timestamp(&self) -> crate::Result<moq_net::Timestamp> {
 		Rendition::timestamp(self, None)
@@ -67,10 +66,12 @@ impl Listing {
 		mut rendition: Rendition<E, C>,
 		config: C,
 	) -> crate::Result<Self> {
+		let measures = C::detects() && config.estimate().bitrate.is_none();
 		rendition.set(config)?;
 		Ok(Self {
 			rendition: Box::new(rendition),
 			estimator: Estimator::new(),
+			measures,
 		})
 	}
 
@@ -81,10 +82,10 @@ impl Listing {
 
 	/// Measure a write of `bytes`, stamped on the broadcast clock.
 	///
-	/// `bytes` is only evaluated for an entry that detects its estimate, since measuring can cost a
+	/// `bytes` is only evaluated for an entry that measures its bitrate, since measuring can cost a
 	/// second serialization.
 	pub(crate) fn record(&mut self, bytes: impl FnOnce() -> usize) -> crate::Result<()> {
-		if !self.rendition.detects() {
+		if !self.measures {
 			return Ok(());
 		}
 		let now = self.rendition.timestamp()?;

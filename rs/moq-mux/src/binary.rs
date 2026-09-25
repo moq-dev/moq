@@ -639,5 +639,23 @@ mod test {
 			assert_eq!(entry.binary.bitrate, Some(1_000_000));
 			assert_eq!(entry.binary.jitter, None, "write spacing is not a flush delay");
 		}
+
+		/// A supplied bitrate is authoritative, so writes aren't measured at all: for JSON that would
+		/// be a second serialization per write, for nothing.
+		#[test]
+		fn a_supplied_bitrate_skips_measurement() {
+			let (mut broadcast, catalog) = catalog();
+			let mut entry = mavlink(1);
+			entry.binary.bitrate = Some(64_000);
+			let mut telemetry = catalog
+				.binary_stream(track(&mut broadcast, "telemetry"), entry)
+				.unwrap();
+
+			let listing = telemetry.listing.as_mut().unwrap();
+			listing
+				.record(|| panic!("measured a write despite a supplied bitrate"))
+				.unwrap();
+			assert_eq!(catalog.snapshot().ext.mavlink["telemetry"].binary.bitrate, Some(64_000));
+		}
 	}
 }
