@@ -1,12 +1,15 @@
-import { describe, expect, it } from "bun:test";
-import { Time } from "@moq/net";
+import { describe, expect, it, spyOn } from "bun:test";
+import * as Container from "@moq/hang/container";
+import { Group, Time, Track, Varint } from "@moq/net";
+import { AUTO_MAX_AGE, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
 import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
 
 // Replay recorded-shape arrival traces through both rings and count what a listener would hear:
 // quanta rendered short (an underrun) and samples the ring threw away (a skip). Both rings are
 // driven through the same harness, since the postMessage fallback is the path every page without
-// cross-origin isolation takes.
+// cross-origin isolation takes. Each ring is sized from the target the estimator settles on, measured
+// through the transport subscription and container consumer the decoder reads.
 
 const RATE = 48000;
 const QUANTUM = 128; // an AudioWorklet render quantum
@@ -51,17 +54,78 @@ function trace(frames: number, burst: number, spread: number, seed = 7): Arrival
 	return out;
 }
 
+/** A legacy container frame: the media timestamp, then a payload the consumer never decodes. */
+function encode(media: Time.Micro): Uint8Array {
+	const timestamp = Varint.encode(media);
+	const frame = new Uint8Array(timestamp.byteLength + 1);
+	frame.set(timestamp, 0);
+	return frame;
+}
+
+interface Measured {
+	/** The playout target after each distinct arrival instant. */
+	targets: Time.Milli[];
+	/** Frames that reached the consumer's reader rather than being dropped for age. */
+	delivered: number;
+}
+
 /**
- * Roughly what the estimator converges on for a steady trace: the p95 arrival delay plus one frame.
- * The estimator itself is graded against the conformance corpus in @moq/hang; this only sizes the
- * rings under test.
+ * Feed `t` through the path the decoder measures on: a transport subscription into a container
+ * consumer, on a stubbed monotonic clock, one group per frame. After each arrival `budget` turns the
+ * current target into the subscription's max age, the way the decoder does.
  */
-function target(t: Arrival[]): number {
-	let min = Number.POSITIVE_INFINITY;
-	for (const { media, arrival } of t) min = Math.min(min, arrival - media);
-	const spreads = t.map(({ media, arrival }) => arrival - media - min).sort((a, b) => a - b);
-	const p95 = Math.ceil(spreads[Math.floor(spreads.length * 0.95)]);
-	return p95 + CHUNK_MS;
+async function measure(t: Arrival[], budget: (target: Time.Milli) => Time.Milli): Promise<Measured> {
+	let clock = 0;
+	const now = spyOn(performance, "now").mockImplementation(() => clock);
+	const track = new Track.Producer("audio");
+	const subscriber = track.subscribe({ maxAge: budget(Time.Milli.zero) });
+	const consumer = new Container.Consumer(subscriber, {
+		format: new Container.Legacy.Format("audio"),
+		maxAge: AUTO_MAX_AGE,
+	});
+
+	const result: Measured = { targets: [], delivered: 0 };
+	const reader = (async () => {
+		for (;;) {
+			const next = await consumer.next();
+			if (!next) return;
+			if (next.frame) result.delivered++;
+		}
+	})();
+
+	try {
+		let next = 0;
+		while (next < t.length) {
+			clock = t[next].arrival;
+			for (; next < t.length && t[next].arrival === clock; next++) {
+				const media = Time.Micro.fromMilli(t[next].media as Time.Milli);
+				const group = new Group.Producer(next);
+				group.writeFrame({ payload: encode(media), timestamp: Time.Timestamp.fromMicros(media) });
+				group.close();
+				track.writeGroup(group);
+			}
+
+			// A macrotask boundary, so the group readers have observed everything written above.
+			await new Promise((resolve) => setImmediate(resolve));
+
+			const current = target({ measured: consumer.spread.peek(), frame: CHUNK_MS as Time.Milli });
+			result.targets.push(current);
+			subscriber.update({ maxAge: budget(current) });
+		}
+	} finally {
+		track.close();
+		consumer.close();
+		await reader;
+		now.mockRestore();
+	}
+
+	return result;
+}
+
+/** The target the estimator settles on by the end of `t`, given the subscription "auto" asks for. */
+async function settled(t: Arrival[]): Promise<number> {
+	const { targets } = await measure(t, (target) => Time.Milli.max(target, AUTO_MAX_AGE));
+	return targets[targets.length - 1];
 }
 
 /** The two rings behind one interface, since the harness drives them identically. */
@@ -140,34 +204,25 @@ const RINGS: Array<[string, (latencyMs: number) => Ring]> = [
 ];
 
 describe.each(RINGS)("%s ring replay", (_name, build) => {
-	it("plays an evenly paced sender without underruns or skips", () => {
+	it("plays an evenly paced sender without underruns or skips", async () => {
 		const t = trace(600, 1, 10);
-		expect(replay(build(target(t)), t, 2000)).toEqual({ underruns: 0, skipped: 0 });
+		expect(replay(build(await settled(t)), t, 2000)).toEqual({ underruns: 0, skipped: 0 });
 	});
 
-	it("plays a bursty sender at the measured target", () => {
+	it("plays a bursty sender at the measured target", async () => {
 		// Three frames flushed at once, which is what an importer packing PES payloads produces.
 		const t = trace(600, 3, 5);
-		expect(target(t)).toBeGreaterThan(2 * CHUNK_MS);
-		const result = replay(build(target(t)), t, 2000);
-		expect(result.underruns).toBeLessThanOrEqual(2);
-		expect(result.skipped).toBe(0);
+		const measured = await settled(t);
+		expect(measured).toBeGreaterThan(2 * CHUNK_MS);
+		expect(replay(build(measured), t, 2000)).toEqual({ underruns: 0, skipped: 0 });
 	});
 
-	it("keeps a five frame flush span playing", () => {
+	it("keeps a five frame flush span playing", async () => {
 		// A hundred milliseconds of arrivals landing at once. The target covers the trough and the
 		// slack above it absorbs the peak, so the flush plays instead of being cut down to the
 		// target on arrival.
-		//
-		// A 95th percentile target sits by construction at the edge of what arrives, so the tail
-		// beyond it can still land a couple of times across the ten second window; closing that
-		// without a deeper buffer is what the time-stretch quest is for. Two orders of magnitude
-		// below the round-trip target below, and the postMessage ring bounds its refill at capacity
-		// rather than in read(), so it can also land one flush past the band.
 		const t = trace(600, 5, 5);
-		const result = replay(build(target(t)), t, 2000);
-		expect(result.underruns).toBeLessThanOrEqual(2);
-		expect(result.skipped).toBeLessThanOrEqual(2 * CHUNK);
+		expect(replay(build(await settled(t)), t, 2000)).toEqual({ underruns: 0, skipped: 0 });
 	});
 
 	it("underruns constantly when the target ignores the arrival spread", () => {
@@ -177,5 +232,40 @@ describe.each(RINGS)("%s ring replay", (_name, build) => {
 		const result = replay(build(46), t, 2000);
 		expect(result.underruns).toBeGreaterThan(100);
 		expect(result.skipped).toBeGreaterThan(10 * CHUNK);
+	});
+});
+
+describe("subscription budget", () => {
+	// A minute of evenly paced audio, long enough for the startup ramp to hand over to the steady
+	// forget factor and the target to settle at its floor, then six seconds of 100ms flushes.
+	const PACED = 3000;
+	const t: Arrival[] = [];
+	for (let i = 0; i < PACED; i++) t.push({ media: i * CHUNK_MS, arrival: i * CHUNK_MS + 50 });
+	t.push(
+		...trace(300, 6, 0).map(({ media, arrival }) => ({
+			media: media + PACED * CHUNK_MS,
+			arrival: arrival + PACED * CHUNK_MS,
+		})),
+	);
+
+	// The targets across the first twenty flushes, 2.4s of them.
+	function onset(targets: Time.Milli[]): Time.Milli[] {
+		return targets.slice(PACED, PACED + 20);
+	}
+
+	it("reaches a flush that starts after the target settled", async () => {
+		const { targets, delivered } = await measure(t, (target) => Time.Milli.max(target, AUTO_MAX_AGE));
+		expect(targets[PACED - 1]).toBe((2 * CHUNK_MS) as Time.Milli);
+		expect(delivered).toBe(t.length);
+		// Every flush lands whole, so its 100ms reaches the 95th percentile within a few intervals.
+		expect(Math.max(...onset(targets))).toBeGreaterThanOrEqual(120);
+	});
+
+	it("drops the flush it should measure when the budget follows the target", async () => {
+		// The transport skips a group older than the subscription's max age, before the consumer
+		// can observe it, so the estimate only ever sees what the target it already holds allows.
+		const { targets, delivered } = await measure(t, (target) => target);
+		expect(delivered).toBeLessThan(t.length);
+		expect(Math.max(...onset(targets))).toBeLessThan(120);
 	});
 });

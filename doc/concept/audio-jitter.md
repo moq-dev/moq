@@ -47,7 +47,17 @@ at least as long as the estimate's ceiling, which is why `moq play` waits 2 s on
 a stalled group under `--delay auto`. The observation is also only as honest as
 the caller is prompt: `read()` is timed when it resolves, so a player drains it
 as packets come and lets the playback buffer hold the target, rather than
-pacing reads to the speaker. A frame dropped by the relay is never observed, which is correct.
+pacing reads to the speaker.
+
+A frame dropped by the relay is never observed, which is correct only while the
+drop is not the receiver's own doing. The subscription's max age drops groups
+before any container sees them, at the relay and in the receiver's own transport
+subscriber, so a subscription cut to the target hides every frame later than
+the target: the estimate creeps up one bucket at a time while the frames it
+should have measured go unplayed. In automatic mode both implementations
+subscribe with at least the ceiling, 2 s: `moq play --delay auto` through its
+age budget, and the browser through the audio subscription alone, since its
+container consumer observes each frame before applying the local budget.
 A frame the container will later discard *is* observed, which is also correct:
 it arrived, and when it arrived is the measurement.
 

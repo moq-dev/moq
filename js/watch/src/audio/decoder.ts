@@ -27,7 +27,7 @@ import {
 	playbackIdentity,
 } from "./config";
 import { Handover } from "./handover";
-import { reanchor, ringSamples, target } from "./latency";
+import { AUTO_MAX_AGE, reanchor, ringSamples, target } from "./latency";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -123,6 +123,9 @@ export class Decoder {
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
 	#measured = new Signal<Time.Milli | undefined>(undefined);
 
+	// The subscription's max age: the shared budget, raised to the estimator's ceiling in "auto".
+	#subscribeMaxAge = new Signal<Time.Milli>(Time.Milli.zero);
+
 	// The codec's frame duration: the catalog constant, refined by each frame's own duration.
 	#frame = new Signal<Time.Milli | undefined>(undefined);
 
@@ -165,11 +168,21 @@ export class Decoder {
 			return config ? decoderConfig(config) : undefined;
 		});
 
+		this.#signals.run(this.#runSubscribeMaxAge.bind(this));
 		this.#signals.run(this.#runWorklet.bind(this));
 		this.#signals.run(this.#runEnabled.bind(this));
 		this.#signals.run(this.#runLatency.bind(this));
 		this.#signals.run(this.#runLatencyReanchor.bind(this));
 		this.#signals.run(this.#runDecoder.bind(this));
+	}
+
+	// A group the relay expires is never observed, so a subscription cut to the target would cap the
+	// estimate at the target it already holds. The container consumer keeps the shared budget as its
+	// local skip, since it observes each frame before applying it. See doc/concept/audio-jitter.md.
+	#runSubscribeMaxAge(effect: Effect): void {
+		const maxAge = effect.get(this.sync.out.maxAge);
+		const auto = effect.get(this.sync.in.delay) === "auto";
+		this.#subscribeMaxAge.set(auto ? Time.Milli.max(maxAge, AUTO_MAX_AGE) : maxAge);
 	}
 
 	#runWorklet(effect: Effect): void {
@@ -349,7 +362,7 @@ export class Decoder {
 			broadcast: active,
 			track,
 			priority: Catalog.PRIORITY.audio,
-			maxAge: this.sync.out.maxAge,
+			maxAge: this.#subscribeMaxAge,
 		});
 		if (!sub) return;
 
