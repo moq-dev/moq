@@ -38,3 +38,11 @@ republished catalog instead of their hand-built one.
 
 Update `doc/bin/cli.md` and `doc/bin/hls.md` inline with an export, import, and
 serve example.
+
+A DVR can expire the only recorded catalog today; import must work once
+[Per-track archive segments](/quest/m1/archive/track-segments.md) keeps one in
+the window, and fail loudly on a recording with none.
+
+## Required
+
+- [Per-track archive segments](/quest/m1/archive/track-segments.md) - a DVR keeps a catalog in its window

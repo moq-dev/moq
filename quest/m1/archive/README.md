@@ -126,6 +126,7 @@ owned by that prerequisite, not duplicated in archive storage.
 
 ## Quests
 
+- [Per-track archive segments](/quest/m1/archive/track-segments.md) - decide per-track segmenting and expiry so a DVR keeps every track's newest group while HLS stays aligned
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq import archive` publishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay
 - [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
