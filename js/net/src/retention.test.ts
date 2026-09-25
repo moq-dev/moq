@@ -53,7 +53,7 @@ const spies = [
 	spyOn(proto, "changed").mockImplementation(function (this: Once<unknown>, fn?: (value: unknown) => void) {
 		if (!fn) {
 			attach(this);
-			return changed.call(this);
+			return (changed as () => Promise<unknown>).call(this);
 		}
 		const release = attach(this);
 		const dispose = changed.call(this, fn);
