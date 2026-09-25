@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/moq-dev/moq/compare/moq-stats-v0.2.3...moq-stats-v0.2.4) - 2026-09-25
+
+### Other
+
+- updated the following local packages: moq-net, moq-json
+
+## [0.2.3](https://github.com/moq-dev/moq/compare/moq-stats-v0.2.2...moq-stats-v0.2.3) - 2026-09-25
+
+### Added
+
+- *(net)* hide dot-named broadcasts from discovery (moq-lite-07) ([#4060](https://github.com/moq-dev/moq/pull/4060))
+
+### Other
+
+- *(json)* track the error path only when a snapshot decode fails ([#4019](https://github.com/moq-dev/moq/pull/4019))
+
 ## [0.2.2](https://github.com/moq-dev/moq/compare/moq-stats-v0.2.1...moq-stats-v0.2.2) - 2026-09-24
 
 ### Other

@@ -26,6 +26,8 @@ pub enum ParameterVarInt {
 	RelayCost = super::cluster::RELAY_COST,
 	/// SOLICIT, from the MoQ Solicit extension.
 	Solicit = super::solicit::SOLICIT,
+	/// HIDDEN, from the MoQ Hidden extension.
+	Hidden = super::hidden::HIDDEN,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }

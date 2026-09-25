@@ -135,7 +135,7 @@ export default class MoqBoy extends HTMLElement {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const entry = await Promise.race([effect.cancel, announced.next()]);
+				const entry = await effect.race(announced.next());
 				if (!entry) break;
 
 				// A broad route that cannot pin the game id names nothing to open.

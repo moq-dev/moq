@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, btree_map};
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::millis::MillisCeil;
 use crate::catalog::{Compression, Mode};
 
 /// The binary tracks a broadcast publishes, keyed by track name.
@@ -86,6 +87,16 @@ pub struct BinaryConfig {
 	#[serde(default)]
 	pub mime: Option<String>,
 
+	/// The maximum bitrate of the track in bits per second, if known.
+	#[serde(default)]
+	pub bitrate: Option<u64>,
+
+	/// The maximum delay between a payload being ready and the publisher flushing it, with the same
+	/// meaning and whole-millisecond encoding as [`VideoConfig::jitter`](crate::catalog::VideoConfig::jitter).
+	#[serde_as(as = "MillisCeil")]
+	#[serde(default)]
+	pub jitter: Option<std::time::Duration>,
+
 	/// Fields this build doesn't recognize, kept so the entry round-trips.
 	///
 	/// A future [`Mode`] or [`Compression`] almost certainly comes with fields describing it, and
@@ -104,7 +115,16 @@ impl BinaryConfig {
 			mode,
 			compression: None,
 			mime: None,
+			bitrate: None,
+			jitter: None,
 			extra: Default::default(),
 		}
+	}
+}
+
+/// The config itself, so a data producer takes it wherever it takes an entry embedding one.
+impl AsMut<BinaryConfig> for BinaryConfig {
+	fn as_mut(&mut self) -> &mut Self {
+		self
 	}
 }

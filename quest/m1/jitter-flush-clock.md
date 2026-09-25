@@ -26,21 +26,62 @@ media span of each emitted batch and advertise no `delay`.
 
 ## Plan
 
-- **Measurement.** `catalog::Estimator` gains an additive `flush(timestamp,
-  now)` observation next to the clock-free `write`. Lateness is
-  `now - timestamp`. Each rendition keeps its own baseline, the minimum
-  lateness over a sliding window (about 10 s) rather than the lifetime
-  minimum, so a media clock that drifts slower than wall time does not ratchet
-  forever. The broadcast baseline, on `catalog::Producer` and shared by every
-  rendition, is the minimum of those. `delay` is the rendition baseline minus
-  the broadcast baseline; `jitter` is `lateness - rendition baseline`. Each is
-  reported as its lifetime maximum.
+- **Landed (#3940):** `jitter` measured at encoder flush. `Estimator::flush`,
+  `container::Producer::flush`, and codec importer forwarding; each rendition
+  keeps its own 10 s sliding minimum and advertises the lifetime maximum spread
+  above it. The `moq-video` and `moq-audio` encoders (so `moq import capture`),
+  libmoq (so OBS), moq-ffi and its wrappers, and the `js/publish` encoders call
+  it. The provisional PTS-gap floor is gone, and `moq_mux::Error::JitterDecreased`
+  plus zero-as-absent text jitter enforce never-lower in Rust and JS.
+  `moq-gst` pads opt in with `encoder=true`; imports stay clock-free.
+  What remains below is `delay` and the player. libmoq and moq-ffi expose
+  `flush` but no discontinuity, so a binding publisher that pauses and resumes
+  on a re-anchored PTS within the window would count the pause; add one when
+  such a caller appears. A `moq-gst` encoder pad has the same gap across a
+  `PLAYING -> PAUSED -> PLAYING` cycle (running time stops, the wall clock
+  does not) and a flushing seek, since `import::Track` forwards no
+  discontinuity.
+- **Measurement.** Lateness is `now - timestamp`, observed by the existing
+  `flush` calls, so no call site changes. Each rendition keeps its own
+  baseline, the minimum lateness over a sliding window (about 10 s), so a media
+  clock that drifts slower than wall time does not ratchet forever. The
+  broadcast baseline, on `catalog::Producer` and shared by every rendition
+  that flushes, is the minimum of those; the per-rendition `Baseline` epochs
+  must become one shared epoch for the subtraction to mean anything. `delay` is
+  the rendition baseline minus the broadcast baseline, reported as its lifetime
+  maximum. Renditions that never flush advertise no `delay`.
 - **Open:** lifetime maxima taken against a sliding baseline stop sharing an
   origin when the earliest rendition changes. If A starts at 0 and B at
   200 ms, B keeps `delay: 200`; if A then drifts to 500 ms, A advertises 300
   and `Sync` computes `300 - 200 = 100` while the tracks are 300 ms apart.
-  Settle a fixed common origin, coordinated rebasing, or no subtraction
-  before implementing.
+  Options:
+  - *No subtraction (recommended).* Keep the sliding baselines and never-lower,
+    and change the player rule to `max(delay + jitter)` over the subscribed
+    renditions, dropping `- min(delay)`. The subscribed renditions' true spread
+    is measured from an earliest subscribed baseline no earlier than the
+    broadcast baseline, so it never exceeds the largest advertised `delay`,
+    and the catalog alone can never under-buffer. The cost is over-buffering by
+    `min(delay)` when the broadcast's earliest rendition is not subscribed
+    (a video-only viewer of a broadcast whose audio leads by 200 ms pays
+    200 ms). Dropping a slow track still lowers latency. The draft says a
+    consumer MUST NOT subtract `delay` values across renditions.
+  - *Fixed common origin.* Measure every `delay` from the broadcast's first
+    lateness. Exact subtraction, but common drift raises every rendition
+    together, so values grow without bound and the catalog republishes for the
+    life of the broadcast; the problem the sliding window exists to avoid.
+  - *Coordinated rebasing.* Advertise each `delay` as its current value against
+    the current broadcast baseline and let it fall. Exact, but `delay` gives up
+    never-lower, the catalog churns as baselines move, and the player must
+    shrink safely.
+  - *No `delay` field.* The player measures each subscribed track's own
+    arrival baseline and sizes by their spread. No wire change, and it also
+    covers gateway and ingest offsets, but a track's offset is unknown until its
+    first frames arrive, so subscribing to a slower rendition glitches once.
+  Every option also needs the player's reference to follow the earliest
+  subscribed track's current arrival rather than its lifetime minimum, since
+  `Sync.received` only ever lowers it; that is receiver-side and belongs with
+  the arrival minimum the [audio jitter target](/quest/m0/audio-jitter-target/README.md)
+  already expires.
 - A faster-than-real-time source flushes early; each frame becomes the new
   minimum and both stay at zero, which is correct for something that is not
   live.
@@ -48,45 +89,24 @@ media span of each emitted batch and advertise no `delay`.
   renditions in `rs/hang`, `js/hang`, and `drafts/draft-lcurley-moq-hang.md`,
   serialized with `MillisCeil` and zero-as-absent like `jitter`. Additive:
   today's `jitter` never included a cross-track offset. Extend the draft's
-  never-lower rule to `delay`, and define both in terms of lateness.
-- **Call sites:** the `moq-video` and `moq-audio` encode producers, the capture
-  path in `moq import capture`, `moq-gst`, and `libmoq` (so OBS). `js/publish`
-  mirrors the measurement in the video and audio encoders and replaces its
-  fixed `ceil(1000 / framerate)` and frame-duration hints. `container::Producer`
-  does not call it on its own.
-- Replace the provisional PTS-gap floor so a decode-order sequence such as
-  `0, 120, 40, 80` ms does not permanently advertise its first 120 ms gap
-  when the reorder delay is only 80 ms. Preserve the never-lower rule for
-  measurements already advertised.
-- **Enforce never-lower at the publisher**, not only by convention.
-  `js/publish/src/catalog.ts:25-29` already refuses a decrease and a zero for
-  audio and video jitter; Rust does not. Add a `moq_mux::Error` for a
-  decreased estimate (covering both fields) and return it from
-  `Rendition::set`, `Rendition::replace`, and `Rendition::estimate`
-  (`rs/moq-mux/src/catalog/tracks.rs`). Extend the `MillisCeil` serialization
-  (`rs/hang/src/catalog/millis.rs`) to `TextConfig`
-  (`rs/hang/src/catalog/text/mod.rs:124`), and mirror the zero-as-absent
-  normalization in `js/hang/src/catalog/text.ts` and the text section of
-  `js/publish/src/catalog.ts`. The `js/publish` check covers `delay` as well
-  as `jitter`, in every section that carries them.
+  never-lower rule to `delay` (unless rebasing wins), along with
+  `moq_mux::Error::JitterDecreased` and the `js/publish/src/catalog.ts` check.
 - **Player.** `Sync` registers each subscribed rendition's `delay` and
-  `jitter` and computes `max(delay + jitter) - min(delay)`; it recomputes when
-  a rendition registers, unregisters, or its catalog entry rises. When the
-  earliest subscribed rendition's `delay` rises, `Sync` re-anchors its
-  reference later by that amount instead of leaving it at the old earliest
-  arrival, or every other track under-buffers. Rename `Sync`'s own `delay`
-  output (the resolved playout total) so it does not collide with the field.
+  `jitter` and recomputes when a rendition registers, unregisters, or its
+  catalog entry rises. Rename `Sync`'s own `delay` output (the resolved
+  playout total) so it does not collide with the field. #3954 on the
+  [audio jitter target](/quest/m0/audio-jitter-target/README.md) line changes
+  what `register()` takes, so build on whichever lands first.
 - **Docs.** Update `doc/concept/audio-jitter.md`, the normative playout page,
   with the cross-track rule and the catalog floor it reads.
-- **Tests** inject the clock. Cover: a batch flushed at its end reports the
-  batch as jitter, a constant offset reports as `delay` on the slower track
-  and nothing on the faster, a slow drift stays bounded, a decrease is refused
-  on every site, and `Sync` resizes on a subscription change and re-anchors on
-  a rising earliest `delay`.
+- **Tests** inject the clock. Cover: a constant offset reports as `delay` on
+  the slower track and nothing on the faster, a slow common drift stays
+  bounded, the earliest rendition changing does not under-buffer, a decrease is
+  refused on every site, and `Sync` resizes on a subscription change.
 
-Public API: additive `delay` field in `hang` and `@moq/hang`, a new
-`moq_mux::Error` variant, `Sync` output rename in `@moq/watch`. Wire: one
-optional catalog field.
+Public API: additive `delay` field in `hang` and `@moq/hang`, the
+decreased-estimate error extended to `delay`, `Sync` output rename in
+`@moq/watch`. Wire: one optional catalog field.
 
 ## Related
 

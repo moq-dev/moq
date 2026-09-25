@@ -17,6 +17,11 @@ pub enum Version {
 	/// hop chain, ranking above hop count in route selection. Advertised over ALPN
 	/// as `moq-lite-06` and preferred by the default version sets.
 	Lite06,
+	/// Lite-07. Adds the hidden opt-in to ANNOUNCE_REQUEST: without it, a route with
+	/// a `.`-prefixed segment below the requested prefix is left out. The wire format is
+	/// still work-in-progress, so it is advertised over ALPN as `moq-lite-07-wip` and
+	/// only when explicitly requested; the default version sets leave it out.
+	Lite07,
 }
 
 impl Version {
@@ -145,7 +150,7 @@ impl Version {
 	pub(crate) fn has_group_order(self) -> bool {
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => true,
-			Self::Lite06 => false,
+			Self::Lite06 | Self::Lite07 => false,
 		}
 	}
 
@@ -161,6 +166,17 @@ impl Version {
 		// Match form so future versions default forward (CLAUDE.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07; older
+	/// requests decode as not opted in.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_hidden(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
 			_ => true,
 		}
 	}
@@ -188,6 +204,7 @@ impl fmt::Display for Version {
 			Self::Lite04 => write!(f, "moq-lite-04"),
 			Self::Lite05 => write!(f, "moq-lite-05"),
 			Self::Lite06 => write!(f, "moq-lite-06"),
+			Self::Lite07 => write!(f, "moq-lite-07-wip"),
 		}
 	}
 }
@@ -201,6 +218,7 @@ impl From<Version> for crate::Version {
 			Version::Lite04 => crate::Version::Lite(Version::Lite04),
 			Version::Lite05 => crate::Version::Lite(Version::Lite05),
 			Version::Lite06 => crate::Version::Lite(Version::Lite06),
+			Version::Lite07 => crate::Version::Lite(Version::Lite07),
 		}
 	}
 }

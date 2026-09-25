@@ -200,7 +200,7 @@ export class Broadcast {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const entry = await Promise.race([effect.cancel, announced.next()]);
+				const entry = await effect.race(announced.next());
 				if (!entry) break;
 				this.#announced.mutate((active) => {
 					if (!active) return;
@@ -223,7 +223,9 @@ export class Broadcast {
 
 	// Whether `path` is covered by an announced route, for `relativeBroadcast`'s
 	// cross-broadcast refs. Announcements are prefix routes, so a route at "room/" covers
-	// "room/alice/cam.hang" without naming it. Opens the announcement stream on first use.
+	// "room/alice/cam.hang" without naming it. That is how a rendition produced only on demand
+	// gets selected: its service claims a covering prefix, and nothing announces the exact path
+	// until this subscribes. Opens the announcement stream on first use.
 	// The blind cases (announcement gate off, no discovery) never reach here; see `#relativeTarget`.
 	#isPathAnnounced(effect: Effect, path: Moq.Path.Valid): boolean {
 		this.#wantAnnounced.set(true);
@@ -335,7 +337,7 @@ export class Broadcast {
 		effect.spawn(async () => {
 			try {
 				for (;;) {
-					const update = await Promise.race([effect.cancel, fetchNext()]);
+					const update = await effect.race(fetchNext());
 					if (!update) break;
 
 					console.debug("received catalog", format, this.in.name.peek(), update);

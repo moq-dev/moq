@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ALPN_05, ALPN_06 } from "../lite/version.ts";
+import { ALPN_05, ALPN_06, ALPN_07_WIP } from "../lite/version.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
 
@@ -54,8 +54,10 @@ function stubWebTransport(transport: WebTransport): () => void {
 	};
 }
 
-test("WebTransport offers lite-06 first by default", async () => {
-	const pair = createMockTransportPair(ALPN_06);
+// Connect through a stubbed `new WebTransport(...)`, returning the offered protocols and
+// the negotiated version.
+async function offered(alpn: string, props: Omit<ConnectProps, "url"> = {}) {
+	const pair = createMockTransportPair(alpn);
 	const original = globalThis.WebTransport;
 	let protocols: string[] | undefined;
 
@@ -66,13 +68,24 @@ test("WebTransport offers lite-06 first by default", async () => {
 	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
 
 	try {
-		const connection = await connect(url, { websocket: { enabled: false } });
+		const connection = await connect(url, { websocket: { enabled: false }, ...props });
 		connection.close();
+		return { protocols, version: connection.version };
 	} finally {
 		globalThis.WebTransport = original;
 	}
+}
 
+test("WebTransport offers lite-06 first by default", async () => {
+	const { protocols } = await offered(ALPN_06);
 	expect(protocols?.[0]).toBe("moq-lite-06");
+	expect(protocols).not.toContain(ALPN_07_WIP);
+});
+
+test("WebTransport negotiates lite-07-wip only when explicitly offered", async () => {
+	const { protocols, version } = await offered(ALPN_07_WIP, { webtransport: { protocols: [ALPN_07_WIP] } });
+	expect(protocols).toEqual(["moq-lite-07-wip"]);
+	expect(version).toBe("moq-lite-07-wip");
 });
 
 test("connect logs the relay URL without its credentials", async () => {

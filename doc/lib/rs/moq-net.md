@@ -135,7 +135,9 @@ most specific matching scope member's wildcards stood for when the prefix
 pins them, and `route` carries hops and cost (on a retraction, its last
 values). The consumer is also a `futures::Stream`. A prefix is not a
 broadcast name; sessions request each scope member's literal head and filter
-locally.
+locally. Routes with a `.`-prefixed segment below that head are [hidden](/concept/moq-lite#hidden-broadcasts)
+unless `with_hidden(true)` opts the consumer in. Sessions always ask the peer
+for hidden routes, so each local consumer decides.
 
 ## Limiting reads
 

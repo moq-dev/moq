@@ -8,9 +8,13 @@ final class AnnounceOptions {
   /// Pattern relative to [prefix], or null for every path beneath it.
   final String? filter;
 
-  const AnnounceOptions({this.prefix = '', this.filter});
+  /// Also list paths with a segment starting with `.` below [prefix].
+  final bool hidden;
 
-  AnnounceConfig get _ffi => AnnounceConfig(prefix: prefix, filter: filter);
+  const AnnounceOptions({this.prefix = '', this.filter, this.hidden = false});
+
+  AnnounceConfig get _ffi =>
+      AnnounceConfig(prefix: prefix, filter: filter, hidden: hidden);
 }
 
 /// Everything [Moq.connect] can be told beyond the URL.

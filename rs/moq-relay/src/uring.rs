@@ -675,7 +675,8 @@ async fn serve_connection(
 	};
 	let path = if path.is_empty() { "/".to_string() } else { path };
 	let mut registration = None;
-	let lease = if cluster::Cluster::is_lan_path(&path) {
+	let lan = cluster::Cluster::is_lan_path(&path);
+	let lease = if lan {
 		match cluster::Cluster::lan_credential(&path) {
 			Some(presented) => match serve.cluster.verify_lan_credential(presented) {
 				Some(true) => serve.auth.admit_fixed("/", serve.cluster.lan_peer_grant()),
@@ -748,20 +749,25 @@ async fn serve_connection(
 	};
 
 	let role = request.role();
-	let grants =
-		match crate::connection::authorize(&serve.cluster, lease.token(), role, &moq_tokio::server::Transport::Quic) {
-			Ok(grants) => grants,
-			Err(err) => {
-				request.close(moq_net::Error::Unauthorized);
-				return Err(err);
-			}
-		};
+	let grants = match crate::connection::authorize(
+		&serve.cluster,
+		lease.token(),
+		role,
+		identity.is_some() || lan,
+		&moq_tokio::server::Transport::Quic,
+	) {
+		Ok(grants) => grants,
+		Err(err) => {
+			request.close(moq_net::Error::Unauthorized);
+			return Err(err);
+		}
+	};
 
 	let peer_hop = request.peer_hop();
 	let lease = lease.with_stats(grants.stats.clone());
 	let mut request = request.with_stats(grants.stats);
 	if let Some(subscribe) = grants.subscribe {
-		request = request.with_publisher(&subscribe);
+		request = request.with_publisher(subscribe);
 	}
 	if let Some(publish) = grants.publish {
 		request = request.with_subscriber(publish);

@@ -150,10 +150,8 @@ field.
   matching paths, and its withdrawal tells the client the capability is gone.
   This is what makes a lazily-produced rendition discoverable without the
   composer waiting for an announcement that only demand would produce. The
-  browser player currently enforces the opposite (`js/watch`'s
-  `#isPathAnnounced` hides a catalog rendition with no exact-path
-  announcement); [Demand](/quest/m1/wildcard/demand.md) makes a covering wildcard count as
-  availability there.
+  browser player's gate (`js/watch`'s `#isPathAnnounced`) lists a catalog
+  rendition under any covering prefix, so a claim is availability there too.
 - **Refusal is a typed stream reset, with no negative cache.** An advertiser
   resets a subscribe it will not serve, and the reset carries which KIND of
   refusal it is (`Error::to_code` already puts a typed code on the wire; the
@@ -258,9 +256,6 @@ than announce state.
 
 - [Spread](/quest/m1/wildcard/spread.md) - equal-cost advertisers of one
   prefix share its paths instead of the first one taking them all
-- [Demand](/quest/m1/wildcard/demand.md) - the browser player subscribes to a
-  catalog-referenced broadcast a wildcard covers, breaking the lazy-rendition
-  deadlock
 
 ## Related
 

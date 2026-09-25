@@ -7,8 +7,8 @@ use crate::origin;
 use crate::time::{Clock, Instant};
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_22, ALPN_LITE, ALPN_LITE_03,
-	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, Consume, Error, NEGOTIATED, Role, Session, SessionError, Version,
-	Versions,
+	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Role, Session,
+	SessionError, Version, Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup, stats,
 };
@@ -157,8 +157,9 @@ impl Server {
 	{
 		let runtime = Clock::new(now);
 		let (path, role, origin, handshake) = match session.protocol() {
-			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06)) => {
+			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_07_WIP)) => {
 				let version = match alpn {
+					ALPN_LITE_07_WIP => lite::Version::Lite07,
 					ALPN_LITE_06 => lite::Version::Lite06,
 					_ => lite::Version::Lite05,
 				};
@@ -293,7 +294,7 @@ impl Server {
 			}
 			// Every lite ALPN goes through the same entry point, which is also
 			// what a `!Send` transport calls directly.
-			Some(ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_04 | ALPN_LITE_03) => {
+			Some(ALPN_LITE_07_WIP | ALPN_LITE_06 | ALPN_LITE_05 | ALPN_LITE_04 | ALPN_LITE_03) => {
 				return self.accept_request_lite(now, session).await;
 			}
 			Some(ALPN_LITE) | None => {
@@ -334,6 +335,7 @@ impl Server {
 					.map(ietf::RequestId);
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&params, v)?,
+					hidden: ietf::hidden::from_setup(&params, v),
 					..Default::default()
 				};
 				(path, request_id_max, peer_declared)
@@ -557,6 +559,7 @@ where
 					parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
 					parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
 					ietf::solicit::into_setup(&mut parameters, v);
+					ietf::hidden::into_setup(&mut parameters, v);
 					parameters.encode_bytes(v)?
 				}
 				Version::Lite(v) => lite::Parameters::default().encode_bytes(v)?,

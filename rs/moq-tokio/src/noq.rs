@@ -8,7 +8,9 @@ use crate::quic::Resolved;
 use crate::quic::ServerId;
 use crate::tls::{FingerprintVerifier, ServeCerts};
 use std::net;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, RwLock};
+use std::task::{Context, Poll, Waker, ready};
 use std::time::Duration;
 use web_transport_moq::noq;
 
@@ -510,7 +512,141 @@ fn proto_status(err: &web_transport_moq::proto::ConnectError) -> Option<u16> {
 pub(crate) struct NoqServer {
 	pub quic: noq::Endpoint,
 	pub certs: Arc<ServeCerts>,
+	socket: Socket,
 	_reload: crate::tls::Reload,
+}
+
+/// The server's UDP socket, which [`NoqServer::shutdown`] closes even while noq
+/// still holds references to it.
+///
+/// noq gives each connection a sender sharing the socket, and a connection lives
+/// as long as anything holds its handle, so dropping the endpoint leaves the port
+/// bound until every accepted session is gone too. Taking the socket out of this
+/// slot closes it regardless.
+#[derive(Clone, Debug)]
+struct Socket {
+	io: Arc<RwLock<Option<Arc<tokio::net::UdpSocket>>>>,
+	state: Arc<noq::udp::UdpSocketState>,
+	local: net::SocketAddr,
+	/// Wakes every sender blocked on a full send buffer from the socket's single
+	/// write-readiness registration.
+	blocked: Arc<Blocked>,
+}
+
+impl Socket {
+	fn new(socket: std::net::UdpSocket) -> std::io::Result<Self> {
+		let state = noq::udp::UdpSocketState::new((&socket).into())?;
+		let local = socket.local_addr()?;
+		let io = tokio::net::UdpSocket::from_std(socket)?;
+		Ok(Self {
+			io: Arc::new(RwLock::new(Some(Arc::new(io)))),
+			state: Arc::new(state),
+			local,
+			blocked: Default::default(),
+		})
+	}
+
+	/// Close the socket, unless a [`crate::server::SocketRetainer`] still holds it.
+	fn release(&self) {
+		self.io.write().unwrap().take();
+	}
+
+	/// A handle keeping the socket open after it is released, or `None` once it is.
+	fn retain(&self) -> Option<Arc<tokio::net::UdpSocket>> {
+		self.io.read().unwrap().clone()
+	}
+}
+
+impl noq::AsyncUdpSocket for Socket {
+	fn create_sender(&self) -> Pin<Box<dyn noq::UdpSender>> {
+		Box::pin(self.clone())
+	}
+
+	fn poll_recv(
+		&mut self,
+		cx: &mut Context<'_>,
+		bufs: &mut [std::io::IoSliceMut<'_>],
+		meta: &mut [noq::udp::RecvMeta],
+	) -> Poll<std::io::Result<usize>> {
+		let io = self.io.read().unwrap();
+		// Released: nothing arrives again, and the endpoint stops through its close.
+		let Some(io) = io.as_deref() else {
+			return Poll::Pending;
+		};
+		// Only the endpoint driver receives, so the one readiness waker is enough.
+		loop {
+			ready!(io.poll_recv_ready(cx))?;
+			if let Ok(res) = io.try_io(tokio::io::Interest::READABLE, || self.state.recv(io.into(), bufs, meta)) {
+				return Poll::Ready(Ok(res));
+			}
+		}
+	}
+
+	fn local_addr(&self) -> std::io::Result<net::SocketAddr> {
+		Ok(self.local)
+	}
+
+	fn max_receive_segments(&self) -> std::num::NonZeroUsize {
+		self.state.gro_segments()
+	}
+
+	fn may_fragment(&self) -> bool {
+		self.state.may_fragment()
+	}
+}
+
+impl noq::UdpSender for Socket {
+	fn poll_send(
+		self: Pin<&mut Self>,
+		transmit: &noq::udp::Transmit<'_>,
+		cx: &mut Context<'_>,
+	) -> Poll<std::io::Result<()>> {
+		let io = self.io.read().unwrap();
+		// Released: the datagram is lost, which UDP always allows.
+		let Some(io) = io.as_deref() else {
+			return Poll::Ready(Ok(()));
+		};
+		loop {
+			match io.try_io(tokio::io::Interest::WRITABLE, || self.state.send(io.into(), transmit)) {
+				Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+				res => return Poll::Ready(res),
+			}
+			// Every connection sends from its own task, but tokio keeps one waker per
+			// direction, so register a fan-out to all of them instead of this task's.
+			self.blocked.push(cx.waker());
+			let waker = Waker::from(self.blocked.clone());
+			ready!(io.poll_send_ready(&mut Context::from_waker(&waker)))?;
+		}
+	}
+
+	fn max_transmit_segments(&self) -> std::num::NonZeroUsize {
+		self.state.max_gso_segments()
+	}
+}
+
+/// The tasks waiting for a [`Socket`] to become writable.
+#[derive(Debug, Default)]
+struct Blocked(Mutex<Vec<Waker>>);
+
+impl Blocked {
+	fn push(&self, waker: &Waker) {
+		let mut wakers = self.0.lock().unwrap();
+		if !wakers.iter().any(|w| w.will_wake(waker)) {
+			wakers.push(waker.clone());
+		}
+	}
+}
+
+impl std::task::Wake for Blocked {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		for waker in std::mem::take(&mut *self.0.lock().unwrap()) {
+			waker.wake();
+		}
+	}
 }
 
 impl NoqServer {
@@ -618,13 +754,21 @@ impl NoqServer {
 		};
 
 		// Create the generic QUIC endpoint.
-		let quic = noq::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;
+		let socket = Socket::new(socket).map_err(Error::CreateEndpoint)?;
+		let quic =
+			noq::Endpoint::new_with_abstract_socket(endpoint_config, Some(tls), Box::new(socket.clone()), runtime)
+				.map_err(Error::CreateEndpoint)?;
 
 		// Spawn the cert reload watcher only after endpoint creation succeeds,
 		// so we don't leave a dangling watcher on failure.
 		let _reload = crate::tls::Reload::spawn(certs.clone(), config.tls.clone());
 
-		Ok(Self { quic, certs, _reload })
+		Ok(Self {
+			quic,
+			certs,
+			socket,
+			_reload,
+		})
 	}
 
 	pub fn accept(&self) -> impl std::future::Future<Output = Option<noq::Incoming>> + '_ {
@@ -641,6 +785,21 @@ impl NoqServer {
 
 	pub fn close(&self) {
 		self.quic.close(noq::VarInt::from_u32(0), b"server shutdown");
+	}
+
+	/// Close every connection, wait until each has sent its close to the peer,
+	/// then release the socket.
+	pub async fn shutdown(self) {
+		self.close();
+		// Not `wait_idle`, which also sits out each connection's 3 PTO closing
+		// period: that only repeats the close to a peer that already has it.
+		self.quic.wait_all_draining().await;
+		self.socket.release();
+	}
+
+	/// A handle keeping the socket open after this server is gone.
+	pub fn retain(&self) -> Option<Arc<tokio::net::UdpSocket>> {
+		self.socket.retain()
 	}
 }
 

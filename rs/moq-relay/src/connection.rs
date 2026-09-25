@@ -95,7 +95,8 @@ impl Connection {
 
 		let transport = self.request.transport();
 		let role = self.request.role();
-		let grants = match authorize(&self.cluster, lease.token(), role, &transport) {
+		let cluster_peer = self.request.peer_identity().is_some() || cluster::Cluster::is_lan_path(self.request.path());
+		let grants = match authorize(&self.cluster, lease.token(), role, cluster_peer, &transport) {
 			Ok(grants) => grants,
 			Err(err) => {
 				let _ = self.request.reject(moq_tokio::server::Reject::Forbidden).await;
@@ -113,7 +114,7 @@ impl Connection {
 		let lease = lease.with_stats(grants.stats.clone());
 		let mut request = self.request.with_stats(grants.stats);
 		if let Some(subscribe) = grants.subscribe {
-			request = request.with_publisher(&subscribe);
+			request = request.with_publisher(subscribe);
 		}
 		if let Some(publish) = grants.publish {
 			request = request.with_subscriber(publish);
@@ -178,10 +179,10 @@ impl Connection {
 /// What an authorized session may serve: the token-scoped origin pair, pruned
 /// to the advertised role, plus its stats context.
 pub(crate) struct Grants {
-	/// What the client may subscribe to (we publish it).
-	pub(crate) publish: Option<moq_net::origin::Producer>,
 	/// What the client may publish (we subscribe to it).
-	pub(crate) subscribe: Option<moq_net::origin::Producer>,
+	pub(crate) publish: Option<moq_net::origin::Producer>,
+	/// What the client may subscribe to (we publish it).
+	pub(crate) subscribe: Option<moq_net::origin::Consumer>,
 	/// The session's billing/attribution context.
 	pub(crate) stats: moq_net::stats::Session,
 }
@@ -196,10 +197,18 @@ pub(crate) struct Grants {
 /// missing that direction's scope is rejected here during the handshake,
 /// instead of being accepted and then silently carrying no media (the bug
 /// that motivated the role hint).
+///
+/// `cluster_peer` marks an authenticated cluster peer (a verified client
+/// certificate or the LAN credential), which discovers hidden routes whether
+/// or not it asks. A peer that predates the hidden opt-in (below moq-lite-07-wip,
+/// or moq-transport without MoQ Hidden) would otherwise lose `.internal/origins`
+/// and every other dot path during a rolling upgrade.
+// TODO: drop the exemption once deployed peers all opt in.
 pub(crate) fn authorize(
 	cluster: &cluster::Cluster,
 	token: &auth::Token,
 	role: Option<moq_net::Role>,
+	cluster_peer: bool,
 	transport: &dyn std::fmt::Display,
 ) -> anyhow::Result<Grants> {
 	let publish = cluster.publisher(token);
@@ -249,6 +258,7 @@ pub(crate) fn authorize(
 		// Bidirectional or an unrecognized future role: keep whatever the token grants.
 		None | Some(_) => (publish, subscribe),
 	};
+	let subscribe = subscribe.map(|subscribe| subscribe.consume().with_hidden(cluster_peer));
 
 	Ok(Grants {
 		publish,

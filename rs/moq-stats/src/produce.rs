@@ -1107,7 +1107,7 @@ mod tests {
 
 	/// Awaits the stats announce and returns its broadcast.
 	async fn announced(origin: &origin::Producer) -> (String, moq_net::broadcast::Consumer) {
-		let mut consumer = origin.consume().announced();
+		let mut consumer = origin.consume().with_hidden(true).announced();
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let update = consumer.next().await.expect("expected announce");
 		assert!(update.kind.is_active());

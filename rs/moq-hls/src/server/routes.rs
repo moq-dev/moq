@@ -26,34 +26,146 @@ pub fn router(server: Server) -> Router {
 	Router::new().route("/{*path}", get(request)).with_state(server)
 }
 
-enum Route {
-	Master {
-		broadcast: String,
-	},
-	Manifest {
-		broadcast: String,
-	},
+/// A parsed request path: the broadcast, and the resource under it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Route {
+	/// The broadcast path, percent-decoded. An embedder that scopes its origin rewrites
+	/// this relative to that scope before calling [`Server::respond`].
+	pub broadcast: String,
+	/// The resource requested under the broadcast.
+	pub resource: Resource,
+}
+
+/// A resource under a broadcast.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Resource {
+	/// `master.m3u8`: the HLS multivariant playlist.
+	Master,
+	/// `manifest.mpd`: the DASH manifest.
+	Manifest,
+	/// `{kind}/{rendition}/media.m3u8`: a rendition's HLS media playlist.
+	#[non_exhaustive]
 	Media {
-		broadcast: String,
-		kind: String,
+		/// The rendition's kind.
+		kind: Kind,
+		/// The rendition's name, percent-decoded.
 		rendition: String,
 	},
+	/// `{kind}/{rendition}/init.{hash}.mp4`: a rendition's CMAF init segment.
+	#[non_exhaustive]
 	Init {
-		broadcast: String,
-		kind: String,
+		/// The rendition's kind.
+		kind: Kind,
+		/// The rendition's name, percent-decoded.
 		rendition: String,
+		/// The hash of the init bytes the URL names.
 		hash: String,
 	},
+	/// `{kind}/{rendition}/seg/[{generation}.]{sequence}.m4s`: a segment by its HLS number.
+	#[non_exhaustive]
 	Segment {
-		broadcast: String,
-		kind: String,
+		/// The rendition's kind.
+		kind: Kind,
+		/// The rendition's name, percent-decoded.
 		rendition: String,
-		file: String,
+		/// The publisher run the URL names, if the broadcaster carries one.
+		generation: Option<String>,
+		/// The segment's aligned number.
+		sequence: u64,
+	},
+	/// `{kind}/{rendition}/seg/[{generation}.]t{pts}.m4s`: the same bytes, addressed by the
+	/// DASH timeline pts (`$Time$`).
+	#[non_exhaustive]
+	SegmentAt {
+		/// The rendition's kind.
+		kind: Kind,
+		/// The rendition's name, percent-decoded.
+		rendition: String,
+		/// The publisher run the URL names, if the broadcaster carries one.
+		generation: Option<String>,
+		/// The segment's timeline pts.
+		pts: u64,
 	},
 }
 
-fn broadcast_path(parts: &[String]) -> Option<String> {
-	(!parts.is_empty() && parts.iter().all(|part| !part.contains('/'))).then(|| parts.join("/"))
+impl Route {
+	/// Parse a request path such as `/project/live/video/hd/media.m3u8`, or `None` when it
+	/// addresses nothing.
+	///
+	/// The broadcast occupies every segment before the resource suffix. Each segment is
+	/// percent-decoded, and one that decodes to a `/` is refused, so an encoded separator
+	/// cannot smuggle a different broadcast past a policy check on [`broadcast`](Self::broadcast).
+	pub fn parse(path: &str) -> Option<Self> {
+		let parts = path
+			.strip_prefix('/')?
+			.split('/')
+			.map(|part| {
+				percent_decode_str(part)
+					.decode_utf8()
+					.ok()
+					.map(|part| part.into_owned())
+			})
+			.collect::<Option<Vec<_>>>()?;
+		if parts.iter().any(String::is_empty) {
+			return None;
+		}
+
+		let (broadcast, resource) = match parts.as_slice() {
+			[broadcast @ .., file] if file == "master.m3u8" => (broadcast, Resource::Master),
+			[broadcast @ .., file] if file == "manifest.mpd" => (broadcast, Resource::Manifest),
+			[broadcast @ .., kind, rendition, file] if file == "media.m3u8" => (
+				broadcast,
+				Resource::Media {
+					kind: Kind::parse(kind)?,
+					rendition: rendition.clone(),
+				},
+			),
+			[broadcast @ .., kind, rendition, file] if init_hash(file).is_some() => (
+				broadcast,
+				Resource::Init {
+					kind: Kind::parse(kind)?,
+					rendition: rendition.clone(),
+					hash: init_hash(file)?.to_string(),
+				},
+			),
+			[broadcast @ .., kind, rendition, directory, file] if directory == "seg" => {
+				let kind = Kind::parse(kind)?;
+				let rendition = rendition.clone();
+				let stem = file.strip_suffix(".m4s")?;
+				// `{generation}.{segment}` when the export carries a generation, `{segment}` otherwise.
+				let (generation, stem) = match stem.split_once('.') {
+					Some((generation, stem)) => (Some(generation.to_string()), stem),
+					None => (None, stem),
+				};
+				let resource = match stem.strip_prefix('t') {
+					Some(pts) => Resource::SegmentAt {
+						kind,
+						rendition,
+						generation,
+						pts: pts.parse().ok()?,
+					},
+					None => Resource::Segment {
+						kind,
+						rendition,
+						generation,
+						sequence: stem.parse().ok()?,
+					},
+				};
+				(broadcast, resource)
+			}
+			_ => return None,
+		};
+
+		if broadcast.is_empty() || broadcast.iter().any(|part| part.contains('/')) {
+			return None;
+		}
+		Some(Self {
+			broadcast: broadcast.join("/"),
+			resource,
+		})
+	}
 }
 
 /// The content hash in an `init.{hash}.mp4` file name.
@@ -63,71 +175,47 @@ fn init_hash(file: &str) -> Option<&str> {
 		.filter(|hash| !hash.is_empty())
 }
 
-fn parse_route(path: &str) -> Option<Route> {
-	let parts = path
-		.strip_prefix('/')?
-		.split('/')
-		.map(|part| {
-			percent_decode_str(part)
-				.decode_utf8()
-				.ok()
-				.map(|part| part.into_owned())
-		})
-		.collect::<Option<Vec<_>>>()?;
-	if parts.iter().any(String::is_empty) {
-		return None;
-	}
-
-	match parts.as_slice() {
-		[broadcast @ .., file] if file == "master.m3u8" => Some(Route::Master {
-			broadcast: broadcast_path(broadcast)?,
-		}),
-		[broadcast @ .., file] if file == "manifest.mpd" => Some(Route::Manifest {
-			broadcast: broadcast_path(broadcast)?,
-		}),
-		[broadcast @ .., kind, rendition, file] if file == "media.m3u8" => Some(Route::Media {
-			broadcast: broadcast_path(broadcast)?,
-			kind: kind.clone(),
-			rendition: rendition.clone(),
-		}),
-		[broadcast @ .., kind, rendition, file] if init_hash(file).is_some() => Some(Route::Init {
-			broadcast: broadcast_path(broadcast)?,
-			kind: kind.clone(),
-			rendition: rendition.clone(),
-			hash: init_hash(file)?.to_string(),
-		}),
-		[broadcast @ .., kind, rendition, directory, file] if directory == "seg" => Some(Route::Segment {
-			broadcast: broadcast_path(broadcast)?,
-			kind: kind.clone(),
-			rendition: rendition.clone(),
-			file: file.clone(),
-		}),
-		_ => None,
+async fn request(State(server): State<Server>, uri: Uri, RawQuery(query): RawQuery) -> Response {
+	match Route::parse(uri.path()) {
+		Some(route) => server.respond(&route, query.as_deref()).await,
+		None => not_found(),
 	}
 }
 
-async fn request(State(server): State<Server>, uri: Uri, RawQuery(query): RawQuery) -> Response {
-	match parse_route(uri.path()) {
-		Some(Route::Master { broadcast }) => master(&server, &broadcast, query.as_deref()).await,
-		Some(Route::Manifest { broadcast }) => manifest(&server, &broadcast, query.as_deref()).await,
-		Some(Route::Media {
-			broadcast,
-			kind,
-			rendition,
-		}) => media(&server, &broadcast, &kind, &rendition, query.as_deref()).await,
-		Some(Route::Init {
-			broadcast,
-			kind,
-			rendition,
-			hash,
-		}) => init(&server, &broadcast, &kind, &rendition, &hash).await,
-		Some(Route::Segment {
-			broadcast,
-			kind,
-			rendition,
-			file,
-		}) => segment(&server, &broadcast, &kind, &rendition, &file).await,
-		None => not_found(),
+impl Server {
+	/// Answer a parsed [`Route`] from this server's origin: the handler behind
+	/// [`router`](Self::router), for an embedder that parses and authorizes the request
+	/// itself.
+	///
+	/// `query` is the raw request query (without the leading `?`), propagated to every
+	/// child URL a playlist or manifest lists, so a credential carried there reaches the
+	/// player's follow-up requests.
+	pub async fn respond(&self, route: &Route, query: Option<&str>) -> Response {
+		let broadcast = route.broadcast.as_str();
+		match &route.resource {
+			Resource::Master => master(self, broadcast, query).await,
+			Resource::Manifest => manifest(self, broadcast, query).await,
+			Resource::Media { kind, rendition } => media(self, broadcast, *kind, rendition, query).await,
+			Resource::Init { kind, rendition, hash } => init(self, broadcast, *kind, rendition, hash).await,
+			Resource::Segment {
+				kind,
+				rendition,
+				generation,
+				sequence,
+			} => {
+				let at = SegmentAt::Sequence(*sequence);
+				segment(self, broadcast, *kind, rendition, generation.as_deref(), at).await
+			}
+			Resource::SegmentAt {
+				kind,
+				rendition,
+				generation,
+				pts,
+			} => {
+				let at = SegmentAt::Pts(*pts);
+				segment(self, broadcast, *kind, rendition, generation.as_deref(), at).await
+			}
+		}
 	}
 }
 
@@ -139,8 +227,6 @@ async fn master(server: &Server, broadcast: &str, query: Option<&str>) -> Respon
 	if broadcaster.is_empty() {
 		return not_found();
 	}
-	// Propagate whatever query reached the master (e.g. a credential a wrapping
-	// middleware required) down to the child media-playlist URLs.
 	m3u8(broadcaster.master_playlist(query))
 }
 
@@ -163,50 +249,39 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 	}
 }
 
-async fn media(server: &Server, broadcast: &str, kind: &str, rendition: &str, query: Option<&str>) -> Response {
+async fn media(server: &Server, broadcast: &str, kind: Kind, rendition: &str, query: Option<&str>) -> Response {
 	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
 		return not_found();
 	};
-
-	// A playlist with no segments confuses players; give the timeline a moment to index the
-	// first complete segment before answering.
-	let _ = tokio::time::timeout(READY_TIMEOUT, rendition.playable()).await;
-
-	// The playlist names its init by a hash of the bytes via EXT-X-MAP, so build it before
-	// rendering (an inline-codec init needs a keyframe group fetched first). init() caches, so
-	// the follow-up GET is free.
-	match rendition.init().await {
-		Ok(Some(_)) => {}
-		Ok(None) => return not_found(),
-		Err(err) => return server_error(err),
-	}
-
-	match rendition.media_playlist(query) {
-		Some(playlist) => m3u8(playlist),
-		None => not_found(),
+	match tokio::time::timeout(READY_TIMEOUT, rendition.playlist(query)).await {
+		Ok(Ok(Some(playlist))) => m3u8(playlist),
+		Ok(Ok(None)) | Err(_) => not_found(),
+		Ok(Err(err)) => server_error(err),
 	}
 }
 
-async fn init(server: &Server, broadcast: &str, kind: &str, rendition: &str, hash: &str) -> Response {
+async fn init(server: &Server, broadcast: &str, kind: Kind, rendition: &str, hash: &str) -> Response {
 	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
 		return not_found();
 	};
-	match rendition.init_versioned(hash).await {
-		Ok(Some(bytes)) => media_bytes(bytes, server),
-		Ok(None) => not_found(),
-		Err(err) => server_error(err),
-	}
+	media_result(rendition.init_versioned(hash).await, server)
 }
 
-async fn segment(server: &Server, broadcast: &str, kind: &str, rendition: &str, file: &str) -> Response {
-	let Some(stem) = file.strip_suffix(".m4s") else {
-		return not_found();
-	};
-	// `{generation}.{segment}` when the export carries a generation, `{segment}` otherwise.
-	let (generation, stem) = match stem.split_once('.') {
-		Some((generation, stem)) => (Some(generation), stem),
-		None => (None, stem),
-	};
+/// How a segment URL addresses its bytes: HLS by aligned number (`seg/0.m4s`), DASH by
+/// timeline pts (`seg/t2000.m4s`, the SegmentTemplate's `$Time$`).
+enum SegmentAt {
+	Sequence(u64),
+	Pts(u64),
+}
+
+async fn segment(
+	server: &Server,
+	broadcast: &str,
+	kind: Kind,
+	rendition: &str,
+	generation: Option<&str>,
+	at: SegmentAt,
+) -> Response {
 	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
 		return not_found();
 	};
@@ -216,32 +291,19 @@ async fn segment(server: &Server, broadcast: &str, kind: &str, rendition: &str, 
 	if !current() {
 		return not_found();
 	}
-	// HLS addresses a segment by its aligned number (`seg/0.m4s`); DASH by its timeline pts
-	// (`seg/t2000.m4s`, the SegmentTemplate's `$Time$`). Same bytes either way.
-	let result = match stem.strip_prefix('t') {
-		Some(time) => match time.parse::<u64>() {
-			Ok(time) => rendition.segment_at(time).await,
-			Err(_) => return not_found(),
-		},
-		None => match stem.parse::<u64>() {
-			Ok(sequence) => rendition.segment(sequence).await,
-			Err(_) => return not_found(),
-		},
+	let result = match at {
+		SegmentAt::Sequence(sequence) => rendition.segment(sequence).await,
+		SegmentAt::Pts(pts) => rendition.segment_at(pts).await,
 	};
 	// A generation change while fetching may have swapped the rows under the lookup.
 	if !current() {
 		return not_found();
 	}
-	match result {
-		Ok(Some(bytes)) => media_bytes(bytes, server),
-		Ok(None) => not_found(),
-		Err(err) => server_error(err),
-	}
+	media_result(result, server)
 }
 
 /// Resolve a rendition, waiting for the catalog to populate.
-async fn rendition_for(server: &Server, broadcast: &str, kind: &str, rendition: &str) -> Option<Arc<Rendition>> {
-	let kind = Kind::parse(kind)?;
+async fn rendition_for(server: &Server, broadcast: &str, kind: Kind, rendition: &str) -> Option<Arc<Rendition>> {
 	let broadcaster = server.broadcaster(broadcast).await?;
 	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.ready()).await;
 	broadcaster.rendition(kind, rendition)
@@ -259,6 +321,14 @@ fn m3u8(body: String) -> Response {
 fn mpd(body: String) -> Response {
 	// Like the playlists: the manifest mutates as the live edge advances.
 	([(header::CONTENT_TYPE, MPD), (header::CACHE_CONTROL, "no-cache")], body).into_response()
+}
+
+fn media_result(result: crate::Result<Option<Bytes>>, server: &Server) -> Response {
+	match result {
+		Ok(Some(bytes)) => media_bytes(bytes, server),
+		Ok(None) => not_found(),
+		Err(err) => server_error(err),
+	}
 }
 
 fn media_bytes(body: Bytes, server: &Server) -> Response {
@@ -295,57 +365,85 @@ mod tests {
 
 	#[test]
 	fn parses_multisegment_broadcast_and_encoded_rendition() {
-		let Some(Route::Media {
-			broadcast,
-			kind,
-			rendition,
-		}) = parse_route("/project/live/video/cam%231%2Fmain%3Falt/media.m3u8")
-		else {
-			panic!("media route should parse");
-		};
-
-		assert_eq!(broadcast, "project/live");
-		assert_eq!(kind, "video");
-		assert_eq!(rendition, "cam#1/main?alt");
+		assert_eq!(
+			Route::parse("/project/live/video/cam%231%2Fmain%3Falt/media.m3u8"),
+			Some(Route {
+				broadcast: "project/live".to_string(),
+				resource: Resource::Media {
+					kind: Kind::Video,
+					rendition: "cam#1/main?alt".to_string(),
+				},
+			})
+		);
 	}
 
 	#[test]
 	fn parses_all_resource_routes() {
-		assert!(matches!(
-			parse_route("/project/live/master.m3u8"),
-			Some(Route::Master { .. })
-		));
-		assert!(matches!(
-			parse_route("/project/live/manifest.mpd"),
-			Some(Route::Manifest { .. })
-		));
-		assert!(matches!(
-			parse_route("/project/live/video/main/init.0123abcd.mp4"),
-			Some(Route::Init { hash, .. }) if hash == "0123abcd"
-		));
-		assert!(parse_route("/project/live/video/main/init.mp4").is_none());
-		assert!(parse_route("/project/live/video/main/init..mp4").is_none());
-		assert!(matches!(
-			parse_route("/project/live/video/main/seg/42.m4s"),
-			Some(Route::Segment { .. })
-		));
-		assert!(matches!(
-			parse_route("/project/live/video/main/seg/t2000.m4s"),
-			Some(Route::Segment { .. })
-		));
-		assert!(parse_route("/master.m3u8").is_none());
-		assert!(parse_route("/project/live/video/main/unknown").is_none());
+		let resource = |path| Route::parse(path).map(|route| route.resource);
+		assert_eq!(resource("/project/live/master.m3u8"), Some(Resource::Master));
+		assert_eq!(resource("/project/live/manifest.mpd"), Some(Resource::Manifest));
+		assert_eq!(
+			resource("/project/live/audio/main/init.0123abcd.mp4"),
+			Some(Resource::Init {
+				kind: Kind::Audio,
+				rendition: "main".to_string(),
+				hash: "0123abcd".to_string(),
+			})
+		);
+		assert_eq!(
+			resource("/project/live/video/main/seg/42.m4s"),
+			Some(Resource::Segment {
+				kind: Kind::Video,
+				rendition: "main".to_string(),
+				generation: None,
+				sequence: 42,
+			})
+		);
+		assert_eq!(
+			resource("/project/live/video/main/seg/run-1.42.m4s"),
+			Some(Resource::Segment {
+				kind: Kind::Video,
+				rendition: "main".to_string(),
+				generation: Some("run-1".to_string()),
+				sequence: 42,
+			})
+		);
+		assert_eq!(
+			resource("/project/live/video/main/seg/t2000.m4s"),
+			Some(Resource::SegmentAt {
+				kind: Kind::Video,
+				rendition: "main".to_string(),
+				generation: None,
+				pts: 2000,
+			})
+		);
+		assert_eq!(
+			resource("/project/live/video/main/seg/init.t2000.m4s"),
+			Some(Resource::SegmentAt {
+				kind: Kind::Video,
+				rendition: "main".to_string(),
+				generation: Some("init".to_string()),
+				pts: 2000,
+			})
+		);
+		assert!(Route::parse("/master.m3u8").is_none());
+		assert!(Route::parse("/project/live/video/main/unknown").is_none());
+		assert!(Route::parse("/project/live/data/main/media.m3u8").is_none());
+		assert!(Route::parse("/project/live/video/main/init.mp4").is_none());
+		assert!(Route::parse("/project/live/video/main/init..mp4").is_none());
+		assert!(Route::parse("/project/live/video/main/seg/tx.m4s").is_none());
+		assert!(Route::parse("/project/live/video/main/seg/1.ts").is_none());
 	}
 
 	#[test]
 	fn rejects_empty_path_segments() {
-		assert!(parse_route("/project//live/master.m3u8").is_none());
+		assert!(Route::parse("/project//live/master.m3u8").is_none());
 	}
 
 	#[test]
 	fn rejects_encoded_broadcast_separators() {
-		assert!(parse_route("/project/private%2F/master.m3u8").is_none());
-		assert!(parse_route("/project%2Fprivate/master.m3u8").is_none());
+		assert!(Route::parse("/project/private%2F/master.m3u8").is_none());
+		assert!(Route::parse("/project%2Fprivate/master.m3u8").is_none());
 	}
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
@@ -503,6 +601,42 @@ mod tests {
 		media.write(vp8_frame(2_000_000, true)).unwrap();
 		media.write(vp8_frame(3_000_000, false)).unwrap();
 		media.write(vp8_frame(4_000_000, true)).unwrap();
+	}
+
+	/// An embedder parses the path, rewrites the broadcast into its own scope, and answers
+	/// through `respond` with the query propagated to every child URL.
+	#[tokio::test]
+	async fn respond_serves_a_route_rewritten_into_scope() {
+		let pair = lite_pair().await;
+		let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
+		broadcast.announce(Default::default()).expect("announce");
+		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), None);
+		write_three_gops(&mut media);
+
+		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
+		let mut route = Route::parse("/tenant/live/video/video0/media.m3u8").expect("media route");
+		route.broadcast = route.broadcast.strip_prefix("tenant/").expect("scoped").to_string();
+
+		let deadline = tokio::time::Instant::now() + TIMEOUT;
+		let body = loop {
+			let response = server.respond(&route, Some("jwt=abc")).await;
+			if response.status() == StatusCode::OK {
+				let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+				let body = String::from_utf8(body.to_vec()).unwrap();
+				if body.contains("seg/0.m4s") {
+					break body;
+				}
+			}
+			assert!(
+				tokio::time::Instant::now() < deadline,
+				"media playlist never listed a segment"
+			);
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		};
+		assert!(body.contains(".mp4?jwt=abc\""), "{body}");
+		assert!(body.contains("seg/0.m4s?jwt=abc"), "{body}");
+
+		pair.accept.abort();
 	}
 
 	async fn status(app: &axum::Router, uri: &str) -> StatusCode {

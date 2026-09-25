@@ -15,7 +15,7 @@ import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { isAnonymous, Route, routesEqual } from "./hop.ts";
-import { hooks, scopeCaptures, scopeOverlaps } from "./internal.ts";
+import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "./internal.ts";
 import * as Path from "./path.ts";
 import { type Advertised, registerWire, wireOf } from "./wire.ts";
 
@@ -221,15 +221,19 @@ class OriginState {
 		remote: new Map<Path.Valid, Advertised>(),
 		local: new Map<Path.Valid, Advertised>(),
 		routes: new Map<Path.Valid, Route>(),
+		visible: new Map<Path.Valid, Route>(),
 	};
 
 	/** The full route table is built once per mutation, regardless of observer count. */
 	available = new Derived([this.local, this.advertisedLocal, this.routes], () => this.snapshot().routes);
+	/** {@link available} without hidden routes, for unscoped readers that did not opt in. */
+	visible = new Derived([this.local, this.advertisedLocal, this.routes], () => this.snapshot().visible);
 
 	snapshot(): {
 		remote: ReadonlyMap<Path.Valid, Advertised>;
 		local: ReadonlyMap<Path.Valid, Advertised>;
 		routes: ReadonlyMap<Path.Valid, Route>;
+		visible: ReadonlyMap<Path.Valid, Route>;
 	} {
 		const version = `${this.local.version}/${this.advertisedLocal.version}/${this.routes.version}`;
 		if (version === this.#snapshotVersion) return this.#snapshot;
@@ -250,7 +254,11 @@ class OriginState {
 			local.set(path, value);
 			available.set(path, value.route);
 		}
-		this.#snapshot = { remote, local, routes: available };
+		const visible = new Map<Path.Valid, Route>();
+		for (const [path, route] of available) {
+			if (!hiddenBelow(Path.empty(), path)) visible.set(path, route);
+		}
+		this.#snapshot = { remote, local, routes: available, visible };
 		this.#snapshotVersion = version;
 		return this.#snapshot;
 	}
@@ -452,10 +460,10 @@ export interface Table {
 	request(path: Path.Valid, options?: RequestOptions): Requesting;
 
 	/** The available announcements under `scope`, as a live map; see {@link Consumer.broadcasts}. */
-	broadcasts(scope?: Path.Pattern): Getter<ReadonlyMap<Path.Valid, Route>>;
+	broadcasts(scope?: Path.Pattern, options?: announce.Options): Getter<ReadonlyMap<Path.Valid, Route>>;
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
-	announced(scope?: Path.Pattern): announce.Consumer;
+	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
 
 	/** Advertise a prefix and serve requests under it; see {@link Producer.dynamic}. */
 	dynamic(prefix: Path.Valid, route?: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint }): Dynamic;
@@ -766,13 +774,13 @@ export class Producer implements Table {
 	}
 
 	/** The available announcements under `scope`, as a live map; see {@link Consumer.broadcasts}. */
-	broadcasts(scope?: Path.Pattern): Getter<ReadonlyMap<Path.Valid, Route>> {
-		return this.#reader.broadcasts(scope);
+	broadcasts(scope?: Path.Pattern, options?: announce.Options): Getter<ReadonlyMap<Path.Valid, Route>> {
+		return this.#reader.broadcasts(scope, options);
 	}
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
-	announced(scope?: Path.Pattern): announce.Consumer {
-		return this.#reader.announced(scope);
+	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
+		return this.#reader.announced(scope, options);
 	}
 
 	/** Close the origin, every broadcast it still routes, and its announcement streams. Idempotent. */
@@ -1103,13 +1111,15 @@ export class Consumer {
 	 * The announced routes matching `scope`, as a live map from covered prefix to route.
 	 * Local broadcasts appear once announced; received and dynamic routes retain their
 	 * advertised prefixes. Reads are synchronous, and the getter needs no teardown.
+	 * Hidden routes are left out unless `options.hidden` opts in (see {@link announce.Options}).
 	 * Unscoped readers share one snapshot; each distinct scope filters the table on changes.
 	 */
-	broadcasts(scope?: Path.Pattern): Getter<ReadonlyMap<Path.Valid, Route>> {
-		if (!scope) return this.#state.available;
+	broadcasts(scope?: Path.Pattern, options?: announce.Options): Getter<ReadonlyMap<Path.Valid, Route>> {
+		const hidden = options?.hidden ?? false;
+		if (!scope) return hidden ? this.#state.available : this.#state.visible;
 		return new Derived([this.#state.available], () => {
 			const routes = new Map<Path.Valid, Route>();
-			for (const [path, entry] of this.#listed(scope)) routes.set(path, entry.route);
+			for (const [path, entry] of this.#listed(scope, hidden)) routes.set(path, entry.route);
 			return routes;
 		});
 	}
@@ -1120,30 +1130,33 @@ export class Consumer {
 	 * Any pattern is accepted. A local broadcast appears once it announces, exactly as a
 	 * peer sees it. A dynamic or received route announces the prefix it covers when its
 	 * subtree overlaps the scope. The stream ends when the origin closes or the consumer is
-	 * closed.
+	 * closed. Hidden routes are left out unless `options.hidden` opts in (see {@link announce.Options}).
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
+	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
 		const producer = new announce.Producer();
-		void this.#runAnnounced(producer, scope);
+		void this.#runAnnounced(producer, scope, options?.hidden ?? false);
 		return producer.consume();
 	}
 
 	/** One snapshot shared by map readers and announcement-stream diffing. */
-	#listed(scope: Path.Pattern): Map<Path.Valid, Presented> {
+	#listed(scope: Path.Pattern, hidden: boolean): Map<Path.Valid, Presented> {
 		const next = new Map<Path.Valid, Presented>();
 		const { remote, local } = this.#state.snapshot();
+		const head = scopeHead(scope);
 		for (const [path, entry] of remote) {
 			if (!scopeOverlaps(scope, path)) continue;
+			if (!hidden && hiddenBelow(head, path)) continue;
 			next.set(path, { identity: entry.identity, route: entry.route, captures: scopeCaptures(scope, path) });
 		}
 		for (const [path, entry] of local) {
 			if (!scope.matches(path)) continue;
+			if (!hidden && hiddenBelow(head, path)) continue;
 			next.set(path, { identity: entry.identity, route: entry.route, captures: scopeCaptures(scope, path) });
 		}
 		return next;
 	}
 
-	async #runAnnounced(producer: announce.Producer, scope: Path.Pattern): Promise<void> {
+	async #runAnnounced(producer: announce.Producer, scope: Path.Pattern, hidden: boolean): Promise<void> {
 		// Keyed by the presented path (from the origin, not the scope), valued by identity
 		// plus route. Diffing identity rather than mere presence means a republish emits a
 		// retraction then a fresh announcement; a re-price of the same identity emits an
@@ -1157,7 +1170,7 @@ export class Consumer {
 				const routes = this.#state.routes.peek();
 				if (local === undefined && advertisedLocal === undefined && routes === undefined) break;
 
-				const next = this.#listed(scope);
+				const next = this.#listed(scope, hidden);
 
 				for (const [path, snap] of active) {
 					const cur = next.get(path);

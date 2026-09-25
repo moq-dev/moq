@@ -146,7 +146,9 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 			let _routes: Vec<_> = (1..=duplicates)
 				.map(|peer| producer.dynamic(PATH, peer_route(peer as u64, INCUMBENT_COST)).unwrap())
 				.collect();
-			let mut cursors: Vec<announce::Consumer> = (0..subscribers).map(|_| consumer.announced()).collect();
+			let mut cursors: Vec<announce::Consumer> = (0..subscribers)
+				.map(|_| consumer.clone().with_hidden(true).announced())
+				.collect();
 			for cursor in &mut cursors {
 				while cursor.next().now_or_never().flatten().is_some() {}
 			}

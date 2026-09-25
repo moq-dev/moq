@@ -394,6 +394,7 @@ impl Rendition {
 	}
 
 	/// The generation every segment URL currently carries.
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	pub(crate) fn generation(&self) -> Option<Arc<str>> {
 		self.run().generation
 	}
@@ -450,17 +451,33 @@ impl Rendition {
 		let run = self.run();
 		let init = self.built_init(&run)?;
 		self.is_playable()
-			.then(|| super::render_media(&self.snapshot(run.generation), &init.hash, query))
+			.then(|| super::render_media(&self.snapshot_as(run.generation), &init.hash, query))
+	}
+
+	/// Wait until the media playlist is servable, then render it: at least one segment is
+	/// listed and the `EXT-X-MAP` init segment it names is built, so a player never loads a
+	/// map that 404s. `None` when the init cannot be built yet.
+	///
+	/// Waits without bound for the first segment; bounding it is the caller's policy. `query`
+	/// propagates exactly as in [`media_playlist`](Self::media_playlist).
+	pub async fn playlist(&self, query: Option<&str>) -> Result<Option<String>> {
+		self.playable().await;
+		// An inline-codec init needs a keyframe group fetched first. init() caches, so the
+		// player's follow-up GET of the init is free.
+		if self.init().await?.is_none() {
+			return Ok(None);
+		}
+		Ok(self.media_playlist(query))
 	}
 
 	/// Snapshot the media playlist from the current timeline window.
 	#[cfg(test)]
-	pub(crate) fn playlist(&self) -> Snapshot {
-		self.snapshot(self.generation())
+	pub(crate) fn snapshot(&self) -> Snapshot {
+		self.snapshot_as(self.generation())
 	}
 
 	/// Snapshot the media playlist from the current timeline window, labeled `generation`.
-	fn snapshot(&self, generation: Option<Arc<str>>) -> Snapshot {
+	fn snapshot_as(&self, generation: Option<Arc<str>>) -> Snapshot {
 		self.media.sync(&self.live);
 		let window = self.live.window();
 

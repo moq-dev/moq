@@ -77,6 +77,10 @@ for media tracks whose timescale should be selected by the importer.
 `WithVideoHint(moq.VideoHint{...})` for video catalog fields that are known
 before the stream reveals them.
 
+`WithAudioTrack(name)` / `WithVideoTrack(name)` name the track instead of
+deriving a unique name from the format. A duplicate name fails, and the
+`OnTrack` variants refuse it because the request already names the track.
+
 JSON tracks are available in two modes. `PublishJSONSnapshot` / `SubscribeJSONSnapshot`
 carry lossy latest state, while `PublishJSONStream` / `SubscribeJSONStream` carry every
 record in order. Producers accept any `encoding/json` value; consumers return
