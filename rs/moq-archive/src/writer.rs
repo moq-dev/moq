@@ -705,6 +705,11 @@ impl<S: ObjectStore> Committer<S> {
 
 		let segment = pending.segment;
 		let record = (*pending).clone();
+		let pts = Timestamp::new(
+			record.pts,
+			Timescale::new(self.timescale).map_err(|_| Error::Timescale(self.timescale))?,
+		)
+		.map_err(|_| Error::Id(record.pts))?;
 		self.timeline.push(pending).map_err(timeline_error)?;
 		self.window.push_back(record);
 
@@ -714,7 +719,7 @@ impl<S: ObjectStore> Committer<S> {
 		}
 		self.timeline.flush().map_err(timeline_error)?;
 
-		let object = self.read_timeline()?;
+		let object = self.read_timeline(pts)?;
 		store.put_segments(&shared.timeline, segment, &object).await?;
 
 		let mut keys = Vec::new();
@@ -747,8 +752,11 @@ impl<S: ObjectStore> Committer<S> {
 		expired
 	}
 
-	/// Collect the timeline groups completed since the last segment.
-	fn read_timeline(&mut self) -> Result<Object> {
+	/// Collect the timeline groups completed since the last segment, stamped at `pts`.
+	///
+	/// The live timeline track stamps frames with the wall clock; storing the segment's content
+	/// time instead keeps a recording's bytes a function of its content alone.
+	fn read_timeline(&mut self, pts: Timestamp) -> Result<Object> {
 		let waiter = kio::Waiter::noop();
 		let timescale = self.groups.info().timescale;
 		let mut groups = Vec::new();
@@ -759,7 +767,10 @@ impl<S: ObjectStore> Committer<S> {
 			let mut frames = Vec::new();
 			loop {
 				match group.poll_read_frame(&waiter) {
-					Poll::Ready(Ok(Some(frame))) => frames.push(frame),
+					Poll::Ready(Ok(Some(mut frame))) => {
+						frame.timestamp = pts;
+						frames.push(frame);
+					}
 					Poll::Ready(Ok(None)) => break,
 					Poll::Ready(Err(err)) => return Err(timeline_error_net(err)),
 					// Flushing closed every group, so an open one is a bug.
@@ -1392,7 +1403,11 @@ mod tests {
 		assert_eq!(ranges(&records, "video"), vec![(0, 0), (1, 1), (2, 2), (4, 4), (5, 5)]);
 		check_objects(&store, &records).await;
 		// An archive deletes nothing; the orphan stays invisible.
-		assert!(stored_groups(&store).await.contains(&Key::groups("video", 3..=3).unwrap()));
+		assert!(
+			stored_groups(&store)
+				.await
+				.contains(&Key::groups("video", 3..=3).unwrap())
+		);
 		assert!(!referenced(&records).contains(&Key::groups("video", 3..=3).unwrap()));
 	}
 

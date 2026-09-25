@@ -23,7 +23,10 @@ pub(crate) enum Op {
 	Put(String),
 	Delete(String),
 	/// A streaming or paginated listing, with its prefix and exclusive offset.
-	List { prefix: String, offset: Option<String> },
+	List {
+		prefix: String,
+		offset: Option<String>,
+	},
 }
 
 #[derive(Debug, Default)]
@@ -117,7 +120,11 @@ impl Mock {
 		self.state().ops.push(op);
 	}
 
-	fn listed(&self, prefix: Option<&Path>, offset: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+	fn listed(
+		&self,
+		prefix: Option<&Path>,
+		offset: Option<&Path>,
+	) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
 		self.log(Op::List {
 			prefix: prefix.map(ToString::to_string).unwrap_or_default(),
 			offset: offset.map(ToString::to_string),
@@ -161,7 +168,12 @@ impl std::fmt::Display for Mock {
 
 #[async_trait::async_trait]
 impl ObjectStore for Mock {
-	async fn put_opts(&self, location: &Path, payload: PutPayload, opts: PutOptions) -> object_store::Result<PutResult> {
+	async fn put_opts(
+		&self,
+		location: &Path,
+		payload: PutPayload,
+		opts: PutOptions,
+	) -> object_store::Result<PutResult> {
 		self.log(Op::Put(location.to_string()));
 		if self.state().fail_puts.iter().any(|p| location.as_ref().contains(p)) {
 			return Err(unsupported("put"));
@@ -203,7 +215,11 @@ impl ObjectStore for Mock {
 		self.listed(prefix, None)
 	}
 
-	fn list_with_offset(&self, prefix: Option<&Path>, offset: &Path) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+	fn list_with_offset(
+		&self,
+		prefix: Option<&Path>,
+		offset: &Path,
+	) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
 		self.listed(prefix, Some(offset))
 	}
 

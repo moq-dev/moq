@@ -359,7 +359,11 @@ mod tests {
 	}
 
 	fn sequences(bytes: Bytes) -> Result<Vec<u64>> {
-		Ok(Object::decode(bytes)?.groups.iter().map(|group| group.sequence).collect())
+		Ok(Object::decode(bytes)?
+			.groups
+			.iter()
+			.map(|group| group.sequence)
+			.collect())
 	}
 
 	#[test]
@@ -464,7 +468,10 @@ mod tests {
 		assert!(matches!(table([(1, 1), (2, 1)], 3), Err(Error::Table)), "late start");
 		assert!(matches!(table([(0, 1), (1, 3)], 3), Err(Error::Table)), "past the end");
 		let varint = (1u64 << 62) - 1;
-		assert!(matches!(table([(0, 1), (1, varint)], 3), Err(Error::Table)), "huge length");
+		assert!(
+			matches!(table([(0, 1), (1, varint)], 3), Err(Error::Table)),
+			"huge length"
+		);
 	}
 
 	#[test]

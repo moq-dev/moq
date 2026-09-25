@@ -377,7 +377,10 @@ mod tests {
 	fn keys_parse_under_an_empty_prefix() {
 		let key = Key::groups("catalog.json", 1..=2).unwrap();
 		let path = key.path(&Path::ROOT).unwrap();
-		assert_eq!(path.as_ref(), "catalog%2Ejson/groups/0000000000000000002.0000000000000000001");
+		assert_eq!(
+			path.as_ref(),
+			"catalog%2Ejson/groups/0000000000000000002.0000000000000000001"
+		);
 		assert_eq!(Key::parse(&Path::ROOT, &path).unwrap(), key);
 	}
 

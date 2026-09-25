@@ -869,7 +869,10 @@ mod tests {
 		] {
 			assert_eq!(lookup(&store, group).await, found, "group {group}");
 		}
-		store.delete(&Key::groups("video", ID_MAX..=ID_MAX).unwrap()).await.unwrap();
+		store
+			.delete(&Key::groups("video", ID_MAX..=ID_MAX).unwrap())
+			.await
+			.unwrap();
 		assert_eq!(lookup(&store, 11).await, None);
 		assert!(Query::groups_from("video", ID_MAX + 1).is_err());
 	}
@@ -881,11 +884,23 @@ mod tests {
 		store.put_groups("video", &one_group(4, b"a")).await.unwrap();
 		assert_eq!(store.paginated_prefix(None), None);
 
-		let expected = std::collections::HashSet::from([Key::info("catalog.json").unwrap(), Key::groups("video", 4..=4).unwrap()]);
-		let streamed: std::collections::HashSet<Key> = store.list(&Query::new()).map_ok(|entry| entry.key).try_collect().await.unwrap();
+		let expected =
+			std::collections::HashSet::from([Key::info("catalog.json").unwrap(), Key::groups("video", 4..=4).unwrap()]);
+		let streamed: std::collections::HashSet<Key> = store
+			.list(&Query::new())
+			.map_ok(|entry| entry.key)
+			.try_collect()
+			.await
+			.unwrap();
 		assert_eq!(streamed, expected);
 		let page = store.list_paginated(&Query::new()).await.unwrap();
-		assert_eq!(page.entries.into_iter().map(|entry| entry.key).collect::<std::collections::HashSet<_>>(), expected);
+		assert_eq!(
+			page.entries
+				.into_iter()
+				.map(|entry| entry.key)
+				.collect::<std::collections::HashSet<_>>(),
+			expected
+		);
 		assert!(page.next.is_none());
 		let page = store.list_paginated(&Query::groups("video").unwrap()).await.unwrap();
 		assert_eq!(page.entries.len(), 1);

@@ -331,7 +331,9 @@ async fn a_missing_tail_is_retried_on_the_next_refresh() {
 	let mut archive = Archive::new().await;
 	for segment in 0..3 {
 		archive.media("video", &[(segment, 1)]).await;
-		archive.commit(&record(segment, &[("video", &[(segment, segment)])]), 0).await;
+		archive
+			.commit(&record(segment, &[("video", &[(segment, segment)])]), 0)
+			.await;
 	}
 	// Listed, but not yet readable.
 	archive.store.inner().hide_gets("segments/0000000000000000002");
@@ -379,7 +381,9 @@ async fn following_lists_only_new_timeline_keys() {
 			Err(moq_net::Error::NotFound)
 		));
 
-		archive.commit(&record(segment, &[("video", &[(segment, segment)])]), 0).await;
+		archive
+			.commit(&record(segment, &[("video", &[(segment, segment)])]), 0)
+			.await;
 		archive.store.inner().take();
 		reader.refresh().await.unwrap();
 		let previous = format!("rec/timeline%2Ez/segments/{:019}", segment - 1);
@@ -408,7 +412,9 @@ async fn an_unordered_listing_replays_in_segment_order() {
 	for segment in 0..4 {
 		archive.media("video", &[(segment, 1)]).await;
 		let pop = u64::from(segment >= 2);
-		archive.commit(&record(segment, &[("video", &[(segment, segment)])]), pop).await;
+		archive
+			.commit(&record(segment, &[("video", &[(segment, segment)])]), pop)
+			.await;
 	}
 
 	let (broadcast, mut reader) = open(&archive).await;
@@ -450,7 +456,10 @@ async fn a_track_without_usable_info_is_not_found() {
 	archive.store.put_groups("bare", &object("bare")).await.unwrap();
 	archive.store.put_groups("future", &object("future")).await.unwrap();
 	archive
-		.raw(&Key::info("future").unwrap(), br#"{"version":2,"priority":0,"timescale":1000}"#)
+		.raw(
+			&Key::info("future").unwrap(),
+			br#"{"version":2,"priority":0,"timescale":1000}"#,
+		)
 		.await;
 	archive
 		.commit(

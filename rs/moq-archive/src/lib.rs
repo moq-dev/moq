@@ -20,6 +20,8 @@ pub mod info;
 #[cfg(test)]
 mod mock;
 mod path;
+#[cfg(test)]
+mod proof;
 pub mod reader;
 mod recover;
 pub mod segment;
