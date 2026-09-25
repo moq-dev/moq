@@ -4,6 +4,7 @@ import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import { ControlStreamAdapter } from "./adapter.ts";
 import { toRequestCode } from "./error.ts";
+import { GoAway } from "./goaway.ts";
 import { PublishNamespace, PublishNamespaceCancel, PublishNamespaceDone } from "./publish_namespace.ts";
 import { RequestError } from "./request.ts";
 import { ALPN, Version } from "./version.ts";
@@ -183,4 +184,39 @@ test("withdrawals distinguish the same namespace by direction", async () => {
 
 	await cancel(peer, namespace);
 	expect(await closed(outgoing)).toBe(true);
+});
+
+/**
+ * Draft-14 to -16 carry GOAWAY on the shared control stream. The adapter decodes it and keeps
+ * routing, so the session serves its groups in flight while the caller migrates.
+ */
+test("the control stream adapter decodes a GOAWAY and keeps running", async () => {
+	const { adapter, peer } = await connect();
+
+	await peer.writer.u53(GoAway.id);
+	await new GoAway({ newSessionUri: "https://relay.example/next" }).encode(peer.writer, VERSION);
+
+	const drain = await adapter.goaway;
+	expect(drain.uri).toBe("https://relay.example/next");
+	// These drafts carry no timeout: absence means the caller's cap, never a zero handover.
+	expect(drain.timeout).toBeUndefined();
+
+	// Still routing: a later announcement opens its virtual stream.
+	await announce(peer, 1n, Path.from("still"));
+	await accept(adapter);
+});
+
+test("a second GOAWAY on the control stream closes the session", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_15);
+	const control = await Stream.open(pair.server, { version: VERSION });
+	const adapter = new ControlStreamAdapter(pair.server, control, VERSION, 100n, true);
+	const running = adapter.run();
+	const peer = await Stream.accept(pair.client, VERSION);
+	if (!peer) throw new Error("no control stream");
+
+	for (let i = 0; i < 2; i++) {
+		await peer.writer.u53(GoAway.id);
+		await new GoAway({ newSessionUri: "" }).encode(peer.writer, VERSION);
+	}
+	await expect(running).rejects.toThrow("duplicate GOAWAY");
 });

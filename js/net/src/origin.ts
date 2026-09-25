@@ -321,11 +321,10 @@ class OriginState {
 		const requests = this.requests.peek();
 		for (const [path, cached] of [...this.materialized]) {
 			if (!Path.hasPrefix(prefix, path)) continue;
-			const refused = requests?.get(path)?.refused;
-			if (cached.entry !== this.bestEntry(path, (entry) => refused?.has(entry) ?? false)) {
-				this.materialized.delete(path);
-				cached.front.close();
-			}
+			// A merely outranked provider is left to `route`, which holds it until the new one serves.
+			if (this.present(cached.entry)) continue;
+			this.materialized.delete(path);
+			cached.front.close();
 		}
 		for (const [path, slot] of requests ?? []) {
 			if (Path.hasPrefix(prefix, path)) slot.route.set(this.route(path, slot));
@@ -369,6 +368,14 @@ class OriginState {
 		cached.front.close();
 	}
 
+	/** Whether `entry` is still in the table, rather than retracted. */
+	present(entry: RouteEntry): boolean {
+		for (const entries of this.routes.peek()?.values() ?? []) {
+			if (entries.includes(entry)) return true;
+		}
+		return false;
+	}
+
 	/** The preferred entry on the most specific route covering `path`, ignoring skipped entries, if any. */
 	bestEntry(path: Path.Valid, skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
 		let bestPrefix: Path.Valid | undefined;
@@ -405,7 +412,9 @@ class OriginState {
 	 *
 	 * Materialization is lazy and cached per path: the first request under a route opens
 	 * the providing session's subscription, repeats share it, and a provider change (the
-	 * route retracting, a better session taking over) swaps it out.
+	 * route retracting, a better session taking over) swaps it out. A route that was only
+	 * outranked keeps serving until its replacement answers, so the swap never leaves the
+	 * path unrouted in between: a relay migration hands over rather than dropping out.
 	 */
 	route(path: Path.Valid, slot: Pick<RequestSlot, "answer" | "refused">): broadcast.Consumer | undefined {
 		const entry = this.bestEntry(path, (candidate) => slot.refused.has(candidate));
@@ -416,23 +425,34 @@ class OriginState {
 			return local;
 		}
 
-		const cached = this.materialized.get(path);
+		let cached = this.materialized.get(path);
 		if (cached && cached.entry === entry) {
 			if (cached.front.closed.peek() === undefined) return cached.front;
 			this.materialized.delete(path);
-		} else if (cached) {
+			cached = undefined;
+		}
+		// Whatever `cached` holds now belongs to another provider, and goes once this one serves.
+		const replace = () => {
+			if (!cached) return;
 			this.materialized.delete(path);
 			cached.front.close();
+		};
+		if (!entry?.server) {
+			replace();
+			return slot.answer;
 		}
-		if (!entry?.server) return slot.answer;
 
 		const served = entry.server.served.get(path);
 		if (served && served.closed.peek() === undefined) {
+			replace();
 			this.materialized.set(path, { entry, front: served });
 			return served;
 		}
 
 		entry.server.enqueue(path);
+		const standby = cached && !slot.refused.has(cached.entry) && this.present(cached.entry);
+		if (standby && cached?.front.closed.peek() === undefined) return cached?.front;
+		replace();
 		return undefined;
 	}
 }

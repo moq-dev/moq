@@ -1,6 +1,10 @@
+import { Once } from "@moq/signals";
 import { Mutex } from "async-mutex";
+import type { Drain } from "../connection/goaway.ts";
+import { ProtocolViolation } from "../error.ts";
 import { Reader, Stream, type Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
+import { GoAway } from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -89,6 +93,9 @@ export class ControlStreamAdapter implements Session {
 	#writer: Writer;
 	#writeMutex = new Mutex();
 	readonly version: IetfVersion;
+
+	/** The peer's GOAWAY, which draft-14 to -16 carry on the shared control stream. */
+	readonly goaway = new Once<Drain>();
 
 	// Virtual streams keyed by requestId
 	#streams = new Map<bigint, StreamEntry>();
@@ -263,8 +270,11 @@ export class ControlStreamAdapter implements Session {
 				const classified = await this.#classify(typeId, body);
 
 				if (classified.route === Route.GoAway) {
-					console.warn("received GOAWAY on control stream");
-					return;
+					// The session keeps serving: a GOAWAY asks us to migrate, not to stop reading.
+					const msg = await GoAway.decodeBody(body, this.version);
+					if (this.goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
+					this.goaway.set(msg.drain());
+					continue;
 				}
 
 				const { route, requestId } = classified;

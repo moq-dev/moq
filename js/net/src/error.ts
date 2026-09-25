@@ -247,6 +247,21 @@ export class NotFound extends Stream {
 }
 
 /**
+ * A peer's GOAWAY named a redirect the connection refuses, or one it could not parse.
+ *
+ * Terminal: the peer is leaving, so the connection stops rather than redialing the old
+ * address. Mirrors the Rust `Error::RefusedRedirect`.
+ *
+ * @public
+ */
+export class RefusedRedirect extends Error {
+	constructor(reason: string) {
+		super(`GOAWAY redirect refused: ${reason}`);
+		this.name = "RefusedRedirect";
+	}
+}
+
+/**
  * A peer broke the protocol in a way the spec says must end the session.
  *
  * Thrown where the violation is detected, rather than handled there: a decoder has no session
