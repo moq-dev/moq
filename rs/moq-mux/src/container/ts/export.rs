@@ -677,6 +677,8 @@ impl<E: catalog::Catalog> Export<E> {
 						track.pending = None;
 					}
 				}
+				// Show where the dropped tracks resume, or the interleave waits on them.
+				self.fill(waiter)?;
 			}
 		}
 

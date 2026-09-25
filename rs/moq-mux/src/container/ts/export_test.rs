@@ -3747,6 +3747,21 @@ async fn quiet_track_is_emitted_around_then_rejoins() {
 	assert!(pts.is_sorted(), "the interleave did not resume: {pts:?}");
 }
 
+/// Audio dropped for leading the first keyframe does not stall the interleave: the
+/// audio already cached past the keyframe shows where the track resumes.
+#[tokio::test(start_paused = true)]
+async fn tune_in_does_not_wait_on_dropped_audio() {
+	let mut rig = Interleave::new();
+	let mut export = rig.export(Duration::from_millis(500)).await;
+	let mut out = Vec::new();
+	rig.audio_until(3 * GOP * VIDEO_US, &mut export, &mut out);
+	for tick in GOP..2 * GOP {
+		rig.video(tick);
+	}
+	out.extend(poll_frames(&mut export));
+	assert!(!out.is_empty(), "the tune-in waited on audio it had dropped");
+}
+
 /// A rewind taken while going around a quiet track gives the new generation a
 /// fresh hold rather than the one that already expired.
 #[tokio::test(start_paused = true)]
