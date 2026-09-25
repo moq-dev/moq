@@ -1425,6 +1425,65 @@ async fn ac3_roundtrip_byte_exact() {
 	assert_eq!(roundtripped, ingested, "AC-3 frames must survive byte-for-byte");
 }
 
+/// The first ADTS frame of the first AAC PES: its header and raw data block.
+fn first_adts_frame(ts: &[u8]) -> (super::adts::Header, Vec<u8>) {
+	let mut pes = PesPacketReader::new(TsPacketReader::new(Cursor::new(ts)));
+	let packet = pes.read_pes_packet().unwrap().expect("an AAC PES");
+	let header = super::adts::Header::parse(&packet.data).unwrap();
+	(header, packet.data[header.header_len..header.frame_len].to_vec())
+}
+
+/// ffmpeg's quad AAC fixture has no channelConfiguration, so its layout rides in a program
+/// config element. Import moves it into the description and export puts it back: channel_config
+/// 0 in ADTS and the element leading the first raw data block, exactly as ffmpeg wrote it.
+#[tokio::test(start_paused = true)]
+async fn aac_program_config_roundtrip() {
+	let data = include_bytes!("test_data/aac_quad.ts");
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(&BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	let (name, audio) = snapshot.audio.renditions.iter().next().expect("an AAC track");
+	assert_eq!(audio.channel_count, 4);
+	let ingested = read_frames(&consumer, name, Kind::Audio).await;
+	assert!(!ingested.is_empty(), "no AAC frames");
+
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	let (header, block) = first_adts_frame(&ts);
+	assert_eq!(header.channel_config, 0, "the layout is not a channelConfiguration");
+	assert_eq!(
+		block,
+		first_adts_frame(data).1,
+		"the first raw data block, element and all"
+	);
+
+	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
+	let consumer2 = broadcast2.consume();
+	let catalog2 = crate::catalog::Producer::new(&mut broadcast2, crate::catalog::Config::default()).unwrap();
+	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
+	import2.finish().unwrap();
+
+	let snapshot2 = catalog2.snapshot();
+	let (name2, audio2) = snapshot2
+		.audio
+		.renditions
+		.iter()
+		.next()
+		.expect("round-trip lost the AAC track");
+	assert_eq!(audio2.channel_count, 4);
+	assert_eq!(audio2.description, audio.description);
+	let roundtripped = read_frames(&consumer2, name2, Kind::Audio).await;
+	assert_eq!(roundtripped, ingested, "the element is written once, not per frame");
+}
+
 /// The ffmpeg E-AC-3 fixture must survive TS -> MoQ -> TS byte-for-byte in an
 /// audio-only program; the PMT re-announces ATSC 0x87 with the 'EAC3'
 /// registration descriptor.

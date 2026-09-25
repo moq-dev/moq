@@ -70,53 +70,10 @@ impl Config {
 	/// that follows, and a reserved one is refused. Any SBR/PS extension bits after the
 	/// core fields are consumed.
 	pub fn parse<T: Buf>(buf: &mut T) -> Result<Self> {
-		if buf.remaining() < 2 {
-			return Err(Error::ConfigTooShort);
-		}
-
 		let mut reader = BitReader::new(buf);
-		let object_type = read_object_type(&mut reader)?;
-
-		// samplingFrequencyIndex: 4 bits; index 15 means an explicit 24-bit rate follows.
-		let freq_index = reader.read(4, Error::IncompleteConfig)? as u8;
-		let sample_rate = if freq_index == 15 {
-			reader.read(24, Error::ExplicitSampleRateTooShort)?
-		} else {
-			*SAMPLE_RATES
-				.get(freq_index as usize)
-				.ok_or(Error::UnsupportedSampleRateIndex(freq_index))?
-		};
-
-		// channelConfiguration: 4 bits, immediately after the (possibly explicit) rate.
-		let channel_config = reader.read(4, Error::IncompleteConfig)? as u8;
+		let (object_type, sample_rate, channel_config) = read_header(&mut reader)?;
 		let channel_count = match channel_config {
-			0 => {
-				// Explicit SBR and PS name their core object type after an extension rate; the
-				// GASpecificConfig carrying the program config element follows that core type.
-				let mut core = object_type;
-				if matches!(object_type, 5 | 29) {
-					if reader.read(4, Error::IncompleteConfig)? == 15 {
-						reader.read(24, Error::IncompleteConfig)?;
-					}
-					core = read_object_type(&mut reader)?;
-					if core == 22 {
-						// extensionChannelConfiguration, only for ER BSAC.
-						reader.read(4, Error::IncompleteConfig)?;
-					}
-				}
-				if !GENERAL_AUDIO.contains(&core) {
-					return Err(Error::ProgramConfigUnsupported(core));
-				}
-
-				// GASpecificConfig: frameLengthFlag, dependsOnCoreCoder (then a 14-bit
-				// coreCoderDelay), and extensionFlag precede the element.
-				reader.read(1, Error::IncompleteConfig)?;
-				if reader.read(1, Error::IncompleteConfig)? == 1 {
-					reader.read(14, Error::IncompleteConfig)?;
-				}
-				reader.read(1, Error::IncompleteConfig)?;
-				program_config(&mut reader)?
-			}
+			0 => program_config(&mut reader)?,
 			_ => channel_count_from_config(channel_config)?,
 		};
 
@@ -178,13 +135,65 @@ impl Config {
 	}
 }
 
+/// Read an AudioSpecificConfig up to its channels: the audioObjectType, sample rate, and
+/// channelConfiguration. For a channelConfiguration of 0 the reader stops at the program config
+/// element.
+fn read_header<T: Buf>(reader: &mut BitReader<T>) -> Result<(u8, u32, u8)> {
+	if reader.buf.remaining() < 2 {
+		return Err(Error::ConfigTooShort);
+	}
+	let object_type = read_object_type(reader)?;
+
+	// samplingFrequencyIndex: 4 bits; index 15 means an explicit 24-bit rate follows.
+	let freq_index = reader.read(4, Error::IncompleteConfig)? as u8;
+	let sample_rate = if freq_index == 15 {
+		reader.read(24, Error::ExplicitSampleRateTooShort)?
+	} else {
+		*SAMPLE_RATES
+			.get(freq_index as usize)
+			.ok_or(Error::UnsupportedSampleRateIndex(freq_index))?
+	};
+
+	// channelConfiguration: 4 bits, immediately after the (possibly explicit) rate.
+	let channel_config = reader.read(4, Error::IncompleteConfig)? as u8;
+	if channel_config != 0 {
+		return Ok((object_type, sample_rate, channel_config));
+	}
+
+	// Explicit SBR and PS name their core object type after an extension rate; the
+	// GASpecificConfig carrying the program config element follows that core type.
+	let mut core = object_type;
+	if matches!(object_type, 5 | 29) {
+		if reader.read(4, Error::IncompleteConfig)? == 15 {
+			reader.read(24, Error::IncompleteConfig)?;
+		}
+		core = read_object_type(reader)?;
+		if core == 22 {
+			// extensionChannelConfiguration, only for ER BSAC.
+			reader.read(4, Error::IncompleteConfig)?;
+		}
+	}
+	if !GENERAL_AUDIO.contains(&core) {
+		return Err(Error::ProgramConfigUnsupported(core));
+	}
+
+	// GASpecificConfig: frameLengthFlag, dependsOnCoreCoder (then a 14-bit
+	// coreCoderDelay), and extensionFlag precede the element.
+	reader.read(1, Error::IncompleteConfig)?;
+	if reader.read(1, Error::IncompleteConfig)? == 1 {
+		reader.read(14, Error::IncompleteConfig)?;
+	}
+	reader.read(1, Error::IncompleteConfig)?;
+	Ok((object_type, sample_rate, 0))
+}
+
 /// Build the AudioSpecificConfig for a stream that signals its fields per frame, as ADTS does.
 ///
 /// A `channel_config` of 0 means a program config element leads `block`, the stream's first raw
-/// data block; it moves into the config, so the config describes the channels on its own. Any
-/// other value leaves `block` unread. An element placed anywhere else is refused: reaching past
-/// the channel data needs a full Huffman decode.
-pub(crate) fn in_band_config(profile: u8, sample_rate: u32, channel_config: u8, block: &[u8]) -> Result<Bytes> {
+/// data block; it moves into the config, so the config describes the channels on its own, and
+/// `block` advances past it. Any other value leaves `block` untouched. An element placed anywhere
+/// else is refused: reaching past the channel data needs a full Huffman decode.
+pub(crate) fn in_band_config(profile: u8, sample_rate: u32, channel_config: u8, block: &mut &[u8]) -> Result<Bytes> {
 	let mut out = BitWriter::default();
 	out.write(5, u32::from(profile & 0x1F));
 	match SAMPLE_RATES.iter().position(|&rate| rate == sample_rate) {
@@ -200,8 +209,8 @@ pub(crate) fn in_band_config(profile: u8, sample_rate: u32, channel_config: u8, 
 		// GASpecificConfig: frameLengthFlag, dependsOnCoreCoder, and extensionFlag, all clear.
 		out.write(3, 0);
 
-		let mut block = block;
-		let mut reader = BitReader::new(&mut block);
+		// The element ends byte aligned to the block, so the reader stops exactly past it.
+		let mut reader = BitReader::new(block);
 		if reader.read(3, Error::ProgramConfigMissing)? != ID_PCE {
 			return Err(Error::ProgramConfigMissing);
 		}
@@ -211,6 +220,27 @@ pub(crate) fn in_band_config(profile: u8, sample_rate: u32, channel_config: u8, 
 	}
 
 	Ok(Bytes::from(out.bytes))
+}
+
+/// Split an AudioSpecificConfig into the channel signaling of a stream that carries it per frame,
+/// as ADTS does; the inverse of [`in_band_config`].
+///
+/// Returns the channelConfiguration and, when that is 0, the program config element framed to
+/// lead a raw data block: its element ID, then the element aligned to the block.
+pub(crate) fn in_band_channels(asc: &[u8]) -> Result<(u8, Option<Bytes>)> {
+	let mut asc = asc;
+	let mut reader = BitReader::new(&mut asc);
+	let (_, _, channel_config) = read_header(&mut reader)?;
+	if channel_config != 0 {
+		return Ok((channel_config, None));
+	}
+
+	let mut out = BitWriter::default();
+	out.write(3, ID_PCE);
+	reader.record = Some(out);
+	program_config(&mut reader)?;
+	let out = reader.record.take().expect("recording set above");
+	Ok((0, Some(Bytes::from(out.bytes))))
 }
 
 /// The raw data block element ID of a program config element (ISO 14496-3 Table 4.85).
@@ -597,23 +627,48 @@ mod tests {
 		let mut block = BitWriter::default();
 		block.write(3, ID_PCE);
 		write_pce(&mut block, &[false, true], &[], &[true], 1);
+		let pce = block.bytes.clone();
 		// The channel elements that follow are never read.
 		block.write(8, 0xFF);
 
-		let asc = in_band_config(2, 48_000, 0, &block.bytes).unwrap();
+		let mut rest = block.bytes.as_slice();
+		let asc = in_band_config(2, 48_000, 0, &mut rest).unwrap();
 		assert_eq!(asc, pce_asc(2, &[false, true], &[], &[true], 1));
 		assert_eq!(Config::parse(&mut asc.as_ref()).unwrap().channel_count, 6);
+		assert_eq!(rest, [0xFF], "the element moves out of the block");
+
+		// And back: the element leads the block again, byte for byte.
+		assert_eq!(in_band_channels(&asc).unwrap(), (0, Some(Bytes::from(pce))));
+	}
+
+	#[test]
+	fn in_band_channels_of_ffmpeg_program_config_element() {
+		// Round trip ffmpeg's own element through a raw data block and back into a config. The
+		// trailing SBR sync extension is not part of the element, so it drops.
+		let (config, pce) = in_band_channels(&FFMPEG_QUAD_ASC).unwrap();
+		assert_eq!(config, 0);
+		let pce = pce.unwrap();
+		let mut block = pce.as_ref();
+		let asc = in_band_config(2, 48_000, 0, &mut block).unwrap();
+		assert!(block.is_empty(), "the element is all that was framed");
+		assert_eq!(asc, FFMPEG_QUAD_ASC[..FFMPEG_QUAD_ASC.len() - 3]);
+	}
+
+	#[test]
+	fn in_band_channels_without_a_program_config_element() {
+		assert_eq!(in_band_channels(&[0x11, 0x90]).unwrap(), (2, None));
+		assert_eq!(in_band_channels(&[0x11, 0xE0]).unwrap(), (12, None));
 	}
 
 	#[test]
 	fn in_band_config_refuses_a_block_without_a_leading_pce() {
 		// ID_CPE first: any element past the channel data is out of reach.
 		assert!(matches!(
-			in_band_config(2, 48_000, 0, &[0x20, 0x00]),
+			in_band_config(2, 48_000, 0, &mut [0x20, 0x00].as_slice()),
 			Err(Error::ProgramConfigMissing)
 		));
 		assert!(matches!(
-			in_band_config(2, 48_000, 0, &[]),
+			in_band_config(2, 48_000, 0, &mut [].as_slice()),
 			Err(Error::ProgramConfigMissing)
 		));
 	}
@@ -621,7 +676,7 @@ mod tests {
 	#[test]
 	fn in_band_config_matches_encode() {
 		// Without a PCE the block is unread and the config is the plain two-byte form.
-		let asc = in_band_config(2, 44_100, 2, &[]).unwrap();
+		let asc = in_band_config(2, 44_100, 2, &mut [].as_slice()).unwrap();
 		let encoded = Config {
 			profile: 2,
 			sample_rate: 44_100,

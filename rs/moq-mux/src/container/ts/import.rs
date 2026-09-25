@@ -2132,17 +2132,19 @@ impl<E: CatalogExt> AacStream<E> {
 				}
 			};
 
+			let mut block = &data[offset + header.header_len..end];
 			let import = match &mut self.import {
 				Some(import) => import,
 				None => {
 					// Synthesize the AudioSpecificConfig `description` so out-of-band consumers
 					// (fMP4/MKV export, WebCodecs) can configure the decoder. A channel_config of 0
-					// moves the program config element out of this first frame into it.
+					// moves the program config element out of this first frame into it, as
+					// ffmpeg's aac_adtstoasc does; the TS export puts it back.
 					let asc = aac::in_band_config(
 						header.object_type,
 						header.sample_rate,
 						header.channel_config,
-						&data[offset + header.header_len..end],
+						&mut block,
 					)?;
 					let mut config = aac::config(&asc)?;
 					config.container = self.container.clone();
@@ -2157,7 +2159,7 @@ impl<E: CatalogExt> AacStream<E> {
 				}
 			};
 
-			import.decode(&data[offset + header.header_len..end], pts)?;
+			import.decode(block, pts)?;
 			// Count only completed frames; input gaps and unfinished tails are not a media burst.
 			burst += std::time::Duration::from_nanos((1024_u64 * 1_000_000_000).div_ceil(header.sample_rate as u64));
 			// The importer accumulates; cut each ADTS frame into its own group (one QUIC stream)
