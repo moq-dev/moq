@@ -1902,12 +1902,13 @@ async fn run_front(task: FrontTask) {
 		front.retain_routes(|route| table.routes.covers(&path.as_path(), route));
 		let best = table
 			.best_route(&path.as_path(), horizon, front.pin(), |entry| {
-				front.skips(entry.id, entry.hops.iter().next().copied())
+				front.skips(entry.id, entry.hops.iter().next().copied(), entry.via)
 			})
 			.map(|entry| Candidate {
 				route: entry.id,
 				first: entry.hops.iter().next().copied(),
 				local: entry.local,
+				via: entry.via,
 			});
 		let serving_closing = front
 			.serving()
@@ -1937,6 +1938,7 @@ async fn run_front(task: FrontTask) {
 											route,
 											first: entry.hops.iter().next().copied(),
 											local: entry.local,
+											via: entry.via,
 										},
 										entry.source.clone(),
 										entry.server.clone(),
@@ -5183,6 +5185,44 @@ mod tests {
 			catch_all.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
 			"a capacity refusal fell through to a less specific route"
 		);
+	}
+
+	#[tokio::test]
+	async fn capacity_refusal_from_an_anonymous_session_skips_that_session() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		// Hop 0 names nobody. Two routes from one session, then a different session.
+		let full = producer
+			.dynamic(
+				"jobs",
+				Route::default().with_hops(hops(&[0])).with_via(origin(7)).with_cost(1),
+			)
+			.unwrap();
+		let sibling = producer
+			.dynamic(
+				"jobs",
+				Route::default().with_hops(hops(&[0])).with_via(origin(7)).with_cost(2),
+			)
+			.unwrap();
+		let other = producer
+			.dynamic(
+				"jobs",
+				Route::default().with_hops(hops(&[0])).with_via(origin(8)).with_cost(3),
+			)
+			.unwrap();
+
+		let pending = consumer.request_broadcast("jobs/a");
+		queued(&full).await.reject(Error::NoCapacity);
+		assert!(
+			sibling.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"the refusing session was asked again"
+		);
+		let request = queued(&other).await;
+		assert_eq!(request.path().as_str(), "jobs/a");
+		let served = broadcast::Info::new().produce();
+		request.accept(&served);
+		pending.await.expect("the other session serves it");
+		assert!(sibling.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
 	}
 
 	#[tokio::test]

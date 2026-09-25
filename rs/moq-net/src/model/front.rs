@@ -32,6 +32,9 @@ pub(super) struct Candidate {
 	pub route: u64,
 	pub first: Option<Hop>,
 	pub local: bool,
+	/// Announcing session. A first hop of 0 names nobody, so a capacity retry
+	/// excludes this session instead of that hop.
+	pub via: Hop,
 }
 
 /// Why an upstream request through a route did not produce a source.
@@ -212,6 +215,12 @@ pub(super) struct Front {
 	/// The first hop of an advertiser that refused for capacity: every route it
 	/// originated is skipped, not just the one that was asked.
 	shunned: Option<Hop>,
+	/// The announcing session of an anonymous advertiser that refused for
+	/// capacity. A hop of 0 names nobody, so the session is what excludes its
+	/// other routes.
+	shunned_via: Option<Hop>,
+	/// Announcing session of the route that fixed the identity.
+	via: Hop,
 	/// Whether the one re-resolution a capacity refusal permits was spent.
 	retried: bool,
 	/// Whether the identity's routes were received from a peer, rather than
@@ -244,6 +253,8 @@ impl Front {
 			upstream: None,
 			refused: HashSet::new(),
 			shunned: None,
+			shunned_via: None,
+			via: Hop::UNKNOWN,
 			retried: false,
 			received: false,
 			last_err: None,
@@ -261,10 +272,13 @@ impl Front {
 		self.identity.pin()
 	}
 
-	/// Whether selection skips the route `route` originated by `first`: it
-	/// refused the path, or its advertiser refused it for capacity.
-	pub(super) fn skips(&self, route: u64, first: Option<Hop>) -> bool {
-		self.refused.contains(&route) || (first.is_some() && first == self.shunned)
+	/// Whether selection skips the route `route` originated by `first` and
+	/// announced by `via`: it refused the path, or its advertiser refused it
+	/// for capacity.
+	pub(super) fn skips(&self, route: u64, first: Option<Hop>, via: Hop) -> bool {
+		self.refused.contains(&route)
+			|| (first.is_some() && first == self.shunned)
+			|| self.shunned_via.is_some_and(|session| session == via)
 	}
 
 	/// Forget refused routes that left the table (a reconnect is a fresh entry).
@@ -432,8 +446,11 @@ impl Front {
 	fn retry(&mut self, route: u64, actions: &mut Vec<Action>) {
 		self.retried = true;
 		self.refused.insert(route);
-		if let Identity::Publisher(hop) = self.identity {
-			self.shunned = Some(hop);
+		match self.identity {
+			Identity::Publisher(hop) => self.shunned = Some(hop),
+			// A hop of 0 names nobody. The announcing session is the advertiser.
+			Identity::Anonymous { .. } if self.via != Hop::UNKNOWN => self.shunned_via = Some(self.via),
+			_ => {}
 		}
 		self.identity = Identity::Undetermined;
 		self.last_err = Some(Error::Unroutable);
@@ -486,6 +503,7 @@ impl Front {
 			return;
 		}
 		self.received = candidate.first.is_some();
+		self.via = candidate.via;
 		self.identity = match (candidate.local, candidate.first) {
 			(true, _) => Identity::Local,
 			(false, Some(hop)) if hop != Hop::UNKNOWN => Identity::Publisher(hop),
@@ -726,6 +744,7 @@ mod tests {
 			route,
 			first: Some(hop(first)),
 			local: false,
+			via: Hop::UNKNOWN,
 		}
 	}
 
@@ -734,6 +753,7 @@ mod tests {
 			route,
 			first: None,
 			local: true,
+			via: Hop::UNKNOWN,
 		}
 	}
 
@@ -923,6 +943,7 @@ mod tests {
 			route: 1,
 			first: Some(Hop::UNKNOWN),
 			local: false,
+			via: Hop::UNKNOWN,
 		};
 		let mut front = serving(candidate, 100);
 		assert_actions(
@@ -960,6 +981,7 @@ mod tests {
 			route: 1,
 			first: Some(Hop::UNKNOWN),
 			local: false,
+			via: Hop::UNKNOWN,
 		};
 		let mut front = serving(candidate, 100);
 		assert_eq!(front.pin(), Pin::Route(1));
@@ -1028,9 +1050,9 @@ mod tests {
 			&[Action::Reselect],
 		);
 		// Every route the refusing advertiser originated is skipped, not just the one asked.
-		assert!(front.skips(1, Some(hop(10))));
-		assert!(front.skips(3, Some(hop(10))));
-		assert!(!front.skips(2, Some(hop(20))));
+		assert!(front.skips(1, Some(hop(10)), Hop::UNKNOWN));
+		assert!(front.skips(3, Some(hop(10)), Hop::UNKNOWN));
+		assert!(!front.skips(2, Some(hop(20)), Hop::UNKNOWN));
 
 		assert_actions(
 			front.step(Event::Selected {
@@ -1051,6 +1073,64 @@ mod tests {
 			}),
 			&[Action::End { err: Error::Unroutable }],
 		);
+	}
+
+	#[test]
+	fn capacity_refusal_from_an_anonymous_session_skips_that_session() {
+		// A hop of 0 names nobody, so the announcing session is what gets excluded.
+		let refusing = Candidate {
+			route: 1,
+			first: Some(Hop::UNKNOWN),
+			local: false,
+			via: hop(7),
+		};
+		let mut front = Front::new(LINGER);
+		front.step(Event::Selected {
+			best: Some(refusing),
+			serving_closing: false,
+		});
+		front.identify(refusing);
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 1,
+				result: Err(Refusal {
+					err: Error::NoCapacity,
+					standing: true,
+				}),
+			}),
+			&[Action::Reselect],
+		);
+		assert!(front.skips(1, Some(Hop::UNKNOWN), hop(7)));
+		assert!(front.skips(4, Some(Hop::UNKNOWN), hop(7)));
+		// Another session's anonymous route, and a named publisher, stay eligible.
+		assert!(!front.skips(2, Some(Hop::UNKNOWN), hop(8)));
+		assert!(!front.skips(3, Some(hop(9)), hop(8)));
+	}
+
+	#[test]
+	fn capacity_refusal_from_an_unknown_session_skips_only_its_route() {
+		// No session identity to exclude, so a sibling anonymous route is not shunned.
+		let refusing = Candidate {
+			route: 1,
+			first: Some(Hop::UNKNOWN),
+			local: false,
+			via: Hop::UNKNOWN,
+		};
+		let mut front = Front::new(LINGER);
+		front.step(Event::Selected {
+			best: Some(refusing),
+			serving_closing: false,
+		});
+		front.identify(refusing);
+		front.step(Event::Resolved {
+			route: 1,
+			result: Err(Refusal {
+				err: Error::NoCapacity,
+				standing: true,
+			}),
+		});
+		assert!(front.skips(1, Some(Hop::UNKNOWN), Hop::UNKNOWN));
+		assert!(!front.skips(4, Some(Hop::UNKNOWN), Hop::UNKNOWN));
 	}
 
 	#[test]
@@ -1085,6 +1165,7 @@ mod tests {
 			route: 1,
 			first: None,
 			local: false,
+			via: Hop::UNKNOWN,
 		};
 		let mut front = Front::new(LINGER);
 		front.step(Event::Selected {
