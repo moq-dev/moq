@@ -98,7 +98,7 @@ Hops {
 
 ## Required
 
-- moq-lite-07 ships as `moq-lite-07-wip`, off by default, so its wire can still change
+- moq-lite-07 ships as `moq-lite-07-wip`, off by default, so its wire can still change ([#4148](https://github.com/moq-dev/moq/pull/4148))
 
 ## Related
 
