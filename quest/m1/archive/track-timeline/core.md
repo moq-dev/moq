@@ -11,9 +11,10 @@ live or recorded timelines without the publisher cutting for it.
 ## Plan
 
 These crates compile together, so they change in one PR. Update the draft's
-timeline and Recording sections in the same change, in a new draft revision; most of their rules assume
-one aligned segment counter (one timeline per broadcast, cross-track boundaries,
-whole-segment retention, reading segment N of track T through record N).
+timeline and Recording sections in the same change, in a new draft revision;
+most of their rules assume one aligned segment counter (one timeline per
+broadcast, cross-track boundaries, whole-segment retention, reading segment N
+of track T through record N).
 
 - **Timeline:** a record describes one stored span of its own track: sequence,
   pts, duration, and the group and frame range. Drop cross-track pacing and the
