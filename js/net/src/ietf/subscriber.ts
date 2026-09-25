@@ -1,3 +1,4 @@
+import { Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
@@ -491,6 +492,11 @@ export class Subscriber {
 		// would miss the local side going away and leave it serving a track nobody reads.
 		// Demand returning before we commit is not abandonment, matching the serving loop.
 		const waitAbandoned = async (): Promise<null> => {
+			// An info-only lookup attaches no subscriber yet still waits on SUBSCRIBE_OK for
+			// the track info, so only demand that arrived and then left is abandonment.
+			while (!producer.used.peek() && producer.closed.peek() === undefined) {
+				await Signal.race(producer.used, producer.closed);
+			}
 			for (;;) {
 				await producer.unused();
 				if (producer.closed.peek() !== undefined || !producer.used.peek()) return null;

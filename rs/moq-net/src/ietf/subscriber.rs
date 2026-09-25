@@ -1610,14 +1610,7 @@ where
 
 		// Write Subscribe message
 		if let Err(err) = self
-			.write_subscribe(
-				&mut stream,
-				request_id,
-				&broadcast_path,
-				request.name(),
-				subscription.as_ref(),
-				join,
-			)
+			.write_subscribe(&mut stream, request_id, &broadcast_path, &request, join)
 			.await
 		{
 			tracing::debug!(%err, "failed to write subscribe");
@@ -1864,18 +1857,20 @@ where
 		stream: &mut Stream<S, Version>,
 		request_id: RequestId,
 		broadcast: &Path<'_>,
-		name: &str,
-		subscription: Option<&track::Subscription>,
+		request: &track::Request,
 		join: Join,
 	) -> Result<(), Error> {
+		// Read the aggregate now: a subscriber can join while the request ID and stream
+		// were awaited, and nothing updates the priority after SUBSCRIBE.
+		let priority = request.subscription().map(|s| s.priority).unwrap_or(0);
 		stream.writer.encode(&ietf::Subscribe::ID).await?;
 		stream
 			.writer
 			.encode(&ietf::Subscribe {
 				request_id,
 				track_namespace: broadcast.to_owned(),
-				track_name: name.into(),
-				subscriber_priority: super::priority::to_wire(subscription.map(|s| s.priority).unwrap_or(0)),
+				track_name: request.name().into(),
+				subscriber_priority: super::priority::to_wire(priority),
 				group_order: GroupOrder::Descending,
 				filter: join.filter,
 				fill: join.fill,
