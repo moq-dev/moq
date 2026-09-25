@@ -750,7 +750,7 @@ export class Publisher {
 		// delays it until they are released.
 		const countStreams = hasStreamCount(this.version);
 		let streams = 0;
-		const opening = new Set<Promise<void>>();
+		const opening = new Set<Promise<unknown>>();
 
 		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_END
 		// straight into finish_at, so it must name the track's boundary (which counts
