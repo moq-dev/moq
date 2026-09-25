@@ -36,10 +36,11 @@ const FRAMES: usize = 4;
 
 const TRACK: &str = "video";
 
-/// One bounded pool for every origin, as a relay configures: without a byte
-/// target, every hop keeps each group for the whole expiry window and memory
-/// grows with the run length instead of the shape.
-const CACHE_CAPACITY: u64 = 16 * 1024 * 1024;
+/// Each endpoint gets its own bounded pool, as a relay configures one per
+/// process: without a byte target, every hop keeps each group for the whole
+/// expiry window and memory grows with the run length instead of the shape.
+const RELAY_CACHE: u64 = 16 * 1024 * 1024;
+const CLIENT_CACHE: u64 = 1024 * 1024;
 
 /// One topology: publishers and viewers spread round-robin over a full mesh of
 /// relays.
@@ -128,7 +129,6 @@ struct Cluster {
 	_broadcasts: Vec<broadcast::Producer>,
 	_origins: Vec<origin::Producer>,
 	_pairs: Vec<MockPair>,
-	pool: cache::Pool,
 	next_hop: u64,
 }
 
@@ -141,12 +141,11 @@ impl Cluster {
 			_broadcasts: Vec::new(),
 			_origins: Vec::new(),
 			_pairs: Vec::new(),
-			pool: cache::Pool::new(cache::Config::default().with_capacity(CACHE_CAPACITY)),
 			next_hop: 0,
 		};
 
 		for _ in 0..shape.relays {
-			let relay = this.origin();
+			let relay = this.origin(RELAY_CACHE);
 			this.relays.push(relay);
 		}
 
@@ -166,7 +165,7 @@ impl Cluster {
 		}
 
 		for publisher in 0..shape.publishers {
-			let origin = this.origin();
+			let origin = this.origin(CLIENT_CACHE);
 			for index in 0..shape.broadcasts {
 				let broadcast = origin
 					.publish(path(publisher * shape.broadcasts + index), Default::default())
@@ -185,10 +184,10 @@ impl Cluster {
 		this
 	}
 
-	fn origin(&mut self) -> origin::Producer {
+	fn origin(&mut self, capacity: u64) -> origin::Producer {
 		self.next_hop += 1;
 		let mut config = origin::Config::new(Hop::new(self.next_hop).unwrap());
-		config.pool = self.pool.clone();
+		config.pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
 		let (producer, driver) = origin::Producer::new(config);
 		tokio::spawn(support::harness::run(driver));
 		producer
@@ -196,7 +195,7 @@ impl Cluster {
 
 	/// Connect a viewer to `relay` and subscribe it to each of `broadcasts`.
 	async fn join(&mut self, relay: usize, broadcasts: impl Iterator<Item = usize>) -> Viewer {
-		let origin = self.origin();
+		let origin = self.origin(CLIENT_CACHE);
 		let mut options = MockConnectOptions::new(self.version);
 		options.server_publish = Some(self.relays[relay].consume());
 		options.client_subscribe = Some(origin.clone());
@@ -333,13 +332,17 @@ fn join(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) 
 						cluster
 					})
 				});
+				// Broadcasts published to relay 0, joined from the last relay: every
+				// sample is local on one relay and crosses one peer hop on a mesh.
+				let hosted: Vec<_> = (0..shape.total())
+					.filter(|broadcast| (broadcast / shape.broadcasts) % shape.relays == 0)
+					.collect();
+				let relay = shape.relays - 1;
 				b.iter_custom(|iters| {
 					rt.block_on(async {
 						let mut elapsed = Duration::ZERO;
 						for iter in 0..iters as usize {
-							let broadcast = iter % shape.total();
-							// The last relay, so a mesh resolves across a peer.
-							let relay = shape.relays - 1;
+							let broadcast = hosted[iter % hosted.len()];
 							let start = Instant::now();
 							let mut viewer = cluster.join(relay, std::iter::once(broadcast)).await;
 							let bytes = read_group(&mut viewer.subscribers[0]).await;
