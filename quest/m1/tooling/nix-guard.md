@@ -2,11 +2,11 @@
 
 ## Goal
 
-`just check`, `just fix`, and `just test` stop at once with a clear "run
+`just check`, `just fix`, and `just ci test` stop at once with a clear "run
 inside `nix develop`" message when they run outside the Nix dev shell, instead
 of failing deep in a build on a host toolchain difference. The repository
-already requires the dev shell; this makes the requirement loud. An explicit
-opt-out keeps a deliberate host run possible.
+already requires the dev shell; this makes the requirement loud. Set
+`MOQ_ALLOW_HOST=1` to keep a deliberate host run possible.
 
 ## Plan
 
@@ -17,7 +17,9 @@ opt-out keeps a deliberate host run possible.
   passes. Reproduce it once outside the shell and confirm the cause from
   jemalloc's `config.log` before relying on it.
 - Put the guard in `sh/dispatch.sh`, the one place the scoped verbs resolve,
-  next to the existing `MOQ_STRICT` missing-tool check. How to detect the dev
+  next to the existing `MOQ_STRICT` missing-tool check. The verbs are `check`,
+  `fix`, `ci-check`, and `ci-test`. `just test` is the cross-language module
+  and does not reach this script, so it stays unguarded. How to detect the dev
   shell (`IN_NIX_SHELL`, a variable the flake sets, or a toolchain probe) is
   the implementer's call; prefer whatever direnv and `nix develop --command`
   both set.
