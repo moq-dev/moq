@@ -26,6 +26,15 @@ The reader evicts popped spans from its object cache, but a group it already
 served stays in `moq_net`'s track cache until the pool reclaims it. Decide
 whether expiry during a seek needs a group eviction API in `moq-net`.
 
+`moq-hls` reads a timeline from the catalog's own broadcast, and an
+`archive.replay` path only marks it non-durable. Decide whether a live
+broadcast's exporter follows `replay` to the recording for rewind, or whether
+viewers address the replay broadcast directly.
+
+## Required
+
+- [Rust per-track timelines](/quest/m1/archive/track-timeline/core.md) - seeks through per-track timelines
+
 ## Closes
 
 - [#2275](https://github.com/moq-dev/moq/issues/2275) - close this issue when the quest finishes
