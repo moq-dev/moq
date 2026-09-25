@@ -95,7 +95,9 @@ mod tests {
 		let mut cuts = Cuts::new(0);
 
 		// Ten seconds at 30 fps with a request before every frame.
-		let cut = (0..300u64).filter(|frame| cuts.due(frame + 1, at(frame * 1000 / 30))).count();
+		let cut = (0..300u64)
+			.filter(|frame| cuts.due(frame + 1, at(frame * 1000 / 30)))
+			.count();
 		assert_eq!(cut, 19, "one forced keyframe per half second after the opening one");
 	}
 

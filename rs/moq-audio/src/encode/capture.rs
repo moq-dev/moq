@@ -1448,8 +1448,7 @@ mod tests {
 		let mut options = CaptureOptions::default();
 		options.capture.source = capture::Source::Microphone(Some("first".into()));
 		options.encode.track = Some("audio".into());
-		let (control, driver) =
-			Control::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
+		let (control, driver) = Control::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
 		let subscription = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
 		(control, driver, source(opens, false), subscription, catalog)
 	}
@@ -1472,8 +1471,7 @@ mod tests {
 		options.capture.source = capture::Source::Microphone(Some("first".into()));
 		options.encode.track = Some("audio".into());
 		options.encode.settings.layout = PcmLayout::from_channels(channels).unwrap();
-		let (control, driver) =
-			Control::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
+		let (control, driver) = Control::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
 		let subscription = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
 		(control, driver, source(opens, false), subscription, catalog)
 	}
@@ -1718,8 +1716,7 @@ mod tests {
 	#[tokio::test]
 	async fn discovery_registers_the_rendition() {
 		let (_events, input) = stream(None);
-		let (mut control, driver, mut source, _subscription, catalog) =
-			setup_publication([Open::Stream(input)]).await;
+		let (mut control, driver, mut source, _subscription, catalog) = setup_publication([Open::Stream(input)]).await;
 		source.formats = [Discovery::Fatal("permission denied"), Discovery::Format(48_000, 2)]
 			.into_iter()
 			.collect();
@@ -1749,8 +1746,7 @@ mod tests {
 	async fn a_rejected_layout_parks_the_publication() {
 		let (_events, input) = stream(None);
 		// A discrete source cannot be assigned stereo speaker positions implicitly.
-		let (mut control, driver, mut source, _subscription, catalog) =
-			setup_encoding(2, [Open::Stream(input)]).await;
+		let (mut control, driver, mut source, _subscription, catalog) = setup_encoding(2, [Open::Stream(input)]).await;
 		source.formats = [Discovery::Format(48_000, 6), Discovery::Format(48_000, 2)]
 			.into_iter()
 			.collect();

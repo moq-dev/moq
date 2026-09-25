@@ -26,12 +26,12 @@ use crate::capture;
 use super::Encoded;
 #[cfg(feature = "capture")]
 use super::Sink;
+#[cfg(feature = "capture")]
+use super::cuts::Cuts;
 #[cfg(any(feature = "capture", test))]
 use super::encoder;
 #[cfg(feature = "capture")]
 use super::encoder::Codec;
-#[cfg(feature = "capture")]
-use super::cuts::Cuts;
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
 #[cfg(feature = "capture")]
@@ -422,8 +422,16 @@ impl<E: CatalogExt> Driver<E> {
 		let mut producer = Producer::with_track(track, catalog, rendition)?;
 		let demand = producer.demand();
 
-		let result =
-			capture_loop(&mut producer, &demand, &mut DeviceSource, &capture, &encode, &clock, &cuts).await;
+		let result = capture_loop(
+			&mut producer,
+			&demand,
+			&mut DeviceSource,
+			&capture,
+			&encode,
+			&clock,
+			&cuts,
+		)
+		.await;
 
 		// This runs only when the loop ends on its own (the track is usually already
 		// going away by then); a Ctrl+C cancels the future before this point, since
@@ -721,7 +729,10 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 			let Some(mut frame) = frame else { break };
 			frame.timestamp = map_capture_timestamp(capture_epoch, frame.timestamp)?;
 			let requests = *cuts.read();
-			if forced.as_mut().is_some_and(|forced| forced.due(requests, frame.timestamp)) {
+			if forced
+				.as_mut()
+				.is_some_and(|forced| forced.due(requests, frame.timestamp))
+			{
 				match encoder.cut().await {
 					Ok(()) => {}
 					// Keep capturing on the GOP cadence and stop asking this encoder.
