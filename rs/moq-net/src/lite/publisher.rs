@@ -237,7 +237,7 @@ enum ControlState<S: crate::transport::poll::Session> {
 	Done,
 }
 
-impl<S: crate::transport::poll::Session> kio::Pollable for Control<S> {
+impl<S: crate::transport::poll::Session> kio::Task for Control<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
@@ -1331,7 +1331,7 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 					self.state = FetchState::Fetch { msg, fetching };
 				}
 				FetchState::Fetch { msg, fetching } => {
-					let mut group = ready!(kio::Pollable::poll(fetching, waiter))?;
+					let mut group = ready!(kio::Task::poll(fetching, waiter))?;
 
 					// The response carries no header, so a short run is indistinguishable
 					// from one that started elsewhere: only serve a range we can cover
@@ -2628,7 +2628,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> kio::Pollable for GroupServe<S> {
+impl<S: crate::transport::poll::Session> kio::Task for GroupServe<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {

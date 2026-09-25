@@ -683,7 +683,7 @@ impl Fetching {
 	}
 }
 
-impl kio::Pollable for Fetching {
+impl kio::Task for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -710,7 +710,7 @@ impl kio::Pollable for Fetching {
 			}
 
 			let (latched, track, fetch) = inner.as_mut().expect("latched above");
-			let err = match kio::Pollable::poll(&mut **fetch, waiter) {
+			let err = match kio::Task::poll(&mut **fetch, waiter) {
 				Poll::Ready(Err(err)) => err,
 				Poll::Ready(Ok(group)) => return Poll::Ready(Ok(group)),
 				Poll::Pending => {

@@ -609,7 +609,7 @@ enum UniState<S: crate::transport::poll::Session> {
 	Done,
 }
 
-impl<S: crate::transport::poll::Session> kio::Pollable for UniServe<S> {
+impl<S: crate::transport::poll::Session> kio::Task for UniServe<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
@@ -1289,7 +1289,7 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> kio::Pollable for SourceServe<S> {
+impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
@@ -3027,7 +3027,7 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> kio::Pollable for TrackServeRun<S> {
+impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
@@ -3430,7 +3430,7 @@ impl<S: crate::transport::poll::Session> FetchServeRun<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> kio::Pollable for FetchServeRun<S> {
+impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {

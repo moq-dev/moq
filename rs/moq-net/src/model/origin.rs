@@ -1,5 +1,5 @@
 use crate::{broadcast, cache, stats, track};
-use kio::Pollable;
+use kio::Task;
 use std::{
 	cmp::Reverse,
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
@@ -3118,7 +3118,7 @@ impl Requesting {
 	}
 }
 
-impl kio::Pollable for Requesting {
+impl kio::Task for Requesting {
 	type Output = Result<broadcast::Consumer, Error>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {

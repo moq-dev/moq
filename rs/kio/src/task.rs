@@ -5,7 +5,7 @@
 //! the task it was aimed at (plus any newly pushed ones). A driver serving
 //! hundreds of children steps one machine per event, not all of them.
 //!
-//! A task is any [`Pollable`] resolving to `()`: a plain poll closure (the same
+//! A task is any [`Task`] resolving to `()`: a plain poll closure (the same
 //! `FnMut(&Waiter) -> Poll<()>` shape [`wait`](crate::wait) takes, state in the
 //! captures) or a named machine implementing the trait directly. `Send` is
 //! purely inferred either way: a [`Tasks`] of `Send` tasks is `Send` and drives
@@ -45,10 +45,7 @@ use std::{
 	task::{Context, Poll, Wake, Waker},
 };
 
-use crate::{
-	Pollable,
-	waiter::{Park, Waiter},
-};
+use crate::waiter::{Park, Waiter};
 
 /// Wake-bits per chunk word and words per chunk: one chunk covers 1024 slots.
 const WORD_BITS: usize = 64;
@@ -65,7 +62,7 @@ impl Chunk {
 	}
 }
 
-/// A set of [`Pollable`] tasks polled by their owner with per-task granularity.
+/// A set of [`Task`]s polled by their owner with per-task granularity.
 ///
 /// [`poll`](Self::poll) drives the tasks that are new or woken and reports
 /// `Ready` when the set is empty; [`push`](Self::push) wakes the owner, so a
@@ -202,7 +199,39 @@ impl<T> Tasks<T> {
 	}
 }
 
-impl<T: Pollable<Output = ()>> Tasks<T> {
+/// A computation polled with a [`Waiter`] until it resolves.
+///
+/// Implementors register the [`Waiter`] with the channels they read. Every
+/// `FnMut(&Waiter) -> Poll<R>` closure implements it, so state can live in the
+/// captures; implement it on a named machine to store one concrete type without
+/// boxing. Wrap it in [`Pending`](crate::Pending) to get a real [`Future`](std::future::Future), or push it
+/// into a [`Tasks`] set.
+///
+/// This exists because a kio [`Waiter`] holds the strong `Arc<Waker>` while the
+/// channel's [`crate::WaiterList`] keeps only a `Weak`. A bare [`Future`](std::future::Future) would have
+/// to park the strong `Waiter` in a field for as long as it stays pending (or lose
+/// its wakeup); [`Pending`](crate::Pending) does that once so each implementor doesn't have to.
+pub trait Task {
+	/// The value the computation resolves to.
+	type Output;
+
+	/// Poll for the output, registering `waiter` with the relevant channels if not
+	/// yet ready.
+	fn poll(&mut self, waiter: &Waiter) -> Poll<Self::Output>;
+}
+
+impl<F, R> Task for F
+where
+	F: FnMut(&Waiter) -> Poll<R>,
+{
+	type Output = R;
+
+	fn poll(&mut self, waiter: &Waiter) -> Poll<R> {
+		self(waiter)
+	}
+}
+
+impl<T: Task<Output = ()>> Tasks<T> {
 	/// Poll every task that is new or was woken since the last call, retiring
 	/// the ones that return `Ready`.
 	///

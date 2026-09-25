@@ -2677,7 +2677,7 @@ impl Subscribing {
 	}
 }
 
-impl kio::Pollable for Subscribing {
+impl kio::Task for Subscribing {
 	type Output = Result<Subscriber>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -2711,7 +2711,7 @@ impl Querying {
 	}
 }
 
-impl kio::Pollable for Querying {
+impl kio::Task for Querying {
 	type Output = Result<Info>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -2818,7 +2818,7 @@ enum FetchingKind {
 	Spliced(kio::Pending<super::resume::Fetching>),
 }
 
-impl kio::Pollable for Fetching {
+impl kio::Task for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -2833,7 +2833,7 @@ impl kio::Pollable for Fetching {
 			FetchingKind::Spliced(spliced) => {
 				// A fetched group is metered here (once), at the tagged handle: the
 				// spliced source track it comes from is the origin's own, untagged.
-				return kio::Pollable::poll(&mut **spliced, waiter)
+				return kio::Task::poll(&mut **spliced, waiter)
 					.map(|res| res.map(|group| group.with_meter(self.stats.meter())));
 			}
 		};
@@ -7073,10 +7073,10 @@ mod test {
 
 		// A cache miss isn't in `peek_group`, but a dynamic handler exists, so
 		// `fetch_group` stays pending and queues a request. `*pending` derefs the
-		// wrapper to the inner `Fetching` (a `kio::Pollable`).
+		// wrapper to the inner `Fetching` (a `kio::Task`).
 		assert!(consumer.peek_group(5).is_none());
 		let mut pending = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
-		assert!(kio::Pollable::poll(&mut *pending, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Task::poll(&mut *pending, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
 			.requested_group()
@@ -7266,7 +7266,7 @@ mod test {
 		// carrying the higher of the two priorities.
 		let mut first = consumer.fetch_group(5, group::Fetch::default().with_priority(1));
 		let second = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
-		assert!(kio::Pollable::poll(&mut *first, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Task::poll(&mut *first, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
 			.requested_group()
@@ -7315,7 +7315,7 @@ mod test {
 
 		// The rejected attempt is gone: a retry starts a fresh one.
 		let mut retry = consumer.fetch_group(5, None);
-		assert!(kio::Pollable::poll(&mut *retry, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Task::poll(&mut *retry, &kio::Waiter::noop()).is_pending());
 		let req = dynamic
 			.requested_group()
 			.now_or_never()
@@ -7332,7 +7332,7 @@ mod test {
 
 		// Queued but never popped: the last handler leaving fails it fast.
 		let mut pending = consumer.fetch_group(5, None);
-		assert!(kio::Pollable::poll(&mut *pending, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Task::poll(&mut *pending, &kio::Waiter::noop()).is_pending());
 		drop(dynamic);
 		assert!(matches!(pending.await, Err(Error::NotFound)));
 
@@ -8207,7 +8207,7 @@ mod test {
 		let consumer = producer.consume();
 
 		let mut pending = consumer.fetch_group(3, None);
-		assert!(kio::Pollable::poll(&mut *pending, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Task::poll(&mut *pending, &kio::Waiter::noop()).is_pending());
 
 		producer.abort(Error::Cancel).unwrap();
 		assert!(pending.await.is_err());

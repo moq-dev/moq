@@ -25,7 +25,7 @@ mod sync;
 mod waiter;
 
 mod consumer;
-mod pollable;
+mod pending;
 mod producer;
 mod queue;
 mod send;
@@ -40,12 +40,12 @@ mod tests;
 
 pub use consumer::Consumer;
 pub use lock::{Lock, LockGuard};
-pub use pollable::{Pending, Pollable};
+pub use pending::Pending;
 pub use producer::{Mut, Producer, Ref, Unused};
 pub use queue::{PushError, Queue};
 pub use send::MaybeSend;
 pub use shared::Shared;
-pub use task::Tasks;
+pub use task::{Task, Tasks};
 pub use waiter::{Park, Waiter, WaiterList, wait};
 pub use weak::{ConsumerWeak, ProducerWeak, Weak};
 
