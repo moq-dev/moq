@@ -160,8 +160,9 @@ export class Encoder {
 	// newest one, where a demand gap's discontinuity marker goes. Cleared once the marker is written.
 	#next: Time.Micro | undefined;
 
-	// The newest demand gap's marker. The AudioEncoder outlives the gap, so chunks it still held
-	// when demand disappeared surface after the resume; they sit below the marker and are dropped.
+	// The newest demand gap's marker. Chunks the AudioEncoder still held when demand disappeared can
+	// surface once it returns (before the pipeline resets the encoder, or when no frame was skipped at
+	// all); they sit below the marker and are dropped.
 	#floor: Time.Micro | undefined;
 
 	// The fatal error an AudioEncoder reported, if any. That instance can never encode again and
@@ -443,6 +444,9 @@ export class Encoder {
 				console.debug("encoding audio", encoderConfig);
 				encoder.configure(encoderConfig);
 
+				// Whether the demand gate skipped a frame since the last one submitted.
+				let skipped = false;
+
 				const pipeline: Pipeline = {
 					channelCount: config.numberOfChannels,
 					push: (captured: AudioFrame) => {
@@ -452,7 +456,21 @@ export class Encoder {
 						for (const data of framer.push(input)) {
 							// The demand gate. The framer still consumes every sample so its timestamps stay
 							// on the capture clock, but there is nowhere to send a chunk with no subscriber.
-							if (!track.peek()) continue;
+							if (!track.peek()) {
+								skipped = true;
+								continue;
+							}
+
+							// The AudioEncoder numbers its output from its own sample count (Chrome does), so
+							// it never sees the frames the gate skipped: every chunk after the gap would carry
+							// a timestamp that far behind the capture clock, below the gap's marker. Restart its
+							// timeline at this frame. The chunks it still held from before the gap go with it,
+							// and they sit below the marker anyway.
+							if (skipped) {
+								skipped = false;
+								encoder.reset();
+								encoder.configure(encoderConfig);
+							}
 
 							// Round to whole microseconds once, here, so a chunk's timestamp and the marker
 							// placed at the next frame's start agree exactly.

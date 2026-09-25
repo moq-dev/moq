@@ -54,7 +54,9 @@ describe("resolve", () => {
 	});
 });
 
-// Like Chrome's Opus encoder, it holds the newest chunks until later input pushes them out.
+// Like Chrome's Opus encoder, it holds the newest chunks until later input pushes them out, and it
+// numbers its output from its own sample count since the first input after a (re)configure, so a
+// hole in the input timestamps never reaches the output.
 class LaggingAudioEncoder {
 	static readonly LAG = 2;
 
@@ -64,6 +66,7 @@ class LaggingAudioEncoder {
 	state: CodecState = "unconfigured";
 	#output: EncodedAudioChunkOutputCallback;
 	#held: { timestamp: number; duration: number }[] = [];
+	#next: number | undefined;
 
 	constructor(init: AudioEncoderInit) {
 		this.#output = init.output;
@@ -74,9 +77,17 @@ class LaggingAudioEncoder {
 		LaggingAudioEncoder.onConfigure?.();
 	}
 
+	reset(): void {
+		this.state = "unconfigured";
+		this.#held = [];
+		this.#next = undefined;
+	}
+
 	encode(data: AudioData): void {
 		const duration = Math.round((data.numberOfFrames / data.sampleRate) * 1_000_000);
-		this.#held.push({ timestamp: data.timestamp, duration });
+		const timestamp = this.#next ?? data.timestamp;
+		this.#next = timestamp + duration;
+		this.#held.push({ timestamp, duration });
 		while (this.#held.length > LaggingAudioEncoder.LAG) {
 			const { timestamp, duration } = this.#held.shift() as { timestamp: number; duration: number };
 			const chunk = {
@@ -171,10 +182,12 @@ class Feed {
 	}
 }
 
-// The encoder outlives a demand gap, so chunks it held when demand disappeared surface after the
-// resume. Written after the marker, they would put pre-gap media on the live edge, and a rounding
-// step below the marker aborts every subscriber.
-test("a demand gap marks where submitted audio ends and drops the chunks held across it", async () => {
+// Chunks the encoder held when demand disappeared must not surface after the marker: they would put
+// pre-gap media on the live edge, and a rounding step below the marker aborts every subscriber. And
+// since the encoder numbers its output from its own sample count, the resumed audio has to restart
+// on the capture clock: otherwise it reads as older than it is by the gap, and the next gap's marker
+// drops that much of it (seconds of silence after a pause and a rejoin).
+test("a demand gap marks where submitted audio ends and resumes on the capture clock", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	const configured = new Promise<void>((resolve) => {
 		LaggingAudioEncoder.onConfigure = resolve;
@@ -234,7 +247,18 @@ test("a demand gap marks where submitted audio ends and drops the chunks held ac
 
 		await push(2); // gated
 		rendition.track.set(track);
-		await push(4); // releases the two held pre-gap chunks, then two resumed ones
+		await push(4); // two resumed chunks written, two held
+
+		const remarked = new Promise<void>((resolve) => {
+			onWrite = resolve;
+		});
+		rendition.track.set(undefined);
+		await remarked;
+		onWrite = undefined;
+
+		await push(3); // gated
+		rendition.track.set(track);
+		await push(4);
 
 		expect(written).toEqual([
 			[18_700, 1],
@@ -242,6 +266,9 @@ test("a demand gap marks where submitted audio ends and drops the chunks held ac
 			[98_700, 0],
 			[138_700, 1],
 			[158_700, 1],
+			[218_700, 0],
+			[278_700, 1],
+			[298_700, 1],
 		]);
 	} finally {
 		LaggingAudioEncoder.onConfigure = undefined;
