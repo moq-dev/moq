@@ -714,8 +714,10 @@ export class Effect {
 
 		// A settled task has nothing left for a rerun to wait on. Dropping it matters for an effect
 		// that never reruns (`new Effect()` spawning per group), which would otherwise keep every one.
-		this.#async.add(promise);
-		void promise.then(() => this.#async.delete(promise));
+		// The set, not `this`, so a task that never settles cannot pin a closed effect.
+		const tasks = this.#async;
+		tasks.add(promise);
+		void promise.then(() => tasks.delete(promise));
 	}
 
 	/** Runs `fn` after `ms` milliseconds, unless the effect reruns or closes first. */
