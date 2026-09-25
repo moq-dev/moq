@@ -15,8 +15,9 @@ the smallest change that lets the handler run over a generic `moq-net`
 transport session without widening the public API. If the seam costs more
 than the bench is worth, say so and stop.
 
-Reuse the scenario, sweep, and delivery accounting from the `moq-net` bench
-so the two results line up, and the difference is the relay layer.
+Reuse the scenario, the publisher and subscriber sweeps, and the delivery
+accounting from the `moq-net` bench so the two results line up, and the
+difference is the relay layer.
 
 ## Required
 

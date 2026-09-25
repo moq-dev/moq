@@ -2,12 +2,13 @@
 
 ## Goal
 
-A Criterion bench in `moq-net` measures a full publisher to relay to
-subscribers path with no sockets: a publishing client, relay sessions that
+A Criterion bench in `moq-net` measures a full publishers to relay to
+subscribers path with no sockets: M publishing clients, relay sessions that
 forward through an origin the way `moq-relay` does, and N subscribing
-clients, all over the in-memory transport. It sweeps subscribers and frame
-size, over lite and IETF, so a per-subscriber or per-frame cost shows as a
-slope and CI can compare it with little noise.
+clients, all over the in-memory transport. It sweeps publishers, subscribers,
+and frame size independently, over lite and IETF, so a per-publisher,
+per-subscriber, or per-frame cost shows as a slope and CI can compare it with
+little noise.
 
 ## Plan
 
