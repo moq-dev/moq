@@ -4,7 +4,8 @@
 //! converts out-of-band payloads (avc1 / hvc1: length-prefixed NALs with the
 //! parameter sets in the description) to Annex-B and injects those parameter sets
 //! ahead of keyframes, leaving in-band H.264 / H.265 payloads (avc3 / hev1,
-//! already Annex-B inline) and AV1 OBU temporal units untouched. Gates output
+//! already Annex-B inline), AV1 OBU temporal units, and VP8 / VP9 frames
+//! untouched. Gates output
 //! until the first keyframe so the backend never sees a delta frame it can't
 //! decode.
 //!
@@ -19,7 +20,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use bytes::Bytes;
-use hang::catalog::{AV1, VideoCodec, VideoConfig};
+use hang::catalog::{AV1, VP9, VideoCodec, VideoConfig};
 use moq_mux::codec::{annexb, h264, h265};
 use moq_net::Timestamp;
 
@@ -36,10 +37,10 @@ pub enum Kind {
 	Auto,
 	/// Hardware only; error if none is available.
 	Hardware,
-	/// Software only (OpenH264 when its feature is enabled).
+	/// Software only (OpenH264 and libvpx, when their features are enabled).
 	Software,
 	/// A specific backend by name, e.g. `"videotoolbox"`, `"mediacodec"`,
-	/// `"nvdec"`, `"vaapi"`, `"v4l2"`, or `"openh264"`.
+	/// `"nvdec"`, `"vaapi"`, `"v4l2"`, `"openh264"`, or `"vpx"`.
 	Named(String),
 }
 
@@ -90,7 +91,7 @@ impl Config {
 /// How to turn a container payload into a backend access unit.
 enum Conversion {
 	/// The payload is already in the backend's input framing: Annex-B for avc3 /
-	/// hev1, OBU temporal units for AV1.
+	/// hev1, OBU temporal units for AV1, one coded frame for VP8 / VP9.
 	Passthrough,
 	/// avc1 / hvc1: length-prefixed NALs with the parameter sets out-of-band (in
 	/// the avcC / hvcC description). Replace the length prefixes with start codes
@@ -164,6 +165,8 @@ impl Decoder {
 				(Codec::H265, conversion)
 			}
 			VideoCodec::AV1(av1) if is_supported_av1(av1) => (Codec::Av1, Conversion::Passthrough),
+			VideoCodec::VP8 => (Codec::Vp8, Conversion::Passthrough),
+			VideoCodec::VP9(vp9) if is_supported_vp9(vp9) => (Codec::Vp9, Conversion::Passthrough),
 			other => return Err(Error::UnsupportedCodec(other.to_string())),
 		};
 
@@ -252,6 +255,11 @@ impl Decoder {
 
 fn is_supported_av1(av1: &AV1) -> bool {
 	av1.bitdepth == 8 && !av1.mono_chrome && av1.chroma_subsampling_x && av1.chroma_subsampling_y
+}
+
+/// Profile 0 is 8-bit 4:2:0, with either chroma siting (`vpcC` 0 or 1).
+fn is_supported_vp9(vp9: &VP9) -> bool {
+	vp9.profile == 0 && vp9.bit_depth == 8 && vp9.chroma_subsampling <= 1
 }
 
 #[cfg(test)]

@@ -15,12 +15,12 @@ ffmpeg, no GStreamer, no system codec to install.
 | --- | --- | --- |
 | `capture` | Camera, display, window, or application frames | AVFoundation + ScreenCaptureKit (macOS), V4L2 + X11/portal + PipeWire (Linux), Media Foundation + DXGI (Windows) |
 | `encode` | Frames to H.264/H.265, published as a hang track | VideoToolbox, Media Foundation, NVENC, VAAPI, V4L2 M2M, MediaCodec (Android), openh264 |
-| `decode` | A subscribed track back to frames | VideoToolbox, Media Foundation/DXVA, NVDEC, VAAPI, V4L2 M2M, MediaCodec (Android), openh264 |
+| `decode` | A subscribed track back to frames | VideoToolbox, Media Foundation/DXVA, NVDEC, VAAPI, V4L2 M2M, MediaCodec (Android), openh264, libvpx |
 | `render` | A frame as a `wgpu` texture | wgpu, with zero-copy Metal and Vulkan imports |
 
 Highlights:
 
-- **Automatic backend selection**, hardware first. Linux GPU libraries are `dlopen`ed at runtime, so one binary starts anywhere and warns when it falls back to software. openh264 (the default-on `openh264` feature) is statically linked as the H.264 fallback; H.265 is hardware-only; AV1 decodes via NVDEC. The VAAPI encoder, decoder, and GPU resize share one render node: the first whose driver does all three, or the one the `MOQ_VAAPI_DEVICE` environment variable names (for example `/dev/dri/renderD129`).
+- **Automatic backend selection**, hardware first. Linux GPU libraries are `dlopen`ed at runtime, so one binary starts anywhere and warns when it falls back to software. openh264 (the default-on `openh264` feature) is statically linked as the H.264 fallback; H.265 is hardware-only; AV1 decodes via NVDEC. VP8 and VP9 decode in software through libvpx (the opt-in `vpx` feature), 8-bit 4:2:0 only: other VP9 profiles are refused rather than converted. The VAAPI encoder, decoder, and GPU resize share one render node: the first whose driver does all three, or the one the `MOQ_VAAPI_DEVICE` environment variable names (for example `/dev/dri/renderD129`).
 - **Publish on demand.** `encode::publish_capture` advertises the track up front and opens the camera only while someone subscribes.
 - **GPU ownership where the platform allows.** Matching codec backends consume their native GPU surfaces directly. The renderer imports `CVPixelBuffer` and supported DMA-BUF formats. Linux/NVIDIA producers can import dedicated Vulkan RGBA8 slots into CUDA with timeline-semaphore ordering and completion-driven slot return. Vulkan/CUDA surfaces deliberately have no CPU pixel fallback; other surfaces use the typed `Surface::into_i420()` and configured `Surface::to_rgba(config)` when needed.
 - **Live bitrate control** where the selected backend supports it, without forcing a keyframe. An unsupported backend keeps its opening rate.
@@ -71,6 +71,7 @@ cargo add moq-video --features render    # wgpu rendering
 cargo add moq-video --features v4l2      # Linux V4L2 M2M codecs, no system build deps
 cargo add moq-video --features vaapi     # Linux VAAPI codecs (bindgen needs libclang)
 cargo add moq-video --features pipewire  # Wayland screen + PipeWire cameras (links libpipewire)
+cargo add moq-video --features vpx       # VP8/VP9 decode (links libvpx; VPX_STATIC=1 for the archive)
 cargo add moq-video --no-default-features --features openh264  # software H.264 only
 cargo add moq-video --no-default-features --features nvidia    # Linux NVIDIA only, no C++ or wgpu
 ```

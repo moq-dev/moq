@@ -28,7 +28,7 @@ The quests separate portable decoding, platform GPU delivery, audio, and publish
 - [Rate control](/quest/m1/obs-moq-video/rate-control.md) - the plugin reserves its bitrate and retunes the OBS encoder to the grant
 - [macOS GPU input](/quest/m1/obs-moq-video/macos.md) - feed the encoder from the OBS compositor without CPU readback
 - [Windows GPU input](/quest/m1/obs-moq-video/windows.md) - import or blit OBS D3D11 textures with explicit synchronization
-- [VP8/VP9 decoding](/quest/m1/obs-moq-video/vpx.md) - restore those playback codecs without an FFmpeg ABI dependency
+- [VP8/VP9 in OBS](/quest/m1/obs-moq-video/vpx-obs.md) - play VP8 and VP9 through moq-video's libvpx backend on every OBS platform
 
 ## Related
 

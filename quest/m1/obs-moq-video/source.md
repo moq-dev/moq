@@ -21,4 +21,4 @@ The MoQ source loads and plays supported video without directly linking FFmpeg l
 - [Decoded frame ownership](/quest/m1/decoded-frames.md) - the decoded-frame consumer moq-ffi does not have yet
 ## Related
 
-- [VP8/VP9 decoding](/quest/m1/obs-moq-video/vpx.md) - restores deferred codec coverage independently
+- [VP8/VP9 in OBS](/quest/m1/obs-moq-video/vpx-obs.md) - restores deferred codec coverage once this lands
