@@ -31,4 +31,3 @@ does too.
 ## Related
 
 - [Decode seam](/quest/m1/audio-codecs/decode-backend.md) - the sniff becomes the software backend's contract
-- [AAC PCE](/quest/m1/audio-codecs/aac-pce.md) - the other place the catalog lies about an AAC stream
