@@ -190,8 +190,8 @@ async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
 
 	let mut updates = Vec::new();
 	let deadline = tokio::time::Instant::now() + window;
-	while let Ok(Some(update)) = tokio::time::timeout_at(deadline, announced.next()).await {
-		updates.push((update.prefix.as_str().to_string(), update.kind.is_active()));
+	while let Ok(Some((update, active))) = tokio::time::timeout_at(deadline, next_update(&mut announced)).await {
+		updates.push((update.prefix.as_str().to_string(), active));
 	}
 	updates
 }
@@ -379,4 +379,17 @@ async fn unknown_publisher_frames_over_an_ietf_cluster() {
 async fn unknown_publisher_does_not_flap_across_a_lite04_cluster_triangle() {
 	let version = "moq-lite-04".parse().expect("parse version");
 	assert_unknown_publisher_stays_announced(Some(version), true).await;
+}
+
+/// The next route and whether it is active, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
+				Some((route, true))
+			}
+			moq_net::announce::Event::Retracted(route) => Some((route, false)),
+			moq_net::announce::Event::Live => continue,
+		};
+	}
 }

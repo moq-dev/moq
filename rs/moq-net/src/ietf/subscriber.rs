@@ -415,6 +415,28 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	going_away: crate::goaway::GoingAway,
 }
 
+/// The prefixes to issue SUBSCRIBE_NAMESPACE for: `origin`'s permitted scope,
+/// relative to its root.
+///
+/// The scope is what we may ASK the peer for; the root is where what comes back
+/// MOUNTS locally. Those are independent, and only coincide when the peer shares
+/// our namespace -- a peer outside it has never heard of our root, so a rooted
+/// subscriber asks for its scope and mounts the replies under the root.
+///
+/// Asked unconditionally, without waiting on the peer's SETUP: a peer with nothing to
+/// advertise answers with an empty set, which costs one stream, while waiting to find
+/// out costs a round trip on every session.
+///
+/// Each comes with the guard its stream holds until the peer's initial set has
+/// landed. Taken when the session starts, before it is handed out, so no announce
+/// cursor misses the replay.
+pub(super) fn subscribe_prefixes(origin: &origin::Producer) -> Vec<(PathOwned, crate::model::Replaying)> {
+	crate::model::interest_prefixes(&origin.allowed())
+		.into_iter()
+		.map(|prefix| (prefix.clone(), origin.replaying(prefix)))
+		.collect()
+}
+
 /// Resolve the subscription a data stream belongs to.
 ///
 /// SUBSCRIBE_OK can be reordered behind the stream it describes, so an alias we have not
@@ -626,21 +648,6 @@ where
 		Some(track)
 	}
 
-	/// The prefixes to issue SUBSCRIBE_NAMESPACE for: this handle's permitted scope,
-	/// relative to its root.
-	///
-	/// The scope is what we may ASK the peer for; the root is where what comes back
-	/// MOUNTS locally. Those are independent, and only coincide when the peer shares
-	/// our namespace -- a peer outside it has never heard of our root, so a rooted
-	/// subscriber asks for its scope and mounts the replies under the root.
-	///
-	/// Asked unconditionally, without waiting on the peer's SETUP: a peer with nothing to
-	/// advertise answers with an empty set, which costs one stream, while waiting to find
-	/// out costs a round trip on every session.
-	pub fn subscribe_prefixes(&self) -> Vec<PathOwned> {
-		crate::model::interest_prefixes(&self.origin.allowed())
-	}
-
 	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream.
 	/// The caller is responsible for opening the appropriate stream type
 	/// (virtual for v14/v15, real bidi for v16+), one per prefix.
@@ -652,6 +659,7 @@ where
 		&mut self,
 		mut stream: Stream<T, Version>,
 		prefix: PathOwned,
+		replaying: crate::model::Replaying,
 	) -> Result<(), Error> {
 		// A peer that sent GOAWAY told us to stop opening requests on this session,
 		// announce-interest included (draft-19 sect 10.4).
@@ -714,6 +722,10 @@ where
 
 		tracing::debug!(%prefix, "subscribe_namespace ok");
 
+		// Nothing on this wire says where the initial set ends, so it has landed once
+		// the stream goes quiet.
+		let mut landing = Some((replaying, crate::model::Quiet::new(&self.runtime)));
+
 		// The extension changes the NAMESPACE encoding, so we can't parse one until
 		// the peer's SETUP says whether it negotiated.
 		let peer = self.peer().await;
@@ -731,7 +743,9 @@ where
 		// its channel without being withdrawn, so hold the front open for a reconnect.
 		// This is what moq-lite already does, where the equivalent map is a local whose
 		// guards drop.
-		let res = self.run_namespace_entries(&mut stream, &prefix, &peer, &mut live).await;
+		let res = self
+			.run_namespace_entries(&mut stream, &prefix, &peer, &mut live, &mut landing)
+			.await;
 		for path in live {
 			let _ = self.stop_announce(path, Detach::Abrupt);
 		}
@@ -749,12 +763,29 @@ where
 		prefix: &PathOwned,
 		peer: &cluster::Peer,
 		live: &mut std::collections::HashSet<PathOwned>,
+		// The replay guard and its quiet timer, until the initial set has landed.
+		landing: &mut Option<(crate::model::Replaying, crate::model::Quiet)>,
 	) -> Result<(), Error> {
 		loop {
-			let type_id: u64 = match stream.reader.decode_maybe().await? {
+			let next = {
+				let mut decode = std::pin::pin!(stream.reader.decode_maybe::<u64>());
+				kio::wait(|waiter| {
+					if let Some((_, quiet)) = landing
+						&& quiet.poll(waiter).is_ready()
+					{
+						*landing = None;
+					}
+					waiter.poll_future(decode.as_mut())
+				})
+				.await
+			};
+			let type_id: u64 = match next? {
 				Some(id) => id,
 				None => break, // Stream closed
 			};
+			if let Some((_, quiet)) = landing {
+				quiet.heard();
+			}
 			let size: u16 = stream.reader.decode().await?;
 			let mut data = stream.reader.read_exact(size as usize).await?;
 
@@ -2894,14 +2925,16 @@ mod tests {
 			Default::default(),
 		);
 
+		let mut namespaces = subscribe_prefixes(&subscriber.origin);
 		assert_eq!(
-			subscriber.subscribe_prefixes(),
+			namespaces.iter().map(|(prefix, _)| prefix.clone()).collect::<Vec<_>>(),
 			vec![crate::Path::new("cam").to_owned()],
 			"one SUBSCRIBE_NAMESPACE per permitted prefix, relative to the root",
 		);
+		let (prefix, replaying) = namespaces.pop().unwrap();
 
 		let stream = Stream::open(&mut session.clone(), Version::Draft16).await.unwrap();
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("cam").to_owned()));
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, replaying));
 		// Parks awaiting the peer's response; the request is already on the wire.
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
@@ -2966,10 +2999,10 @@ mod tests {
 			Default::default(),
 		);
 
-		let prefix = subscriber.subscribe_prefixes().pop().expect("one prefix");
+		let (prefix, replaying) = subscribe_prefixes(&subscriber.origin).pop().expect("one prefix");
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		// Parks on the read after the scripted NAMESPACE is consumed.
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix));
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, replaying));
 		for _ in 0..100 {
 			// The result is deliberately ignored: a regressed mount lands out of scope
 			// and errors here, which the assertions below name far better than a poll
@@ -3999,7 +4032,7 @@ mod tests {
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		subscriber
-			.run_subscribe_namespace(stream, crate::Path::new("").to_owned())
+			.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), subscriber.origin.replaying(""))
 			.await
 			.expect("a clean FIN is not an error");
 		settle().await;
@@ -4069,7 +4102,9 @@ mod tests {
 		);
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned()));
+		let replaying = subscriber.origin.replaying("");
+		let mut run =
+			std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), replaying));
 		for _ in 0..100 {
 			assert!(
 				futures::poll!(run.as_mut()).is_pending(),

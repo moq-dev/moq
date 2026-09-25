@@ -1585,7 +1585,12 @@ impl Cluster {
 		loop {
 			tokio::select! {
 				ann = announced.next() => {
-					let Some(update) = ann else { return; };
+					let (update, active) = match ann {
+						Some(moq_net::announce::Event::Announced(update) | moq_net::announce::Event::Updated(update)) => (update, true),
+						Some(moq_net::announce::Event::Retracted(update)) => (update, false),
+						Some(moq_net::announce::Event::Live) => continue,
+						None => return,
+					};
 					let relative = update.prefix;
 					// The address to dial, which keeps its query: `run_remote` reads
 					// `?cost=` and `?jwt=` off it. The key is only its identity.
@@ -1603,7 +1608,7 @@ impl Cluster {
 						continue;
 					}
 					let advertisement = relative.as_str().to_owned();
-					match update.kind.is_active() {
+					match active {
 						true => {
 							let target = live.announce(advertisement, target);
 							let mut spawn = |target: DialTarget| {
@@ -2216,6 +2221,19 @@ where
 mod tests {
 	use super::*;
 	use crate::Config as RelayConfig;
+
+	/// The next route and whether it is active, skipping the caught-up marker.
+	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+		loop {
+			return match announced.next().await? {
+				moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
+					Some((route, true))
+				}
+				moq_net::announce::Event::Retracted(route) => Some((route, false)),
+				moq_net::announce::Event::Live => continue,
+			};
+		}
+	}
 
 	fn new_cluster(config: Config) -> anyhow::Result<Cluster> {
 		Cluster::new(Options::new(config))
@@ -2951,11 +2969,11 @@ mod tests {
 			.announced();
 		let registration = origin.create_broadcast(&path).expect("node advertise");
 		registration.announce(Default::default()).expect("announce node");
-		let update = tokio::time::timeout(Duration::from_secs(2), announced.next())
+		let (_, active) = tokio::time::timeout(Duration::from_secs(2), next_update(&mut announced))
 			.await
 			.expect("node advertised")
 			.expect("announce");
-		assert!(update.kind.is_active());
+		assert!(active);
 		let snapshot = cluster.nodes.snapshot();
 		assert!(
 			snapshot.nodes.iter().any(|node| node.node.contains("peer.example")),
@@ -3008,9 +3026,12 @@ mod tests {
 		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
 		// The self-registration route must be visible on the origin.
-		let update = watcher.try_next().expect("self-registration must be published");
+		// The watcher subscribed to an empty origin, so its marker comes first.
+		assert!(matches!(watcher.try_next(), Some(moq_net::announce::Event::Live)));
+		let Some(moq_net::announce::Event::Announced(update)) = watcher.try_next() else {
+			panic!("self-registration must be published");
+		};
 		assert_eq!(update.prefix.as_str(), ".internal/origins/rendezvous.example.com:4443");
-		assert!(update.kind.is_active());
 
 		// run() must NOT have returned: dropping the broadcast (via run returning)
 		// would unannounce the registration immediately. Use a short timeout to
@@ -3589,7 +3610,7 @@ mod tests {
 		let _dial = fingerprint.dial_lan_target(&target).expect("dial");
 
 		let mut announced = fingerprint.origin.consume().announced();
-		let update = tokio::time::timeout(TIMEOUT, announced.next())
+		let (update, _) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
 			.await
 			.expect("timed out waiting for from-node")
 			.expect("origin closed");
@@ -3599,7 +3620,7 @@ mod tests {
 		_from_fp.announce(Default::default()).expect("announce");
 		let mut announced = node.origin.consume().announced();
 		loop {
-			let update = tokio::time::timeout(TIMEOUT, announced.next())
+			let (update, _) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
 				.await
 				.expect("timed out waiting for from-fingerprint")
 				.expect("origin closed");

@@ -25,6 +25,19 @@ pub fn spawn_config(config: moq_net::origin::Config) -> moq_net::origin::Produce
 mod tests {
 	use super::*;
 
+	/// The next route and whether it is active, skipping the caught-up marker.
+	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+		loop {
+			return match announced.next().await? {
+				moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
+					Some((route, true))
+				}
+				moq_net::announce::Event::Retracted(route) => Some((route, false)),
+				moq_net::announce::Event::Live => continue,
+			};
+		}
+	}
+
 	/// The spawned driver runs the origin's lifecycle: an announced route
 	/// reaches a consumer, and dropping the announcement retracts it.
 	#[tokio::test]
@@ -35,13 +48,13 @@ mod tests {
 		let broadcast = origin.create_broadcast("cam").expect("create broadcast");
 		broadcast.announce(Default::default()).expect("create broadcast");
 
-		let update = announced.next().await.expect("announce");
+		let (update, active) = next_update(&mut announced).await.expect("announce");
 		assert_eq!(update.prefix.as_str(), "cam");
-		assert!(update.kind.is_active());
+		assert!(active);
 
 		broadcast.finish();
-		let update = announced.next().await.expect("retraction");
-		assert!(!update.kind.is_active());
+		let (_, active) = next_update(&mut announced).await.expect("retraction");
+		assert!(!active);
 	}
 
 	/// Outside a runtime the spawn has nowhere to run the driver: it panics

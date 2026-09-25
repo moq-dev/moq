@@ -1419,6 +1419,19 @@ impl Request {
 mod tests {
 	use super::*;
 
+	/// The next route and whether it is active, skipping the caught-up marker.
+	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+		loop {
+			return match announced.next().await? {
+				moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
+					Some((route, true))
+				}
+				moq_net::announce::Event::Retracted(route) => Some((route, false)),
+				moq_net::announce::Event::Live => continue,
+			};
+		}
+	}
+
 	#[test]
 	fn version_help_lists_every_parseable_name() {
 		#[derive(usage::Cli)]
@@ -1582,12 +1595,12 @@ mod tests {
 
 		// Without the server's publisher the session announces nothing, so this is
 		// where the regression shows up.
-		let update = tokio::time::timeout(TIMEOUT, announced.next())
+		let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
 			.await
 			.expect("announce timeout")
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "test");
-		assert!(update.kind.is_active());
+		assert!(active);
 		let broadcast = consumer.request_broadcast("test").await.expect("resolve");
 
 		let mut track = broadcast

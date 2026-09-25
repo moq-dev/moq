@@ -50,8 +50,9 @@ let session = client.with_origin(origin.clone()).connect(url);
 // Subscribe: wait for a route, resolve the broadcast at its path, read the catalog.
 let consumer = origin.consume();
 let mut announced = consumer.announced();
-while let Some(update) = announced.next().await {
-    if !update.kind.is_active() { continue }
+while let Some(event) = announced.next().await {
+    // Skip retractions, and `Live`, which marks the end of what was already live.
+    let moq_net::announce::Event::Announced(update) = event else { continue };
     let broadcast = consumer.request_broadcast(&update.prefix).await?;
     let catalog = broadcast
         .track(hang::Catalog::DEFAULT_NAME)?

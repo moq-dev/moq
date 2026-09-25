@@ -167,13 +167,14 @@ impl Nodes {
 	fn scan_announced(&self, announced: &mut moq_net::announce::Consumer) -> Announced {
 		let mut scanned = Announced::default();
 
-		while let Some(update) = announced.try_next() {
+		while let Some(event) = announced.try_next() {
 			// A retraction can land mid-drain (a re-announce is a metadata update,
 			// not a retract-and-announce). Skip it rather than end the scan, which
 			// would drop every node still queued behind it.
-			if !update.kind.is_active() {
+			let (moq_net::announce::Event::Announced(update) | moq_net::announce::Event::Updated(update)) = event
+			else {
 				continue;
-			}
+			};
 
 			let key = canonical_announced_node(update.prefix.as_str());
 			let route = update.route;
@@ -384,7 +385,9 @@ mod tests {
 
 		// Take relay-a's replayed announce, then retire it so the cursor queues a
 		// bare unannounce ahead of relay-b's still-pending announce.
-		let first_update = announced.try_next().expect("replayed announce");
+		let Some(moq_net::announce::Event::Announced(first_update)) = announced.try_next() else {
+			panic!("replayed announce");
+		};
 		assert_eq!(
 			canonical_announced_node(first_update.prefix.as_str()),
 			"https://relay-a.example/"

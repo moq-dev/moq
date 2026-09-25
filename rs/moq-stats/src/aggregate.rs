@@ -295,7 +295,13 @@ impl<V: Mergeable> Merged<V> {
 		// unannounce. A closed stream ends the merged view.
 		loop {
 			match self.announce.poll_next(waiter) {
-				Poll::Ready(Some(update)) => changed |= self.apply_announce(update),
+				Poll::Ready(Some(
+					moq_net::announce::Event::Announced(update) | moq_net::announce::Event::Updated(update),
+				)) => changed |= self.apply_announce(update, true),
+				Poll::Ready(Some(moq_net::announce::Event::Retracted(update))) => {
+					changed |= self.apply_announce(update, false)
+				}
+				Poll::Ready(Some(moq_net::announce::Event::Live)) => {}
 				Poll::Ready(None) => return Poll::Ready(Ok(None)),
 				Poll::Pending => break,
 			}
@@ -319,7 +325,7 @@ impl<V: Mergeable> Merged<V> {
 	/// Apply one announce update to the node set. Returns whether the merged view
 	/// changed (only a non-sticky contribution leaving does; a sticky one is
 	/// kept).
-	fn apply_announce(&mut self, update: moq_net::announce::Update) -> bool {
+	fn apply_announce(&mut self, update: moq_net::announce::Announce, active: bool) -> bool {
 		let path = update.prefix;
 		let absolute = self.announce.absolute(&path).to_owned();
 
@@ -330,7 +336,7 @@ impl<V: Mergeable> Merged<V> {
 			return false;
 		}
 
-		if update.kind.is_active() {
+		if active {
 			// A route update on a node already tracked (a reprice, or a takeover
 			// with different metadata) keeps the live reader: existing
 			// subscriptions survive a takeover, and the reader re-resolves through
@@ -489,6 +495,19 @@ mod tests {
 		producer
 	}
 
+	/// The next route and whether it is active, skipping the caught-up marker.
+	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+		loop {
+			return match announced.next().await? {
+				moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
+					Some((route, true))
+				}
+				moq_net::announce::Event::Retracted(route) => Some((route, false)),
+				moq_net::announce::Event::Live => continue,
+			};
+		}
+	}
+
 	use std::time::Duration;
 
 	use moq_net::{PathOwned, Timestamp, announce, broadcast, origin, track};
@@ -533,8 +552,8 @@ mod tests {
 		source.announce(origin::Route::default()).expect("announce");
 		let track = source.create_track("video", None).expect("create_track");
 
-		let update = announced.next().await.expect("announce");
-		assert!(update.kind.is_active());
+		let (_, active) = next_update(&mut announced).await.expect("announce");
+		assert!(active);
 		let consumer = egress.request_broadcast(path).await.expect("resolve");
 		let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 

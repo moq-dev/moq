@@ -54,7 +54,7 @@ struct AnnouncedRecord {
 unsafe impl Send for AnnouncedRecord {}
 
 impl AnnouncedRecord {
-	fn new(update: moq_net::announce::Update) -> Self {
+	fn new(update: moq_net::announce::Announce, active: bool) -> Self {
 		let captures = update.captures.map(|captures| {
 			captures
 				.into_iter()
@@ -75,7 +75,7 @@ impl AnnouncedRecord {
 			prefix: update.prefix.to_string(),
 			captures,
 			capture_views,
-			active: update.kind.is_active(),
+			active,
 		}
 	}
 }
@@ -143,17 +143,25 @@ impl Origin {
 	) -> Result<(), Error> {
 		loop {
 			// `biased` so a pending close always wins over a ready announcement.
-			let update = tokio::select! {
+			let (update, active) = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
 				next = consumer.next() => match next {
-					Some(announced) => announced,
+					Some(moq_net::announce::Event::Announced(update) | moq_net::announce::Event::Updated(update)) => {
+						(update, true)
+					}
+					Some(moq_net::announce::Event::Retracted(update)) => (update, false),
+					// The C API has no caught-up callback yet.
+					Some(moq_net::announce::Event::Live) => continue,
 					None => return Ok(()),
 				},
 			};
 
 			// Hold the lock only to buffer the announcement; release it before the callback.
-			let announced_id = State::lock().origin.announced.insert(AnnouncedRecord::new(update))?;
+			let announced_id = State::lock()
+				.origin
+				.announced
+				.insert(AnnouncedRecord::new(update, active))?;
 			callback.call(announced_id);
 		}
 	}

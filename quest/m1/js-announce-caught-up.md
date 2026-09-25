@@ -2,17 +2,15 @@
 
 ## Goal
 
-`@moq/net`'s announce consumer yields the same `Live` marker the Rust
-consumer gets from [Caught up](/quest/m1/cli-inspect/caught-up.md), with
-the same ordering and per-source semantics, so a browser app can render "no
+`@moq/net`'s announce consumer yields the same `Live` marker as the Rust
+`announce::Consumer`, with the same ordering and per-source semantics, so a browser app can render "no
 broadcasts" instead of a spinner that never resolves.
 
 ## Plan
 
-Mirror the Rust shape, name, and marker-less fallback. Test the same cases
+Mirror the Rust shape (one flat `announce::Event`: `Announced`, `Updated`,
+`Retracted`, each holding an `Announce`, or `Live`), its
+per-source guards (a session holds one per announce stream until the count,
+ANNOUNCE_INIT, or a quiet stream lands it), and the marker-less fallback. Test the same cases
 in JS. Public API: the announce consumer's yield type changes, so it lands
 with the Rust break. Wire: none.
-
-## Required
-
-- [Caught up](/quest/m1/cli-inspect/caught-up.md) - settles the API shape this mirrors

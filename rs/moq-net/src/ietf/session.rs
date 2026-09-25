@@ -8,8 +8,10 @@ use crate::{
 };
 
 use super::{
-	Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter, cluster, peer, solicit,
-	subscriber::is_protocol_violation,
+	Control, Message, Publisher, Subscriber, Version,
+	adapter::ControlStreamAdapter,
+	cluster, peer, solicit,
+	subscriber::{is_protocol_violation, subscribe_prefixes},
 };
 
 /// Everything one moq-transport session needs to start.
@@ -89,6 +91,10 @@ where
 	// A moq-transport client MUST send an empty New Session URI: it cannot tell a
 	// server to open connections (draft-19 sect 10.4).
 	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
+
+	// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`: the
+	// scope is what we may ask for, and it is not the origin's root.
+	let namespaces = subscribe.as_ref().map(subscribe_prefixes).unwrap_or_default();
 
 	let driver = async move {
 		// Our own Hop ID, taken from whichever origin the caller actually supplied so
@@ -203,11 +209,9 @@ where
 				// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
 				// see `Publisher::run_publish_namespaces`.
 				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
-				// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`:
-				// the scope is what we may ask for, and it is not the origin's root.
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
 					let mut prefixes = futures::stream::FuturesUnordered::new();
-					for prefix in sub_ns.subscribe_prefixes() {
+					for (prefix, replaying) in namespaces {
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_adapter = sub_ns_adapter.clone();
 						prefixes.push(async move {
@@ -222,7 +226,7 @@ where
 								}
 								_ => Stream::open(&mut sub_ns_adapter.clone(), version).await?,
 							};
-							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, replaying).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
 								if is_protocol_violation(&err) {
@@ -340,16 +344,15 @@ where
 				// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
 				// see `Publisher::run_publish_namespaces`.
 				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
-				// One SUBSCRIBE_NAMESPACE per permitted prefix; see the draft-16 arm.
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
 					let mut prefixes = futures::stream::FuturesUnordered::new();
-					for prefix in sub_ns.subscribe_prefixes() {
+					for (prefix, replaying) in namespaces {
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_session = sub_ns_session.clone();
 						prefixes.push(async move {
 							let mut sub_ns_session = sub_ns_session;
 							let stream = Stream::open(&mut sub_ns_session, version).await?;
-							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, replaying).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
 								if is_protocol_violation(&err) {

@@ -601,7 +601,7 @@ impl AnnounceRun {
 
 	/// Where an update travels on this stream: its prefix relative to the requested
 	/// prefix, which the origin's scope guarantees it sits under.
-	fn suffix(&self, update: &announce::Update) -> crate::PathOwned {
+	fn suffix(&self, update: &announce::Announce) -> crate::PathOwned {
 		update
 			.prefix
 			.strip_prefix(&self.prefix)
@@ -685,11 +685,18 @@ impl AnnounceRun {
 
 				// Send ANNOUNCE_INIT as the first message with all currently active routes.
 				// We use `try_next()` to synchronously get the initial updates.
-				while let Some(update) = announced.try_next() {
+				while let Some(event) = announced.try_next() {
+					let (update, active) = match event {
+						announce::Event::Announced(update) | announce::Event::Updated(update) => (update, true),
+						announce::Event::Retracted(update) => (update, false),
+						// The marker only says the origin caught up; the peer learns the
+						// initial set's end from the version's own framing.
+						announce::Event::Live => continue,
+					};
 					let absolute = origin.absolute(&update.prefix);
 					let suffix = self.suffix(&update);
 
-					if update.kind.is_active() {
+					if active {
 						if self.outgoing(&update.route, &absolute).is_none() {
 							continue;
 						}
@@ -713,11 +720,18 @@ impl AnnounceRun {
 				// them afterward. The receiver stamps our origin onto each hop chain, so we
 				// forward the stored chain as-is (no self push here).
 				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
-				while let Some(update) = announced.try_next() {
+				while let Some(event) = announced.try_next() {
+					let (update, active) = match event {
+						announce::Event::Announced(update) | announce::Event::Updated(update) => (update, true),
+						announce::Event::Retracted(update) => (update, false),
+						// The marker only says the origin caught up; the peer learns the
+						// initial set's end from the version's own framing.
+						announce::Event::Live => continue,
+					};
 					let absolute = origin.absolute(&update.prefix);
 					let suffix = self.suffix(&update);
 
-					if update.kind.is_active() {
+					if active {
 						let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
 							continue;
 						};
@@ -785,18 +799,23 @@ impl AnnounceRun {
 				return Poll::Pending;
 			};
 
-			let Some(update) = next else {
-				// The buffer is empty (flushed at the loop top), so FIN now and
-				// wait for the acknowledgement.
-				stream.writer.finish()?;
-				self.phase = AnnouncePhase::Closing;
-				continue;
+			let (update, active) = match next {
+				Some(announce::Event::Announced(update) | announce::Event::Updated(update)) => (update, true),
+				Some(announce::Event::Retracted(update)) => (update, false),
+				Some(announce::Event::Live) => continue,
+				None => {
+					// The buffer is empty (flushed at the loop top), so FIN now and
+					// wait for the acknowledgement.
+					stream.writer.finish()?;
+					self.phase = AnnouncePhase::Closing;
+					continue;
+				}
 			};
 
 			let absolute = origin.absolute(&update.prefix);
 			let suffix = self.suffix(&update);
 
-			if !update.kind.is_active() {
+			if !active {
 				self.retract(stream, suffix, &absolute)?;
 				continue;
 			}
