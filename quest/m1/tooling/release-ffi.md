@@ -24,12 +24,11 @@ only its packaging and publish steps.
   read the version from `rs/moq-ffi/Cargo.toml` instead. The reusable
   workflow keeps that fallback (an input or a ref check), or those PR runs die
   before building.
-- Callers keep their `name:` and triggers, as the binary quest did, so
-  `alert.yml` and the `workflow_run` chains (`release-go.yml`,
-  `release-py.yml`, `release-swift-lib.yml`) are untouched.
+- Callers keep their `name:` and triggers, as `moq-cli.yml` and
+  `moq-relay.yml` do over `release-binary.yml`, so `alert.yml` and the
+  `workflow_run` chains (`release-go.yml`, `release-py.yml`,
+  `release-swift-lib.yml`) are untouched. A calling job must grant every
+  permission a called job raises to, and `alert.sh` already skips a
+  `workflow_call`-only file.
 - Verify with `just gh check`; the next tagged `moq-ffi-v*` release is the
   end-to-end check.
-
-## Required
-
-- [Binary release workflow](/quest/m1/tooling/release-binary.md) - proves the reusable-plus-callers pattern before it is applied to five files

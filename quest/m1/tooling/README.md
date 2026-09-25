@@ -19,5 +19,4 @@ requires the one before it, so they land as one line of pull requests.
 
 ## Quests
 
-- [Binary release workflow](/quest/m1/tooling/release-binary.md) - moq-cli and moq-relay share one reusable workflow behind two thin callers
 - [FFI release workflow](/quest/m1/tooling/release-ffi.md) - the five `release-*-ffi.yml` share the moq-ffi target matrix and artifact staging
