@@ -60,6 +60,9 @@ unreferenced group objects one grace period after recovery.
 supplied `broadcast::Producer` and serves FETCH through `track::Dynamic` with a byte-bounded
 object LRU. `Reader::refresh` follows by listing timeline keys after its cursor, so gaps and
 DVR expiry recover from the next checkpoint; `Reader::finish` applies out-of-band finality.
+`rs/moq-archive/src/proof.rs` records one multi-rendition broadcast end to end: its exact keys and
+bytes match on memory, local disk, and an unordered listing, FETCH replays every group exactly,
+and a rendition's playback GETs only that rendition's objects.
 
 ### Format
 
@@ -133,7 +136,6 @@ owned by that prerequisite, not duplicated in archive storage.
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq import archive` publishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay
 - [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
-- [Archive proof](/quest/m1/archive/proof.md) - prove persistence ordering, selective reads, exact FETCH replay, and timeline-only HLS generation
 
 ## Related
 
