@@ -65,6 +65,10 @@ struct Feed {
 	anchor: Option<SystemTime>,
 	/// The publisher run every segment URL carries; late-created renditions inherit it.
 	generation: Option<Arc<str>>,
+	/// The playlist window duration applied on every push (see
+	/// [`Config::window`](super::Config::window)), or `None` when the source timeline is
+	/// authoritative and only its pops trim the playlists.
+	window: Option<Duration>,
 }
 
 /// The producing side of a broadcast's rendition set.
@@ -87,8 +91,6 @@ pub(crate) struct Producer {
 #[derive(Clone)]
 pub(crate) struct Fanout {
 	feed: Arc<Mutex<Feed>>,
-	/// The playlist window duration (see [`Config::window`](super::Config::window)), applied on every push.
-	window: Duration,
 }
 
 impl Producer {
@@ -104,8 +106,8 @@ impl Producer {
 					closed: false,
 					anchor: None,
 					generation: None,
+					window: Some(window),
 				})),
-				window,
 			},
 		}
 	}
@@ -115,9 +117,10 @@ impl Producer {
 		self.fanout.clone()
 	}
 
-	/// The playlist window duration every rendition's window is trimmed to.
-	pub fn window(&self) -> Duration {
-		self.fanout.window
+	/// The playlist window duration every rendition's window is trimmed to, or `None` when
+	/// only the source timeline trims them.
+	pub fn window(&self) -> Option<Duration> {
+		self.fanout.feed.lock().unwrap().window
 	}
 
 	/// The estimated wall-clock time of timeline `pts` 0 (see [`Feed::anchor`]); `None` until
@@ -184,6 +187,12 @@ impl Producer {
 }
 
 impl Fanout {
+	/// List every record the source timeline retains, trimming only on its pops, instead of
+	/// a window. Call before the first record.
+	pub fn unbound(&self) {
+		self.feed.lock().unwrap().window = None;
+	}
+
 	/// Fan one timeline record out to every living rendition, and into the replay history.
 	pub fn push(&self, index: u64, entry: Entry) {
 		let mut feed = self.feed.lock().unwrap();
@@ -205,17 +214,19 @@ impl Fanout {
 		let pts = Duration::from(entry.pts);
 		let discontinuity = feed.discontinuities.stamp(pts, pts + entry.duration);
 		feed.history.push_back((index, entry.clone(), discontinuity));
-		while feed.history.len() >= 2 {
+		let window = feed.window;
+		while let Some(window) = window
+			&& feed.history.len() >= 2
+		{
 			let newest = &feed.history.back().unwrap().1;
 			let span =
 				(Duration::from(newest.pts) + newest.duration).saturating_sub(Duration::from(feed.history[1].1.pts));
-			if span < self.window {
+			if span < window {
 				break;
 			}
 			feed.history.pop_front();
 		}
 
-		let window = self.window;
 		feed.targets.retain(|target| {
 			let Some(rendition) = target.upgrade() else {
 				return false;
@@ -335,7 +346,7 @@ impl Producer {
 		let mut feed = self.fanout.feed.lock().unwrap();
 		rendition.label(feed.generation.clone());
 		for (index, entry, discontinuity) in &feed.history {
-			rendition.push(*index, entry, *discontinuity, self.fanout.window);
+			rendition.push(*index, entry, *discontinuity, feed.window);
 		}
 		if feed.ended {
 			rendition.end();
