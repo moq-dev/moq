@@ -148,6 +148,11 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 		self.inner.consume()
 	}
 
+	/// A watch-only handle to whether this track has subscribers.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.inner.demand()
+	}
+
 	/// Publish a new value, superseding the previous one.
 	pub fn update(&mut self, value: &T) -> crate::Result<()> {
 		Ok(self.inner.update(value)?)
@@ -207,6 +212,11 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 	/// on its first read.
 	pub fn consume(&self) -> moq_net::track::Subscriber {
 		self.inner.consume()
+	}
+
+	/// A watch-only handle to whether this track has subscribers.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.inner.demand()
 	}
 
 	/// Append one record to the log.
