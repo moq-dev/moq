@@ -343,112 +343,15 @@ mod tests {
 	use std::num::NonZeroUsize;
 
 	use futures::TryStreamExt;
-	use object_store::list::{PaginatedListOptions, PaginatedListResult, PaginatedListStore};
+	use object_store::ObjectStoreExt;
 	use object_store::memory::InMemory;
 	use object_store::path::Path;
-	use object_store::{
-		CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions,
-		PutOptions, PutPayload, PutResult,
-	};
 
 	use super::*;
 	use crate::ID_MAX;
+	use crate::mock::Mock;
 	use crate::path::encode_track;
 	use crate::segment::{Frame, Group};
-
-	/// In-memory store with a trivial offset-based paginated listing implementation.
-	/// Page tokens are decimal indexes into the filtered, sorted key list.
-	#[derive(Debug, Clone)]
-	struct PaginatedMemory {
-		inner: InMemory,
-	}
-
-	impl std::fmt::Display for PaginatedMemory {
-		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-			write!(f, "PaginatedMemory")
-		}
-	}
-
-	#[async_trait::async_trait]
-	impl ObjectStore for PaginatedMemory {
-		async fn put_opts(
-			&self,
-			location: &Path,
-			payload: PutPayload,
-			opts: PutOptions,
-		) -> object_store::Result<PutResult> {
-			self.inner.put_opts(location, payload, opts).await
-		}
-
-		async fn put_multipart_opts(
-			&self,
-			location: &Path,
-			opts: PutMultipartOptions,
-		) -> object_store::Result<Box<dyn MultipartUpload>> {
-			self.inner.put_multipart_opts(location, opts).await
-		}
-
-		async fn get_opts(&self, location: &Path, options: GetOptions) -> object_store::Result<GetResult> {
-			self.inner.get_opts(location, options).await
-		}
-
-		fn delete_stream(
-			&self,
-			locations: BoxStream<'static, object_store::Result<Path>>,
-		) -> BoxStream<'static, object_store::Result<Path>> {
-			self.inner.delete_stream(locations)
-		}
-
-		fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-			self.inner.list(prefix)
-		}
-
-		async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
-			self.inner.list_with_delimiter(prefix).await
-		}
-
-		async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> object_store::Result<()> {
-			self.inner.copy_opts(from, to, options).await
-		}
-	}
-
-	#[async_trait::async_trait]
-	impl PaginatedListStore for PaginatedMemory {
-		async fn list_paginated(
-			&self,
-			prefix: Option<&str>,
-			opts: PaginatedListOptions,
-		) -> object_store::Result<PaginatedListResult> {
-			let mut metas: Vec<ObjectMeta> = self.inner.list(None).try_collect().await?;
-			metas.sort_by(|a, b| a.location.as_ref().cmp(b.location.as_ref()));
-			if let Some(prefix) = prefix {
-				metas.retain(|meta| meta.location.as_ref().starts_with(prefix));
-			}
-			if let Some(offset) = opts.offset.as_deref() {
-				metas.retain(|meta| meta.location.as_ref() > offset);
-			}
-			let start: usize = match opts.page_token {
-				Some(token) => token.parse().map_err(|err| object_store::Error::Generic {
-					store: "PaginatedMemory",
-					source: Box::new(err),
-				})?,
-				None => 0,
-			};
-			let remaining = &metas[start.min(metas.len())..];
-			let take = opts.max_keys.unwrap_or(remaining.len()).min(remaining.len());
-			let objects = remaining[..take].to_vec();
-			let next = start.saturating_add(take);
-			let page_token = (next < metas.len()).then(|| next.to_string());
-			Ok(PaginatedListResult {
-				result: ListResult {
-					objects,
-					common_prefixes: Vec::new(),
-					extensions: Default::default(),
-				},
-				page_token,
-			})
-		}
-	}
 
 	fn memory() -> Store<InMemory> {
 		Store::new(InMemory::new(), "rec")
@@ -818,7 +721,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn paginated_listing_walks_pages_and_excludes_siblings() {
-		let store = Store::new(PaginatedMemory { inner: InMemory::new() }, "rec");
+		let store = Store::new(Mock::memory(), "rec");
 		for segment in 0..3 {
 			store
 				.put_segments("timeline.z", segment, &one_group(segment, b"t"))
@@ -827,7 +730,6 @@ mod tests {
 		}
 		store
 			.inner()
-			.inner
 			.put(
 				&Path::from("rec-other/video/.info"),
 				Bytes::from_static(b"sibling").into(),

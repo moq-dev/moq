@@ -803,90 +803,11 @@ fn malformed(track: &str, sequence: u64, err: impl std::fmt::Display) -> Error {
 mod tests {
 
 	use futures::TryStreamExt;
-	use futures::stream::BoxStream;
 	use object_store::memory::InMemory;
-	use object_store::path::Path;
-	use object_store::{
-		CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, PutMultipartOptions, PutOptions,
-		PutPayload, PutResult,
-	};
 
 	use super::*;
+	use crate::mock::Mock;
 	use crate::store::list::Query;
-
-	/// An in-memory store whose group PUTs fail for one track, and whose listings fail at the end.
-	#[derive(Debug, Clone)]
-	struct Failing {
-		inner: Arc<InMemory>,
-		track: &'static str,
-		list: bool,
-	}
-
-	impl std::fmt::Display for Failing {
-		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-			write!(f, "Failing")
-		}
-	}
-
-	#[async_trait::async_trait]
-	impl ObjectStore for Failing {
-		async fn put_opts(
-			&self,
-			location: &Path,
-			payload: PutPayload,
-			opts: PutOptions,
-		) -> object_store::Result<PutResult> {
-			if location.as_ref().contains(&format!("/{}/groups/", self.track)) {
-				return Err(object_store::Error::NotImplemented {
-					operation: "put".into(),
-					implementer: "Failing".into(),
-				});
-			}
-			self.inner.put_opts(location, payload, opts).await
-		}
-
-		async fn put_multipart_opts(
-			&self,
-			location: &Path,
-			opts: PutMultipartOptions,
-		) -> object_store::Result<Box<dyn MultipartUpload>> {
-			self.inner.put_multipart_opts(location, opts).await
-		}
-
-		async fn get_opts(&self, location: &Path, options: GetOptions) -> object_store::Result<GetResult> {
-			self.inner.get_opts(location, options).await
-		}
-
-		fn delete_stream(
-			&self,
-			locations: BoxStream<'static, object_store::Result<Path>>,
-		) -> BoxStream<'static, object_store::Result<Path>> {
-			self.inner.delete_stream(locations)
-		}
-
-		fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-			let listed = self.inner.list(prefix);
-			match self.list {
-				true => listed
-					.chain(futures::stream::once(async {
-						Err(object_store::Error::NotImplemented {
-							operation: "list".into(),
-							implementer: "Failing".into(),
-						})
-					}))
-					.boxed(),
-				false => listed,
-			}
-		}
-
-		async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
-			self.inner.list_with_delimiter(prefix).await
-		}
-
-		async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> object_store::Result<()> {
-			self.inner.copy_opts(from, to, options).await
-		}
-	}
 
 	const TIMELINE: &str = hang::timeline::DEFAULT_NAME;
 
@@ -1031,12 +952,9 @@ mod tests {
 		let video = track(&source, "video");
 		let audio = track(&source, "audio");
 
-		let failing = Failing {
-			inner: Arc::new(InMemory::new()),
-			track: "audio",
-			list: false,
-		};
-		let store = Store::new(failing, "rec");
+		let mock = Mock::memory();
+		mock.fail_puts("/audio/groups/");
+		let store = Store::new(mock, "rec");
 		let writer = Writer::new(store.clone(), source.consume(), Config::default())
 			.await
 			.unwrap();
@@ -1367,18 +1285,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn a_failed_recovery_deletes_nothing() {
-		let inner = Arc::new(InMemory::new());
-		let store = Store::new(inner.clone(), "rec");
+		let mock = Mock::memory();
+		let store = Store::new(mock.clone(), "rec");
 		let config = Config::default().with_retention(Retention::new(Duration::from_secs(2), Duration::ZERO));
 		record(&store, config.clone(), 0..6).await;
 		store.put_groups("video", &orphan(1)).await.unwrap();
 		let before = stored_groups(&store).await;
 
-		let failing = Failing {
-			inner: inner.clone(),
-			track: "",
-			list: true,
-		};
+		let failing = mock.fork();
+		failing.fail_lists();
 		let source = broadcast::Info::new().produce();
 		let result = Writer::new(Store::new(failing, "rec"), source.consume(), config.clone()).await;
 		assert!(matches!(result, Err(Error::Store(_))));

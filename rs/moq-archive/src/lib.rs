@@ -17,6 +17,8 @@ pub use object_store;
 
 mod error;
 pub mod info;
+#[cfg(test)]
+mod mock;
 mod path;
 pub mod reader;
 mod recover;

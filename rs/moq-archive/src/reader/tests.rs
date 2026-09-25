@@ -1,89 +1,19 @@
-use std::sync::{Arc, Mutex};
-
 use bytes::Bytes;
-use futures::stream::BoxStream;
 use hang::timeline::{Range, Record};
 use moq_json::window;
 use moq_net::{broadcast, group};
-use object_store::memory::InMemory;
-use object_store::path::Path;
-use object_store::{
-	CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt,
-	PutMultipartOptions, PutOptions, PutPayload, PutResult,
-};
+use object_store::ObjectStoreExt;
 
 use super::*;
+use crate::mock::Mock;
 use crate::segment::{Frame, Group};
 use crate::{ID_MAX, Info};
 
 const TIMELINE: &str = "timeline.z";
 
-/// In-memory store that records every GET path.
-#[derive(Debug, Clone, Default)]
-struct Counting {
-	inner: Arc<InMemory>,
-	gets: Arc<Mutex<Vec<String>>>,
-}
-
-impl Counting {
-	fn gets(&self) -> Vec<String> {
-		self.gets.lock().unwrap().clone()
-	}
-}
-
-impl std::fmt::Display for Counting {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "Counting")
-	}
-}
-
-#[async_trait::async_trait]
-impl ObjectStore for Counting {
-	async fn put_opts(
-		&self,
-		location: &Path,
-		payload: PutPayload,
-		opts: PutOptions,
-	) -> object_store::Result<PutResult> {
-		self.inner.put_opts(location, payload, opts).await
-	}
-
-	async fn put_multipart_opts(
-		&self,
-		location: &Path,
-		opts: PutMultipartOptions,
-	) -> object_store::Result<Box<dyn MultipartUpload>> {
-		self.inner.put_multipart_opts(location, opts).await
-	}
-
-	async fn get_opts(&self, location: &Path, options: GetOptions) -> object_store::Result<GetResult> {
-		self.gets.lock().unwrap().push(location.to_string());
-		self.inner.get_opts(location, options).await
-	}
-
-	fn delete_stream(
-		&self,
-		locations: BoxStream<'static, object_store::Result<Path>>,
-	) -> BoxStream<'static, object_store::Result<Path>> {
-		self.inner.delete_stream(locations)
-	}
-
-	fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-		self.inner.list(prefix)
-	}
-
-	async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
-		self.inner.list_with_delimiter(prefix).await
-	}
-
-	async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> object_store::Result<()> {
-		self.inner.copy_opts(from, to, options).await
-	}
-}
-
 /// Writes archive objects the way a recording writer lays them out.
 struct Archive {
-	store: Store<Counting>,
+	store: Store<Mock>,
 	encoder: window::Encoder<Record>,
 	/// Next timeline group sequence.
 	sequence: u64,
@@ -96,7 +26,7 @@ impl Archive {
 
 	/// `op_ratio` 0 makes every window edit its own checkpoint group.
 	async fn with_op_ratio(op_ratio: u32) -> Self {
-		let store = Store::new(Counting::default(), "rec");
+		let store = Store::new(Mock::memory(), "rec");
 		store.put_info(TIMELINE, &Info::new(0, 1000).unwrap()).await.unwrap();
 		let config = window::ProducerConfig::default()
 			.with_compression(true)
@@ -188,7 +118,7 @@ fn record(segment: u64, tracks: &[(&str, &[(u64, u64)])]) -> Record {
 	record
 }
 
-async fn open(archive: &Archive) -> (broadcast::Producer, Reader<Counting>) {
+async fn open(archive: &Archive) -> (broadcast::Producer, Reader<Mock>) {
 	let broadcast = broadcast::Info::new().produce();
 	let reader = Reader::open(archive.store.clone(), &broadcast, Config::new(TIMELINE))
 		.await
@@ -269,7 +199,7 @@ async fn requests_download_only_their_object() {
 		.await;
 
 	let (broadcast, _reader) = open(&archive).await;
-	let before = archive.store.inner().gets().len();
+	archive.store.inner().take();
 
 	for sequence in 0..3 {
 		assert_eq!(
@@ -278,7 +208,7 @@ async fn requests_download_only_their_object() {
 		);
 	}
 
-	let gets = archive.store.inner().gets()[before..].to_vec();
+	let gets = archive.store.inner().gets();
 	assert_eq!(
 		gets,
 		vec![
@@ -365,12 +295,12 @@ async fn refresh_follows_new_segments_and_pops() {
 	);
 
 	// The popped record's groups are gone, although its object is still stored and was cached.
-	let gets = archive.store.inner().gets().len();
+	archive.store.inner().take();
 	assert!(matches!(
 		fetch(&broadcast, "video", 1, 0).await,
 		Err(moq_net::Error::NotFound)
 	));
-	assert_eq!(archive.store.inner().gets().len(), gets);
+	assert_eq!(archive.store.inner().gets(), Vec::<String>::new());
 }
 
 #[tokio::test]
@@ -440,7 +370,7 @@ async fn timeline_track_is_republished_and_finished_on_request() {
 
 #[tokio::test]
 async fn open_requires_the_timeline_info() {
-	let store = Store::new(Counting::default(), "rec");
+	let store = Store::new(Mock::memory(), "rec");
 	let broadcast = broadcast::Info::new().produce();
 	let result = Reader::open(store, &broadcast, Config::new(TIMELINE)).await;
 	assert!(matches!(result, Err(Error::NotFound(_))));
