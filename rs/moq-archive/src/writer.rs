@@ -201,8 +201,9 @@ impl<S: ObjectStore> Writer<S> {
 	/// Record until the source broadcast closes and every enrolled track ends.
 	///
 	/// Then flush the final segment and finish the timeline. Fails when the timeline cannot be
-	/// committed or stored: the recording stops at its last durable timeline object. Returns the
-	/// source's error, after finishing, when the broadcast aborted.
+	/// committed or stored, or an enrolled track delivers a group the recording cannot represent:
+	/// the recording stops at its last durable timeline object. Returns the source's error, after
+	/// finishing, when the broadcast aborted.
 	pub async fn run(self) -> Result<()> {
 		let Self {
 			control,
@@ -262,6 +263,7 @@ impl<S: ObjectStore> Writer<S> {
 							recorder,
 							timescale,
 							largest: None,
+							reported: None,
 							accepted: BTreeMap::new(),
 							subscribed: true,
 							_cancel: cancel,
@@ -274,7 +276,7 @@ impl<S: ObjectStore> Writer<S> {
 					Some(Command::Poke) => {}
 				},
 				Some(read) = reads.next(), if !reads.is_empty() => {
-					handle(read, &mut tracks, &mut buffered, &mut reads);
+					handle(read, &mut tracks, &mut buffered, &mut reads)?;
 				}
 				(done, result) = async { commit.as_mut().unwrap().await }, if commit.is_some() => {
 					commit = None;
@@ -393,6 +395,8 @@ struct TrackState {
 	timescale: Timescale,
 	/// The newest group accepted; later arrivals must exceed it.
 	largest: Option<u64>,
+	/// The first-frame timestamp of the newest reported group; later groups must not precede it.
+	reported: Option<u64>,
 	/// Accepted groups in sequence order: `None` while reading, `Some` once complete. Reported in
 	/// order, so a complete group waits for every earlier accepted one.
 	accepted: BTreeMap<u64, Option<Group>>,
@@ -405,7 +409,9 @@ struct TrackState {
 
 impl TrackState {
 	/// Report every complete group at the front of the accepted queue.
-	fn report(&mut self, name: &str, buffered: &mut HashMap<String, BTreeMap<u64, Group>>) {
+	///
+	/// Fails on a group that starts before the previous one, which the timeline cannot place.
+	fn report(&mut self, name: &str, buffered: &mut HashMap<String, BTreeMap<u64, Group>>) -> Result<()> {
 		while let Some(entry) = self.accepted.first_entry() {
 			if entry.get().is_none() {
 				break;
@@ -414,6 +420,16 @@ impl TrackState {
 			let (Some(first), Some(last)) = (group.frames.first(), group.frames.last()) else {
 				continue;
 			};
+			if let Some(reported) = self.reported
+				&& first.timestamp < reported
+			{
+				return Err(malformed(
+					name,
+					group.sequence,
+					format!("timestamp {} precedes {reported}", first.timestamp),
+				));
+			}
+			self.reported = Some(first.timestamp);
 			// Frame timestamps were validated while reading, so these conversions succeed.
 			let (Ok(first), Ok(last)) = (
 				Timestamp::new(first.timestamp, self.timescale),
@@ -428,6 +444,7 @@ impl TrackState {
 				.or_default()
 				.insert(group.sequence, group);
 		}
+		Ok(())
 	}
 }
 
@@ -477,21 +494,22 @@ async fn guard(mut cancelled: watch::Receiver<()>, read: impl Future<Output = Re
 	}
 }
 
+/// Fails on malformed source input; a group the network aborted is dropped instead.
 fn handle(
 	read: Read,
 	tracks: &mut HashMap<String, TrackState>,
 	buffered: &mut HashMap<String, BTreeMap<u64, Group>>,
 	reads: &mut FuturesUnordered<BoxFuture<'static, Read>>,
-) {
+) -> Result<()> {
 	let name = match read {
-		Read::Cancelled => return,
+		Read::Cancelled => return Ok(()),
 		Read::Group {
 			name,
 			subscriber,
 			result,
 		} => {
 			let Some(track) = tracks.get_mut(&name) else {
-				return;
+				return Ok(());
 			};
 			match result {
 				Ok(Some(group)) => {
@@ -515,24 +533,24 @@ fn handle(
 		}
 		Read::Frames { name, sequence, result } => {
 			let Some(track) = tracks.get_mut(&name) else {
-				return;
+				return Ok(());
 			};
-			let group = result
-				.map_err(|err| err.to_string())
-				.and_then(|frames| convert(sequence, frames, track.timescale).map_err(|err| err.to_string()));
-			match group {
-				Ok(group) if !group.frames.is_empty() => {
-					track.accepted.insert(sequence, Some(group));
-				}
-				Ok(_) => {
-					track.accepted.remove(&sequence);
+			match result {
+				Ok(frames) => {
+					let group =
+						convert(sequence, frames, track.timescale).map_err(|err| malformed(&name, sequence, err))?;
+					if group.frames.is_empty() {
+						track.accepted.remove(&sequence);
+					} else {
+						track.accepted.insert(sequence, Some(group));
+					}
 				}
 				Err(err) => {
 					tracing::warn!(track = %name, sequence, %err, "dropping an incomplete group");
 					track.accepted.remove(&sequence);
 				}
 			}
-			track.report(&name, buffered);
+			track.report(&name, buffered)?;
 			name
 		}
 	};
@@ -544,6 +562,7 @@ fn handle(
 	{
 		tracks.remove(&name);
 	}
+	Ok(())
 }
 
 /// Convert a complete group's frames into the track's timescale.
@@ -735,6 +754,10 @@ fn timeline_error_net(err: moq_net::Error) -> Error {
 
 fn source_error(err: moq_net::Error) -> Error {
 	Error::Source(err.to_string())
+}
+
+fn malformed(track: &str, sequence: u64, err: impl std::fmt::Display) -> Error {
+	Error::Source(format!("track {track} group {sequence}: {err}"))
 }
 
 #[cfg(test)]
@@ -1072,6 +1095,51 @@ mod tests {
 		let records = window(&store).await;
 		assert_eq!(ranges(&records, "video"), vec![(0, 0), (2, 2), (3, 3)]);
 		check_objects(&store, &records).await;
+	}
+
+	#[tokio::test]
+	async fn an_unrepresentable_group_fails_the_recording() {
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+
+		let store = Store::new(InMemory::new(), "rec");
+		let writer = Writer::new(store, source.consume(), Config::default()).await.unwrap();
+		writer.control().pacing_track("video").await.unwrap();
+
+		group(&video, 0, &[0]);
+		// One past the recording's largest group ID.
+		group(&video, 1 << 53, &[1000]);
+		video.finish().unwrap();
+		source.finish();
+
+		assert_eq!(
+			writer.run().await,
+			Err(Error::Source(format!(
+				"track video group {}: {}",
+				1u64 << 53,
+				Error::Id(1 << 53)
+			)))
+		);
+	}
+
+	#[tokio::test]
+	async fn a_decreasing_timestamp_fails_the_recording() {
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+
+		let store = Store::new(InMemory::new(), "rec");
+		let writer = Writer::new(store, source.consume(), Config::default()).await.unwrap();
+		writer.control().pacing_track("video").await.unwrap();
+
+		group(&video, 0, &[1000]);
+		group(&video, 1, &[500]);
+		video.finish().unwrap();
+		source.finish();
+
+		assert_eq!(
+			writer.run().await,
+			Err(Error::Source("track video group 1: timestamp 500 precedes 1000".into()))
+		);
 	}
 
 	#[tokio::test]
