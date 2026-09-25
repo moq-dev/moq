@@ -81,6 +81,9 @@ Design points left open for the implementer:
   zigzag, or have a producer with a non-`()` extension refuse this flavor, and
   document the contract.
 - Measure `sessions` (`Presence`) too; the benchmark skipped it.
+- Sweep the aggregate over node publishers x entries per node, for both
+  flavors; the benchmark above only varied one relay's stream, so it cannot
+  show the fan-in cost the gate cites.
 
 **Serving.** Like `.fb.z` was planned: a flavor suffix accepted by
 `requested_track_shape` and the track-name helpers for every name that takes
