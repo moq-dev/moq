@@ -93,7 +93,7 @@ that the producer is gone. The track ends when it is.
 | --- | --- |
 | `announces_started` / `announces_ended` | Announces and unannounces of the broadcast. |
 | `announced_bytes` | The broadcast name's length, summed over each announce and unannounce. Not part of `bytes`. |
-| `broadcasts_started` / `broadcasts_ended` | A session's first subscription to the broadcast, and its last one closing. Started minus ended is the viewer count. |
+| `broadcasts_started` / `broadcasts_ended` | On `publisher.json`, a session's first subscription to the broadcast and its last one closing. Started minus ended is the viewer count. `subscriber.json` leaves both at zero: ingress does not count viewers. |
 | `subscriptions_started` / `subscriptions_ended` | Track subscriptions opened and closed. |
 | `fetches` | One-shot group fetches requested, including ones that found nothing. Their payload counts in `bytes`, `frames`, and `groups`. |
 | `bytes` / `frames` / `groups` | Payload delivered. |
