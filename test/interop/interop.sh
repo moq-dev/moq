@@ -5,8 +5,9 @@
 # public registry to catch packaging breakage), this builds every client from
 # the workspace source. It proves the code in the tree interoperates across
 # implementations before anything is published: a relay built from rs/moq-relay,
-# clients built from rs/moq-cli, py/, js/, and rs/libmoq, all talking to each
-# other. There's no apt/brew/npm/PyPI here, just cargo/bun/uv/cc.
+# clients built from rs/moq-cli, py/, go/, cpp/moq, js/, and rs/libmoq, all
+# talking to each other. There's no apt/brew/npm/PyPI here, just
+# cargo/bun/uv/go/cmake/cc.
 #
 # It stands up a moq-relay, then for each publisher language publishes an H.264
 # broadcast and confirms every subscriber sees data flowing before the timeout.
@@ -130,6 +131,7 @@ TARGET_BASE=""    # cargo target dir (resolved in require_tools)
 PY=""             # python interpreter with the workspace moq build (set in prepare)
 C_INTEROP=""      # compiled C client binary (set in prepare)
 GO_INTEROP=""     # compiled Go client binary (set in prepare)
+CPP_INTEROP=""    # compiled C++ client binary (set in prepare)
 GST_PLUGIN_DIR="" # dir holding the built moq-gst plugin (set in prepare)
 BROKEN_LANGS=""   # clients whose source build failed
 
@@ -280,6 +282,35 @@ prepare_go() {
     fi
 }
 
+# Build and install cpp/moq (cargo builds moq-ffi, uniffi-bindgen-cpp renders the
+# bindings), then build the C++ client against the installed package with
+# find_package(moq), the way an external project consumes it. Debug, like the
+# rest of the run.
+prepare_cpp() {
+    local t
+    for t in cmake uniffi-bindgen-cpp; do
+        have "$t" || {
+            mark_broken cpp "$t not found (see cpp/moq/README.md)"
+            return
+        }
+    done
+    echo "building c++ client (workspace cpp/moq via uniffi-bindgen-cpp + cmake)..."
+    local build="$HARNESS_RUN/cpp-build" prefix="$HARNESS_RUN/cpp-prefix" config=Debug
+    [[ "$PROFILE" == "release" ]] && config=Release
+    if ! {
+        cmake -S "$WORKSPACE/cpp/moq" -B "$build/package" -DCMAKE_BUILD_TYPE="$config" -DCMAKE_INSTALL_LIBDIR=lib &&
+            cmake --build "$build/package" &&
+            cmake --install "$build/package" --prefix "$prefix" &&
+            cmake -S "$CLIENTS/cpp" -B "$build/client" -DCMAKE_BUILD_TYPE="$config" -DCMAKE_PREFIX_PATH="$prefix" &&
+            cmake --build "$build/client"
+    } >"$HARNESS_RUN/cpp-build.log" 2>&1; then
+        mark_broken cpp "cmake build failed"
+        sed 's/^/        /' "$HARNESS_RUN/cpp-build.log" >&2 || true
+        return
+    fi
+    CPP_INTEROP="$build/client/cpp-interop"
+}
+
 # Build libmoq (the C staticlib + cbindgen header) and compile the C subscriber
 # against it. cargo writes moq.h to $TARGET_BASE/include and libmoq.a to the
 # profile dir.
@@ -368,6 +399,7 @@ echo "moq-cli: $MOQ"
 
 needs python && prepare_python
 needs go && prepare_go
+needs cpp && prepare_cpp
 needs_js && prepare_js
 needs c && prepare_c
 needs gst && prepare_gst
@@ -428,6 +460,9 @@ run_publisher() {
         go)
             ffmpeg_h264 | "$GO_INTEROP" publish --url "$URL" --broadcast "$broadcast"
             ;;
+        cpp)
+            ffmpeg_h264 | "$CPP_INTEROP" publish --url "$URL" --broadcast "$broadcast"
+            ;;
         js)
             # Headless Chromium encodes its own H.264 from a fake camera via
             # WebCodecs (lazily, once a subscriber creates demand).
@@ -480,6 +515,9 @@ run_subscriber() {
             ;;
         go)
             "$GO_INTEROP" subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"
+            ;;
+        cpp)
+            "$CPP_INTEROP" subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"
             ;;
         c)
             "$C_INTEROP" subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"

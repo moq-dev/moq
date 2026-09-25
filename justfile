@@ -11,7 +11,7 @@ mod kt
 mod swift
 mod go
 mod dart
-# Generated C++ bindings for moq-ffi.
+# The C++ package over moq-ffi.
 mod cpp
 # OBS Studio plugin (C++). See doc/bin/obs.md.
 mod obs 'cpp/obs'
@@ -453,7 +453,7 @@ _tools $FILES="":
     # here to prevent.
     scoped '^(go/|rs/moq-ffi/)'                                && tools+=(go uniffi-bindgen-go cargo rsync)
     scoped '^(dart/|rs/moq-ffi/)'                              && tools+=(cargo dart uniffi_bindgen_dart)
-    scoped '^(cpp/ffi/|cpp/justfile$|rs/moq-ffi/)'              && tools+=(cargo jq cmake c++ uniffi-bindgen-cpp)
+    scoped '^(cpp/moq/|cpp/justfile$|rs/moq-ffi/|rs/libmoq/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)' && tools+=(cargo cmake c++ pkg-config uniffi-bindgen-cpp)
     # Two obs recipes with two dispatch scopes, so two lines: over-requiring
     # would fail a diff that never runs the recipe. `just obs compile` needs
     # cargo to regenerate moq.h and pkg-config to locate Qt6 and ffmpeg. Every

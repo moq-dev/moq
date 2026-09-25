@@ -187,6 +187,12 @@ jobs:
     permissions:
       contents: write
 
+  release-cpp:
+    name: Release C++
+    uses: ./.github/workflows/release-cpp.yml
+    permissions:
+      contents: write
+
   release-moq-relay:
     name: moq-relay
     uses: ./.github/workflows/moq-relay.yml
@@ -295,8 +301,7 @@ jobs:
         shell: bash
         run: just rs windows
 
-  # The generated moq-ffi C++ bindings under MSVC, with exceptions and RTTI
-  # off. cpp.yml covers clang on pull requests and `just check` covers gcc; this
+  # The moq C++ package (cpp/moq) under MSVC, with exceptions and RTTI off. cpp.yml covers clang on pull requests and `just check` covers gcc; this
   # is the Windows half, nightly for the same runner cost as `windows`.
   cpp-windows:
     name: C++ (MSVC)

@@ -25,7 +25,7 @@ CI on Windows, macOS, and Linux.
 
 ## Required
 
-- [Package](/quest/m1/cpp/package.md) - the release tarballs the port fetches
+- The first `cpp-v*` release from `release-cpp.yml`, the tarballs the port fetches
 
 ## Related
 

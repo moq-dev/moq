@@ -31,10 +31,10 @@ unchanged: same settings, same dock, same reconnect and teardown timing.
   fake executor; keep the scenarios (stop during connect, late terminal,
   superseded attempt).
 - Build and release: `cpp/obs/CMakeLists.txt` consumes the package
-  (in-tree `cpp/` for `MOQ_LOCAL`, the release tarball otherwise); `obs.yml`
+  (in-tree `cpp/moq` for `MOQ_LOCAL`, the release tarball otherwise); `obs.yml`
   rides `release-cpp.yml` instead of `libmoq.yml`. `doc/bin/obs.md` says the
   plugin is C++ over the generated bindings.
-- Shutdown: define `obs_module_unload` and call `moq_ffi_shutdown` there,
+- Shutdown: define `obs_module_unload` and call `moq::shutdown()` there,
   after OBS has destroyed the outputs and sources, so the runtime thread is
   joined before the module is unmapped; log it so a hung shutdown is visible.
   A `cpp/obs/test` stub test asserts the unload calls it. Reproduce the crash
@@ -43,10 +43,6 @@ unchanged: same settings, same dock, same reconnect and teardown timing.
 - Verification: `just obs compile` and `just obs test` on all three
   platforms; a manual publish and watch round trip against a relay with
   reconnect and mid-stream source deletion.
-
-## Required
-
-- [Package](/quest/m1/cpp/package.md) - the wrapper and CMake package OBS links
 
 ## Related
 

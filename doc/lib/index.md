@@ -1,11 +1,11 @@
 ---
 title: Libraries
-description: MoQ libraries for Rust, TypeScript, C, Python, Kotlin, Swift, Go, and Dart
+description: MoQ libraries for Rust, TypeScript, C++, C, Python, Kotlin, Swift, Go, and Dart
 ---
 
 # Libraries
 
-Two primary implementations and six bindings, all speaking the same wire
+Two primary implementations and seven bindings, all speaking the same wire
 protocol. A publisher in Python is consumable by a subscriber in Swift.
 
 | Language | Package | Best for |
@@ -17,13 +17,14 @@ protocol. A publisher in Python is consumable by a subscriber in Swift.
 | [Python](/lib/py/) | `moq-rs` on PyPI | Scripts, ML pipelines, voice agents. |
 | [Go](/lib/go/) | `moq.dev/moq` | Go services and tooling. |
 | [Dart](/lib/dart/) | `moq` on pub.dev | Flutter apps. |
-| [C](/lib/c/) | `libmoq` | C/C++ and any language with a C FFI. |
+| [C++](/lib/cpp/) | `moq` via CMake or pkg-config | C++ apps, engines, and plugins. |
+| [C](/lib/c/) | `libmoq` | The plain-C ABI, for C and any language with a C FFI; C++ should use the package above. |
 
 ## How they relate
 
 Rust is the reference implementation; every server-side tool is built on it.
-TypeScript is a from-scratch browser implementation. The other six wrap the
-Rust core: Python, Kotlin, Swift, Go, and Dart are generated from one
+TypeScript is a from-scratch browser implementation. The other seven wrap the
+Rust core: Python, Kotlin, Swift, Go, Dart, and C++ are generated from one
 [UniFFI](https://mozilla.github.io/uniffi-rs/) crate (`moq-ffi`) and then
 wrapped in an idiomatic layer, while C gets a hand-written stable ABI
 (`libmoq`). A feature added to the core lands in all of them together.

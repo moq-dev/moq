@@ -1,0 +1,12 @@
+# The generated bindings ship as source: compile `pkg-config --variable=sources moq` with the
+# same standard and flags as the code that includes <moq/moq.hpp>.
+prefix=${pcfiledir}/../..
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+sources=${prefix}/@CMAKE_INSTALL_DATADIR@/moq/moq.cpp
+
+Name: moq
+Description: Media over QUIC for C++
+Version: @PROJECT_VERSION@
+Cflags: -I${includedir}
+Libs: -L${libdir} -lmoq_ffi@MOQ_NATIVE_LIBS_PC@

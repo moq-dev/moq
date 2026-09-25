@@ -331,20 +331,21 @@
           doCheck = false;
         };
 
-        # uniffi-bindgen-cpp renders rs/moq-ffi into cpp/ffi/generated. Not in
+        # uniffi-bindgen-cpp renders rs/moq-ffi for cpp/moq's CMake build. Not in
         # nixpkgs, so build it from source; without it `just cpp check` skips
         # itself, which MOQ_STRICT turns into a failure in CI.
         #
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
-        # rs/moq-ffi/Cargo.toml. Five other places name the same tag and must be
+        # rs/moq-ffi/Cargo.toml. Six other places name the same tag and must be
         # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
-        # cpp/justfile, cpp/ffi/README.md, .github/workflows/cpp.yml, and the
-        # cpp-windows job in .github/workflows/nightly.yml.
+        # cpp/justfile, cpp/moq/README.md, .github/workflows/cpp.yml,
+        # .github/workflows/release-cpp.yml, and the cpp-windows job in
+        # .github/workflows/nightly.yml.
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
-        # and the fork adds `error_style = "expected"`, which cpp/ffi/uniffi.toml
+        # and the fork adds `error_style = "expected"`, which cpp/moq/uniffi.toml
         # turns on. Its tags add a `-kixelated.N` pre-release so they never
         # collide with upstream's. Move back upstream once one tags both.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
