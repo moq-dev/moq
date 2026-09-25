@@ -55,6 +55,16 @@ export function handover(cap: Time.Milli, timeout?: Time.Milli): Time.Milli {
 }
 
 /**
+ * The URL a redirect is judged against. A WebSocket fallback that won the race is the host
+ * we dialed; the primary URL was not, so same-host must not treat it as the current peer.
+ *
+ * @internal
+ */
+export function dialed(primary: URL, transport: "webtransport" | "websocket", websocket?: URL): URL {
+	return transport === "websocket" && websocket ? websocket : primary;
+}
+
+/**
  * The URL a GOAWAY assigns: `undefined` keeps the current URL (the peer named none, or the
  * policy ignores it), and a URL replaces it. Throws {@link RefusedRedirect} for an explicit
  * URI the policy will not follow.

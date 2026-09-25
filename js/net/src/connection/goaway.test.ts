@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { RefusedRedirect } from "../error.ts";
 import * as Time from "../time.ts";
-import { handover, isLocal, type Redirect, target } from "./goaway.ts";
+import { dialed, handover, isLocal, type Redirect, target } from "./goaway.ts";
 
 const current = new URL("https://relay.example/room?jwt=secret");
 
@@ -84,6 +84,14 @@ test("local literals are recognized in every spelling", () => {
 	for (const url of ["https://example.com/", "https://8.8.8.8/", "https://172.32.0.1/", "https://[2606:4700::1]/"]) {
 		expect(isLocal(new URL(url)), url).toBe(false);
 	}
+});
+
+test("a WebSocket fallback that connected is the host a redirect is judged against", () => {
+	const primary = new URL("https://relay.example/");
+	const socket = new URL("wss://edge.example/moq");
+	expect(dialed(primary, "websocket", socket).href).toBe(socket.href);
+	expect(dialed(primary, "webtransport", socket).href).toBe(primary.href);
+	expect(dialed(primary, "websocket").href).toBe(primary.href);
 });
 
 test("the handover is the cap, lowered only by a positive peer deadline", () => {

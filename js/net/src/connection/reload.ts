@@ -8,7 +8,7 @@ import * as Time from "../time.ts";
 import { wireOf } from "../wire.ts";
 import { type ConnectProps, connect, type WebSocketProps, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
-import { DEFAULT_HANDOVER, type Drain, type GoawayProps, handover, target } from "./goaway.ts";
+import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, target } from "./goaway.ts";
 import type { Probe, Stats } from "./stats.ts";
 
 /**
@@ -410,7 +410,10 @@ export class Reload {
 					}
 
 					current = undefined;
-					if (!this.#migrate(connection, dialing, ended)) return;
+					// A pinned WebSocket URL can win the race against the primary. Judge the
+					// redirect against that endpoint, not the primary we never reached.
+					const socket = this.#redirect.peek() ? undefined : this.websocket?.url;
+					if (!this.#migrate(connection, dialed(dialing, connection.transport, socket), ended)) return;
 
 					// A session that outlived the initial delay was healthy, so its handover is not a
 					// failure. One redirected almost at once still migrates, but through the backoff,
