@@ -86,7 +86,7 @@ test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_06])(
 
 // Delivers `sequences` in the given order, finishes the track, and returns the
 // SUBSCRIBE_END the publisher put on the wire.
-async function subscribeEnd(sequences: number[], version = Version.DRAFT_05): Promise<SubscribeEnd> {
+async function subscribeEnd(sequences: number[], version: Version = Version.DRAFT_05): Promise<SubscribeEnd> {
 	const pair = createMockTransportPair(version === Version.DRAFT_07 ? ALPN_07_WIP : ALPN_05);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
