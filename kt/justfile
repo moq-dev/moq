@@ -21,8 +21,11 @@ check:
 generate:
     bash ../sh/kt/generate.sh
 
-# Assemble the KMP module from per-target moq-ffi binaries + bindings.
-# Used by .github/workflows/release-kt-ffi.yml; see kt/README.md for the
-# expected --lib-dir layout.
+# Runs in the caller's directory, so a relative `--lib-dir` or `--output` means
+# what it would to the script itself. See kt/README.md for the --lib-dir layout.
+
+# Assemble the KMP module from per-target moq-ffi binaries and bindings.
+[no-cd]
+[positional-arguments]
 package *args:
-    bash ../sh/kt/package.sh {{ args }}
+    {{ quote(justfile_directory() / "sh/kt/package.sh") }} "$@"

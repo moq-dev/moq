@@ -57,3 +57,12 @@ check:
 # Auto-fix formatting.
 fix:
     ../../sh/obs/fix.sh
+
+# Runs in the caller's directory, so a relative `--output` means what it would
+# to the script itself.
+
+# Build and package the obs-moq plugin for release.
+[no-cd]
+[positional-arguments]
+package *args:
+    {{ quote(justfile_directory() / "cpp/obs/build.sh") }} "$@"

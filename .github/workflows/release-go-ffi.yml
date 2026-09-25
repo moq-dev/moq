@@ -16,11 +16,11 @@ on:
   pull_request:
     paths:
       - ".github/workflows/release-go-ffi.yml"
-      - "sh/gh/release.sh"
+      - "just gh release"
       - "go/ffi/**"
-      - "sh/go/package-ffi.sh"
-      - "sh/go/publish-ffi.sh"
-      - "rs/moq-ffi/build.sh"
+      - "just go package-ffi"
+      - "just go publish-ffi"
+      - "just rs package-ffi"
 
 permissions:
   contents: read
@@ -51,9 +51,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Parse version
         id: parse
-        run: sh/gh/release.sh parse-version moq-ffi
+        run: just gh release parse-version moq-ffi
 
   build:
     name: Build moq-ffi (${{ matrix.target }})
@@ -77,6 +79,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/just
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -103,7 +107,7 @@ jobs:
           BUILD_TARGET: ${{ matrix.target }}
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
-          ./rs/moq-ffi/build.sh \
+          just rs package-ffi \
             --target "$BUILD_TARGET" \
             --version "$BUILD_VERSION" \
             --output dist
@@ -125,6 +129,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
@@ -144,7 +150,7 @@ jobs:
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
-          ./rs/moq-ffi/build.sh \
+          just rs package-ffi \
             --bindings-only \
             --version "$BUILD_VERSION" \
             --output dist
@@ -164,6 +170,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/just
 
       - name: Download per-target libs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -208,7 +216,7 @@ jobs:
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
-          ./sh/go/package-ffi.sh \
+          just go package-ffi \
             --version "$BUILD_VERSION" \
             --source-dir go/ffi \
             --lib-dir libs \
@@ -231,6 +239,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/just
 
       - name: Generate moq-bot token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
@@ -256,7 +266,7 @@ jobs:
           GO_FFI_MIRROR_TOKEN: ${{ steps.token.outputs.token }}
           GIT_AUTHOR_NAME: moq-bot
           GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
-        run: ./sh/go/publish-ffi.sh
+        run: just go publish-ffi
 
   publish-dry-run:
     name: Publish dry-run
@@ -269,6 +279,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Download package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -278,4 +290,4 @@ jobs:
       - name: Dry-run publish to mirror
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-        run: ./sh/go/publish-ffi.sh --dry-run
+        run: just go publish-ffi --dry-run

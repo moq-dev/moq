@@ -25,7 +25,3 @@ and workflow name, so `alert.yml`, `release-brew.yml`, and
 - Verify with `just gh check` and by diffing the rendered job list of each
   caller against its predecessor with `gh workflow view`. The next tagged
   release is the end-to-end check; say so in the PR.
-
-## Required
-
-- [Workflows call just](/quest/m1/tooling/workflows-call-just.md) - the reusable workflow is written in the recipe style from the start

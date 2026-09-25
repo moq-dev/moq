@@ -11,3 +11,12 @@ fix:
 # Regenerate the raw UniFFI Dart bindings.
 generate:
     ../sh/dart/generate.sh
+
+# `package` runs in the caller's directory, so a relative `--output` means
+# what it would to the script itself.
+
+# Package a Dart library for pub.dev.
+[no-cd]
+[positional-arguments]
+package *args:
+    {{ quote(justfile_directory() / "sh/dart/package.sh") }} "$@"

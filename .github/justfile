@@ -1,9 +1,10 @@
 set working-directory := '..'
 
-# Lint GitHub Actions workflows and their alert coverage.
+# Lint GitHub Actions workflows, their alert coverage, and that every step runs a recipe.
 check:
     actionlint
     sh/gh/alert.sh check-coverage
+    bun sh/gh/check-runs.ts
 
 # Tests of the release tooling itself; nightly, not on every pull request.
 test:
@@ -11,3 +12,24 @@ test:
     sh/gh/release.test.sh
     python3 sh/rs/package-rename.test.py
     sh/go/publish-wrapper.test.sh
+    .claude/hooks/direnv.test.sh
+
+# Release workflow helpers, e.g. `just gh release parse-version moq-cli`.
+[positional-arguments]
+release *args:
+    sh/gh/release.sh "$@"
+
+# Post a failed run to Discord, or check that alert.yml covers every workflow.
+[positional-arguments]
+alert *args:
+    sh/gh/alert.sh "$@"
+
+# Render a Homebrew formula template for a release.
+[positional-arguments]
+formula *args:
+    sh/gh/render-formula.sh "$@"
+
+# Trigger the apt-repo and rpm-repo workflows for a release tag.
+[positional-arguments]
+trigger-repo-publish *args:
+    sh/gh/trigger-repo-publish.sh "$@"

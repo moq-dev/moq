@@ -19,7 +19,7 @@ on:
     paths:
       - "py/moq-rs/**"
       - ".github/workflows/release-py.yml"
-      - "sh/gh/release.sh"
+      - "just gh release"
   workflow_run:
     workflows: ["Release Py FFI"]
     types:
@@ -56,9 +56,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Read version
         id: version
-        run: sh/gh/release.sh read-version py/moq-rs/pyproject.toml
+        run: just gh release read-version py/moq-rs/pyproject.toml
 
       - name: Resolve FFI version
         id: ffi
@@ -78,14 +80,14 @@ jobs:
         if: github.event_name == 'push'
         env:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
-        run: sh/gh/release.sh ffi-unreleased "$FFI_VERSION"
+        run: just gh release ffi-unreleased "$FFI_VERSION"
 
       - name: Check FFI on PyPI
         id: ffi-pypi
         if: github.event_name == 'push' && steps.ffi-gate.outputs.unreleased != 'true'
         env:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
-        run: sh/gh/release.sh pypi-exists moq-ffi "$FFI_VERSION"
+        run: just gh release pypi-exists moq-ffi "$FFI_VERSION"
 
       - name: Unpublished FFI notice
         if: github.event_name == 'push' && steps.ffi-gate.outputs.unreleased != 'true' && steps.ffi-pypi.outputs.exists != 'true'
@@ -100,7 +102,7 @@ jobs:
         id: pypi
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: sh/gh/release.sh pypi-exists moq-rs "$VERSION"
+        run: just gh release pypi-exists moq-rs "$VERSION"
 
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
