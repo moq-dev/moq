@@ -134,7 +134,11 @@ async fn vulkan_cuda_convert_resize_encode() {
 	producer.upload(&rgba, None, 1);
 	let (frame, completion) = slot.publish(Timeline::new(1, 2).unwrap()).unwrap();
 
-	let converted = converter.convert(&frame).expect("convert RGBA");
+	let converted = converter
+		.reserve()
+		.expect("an empty pool")
+		.convert(&frame)
+		.expect("convert RGBA");
 	assert_eq!(converted.size(), size);
 	assert_eq!(converted.color(), Some(color));
 	assert!(converted.pitch.is_multiple_of(256) && converted.pitch >= size.width);
@@ -153,7 +157,11 @@ async fn vulkan_cuda_convert_resize_encode() {
 	assert!(max_diff(actual.u(), expected.u()) <= 1, "u differs from the reference");
 	assert!(max_diff(actual.v(), expected.v()) <= 1, "v differs from the reference");
 
-	let scaled = converted.resize(sd).expect("GPU resize");
+	let scaled = converter
+		.reserve()
+		.expect("a free buffer")
+		.resize(&converted, sd)
+		.expect("GPU resize");
 	assert_eq!(scaled.size(), sd);
 	assert_eq!(scaled.color(), Some(color));
 	let actual = scaled.download_i420().unwrap();
@@ -171,13 +179,25 @@ async fn vulkan_cuda_convert_resize_encode() {
 	assert!(mae(actual.u(), expected_sd.u()) < 4, "scaled u disagrees with the CPU");
 	assert!(mae(actual.v(), expected_sd.v()) < 4, "scaled v disagrees with the CPU");
 
-	// Three buffers live fills the pool; a fourth is refused, not allocated.
-	let third = converter.convert(&frame).expect("third buffer");
-	let refused = converter.convert(&frame).expect_err("a full pool must refuse");
-	assert!(matches!(refused, Error::Unsupported(_)), "{refused}");
-	assert!(matches!(scaled.resize(sd), Err(Error::Unsupported(_))));
+	// Three buffers live fills the pool; a fourth is not reserved, let alone
+	// allocated.
+	let third = converter.reserve().expect("third buffer");
+	assert!(converter.reserve().is_none(), "a full pool must refuse");
+	// A slot dropped unused, or consumed by a failed resize, gives its buffer
+	// back.
 	drop(third);
-	drop(converter.convert(&frame).expect("a returned buffer is reusable"));
+	let odd = converter.reserve().expect("an unfilled slot returned its buffer");
+	odd.resize(&converted, Size::new(81, 49))
+		.expect_err("an odd size is an error");
+	let third = converter
+		.reserve()
+		.expect("a failed resize returned its buffer")
+		.convert(&frame)
+		.expect("third conversion");
+	assert!(converter.reserve().is_none());
+	drop(third);
+	let third = converter.reserve().expect("a returned buffer is reusable");
+	drop(third.convert(&frame).expect("convert into a reused buffer"));
 	eprintln!("pool bound held at capacity 3");
 
 	drop((converted, scaled, frame));
@@ -212,7 +232,11 @@ async fn vulkan_cuda_convert_resize_encode() {
 		producer.upload(&bgra, Some(ready - 1), ready);
 		let (frame, completion) = slot.publish(Timeline::new(ready, ready + 1).unwrap()).unwrap();
 
-		let converted = converter.convert(&frame).expect("convert BGRA");
+		let converted = converter
+			.reserve()
+			.expect("a free buffer")
+			.convert(&frame)
+			.expect("convert BGRA");
 		if i == 0 {
 			let rgba = gradient(size, Channels::Rgba, 0);
 			let actual = converted.download_i420().unwrap();
@@ -221,7 +245,11 @@ async fn vulkan_cuda_convert_resize_encode() {
 			assert!(max_diff(actual.u(), reference.u()) <= 1);
 			assert!(max_diff(actual.v(), reference.v()) <= 1);
 		}
-		let scaled = converted.resize(sd).expect("GPU resize");
+		let scaled = converter
+			.reserve()
+			.expect("a free buffer")
+			.resize(&converted, sd)
+			.expect("GPU resize");
 		drop(frame);
 
 		let timestamp = moq_net::Timestamp::from_micros(i * 33_333).unwrap();
@@ -402,9 +430,13 @@ async fn vulkan_cuda_three_view_workload() {
 				})
 				.unwrap();
 
-			let converted = convert.measure(|| converter.convert(&frame)).expect("convert");
+			let converted = convert
+				.measure(|| converter.reserve().expect("a free buffer").convert(&frame))
+				.expect("convert");
 			drop(frame);
-			let scaled = resize.measure(|| converted.resize(sd)).expect("resize");
+			let scaled = resize
+				.measure(|| converter.reserve().expect("a free buffer").resize(&converted, sd))
+				.expect("resize");
 
 			let packets = encode_hd
 				.measure(|| hd.encode(&VideoFrame::new(Surface::Cuda(converted), timestamp)))
