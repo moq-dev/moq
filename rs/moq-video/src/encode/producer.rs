@@ -949,8 +949,10 @@ mod tests {
 				let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
 				let task = tokio::spawn(async move {
 					let mut source = Opens(rx);
-					let mut options = Options::default();
-					options.kind = encoder::Kind::Software;
+					let options = Options {
+						kind: encoder::Kind::Software,
+						..Options::default()
+					};
 					let config = capture::Config::default();
 					tokio::select! {
 						res = capture_loop(&mut producer, &demand, &mut source, &config, &options, &clock) => res?,

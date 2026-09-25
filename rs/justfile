@@ -495,9 +495,14 @@ check-changed $FILES $TEST="false":
 
     # moq-video's and moq-audio's device code is behind `capture`, which is off
     # by default, so the pass above never compiles it. Only nightly's
-    # `--all-features` did, and a break there lands on main.
+    # `--all-features` did, and a break there lands on main. With TEST=true the
+    # lint rides the test build, as in `check-test`.
     if [[ "$packages" == "ALL" ]] || just rs _wants-capture "$packages"; then
-    	just rs capture
+    	if [[ "$TEST" == true ]]; then
+    		CARGO_BUILD_WARNINGS=deny just rs capture-test
+    	else
+    		just rs capture
+    	fi
     fi
 
     # moq-relay's io_uring listener is behind `io-uring`, off by default, so the
@@ -627,6 +632,13 @@ macos *args:
 # Compile and lint the capture feature, which the default check skips.
 capture *args:
     cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture {{ args }} -- -D warnings
+
+# The capture publishers' tests (the clock fixtures among them) drive synthetic
+# devices, so they need no hardware and run with every PR that reaches either crate.
+
+# Test the capture feature, which the default test pass skips.
+capture-test *args:
+    just rs test -p moq-video -p moq-audio --features moq-video/capture,moq-audio/capture {{ args }}
 
 # Same idea as `windows`/`macos`, for Android: moq-video's MediaCodec encoder and
 # decoder, its `Surface::HardwareBuffer` variant, and the `frame::android` module
@@ -885,6 +897,11 @@ test-changed $FILES:
     	ALL)   just rs test --workspace {{ no_fuzz }} ;;
     	*)     echo "rs: testing $(just rs _names "$packages")"; just rs test --no-tests=pass $packages ;;
     esac
+
+    # Mirrors `check-changed`: the capture tests are off the default feature set.
+    if [[ "$packages" == "ALL" ]] || just rs _wants-capture "$packages"; then
+    	just rs capture-test
+    fi
 
 # Compile and run the `/// ```` examples, which nextest skips.
 doctest *args:
