@@ -2402,7 +2402,9 @@ fn close_twice_is_a_noop() {
 	broadcast.close().unwrap();
 	broadcast.close().unwrap();
 
-	let err = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap_err();
+	let Err(err) = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)) else {
+		panic!("publishing after close succeeded");
+	};
 	assert!(
 		matches!(err, crate::error::MoqError::Closed),
 		"expected Closed error, got {err}"
