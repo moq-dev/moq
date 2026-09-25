@@ -179,6 +179,9 @@ broadcast paths. A new route to a path already live prints nothing. A name
 starting with `.` stays hidden unless `prefix` names it. `ls` only dials
 `--connect`, and refuses any other MoQ-side flag.
 
+[Inspect a relay](/bin/inspect) walks through `ls` and `fetch` next to their
+`curl` equivalents, including reading the relay's stats.
+
 ## Fetch
 
 ```bash
@@ -301,7 +304,7 @@ track quiet for longer is muxed around until it catches up; a sparse track
 ## Debugging
 
 `RUST_LOG=debug` prints the negotiated version and every subscription.
-`moq --connect <url> ls`, or `curl http://relay:4443/announced/`, confirms the
-relay is reachable and shows what it holds. Connection refused means UDP isn't getting through; certificate
+`moq --connect <url> ls`, or `curl http://relay:4443/announced`, confirms the
+relay is reachable and shows what it holds; see [Inspect a relay](/bin/inspect). Connection refused means UDP isn't getting through; certificate
 errors on a dev relay want `--connect-tls-insecure` or the `http://`
 fingerprint flow.
