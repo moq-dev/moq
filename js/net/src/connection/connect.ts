@@ -281,7 +281,7 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
-	} else if (protocol === Lite.ALPN_07) {
+	} else if (protocol === Lite.ALPN_07_WIP) {
 		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_07, ...wiring });
 	} else if (protocol === Lite.ALPN_06) {
 		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_06, ...wiring });
@@ -438,7 +438,8 @@ async function connectWebTransport(
 		allowPooling: false,
 		congestionControl: "low-latency",
 		protocols: [
-			Lite.ALPN_07,
+			// Lite.ALPN_07_WIP is intentionally omitted: lite-07 is work-in-progress and
+			// not advertised by default (negotiate still accepts it if a server selects it).
 			Lite.ALPN_06,
 			Lite.ALPN_05,
 			Lite.ALPN_04,
@@ -525,7 +526,7 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 	// advertises every QMux draft it knows about and the server picks one.
 	// Insertion order is the negotiation preference on the wire.
 	const versions = {
-		[Lite.ALPN_07]: null,
+		// Lite.ALPN_07_WIP omitted on purpose: lite-07 is work-in-progress, not advertised by default.
 		[Lite.ALPN_06]: null,
 		[Lite.ALPN_05]: null,
 		[Lite.ALPN_04]: null,

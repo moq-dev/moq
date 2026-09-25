@@ -4,7 +4,7 @@ use crate::runtime::Timers;
 use crate::time::{Clock, Instant};
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_22, ALPN_LITE, ALPN_LITE_03,
-	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07, Consume, Error, NEGOTIATED, Session, Version, Versions,
+	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup, stats,
 };
@@ -216,7 +216,7 @@ impl Client {
 	{
 		let runtime = Clock::new(now);
 		let version = match session.protocol() {
-			Some(ALPN_LITE_07) => lite::Version::Lite07,
+			Some(ALPN_LITE_07_WIP) => lite::Version::Lite07,
 			Some(ALPN_LITE_06) => lite::Version::Lite06,
 			Some(ALPN_LITE_05) => lite::Version::Lite05,
 			Some(ALPN_LITE_04) => lite::Version::Lite04,
@@ -301,9 +301,9 @@ impl Client {
 					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
-			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_07)) => {
+			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_07_WIP)) => {
 				let version = match alpn {
-					ALPN_LITE_07 => lite::Version::Lite07,
+					ALPN_LITE_07_WIP => lite::Version::Lite07,
 					ALPN_LITE_06 => lite::Version::Lite06,
 					_ => lite::Version::Lite05,
 				};

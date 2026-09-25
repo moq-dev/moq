@@ -2835,7 +2835,7 @@ dependencies = [
 
 [[package]]
 name = "hang"
-version = "0.21.3"
+version = "0.21.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3884,7 +3884,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4165,7 +4165,7 @@ dependencies = [
 
 [[package]]
 name = "moq-archive"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4182,7 +4182,7 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "block2 0.6.2",
  "bytes",
@@ -4261,7 +4261,7 @@ dependencies = [
 
 [[package]]
 name = "moq-binary"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "bytes",
  "kio 0.6.0",
@@ -4273,7 +4273,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4293,7 +4293,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -4331,7 +4331,7 @@ dependencies = [
 
 [[package]]
 name = "moq-e2ee"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
@@ -4350,7 +4350,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -4384,7 +4384,7 @@ dependencies = [
 
 [[package]]
 name = "moq-gst"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4403,7 +4403,7 @@ dependencies = [
 
 [[package]]
 name = "moq-hls"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "axum",
  "bytes",
@@ -4427,7 +4427,7 @@ dependencies = [
 
 [[package]]
 name = "moq-json"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "criterion",
@@ -4444,7 +4444,7 @@ dependencies = [
 
 [[package]]
 name = "moq-loc"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "bytes",
  "moq-net",
@@ -4462,7 +4462,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4499,7 +4499,7 @@ version = "0.20.0"
 
 [[package]]
 name = "moq-net"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "arrayvec",
  "bytes",
@@ -4616,7 +4616,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -4659,7 +4659,7 @@ dependencies = [
 
 [[package]]
 name = "moq-room"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "kio 0.6.0",
  "moq-auth",
@@ -4673,7 +4673,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtc"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -4693,7 +4693,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtmp"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -4741,7 +4741,7 @@ dependencies = [
 
 [[package]]
 name = "moq-srt"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "bytes",
  "futures",
@@ -4757,7 +4757,7 @@ dependencies = [
 
 [[package]]
 name = "moq-stats"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "futures",
  "moq-json",
@@ -4772,7 +4772,7 @@ dependencies = [
 
 [[package]]
 name = "moq-tokio"
-version = "0.19.14"
+version = "0.19.15"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4825,7 +4825,7 @@ dependencies = [
 
 [[package]]
 name = "moq-transcode"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4844,7 +4844,7 @@ dependencies = [
 
 [[package]]
 name = "moq-uring"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4901,7 +4901,7 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "ash",
@@ -8071,9 +8071,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.16.1"
+version = "1.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba467056f1b547ed52077911161fc86985becbc60e8e1857c8a144dab0def891"
+checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 
 [[package]]
 name = "smawk"

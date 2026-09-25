@@ -262,7 +262,10 @@ async fn announced_until(announcements: &mut moq_net::announce::Consumer, until:
 /// by exact path needs no opt-in.
 #[tokio::test]
 async fn hidden_broadcasts_need_a_lite07_opt_in() {
-	let (port, web_handle) = spawn_relay().await;
+	// lite-07 is work-in-progress and off by default, so the relay must enable it.
+	let lite07: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+	let lite06: moq_net::Version = "moq-lite-06".parse().unwrap();
+	let (port, web_handle) = spawn_versioned_relay(vec![lite07, lite06]).await;
 	let url: url::Url = format!("ws://127.0.0.1:{port}/hidden").parse().expect("parse url");
 
 	let pub_origin = moq_tokio::origin::spawn();
@@ -274,14 +277,17 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 		.expect("append group")
 		.write_frame(moq_net::Timestamp::ZERO, b"hidden".as_ref())
 		.expect("write frame");
-	let (_pub_client, pub_connection) =
-		tokio::time::timeout(TIMEOUT, connect_once(client().with_publisher(&pub_origin), url.clone()))
-			.await
-			.expect("publisher connect timeout")
-			.expect("publisher connect failed");
+	// The relay's announce request carries the opt-in only on lite-07, so the publisher
+	// must speak it too for the hidden route to reach the relay.
+	let (_pub_client, pub_connection) = tokio::time::timeout(
+		TIMEOUT,
+		connect_once(client_version(Some(lite07)).with_publisher(&pub_origin), url.clone()),
+	)
+	.await
+	.expect("publisher connect timeout")
+	.expect("publisher connect failed");
 
 	// An opted-in lite-07 client discovers the hidden broadcast.
-	let lite07: moq_net::Version = "moq-lite-07".parse().unwrap();
 	let opted_origin = moq_tokio::origin::spawn();
 	let mut opted = opted_origin.consume().with_hidden(true).announced();
 	let (_opted_client, opted_connection) = tokio::time::timeout(
@@ -301,7 +307,6 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 
 	// A lite-07 client that did not opt in, and a lite-06 client that cannot even
 	// when its local reader asks, see only the visible broadcast.
-	let lite06: moq_net::Version = "moq-lite-06".parse().unwrap();
 	for (version, local_hidden) in [(lite07, false), (lite06, true)] {
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume().with_hidden(local_hidden);
