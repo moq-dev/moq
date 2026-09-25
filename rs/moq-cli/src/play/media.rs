@@ -364,7 +364,7 @@ async fn play_audio(mut consumer: moq_audio::decode::Consumer, playback: AudioPl
 		// so a deeper target could never fill. The advertised floor needs the cap,
 		// being a number the publisher declared about itself, unbounded. The budget
 		// is also what the sink's ring was sized to hold.
-		let target = samples(consumer.delay().clamp(AUDIO_BUFFER_MIN, consumer.max_age()));
+		let target = samples(consumer.delay().min(consumer.max_age()).max(AUDIO_BUFFER_MIN));
 		let fit = fit(dry, buffered, target, slack, timing.silence + length as u64);
 		dry = false;
 
