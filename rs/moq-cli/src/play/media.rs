@@ -224,7 +224,7 @@ impl Media {
 					decode.output.format = moq_audio::Format::F32;
 					match moq_audio::decode::Consumer::new(&rendition, &config, &name, decode).await {
 						Ok(consumer) => {
-							tracing::info!(track = name, "playing audio rendition");
+							tracing::info!(track = name, decoder = consumer.name(), "playing audio rendition");
 							if engine.is_none() {
 								engine = Some(Engine::open(Default::default()).await?);
 							}

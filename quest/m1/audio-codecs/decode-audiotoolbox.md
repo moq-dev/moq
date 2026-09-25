@@ -10,9 +10,14 @@ documents as unsupported.
 ## Plan
 
 An `AudioConverter` from the packetized format to interleaved `f32` at the
-codec's native rate and layout, behind the decode seam as the first platform
-candidate on `target_os = "macos"` and `"ios"`. `objc2-audio-toolbox` is the
-binding, alongside the `objc2-core-audio-types` the crate already carries.
+codec's native rate and layout, behind the decode seam
+(`rs/moq-audio/src/decode/backend`) as the first platform candidate on
+`target_os = "macos"` and `"ios"`. `objc2-audio-toolbox` is the binding,
+alongside the `objc2-core-audio-types` the crate already carries.
+
+- With a platform tier in place, `Auto` falling past a refusing platform
+  decoder to software should warn, as moq-video's `select` does; the seam
+  only aggregates the refusals into its error today.
 
 - Build the `AudioStreamBasicDescription` and magic cookie from the catalog
   description; the converter reports the output layout, which maps to
@@ -20,7 +25,8 @@ binding, alongside the `objc2-core-audio-types` the crate already carries.
 - HE-AAC: the converter reads SBR in band and reports the doubled rate; the
   seam passes it through. No config-level guessing.
 - Priming and remainder: AudioToolbox reports `kAudioConverterPrimeInfo`;
-  trim it so timestamps line up with symphonia's output on the same stream.
+  report it as the backend's startup delay, which the front end trims, so
+  timestamps line up with symphonia's output on the same stream.
 - Every codec the backend advertises has a fixture and a decode test, and the
   test asserts the layout order matches the canonical one (the LFE and centre
   end up where `Layout` says).
@@ -28,10 +34,6 @@ binding, alongside the `objc2-core-audio-types` the crate already carries.
   on a device like the rest of the mobile line.
 - Docs: `doc/bin/obs.md` drops the HE-AAC and multichannel caveat on macOS,
   and the backend table names what this host decodes.
-
-## Required
-
-- [Decode seam](/quest/m1/audio-codecs/decode-backend.md) - the candidate order this backend joins
 
 ## Related
 

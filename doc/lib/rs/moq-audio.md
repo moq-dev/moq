@@ -33,9 +33,20 @@ policy. Decoding likewise separates low-level `decode::Config`, PCM
 | `playback` | One output device mixing every track in a call, with click-free volume ramps |
 | `aec` | Acoustic echo cancellation (a port of WebRTC's), so a laptop with no headset doesn't feed itself back |
 
-AAC decoding refuses HE-AAC its config declares. HE-AAC signaled only in band
-(implicit SBR, as over MPEG-TS) goes undetected and plays as its half-rate
-AAC-LC core.
+`decode` picks a backend per track the way `moq-video` does: a platform decoder
+first, then software. `decode::Config::kind` forces one (`Kind::Software`, or
+`Kind::Named` with a name below), and `Decoder::name()` reports what opened.
+
+| Backend | Decodes | Hosts |
+| --- | --- | --- |
+| `libopus` | Opus, mono or stereo | all |
+| `pcm` | PCM | all |
+| `symphonia` | AAC-LC, mono or stereo (the default-on `aac` feature) | all |
+
+No platform decoder is wired in yet, so multichannel AAC and HE-AAC declared in
+its config are refused at construction on every host. HE-AAC signaled only in
+band plays as its half-rate LC core. Linux has no OS audio decoder, so it will
+stay that way there.
 
 Highlights:
 

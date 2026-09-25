@@ -187,6 +187,11 @@ impl Consumer {
 		})
 	}
 
+	/// The decoder backend name in use, e.g. `"libopus"` or `"symphonia"`.
+	pub fn name(&self) -> &str {
+		self.decoder.name()
+	}
+
 	/// The options this consumer was built with.
 	pub fn options(&self) -> &Options {
 		&self.options
