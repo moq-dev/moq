@@ -360,13 +360,11 @@ async fn play_audio(mut consumer: moq_audio::decode::Consumer, playback: AudioPl
 		// of the frame, and the pair is fitted to the target as one write.
 		let buffered = samples(sink.buffered());
 		dry |= buffered == 0;
-		// Capped at the most a sink accepts: the advertised floor is a number the
-		// publisher declared, unbounded, and padding up to it would never return.
-		let target = samples(
-			consumer
-				.delay()
-				.clamp(AUDIO_BUFFER_MIN, moq_audio::playback::Input::LATENCY_MAX),
-		);
+		// Capped at the age budget: audio older than it is skipped rather than held,
+		// so a deeper target could never fill. The advertised floor needs the cap,
+		// being a number the publisher declared about itself, unbounded. The budget
+		// is also what the sink's ring was sized to hold.
+		let target = samples(consumer.delay().clamp(AUDIO_BUFFER_MIN, consumer.max_age()));
 		let fit = fit(dry, buffered, target, slack, timing.silence + length as u64);
 		dry = false;
 
