@@ -38,7 +38,3 @@ A `test/interop/clients/cpp` client joins `just test interop --all`, and
   they exist; the future, expected, executor, and coroutine rules) and a row in
   `doc/lib/index.md`. The C row now says libmoq is the plain-C ABI and points
   C++ readers at the new package.
-
-## Required
-
-- [Generator](/quest/m1/cpp/generator.md) - the pinned generator that emits `cpp/ffi`

@@ -11,6 +11,8 @@ mod kt
 mod swift
 mod go
 mod dart
+# Generated C++ bindings for moq-ffi.
+mod cpp
 # OBS Studio plugin (C++). See doc/bin/obs.md.
 mod obs 'cpp/obs'
 # Unit tests per language (`just test`).
@@ -451,6 +453,7 @@ _tools $FILES="":
     # here to prevent.
     scoped '^(go/|rs/moq-ffi/)'                                && tools+=(go uniffi-bindgen-go cargo rsync)
     scoped '^(dart/|rs/moq-ffi/)'                              && tools+=(cargo dart uniffi_bindgen_dart)
+    scoped '^(cpp/ffi/|cpp/justfile$|rs/moq-ffi/)'              && tools+=(cargo jq cmake c++ uniffi-bindgen-cpp)
     # Two obs recipes with two dispatch scopes, so two lines: over-requiring
     # would fail a diff that never runs the recipe. `just obs compile` needs
     # cargo to regenerate moq.h and pkg-config to locate Qt6 and ffmpeg. Every
@@ -520,6 +523,7 @@ check $BASE="" *args:
         just swift check
         just go check
         just dart check
+        just cpp check
         just obs check
         just obs compile
         just _flake
@@ -544,6 +548,7 @@ check $BASE="" *args:
         just swift check "$files"
         just go check "$files"
         just dart check "$files"
+        just cpp check "$files"
     	# Type-checking the plugin and its unit tests needs only headers, so it
     	# runs here rather than waiting for obs.yml to link them on Linux. libmoq
     	# is in scope because the plugin calls through its generated C header, and
