@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use base64::Engine;
+use hang::moq_net;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
 
@@ -60,8 +61,15 @@ async fn fetch(
 		.context("`fetch` dials a relay: pass --connect <url>")?;
 	let broadcast = moq.broadcast.clone().unwrap_or_default();
 
+	// Scoped to the broadcast, so the relay announces it by name even when a hidden
+	// segment such as `.stats` would keep it out of an unscoped listing.
+	let pattern =
+		moq_net::Pattern::subtree(&broadcast).with_context(|| format!("invalid broadcast `{broadcast}`"))?;
+	let origin = moq_tokio::origin::spawn()
+		.scope("", &moq_net::Patterns::from(pattern))
+		.with_context(|| format!("failed to scope to `{broadcast}`"))?;
+
 	// Subscribe-only: this session reads and never publishes.
-	let origin = moq_tokio::origin::spawn();
 	let client = net
 		.client(moq.client.clone())?
 		.with_subscriber(origin.clone())
@@ -122,7 +130,6 @@ mod tests {
 	use super::*;
 	use crate::args::{Command, Invocation};
 	use crate::test_env::EnvGuard;
-	use hang::moq_net;
 
 	/// The frames of each finished group on the `data` track.
 	fn frames(sequence: u64) -> [Vec<u8>; 2] {
@@ -141,7 +148,7 @@ mod tests {
 		/// Kept so the published broadcast, its tracks, and the open group stay live.
 		_publisher: (
 			moq_tokio::Connection,
-			moq_net::broadcast::Producer,
+			Vec<moq_net::broadcast::Producer>,
 			Vec<moq_net::track::Producer>,
 			moq_net::group::Producer,
 		),
@@ -153,6 +160,21 @@ mod tests {
 		async fn new() -> Self {
 			let _ = moq_tokio::crypto::install_default();
 			let fixture = moq_relay::test_relay().await.expect("test relay");
+			// A dot-prefixed broadcast on the relay itself, like its `.stats`, which
+			// announce listings hide unless asked for by name.
+			let hidden = fixture
+				.relay
+				.cluster()
+				.origin
+				.create_broadcast(".hidden")
+				.expect("hidden broadcast");
+			hidden.announce(Default::default()).expect("announce hidden");
+			let secret = hidden.create_track("data", None).expect("hidden track");
+			let mut group = secret.append_group().expect("group");
+			group.write_frame(moq_net::Timestamp::ZERO, b"secret".as_ref())
+				.expect("frame");
+			group.finish().expect("finish");
+
 			let ready = fixture.relay.ready();
 			tokio::spawn(fixture.relay.run());
 			ready.wait().await.expect("relay ready");
@@ -182,7 +204,7 @@ mod tests {
 			open.write_frame(moq_net::Timestamp::ZERO, b"first".as_ref())
 				.expect("frame");
 
-			let (moq, _) = parse(&connect, &[]);
+			let (moq, _) = parse(&connect, "demo", &[]);
 			let connection = net()
 				.client(moq.client.clone())
 				.expect("client")
@@ -196,14 +218,19 @@ mod tests {
 			Self {
 				connect,
 				http: fixture.http,
-				_publisher: (connection, broadcast, vec![data, empty, live], open),
+				_publisher: (connection, vec![broadcast, hidden], vec![data, empty, live, secret], open),
 			}
 		}
 
 		/// Run `moq <connect> --broadcast demo fetch <args>` with `timeout`, returning
 		/// the outcome and what it wrote.
 		async fn fetch(&self, args: &[&str], timeout: Duration) -> (anyhow::Result<()>, Vec<u8>) {
-			let (moq, args) = parse(&self.connect, args);
+			self.fetch_from("demo", args, timeout).await
+		}
+
+		/// [`Self::fetch`] from another broadcast.
+		async fn fetch_from(&self, broadcast: &str, args: &[&str], timeout: Duration) -> (anyhow::Result<()>, Vec<u8>) {
+			let (moq, args) = parse(&self.connect, broadcast, args);
 			let mut out = Vec::new();
 			let result = super::fetch(&moq, &args, &net(), Instant::now() + timeout, &mut out).await;
 			(result, out)
@@ -220,11 +247,11 @@ mod tests {
 	}
 
 	/// Parse a fetch invocation the way `main` does.
-	fn parse(connect: &[String], args: &[&str]) -> (MoqSide, Args) {
+	fn parse(connect: &[String], broadcast: &str, args: &[&str]) -> (MoqSide, Args) {
 		let argv = ["moq"]
 			.into_iter()
 			.chain(connect.iter().map(String::as_str))
-			.chain(["--broadcast", "demo", "fetch"])
+			.chain(["--broadcast", broadcast, "fetch"])
 			.chain(args.iter().copied())
 			.chain(args.is_empty().then_some("data"));
 		let mut cli = Invocation::try_parse_from(argv).expect("parse");
@@ -267,6 +294,17 @@ mod tests {
 		result.expect("fetch");
 		assert_eq!(out, frames(2).concat());
 		assert_eq!(out, fixture.curl("").await);
+	}
+
+	/// A hidden broadcast such as `.stats` is fetched by name, as `/fetch` serves it.
+	#[tokio::test]
+	async fn a_hidden_broadcast_is_fetched_by_name() {
+		let _env = EnvGuard::clear(ENV);
+		let fixture = Fixture::new().await;
+
+		let (result, out) = fixture.fetch_from(".hidden", &["data"], Duration::from_secs(5)).await;
+		result.expect("fetch");
+		assert_eq!(out, b"secret");
 	}
 
 	#[tokio::test]
