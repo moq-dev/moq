@@ -263,6 +263,12 @@ impl Redirect {
 	}
 }
 
+/// Whether this scheme's dial installs the Rustls verifier, so a configured
+/// fingerprint actually checked the peer. Plain and non-Rustls transports do not.
+fn fingerprint_pins(scheme: &str) -> bool {
+	matches!(scheme, "https" | "wss" | "moqt" | "moql")
+}
+
 /// Rank a scheme so a peer-supplied redirect cannot silently drop encryption.
 /// Unknown schemes rank lowest, so a forgotten classification is refused.
 fn scheme_tier(scheme: &str) -> u8 {
@@ -771,7 +777,13 @@ impl Connection {
 					// refused redirect is terminal: the peer is leaving and named somewhere we
 					// won't go, so redialing the old address or a fallback would ignore it.
 					let assigned = match &ended {
-						Ended::Goaway(msg) => goaway.redirect.target(msg.uri(), &url, client.pinned)?,
+						// A fingerprint only checked the dial that installed the Rustls
+						// verifier. tcp, unix, iroh, and plaintext WebSocket never consult it.
+						Ended::Goaway(msg) => {
+							goaway
+								.redirect
+								.target(msg.uri(), &url, client.pinned && fingerprint_pins(url.scheme()))?
+						}
 						Ended::Closed(_) => None,
 					};
 					if assigned.is_some() && addr.addresses().is_some() {
@@ -1617,6 +1629,18 @@ mod tests {
 			Redirect::SameHost.target(moved, &current, false).unwrap(),
 			Some(moved.parse().unwrap())
 		);
+	}
+
+	/// A fingerprint is a Rustls check. Schemes that never install that verifier
+	/// must not inherit the pin.
+	#[test]
+	fn a_fingerprint_pin_only_covers_rustls_schemes() {
+		for scheme in ["https", "wss", "moqt", "moql"] {
+			assert!(fingerprint_pins(scheme), "{scheme}");
+		}
+		for scheme in ["http", "ws", "tcp", "unix", "iroh"] {
+			assert!(!fingerprint_pins(scheme), "{scheme}");
+		}
 	}
 
 	/// A certificate pin verifies only the host it was configured for, so it
