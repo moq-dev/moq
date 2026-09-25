@@ -1,15 +1,6 @@
-import { type Getter, Signal } from "@moq/signals";
-import {
-	type Auth as AuthApi,
-	type Grant,
-	grantsEqual,
-	type Issued,
-	type Request,
-	type Requests,
-	type Token,
-	Unsupported,
-} from "../auth.ts";
-import { error, SessionCode, SessionError, StreamCode, StreamError } from "../error.ts";
+import { Unsupported } from "../auth.ts";
+import type { AuthWire, WireGrant, WireReply } from "../auth_session.ts";
+import { type SessionCode, SessionError } from "../error.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream, type Writer } from "../stream.ts";
 import * as Message from "./message.ts";
@@ -179,361 +170,48 @@ export async function decodeAuthReplyMaybe(r: Reader, version: Version): Promise
 	}
 }
 
-function union(grants: Iterable<Grant>): Grant {
-	const publish = new Path.Patterns();
-	const subscribe = new Path.Patterns();
-	let expires: number | undefined;
-	for (const grant of grants) {
-		for (const pattern of grant.publish) publish.insert(pattern);
-		for (const pattern of grant.subscribe) subscribe.insert(pattern);
-		// The earliest expiry is when the union next shrinks.
-		if (grant.expires !== undefined) expires = Math.min(expires ?? grant.expires, grant.expires);
-	}
-	return { publish, subscribe, expires };
-}
-
-function cancel(): StreamError {
-	return new StreamError(StreamCode.Cancel, { message: "cancel" });
-}
-
-/** One token this side presented. */
-class Presented implements Token {
-	readonly grant = new Signal<Grant | undefined>(undefined);
-	readonly closed: Promise<Error | null>;
-	readonly answered: Promise<void>;
-	readonly setup: boolean;
-	readonly token: Uint8Array;
-
-	stream?: Stream;
-	withdrawn = false;
-	isAnswered = false;
-	ended = false;
-
-	#close!: (err: Error | null) => void;
-	#answer!: () => void;
-	#refuse!: (err: Error) => void;
-
-	constructor(token: Uint8Array, setup: boolean) {
-		this.token = token;
-		this.setup = setup;
-		this.closed = new Promise((resolve) => {
-			this.#close = resolve;
-		});
-		this.answered = new Promise((resolve, reject) => {
-			this.#answer = resolve;
-			this.#refuse = reject;
-		});
-		// A caller that never awaits the answer must not see an unhandled rejection.
-		this.answered.catch(() => void 0);
-	}
-
-	answer() {
-		if (this.isAnswered) return;
-		this.isAnswered = true;
-		this.#answer();
-	}
-
-	end(err: Error | null) {
-		if (this.ended) return;
-		this.ended = true;
-		this.grant.set(undefined);
-		if (!this.isAnswered) {
-			this.isAnswered = true;
-			this.#refuse(err ?? new Error("withdrawn"));
-		}
-		this.#close(err);
-	}
-
-	close() {
-		if (this.withdrawn) return;
-		this.withdrawn = true;
-		// The stream's loop notices and ends the token; one still opening checks on arrival.
-		this.stream?.abort(cancel());
-	}
-}
-
-/** The peer's token, answered by the application. */
-class PeerRequest implements Request {
-	readonly token: Uint8Array;
-	#issued: IssuedGrant;
-	#answered = false;
-
-	constructor(token: Uint8Array, issued: IssuedGrant) {
-		this.token = token;
-		this.#issued = issued;
-	}
-
-	accept(grant: Grant): Issued {
-		if (this.#answered) throw new Error("already answered");
-		this.#answered = true;
-		this.#issued.update(grant);
-		return this.#issued;
-	}
-
-	reject(code: SessionCode, reason: string): void {
-		if (this.#answered) throw new Error("already answered");
-		this.#answered = true;
-		this.#issued.revoke(code, reason);
-	}
-}
-
-/** Our side of one of the peer's tokens: the grant we issued and its stream. */
-class IssuedGrant implements Issued {
-	readonly closed: Promise<Error | null>;
-	#stream: Stream;
-	#version: Version;
-	#writes = Promise.resolve();
-	#done = false;
-
-	constructor(stream: Stream, version: Version) {
-		this.#stream = stream;
-		this.#version = version;
-		// The presenter withdraws by closing or cancelling its side.
-		this.closed = stream.reader.closed.then(
-			() => null,
-			(err: unknown) => (err instanceof StreamError && err.code === StreamCode.Cancel ? null : error(err)),
-		);
-	}
-
-	#write(reply: AuthReply) {
-		this.#writes = this.#writes
-			.then(() => encodeAuthReply(this.#stream.writer, reply, this.#version))
-			.catch((err: unknown) => {
-				// The peer already closed the stream: nothing left to tell it.
-				if (err instanceof StreamError) return;
-				// This wire carries prefixes only, so a pattern grant cannot be told, only
-				// withheld: reset the stream, which the presenter reads as unsupported rather
-				// than refused. Never widen it. Any other reply that fails to encode resets
-				// the same way.
-				if (!(err instanceof Unsupported)) console.warn("auth reply not sent", err);
-				this.#done = true;
-				this.#stream.writer.reset(err);
-			});
-	}
-
-	update(grant: Grant): void {
-		if (this.#done) return;
-		const expires = grant.expires === undefined ? undefined : grant.expires - Date.now();
-		this.#write(new AuthOk(grant.publish, grant.subscribe, expires));
-	}
-
-	revoke(code: SessionCode, reason: string): void {
-		if (this.#done) return;
-		this.#write(new AuthError(code, reason));
-		this.close();
-	}
-
-	close(): void {
-		if (this.#done) return;
-		this.#done = true;
-		this.#writes = this.#writes.then(() => this.#stream.writer.close());
-	}
-}
-
-/** The peer's tokens, queued for the application. */
-class RequestQueue implements Requests {
-	#queue: PeerRequest[] = [];
-	#waiters: ((request: PeerRequest | undefined) => void)[] = [];
-	#closed = false;
-
-	push(request: PeerRequest): boolean {
-		if (this.#closed) return false;
-		const waiter = this.#waiters.shift();
-		if (waiter) waiter(request);
-		else this.#queue.push(request);
-		return true;
-	}
-
-	next(): Promise<Request | undefined> {
-		const next = this.#queue.shift();
-		if (next || this.#closed) return Promise.resolve(next);
-		return new Promise((resolve) => this.#waiters.push(resolve));
-	}
-
-	close(): void {
-		this.#closed = true;
-		for (const request of this.#queue.splice(0)) {
-			request.reject(SessionCode.Unauthorized, "not accepting tokens");
-		}
-		for (const waiter of this.#waiters.splice(0)) waiter(undefined);
-	}
-}
-
-/** Constructor options for {@link AuthSession}. @internal */
-export interface AuthSessionProps {
-	quic: WebTransport;
-	version: Version;
-	/** What the default acceptor grants the peer's connection credential. */
-	peerGrant: Grant;
-}
-
-/**
- * A lite session's tokens and grants: presents ours, one AUTH stream each, and answers
- * the peer's.
- *
- * @internal
- */
-export class AuthSession implements AuthApi {
+/** The moq-lite binding of the token lifecycle: one Auth Stream per token. @internal */
+export class LiteAuthWire implements AuthWire {
 	#quic: WebTransport;
 	#version: Version;
-	#peerGrant: Grant;
 
-	#union = new Signal<Grant | undefined>(undefined);
-	// The peer replied to some token, so the union is known even when empty.
-	#replied = false;
-	#tokens = new Set<Presented>();
-	#setupPending = new Signal(0);
-	#acceptor: "undecided" | "default" | RequestQueue = "undecided";
-	#closed = false;
-
-	// Whoever answers the peer's tokens is decided once, after the task that established
-	// the session: an app that calls requests() as soon as connect/accept resolves always
-	// wins, however quickly the peer's first token arrives.
-	#decided = new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-	constructor({ quic, version, peerGrant }: AuthSessionProps) {
+	constructor(quic: WebTransport, version: Version) {
 		this.#quic = quic;
 		this.#version = version;
-		this.#peerGrant = peerGrant;
-
-		// Present the connection's own credential right away, so both sides learn their
-		// grant without waiting on the app.
-		if (hasAuth(version)) this.#present(new Uint8Array(), true);
 	}
 
-	get grant(): Getter<Grant | undefined> {
-		return this.#union;
+	async present(token: Uint8Array): Promise<Stream> {
+		const stream = await Stream.open(this.#quic);
+		await stream.writer.u53(StreamId.Auth);
+		await new AuthMessage(token).encode(stream.writer, this.#version);
+		return stream;
 	}
 
-	async add(token: string | Uint8Array): Promise<Token> {
-		if (!hasAuth(this.#version) || this.#closed) throw new Unsupported();
-		const bytes = typeof token === "string" ? new TextEncoder().encode(token) : token;
-		const presented = this.#present(bytes, false);
-		await presented.answered;
-		return presented;
+	async read(stream: Stream): Promise<WireReply | undefined> {
+		const reply = await decodeAuthReplyMaybe(stream.reader, this.#version);
+		if (!reply) return undefined;
+		if (reply instanceof AuthOk) {
+			return { grant: { publish: reply.publish, subscribe: reply.subscribe, expires: reply.expires } };
+		}
+		return { refused: new SessionError(reply.code as SessionCode, { reason: reply.reason }) };
 	}
 
-	requests(): Requests {
-		if (this.#acceptor !== "undecided") throw new Error("auth requests already taken or answered by default");
-		const queue = new RequestQueue();
-		if (!hasAuth(this.#version)) queue.close();
-		this.#acceptor = queue;
-		return queue;
-	}
-
-	/** Resolves once every token the session presented at setup has its first reply. */
-	async setupAnswered(): Promise<void> {
-		while (this.#setupPending.peek() > 0) await this.#setupPending.changed();
-	}
-
-	/** Answer one of the peer's AUTH streams, for the life of its token. */
-	async serve(stream: Stream): Promise<void> {
+	/** The stream type is already consumed by the dispatcher. */
+	async accept(stream: Stream): Promise<Uint8Array> {
 		const msg = await AuthMessage.decode(stream.reader, this.#version);
-		await this.#decided;
-		if (this.#acceptor === "undecided") this.#acceptor = "default";
-
-		const issued = new IssuedGrant(stream, this.#version);
-		if (this.#acceptor instanceof RequestQueue) {
-			const request = new PeerRequest(msg.token, issued);
-			if (!this.#acceptor.push(request)) request.reject(SessionCode.Unauthorized, "not accepting tokens");
-		} else if (msg.token.byteLength > 0) {
-			// Only the connection's own credential has a default answer. Resetting reads as
-			// unsupported to the presenter, the same as a peer that predates AUTH.
-			throw new Unsupported("no acceptor for tokens");
-		} else {
-			issued.update(this.#peerGrant);
-		}
-
-		await issued.closed;
-		issued.close();
+		return msg.token;
 	}
 
-	/** End the session: fail every pending token and close the requests. */
-	close() {
-		if (this.#closed) return;
-		this.#closed = true;
-		for (const token of this.#tokens) token.end(new Error("session closed"));
-		this.#tokens.clear();
-		if (this.#acceptor instanceof RequestQueue) this.#acceptor.close();
+	async grant(stream: Stream, grant: WireGrant): Promise<void> {
+		await encodeAuthReply(stream.writer, new AuthOk(grant.publish, grant.subscribe, grant.expires), this.#version);
 	}
 
-	#present(token: Uint8Array, setup: boolean): Presented {
-		const presented = new Presented(token, setup);
-		this.#tokens.add(presented);
-		if (setup) this.#setupPending.update((n) => n + 1);
-		void this.#run(presented);
-		return presented;
+	async refuse(stream: Stream, code: SessionCode, reason: string): Promise<void> {
+		await encodeAuthReply(stream.writer, new AuthError(code, reason), this.#version);
 	}
 
-	async #run(token: Presented) {
-		let result: Error | null = null;
-		try {
-			const stream = await Stream.open(this.#quic);
-			token.stream = stream;
-			if (token.withdrawn) throw cancel();
-
-			await stream.writer.u53(StreamId.Auth);
-			await new AuthMessage(token.token).encode(stream.writer, this.#version);
-
-			for (;;) {
-				const reply = await decodeAuthReplyMaybe(stream.reader, this.#version);
-				if (!reply) {
-					// The peer ended the grant without revoking it, or closed without ever
-					// answering.
-					result = token.isAnswered ? null : new Unsupported();
-					break;
-				}
-				if (reply instanceof AuthOk) {
-					const expires = reply.expires === undefined ? undefined : Date.now() + reply.expires;
-					token.grant.set({ publish: reply.publish, subscribe: reply.subscribe, expires });
-					this.#replied = true;
-					this.#answered(token);
-					this.#recompute();
-					continue;
-				}
-				console.warn(`auth token refused: code=${reply.code} reason=${reply.reason}`);
-				// A refused setup token leaves an empty union, not an unknown (unrestricted) one.
-				this.#replied = true;
-				result = new SessionError(reply.code as SessionCode, { reason: reply.reason });
-				stream.close();
-				break;
-			}
-		} catch (err: unknown) {
-			if (token.withdrawn) {
-				result = null;
-			} else if (!token.isAnswered && err instanceof StreamError) {
-				// A peer that predates AUTH resets a stream type it does not know.
-				result = new Unsupported();
-			} else {
-				result = error(err);
-				if (!this.#closed) console.warn("auth token ended", result);
-			}
-		}
-
-		// A token that ends unanswered counts as answered for enforcement: its refusal is
-		// the reply.
-		const unanswered = !token.isAnswered;
-		token.end(result);
-		if (unanswered && token.setup) this.#setupPending.update((n) => n - 1);
-		this.#tokens.delete(token);
-		this.#recompute();
-	}
-
-	#answered(token: Presented) {
-		if (token.isAnswered) return;
-		token.answer();
-		if (token.setup) this.#setupPending.update((n) => n - 1);
-	}
-
-	#recompute() {
-		const granted: Grant[] = [];
-		for (const token of this.#tokens) {
-			const grant = token.grant.peek();
-			if (grant) granted.push(grant);
-		}
-		// Undefined until the first reply; an empty union afterwards grants nothing.
-		if (granted.length === 0 && !this.#replied) return;
-		const next = union(granted);
-		if (!grantsEqual(next, this.#union.peek())) this.#union.set(next);
+	/** Resetting reads as unsupported to the presenter, the same as a peer that predates AUTH. */
+	async unsupported(stream: Stream, reason: string): Promise<void> {
+		stream.writer.reset(new Unsupported(reason));
 	}
 }

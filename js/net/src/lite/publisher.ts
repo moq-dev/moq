@@ -1,7 +1,8 @@
 import { type Dispose, type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
+import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
-import { closeReason, error, NotFound, reason, SessionCode, SessionError, StreamCode, StreamError } from "../error.ts";
+import { error, NotFound, reason, SessionCode, SessionError, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { type Hop, type Route, routesEqual } from "../hop.ts";
 import { hiddenBelow, hooks } from "../internal.ts";
@@ -1231,65 +1232,14 @@ export class Publisher {
 	}
 
 	/**
-	 * Close the session when our origin publishes a broadcast our grant does not cover,
-	 * instead of leaving it to wait for a subscription that never comes.
-	 *
-	 * Starts once the tokens the session presented at setup are answered, then checks each
-	 * broadcast when it first appears. A grant that later shrinks withdraws what it no longer
-	 * covers (see {@link runAnnounce}) without closing anything: the grant is read before the
-	 * table, so a revocation is never mistaken for a new unauthorized publication.
+	 * Close the session when our origin publishes a broadcast our grant does not cover;
+	 * see {@link enforceGrant}.
 	 *
 	 * @internal
 	 */
 	async runEnforce(setupAnswered: Promise<void>): Promise<void> {
-		const closed = this.#quic.closed.then(
-			() => "closed" as const,
-			() => "closed" as const,
-		);
-		if ((await Promise.race([setupAnswered.then(() => "ready" as const), closed])) === "closed") return;
-
-		// Every broadcast admitted so far that is still published.
-		const live = new Set<Path.Valid>();
-		for (;;) {
-			let dispose: Dispose = () => {};
-			const woke = new Promise<"changed">((resolve) => {
-				const table = this.#advertised.changed(() => resolve("changed"));
-				const grant = this.#grant?.changed(() => resolve("changed"));
-				dispose = () => {
-					table();
-					grant?.();
-				};
-			});
-
-			const grant = this.#grant?.peek();
-			const table = this.#advertised.peek();
-			if (!table) {
-				dispose();
-				return;
-			}
-			if (grant) {
-				for (const path of live) {
-					if (!table.has(path)) live.delete(path);
-				}
-				for (const path of table.keys()) {
-					if (live.has(path)) continue;
-					if (!grant.publish.matches(path)) {
-						console.error(`publishing outside our grant; closing the session: broadcast=${path}`);
-						this.#quic.close({
-							closeCode: SessionCode.Unauthorized,
-							reason: closeReason(`unauthorized: ${path}`),
-						});
-						dispose();
-						return;
-					}
-					live.add(path);
-				}
-			}
-
-			const why = await Promise.race([woke, closed]);
-			dispose();
-			if (why === "closed") return;
-		}
+		if (!this.#grant) return;
+		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered });
 	}
 
 	close() {
