@@ -102,17 +102,38 @@ pub enum Jitter {
 	Gaussian,
 }
 
+/// Hold datagrams, then release them together, the way a paced hop bunches them.
+///
+/// A batch closes once `count` datagrams are waiting, or `window` after the
+/// first of them arrived, and everything in it leaves when the latest would.
+/// That clump is what a receiver's jitter estimate sees on such a path, and no
+/// delay or jitter produces it: the datagrams arrive together rather than late.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Batch {
+	/// How many datagrams close a batch early.
+	pub count: usize,
+	/// How long a batch waits for that many.
+	pub window: Duration,
+}
+
 /// One direction's opt-in options beyond its [`Profile`]. The default adds nothing.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Options {
 	/// How the profile's `jitter` is drawn.
 	pub jitter_model: Jitter,
+	/// Hold datagrams and release them together, if at all.
+	pub batch: Option<Batch>,
 }
 
 impl Options {
 	/// Check the options, and `profile` as they draw it.
 	fn validate(&self, profile: &Profile) -> anyhow::Result<()> {
-		profile.validate(self.jitter_model)
+		profile.validate(self.jitter_model)?;
+		if let Some(batch) = &self.batch {
+			anyhow::ensure!(batch.count > 0, "a batch of zero datagrams never closes");
+			anyhow::ensure!(!batch.window.is_zero(), "a batch with no window never holds anything");
+		}
+		Ok(())
 	}
 }
 
@@ -148,6 +169,18 @@ fn unapplied(config: &Config, stats: &Stats) -> Vec<&'static str> {
 		})
 		.map(|(name, ..)| *name)
 		.collect()
+}
+
+/// Whether the batches `setup` configures implausibly never held a datagram.
+///
+/// A batch holds every datagram but the one that fills it, so it acts on at
+/// least `1 - 1 / count` of them. What it holds counts as delayed once the
+/// batch leaves.
+fn unbatched(setup: &Setup, stats: &Stats) -> bool {
+	let chance = |options: &Options| options.batch.map_or(0.0, |batch| 1.0 - 1.0 / batch.count as f64);
+	let silence = (1.0 - chance(&setup.up)).powf(stats.up.packets as f64)
+		* (1.0 - chance(&setup.down)).powf(stats.down.packets as f64);
+	stats.up.delayed + stats.down.delayed == 0 && silence < IMPLAUSIBLE
 }
 
 /// A token-bucket rate limit with a bounded queue behind it.
@@ -234,7 +267,7 @@ pub struct Counters {
 	pub overflowed: u64,
 	/// Datagrams that waited for the rate limit.
 	pub throttled: u64,
-	/// Datagrams given a nonzero delay.
+	/// Datagrams given a nonzero delay, by the profile or by a batch holding them.
 	pub delayed: u64,
 	/// Datagrams sent ahead of the delay, overtaking any still in flight.
 	pub reordered: u64,
@@ -349,7 +382,10 @@ impl Shaper {
 			anyhow::bail!("the shaper stopped forwarding: {err} ({stats})");
 		}
 
-		let missing = unapplied(&self.setup.config, &stats);
+		let mut missing = unapplied(&self.setup.config, &stats);
+		if unbatched(&self.setup, &stats) {
+			missing.push("batch");
+		}
 		anyhow::ensure!(
 			missing.is_empty(),
 			"the profile never applied {} ({stats}), so this run was not impaired as configured",
@@ -414,10 +450,7 @@ async fn run(
 	// A shared path is one link each way, drawing the streams the first flow would.
 	let shared = setup.shared.then(|| {
 		let now = Instant::now();
-		[
-			link(&mut tasks, &config.up, &setup.up, config.seed, 0, now),
-			link(&mut tasks, &config.down, &setup.down, config.seed, 1, now),
-		]
+		[UP, DOWN].map(|direction| link(&mut tasks, &setup, direction, 0, now, &tally))
 	});
 
 	loop {
@@ -435,7 +468,7 @@ async fn run(
 		};
 		let now = Instant::now();
 
-		let stream = 2 * flows.len() as u64;
+		let number = flows.len() as u64;
 		let flow = match flows.entry(from) {
 			hash_map::Entry::Occupied(entry) => entry.into_mut(),
 			hash_map::Entry::Vacant(entry) => {
@@ -443,10 +476,7 @@ async fn run(
 
 				let [up, down] = match &shared {
 					Some(links) => links.clone(),
-					None => [
-						link(&mut tasks, &config.up, &setup.up, config.seed, stream, now),
-						link(&mut tasks, &config.down, &setup.down, config.seed, stream + 1, now),
-					],
+					None => [UP, DOWN].map(|direction| link(&mut tasks, &setup, direction, number, now, &tally)),
 				};
 				tasks.spawn(reply(
 					upstream.clone(),
@@ -472,18 +502,31 @@ struct Flow {
 	up: Arc<Mutex<Link>>,
 }
 
-/// A link, and the task delivering what it treats.
+/// One direction of the flow numbered `flow` as a link, and the task delivering
+/// what it treats.
 fn link(
 	tasks: &mut JoinSet<anyhow::Result<()>>,
-	profile: &Profile,
-	options: &Options,
-	seed: u64,
-	stream: u64,
+	setup: &Setup,
+	direction: usize,
+	flow: u64,
 	now: Instant,
+	tally: &Arc<[Tally; 2]>,
 ) -> Arc<Mutex<Link>> {
+	let (profile, options) = match direction {
+		UP => (&setup.config.up, &setup.up),
+		_ => (&setup.config.down, &setup.down),
+	};
 	let (queue, queued) = mpsc::unbounded_channel();
-	tasks.spawn(deliver(queued));
-	Arc::new(Mutex::new(Link::new(profile, options, seed, stream, now, queue)))
+	tasks.spawn(deliver(queued, options.batch, tally.clone(), direction));
+	let stream = 2 * flow + direction as u64;
+	Arc::new(Mutex::new(Link::new(
+		profile,
+		options,
+		setup.config.seed,
+		stream,
+		now,
+		queue,
+	)))
 }
 
 /// The next TCP connection, or never without a passthrough.
@@ -539,24 +582,34 @@ async fn reply(
 	}
 }
 
-/// Send each treated datagram at its departure time.
-async fn deliver(mut queue: mpsc::UnboundedReceiver<Parcel>) -> anyhow::Result<()> {
+/// Send each treated datagram at its departure time, after its batch if the
+/// link has one.
+async fn deliver(
+	mut queue: mpsc::UnboundedReceiver<Parcel>,
+	batch: Option<Batch>,
+	tally: Arc<[Tally; 2]>,
+	direction: usize,
+) -> anyhow::Result<()> {
 	// Ordered by departure, then by arrival, so ties keep their order.
 	let mut pending = BinaryHeap::<Reverse<(Instant, u64)>>::new();
 	let mut parcels = HashMap::<u64, Parcel>::new();
 	let mut sequence = 0u64;
+	let mut held = Held::default();
+	let mut ready = Vec::new();
 
 	loop {
 		let next = pending.peek().map(|Reverse((at, _))| *at);
+		let wake = next.into_iter().chain(held.closes).min();
 		tokio::select! {
 			item = queue.recv() => {
 				// The link is gone, so the flow is too.
 				let Some(parcel) = item else { return Ok(()) };
-				pending.push(Reverse((parcel.at, sequence)));
-				parcels.insert(sequence, parcel);
-				sequence += 1;
+				match batch {
+					Some(batch) => held.hold(batch, parcel, &mut ready, &tally[direction]),
+					None => ready.push(parcel),
+				}
 			}
-			_ = tokio::time::sleep_until(next.unwrap_or_else(Instant::now)), if next.is_some() => {
+			_ = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {
 				let now = Instant::now();
 				while let Some(&Reverse((at, id))) = pending.peek() {
 					if at > now {
@@ -569,14 +622,64 @@ async fn deliver(mut queue: mpsc::UnboundedReceiver<Parcel>) -> anyhow::Result<(
 					// so it is not the shaper failing.
 					let _ = parcel.socket.send_to(&parcel.datagram, parcel.dest).await;
 				}
+				// The window closes a batch that never filled.
+				if let Some(closes) = held.closes.filter(|&closes| closes <= now) {
+					held.release(closes, &mut ready, &tally[direction]);
+				}
 			}
+		}
+		for parcel in ready.drain(..) {
+			pending.push(Reverse((parcel.at, sequence)));
+			parcels.insert(sequence, parcel);
+			sequence += 1;
 		}
 	}
 }
 
-/// A treated datagram: when it leaves, and the socket and address it leaves by.
+/// The datagrams a batch is holding, and when its window closes on them.
+#[derive(Default)]
+struct Held {
+	parcels: Vec<Parcel>,
+	closes: Option<Instant>,
+}
+
+impl Held {
+	/// Hold `parcel`, releasing the batch into `ready` once it is full.
+	fn hold(&mut self, batch: Batch, parcel: Parcel, ready: &mut Vec<Parcel>, tally: &Tally) {
+		let arrived = parcel.arrived;
+		self.closes.get_or_insert(arrived + batch.window);
+		self.parcels.push(parcel);
+		if self.parcels.len() >= batch.count {
+			self.release(arrived, ready, tally);
+		}
+	}
+
+	/// Release the batch, closed at `closed`, into `ready`: every datagram leaves
+	/// when the latest would, and none before the batch closed.
+	fn release(&mut self, closed: Instant, ready: &mut Vec<Parcel>, tally: &Tally) {
+		self.closes = None;
+		let Some(latest) = self.parcels.iter().map(|parcel| parcel.at).max() else {
+			return;
+		};
+		let at = latest.max(closed);
+		for mut parcel in self.parcels.drain(..) {
+			// A hold is a delay, counted once whichever stage gave it.
+			if at > parcel.at && !parcel.delayed {
+				bump(&tally.delayed);
+			}
+			parcel.at = at;
+			ready.push(parcel);
+		}
+	}
+}
+
+/// A treated datagram: when it arrived and leaves, and the socket and address
+/// it leaves by.
 struct Parcel {
+	arrived: Instant,
 	at: Instant,
+	/// Whether the link already counted it as delayed.
+	delayed: bool,
 	datagram: Vec<u8>,
 	socket: Arc<UdpSocket>,
 	dest: SocketAddr,
@@ -622,21 +725,23 @@ impl Link {
 
 	/// Treat a datagram and queue it to leave by `socket` for `dest`.
 	fn push(&mut self, now: Instant, datagram: Vec<u8>, socket: &Arc<UdpSocket>, dest: SocketAddr, tally: &Tally) {
-		let Some(at) = self.treat(now, datagram.len(), tally) else {
+		let Some((at, delayed)) = self.treat(now, datagram.len(), tally) else {
 			return;
 		};
 		// The delivery task only ends once this link is dropped.
 		let _ = self.queue.send(Parcel {
+			arrived: now,
 			at,
+			delayed,
 			datagram,
 			socket: socket.clone(),
 			dest,
 		});
 	}
 
-	/// When a datagram of `size` bytes arriving `now` leaves, or `None` when it
-	/// is dropped.
-	fn treat(&mut self, now: Instant, size: usize, tally: &Tally) -> Option<Instant> {
+	/// When a datagram of `size` bytes arriving `now` leaves, and whether it was
+	/// counted as delayed, or `None` when it is dropped.
+	fn treat(&mut self, now: Instant, size: usize, tally: &Tally) -> Option<(Instant, bool)> {
 		bump(&tally.packets);
 
 		// Every draw happens for every datagram, whatever the profile, so one
@@ -672,6 +777,7 @@ impl Link {
 			depart = start;
 		}
 
+		let mut delayed = false;
 		if skip {
 			bump(&tally.reordered);
 		} else if self.jitter == Jitter::Gaussian {
@@ -680,18 +786,19 @@ impl Link {
 			let leave = (depart + Duration::from_secs_f64(wait.max(0.0))).max(self.floor);
 			// Counted like the uniform model whenever a delay is configured, so
 			// the chance `verify` holds it to is the same.
-			if !self.profile.delay.is_zero() || leave > depart {
-				bump(&tally.delayed);
-			}
+			delayed = !self.profile.delay.is_zero() || leave > depart;
 			self.floor = leave;
 			depart = leave;
 		} else if !self.profile.delay.is_zero() {
 			let jitter = self.profile.jitter.as_secs_f64() * spread;
 			depart += Duration::from_secs_f64(self.profile.delay.as_secs_f64() + jitter);
+			delayed = true;
+		}
+		if delayed {
 			bump(&tally.delayed);
 		}
 
-		Some(depart)
+		Some((depart, delayed))
 	}
 }
 
@@ -1023,7 +1130,7 @@ mod tests {
 		let mut link = Link::new(profile, options, 7, 0, now, queue);
 		let tally = Tally::default();
 		let mut sent: Vec<(u32, Instant)> = (0..count)
-			.filter_map(|id| Some((id, link.treat(now + spacing * id, 4, &tally)?)))
+			.filter_map(|id| Some((id, link.treat(now + spacing * id, 4, &tally)?.0)))
 			.collect();
 		// Ties leave in arrival order, which is id order here.
 		sent.sort_by_key(|&(id, at)| (at, id));
@@ -1032,6 +1139,7 @@ mod tests {
 
 	const GAUSSIAN: Options = Options {
 		jitter_model: Jitter::Gaussian,
+		batch: None,
 	};
 
 	#[tokio::test]
@@ -1169,50 +1277,63 @@ mod tests {
 		shaper.verify().unwrap();
 	}
 
-	/// Two clients take turns sending numbered datagrams up one gaussian path,
-	/// and the target's arrival order comes back.
-	async fn two_clients(shared: bool) -> Vec<u32> {
+	/// Two clients take turns sending `count` numbered datagrams up the path
+	/// `setup` builds, and what reaches the target comes back, in order, with
+	/// how long after the first send it did.
+	async fn two_clients(setup: impl FnOnce(Config) -> Setup, count: u32) -> Vec<(u32, Duration)> {
 		let target = UdpSocket::bind(LOCALHOST).await.unwrap();
 		let config = Config {
 			bind: LOCALHOST,
 			target: target.local_addr().unwrap(),
 			seed: 5,
-			up: Profile {
-				delay: Duration::from_millis(20),
-				jitter: Duration::from_millis(10),
-				..Default::default()
-			},
+			up: Profile::default(),
 			down: Profile::default(),
 		};
-		let shaper = Shaper::bind(Setup {
-			shared,
-			up: GAUSSIAN,
-			..config.into()
-		})
-		.await
-		.unwrap();
+		let shaper = Shaper::bind(setup(config)).await.unwrap();
 
 		let clients = [
 			UdpSocket::bind(LOCALHOST).await.unwrap(),
 			UdpSocket::bind(LOCALHOST).await.unwrap(),
 		];
-		for id in 0..200u32 {
+		let start = Instant::now();
+		for id in 0..count {
 			let client = &clients[id as usize % 2];
 			client.send_to(&id.to_be_bytes(), shaper.addr()).await.unwrap();
 		}
 
 		let mut got = Vec::new();
 		let mut buf = [0u8; 4];
-		while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(200), target.recv_from(&mut buf)).await {
-			got.push(u32::from_be_bytes(buf));
+		while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(500), target.recv_from(&mut buf)).await {
+			got.push((u32::from_be_bytes(buf), start.elapsed()));
 		}
 		got
 	}
 
 	#[tokio::test]
 	async fn a_shared_path_keeps_the_order_across_clients() {
+		let jittery = Profile {
+			delay: Duration::from_millis(20),
+			jitter: Duration::from_millis(10),
+			..Default::default()
+		};
+		let order = |shared: bool| {
+			let up = jittery.clone();
+			async move {
+				let got = two_clients(
+					|config| Setup {
+						shared,
+						up: GAUSSIAN,
+						..Config { up, ..config }.into()
+					},
+					200,
+				)
+				.await;
+				got.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+			}
+		};
+
 		// Separate links keep each client's order, but not the order between them.
-		let apart = two_clients(false).await;
+		let apart = order(false).await;
 		let mut sorted = apart.clone();
 		sorted.sort();
 		assert_eq!(sorted, (0..200).collect::<Vec<_>>(), "a client lost datagrams");
@@ -1224,7 +1345,221 @@ mod tests {
 			assert!(apart.iter().filter(|&&id| id % 2 == parity).is_sorted());
 		}
 
-		let together = two_clients(true).await;
-		assert_eq!(together, (0..200).collect::<Vec<_>>(), "a shared path reordered");
+		assert_eq!(
+			order(true).await,
+			(0..200).collect::<Vec<_>>(),
+			"a shared path reordered"
+		);
+	}
+
+	/// Send `count` numbered datagrams `spacing` apart, and collect what echoes
+	/// back with when it did, alongside when each was sent.
+	async fn paced(client: &UdpSocket, count: u32, spacing: Duration) -> (Vec<Instant>, Vec<(u32, Instant)>) {
+		let send = async {
+			let mut sent = Vec::new();
+			for id in 0..count {
+				sent.push(Instant::now());
+				client.send(&id.to_be_bytes()).await.unwrap();
+				tokio::time::sleep(spacing).await;
+			}
+			sent
+		};
+		let receive = async {
+			let mut got = Vec::new();
+			let mut buf = [0u8; 4];
+			while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(500), client.recv(&mut buf)).await {
+				got.push((u32::from_be_bytes(buf), Instant::now()));
+			}
+			got
+		};
+		tokio::join!(send, receive)
+	}
+
+	fn batched(count: usize, window: Duration) -> Options {
+		Options {
+			batch: Some(Batch { count, window }),
+			..Default::default()
+		}
+	}
+
+	#[tokio::test]
+	async fn a_batch_releases_on_count_and_on_the_window() {
+		let socket = Arc::new(UdpSocket::bind(LOCALHOST).await.unwrap());
+		let ms = |ms| Duration::from_millis(ms);
+		let now = Instant::now();
+		let parcel = |at: Instant| Parcel {
+			arrived: at,
+			at,
+			delayed: false,
+			datagram: Vec::new(),
+			socket: socket.clone(),
+			dest: LOCALHOST,
+		};
+		let batch = Batch {
+			count: 3,
+			window: ms(160),
+		};
+		let tally = Tally::default();
+		let mut held = Held::default();
+		let mut ready = Vec::new();
+
+		held.hold(batch, parcel(now), &mut ready, &tally);
+		held.hold(batch, parcel(now + ms(10)), &mut ready, &tally);
+		assert!(ready.is_empty(), "a partial batch leaked");
+		assert_eq!(
+			held.closes,
+			Some(now + ms(160)),
+			"the window counts from the first arrival"
+		);
+
+		held.hold(batch, parcel(now + ms(20)), &mut ready, &tally);
+		let leaves: Vec<Instant> = ready.drain(..).map(|parcel| parcel.at).collect();
+		assert_eq!(
+			leaves,
+			[now + ms(20); 3],
+			"a full batch leaves together, as the latest would"
+		);
+		assert_eq!(
+			tally.snapshot().delayed,
+			2,
+			"the datagram that filled it waited for nothing"
+		);
+
+		// The window closes a batch that never fills, and nothing in it leaves sooner.
+		held.hold(batch, parcel(now + ms(30)), &mut ready, &tally);
+		let closes = held.closes.unwrap();
+		assert_eq!(closes, now + ms(190));
+		held.release(closes, &mut ready, &tally);
+		assert_eq!(ready.iter().map(|parcel| parcel.at).collect::<Vec<_>>(), [closes]);
+		assert_eq!(tally.snapshot().delayed, 3);
+	}
+
+	#[tokio::test]
+	async fn a_batch_releases_datagrams_together() {
+		let (shaper, client) = shaped(|config| Setup {
+			up: batched(7, Duration::from_millis(160)),
+			..config.into()
+		})
+		.await;
+
+		// Three full batches, each filled well inside its window.
+		let (_, got) = paced(&client, 21, Duration::from_millis(10)).await;
+		assert_eq!(
+			got.iter().map(|&(id, _)| id).collect::<Vec<_>>(),
+			(0..21).collect::<Vec<_>>()
+		);
+
+		let batches: Vec<&[(u32, Instant)]> = got.chunks(7).collect();
+		for batch in &batches {
+			let spread = batch[6].1 - batch[0].1;
+			assert!(
+				spread < Duration::from_millis(15),
+				"a batch arrived spread over {spread:?}"
+			);
+		}
+		for pair in batches.windows(2) {
+			let gap = pair[1][0].1 - pair[0][0].1;
+			assert!(gap > Duration::from_millis(40), "two batches arrived {gap:?} apart");
+		}
+
+		let stats = shaper.verify().unwrap();
+		assert_eq!(
+			stats.up.delayed, 18,
+			"every datagram but the last of each batch waits: {stats}"
+		);
+	}
+
+	#[tokio::test]
+	async fn the_window_releases_a_batch_that_never_fills() {
+		let (shaper, client) = shaped(|config| Setup {
+			up: batched(100, Duration::from_millis(80)),
+			..config.into()
+		})
+		.await;
+
+		let (sent, got) = paced(&client, 3, Duration::ZERO).await;
+		assert_eq!(got.len(), 3);
+		let held = got[0].1 - sent[0];
+		assert!(held >= Duration::from_millis(80), "the batch left after only {held:?}");
+		assert_eq!(shaper.verify().unwrap().up.delayed, 3);
+	}
+
+	#[tokio::test]
+	async fn a_shared_batch_fills_from_every_client() {
+		// Three datagrams from each of two clients, into batches of six: only a
+		// shared path fills one, and separate links wait out the window.
+		let window = Duration::from_millis(300);
+		for shared in [true, false] {
+			let got = two_clients(
+				|config| Setup {
+					shared,
+					up: batched(6, window),
+					..config.into()
+				},
+				6,
+			)
+			.await;
+			assert_eq!(got.len(), 6);
+			let last = got.iter().map(|&(_, after)| after).max().unwrap();
+			assert_eq!(
+				last < window / 2,
+				shared,
+				"shared {shared}: the batch left after {last:?}"
+			);
+		}
+	}
+
+	#[tokio::test]
+	async fn a_batch_needs_a_count_and_a_window() {
+		let refused = |options: Options, why: &'static str| async move {
+			let config = Config {
+				bind: LOCALHOST,
+				target: LOCALHOST,
+				seed: 0,
+				up: Profile::default(),
+				down: Profile::default(),
+			};
+			let err = Shaper::bind(Setup {
+				up: options,
+				..config.into()
+			})
+			.await
+			.err()
+			.unwrap_or_else(|| panic!("accepted a batch where {why}"));
+			assert!(format!("{err:#}").contains(why), "{err:#}");
+		};
+		refused(batched(0, Duration::from_millis(10)), "never closes").await;
+		refused(batched(7, Duration::ZERO), "never holds").await;
+	}
+
+	#[test]
+	fn a_batch_that_never_held_anything_is_unapplied() {
+		let config = Config {
+			bind: LOCALHOST,
+			target: LOCALHOST,
+			seed: 0,
+			up: Profile::default(),
+			down: Profile::default(),
+		};
+		let setup = Setup {
+			up: batched(7, Duration::from_millis(160)),
+			..config.into()
+		};
+		let quiet = |packets| Stats {
+			up: Counters {
+				packets,
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		// (1/7)^2 is 2%: two datagrams through batches of seven prove nothing.
+		assert!(!unbatched(&setup, &quiet(2)));
+		// (1/7)^10 is 4e-9: ten datagrams a batch never held means no batch.
+		assert!(unbatched(&setup, &quiet(10)));
+
+		let mut held = quiet(10);
+		held.up.delayed = 6;
+		assert!(!unbatched(&setup, &held));
 	}
 }

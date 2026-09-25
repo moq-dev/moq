@@ -43,6 +43,12 @@ struct Args {
 	/// The longest a datagram waits for the rate limit before it is dropped.
 	#[arg(long, default_value = "100ms", value_parser = humantime::parse_duration, requires = "rate")]
 	queue: Duration,
+	/// Hold datagrams until this many are waiting, then release them together.
+	#[arg(long, requires = "batch_window")]
+	batch: Option<usize>,
+	/// The longest a batch waits to fill before it leaves anyway.
+	#[arg(long, value_parser = humantime::parse_duration, requires = "batch")]
+	batch_window: Option<Duration>,
 	/// Every client shares one link each way, instead of each getting its own.
 	#[arg(long)]
 	shared: bool,
@@ -86,6 +92,10 @@ async fn main() -> anyhow::Result<()> {
 			JitterModel::Uniform => moq_shaper::Jitter::Uniform,
 			JitterModel::Gaussian => moq_shaper::Jitter::Gaussian,
 		},
+		batch: args
+			.batch
+			.zip(args.batch_window)
+			.map(|(count, window)| moq_shaper::Batch { count, window }),
 	};
 	let shaper = moq_shaper::Shaper::bind(moq_shaper::Setup {
 		tcp_passthrough: args.tcp_passthrough,
