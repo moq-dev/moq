@@ -505,6 +505,7 @@ impl TrackState {
 			presentation: self.live_edge(anchor.cap),
 			outer: anchor.edge,
 			cap: anchor.cap,
+			successor: anchor.successor,
 		}
 	}
 
@@ -518,14 +519,27 @@ impl TrackState {
 	/// so a later stamped group proves nothing about where an unstamped successor will
 	/// begin, and shrinking the bound is the unsafe direction. An unstamped successor
 	/// therefore leaves the reach unbounded until it presents its first frame.
-	fn reach(&self, sequence: u64, cap: Option<u64>) -> Option<Timestamp> {
-		let successor = self
+	///
+	/// With no servable successor below `cap`, the reader's next group is past the cap,
+	/// and `beyond` is where it starts when another track serves it (a splice's next
+	/// segment; see [`Anchor::successor`]).
+	fn reach(&self, sequence: u64, cap: Option<u64>, beyond: Option<Timestamp>) -> Option<Timestamp> {
+		match self.first_start(sequence.saturating_add(1), cap) {
+			Some(start) => start,
+			None => beyond,
+		}
+	}
+
+	/// Where the first servable group in `from..cap` starts presenting: `None` when no
+	/// such group is cached, `Some(None)` while it has no frame yet.
+	fn first_start(&self, from: u64, cap: Option<u64>) -> Option<Option<Timestamp>> {
+		let slot = self
 			.lookup
-			.range(sequence.saturating_add(1)..)
+			.range(from..)
 			.map(|(_, slot)| slot)
 			.take_while(|slot| super::subscription::before_end(slot.group.sequence, cap))
 			.find(|slot| slot.visible && !slot.group.is_aborted())?;
-		successor.group.timestamp()
+		Some(slot.group.timestamp())
 	}
 
 	/// Whether the group at `sequence` has drifted further behind `edge` than `budget`
@@ -579,7 +593,7 @@ impl TrackState {
 		else {
 			return false;
 		};
-		self.reach(sequence, edge.cap).is_some_and(
+		self.reach(sequence, edge.cap, edge.successor).is_some_and(
 			|reach| matches!(live_edge.timestamp.checked_sub(reach), Ok(age) if Duration::from(age) >= budget),
 		)
 	}
@@ -2386,6 +2400,16 @@ impl Consumer {
 		}
 	}
 
+	/// Where the first servable group in `from..cap` starts presenting: `None` when no
+	/// such group is cached, `Some(None)` while it has no frame yet. A splice answers from
+	/// the first segment holding one.
+	pub(crate) fn first_start(&self, from: u64, cap: Option<u64>) -> Option<Option<Timestamp>> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => state.read().first_start(from, cap),
+			ConsumerKind::Spliced(resume) => resume.first_start(from, cap),
+		}
+	}
+
 	/// The live edge below the exclusive `cap` that drift is measured against; see
 	/// [`TrackState::live_edge`]. A splice reports the newest across its segments.
 	pub(crate) fn live_edge(&self, cap: Option<u64>) -> Option<LiveEdge> {
@@ -3038,7 +3062,7 @@ impl group::Expiry for GroupExpiry {
 			anchor = **current;
 			Poll::<()>::Pending
 		});
-		anchor.cap = super::subscription::min_some(anchor.cap, self.bound);
+		let anchor = anchor.capped(self.bound);
 		let cap = anchor.cap;
 
 		let mut expired = false;
@@ -3109,6 +3133,8 @@ struct Edge {
 	/// The cap the edge was resolved under, so per-candidate reach lookups measure
 	/// against the same servable window.
 	cap: Option<u64>,
+	/// Bounds the reach of the last group below `cap`; see [`Anchor::successor`].
+	successor: Option<Timestamp>,
 }
 
 /// How a reader wrapping a cursor bounds its drift anchor from outside: pushed by a
@@ -3121,6 +3147,24 @@ pub(crate) struct Anchor {
 	/// that only sees its own groups, so without this a parked segment measures against
 	/// its own frozen edge while the logical track has moved on.
 	pub edge: Option<LiveEdge>,
+	/// Where the reader's next group past `cap` starts presenting, when another track
+	/// serves it (a splice's next segment). The last group below the cap has no
+	/// successor in its own track, so without this nothing bounds its reach and it is
+	/// never judged stale. `None` while unknown or unstamped.
+	pub successor: Option<Timestamp>,
+}
+
+impl Anchor {
+	/// This anchor under a further `cap`. A lower cap drops the successor: it named
+	/// where the reader continues past the old cap, which is no longer served.
+	pub fn capped(mut self, cap: Option<u64>) -> Self {
+		let capped = servable_cap(cap, self.cap);
+		if capped != self.cap {
+			self.cap = capped;
+			self.successor = None;
+		}
+		self
+	}
 }
 
 /// The newest stamped group of a track: its sequence and the newest frame it presented.
@@ -3197,20 +3241,15 @@ struct PlainSubscriber {
 }
 
 impl PlainSubscriber {
-	/// The drift anchor for a read bounded by `end`: the outer edge, with `end` folded
-	/// into the outer cap.
+	/// The drift anchor for a read bounded by `end`. Every read folds `end_sequence`
+	/// into `end`, so capping the shared anchor (which already holds it) is exact.
 	fn anchor(&self, end: Option<u64>) -> Anchor {
-		Anchor {
-			cap: servable_cap(end, self.stale_cap),
-			edge: self.drift_anchor.read().edge,
-		}
+		self.drift_anchor.read().capped(end)
 	}
 
-	fn update_drift_anchor(&mut self, edge: Option<LiveEdge>) {
-		let anchor = Anchor {
-			cap: servable_cap(self.end_sequence, self.stale_cap),
-			edge,
-		};
+	/// Publish the `outer` anchor under this cursor's own cap.
+	fn update_drift_anchor(&mut self, outer: Anchor) {
+		let anchor = outer.capped(self.end_sequence);
 		// Skip a no-op write: every handed-out group's expiry watches this channel.
 		if *self.drift_anchor.read() != anchor
 			&& let Ok(mut current) = self.drift_anchor.write()
@@ -3550,7 +3589,7 @@ impl Subscriber {
 		match &mut self.inner {
 			SubscriberKind::Plain(plain) => {
 				plain.stale_cap = anchor.cap;
-				plain.update_drift_anchor(anchor.edge);
+				plain.update_drift_anchor(anchor);
 			}
 			SubscriberKind::Spliced(spliced) => spliced.set_anchor(anchor),
 		}
@@ -3817,8 +3856,13 @@ impl Subscriber {
 		match &mut self.inner {
 			SubscriberKind::Plain(plain) => {
 				plain.end_sequence = end.exclusive();
-				let edge = plain.drift_anchor.read().edge;
-				plain.update_drift_anchor(edge);
+				// A successor dropped by a lower cap stays dropped until the wrapping
+				// reader pushes its anchor again, which it does on every poll.
+				let outer = Anchor {
+					cap: plain.stale_cap,
+					..*plain.drift_anchor.read()
+				};
+				plain.update_drift_anchor(outer);
 			}
 			SubscriberKind::Spliced(spliced) => spliced.end_at(end),
 		}

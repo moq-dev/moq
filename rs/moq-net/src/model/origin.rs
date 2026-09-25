@@ -6414,10 +6414,11 @@ mod tests {
 			"every front keeps the delivered groups after releasing its source"
 		);
 
+		// A budget spanning the cache, so the returning reader replays it.
 		let mut subscription = edge_resolved
 			.track("video")
 			.unwrap()
-			.subscribe(None)
+			.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(3600)))
 			.await
 			.expect("resubscribe");
 		tokio::time::timeout(Duration::from_secs(5), track.used())

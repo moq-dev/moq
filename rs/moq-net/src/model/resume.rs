@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound;
 use std::task::{Poll, ready};
 
-use crate::{Datagram, Error, Result, frame, group, track};
+use crate::{Datagram, Error, Result, Timestamp, frame, group, track};
 use track::{Anchor, LiveEdge};
 
 use super::subscription::{Cap, Position, Subscription, max_some, min_some};
@@ -142,6 +142,15 @@ fn slice(prefs: &Subscription, start: Option<Position>, end: Option<Position>) -
 	}
 }
 
+/// Where the first servable group in `from..cap` starts presenting, from the first of
+/// `segments` holding one in its range; see [`track::Consumer::first_start`].
+fn first_start(segments: &[Segment], from: u64, cap: Option<u64>) -> Option<Option<Timestamp>> {
+	segments.iter().find_map(|segment| {
+		let start = segment.start.map_or(0, |start| start.group).max(from);
+		segment.track.first_start(start, min_some(cap, last_group(segment.end)))
+	})
+}
+
 /// How many segments a logical track keeps before pruning terminal ones from the
 /// front: the live segment plus a couple of predecessors still draining to slow
 /// readers. Without a bound, every failover leaves one dead segment (pinning a
@@ -232,6 +241,14 @@ impl ResumeState {
 				(edge.sequence >= start).then_some(edge)
 			})
 			.max_by_key(|edge| edge.sequence)
+	}
+
+	/// Where the logical track continues past the exclusive group `boundary` of segment
+	/// `id`, below the reader's `cap`: the start of the first group the later segments
+	/// serve there. `None` while none is cached, or it has no frame yet.
+	fn successor(&self, id: u64, boundary: u64, cap: Option<u64>) -> Option<Timestamp> {
+		let index = self.segments.iter().position(|segment| segment.id == id)?;
+		first_start(&self.segments[index + 1..], boundary, cap)?
 	}
 
 	/// Append a segment serving the track from `start` onward, capping (or replacing)
@@ -677,6 +694,12 @@ impl Consumer {
 	/// The newest live edge across the segments; see [`track::Consumer::live_edge`].
 	pub(crate) fn live_edge(&self, cap: Option<u64>) -> Option<LiveEdge> {
 		self.state.read().live_edge(cap)
+	}
+
+	/// Where the first servable group in `from..cap` starts presenting across the
+	/// segments; see [`track::Consumer::first_start`].
+	pub(crate) fn first_start(&self, from: u64, cap: Option<u64>) -> Option<Option<Timestamp>> {
+		first_start(&self.state.read().segments, from, cap)
 	}
 
 	/// The newest cached group across every spliced segment; see
@@ -1337,6 +1360,9 @@ struct SegmentSub {
 	/// A completed segment's cursor, retained while parked groups may need their
 	/// max age budget re-evaluated after the outer cap rises.
 	terminal: Option<track::Subscriber>,
+	/// The drift anchor for this segment's cursor as of the last
+	/// [`Subscriber::refresh_anchor`], applied when a pending cursor activates.
+	anchor: Anchor,
 	/// The producer dropped this segment (pruned, or replaced before producing).
 	/// The cursor drains what it already holds, then retires; see
 	/// [`Self::retired`].
@@ -1629,6 +1655,7 @@ impl Subscriber {
 						ask: segment.ask,
 						sub: SubState::Pending(sub),
 						terminal: None,
+						anchor: Anchor::default(),
 						pruned: false,
 						parked: BTreeMap::new(),
 						warm: segment.warm.then(|| Warm {
@@ -1679,11 +1706,19 @@ impl Subscriber {
 	/// against groups it will never surface: the route running past the boundary, or the
 	/// reader's own cap holding content back. The edge is left as is: it is the newest
 	/// content the logical track holds, which a segment's own track never sees.
-	fn segment_anchor(seg: &SegmentSub, anchor: Anchor) -> Anchor {
-		Anchor {
-			cap: min_some(anchor.cap, seg.last_group()),
-			..anchor
+	///
+	/// When the boundary lowers the cap, the reader's next group past it lives in a
+	/// later segment, so `state` supplies where it starts ([`Anchor::successor`]).
+	/// Otherwise the logical anchor's own successor (a wrapping splice's) still holds.
+	fn segment_anchor(seg: &SegmentSub, anchor: Anchor, state: &ResumeState) -> Anchor {
+		let Some(boundary) = seg.last_group() else {
+			return anchor;
+		};
+		let mut capped = anchor.capped(Some(boundary));
+		if capped.cap != anchor.cap {
+			capped.successor = state.successor(seg.id, boundary, anchor.cap);
 		}
+		capped
 	}
 
 	/// The logical drift anchor, as of the last [`Self::refresh_anchor`].
@@ -1699,15 +1734,14 @@ impl Subscriber {
 	/// newer. Resolved on every sync, since each segment is a separate track and the
 	/// logical edge moves whenever any of them grows.
 	fn refresh_anchor(&mut self) {
-		let cap = min_some(self.outer.cap, self.end_sequence);
-		let edge = self
-			.state
-			.read()
-			.live_edge(cap)
+		let outer = self.outer.capped(self.end_sequence);
+		let state = self.state.read();
+		let edge = state
+			.live_edge(outer.cap)
 			.into_iter()
-			.chain(self.outer.edge)
+			.chain(outer.edge)
 			.max_by_key(|edge| edge.sequence);
-		let anchor = Anchor { cap, edge };
+		let anchor = Anchor { edge, ..outer };
 		// Skip a no-op write: every handed-out group's expiry watches this channel.
 		if self.anchor() != anchor
 			&& let Ok(mut current) = self.drift_anchor.write()
@@ -1715,7 +1749,8 @@ impl Subscriber {
 			*current = anchor;
 		}
 		for seg in &mut self.segments {
-			let anchor = Self::segment_anchor(seg, anchor);
+			let anchor = Self::segment_anchor(seg, anchor, &state);
+			seg.anchor = anchor;
 			if let Some(sub) = seg.stale_sub_mut() {
 				sub.set_anchor(anchor);
 			}
@@ -1771,13 +1806,7 @@ impl Subscriber {
 	/// Resolve a segment's pending subscription, if any. Ready once the segment is
 	/// `Active` or `Done`; a rejected or closed track becomes `Done` (stall, not
 	/// error). Never consumes groups, so terminal-state pollers can share it.
-	fn poll_activate(
-		seg: &mut SegmentSub,
-		prefs: &Subscription,
-		min_sequence: u64,
-		anchor: Anchor,
-		waiter: &kio::Waiter,
-	) -> Poll<()> {
+	fn poll_activate(seg: &mut SegmentSub, prefs: &Subscription, min_sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
 		if matches!(seg.sub, SubState::Pending(_))
 			&& let Some(warm) = &seg.warm
 		{
@@ -1808,7 +1837,8 @@ impl Subscriber {
 					// assigned: the inner subscription resolved its own start from its
 					// budget and floor, and this must not rewind past it.
 					sub.raise_start_to(seg.first_group().max(min_sequence));
-					sub.set_anchor(Self::segment_anchor(seg, anchor));
+					let anchor = seg.anchor;
+					sub.set_anchor(anchor);
 					let _ = sub.update(slice(prefs, seg.ask, seg.end));
 					seg.sub = SubState::Active(Box::new(sub));
 				}
@@ -1825,13 +1855,12 @@ impl Subscriber {
 		seg: &mut SegmentSub,
 		prefs: &Subscription,
 		min_sequence: u64,
-		anchor: Anchor,
 		waiter: &kio::Waiter,
 	) -> Poll<Option<group::Consumer>> {
 		loop {
 			match &mut seg.sub {
 				SubState::Pending(_) => {
-					ready!(Self::poll_activate(seg, prefs, min_sequence, anchor, waiter));
+					ready!(Self::poll_activate(seg, prefs, min_sequence, waiter));
 				}
 				SubState::Active(sub) => match ready!(sub.poll_recv_group(waiter)) {
 					Ok(Some(group)) => {
@@ -1897,7 +1926,6 @@ impl Subscriber {
 			self.commit_seek_stale(committed);
 		}
 
-		let anchor = self.anchor();
 		let mut floor = floor;
 		'retry: loop {
 			let mut all_done = true;
@@ -1905,14 +1933,8 @@ impl Subscriber {
 
 			for index in 0..self.segments.len() {
 				if matches!(self.segments[index].sub, SubState::Pending(_))
-					&& Self::poll_activate(
-						&mut self.segments[index],
-						&self.last_prefs,
-						self.min_sequence,
-						anchor,
-						waiter,
-					)
-					.is_pending()
+					&& Self::poll_activate(&mut self.segments[index], &self.last_prefs, self.min_sequence, waiter)
+						.is_pending()
 				{
 					all_done = false;
 					continue;
@@ -2004,7 +2026,6 @@ impl Subscriber {
 		self.poll_sync(waiter);
 
 		let end_sequence = self.end_sequence;
-		let anchor = self.anchor();
 		let min_sequence = self.min_sequence;
 		let beyond_cap = |sequence: u64| !super::subscription::before_end(sequence, end_sequence);
 
@@ -2059,13 +2080,7 @@ impl Subscriber {
 			}
 
 			loop {
-				let polled = Self::poll_segment(
-					&mut self.segments[index],
-					&self.last_prefs,
-					min_sequence,
-					anchor,
-					waiter,
-				);
+				let polled = Self::poll_segment(&mut self.segments[index], &self.last_prefs, min_sequence, waiter);
 				match polled {
 					Poll::Ready(Some(group)) => {
 						if beyond_cap(group.sequence) {
@@ -2180,9 +2195,8 @@ impl Subscriber {
 		// datagrams must still resolve the subscription (registering demand) and
 		// be woken when it activates.
 		let mut pending_activation = false;
-		let anchor = self.anchor();
 		if let Some(seg) = self.segments.last_mut() {
-			if Self::poll_activate(seg, &self.last_prefs, self.min_sequence, anchor, waiter).is_pending() {
+			if Self::poll_activate(seg, &self.last_prefs, self.min_sequence, waiter).is_pending() {
 				pending_activation = true;
 			} else if let SubState::Active(sub) = &mut seg.sub
 				&& let Ok(Some(datagram)) = ready!(sub.poll_recv_datagram(waiter))
@@ -2241,17 +2255,10 @@ impl Subscriber {
 	/// completing the segment, would steal them from a `recv_group` caller on the
 	/// same subscriber.
 	fn poll_final(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
-		let anchor = self.anchor();
 		let Some(seg) = self.segments.last_mut() else {
 			return Poll::Ready(None);
 		};
-		ready!(Self::poll_activate(
-			seg,
-			&self.last_prefs,
-			self.min_sequence,
-			anchor,
-			waiter
-		));
+		ready!(Self::poll_activate(seg, &self.last_prefs, self.min_sequence, waiter));
 		match &mut seg.sub {
 			SubState::Done(count) => Poll::Ready(*count),
 			// Observe only: the cursor may still hold groups, so the read path
@@ -2354,7 +2361,7 @@ impl Subscriber {
 #[cfg(test)]
 mod test {
 	use super::*;
-	use crate::{Timestamp, broadcast};
+	use crate::broadcast;
 	use futures::FutureExt;
 	use std::sync::Arc;
 	use std::time::Duration;
@@ -2724,7 +2731,7 @@ mod test {
 
 		let mut producer = Producer::new();
 		producer.switch(&consumer_a, None).unwrap();
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 
 		write_group(&mut track_a, 0, "a0");
 		producer.switch(&consumer_b, Position::group(1)).unwrap();
@@ -3180,12 +3187,11 @@ mod test {
 		})
 		.collect();
 
-		// Group 1 survives where the plain cursor drops it: every segment measures
-		// against the logical edge (group 3), but a group's reach is bounded only by a
-		// successor in its own track, and group 1's lives in segment B. The sequence
-		// path inherits that from the arrival path rather than inventing its own
-		// anchor, so the two agree.
-		assert_eq!(spliced, vec![1, 3], "each segment is judged against the logical edge");
+		// Segment A's groups are judged as the plain cursor judges them: against the
+		// logical edge (group 3), with group 1's reach bounded by its successor in
+		// segment B. The sequence path inherits that from the arrival path rather than
+		// inventing its own anchor, so the two agree.
+		assert_eq!(spliced, baseline, "a splice sheds the backlog like one track");
 
 		let mut arrival = producer.consume().subscribe(None);
 		let arrival: Vec<u64> = std::iter::from_fn(|| {
@@ -3211,26 +3217,45 @@ mod test {
 		assert_eq!(replayed, vec![0, 1, 2, 3], "a backlog inside the budget crosses whole");
 	}
 
-	/// A segment's track never sees the groups of the segments after it, so its own
-	/// edge freezes once a takeover caps it. Both spliced cursors judge its backlog
-	/// against the logical edge instead, the one a single track would have.
+	/// A segment's track never sees the groups of the segments after it: its own edge
+	/// freezes once a takeover caps it, and its last group has no successor there.
+	/// Both spliced cursors judge its backlog as one plain track holding the same groups
+	/// would: against the logical edge, with the last group's reach bounded by where the
+	/// next segment picks up.
 	#[tokio::test]
-	async fn a_capped_segment_is_judged_against_the_newest_segment() {
+	async fn a_capped_segment_is_judged_like_one_track() {
 		let budget = Subscription::default().with_max_age(Duration::from_millis(100));
+		let old = [(0, 0), (1, 20), (2, 40), (3, 60)];
+		let new = [(20, 400), (21, 420), (22, 440), (23, 460), (24, 480), (25, 500)];
+
+		let (mut plain, _plain_consumer) = track_pair("plain");
+		for (sequence, millis) in old.into_iter().chain(new) {
+			write_group_at(&mut plain, sequence, "p", Duration::from_millis(millis));
+		}
+		let mut baseline = plain.subscribe(budget.clone());
+		let baseline: Vec<u64> = std::iter::from_fn(|| {
+			baseline
+				.recv_group()
+				.now_or_never()?
+				.expect("should not error")
+				.map(|group| group.sequence)
+		})
+		.collect();
+		// Group 3 reaches group 20's start at 400ms, 100ms behind the edge at 500ms.
+		assert_eq!(baseline, vec![20, 21, 22, 23, 24, 25]);
+
 		let (mut track_a, consumer_a) = track_pair("a");
 		let (mut track_b, consumer_b) = track_pair("b");
 		let mut producer = Producer::new();
 		producer.switch(&consumer_a, None).unwrap();
 		producer.switch(&consumer_b, Position::group(4)).unwrap();
-		for (sequence, millis) in [(0, 0), (1, 20), (2, 40), (3, 60)] {
+		for (sequence, millis) in old {
 			write_group_at(&mut track_a, sequence, "a", Duration::from_millis(millis));
 		}
-		for (sequence, millis) in [(20, 400), (21, 420), (22, 440)] {
+		for (sequence, millis) in new {
 			write_group_at(&mut track_b, sequence, "b", Duration::from_millis(millis));
 		}
 
-		// Groups 0..=2 reach at most 60ms against an edge at 440ms. Group 3 stays: its
-		// successor lives in segment B, so nothing in its own track bounds its reach.
 		let mut arrival = producer.consume().subscribe(budget.clone());
 		let arrival: Vec<u64> = std::iter::from_fn(|| {
 			kio::wait(|waiter| arrival.poll_recv_group(waiter))
@@ -3239,7 +3264,7 @@ mod test {
 				.map(|group| group.sequence)
 		})
 		.collect();
-		assert_eq!(arrival, vec![3, 20, 21, 22]);
+		assert_eq!(arrival, baseline);
 
 		let mut ordered = producer.consume().subscribe(budget);
 		let ordered: Vec<u64> = std::iter::from_fn(|| {
@@ -3249,7 +3274,7 @@ mod test {
 				.map(|group| group.sequence)
 		})
 		.collect();
-		assert_eq!(ordered, arrival);
+		assert_eq!(ordered, baseline);
 	}
 
 	/// A nested splice's leaves are judged within the *outer* boundary. The outer
@@ -3260,30 +3285,33 @@ mod test {
 	#[tokio::test]
 	async fn nested_splice_judges_within_the_outer_boundary() {
 		let stamp = |sequence: u64| Duration::from_secs(10 * sequence);
+		let retain = track::Info::default().with_max_age(Duration::from_secs(60));
+		let budget = Subscription::default().with_max_age(Duration::from_secs(15));
 
 		// Inner splice: one segment carrying groups 0..=2. Group 2 sits past the
-		// outer boundary below, so it is exactly the anchor the outer window must
-		// hide from the inner leaves.
-		let (mut track_a, consumer_a) = track_pair("a");
+		// outer boundary below and rewinds to 0s, so it is exactly the successor the
+		// outer window must hide from the inner leaves: taken as group 1's, it would
+		// collapse group 1's reach to 0s, 30s behind the edge.
+		let (mut track_a, consumer_a) = track_pair_with("a", retain.clone());
 		let mut inner = Producer::new();
 		inner.switch(&consumer_a, None).unwrap();
 		write_group_at(&mut track_a, 0, "a0", stamp(0));
 		write_group_at(&mut track_a, 1, "a1", stamp(1));
-		write_group_at(&mut track_a, 2, "a2", stamp(2));
+		write_group_at(&mut track_a, 2, "a2", stamp(0));
 
 		// Outer splice: the inner spliced track up to group 2, then a plain track.
 		let inner_track =
 			track::Consumer::spliced("inner".into(), Arc::new(broadcast::Info::default()), inner.consume());
-		let (mut track_b, consumer_b) = track_pair("b");
+		let (mut track_b, consumer_b) = track_pair_with("b", retain);
 		let mut outer = Producer::new();
 		outer.switch(&inner_track, None).unwrap();
 		outer.switch(&consumer_b, Position::group(2)).unwrap();
 		write_group_at(&mut track_b, 2, "b2", stamp(2));
 		write_group_at(&mut track_b, 3, "b3", stamp(3));
 
-		// Group 1 is the newest group the outer window can serve from the nested
-		// segment, so it is its own live edge there and survives a zero budget.
-		let mut sub = outer.consume().subscribe(None);
+		// Group 0 is 20s behind the edge, past the 15s budget. Group 1 reaches B's
+		// group 2 at 20s, only 10s behind, so it survives.
+		let mut sub = outer.consume().subscribe(budget.clone());
 		let sequences: Vec<u64> = std::iter::from_fn(|| {
 			kio::wait(|waiter| sub.poll_next_group(waiter))
 				.now_or_never()?
@@ -3293,11 +3321,11 @@ mod test {
 		.collect();
 		assert_eq!(
 			sequences,
-			vec![1, 3],
+			vec![1, 2, 3],
 			"the nested segment is judged within the outer boundary"
 		);
 
-		let mut arrival = outer.consume().subscribe(None);
+		let mut arrival = outer.consume().subscribe(budget);
 		let arrival: Vec<u64> = std::iter::from_fn(|| {
 			kio::wait(|waiter| arrival.poll_recv_group(waiter))
 				.now_or_never()?
@@ -3314,7 +3342,9 @@ mod test {
 	/// the group after all, and delivered content never counts.
 	#[tokio::test]
 	async fn seek_conviction_counts_only_once_committed() {
-		let stamp = |sequence: u64| Duration::from_secs(10 * sequence);
+		// Group 2 starts after group 3 (a rewind), so group 1's reach runs past the live
+		// edge and it survives a zero budget, while groups 0 and 2 are convicted.
+		let stamp = |sequence: u64| Duration::from_secs([0, 10, 40, 30][sequence as usize]);
 
 		let (mut track_a, consumer_a) = track_pair("a");
 		let (mut track_b, consumer_b) = track_pair("b");
@@ -3359,7 +3389,9 @@ mod test {
 	/// jumped past it, and still be deliverable (uncounted) once the budget widens.
 	#[tokio::test]
 	async fn a_reversible_floor_does_not_commit_a_conviction() {
-		let stamp = |sequence: u64| Duration::from_secs(10 * sequence);
+		// Group 2 starts after group 3 (a rewind), so group 1's reach runs past the live
+		// edge and it survives a zero budget, while groups 0 and 2 are convicted.
+		let stamp = |sequence: u64| Duration::from_secs([0, 10, 40, 30][sequence as usize]);
 
 		let (mut track_a, consumer_a) = track_pair("a");
 		let (mut track_b, consumer_b) = track_pair("b");
@@ -3408,7 +3440,9 @@ mod test {
 	/// that content, so the conviction must be discarded rather than counted.
 	#[tokio::test]
 	async fn a_delivered_continuation_is_not_counted_stale() {
-		let stamp = |sequence: u64| Duration::from_secs(10 * sequence);
+		// Group 2 starts after group 3 (a rewind), so group 1's reach runs past the live
+		// edge and it survives a zero budget, while groups 0 and 2 are convicted.
+		let stamp = |sequence: u64| Duration::from_secs([0, 10, 40, 30][sequence as usize]);
 
 		let (mut track_a, consumer_a) = track_pair("a");
 		let (mut track_b, consumer_b) = track_pair("b");
@@ -3432,9 +3466,9 @@ mod test {
 				.sequence
 		};
 
-		// Group 1 wins from segment A (it holds the head copy) while segment B has
-		// convicted both its continuation copy of 1 and group 2. Delivering 1 must
-		// discard B's copy, not count it.
+		// Group 1 wins from segment A (it holds the head copy) while segment B convicts
+		// group 2. B's continuation copy of 1 is delivered through the head, so it
+		// must not be counted.
 		assert_eq!(next(&mut sub), 1);
 		assert_eq!(next(&mut sub), 3);
 		assert_eq!(
@@ -3451,12 +3485,16 @@ mod test {
 	/// commit may count; a conviction never committed is dropped with the cursor.
 	#[tokio::test]
 	async fn a_finalized_segment_flushes_nothing_without_a_delivery() {
-		let stamp = |sequence: u64| Duration::from_secs(10 * sequence);
+		// Group 1 starts after group 3 (a rewind), so group 0's reach runs past the live
+		// edge and it survives a zero budget, while groups 1 and 2 are convicted.
+		let stamp = |sequence: u64| Duration::from_secs([0, 40, 20, 30][sequence as usize]);
 
 		// C owns group 0, A owns group 1's head, finalized B owns its tail onward.
-		let (mut track_c, consumer_c) = track_pair("c");
-		let (mut track_a, consumer_a) = track_pair("a");
-		let (mut track_b, consumer_b) = track_pair("b");
+		// Retained long enough that the widened budget below is not clamped.
+		let retain = track::Info::default().with_max_age(Duration::from_secs(60));
+		let (mut track_c, consumer_c) = track_pair_with("c", retain.clone());
+		let (mut track_a, consumer_a) = track_pair_with("a", retain.clone());
+		let (mut track_b, consumer_b) = track_pair_with("b", retain);
 		let mut producer = Producer::new();
 		producer.switch(&consumer_c, None).unwrap();
 		producer.switch(&consumer_a, Position::group(1)).unwrap();
@@ -4348,7 +4386,7 @@ mod test {
 	#[tokio::test]
 	async fn capped_subscriber_bounds_parked_segments() {
 		let mut producer = Producer::new();
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 		sub.end_at(..1);
 
 		// Every round parks one group beyond the cap, then fails over to a live
@@ -5157,8 +5195,8 @@ mod test {
 		let mut producer = Producer::new();
 		producer.switch(&consumer_a, None).unwrap();
 		let consumer = producer.consume();
-		let mut sub1 = consumer.subscribe(None);
-		let mut sub2 = consumer.subscribe(None);
+		let mut sub1 = consumer.subscribe(replay());
+		let mut sub2 = consumer.subscribe(replay());
 		recv_pending(&mut sub1);
 		recv_pending(&mut sub2);
 
