@@ -529,17 +529,24 @@ export class Writer {
 		// `cancel` across every group of a subscription, which must not gain a reaction per call.
 		const open = Writer.open(quic, options);
 
+		// Resets a stream that opens after we gave up; a no-op if the open itself failed.
+		const abandon = () => {
+			const abandoned = new Error("abandoned waiting for a stream slot");
+			open.then((w) => w.reset(abandoned)).catch(() => void 0);
+		};
+
 		try {
 			const stream = await race([options.cancel, open]);
 			if (stream) return stream;
 		} catch (err: unknown) {
 			// open already discarded the late stream on its way out.
-			if (!(err instanceof TimeoutError)) throw err;
-			return undefined;
+			if (err instanceof TimeoutError) return undefined;
+			// A rejected `cancel` still leaves the open pending.
+			abandon();
+			throw err;
 		}
 
-		const abandoned = new Error("abandoned waiting for a stream slot");
-		open.then((w) => w.reset(abandoned)).catch(() => void 0);
+		abandon();
 		return undefined;
 	}
 }

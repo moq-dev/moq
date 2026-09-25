@@ -561,6 +561,22 @@ test("tryOpen gives up when cancelled, resetting a stream that opens afterwards"
 	await aborted;
 });
 
+test("tryOpen rethrows a rejected cancel, resetting a stream that opens afterwards", async () => {
+	const { quic, freeSlot, aborted } = stalledTransport();
+
+	let fail!: (err: Error) => void;
+	const cancelled = new Promise<void>((_, reject) => {
+		fail = reject;
+	});
+
+	const opening = Writer.tryOpen(quic, { cancel: cancelled });
+	fail(new Error("stop sending"));
+	await expect(opening).rejects.toThrow("stop sending");
+
+	freeSlot();
+	await aborted;
+});
+
 // Without a deadline a peer that withholds stream credit while keeping the subscription
 // open queues work forever, since waitUntilAvailable never rejects.
 test("tryOpen gives up when the peer never frees a slot", async () => {
