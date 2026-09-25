@@ -72,6 +72,27 @@ class SmokeTest {
     }
 
     /**
+     * The WebSocket fallback knobs reach the native client: a QUIC-only dial with
+     * no head start still fails fast, and a negative delay is refused up front
+     * rather than wrapping into an enormous one.
+     */
+    @Test
+    fun `connect accepts the websocket fallback knobs`() = runTest {
+        assertFailsWith<MoqException> {
+            Moq.connect(
+                "https://localhost:0/test",
+                tlsVerify = false,
+                reconnect = false,
+                websocketEnabled = false,
+                websocketDelay = 0.milliseconds,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Moq.connect("https://localhost:0/test", websocketDelay = (-1).milliseconds)
+        }
+    }
+
+    /**
      * The `dev.moq` typealiases resolve to the FFI objects, and the wrapper
      * extensions apply to them. Constructing through an alias is enough to
      * confirm both at compile time + lib load at runtime.
@@ -190,7 +211,7 @@ class SmokeTest {
     /**
      * Video has the same Flow audio does. Decoding real frames needs an encoder
      * backend, so this pins the extension's shape; the decode itself is covered
-     * by the interop smoke tests.
+     * by the interop test (`just test interop`).
      */
     @Test
     fun `video consumer exposes a frames flow like audio does`() {
@@ -234,6 +255,21 @@ class SmokeTest {
 
             val consumer = broadcast.consume().subscribeJsonSnapshot("status", config)
             assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first())
+        }
+    }
+
+    @Test
+    fun `json producer demand follows subscribers`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val config = JsonSnapshotConfig(deltaRatio = 0u, compression = false)
+            val demand: TrackDemand = broadcast.publishJsonSnapshot("status", config).demand()
+            assertEquals("status", demand.name())
+            assertEquals(false, demand.isUsed())
+
+            val consumer = broadcast.consume().subscribeJsonSnapshot("status", config)
+            demand.used()
+            consumer.cancel()
+            demand.unused()
         }
     }
 
@@ -284,19 +320,28 @@ class SmokeTest {
     }
 
     @Test
-    fun `announce then unannounce is visible`() = runTest {
+    fun `a broadcast is reachable only while announced`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.createBroadcast("live").use { broadcast ->
                 broadcast.publishTrack("events", null)
+                val consumer = origin.consume()
+                assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
+
                 broadcast.announce(Route())
-                val announced = origin.consume().announced(AnnounceConfig())
+                val announced = consumer.announced(AnnounceConfig())
                 val first = announced.next()!!
                 assertEquals("live", first.prefix())
                 assertTrue(first.active())
+
                 broadcast.unannounce()
                 val retracted = announced.next()!!
                 assertEquals("live", retracted.prefix())
                 assertTrue(!retracted.active())
+                assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
+
+                broadcast.announce(Route())
+                assertTrue(announced.next()!!.active())
+                consumer.requestBroadcast("live")
             }
         }
     }

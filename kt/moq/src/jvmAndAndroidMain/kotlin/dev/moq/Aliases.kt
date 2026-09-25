@@ -31,7 +31,7 @@ typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
 /** A stream of route announcements and retractions under a prefix. */
 typealias AnnounceConsumer = uniffi.moq.MoqAnnounceConsumer
-/** A literal prefix plus an optional relative pattern for announcement discovery. */
+/** A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery. */
 typealias AnnounceConfig = uniffi.moq.MoqAnnounceConfig
 /** A pending wait for a route to cover a specific path. */
 typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
@@ -50,6 +50,8 @@ typealias TrackProducer = uniffi.moq.MoqTrackProducer
 typealias TrackRequest = uniffi.moq.MoqTrackRequest
 /** A stream of uncached group requests for one track, for serving fetches on demand. */
 typealias TrackDynamic = uniffi.moq.MoqTrackDynamic
+/** A watch-only handle to whether a published track has subscribers; holding it keeps nothing open. */
+typealias TrackDemand = uniffi.moq.MoqTrackDemand
 /** The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind. */
 typealias TrackConsumer = uniffi.moq.MoqTrackConsumer
 /** A request to produce one uncached group for a fetch consumer. */

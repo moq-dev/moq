@@ -1,5 +1,6 @@
 //! The track-free half of snapshot publishing: values in, frame payloads out.
 
+use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::sync::OnceLock;
 
@@ -7,7 +8,7 @@ use bytes::Bytes;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{Compression, Diff, Result, diff};
+use crate::{Compression, Result};
 
 /// Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced.
 ///
@@ -196,6 +197,9 @@ pub struct Encoder<T> {
 	/// snapshot, which is what makes that first [`update`](Self::update) a keyframe.
 	last: Option<Baseline>,
 
+	/// Reused key buffers for comparing unchanged fields without per-update allocations.
+	scratch: RefCell<crate::diff::Scratch>,
+
 	/// The current group's DEFLATE encoder (one window per group), `Some` while compressing.
 	flate: Option<moq_flate::Encoder>,
 
@@ -225,6 +229,7 @@ impl<T> Encoder<T> {
 		Self {
 			config,
 			last: None,
+			scratch: RefCell::new(crate::diff::Scratch::default()),
 			flate: None,
 			delta_bytes: 0,
 			snapshot_len: 0,
@@ -307,10 +312,11 @@ impl<T: Serialize> Encoder<T> {
 		};
 
 		// Diff straight off `T`, without building a full `Value` for the new value first.
-		let Diff { patch, forced_snapshot } = diff(last, value);
+		let crate::diff::PatchBytes { patch, forced_snapshot } =
+			crate::diff::bytes(last, value, &self.scratch).map_err(crate::Error::Json)?;
 
 		// An empty object patch with no forced null means the value is unchanged: encode nothing.
-		if !forced_snapshot && patch.as_object().is_some_and(serde_json::Map::is_empty) {
+		if !forced_snapshot && patch.is_empty() {
 			return Ok(None);
 		}
 
@@ -321,7 +327,7 @@ impl<T: Serialize> Encoder<T> {
 		}
 
 		// Compress into the per-group window only now, for a frame we are committed to emitting.
-		let bytes = serde_json::to_vec(&patch)?;
+		let bytes = Bytes::from(patch);
 
 		// Same cap as a snapshot, on the patch's plaintext: a delta that decompresses past the
 		// consumer's limit makes the whole group unreadable, since there is no keyframe after it to
@@ -331,7 +337,7 @@ impl<T: Serialize> Encoder<T> {
 		}
 		let payload = match self.flate.as_mut() {
 			Some(flate) => flate.frame(&bytes),
-			None => Bytes::from(bytes),
+			None => bytes.clone(),
 		};
 
 		// A delta is only readable while the group still holds the snapshot it applies to.
@@ -356,7 +362,7 @@ impl<T: Serialize> Encoder<T> {
 		let Some(Baseline::Parsed(last)) = self.last.as_mut() else {
 			unreachable!("a parsed snapshot precedes any delta")
 		};
-		json_patch::merge(last, &patch);
+		crate::merge::apply_generated_bytes(last, &bytes)?;
 
 		Ok(Some(Encoded {
 			payload,
@@ -451,6 +457,33 @@ impl<T: Serialize> Encoder<T> {
 mod test {
 	use super::*;
 	use serde_json::json;
+
+	#[test]
+	fn duplicate_serialized_keys_are_refused() {
+		use serde::ser::SerializeMap;
+		struct Duplicate {
+			duplicate: bool,
+		}
+		impl Serialize for Duplicate {
+			fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+				let mut map = serializer.serialize_map(Some(2 + usize::from(self.duplicate)))?;
+				map.serialize_entry("a", &1)?;
+				map.serialize_entry("b", &2)?;
+				if self.duplicate {
+					map.serialize_entry("a", &3)?;
+				}
+				map.end()
+			}
+		}
+		let mut encoder = Encoder::<Duplicate>::new(Config::default());
+		encoder
+			.update(&Duplicate { duplicate: false })
+			.unwrap()
+			.unwrap()
+			.commit();
+		let err = encoder.encode(&Duplicate { duplicate: true }).unwrap_err();
+		assert!(err.to_string().contains("duplicate JSON object key"));
+	}
 
 	/// Encode a sequence of values, committing each frame, and return `(keyframe, payload_len)` per
 	/// emitted frame.

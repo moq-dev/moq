@@ -253,6 +253,10 @@ pub struct AnnounceRequest<'a> {
 	// when encoding for another version and decodes as zero; lite-06 carries the
 	// identity session-wide in the SETUP Hop parameter instead.
 	pub exclude_hop: u64,
+	// Lite07+: also announce routes with a `.`-prefixed segment below the prefix.
+	// Not on the wire earlier, so the value set here is ignored when encoding for an
+	// older version and decodes as false.
+	pub hidden: bool,
 }
 
 impl Message for AnnounceRequest<'_> {
@@ -262,13 +266,24 @@ impl Message for AnnounceRequest<'_> {
 			true => u64::decode(r, version)?,
 			false => 0,
 		};
-		Ok(Self { prefix, exclude_hop })
+		let hidden = match version.has_hidden() {
+			true => bool::decode(r, version)?,
+			false => false,
+		};
+		Ok(Self {
+			prefix,
+			exclude_hop,
+			hidden,
+		})
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.prefix.encode(w, version)?;
 		if version.has_exclude_hop() {
 			self.exclude_hop.encode(w, version)?;
+		}
+		if version.has_hidden() {
+			self.hidden.encode(w, version)?;
 		}
 
 		Ok(())
@@ -519,13 +534,13 @@ mod tests {
 			hops: hops.clone(),
 			cost,
 		};
-		assert_eq!(broadcast_round_trip(&active, Version::Lite06Wip), active);
+		assert_eq!(broadcast_round_trip(&active, Version::Lite06), active);
 
 		let ended = AnnounceBroadcast::EndedId { id: 3 };
-		assert_eq!(broadcast_round_trip(&ended, Version::Lite06Wip), ended);
+		assert_eq!(broadcast_round_trip(&ended, Version::Lite06), ended);
 
 		let restart = AnnounceBroadcast::Restart { id: 3, hops, cost };
-		assert_eq!(broadcast_round_trip(&restart, Version::Lite06Wip), restart);
+		assert_eq!(broadcast_round_trip(&restart, Version::Lite06), restart);
 	}
 
 	// The id-referencing forms don't exist before lite-06, and the path form is gone on lite-06.
@@ -550,7 +565,7 @@ mod tests {
 				suffix: Path::new("room/cam"),
 				hops: Hops::new()
 			}
-			.encode(&mut buf, Version::Lite06Wip),
+			.encode(&mut buf, Version::Lite06),
 			Err(EncodeError::Version)
 		));
 	}
@@ -584,25 +599,25 @@ mod tests {
 		let mut buf = Vec::new();
 		crate::origin::Cost::MAX
 			.charged(1)
-			.encode(&mut buf, Version::Lite06Wip)
+			.encode(&mut buf, Version::Lite06)
 			.expect("a charged cost must stay encodable");
 	}
 
 	#[test]
 	fn unknown_announce_type_is_skipped() {
 		let mut body = Vec::new();
-		Path::new("room/cam").encode(&mut body, Version::Lite06Wip).unwrap();
-		Hops::new().encode(&mut body, Version::Lite06Wip).unwrap();
-		Cost::default().encode(&mut body, Version::Lite06Wip).unwrap();
+		Path::new("room/cam").encode(&mut body, Version::Lite06).unwrap();
+		Hops::new().encode(&mut body, Version::Lite06).unwrap();
+		Cost::default().encode(&mut body, Version::Lite06).unwrap();
 
 		let mut buf = bytes::BytesMut::new();
-		4u64.encode(&mut buf, Version::Lite06Wip).unwrap();
-		(body.len() as u64).encode(&mut buf, Version::Lite06Wip).unwrap();
+		4u64.encode(&mut buf, Version::Lite06).unwrap();
+		(body.len() as u64).encode(&mut buf, Version::Lite06).unwrap();
 		buf.extend_from_slice(&body);
 
 		let mut slice = &buf[..];
 		let got =
-			AnnounceBroadcast::decode(&mut slice, Version::Lite06Wip).expect("unknown type must not kill the stream");
+			AnnounceBroadcast::decode(&mut slice, Version::Lite06).expect("unknown type must not kill the stream");
 		assert!(slice.is_empty());
 		assert_eq!(got, AnnounceBroadcast::Skipped);
 	}
@@ -612,7 +627,7 @@ mod tests {
 	fn ended_by_id_is_three_bytes() {
 		let mut buf = bytes::BytesMut::new();
 		AnnounceBroadcast::EndedId { id: 42 }
-			.encode(&mut buf, Version::Lite06Wip)
+			.encode(&mut buf, Version::Lite06)
 			.unwrap();
 		assert_eq!(buf.len(), 3);
 	}
@@ -626,7 +641,34 @@ mod tests {
 		AnnounceRequest {
 			prefix: got.prefix.to_owned(),
 			exclude_hop: got.exclude_hop,
+			hidden: got.hidden,
 		}
+	}
+
+	// Lite07 carries the hidden opt-in; every earlier version decodes as not opted in.
+	#[test]
+	fn announce_request_carries_hidden_from_lite07() {
+		for hidden in [false, true] {
+			let msg = AnnounceRequest {
+				prefix: Path::new("room/"),
+				exclude_hop: 0,
+				hidden,
+			};
+			assert_eq!(request_round_trip(&msg, Version::Lite07).hidden, hidden);
+			assert!(!request_round_trip(&msg, Version::Lite06).hidden);
+		}
+	}
+
+	// A flag byte other than 0 or 1 is malformed, not a future extension.
+	#[test]
+	fn announce_request_rejects_a_bad_hidden_flag() {
+		let mut buf = bytes::BytesMut::new();
+		let mut body = Vec::new();
+		Path::new("room").encode(&mut body, Version::Lite07).unwrap();
+		body.push(2);
+		(body.len() as u64).encode(&mut buf, Version::Lite07).unwrap();
+		buf.extend_from_slice(&body);
+		assert!(AnnounceRequest::decode(&mut &buf[..], Version::Lite07).is_err());
 	}
 
 	// Lite04/05 carry the subscriber's origin id so the publisher can skip reflected
@@ -636,6 +678,7 @@ mod tests {
 		let msg = AnnounceRequest {
 			prefix: Path::new("room/"),
 			exclude_hop: 42,
+			hidden: false,
 		};
 		assert_eq!(request_round_trip(&msg, Version::Lite05).exclude_hop, 42);
 	}
@@ -647,14 +690,15 @@ mod tests {
 		let msg = AnnounceRequest {
 			prefix: Path::new("room/"),
 			exclude_hop: 42,
+			hidden: false,
 		};
-		assert_eq!(request_round_trip(&msg, Version::Lite06Wip).exclude_hop, 0);
+		assert_eq!(request_round_trip(&msg, Version::Lite06).exclude_hop, 0);
 
 		// And it costs nothing on the wire: the body is just the prefix.
 		let mut with = bytes::BytesMut::new();
 		msg.encode(&mut with, Version::Lite05).unwrap();
 		let mut without = bytes::BytesMut::new();
-		msg.encode(&mut without, Version::Lite06Wip).unwrap();
+		msg.encode(&mut without, Version::Lite06).unwrap();
 		assert!(
 			without.len() < with.len(),
 			"lite06 must not encode the exclude_hop varint"

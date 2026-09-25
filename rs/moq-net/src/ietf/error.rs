@@ -596,6 +596,7 @@ mod tests {
 			StreamError::Internal,
 			StreamError::Cancel,
 			StreamError::DeliveryTimeout,
+			StreamError::ControlTimeout,
 			StreamError::GoingAway,
 			StreamError::TooFarBehind,
 			StreamError::MalformedTrack,
@@ -701,6 +702,7 @@ mod tests {
 			StreamError::FrameTooLarge,
 			StreamError::GroupTooLarge,
 			StreamError::TimestampMismatch,
+			StreamError::ControlTimeout,
 			StreamError::App(7),
 			StreamError::Unknown(0x1234),
 		] {
@@ -738,11 +740,12 @@ mod tests {
 
 	/// Every stream error this crate can hold, so the conformance check below covers the
 	/// whole space rather than the variants someone remembered. A new variant belongs here.
-	const EVERY_ERROR: [StreamError; 17] = [
+	const EVERY_ERROR: [StreamError; 18] = [
 		StreamError::Session(SessionError::Cancel),
 		StreamError::Internal,
 		StreamError::Cancel,
 		StreamError::DeliveryTimeout,
+		StreamError::ControlTimeout,
 		StreamError::GoingAway,
 		StreamError::TooFarBehind,
 		StreamError::MalformedTrack,

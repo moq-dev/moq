@@ -89,6 +89,23 @@ mod test {
 		(Producer::new(track, config), consumer)
 	}
 
+	/// Demand follows the track's subscribers, so a producer can idle while nobody is watching.
+	#[test]
+	fn demand_follows_subscribers() {
+		let (producer, consumer) = producer(Config::default());
+		let demand = producer.demand();
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Ok(()))));
+
+		drop(consumer);
+		assert!(matches!(demand.poll_unused(&waiter), Poll::Ready(Ok(()))));
+		assert!(demand.poll_used(&waiter).is_pending());
+
+		let _consumer = producer.consume();
+		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Ok(()))));
+		assert!(demand.poll_unused(&waiter).is_pending());
+	}
+
 	/// Drain every value currently available from a plaintext consumer without blocking.
 	fn drain(track: moq_net::track::Subscriber) -> Vec<Value> {
 		drain_with(Consumer::<Value>::new(track, consumer::Config::default()))

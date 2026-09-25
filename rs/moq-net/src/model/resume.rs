@@ -377,7 +377,6 @@ impl Producer {
 	/// copy can die, while the segment stays spliced so readers keep what it already
 	/// delivered. That makes this, not the caller's own handle on the serving route,
 	/// the condition for arming an idle release.
-	#[cfg(test)]
 	pub(crate) fn is_spliced(&self) -> bool {
 		!self.state.read().segments.is_empty()
 	}
@@ -1097,8 +1096,12 @@ impl Group {
 	}
 
 	/// No replacement can arrive: report the loss that stalled us, or a clean end.
-	fn give_up(&mut self) -> Result<bool> {
-		match self.dead.take() {
+	///
+	/// The dead route stays recorded, so every later poll reaches the same verdict.
+	/// Clearing it would re-resolve the route's reclaimed copy as one still to come
+	/// and park, and a reader probing `poll_finished` for the loss would hang.
+	fn give_up(&self) -> Result<bool> {
+		match &self.dead {
 			Some((_, err)) => {
 				// The only place a spliced group's loss becomes visible, so say which
 				// frames went missing rather than leaving a stuck group to explain itself.
@@ -1108,7 +1111,7 @@ impl Group {
 					%err,
 					"no route can serve the rest of this group"
 				);
-				Err(err)
+				Err(err.clone())
 			}
 			None => Ok(false),
 		}
@@ -1331,9 +1334,10 @@ enum SubState {
 /// boundaries. A segment's session failing does not error the subscription; it
 /// stalls until [`Producer::switch`] provides a replacement, or ends cleanly once
 /// the producer [`finish`](Producer::finish)es and the final segment completes.
-/// The producer itself going away without a terminal state is an error
-/// ([`Error::Dropped`]) once the remaining segments drain: with nobody left to
-/// splice a replacement, a stall would never end.
+/// The producer itself going away without a terminal state ends the track as its
+/// final segment's track ended, once the remaining segments drain: cleanly if it
+/// finished, [`Error::Dropped`] if it died. With nobody left to splice a
+/// replacement, a stall would never end.
 pub struct Subscriber {
 	state: kio::Consumer<ResumeState>,
 
@@ -1347,8 +1351,8 @@ pub struct Subscriber {
 	finished: bool,
 	abort: Option<Error>,
 	/// The producer is gone without a terminal state: the segment list is frozen,
-	/// so once it drains the read paths surface [`Error::Dropped`] (no takeover
-	/// can ever resume the track), mirroring a plain track's dropped producer.
+	/// so once it drains the read paths end as the final segment did (no takeover
+	/// can ever resume the track).
 	closed: bool,
 
 	/// Cursors over the segments, in segment order.
@@ -1837,9 +1841,9 @@ impl Subscriber {
 					return Poll::Ready(Ok(None));
 				}
 				// The producer is gone without finishing: no takeover can ever resume
-				// the drained segments, so report the drop like a plain track would.
+				// the drained segments, so the track ends as its final segment did.
 				if self.closed {
-					return Poll::Ready(Err(Error::Dropped));
+					return Poll::Ready(self.orphan_end().map(|()| None));
 				}
 			}
 			return Poll::Pending;
@@ -1852,10 +1856,10 @@ impl Subscriber {
 	/// spliced onto that group rather than surfaced again, so each sequence is handed
 	/// out exactly once no matter how many routes contributed to it.
 	///
-	/// Returns `Poll::Ready(Ok(None))` once the producer finished and every
-	/// segment completed, and `Poll::Ready(Err(_))` if the producer aborted, or
-	/// was dropped without finishing and every segment has drained
-	/// ([`Error::Dropped`], like a plain track's dropped producer).
+	/// Returns `Poll::Ready(Ok(None))` once every segment completed and the
+	/// producer finished, or was dropped with the final segment's track finished.
+	/// Returns `Poll::Ready(Err(_))` if the producer aborted, or was dropped and
+	/// the final segment's track died ([`Error::Dropped`]).
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll_sync(waiter);
 
@@ -1971,10 +1975,10 @@ impl Subscriber {
 				return Poll::Ready(Ok(None));
 			}
 			// The producer is gone without finishing: no takeover can ever
-			// resume the drained segments, so report the drop like a plain
-			// track would rather than stalling forever.
+			// resume the drained segments, so the track ends as its final
+			// segment did rather than stalling forever.
 			if self.closed {
-				return Poll::Ready(Err(Error::Dropped));
+				return Poll::Ready(self.orphan_end().map(|()| None));
 			}
 		}
 		Poll::Pending
@@ -2053,10 +2057,13 @@ impl Subscriber {
 		if self.finished {
 			return Poll::Ready(Ok(None));
 		}
-		// The newest segment can't progress and the producer is gone: no
-		// takeover is coming, so surface the drop rather than stalling forever.
+		// The producer is gone: no takeover is coming, so the track ends when
+		// its newest segment does, and the way it did.
 		if self.closed && !pending_activation {
-			return Poll::Ready(Err(Error::Dropped));
+			return match ready!(self.poll_final(waiter)) {
+				Some(_) => Poll::Ready(Ok(None)),
+				None => Poll::Ready(Err(Error::Dropped)),
+			};
 		}
 		Poll::Pending
 	}
@@ -2076,40 +2083,51 @@ impl Subscriber {
 		if let Some(err) = &self.abort {
 			return Poll::Ready(Err(err.clone()));
 		}
-		if !self.finished {
-			// A dropped producer can never finish the logical track.
-			if self.closed {
-				return Poll::Ready(Err(Error::Dropped));
-			}
+		if !self.finished && !self.closed {
 			return Poll::Pending;
 		}
+		let end = ready!(self.poll_final(waiter));
+		match self.finished {
+			true => Poll::Ready(Ok(end.unwrap_or(0))),
+			// The producer is gone without finishing: the track ends as its final
+			// segment did.
+			false => Poll::Ready(end.ok_or(Error::Dropped)),
+		}
+	}
 
-		// Drive the final segment to completion; earlier segments don't decide the
-		// count. Only the subscription is resolved here: consuming groups would
-		// steal them from a `recv_group` caller on the same subscriber.
+	/// Wait for the final segment's track to end: its group count when it
+	/// finished, `None` when it died or there is no segment. Earlier segments don't
+	/// decide the end. Only the subscription is resolved here: consuming groups, or
+	/// completing the segment, would steal them from a `recv_group` caller on the
+	/// same subscriber.
+	fn poll_final(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+		let anchor = min_some(self.stale_cap, self.end_sequence);
 		let Some(seg) = self.segments.last_mut() else {
-			return Poll::Ready(Ok(0));
+			return Poll::Ready(None);
 		};
 		ready!(Self::poll_activate(
 			seg,
 			&self.last_prefs,
 			self.min_sequence,
-			min_some(self.stale_cap, self.end_sequence),
+			anchor,
 			waiter
 		));
 		match &mut seg.sub {
-			SubState::Done(count) => Poll::Ready(Ok(count.unwrap_or(0))),
-			SubState::Active(sub) => match ready!(sub.poll_finished(waiter)) {
-				Ok(count) => {
-					seg.complete(Some(count));
-					Poll::Ready(Ok(count))
-				}
-				Err(_) => {
-					seg.complete(None);
-					Poll::Ready(Ok(0))
-				}
-			},
+			SubState::Done(count) => Poll::Ready(*count),
+			// Observe only: the cursor may still hold groups, so the read path
+			// completes the segment once it drains.
+			SubState::Active(sub) => Poll::Ready(ready!(sub.poll_finished(waiter)).ok()),
 			SubState::Pending(_) => unreachable!("poll_activate resolved above"),
+		}
+	}
+
+	/// How a logical track whose producer went away without finishing ends, once
+	/// every segment drained: cleanly if its final segment's track finished, since
+	/// that is where the content ended, and [`Error::Dropped`] otherwise.
+	fn orphan_end(&self) -> Result<()> {
+		match self.segments.last().map(|seg| &seg.sub) {
+			Some(SubState::Done(Some(_))) => Ok(()),
+			_ => Err(Error::Dropped),
 		}
 	}
 
@@ -3681,6 +3699,45 @@ mod test {
 		);
 	}
 
+	/// A group the reader gave up on stays lost: every later poll reports the same
+	/// loss. `finished` is how a reader tells a transport loss from a bad payload, so
+	/// it must not park once the route's aborted copy has been reclaimed from its cache.
+	#[tokio::test]
+	async fn lost_group_stays_lost() {
+		let (mut track_a, consumer_a) = track_pair("a");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(replay());
+
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"a0");
+
+		// The relay resets the rest of the group, then moves on. The next write
+		// reclaims the aborted slot, so the route no longer knows the group at all.
+		group.abort(Error::Stream(crate::StreamError::Old)).unwrap();
+		write_group(&mut track_a, 1, "a1");
+
+		assert!(matches!(
+			reading.read_frame().now_or_never(),
+			Some(Err(Error::Stream(crate::StreamError::Old)))
+		));
+		assert!(
+			matches!(
+				reading.finished().now_or_never(),
+				Some(Err(Error::Stream(crate::StreamError::Old)))
+			),
+			"a lost group must not park or change its answer"
+		);
+		assert!(matches!(
+			reading.read_frame().now_or_never(),
+			Some(Err(Error::Stream(crate::StreamError::Old)))
+		));
+	}
+
 	/// A route whose copy of the group is missing the frames the reader needs is treated
 	/// like a dead one. Reading the tail as if it were the head would silently renumber
 	/// every frame in the group.
@@ -4636,27 +4693,70 @@ mod test {
 		assert_eq!(recv(&mut sub), 0);
 		recv_pending(&mut sub);
 
-		// Only once that segment ends, without the logical track having
-		// finished, does the missing producer surface.
+		// The segment finishing ends the logical track cleanly: that is where
+		// the content ended, and no takeover can come.
 		track_a.finish().unwrap();
 		let result = sub.recv_group().now_or_never().expect("must not stall forever");
-		assert!(matches!(result, Err(Error::Dropped)));
+		assert!(matches!(result, Ok(None)));
 	}
 
 	#[tokio::test]
-	async fn dropped_producer_fails_finished_waiters() {
-		let (_track_a, consumer_a) = track_pair("a");
+	async fn dropped_producer_ends_finished_waiters_with_the_segment() {
+		for clean in [true, false] {
+			let (track_a, consumer_a) = track_pair("a");
 
-		let mut producer = Producer::new();
-		producer.switch(&consumer_a, None).unwrap();
-		let mut sub = producer.consume().subscribe(None);
-		recv_pending(&mut sub);
+			let mut producer = Producer::new();
+			producer.switch(&consumer_a, None).unwrap();
+			let mut sub = producer.consume().subscribe(None);
+			recv_pending(&mut sub);
 
-		// The producer can never finish the logical track once dropped, so an
-		// end-waiter must not park forever, even while a segment is still live.
-		drop(producer);
-		let result = sub.finished().now_or_never().expect("must not stall forever");
-		assert!(matches!(result, Err(Error::Dropped)));
+			// Once dropped, the producer can never finish the logical track: an
+			// end-waiter waits on the live segment and ends as it does.
+			drop(producer);
+			assert!(
+				sub.finished().now_or_never().is_none(),
+				"ended while the segment is live"
+			);
+			match clean {
+				true => track_a.finish().unwrap(),
+				false => track_a.abort(Error::Cancel).unwrap(),
+			}
+			let result = sub.finished().now_or_never().expect("must not stall forever");
+			match clean {
+				true => assert!(matches!(result, Ok(0))),
+				false => assert!(matches!(result, Err(Error::Dropped))),
+			}
+		}
+	}
+
+	/// Waiting for the end, or polling datagrams, must not consume the final
+	/// segment: groups still queued in its cursor are delivered afterwards, for a
+	/// finished producer and a dropped one alike.
+	#[tokio::test]
+	async fn end_waiters_leave_queued_groups_readable() {
+		for dropped in [false, true] {
+			let (mut track_a, consumer_a) = track_pair("a");
+
+			let mut producer = Producer::new();
+			producer.switch(&consumer_a, None).unwrap();
+			let mut sub = producer.consume().subscribe(replay());
+
+			write_group(&mut track_a, 0, "a0");
+			track_a.finish().unwrap();
+			match dropped {
+				true => drop(producer),
+				false => producer.finish().unwrap(),
+			}
+
+			let count = sub.finished().now_or_never().expect("the end is known");
+			assert!(matches!(count, Ok(1)), "{count:?}");
+			let datagram = kio::wait(|waiter| sub.poll_recv_datagram(waiter)).now_or_never();
+			assert!(matches!(datagram, Some(Ok(None))), "{datagram:?}");
+
+			assert_eq!(recv(&mut sub), 0, "dropped={dropped}");
+			let end = sub.recv_group().now_or_never().expect("must not stall forever");
+			assert!(matches!(end, Ok(None)), "dropped={dropped}");
+		}
 	}
 
 	#[tokio::test]

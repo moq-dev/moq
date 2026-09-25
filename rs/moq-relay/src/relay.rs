@@ -25,6 +25,27 @@ use axum::Router;
 
 use crate::{Config, Connection, auth, auth::Admissions, cluster, internal, shutdown, web};
 
+/// A handle that waits until a relay has finished startup.
+#[derive(Clone)]
+pub struct Ready {
+	receiver: tokio::sync::watch::Receiver<bool>,
+}
+
+impl Ready {
+	/// Wait until `Relay::run` starts serving, or fail if it exits first.
+	pub async fn wait(mut self) -> anyhow::Result<()> {
+		loop {
+			if *self.receiver.borrow() {
+				return Ok(());
+			}
+			self.receiver
+				.changed()
+				.await
+				.context("relay stopped before becoming ready")?;
+		}
+	}
+}
+
 /// A fully assembled relay: the owner of every listener, worker group, and
 /// shutdown join.
 ///
@@ -48,6 +69,8 @@ use crate::{Config, Connection, auth, auth::Admissions, cluster, internal, shutd
 /// running.await??;
 /// ```
 pub struct Relay {
+	ready: tokio::sync::watch::Sender<bool>,
+	config: Config,
 	server: moq_tokio::Server,
 	client: moq_tokio::Client,
 	auth: auth::Auth,
@@ -90,6 +113,7 @@ impl Relay {
 	/// it.
 	pub async fn load(mut config: Config) -> anyhow::Result<Self> {
 		config.resolve()?;
+		let resolved_config = config.clone();
 		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,
 		// else the cluster node URL, else nothing.
@@ -244,10 +268,12 @@ impl Relay {
 		// GOAWAY; a second signal (or the drain window elapsing) exits.
 		let (shutdown_trigger, shutdown) = shutdown::Observer::new(drain_timeout);
 		let sessions = crate::session::Registry::new();
+		let (ready, _) = tokio::sync::watch::channel(false);
 		let web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web)
 			.with_shutdown(shutdown.clone())
 			.with_versions(server_versions)
-			.with_sessions(sessions.clone());
+			.with_sessions(sessions.clone())
+			.bind()?;
 
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
@@ -276,6 +302,8 @@ impl Relay {
 		}
 
 		Ok(Relay {
+			ready,
+			config: resolved_config,
 			server,
 			client,
 			auth,
@@ -297,9 +325,31 @@ impl Relay {
 		})
 	}
 
+	/// A handle that waits for [`Self::run`] to finish startup.
+	pub fn ready(&self) -> Ready {
+		Ready {
+			receiver: self.ready.subscribe(),
+		}
+	}
+
+	/// The resolved configuration used to assemble this relay.
+	pub fn config(&self) -> &Config {
+		&self.config
+	}
+
 	/// The QUIC bind address, or `None` for a stream-only server (no QUIC).
 	pub fn addr(&self) -> Option<std::net::SocketAddr> {
 		self.addr
+	}
+
+	/// The QUIC bind address, or an error for a stream-only relay.
+	pub fn quic_addr(&self) -> anyhow::Result<std::net::SocketAddr> {
+		self.addr.context("relay has no QUIC listener")
+	}
+
+	/// The actual bound HTTP and HTTPS addresses, including ephemeral ports.
+	pub fn web_addrs(&self) -> web::Addrs {
+		self.web.addrs()
 	}
 
 	/// The client used to dial cluster peers. Already handed to [`Self::cluster`];
@@ -364,6 +414,13 @@ impl Relay {
 		&self.sessions
 	}
 
+	/// Report embedder-owned listeners at the relay's `/metrics` endpoint.
+	#[must_use = "the relay with the extra listeners is returned"]
+	pub fn with_listeners(mut self, health: impl IntoIterator<Item = moq_tokio::accept::Health>) -> Self {
+		self.internal = self.internal.with_listeners(health);
+		self
+	}
+
 	/// Serve `routes` on the public HTTP/HTTPS listeners instead of the
 	/// relay's default router.
 	///
@@ -400,6 +457,7 @@ impl Relay {
 	/// / [`Self::with_internal`] before calling this; cloned handles outlive it.
 	pub async fn run(self) -> anyhow::Result<()> {
 		let Relay {
+			ready,
 			server,
 			auth,
 			admissions,
@@ -446,6 +504,12 @@ impl Relay {
 				.serve(cluster.clone(), auth.clone(), shutdown.clone(), sessions.clone())
 				.context("failed to start the io_uring QUIC workers")?;
 		}
+
+		// Bind the shared TCP/Unix and optional internal sockets before reporting
+		// readiness, so an unavailable port cannot leave a falsely ready relay.
+		let server = server.listen().await.context("failed to bind listeners")?;
+		let internal_listener = internal.bind()?;
+		ready.send_replace(true);
 
 		#[cfg(unix)]
 		// Notify systemd that we're ready after all initialization is complete
@@ -544,7 +608,7 @@ impl Relay {
 			async move {
 				match idle {
 					true => std::future::pending().await,
-					false => serve(server, cluster, auth, shutdown, sessions).await,
+					false => serve_listening(server, cluster, auth, shutdown, sessions).await,
 				}
 			}
 		};
@@ -552,7 +616,7 @@ impl Relay {
 		let result = tokio::select! {
 			Err(err) = started.run() => Err(err).context("cluster failed"),
 			Err(err) = web.serve(web_routes) => Err(err).context("web server failed"),
-			Err(err) = internal.serve(internal_routes) => Err(err).context("internal server failed"),
+			Err(err) = internal.serve_bound(internal_routes, internal_listener) => Err(err).context("internal server failed"),
 			Err(err) = serve_shared => Err(err).context("server failed"),
 			Err(err) = quic_workers => Err(err).context("QUIC workers failed"),
 			err = uring_failed => Err(err).context("io_uring QUIC workers failed"),
@@ -629,21 +693,30 @@ async fn shutdown_signal() -> anyhow::Result<()> {
 /// Accept sessions off `server` until it stops, spawning a [`Connection`] task
 /// for each.
 ///
-/// The accept loop for a single [`moq_tokio::Server`]. Embedders driving a
-/// [`Relay`] call [`Relay::run`] instead, which owns worker selection and
-/// shutdown; this stays public for a server the caller bound itself.
-pub async fn serve(
+/// The accept loop for a single [`moq_tokio::Server`]. [`Relay::run`] owns
+/// worker selection and shutdown for embedders.
+#[cfg(feature = "_quic")]
+async fn serve(
 	server: moq_tokio::Server,
 	cluster: cluster::Cluster,
 	auth: auth::Auth,
 	shutdown: shutdown::Observer,
 	sessions: crate::session::Registry,
 ) -> anyhow::Result<()> {
-	// Binds whatever is still unbound (the `tcp`/`unix` listeners), so a bind
-	// failure is reported here rather than as an immediate stop.
-	let mut server = server.listen().await.context("failed to bind listeners")?;
+	// Each QUIC worker binds here; Relay::run binds the shared listener before
+	// readiness and passes it to the same accept loop.
+	let listener = server.listen().await.context("failed to bind listeners")?;
+	serve_listening(listener, cluster, auth, shutdown, sessions).await
+}
 
-	while let Some(request) = server.accept().await {
+async fn serve_listening(
+	mut listener: moq_tokio::Listener,
+	cluster: cluster::Cluster,
+	auth: auth::Auth,
+	shutdown: shutdown::Observer,
+	sessions: crate::session::Registry,
+) -> anyhow::Result<()> {
+	while let Some(request) = listener.accept().await {
 		let conn = Connection::new(request, cluster.clone(), auth.clone())
 			.with_id(cluster.next_connection_id())
 			.with_shutdown(shutdown.clone())

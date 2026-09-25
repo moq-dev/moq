@@ -38,7 +38,7 @@ import map required:
 ```
 
 Pin a version range in the URL for production, e.g.
-`https://esm.sh/@moq/watch@0.2/element`. jsDelivr's `+esm` endpoint
+`https://esm.sh/@moq/watch@0.6/element`. jsDelivr's `+esm` endpoint
 (`https://cdn.jsdelivr.net/npm/@moq/watch/element.js/+esm`) works the same way
 if you prefer it.
 
@@ -88,38 +88,36 @@ Only the distance mode suspends video while the tab is hidden; `always` keeps do
 
 ## JavaScript API
 
-For more control, `Broadcast` fetches the catalog and follows the broadcast across reconnects.
-The rest of the pipeline is assembled around it: a `Source` picks a rendition,
-a `Decoder` decodes it, `Sync` paces both media clocks, and a `Renderer` /
-`Emitter` paints to a canvas and plays through WebAudio.
-
-Standalone components start enabled when `enabled` is omitted. Pass `false` or a live signal when
-activation follows application lifecycle state.
+For a headless player, construct `Player` with a connection origin and a canvas.
+It owns the broadcast, rendition selection, synchronized decoders, video
+renderer, audio emitter, and captions. Pass `Signal` values to change controls
+later; call `close()` when playback ends.
 
 ```typescript
 import * as Watch from "@moq/watch";
+import { Signal } from "@moq/signals";
 
 const connection = new Watch.Net.Connection({
     url: new URL("https://relay.example.com/anon"),
     enabled: true,
 });
-
-const broadcast = new Watch.Broadcast({
+const muted = new Signal(false);
+const player = new Watch.Player({
     origin: connection.origin,
-    enabled: true,
+    probe: connection.probe,
     name: Watch.Net.Path.from("room/alice.hang"),
+    canvas,
+    muted,
 });
 
-const source = new Watch.Video.Source({ broadcast, supported: Watch.Video.Decoder.supported, probe: connection.probe });
-const sync = new Watch.Sync({ probe: connection.probe });
-const decoder = new Watch.Video.Decoder({ source, sync, enabled: true });
-
-// Video renders to a <canvas>; there is no MediaStream to assign.
-const renderer = new Watch.Video.Renderer({ decoder, canvas });
+// player.broadcast, player.video, player.audio, player.text,
+// player.renderer, player.emitter, and player.sync expose the pipeline.
+// Later: player.close(); connection.close();
 ```
 
-Audio is the same shape: `Audio.Source` into `Audio.Decoder` into
-`Audio.Emitter`, sharing the one `Sync`.
+`<moq-watch>` wraps this same `Player` and maps attributes to its controls.
+`Broadcast`, `Sync`, and the `Video`, `Audio`, and `Text` components remain
+available when an application needs a different pipeline.
 
 ## UI Web Component
 

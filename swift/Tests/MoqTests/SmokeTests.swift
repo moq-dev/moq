@@ -73,13 +73,18 @@ final class SmokeTests: XCTestCase {
         _ = try origin.dynamic(prefix: "")
     }
 
-    func testAnnounceThenUnannounceIsVisible() async throws {
+    func testBroadcastIsReachableOnlyWhileAnnounced() async throws {
         let origin = OriginProducer()
         let broadcast = try origin.createBroadcast(path: "live")
         _ = try broadcast.publishTrack(name: "events")
-        try broadcast.announce()
+        let consumer = origin.consume()
+        do {
+            _ = try await consumer.requestBroadcast(path: "live")
+            XCTFail("an unannounced broadcast must be unroutable")
+        } catch {}
 
-        let announced = try origin.consume().announced(prefix: "")
+        try broadcast.announce()
+        let announced = try consumer.announced(prefix: "")
         let first = try await announced.next()
         XCTAssertEqual(first?.prefix, "live")
         XCTAssertEqual(first?.active, true)
@@ -88,7 +93,15 @@ final class SmokeTests: XCTestCase {
         let retracted = try await announced.next()
         XCTAssertEqual(retracted?.prefix, "live")
         XCTAssertEqual(retracted?.active, false)
-        _ = try await origin.consume().requestBroadcast(path: "live")
+        do {
+            _ = try await consumer.requestBroadcast(path: "live")
+            XCTFail("an unannounced broadcast must be unroutable")
+        } catch {}
+
+        try broadcast.announce()
+        let back = try await announced.next()
+        XCTAssertEqual(back?.active, true)
+        _ = try await consumer.requestBroadcast(path: "live")
     }
 
     func testAnnouncedPatternCaptures() async throws {
@@ -207,6 +220,30 @@ final class SmokeTests: XCTestCase {
 
         consumer.cancel()
         try producer.finish()
+        try broadcast.finish()
+    }
+
+    func testJsonProducersReportDemand() async throws {
+        let broadcast = try BroadcastProducer()
+        let snapshot = try broadcast.publishJsonSnapshot(name: "status", of: [String: Int].self)
+        let stream = try broadcast.publishJsonStream(name: "events", of: [String: Int].self)
+        let snapshotDemand = try snapshot.demand()
+        let streamDemand = try stream.demand()
+        XCTAssertEqual(snapshotDemand.name, "status")
+        XCTAssertFalse(snapshotDemand.isUsed)
+        let consumer = try broadcast.consume()
+
+        let snapshotConsumer = try await consumer.subscribeJsonSnapshot(name: "status", as: [String: Int].self)
+        let streamConsumer = try await consumer.subscribeJsonStream(name: "events", as: [String: Int].self)
+        try await snapshotDemand.used()
+        try await streamDemand.used()
+        XCTAssertTrue(snapshotDemand.isUsed)
+
+        snapshotConsumer.cancel()
+        streamConsumer.cancel()
+        try await snapshotDemand.unused()
+        try await streamDemand.unused()
+
         try broadcast.finish()
     }
 

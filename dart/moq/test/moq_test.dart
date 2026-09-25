@@ -77,7 +77,8 @@ void main() {
       return request.accept().timeout(timeout);
     }();
 
-    // A one-shot dial with explicit pacing: both knobs reach the FFI client.
+    // A one-shot QUIC-only dial with explicit pacing: every knob reaches the
+    // FFI client, and QUIC alone still connects.
     final client = await Moq.connect(
       'https://${server.localAddr}',
       options: ConnectOptions(
@@ -85,6 +86,8 @@ void main() {
         bind: '127.0.0.1:0',
         reconnect: false,
         backoff: Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000),
+        websocketEnabled: false,
+        websocketDelay: Duration.zero,
       ),
     ).timeout(timeout);
     final serverSession = await accepted;
@@ -101,6 +104,18 @@ void main() {
     track.finish();
     broadcast.finish();
     server.close();
+  });
+
+  test('a negative websocket delay is refused before dialing', () {
+    expect(
+      Moq.connect(
+        'https://localhost',
+        options: const ConnectOptions(
+          websocketDelay: Duration(microseconds: -1),
+        ),
+      ),
+      throwsArgumentError,
+    );
   });
 
   test('closing a server releases its port', () async {
@@ -138,13 +153,18 @@ void main() {
     );
   });
 
-  test('announce then unannounce is visible', () async {
+  test('a broadcast is reachable only while announced', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final broadcast = origin.createBroadcast(path: 'live');
     broadcast.publishTrack(name: 'events', info: null);
-    broadcast.announce(route: MoqRoute());
+    final consumer = origin.consume();
+    await expectLater(
+      consumer.requestBroadcast(path: 'live').timeout(timeout),
+      throwsA(anything),
+    );
 
-    final announced = origin.consume().announced(config: MoqAnnounceConfig());
+    broadcast.announce(route: MoqRoute());
+    final announced = consumer.announced(config: MoqAnnounceConfig());
     final first = await announced.next().timeout(timeout);
     expect(first?.prefix(), 'live');
     expect(first?.active(), isTrue);
@@ -153,7 +173,15 @@ void main() {
     final retracted = await announced.next().timeout(timeout);
     expect(retracted?.prefix(), 'live');
     expect(retracted?.active(), isFalse);
-    await origin.consume().requestBroadcast(path: 'live').timeout(timeout);
+    await expectLater(
+      consumer.requestBroadcast(path: 'live').timeout(timeout),
+      throwsA(anything),
+    );
+
+    broadcast.announce(route: MoqRoute());
+    final back = await announced.next().timeout(timeout);
+    expect(back?.active(), isTrue);
+    await consumer.requestBroadcast(path: 'live').timeout(timeout);
     announced.cancel();
     announced.dispose();
   });

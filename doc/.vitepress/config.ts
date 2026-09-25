@@ -76,6 +76,7 @@ export default defineConfig({
 						{ text: "Install", link: "/setup/install" },
 						{ text: "Development", link: "/setup/dev" },
 						{ text: "Production", link: "/setup/prod" },
+						{ text: "Upgrade", link: "/setup/upgrade" },
 						{ text: "Coding agents", link: "/setup/agent" },
 					],
 				},
@@ -90,6 +91,7 @@ export default defineConfig({
 						{ text: "Transport", link: "/concept/transport" },
 						{ text: "moq-lite", link: "/concept/moq-lite" },
 						{ text: "hang", link: "/concept/hang" },
+						{ text: "Audio jitter", link: "/concept/audio-jitter" },
 						{ text: "Standards", link: "/concept/standard" },
 						{
 							text: "Use cases",

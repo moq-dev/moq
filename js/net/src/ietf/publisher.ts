@@ -1,15 +1,15 @@
 import { type Dispose, type Getter, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
-import { error, reason, StreamCode, StreamError } from "../error.ts";
+import { controlTimeout, error, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { type Route, routesEqual } from "../hop.ts";
-import { hooks } from "../internal.ts";
+import { hiddenBelow, hooks } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Milli, type Timescale } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
-import { withTimeout } from "../util/timeout.ts";
+import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
@@ -154,12 +154,10 @@ export class Publisher {
 	#session: Session;
 	#requiresSolicitation: boolean;
 
-	// The published broadcasts, borrowed from the origin this session serves. The origin
-	// outlives the session, so this is read-only here: subscribe_namespace streams watch it
-	// for changes, and closing the session leaves the broadcasts alone. The namespaces are
-	// advertised with an unsolicited PUBLISH_NAMESPACE (see {@link runPublishNamespaces}), or on
-	// request if the peer asked for that (see {@link runSubscribeNamespace}).
-	#broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
+	// The origin this session serves, borrowed: it outlives the session, and closing the
+	// session leaves its broadcasts alone. The namespaces are advertised with an unsolicited
+	// PUBLISH_NAMESPACE (see {@link runPublishNamespaces}), or on request if the peer asked
+	// for that (see {@link runSubscribeNamespace}).
 	#advertised: Getter<ReadonlyMap<Path.Valid, Advertised> | undefined>;
 	#publish?: OriginConsumer;
 
@@ -194,7 +192,6 @@ export class Publisher {
 		this.#quic = quic;
 		this.#session = session;
 		const origin = publish && wireOf(publish);
-		this.#broadcasts = origin?.broadcasts ?? new Signal(new Map());
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
 		this.#publish = publish;
 		this.#requiresSolicitation = requiresSolicitation;
@@ -214,7 +211,7 @@ export class Publisher {
 		let refusal: { errorCode: number; reasonPhrase: string } | undefined;
 		try {
 			broadcast =
-				this.#broadcasts.peek()?.get(name) ?? (this.#publish && (await wireOf(this.#publish).demand(name)));
+				this.#publish && (wireOf(this.#publish).local(name) ?? (await wireOf(this.#publish).demand(name)));
 			if (!broadcast) {
 				refusal = {
 					errorCode: toRequestCode("does_not_exist", "subscribe", version),
@@ -635,10 +632,10 @@ export class Publisher {
 	/**
 	 * Handles an incoming SUBSCRIBE_NAMESPACE on a bidi stream.
 	 *
-	 * This carries the advertisements only when the peer asked to be told on request
-	 * (MoQ Solicit); otherwise {@link runPublishNamespaces} has already announced
-	 * everything and repeating it here would leave the peer holding two sources for one
-	 * broadcast. Draft-16+ streams Namespace entries inline; draft-14/15 predate those
+	 * This carries the advertisements when the peer asked to be told on request (MoQ
+	 * Solicit); otherwise {@link runPublishNamespaces} has already announced everything
+	 * visible and repeating it here would leave the peer holding two sources for one
+	 * broadcast, so only the hidden namespaces it may see ride here (MoQ Hidden). Draft-16+ streams Namespace entries inline; draft-14/15 predate those
 	 * messages, so each advertisement is a PUBLISH_NAMESPACE request of its own.
 	 *
 	 * @internal
@@ -665,12 +662,12 @@ export class Publisher {
 				await ok.encode(stream.writer, version);
 			}
 
-			if (!this.#requiresSolicitation) {
-				// Already announced, unasked. Hold the stream open until the peer is done.
-				await stream.reader.closed;
-				stream.close();
-				return;
-			}
+			// Hidden namespaces are left out unless the peer opted in (MoQ Hidden). Unless the
+			// peer asked to be told only on request, it has already heard everything visible
+			// from the empty prefix unasked, so this stream carries only what that hid.
+			const carries = (covered: Path.Valid) =>
+				(msg.hidden || !hiddenBelow(prefix, covered)) &&
+				(this.#requiresSolicitation || hiddenBelow(Path.empty(), covered));
 
 			// Reports whether the peer now holds the namespace: an inline entry always
 			// lands, but a PUBLISH_NAMESPACE request can be declined.
@@ -721,7 +718,7 @@ export class Publisher {
 				const updated = new Map<Path.Valid, Advertised>();
 				for (const [covered, snap] of advertised) {
 					const suffix = Path.stripPrefix(prefix, covered);
-					if (suffix === null) continue;
+					if (suffix === null || !carries(covered)) continue;
 					updated.set(suffix, snap);
 				}
 
@@ -850,6 +847,8 @@ export class Publisher {
 
 				const updated = new Map<Path.Valid, Advertised>();
 				for (const [covered, snap] of advertised) {
+					// Unasked, a hidden namespace stays off the wire (MoQ Hidden).
+					if (hiddenBelow(Path.empty(), covered)) continue;
 					updated.set(covered, snap);
 				}
 
@@ -1015,7 +1014,8 @@ export class Publisher {
 			requests.set(path, { path, requestId, stream: request });
 			return true;
 		} catch (err: unknown) {
-			const e = error(err);
+			// The peer never answered the advertisement: a control timeout, not late content.
+			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
 			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
 			request?.abort(e);
 			return false;

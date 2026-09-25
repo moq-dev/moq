@@ -7,9 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/moq-dev/moq/compare/moq-net-v0.3.0...moq-net-v0.3.1) - 2026-09-24
+
+### Fixed
+
+- *(relay)* keep only finished groups warm when a track goes idle ([#3977](https://github.com/moq-dev/moq/pull/3977))
+- *(net)* don't end in-flight tracks when their broadcast ends ([#4007](https://github.com/moq-dev/moq/pull/4007))
+
+### Other
+
+- rename in-repo smoke test to interop ([#3963](https://github.com/moq-dev/moq/pull/3963))
+
+## [0.3.0](https://github.com/moq-dev/moq/compare/moq-net-v0.2.22...moq-net-v0.3.0) - 2026-09-23
+
+### Added
+
+- *(moq-net)* reset an unanswered control request with CONTROL_TIMEOUT ([#3913](https://github.com/moq-dev/moq/pull/3913))
+- *(net)* origin failover as a state machine ([#3895](https://github.com/moq-dev/moq/pull/3895))
+- *(moq-net)* add moq-transport draft-22 (moqt-22) ([#3858](https://github.com/moq-dev/moq/pull/3858))
+- *(net)* [**breaking**] simplify origin scoping ([#3804](https://github.com/moq-dev/moq/pull/3804))
+- *(net)* [**breaking**] scope origins with any pattern union and report announce matches ([#3746](https://github.com/moq-dev/moq/pull/3746))
+- *(net)* negotiate the cluster extension with HOP_ID ([#3747](https://github.com/moq-dev/moq/pull/3747))
+
+### Fixed
+
+- *(net)* announce local broadcasts on origin cursors ([#3928](https://github.com/moq-dev/moq/pull/3928))
+- tighten release APIs and preserve Lite compatibility ([#3933](https://github.com/moq-dev/moq/pull/3933))
+- *(net)* retain spliced warm cache ([#3814](https://github.com/moq-dev/moq/pull/3814))
+- *(net)* wake the demand aggregate when its widest subscriber changes ([#3785](https://github.com/moq-dev/moq/pull/3785))
+
+### Other
+
+- allocation-free binary stats ([#3918](https://github.com/moq-dev/moq/pull/3918))
+- *(net)* sweep the idle serve poll over a session's routes ([#3924](https://github.com/moq-dev/moq/pull/3924))
+- *(net)* routed_broadcast waits on the watch alone ([#3901](https://github.com/moq-dev/moq/pull/3901))
+- *(net)* sweep duplicate routes at one prefix ([#3922](https://github.com/moq-dev/moq/pull/3922))
+- *(net)* wake a front only when a covering route changes ([#3884](https://github.com/moq-dev/moq/pull/3884))
+- *(net)* key the origin route table by prefix ([#3882](https://github.com/moq-dev/moq/pull/3882))
+- *(net)* build a route's prefix claim once, not per cursor visit ([#3881](https://github.com/moq-dev/moq/pull/3881))
+- *(mux)* [**breaking**] share media rate policy ([#3840](https://github.com/moq-dev/moq/pull/3840))
+- *(just)* consolidate full-suite actions ([#3823](https://github.com/moq-dev/moq/pull/3823))
+- *(net)* [**breaking**] name path roles without new types ([#3826](https://github.com/moq-dev/moq/pull/3826))
+- *(net)* [**breaking**] return the next deadline from driver polls ([#3828](https://github.com/moq-dev/moq/pull/3828))
+- *(net)* [**breaking**] drive time and cache cleanup explicitly ([#3825](https://github.com/moq-dev/moq/pull/3825))
+- *(net)* expose route cost fields ([#3802](https://github.com/moq-dev/moq/pull/3802))
+- *(net)* format the merged track test ([#3791](https://github.com/moq-dev/moq/pull/3791))
+- Merge remote-tracking branch 'origin/main' into dev
+
 ### Added
 
 - `group::Producer::used` waits until the group has a consumer, matching `unused`.
+- `StreamError::ControlTimeout` (moq-lite stream code 0x31): a request stream torn down because the peer never answered, distinct from `DeliveryTimeout`. The moq-transport registry has no value for it, so an IETF peer is sent INTERNAL_ERROR.
 
 ### Fixed
 
@@ -17,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- [**breaking**] `stats::Registry::report` refills a caller-owned `&mut Report` instead of returning a new one, so an interval drain reuses its buffers.
 - [**breaking**] Dead exports removed: `Hops::replace_first`, `origin::Dynamic::{hop, root}`, `DRAIN_COST` / `MAX_COST` (use `Cost::{DRAIN, MAX}`), `broadcast::Producer::remove_track`, `track::Producer::start_sequence`, `Subscriber::with_groups`, `Ordered::with_groups`, `group::Consumer::with_frames`, `cache::Pool::same_pool`, `Timestamp::new_const`, `Error::to_code`, `Route::with_hop` (build `Hops` and use `with_hops`), and `Cost: From<(u64, u64)>` (use `Cost { warm, cold }`).
 - [**breaking**] `track::SubscriberControl` is `track::Control`, `track::GroupRequest` is `group::Request`, `ConnectionStats` is `session::Stats` with `estimated_send_rate` / `estimated_recv_rate` as `Option<bandwidth::Rate>`, and the paused handshake `Request<S, R>` is `server::Handshake`.
 - [**breaking**] `create_track`, `reserve_track`, `unique_track`, `finish`, `create_group`, and `append_group` take `&self`. `track::Consumer::info()` is `query()`. `track::Demand` gains `is_used` / `poll_used` / `poll_unused`. `track::Producer::poll_unused` returns `Poll<Result<()>>`. `bandwidth::Producer::closed()` returns the cause.

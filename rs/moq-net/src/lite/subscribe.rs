@@ -636,8 +636,8 @@ mod test {
 	fn subscribe_frame_bounds_roundtrip() {
 		let msg = subscribe_sample();
 		let mut buf = Vec::new();
-		msg.encode_msg(&mut buf, Version::Lite06Wip).unwrap();
-		let got = Subscribe::decode_msg(&mut buf.as_slice(), Version::Lite06Wip).unwrap();
+		msg.encode_msg(&mut buf, Version::Lite06).unwrap();
+		let got = Subscribe::decode_msg(&mut buf.as_slice(), Version::Lite06).unwrap();
 		assert_eq!((got.start_group, got.start_frame), (Some(7), 4));
 		assert_eq!((got.end_group, got.end_frame), (Some(9), Some(2)));
 	}
@@ -655,7 +655,7 @@ mod test {
 		let mut lite05 = Vec::new();
 		msg.encode_msg(&mut lite05, Version::Lite05).unwrap();
 		let mut lite06 = Vec::new();
-		msg.encode_msg(&mut lite06, Version::Lite06Wip).unwrap();
+		msg.encode_msg(&mut lite06, Version::Lite06).unwrap();
 
 		// The two layouts diverge in exactly one place: the retired byte lite-05 still
 		// reserves. A deployed peer's field offsets depend on it being there and zero.
@@ -688,10 +688,10 @@ mod test {
 		let mut lite05 = Vec::new();
 		msg.encode_msg(&mut lite05, Version::Lite05).unwrap();
 		let mut lite06 = Vec::new();
-		msg.encode_msg(&mut lite06, Version::Lite06Wip).unwrap();
+		msg.encode_msg(&mut lite06, Version::Lite06).unwrap();
 
 		let on05 = Subscribe::decode_msg(&mut lite05.as_slice(), Version::Lite05).unwrap();
-		let on06 = Subscribe::decode_msg(&mut lite06.as_slice(), Version::Lite06Wip).unwrap();
+		let on06 = Subscribe::decode_msg(&mut lite06.as_slice(), Version::Lite06).unwrap();
 		assert_eq!(on05.start_group, Some(7));
 		assert_eq!(on06.start_group, Some(7));
 		// The raw byte differs: 7 on the wire, not 7 + 1.
@@ -701,12 +701,12 @@ mod test {
 		// byte-identical on the wire, and canonicalized to absent on decode.
 		msg.start_group = None;
 		let mut absent = Vec::new();
-		msg.encode_msg(&mut absent, Version::Lite06Wip).unwrap();
+		msg.encode_msg(&mut absent, Version::Lite06).unwrap();
 		msg.start_group = Some(0);
 		let mut zero = Vec::new();
-		msg.encode_msg(&mut zero, Version::Lite06Wip).unwrap();
+		msg.encode_msg(&mut zero, Version::Lite06).unwrap();
 		assert_eq!(absent, zero);
-		let got = Subscribe::decode_msg(&mut zero.as_slice(), Version::Lite06Wip).unwrap();
+		let got = Subscribe::decode_msg(&mut zero.as_slice(), Version::Lite06).unwrap();
 		assert_eq!(got.start_group, None);
 
 		// On the pre-06 wire the vacuous floor folds to absent (the latest group).
@@ -725,8 +725,8 @@ mod test {
 		msg.start_frame = 4;
 
 		let mut buf = Vec::new();
-		msg.encode_msg(&mut buf, Version::Lite06Wip).unwrap();
-		let got = Subscribe::decode_msg(&mut buf.as_slice(), Version::Lite06Wip).unwrap();
+		msg.encode_msg(&mut buf, Version::Lite06).unwrap();
+		let got = Subscribe::decode_msg(&mut buf.as_slice(), Version::Lite06).unwrap();
 		assert_eq!((got.start_group, got.start_frame), (Some(0), 4));
 	}
 
@@ -749,14 +749,14 @@ mod test {
 
 		let mut buf = Vec::new();
 		assert!(matches!(
-			msg.encode_msg(&mut buf, Version::Lite06Wip),
+			msg.encode_msg(&mut buf, Version::Lite06),
 			Err(EncodeError::InvalidState)
 		));
 
 		msg.start_frame = 0;
 		msg.end_frame = Some(7);
 		assert!(matches!(
-			msg.encode_msg(&mut buf, Version::Lite06Wip),
+			msg.encode_msg(&mut buf, Version::Lite06),
 			Err(EncodeError::InvalidState)
 		));
 	}

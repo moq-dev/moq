@@ -17,9 +17,13 @@ on:
 permissions:
   contents: read
 
+# Only publishing runs share the serialized group. GitHub keeps a single pending
+# run per group and drops the older one, so a PR (or nightly dry-run) sharing it
+# silently cancelled a queued release. Dry-runs get a per-ref group instead and
+# cancel their superseded builds.
 concurrency:
-  group: release-dart
-  cancel-in-progress: false
+  group: release-dart-${{ github.event_name == 'push' && 'publish' || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   package:

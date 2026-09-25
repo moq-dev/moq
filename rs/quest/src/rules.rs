@@ -224,7 +224,7 @@ fn links(found: &mut Findings, root: &Path, known: &BTreeSet<&Path>, doc: &Doc) 
 		// a plain-text external condition (no quest link at all).
 		// moq-dev/moq.pro#1170 shipped the third shape: a customer-gate sentence
 		// mentioning a questline mid-line, which reads as context but IS a
-		// blocker, and so silently required all of the roadmap.
+		// blocker, and so silently required all of m2.
 		if link.section.as_deref() == Some("Required")
 			&& known.contains(path.as_path())
 			&& link.position != Position::Entry
@@ -255,7 +255,7 @@ fn index<'a>(found: &mut Findings, known: &BTreeSet<&Path>, docs: &'a [Doc]) -> 
 				continue;
 			}
 			// The index is a list of entries, not prose that happens to link:
-			// `See [One](/quest/dev/one.md)` must not make One look indexed.
+			// `See [One](/quest/m0/one.md)` must not make One look indexed.
 			if link.position != Position::Entry {
 				found.at(
 					&doc.path,

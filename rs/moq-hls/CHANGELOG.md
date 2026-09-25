@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2](https://github.com/moq-dev/moq/compare/moq-hls-v0.5.1...moq-hls-v0.5.2) - 2026-09-24
+
+### Other
+
+- updated the following local packages: moq-net, hang, moq-mux
+
+## [0.5.1](https://github.com/moq-dev/moq/compare/moq-hls-v0.5.0...moq-hls-v0.5.1) - 2026-09-23
+
+### Other
+
+- updated the following local packages: moq-tokio, hang, moq-mux
+
+## [0.5.0](https://github.com/moq-dev/moq/compare/moq-hls-v0.4.16...moq-hls-v0.5.0) - 2026-09-23
+
+### Added
+
+- *(gateway)* [**breaking**] align embedding APIs ([#3818](https://github.com/moq-dev/moq/pull/3818))
+- *(net)* [**breaking**] simplify origin scoping ([#3804](https://github.com/moq-dev/moq/pull/3804))
+- *(hang)* [**breaking**] unify catalog APIs ([#3813](https://github.com/moq-dev/moq/pull/3813))
+- *(net)* [**breaking**] slim the moq-net public surface ([#3779](https://github.com/moq-dev/moq/pull/3779))
+- *(net)* [**breaking**] announce prefixes on every wire; consumers read paths ([#3770](https://github.com/moq-dev/moq/pull/3770))
+- *(net)* [**breaking**] one name per announce, request, and origin config concept ([#3725](https://github.com/moq-dev/moq/pull/3725))
+- *(hang)* [**breaking**] one continuous broadcast clock at the catalog root ([#3675](https://github.com/moq-dev/moq/pull/3675))
+
+### Fixed
+
+- *(hls)* advertise only playable renditions ([#3824](https://github.com/moq-dev/moq/pull/3824))
+
+### Other
+
+- Unify mux track and rendition ownership ([#3857](https://github.com/moq-dev/moq/pull/3857))
+- *(net)* [**breaking**] name path roles without new types ([#3826](https://github.com/moq-dev/moq/pull/3826))
+- *(net)* [**breaking**] return the next deadline from driver polls ([#3828](https://github.com/moq-dev/moq/pull/3828))
+- *(net)* [**breaking**] drive time and cache cleanup explicitly ([#3825](https://github.com/moq-dev/moq/pull/3825))
+- *(net)* expose route cost fields ([#3802](https://github.com/moq-dev/moq/pull/3802))
+- Merge origin/main into dev
+- Merge remote-tracking branch 'origin/main' into merge-main-into-dev-20260914
+
 ### Changed
 
 - [**breaking**] Read the broadcast timeline from `catalog.archive`

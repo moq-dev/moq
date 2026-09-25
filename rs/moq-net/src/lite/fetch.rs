@@ -120,7 +120,7 @@ mod test {
 		msg.start_frame = 2;
 		msg.end_frame = Some(6);
 
-		let got = fetch_roundtrip(Version::Lite06Wip, &msg);
+		let got = fetch_roundtrip(Version::Lite06, &msg);
 		assert_eq!((got.start_frame, got.end_frame), (2, Some(6)));
 	}
 
@@ -132,9 +132,9 @@ mod test {
 		msg.end_frame = Some(2);
 
 		let mut buf = Vec::new();
-		msg.encode_msg(&mut buf, Version::Lite06Wip).unwrap();
+		msg.encode_msg(&mut buf, Version::Lite06).unwrap();
 		assert!(matches!(
-			Fetch::decode_msg(&mut buf.as_slice(), Version::Lite06Wip),
+			Fetch::decode_msg(&mut buf.as_slice(), Version::Lite06),
 			Err(DecodeError::InvalidSubscribeLocation)
 		));
 	}

@@ -9,7 +9,7 @@
 # generated `js/wasm/dist` loaded by a real browser.
 #
 # One relay per protocol flavour, because negotiation is the part that broke:
-#   lite   default versions        -> moq-lite-05 over its own ALPN
+#   lite   default versions        -> moq-lite-07 over its own ALPN
 #   ietf   --listen-version 19     -> moq-transport-19 over its own ALPN
 #   setup  --listen-version lite-02 -> the "moql" ALPN, version chosen by SETUP
 #
@@ -64,7 +64,7 @@ fi
 # name:version-flag:expected-version. An empty flag leaves the relay at its
 # defaults, which is the ALPN both sides prefer.
 FLAVOURS=(
-    "lite::moq-lite-05"
+    "lite::moq-lite-07"
     "ietf:moq-transport-19:moq-transport-19"
     "setup:moq-lite-02:moq-lite-02"
 )

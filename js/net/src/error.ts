@@ -82,6 +82,8 @@ export const StreamCode = Object.freeze(
 		TooFarBehind: 0x5 as StreamCode,
 		/** The track's content could not be parsed. */
 		MalformedTrack: 0x12 as StreamCode,
+		/** The peer took too long to answer a control request. */
+		ControlTimeout: 0x31 as StreamCode,
 		/** The requested broadcast or track does not exist at the peer. */
 		NotFound: 0x33 as StreamCode,
 		/** The group was superseded by a newer one and dropped. */
@@ -314,6 +316,20 @@ function localStreamCode(err: unknown): StreamCode {
 	// Session-scoped: the peer learns which rule it broke from the session close, not from here.
 	if (err instanceof ProtocolViolation) return StreamCode.SessionClosed;
 	return StreamCode.Internal;
+}
+
+/**
+ * The {@link StreamCode.ControlTimeout} error for a control request the peer never answered.
+ *
+ * A control request that outlives its deadline is not late content, so it does not go out as
+ * {@link StreamCode.DeliveryTimeout} the way a bare {@link TimeoutError} would. Callers that
+ * bound a request's response build this instead.
+ *
+ * @internal
+ */
+export function controlTimeout(cause: unknown): Stream {
+	const message = cause instanceof Error && cause.message ? cause.message : "control request timed out";
+	return new Stream(StreamCode.ControlTimeout, { cause, message });
 }
 
 /**

@@ -176,6 +176,7 @@ test("stream reset codes are shared only where the draft agrees", () => {
 		// Lite-only: the codes assigned in moq-lite's own 48-63 range are not in this
 		// registry at all, so no lite value ever reaches a moq-transport peer.
 		for (const code of [
+			StreamCode.ControlTimeout,
 			StreamCode.NotFound,
 			StreamCode.Old,
 			StreamCode.Evicted,

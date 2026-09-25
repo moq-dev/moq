@@ -14,7 +14,7 @@ import { registerWire, trackOf, type Broadcast as Wire } from "./wire.ts";
 export interface Announcer {
 	/** Advertise or re-price this broadcast's path. */
 	announce(route: Route): void;
-	/** Retract the advertisement, leaving the broadcast reachable by exact path. */
+	/** Retract the advertisement from local consumers and peers alike. */
 	unannounce(): void;
 }
 
@@ -244,8 +244,8 @@ export class Producer {
 	/**
 	 * Advertise this broadcast's exact path, or re-price a standing advertisement in place.
 	 *
-	 * Call it once the tracks a subscriber needs first (a catalog) exist. The broadcast is
-	 * reachable by exact path either way; announcing only makes it discoverable. Retracts on
+	 * Call it once the tracks a subscriber needs first (a catalog) exist. Until then the
+	 * broadcast exists for nobody, on its own origin or at a peer. Retracts on
 	 * {@link unannounce} or {@link close}. Throws if this producer was not created through an
 	 * origin, or if the broadcast is already closed.
 	 */
@@ -257,7 +257,10 @@ export class Producer {
 		this.#announcer.announce(Route.normalize(route));
 	}
 
-	/** Retract the advertisement of this broadcast's path, if any. */
+	/**
+	 * Retract the advertisement of this broadcast's path, if any, from local consumers and
+	 * peers alike. {@link announce} brings it back.
+	 */
 	unannounce(): void {
 		this.#announcer?.unannounce();
 	}

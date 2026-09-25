@@ -4,7 +4,7 @@ use crate::runtime::Timers;
 use crate::time::{Clock, Instant};
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_22, ALPN_LITE, ALPN_LITE_03,
-	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
+	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07, Consume, Error, NEGOTIATED, Session, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup, stats,
 };
@@ -66,8 +66,8 @@ impl Client {
 		self
 	}
 
-	/// Set the request path to advertise in the SETUP (moq-lite-05 and every
-	/// moq-transport draft we speak).
+	/// Set the request path to advertise in SETUP (moq-lite-05 and newer, and
+	/// every moq-transport draft we speak).
 	///
 	/// Only for transports that carry no request URI of their own (native QUIC, qmux
 	/// over TCP/TLS, unix sockets), so the server learns which path the client wants.
@@ -144,10 +144,7 @@ impl Client {
 			.subscribe
 			.clone()
 			.map(|origin| origin.with_stats(self.stats.clone()));
-		let publish = match self.peer_hop {
-			Some(peer) => publish.map(|origin| origin.excluding(peer)),
-			None => publish,
-		};
+		let publish = publish.map(|origin| origin.excluding(self.peer_hop.unwrap_or(crate::Hop::UNKNOWN)));
 		(publish, subscribe)
 	}
 
@@ -219,7 +216,8 @@ impl Client {
 	{
 		let runtime = Clock::new(now);
 		let version = match session.protocol() {
-			Some(ALPN_LITE_06_WIP) => lite::Version::Lite06Wip,
+			Some(ALPN_LITE_07) => lite::Version::Lite07,
+			Some(ALPN_LITE_06) => lite::Version::Lite06,
 			Some(ALPN_LITE_05) => lite::Version::Lite05,
 			Some(ALPN_LITE_04) => lite::Version::Lite04,
 			Some(ALPN_LITE_03) => lite::Version::Lite03,
@@ -303,9 +301,10 @@ impl Client {
 					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
-			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06_WIP)) => {
+			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_07)) => {
 				let version = match alpn {
-					ALPN_LITE_06_WIP => lite::Version::Lite06Wip,
+					ALPN_LITE_07 => lite::Version::Lite07,
+					ALPN_LITE_06 => lite::Version::Lite06,
 					_ => lite::Version::Lite05,
 				};
 				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
@@ -343,6 +342,7 @@ impl Client {
 			parameters.set_bytes(ietf::ParameterBytes::Path, path.clone().into_bytes());
 		}
 		ietf::solicit::into_setup(&mut parameters, ietf_encoding);
+		ietf::hidden::into_setup(&mut parameters, ietf_encoding);
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
 		let client = setup::Client {
@@ -392,6 +392,7 @@ impl Client {
 					.map(ietf::RequestId);
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&parameters, v)?,
+					hidden: ietf::hidden::from_setup(&parameters, v),
 					..Default::default()
 				};
 

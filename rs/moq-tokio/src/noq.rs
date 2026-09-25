@@ -719,8 +719,8 @@ pub(crate) async fn accept(
 		}
 		// Recognize any moq ALPN this server actually offered (its configured versions),
 		// not the global default set. rustls only negotiates an ALPN the server offered, so
-		// this covers opt-in / work-in-progress versions (e.g. moq-lite-06-wip) that are
-		// deliberately absent from `moq_net::ALPNS`.
+		// this also covers versions omitted from `moq_net::ALPNS` but enabled
+		// in this server's configuration.
 		alpn if alpns.contains(&alpn) => {
 			let identity = crate::tls::PeerIdentity::from_any(conn.peer_identity());
 			// Raw QUIC carries no request URL; the path rides the SETUP. The TLS SNI is the

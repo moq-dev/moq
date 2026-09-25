@@ -6,5 +6,11 @@
 	},
 	// config.ts is not type-checked: VitePress's own nav types reject the
 	// `link` + `items` combination the theme relies on.
-	"include": [".vitepress/drafts.ts", ".vitepress/drafts.test.ts"]
+	"include": [
+		".vitepress/drafts.ts",
+		".vitepress/drafts.test.ts",
+		"concept/audio-jitter/reference.ts",
+		"concept/audio-jitter/corpus.ts",
+		"concept/audio-jitter/corpus.test.ts"
+	]
 }

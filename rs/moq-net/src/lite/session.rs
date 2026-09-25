@@ -24,7 +24,7 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 /// the session, so the caller can inspect the advertised path (and gate on it) before
 /// serving. lite-05+ only.
 ///
-/// Blocks on the peer's Setup Stream, which every lite-05 endpoint opens at startup.
+/// Blocks on the peer's Setup Stream, which every lite-05+ endpoint opens at startup.
 /// Almost always the first unidirectional stream; any other uni stream that races
 /// ahead of it is `STOP_SENDING`-ed and skipped (we don't support proactive uni
 /// PUBLISH, so nothing legitimate precedes the SETUP today). The eventual home for

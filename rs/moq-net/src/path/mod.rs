@@ -263,6 +263,12 @@ impl<'a> Path<'a> {
 		}
 	}
 
+	/// Whether a segment starts with `.`, which hides the path from announce
+	/// discovery below the requested prefix.
+	pub(crate) fn is_hidden(&self) -> bool {
+		self.parts().any(|part| part.starts_with('.'))
+	}
+
 	/// The normalized path as a string, with no leading or trailing slash.
 	pub fn as_str(&self) -> &str {
 		match &self.0 {

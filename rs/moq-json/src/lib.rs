@@ -18,6 +18,7 @@
 //! managing a timeline and a catalog estimate.
 
 mod diff;
+mod merge;
 pub mod snapshot;
 pub mod stream;
 pub mod window;

@@ -1,15 +1,15 @@
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
-import { error, ProtocolViolation, reason } from "../error.ts";
+import { controlTimeout, error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
-import { withTimeout } from "../util/timeout.ts";
+import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
@@ -69,6 +69,14 @@ type SubscribeSetupState = {
 	rejected?: boolean;
 };
 
+/** A local announce reader's filter: its scope, the prefix it asked for, and its hidden opt-in. */
+type Filter = { scope: Path.Pattern; prefix: Path.Valid; hidden: boolean };
+
+/** Whether a reader with `filter` sees an announcement at `path`. */
+function sees(filter: Filter, path: Path.Valid): boolean {
+	return scopeOverlaps(filter.scope, path) && (filter.hidden || !hiddenBelow(filter.prefix, path));
+}
+
 /**
  * Handles subscribing to broadcasts using moq-transport protocol.
  * Uses the stream-per-request pattern (real bidi streams for v17, virtual for v14-v16).
@@ -109,7 +117,10 @@ export class Subscriber {
 	#announced = new Map<Path.Valid, { count: number; route: Route }>();
 
 	// Any consumers that want each new announcement, keyed by their local filter.
-	#announcedConsumers = new Map<announce.Producer, Path.Pattern>();
+	#announcedConsumers = new Map<announce.Producer, Filter>();
+
+	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
+	#hidden: boolean;
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -119,14 +130,18 @@ export class Subscriber {
 	constructor({
 		session,
 		cluster,
+		hidden = false,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
 		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
 		cluster?: Cluster.Hops;
+		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
+		hidden?: boolean;
 	}) {
 		this.#session = session;
 		this.#cluster = cluster;
+		this.#hidden = hidden;
 	}
 
 	/**
@@ -154,13 +169,19 @@ export class Subscriber {
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
 	 * that only answers are both discovered.
+	 *
+	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
+	 * `options.hidden` opts in. The opt-in rides the SUBSCRIBE_NAMESPACE when the peer
+	 * understands it (MoQ Hidden); the rule is also applied here, since an unsolicited
+	 * PUBLISH_NAMESPACE or a peer that never heard of it hides nothing.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
+	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
 		// The wire speaks announce interest by prefix.
 		const prefix = scopeHead(scope);
+		const filter = { scope, prefix, hidden: options?.hidden ?? false };
 		const announced = new announce.Producer();
 		for (const [active, info] of this.#announced) {
-			if (!scopeOverlaps(scope, active)) continue;
+			if (!sees(filter, active)) continue;
 			announced.append({
 				prefix: active,
 				captures: scopeCaptures(scope, active),
@@ -168,9 +189,9 @@ export class Subscriber {
 				route: info.route,
 			});
 		}
-		this.#announcedConsumers.set(announced, scope);
+		this.#announcedConsumers.set(announced, filter);
 
-		void this.#runAnnounced(announced, prefix).finally(() => {
+		void this.#runAnnounced(announced, prefix, filter.hidden && this.#hidden).finally(() => {
 			this.#announcedConsumers.delete(announced);
 			announced.close();
 		});
@@ -191,8 +212,9 @@ export class Subscriber {
 		this.#announced.set(path, { count: 1, route });
 
 		console.debug(`announced: broadcast=${path} active=true`);
-		for (const [consumer, scope] of this.#announcedConsumers) {
-			if (!scopeOverlaps(scope, path)) continue;
+		for (const [consumer, filter] of this.#announcedConsumers) {
+			if (!sees(filter, path)) continue;
+			const scope = filter.scope;
 			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "announced", route });
 		}
 	}
@@ -207,8 +229,9 @@ export class Subscriber {
 		if (existing === undefined || routesEqual(existing.route, route)) return;
 		existing.route = route;
 		console.debug(`announced: broadcast=${path} rerouted`);
-		for (const [consumer, scope] of this.#announcedConsumers) {
-			if (!scopeOverlaps(scope, path)) continue;
+		for (const [consumer, filter] of this.#announcedConsumers) {
+			if (!sees(filter, path)) continue;
+			const scope = filter.scope;
 			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "updated", route });
 		}
 	}
@@ -231,8 +254,9 @@ export class Subscriber {
 		this.#consumes.evict(path);
 		console.debug(`announced: broadcast=${path} active=false`);
 
-		for (const [consumer, scope] of this.#announcedConsumers) {
-			if (!scopeOverlaps(scope, path)) continue;
+		for (const [consumer, filter] of this.#announcedConsumers) {
+			if (!sees(filter, path)) continue;
+			const scope = filter.scope;
 			try {
 				consumer.append({
 					prefix: path,
@@ -246,7 +270,7 @@ export class Subscriber {
 		}
 	}
 
-	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid) {
+	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, hidden: boolean) {
 		const version = this.#session.version;
 
 		// Suffixes live on this stream, so a repeat is recognized as an update to the
@@ -283,10 +307,16 @@ export class Subscriber {
 					version === Version.DRAFT_17
 				) {
 					await stream.writer.u53(SubscribeNamespaceLegacy.id);
-					await new SubscribeNamespaceLegacy({ namespace: prefix, requestId }).encode(stream.writer, version);
+					await new SubscribeNamespaceLegacy({ namespace: prefix, requestId, hidden }).encode(
+						stream.writer,
+						version,
+					);
 				} else {
 					await stream.writer.u53(SubscribeNamespace.id);
-					await new SubscribeNamespace({ namespace: prefix, requestId }).encode(stream.writer, version);
+					await new SubscribeNamespace({ namespace: prefix, requestId, hidden }).encode(
+						stream.writer,
+						version,
+					);
 				}
 				console.debug(`subscribe_namespace written: requestId=${requestId}`);
 
@@ -485,7 +515,8 @@ export class Subscriber {
 			trackAlias = result.alias;
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
-			const e = error(err);
+			// A control request that timed out is not late content, so it carries its own code.
+			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
 			request.reject(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,

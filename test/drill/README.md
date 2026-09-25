@@ -12,7 +12,8 @@ and the sensitivity proof.
 
 ```bash
 just test drill                 # the drills, plus the negative control
-just test drill relay_killed    # one of them
+just test drill relay_killed    # one of them, in both lanes
+just test drill impaired        # every drill over the impaired path
 just test drill-sensitivity     # prove each drill fails without its fix
 ```
 
@@ -47,13 +48,66 @@ would all pass for free.
 ### Killing the relay
 
 The relay runs on its own tokio runtime and is killed by dropping it. Aborting
-the `run` task is not enough, because `moq_relay::serve` spawns a task per
+the `run` task is not enough, because the relay accept loop spawns a task per
 connection and those keep serving a relay whose accept loop is gone.
 
 A dropped runtime sends no `CONNECTION_CLOSE`, exactly like a killed process, so
 the clients discover the loss through the QUIC idle timeout. The drills set that
 to two seconds (and the keep-alive well inside it), which is what keeps a crash
 bounded rather than fast.
+
+## Two lanes
+
+Every drill runs twice, as `<drill>::loopback` and `<drill>::impaired`. The
+`lanes!` macro generates both from one body, so a scenario cannot drift between
+them. In the impaired lane every client dials a `moq-shaper` in front of the
+relay instead of the relay itself. The shaper is a userspace UDP relay that
+forwards each datagram, both ways, after applying the same profile:
+
+| Impairment | Value |
+|---|---|
+| delay | 20ms each way, plus or minus 5ms of uniform jitter |
+| loss | 5% |
+| reorder | 2% skip the delay and overtake whatever is in flight |
+| rate | 10 Mbit/s token bucket, 1500 byte burst, 100ms queue then tail drop |
+
+It is a datagram relay, not an HTTP or TCP proxy, neither of which can impair
+QUIC. It needs no capabilities, works the same on macOS and Linux, and touches
+nothing on the host; QUIC is indifferent to the extra hop.
+The shaper runs on the test's runtime rather than the relay's, so killing the
+relay leaves the path up, the way a network outlives the server behind it.
+
+Every decision the shaper makes comes from one seed. Each run picks a fresh one
+and prints it, with the profile, as `impaired: MOQ_SHAPER_SEED=...`; setting that
+variable replays the same decisions. Kernel scheduling still varies delivery
+timing, so the seed makes the decisions reproducible, not the clock. Each client
+draws from its own stream, numbered in the order clients first send, so
+concurrent clients that race to connect can swap streams between runs.
+
+The impairment is asserted, not assumed. The shaper counts what it lost,
+throttled, delayed, and reordered, the drill prints those counters, and
+`Shaper::verify` fails the run when an impairment the profile configures never
+acted and the traffic makes that silence implausible (below one in 10,000). A
+delay always acts, so one undelayed run fails outright, while a short run can
+plausibly see no loss. A rate limit only bites on traffic that exceeds it, so
+its counts are reported but never required. A profile that silently did nothing
+would turn this lane into a second loopback run that passes for free.
+
+There are no retries: a drill that only passes on loopback is a finding.
+
+The same shaper is a binary, for putting in front of a relay from another
+process. It applies one profile both ways, prints the seed at start and the
+counters at exit (Ctrl-C or SIGTERM), and exits nonzero if the profile never
+acted:
+
+```bash
+cargo run -p moq-shaper -- --listen 127.0.0.1:4444 --target 127.0.0.1:4443 \
+    --delay 20ms --jitter 5ms --loss 0.05 --reorder 0.02 --rate 10000000 --seed 1
+```
+
+Kernel-real impairment (`netem` in a network namespace) is deliberately not
+used: it is Linux only, needs `CAP_NET_ADMIN`, and the drills grade the
+protocol's reaction to loss and delay, not the kernel's rendering of them.
 
 ## Sensitivity
 
@@ -66,14 +120,17 @@ disposable copy of the tree; the checkout it runs from is never modified.
 
 ```bash
 just test drill-sensitivity --list
-just test drill-sensitivity reconnect-linger-disabled
+just test drill-sensitivity reconnect-stops-after-session-loss
 ```
+
+Each mutation names its drill's `loopback` lane, which is the faster of the two
+and grades the same body.
 
 | Mutation | Removes | Drill that must fail |
 |---|---|---|
-| `subscriber-leaks-broadcasts` | releasing the broadcasts a subscribing session fed when that session ends | `cancel_under_backpressure_releases_the_reader` |
-| `reconnect-linger-disabled` | the linger window that carries a broadcast across a reconnect | `relay_killed_mid_group_aborts_then_resumes` |
-| `relay-linger-never-expires` | the end of the relay's linger window for a vanished publisher | `interrupted_publisher_republishes_new_content` |
+| `subscriber-leaks-broadcasts` | releasing the broadcasts a subscribing session fed when that session ends | `cancel_under_backpressure_releases_the_reader::loopback` |
+| `reconnect-stops-after-session-loss` | redialing after an established session is lost | `relay_killed_mid_group_aborts_then_resumes::loopback` |
+| `relay-withdraws-lost-publisher` | withdrawing a publisher's announcements when its session is lost | `interrupted_publisher_republishes_new_content::loopback` |
 
 A mutated tree that fails to compile is a failure of the proof, not a pass: a
 compile error shows the patch touched something, not that the drill was
@@ -104,9 +161,4 @@ corpus nobody replays.
 
 ## Not covered here
 
-- An impaired path (delay, loss, rate limits). Loopback is the only path these
-  drills see; `quest/next/transport-impairment-profile.md` adds the seeded UDP
-  shaper they run under.
 - CI lane scheduling.
-- Failure bundles beyond what the test harness prints, which belongs to
-  `quest/next/qa-failure-artifacts.md`.

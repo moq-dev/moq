@@ -43,7 +43,7 @@ typedef BroadcastRequest = MoqBroadcastRequest;
 /// A stream of route announcements and retractions under a prefix.
 typedef AnnounceConsumer = MoqAnnounceConsumer;
 
-/// A literal prefix plus an optional relative pattern for announcement discovery.
+/// A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery.
 typedef AnnounceConfig = MoqAnnounceConfig;
 
 /// A pending wait for a route to cover a specific path.
@@ -69,6 +69,9 @@ typedef TrackRequest = MoqTrackRequest;
 
 /// A stream of uncached group requests for one track, for serving fetches on demand.
 typedef TrackDynamic = MoqTrackDynamic;
+
+/// A watch-only handle to whether a published track has subscribers; holding it keeps nothing open.
+typedef TrackDemand = MoqTrackDemand;
 
 /// The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind.
 typedef TrackConsumer = MoqTrackConsumer;

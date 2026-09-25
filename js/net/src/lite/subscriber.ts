@@ -3,15 +3,15 @@ import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
-import { error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
+import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { groupBounds, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
-import { withTimeout } from "../util/timeout.ts";
+import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcastMaybe } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -160,21 +160,31 @@ export class Subscriber {
 	 * Reflected announces (those whose hop chain already includes this
 	 * connection) are always dropped: moq-lite-06 has none to keep, and older
 	 * versions stay consistent with that.
+	 *
+	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
+	 * `options.hidden` opts in. The opt-in rides the request on lite-07+; an older peer
+	 * never hides anything, so the rule is also applied here.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
+	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
 		const announced = new announce.Producer();
 		// The wire speaks announce interest by prefix, and echoes suffixes beneath it.
-		void this.#runAnnounced(announced, scopeHead(scope), scope);
+		void this.#runAnnounced(announced, scopeHead(scope), scope, options?.hidden ?? false);
 		return announced.consume();
 	}
 
-	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, scope: Path.Pattern): Promise<void> {
+	async #runAnnounced(
+		announced: announce.Producer,
+		prefix: Path.Valid,
+		scope: Path.Pattern,
+		hidden: boolean,
+	): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
 		// Lite04/05: send our own session-level Hop ID so the peer can skip announces
 		// whose hop chain already passed through us. Encoding drops it on every other
 		// version, where we drop the reflected announce on receipt instead. Matches the
 		// Rust subscriber's `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
-		const msg = new AnnounceRequest(prefix, this.hop);
+		const msg = new AnnounceRequest(prefix, this.hop, hidden);
+		const visible = (path: Path.Valid) => scopeOverlaps(scope, path) && (hidden || !hiddenBelow(prefix, path));
 
 		// Opened outside the try so the catch can reach it: a protocol violation below has
 		// to reset the stream, not just close our side of it.
@@ -240,7 +250,7 @@ export class Subscriber {
 							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
 						const route = { hops: [UNKNOWN_HOP], cost: Cost.zero };
-						const live = scopeOverlaps(scope, path);
+						const live = visible(path);
 						const captures = scopeCaptures(scope, path);
 						advertised.set(path, { publisher: undefined, live, route, captures });
 						if (!live) continue;
@@ -405,7 +415,7 @@ export class Subscriber {
 				}
 				const route: Route = { hops: fullHops, cost: cost ?? Cost.zero };
 				const captures = scopeCaptures(scope, path);
-				if (!scopeOverlaps(scope, path)) {
+				if (!visible(path)) {
 					advertised.set(path, { publisher, live: false, route, captures });
 					continue;
 				}
@@ -530,7 +540,9 @@ export class Subscriber {
 			);
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
-			const e = error(err);
+			// The setup outlived its deadline waiting for the first response: a control
+			// timeout, not content that arrived late.
+			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
 			request.reject(e);
 			this.#subscribes.delete(id);
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);

@@ -12,7 +12,7 @@
 # Usage:
 #
 #     source "$(dirname "${BASH_SOURCE[0]}")/../lib/harness.sh"
-#     harness_begin smoke "just test smoke"
+#     harness_begin interop "just test interop"
 #     harness_port relay
 #     harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$HARNESS_RUN/relay.toml"
 #     harness_endpoint relay "http://127.0.0.1:$HARNESS_PORT"
@@ -56,7 +56,7 @@ harness_argv() {
 }
 
 # Print the environment overrides among NAMES that are set, as a requoted prefix
-# for the rerun command: `harness_env SMOKE_PORT SMOKE_PROFILE`. Timing, port,
+# for the rerun command: `harness_env INTEROP_PORT INTEROP_PROFILE`. Timing, port,
 # and profile knobs arrive this way rather than in argv, so a command built from
 # argv alone reruns with the defaults and reproduces a different test.
 #
@@ -86,6 +86,9 @@ harness_begin() {
     # owner even where the temp root itself is world-readable.
     chmod 700 "$HARNESS_RUN"
     HARNESS_RERUN="$rerun"
+    # The browser drivers cannot see a shell variable, and a Playwright trace has
+    # to land beside the logs it explains, so the path rides the environment.
+    export MOQ_TEST_RUN="$HARNESS_RUN"
 
     # Cancellation needs its own traps: children run in their own process groups
     # (see `harness_spawn`), so a ^C aimed at this shell's group never reaches
@@ -127,7 +130,7 @@ harness_valid_port() {
 # Reserve a port for this run, held until it exits, and set HARNESS_PORT.
 #
 # `harness_port <label> [wanted]`. With `wanted` that exact port is taken or the
-# call fails, which is what an explicit SMOKE_PORT/WASM_PORT asks for; without it
+# call fails, which is what an explicit INTEROP_PORT/WASM_PORT asks for; without it
 # the search walks up from MOQ_TEST_PORT_BASE.
 #
 # The answer lands in a variable rather than on stdout because `$(harness_port)`
@@ -381,16 +384,18 @@ harness_finish() {
 
     [[ -n "$HARNESS_RUN" ]] || return "$status"
 
-    if [[ "${MOQ_TEST_KEEP:-0}" == 0 ]]; then
+    # A failing run is exactly when the logs matter, so keep it without asking;
+    # MOQ_TEST_KEEP does the same for a passing run you want to inspect.
+    if [[ "${MOQ_TEST_KEEP:-0}" == 0 && "$status" -eq 0 ]]; then
         rm -rf "$HARNESS_RUN"
     else
         # The ports are already released and the children are gone, so a retained
         # directory is evidence only. Say so rather than implying a live session.
         echo "kept: $HARNESS_RUN (children reaped, ports released)" >&2
         echo "remove it with: rm -rf $HARNESS_RUN" >&2
-    fi
-    if [[ -n "$HARNESS_RERUN" && ("$status" -ne 0 || "${MOQ_TEST_KEEP:-0}" != 0) ]]; then
-        echo "rerun: $HARNESS_RERUN" >&2
+        if [[ -n "$HARNESS_RERUN" ]]; then
+            echo "rerun: $HARNESS_RERUN" >&2
+        fi
     fi
     return "$status"
 }

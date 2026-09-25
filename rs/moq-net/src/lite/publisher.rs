@@ -461,7 +461,7 @@ enum AnnounceState {
 	Decode,
 	/// Waiting on the peer's SETUP for the session-wide excluded origin
 	/// (lite-05, whose wire carries no per-stream exclude_hop).
-	ExcludeHop { prefix: crate::PathOwned },
+	ExcludeHop { prefix: crate::PathOwned, hidden: bool },
 	/// Streaming announce updates.
 	Run {
 		origin: origin::Consumer,
@@ -487,6 +487,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 					let mut cx = Context::from_waker(waiter.waker());
 					let interest = ready!(stream.reader.poll_decode::<lite::AnnounceRequest>(&mut cx))?;
 					let prefix = interest.prefix.to_owned();
+					let hidden = interest.hidden;
 
 					// The identity whose routes we filter out. Lite-04/05 carry it per
 					// announce stream; lite-06+ reads the session-wide SETUP Hop
@@ -499,20 +500,20 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 							0 => assigned,
 							id => id,
 						};
-						self.start(prefix, exclude_hop);
+						self.start(prefix, exclude_hop, hidden);
 					} else if self.shared.version.has_setup_stream() {
-						self.state = AnnounceState::ExcludeHop { prefix };
+						self.state = AnnounceState::ExcludeHop { prefix, hidden };
 					} else {
-						self.start(prefix, assigned);
+						self.start(prefix, assigned, hidden);
 					}
 				}
-				AnnounceState::ExcludeHop { prefix } => {
+				AnnounceState::ExcludeHop { prefix, hidden } => {
 					let assigned = self.shared.peer_hop.map(|origin| origin.id()).unwrap_or(0);
 					let exclude_hop = ready!(self.shared.peer_setup.poll_hop(waiter))
 						.map(|origin| origin.id())
 						.unwrap_or(assigned);
-					let prefix = prefix.clone();
-					self.start(prefix, exclude_hop);
+					let (prefix, hidden) = (prefix.clone(), *hidden);
+					self.start(prefix, exclude_hop, hidden);
 				}
 				AnnounceState::Run { origin, announced, run } => {
 					let stream = self.stream.as_mut().expect("stream present");
@@ -537,7 +538,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		}
 	}
 
-	fn start(&mut self, prefix: crate::PathOwned, exclude_hop: u64) {
+	fn start(&mut self, prefix: crate::PathOwned, exclude_hop: u64, hidden: bool) {
 		// If the requested prefix is outside our scope (an empty origin, or a token
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
 		// empty set and keep the stream open (the subscriber treats a FIN here as a
@@ -555,9 +556,12 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
-		let origin = match Hop::new(exclude_hop) {
-			Ok(peer) => origin.excluding(peer),
-			Err(_) => origin,
+		let origin = origin.excluding(Hop::new(exclude_hop).unwrap_or(Hop::UNKNOWN));
+		// Hidden routes are left out unless the peer opted in. A publish origin that
+		// already opted in (the caller's choice for this peer) keeps them either way.
+		let origin = match hidden {
+			true => origin.with_hidden(true),
+			false => origin,
 		};
 		let announced = origin.announced();
 		let run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
@@ -1498,7 +1502,7 @@ mod test {
 		// On lite-06 the declared budget is what resolves the start, so it stands.
 		let mut declared =
 			producer.subscribe(track::Subscription::default().with_max_age(std::time::Duration::from_secs(5)));
-		position_cursor(&mut declared, Version::Lite06Wip, None);
+		position_cursor(&mut declared, Version::Lite06, None);
 		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
 
@@ -1642,7 +1646,7 @@ mod announce_test {
 
 	type TestPublisher = Publisher<SinkSession>;
 
-	const VERSION: Version = Version::Lite06Wip;
+	const VERSION: Version = Version::Lite06;
 
 	/// The hops stamped on every harness route.
 	fn pub_hops() -> Hops {
@@ -2212,7 +2216,7 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	emit_range: bool,
 	start_sent: bool,
 	end_sent: bool,
-	// Serve datagrams off this same subscriber, but only on lite-05 over a
+	// Serve datagrams off this same subscriber, but only on lite-05+ over a
 	// datagram-capable transport (qmux/WebSocket/TCP/UDS report size 0). No group
 	// fallback: otherwise off.
 	datagrams: bool,
@@ -2762,7 +2766,7 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			version: Version::Lite06Wip,
+			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
 		};
 
@@ -2802,7 +2806,7 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			version: Version::Lite06Wip,
+			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
 		};
 
@@ -2846,7 +2850,7 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			version: Version::Lite06Wip,
+			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
 		};
 
@@ -2908,7 +2912,7 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			version: Version::Lite06Wip,
+			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
 		};
 
@@ -2977,7 +2981,7 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			version: Version::Lite06Wip,
+			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
 		};
 
@@ -3047,7 +3051,7 @@ mod tests {
 			runtime: crate::time::Clock::tokio(),
 			session: SinkSession::new(Default::default()),
 			origin: origin.consume(),
-			version: Version::Lite06Wip,
+			version: Version::Lite06,
 			peer_setup,
 			goaway,
 			peer_hop: Some(assigned),

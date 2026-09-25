@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/moq-dev/moq/compare/moq-video-v0.1.0...moq-video-v0.1.1) - 2026-09-24
+
+### Added
+
+- *(moq-video)* one VAAPI render node for encode, decode and resize ([#4023](https://github.com/moq-dev/moq/pull/4023))
+
+## [0.0.27](https://github.com/moq-dev/moq/compare/moq-video-v0.0.26...moq-video-v0.0.27) - 2026-09-23
+
+### Fixed
+
+- *(ci)* repair nightly builds hidden behind the first failure ([#3956](https://github.com/moq-dev/moq/pull/3956))
+
+## [0.0.26](https://github.com/moq-dev/moq/compare/moq-video-v0.0.25...moq-video-v0.0.26) - 2026-09-23
+
+### Added
+
+- *(video)* fork v4l in-tree with checked-in V4L2 bindings ([#3867](https://github.com/moq-dev/moq/pull/3867))
+- *(video)* GPU color conversion and NVENC for imported Vulkan frames ([#3869](https://github.com/moq-dev/moq/pull/3869))
+- *(video)* [**breaking**] type the group configuration and make cut fallible ([#3876](https://github.com/moq-dev/moq/pull/3876))
+- preserve video capture timing ([#3849](https://github.com/moq-dev/moq/pull/3849))
+- *(video)* import retained Vulkan images into CUDA ([#3836](https://github.com/moq-dev/moq/pull/3836))
+- *(net)* [**breaking**] simplify origin scoping ([#3804](https://github.com/moq-dev/moq/pull/3804))
+- *(hang)* [**breaking**] unify catalog APIs ([#3813](https://github.com/moq-dev/moq/pull/3813))
+- *(net)* [**breaking**] slim the moq-net public surface ([#3779](https://github.com/moq-dev/moq/pull/3779))
+- *(net)* [**breaking**] announce prefixes on every wire; consumers read paths ([#3770](https://github.com/moq-dev/moq/pull/3770))
+- [**breaking**] borrow publisher finish so abort can still run ([#3714](https://github.com/moq-dev/moq/pull/3714))
+- *(hang)* [**breaking**] timelines only move forward ([#3711](https://github.com/moq-dev/moq/pull/3711))
+
+### Fixed
+
+- *(video)* compile the macOS capture backends after the Frame reshape ([#3877](https://github.com/moq-dev/moq/pull/3877))
+- *(nvenc)* [**breaking**] make driver loading fallible ([#3838](https://github.com/moq-dev/moq/pull/3838))
+- *(video)* convert CUDA device UUID bytes portably ([#3861](https://github.com/moq-dev/moq/pull/3861))
+- *(nvenc)* [**breaking**] retain resources through completion ([#3835](https://github.com/moq-dev/moq/pull/3835))
+- *(video)* [**breaking**] confine synchronous codecs to their thread ([#3837](https://github.com/moq-dev/moq/pull/3837))
+- *(moq-audio,moq-video)* build capture and Android again, and gate both on PRs ([#3850](https://github.com/moq-dev/moq/pull/3850))
+- *(net)* drop origin source track when last reader leaves
+
+### Other
+
+- *(rs)* read constant-size chunks with as_chunks ([#3899](https://github.com/moq-dev/moq/pull/3899))
+- *(deps)* bump the cargo group with 3 updates ([#3905](https://github.com/moq-dev/moq/pull/3905))
+- *(video)* validate the GPU conversion and NVENC path on NVIDIA hardware ([#3890](https://github.com/moq-dev/moq/pull/3890))
+- *(quest)* complete the media release review ([#3878](https://github.com/moq-dev/moq/pull/3878))
+- *(video)* [**breaking**] separate decoder output from subscription policy ([#3875](https://github.com/moq-dev/moq/pull/3875))
+- Unify mux track and rendition ownership ([#3857](https://github.com/moq-dev/moq/pull/3857))
+- Make media backends optional ([#3839](https://github.com/moq-dev/moq/pull/3839))
+- *(video)* [**breaking**] type frame conversions ([#3846](https://github.com/moq-dev/moq/pull/3846))
+- *(mux)* [**breaking**] share media rate policy ([#3840](https://github.com/moq-dev/moq/pull/3840))
+- *(net)* [**breaking**] return the next deadline from driver polls ([#3828](https://github.com/moq-dev/moq/pull/3828))
+- *(net)* [**breaking**] drive time and cache cleanup explicitly ([#3825](https://github.com/moq-dev/moq/pull/3825))
+- Merge origin/main into dev
+- Merge remote-tracking branch 'origin/main' into merge-main-into-dev-20260914
+
 ### Added
 
 - Import retained Vulkan RGBA8 slots into CUDA with explicit timeline synchronization.

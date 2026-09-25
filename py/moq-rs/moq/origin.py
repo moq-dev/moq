@@ -180,24 +180,28 @@ class OriginConsumer:
     def __init__(self, inner: MoqOriginConsumer) -> None:
         self._inner = inner
 
-    def announced(self, prefix: str = "", *, filter: str | None = None) -> AnnounceConsumer:
-        """Iterate routes in the literal ``prefix`` matching the optional pattern ``filter``."""
-        return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter)))
+    def announced(self, prefix: str = "", *, filter: str | None = None, hidden: bool = False) -> AnnounceConsumer:
+        """Iterate routes in the literal ``prefix`` matching the optional pattern ``filter``.
+
+        Paths with a segment starting with ``.`` below ``prefix`` are hidden unless ``hidden``.
+        """
+        return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter, hidden=hidden)))
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
         """Await the broadcast at ``path``, resolving once something can serve it.
 
-        Serving and advertising are separate, so a local broadcast at the exact
-        path resolves without ever being announced.
+        A broadcast created on this origin resolves once it is announced, like a
+        remote one.
         """
         return AnnouncedBroadcast(self._inner.announced_broadcast(path))
 
     async def request_broadcast(self, path: str) -> BroadcastConsumer:
         """Request a broadcast by path, resolving as soon as it can be served.
 
-        Resolution order: a local broadcast at the exact path, then the best
-        announced route covering the path (served on demand by the session that
-        announced it), then a dynamic handler on the origin (if any). Unlike
+        Resolves through the best announced route covering the path: an
+        announced broadcast on this origin, a route a session announced (served
+        on demand by that session), or a dynamic handler on the origin. An
+        unannounced broadcast is unroutable. Unlike
         `announced_broadcast`, this answers for what is reachable now and raises
         if nothing can serve the path.
         """
@@ -240,9 +244,9 @@ class OriginProducer:
     def create_broadcast(self, path: str) -> BroadcastProducer:
         """Create a broadcast at ``path``, returning the producer that feeds it.
 
-        The broadcast starts unadvertised: reachable by exact path, but not
-        visible to announcement streams. Advertise it with
-        :meth:`BroadcastProducer.announce` after populating tracks. Create,
+        The broadcast is invisible and unroutable, for this origin's consumers
+        and peers alike, until :meth:`BroadcastProducer.announce`. Announce it
+        after populating tracks. Create,
         :meth:`dynamic` if tracks are served on demand, populate, then announce.
         ``finish()`` unpublishes immediately, while dropping the producer without
         finishing also unpublishes but reads to subscribers as a failure rather

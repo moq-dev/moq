@@ -647,9 +647,8 @@ where
 	/// our namespace -- a peer outside it has never heard of our root, so a rooted
 	/// subscriber asks for its scope and mounts the replies under the root.
 	///
-	/// Asked unconditionally, without waiting on the peer's SETUP: a peer with nothing to
-	/// advertise answers with an empty set, which costs one stream, while waiting to find
-	/// out costs a round trip on every session.
+	/// Asked unconditionally: a peer with nothing to advertise answers with an empty set,
+	/// which costs one stream.
 	pub fn subscribe_prefixes(&self) -> Vec<PathOwned> {
 		crate::model::interest_prefixes(&self.origin.allowed())
 	}
@@ -672,6 +671,12 @@ where
 			return Err(Error::GoingAway);
 		}
 
+		// Hidden namespaces are requested too, as on moq-lite: the session mirrors the
+		// peer into the origin and each local reader opts in on its own. The parameter
+		// fails decoding at a peer that doesn't know it, so it waits on the peer's SETUP
+		// to say whether it does (MoQ Hidden).
+		let hidden = self.peer_setup.get().await.hidden;
+
 		let request_id = self.control.next_request_id(&self.runtime).await?;
 
 		// Draft-18+ uses SUBSCRIBE_NAMESPACE (0x50); earlier drafts use the legacy
@@ -682,6 +687,7 @@ where
 					request_id,
 					namespace: prefix.clone(),
 					subscribe_options: 0x01, // NAMESPACE only
+					hidden,
 				};
 				stream.writer.encode(&ietf::SubscribeNamespaceLegacy::ID).await?;
 				stream.writer.encode(&msg).await?;
@@ -690,6 +696,7 @@ where
 				let msg = ietf::SubscribeNamespace {
 					request_id,
 					namespace: prefix.clone(),
+					hidden,
 				};
 				stream.writer.encode(&ietf::SubscribeNamespace::ID).await?;
 				stream.writer.encode(&msg).await?;
@@ -1394,9 +1401,26 @@ where
 		Ok(())
 	}
 
+	/// Run `tasks` to their own end, or until the session dies.
+	///
+	/// A retraction does not disturb subscriptions already in flight: what ended
+	/// takes no new work, but the work it started finishes.
+	async fn drain(&self, tasks: &mut TaskSet) {
+		let mut session = self.session.clone();
+		kio::wait(|waiter| {
+			let mut cx = std::task::Context::from_waker(waiter.waker());
+			if session.poll_closed(&mut cx).is_ready() {
+				return Poll::Ready(());
+			}
+			tasks.poll(waiter)
+		})
+		.await
+	}
+
 	/// Serve materialization requests for one announced namespace: mint a source
 	/// per requested path and serve its track requests until the route is
-	/// retracted or the session dies.
+	/// retracted or the session dies. Tracks in flight at a retraction run to
+	/// their own end.
 	async fn run_route(&self, path: PathOwned) {
 		let mut broadcasts = TaskSet::owned();
 		let mut closed_session = self.session.clone();
@@ -1426,8 +1450,12 @@ where
 
 			let request = match next {
 				Some(Ok(request)) => request,
-				// Retracted or torn down: no request will ever arrive again.
-				Some(Err(_)) | None => break,
+				// Retracted or torn down: no request will ever arrive again, but
+				// the broadcasts already served keep their tracks in flight.
+				Some(Err(_)) | None => {
+					self.drain(&mut broadcasts).await;
+					break;
+				}
 			};
 
 			// The request path is absolute; the wire (and our origin handle) speak
@@ -1441,15 +1469,21 @@ where
 			request.accept(&source);
 
 			// Retain the source so a retraction can finish it. If the route was
-			// retracted since, the guard drops here and consumers observe the abort.
-			{
+			// retracted since the accept, finish it here as that retraction would
+			// have, and still serve what it took on: tracks subscribed since carry on.
+			let guard = crate::model::broadcast::SourceGuard::new(source);
+			let retracted = {
 				let mut state = self.state.lock();
-				let Some(entry) = state.broadcasts.get_mut(&path) else {
-					continue;
-				};
-				entry
-					.sources
-					.insert(requested.clone(), crate::model::broadcast::SourceGuard::new(source));
+				match state.broadcasts.get_mut(&path) {
+					Some(entry) => {
+						entry.sources.insert(requested.clone(), guard);
+						None
+					}
+					None => Some(guard),
+				}
+			};
+			if let Some(guard) = retracted {
+				guard.finish();
 			}
 
 			let this = self.clone();
@@ -1494,6 +1528,8 @@ where
 				Some(Ok(request)) => request,
 				Some(Err(err)) => {
 					tracing::debug!(%err, "broadcast closed");
+					// No new tracks, but those in flight run to their own end.
+					self.drain(&mut subscribes).await;
 					break;
 				}
 				// Session gone.
@@ -1515,7 +1551,9 @@ where
 	async fn run_subscribe(
 		&mut self,
 		broadcast_path: Path<'_>,
-		broadcast: broadcast::Dynamic,
+		// Held for the subscription's lifetime but never watched: the broadcast ending
+		// is a retraction, which does not disturb a subscription already in flight.
+		_broadcast: broadcast::Dynamic,
 		request: track::Request,
 	) {
 		// Data streams wait on the alias bound by SUBSCRIBE_OK, so leave the model request
@@ -1593,11 +1631,12 @@ where
 		// A publisher can be serving before its SUBSCRIBE_OK reaches us, since the data
 		// streams are independent of the request stream. Waiting for the response alone would
 		// miss the local side going away in that window and leave the publisher serving a
-		// track nobody reads, which is the leak this whole path exists to close.
+		// track nobody reads, which is the leak this whole path exists to close. The broadcast
+		// ending is not a local side going away: a retraction does not disturb subscriptions
+		// already in flight, and this one is.
 		enum Setup {
 			Response(Result<Option<Accepted>, Error>),
 			Unused,
-			BroadcastClosed(Error),
 		}
 
 		let track_name = request.name().to_owned();
@@ -1615,9 +1654,6 @@ where
 					if request.poll_unused(waiter).is_ready() {
 						return Poll::Ready(Setup::Unused);
 					}
-					if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
-						return Poll::Ready(Setup::BroadcastClosed(err));
-					}
 					Poll::Pending
 				})
 				.await;
@@ -1628,10 +1664,6 @@ where
 						if request.reject_unused(Error::Cancel) {
 							break None;
 						}
-					}
-					Setup::BroadcastClosed(err) => {
-						request.reject(err);
-						break None;
 					}
 				}
 			}
@@ -1712,11 +1744,11 @@ where
 			fetching = self.start_joining_fetch(request_id, &track, joining).await;
 		}
 
-		// One event ends the subscription: the last consumer leaving, the broadcast
-		// dying, or the subscribe stream closing.
+		// One event ends the subscription: the last consumer leaving, or the
+		// subscribe stream closing. The broadcast ending does not: a retraction
+		// does not disturb subscriptions already in flight.
 		enum End {
 			Unused,
-			BroadcastClosed(Error),
 			StreamClosed(Result<(), Error>),
 		}
 
@@ -1732,9 +1764,6 @@ where
 				if track.poll_unused(waiter).is_ready() {
 					return Poll::Ready(End::Unused);
 				}
-				if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
-					return Poll::Ready(End::BroadcastClosed(err));
-				}
 				let mut cx = std::task::Context::from_waker(waiter.waker());
 				stream.reader.poll_closed(&mut cx).map(End::StreamClosed)
 			})
@@ -1748,11 +1777,6 @@ where
 					}
 					Err(used) => track = used,
 				},
-				End::BroadcastClosed(err) => {
-					tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "broadcast closed");
-					let _ = track.abort(err);
-					break true;
-				}
 				End::StreamClosed(res) => {
 					match res {
 						Ok(()) => {
@@ -2901,13 +2925,17 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 		let (tasks, _task_set) = crate::util::TaskSet::new();
+		// The request waits on the peer's SETUP to learn whether it may opt in to
+		// hidden namespaces.
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
 		let mut subscriber = Subscriber::new(
 			crate::time::Clock::tokio(),
 			session.clone(),
 			scoped,
 			Control::new(None, false),
 			None,
-			peer::PeerSetup::default(),
+			peer_setup,
 			crate::Hop::new(1).unwrap(),
 			None,
 			Version::Draft16,
@@ -3360,6 +3388,70 @@ mod tests {
 			vec![crate::ietf::error::CANCELLED],
 			"and must stop the direction the publisher writes",
 		);
+	}
+
+	/// A retraction does not disturb subscriptions already in flight, and one whose
+	/// SUBSCRIBE_OK has not arrived yet is in flight too: the publisher may already be
+	/// serving it. The broadcast ending in that window must not abort the track or cancel
+	/// the subscription.
+	#[tokio::test(start_paused = true)]
+	async fn a_retraction_before_subscribe_ok_keeps_the_subscription() {
+		const VERSION: Version = Version::Draft16;
+
+		// A peer that accepts the stream and then says nothing at all.
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let log = session.log.clone();
+
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::Clock::tokio(),
+			session,
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+
+		let request = dynamic.requested_track().await.expect("no track requested");
+
+		let serving = tokio::spawn(async move {
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+		});
+
+		// Let the SUBSCRIBE go out, then retract the broadcast before any response.
+		settle().await;
+		producer.finish();
+		settle().await;
+
+		assert!(
+			!serving.is_finished(),
+			"a retraction ended a subscription still in flight"
+		);
+		assert_eq!(
+			occurrences(&log, &[ietf::Unsubscribe::ID as u8]),
+			0,
+			"a retraction must not cancel a subscription still in flight",
+		);
+
+		// The reader leaving is still what ends it.
+		drop(subscription);
+		drop(track);
+		drop(consumer);
+		tokio::time::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.expect("run_subscribe parked after its reader left")
+			.unwrap();
 	}
 
 	/// The control messages that actually reached the wire, by type id.

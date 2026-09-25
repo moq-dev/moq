@@ -55,6 +55,7 @@ final server = await Server.listen(
   ),
 );
 final live = server.createBroadcast('live/camera');
+live.announce(route: MoqRoute()); // unannounced broadcasts are invisible
 await for (final request in server.requests()) {
   final session = await request.accept();
   print(session.epoch());
@@ -62,7 +63,7 @@ await for (final request in server.requests()) {
 ```
 
 The three advertising operations: `moq.createBroadcast(path)` (or
-`origin.createBroadcast`) returns an unadvertised producer;
+`origin.createBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.announce(route:)` / `broadcast.unannounce()` own that exact-path
 advertisement; `origin.dynamic_(prefix:, route:)` claims `prefix` and
 every path beneath it (`''` for everything; Dart spells the origin method
@@ -70,7 +71,8 @@ every path beneath it (`''` for everything; Dart spells the origin method
 claim should stay advertised, and reject the requests you will not serve. A
 route is a capability, not an inventory. `announcements(options:)` takes a
 literal prefix plus an optional relative pattern; `announcement.prefix()`
-stays origin-relative and `captures()` reports the wildcard matches.
+stays origin-relative and `captures()` reports the wildcard matches. Paths with
+a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless `hidden: true`.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `Moq.connect` and `Server.listen` take a `ConnectOptions` /
@@ -78,6 +80,10 @@ broadcasts. `Moq.connect` and `Server.listen` take a `ConnectOptions` /
 and `backoff:` re-paces the retries. `moq.epoch` counts the connections, 1 on the first, pairing with
 `session.status()` to log each reconnect; `maxStreams` raises the peer's
 inbound stream cap for a subscriber to many tracks.
+
+The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
+a 200 ms head start. `websocketEnabled: false` turns it off for a QUIC-only
+relay, and a `websocketDelay` `Duration` changes the head start.
 
 Types are spelled without the `Moq` prefix (`Session`, `BroadcastProducer`,
 `Backoff`); the generated names stay valid, since these are aliases rather than
@@ -100,6 +106,26 @@ Unlike the other bindings, the published Dart binaries carry **no codecs**:
 catalog and container types are there, so already-encoded frames flow through
 `MoqMediaProducer`/`MoqMediaConsumer`, but encoding is up to
 `package:camera`, platform channels, or another codec package.
+
+## Connection stats
+
+`session.stats()` returns a `ConnectionStats` snapshot. Each field is `null`
+when the transport backend does not report it (native QUIC reports all of them;
+browser WebTransport reports few or none) or before it is available, which is
+not the same as zero. `rttUs` is microseconds; the `rtt` extension reads it as a
+`Duration`.
+
+| Field | Unit | Meaning |
+| --- | --- | --- |
+| `rttUs` | microseconds | Smoothed round-trip time. |
+| `estimatedSendRateBps` | bits per second | Send bandwidth from the congestion controller. |
+| `estimatedRecvRateBps` | bits per second | Receive bandwidth from MoQ PROBE. |
+| `bytesSent` | bytes | Total sent, including retransmissions and overhead. |
+| `bytesReceived` | bytes | Total received, including duplicates and overhead. |
+| `bytesLost` | bytes | Total lost, detected via retransmission or acknowledgement. |
+| `packetsSent` | datagrams | Total datagrams sent. |
+| `packetsReceived` | datagrams | Total datagrams received. |
+| `packetsLost` | datagrams | Total datagrams detected as lost. |
 
 - Source: [`dart/`](https://github.com/moq-dev/moq/tree/main/dart)
 - Packages: [moq](https://pub.dev/packages/moq), [moq\_ffi](https://pub.dev/packages/moq_ffi)

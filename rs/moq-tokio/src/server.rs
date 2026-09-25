@@ -772,7 +772,7 @@ async fn serve_session(request: Request) -> crate::Result<()> {
 
 /// The version set offered on stream (`tcp://`/`unix://`) listeners.
 ///
-/// A URL-less transport carries the request path in the moq-lite-05 SETUP, so
+/// A URL-less transport carries the request path in the moq-lite-05+ SETUP, so
 /// lite-05 is offered on top of the configured versions even when a custom set
 /// omits it. Older versions still work for clients that need no path.
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]

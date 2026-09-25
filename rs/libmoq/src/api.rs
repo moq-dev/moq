@@ -874,9 +874,6 @@ static VERSION_NAMES: std::sync::LazyLock<Vec<String>> =
 /// first. Each name borrows a static string valid for the life of the process, so a
 /// caller building a menu can hold them indefinitely.
 ///
-/// Work-in-progress versions are omitted, since they are not advertised unless pinned;
-/// a dial still accepts them by name.
-///
 /// Returns the total count on success, or a negative code on failure.
 ///
 /// # Safety
@@ -1248,15 +1245,263 @@ pub unsafe extern "C" fn moq_session_snapshot(session: u32, dst: *mut moq_connec
 	ffi::enter(move || {
 		let session = ffi::parse_id(session)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		let snapshot = State::lock().session.snapshot(session)?;
-		let name = snapshot.version.as_str();
+		let (stats, version) = State::lock().session.snapshot(session)?;
+		let name = version.as_str();
 		*dst = moq_connection_snapshot {
-			stats: moq_connection_stats::from(&snapshot.stats),
+			stats: moq_connection_stats::from(&stats),
 			protocol: moq_string {
 				data: name.as_ptr().cast::<c_char>(),
 				len: name.len(),
 			},
 		};
+		Ok(())
+	})
+}
+
+/// Settings for [moq_server_listen].
+///
+/// Zero it and set only what you need; new settings are appended, and a zeroed
+/// one keeps the previous behavior. TLS is required: set `tls_cert` and `tls_key`,
+/// or `tls_generate`.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_server_config {
+	/// Address to bind, e.g. `[::]:443`, `127.0.0.1:0`, or `localhost:4443`; NULL
+	/// for `[::]:443`. A port of 0 picks one; read it back with [moq_server_addr].
+	pub bind: *const c_char,
+	pub bind_len: usize,
+
+	/// Certificate chain paths (PEM), paired with `tls_key`.
+	pub tls_cert: *const moq_string,
+	pub tls_cert_len: usize,
+
+	/// Private key paths (PEM), paired with `tls_cert`.
+	pub tls_key: *const moq_string,
+	pub tls_key_len: usize,
+
+	/// Hostnames to generate a self-signed certificate for. Clients must pin its
+	/// fingerprint ([moq_server_fingerprints]) or disable verification.
+	pub tls_generate: *const moq_string,
+	pub tls_generate_len: usize,
+}
+
+/// Build the listener `config` describes, binding its socket.
+///
+/// # Safety
+/// - Every non-NULL pointer in `config` must be valid for its length.
+unsafe fn parse_server(config: &moq_server_config) -> Result<moq_tokio::Server, Error> {
+	let mut listen = moq_tokio::listen::Config::default();
+	if let Some(bind) = unsafe { ffi::parse_str_optional(config.bind, config.bind_len)? } {
+		let bind = moq_tokio::listen::Bind::from_str(bind)
+			.map_err(|_| Error::InvalidConfig(format!("invalid bind address: {bind}")))?;
+		listen.bind = Some(bind);
+	}
+	listen.tls.cert = unsafe { ffi::parse_strings(config.tls_cert, config.tls_cert_len)? }
+		.into_iter()
+		.map(Into::into)
+		.collect();
+	listen.tls.key = unsafe { ffi::parse_strings(config.tls_key, config.tls_key_len)? }
+		.into_iter()
+		.map(Into::into)
+		.collect();
+	listen.tls.generate = unsafe { ffi::parse_strings(config.tls_generate, config.tls_generate_len)? };
+
+	listen
+		.init(Default::default())
+		.map_err(|err| Error::InvalidConfig(err.to_string()))
+}
+
+/// Listen for incoming sessions.
+///
+/// Binds before returning, so a bad address or certificate fails here with a reason in
+/// [moq_error]. Returns a non-zero server handle on success, or a negative code on failure.
+///
+/// `on_request` is called with a positive session request handle for each incoming
+/// session, then exactly once more with a terminal code: `0` (stopped cleanly, including
+/// after [moq_server_close]) or a negative error. After the terminal (`<= 0`) callback,
+/// `user_data` is never touched again, so release it there. Answer each request with
+/// [moq_session_request_accept], [moq_session_request_reject], or [moq_session_request_free].
+///
+/// # Safety
+/// - `config` must point at a readable [moq_server_config] whose non-NULL pointers are
+///   valid for their paired lengths during this call.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_request` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_server_listen(
+	config: *const moq_server_config,
+	on_request: ffi::moq_status_callback,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let on_request = unsafe { ffi::OnStatus::new(user_data, on_request)? };
+		// Bind without the global lock: resolving and loading certificates can be slow.
+		let server = unsafe { parse_server(config)? };
+		State::lock().server.listen(server, on_request)
+	})
+}
+
+/// The address a server bound, e.g. `127.0.0.1:4443`.
+///
+/// The destination borrows the server's storage, valid until its terminal
+/// `on_request` callback. Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must point at a writable [moq_string].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_server_addr(server: u32, dst: *mut moq_string) -> i32 {
+	ffi::enter(move || {
+		let server = ffi::parse_id(server)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().server.addr(server, dst)
+	})
+}
+
+/// The SHA-256 fingerprints of the server's certificates, hex encoded.
+///
+/// Pin these on a client (`tls_fingerprints` in [moq_client_config], or a browser's
+/// `serverCertificateHashes`) to trust a generated certificate. Writes up to `count`
+/// into `dst` and returns the total number available; pass a NULL `dst` with a zero
+/// `count` to size the array first. Each string borrows the server's storage, valid
+/// until its terminal `on_request` callback.
+///
+/// Returns the total count on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must be NULL with a zero `count`, or point to `count` writable [moq_string] values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_server_fingerprints(server: u32, dst: *mut moq_string, count: usize) -> i32 {
+	ffi::enter(move || {
+		let server = ffi::parse_id(server)?;
+		let dst = if count == 0 {
+			&mut [][..]
+		} else {
+			if dst.is_null() {
+				return Err(Error::InvalidPointer);
+			}
+			unsafe { std::slice::from_raw_parts_mut(dst, count) }
+		};
+		State::lock().server.fingerprints(server, dst)
+	})
+}
+
+/// Stop listening.
+///
+/// Returns immediately: zero on success, or a negative code if the server is unknown or
+/// already closing. Sessions already accepted keep running. The `on_request` callback
+/// still fires once more with a terminal `0` after the sockets are released, so the
+/// address can be bound again from there; release `user_data` in that callback.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_server_close(server: u32) -> i32 {
+	ffi::enter(move || {
+		let server = ffi::parse_id(server)?;
+		State::lock().server.close(server)
+	})
+}
+
+/// The path of a session request, without the query, or empty for the root.
+///
+/// The destination borrows the request's storage: copy it out before accept,
+/// reject, or [moq_session_request_free]. Returns a zero on success, or a negative
+/// code on failure.
+///
+/// # Safety
+/// - `dst` must point at a writable [moq_string].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_session_request_path(request: u32, dst: *mut moq_string) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().server.request_path(request, dst)
+	})
+}
+
+/// The query of a session request without the leading `?`, or a NULL `data` if it has none.
+///
+/// Where a token usually rides. The destination borrows the request's storage, like
+/// [moq_session_request_path]. Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must point at a writable [moq_string].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_session_request_query(request: u32, dst: *mut moq_string) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().server.request_query(request, dst)
+	})
+}
+
+/// Accept a session request, completing the MoQ handshake.
+///
+/// Takes origin handles like [moq_session_connect]: broadcasts in `origin_publish` are
+/// announced to the peer, and broadcasts the peer announces land in `origin_consume`.
+/// An origin handle of 0 disables that direction.
+///
+/// Consumes the request handle on success and returns a non-zero session handle, or a
+/// negative code on failure (leaving the request unanswered). The session works with every
+/// `moq_session_*` call; stats and bandwidth report offline until the handshake completes.
+///
+/// `on_status` reports the session lifecycle:
+/// - `1` once the handshake completes. An accepted session is a single connection, so it
+///   never reconnects and never reports more.
+/// - `0` when closed via [moq_session_close] (terminal).
+/// - a negative error code if the handshake fails or the peer closes the session; read
+///   [moq_error_protocol] for the peer's close code (terminal).
+///
+/// # Safety
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_status` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_session_request_accept(
+	request: u32,
+	origin_publish: u32,
+	origin_consume: u32,
+	on_status: ffi::moq_status_callback,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let origin_publish = ffi::parse_id_optional(origin_publish)?;
+		let origin_consume = ffi::parse_id_optional(origin_consume)?;
+		let callback = unsafe { ffi::OnStatus::new(user_data, on_status)? };
+
+		let mut state = State::lock();
+		let publish = origin_publish.map(|id| state.origin.get(id)).transpose()?.cloned();
+		let consume = origin_consume.map(|id| state.origin.get(id)).transpose()?.cloned();
+		let request = state.server.request_take(request)?;
+		state.session.accept(request, publish, consume, callback)
+	})
+}
+
+/// Reject a session request with an HTTP-style status code.
+///
+/// 401 and 403 are sent as the protocol's unauthorized close; every other code is sent
+/// as an application error. Consumes the request handle. Returns a zero on success, or
+/// a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_session_request_reject(request: u32, code: u16) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let request = State::lock().server.request_take(request)?;
+		let reject = match code {
+			401 => moq_tokio::server::Reject::Unauthorized,
+			403 => moq_tokio::server::Reject::Forbidden,
+			code => moq_tokio::server::Reject::App(code),
+		};
+		// Rejecting only queues the close, so this never waits on the network.
+		Ok::<_, Error>(pollster::block_on(request.reject(reject))?)
+	})
+}
+
+/// Free a session request without accepting or rejecting it.
+///
+/// Dropping the request closes the session. Returns a zero on success, or a negative
+/// code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_session_request_free(request: u32) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		State::lock().server.request_take(request)?;
 		Ok(())
 	})
 }
@@ -1277,10 +1522,9 @@ pub extern "C" fn moq_origin_create() -> i32 {
 
 /// Create a broadcast at `path` on an origin, for publishing media tracks.
 ///
-/// The broadcast starts unadvertised: reachable by exact path, but not visible
-/// to announcement streams. Fill it with the `moq_publish_*` functions, then
-/// [moq_publish_announce] after populating. [moq_publish_finish] unpublishes
-/// immediately.
+/// The broadcast is invisible and unroutable, on this origin and its peers
+/// alike, until [moq_publish_announce]. Fill it with the `moq_publish_*`
+/// functions, then announce it. [moq_publish_finish] unpublishes immediately.
 ///
 /// Returns a non-zero broadcast handle on success, or a negative code on failure.
 ///
@@ -1520,11 +1764,11 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 
 /// Consume a broadcast from an origin by path, waiting until something can serve it.
 ///
-/// It waits for whatever will serve the path to arrive (e.g. an announcement over the network)
-/// and then delivers the broadcast handle via `on_broadcast`. Use it right after
-/// [moq_session_connect] to avoid racing announcement gossip. Serving and advertising are
-/// separate, so a local broadcast at the exact path resolves without ever being announced. To
-/// answer for what is reachable now and fail otherwise, use [moq_origin_request] instead.
+/// Resolves against future announcements: it waits for the announcement to arrive (e.g. over the
+/// network) and then delivers the broadcast handle via `on_broadcast`. Use it right after
+/// [moq_session_connect] to avoid racing announcement gossip. To resolve against only what is
+/// reachable now, use [moq_origin_request] instead. A broadcast created on this origin
+/// resolves once it is announced, like a remote one.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once announced, then exactly once
 /// more with a terminal code: `0` (the wait finished, including after
@@ -1571,9 +1815,9 @@ pub extern "C" fn moq_origin_announced_broadcast_cancel(task: u32) -> i32 {
 
 /// Request a broadcast from an origin by path, resolving as soon as it can be served.
 ///
-/// Resolves against what is reachable by exact path *now*, where
-/// [moq_origin_announced_broadcast] waits indefinitely: it returns an existing broadcast at once,
-/// whether announced or not, and fails when none is reachable. It does NOT wait for a later
+/// Resolves against what is announced *now*, where [moq_origin_announced_broadcast] waits
+/// indefinitely: it returns an announced broadcast at once, and fails when none is reachable,
+/// including a broadcast created but not announced. It does NOT wait for a later
 /// announcement. Serve on-demand paths with [moq_origin_dynamic].
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
@@ -1631,7 +1875,8 @@ pub extern "C" fn moq_origin_close(origin: u32) -> i32 {
 /// Advertise a broadcast's exact path as a route.
 ///
 /// Announcing again re-prices the route in place. A NULL `route` uses the default
-/// (no hops, cost 0). An unannounced broadcast stays reachable by exact path.
+/// (no hops, cost 0). Until announced, the broadcast is invisible and unroutable for
+/// local consumers and peers alike.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -1648,7 +1893,8 @@ pub unsafe extern "C" fn moq_publish_announce(broadcast: u32, route: *const moq_
 
 /// Retract a broadcast's exact-path advertisement, if any.
 ///
-/// The broadcast stays reachable by exact path. Returns a zero on success, or a
+/// Local consumers and peers alike stop discovering and requesting it; tracks already in
+/// flight carry on, and announcing again brings it back. Returns a zero on success, or a
 /// negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_unannounce(broadcast: u32) -> i32 {

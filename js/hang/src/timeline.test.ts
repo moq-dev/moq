@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import * as Json from "@moq/json";
-import { Time, Track } from "@moq/net";
+import { Broadcast, Time, Track } from "@moq/net";
 import { u53 } from "./catalog";
-import { Producer, type Record } from "./timeline.ts";
+import { Consumer, Producer, type Record } from "./timeline.ts";
 
 const us = (ms: number): Time.Micro => (ms * 1000) as Time.Micro;
 
@@ -535,4 +535,37 @@ test("a non-pacing track uses arrival and does not extend the tail", async () =>
 		},
 		{ segment: 1, pts: 2000, duration: 2000, tracks: { video0: [{ start: 1, end: 1 }] } },
 	]);
+});
+
+test("timeline consumer yields converted push and pop events", async () => {
+	const broadcast = new Broadcast.Producer();
+	const track = broadcast.createTrack("timeline.z");
+	const producer = new Json.Window.Producer<Record>({ track, compression: true });
+	const consumer = Consumer.subscribe(broadcast.consume(), { track: "timeline.z", timescale: u53(1000) });
+	producer.push({ segment: 7, pts: 250, duration: 1250, tracks: { video: [{ start: 1, end: 2 }] } });
+	expect(await consumer.next()).toEqual({
+		push: {
+			index: 0,
+			entry: { segment: 7, pts: us(250), duration: us(1250), tracks: { video: [{ start: 1, end: 2 }] } },
+		},
+	});
+	producer.pop(1);
+	expect(await consumer.next()).toEqual({ pop: { start: 0, end: 1 } });
+	producer.finish();
+	consumer.close();
+	broadcast.close();
+});
+
+test("timeline consumer floors fractional microseconds without floating point drift", async () => {
+	const broadcast = new Broadcast.Producer();
+	const track = broadcast.createTrack("timeline.z");
+	const producer = new Json.Window.Producer<Record>({ track, compression: true });
+	const consumer = Consumer.subscribe(broadcast.consume(), { track: "timeline.z", timescale: u53(3) });
+	producer.push({ segment: 0, pts: 1, duration: 2 });
+	expect(await consumer.next()).toEqual({
+		push: { index: 0, entry: { segment: 0, pts: 333_333 as Time.Micro, duration: 666_666 as Time.Micro } },
+	});
+	producer.finish();
+	consumer.close();
+	broadcast.close();
 });
