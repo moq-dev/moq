@@ -22,5 +22,4 @@ the encode seam as the platform candidate on macOS and iOS.
 ## Required
 
 - [Encode seam](/quest/m1/audio-codecs/encode-backend.md) - the candidate order this backend joins
-- [Layout](/quest/m1/audio-codecs/layout.md) - the input layout the encoder accepts
 - [AudioToolbox decode](/quest/m1/audio-codecs/decode-audiotoolbox.md) - the round-trip regression decodes through it

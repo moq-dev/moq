@@ -94,6 +94,12 @@ native side.
 `AudioCodec.opus()`, and `AudioEncoderOutput.frameDurationUs` sets the Opus
 frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000.
 
+Audio `channels` also names the speaker layout, by the WAVE convention: 1 is
+mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1, and 8 7.1, interleaved
+front left, front right, center, LFE, back, then side. Decoding remixes to the
+count you ask for; past 8 channels the samples pass through but can't be
+remixed.
+
 `decodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.format`
 is `VideoPixelFormat.I420` when null, or `VideoPixelFormat.RGBA` for four bytes
 a pixel, and every frame repeats the layout it was decoded to. `resize` is best

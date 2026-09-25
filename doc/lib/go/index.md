@@ -115,6 +115,12 @@ one: `FetchGroup`/`FetchMediaGroup`, `Dynamic()` with `Requests(ctx)`,
 `AppendDatagram`/`Datagrams(ctx)`, `SetCatalogSection`, `Demand()` for `Used`/`Unused`,
 `Session().Stats()`. `moq.IsAuthError` and `moq.IsShutdown` classify errors. `moq.ProtocolError(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one.
 
+Audio `Channels` also names the speaker layout, by the WAVE convention: 1 is
+mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1, and 8 7.1, interleaved
+front left, front right, center, LFE, back, then side. Decoding remixes to the
+count you ask for; past 8 channels the samples pass through but can't be
+remixed.
+
 `DecodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.Format`
 is I420 when nil, or `VideoPixelFormatRgba` for four bytes a pixel, and every
 `VideoDecodedFrame` repeats the layout it was decoded to. `Resize` is best

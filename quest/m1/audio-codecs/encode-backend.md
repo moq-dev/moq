@@ -9,7 +9,7 @@ host with no AAC encoder refuses it at construction.
 
 ## Plan
 
-Mirror the decode seam: `encode::backend` with a crate-private `Backend`
+Mirror the decode seam (`rs/moq-audio/src/decode/backend`): `encode::backend` with a crate-private `Backend`
 trait (`encode`, `flush`, `set_bitrate`, `name`), an `open(codec, config)`
 that walks platform candidates before software ones, using the public settings
 and selection contract settled in main. Opus and PCM retain their behavior. This
@@ -34,10 +34,6 @@ quest adds AAC through platform encoders; no software AAC dependency is selected
   mid-stream keeps its opening rate, as the video seam documents.
 - Regression: the selection order with a stub backend; `Codec::Aac` refused on
   a host with no backend; the Opus and PCM paths unchanged.
-
-## Required
-
-- [Decode seam](/quest/m1/audio-codecs/decode-backend.md) - the naming and shape this mirrors
 
 ## Related
 

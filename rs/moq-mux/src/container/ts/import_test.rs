@@ -156,6 +156,32 @@ fn import_ac3_catalog() {
 	assert!(audio.description.is_none(), "verbatim AC-3 needs no description");
 }
 
+/// `aac_quad.ts` is an ffmpeg-authored audio-only AAC program in quad, which has no
+/// channelConfiguration, so its ADTS headers carry 0 and the first raw data block leads with a
+/// program config element. Regenerated with (ffmpeg 9.0.1):
+/// `ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.1
+/// -af "pan=quad|FL=c0|FR=c0|BL=c0|BR=c0" -c:a aac -b:a 128k -f mpegts aac_quad.ts`.
+#[test]
+fn import_aac_program_config_catalog() {
+	let data = include_bytes!("test_data/aac_quad.ts");
+	let catalog = import_ts(data);
+
+	assert_eq!(catalog.audio.renditions.len(), 1, "expected one AAC track");
+	let audio = catalog.audio.renditions.values().next().unwrap();
+	assert_eq!(audio.codec.to_string(), "mp4a.40.2");
+	assert_eq!(audio.sample_rate, 48_000);
+	assert_eq!(
+		audio.channel_count, 4,
+		"two channel pair elements, not a guessed stereo"
+	);
+
+	// The element moved into the description is byte-for-byte what ffmpeg itself writes as the
+	// AudioSpecificConfig for the same stream in MP4, minus the trailing SBR sync extension.
+	let mut expected = vec![0x11, 0x80, 0x04, 0xC4, 0x04, 0x00, 0x21, 0x10, 0x0C];
+	expected.extend_from_slice(b"Lavc63.1.101");
+	assert_eq!(audio.description.as_deref(), Some(expected.as_slice()));
+}
+
 /// `opus.ts` is an ffmpeg-authored audio-only Opus program (private stream_type 0x06
 /// plus the 'Opus' registration and DVB extension descriptors), generated with:
 /// `ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.5

@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use bytes::Bytes;
 
 use super::decoder::{Config, Decoder};
-use crate::resample::{Resampler, remix, validate_remix};
+use crate::resample::{Remix, Resampler};
 use crate::{Activity, Error, Format, Frame, Layout};
 
 /// Where a consumer starts on a track that already holds groups.
@@ -63,6 +63,8 @@ pub struct Consumer {
 	decoder: Decoder,
 	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 	resampler: Option<Resampler>,
+	/// Converts the decoded layout to the output's, when they differ.
+	remix: Option<Remix>,
 	options: Options,
 	max_age: std::time::Duration,
 	resolved_sample_rate: u32,
@@ -111,7 +113,9 @@ impl Consumer {
 		let decoder = Decoder::new(catalog, &options.decoder)?;
 		let sample_rate = options.output.sample_rate.unwrap_or_else(|| decoder.sample_rate());
 		let layout = options.output.layout.unwrap_or_else(|| decoder.layout());
-		validate_remix(decoder.layout(), layout)?;
+		let remix = (decoder.layout() != layout)
+			.then(|| Remix::new(decoder.layout(), layout))
+			.transpose()?;
 
 		let resampler = if sample_rate == decoder.sample_rate() {
 			None
@@ -165,6 +169,7 @@ impl Consumer {
 			decoder,
 			track,
 			resampler,
+			remix,
 			options,
 			max_age,
 			resolved_sample_rate: sample_rate,
@@ -180,6 +185,11 @@ impl Consumer {
 			terminal_start: None,
 			discontinuity: 0,
 		})
+	}
+
+	/// The decoder backend name in use, e.g. `"libopus"` or `"symphonia"`.
+	pub fn name(&self) -> &str {
+		self.decoder.name()
 	}
 
 	/// The options this consumer was built with.
@@ -438,10 +448,9 @@ impl Consumer {
 
 	/// Remix and pack decoded PCM into an output frame.
 	fn frame(&self, pcm: Vec<f32>, timestamp: moq_net::Timestamp, activity: Activity) -> Result<Frame, Error> {
-		let pcm = if self.decoder.layout() == self.resolved_layout {
-			pcm
-		} else {
-			remix(&pcm, self.decoder.layout(), self.resolved_layout)?
+		let pcm = match &self.remix {
+			Some(remix) => remix.process(&pcm),
+			None => pcm,
 		};
 
 		let bytes = self

@@ -13,8 +13,14 @@ the far end. Everything is Rust, so there is no C toolchain, CMake step, or
 codec to install.
 
 `Layout` names speaker meaning separately from a channel count. `Mono` is center,
-`Stereo` is left then right, and `Discrete(n)` preserves unnamed channels without
-inventing speaker positions. Encoding keeps source PCM in `encode::Input` and
+`Stereo` is left then right, and the surround layouts up to `SevenPointOne`
+interleave in the SMPTE/WAVE order (front left, front right, center, LFE, back,
+side). A catalog carries only a count, which reads as that count's WAVE default
+(`Layout::from_channels`: 6 is 5.1, 8 is 7.1). `Discrete(n)` preserves unnamed
+channels without inventing speaker positions, so it passes through but never
+remixes. Decoding and playback downmix with the ITU-R BS.775 coefficients and
+upmix by leaving the extra speakers silent; the playback mix runs in whatever
+layout the output device opened. Encoding keeps source PCM in `encode::Input` and
 codec requirements in `encode::Settings`; `encode::Options` adds publication
 policy. Decoding likewise separates low-level `decode::Config`, PCM
 `decode::Output`, and subscription `decode::Options`.
@@ -26,6 +32,21 @@ policy. Decoding likewise separates low-level `decode::Config`, PCM
 | `decode` | Opus, PCM, and AAC-LC back to PCM, resampled to the rate you want |
 | `playback` | One output device mixing every track in a call, with click-free volume ramps |
 | `aec` | Acoustic echo cancellation (a port of WebRTC's), so a laptop with no headset doesn't feed itself back |
+
+`decode` picks a backend per track the way `moq-video` does: a platform decoder
+first, then software. `decode::Config::kind` forces one (`Kind::Software`, or
+`Kind::Named` with a name below), and `Decoder::name()` reports what opened.
+
+| Backend | Decodes | Hosts |
+| --- | --- | --- |
+| `libopus` | Opus, mono or stereo | all |
+| `pcm` | PCM | all |
+| `symphonia` | AAC-LC, mono or stereo (the default-on `aac` feature) | all |
+
+No platform decoder is wired in yet, so multichannel AAC and HE-AAC declared in
+its config are refused at construction on every host. HE-AAC signaled only in
+band plays as its half-rate LC core. Linux has no OS audio decoder, so it will
+stay that way there.
 
 Highlights:
 

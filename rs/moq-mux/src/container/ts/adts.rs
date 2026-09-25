@@ -21,7 +21,8 @@ pub(super) struct Header {
 	/// audioObjectType (ADTS `profile` + 1). AAC-LC is 2.
 	pub object_type: u8,
 	pub sample_rate: u32,
-	pub channel_count: u32,
+	/// channelConfiguration; 0 means a program config element in the raw data block describes the channels.
+	pub channel_config: u8,
 	/// Total access-unit length, header included.
 	pub frame_len: usize,
 	/// Header length: 7 without CRC, 9 with.
@@ -51,7 +52,7 @@ impl Header {
 		Ok(Self {
 			object_type: profile + 1,
 			sample_rate,
-			channel_count: channel_count_from_config(channel_config),
+			channel_config,
 			frame_len,
 			header_len,
 		})
@@ -96,16 +97,7 @@ fn freq_index_from_rate(sample_rate: u32) -> anyhow::Result<u8> {
 		.with_context(|| format!("sample rate {sample_rate} not representable in ADTS"))
 }
 
-/// Map an AAC `channel_config` (ISO 14496-3 Table 1.19) to a channel count.
-fn channel_count_from_config(channel_config: u8) -> u32 {
-	match channel_config {
-		1..=6 => channel_config as u32,
-		7 => 8,
-		_ => 2,
-	}
-}
-
-/// Inverse of [`channel_count_from_config`].
+/// Map a channel count to an AAC `channel_config` (ISO 14496-3 Table 1.19).
 fn channel_config_from_count(channel_count: u32) -> u8 {
 	match channel_count {
 		1..=6 => channel_count as u8,
@@ -126,7 +118,7 @@ mod tests {
 
 		assert_eq!(parsed.object_type, 2);
 		assert_eq!(parsed.sample_rate, 48_000);
-		assert_eq!(parsed.channel_count, 2);
+		assert_eq!(parsed.channel_config, 2);
 		assert_eq!(parsed.header_len, 7);
 		assert_eq!(parsed.frame_len, 107, "frame_len includes the 7-byte header");
 	}
@@ -142,7 +134,7 @@ mod tests {
 	fn frame_len_for_5_1() {
 		let header = write_header(2, 44_100, 6, 512).unwrap();
 		let parsed = Header::parse(&header).unwrap();
-		assert_eq!(parsed.channel_count, 6);
+		assert_eq!(parsed.channel_config, 6);
 		assert_eq!(parsed.sample_rate, 44_100);
 		assert_eq!(parsed.frame_len, 519);
 	}
