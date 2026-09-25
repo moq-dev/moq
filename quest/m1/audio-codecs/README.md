@@ -39,12 +39,11 @@ mono/stereo.
 
 The core configuration and layout contracts land in main. These quests implement
 surround and backend dispatch on that contract; each platform then lands as
-its own decode and encode quest so verification stays per host. The PCE
-parse is a defect in what ships today and is ready now.
+its own decode and encode quest so verification stays per host.
 
 ## Quests
 
-- [AAC PCE](/quest/m1/audio-codecs/aac-pce.md) - a channel_config of 0 parses the program config element instead of guessing stereo
+- [TS export PCE](/quest/m1/audio-codecs/ts-export-pce.md) - a TS export of a PCE-described AAC track writes channel_config 0 and the PCE instead of a count-derived config
 - [Layout](/quest/m1/audio-codecs/layout.md) - the settled `Layout` carries up to 7.1 through decode, resample, playback, and the FFI
 - [Decode seam](/quest/m1/audio-codecs/decode-backend.md) - `decode::backend` selects a platform decoder before symphonia, mirroring moq-video
 - [AudioToolbox decode](/quest/m1/audio-codecs/decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers

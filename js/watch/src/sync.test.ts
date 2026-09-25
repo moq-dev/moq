@@ -1,7 +1,8 @@
+import { heapStats } from "bun:jsc";
 import { describe, expect, it } from "bun:test";
-import type { Time } from "@moq/net";
+import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
-import { Sync } from "./sync";
+import { type Delay, Sync } from "./sync";
 
 // Effects in @moq/signals flush on a microtask, so let pending updates drain before asserting.
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -93,6 +94,58 @@ describe("delay and buffer", () => {
 		unregisterSecond();
 		await flush();
 		expect(sync.out.delay.peek()).toBe(100 as Time.Milli);
+		sync.close();
+	});
+});
+
+describe("wait", () => {
+	const promises = () => {
+		Bun.gc(true);
+		return heapStats().objectTypeCounts.Promise ?? 0;
+	};
+
+	it("leaves nothing behind on a stable clock", async () => {
+		const sync = new Sync({ delay: 10 as Time.Milli });
+		await flush();
+		sync.received(Time.Milli.now());
+
+		const before = promises();
+		for (let round = 0; round < 10; round++) {
+			const now = Time.Milli.now();
+			await Promise.all(Array.from({ length: 100 }, () => sync.wait(now)));
+		}
+		expect(promises() - before).toBeLessThan(100);
+		sync.close();
+	});
+
+	it("wakes a sleeping wait when the delay switches to instant", async () => {
+		const delay = new Signal<Delay>(10_000 as Time.Milli);
+		const sync = new Sync({ delay });
+		await flush();
+		sync.received(Time.Milli.now());
+
+		let woke = false;
+		const waiting = sync.wait(Time.Milli.now()).then(() => {
+			woke = true;
+		});
+		await flush();
+		expect(woke).toBe(false);
+
+		delay.set("instant");
+		await waiting;
+		expect(woke).toBe(true);
+		sync.close();
+	});
+
+	it("wakes a sleeping wait on reset", async () => {
+		const sync = new Sync({ delay: 10_000 as Time.Milli });
+		await flush();
+		sync.received(Time.Milli.now());
+
+		const waiting = sync.wait(Time.Milli.now());
+		await flush();
+		sync.reset();
+		await waiting;
 		sync.close();
 	});
 });

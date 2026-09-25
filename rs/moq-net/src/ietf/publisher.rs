@@ -435,8 +435,16 @@ where
 				.maybe_boxed()
 			}
 			ietf::TrackStatus::ID => {
-				tracing::warn!("TrackStatus not supported");
-				async {}.maybe_boxed()
+				let msg = ietf::TrackStatus::decode_msg(&mut data, this.version)?;
+				if !data.is_empty() {
+					return Err(Error::WrongSize);
+				}
+				async move {
+					if let Err(err) = this.reject_track_status(stream, msg.request_id).await {
+						tracing::debug!(%err, "track status refusal failed");
+					}
+				}
+				.maybe_boxed()
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type for publisher");
@@ -566,6 +574,7 @@ where
 						// We serve the newest group first, matching moq-lite.
 						true => ietf::Properties {
 							timescale: Some(track.info().timescale),
+							priority: Some(super::priority::to_wire(track.info().priority)),
 							group_order: Some(GroupOrder::Descending),
 						},
 						// INCLUDE_PROPERTIES=0. The field stays present but empty, which also
@@ -1057,7 +1066,22 @@ where
 		let (end, cache, timescale) = match joined {
 			None => {
 				return self
-					.reject_fetch(stream, msg.request_id, &Error::NotFound, "no such subscription")
+					.reject_fetch(
+						stream,
+						msg.request_id,
+						&if matches!(
+							self.version,
+							Version::Draft14
+								| Version::Draft15 | Version::Draft16
+								| Version::Draft17 | Version::Draft18
+								| Version::Draft19
+						) {
+							Error::InvalidJoiningRequestId
+						} else {
+							Error::NotFound
+						},
+						"no such subscription",
+					)
 					.await;
 			}
 			Some(Joined::Unsupported) => {
@@ -1082,7 +1106,7 @@ where
 					.reject_fetch(
 						stream,
 						msg.request_id,
-						&Error::NotFound,
+						&Error::InvalidRange,
 						"no objects at subscription start",
 					)
 					.await;
@@ -1177,6 +1201,34 @@ where
 		// as it would be for a refusal. The peer dropping the stream first is a normal end.
 		let _ = stream.writer.close().await;
 
+		Ok(())
+	}
+
+	async fn reject_track_status(&self, mut stream: Stream<S, Version>, request_id: RequestId) -> Result<(), Error> {
+		let error_code = request::to_code(&Error::Unsupported, request::Kind::TrackStatus, self.version);
+		if self.version == Version::Draft14 {
+			stream.writer.encode(&0x0fu64).await?; // TRACK_STATUS_ERROR has the SUBSCRIBE_ERROR body.
+			stream
+				.writer
+				.encode(&ietf::SubscribeError {
+					request_id,
+					error_code,
+					reason_phrase: "TRACK_STATUS is not supported".into(),
+				})
+				.await?;
+		} else {
+			stream.writer.encode(&ietf::RequestError::ID).await?;
+			stream
+				.writer
+				.encode(&ietf::RequestError {
+					request_id: matches!(self.version, Version::Draft15 | Version::Draft16).then_some(request_id),
+					error_code,
+					reason_phrase: "TRACK_STATUS is not supported".into(),
+					retry_interval: 0,
+				})
+				.await?;
+		}
+		let _ = stream.writer.close().await;
 		Ok(())
 	}
 
@@ -2700,6 +2752,70 @@ mod serve_tests {
 		}
 	}
 
+	/// TRACK_STATUS is recognized but not implemented, and must get a complete refusal.
+	#[tokio::test]
+	async fn track_status_is_refused_on_every_draft() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			let h = serve(version);
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let msg = ietf::TrackStatus {
+				request_id: RequestId(REQUEST_ID),
+				track_namespace: crate::Path::new("live"),
+				track_name: "video".into(),
+			};
+			let mut body = bytes::BytesMut::new();
+			msg.encode_msg(&mut body, version).unwrap();
+			let mark = h.log.writes.lock().unwrap().len();
+			h.publisher
+				.clone()
+				.handle_stream(ietf::TrackStatus::ID, body.freeze(), stream)
+				.unwrap()
+				.await;
+			let actual = h.log.writes.lock().unwrap()[mark..].to_vec();
+			let expected = {
+				let log = crate::lite::test_transport::Log::default();
+				let mut writer =
+					crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+				if version == Version::Draft14 {
+					writer.encode(&0x0fu64).await.unwrap();
+					writer
+						.encode(&ietf::SubscribeError {
+							request_id: RequestId(REQUEST_ID),
+							error_code: 0x3,
+							reason_phrase: "TRACK_STATUS is not supported".into(),
+						})
+						.await
+						.unwrap();
+				} else {
+					writer.encode(&ietf::RequestError::ID).await.unwrap();
+					writer
+						.encode(&ietf::RequestError {
+							request_id: matches!(version, Version::Draft15 | Version::Draft16)
+								.then_some(RequestId(REQUEST_ID)),
+							error_code: 0x3,
+							reason_phrase: "TRACK_STATUS is not supported".into(),
+							retry_interval: 0,
+						})
+						.await
+						.unwrap();
+				}
+				log.writes.lock().unwrap().clone()
+			};
+			assert_eq!(actual, expected, "{version}: wrong TRACK_STATUS refusal bytes");
+			assert!(h.log.resets().is_empty(), "{version}: refusal was reset");
+		}
+	}
+
 	/// The draft's canonical current-group join: a Next Object subscription plus a
 	/// StartGroup=1 fill. The published head arrives exactly once, on a fetch stream,
 	/// and the subscription starts past the snapshot, so nothing is duplicated and
@@ -2821,6 +2937,14 @@ mod serve_tests {
 		Version::Draft18,
 		Version::Draft19,
 	];
+
+	fn invalid_joining_request_id(version: Version) -> u64 {
+		if version == Version::Draft14 { 0x7 } else { 0x32 }
+	}
+
+	fn invalid_range(version: Version) -> u64 {
+		if version == Version::Draft14 { 0x5 } else { 0x11 }
+	}
 
 	/// The registry's "does not exist" value: draft-14 numbers it 0x4 on FETCH_ERROR and
 	/// draft-15 moved it to 0x10.
@@ -3061,13 +3185,13 @@ mod serve_tests {
 				assert_eq!(id, ietf::FetchError::ID);
 				assert_eq!(
 					ietf::FetchError::decode(&mut response, version).unwrap().error_code,
-					does_not_exist(version)
+					invalid_joining_request_id(version)
 				);
 			} else {
 				assert_eq!(id, ietf::RequestError::ID);
 				assert_eq!(
 					ietf::RequestError::decode(&mut response, version).unwrap().error_code,
-					does_not_exist(version)
+					invalid_joining_request_id(version)
 				);
 			}
 			assert!(response.is_empty());
@@ -3138,13 +3262,13 @@ mod serve_tests {
 				assert_eq!(id, ietf::FetchError::ID);
 				assert_eq!(
 					ietf::FetchError::decode(&mut buf, version).unwrap().error_code,
-					does_not_exist(version)
+					invalid_joining_request_id(version)
 				);
 			} else {
 				assert_eq!(id, ietf::RequestError::ID);
 				assert_eq!(
 					ietf::RequestError::decode(&mut buf, version).unwrap().error_code,
-					does_not_exist(version)
+					invalid_joining_request_id(version)
 				);
 			}
 			assert!(buf.is_empty());
@@ -3180,8 +3304,8 @@ mod serve_tests {
 		}
 	}
 
-	/// A subscription that started on an empty track has no prefix to serve: the
-	/// registry has no "nothing to fetch" value, so it is refused as not existing.
+	/// A subscription that started on an empty track has no prefix to serve, so the
+	/// fetch range is invalid on every draft that carries joining FETCH.
 	#[tokio::test]
 	async fn a_joining_fetch_rejects_an_empty_snapshot() {
 		for version in JOINING_DRAFTS {
@@ -3201,13 +3325,13 @@ mod serve_tests {
 				assert_eq!(id, ietf::FetchError::ID);
 				assert_eq!(
 					ietf::FetchError::decode(&mut buf, version).unwrap().error_code,
-					does_not_exist(version)
+					invalid_range(version)
 				);
 			} else {
 				assert_eq!(id, ietf::RequestError::ID);
 				assert_eq!(
 					ietf::RequestError::decode(&mut buf, version).unwrap().error_code,
-					does_not_exist(version)
+					invalid_range(version)
 				);
 			}
 			assert!(buf.is_empty());

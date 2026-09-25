@@ -160,6 +160,8 @@ pub(crate) mod request {
 		PublishNamespace,
 		/// SUBSCRIBE_NAMESPACE_ERROR, draft-14 section 13.1.7.
 		SubscribeNamespace,
+		/// TRACK_STATUS_ERROR on draft-14, REQUEST_ERROR later.
+		TrackStatus,
 	}
 
 	/// An implementation-specific error, with no registry entry for why. Assigned by every
@@ -182,6 +184,14 @@ pub(crate) mod request {
 	/// TRACK_DOES_NOT_EXIST.
 	const DOES_NOT_EXIST_14: u64 = 0x4;
 
+	/// An invalid FETCH range: draft-14 FETCH_ERROR and draft-15+ REQUEST_ERROR.
+	const INVALID_RANGE_14: u64 = 0x5;
+	const INVALID_RANGE: u64 = 0x11;
+
+	/// A joining FETCH named no active subscription. Removed from the registry in draft-20.
+	const INVALID_JOINING_REQUEST_ID_14: u64 = 0x7;
+	const INVALID_JOINING_REQUEST_ID: u64 = 0x32;
+
 	/// The same condition from draft-15 on, renamed DOES_NOT_EXIST and moved off 0x4.
 	const DOES_NOT_EXIST: u64 = 0x10;
 
@@ -202,10 +212,34 @@ pub(crate) mod request {
 	fn does_not_exist(kind: Kind, version: Version) -> Option<u64> {
 		match version {
 			Version::Draft14 => match kind {
-				Kind::Subscribe | Kind::Fetch => Some(DOES_NOT_EXIST_14),
+				Kind::Subscribe | Kind::Fetch | Kind::TrackStatus => Some(DOES_NOT_EXIST_14),
 				_ => None,
 			},
 			_ => Some(DOES_NOT_EXIST),
+		}
+	}
+
+	fn invalid_range(kind: Kind, version: Version) -> Option<u64> {
+		if kind != Kind::Fetch {
+			return None;
+		}
+		Some(if version == Version::Draft14 {
+			INVALID_RANGE_14
+		} else {
+			INVALID_RANGE
+		})
+	}
+
+	fn invalid_joining_request_id(kind: Kind, version: Version) -> Option<u64> {
+		if kind != Kind::Fetch {
+			return None;
+		}
+		match version {
+			Version::Draft14 => Some(INVALID_JOINING_REQUEST_ID_14),
+			Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
+				Some(INVALID_JOINING_REQUEST_ID)
+			}
+			_ => None,
 		}
 	}
 
@@ -256,12 +290,14 @@ pub(crate) mod request {
 			}
 			Error::Unsupported | Error::Version | Error::Session(SessionError::Version) => return NOT_SUPPORTED,
 			Error::NotFound | Error::Stream(StreamError::NotFound) => does_not_exist(kind, version),
+			Error::InvalidRange => invalid_range(kind, version),
+			Error::InvalidJoiningRequestId => invalid_joining_request_id(kind, version),
 			// A path with no route is one we will not carry. A subscriber that asked for it
 			// cannot act on "we do not want it": what it needs to know is that we do not have
 			// it, which is the same refusal from its side. Only the requests that offer content
 			// say UNINTERESTED.
 			Error::Unroutable | Error::Stream(StreamError::Unroutable) => match kind {
-				Kind::Subscribe | Kind::Fetch => does_not_exist(kind, version),
+				Kind::Subscribe | Kind::Fetch | Kind::TrackStatus => does_not_exist(kind, version),
 				Kind::Publish | Kind::PublishNamespace | Kind::SubscribeNamespace => uninterested(kind, version),
 			},
 			// Our own parse failure is, from the peer's side, a malformed track.
@@ -288,6 +324,8 @@ pub(crate) mod request {
 			TIMEOUT => Error::Timeout,
 			NOT_SUPPORTED => Error::Unsupported,
 			code if Some(code) == does_not_exist(kind, version) => Error::NotFound,
+			code if Some(code) == invalid_range(kind, version) => Error::InvalidRange,
+			code if Some(code) == invalid_joining_request_id(kind, version) => Error::InvalidJoiningRequestId,
 			code if Some(code) == uninterested(kind, version) => Error::Unroutable,
 			code if Some(code) == malformed_track(kind, version) => Error::MalformedTrack,
 			code if Some(code) == going_away(version) => Error::GoingAway,
@@ -311,23 +349,26 @@ pub(crate) mod request {
 			Version::Draft22,
 		];
 
-		const KINDS: [Kind; 5] = [
+		const KINDS: [Kind; 6] = [
 			Kind::Subscribe,
 			Kind::Fetch,
 			Kind::Publish,
 			Kind::PublishNamespace,
 			Kind::SubscribeNamespace,
+			Kind::TrackStatus,
 		];
 
 		/// Every error a rejection distinguishes, plus one it does not, so the checks below cover
 		/// the whole registry rather than the variants someone remembered. A new arm in
 		/// [`to_code`] belongs here.
-		const EVERY_ERROR: [Error; 9] = [
+		const EVERY_ERROR: [Error; 11] = [
 			Error::Duplicate,
 			Error::Unauthorized,
 			Error::Timeout,
 			Error::Unsupported,
 			Error::NotFound,
+			Error::InvalidRange,
+			Error::InvalidJoiningRequestId,
 			Error::Unroutable,
 			Error::MalformedTrack,
 			Error::GoingAway,
@@ -400,6 +441,34 @@ pub(crate) mod request {
 			}
 		}
 
+		#[test]
+		fn fetch_refusals_follow_each_drafts_registry() {
+			for version in ALL {
+				let range = if version == Version::Draft14 { 0x5 } else { 0x11 };
+				assert_eq!(to_code(&Error::InvalidRange, Kind::Fetch, version), range);
+				assert!(matches!(from_code(range, Kind::Fetch, version), Error::InvalidRange));
+				let joining = match version {
+					Version::Draft14 => Some(0x7),
+					Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
+						Some(0x32)
+					}
+					_ => None,
+				};
+				assert_eq!(
+					to_code(&Error::InvalidJoiningRequestId, Kind::Fetch, version),
+					joining.unwrap_or(0)
+				);
+				if let Some(code) = joining {
+					assert!(matches!(
+						from_code(code, Kind::Fetch, version),
+						Error::InvalidJoiningRequestId
+					));
+				} else {
+					assert!(matches!(from_code(0x32, Kind::Fetch, version), Error::Remote(0x32)));
+				}
+			}
+		}
+
 		/// Every code we send must decode back to what we meant on the same draft and
 		/// request, or two moq-net peers disagree about what a rejection said.
 		#[test]
@@ -431,6 +500,7 @@ pub(crate) mod request {
 					(Version::Draft14, Kind::Fetch) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0x10, 0x12],
 					(Version::Draft14, Kind::Publish) => &[0x0, 0x1, 0x2, 0x3, 0x4],
 					(Version::Draft14, Kind::PublishNamespace) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x10, 0x12],
+					(Version::Draft14, Kind::TrackStatus) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x10, 0x12],
 					(Version::Draft14, Kind::SubscribeNamespace) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x10, 0x12],
 					(Version::Draft15, _) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x10, 0x11, 0x12, 0x20, 0x30, 0x32, 0x33],
 					(Version::Draft16, _) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x32],

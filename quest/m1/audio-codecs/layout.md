@@ -16,7 +16,10 @@ Keep the representation extensible. Each codec module maps its native
 order into it: AAC's `C L R Ls Rs LFE` and Opus's Vorbis `L C R Ls Rs LFE`
 both become `L R C LFE Ls Rs`. An unspecified discrete PCM layout remains
 valid for passthrough but is refused for spatial remixing; never invent speaker
-positions from an arbitrary channel count.
+positions from an arbitrary channel count. An AAC stream with
+channelConfiguration 0 takes its layout from the program config element's
+front, side, back, and LFE elements, which `moq_mux::codec::aac` already parses
+for the channel count.
 
 - Reuse the settled PCM descriptors and codec/consumer settings. This quest
   adds supported layout behavior rather than replacing public field types.

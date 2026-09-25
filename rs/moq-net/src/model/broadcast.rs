@@ -132,10 +132,10 @@ impl BroadcastState {
 	/// Resolve every name the broadcast never filled, so subscribers waiting on a
 	/// [`track::Info`] that can no longer arrive fail with `err` instead of parking.
 	///
-	/// Covers a reservation nobody accepted, a request handed to a [`Dynamic`] that
-	/// never answered it, and one still queued for a handler. A track that carries
-	/// its info has a publisher and is left alone: an end there is that publisher's
-	/// call, and its cache stays readable.
+	/// Covers a reservation nobody accepted and a request still queued for a handler.
+	/// A request a [`Dynamic`] already took is left alone: it may be in flight to a peer
+	/// still serving it, and the handler answers or drops it. So is a track that carries
+	/// its info: an end there is that publisher's call, and its cache stays readable.
 	fn reject_unserved(&mut self, err: Error) {
 		for request in self.requests.drain_queued() {
 			request.reject(err.clone());
@@ -448,9 +448,10 @@ impl Producer {
 	/// new tracks are served, whether or not other producer clones are still alive.
 	/// Existing tracks stay readable so consumers can drain what they already have.
 	///
-	/// A name that was reserved or requested but never served resolves with
-	/// [`Error::NotFound`]: nothing can fill it now, so its subscribers fail rather
-	/// than waiting on a [`track::Info`] that is never coming.
+	/// A name that was reserved, or requested and never taken by a [`Dynamic`], resolves
+	/// with [`Error::NotFound`]: nothing can fill it now, so its subscribers fail rather
+	/// than waiting on a [`track::Info`] that is never coming. A request a handler took
+	/// is left for that handler to answer.
 	///
 	/// Borrows rather than consumes, matching [`track::Producer::finish`]. Finishing
 	/// declares the end, so it must not depend on the caller also surrendering the
@@ -460,7 +461,7 @@ impl Producer {
 			let mut state = self.state.lock();
 			state.closing = true;
 			state.finished = true;
-			// A name that was reserved or requested but never served can't arrive now,
+			// A name that was reserved or queued but never served can't arrive now,
 			// and `Consumer::track` already answers `NotFound` for one asked about after
 			// this point. Say the same to whoever asked earlier.
 			state.reject_unserved(Error::NotFound);
@@ -680,7 +681,7 @@ impl Dynamic {
 		// holds the name (a publish raced the request), `insert` keeps it rather than shadowing it.
 		let _ = state.tracks.insert(name, pending.weak());
 		// Attribute the served track to this broadcast's ingress scope (no-op untagged).
-		Poll::Ready(Ok(pending.with_stats(self.stats.clone())))
+		Poll::Ready(Ok(pending.claim().with_stats(self.stats.clone())))
 	}
 
 	/// Block until a consumer requests a track, returning a [`track::Request`] to serve.
@@ -1550,19 +1551,34 @@ mod test {
 		drop(dynamic);
 	}
 
-	/// A request a handler already took parks the same way if the handler never answers
-	/// it, so the sweep has to reach that one too.
+	/// A request a handler already took is the handler's to answer: it may be in flight
+	/// to a peer, and a retraction does not disturb subscriptions already in flight.
+	/// Whatever the handler decides still reaches the consumer.
 	#[tokio::test]
-	async fn finish_resolves_a_request_a_handler_never_answered() {
+	async fn finish_leaves_a_claimed_request_to_its_handler() {
 		let producer = Info::new().produce();
 		let mut dynamic = producer.dynamic();
 		let consumer = dynamic.consume();
 
-		let pending = subscribe_pending!(consumer, "track1");
-		let _request = dynamic.requested_track().await.unwrap();
+		let accepted = subscribe_pending!(consumer, "track1");
+		let request = dynamic.requested_track().await.unwrap();
+		let dropped = subscribe_pending!(consumer, "track2");
+		let abandoned = dynamic.requested_track().await.unwrap();
 
 		producer.finish();
-		assert!(matches!(pending.await, Err(Error::NotFound)));
+		assert!(
+			accepted.poll_ok(&kio::Waiter::noop()).is_pending(),
+			"finish rejected a claimed request"
+		);
+		assert!(
+			dropped.poll_ok(&kio::Waiter::noop()).is_pending(),
+			"finish rejected a claimed request"
+		);
+
+		let _track = request.accept(None);
+		assert!(accepted.await.is_ok(), "the handler's accept reaches the consumer");
+		drop(abandoned);
+		assert!(dropped.await.is_err(), "the handler dropping it rejects the consumer");
 		drop(dynamic);
 	}
 

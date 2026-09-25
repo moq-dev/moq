@@ -3,7 +3,7 @@
  *
  * @module
  */
-import type { Dispose } from "@moq/signals";
+import { type Dispose, race } from "@moq/signals";
 import { isActive } from "../announced.ts";
 import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import type * as Path from "../path.ts";
@@ -160,7 +160,7 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 
 		// Woken by the table too, not just the requests: a path that stops being routed needs
 		// the blind answer this loop skipped while it was.
-		await Promise.race([table.changed(), closed]);
+		await race([table.changed(), closed]);
 	}
 
 	// Session gone: withdraw our answers, waking a standby session to provide fresh ones.

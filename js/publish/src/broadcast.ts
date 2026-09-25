@@ -111,7 +111,8 @@ export class Broadcast {
 	 *
 	 * Set the returned rendition's `config` to a {@link Catalog.TextConfig}, then write one cue per
 	 * group into its `track` with `Hang.Container.Legacy.Producer` (each cue is a keyframe, so it opens
-	 * its own group). See the module docs for the cue framing.
+	 * its own group). See the module docs for the cue framing. Stamp cues with `performance.now()` in
+	 * microseconds, the broadcast clock the catalog advertises.
 	 */
 	text(name: string): Rendition<Catalog.TextConfig> {
 		return this.#register<Catalog.TextConfig>(name, "text");

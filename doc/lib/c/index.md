@@ -57,6 +57,8 @@ if (session < 0)
     return fail(moq_error());
 ```
 
+For a locally encoded media track, call `moq_publish_media_flush(media, timestamp_us)` after `moq_publish_media_frame` with the same broadcast-clock PTS. The monotonic handoff time is sampled inside libmoq. Do not call it for file, pipe, or network imports; those remain clock-free. Invalid handles and unrepresentable timestamps return a negative error code.
+
 ## Connection stats
 
 Every field in `moq_connection_stats` carries a matching `<field>_valid` flag,

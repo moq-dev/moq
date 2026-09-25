@@ -255,7 +255,7 @@ export class Reload {
 				if (pending) return;
 				pending = true;
 				try {
-					const stats = await Promise.race([effect.cancel, connection.stats()]);
+					const stats = await effect.race(connection.stats());
 					if (stats) this.#estimate.set(stats.estimatedSendRate);
 				} finally {
 					pending = false;
@@ -341,7 +341,7 @@ export class Reload {
 				// A cancelled effect resolves undefined, so the sentinel tells the session
 				// closing (null for clean, an Error otherwise) apart from this run being
 				// torn down.
-				const closed = await Promise.race([effect.cancel, connection.closed]);
+				const closed = await effect.race(connection.closed);
 				if (closed === undefined) return;
 
 				console.warn("connection closed, reconnecting");
@@ -470,7 +470,7 @@ export class Reload {
 			effect.spawn(async () => {
 				try {
 					for (;;) {
-						const entry = await Promise.race([effect.cancel, upstream.next()]);
+						const entry = await effect.race(upstream.next());
 						if (!entry) break;
 						if (Announce.isActive(entry.kind)) active.set(entry.prefix, entry);
 						else active.delete(entry.prefix);
