@@ -34,9 +34,9 @@ before its header arrived is still invisible, so the track-tail grace stays.
   that is never counted, a reset stream, and a count of zero. Add a Rust-JS
   interop case.
 
-This lands before lite-07 is finalized. Published drafts keep SUBSCRIBE_DROP.
-lite-07 replaces it with the count in both Rust and JS. Rust still does not
-send SUBSCRIBE_DROP; it only accounts one a peer sends.
+This lands before lite-07 is finalized. Published drafts keep SUBSCRIBE_DROP,
+which moq-net and `@moq/net` already account. lite-07 replaces it with the
+count in both. Rust still does not send SUBSCRIBE_DROP.
 
 ## Related
 
