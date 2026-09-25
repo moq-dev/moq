@@ -268,7 +268,8 @@ impl Relay {
 		let cluster = cluster.with_stats(stats.clone());
 
 		// Graceful shutdown: the first signal drains every accepted session with a
-		// GOAWAY; a second signal (or the drain window elapsing) exits.
+		// GOAWAY; the relay exits once they have all left, at the drain deadline,
+		// or on a second signal.
 		let (shutdown_trigger, shutdown) = shutdown::Observer::new(drain_timeout);
 		let sessions = crate::session::Registry::new();
 		let (ready, _) = tokio::sync::watch::channel(false);
@@ -286,6 +287,7 @@ impl Relay {
 		let internal = internal::Internal::new(config.internal, cluster.stats.clone())
 			.with_cluster(&cluster)
 			.with_sessions(sessions.clone())
+			.with_shutdown(shutdown.clone())
 			.with_listeners(web.accept_health())
 			.with_listeners(server.accept_health());
 		// Bound but not yet serving: registering here (rather than after the
@@ -394,8 +396,9 @@ impl Relay {
 	}
 
 	/// Starts graceful shutdown: every session, including any accepted
-	/// afterwards, drains with a GOAWAY and [`Self::run`] returns once the drain
-	/// window elapses. Clone it before `run` consumes the relay.
+	/// afterwards, drains with a GOAWAY and [`Self::run`] returns once every
+	/// session has left or the drain window elapses. Clone it before `run`
+	/// consumes the relay.
 	pub fn shutdown_trigger(&self) -> &shutdown::Trigger {
 		&self.shutdown_trigger
 	}
@@ -462,9 +465,10 @@ impl Relay {
 
 	/// Serve until something fails or shutdown completes: accept sessions, run
 	/// the cluster, and serve both HTTP surfaces. Notifies systemd once
-	/// everything is up. Returns once the drain window elapses after a signal
-	/// (see [`Self::with_signals`]) or [`shutdown::Trigger::start`], with every
-	/// listener released and every worker joined.
+	/// everything is up. Returns once a drain started by a signal (see
+	/// [`Self::with_signals`]) or [`shutdown::Trigger::start`] ends, as soon as
+	/// every session has left or at the drain deadline, with every listener
+	/// released and every worker joined.
 	///
 	/// This is also the embedding loop. Extra routes go on via [`Self::with_web`]
 	/// / [`Self::with_internal`] before calling this; cloned handles outlive it.
@@ -656,9 +660,10 @@ impl Relay {
 
 /// Two-stage shutdown: the first signal, or an embedder firing
 /// [`shutdown::Trigger::start`], starts the drain broadcast (every session sends
-/// GOAWAY and waits for its peer to leave); a second signal, or that recorded
-/// deadline plus one second, returns from [`Relay::run`]. Without `signals`
-/// only the trigger and that deadline count.
+/// GOAWAY and waits for its peer to leave). Returns from [`Relay::run`] once
+/// every session has left, which the drain deadline forces, or on a second
+/// signal, logging which ended it.
+/// Without `signals` only the trigger and the sessions count.
 async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, signals: bool) -> anyhow::Result<()> {
 	let window = shutdown.drain_timeout;
 	let signal = || async move {
@@ -679,19 +684,38 @@ async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, sig
 		_ = shutdown.started() => tracing::info!(?window, "shutdown requested; draining sessions"),
 	}
 
-	// One extra second past the deadline fixed when the trigger fired, so
-	// per-session force-closes fire first. That instant may be earlier than
-	// this future was polled (the embedder can start the drain during startup),
-	// and a fresh window here would keep the process up past the time sessions
-	// were told.
+	// The deadline fixed when the trigger fired, which may be earlier than this
+	// future was polled (the embedder can start the drain during startup); a
+	// fresh window here would keep the process up past the time sessions were
+	// told. Each session is force-closed at it, so `drained` resolves by then;
+	// the extra second only bounds a session whose close never completes.
 	let deadline = shutdown.deadline().context("drain started without a deadline")?;
-	let grace = (deadline + std::time::Duration::from_secs(1)).saturating_duration_since(std::time::Instant::now());
 	tokio::select! {
 		res = signal() => {
 			res?;
-			tracing::warn!("second shutdown signal; exiting immediately");
+			tracing::warn!(open = shutdown.tally().live, "second shutdown signal; exiting immediately");
+			return Ok(());
 		}
-		_ = tokio::time::sleep(grace) => tracing::info!("drain window elapsed; exiting"),
+		_ = shutdown.drained() => {}
+		_ = tokio::time::sleep_until(deadline + std::time::Duration::from_secs(1)) => {}
+	}
+
+	let elapsed = tokio::time::Instant::now().saturating_duration_since(deadline - window);
+	match shutdown.tally() {
+		shutdown::Tally { live: 0, forced: 0, .. } => {
+			tracing::info!(?elapsed, "drain complete: every session left; exiting")
+		}
+		shutdown::Tally { live: 0, forced, .. } => {
+			tracing::warn!(?elapsed, forced, "drain deadline force-closed sessions; exiting")
+		}
+		shutdown::Tally { live, forced, .. } => {
+			tracing::warn!(
+				?elapsed,
+				forced,
+				open = live,
+				"drain deadline passed with sessions still open; exiting"
+			)
+		}
 	}
 	Ok(())
 }

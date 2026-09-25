@@ -9,7 +9,8 @@
 //! - `/metrics` - this node's own traffic counters as Prometheus text
 //!   exposition, plus the accept-loop health of its TCP listeners
 //!   ([`with_listeners`](Internal::with_listeners)) and the per-worker health of
-//!   its io_uring runtime ([`with_uring`](Internal::with_uring)). A distinct plane
+//!   its io_uring runtime ([`with_uring`](Internal::with_uring)), and the
+//!   progress of a shutdown drain ([`with_shutdown`](Internal::with_shutdown)). A distinct plane
 //!   from both the customer `web` surface and the MoQ `.stats` broadcast: the same
 //!   atomics, but a different transport and audience (an ops scraper, not a
 //!   customer or the dashboard/billing aggregators). The runtime counters are
@@ -89,6 +90,7 @@ pub struct Internal {
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	shutdown: Option<crate::shutdown::Observer>,
 }
 
 #[derive(Clone)]
@@ -98,6 +100,7 @@ struct InternalState {
 	sessions: crate::session::Registry,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	shutdown: Option<crate::shutdown::Observer>,
 }
 
 impl Internal {
@@ -122,6 +125,7 @@ impl Internal {
 			health,
 			listeners,
 			uring: Vec::new(),
+			shutdown: None,
 		}
 	}
 
@@ -172,6 +176,12 @@ impl Internal {
 		self
 	}
 
+	/// Report the sessions a shutdown drain is still waiting on at `/metrics`.
+	pub fn with_shutdown(mut self, shutdown: crate::shutdown::Observer) -> Self {
+		self.shutdown = Some(shutdown);
+		self
+	}
+
 	/// Attach the relay cluster used to serve the `/nodes` topology snapshot.
 	pub fn with_cluster(mut self, cluster: &crate::cluster::Cluster) -> Self {
 		self.nodes = Some(cluster.nodes.clone());
@@ -205,6 +215,7 @@ impl Internal {
 				sessions: self.sessions.clone(),
 				listeners: self.listeners.clone(),
 				uring: self.uring.clone(),
+				shutdown: self.shutdown.clone(),
 			})
 	}
 
@@ -275,7 +286,10 @@ async fn serve_health() -> Response {
 /// current cumulative snapshot; a downstream scraper derives rates and live
 /// counts (`open - closed`).
 async fn serve_metrics(State(state): State<InternalState>) -> Response {
-	let body = render_metrics(&state.stats.snapshot(), &state.listeners, &state.uring);
+	let mut body = render_metrics(&state.stats.snapshot(), &state.listeners, &state.uring);
+	if let Some(shutdown) = &state.shutdown {
+		render_drain(&mut body, shutdown.tally());
+	}
 	([(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
 
@@ -452,6 +466,21 @@ fn render_metrics(
 	render_uring(&mut out, uring);
 
 	out
+}
+
+/// The sessions a shutdown drain is still waiting on: 0 until the drain starts,
+/// and back to 0 when every session has left, which is when the relay exits.
+/// A scrape that last saw it above 0 shortly before the deadline means the
+/// deadline force-closed the rest; the exit log records how many.
+fn render_drain(out: &mut String, tally: crate::shutdown::Tally) {
+	use std::fmt::Write as _;
+
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_draining_sessions Sessions sent a shutdown GOAWAY that have not left yet."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_draining_sessions gauge");
+	let _ = writeln!(out, "moq_relay_draining_sessions {}", tally.draining);
 }
 
 /// The accept-loop health of every listener on the node.
@@ -863,6 +892,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			shutdown: None,
 		};
 
 		let Json(snapshot) = serve_nodes(State(state)).await;
@@ -880,6 +910,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			shutdown: None,
 		};
 
 		let Json(snapshot) = serve_nodes(State(state)).await;

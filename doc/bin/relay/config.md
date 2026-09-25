@@ -231,8 +231,14 @@ The first SIGTERM or SIGINT starts a drain: every session is sent a GOAWAY
 asking it to reconnect, and is force-closed if it is still connected when the
 window ends. A session that connects during the drain, such as a client with a
 cached DNS answer, is sent a GOAWAY immediately, with only the time left in
-the window. The relay exits one second after the window ends, or immediately
-on a second signal. `0` skips the GOAWAY and closes every session at once.
+the window. The relay exits as soon as every session has left, when the window
+ends, or immediately on a second signal. `0` skips the GOAWAY and closes every
+session at once.
+
+The exit is logged with how long the drain took, as either
+`drain complete: every session left` or `drain deadline force-closed sessions`
+with the number `forced`. A session still in its handshake when the last one
+leaves is not waited for.
 Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are
 closed when the window ends. An embedder can take over the signals and start
 the drain itself; see [Embed](/bin/relay/#embed).
