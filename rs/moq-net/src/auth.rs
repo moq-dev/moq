@@ -1,6 +1,6 @@
 //! In-band authorization: present tokens to the peer and learn what they grant.
 //!
-//! Each side of a moq-lite-06 session presents the credential its connection
+//! Each side of a session presents the credential its connection
 //! already carried (the URL, a client certificate, or nothing) right after
 //! setup, and learns the [`Grant`] it earned. [`Session::auth`](crate::Session::auth)
 //! returns the [`Handle`]: [`grant`](Handle::grant) is the union of every token
@@ -12,8 +12,10 @@
 //! itself takes [`requests`](Handle::requests) before running the session's
 //! driver, and then answers every token the peer presents.
 //!
-//! Older versions and moq-transport carry no AUTH exchange: there the grant stays
-//! `None` and [`add`](Handle::add) fails with [`Error::Unsupported`].
+//! moq-transport draft-17+ carries the same exchange when both sides negotiate the
+//! MoQ Auth extension. Older versions, and peers that do not negotiate it, carry no
+//! AUTH exchange: there the grant stays `None` and [`add`](Handle::add) fails with
+//! [`Error::Unsupported`].
 
 use std::{
 	collections::{BTreeMap, VecDeque},
@@ -362,6 +364,23 @@ impl Handle {
 			.union
 			.as_ref()
 			.is_none_or(|union| union.patterns(direction).matches(path))
+	}
+
+	/// The peer turned out not to negotiate AUTH: fail every token as unsupported and
+	/// close the requests, leaving the union unknown.
+	pub(crate) fn unsupported(&self) {
+		let mut state = self.state.lock();
+		state.supported = false;
+		state.opening.clear();
+		for slot in state.tokens.values_mut() {
+			slot.answered.get_or_insert(Err(Error::Unsupported));
+			slot.ended.get_or_insert(Error::Unsupported);
+		}
+		// Nothing will read a withdrawn slot again.
+		state.tokens.retain(|_, slot| !slot.withdrawn);
+		if let Acceptor::App(queue) = &state.acceptor {
+			queue.close();
+		}
 	}
 
 	/// End the session: fail every pending token, end every watch, and close the
@@ -716,6 +735,71 @@ impl Gate {
 			};
 			if !union.patterns(self.direction).matches(self.path.as_str()) {
 				return Poll::Ready(());
+			}
+		}
+	}
+}
+
+/// The close reason naming a broadcast published outside the grant. [`Error`] carries
+/// no payload, so the path travels here, in the session's own terms.
+pub(crate) fn unauthorized_reason(path: &crate::Path) -> String {
+	format!("unauthorized: {path}")
+}
+
+/// Finds a broadcast this side publishes that its grant never covered, so the session
+/// can fail loudly instead of waiting for a subscription that never comes.
+///
+/// Waits until the tokens the session presented at setup are answered, then checks
+/// each broadcast when it is first announced. A grant that later shrinks withdraws what
+/// it no longer covers without aborting: the union is processed before new
+/// announcements, so a revocation is never mistaken for a new unauthorized
+/// publication. Only the dialing side enforces: a server's publish origin is everything
+/// the peer may read, not what it intends to push.
+#[derive(Default)]
+pub(crate) struct Enforce {
+	epoch: u64,
+	permit: Option<Patterns>,
+	/// Every broadcast admitted so far, still announced.
+	live: std::collections::HashSet<crate::PathOwned>,
+	setup: bool,
+}
+
+impl Enforce {
+	/// Resolve with the first broadcast announced outside the union, or `None` once the
+	/// origin ends.
+	pub(crate) fn poll(
+		&mut self,
+		handle: &Handle,
+		announced: &mut crate::announce::Consumer,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<crate::PathOwned>> {
+		if !self.setup {
+			ready_or!(handle.poll_setup_answered(waiter));
+			self.setup = true;
+		}
+		while let Poll::Ready(union) = handle.poll_union(&mut self.epoch, waiter) {
+			self.permit = union.map(|grant| grant.publish);
+		}
+		// No grant yet (the peer never answered with one): nothing to check against.
+		let Some(permit) = &self.permit else {
+			return Poll::Pending;
+		};
+
+		loop {
+			let Some(update) = ready_or!(announced.poll_next(waiter)) else {
+				return Poll::Ready(None);
+			};
+			match update.kind {
+				crate::announce::Kind::Announced if !self.live.contains(&update.prefix) => {
+					if !permit.matches(update.prefix.as_str()) {
+						return Poll::Ready(Some(update.prefix));
+					}
+					self.live.insert(update.prefix);
+				}
+				crate::announce::Kind::Retracted => {
+					self.live.remove(&update.prefix);
+				}
+				_ => {}
 			}
 		}
 	}

@@ -495,21 +495,12 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 }
 
 /// Aborts the session when our origin announces a broadcast our grant does not
-/// cover, instead of leaving it to wait for a subscription that never comes.
-///
-/// Waits until the tokens the session presented at setup are answered, then
-/// checks each broadcast when it is first announced. A grant that later shrinks
-/// withdraws what it no longer covers (see [`AnnounceRun`]) without aborting:
-/// the union is processed before new announcements, so a revocation is never
-/// mistaken for a new unauthorized publication.
+/// cover, instead of leaving it to wait for a subscription that never comes. See
+/// [`crate::auth::Enforce`].
 #[derive(Default)]
 struct Enforce {
-	epoch: u64,
-	permit: Option<crate::Patterns>,
+	check: crate::auth::Enforce,
 	announced: Option<announce::Consumer>,
-	/// Every broadcast admitted so far, still announced.
-	live: std::collections::HashSet<crate::PathOwned>,
-	setup: bool,
 }
 
 impl Enforce {
@@ -518,18 +509,6 @@ impl Enforce {
 		shared: &Shared<S>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
-		if !self.setup {
-			ready!(shared.auth.poll_setup_answered(waiter));
-			self.setup = true;
-		}
-		while let Poll::Ready(union) = shared.auth.poll_union(&mut self.epoch, waiter) {
-			self.permit = union.map(|grant| grant.publish);
-		}
-		// No grant yet (the peer never answered with one): nothing to check against.
-		let Some(permit) = &self.permit else {
-			return Poll::Pending;
-		};
-
 		let announced = match &mut self.announced {
 			Some(announced) => announced,
 			None => {
@@ -537,36 +516,19 @@ impl Enforce {
 				self.announced.insert(origin.announced())
 			}
 		};
-
-		loop {
-			let Some(update) = ready!(announced.poll_next(waiter)) else {
-				return Poll::Ready(Ok(()));
-			};
-			match update.kind {
-				announce::Kind::Announced if !self.live.contains(&update.prefix) => {
-					if !permit.matches(update.prefix.as_str()) {
-						tracing::error!(
-							broadcast = %shared.origin.absolute(&update.prefix),
-							"publishing outside our grant; closing the session"
-						);
-						// `Error` carries no payload, so the path travels in the close
-						// reason, in the session's own terms.
-						let err = Error::Unauthorized;
-						let reason = format!("unauthorized: {}", update.prefix);
-						shared
-							.session
-							.clone()
-							.close(SessionError::from(&err).to_code(), &reason);
-						return Poll::Ready(Err(err));
-					}
-					self.live.insert(update.prefix);
-				}
-				announce::Kind::Retracted => {
-					self.live.remove(&update.prefix);
-				}
-				_ => {}
-			}
-		}
+		let Some(path) = ready!(self.check.poll(&shared.auth, announced, waiter)) else {
+			return Poll::Ready(Ok(()));
+		};
+		tracing::error!(
+			broadcast = %shared.origin.absolute(&path),
+			"publishing outside our grant; closing the session"
+		);
+		let err = Error::Unauthorized;
+		shared.session.clone().close(
+			SessionError::from(&err).to_code(),
+			&crate::auth::unauthorized_reason(&path),
+		);
+		Poll::Ready(Err(err))
 	}
 }
 
@@ -1133,12 +1095,13 @@ impl AnnounceRun {
 		let mut cx = Context::from_waker(waiter.waker());
 
 		if matches!(self.phase, AnnouncePhase::Init) {
-			// Start from whatever grant we already hold, so the initial set never
-			// advertises something it would withdraw a moment later.
-			if let Some(auth) = &self.auth
-				&& let Poll::Ready(union) = auth.poll_union(&mut self.epoch, waiter)
-			{
-				self.permit = union.map(|grant| grant.publish);
+			// Start from the grant the setup token earns, so the initial set never
+			// advertises something it would withdraw, or abort over, a moment later.
+			if let Some(auth) = &self.auth {
+				ready!(auth.poll_setup_answered(waiter));
+				if let Poll::Ready(union) = auth.poll_union(&mut self.epoch, waiter) {
+					self.permit = union.map(|grant| grant.publish);
+				}
 			}
 			self.init(stream, origin, announced)?;
 			self.phase = AnnouncePhase::Running;

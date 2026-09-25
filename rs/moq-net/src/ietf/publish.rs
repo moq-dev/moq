@@ -126,6 +126,8 @@ pub(crate) enum PublishDoneStatus {
 	InternalError,
 	/// The track is no longer being published.
 	TrackEnded,
+	/// The publisher's grant no longer covers the track (MoQ Auth).
+	Unauthorized,
 }
 
 impl PublishDoneStatus {
@@ -144,6 +146,7 @@ impl PublishDoneStatus {
 			| Version::Draft21
 			| Version::Draft22 => match self {
 				Self::InternalError => 0x0,
+				Self::Unauthorized => 0x1,
 				Self::TrackEnded => 0x2,
 			},
 		}
