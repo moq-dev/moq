@@ -30,6 +30,22 @@ func WithVideoLabel(label string) VideoOption {
 	}
 }
 
+// WithAudioTrack names the track instead of deriving a unique name from the
+// format. A requested track already has a name, so the OnTrack variant refuses it.
+func WithAudioTrack(track string) AudioOption {
+	return func(init *ffi.MoqAudioInit) {
+		init.Track = &track
+	}
+}
+
+// WithVideoTrack names the track instead of deriving a unique name from the
+// format. A requested track already has a name, so the OnTrack variant refuses it.
+func WithVideoTrack(track string) VideoOption {
+	return func(init *ffi.MoqVideoInit) {
+		init.Track = &track
+	}
+}
+
 // WithVideoHint seeds catalog fields that a video stream cannot reveal itself.
 func WithVideoHint(hint VideoHint) VideoOption {
 	return func(init *ffi.MoqVideoInit) {
