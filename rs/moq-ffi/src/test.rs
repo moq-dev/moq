@@ -2398,7 +2398,9 @@ async fn catalog_update_on_new_track() {
 fn close_twice_is_a_noop() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let _media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init.clone())).unwrap();
+	let _media = broadcast
+		.publish_audio(audio_init(MoqAudioFormat::Opus, init.clone()))
+		.unwrap();
 	broadcast.close().unwrap();
 	broadcast.close().unwrap();
 
