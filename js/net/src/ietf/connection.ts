@@ -46,6 +46,9 @@ export class Connection implements Established {
 	// The established WebTransport session.
 	#quic: WebTransport;
 
+	// Whether this side opened the session. Only a server may name a redirect.
+	#client: boolean;
+
 	// Session abstraction: adapter for v14-v16, native for v17.
 	#session: Session;
 
@@ -120,6 +123,7 @@ export class Connection implements Established {
 		this.version = versionName(version);
 		this.transport = transportOf(quic);
 		this.#quic = quic;
+		this.#client = client;
 
 		// Two-path dispatch: v14-v16 uses adapter, v17+ uses native bidi streams
 		if (version >= Version.DRAFT_17) {
@@ -341,6 +345,10 @@ export class Connection implements Established {
 
 				const msg = await GoAway.decode(controlStream.reader, version);
 				if (this.#goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
+				// A client may leave, but only the server may name where to go.
+				if (!this.#client && msg.newSessionUri !== "") {
+					throw new ProtocolViolation("client GOAWAY must not name a redirect");
+				}
 				this.#goaway.set(msg.drain());
 			}
 		} catch (err) {

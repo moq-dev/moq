@@ -206,6 +206,19 @@ test("the control stream adapter decodes a GOAWAY and keeps running", async () =
 	await accept(adapter);
 });
 
+test("a server adapter rejects a client GOAWAY that names a redirect", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_15);
+	const control = await Stream.open(pair.server, { version: VERSION });
+	const adapter = new ControlStreamAdapter(pair.server, control, VERSION, 100n, false);
+	const running = adapter.run();
+	const peer = await Stream.accept(pair.client, VERSION);
+	if (!peer) throw new Error("no control stream");
+
+	await peer.writer.u53(GoAway.id);
+	await new GoAway({ newSessionUri: "https://other.example/" }).encode(peer.writer, VERSION);
+	await expect(running).rejects.toThrow("client GOAWAY must not name a redirect");
+});
+
 test("a second GOAWAY on the control stream closes the session", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_15);
 	const control = await Stream.open(pair.server, { version: VERSION });

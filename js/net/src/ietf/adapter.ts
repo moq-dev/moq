@@ -130,6 +130,9 @@ export class ControlStreamAdapter implements Session {
 
 	#closed = false;
 
+	// Whether this side opened the session. Only a server may name a redirect.
+	#client: boolean;
+
 	constructor(
 		quic: WebTransport,
 		controlStream: Stream,
@@ -145,6 +148,7 @@ export class ControlStreamAdapter implements Session {
 		this.version = version;
 		this.#maxRequestId = maxRequestId;
 		this.#requestId = client ? 0n : 1n;
+		this.#client = client;
 	}
 
 	/**
@@ -273,6 +277,10 @@ export class ControlStreamAdapter implements Session {
 					// The session keeps serving: a GOAWAY asks us to migrate, not to stop reading.
 					const msg = await GoAway.decodeBody(body, this.version);
 					if (this.goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
+					// A client may leave, but only the server may name where to go.
+					if (!this.#client && msg.newSessionUri !== "") {
+						throw new ProtocolViolation("client GOAWAY must not name a redirect");
+					}
 					this.goaway.set(msg.drain());
 					continue;
 				}
