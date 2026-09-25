@@ -91,11 +91,14 @@ driver without the force-keyframe control), and queues nothing then: groups
 keep falling where `Config::gop` puts them. `encode::Sink` answers the same
 way, awaited.
 
-Two public entry points:
+Public entry points:
 
 - `encode::publish_capture(...)` captures a webcam, encodes it, and publishes on
   demand: the track and catalog are advertised up front, but the camera opens
   only while a subscriber is watching and is released when the last one leaves.
+- `encode::Control::new(...)` does the same but returns a `Control` handle with
+  the `Driver` that runs it, like `moq-audio`'s. `Control::cut()` asks for a
+  keyframe: requests coalesce, and forced keyframes land at least 500ms apart.
 - `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
   handling the catalog and framing. Each is published at its own timestamp.
 

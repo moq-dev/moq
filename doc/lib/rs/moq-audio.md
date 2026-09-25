@@ -37,7 +37,7 @@ than falling back to the catalog's fields.
 
 Highlights:
 
-- **`encode::Publication`** advertises the track and opens the microphone only while someone listens. Stop, swap devices, and restart without changing the track subscribers know; read a level meter for the UI.
+- **`encode::Control`** advertises the track and opens the microphone only while someone listens. Stop, swap devices, and restart without changing the track subscribers know; read a level meter for the UI.
 - **A/V sync signal.** `Sink::buffered()` reports how far ahead the speaker is, which is what a video clock steers by.
 - **Activity per packet**, read off the Opus stream, so a call UI shows who is talking without a second voice detector.
 - **One Linux build dependency**: ALSA headers, and only when `capture` or `playback` is enabled.
