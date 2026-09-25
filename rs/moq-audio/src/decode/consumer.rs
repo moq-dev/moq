@@ -1,10 +1,12 @@
 //! Subscribe to an encoded audio track and emit raw PCM.
 
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
 use super::decoder::{Config, Decoder};
+use crate::jitter::{self, Target};
 use crate::resample::{Resampler, remix, validate_remix};
 use crate::{Activity, Error, Format, Frame, Layout};
 
@@ -43,6 +45,13 @@ pub struct Options {
 	pub max_age: std::time::Duration,
 	/// Initial cached-group policy.
 	pub start: Start,
+	/// A fixed playout delay, or `None` to estimate it from arrival timing.
+	///
+	/// The jitter buffer a player holds ahead of the playhead, reported by
+	/// [`Consumer::delay`]. Distinct from [`max_age`](Self::max_age), which is
+	/// the live-edge skip budget and adds no buffering. A fixed delay beyond the
+	/// track's retention is refused.
+	pub delay: Option<Duration>,
 }
 
 impl Options {
@@ -92,6 +101,10 @@ pub struct Consumer {
 	terminal_start: Option<moq_net::Timestamp>,
 	/// Last container playhead generation applied to timeline state.
 	discontinuity: u64,
+	/// The playout delay, fixed or estimated from arrivals.
+	target: Target,
+	/// Where arrival times are measured from.
+	origin: Instant,
 }
 
 struct ActivitySpan {
@@ -154,7 +167,17 @@ impl Consumer {
 			subscriber.set_groups(live_edge..);
 		}
 		let track = subscriber;
-		let max_age = options.max_age.min(track.info().max_age);
+		let retention = track.info().max_age;
+		let max_age = options.max_age.min(retention);
+		// Holding more than the publisher keeps would wait on media it has already
+		// discarded, so the caller asked for something impossible.
+		if let Some(delay) = options.delay
+			&& delay > retention
+		{
+			return Err(Error::Unsupported(format!(
+				"playout delay {delay:?} exceeds the track's retention of {retention:?}"
+			)));
+		}
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
@@ -162,6 +185,7 @@ impl Consumer {
 		let track = moq_mux::container::Consumer::new(track, container);
 
 		Ok(Self {
+			target: Target::new(options.delay, catalog.jitter),
 			decoder,
 			track,
 			resampler,
@@ -179,6 +203,7 @@ impl Consumer {
 			end: None,
 			terminal_start: None,
 			discontinuity: 0,
+			origin: now(),
 		})
 	}
 
@@ -190,6 +215,17 @@ impl Consumer {
 	/// The effective age budget after clamping to the publisher's retention window.
 	pub fn max_age(&self) -> std::time::Duration {
 		self.max_age
+	}
+
+	/// The playout delay to hold ahead of the playhead right now: the fixed
+	/// [`Options::delay`], or the estimate from every frame read so far.
+	///
+	/// The estimate measures when [`read`](Self::read) hands each packet over, so
+	/// it is only as honest as the caller is prompt: read as soon as the previous
+	/// frame is handled and let the playback buffer absorb the jitter, rather than
+	/// pacing reads to the speaker.
+	pub fn delay(&self) -> Duration {
+		Duration::from_secs_f64(self.target.millis() / 1000.0)
 	}
 
 	/// Sample rate samples are actually delivered at, which is
@@ -227,6 +263,13 @@ impl Consumer {
 				return self.flush();
 			};
 
+			// Every packet the container hands over is an arrival, including one the
+			// decoder is about to refuse, so it is observed before anything can fail.
+			let arrival = jitter::millis(now().duration_since(self.origin));
+			let timestamp = mux_frame.timestamp;
+			let media = timestamp.value() as f64 * 1000.0 / timestamp.scale().as_u64() as f64;
+			self.target.observe(arrival, media);
+
 			if let Some(end) = self.track.end()
 				&& self.end != Some(end)
 			{
@@ -261,6 +304,12 @@ impl Consumer {
 			self.delay_trimmed += trimmed;
 			let activity = decoded.activity;
 			let mut decoded = decoded.samples;
+			// The packet's duration as the codec states it, never read off the
+			// timestamps: those carry every tune-in and hole along with the spacing.
+			let covered = decoded.len() / self.decoder.layout().channels() as usize + trimmed;
+			if covered > 0 {
+				self.target.set_frame(covered as f64 * 1000.0 / rate as f64);
+			}
 			if let Some(end) = self.end {
 				let terminal_start = *self
 					.terminal_start
@@ -455,6 +504,16 @@ impl Consumer {
 			activity,
 		})
 	}
+}
+
+/// The receiver's monotonic clock, which a test can pin to replay a recorded
+/// arrival trace without waiting it out.
+fn now() -> Instant {
+	#[cfg(test)]
+	if let Some(now) = tests::CLOCK.get() {
+		return now;
+	}
+	Instant::now()
 }
 
 /// Whether `timestamp` fails to continue `expected`, leaving a hole (or an
@@ -1110,6 +1169,167 @@ mod tests {
 			third.timestamp,
 			advance(second.timestamp, second_frames, 48_000).unwrap()
 		);
+	}
+
+	thread_local! {
+		/// A pinned receiver clock for [`now`], so a test replays an arrival trace
+		/// instantly. Thread-local because a `tokio::test` runs on one thread.
+		pub(super) static CLOCK: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+	}
+
+	/// Replay a corpus trace through the whole decode path, one PCM packet per group
+	/// written at its recorded arrival and read straight back, and return the
+	/// consumer's delay after each packet in milliseconds.
+	///
+	/// PCM rather than Opus only for speed: the frame term comes from the decoded
+	/// sample count either way, and an unoptimized Opus codec takes minutes over
+	/// the whole corpus. [`opus_states_its_own_frame_duration`] covers Opus.
+	async fn replay(case: &crate::jitter::tests::Case) -> Vec<f64> {
+		use crate::jitter::tests::duration;
+
+		let rate = 48_000;
+		let samples = (case.frame * rate as f64 / 1000.0) as usize;
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, rate, 1);
+		catalog.jitter = case.advertised.map(duration);
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+
+		let origin = Instant::now();
+		CLOCK.set(Some(origin));
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Options {
+				delay: case.delay.map(duration),
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let payload: Bytes = vec![0u8; samples * size_of::<f32>()].into();
+		let mut series = Vec::with_capacity(case.arrival.len());
+		for (&arrival, &media) in case.arrival.iter().zip(&case.media) {
+			CLOCK.set(Some(origin + duration(arrival)));
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(media as u64 * 1000).unwrap(),
+					duration: None,
+					payload: payload.clone(),
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+
+			consumer.read().await.unwrap().expect("one decoded frame per packet");
+			series.push(crate::jitter::millis(consumer.delay()));
+		}
+		CLOCK.set(None);
+		series
+	}
+
+	/// The decode path measures what the corpus says it should: arrival when the
+	/// container hands a packet over, media from its timestamp, and the frame term
+	/// from what the codec decoded. `reorder` is left to the estimator's own test,
+	/// since the container refuses a timestamp that runs backwards.
+	#[tokio::test]
+	async fn the_decode_path_conforms_to_the_corpus() {
+		for name in [
+			"advertised",
+			"buildup",
+			"fixed",
+			"flush",
+			"idle",
+			"paced",
+			"spike",
+			"tunein",
+		] {
+			let case = crate::jitter::tests::case(name);
+			let expected = case.series();
+			for (index, actual) in replay(&case).await.into_iter().enumerate() {
+				// A Duration is whole nanoseconds, so the round trip through one costs up
+				// to a nanosecond on top of the corpus tolerance.
+				assert!(
+					(actual - expected[index]).abs() <= 1e-5,
+					"{name}: packet {index} delays {actual} ms, expected {}",
+					expected[index]
+				);
+			}
+		}
+	}
+
+	/// The frame term is the packet's full duration, pre-skip included: Opus trims
+	/// codec delay off the first packet, and reading the frame off what came out
+	/// would shrink the term by exactly that much.
+	#[tokio::test]
+	async fn opus_states_its_own_frame_duration() {
+		let mut encoder = Encoder::new(&Settings::new(48_000, Layout::Mono)).unwrap();
+		let catalog = encoder.catalog();
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Options::new())
+			.await
+			.unwrap();
+
+		producer
+			.write(moq_mux::container::Frame {
+				timestamp: Timestamp::from_micros(0).unwrap(),
+				duration: None,
+				payload: encoder.encode(&vec![0.25f32; encoder.frame_size()]).unwrap().payload,
+				keyframe: true,
+			})
+			.unwrap();
+		producer.cut(None).unwrap();
+
+		let frame = consumer.read().await.unwrap().expect("decoded frame");
+		assert!(
+			frame.data.len() / size_of::<f32>() < encoder.frame_size(),
+			"pre-skip is trimmed"
+		);
+		// The cold-start prior reads 100 ms, plus one 20 ms packet.
+		assert_eq!(consumer.delay(), std::time::Duration::from_millis(120));
+	}
+
+	#[tokio::test]
+	async fn a_delay_beyond_retention_is_refused() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let info = hang::container::track_info(hang::catalog::PRIORITY.audio)
+			.with_max_age(std::time::Duration::from_millis(100));
+		let _track = broadcast.create_track("audio", info).unwrap();
+		let subscriber = broadcast.consume();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+
+		let options = |delay| Options {
+			delay: Some(std::time::Duration::from_millis(delay)),
+			..Options::new()
+		};
+		let err = Consumer::new(&subscriber, &catalog, "audio", options(101))
+			.await
+			.err()
+			.expect("a delay the publisher cannot hold");
+		assert!(matches!(err, Error::Unsupported(_)), "{err}");
+
+		let consumer = Consumer::new(&subscriber, &catalog, "audio", options(100))
+			.await
+			.unwrap();
+		assert_eq!(consumer.delay(), std::time::Duration::from_millis(100));
 	}
 
 	#[tokio::test]

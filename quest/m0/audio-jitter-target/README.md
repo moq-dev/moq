@@ -33,16 +33,16 @@ observes each frame in `Container.Consumer` and passes the corpus, `js/watch`
 composes each track's target and `Sync` holds the deepest one in `"auto"`. What
 remains of the watch quest is proving it in a real browser.
 
-Native has no jitter buffer at all. `rs/moq-audio`'s `decode::Options`
-(`rs/moq-audio/src/decode/consumer.rs`) carries `max_age`, how far
-playback may drift from the live edge before skipping a stalled group, and
-`start`, where to begin on a track that already holds groups. Nothing pads the
-buffer against uneven arrivals.
+Native is done: `rs/moq-audio` estimates the target behind
+`decode::Options::delay` and `decode::Consumer::delay`, passes the corpus both
+directly and through the decode path, and `moq play --delay auto` holds it.
+What the line still owes once the watch quest lands: its trimmed #3477 trace
+replayed through the native decode path too, asserting the same target series
+the browser's `replay.test.ts` does.
 
 ## Quests
 
 - [Watch](/quest/m0/audio-jitter-target/watch.md) - the browser's measured target, proven on Chrome and Safari against the public relay
-- [Native](/quest/m0/audio-jitter-target/native.md) - rs/moq-audio grows a measured jitter buffer from the same algorithm
 
 ## Closes
 

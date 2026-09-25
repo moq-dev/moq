@@ -136,4 +136,7 @@ objc2-foundation = { workspace = true, optional = true }
 objc2-screen-capture-kit = { workspace = true, features = ["SCStream", "SCShareableContent"], optional = true }
 
 [dev-dependencies]
+# Reads the jitter conformance corpus at doc/concept/audio-jitter/.
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
