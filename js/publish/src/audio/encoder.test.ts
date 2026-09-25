@@ -54,7 +54,9 @@ describe("resolve", () => {
 	});
 });
 
-// Like Chrome's Opus encoder, it holds the newest chunks until later input pushes them out.
+// Like Chrome's Opus encoder, it holds the newest chunks until later input pushes them out, and
+// stamps each chunk from the first input's timestamp plus the audio encoded since, so a jump in
+// input timestamps never reaches the output.
 class LaggingAudioEncoder {
 	static readonly LAG = 2;
 
@@ -64,6 +66,8 @@ class LaggingAudioEncoder {
 	state: CodecState = "unconfigured";
 	#output: EncodedAudioChunkOutputCallback;
 	#held: { timestamp: number; duration: number }[] = [];
+	#base: number | undefined;
+	#encoded = 0;
 
 	constructor(init: AudioEncoderInit) {
 		this.#output = init.output;
@@ -76,7 +80,9 @@ class LaggingAudioEncoder {
 
 	encode(data: AudioData): void {
 		const duration = Math.round((data.numberOfFrames / data.sampleRate) * 1_000_000);
-		this.#held.push({ timestamp: data.timestamp, duration });
+		this.#base ??= data.timestamp;
+		this.#held.push({ timestamp: this.#base + this.#encoded, duration });
+		this.#encoded += duration;
 		while (this.#held.length > LaggingAudioEncoder.LAG) {
 			const { timestamp, duration } = this.#held.shift() as { timestamp: number; duration: number };
 			const chunk = {
@@ -88,6 +94,13 @@ class LaggingAudioEncoder {
 			};
 			this.#output(chunk as unknown as EncodedAudioChunk);
 		}
+	}
+
+	reset(): void {
+		this.state = "unconfigured";
+		this.#held = [];
+		this.#base = undefined;
+		this.#encoded = 0;
 	}
 
 	close(): void {
@@ -173,7 +186,8 @@ class Feed {
 
 // The encoder outlives a demand gap, so chunks it held when demand disappeared surface after the
 // resume. Written after the marker, they would put pre-gap media on the live edge, and a rounding
-// step below the marker aborts every subscriber.
+// step below the marker aborts every subscriber. The resumed chunks have to carry the capture clock,
+// not the encoder's gap-blind one, or they trail the next gap's marker and are dropped as pre-gap.
 test("a demand gap marks where submitted audio ends and drops the chunks held across it", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	const configured = new Promise<void>((resolve) => {
