@@ -336,7 +336,11 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 			.expect("recv_group timeout")
 			.expect("recv_group failed")
 			.expect("track closed");
-		let frame = group.read_frame().await.expect("read frame").expect("frame");
+		let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("read_frame timeout")
+			.expect("read frame")
+			.expect("frame");
 		assert_eq!(&frame.payload[..], b"hidden");
 		drop(connection);
 	}

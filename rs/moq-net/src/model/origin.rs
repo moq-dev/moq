@@ -4008,7 +4008,8 @@ mod tests {
 	async fn hidden_broadcast_resolves_by_path() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let _broadcast = producer.create_broadcast(".stats/node").unwrap();
+		let broadcast = producer.create_broadcast(".stats/node").unwrap();
+		broadcast.announce(Route::default()).unwrap();
 
 		consumer.announced().assert_next_wait();
 		let resolved = consumer.request_broadcast(".stats/node").await.expect("resolves");
