@@ -47,17 +47,20 @@
 //! # }
 //! ```
 
+use std::marker::PhantomData;
+
 use bytes::Bytes;
 
 use hang::catalog::{BinaryConfig, Compression, Mode};
 
-use crate::catalog::Rendition;
 use crate::catalog::hang::CatalogExt;
+use crate::catalog::{IntoRendition, Listing, RenditionConfig};
 
 /// Everything a binary track declares about itself, beyond its mode and name.
 ///
 /// Start from [`default`](Default::default) and chain the setters. The mode is not in here: it is
-/// fixed by which producer you create.
+/// fixed by which producer you create. To list the track in an application's own catalog section
+/// instead of `binary`, pass that section's entry (see [`IntoRendition`]).
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct Config {
@@ -83,14 +86,27 @@ impl Config {
 		self.mime = Some(mime.into());
 		self
 	}
+}
 
-	/// The catalog entry describing a track published under this config in `mode`.
-	pub(crate) fn entry(&self, mode: Mode) -> BinaryConfig {
-		let mut entry = BinaryConfig::new(mode);
+impl<E: CatalogExt> IntoRendition<E, BinaryConfig> for Config {
+	type Config = BinaryConfig;
+
+	fn into_rendition(self) -> BinaryConfig {
+		// The producer overwrites the mode with the one it publishes in.
+		let mut entry = BinaryConfig::new(Mode::Snapshot);
 		entry.compression = self.compression.then_some(Compression::Deflate);
-		entry.mime = self.mime.clone();
+		entry.mime = self.mime;
 		entry
 	}
+}
+
+/// Fix `config`'s mode and return whether its frames are compressed.
+///
+/// Errors on a compression this build can't write, rather than advertising one the frames don't use.
+fn prepare(config: &mut impl AsMut<BinaryConfig>, mode: Mode) -> crate::Result<bool> {
+	let binary = config.as_mut();
+	binary.mode = mode;
+	crate::compression(binary.compression.as_ref())
 }
 
 /// Publishes a latest-value binary track, advertised in the catalog for as long as this handle
@@ -100,27 +116,33 @@ impl Config {
 /// For a log where every payload survives, use [`Stream`].
 pub struct Snapshot<E: CatalogExt = ()> {
 	inner: moq_binary::snapshot::Producer,
-	rendition: Rendition<E, BinaryConfig>,
+	listing: Listing,
+	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
+	_catalog: PhantomData<fn() -> E>,
 }
 
 impl<E: CatalogExt> Snapshot<E> {
-	pub(crate) fn new(
+	pub(crate) fn new<C: RenditionConfig<E> + AsMut<BinaryConfig>>(
 		track: moq_net::track::Producer,
-		mut rendition: Rendition<E, BinaryConfig>,
-		config: &Config,
+		rendition: crate::catalog::Rendition<E, C>,
+		mut config: C,
 	) -> crate::Result<Self> {
 		let mut binary = moq_binary::snapshot::Config::default();
-		if config.compression {
+		if prepare(&mut config, Mode::Snapshot)? {
 			binary.compression = moq_binary::Compression::Deflate;
 		}
 		let inner = moq_binary::snapshot::Producer::new(track, binary);
-		rendition.set(config.entry(Mode::Snapshot))?;
-		Ok(Self { inner, rendition })
+		let listing = Listing::new(rendition, config)?;
+		Ok(Self {
+			inner,
+			listing,
+			_catalog: PhantomData,
+		})
 	}
 
 	/// The track name, which is also the catalog key.
 	pub fn name(&self) -> &str {
-		self.rendition.name()
+		self.listing.name()
 	}
 
 	/// Create a subscriber for the underlying track.
@@ -130,7 +152,10 @@ impl<E: CatalogExt> Snapshot<E> {
 
 	/// Publish a new payload, superseding the previous one.
 	pub fn update(&mut self, payload: impl Into<Bytes>) -> crate::Result<()> {
-		Ok(self.inner.update(payload)?)
+		let payload = payload.into();
+		let len = payload.len();
+		self.inner.update(payload)?;
+		self.listing.record(|| len)
 	}
 
 	/// Finish the track and retire its catalog entry.
@@ -154,25 +179,28 @@ pub struct Stream<E: CatalogExt = ()> {
 	/// Cleared when a terminal failure ends the track, which retires the catalog entry with it. An
 	/// entry advertising a track that can no longer accept records only misleads a consumer that
 	/// discovers it afterwards.
-	rendition: Option<Rendition<E, BinaryConfig>>,
+	listing: Option<Listing>,
+	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
+	_catalog: PhantomData<fn() -> E>,
 }
 
 impl<E: CatalogExt> Stream<E> {
-	pub(crate) fn new(
+	pub(crate) fn new<C: RenditionConfig<E> + AsMut<BinaryConfig>>(
 		track: moq_net::track::Producer,
-		mut rendition: Rendition<E, BinaryConfig>,
-		config: &Config,
+		rendition: crate::catalog::Rendition<E, C>,
+		mut config: C,
 	) -> crate::Result<Self> {
 		let mut binary = moq_binary::stream::Config::default();
-		if config.compression {
+		if prepare(&mut config, Mode::Stream)? {
 			binary.compression = moq_binary::Compression::Deflate;
 		}
 		let inner = moq_binary::stream::Producer::new(track, binary);
-		rendition.set(config.entry(Mode::Stream))?;
+		let listing = Listing::new(rendition, config)?;
 		Ok(Self {
 			inner,
-			name: rendition.name().to_string(),
-			rendition: Some(rendition),
+			name: listing.name().to_string(),
+			listing: Some(listing),
+			_catalog: PhantomData,
 		})
 	}
 
@@ -194,16 +222,21 @@ impl<E: CatalogExt> Stream<E> {
 	/// A payload that cannot be written ends the track (see
 	/// [`moq_binary::stream::Producer::append`]) and retires the catalog entry with it.
 	pub fn append(&mut self, payload: impl Into<Bytes>) -> crate::Result<()> {
-		let Err(err) = self.inner.append(payload) else {
-			return Ok(());
-		};
+		let payload = payload.into();
+		let len = payload.len();
+		if let Err(err) = self.inner.append(payload) {
+			// The inner producer has already closed the track. Dropping the listing retires the
+			// catalog entry too: waiting for the handle to drop would keep advertising a track that
+			// can no longer accept records, so a consumer discovering it now would subscribe to an
+			// already-ended log.
+			self.listing = None;
+			return Err(err.into());
+		}
 
-		// The inner producer has already closed the track. Dropping the rendition retires the catalog
-		// entry too: waiting for the handle to drop would keep advertising a track that can no longer
-		// accept records, so a consumer discovering it now would subscribe to an already-ended log.
-		self.rendition = None;
-
-		Err(err.into())
+		match &mut self.listing {
+			Some(listing) => listing.record(|| len),
+			None => Ok(()),
+		}
 	}
 
 	/// Finish the track and retire its catalog entry.
@@ -424,5 +457,166 @@ mod test {
 			.unwrap();
 
 		assert!(broadcast.create_track("data", None).is_err());
+	}
+
+	/// A data track listed in an application's own section, beside its own per-track fields.
+	mod section {
+		use std::collections::BTreeMap;
+
+		use serde::{Deserialize, Serialize};
+
+		use super::*;
+		use crate::catalog::Estimate;
+		use crate::catalog::hang::Catalog;
+
+		#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
+		struct Ext {
+			#[serde(rename = "com.example.mavlink", default, skip_serializing_if = "BTreeMap::is_empty")]
+			mavlink: BTreeMap<String, Mavlink>,
+		}
+
+		impl CatalogExt for Ext {}
+
+		#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+		struct Mavlink {
+			#[serde(flatten)]
+			binary: BinaryConfig,
+			sysid: u8,
+		}
+
+		impl AsMut<BinaryConfig> for Mavlink {
+			fn as_mut(&mut self) -> &mut BinaryConfig {
+				&mut self.binary
+			}
+		}
+
+		impl RenditionConfig<Ext> for Mavlink {
+			fn insert(self, catalog: &mut Catalog<Ext>, name: &str) {
+				catalog.ext.mavlink.insert(name.to_string(), self);
+			}
+			fn get_mut<'a>(catalog: &'a mut Catalog<Ext>, name: &str) -> Option<&'a mut Self> {
+				catalog.ext.mavlink.get_mut(name)
+			}
+			fn remove(catalog: &mut Catalog<Ext>, name: &str) {
+				catalog.ext.mavlink.remove(name);
+			}
+
+			fn detects() -> bool {
+				true
+			}
+			fn estimate(&self) -> Estimate {
+				Estimate::default()
+					.with_bitrate(self.binary.bitrate)
+					.with_jitter(self.binary.jitter)
+			}
+			fn set_estimate(&mut self, estimate: Estimate) {
+				self.binary.bitrate = estimate.bitrate;
+				self.binary.jitter = estimate.jitter;
+			}
+		}
+
+		fn mavlink(sysid: u8) -> Mavlink {
+			let mut binary = BinaryConfig::new(Mode::Snapshot);
+			binary.compression = Some(Compression::Deflate);
+			Mavlink { binary, sysid }
+		}
+
+		fn catalog() -> (moq_net::broadcast::Producer, crate::catalog::Producer<Ext>) {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let config = crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default());
+			let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
+			(broadcast, catalog)
+		}
+
+		/// The producer fixes the mode and keeps the application's fields; a `Catalog<Ext>` consumer
+		/// reads the entry back and subscribes through its embedded config alone.
+		#[tokio::test]
+		async fn roundtrips_through_a_catalog_consumer() {
+			let (mut broadcast, catalog) = catalog();
+			let source = crate::source::announced(&broadcast.consume());
+			let mut consumer = catalog.consume().unwrap();
+
+			let mut telemetry = catalog
+				.binary_stream(track(&mut broadcast, "telemetry"), mavlink(7))
+				.unwrap();
+			telemetry.append(&b"heartbeat"[..]).unwrap();
+
+			let published = consumer.next().await.unwrap().expect("catalog published");
+			let entry = published.ext.mavlink.get("telemetry").expect("missing entry");
+			assert_eq!(entry.sysid, 7, "the application's fields survive");
+			assert_eq!(entry.binary.mode, Mode::Stream, "the producer fixes the mode");
+			assert_eq!(entry.binary.compression, Some(Compression::Deflate));
+			assert!(published.binary.tracks.is_empty(), "not listed in the binary section");
+
+			let mut reader = crate::catalog::Entry::new("telemetry", &entry.binary)
+				.subscribe(&source)
+				.await
+				.unwrap();
+			telemetry.finish().unwrap();
+			assert_eq!(reader.next().await.unwrap(), Some(Bytes::from_static(b"heartbeat")));
+			assert_eq!(reader.next().await.unwrap(), None);
+		}
+
+		#[test]
+		fn dropping_the_producer_retires_the_entry() {
+			let (mut broadcast, catalog) = catalog();
+			let telemetry = catalog
+				.binary_snapshot(track(&mut broadcast, "telemetry"), mavlink(1))
+				.unwrap();
+			assert!(catalog.snapshot().ext.mavlink.contains_key("telemetry"));
+
+			drop(telemetry);
+			assert!(!catalog.snapshot().ext.mavlink.contains_key("telemetry"));
+		}
+
+		/// The name is owned per section, so an entry already in the application's section refuses
+		/// a second producer without touching the first.
+		#[test]
+		fn a_duplicate_name_is_refused() {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let mut seed = Catalog::<Ext>::default();
+			seed.ext.mavlink.insert("telemetry".to_string(), mavlink(1));
+			let config = crate::catalog::Config::default().with_catalog(seed);
+			let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
+
+			assert!(matches!(
+				catalog.binary_stream(track(&mut broadcast, "telemetry"), mavlink(2)),
+				Err(crate::Error::Hang(hang::Error::Duplicate(_)))
+			));
+			assert_eq!(catalog.snapshot().ext.mavlink["telemetry"].sysid, 1);
+		}
+
+		/// A compression this build can't write is refused rather than advertised over plain frames.
+		#[test]
+		fn an_unknown_compression_is_refused() {
+			let (mut broadcast, catalog) = catalog();
+			let mut entry = mavlink(1);
+			entry.binary.compression = Some(Compression::Unknown("zstd".to_string()));
+
+			assert!(matches!(
+				catalog.binary_stream(track(&mut broadcast, "telemetry"), entry),
+				Err(crate::Error::UnsupportedCompression(_))
+			));
+			assert!(catalog.snapshot().ext.mavlink.is_empty());
+		}
+
+		/// Writes fill an absent bitrate, through the entry's embedded config.
+		#[test]
+		fn detects_bitrate() {
+			let (mut broadcast, catalog) = catalog();
+			let mut telemetry = catalog
+				.binary_stream(track(&mut broadcast, "telemetry"), mavlink(1))
+				.unwrap();
+
+			// 40ms payloads of 5 kB: 1 Mbps, over more than the bitrate window.
+			for i in 0..60u64 {
+				let now = moq_net::Timestamp::from_micros(i * 40_000).unwrap();
+				telemetry.listing.as_mut().unwrap().record_at(now, 5_000).unwrap();
+			}
+
+			let entry = &catalog.snapshot().ext.mavlink["telemetry"];
+			assert_eq!(entry.binary.bitrate, Some(1_000_000));
+			assert_eq!(entry.binary.jitter, None, "write spacing is not a flush delay");
+		}
 	}
 }

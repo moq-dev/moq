@@ -7,52 +7,74 @@ use super::hang::{Catalog, CatalogExt};
 
 /// A catalog config that can be published as a named rendition.
 ///
-/// Implement it on your own config type to get the full catalog lifecycle through
-/// [`Reserved::track`]: reservation gating, removal on drop, and optional jitter/bitrate detection.
-/// [`VideoConfig`](hang::catalog::VideoConfig) and [`AudioConfig`](hang::catalog::AudioConfig)
-/// implement it for every extension; a custom config implements it for the one [`CatalogExt`] that
-/// holds it:
+/// Implement it on your own config type to get the full catalog lifecycle: reservation gating,
+/// removal on drop, and optional jitter/bitrate detection. [`VideoConfig`](hang::catalog::VideoConfig)
+/// and [`AudioConfig`](hang::catalog::AudioConfig) implement it for every extension; a custom
+/// config implements it for the one [`CatalogExt`] that holds it. Publish a media track under it
+/// with [`Reserved::track`], or a data track with [`Producer::binary_stream`] and the like when it
+/// embeds a data config (see [`IntoRendition`](super::IntoRendition)):
 ///
 /// ```
+/// # use std::collections::BTreeMap;
+/// # use hang::catalog::{BinaryConfig, Mode};
 /// # use moq_mux::catalog::{Estimate, RenditionConfig};
 /// # use moq_mux::catalog::hang::{Catalog, CatalogExt};
 /// # use serde::{Deserialize, Serialize};
-/// # use std::collections::BTreeMap;
 /// #[derive(Serialize, Deserialize, Clone, Default)]
-/// struct MyExt {
-///     telemetry: BTreeMap<String, Telemetry>,
+/// struct Ext {
+///     #[serde(rename = "com.example.mavlink", default)]
+///     mavlink: BTreeMap<String, Mavlink>,
 /// }
-/// impl CatalogExt for MyExt {}
+/// impl CatalogExt for Ext {}
 ///
-/// #[derive(Serialize, Deserialize, Clone, Default)]
-/// struct Telemetry {
-///     schema: String,
-///     bitrate: Option<u64>,
+/// #[derive(Serialize, Deserialize, Clone)]
+/// struct Mavlink {
+///     #[serde(flatten)]
+///     binary: BinaryConfig,
+///     sysid: u8,
 /// }
 ///
-/// impl RenditionConfig<MyExt> for Telemetry {
+/// impl AsMut<BinaryConfig> for Mavlink {
+///     fn as_mut(&mut self) -> &mut BinaryConfig {
+///         &mut self.binary
+///     }
+/// }
+///
+/// impl RenditionConfig<Ext> for Mavlink {
+///     fn insert(self, catalog: &mut Catalog<Ext>, name: &str) {
+///         catalog.ext.mavlink.insert(name.to_string(), self);
+///     }
+///     fn get_mut<'a>(catalog: &'a mut Catalog<Ext>, name: &str) -> Option<&'a mut Self> {
+///         catalog.ext.mavlink.get_mut(name)
+///     }
+///     fn remove(catalog: &mut Catalog<Ext>, name: &str) {
+///         catalog.ext.mavlink.remove(name);
+///     }
+///
+///     // Opt into bitrate detection through the embedded config.
 ///     fn detects() -> bool {
 ///         true
 ///     }
-///
-///     fn insert(self, catalog: &mut Catalog<MyExt>, name: &str) {
-///         catalog.ext.telemetry.insert(name.to_string(), self);
-///     }
-///     fn get_mut<'a>(catalog: &'a mut Catalog<MyExt>, name: &str) -> Option<&'a mut Self> {
-///         catalog.ext.telemetry.get_mut(name)
-///     }
-///     fn remove(catalog: &mut Catalog<MyExt>, name: &str) {
-///         catalog.ext.telemetry.remove(name);
-///     }
-///
-///     // Opt into bitrate detection; jitter is left undetected.
 ///     fn estimate(&self) -> Estimate {
-///         Estimate::default().with_bitrate(self.bitrate)
+///         Estimate::default().with_bitrate(self.binary.bitrate).with_jitter(self.binary.jitter)
 ///     }
 ///     fn set_estimate(&mut self, estimate: Estimate) {
-///         self.bitrate = estimate.bitrate;
+///         self.binary.bitrate = estimate.bitrate;
+///         self.binary.jitter = estimate.jitter;
 ///     }
 /// }
+///
+/// # fn example(
+/// #     broadcast: &mut moq_net::broadcast::Producer,
+/// #     catalog: &moq_mux::catalog::Producer<Ext>,
+/// # ) -> moq_mux::Result<()> {
+/// let track = broadcast.create_track("telemetry", None)?;
+/// // The producer fixes the mode, so the one passed here is only a placeholder.
+/// let entry = Mavlink { binary: BinaryConfig::new(Mode::Stream), sysid: 1 };
+/// let mut telemetry = catalog.binary_stream(track, entry)?;
+/// telemetry.append(&b"\xfd..."[..])?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// Note that `insert` takes the whole [`Catalog`], not just the extension, so the built-in media
@@ -62,7 +84,7 @@ use super::hang::{Catalog, CatalogExt};
 /// [`Reserved::track`] and [`Producer::track`](super::Producer::track) enroll the track in the
 /// broadcast timeline, measure it, and keep its estimate current automatically.
 pub trait RenditionConfig<E: CatalogExt>: Clone + Send + 'static {
-	/// Whether container writes should update this config's estimate fields.
+	/// Whether container or data-track writes should update this config's estimate fields.
 	fn detects() -> bool {
 		false
 	}
@@ -95,6 +117,17 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::JsonConfig {
 	fn remove(catalog: &mut Catalog<E>, name: &str) {
 		catalog.json.tracks.remove(name);
 	}
+
+	fn detects() -> bool {
+		true
+	}
+	fn estimate(&self) -> Estimate {
+		Estimate::default().with_jitter(self.jitter).with_bitrate(self.bitrate)
+	}
+	fn set_estimate(&mut self, estimate: Estimate) {
+		self.jitter = estimate.jitter;
+		self.bitrate = estimate.bitrate;
+	}
 }
 
 impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::BinaryConfig {
@@ -106,6 +139,17 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::BinaryConfig {
 	}
 	fn remove(catalog: &mut Catalog<E>, name: &str) {
 		catalog.binary.tracks.remove(name);
+	}
+
+	fn detects() -> bool {
+		true
+	}
+	fn estimate(&self) -> Estimate {
+		Estimate::default().with_jitter(self.jitter).with_bitrate(self.bitrate)
+	}
+	fn set_estimate(&mut self, estimate: Estimate) {
+		self.jitter = estimate.jitter;
+		self.bitrate = estimate.bitrate;
 	}
 }
 
