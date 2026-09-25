@@ -89,7 +89,10 @@ impl Shape {
 }
 
 fn runtime() -> tokio::runtime::Runtime {
-	tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap()
+	tokio::runtime::Builder::new_current_thread()
+		.enable_time()
+		.build()
+		.unwrap()
 }
 
 fn write_group(track: &track::Producer, payload: &Bytes) {
@@ -231,7 +234,10 @@ struct Room {
 
 impl Room {
 	async fn new(version: &str, shape: Shape) -> Self {
-		assert!(shape.watch <= shape.total(), "a viewer can't watch more broadcasts than exist");
+		assert!(
+			shape.watch <= shape.total(),
+			"a viewer can't watch more broadcasts than exist"
+		);
 		let mut cluster = Cluster::new(version, shape).await;
 
 		// Viewer v watches a contiguous window starting at v * watch, so viewers
@@ -254,7 +260,12 @@ impl Room {
 		let mut room = Self {
 			cluster,
 			viewers,
-			watched: watched.iter().enumerate().filter(|(_, w)| **w).map(|(i, _)| i).collect(),
+			watched: watched
+				.iter()
+				.enumerate()
+				.filter(|(_, w)| **w)
+				.map(|(i, _)| i)
+				.collect(),
 			payload: Bytes::from(vec![0; shape.frame]),
 			expected: shape.expected(),
 		};
@@ -350,7 +361,11 @@ fn join(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) 
 fn session(c: &mut Criterion) {
 	let base = Shape::BASE;
 
-	delivery(c, "publishers", [1, 16, 256].map(|publishers| Shape { publishers, ..base }));
+	delivery(
+		c,
+		"publishers",
+		[1, 16, 256].map(|publishers| Shape { publishers, ..base }),
+	);
 	delivery(c, "viewers", [1, 16, 256].map(|viewers| Shape { viewers, ..base }));
 	delivery(
 		c,
