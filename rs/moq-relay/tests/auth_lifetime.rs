@@ -4,7 +4,7 @@
 //! or QUIC) or its axum WebSocket path (`serve_ws` over `ws://`), points it at a
 //! scripted auth server, connects a publisher and a subscriber, confirms media
 //! flows, then asserts the relay follows the server's word: a re-check that moves
-//! the tier keeps the session, a narrower grant or a refusal closes it, an outage
+//! the tier retags the live session's stats, a narrower grant or a refusal closes it, an outage
 //! keeps it until `expires`, and every close reports `end` with what it moved.
 //! The last tests swap the server for an in-process decider answering
 //! `Admissions`, and prove the lease it drives reaches the session the same way.
@@ -21,6 +21,7 @@ use axum::{Json, Router};
 use moq_auth::{Event, Grant, Pattern, Patterns, Request};
 use moq_relay::{Config, Connection, Relay, auth, cluster, web};
 use moq_tokio::moq_net;
+use moq_tokio::moq_net::stats;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -144,6 +145,15 @@ fn free_port() -> u16 {
 /// Stand up the relay's accept loop on a plain-TCP qmux listener and return the
 /// port plus an abort handle.
 async fn spawn_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinHandle<()>) {
+	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	spawn_relay_with(auth, cluster).await
+}
+
+/// [`spawn_relay`] serving `cluster`.
+async fn spawn_relay_with(
+	auth: moq_relay::auth::Auth,
+	cluster: cluster::Cluster,
+) -> (u16, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let port = free_port();
 
@@ -151,7 +161,6 @@ async fn spawn_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinHand
 	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 	let server = config.init(Default::default()).expect("server init");
 	let mut server = server.listen().await.expect("listen");
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
 
 	let handle = tokio::spawn(async move {
 		let mut id = 0;
@@ -379,23 +388,132 @@ async fn refusals_and_outages_refuse_at_connect() {
 	relay.abort();
 }
 
-/// A re-check that moves the tier keeps the session: the stats carriers resolve
-/// their counters once at admission, so the new tier applies to the next one.
+/// A re-check that moves the tier keeps the session and retags its stats live:
+/// both sessions' presence leaves the old tier for the new one, and media sent
+/// afterwards records under the new tier in both directions.
 #[tokio::test]
-async fn a_moved_tier_keeps_the_session() {
+async fn a_moved_tier_retags_the_live_session() {
 	let script = Script::new(grant(Duration::from_secs(3600)));
-	let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
-	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
+	let mut cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	cluster.stats = stats::Registry::new(stats::Config::new());
+	let registry = cluster.stats.clone();
+	let (port, relay) = spawn_relay_with(build_auth(script.spawn().await), cluster).await;
+	let url = room_url("tcp", port);
 
-	let mut moved = grant(Duration::from_secs(3600));
-	moved.tier = Some("moved".into());
-	script.on_revalidate(Answer::Grant(moved));
+	let moved = stats::Tier::new("moved");
+	let active = |tier: &stats::Tier| {
+		registry
+			.snapshot()
+			.sessions()
+			.into_iter()
+			.find(|(t, _)| t == tier)
+			.map_or(0, |(_, presence)| presence.active())
+	};
+	let bytes = |tier: &stats::Tier, role: stats::Role| {
+		registry
+			.snapshot()
+			.traffic()
+			.into_iter()
+			.find(|(t, r, _)| t == tier && *r == role)
+			.map_or(0, |(_, _, traffic)| traffic.bytes)
+	};
 
-	tokio::time::sleep(Duration::from_millis(2500)).await;
-	assert!(
-		script.seen.lock().unwrap().iter().any(|r| r.event == Event::Revalidate),
-		"the relay re-checked"
+	// A publisher whose track stays open across the move, and a subscriber to it.
+	let pub_origin = moq_tokio::origin::spawn();
+	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	broadcast.announce(Default::default()).expect("announce broadcast");
+	let track = broadcast.create_track("video", None).expect("create track");
+	let pub_session = tokio::time::timeout(
+		TIMEOUT,
+		client()
+			.with_publisher(pub_origin.consume())
+			.with_reconnect(false)
+			.connect(url.clone())
+			.established(),
+	)
+	.await
+	.expect("publisher connect timeout")
+	.expect("publisher connect failed");
+
+	let sub_origin = moq_tokio::origin::spawn();
+	let sub_consumer = sub_origin.consume();
+	let mut announcements = sub_consumer.announced();
+	let sub_session = tokio::time::timeout(
+		TIMEOUT,
+		client()
+			.with_subscriber(sub_origin)
+			.with_reconnect(false)
+			.connect(url.clone())
+			.established(),
+	)
+	.await
+	.expect("subscriber connect timeout")
+	.expect("subscriber connect failed");
+	let (update, announced) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+		.await
+		.expect("announcement timeout")
+		.expect("origin closed");
+	assert_eq!(update.prefix.as_str(), "test");
+	assert!(announced, "expected announce, got retraction");
+	let bc = sub_consumer
+		.request_broadcast("test")
+		.await
+		.expect("announced broadcast resolves");
+	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
+
+	let mut round_trip = async |payload: &'static [u8]| {
+		let mut group = track.append_group().expect("append group");
+		group
+			.write_frame(moq_net::Timestamp::ZERO, payload)
+			.expect("write frame");
+		group.finish().expect("finish group");
+		let mut group = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+			.await
+			.expect("recv_group timeout")
+			.expect("recv_group failed")
+			.expect("track closed prematurely");
+		let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("read_frame timeout")
+			.expect("read_frame failed")
+			.expect("group closed prematurely");
+		assert_eq!(&frame.payload[..], payload);
+	};
+
+	round_trip(b"before").await;
+	assert_eq!(active(&stats::Tier::default()), 2);
+	assert_eq!(active(&moved), 0);
+
+	let mut moved_grant = grant(Duration::from_secs(3600));
+	moved_grant.tier = Some("moved".into());
+	script.on_revalidate(Answer::Grant(moved_grant));
+
+	let deadline = tokio::time::Instant::now() + TIMEOUT;
+	while active(&moved) < 2 {
+		assert!(
+			tokio::time::Instant::now() < deadline,
+			"the re-checked tier never applied"
+		);
+		tokio::time::sleep(Duration::from_millis(50)).await;
+	}
+	assert_eq!(active(&stats::Tier::default()), 0, "presence left the old tier");
+
+	let before = (
+		bytes(&stats::Tier::default(), stats::Role::Publisher),
+		bytes(&stats::Tier::default(), stats::Role::Subscriber),
 	);
+	round_trip(b"after").await;
+	assert_eq!(
+		(
+			bytes(&stats::Tier::default(), stats::Role::Publisher),
+			bytes(&stats::Tier::default(), stats::Role::Subscriber),
+		),
+		before,
+		"nothing more records under the old tier"
+	);
+	assert_eq!(bytes(&moved, stats::Role::Subscriber), 5, "ingress from the publisher");
+	assert_eq!(bytes(&moved, stats::Role::Publisher), 5, "egress to the subscriber");
+
 	assert!(
 		tokio::time::timeout(Duration::from_millis(200), pub_session.closed())
 			.await

@@ -58,6 +58,19 @@ mod test {
 		catalog
 	}
 
+	#[test]
+	fn text_rounds_up_and_normalizes_zero() {
+		let mut catalog = Catalog::<()>::default();
+		let mut text = crate::catalog::TextConfig::new(crate::catalog::TextFormat::Utf8);
+		text.jitter = Some(std::time::Duration::from_micros(500));
+		catalog.text.renditions.insert("caption".to_string(), text);
+		let json = catalog.to_json().unwrap();
+		assert!(json.contains(r#""jitter":1"#), "{json}");
+		let json = json.replace(r#""jitter":1"#, r#""jitter":0"#);
+		let parsed = Catalog::<()>::from_str(&json).unwrap();
+		assert_eq!(parsed.text.renditions["caption"].jitter, None);
+	}
+
 	/// A sub-millisecond jitter must not reach the wire as 0: 0 means "flushed immediately",
 	/// which is the one thing a consumer must not believe about a track that buffers.
 	#[test]

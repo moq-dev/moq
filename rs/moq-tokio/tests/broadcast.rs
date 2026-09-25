@@ -1113,7 +1113,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	handle.await.expect("server panicked").expect("server failed");
 }
 
-/// Route re-advertisement on the default version (lite-06: ANNOUNCE_RESTART by id).
+/// Route re-advertisement on the default version (lite-07: ANNOUNCE_RESTART by id).
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_reannounce() {
@@ -1151,6 +1151,12 @@ async fn broadcast_moq_lite_03() {
 #[tokio::test]
 async fn broadcast_moq_lite_06() {
 	broadcast_test("moqt", Some("moq-lite-06"), Some("moq-lite-06")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_moq_lite_07() {
+	broadcast_test("moqt", Some("moq-lite-07"), Some("moq-lite-07")).await;
 }
 
 #[tracing_test::traced_test]
@@ -1874,7 +1880,7 @@ async fn broadcast_websocket_fallback() {
 ///
 /// Bump this whenever [`moq_net::Versions::all`] gains a newer Lite variant
 /// so the regression tests below keep tracking "the newest", not a frozen value.
-const NEWEST_LITE: &str = "moq-lite-06";
+const NEWEST_LITE: &str = "moq-lite-07";
 
 /// Regression guard for the WebSocket ALPN path. Lite02 over WebSocket means
 /// the qmux subprotocol negotiation produced a bare `moql` (or no match)
@@ -2485,12 +2491,20 @@ async fn reconnect_stops_on_websocket_unauthorized() {
 async fn websocket_forbidden_does_not_end_a_quic_connect() {
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-	let (mut server, addr) = test_server().await;
-
-	// The same port over TCP, where the fallback dials.
-	let listener = tokio::net::TcpListener::bind(("::", addr.port()))
-		.await
-		.expect("failed to bind TCP listener");
+	// The fallback dials the same port over TCP. Nothing reserves a port for both
+	// UDP and TCP at once, and the ephemeral UDP port may already be taken over TCP,
+	// so pick again until both bind.
+	let (mut server, addr, listener) = 'bind: {
+		for _ in 0..20 {
+			let (server, addr) = test_server().await;
+			match tokio::net::TcpListener::bind(("::", addr.port())).await {
+				Ok(listener) => break 'bind (server, addr, listener),
+				Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => continue,
+				Err(err) => panic!("failed to bind TCP listener: {err}"),
+			}
+		}
+		panic!("no port was free over both UDP and TCP");
+	};
 	let forbid = tokio::spawn(async move {
 		let (mut stream, _) = listener.accept().await?;
 		let mut buf = [0; 1024];

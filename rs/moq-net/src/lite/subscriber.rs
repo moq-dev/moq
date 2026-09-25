@@ -1155,9 +1155,13 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					// through us, so the reflected ones never hit the wire. Encoding drops
 					// this on every other version, where start_announce below is the only
 					// filter.
+					// Hidden routes are requested too: the session mirrors the peer into
+					// the origin, and each local reader opts in on its own
+					// (`origin::Consumer::with_hidden`).
 					stream.writer.buffer(&lite::AnnounceRequest {
 						prefix: self.prefix.as_path(),
 						exclude_hop: self.subscriber.self_origin.id(),
+						hidden: true,
 					})?;
 					self.state = PrefixState::Send { stream };
 				}
@@ -1302,8 +1306,10 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 }
 
 /// Serves the origin's track requests for one announced source until the peer
-/// unannounces (the source is finished) or the session dies. Dropping it drops
-/// the in-flight track machines with it.
+/// unannounces it (the source is finished) or the session dies. An unannounce
+/// takes no new tracks but lets those in flight run to their own end (moq-lite:
+/// retraction does not disturb subscriptions already in flight); the session
+/// dying drops them.
 struct SourceServe<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	path: PathOwned,
@@ -1311,6 +1317,8 @@ struct SourceServe<S: crate::transport::poll::Session> {
 	// A dedicated close-watch handle, since each pending operation needs its own.
 	closed: S,
 	tracks: kio::Tasks<TrackServeRun<S>>,
+	// The source ended: no more track requests will arrive.
+	ended: bool,
 }
 
 impl<S: crate::transport::poll::Session> SourceServe<S> {
@@ -1322,6 +1330,7 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 			dynamic,
 			closed,
 			tracks: kio::Tasks::new(),
+			ended: false,
 		}
 	}
 }
@@ -1335,6 +1344,10 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 			if self.closed.poll_closed(&mut cx).is_ready() {
 				// Session gone.
 				return Poll::Ready(());
+			}
+			if self.ended {
+				// Done once the tracks in flight are.
+				return self.tracks.poll(waiter);
 			}
 			match self.dynamic.poll_requested_track(waiter) {
 				Poll::Ready(Ok(request)) => {
@@ -1350,7 +1363,7 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 				// The source was finished (unannounced) or aborted.
 				Poll::Ready(Err(err)) => {
 					tracing::debug!(%err, "source closed");
-					return Poll::Ready(());
+					self.ended = true;
 				}
 				Poll::Pending => break,
 			}
@@ -2160,7 +2173,7 @@ mod tests {
 		let origin = origin::Config::new(relay).produce();
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let local = origin.create_broadcast("room/host").unwrap();
+		let local = origin.publish("room/host", origin::Route::default()).unwrap();
 		let track = local.create_track("video", None).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"local".as_ref()).unwrap();

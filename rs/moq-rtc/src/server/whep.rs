@@ -3,6 +3,7 @@
 //! `POST /<broadcast-path>` accepts a WHEP SDP offer and returns an SDP
 //! answer sourced from the matching MoQ broadcast on the subscribe origin.
 
+#[cfg(feature = "server")]
 use axum::{
 	Router,
 	body::Bytes,
@@ -19,6 +20,7 @@ use crate::{Error, Result, egress::EgressSource, sdp, server::Server, session};
 
 pub use crate::server::Response;
 
+#[cfg(feature = "server")]
 #[derive(Clone)]
 struct RouterState {
 	server: Server,
@@ -31,13 +33,15 @@ struct RouterState {
 /// `accept` future parks forever inside the HTTP handler, leaking the request.
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Build the WHEP axum router.
+/// Build the WHEP axum router. Only with the `server` feature.
+#[cfg(feature = "server")]
 pub fn router(server: Server, subscriber: moq_net::origin::Consumer) -> Router {
 	Router::new()
 		.route("/{*path}", post(handle).delete(delete))
 		.with_state(RouterState { server, subscriber })
 }
 
+#[cfg(feature = "server")]
 async fn handle(
 	state: State<RouterState>,
 	path: Path<String>,
@@ -72,6 +76,7 @@ async fn handle(
 
 /// Router glue: enforce the WHEP `Content-Type` then hand the raw offer to
 /// [`accept`], using the request path as the (unauthenticated) broadcast name.
+#[cfg(feature = "server")]
 async fn accept_offer(
 	server: &Server,
 	subscriber: &moq_net::origin::Consumer,
@@ -86,6 +91,7 @@ async fn accept_offer(
 	accept(server, subscriber, path, offer).await
 }
 
+#[cfg(feature = "server")]
 async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> StatusCode {
 	crate::server::delete(&state.server, &path)
 }
@@ -172,6 +178,7 @@ pub async fn accept(
 	})
 }
 
+#[cfg(feature = "server")]
 fn is_sdp(headers: &HeaderMap) -> bool {
 	headers
 		.get(header::CONTENT_TYPE)
@@ -180,6 +187,7 @@ fn is_sdp(headers: &HeaderMap) -> bool {
 		.unwrap_or(false)
 }
 
+#[cfg(feature = "server")]
 fn status_for(err: &Error) -> StatusCode {
 	match err {
 		Error::InvalidSdp(_) => StatusCode::BAD_REQUEST,

@@ -22,14 +22,18 @@ pub struct MoqAnnounceConfig {
 	/// Pattern relative to `prefix`, or `None` for every path beneath it.
 	#[uniffi(default = None)]
 	pub filter: Option<String>,
+	/// Also list hidden paths: those with a segment starting with `.` below the prefix.
+	#[uniffi(default = false)]
+	pub hidden: bool,
 }
 
 /// A path-prefix route: hops and costs for an advertisement.
 ///
 /// Pair one with `MoqBroadcastProducer::announce` for an exact path, or with
 /// `MoqOriginProducer::dynamic` for a prefix. Observe them with
-/// `MoqOriginConsumer::announced`. A route claims capability, not inventory: a publisher advertises each broadcast's exact path to peers once ready,
-/// while local consumers can enumerate it from creation, while a service advertises a prefix and answers
+/// `MoqOriginConsumer::announced`. A route claims capability, not inventory: by
+/// convention a publisher announces each broadcast's exact path, so subscribers
+/// can enumerate broadcasts, while a service advertises a prefix and answers
 /// whatever is requested beneath it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqRoute {
@@ -304,11 +308,11 @@ impl MoqOriginProducer {
 
 	/// Create a broadcast at `path` on this origin, returning the producer that feeds it.
 	///
-	/// The broadcast appears on this origin's local announcement streams immediately.
-	/// Advertise it to peers with
-	/// [`MoqBroadcastProducer::announce`] after populating tracks; an on-demand
-	/// handler is [`Self::dynamic`]. Create, `dynamic()` if tracks are served on
-	/// demand, populate, then announce.
+	/// The broadcast exists for nobody, on this origin or its peers, until
+	/// [`MoqBroadcastProducer::announce`]: until then announcement streams skip it
+	/// and requests for its path are unroutable. Announce after populating
+	/// tracks; an on-demand handler is [`Self::dynamic`]. Create, `dynamic()` if
+	/// tracks are served on demand, populate, then announce.
 	///
 	/// [`MoqBroadcastProducer::finish`] unpublishes immediately. Dropping the producer
 	/// without finishing also unpublishes, but subscribers observe the end as a
@@ -331,7 +335,10 @@ impl MoqOriginConsumer {
 			None => moq_net::Pattern::all(),
 		};
 		let filter = filter.rooted(&config.prefix)?;
-		let origin = self.inner.scope("", &moq_net::Patterns::from(filter))?;
+		let origin = self
+			.inner
+			.scope("", &moq_net::Patterns::from(filter))?
+			.with_hidden(config.hidden);
 		Ok(Arc::new(MoqAnnounceConsumer {
 			task: Task::new(Announced {
 				inner: origin.announced(),
@@ -343,8 +350,8 @@ impl MoqOriginConsumer {
 	///
 	/// This is how you resolve a path right after connecting: announcements arrive over the
 	/// session after it opens, so `request_broadcast` on its own races them. A
-	/// local broadcast appears on this origin's cursor when created, whether or not
-	/// it has been advertised to peers.
+	/// broadcast created on this origin resolves once it is announced, like a
+	/// remote one.
 	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let path = moq_net::Path::new(&path).to_owned();
@@ -368,9 +375,10 @@ impl MoqOriginConsumer {
 
 	/// Request a broadcast by path, resolving as soon as it can be served.
 	///
-	/// Resolution order: a local broadcast at the exact path, then the best announced route
-	/// covering the path (served on demand by the session that announced it), then a dynamic
-	/// handler on the origin (if any). Unlike `announced_broadcast`, this answers for what is
+	/// Resolves through the best announced route covering the path: an announced broadcast
+	/// on this origin, a route a session announced (served on demand by that session), or a
+	/// dynamic handler on the origin. The most specific prefix wins, then the cheapest. An
+	/// unannounced broadcast is unroutable. Unlike `announced_broadcast`, this answers for what is
 	/// reachable *now* and errors if nothing can serve the path. Drop the returned future to
 	/// cancel.
 	///
@@ -386,8 +394,7 @@ impl MoqOriginConsumer {
 
 #[uniffi::export]
 impl MoqOriginDynamic {
-	/// Wait for the next requested broadcast no local broadcast resolves under
-	/// this handle's prefix.
+	/// Wait for the next broadcast requested through this handle's prefix.
 	///
 	/// Returns a [`MoqBroadcastRequest`]: accept it with a broadcast producer or reject
 	/// it with an application error code. The requesting consumer stays pending until then.

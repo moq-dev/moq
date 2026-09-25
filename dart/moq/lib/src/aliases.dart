@@ -43,7 +43,7 @@ typedef BroadcastRequest = MoqBroadcastRequest;
 /// A stream of route announcements and retractions under a prefix.
 typedef AnnounceConsumer = MoqAnnounceConsumer;
 
-/// A literal prefix plus an optional relative pattern for announcement discovery.
+/// A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery.
 typedef AnnounceConfig = MoqAnnounceConfig;
 
 /// A pending wait for a route to cover a specific path.

@@ -18,6 +18,7 @@ Include a short summary and your recommendation.
 
 Spawn a background sub-agent for each /start-quest.
 Create a fresh worktree on the base `quest branch` prints, creating that line branch first if it is missing.
+Agents share no writable files: each keeps its scratch files in its own worktree's `.scratch/`, and anything you hand every agent goes in its prompt, not a shared file.
 Limit the concurrency to at most N agents in parallel, where N is half the number of physical CPU cores.
 
 Monitor the sub-agents and report their final status, but do not monitor their PRs.

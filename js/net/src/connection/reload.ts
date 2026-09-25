@@ -255,7 +255,7 @@ export class Reload {
 				if (pending) return;
 				pending = true;
 				try {
-					const stats = await Promise.race([effect.cancel, connection.stats()]);
+					const stats = await effect.race(connection.stats());
 					if (stats) this.#estimate.set(stats.estimatedSendRate);
 				} finally {
 					pending = false;
@@ -341,7 +341,7 @@ export class Reload {
 				// A cancelled effect resolves undefined, so the sentinel tells the session
 				// closing (null for clean, an Error otherwise) apart from this run being
 				// torn down.
-				const closed = await Promise.race([effect.cancel, connection.closed]);
+				const closed = await effect.race(connection.closed);
 				if (closed === undefined) return;
 
 				console.warn("connection closed, reconnecting");
@@ -443,10 +443,10 @@ export class Reload {
 	 *
 	 * Stays empty while the relay lacks {@link Established.discovery}.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all()): Announce.Consumer {
+	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
 		// With a consume origin the table already spans reconnects (the forwarder retracts
 		// a dead session's entries), so its stream is the same thing with less machinery.
-		if (this.consume) return this.consume.announced(scope);
+		if (this.consume) return this.consume.announced(scope, options);
 
 		const producer = new Announce.Producer();
 		const consumer = producer.consume();
@@ -460,7 +460,7 @@ export class Reload {
 			// consumer empty rather than opening a subscription that can't be answered.
 			if (!conn.discovery) return;
 
-			const upstream = conn.announced(scope);
+			const upstream = conn.announced(scope, options);
 			effect.cleanup(() => upstream.close());
 
 			// Track what this connection announced so we can retract it if the connection
@@ -470,7 +470,7 @@ export class Reload {
 			effect.spawn(async () => {
 				try {
 					for (;;) {
-						const entry = await Promise.race([effect.cancel, upstream.next()]);
+						const entry = await effect.race(upstream.next());
 						if (!entry) break;
 						if (Announce.isActive(entry.kind)) active.set(entry.prefix, entry);
 						else active.delete(entry.prefix);

@@ -22,7 +22,7 @@ line builds on, and it replaces the e2ee-local `moq_e2ee::Epoch`.
   from reading as an epoch. Rejecting it instead would break the path contract
   and land on `dev`. Check how the split interacts with
   [path patterns](/quest/m1/path-patterns.md) and
-  [hidden broadcasts](/quest/m1/hidden-broadcasts.md) (a leading `.`).
+  hidden broadcasts (a leading `.`, see `doc/concept/moq-lite.md`).
 - `moq-e2ee` uses the shared type. Update
   [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md) so the path is
   `<opaque>/@<epoch>`. Keep the HKDF input as the UUID text, so vectors change

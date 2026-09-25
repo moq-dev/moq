@@ -142,6 +142,15 @@ test("AnnounceRequest drops excludeHop on draft-06", async () => {
 	expect(with06.byteLength).toBeLessThan(with05.byteLength);
 });
 
+// Draft07 carries the hidden opt-in; every earlier version decodes as not opted in.
+test("AnnounceRequest carries hidden from draft-07", async () => {
+	for (const hidden of [false, true]) {
+		const msg = new AnnounceRequest(Path.from("room/"), 0n, hidden);
+		expect((await requestRoundTrip(msg, Version.DRAFT_07)).hidden).toBe(hidden);
+		expect((await requestRoundTrip(msg, Version.DRAFT_06)).hidden).toBe(false);
+	}
+});
+
 // The draft reserves Hop ID 0 for a responder that was never assigned an id, or that
 // withholds it to obscure its routing. Rejecting it tore down the announce stream of a
 // conforming publisher.

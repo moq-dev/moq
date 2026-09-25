@@ -38,16 +38,17 @@ expiry, an expiry that leaves the union intact ends only that token, and
 - Expiry: the deadline today is the admitted lease's `closed()` inside one
   `tokio::select!` arm. Select on one lease per token in the set instead, and on any firing recompute the union without it: unchanged
   means `AUTH_ERROR { Expired }` on that token's stream and the session
-  continues, shrunk means `session.abort(Unauthorized)` as today. A token
+  continues, shrunk narrows the origin and resets each stream that lost
+  access with `UNAUTHORIZED`. A token
   withdrawn by the client (its stream closed or reset) recomputes the union
   the same way with nothing written back, since the stream is gone: unchanged
-  means the session continues, shrunk means abort. Each lease revalidates on
+  means the session continues, shrunk narrows the same way. Each lease revalidates on
   its own cadence, and every re-check that changes the grant, a lower
   `expires` or a different `publish` or `subscribe`, writes the complete
   replacement grant as an update AUTH_OK on that token's stream and
   recomputes the union from the latest grant of every token, so the client
   can present a replacement in time and a narrowed token never keeps its old
-  scope; a shrunk union aborts as above until Origin scopes resizes.
+  scope; a shrunk union narrows as above.
 - Refusals map as connect-time ones do and never expose a status: every
   refusal `Client::attach` returns for a new token, a `403`, an empty or
   invalid grant, an unparseable body, or a `5xx`, is
@@ -71,7 +72,8 @@ expiry, an expiry that leaves the union intact ends only that token, and
   an expired or invalid token is refused and nothing changes; a token with a
   different root is refused naming it; a token adding a prefix rebuilds the
   origin scope and the prefix is now solicited; withdrawing the only token
-  covering a prefix closes the session; an mTLS session refuses a token; a
+  covering a prefix resets that prefix's streams with `UNAUTHORIZED` and
+  the session stays connected; an mTLS session refuses a token; a
   proxy-mode outage on re-check keeps the token.
 
 Additive.
@@ -82,3 +84,5 @@ Additive.
 - [Pattern interest](/quest/m1/path-patterns.md) - AUTH can represent the complete grants relay revalidation returns
 - [Lite stream](/quest/m1/auth/lite.md) - supplies the AUTH stream and
   `auth::Request` this consumes
+- [Unauthorized reset](/quest/m1/auth/unauthorized.md) - the code this
+  relay's revocations reset with

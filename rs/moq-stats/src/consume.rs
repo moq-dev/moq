@@ -195,7 +195,7 @@ mod tests {
 	}
 
 	async fn announced(origin: &origin::Producer) -> moq_net::broadcast::Consumer {
-		let mut consumer = origin.consume().announced();
+		let mut consumer = origin.consume().with_hidden(true).announced();
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let (update, active) = next_update(&mut consumer).await.expect("expected announce");
 		assert!(active);

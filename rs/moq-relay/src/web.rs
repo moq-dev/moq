@@ -920,31 +920,13 @@ async fn serve_fetch(
 		// freshly-connected subscribers don't get a spurious 404 before gossip arrives.
 		let consumer = origin.consume();
 		let broadcast = consumer.routed_broadcast("").await.map_err(|_| StatusCode::NOT_FOUND)?;
-		let group = match params.group {
-			// "latest" needs a live subscription to learn the newest sequence, since a
-			// fetch can only retrieve a sequence you already know. Once it's known, fetch
-			// it rather than reading it off the subscription, so an evicted latest is
-			// re-retrieved from upstream instead of waited on forever.
-			FetchGroup::Latest => {
-				async {
-					let consumer = broadcast.track(&track)?;
-					let mut sub = consumer.subscribe(None).await?;
-					match sub.latest() {
-						Some(sequence) => consumer.fetch_group(sequence, None).await.map(Some),
-						None => sub.recv_group().await,
-					}
-				}
-				.await
-			}
-			// A one-shot fetch, no subscription required.
-			FetchGroup::Num(sequence) => async { broadcast.track(&track)?.fetch_group(sequence, None).await }
-				.await
-				.map(Some),
+		let sequence = match params.group {
+			FetchGroup::Num(sequence) => Some(sequence),
+			FetchGroup::Latest => None,
 		};
-
-		let group = match group {
-			Ok(Some(group)) => group,
-			Ok(None) | Err(moq_net::Error::NotFound) => return Err(StatusCode::NOT_FOUND),
+		let group = match async { crate::fetch_group(&broadcast.track(&track)?, sequence).await }.await {
+			Ok(group) => group,
+			Err(moq_net::Error::NotFound) => return Err(StatusCode::NOT_FOUND),
 			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
 		};
 
