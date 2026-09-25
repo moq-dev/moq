@@ -22,6 +22,8 @@ const (
 	TransportTCP = ffi.MoqTransportTcp
 	// TransportUnix is a session that arrived over a Unix domain socket.
 	TransportUnix = ffi.MoqTransportUnix
+	// TransportWebTransport is a session that arrived over WebTransport (HTTP/3).
+	TransportWebTransport = ffi.MoqTransportWebTransport
 )
 
 // Request is an incoming session that can be accepted (Accept) or rejected (Reject).
