@@ -231,7 +231,7 @@ function subscribeJson<T>(
 	const consumer = new Json.Snapshot.Consumer<T>({ track });
 	effect.spawn(async () => {
 		for (;;) {
-			const value = await Promise.race([effect.cancel, consumer.next()]);
+			const value = await effect.race(consumer.next());
 			if (value === undefined) break;
 			update(value);
 		}

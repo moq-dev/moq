@@ -181,10 +181,7 @@ export class Decoder {
 			// abandoned, so building against its name would throw. Gate on the race result, not
 			// `context.state`, because `AudioContext.close()` only flips `.state` to "closed" synchronously
 			// on Chrome (Firefox/Safari report "suspended").
-			const loaded = await Promise.race([
-				context.audioWorklet.addModule(RenderWorklet).then(() => true),
-				effect.cancel,
-			]);
+			const loaded = await effect.race(context.audioWorklet.addModule(RenderWorklet).then(() => true));
 			if (!loaded) return;
 
 			// Create the worklet node. outputChannelCount must be set explicitly

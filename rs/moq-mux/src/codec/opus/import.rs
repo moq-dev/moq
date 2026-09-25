@@ -52,6 +52,11 @@ impl Import {
 		self.track.track().demand()
 	}
 
+	/// Record a locally encoded frame's transport handoff for catalog jitter measurement.
+	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
+		self.track.flush(timestamp, now)
+	}
+
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;

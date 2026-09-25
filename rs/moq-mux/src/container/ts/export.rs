@@ -17,6 +17,7 @@
 //! inline NALs on every keyframe. CMAF tracks are rejected with a clear error.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -164,6 +165,12 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// step backwards all the time, so a span closes on a timestamp passing this
 	/// high-water mark rather than on every frame.
 	watermark: Option<Timestamp>,
+	/// When the interleave started waiting on a lagging track: the arrival of the
+	/// first leading frame it held. Cleared once every track has caught up
+	/// ([`Self::pick_next_track`]).
+	stall: Option<web_async::time::Instant>,
+	/// Wakes [`Self::pick_next_track`] once the stall has lasted `max_age`.
+	hold: Option<Pin<Box<web_async::time::Sleep>>>,
 	/// The rate to pad the output to with null packets, in bits per second: the
 	/// builder override when set, else the catalog's recorded multiplex rate, else
 	/// none and the output is unpadded ([`Self::stuff`]).
@@ -187,6 +194,9 @@ pub struct Export<E: catalog::Catalog = ()> {
 struct Pending {
 	frame: Frame,
 	discontinuity: u64,
+	/// When the frame was pulled from its source: the start of a stall it leads
+	/// ([`Export::pick_next_track`]).
+	arrived: web_async::time::Instant,
 }
 
 struct Track {
@@ -205,7 +215,8 @@ struct Track {
 	/// Last decode timestamp (continuous 90 kHz ticks) authored for this track, keeping the
 	/// decode clock monotonic across reordered (B-frame) video. Only video uses it.
 	last_dts: Option<u64>,
-	/// High-water mark within this rendition, independent of cross-track skew.
+	/// High-water mark of the timestamps muxed within this rendition, independent of
+	/// cross-track skew. Bounds where its next frame can land ([`Track::shown`]).
 	timeline: Option<Timestamp>,
 	/// Decode-clock reserve (90 kHz ticks): how far ahead of its PTS each frame decodes. Taken
 	/// from the catalog `jitter` (the reorder depth) so it is large enough for `DTS <= PTS`,
@@ -217,6 +228,25 @@ impl Track {
 	/// Admit any frame that belongs to the current program generation.
 	fn admit(&mut self, pending: Pending, epoch: u64) -> Option<Pending> {
 		(self.epoch == epoch).then_some(pending)
+	}
+
+	/// Whether this track's next frame is known to sort after `(timestamp, pid)`: it
+	/// holds one, it has finished, or the frames it already muxed bound the next one
+	/// from below. Video is emitted in decode order, so a B-frame can land up to the
+	/// reorder depth (the decode-clock reserve) below the high-water mark.
+	fn shown(&self, timestamp: Timestamp, pid: u16) -> bool {
+		if self.pending.is_some() || self.finished {
+			return true;
+		}
+		let Some(timeline) = self.timeline else {
+			return false;
+		};
+		let reorder = match self.kind {
+			Kind::Video(_) => u128::from(self.dts_reserve) * 1_000_000_000 / 90_000,
+			_ => 0,
+		};
+		let floor = timeline.as_nanos().saturating_sub(reorder);
+		(floor, self.pid) > (timestamp.as_nanos(), pid)
 	}
 }
 
@@ -349,9 +379,11 @@ impl SiTrack {
 			track: entry.track.clone(),
 			interval: entry.interval,
 			state,
+			// Inline sections are a snapshot that has not hit the wire yet, which a
+			// clock table only sends as a revision.
+			dirty: !active.is_empty(),
 			active,
 			pending: None,
-			dirty: false,
 			last_emit: None,
 			max_age,
 		}
@@ -530,6 +562,8 @@ impl<E: catalog::Catalog> Export<E> {
 			clock: None,
 			low: None,
 			watermark: None,
+			stall: None,
+			hold: None,
 			video_start: None,
 			mux_rate: None,
 			mux_rate_override: None,
@@ -552,11 +586,13 @@ impl<E: catalog::Catalog> Export<E> {
 		self
 	}
 
-	/// Set the max age for each per-track source.
+	/// Set the max age for each per-track source, which also bounds how long the
+	/// interleave holds a leading track for a lagging one.
 	///
 	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
-	/// Defaults to
-	/// [`Duration::ZERO`] (skip aggressively).
+	/// Frames are muxed in media-time order across every track, waiting up to this
+	/// long for a track that has not yet shown where its next frame lands. Defaults
+	/// to [`Duration::ZERO`] (skip aggressively, and mux in arrival order).
 	pub fn with_max_age(mut self, max_age: Duration) -> Self {
 		self.max_age = max_age;
 		self
@@ -641,6 +677,8 @@ impl<E: catalog::Catalog> Export<E> {
 						track.pending = None;
 					}
 				}
+				// Show where the dropped tracks resume, or the interleave waits on them.
+				self.fill(waiter)?;
 			}
 		}
 
@@ -655,7 +693,9 @@ impl<E: catalog::Catalog> Export<E> {
 				self.emitted_epoch = self.epoch;
 				return Poll::Ready(Ok(Some(out)));
 			}
-			let Some(name) = self.pick_next_track() else { break };
+			let Some(name) = self.pick_next_track(waiter) else {
+				break;
+			};
 			let pending = self.tracks.get_mut(&name).unwrap().pending.take().unwrap();
 			let changed = pending.discontinuity != self.tracks[&name].discontinuity;
 			if changed {
@@ -768,8 +808,12 @@ impl<E: catalog::Catalog> Export<E> {
 						if waiting_for_header && !track.source.header_ready() {
 							continue;
 						}
-						let discontinuity = track.source.discontinuity();
-						let Some(pending) = track.admit(Pending { frame, discontinuity }, self.epoch) else {
+						let pending = Pending {
+							frame,
+							discontinuity: track.source.discontinuity(),
+							arrived: web_async::time::Instant::now(),
+						};
+						let Some(pending) = track.admit(pending, self.epoch) else {
 							continue;
 						};
 						let changed = pending.discontinuity != track.discontinuity;
@@ -1044,6 +1088,9 @@ impl<E: catalog::Catalog> Export<E> {
 		self.keyframes.clear();
 		self.queue.clear();
 		self.watermark = None;
+		// The new generation waits for every track again, with a fresh budget: a
+		// frame held across the break restarts its `arrived` below.
+		self.stall = None;
 		self.clock = None;
 		self.low = None;
 		self.last_pcr = None;
@@ -1056,11 +1103,13 @@ impl<E: catalog::Catalog> Export<E> {
 		self.stuffing = Stuffing::default();
 		for track in self.tracks.values_mut() {
 			track.last_dts = None;
+			track.timeline = None;
 			track.epoch = self.epoch;
 			if let Some(pending) = track.pending.as_ref() {
 				track.discontinuity = pending.discontinuity;
 			}
-			if let Some(pending) = track.pending.take() {
+			if let Some(mut pending) = track.pending.take() {
+				pending.arrived = web_async::time::Instant::now();
 				track.pending = track.admit(pending, self.epoch);
 			}
 		}
@@ -1246,13 +1295,40 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(())
 	}
 
-	/// Use timestamp order. No track is fenced, so a boundary does not jump the queue.
-	fn pick_next_track(&self) -> Option<String> {
-		self.tracks
+	/// The track whose pending frame goes next, in `(timestamp, pid)` order across
+	/// every track rather than only those whose frame has arrived.
+	///
+	/// The earliest pending frame waits until every other track has shown it cannot
+	/// be preceded ([`Track::shown`]), so the interleave is a function of the media
+	/// and two exporters of one broadcast render it in one order whatever the arrival
+	/// skew between tracks. Once that wait has lasted `max_age`, the same budget the
+	/// sources give a stalled group, output goes around the lagging track until it
+	/// catches up; zero keeps arrival order. The stall is timed from its first held
+	/// frame rather than per frame: a frame's successor is only pulled once it goes
+	/// out, so a per-frame wait would release one frame per `max_age`. No track is
+	/// fenced, so a boundary does not jump the queue.
+	fn pick_next_track(&mut self, waiter: &kio::Waiter) -> Option<String> {
+		let (timestamp, pid, name, arrived) = self
+			.tracks
 			.iter()
-			.filter_map(|(n, t)| t.pending.as_ref().map(|p| (p.frame.timestamp, t.pid, n)))
-			.min_by_key(|(timestamp, pid, name)| (*timestamp, *pid, *name))
-			.map(|(_, _, name)| name.clone())
+			.filter_map(|(n, t)| t.pending.as_ref().map(|p| (p.frame.timestamp, t.pid, n, p.arrived)))
+			.min_by_key(|(timestamp, pid, name, _)| (*timestamp, *pid, *name))?;
+		let name = name.clone();
+		if self.max_age.is_zero() {
+			return Some(name);
+		}
+		if self.tracks.values().all(|t| t.shown(timestamp, pid)) {
+			self.stall = None;
+			return Some(name);
+		}
+		let deadline = *self.stall.get_or_insert(arrived) + self.max_age;
+		let hold = self
+			.hold
+			.get_or_insert_with(|| Box::pin(web_async::time::sleep_until(deadline)));
+		if hold.deadline() != deadline {
+			hold.as_mut().reset(deadline);
+		}
+		waiter.poll_future(hold.as_mut()).is_ready().then_some(name)
 	}
 
 	/// Packetize one media frame into the open span, re-emitting PAT/PMT before
@@ -1326,39 +1402,37 @@ impl<E: catalog::Catalog> Export<E> {
 			self.last_psi = Some(frame.timestamp);
 		}
 
-		// Emit each SI entry's sections verbatim: on the revision floor when the
-		// snapshot changed (`dirty`), else once its own repetition interval has
-		// elapsed since the entry last hit the wire. The interval is the table's
-		// repetition requirement, a *floor* between unchanged repeats rather than an
-		// emission grid: an SDT wants 2s where the PSI wants 500ms, and a TDT/TOT
-		// revision held to a 30s grid would deliver the clock up to a whole slot
-		// late and re-assert an already-sent time (#2934). Unknown tables have no
-		// declared interval and fall back to the PSI cadence. `Bytes` clones are
-		// refcount bumps, and only a due entry is collected at all.
+		// Emit each SI entry's sections verbatim. A changed snapshot (`dirty`) goes
+		// out once the revision floor has elapsed since the entry last hit the wire,
+		// rather than waiting for a slot: a TDT/TOT revision held to a 30s grid would
+		// deliver the clock up to a whole slot late (#2934). Unchanged repeats ride
+		// the absolute media-time grid [`due`] gives the PSI, so two exporters of
+		// one broadcast repeat them at the same instants whatever their start
+		// (#3948): an SDT every 2s where the PSI wants 500ms. Clock tables never
+		// repeat unchanged, since a repeat re-asserts an already-sent time and steps
+		// a receiver backwards; every value they carry is a revision. Unknown tables
+		// have no declared interval and fall back to the PSI cadence. `Bytes` clones
+		// are refcount bumps, and only a due entry is collected at all.
 		let pending: Vec<(u16, Vec<Bytes>)> = self
 			.si
 			.iter_mut()
 			.filter(|(_, si)| !si.active.is_empty())
-			.filter(|(_, si)| {
+			.filter(|((_, table_id), si)| {
 				let interval = si.interval.unwrap_or(PSI_INTERVAL);
-				// A revision waits only for the revision floor; an unchanged snapshot
-				// waits for the full interval. A deferred revision stays dirty and
-				// carries whatever `active` holds when it finally rides.
-				let due = if si.dirty {
-					SI_REVISION_INTERVAL.min(interval)
-				} else {
-					interval
-				};
-				si_due(frame.timestamp, si.last_emit, due)
+				// A deferred revision stays dirty and carries whatever `active`
+				// holds when it finally rides.
+				let revision = si.dirty && si_due(frame.timestamp, si.last_emit, SI_REVISION_INTERVAL.min(interval));
+				let repeat = !is_clock_table(*table_id) && due(frame.timestamp, si.last_emit, interval);
+				revision || repeat
 			})
 			.map(|((pid, _), si)| {
 				si.dirty = false;
 				// The anchor never moves backwards. A non-zero interval cannot regress
-				// it on its own (`si_due` saturates, admitting only timestamps strictly
-				// above it), but a zero-interval entry emits on every frame including
-				// reordered (B-frame) timestamps below the anchor, and a catalog update
-				// can raise the interval later; a regressed anchor would then credit
-				// the reorder span against the floor.
+				// it on its own (`si_due` and `due` admit only timestamps past it), but
+				// a zero-interval entry emits on every frame including reordered
+				// (B-frame) timestamps below the anchor, and a catalog update can raise
+				// the interval later; a regressed anchor would then fall in an earlier
+				// slot or credit the reorder span against the floor, emitting early.
 				if si.last_emit.is_none_or(|last| frame.timestamp > last) {
 					si.last_emit = Some(frame.timestamp);
 				}
@@ -1893,18 +1967,13 @@ fn due(timestamp: Timestamp, last: Option<Timestamp>, interval: Duration) -> boo
 	slot(timestamp, interval) > slot(last, interval)
 }
 
-/// Whether an unchanged SI entry owes a repeat: `interval` has elapsed on the media
-/// timeline since it last hit the wire.
+/// Whether a changed SI snapshot may go out: `interval` has elapsed on the media
+/// timeline since the entry last hit the wire.
 ///
 /// A floor measured from the entry's own last emission, unlike [`due`]'s absolute
-/// grid, because SI emission is content-driven: a changed snapshot goes out on the
-/// revision floor (`SiTrack::dirty`, [`SI_REVISION_INTERVAL`]), and a grid boundary
-/// shortly after would re-send it as a near-immediate stale repeat. For a clock
-/// table that repeat asserts an already-sent time and steps a receiver backwards
-/// (#2934). The cost is that *unchanged* repeats are phased by each exporter's own
-/// emission history rather than shared slots; the emissions that carry information
-/// (the revisions) stay driven by the broadcast alone. `None` (never emitted) is
-/// always due, so a fresh exporter leads with the tables.
+/// grid, so a revision goes out promptly (`SiTrack::dirty`, [`SI_REVISION_INTERVAL`])
+/// while a publisher revising every frame still cannot drive the mux at that rate.
+/// `None` (never emitted) is always due, so a fresh exporter leads with the tables.
 fn si_due(timestamp: Timestamp, last: Option<Timestamp>, interval: Duration) -> bool {
 	let Some(last) = last else {
 		return true;
@@ -1912,6 +1981,12 @@ fn si_due(timestamp: Timestamp, last: Option<Timestamp>, interval: Duration) -> 
 	// Reordered (B-frame) timestamps step backwards; saturate rather than wrap so a
 	// dip never counts as elapsed time (a zero interval still means "every frame").
 	Duration::from(timestamp).saturating_sub(Duration::from(last)) >= interval
+}
+
+/// DVB's TDT and TOT: tables whose content is the current time, so a repeat of an
+/// unchanged snapshot asserts a time already sent (#2934).
+fn is_clock_table(table_id: u8) -> bool {
+	matches!(table_id, 0x70 | 0x73)
 }
 
 /// Index of `timestamp`'s repetition slot: how many whole `interval`s fit under it.

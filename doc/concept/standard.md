@@ -26,6 +26,11 @@ maps everything else to "not supported" or a harmless equivalent. The
 [moq-lite page](/concept/moq-lite#what-moq-lite-leaves-out) lists the
 differences.
 
+An IETF publisher declares the track's default priority in `SUBSCRIBE_OK` or
+`PUBLISH` when that draft carries track properties. Groups without a priority
+flag inherit it. If the property is absent, the IETF wire default of 128 maps
+to model priority 127, where higher values are served first.
+
 On drafts 14–19, the Rust publisher serves relative joining `FETCH` requests
 with offset zero for `NextObject` subscriptions. The fetch delivers the saved
 current-group prefix, and the subscription delivers later objects. Standalone,
