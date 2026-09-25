@@ -491,15 +491,19 @@ impl TrackState {
 			})
 	}
 
-	/// The edge a reader bounded by `anchor` measures drift against: this track's own
-	/// live edge under the anchor's cap, plus whatever newer edge the anchor carries
-	/// from outside (a splice's other segments).
-	fn drift_edge(&self, anchor: Anchor) -> Edge {
+	/// This track's own edge under the exclusive `cap`, for measuring drift.
+	fn drift_edge(&self, cap: Option<u64>) -> Edge {
 		Edge {
-			presentation: self.live_edge(anchor.cap),
-			outer: anchor.edge,
-			cap: anchor.cap,
+			presentation: self.live_edge(cap),
+			cap,
 		}
+	}
+
+	/// Whether `sequence` still holds the servable incarnation `stamp`.
+	fn holds(&self, sequence: u64, stamp: u32) -> bool {
+		self.lookup
+			.get(&sequence)
+			.is_some_and(|slot| slot.stamp == stamp && !slot.group.is_aborted())
 	}
 
 	/// The furthest presentation time the group at `sequence` could still reach: where
@@ -546,8 +550,9 @@ impl TrackState {
 	/// The edge must sit strictly above the candidate. The live edge is never late
 	/// against itself, and backfill or the tail of a rewound timeline can carry a high
 	/// timestamp on a low sequence without being an edge at all. Of the edges that
-	/// qualify, the highest sequence is the newest content, whichever track holds it.
-	fn is_stale(&self, sequence: u64, edge: &Edge, budget: Duration) -> bool {
+	/// qualify, the highest sequence is the newest content, whichever track holds it:
+	/// this one's, or the `outer` edge a splice pushed from another segment.
+	fn is_stale(&self, sequence: u64, edge: &Edge, outer: Option<&LiveEdge>, budget: Duration) -> bool {
 		if !self.lookup.contains_key(&sequence) {
 			return false;
 		}
@@ -557,25 +562,21 @@ impl TrackState {
 		// (delivering) is right, since the next poll resolves fresh anchors.
 		let local = edge
 			.presentation
-			.filter(|live| {
-				self.lookup
-					.get(&live.sequence)
-					.is_some_and(|slot| slot.stamp == live.stamp && !slot.group.is_aborted())
-			})
-			.map(LiveEdge::from);
-		// An outer edge lives on another track, so there is no slot here to revalidate
-		// it against; it is resolved fresh on every poll of the splice that pushes it.
-		let Some(live_edge) = local
+			.filter(|live| self.holds(live.sequence, live.stamp))
+			.map(|live| (live.sequence, live.timestamp));
+		// The outer edge lives on another track, whose lock this one must not nest, so
+		// the caller revalidates it first ([`LiveEdge::is_live`]).
+		let outer = outer.map(|live| (live.sequence, live.timestamp));
+		let Some((_, timestamp)) = local
 			.into_iter()
-			.chain(edge.outer)
-			.filter(|live| live.sequence > sequence)
-			.max_by_key(|live| live.sequence)
+			.chain(outer)
+			.filter(|(live, _)| *live > sequence)
+			.max_by_key(|(live, _)| *live)
 		else {
 			return false;
 		};
-		self.reach(sequence, edge.cap).is_some_and(
-			|reach| matches!(live_edge.timestamp.checked_sub(reach), Ok(age) if Duration::from(age) >= budget),
-		)
+		self.reach(sequence, edge.cap)
+			.is_some_and(|reach| matches!(timestamp.checked_sub(reach), Ok(age) if Duration::from(age) >= budget))
 	}
 
 	/// Resolve a one-shot fetch from the track side: the cached group, or an [`Error`]
@@ -2352,7 +2353,12 @@ impl Consumer {
 	/// [`TrackState::live_edge`]. A splice reports the newest across its segments.
 	pub(crate) fn live_edge(&self, cap: Option<u64>) -> Option<LiveEdge> {
 		match &self.inner {
-			ConsumerKind::Plain(state) => state.read().live_edge(cap).map(LiveEdge::from),
+			ConsumerKind::Plain(state) => state.read().live_edge(cap).map(|edge| LiveEdge {
+				sequence: edge.sequence,
+				timestamp: edge.timestamp,
+				stamp: edge.stamp,
+				track: state.weak(),
+			}),
 			ConsumerKind::Spliced(resume) => resume.live_edge(cap),
 		}
 	}
@@ -2971,6 +2977,8 @@ enum SubscriberKind {
 struct Drift {
 	budget: Duration,
 	edge: Edge,
+	/// Revalidated per candidate, like `edge`; see [`LiveEdge::is_live`].
+	outer: Option<LiveEdge>,
 }
 
 /// Keeps one handed-out group tied to the subscription whose cursor selected it.
@@ -2997,18 +3005,18 @@ impl group::Expiry for GroupExpiry {
 
 		let mut anchor = Anchor::default();
 		let _ = self.anchor.poll(waiter, |current| {
-			anchor = **current;
+			anchor = (**current).clone();
 			Poll::<()>::Pending
 		});
-		anchor.cap = super::subscription::min_some(anchor.cap, self.bound);
-		let cap = anchor.cap;
+		let cap = super::subscription::min_some(anchor.cap, self.bound);
+		let outer = anchor.edge.filter(LiveEdge::is_live);
 
 		let mut expired = false;
 		let _ = self.state.poll(waiter, |state| {
 			let budget = clamp_max_age(max_age, state.max_age_bound());
 			loop {
-				let edge = state.drift_edge(anchor);
-				expired = state.is_stale(self.sequence, &edge, budget);
+				let edge = state.drift_edge(cap);
+				expired = state.is_stale(self.sequence, &edge, outer.as_ref(), budget);
 				if expired {
 					break;
 				}
@@ -3066,8 +3074,6 @@ impl group::Expiry for GroupExpiry {
 struct Edge {
 	/// This track's own edge, revalidated before it convicts anything.
 	presentation: Option<PresentationEdge>,
-	/// A newer edge on another track of the same splice; see [`Anchor::edge`].
-	outer: Option<LiveEdge>,
 	/// The cap the edge was resolved under, so per-candidate reach lookups measure
 	/// against the same servable window.
 	cap: Option<u64>,
@@ -3075,29 +3081,43 @@ struct Edge {
 
 /// How a reader wrapping a cursor bounds its drift anchor from outside: pushed by a
 /// splice onto each segment's cursor, and shared with the groups a cursor hands out.
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq)]
 pub(crate) struct Anchor {
 	/// The exclusive sequence cap on what the reader could be handed; see [`servable_cap`].
 	pub cap: Option<u64>,
 	/// The newest edge across a splice's segments. Each segment is a separate track
 	/// that only sees its own groups, so without this a parked segment measures against
-	/// its own frozen edge while the logical track has moved on.
+	/// its own frozen edge while the logical track has moved on. Revalidated on its own
+	/// track before it convicts anything, since it may be judged long after it was pushed.
 	pub edge: Option<LiveEdge>,
 }
 
-/// The newest stamped group of a track: its sequence and the newest frame it presented.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// The newest stamped group of a track: its sequence and the newest frame it presented,
+/// plus enough identity for a reader on another track to revalidate it.
+#[derive(Clone)]
 pub(crate) struct LiveEdge {
 	pub sequence: u64,
 	pub timestamp: Timestamp,
+	stamp: u32,
+	track: kio::ConsumerWeak<TrackState>,
 }
 
-impl From<PresentationEdge> for LiveEdge {
-	fn from(edge: PresentationEdge) -> Self {
-		Self {
-			sequence: edge.sequence,
-			timestamp: edge.timestamp,
-		}
+impl LiveEdge {
+	/// Whether the edge still names the same servable group on its own track, the
+	/// check [`TrackState::is_stale`] runs on a local edge: an eviction or abort since
+	/// the splice resolved it must not convict anything. Takes that track's lock, so
+	/// never call it under another's.
+	fn is_live(&self) -> bool {
+		self.track.read().holds(self.sequence, self.stamp)
+	}
+}
+
+impl PartialEq for LiveEdge {
+	fn eq(&self, other: &Self) -> bool {
+		self.sequence == other.sequence
+			&& self.timestamp == other.timestamp
+			&& self.stamp == other.stamp
+			&& self.track.same_channel(&other.track)
 	}
 }
 
@@ -3164,7 +3184,7 @@ impl PlainSubscriber {
 	fn anchor(&self, end: Option<u64>) -> Anchor {
 		Anchor {
 			cap: servable_cap(end, self.stale_cap),
-			edge: self.drift_anchor.read().edge,
+			edge: self.drift_anchor.read().edge.clone(),
 		}
 	}
 
@@ -3223,7 +3243,8 @@ impl PlainSubscriber {
 		self.poll(waiter, move |state| {
 			Poll::Ready(Ok(Drift {
 				budget: clamp_max_age(max_age, state.max_age_bound()),
-				edge: state.drift_edge(anchor),
+				edge: state.drift_edge(anchor.cap),
+				outer: anchor.edge.clone(),
 			}))
 		})
 	}
@@ -3231,8 +3252,9 @@ impl PlainSubscriber {
 	/// Whether the drift budget says to skip `group`, against a [`Drift`] already resolved
 	/// for this poll.
 	fn poll_stale(&self, group: &group::Consumer, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<bool>> {
+		let outer = drift.outer.as_ref().filter(|live| live.is_live());
 		self.poll(waiter, move |state| {
-			Poll::Ready(Ok(state.is_stale(group.sequence, &drift.edge, drift.budget)))
+			Poll::Ready(Ok(state.is_stale(group.sequence, &drift.edge, outer, drift.budget)))
 		})
 	}
 
@@ -3779,7 +3801,7 @@ impl Subscriber {
 		match &mut self.inner {
 			SubscriberKind::Plain(plain) => {
 				plain.end_sequence = end.exclusive();
-				let edge = plain.drift_anchor.read().edge;
+				let edge = plain.drift_anchor.read().edge.clone();
 				plain.update_drift_anchor(edge);
 			}
 			SubscriberKind::Spliced(spliced) => spliced.end_at(end),
@@ -6042,10 +6064,11 @@ mod test {
 		let state = producer.state.read();
 		let drift = Drift {
 			budget: Duration::ZERO,
-			edge: state.drift_edge(Anchor::default()),
+			edge: state.drift_edge(None),
+			outer: None,
 		};
 		assert!(
-			state.is_stale(0, &drift.edge, drift.budget),
+			state.is_stale(0, &drift.edge, None, drift.budget),
 			"stale against a live edge"
 		);
 		drop(state);
@@ -6056,9 +6079,50 @@ mod test {
 
 		let state = producer.state.read();
 		assert!(
-			!state.is_stale(0, &drift.edge, drift.budget),
+			!state.is_stale(0, &drift.edge, None, drift.budget),
 			"a vanished edge is no reason to drop what is left"
 		);
+	}
+
+	/// The same holds for an edge a splice pushed from another segment: a handed-out
+	/// group judges it long after the splice resolved it, so it is revalidated on its own
+	/// track before it convicts anything.
+	#[tokio::test]
+	async fn an_evicted_outer_edge_convicts_nothing() {
+		let mut producer = track_producer("a", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(1)));
+		let mut open = producer.append_group().unwrap();
+		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"a"))
+			.unwrap();
+		let mut group = subscriber.recv_group().await.unwrap().expect("group");
+		assert!(group.read_frame().await.unwrap().is_some());
+		// A successor bounds the open group's reach, without being late against it.
+		append_at(&mut producer, 10);
+
+		let mut next = track_producer("b", None);
+		append_at(&mut next, 30_000);
+		let edge = append_at(&mut next, 30_010);
+		subscriber.set_anchor(Anchor {
+			cap: None,
+			edge: next.consume().live_edge(None),
+		});
+
+		let mut control = group.clone();
+		assert!(
+			matches!(control.read_frame().now_or_never(), Some(Ok(None))),
+			"the open group ends against the outer edge"
+		);
+
+		// The outer edge dies before the group is judged again.
+		let slot = next.modify().unwrap().lookup.remove(&edge).unwrap();
+		let _ = slot.group.abort(Error::Evicted);
+
+		assert!(
+			group.read_frame().now_or_never().is_none(),
+			"a vanished outer edge is no reason to drop what is left"
+		);
+		assert!(!group.latency_expired());
+		open.finish().unwrap();
 	}
 
 	#[tokio::test]

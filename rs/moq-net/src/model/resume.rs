@@ -1596,16 +1596,16 @@ impl Subscriber {
 	/// against groups it will never surface: the route running past the boundary, or the
 	/// reader's own cap holding content back. The edge is left as is: it is the newest
 	/// content the logical track holds, which a segment's own track never sees.
-	fn segment_anchor(seg: &SegmentSub, anchor: Anchor) -> Anchor {
+	fn segment_anchor(seg: &SegmentSub, anchor: &Anchor) -> Anchor {
 		Anchor {
 			cap: min_some(anchor.cap, seg.last_group()),
-			..anchor
+			edge: anchor.edge.clone(),
 		}
 	}
 
 	/// The logical drift anchor, as of the last [`Self::refresh_anchor`].
 	fn anchor(&self) -> Anchor {
-		*self.drift_anchor.read()
+		self.drift_anchor.read().clone()
 	}
 
 	/// Re-derive the logical drift anchor and push it onto every segment cursor.
@@ -1622,17 +1622,17 @@ impl Subscriber {
 			.read()
 			.live_edge(cap)
 			.into_iter()
-			.chain(self.outer.edge)
+			.chain(self.outer.edge.clone())
 			.max_by_key(|edge| edge.sequence);
 		let anchor = Anchor { cap, edge };
 		// Skip a no-op write: every handed-out group's expiry watches this channel.
 		if self.anchor() != anchor
 			&& let Ok(mut current) = self.drift_anchor.write()
 		{
-			*current = anchor;
+			*current = anchor.clone();
 		}
 		for seg in &mut self.segments {
-			let anchor = Self::segment_anchor(seg, anchor);
+			let anchor = Self::segment_anchor(seg, &anchor);
 			if let Some(sub) = seg.stale_sub_mut() {
 				sub.set_anchor(anchor);
 			}
@@ -1692,7 +1692,7 @@ impl Subscriber {
 		seg: &mut SegmentSub,
 		prefs: &Subscription,
 		min_sequence: u64,
-		anchor: Anchor,
+		anchor: &Anchor,
 		waiter: &kio::Waiter,
 	) -> Poll<()> {
 		if let SubState::Pending(pending) = &mut seg.sub {
@@ -1723,7 +1723,7 @@ impl Subscriber {
 		seg: &mut SegmentSub,
 		prefs: &Subscription,
 		min_sequence: u64,
-		anchor: Anchor,
+		anchor: &Anchor,
 		waiter: &kio::Waiter,
 	) -> Poll<Option<group::Consumer>> {
 		loop {
@@ -1807,7 +1807,7 @@ impl Subscriber {
 						&mut self.segments[index],
 						&self.last_prefs,
 						self.min_sequence,
-						anchor,
+						&anchor,
 						waiter,
 					)
 					.is_pending()
@@ -1961,7 +1961,7 @@ impl Subscriber {
 					&mut self.segments[index],
 					&self.last_prefs,
 					min_sequence,
-					anchor,
+					&anchor,
 					waiter,
 				);
 				match polled {
@@ -2080,7 +2080,7 @@ impl Subscriber {
 		let mut pending_activation = false;
 		let anchor = self.anchor();
 		if let Some(seg) = self.segments.last_mut() {
-			if Self::poll_activate(seg, &self.last_prefs, self.min_sequence, anchor, waiter).is_pending() {
+			if Self::poll_activate(seg, &self.last_prefs, self.min_sequence, &anchor, waiter).is_pending() {
 				pending_activation = true;
 			} else if let SubState::Active(sub) = &mut seg.sub
 				&& let Ok(Some(datagram)) = ready!(sub.poll_recv_datagram(waiter))
@@ -2147,7 +2147,7 @@ impl Subscriber {
 			seg,
 			&self.last_prefs,
 			self.min_sequence,
-			anchor,
+			&anchor,
 			waiter
 		));
 		match &mut seg.sub {
