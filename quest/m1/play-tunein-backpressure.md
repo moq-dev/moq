@@ -29,9 +29,8 @@ duplicating the subscription and codec rules. Bound the encoded buffer by media
 age and account for its bytes; `--delay` allows 10s, which as raw 1080p frames
 would be ~900 MB.
 
-The regression lives on #3946's branch (`quest/main/play-tunein-backpressure`,
-`play::media::tests`): 61 frames at 30fps, a 2s delay, and no window drain park
-the decoder at frame 31, leaving the newest frame due 990ms late. Port it onto
+The regression lives in #3946 (`refs/pull/3946/head`, `play::media::tests`):
+61 frames at 30fps, a 2s delay, and no window drain park the decoder at frame 31, leaving the newest frame due 990ms late. Port it onto
 the harness, and also cover video-only and speaker-owned anchors, delayed
 drains, reordering, discontinuity, and the decoder's tail flush.
 
