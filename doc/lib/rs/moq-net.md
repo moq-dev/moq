@@ -72,10 +72,11 @@ Expiry is therefore approximate; a late `gc` extends retention.
 
 ## Authorization
 
-`session.auth()` is the session's `auth::Handle`. On moq-lite 06 each side
-presents its connection's credential right after setup, and `grant()` watches
-the union of every grant this side holds: `None` until the peer answers,
-forever on other versions. `add(token)` presents another token and resolves
+`session.auth()` is the session's `auth::Handle`. On moq-lite 06, and on
+moq-transport draft-17+ when both sides negotiate the
+[MoQ Auth extension](/draft/moq-auth), each side presents its connection's
+credential right after setup, and `grant()` watches the union of every grant
+this side holds: `None` until the peer answers, forever otherwise. `add(token)` presents another token and resolves
 once the peer answers; drop the returned `auth::Token` to withdraw it.
 
 ```rust
@@ -91,8 +92,9 @@ origin handles allow and refuses any other token as unsupported. To verify
 tokens yourself, take `handshake.auth().requests()` on the `server::Handshake`
 before `ok()` (or `session.auth().requests()` before first polling the driver)
 and answer every `auth::Request` with `accept(grant)`, which returns an
-`auth::Issued` you can `update` or `revoke`, or `reject`. The wire carries
-prefix grants for now, so a grant that is not a union of subtrees is refused.
+`auth::Issued` you can `update` or `revoke`, or `reject`. Both wires carry
+prefix grants for now, so a grant that is not a union of subtrees is refused
+and the presenter sees `Unsupported`; after a grant, such an update revokes it.
 
 A client whose origin publishes a broadcast outside its grant closes the
 session with `Unauthorized`, naming the path in the close reason. A grant that
