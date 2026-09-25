@@ -21,7 +21,8 @@ Additive on `moq-auth` and `moq-relay`, so on main:
 - `Cluster::admit(&self, auth: &Auth, request: moq_auth::Request) ->
   Result<Admitted, auth::Error>` with
   `Admitted { lease: Lease, publisher: Option<origin::Producer>, subscriber: Option<origin::Consumer>, stats: stats::Session }`
-  already scoped and tagged from `grant.tier`; today `authorize` and
+  already scoped and tagged from `grant.tier`, with the lease holding the same
+  `stats::Session` (`Lease::with_stats`) so a re-checked tier retags it; today `authorize` and
   `Grants` are `pub(crate)` in `rs/moq-relay/src/connection.rs` and
   `Cluster::publisher(&Token)` drops the `Lease`. `auth::hold(lease, work)`
   holds non-session work for as long as the lease allows, the way
@@ -43,5 +44,3 @@ Additive on `moq-auth` and `moq-relay`, so on main:
 
 Public API: additive. Wire: the auth JSON gains transport values and end
 reasons.
-
-- [Stats retier](/quest/m1/stats-retier.md) - what a re-checked tier does to the `stats::Session` handed out here

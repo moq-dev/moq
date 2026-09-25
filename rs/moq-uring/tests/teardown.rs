@@ -11,7 +11,7 @@
 //! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
 //! and runs everywhere else.
 
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "noq"))]
 
 #[path = "support.rs"]
 mod support;

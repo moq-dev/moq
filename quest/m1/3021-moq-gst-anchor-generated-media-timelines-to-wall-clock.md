@@ -30,7 +30,7 @@ delayed first buffers, multiple pads, timescale conversion, numeric limits,
 source restarts, idle gaps, and a system-clock adjustment. Existing timeline
 records remain unchanged. Consume the prerequisite's catalog format; no new
 transport TIMESTAMP/TIMESCALE semantics, synchronization protocol, or drift
-correction is introduced here. Run the GStreamer CI and `smoke --all` lanes.
+correction is introduced here. Run the GStreamer CI and `interop --all` lanes.
 
 ## Closes
 

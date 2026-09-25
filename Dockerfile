@@ -29,9 +29,8 @@ RUN --mount=type=cache,target=/root/.cache --mount=type=cache,target=/nix,from=n
 ARG package="sh"
 
 # Create entry.sh script that knows which binary to run. Derive it from the
-# single binary the package produced (so a crate whose `[[bin]]` name differs
-# from its package name, e.g. `moq-cli` shipping as `moq`, just works); fall
-# back to the package name when there's no binary (the `sh` default).
+# single binary the package produced, so a package need not share its binary's
+# name; fall back to the package name when there's no binary (the `sh` default).
 RUN binary="$(ls /output/result/bin 2>/dev/null | head -n1)"; \
 	[ -n "$binary" ] || binary="${package}"; \
 	printf '#!/bin/sh\nexec /bin/%s "$@"\n' "${binary}" > /output/entry.sh && \

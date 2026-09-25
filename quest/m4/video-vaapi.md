@@ -9,21 +9,23 @@ release first.
 
 ## Plan
 
-Four gaps, one external dependency.
+Three gaps, one external dependency.
 
 **Decode.** The H.264 decoder landed (moq-vaapi 0.0.4, `decode/backend/vaapi.rs`),
 with the default `decode::Config::output` of `Output::Native` handing out
 DMA-BUF surfaces the renderer imports without a download. H.265 decode is still missing, so a Linux box
 without NVDEC has no hardware path for it.
 
-**The encoder.** Ours is a 111-line CPU-only adapter whose own header says it
-is unvalidated on hardware. iroh-live's imports a DMA-BUF directly and does
-scale and convert through VPP, validated on Intel Meteor Lake. Take theirs and
-reshape it to our surface rather than growing ours toward it.
+**The encoder.** H.264 is done. `moq-vaapi` imports DMA-BUFs and scales and
+converts them through VPP (`dmabuf`, `vpp`, `Encoder::encode_dmabuf`,
+`Encoder::set_bitrate`); `encode/backend/vaapi.rs` encodes a `Surface::DmaBuf`
+without a download, and `Surface::resize` scales one through VPP. Validated on
+Intel Meteor Lake. What is left is H.265, below.
 
 **H.265.** The VAAPI backend advertises H.264 only. `moq-vaapi` 0.0.2 vendors
 the HEVC buffer types (`src/buffer/hevc.rs`) but its `Encoder` is hardcoded to
-`VAProfileH264Main` / `VAEntrypointEncSlice`, so exposing an HEVC encoder is a
+`VAProfileH264Main` (with `VAEntrypointEncSlice`, or the low-power entrypoint
+where that is all a device has), so exposing an HEVC encoder is a
 change to that crate, not a flag here.
 
 **Build cost.** `moq-vaapi` 0.0.3 dlopens libva (no `DT_NEEDED`), so a
@@ -43,6 +45,6 @@ already falls back cleanly, since `Encoder::new` returns `Err` and
 
 ## Required
 
-- A `moq-dev/vaapi` release exposing an HEVC encoder, the decode half and a
-  VPP wrapper, and shipping pre-generated bindings instead of a bindgen build
-  script
+- A `moq-dev/vaapi` release exposing an HEVC encoder (H.264 decode is in
+  0.0.4; DMA-BUF encode and VPP shipped in 0.1.0) and pre-generated bindings
+  instead of a bindgen build script

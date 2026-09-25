@@ -1,12 +1,12 @@
-# [M] cs/moq: the wrapper, NuGet package, smoke client, and docs
+# [M] cs/moq: the wrapper, NuGet package, interop client, and docs
 
 ## Goal
 
 `dotnet add package Moq.Net` (final name decided in the quest; `Moq` collides
 with the mocking library on NuGet) gives a .NET 8 program the full moq-ffi
 surface as `await`-able classes, with `runtimes/<rid>/native` libraries for
-the release matrix. A `test/smoke/clients/cs` client joins `just test
-smoke --all` and `doc/lib/cs` documents the package.
+the release matrix. A `test/interop/clients/cs` client joins `just test
+interop --all` and `doc/lib/cs` documents the package.
 
 ## Plan
 
@@ -19,7 +19,7 @@ smoke --all` and `doc/lib/cs` documents the package.
   (win-x64, osx-arm64, linux-x64, linux-arm64, matching `libmoq.yml`), built by
   `release-cs.yml` on the nightly dry-run chain and published on a `cs-v*`
   tag.
-- Smoke: `test/smoke/clients/cs` publishes and subscribes like the Go client.
+- Interop: `test/interop/clients/cs` publishes and subscribes like the Go client.
 - Docs: `doc/lib/cs/index.md` and a row in `doc/lib/index.md`.
 
 ## Required

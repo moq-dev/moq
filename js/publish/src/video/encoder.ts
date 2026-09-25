@@ -13,6 +13,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import { RenditionJitter } from "../jitter";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";
@@ -152,6 +153,7 @@ export class Encoder {
 	#lastCaptured?: Time.Micro;
 	#lastAccepted?: Time.Micro;
 	#lastCaptureWall?: number;
+	#jitter = new RenditionJitter();
 
 	constructor(name: string, props?: EncoderProps) {
 		this.name = name;
@@ -235,9 +237,10 @@ export class Encoder {
 		this.#lastCaptureWall = performance.now();
 
 		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
-		// The broadcast owns this static track across demand gaps. End only the current
-		// group when demand disappears so a later subscriber can resume on the same track.
-		// A fatal encoder error still aborts the track through producer.close(err) below.
+		// The broadcast owns this static track across demand gaps. When demand disappears, cut the
+		// current group, marking the break so a later subscriber resumes on the same track without
+		// the pre-gap group reading as live. A fatal encoder error still aborts the track through
+		// producer.close(err) below.
 		effect.cleanup(() => {
 			if (track.closed.peek() === undefined) producer.cut();
 		});
@@ -260,6 +263,11 @@ export class Encoder {
 					}));
 
 					producer.encode(frame, frame.timestamp as Time.Micro, key);
+					const jitter = this.#jitter.observe(frame.timestamp);
+					if (jitter !== undefined) {
+						const catalog = this.#out.catalog.peek();
+						if (catalog) this.#out.catalog.set({ ...catalog, jitter: Catalog.u53(jitter) });
+					}
 					this.#lastAccepted = frame.timestamp as Time.Micro;
 					this.#observe({ demand: true, idle: false, frame: true });
 				},
@@ -387,8 +395,7 @@ export class Encoder {
 			codedHeight: Catalog.u53(config.height),
 			optimizeForLatency: true,
 			container: { kind: "legacy" } as const,
-			// Each frame is flushed immediately, so the jitter is one frame duration.
-			jitter: config.framerate ? Catalog.u53(Math.ceil(1000 / config.framerate)) : undefined,
+			jitter: this.#jitter.current ? Catalog.u53(this.#jitter.current) : undefined,
 			stalled: this.#stalled.flag(),
 		};
 

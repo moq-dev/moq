@@ -20,7 +20,7 @@ ffmpeg, no GStreamer, no system codec to install.
 
 Highlights:
 
-- **Automatic backend selection**, hardware first. Linux GPU libraries are `dlopen`ed at runtime, so one binary starts anywhere and warns when it falls back to software. openh264 (the default-on `openh264` feature) is statically linked as the H.264 fallback; H.265 is hardware-only; AV1 decodes via NVDEC. The VAAPI encoder is compile-verified but not yet validated on hardware.
+- **Automatic backend selection**, hardware first. Linux GPU libraries are `dlopen`ed at runtime, so one binary starts anywhere and warns when it falls back to software. openh264 (the default-on `openh264` feature) is statically linked as the H.264 fallback; H.265 is hardware-only; AV1 decodes via NVDEC. The VAAPI encoder, decoder, and GPU resize share one render node: the first whose driver does all three, or the one the `MOQ_VAAPI_DEVICE` environment variable names (for example `/dev/dri/renderD129`).
 - **Publish on demand.** `encode::publish_capture` advertises the track up front and opens the camera only while someone subscribes.
 - **GPU ownership where the platform allows.** Matching codec backends consume their native GPU surfaces directly. The renderer imports `CVPixelBuffer` and supported DMA-BUF formats. Linux/NVIDIA producers can import dedicated Vulkan RGBA8 slots into CUDA with timeline-semaphore ordering and completion-driven slot return. Vulkan/CUDA surfaces deliberately have no CPU pixel fallback; other surfaces use the typed `Surface::into_i420()` and configured `Surface::to_rgba(config)` when needed.
 - **Live bitrate control** where the selected backend supports it, without forcing a keyframe. An unsupported backend keeps its opening rate.
@@ -39,11 +39,21 @@ and an empty rate list means no discrete intervals were reported. Device errors
 are returned rather than treated as an empty list. Other platforms return
 `Error::Unsupported`.
 
+With `pipewire` enabled, `capture::cameras` also lists PipeWire camera nodes as
+`pipewire:<node name>` after the V4L2 devices, and `pipewire` alone opens the
+camera with the highest session priority, the session manager's default. That
+reaches cameras V4L2 cannot: a Raspberry Pi CSI camera behind libcamera, and any
+camera from inside a Flatpak or Snap sandbox, where the default camera comes
+through the xdg-desktop-portal Camera interface. The mode is chosen from the
+node's own format list by the same rules as V4L2 (below) and offered exactly,
+across YUY2, NV12, RGB, and MJPEG, and `camera_modes` lists the same modes.
+
 `capture::Config::framerate` is an `Option<Rate>` request in the same exact
 type; the stream reports the rate the device accepted, or `None` when the
 driver reported none.
-V4L2 chooses the closest geometry, then the format whose accepted rate is
-nearest the request, then the cheaper conversion when both match equally well.
+V4L2 and PipeWire cameras choose the closest geometry, then the format whose
+accepted rate is nearest the request, then the cheaper conversion when both
+match equally well.
 
 ```rust
 let mut video = moq_video::decode::Consumer::new(&broadcast, &rendition, "video", Default::default()).await?;
@@ -59,7 +69,7 @@ cargo add moq-video --features capture   # camera + screen capture, no system bu
 cargo add moq-video --features render    # wgpu rendering
 cargo add moq-video --features v4l2      # Linux V4L2 M2M codecs, no system build deps
 cargo add moq-video --features vaapi     # Linux VAAPI codecs (bindgen needs libclang)
-cargo add moq-video --features pipewire  # Wayland screen capture (links libpipewire)
+cargo add moq-video --features pipewire  # Wayland screen + PipeWire cameras (links libpipewire)
 cargo add moq-video --no-default-features --features openh264  # software H.264 only
 cargo add moq-video --no-default-features --features nvidia    # Linux NVIDIA only, no C++ or wgpu
 ```

@@ -1,13 +1,31 @@
-# drill: cancel_under_backpressure_releases_the_reader
+# drill: cancel_under_backpressure_releases_the_reader::loopback
 # expect: the cancelled subscriber's broadcast never closed
 #
-# Removes the release a subscribing session performs when it ends: the
-# `Announced` collection owns the guards that abort every broadcast the session
-# fed. Preventing that local from dropping keeps every handle downstream of it
-# alive forever, including when cancellation drops the future at an await.
+# Removes the release a subscribing session performs when it ends: each announce
+# stream's `Announced` collection owns the routes and source guards for every
+# broadcast the session fed, and dropping it aborts them. Wrapping it in
+# `ManuallyDrop` keeps every handle downstream of it alive after the session is
+# gone, so a cancelled reader's broadcast parks forever instead of closing.
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
+index 729a23e4b..54aa7a5be 100644
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -269 +269 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
--		let mut announced = Announced::default();
-+		let mut announced = std::mem::ManuallyDrop::new(Announced::default());
+@@ -1087,7 +1087,8 @@ struct PrefixRun {
+ 	/// it comes from the connect config or the peer's SETUP, neither of which
+ 	/// changes for the life of the session.
+ 	link_cost: u64,
+-	announced: Announced,
++	// MUTATION: never dropped, so a session that ends keeps every route and source alive.
++	announced: std::mem::ManuallyDrop<Announced>,
+ 	// Lite06+: announce ids. Each received `active` implicitly assigns the next
+ 	// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
+ 	// path. Tracked even for announces we drop locally (reflected loops), since
+@@ -1175,7 +1176,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
+ 					let run = PrefixRun {
+ 						responder_origin,
+ 						link_cost,
+-						announced: Announced::default(),
++						announced: std::mem::ManuallyDrop::new(Announced::default()),
+ 						next_announce_id: 0,
+ 						announced_by_id: HashMap::new(),
+ 					};

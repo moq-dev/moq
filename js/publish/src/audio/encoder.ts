@@ -5,6 +5,7 @@ import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import { RenditionJitter } from "../jitter";
 import type { AudioFrame, Capture, Format } from "./capture";
 import { Gain } from "./gain";
 import { Resampler } from "./resampler";
@@ -155,11 +156,20 @@ export class Encoder {
 	// discontinuity and re-anchors on.
 	#pipeline: Pipeline | undefined;
 
+	// Where the next frame submitted to the AudioEncoder starts, i.e. the exclusive end of the
+	// newest one, where a demand gap's discontinuity marker goes. Cleared once the marker is written.
+	#next: Time.Micro | undefined;
+
+	// The newest demand gap's marker. The AudioEncoder outlives the gap, so chunks it still held
+	// when demand disappeared surface after the resume; they sit below the marker and are dropped.
+	#floor: Time.Micro | undefined;
+
 	// The fatal error an AudioEncoder reported, if any. That instance can never encode again and
 	// reconfiguring it would be a retry, so the rendition stays down for the life of this encoder.
 	#fatal = new Signal<Error | undefined>(undefined);
 
 	#signals = new Effect();
+	#jitter = new RenditionJitter();
 
 	constructor(name: string, props?: EncoderProps) {
 		// `source` moved to Audio.Capture, which renditions share. TypeScript catches this, but a
@@ -258,6 +268,24 @@ export class Encoder {
 			this.#encode(rendition.track, format, effect);
 		});
 
+		// When demand disappears, end the epoch with a discontinuity marker (see
+		// Container.Legacy.Producer.cut) so a later subscriber resumes on the same track without the
+		// pre-gap frames reading as live. Its empty payload marks where the submitted media ends.
+		effect.run((effect) => {
+			const track = effect.get(rendition.track);
+			if (!track) return;
+			effect.cleanup(() => {
+				const end = this.#next;
+				this.#next = undefined;
+				if (end === undefined || track.closed.peek() !== undefined) return;
+				this.#floor = end;
+				track.writeFrame({
+					payload: Container.Legacy.encodeFrame(new Uint8Array(), end),
+					timestamp: Time.Timestamp.fromMicros(end),
+				});
+			});
+		});
+
 		effect.run((effect) => {
 			const enabled = effect.get(this.in.enabled);
 			const capture = effect.get(this.in.capture);
@@ -319,7 +347,10 @@ export class Encoder {
 
 		const decoder = effect.get(this.#decoderDescription);
 		const catalog = decoder?.config === config ? { ...config, description: decoder.description } : config;
-		effect.set(this.#out.catalog, catalog);
+		effect.set(this.#out.catalog, {
+			...catalog,
+			jitter: this.#jitter.current ? Catalog.u53(this.#jitter.current) : undefined,
+		});
 	}
 
 	// Collect the encode-only Opus knobs that are set, reading the codec through the effect so the
@@ -384,10 +415,18 @@ export class Encoder {
 
 						// Each audio frame is its own group so the relay can forward it without
 						// waiting for a group boundary. Loss is handled by the codec's PLC.
-						track.peek()?.writeFrame({
+						const live = track.peek();
+						if (!live) return;
+						if (this.#floor !== undefined && frame.timestamp < this.#floor) return;
+						live.writeFrame({
 							payload: Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro),
 							timestamp: Time.Timestamp.fromMicros(frame.timestamp as Time.Micro),
 						});
+						const jitter = this.#jitter.observe(frame.timestamp);
+						if (jitter !== undefined) {
+							const catalog = this.#out.catalog.peek();
+							if (catalog) this.#out.catalog.set({ ...catalog, jitter: Catalog.u53(jitter) });
+						}
 					},
 					error: (err) => {
 						console.error("encoder error", err);
@@ -415,6 +454,10 @@ export class Encoder {
 							// on the capture clock, but there is nowhere to send a chunk with no subscriber.
 							if (!track.peek()) continue;
 
+							// Round to whole microseconds once, here, so a chunk's timestamp and the marker
+							// placed at the next frame's start agree exactly.
+							const timestamp = Math.round(data.timestamp) as Time.Micro;
+
 							const joinedLength = data.channels.reduce((total, channel) => total + channel.length, 0);
 							const joined = new Float32Array(joinedLength);
 
@@ -428,13 +471,14 @@ export class Encoder {
 								sampleRate: config.sampleRate,
 								numberOfFrames: data.channels[0].length,
 								numberOfChannels: data.channels.length,
-								timestamp: data.timestamp,
+								timestamp,
 								data: joined,
 								transfer: [joined.buffer],
 							});
 
 							encoder.encode(frame);
 							frame.close();
+							this.#next = Math.round(framer.next) as Time.Micro;
 						}
 					},
 				};
@@ -508,8 +552,6 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 				container: { kind: "legacy" } as const,
 				// Frames are raw (no ADTS header), so the decoder needs the AudioSpecificConfig to init.
 				description: Util.Hex.fromBytes(Util.Aac.audioSpecificConfig(rate, captured.channelCount)),
-				// Each AAC-LC frame is 1024 samples; report that duration as the jitter hint.
-				jitter: Catalog.u53(Math.ceil((AAC_FRAME_SAMPLES / rate) * 1000)),
 			},
 		};
 	}
@@ -528,9 +570,6 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 			numberOfChannels,
 			bitrate: Catalog.u53(codec.bitrate ?? captured.channelCount * OPUS_BITRATE_PER_CHANNEL),
 			container: { kind: "legacy" } as const,
-			// jitter is an integer upper bound on how long a decoder waits for the next frame, so a
-			// 2.5ms Opus frame rounds up to 3 rather than down. The encoder uses the exact value.
-			jitter: Catalog.u53(Math.ceil(frameDuration)),
 		},
 		frameDuration: Time.Micro.fromMilli(frameDuration),
 	};
