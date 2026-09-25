@@ -200,7 +200,7 @@ export class Broadcast {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const entry = await Promise.race([effect.cancel, announced.next()]);
+				const entry = await effect.race(announced.next());
 				if (!entry) break;
 				this.#announced.mutate((active) => {
 					if (!active) return;
@@ -335,7 +335,7 @@ export class Broadcast {
 		effect.spawn(async () => {
 			try {
 				for (;;) {
-					const update = await Promise.race([effect.cancel, fetchNext()]);
+					const update = await effect.race(fetchNext());
 					if (!update) break;
 
 					console.debug("received catalog", format, this.in.name.peek(), update);

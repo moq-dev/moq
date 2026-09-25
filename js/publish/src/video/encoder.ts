@@ -291,7 +291,7 @@ export class Encoder {
 
 				effect.spawn(async () => {
 					for (;;) {
-						const next = await Promise.race([reader.read(), effect.cancel]);
+						const next = await effect.race(reader.read());
 						if (!next?.value) break;
 
 						// Ours now: every path below has to close it.
