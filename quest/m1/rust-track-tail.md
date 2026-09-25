@@ -47,6 +47,10 @@ session in `rs/moq-net/tests/support`. Add a Rust-JS interop case to
 `just test smoke --all` for a publisher that ends a track with a group still
 in flight.
 
+## Required
+
+- [lite-07 stream count](/quest/m1/lite-stream-count.md) - the moq-lite accounting this builds on, instead of SUBSCRIBE_DROP
+
 ## Related
 
 - [JS track tail](/quest/m1/js-track-tail.md) - the same rule in `@moq/net`

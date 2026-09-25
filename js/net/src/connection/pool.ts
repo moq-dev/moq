@@ -293,7 +293,7 @@ export class Connection {
 			effect.spawn(async () => {
 				try {
 					for (;;) {
-						const entry = await Promise.race([effect.cancel, upstream.next()]);
+						const entry = await effect.race(upstream.next());
 						if (!entry) break;
 						if (Announce.isActive(entry.kind)) active.set(entry.prefix, entry);
 						else active.delete(entry.prefix);

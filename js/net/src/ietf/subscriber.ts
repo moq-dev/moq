@@ -1,4 +1,4 @@
-import { Signal } from "@moq/signals";
+import { race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
@@ -396,7 +396,7 @@ export class Subscriber {
 				});
 
 				// Wait for either the read loop or the announced to close
-				await Promise.race([readLoop, announced.closed]);
+				await race([readLoop, announced.closed]);
 
 				// For v14/v15: send UnsubscribeNamespace before closing
 				if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
@@ -506,7 +506,7 @@ export class Subscriber {
 		let stream: Stream;
 		let trackAlias: bigint;
 		try {
-			const result = await Promise.race([
+			const result = await race([
 				withTimeout(
 					setup,
 					SUBSCRIBE_OK_TIMEOUT_MS,
@@ -577,7 +577,7 @@ export class Subscriber {
 
 			// Terminal conditions settle at most once (stream close = PublishDone, track close =
 			// local unsubscribe); race them once so the demand loop doesn't re-subscribe each pass.
-			const done = Promise.race([
+			const done = race([
 				stream.reader.closed.then(() => publisherEnded),
 				producer.closed.then(() => localEnded),
 			]);
@@ -587,7 +587,7 @@ export class Subscriber {
 			// down resumes on the same stream.
 			let terminal = localEnded;
 			for (;;) {
-				const reason = await Promise.race([done, producer.unused().then(() => idle)]);
+				const reason = await race([done, producer.unused().then(() => idle)]);
 				if (reason === idle && producer.closed.peek() === undefined && producer.used.peek()) continue;
 				terminal = reason;
 				break;
@@ -963,7 +963,7 @@ export class Subscriber {
 			track.writeGroup(producer);
 
 			for (;;) {
-				const done = await Promise.race([stream.done(), producer.closed, track.closed]);
+				const done = await race([stream.done(), producer.closed, track.closed]);
 				if (done !== false) break;
 
 				const frame = await Frame.decode(

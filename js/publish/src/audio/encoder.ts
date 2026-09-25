@@ -160,8 +160,9 @@ export class Encoder {
 	// newest one, where a demand gap's discontinuity marker goes. Cleared once the marker is written.
 	#next: Time.Micro | undefined;
 
-	// The newest demand gap's marker. The AudioEncoder outlives the gap, so chunks it still held
-	// when demand disappeared surface after the resume; they sit below the marker and are dropped.
+	// The newest demand gap's marker. The AudioEncoder outlives a gap too brief to skip a frame, so
+	// chunks it still held when demand disappeared surface after the resume; they sit below the
+	// marker and are dropped.
 	#floor: Time.Micro | undefined;
 
 	// The fatal error an AudioEncoder reported, if any. That instance can never encode again and
@@ -223,7 +224,7 @@ export class Encoder {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await Promise.race([reader.read(), effect.cancel]);
+				const next = await effect.race(reader.read());
 				if (!next?.value) break;
 
 				const format = capture.out.format.peek();
@@ -443,13 +444,17 @@ export class Encoder {
 				console.debug("encoding audio", encoderConfig);
 				encoder.configure(encoderConfig);
 
+				// Where the next frame starts if it continues the last one encoded.
+				let contiguous: Time.Micro | undefined;
+
 				const pipeline: Pipeline = {
 					channelCount: config.numberOfChannels,
 					push: (captured: AudioFrame) => {
 						const input = resampler ? resampler.push(captured) : captured;
 						if (!input) return;
 
-						for (const data of framer.push(input)) {
+						const frames = framer.push(input);
+						for (const [i, data] of frames.entries()) {
 							// The demand gate. The framer still consumes every sample so its timestamps stay
 							// on the capture clock, but there is nowhere to send a chunk with no subscriber.
 							if (!track.peek()) continue;
@@ -457,6 +462,16 @@ export class Encoder {
 							// Round to whole microseconds once, here, so a chunk's timestamp and the marker
 							// placed at the next frame's start agree exactly.
 							const timestamp = Math.round(data.timestamp) as Time.Micro;
+
+							// Chrome stamps encoder output from the first input's timestamp plus the samples
+							// encoded since, ignoring any later jump. Across a gap (demand, or a capture
+							// discontinuity) the output would trail the capture clock by the gap, and the
+							// next demand gap's marker would then sit ahead of everything encoded after it.
+							// Restarting re-bases the output clock; the chunks it drops predate the gap.
+							if (contiguous !== undefined && timestamp !== contiguous) {
+								encoder.reset();
+								encoder.configure(encoderConfig);
+							}
 
 							const joinedLength = data.channels.reduce((total, channel) => total + channel.length, 0);
 							const joined = new Float32Array(joinedLength);
@@ -478,7 +493,9 @@ export class Encoder {
 
 							encoder.encode(frame);
 							frame.close();
-							this.#next = Math.round(framer.next) as Time.Micro;
+							// One input can complete several frames, and the framer has already advanced past all of them.
+							contiguous = Math.round(frames[i + 1]?.timestamp ?? framer.next) as Time.Micro;
+							this.#next = contiguous;
 						}
 					},
 				};

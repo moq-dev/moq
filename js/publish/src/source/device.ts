@@ -92,10 +92,7 @@ export class Device<Kind extends "audio" | "video"> {
 		effect.get(this.out.permission);
 
 		// Ignore permission errors for now.
-		let devices = await Promise.race([
-			navigator.mediaDevices.enumerateDevices().catch(() => undefined),
-			effect.cancel,
-		]);
+		let devices = await effect.race(navigator.mediaDevices.enumerateDevices().catch(() => undefined));
 		if (!devices) return; // cancelled, keep stale values
 
 		devices = devices.filter((d) => d.kind === `${this.kind}input`);
