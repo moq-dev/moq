@@ -21,7 +21,7 @@ nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -e \
 # Publish a test pattern
 gst-launch-1.0 -e videotestsrc is-live=true ! x264enc tune=zerolatency ! h264parse \
   ! video/x-h264,stream-format=byte-stream,alignment=au ! mux.sink_0 \
-  moqsink name=mux url=https://cdn.moq.dev/anon broadcast=<your-name>.hang
+  moqsink name=mux url=https://cdn.moq.dev/anon broadcast=<your-name>.hang sink_0::encoder=true
 ```
 
 Install via `apt install gstreamer1.0-moq` or `dnf install gstreamer1-moq`
@@ -48,7 +48,8 @@ directly. A cue with no duration is dropped rather than left on screen.
 
 Each `sink_%u` request pad is one track. Pad properties: `track` names it
 (default: after the codec), `container=loc` publishes it as
-[LOC](/concept/standard#loc) instead of the legacy hang container, and
+[LOC](/concept/standard#loc) instead of the legacy hang container,
+`encoder=true` marks it as fed by a local encoder, and
 `track-status`/`track-error` report its lifecycle. Element properties:
 `url`, `broadcast`, `tls-disable-verify`, `quic-idle-timeout`,
 `quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
@@ -72,6 +73,14 @@ read returns both counters from the same instant, so `started - ended` is 1
 while connected and 0 otherwise, reconnects are `started - 1` once `started`
 is at least 1, and a rate is the delta over any window you sample. Unlike
 `status`, a connection that drops before you poll still moves both counters.
+
+Set `encoder=true` on audio and video pads a local encoder feeds
+(`x264enc`, `opusenc`, ...). The pad then measures how late each frame reaches
+the sink behind its running time and raises the catalog `jitter` by the spread,
+so players buffer for an encoder that delivers irregularly. Leave it off, the
+default, for file, demuxed, and network media: their arrival reflects the disk
+or the network, not the original encoder, and a GStreamer segment cannot tell
+the two apart. Text and opaque pads refuse it.
 
 ## moqsrc
 

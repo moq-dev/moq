@@ -4,6 +4,8 @@
 //! that pad's own streaming thread, so this type is touched from one thread and needs no generation
 //! tagging or cross-thread failure map.
 
+use std::time::Instant;
+
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 
@@ -30,16 +32,42 @@ enum PadState {
 /// Both payloads are large (a codec importer, a container producer), so each is boxed to keep the
 /// enum small.
 enum Sink {
-	/// `audio` decides grouping. `import::Track` draws no audio boundaries of its own (every
-	/// packet is independently decodable, so there is no keyframe to group on), leaving them to
-	/// whoever knows the latency target. A live sink wants each packet forwarded without waiting,
-	/// so it cuts per frame. Video groups at its own keyframes and needs nothing.
-	Media {
-		track: Box<import::Track>,
-		audio: bool,
-	},
+	Media(Box<Media>),
 	Text(Box<Text>),
 	Opaque(moq_net::track::Producer),
+}
+
+/// An audio or video pad, published through a codec importer.
+struct Media {
+	track: import::Track,
+	/// Decides grouping. `import::Track` draws no audio boundaries of its own (every packet is
+	/// independently decodable, so there is no keyframe to group on), leaving them to whoever knows
+	/// the latency target. A live sink wants each packet forwarded without waiting, so it cuts per
+	/// frame. Video groups at its own keyframes and needs nothing.
+	audio: bool,
+	/// Records each frame's handoff against the wall clock, raising the catalog jitter by how
+	/// irregularly a local encoder delivers. Imports leave it off: their arrival times describe the
+	/// file or network, not the encoder.
+	encoder: bool,
+}
+
+impl Media {
+	/// Publish one frame at `micros` on the media clock, handed over at `now`.
+	fn write(&mut self, data: &Bytes, micros: u64, now: Instant) -> Result<()> {
+		let ts = hang::container::Timestamp::from_micros(micros).ok();
+		self.track.decode(data, ts)?;
+		// One group (one QUIC stream) per audio packet, so the relay forwards it without waiting for
+		// the next.
+		if self.audio {
+			self.track.cut(None)?;
+		}
+		if self.encoder {
+			// Skipping the observation would publish a frame the jitter never saw.
+			let ts = ts.context("encoder frame timestamp out of range")?;
+			self.track.flush(ts, now)?;
+		}
+		Ok(())
+	}
 }
 
 /// Inputs used to build a producer after a pad observes caps.
@@ -47,6 +75,7 @@ pub(super) struct ProducerOptions<'a> {
 	container: hang::catalog::Container,
 	caps: &'a gst::Caps,
 	requested: Option<&'a str>,
+	encoder: bool,
 }
 
 impl<'a> ProducerOptions<'a> {
@@ -55,6 +84,7 @@ impl<'a> ProducerOptions<'a> {
 			container: hang::catalog::Container::default(),
 			caps,
 			requested: None,
+			encoder: false,
 		}
 	}
 
@@ -65,6 +95,11 @@ impl<'a> ProducerOptions<'a> {
 
 	pub(super) fn with_track(mut self, track: &'a str) -> Self {
 		self.requested = Some(track);
+		self
+	}
+
+	pub(super) fn with_encoder(mut self, encoder: bool) -> Self {
+		self.encoder = encoder;
 		self
 	}
 }
@@ -245,8 +280,15 @@ impl Pad {
 			container,
 			caps,
 			requested,
+			encoder,
 		} = options;
 		let structure = caps.structure(0).context("empty caps")?;
+		// Only a codec rendition carries the jitter a local encoder's clock would raise.
+		ensure!(
+			!encoder || !matches!(structure.name().as_str(), "application/octet-stream" | "text/x-raw"),
+			"encoder is only supported on audio and video pads, not {}",
+			structure.name()
+		);
 		// Renegotiation: finalize the previous producer before replacing it (closed once, not abandoned).
 		self.finalize()?;
 		// Opaque data has no codec importer and no catalog entry, so it never reaches the codec match.
@@ -422,10 +464,7 @@ impl Pad {
 			}
 			other => anyhow::bail!("unsupported caps: {other}"),
 		};
-		self.track = Some(Sink::Media {
-			track: Box::new(track),
-			audio,
-		});
+		self.track = Some(Sink::Media(Box::new(Media { track, audio, encoder })));
 		self.caps = Some(caps.clone());
 		Ok(name)
 	}
@@ -597,8 +636,9 @@ impl Pad {
 
 	/// Import one buffer into the producer. A failed or producer-less pad drops the buffer; a timeline
 	/// drop is logged. Unstamped opaque data on an active timeline uses the element's current running
-	/// time. A bad bitstream (or an oversized frame, rejected by moq-net) invalidates only this pad and
-	/// says so in the returned outcome. Returns an error when an unstamped opaque buffer has no current
+	/// time. An encoder pad records `now` as the frame's handoff once it is published. A bad bitstream
+	/// (or an oversized frame, rejected by moq-net) invalidates only this pad and says so in the
+	/// returned outcome. Returns an error when an unstamped opaque buffer has no current
 	/// running time, so the caller fails the flow instead of silently dropping data.
 	pub fn push_buffer(
 		&mut self,
@@ -606,6 +646,7 @@ impl Pad {
 		pts: Option<gst::ClockTime>,
 		duration: Option<gst::ClockTime>,
 		current_running_time: Option<gst::ClockTime>,
+		now: Instant,
 	) -> std::result::Result<PushOutcome, &'static str> {
 		if self.failed {
 			return Ok(PushOutcome::Dropped);
@@ -625,15 +666,7 @@ impl Pad {
 		match timestamp {
 			Ok(micros) => {
 				let result: Result<()> = match self.track.as_mut().expect("track present") {
-					Sink::Media { track, audio } => {
-						let ts = hang::container::Timestamp::from_micros(micros).ok();
-						track
-							.decode(&data, ts)
-							// One group (one QUIC stream) per audio packet, so the relay forwards
-							// it without waiting for the next. See `Sink::Media`.
-							.and_then(|()| if *audio { track.cut(None) } else { Ok(()) })
-							.map_err(Into::into)
-					}
+					Sink::Media(media) => media.write(&data, micros, now),
 					Sink::Text(text) => match std::str::from_utf8(&data) {
 						// A cue with no duration would never be dismissed, so drop it rather than pin it
 						// on screen; the demuxer supplies one for every real subtitle sample.
@@ -687,7 +720,7 @@ impl Pad {
 			return Ok(false);
 		};
 		let closed = match track {
-			Sink::Media { mut track, .. } => track.finish().map_err(anyhow::Error::from),
+			Sink::Media(mut media) => media.track.finish().map_err(anyhow::Error::from),
 			Sink::Text(mut text) => text.producer.finish().map_err(anyhow::Error::from),
 			Sink::Opaque(producer) => producer.finish().map_err(anyhow::Error::from),
 		};
@@ -831,8 +864,14 @@ mod tests {
 			"the reserved name is the requested one"
 		);
 		pad.observe_segment(time_segment());
-		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None)
-			.unwrap();
+		pad.push_buffer(
+			h264_keyframe_au(),
+			Some(gst::ClockTime::ZERO),
+			None,
+			None,
+			Instant::now(),
+		)
+		.unwrap();
 
 		let snapshot = catalog.snapshot();
 		let renditions: Vec<String> = snapshot.video.renditions.keys().map(|name| name.to_string()).collect();
@@ -933,14 +972,26 @@ mod tests {
 		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), None));
 		// No observe_segment: the pad stays in NoSegment.
 		assert_eq!(
-			pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None)
-				.unwrap(),
+			pad.push_buffer(
+				h264_keyframe_au(),
+				Some(gst::ClockTime::ZERO),
+				None,
+				None,
+				Instant::now()
+			)
+			.unwrap(),
 			PushOutcome::NoSegment,
 			"first no-segment buffer is reported"
 		);
 		assert_eq!(
-			pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None)
-				.unwrap(),
+			pad.push_buffer(
+				h264_keyframe_au(),
+				Some(gst::ClockTime::ZERO),
+				None,
+				None,
+				Instant::now()
+			)
+			.unwrap(),
 			PushOutcome::Dropped,
 			"subsequent no-segment buffers are not re-reported"
 		);
@@ -995,7 +1046,13 @@ mod tests {
 		assert!(!data.is_failed());
 		video.observe_segment(time_segment());
 		video
-			.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None)
+			.push_buffer(
+				h264_keyframe_au(),
+				Some(gst::ClockTime::ZERO),
+				None,
+				None,
+				Instant::now(),
+			)
 			.unwrap();
 
 		let snapshot = catalog.snapshot();
@@ -1028,6 +1085,7 @@ mod tests {
 			Some(gst::ClockTime::from_mseconds(40)),
 			None,
 			None,
+			Instant::now(),
 		)
 		.unwrap();
 		pad.push_buffer(
@@ -1035,6 +1093,7 @@ mod tests {
 			Some(gst::ClockTime::from_mseconds(80)),
 			None,
 			None,
+			Instant::now(),
 		)
 		.unwrap();
 
@@ -1086,8 +1145,14 @@ mod tests {
 			CapsOutcome::Active("camera".to_string())
 		);
 		pad.observe_segment(time_segment());
-		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None)
-			.unwrap();
+		pad.push_buffer(
+			h264_keyframe_au(),
+			Some(gst::ClockTime::ZERO),
+			None,
+			None,
+			Instant::now(),
+		)
+		.unwrap();
 
 		let config = catalog.snapshot().video.renditions.get("camera").cloned().unwrap();
 		assert_eq!(config.container, hang::catalog::Container::Loc);
@@ -1155,6 +1220,7 @@ mod tests {
 			None,
 			None,
 			Some(gst::ClockTime::from_mseconds(25)),
+			Instant::now(),
 		)
 		.unwrap();
 		assert!(!pad.is_failed(), "a missing PTS uses the supplied running time");
@@ -1186,7 +1252,7 @@ mod tests {
 		pad.observe_segment(time_segment());
 
 		assert!(
-			pad.push_buffer(Bytes::from_static(b"no timestamp"), None, None, None)
+			pad.push_buffer(Bytes::from_static(b"no timestamp"), None, None, None, Instant::now())
 				.is_err(),
 			"the caller gets a hard error instead of a silent drop"
 		);
@@ -1205,8 +1271,14 @@ mod tests {
 		);
 		assert!(pad.is_failed());
 		pad.observe_segment(time_segment());
-		pad.push_buffer(Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO), None, None)
-			.unwrap();
+		pad.push_buffer(
+			Bytes::from_static(b"x"),
+			Some(gst::ClockTime::ZERO),
+			None,
+			None,
+			Instant::now(),
+		)
+		.unwrap();
 	}
 
 	// A real IDR AU emits a frame to the published track (not just a rendition off the SPS).
@@ -1217,8 +1289,14 @@ mod tests {
 		let mut pad = Pad::new();
 		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), None));
 		pad.observe_segment(time_segment());
-		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None)
-			.unwrap();
+		pad.push_buffer(
+			h264_keyframe_au(),
+			Some(gst::ClockTime::ZERO),
+			None,
+			None,
+			Instant::now(),
+		)
+		.unwrap();
 
 		let snapshot = catalog.snapshot();
 		let track = snapshot.video.renditions.keys().next().expect("a video rendition");
@@ -1419,6 +1497,7 @@ mod tests {
 			Some(gst::ClockTime::ZERO),
 			Some(gst::ClockTime::from_seconds(1)),
 			None,
+			Instant::now(),
 		)
 		.unwrap();
 		assert!(pad.is_failed());
@@ -1445,6 +1524,7 @@ mod tests {
 				Some(gst::ClockTime::from_mseconds(start_ms)),
 				Some(gst::ClockTime::from_mseconds(dur_ms)),
 				None,
+				Instant::now(),
 			)
 			.unwrap();
 		}
@@ -1463,8 +1543,14 @@ mod tests {
 		let mut pad = Pad::new();
 		pad.observe_caps(&broadcast, &catalog, producer_options(&text_caps(), None));
 		pad.observe_segment(time_segment());
-		pad.push_buffer(Bytes::from_static(b"hello"), Some(gst::ClockTime::ZERO), None, None)
-			.unwrap();
+		pad.push_buffer(
+			Bytes::from_static(b"hello"),
+			Some(gst::ClockTime::ZERO),
+			None,
+			None,
+			Instant::now(),
+		)
+		.unwrap();
 		assert!(!pad.is_failed(), "a durationless cue drops the buffer, not the pad");
 	}
 
@@ -1502,5 +1588,65 @@ mod tests {
 			.filter(|&ms| pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(ms))).is_ok())
 			.count();
 		assert_eq!(emitted, 5, "all five decode-order frames must emit (got {emitted})");
+	}
+
+	// `multifilesrc ! parsebin` and a live encoder deliver identical segments and PTS, so the opt-in is
+	// the only thing that tells them apart. The same late frame raises only the encoder pad's jitter.
+	#[test]
+	fn only_an_encoder_pad_measures_its_handoff() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut encoder = Pad::new();
+		let mut import = Pad::new();
+		encoder.observe_caps(
+			&broadcast,
+			&catalog,
+			producer_options(&h264_caps(), Some("encoder")).with_encoder(true),
+		);
+		import.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("import")));
+
+		// The third frame reaches the sink 100ms later than its running time says it should.
+		let anchor = Instant::now();
+		for (pts, arrival) in [(0, 0), (33, 33), (66, 166)] {
+			for pad in [&mut encoder, &mut import] {
+				pad.observe_segment(time_segment());
+				let outcome = pad
+					.push_buffer(
+						h264_keyframe_au(),
+						Some(gst::ClockTime::from_mseconds(pts)),
+						None,
+						None,
+						anchor + std::time::Duration::from_millis(arrival),
+					)
+					.unwrap();
+				assert_eq!(outcome, PushOutcome::Published);
+			}
+		}
+
+		let snapshot = catalog.snapshot();
+		let jitter = |name: &str| snapshot.video.renditions[name].jitter;
+		assert_eq!(jitter("encoder"), Some(std::time::Duration::from_millis(100)));
+		assert_eq!(jitter("import"), None, "an import's arrival never reaches the catalog");
+	}
+
+	// Text and opaque tracks carry no codec jitter, so asking them to measure one is a mistake to report
+	// rather than a setting to ignore.
+	#[test]
+	fn an_encoder_pad_must_carry_audio_or_video() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		for caps in [text_caps(), opaque_caps()] {
+			let mut pad = Pad::new();
+			let outcome = pad.observe_caps(
+				&broadcast,
+				&catalog,
+				producer_options(&caps, Some("data")).with_encoder(true),
+			);
+			assert!(
+				matches!(outcome, CapsOutcome::Failed(ref reason) if reason.starts_with("encoder is only supported")),
+				"{outcome:?}"
+			);
+			assert!(pad.is_failed());
+		}
 	}
 }
