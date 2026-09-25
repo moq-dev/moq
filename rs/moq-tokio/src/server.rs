@@ -1506,30 +1506,6 @@ mod tests {
 		std::net::TcpListener::bind(("127.0.0.1", port)).expect("the tcp port must be free again");
 	}
 
-	/// Closing consumes the listener and immediately releases its stream sockets.
-	#[cfg(feature = "tcp")]
-	#[tokio::test]
-	async fn close_releases_stream_listeners() {
-		let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe");
-		let addr = probe.local_addr().expect("probe addr");
-		drop(probe);
-
-		let mut config = crate::listen::Config::default();
-		config.tcp.bind = Some(addr);
-		let listener = Config {
-			listen: config,
-			..Default::default()
-		}
-		.init()
-		.expect("stream-only server")
-		.listen()
-		.await
-		.expect("listen");
-
-		listener.close().await;
-		std::net::TcpListener::bind(addr).expect("close must release the tcp port");
-	}
-
 	/// The stream listeners must hand accepted sessions to the *configured*
 	/// [`moq_net::Server`]. [`Server::serve_publish`] sets the publisher there
 	/// rather than on the request, so a session that handshakes against any other
@@ -1632,12 +1608,8 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn close_releases_stream_listener_socket() {
-		let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let addr = probe.local_addr().unwrap();
-		drop(probe);
-
 		let mut config = crate::listen::Config::default();
-		config.tcp.bind = Some(addr);
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		let server = Config {
 			listen: config,
 			..Default::default()
@@ -1645,6 +1617,7 @@ mod tests {
 		.init()
 		.expect("stream-only server");
 		let listener = server.listen().await.expect("listen");
+		let addr = listener.tcp_local_addr().expect("tcp listener bound");
 		assert!(tokio::net::TcpListener::bind(addr).await.is_err(), "listener is bound");
 
 		listener.close().await;
