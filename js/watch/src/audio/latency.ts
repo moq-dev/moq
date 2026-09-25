@@ -21,6 +21,13 @@ export function target(props: Target): Time.Milli {
 	return Time.Milli.add(floored, props.frame ?? Time.Milli.zero);
 }
 
+/**
+ * The least subscription max age an "auto" track asks for: the estimator's ceiling.
+ *
+ * The measured term saturates at 100 buckets of 20 ms, so a frame later than this adds nothing.
+ */
+export const AUTO_MAX_AGE = 2000 as Time.Milli;
+
 /** Whether a deeper target re-stalls the ring, and the baseline the next target is compared against. */
 export interface Reanchor {
 	stall: boolean;
