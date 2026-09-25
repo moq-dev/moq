@@ -350,9 +350,4 @@ public final class BroadcastProducer: Sendable {
     public func close() throws {
         try ffi.close()
     }
-
-    @available(*, deprecated, renamed: "close", message: "A broadcast end carries no cause.")
-    public func finish() throws {
-        try ffi.close()
-    }
 }

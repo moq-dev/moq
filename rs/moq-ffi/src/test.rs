@@ -1802,7 +1802,7 @@ async fn finish_unpublishes() {
 		}
 	})
 	.await;
-	assert!(removed.is_ok(), "finish should unpublish the broadcast");
+	assert!(removed.is_ok(), "close should unpublish the broadcast");
 }
 
 #[tokio::test]

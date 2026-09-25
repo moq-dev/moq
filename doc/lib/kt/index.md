@@ -56,8 +56,9 @@ Moq.connect("https://relay.example.com").use { moq ->
 The three advertising operations: `moq.createBroadcast(path)` (or
 `origin.createBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.announce(route)` / `broadcast.unannounce()` own that exact-path
-advertisement, and `broadcast.close()` (or `use { }`) releases the producer,
-ending the broadcast once no `dynamic()` handle remains; `origin.dynamic(prefix, route)` claims `prefix` and every
+advertisement, and `broadcast.end()` ends the broadcast for good (a second call
+is a no-op; Kotlin spells it `end` because `close()`, or `use { }`, releases the
+handle, which ends the broadcast only once no `dynamic()` handle remains); `origin.dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
 serve. A route is a capability, not an inventory. `announcements(config)` takes

@@ -1822,10 +1822,6 @@ fn publish_close_releases_the_handle() {
 	let broadcast = publish_broadcast(origin, b"close/twice");
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert!(moq_publish_close(broadcast) < 0, "a closed handle is released");
-
-	// The deprecated alias still ends a broadcast.
-	let broadcast = publish_broadcast(origin, b"close/finish");
-	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 

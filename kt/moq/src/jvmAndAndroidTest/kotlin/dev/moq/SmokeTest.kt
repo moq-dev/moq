@@ -143,6 +143,19 @@ class SmokeTest {
     }
 
     @Test
+    fun `ending a broadcast ends it while a dynamic handle remains`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            broadcast.dynamic().use {
+                val consumer = broadcast.consume()
+                // Releasing the producer alone would leave the dynamic handle holding it open.
+                broadcast.end()
+                broadcast.end()
+                assertFailsWith<MoqException> { consumer.subscribeTrack("events", null) }
+            }
+        }
+    }
+
+    @Test
     fun `broadcast updates shared video properties`() {
         BroadcastProducer().use { broadcast ->
             broadcast.setVideoProperties(VideoProperties(rotation = 315.0))
