@@ -7,8 +7,9 @@ reads, and timeline-only HLS generation from one multi-rendition broadcast.
 
 ## Plan
 
-Record explicitly enrolled video, audio, catalog, and non-media tracks. Cut at
-aligned keyframe boundaries, including multiple audio groups per segment, then
+Record explicitly enrolled video, audio, catalog, and non-media tracks. Cut each
+track on its own timeline, including many audio groups per object and a group
+split across objects by frame, then
 replay their original sequences, timestamps, and payloads through
 `track::Dynamic`.
 
@@ -60,3 +61,7 @@ restart must finish this cleanup before accepting new groups.
 Finally render and reload HLS playlists while rejecting every media-object GET
 until a segment URI is requested. A segment request must resolve one object
 from the replayed timeline without any listing or separate index object.
+
+## Required
+
+- [Rust per-track timelines](/quest/m1/archive/track-timeline/core.md) - proves the per-track format, not the aligned one
