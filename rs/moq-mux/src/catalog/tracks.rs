@@ -536,8 +536,11 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			self.detected = estimate;
 			return Ok(());
 		}
-		let resolved = Self::resolved(&self.supplied, &estimate);
-		self.check_jitter(&resolved)?;
+		let mut resolved = Self::resolved(&self.supplied, &estimate);
+		// A measurement never lowers the published jitter, including one raised through `modify`.
+		if let Some(published) = self.config()?.estimate().jitter {
+			resolved.jitter = Some(resolved.jitter.map_or(published, |jitter| jitter.max(published)));
+		}
 		self.detected = estimate;
 		if self.published.as_ref() != Some(&resolved) {
 			let mut config = self.config()?;
@@ -666,13 +669,40 @@ mod tests {
 		detected
 			.estimate(Estimate::default().with_jitter(Duration::from_millis(100)))
 			.unwrap();
-		assert!(matches!(
-			detected.estimate(Estimate::default().with_jitter(Duration::from_millis(50))),
-			Err(crate::Error::JitterDecreased)
-		));
+		// A lower measurement holds the published value rather than failing the write path.
+		detected
+			.estimate(Estimate::default().with_jitter(Duration::from_millis(50)))
+			.unwrap();
 		assert_eq!(
 			catalog.snapshot().video.renditions["v"].jitter,
 			Some(Duration::from_millis(100))
+		);
+	}
+
+	#[test]
+	fn measurement_keeps_a_jitter_raised_by_modify() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		rendition.set(config(None, None)).unwrap();
+		rendition
+			.estimate(Estimate::default().with_jitter(Duration::from_millis(60)))
+			.unwrap();
+		let mut raised = rendition.config().unwrap();
+		raised.jitter = Some(Duration::from_millis(200));
+		rendition.replace(raised).unwrap();
+
+		rendition
+			.estimate(Estimate::default().with_jitter(Duration::from_millis(80)))
+			.unwrap();
+		assert_eq!(
+			catalog.snapshot().video.renditions["v"].jitter,
+			Some(Duration::from_millis(200))
+		);
+		rendition
+			.estimate(Estimate::default().with_jitter(Duration::from_millis(300)))
+			.unwrap();
+		assert_eq!(
+			catalog.snapshot().video.renditions["v"].jitter,
+			Some(Duration::from_millis(300))
 		);
 	}
 

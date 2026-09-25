@@ -387,10 +387,11 @@ impl<E: CatalogExt> Producer<E> {
 			duration: None,
 		};
 		track.write(mux_frame)?;
-		track.flush(timestamp, Instant::now())?;
 		// No boundary to give: the next packet bounds this one, and Opus frames have a
-		// deterministic duration anyway.
+		// deterministic duration anyway. Cut before observing the flush so a failed observation
+		// never leaves the group open.
 		track.cut(None)?;
+		track.flush(timestamp, Instant::now())?;
 		Ok(())
 	}
 
