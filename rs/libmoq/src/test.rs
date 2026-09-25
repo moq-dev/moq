@@ -4944,7 +4944,7 @@ fn json_tracks_are_advertised_in_the_catalog() {
 	assert_eq!(moq_publish_json_stream_finish(stream), 0);
 	assert!(published_catalog(broadcast).json.tracks.is_empty());
 
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -4992,7 +4992,7 @@ fn binary_snapshot_is_advertised_and_delivered() {
 	assert!(published_catalog(broadcast).binary.tracks.is_empty());
 
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -5038,7 +5038,7 @@ fn binary_stream_is_advertised_and_delivered() {
 	assert!(published_catalog(broadcast).binary.tracks.is_empty());
 
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -5100,6 +5100,6 @@ fn data_track_names_cannot_collide() {
 	);
 
 	assert_eq!(moq_publish_json_snapshot_finish(first), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }

@@ -476,7 +476,9 @@ impl MoqBroadcastProducer {
 	/// producer fails with `Closed`; closing again is a no-op.
 	pub fn close(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let Some(mut state) = self.state.lock().unwrap().take() else {
+		// Hold the lock through shutdown so a concurrent close() returns only once it is done.
+		let mut guard = self.state.lock().unwrap();
+		let Some(mut state) = guard.take() else {
 			return Ok(());
 		};
 		// Close the broadcast first so it ends even if finalizing the catalog fails.
