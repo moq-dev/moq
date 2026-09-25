@@ -21,4 +21,9 @@ and any other caller over, and keep data tracks skipping a sequence the way
 Rust's `discontinuity()` does if a JS data-track caller appears. Rust is
 untouched.
 
+Match Rust's break, too: without an explicit end, `discontinuity()` closes the
+group with no cadence-estimated duration marker. Whatever resumes can land
+sooner than one estimated frame later (a capture swap), and a marker past it
+reads as a rewind to every consumer.
+
 Public API: breaking in published `@moq/hang`, so it targets `dev`. Wire: none.
