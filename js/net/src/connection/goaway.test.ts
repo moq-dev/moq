@@ -15,6 +15,7 @@ test("an explicit URI the policy will not follow is refused, not ignored", () =>
 	const refused: [Redirect, string][] = [
 		["same-host", "https://other.example/"],
 		["follow", "not a url"],
+		["ignore", "not a url"],
 		["follow", "http://relay.example/"],
 		["follow", "unix:///tmp/moq.sock"],
 		["follow", "https://127.0.0.1/"],

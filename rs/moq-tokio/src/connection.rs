@@ -221,21 +221,27 @@ impl Redirect {
 	}
 
 	/// The URL a GOAWAY assigns. `Ok(None)` keeps the current address list (the
-	/// peer named no URI, or the policy ignores it), `Ok(Some)` replaces it, and
-	/// `Err` is an explicit URI this policy refuses.
+	/// peer named no URI, or the policy ignores a URI it could parse), `Ok(Some)`
+	/// replaces it, and `Err` is an explicit URI this policy refuses. A malformed
+	/// URI is refused even under [`Self::Ignore`].
 	///
 	/// `pinned` is a certificate pin on the connection, which can only verify the
 	/// host it was configured for, so it refuses a host change even under
 	/// [`Self::Follow`].
 	fn target(&self, uri: &str, current: &Url, pinned: bool) -> crate::Result<Option<Url>> {
-		if uri.is_empty() || matches!(self, Self::Ignore) {
+		if uri.is_empty() {
 			return Ok(None);
 		}
 
 		// The URI can carry credentials, so the error names the reason, never the URI.
+		// Parse before `Ignore`: a malformed redirect is terminal even when the policy
+		// would otherwise stay on the current address list.
 		let refuse = |reason: &str| Error::RefusedRedirect(reason.to_string());
 
 		let target = uri.parse::<Url>().map_err(|_| refuse("the GOAWAY URI is malformed"))?;
+		if matches!(self, Self::Ignore) {
+			return Ok(None);
+		}
 
 		if scheme_tier(target.scheme()) < scheme_tier(current.scheme()) {
 			return Err(refuse("the GOAWAY redirect downgrades the scheme"));
@@ -1610,6 +1616,7 @@ mod tests {
 		for (policy, uri) in [
 			(Redirect::SameHost, "https://other.example/"),
 			(Redirect::Follow, "not a url"),
+			(Redirect::Ignore, "not a url"),
 			(Redirect::Follow, "http://relay.example/"),
 			(Redirect::Follow, "https://127.0.0.1/"),
 		] {

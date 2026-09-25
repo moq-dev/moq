@@ -76,8 +76,8 @@ export function pinnedTransport(transport: "webtransport" | "websocket", configu
 
 /**
  * The URL a GOAWAY assigns: `undefined` keeps the current URL (the peer named none, or the
- * policy ignores it), and a URL replaces it. Throws {@link RefusedRedirect} for an explicit
- * URI the policy will not follow.
+ * policy ignores a URI it could parse), and a URL replaces it. Throws {@link RefusedRedirect}
+ * for an explicit URI the policy will not follow, including a malformed one under `ignore`.
  *
  * `pinned` is a certificate pin on the connection, which can only verify the host it was
  * configured for, so it refuses a host change even under `follow`.
@@ -85,15 +85,18 @@ export function pinnedTransport(transport: "webtransport" | "websocket", configu
  * @internal
  */
 export function target(policy: Redirect, uri: string, current: URL, pinned: boolean): URL | undefined {
-	if (uri === "" || policy === "ignore") return undefined;
+	if (uri === "") return undefined;
 
 	// The URI can carry credentials, so the error names the reason, never the URI.
+	// Parse before `ignore`: a malformed redirect is terminal even when the policy
+	// would otherwise stay on the current URL.
 	let next: URL;
 	try {
 		next = new URL(uri);
 	} catch {
 		throw new RefusedRedirect("the GOAWAY URI is malformed");
 	}
+	if (policy === "ignore") return undefined;
 
 	if (schemeTier(next.protocol) < schemeTier(current.protocol)) {
 		throw new RefusedRedirect("the GOAWAY redirect downgrades the scheme");
