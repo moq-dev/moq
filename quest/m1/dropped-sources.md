@@ -2,25 +2,22 @@
 
 ## Goal
 
-A track or broadcast that ends because its source ended reports the source's
-own error to every consumer, locally and across a relay. `Dropped` means only
-that a handle was dropped without an end, which a correct producer never does.
-The open #4179 fixes revoked upstream subscriptions. The merged #4120 preserves
-session death and resumed-track errors; remaining paths still need verification.
+A track that ends because its source ended reports the source's own error to
+every consumer, locally and across a relay. `Dropped` means only that a handle
+was dropped without an end, which a correct producer never does. A broadcast
+end carries no cause ([Broadcast close](/quest/m1/broadcast-close/README.md)),
+so only track errors are in scope.
 
 ## Plan
 
-- Origin broadcasts now preserve an aborted source's cause through local and
-  routed fronts, including a concurrent route withdrawal and later track lookup.
-  A closed source's standing route is excluded from that front's failover.
-- Rust maps IETF `PUBLISH_DONE` Unauthorized to `Error::Unauthorized`.
-- After #4179 lands, verify the combined track paths locally and over
-  mock sessions, and map JS `PUBLISH_DONE` Unauthorized to the shared error from
-  #4179. Do not duplicate the resume changes those PRs own.
-
-- Complete the remaining source-close, route-removal, and broadcast-withdrawal
-  track regressions locally and over a mock session. Preserve causes at the
-  source rather than remapping `Dropped` at consumers.
+- Rust already maps IETF `PUBLISH_DONE` Unauthorized to `Error::Unauthorized`,
+  and a closed source's standing route no longer re-requests it.
+- #4179 fixes revoked upstream subscriptions and #4120 preserves session death
+  and resumed-track errors. After #4179 reaches `main`, verify the remaining
+  track paths (source close, route removal, broadcast withdrawal) locally and
+  over a mock session, and map JS `PUBLISH_DONE` Unauthorized to #4179's shared
+  error. Preserve causes at the source rather than remapping `Dropped` at
+  consumers.
 
 Public API: none expected; error values consumers observe change. Wire: none.
 

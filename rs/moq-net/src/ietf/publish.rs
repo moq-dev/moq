@@ -124,6 +124,8 @@ use super::Version;
 pub(crate) enum PublishDoneStatus {
 	/// An implementation-specific failure ended the subscription.
 	InternalError,
+	/// The subscriber is no longer authorized for the track.
+	Unauthorized,
 	/// The track is no longer being published.
 	TrackEnded,
 }
@@ -144,6 +146,7 @@ impl PublishDoneStatus {
 			| Version::Draft21
 			| Version::Draft22 => match self {
 				Self::InternalError => 0x0,
+				Self::Unauthorized => 0x1,
 				Self::TrackEnded => 0x2,
 			},
 		}
@@ -163,8 +166,8 @@ impl PublishDone<'_> {
 	/// How the publisher ended the subscription: cleanly, or with the error its status names.
 	pub(crate) fn end(&self, version: Version) -> Result<(), crate::Error> {
 		match self.status_code {
-			0x1 => Err(crate::Error::Unauthorized),
 			code if code == PublishDoneStatus::TrackEnded.code(version) => Ok(()),
+			code if code == PublishDoneStatus::Unauthorized.code(version) => Err(crate::Error::Unauthorized),
 			// SUBSCRIPTION_ENDED: the subscription reached the end its filter asked for.
 			// Draft-20 removed it and left 0x3 unassigned.
 			0x3 if matches!(

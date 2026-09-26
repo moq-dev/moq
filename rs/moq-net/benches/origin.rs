@@ -374,54 +374,6 @@ fn bench_handoff(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Closing one routed source with a standing route, swept over unrelated routes
-/// and consumers of that source. Only the touched front should reselect.
-fn bench_source_close(c: &mut Criterion) {
-	let mut group = c.benchmark_group("origin/source_close");
-	for (routes, subscribers) in [(1, 1), (1_000, 1), (1, 100), (1_000, 100)] {
-		group.bench_function(BenchmarkId::from_parameter(format!("{routes}r_{subscribers}s")), |b| {
-			let runtime = tokio::runtime::Builder::new_current_thread()
-				.enable_all()
-				.build()
-				.unwrap();
-			let (producer, driver) = origin::Producer::new(origin::Config::default());
-			runtime.spawn(moq_net::time::run(driver));
-			let consumer = producer.consume();
-			let _others: Vec<_> = (0..routes)
-				.map(|i| {
-					producer
-						.dynamic(format!("other/{i}"), origin::Route::default())
-						.unwrap()
-				})
-				.collect();
-			b.iter_custom(|iterations| {
-				runtime.block_on(async {
-					let mut total = Duration::ZERO;
-					for _ in 0..iterations {
-						let server = producer.dynamic("live", peer_route(1, 0)).unwrap();
-						let source = broadcast::Info::new().produce();
-						let pending = consumer.request_broadcast("live");
-						server.requested_broadcast().await.unwrap().accept(&source);
-						let first = pending.await.unwrap();
-						let mut readers = vec![first];
-						for _ in 1..subscribers {
-							readers.push(consumer.request_broadcast("live").await.unwrap());
-						}
-						let started = std::time::Instant::now();
-						source.abort(moq_net::Error::Unauthorized).unwrap();
-						for reader in readers {
-							assert!(matches!(reader.closed().await, moq_net::Error::Unauthorized));
-						}
-						total += started.elapsed();
-					}
-					total
-				})
-			});
-		});
-	}
-	group.finish();
-}
-
 criterion_group!(
 	benches,
 	bench_announce,
@@ -431,7 +383,6 @@ criterion_group!(
 	bench_serve_idle,
 	bench_subscribe,
 	bench_request,
-	bench_handoff,
-	bench_source_close
+	bench_handoff
 );
 criterion_main!(benches);
