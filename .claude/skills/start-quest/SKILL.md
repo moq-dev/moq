@@ -18,5 +18,5 @@ Keep scratch files (PR body, logs, notes) in the worktree's gitignored `.scratch
 Never write to or clean up a directory other agents share, such as a session scratchpad.
 
 When done, summarize any issues encounted, and suggest potential follow-up.
-If you're happy with the outcome, switch the draft PR to ready for review.
-If you want another set of eyes on it, keep it a draft.
+List every open decision (naming, API shape, branch, blockers, manual steps) with a recommendation, and prompt the user interactively when you can.
+Keep the PR a draft until the user has confirmed every decision, then mark it ready for review.
