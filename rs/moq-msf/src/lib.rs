@@ -184,6 +184,15 @@ pub struct Track {
 	/// Serialized as a JSON number of milliseconds, matching the hang catalog.
 	#[serde_as(as = "Option<DurationMilliSecondsWithFrac>")]
 	pub jitter: Option<Duration>,
+
+	/// How far this rendition trails the broadcast's earliest rendition (non-standard
+	/// extension; not in the MSF/CMSF drafts).
+	///
+	/// Serialized as a JSON number of milliseconds, matching [`jitter`](Self::jitter). Absent on
+	/// the earliest rendition. A consumer holds `delay + jitter` and does not subtract one
+	/// rendition's `delay` from another's.
+	#[serde_as(as = "Option<DurationMilliSecondsWithFrac>")]
+	pub delay: Option<Duration>,
 }
 
 impl Catalog<()> {
@@ -480,6 +489,7 @@ impl Track {
 			max_grp_sap_starting_type: None,
 			max_obj_sap_starting_type: None,
 			jitter: None,
+			delay: None,
 		}
 	}
 }
@@ -631,6 +641,7 @@ mod test {
 			max_grp_sap_starting_type: None,
 			max_obj_sap_starting_type: None,
 			jitter: None,
+			delay: None,
 		}
 	}
 
@@ -655,6 +666,7 @@ mod test {
 			max_grp_sap_starting_type: None,
 			max_obj_sap_starting_type: None,
 			jitter: None,
+			delay: None,
 		}
 	}
 
@@ -679,6 +691,7 @@ mod test {
 			max_grp_sap_starting_type: Some(1),
 			max_obj_sap_starting_type: Some(2),
 			jitter: Some(Duration::from_millis(15)),
+			delay: None,
 		}
 	}
 
@@ -700,6 +713,7 @@ mod test {
 		assert!(track.get("maxGrpSapStartingType").is_none());
 		assert!(track.get("maxObjSapStartingType").is_none());
 		assert!(track.get("jitter").is_none());
+		assert!(track.get("delay").is_none());
 		assert_eq!(track["stalled"], true);
 	}
 
@@ -823,6 +837,7 @@ mod test {
 		assert_eq!(track.max_grp_sap_starting_type, None);
 		assert_eq!(track.max_obj_sap_starting_type, None);
 		assert_eq!(track.jitter, None);
+		assert_eq!(track.delay, None);
 	}
 
 	#[test]
@@ -856,6 +871,20 @@ mod test {
 
 		let value: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
 		assert_eq!(value["tracks"][0]["jitter"].as_f64(), Some(15.0));
+	}
+
+	#[test]
+	fn delay_roundtrips() {
+		let mut track = track_with_sap_and_jitter();
+		track.delay = Some(Duration::from_millis(200));
+		let original = Catalog::new(vec![track]);
+
+		let json = original.to_json().unwrap();
+		let parsed = Catalog::<()>::from_str(&json).unwrap();
+		assert_eq!(parsed.tracks[0].delay, Some(Duration::from_millis(200)));
+
+		let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+		assert_eq!(value["tracks"][0]["delay"].as_f64(), Some(200.0));
 	}
 
 	#[test]

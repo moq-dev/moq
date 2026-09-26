@@ -107,6 +107,17 @@ pub struct TextConfig {
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
+
+	/// How far this rendition's frames reach the transport behind the broadcast's earliest
+	/// rendition, measured at the publisher from each rendition's minimum flush lateness.
+	/// Absent on the earliest rendition and on any rendition the publisher did not measure.
+	///
+	/// A consumer holds `delay + jitter` for this rendition and MUST NOT subtract one rendition's
+	/// `delay` from another's: each is a lifetime maximum, so two need not share an origin. It only
+	/// ever grows over the life of a stream, and is serialized like [`jitter`](Self::jitter).
+	#[serde_as(as = "MillisCeil")]
+	#[serde(default)]
+	pub delay: Option<std::time::Duration>,
 }
 
 impl TextConfig {
@@ -125,6 +136,7 @@ impl TextConfig {
 			label: None,
 			container: Container::default(),
 			jitter: None,
+			delay: None,
 		}
 	}
 }

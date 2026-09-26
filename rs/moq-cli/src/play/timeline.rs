@@ -54,6 +54,13 @@ impl Presentation {
 		before != Some(self.pacer.pace(timestamp, now))
 	}
 
+	/// Start a new video timeline without taking ownership from a speaker.
+	pub(super) fn video_restarted(&mut self) {
+		if !self.speaker {
+			self.pacer = moq_mux::Pacer::default().with_delay(self.delay);
+		}
+	}
+
 	/// Fold the speaker's position into the anchor, reporting whether that moved
 	/// the schedule.
 	///
