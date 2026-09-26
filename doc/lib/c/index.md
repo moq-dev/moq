@@ -63,6 +63,8 @@ if (session < 0)
 
 For a locally encoded media track, call `moq_publish_media_flush(media, timestamp_us)` after `moq_publish_media_frame` with the same broadcast-clock PTS. The monotonic handoff time is sampled inside libmoq. Do not call it for file, pipe, or network imports; those remain clock-free. Invalid handles and unrepresentable timestamps return a negative error code.
 
+Call `moq_publish_media_discontinuity(media)` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds.
+
 ## Connection stats
 
 Every field in `moq_connection_stats` carries a matching `<field>_valid` flag,

@@ -2212,6 +2212,18 @@ pub extern "C" fn moq_publish_media_flush(media: u32, timestamp_us: u64) -> i32 
 	})
 }
 
+/// Mark a timeline break and restart handoff measurement without lowering advertised jitter.
+///
+/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock.
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_media_discontinuity(media: u32) -> i32 {
+	ffi::enter(move || {
+		let media = ffi::parse_id(media)?;
+		State::lock().publish.media_discontinuity(media)
+	})
+}
+
 /// Replace the catalog properties shared by every video rendition.
 ///
 /// Rotation is clockwise and normalized to the nearest quarter turn. A field whose matching `has_*` flag is false is removed from the next catalog update.
