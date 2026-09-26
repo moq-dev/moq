@@ -118,7 +118,7 @@ impl Worker {
 						kernel_release()
 					))
 				}
-				_ => Error::Io(err),
+				_ => Error::ring(err),
 			})?;
 
 		// One feature bit gates the whole floor: MIN_TIMEOUT landed in 6.12
