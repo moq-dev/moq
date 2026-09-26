@@ -18,5 +18,4 @@ This is a published API break, so it targets `dev`.
 
 ## Required
 
-- [Binding close](/quest/m1/broadcast-close/bindings.md) - every binding already has `close()` to move to
-- [Kotlin end](/quest/m1/broadcast-close/kotlin-end.md) - Kotlin keeps a forced end once `finish` is gone
+- [Kotlin end](/quest/m1/kotlin-end.md) - Kotlin keeps a forced end once `finish` is gone

@@ -730,7 +730,7 @@ relay-minimal:
 #
 # Outside nextest on purpose. The staticlib link alone takes ~2 minutes, past the
 # hang budget in `.config/nextest.toml` once the rest of the workspace builds
-# beside it, and `rs/CLAUDE.md` says to make a slow test fast, not to raise the
+# beside it, and `rs/AGENTS.md` says to make a slow test fast, not to raise the
 # ceiling. obs.yml runs this on every PR that touches rs/libmoq, right after it
 # has built the same debug libmoq.a for the plugin, and nightly.yml covers the
 # paths that filter misses.
@@ -750,22 +750,22 @@ c-tests:
 
     cargo build --locked -p libmoq
 
-    # Ask cargo where it put the staticlib rather than assuming target/debug:
-    # CARGO_TARGET_DIR and a configured build target (`target/<triple>/debug`)
-    # both move it, and guessing wrong would link a stale copy or nothing.
-    # Replays the build above from cache, so it costs a process, not a compile.
-    lib=$(cargo build --locked -p libmoq --message-format=json |
-        jq -r 'select(.reason == "compiler-artifact") | .filenames[] | select(endswith("/libmoq.a"))' |
-        tail -1)
+    # Ask cargo where it put the staticlib and the header rather than assuming
+    # target/debug: CARGO_TARGET_DIR and a configured build target
+    # (`target/<triple>/debug`) both move them, and guessing wrong would link a
+    # stale copy or nothing. Replays the build above from cache, so it costs a
+    # process, not a compile.
+    log=$(cargo build --locked -p libmoq --message-format=json)
+    lib=$(jq -r 'select(.reason == "compiler-artifact") | .filenames[] | select(endswith("/libmoq.a"))' <<<"$log" | tail -1)
     if [ -z "$lib" ]; then
         echo "cargo reported no libmoq.a for libmoq" >&2
         exit 1
     fi
-    # The header sits beside the profile directory: rs/libmoq/build.rs writes it
-    # to `<target>/include`, one level above `<target>/<profile>/libmoq.a`.
     profile=$(dirname "$lib")
-    include="$(dirname "$profile")/include"
-    if [ ! -f "$include/moq.h" ]; then
+    # rs/libmoq/build.rs writes the header into its OUT_DIR.
+    out_dir=$(jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("libmoq")) | .out_dir' <<<"$log" | tail -1)
+    include="$out_dir/include"
+    if [ -z "$out_dir" ] || [ ! -f "$include/moq.h" ]; then
         echo "$include/moq.h missing after 'cargo build --locked -p libmoq'" >&2
         exit 1
     fi

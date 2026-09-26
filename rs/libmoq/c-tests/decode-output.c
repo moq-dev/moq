@@ -284,8 +284,8 @@ int main(void) {
         fail("error: moq_consume_close failed (%s)\n", moq_error());
     if (moq_encode_video_finish((uint32_t)producer) < 0)
         fail("error: moq_encode_video_finish failed (%s)\n", moq_error());
-    if (moq_publish_finish((uint32_t)broadcast) < 0)
-        fail("error: moq_publish_finish failed (%s)\n", moq_error());
+    if (moq_publish_close((uint32_t)broadcast) < 0)
+        fail("error: moq_publish_close failed (%s)\n", moq_error());
     if (moq_origin_close((uint32_t)origin) < 0)
         fail("error: moq_origin_close failed (%s)\n", moq_error());
 

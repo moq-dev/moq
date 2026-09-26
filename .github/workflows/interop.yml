@@ -88,6 +88,10 @@ jobs:
         run: nix develop --command just test max-age
         shell: bash -leo pipefail {0}
 
+      - name: Subscription termination interop
+        run: nix develop --command just test bare-fin
+        shell: bash -leo pipefail {0}
+
       - name: Interop (full matrix)
         run: nix develop --command just test interop --all
         shell: bash -leo pipefail {0}
