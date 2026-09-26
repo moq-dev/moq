@@ -397,10 +397,10 @@ fn ready_if(condition: bool) -> Poll<()> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use std::time::SystemTime;
 	use std::future::Future;
 	use std::pin::pin;
 	use std::task::{Context, Waker};
+	use std::time::SystemTime;
 
 	fn grant(publish: &str) -> Grant {
 		Grant::new([publish.parse().unwrap()].into_iter().collect(), Default::default())

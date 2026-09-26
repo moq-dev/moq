@@ -63,8 +63,7 @@ async fn fetch(
 
 	// Scoped to the broadcast, so the relay announces it by name even when a hidden
 	// segment such as `.stats` would keep it out of an unscoped listing.
-	let pattern =
-		moq_net::Pattern::subtree(&broadcast).with_context(|| format!("invalid broadcast `{broadcast}`"))?;
+	let pattern = moq_net::Pattern::subtree(&broadcast).with_context(|| format!("invalid broadcast `{broadcast}`"))?;
 	let origin = moq_tokio::origin::spawn()
 		.scope("", &moq_net::Patterns::from(pattern))
 		.with_context(|| format!("failed to scope to `{broadcast}`"))?;
@@ -170,7 +169,8 @@ mod tests {
 			hidden.announce(Default::default()).expect("announce hidden");
 			let secret = hidden.create_track("data", None).expect("hidden track");
 			let mut group = secret.append_group().expect("group");
-			group.write_frame(moq_net::Timestamp::ZERO, b"secret".as_ref())
+			group
+				.write_frame(moq_net::Timestamp::ZERO, b"secret".as_ref())
 				.expect("frame");
 			group.finish().expect("finish");
 
@@ -217,7 +217,12 @@ mod tests {
 			Self {
 				connect,
 				http: fixture.http,
-				_publisher: (connection, vec![broadcast, hidden], vec![data, empty, live, secret], open),
+				_publisher: (
+					connection,
+					vec![broadcast, hidden],
+					vec![data, empty, live, secret],
+					open,
+				),
 			}
 		}
 
