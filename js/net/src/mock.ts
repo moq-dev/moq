@@ -12,9 +12,15 @@ import type { SendStream } from "./stream.ts";
 const WRITABLE_STRATEGY: QueuingStrategy<Uint8Array> = { highWaterMark: 256 };
 const READABLE_STRATEGY: QueuingStrategy<Uint8Array> = { highWaterMark: 256 };
 
-function newStream(): TransformStream<Uint8Array, Uint8Array> {
+/** Every stream of a transport pair, so a session close can fail the ones still open. */
+type StreamSet = Set<TransformStreamDefaultController<Uint8Array>>;
+
+function newStream(streams: StreamSet): TransformStream<Uint8Array, Uint8Array> {
 	return new TransformStream(
 		{
+			start(controller) {
+				streams.add(controller);
+			},
 			// Copy each chunk to simulate real WebTransport's kernel-boundary copy.
 			// Without this, Writer's scratch buffer reuse corrupts queued data.
 			transform(chunk, controller) {
@@ -56,6 +62,10 @@ export class MockTransport implements WebTransport {
 
 	// Reference to the peer so we can enqueue streams to them
 	#peer?: MockTransport;
+
+	// Shared with the peer: a session close fails every stream either side opened, the way
+	// a real WebTransport session does.
+	#streams: StreamSet = new Set();
 
 	constructor(
 		protocol: string,
@@ -149,6 +159,7 @@ export class MockTransport implements WebTransport {
 
 	setPeer(peer: MockTransport) {
 		this.#peer = peer;
+		this.#streams = peer.#streams;
 	}
 
 	async createBidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WebTransportBidirectionalStream> {
@@ -156,8 +167,8 @@ export class MockTransport implements WebTransport {
 		if (!peer) throw new Error("no peer");
 
 		// Create two TransformStreams for the two directions
-		const c2s = newStream();
-		const s2c = newStream();
+		const c2s = newStream(this.#streams);
+		const s2c = newStream(this.#streams);
 
 		// Local side: writes to c2s, reads from s2c
 		const local = {
@@ -184,7 +195,7 @@ export class MockTransport implements WebTransport {
 		const peer = this.#peer;
 		if (!peer) throw new Error("no peer");
 
-		const c2s = newStream();
+		const c2s = newStream(this.#streams);
 
 		// Record before handing the peer its end, so a peer that waits for the stream to arrive
 		// always finds it here.
@@ -215,6 +226,13 @@ export class MockTransport implements WebTransport {
 	close(_closeInfo?: WebTransportCloseInfo): void {
 		const info = _closeInfo ?? { closeCode: 0, reason: "" };
 		this.#closeResolve(info);
+
+		// Shaped like the WebTransportError a real session close fails its streams with.
+		const closed = Object.assign(new Error("session closed"), { source: "session", streamErrorCode: null });
+		for (const stream of this.#streams) {
+			stream.error(closed);
+		}
+		this.#streams.clear();
 
 		try {
 			this.#bidiController.close();
