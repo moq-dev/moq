@@ -154,7 +154,9 @@ impl Consumer {
 			subscriber.set_groups(live_edge..);
 		}
 		let track = subscriber;
-		let max_age = options.max_age.min(track.info().max_age);
+		let max_age = options
+			.max_age
+			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.

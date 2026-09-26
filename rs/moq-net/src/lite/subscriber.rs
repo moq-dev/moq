@@ -3059,9 +3059,8 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 				info: TrackInfoFetch::new(&serve),
 			}
 		} else {
-			// No TRACK stream, so the publisher's retention window never reaches us:
-			// the accepting side picks it (see `origin::Config::default_max_age`).
-			let info = track::Info::default().with_max_age(serve.subscriber.origin.default_max_age());
+			// Older wires declare no publisher retention limit.
+			let info = track::Info::default();
 			TrackRunState::Serve(ServeLoop::new(&serve, request, info, None))
 		};
 		Self { serve, state }
@@ -3629,9 +3628,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					// accepted timescale. Relay-served FETCH is lite-05+, so `timescale` is
 					// `Some`; fall back to the default scale defensively rather than
 					// panicking.
-					let group_info = track::Info::default()
-						.with_timescale(self.timescale.unwrap_or_default())
-						.with_max_age(self.serve.subscriber.origin.default_max_age());
+					let group_info = track::Info::default().with_timescale(self.timescale.unwrap_or_default());
 					let mut producer = match request.accept(group_info) {
 						Ok(producer) => producer,
 						Err(err) => {

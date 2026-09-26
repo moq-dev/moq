@@ -686,7 +686,7 @@ export class Subscriber {
 			timescale: Time.Timescale(info.timescale),
 			// Publisher Max Age rides on the wire, so the local retention window
 			// matches what the upstream advertises (relays re-serve with the same bound).
-			maxAge: Time.Milli(info.maxAge),
+			maxAge: info.maxAge === undefined ? undefined : Time.Milli(info.maxAge),
 			priority: info.priority,
 		};
 	}

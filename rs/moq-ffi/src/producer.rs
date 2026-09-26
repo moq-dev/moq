@@ -11,14 +11,14 @@ use crate::media::{MoqAudioInit, MoqContainerFormat, MoqContainerInit, MoqFrame,
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
-/// (priority 0, the publisher's default max age, microsecond timescale).
+/// (priority 0, no publisher age limit, microsecond timescale).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
 	#[uniffi(default = 0)]
 	pub priority: u8,
 	/// Maximum age of a non-latest group before the publisher evicts it, in
-	/// microseconds. Null uses the default. This is the publisher-side half of
+	/// microseconds. Null imposes no publisher age limit. This is the publisher-side half of
 	/// [`MoqSubscription::max_age_us`](crate::consumer::MoqSubscription::max_age_us).
 	#[uniffi(default = None)]
 	pub max_age_us: Option<u64>,
@@ -56,11 +56,14 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 	type Error = MoqError;
 
 	fn try_from(info: &moq_net::track::Info) -> Result<Self, MoqError> {
-		let max_age_us = u64::try_from(info.max_age.as_micros())
+		let max_age_us = info
+			.max_age
+			.map(|age| u64::try_from(age.as_micros()))
+			.transpose()
 			.map_err(|_| MoqError::Codec("track max_age duration overflow".into()))?;
 		Ok(Self {
 			priority: info.priority,
-			max_age_us: Some(max_age_us),
+			max_age_us,
 			timescale: Some(info.timescale.as_u64()),
 		})
 	}
@@ -1143,4 +1146,23 @@ fn reserve_track(
 	broadcast
 		.reserve_track(name)
 		.map_err(|err| MoqError::Codec(format!("init failed: {err}")))
+}
+
+#[cfg(test)]
+mod metadata_tests {
+	use super::*;
+
+	#[test]
+	fn optional_retention_survives_binding_conversion() {
+		for max_age_us in [None, Some(0), Some(30_000_000)] {
+			let info = MoqTrackInfo {
+				priority: 0,
+				max_age_us,
+				timescale: None,
+			};
+			let model = moq_net::track::Info::try_from(info).unwrap();
+			assert_eq!(model.max_age, max_age_us.map(std::time::Duration::from_micros));
+			assert_eq!(MoqTrackInfo::try_from(&model).unwrap().max_age_us, max_age_us);
+		}
+	}
 }

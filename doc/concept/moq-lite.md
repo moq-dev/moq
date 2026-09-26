@@ -190,9 +190,23 @@ anything on its own. Both ends apply it: the publisher skips a group rather
 than sending it, and the subscriber skips it again as it reads, since the
 publisher only ever sees the most tolerant budget across its subscribers.
 
-The publisher declares a retention window per track, which bounds how far back
-a fetch or late subscriber can reach. Media tracks default to 30 seconds so a
+The publisher may declare a retention window per track. Omission sets no limit;
+zero keeps only the live edge. The origin cache ceiling and cache pool may still
+evict content sooner. Relays preserve the publisher's declaration rather than
+substituting a local default. Media tracks explicitly use 30 seconds so a
 segmented egress can still find its segments.
+
+IETF carries this value as MAX\_CACHE\_DURATION, received on every supported draft
+and sent from draft 17 onward. Drafts 14–16 remain receive-only for compatibility
+with older implementations. This is an approximate mapping: IETF measures wall
+time, while max age uses media timestamps and always keeps the newest group.
+EXPIRES describes subscription lifetime and does not set retention.
+
+Lite-07 encodes a finite limit as milliseconds plus one, with zero meaning no limit.
+Lite-05/06 send no limit as `2^53 - 1` milliseconds so older JavaScript readers can
+parse it. New readers treat every value at or above that boundary as no limit;
+older readers treat it as a finite window of approximately 285,000 years. Their
+timer cap schedules periodic age checks and does not shorten that window.
 
 Put together, a conference might use:
 

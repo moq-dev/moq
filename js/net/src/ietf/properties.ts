@@ -22,6 +22,9 @@ export const DESCENDING = 0x02;
 
 /// The Track Properties block carried at the end of SUBSCRIBE_OK, PUBLISH, and FETCH_OK.
 export interface Properties {
+	/** The publisher's cache window in milliseconds, omitted when unconstrained. */
+	maxCacheDuration?: bigint;
+
 	/// The track's Timescale, which declares the units of every object Timestamp on it.
 	///
 	/// `undefined` declares no timeline, so the subscriber times objects by arrival.
@@ -52,8 +55,14 @@ export async function encode(w: Writer, properties: Properties, version: IetfVer
 
 	let prevType = 0n;
 
+	if (properties.maxCacheDuration !== undefined) {
+		await w.u62(4n);
+		await w.u62(properties.maxCacheDuration);
+		prevType = 4n;
+	}
+
 	if (properties.timescale !== undefined) {
-		await w.u62(TIMESCALE);
+		await w.u62(TIMESCALE - prevType);
 		await w.u62(BigInt(properties.timescale));
 		prevType = TIMESCALE;
 	}
@@ -103,7 +112,9 @@ export async function decode(r: Reader, version: IetfVersion): Promise<Propertie
 		if (abs % 2n === 0n) {
 			// Even type: single varint value
 			const value = await r.u62();
-			if (abs === TIMESCALE && value > 0n) {
+			if (abs === 4n) {
+				properties.maxCacheDuration = value;
+			} else if (abs === TIMESCALE && value > 0n) {
 				// A zero timescale is invalid; treat it as no declaration rather than
 				// failing the whole message over one property we could have ignored.
 				properties.timescale = Timescale(Number(value));

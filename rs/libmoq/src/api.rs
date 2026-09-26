@@ -502,7 +502,7 @@ pub struct moq_track_info {
 	/// Maximum age of a non-latest group before the publisher evicts it, in microseconds.
 	/// The publisher-side half of `moq_subscription.max_age_us`.
 	pub max_age_us: u64,
-	/// Whether `max_age_us` is set. When false, the publisher's default applies.
+	/// Whether `max_age_us` is set. When false, the publisher imposes no age limit.
 	pub max_age_present: bool,
 
 	/// Per-frame timescale in ticks per second.

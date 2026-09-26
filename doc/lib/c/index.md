@@ -82,3 +82,5 @@ reports few or none.
 The header is the reference; each function carries a doc comment. Source and
 a worked example: [`rs/libmoq`](https://github.com/moq-dev/moq/tree/main/rs/libmoq),
 API docs on [docs.rs/libmoq](https://docs.rs/libmoq).
+
+Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).

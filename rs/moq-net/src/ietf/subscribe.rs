@@ -279,7 +279,10 @@ impl Message for SubscribeOk {
 					largest = Some(Location::decode(r, version)?);
 				}
 
-				let _params = Parameters::decode(r, version)?;
+				let params = Parameters::decode(r, version)?;
+				properties.max_cache_duration = params
+					.get_varint(super::ParameterVarInt::from(0x04))
+					.map(std::time::Duration::from_millis);
 			}
 			_ => {
 				// GROUP_ORDER is only legal here through draft-15, but keep accepting it so a
@@ -288,12 +291,16 @@ impl Message for SubscribeOk {
 				// rejecting it would tear down a session over a parameter compliant
 				// publishers must send. EXPIRES is ignored, as on draft-14.
 				decode_params!(r, version,
+					0x04 => max_cache_duration: Option<u64>,
 					0x08 => _expires: Option<u64>,
 					0x09 => largest: Option<Location>,
 					0x22 => group_order: Option<GroupOrder>,
 				);
 				properties = Properties::decode(r, version)?;
 				properties.group_order = properties.group_order.or(group_order);
+				if version == Version::Draft15 {
+					properties.max_cache_duration = max_cache_duration.map(std::time::Duration::from_millis);
+				}
 
 				return Ok(Self {
 					request_id,
@@ -1112,6 +1119,7 @@ mod tests {
 			track_alias: 42,
 			largest: None,
 			properties: Properties {
+				max_cache_duration: None,
 				timescale: None,
 				priority: None,
 				group_order: Some(GroupOrder::Descending),
@@ -1140,6 +1148,7 @@ mod tests {
 			track_alias: 42,
 			largest: None,
 			properties: Properties {
+				max_cache_duration: None,
 				timescale: None,
 				priority: None,
 				group_order: Some(GroupOrder::Descending),
@@ -1241,5 +1250,78 @@ mod tests {
 		let v17 = encode_message(&v17_msg, Version::Draft17);
 		let v18 = encode_message(&v18_msg, Version::Draft18);
 		assert_eq!(v17.len(), v18.len() + 1);
+	}
+}
+
+#[cfg(test)]
+mod cache_duration_tests {
+	use super::*;
+	use std::time::Duration;
+
+	#[test]
+	fn max_cache_duration_is_read_in_each_drafts_field() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			for age in [0u64, 30_000] {
+				let mut payload = match version {
+					Version::Draft14 => vec![0, 0, 0, 1, 0, 1, 4],
+					Version::Draft15 => vec![0, 0, 1, 4],
+					Version::Draft16 => vec![0, 0, 0, 4],
+					_ => vec![0, 0, 4],
+				};
+				age.encode(&mut payload, version).unwrap();
+				let got = SubscribeOk::decode_msg(&mut payload.as_slice(), version).unwrap();
+				assert_eq!(
+					got.properties.max_cache_duration,
+					Some(Duration::from_millis(age)),
+					"{version}"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn legacy_never_sends_cache_duration_and_modern_preserves_optional_value() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			let legacy = matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16);
+			for age in [None, Some(Duration::ZERO), Some(Duration::from_secs(30))] {
+				let ok = SubscribeOk {
+					request_id: legacy.then_some(RequestId(0)),
+					track_alias: 0,
+					largest: None,
+					properties: Properties {
+						max_cache_duration: age,
+						..Default::default()
+					},
+				};
+				let mut payload = Vec::new();
+				ok.encode_msg(&mut payload, version).unwrap();
+				let got = SubscribeOk::decode_msg(&mut payload.as_slice(), version).unwrap();
+				assert_eq!(
+					got.properties.max_cache_duration,
+					if legacy { None } else { age },
+					"{version}"
+				);
+			}
+		}
 	}
 }
