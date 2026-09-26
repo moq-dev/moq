@@ -42,7 +42,10 @@ retires the entry. Calling `modify` before the first `set` returns
 measure batch span or reorder delay for jitter. Locally encoded frames call
 `container::Producer::flush(timestamp, Instant::now())`; jitter is the spread
 above that track's own recent minimum lateness, published as soon as it rises.
-Generic imports remain clock-free. Invalid or decreasing jitter is rejected
+`import::Track::discontinuity()` marks a source seek or pause, clears partial
+input, and restarts the flush baseline without lowering advertised values. It
+forwards the container timeline marker, so resumed timestamps must continue
+forward on the broadcast clock. Generic imports remain clock-free. Invalid or decreasing jitter is rejected
 before the edit is retained, including while the initial catalog is reserved.
 Codec importers propagate catalog and media errors through their configuration
 and frame-writing methods.

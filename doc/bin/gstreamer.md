@@ -82,6 +82,11 @@ default, for file, demuxed, and network media: their arrival reflects the disk
 or the network, not the original encoder, and a GStreamer segment cannot tell
 the two apart. Text and opaque pads refuse it.
 
+After a pause, flush, or changed TIME segment, the next media buffer starts a new
+timeline epoch and resets the handoff baseline. The pause does not inflate
+advertised jitter, and previously measured maxima remain. Resumed timestamps
+must continue forward on the broadcast media clock.
+
 ## moqsrc
 
 Pads are named by kind and appear as the catalog announces renditions:

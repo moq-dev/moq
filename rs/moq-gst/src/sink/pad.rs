@@ -49,11 +49,16 @@ struct Media {
 	/// irregularly a local encoder delivers. Imports leave it off: their arrival times describe the
 	/// file or network, not the encoder.
 	encoder: bool,
+	/// Apply a timeline break before the next valid frame, using the normal write error path.
+	discontinuity: bool,
 }
 
 impl Media {
 	/// Publish one frame at `micros` on the media clock, handed over at `now`.
 	fn write(&mut self, data: &Bytes, micros: u64, now: Instant) -> Result<()> {
+		if std::mem::take(&mut self.discontinuity) {
+			self.track.discontinuity()?;
+		}
 		let ts = hang::container::Timestamp::from_micros(micros).ok();
 		self.track.decode(data, ts)?;
 		// One group (one QUIC stream) per audio packet, so the relay forwards it without waiting for
@@ -464,7 +469,12 @@ impl Pad {
 			}
 			other => anyhow::bail!("unsupported caps: {other}"),
 		};
-		self.track = Some(Sink::Media(Box::new(Media { track, audio, encoder })));
+		self.track = Some(Sink::Media(Box::new(Media {
+			track,
+			audio,
+			encoder,
+			discontinuity: false,
+		})));
 		self.caps = Some(caps.clone());
 		Ok(name)
 	}
@@ -590,7 +600,14 @@ impl Pad {
 		self.segment_info = Some(info);
 		match classify_segment(prev.as_ref(), &info) {
 			Ok(()) => {
-				self.segment = segment.downcast::<gst::ClockTime>().ok();
+				let segment = segment.downcast::<gst::ClockTime>().ok();
+				if self.segment.is_some()
+					&& self.segment != segment
+					&& let Some(Sink::Media(media)) = self.track.as_mut()
+				{
+					media.discontinuity = true;
+				}
+				self.segment = segment;
 				self.state = PadState::Active;
 			}
 			Err(reason) => {
@@ -606,11 +623,21 @@ impl Pad {
 
 	/// Re-anchor on FLUSH. A flushing seek rewinds running time, so the timeline must restart: dropping
 	/// the segment moves the pad to NoSegment (the next SEGMENT is accepted fresh via `prev = None`). The
-	/// producer is kept (FLUSH is not EOS); the codec's partial-AU reset is a documented follow-up.
+	/// producer is kept (FLUSH is not EOS); its next frame declares the break and resets partial input.
 	pub fn flush(&mut self) {
+		self.discontinuity();
 		self.state = PadState::NoSegment;
 		self.segment = None;
 		self.segment_info = None;
+	}
+
+	/// Restart measurement on the next frame while retaining the current segment.
+	pub fn discontinuity(&mut self) {
+		if self.segment.is_some()
+			&& let Some(Sink::Media(media)) = self.track.as_mut()
+		{
+			media.discontinuity = true;
+		}
 	}
 
 	/// Maps a buffer PTS to a MoQ timestamp without enforcing frame-level monotonicity: frames arrive in
@@ -1627,6 +1654,68 @@ mod tests {
 		let jitter = |name: &str| snapshot.video.renditions[name].jitter;
 		assert_eq!(jitter("encoder"), Some(std::time::Duration::from_millis(100)));
 		assert_eq!(jitter("import"), None, "an import's arrival never reaches the catalog");
+	}
+
+	#[test]
+	fn encoder_seek_does_not_measure_the_pause_as_jitter() {
+		gst::init().unwrap();
+		for boundary in ["segment", "flush", "pause"] {
+			let (broadcast, catalog) = producers();
+			let mut pad = Pad::new();
+			pad.observe_caps(
+				&broadcast,
+				&catalog,
+				producer_options(&h264_caps(), Some("encoder")).with_encoder(true),
+			);
+			let anchor = Instant::now();
+			for (pts, arrival) in [(0, 0), (33, 33), (66, 166)] {
+				pad.observe_segment(time_segment());
+				assert_eq!(
+					pad.push_buffer(
+						h264_keyframe_au(),
+						Some(gst::ClockTime::from_mseconds(pts)),
+						None,
+						None,
+						anchor + std::time::Duration::from_millis(arrival)
+					)
+					.unwrap(),
+					PushOutcome::Published
+				);
+			}
+			let before = catalog.snapshot().video.renditions["encoder"].jitter;
+			assert_eq!(before, Some(std::time::Duration::from_millis(100)));
+			match boundary {
+				"flush" => pad.flush(),
+				"pause" => pad.discontinuity(),
+				_ => {}
+			}
+			// Seek in the source while keeping the broadcast media clock moving forward.
+			for (pts, arrival) in [(30_000, 6_000), (30_033, 6_033)] {
+				let pts = if boundary == "pause" {
+					// Pausing preserves the segment while the running clock stops.
+					pts - 29_000
+				} else {
+					pad.observe_segment(time_segment_at(30_000, 1_000));
+					pts
+				};
+				assert_eq!(
+					pad.push_buffer(
+						h264_keyframe_au(),
+						Some(gst::ClockTime::from_mseconds(pts)),
+						None,
+						None,
+						anchor + std::time::Duration::from_millis(arrival)
+					)
+					.unwrap(),
+					PushOutcome::Published
+				);
+			}
+			assert_eq!(
+				catalog.snapshot().video.renditions["encoder"].jitter,
+				before,
+				"boundary={boundary}"
+			);
+		}
 	}
 
 	// Text and opaque tracks carry no codec jitter, so asking them to measure one is a mistake to report
