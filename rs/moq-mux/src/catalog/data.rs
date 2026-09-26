@@ -30,15 +30,13 @@ impl<E: CatalogExt, D, C: RenditionConfig<E> + AsMut<D>> IntoRendition<E, D> for
 }
 
 /// A data track's catalog entry, owned for the life of its producer and kept current with the
-/// bitrate its writes measure.
+/// bitrate, jitter, and delay its writes measure.
 ///
 /// Erases the entry's type, so a data producer's own type doesn't depend on which section lists it.
 pub(crate) struct Listing {
 	rendition: Box<dyn Owned>,
+	/// Measures `delay` against the catalog's other renditions, media included.
 	estimator: Estimator,
-	/// Whether writes are measured: only when the entry detects its estimate and the publisher
-	/// didn't supply a bitrate, which detection never overrides.
-	measures: bool,
 }
 
 /// The parts of a [`Rendition`] a [`Listing`] uses, without its config type.
@@ -66,12 +64,10 @@ impl Listing {
 		mut rendition: Rendition<E, C>,
 		config: C,
 	) -> crate::Result<Self> {
-		let measures = C::detects() && config.estimate().bitrate.is_none();
 		rendition.set(config)?;
 		Ok(Self {
+			estimator: rendition.estimator(),
 			rendition: Box::new(rendition),
-			estimator: Estimator::new(),
-			measures,
 		})
 	}
 
@@ -80,49 +76,31 @@ impl Listing {
 		self.rendition.name()
 	}
 
-	/// Measure a write of `bytes`, stamped on the broadcast clock.
-	///
-	/// `bytes` is only evaluated for an entry that measures its bitrate, since measuring can cost a
-	/// second serialization.
-	pub(crate) fn record(&mut self, bytes: impl FnOnce() -> usize) -> crate::Result<()> {
-		if !self.measures {
-			return Ok(());
-		}
+	/// Measure a frame of `bytes` encoded bytes, just written, captured at `captured` on the
+	/// broadcast clock if known.
+	pub(crate) fn record(&mut self, bytes: usize, captured: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		let now = self.rendition.timestamp()?;
-		self.record_at(now, bytes())
+		let flush = captured.map(|captured| (captured, std::time::Instant::now()));
+		self.record_at(now, bytes, flush)
 	}
 
 	/// [`record`](Self::record) at a chosen time, which a test needs since the broadcast clock only
-	/// moves in real time.
-	pub(crate) fn record_at(&mut self, now: moq_net::Timestamp, bytes: usize) -> crate::Result<()> {
+	/// moves in real time. `flush` is the capture time and the instant the frame was written.
+	pub(crate) fn record_at(
+		&mut self,
+		now: moq_net::Timestamp,
+		bytes: usize,
+		flush: Option<(moq_net::Timestamp, std::time::Instant)>,
+	) -> crate::Result<()> {
 		// Each write is its own span, closed by the next one.
 		self.estimator.cut(Some(now));
 		self.estimator.write(now, bytes);
 
-		// The spacing between writes is the application's cadence, not a flush delay, so only the
-		// bitrate is measured. A publisher that knows its jitter sets it on the entry.
-		let estimate = self.estimator.estimate().with_jitter(None);
-		self.rendition.estimate(estimate)
-	}
-}
-
-/// The serialized size of `value`, as an upper bound on what a JSON write puts on the wire:
-/// compression and deltas only shrink it.
-pub(crate) fn json_len<T: serde::Serialize>(value: &T) -> usize {
-	struct Count(usize);
-
-	impl std::io::Write for Count {
-		fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-			self.0 += buf.len();
-			Ok(buf.len())
+		// The spacing between writes is the application's cadence, not a flush delay, so only a
+		// capture time measures jitter and delay. Without one neither is advertised.
+		if let Some((captured, written)) = flush {
+			self.estimator.flush(captured, written);
 		}
-		fn flush(&mut self) -> std::io::Result<()> {
-			Ok(())
-		}
+		self.rendition.estimate(self.estimator.estimate())
 	}
-
-	let mut count = Count(0);
-	// Only reached after the producer serialized the same value, so this cannot fail.
-	let _ = serde_json::to_writer(&mut count, value);
-	count.0
 }

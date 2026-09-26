@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use moq_net::Timed;
 
 use crate::Result;
 
@@ -44,12 +45,12 @@ impl Producer {
 		self.inner.lock().unwrap().track.is_used()
 	}
 
-	/// Publish a new value, superseding the previous one.
+	/// Publish a new value, superseding the previous one, and return the frame's encoded size.
 	///
 	/// Unlike [`moq-json`](https://docs.rs/moq-json), an identical value is republished rather than
 	/// skipped: comparing two opaque blobs costs a full scan, and only the caller knows whether its
 	/// bytes changed.
-	pub fn update(&mut self, payload: impl Into<Bytes>) -> Result<()> {
+	pub fn update(&mut self, payload: impl Into<Timed<Bytes>>) -> Result<usize> {
 		self.inner.lock().unwrap().update(payload.into())
 	}
 
@@ -66,7 +67,10 @@ struct Inner {
 }
 
 impl Inner {
-	fn update(&mut self, payload: Bytes) -> Result<()> {
+	fn update(&mut self, payload: Timed<Bytes>) -> Result<usize> {
+		let timestamp = payload.at.unwrap_or_else(moq_net::Timestamp::now);
+		let payload = payload.value;
+
 		// One frame per group, so the window spans a single value and starts cold every time.
 		let payload = match self.compression {
 			true => {
@@ -88,8 +92,9 @@ impl Inner {
 			return Err(moq_net::Error::FrameTooLarge.into());
 		}
 
+		let size = payload.len();
 		let mut group = self.track.append_group()?;
-		if let Err(err) = group.write_frame(moq_net::Timestamp::now(), payload) {
+		if let Err(err) = group.write_frame(timestamp, payload) {
 			// `append_group` already published this group, and a rejected frame (too large) doesn't
 			// close the track. Dropping the handle does NOT close the group, so leaving it would strand
 			// any subscriber that advanced into it with nothing to read and no end.
@@ -98,7 +103,7 @@ impl Inner {
 		}
 
 		group.finish()?;
-		Ok(())
+		Ok(size)
 	}
 
 	fn finish(&mut self) -> Result<()> {

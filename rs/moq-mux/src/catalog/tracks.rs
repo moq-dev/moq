@@ -51,16 +51,20 @@ use super::hang::{Catalog, CatalogExt};
 ///         catalog.ext.mavlink.remove(name);
 ///     }
 ///
-///     // Opt into bitrate detection through the embedded config.
+///     // Opt into detection through the embedded config.
 ///     fn detects() -> bool {
 ///         true
 ///     }
 ///     fn estimate(&self) -> Estimate {
-///         Estimate::default().with_bitrate(self.binary.bitrate).with_jitter(self.binary.jitter)
+///         Estimate::default()
+///             .with_bitrate(self.binary.bitrate)
+///             .with_jitter(self.binary.jitter)
+///             .with_delay(self.binary.delay)
 ///     }
 ///     fn set_estimate(&mut self, estimate: Estimate) {
 ///         self.binary.bitrate = estimate.bitrate;
 ///         self.binary.jitter = estimate.jitter;
+///         self.binary.delay = estimate.delay;
 ///     }
 /// }
 ///
@@ -122,11 +126,15 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::JsonConfig {
 		true
 	}
 	fn estimate(&self) -> Estimate {
-		Estimate::default().with_jitter(self.jitter).with_bitrate(self.bitrate)
+		Estimate::default()
+			.with_jitter(self.jitter)
+			.with_bitrate(self.bitrate)
+			.with_delay(self.delay)
 	}
 	fn set_estimate(&mut self, estimate: Estimate) {
 		self.jitter = estimate.jitter;
 		self.bitrate = estimate.bitrate;
+		self.delay = estimate.delay;
 	}
 }
 
@@ -145,11 +153,15 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::BinaryConfig {
 		true
 	}
 	fn estimate(&self) -> Estimate {
-		Estimate::default().with_jitter(self.jitter).with_bitrate(self.bitrate)
+		Estimate::default()
+			.with_jitter(self.jitter)
+			.with_bitrate(self.bitrate)
+			.with_delay(self.delay)
 	}
 	fn set_estimate(&mut self, estimate: Estimate) {
 		self.jitter = estimate.jitter;
 		self.bitrate = estimate.bitrate;
+		self.delay = estimate.delay;
 	}
 }
 
@@ -534,6 +546,11 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// A fresh estimator measuring `delay` against the catalog's other renditions.
 	pub(crate) fn estimator(&self) -> super::Estimator {
 		self.catalog.estimator()
+	}
+
+	/// The broadcast clock the catalog stamps its tracks on.
+	pub(crate) fn clock(&self) -> crate::Clock {
+		self.catalog.clock()
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).

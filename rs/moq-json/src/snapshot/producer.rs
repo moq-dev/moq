@@ -8,6 +8,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::{Encoded, Encoder};
+use moq_net::Timed;
+
 use crate::{Error, Result};
 
 pub use super::Config;
@@ -85,9 +87,13 @@ impl<T: Serialize> Producer<T> {
 
 	/// Publish a new value, emitting a snapshot or a delta automatically.
 	///
-	/// Does nothing if the value is unchanged from the previous publish.
-	pub fn update(&mut self, value: &T) -> Result<()> {
-		take(&self.inner).update(value)
+	/// Returns the encoded size of the frame written, or `None` if the value is unchanged from the
+	/// previous publish and nothing was written.
+	pub fn update<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> Result<Option<usize>>
+	where
+		T: 'a,
+	{
+		take(&self.inner).update(value.into())
 	}
 
 	/// Edit the current value in place and publish the result.
@@ -226,7 +232,8 @@ impl<T: Serialize> Guard<'_, T> {
 		self.dirty = false;
 
 		// We already hold the lock, so publish through the held guard rather than re-locking.
-		self.inner.update(&self.value)
+		self.inner.update(Timed::from(&self.value))?;
+		Ok(())
 	}
 }
 
@@ -318,21 +325,23 @@ impl<T> Inner<T> {
 }
 
 impl<T: Serialize> Inner<T> {
-	fn update(&mut self, value: &T) -> Result<()> {
+	fn update(&mut self, payload: Timed<&T>) -> Result<Option<usize>> {
 		// Split the borrow so `frame` can hold the encoder while `track` is written through.
 		let Inner { track, encoder, .. } = self;
 
-		let Some(frame) = encoder.update(value)? else {
-			return Ok(());
+		let Some(frame) = encoder.update(payload.value)? else {
+			return Ok(None);
 		};
 
 		// A failed write drops `frame` uncommitted, which resets the encoder so the next update
 		// resynchronizes with a fresh snapshot. Most failures kill the track outright, but a rejected
 		// frame (too large) doesn't, and a delta against a snapshot no consumer ever saw is unreadable.
-		track.write(&frame)?;
+		let timestamp = payload.at.unwrap_or_else(moq_net::Timestamp::now);
+		track.write(timestamp, &frame)?;
+		let size = frame.payload.len();
 		frame.commit();
 
-		Ok(())
+		Ok(Some(size))
 	}
 
 	fn finish(&mut self) -> Result<()> {
@@ -365,8 +374,8 @@ impl Track {
 		Ok(())
 	}
 
-	/// Write one encoded frame, rolling a group when it's a snapshot.
-	fn write(&mut self, encoded: &Encoded) -> Result<()> {
+	/// Write one encoded frame at `timestamp`, rolling a group when it's a snapshot.
+	fn write(&mut self, timestamp: moq_net::Timestamp, encoded: &Encoded) -> Result<()> {
 		// Check before touching a group. `write_snapshot` closes the previous group and publishes a
 		// new one before the frame is written, so discovering the limit inside `write_frame` would
 		// leave an empty newest group behind: a snapshot consumer jumps to the newest, so the previous
@@ -376,20 +385,20 @@ impl Track {
 		}
 
 		match encoded.keyframe {
-			true => self.write_snapshot(encoded.payload.clone()),
-			false => self.write_delta(encoded.payload.clone()),
+			true => self.write_snapshot(timestamp, encoded.payload.clone()),
+			false => self.write_delta(timestamp, encoded.payload.clone()),
 		}
 	}
 
 	/// Close the open group and write a snapshot as the first frame of a new one.
-	fn write_snapshot(&mut self, payload: bytes::Bytes) -> Result<()> {
+	fn write_snapshot(&mut self, timestamp: moq_net::Timestamp, payload: bytes::Bytes) -> Result<()> {
 		// The previous group is complete; no more frames will be appended to it.
 		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 
 		let mut group = self.inner.append_group()?;
-		if let Err(err) = group.write_frame(moq_net::Timestamp::now(), payload) {
+		if let Err(err) = group.write_frame(timestamp, payload) {
 			// `append_group` already published this group, and a rejected frame (too large) doesn't
 			// close the track. Dropping the handle does NOT close the group, so leaving it would strand
 			// any subscriber that advanced into it with nothing to read and no end.
@@ -408,11 +417,11 @@ impl Track {
 	}
 
 	/// Append a delta to the group the last snapshot opened.
-	fn write_delta(&mut self, payload: bytes::Bytes) -> Result<()> {
+	fn write_delta(&mut self, timestamp: moq_net::Timestamp, payload: bytes::Bytes) -> Result<()> {
 		self.group
 			.as_mut()
 			.expect("the encoder only emits a delta after a snapshot opened a group")
-			.write_frame(moq_net::Timestamp::now(), payload)?;
+			.write_frame(timestamp, payload)?;
 		Ok(())
 	}
 

@@ -21,7 +21,3 @@ running behind its audio encoder advertises that offset on video, so
   renditions and holds the largest `delay + jitter` it subscribes to, so the
   publisher reports its sliding-baseline maximum as is.
 - `CatalogProducer` already refuses a lowered or zero `delay`.
-
-## Related
-
-- [Data jitter](/quest/m1/data-jitter.md) - the same measurement for JSON and binary tracks in Rust

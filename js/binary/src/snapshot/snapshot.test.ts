@@ -138,3 +138,14 @@ test("an aborted track surfaces its error instead of spinning", async () => {
 
 	await expect(consumer.next()).rejects.toThrow("subscription aborted");
 });
+
+test("a capture timestamp is written as the frame timestamp", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer({ track });
+	const captured = Time.Timestamp.fromMillis(1_234);
+	producer.update(bytes(1), captured);
+	producer.finish();
+
+	const frame = await (await track.subscribe().ordered().nextGroup())?.readFrame();
+	expect(frame?.timestamp.as(Time.Timescale.MILLI)).toBe(1_234);
+});

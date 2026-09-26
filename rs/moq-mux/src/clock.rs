@@ -97,6 +97,27 @@ impl Clock {
 			.expect("an instant elapsed duration fits in a timestamp")
 	}
 
+	/// Map the instant a payload was captured (a datagram's arrival, a sensor read) onto this clock.
+	///
+	/// Refuses an instant ahead of now, which would claim the payload reached the transport before
+	/// it existed, and one before the clock's epoch, which no timestamp can name.
+	pub(crate) fn capture(&self, at: Instant) -> crate::Result<moq_net::Timestamp> {
+		if at > Instant::now() {
+			return Err(crate::Error::InvalidCapture);
+		}
+		let elapsed = at
+			.checked_duration_since(self.epoch)
+			.ok_or(crate::Error::InvalidCapture)?;
+		Ok(moq_net::Timestamp::from_micros(elapsed.as_micros() as u64)
+			.expect("an instant elapsed duration fits in a timestamp"))
+	}
+
+	/// Map a payload's capture instant onto this clock, keeping the payload.
+	pub(crate) fn stamp<P>(&self, timed: moq_net::Timed<P, Instant>) -> crate::Result<moq_net::Timed<P>> {
+		let at = timed.at.map(|at| self.capture(at)).transpose()?;
+		Ok(moq_net::Timed { value: timed.value, at })
+	}
+
 	/// Units per second for [`wall`](Self::wall): [`TIMESCALE`](Self::TIMESCALE).
 	pub fn timescale(&self) -> moq_net::Timescale {
 		Self::TIMESCALE
@@ -381,6 +402,24 @@ mod tests {
 		// Compare the anchors, not live readings: two `now()` calls race the clock.
 		assert_eq!(clock.epoch, shared.epoch);
 		assert_eq!(clock.wall(), shared.wall());
+	}
+
+	/// A capture maps onto the clock's own timeline, and one ahead of now or before the epoch is
+	/// refused rather than clamped.
+	#[test]
+	fn a_capture_maps_onto_the_clock() {
+		let now = Instant::now();
+		let clock = Clock::at(now - Duration::from_secs(5), moq_epoch()).unwrap();
+		assert_eq!(clock.capture(now - Duration::from_secs(2)).unwrap(), us(3_000_000));
+
+		assert!(matches!(
+			clock.capture(Instant::now() + Duration::from_secs(1)),
+			Err(crate::Error::InvalidCapture)
+		));
+		assert!(matches!(
+			clock.capture(now - Duration::from_secs(6)),
+			Err(crate::Error::InvalidCapture)
+		));
 	}
 
 	#[test]

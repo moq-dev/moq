@@ -38,8 +38,10 @@ export class Producer {
 	 *
 	 * Unlike `@moq/json`, an identical value is republished rather than skipped: comparing two
 	 * opaque blobs costs a full scan, and only the caller knows whether its bytes changed.
+	 *
+	 * `at` is when the payload was captured, written as its frame timestamp. Defaults to now.
 	 */
-	update(payload: Uint8Array): void {
+	update(payload: Uint8Array, at: Time.Timestamp = Time.Timestamp.now()): void {
 		// Consumers all decode with `@moq/flate`'s default cap, so publishing past it would advertise
 		// a value that always fails to read. Rejected before anything is published; unlike a stream
 		// this is not terminal, since the previous value still stands and the next update supersedes.
@@ -57,7 +59,7 @@ export class Producer {
 
 		const group = this.#track.appendGroup();
 		try {
-			group.writeFrame({ payload: encoded, timestamp: Time.Timestamp.now() });
+			group.writeFrame({ payload: encoded, timestamp: at });
 		} finally {
 			// The group is already visible on the track, so leaving it open on a failed write would
 			// strand a subscriber that advanced into it with nothing to read and no end.
