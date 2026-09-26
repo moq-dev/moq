@@ -1,9 +1,8 @@
-import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import * as Message from "./message.ts";
-import { hasGroupOrder, hasTrackOrigin, Version } from "./version.ts";
+import { hasGroupOrder, Version } from "./version.ts";
 
 // The Track Stream (0x6) is draft-05+ only.
 function guardTrack(version: Version) {
@@ -72,22 +71,15 @@ export class TrackInfo {
 	 * timestamp at this scale.
 	 */
 	timescale: number;
-	/**
-	 * The origin serving the track: the Hop ID a relay stitches failover on.
-	 * {@link UNKNOWN_HOP} names nobody. Lite-07+; older versions decode it as unknown.
-	 */
-	origin: Hop;
 
 	constructor({
 		priority = 0,
 		maxAge = 0,
 		timescale = Timescale.MILLI,
-		origin = UNKNOWN_HOP,
 	}: {
 		priority?: number;
 		maxAge?: number;
 		timescale?: number;
-		origin?: Hop;
 	}) {
 		if (!Number.isInteger(priority) || priority < 0 || priority > 255) {
 			throw new RangeError(`priority must be an integer in 0..=255: ${priority}`);
@@ -98,7 +90,6 @@ export class TrackInfo {
 		this.priority = priority;
 		this.maxAge = maxAge;
 		this.timescale = Timescale(timescale);
-		this.origin = origin;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -107,7 +98,6 @@ export class TrackInfo {
 		if (hasGroupOrder(version)) await w.bool(false);
 		await w.u53(this.maxAge);
 		await w.u53(this.timescale);
-		if (hasTrackOrigin(version)) await w.u62(this.origin);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<TrackInfo> {
@@ -115,8 +105,7 @@ export class TrackInfo {
 		if (hasGroupOrder(version)) await r.bool();
 		const maxAge = await r.u53();
 		const timescale = await r.u53();
-		const origin = hasTrackOrigin(version) ? HopSchema.parse(await r.u62()) : UNKNOWN_HOP;
-		return new TrackInfo({ priority, maxAge, timescale, origin });
+		return new TrackInfo({ priority, maxAge, timescale });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

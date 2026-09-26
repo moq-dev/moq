@@ -18,8 +18,8 @@ on moq-transport 17+.
 
 Failover routes must carry copies of the same broadcast. A relay moves a
 subscription only between sources from the same origin: on moq-lite-07 the one a
-source's TRACK\_INFO names, otherwise the first hop of its route. A change of
-origin ends the subscription and the viewer re-subscribes. For each track, the
+source's SUBSCRIBE\_OK or FETCH\_OK names, otherwise the first hop of its route.
+A change of origin ends the subscription and the viewer re-subscribes. For each track, the
 relay requires matching timescale, retention window, publisher priority, and
 group ordering. A source with different properties is refused before its groups
 are spliced in. If no compatible source remains, the track fails with

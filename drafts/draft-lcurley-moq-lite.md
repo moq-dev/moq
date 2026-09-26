@@ -422,12 +422,13 @@ The Spread Hash is the 64-bit FNV-1a hash, with offset basis `0x420C0DECB00B` an
 It is keyed on the requested path rather than the route's prefix, so equal-cost advertisers of one prefix share its paths instead of the first one taking them all, while one path resolves to the same advertiser on every relay that holds the same routes.
 When choosing which route to advertise for a prefix, the requested path is the prefix itself.
 
-A subscription's identity is the origin serving it, named by the `Origin` field of the track's [TRACK_INFO](#track-info).
+A subscription's identity is the origin serving it, named by the `Origin` field of the reply that carries its content: [SUBSCRIBE_OK](#subscribe-ok) for a subscription and [FETCH_OK](#fetch-ok) for a fetch.
 A relay learns it from the reply rather than the route: a route promises only that paths under its prefix are servable, and an advertiser serving a prefix from several origins advertises one route for all of them.
-Two sources of one track whose TRACK_INFO name the same non-zero Origin are the same origin reached different ways, and a relay MAY move a live subscription between them, resuming at a group boundary, so a change the identity survives (a reconnect, a draining session, a relay failing over within a pool) is invisible to the subscriber.
+Two sources of one track whose replies name the same non-zero Origin are the same origin reached different ways, and a relay MAY move a live subscription between them, resuming at a group boundary, so a change the identity survives (a reconnect, a draining session, a relay failing over within a pool) is invisible to the subscriber.
 Across differing Origins, or where either is 0, the sources promise nothing about each other's content: a relay MUST NOT splice a live subscription across them, and instead ends it (a reset) so the subscriber re-requests through the best remaining route.
+Group Streams are not ordered with the Subscribe Stream, so a relay that splices on Origin MUST hold a subscription's groups until its SUBSCRIBE_OK names their origin, and discard them if that origin is not the one it serves.
 A relay learns a replacement's Origin only once it replies, so it SHOULD keep serving from a live source when a better route appears rather than trade it for a source that may end the subscription.
-A source reached over an earlier version, whose TRACK_INFO carries no Origin, is identified by its route's first hop: the endpoint that originated the route (see [ANNOUNCE_START](#announce-start)).
+A source reached over an earlier version, whose replies carry no Origin, is identified by its route's first hop: the endpoint that originated the route (see [ANNOUNCE_START](#announce-start)).
 Equal Origins promise the same origin, not interchangeable bytes; what a resuming relay serves next is whatever that origin publishes next at the group boundary.
 
 #### Resolution {#resolution}
@@ -474,9 +475,9 @@ A subscriber opens a Fetch Stream (0x3) to request a single Group from a Track.
 
 The subscriber sends a FETCH message containing the broadcast path, track name, priority, group sequence, and the frame range within that group.
 Unlike SUBSCRIBE, FETCH works on both live and ended broadcasts; it is the only way to read an ended one.
-The publisher responds with FRAME messages directly on the same bidirectional stream — there is no response header.
+The publisher responds with a FETCH_OK naming the origin serving the group, followed by FRAME messages on the same bidirectional stream.
 The Subscribe ID, Group Sequence, and index of the first returned frame are implicit, taken from the original FETCH request.
-Because there is no response header, a publisher that cannot serve the requested frame range in full MUST reset the stream rather than return a shorter run; the subscriber has no way to learn where a truncated response actually started.
+Because the response carries no position, a publisher that cannot serve the requested frame range in full MUST reset the stream rather than return a shorter run; the subscriber has no way to learn where a truncated response actually started.
 As with a subscription, the subscriber MUST already have the track's [TRACK_INFO](#track-info) to parse the returned frames; because the properties are immutable, a single Track Stream lookup is reused across every FETCH of that track (group-by-group fetches do not re-fetch it).
 The publisher FINs the stream after the last frame, or resets the stream on error.
 
@@ -1094,7 +1095,6 @@ TRACK_INFO Message {
   Publisher Priority (8)
   Publisher Max Age (i)
   Timescale (i)
-  Origin (i)
 }
 ~~~
 
@@ -1123,24 +1123,18 @@ The number of timestamp units per second for frame timestamps on this Track.
 It MUST be non-zero; a subscriber that receives 0 MUST reset the stream with a protocol violation.
 Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (audio sample rate), and `90000` (RTP video clock).
 
-**Origin**:
-The Hop ID of the origin serving the Track, which relays splice failover on (see [Routing](#routing)).
-A publisher names itself for content it produces; a relay names the Origin its own source's TRACK_INFO named, or for a source reached over an earlier version, the first hop of that source's route.
-A value of 0 names nobody, and a relay never splices across it.
-Like every other field it is fixed for the Track: a publisher that re-resolves the path to a different origin serves a new Track, ending subscriptions to the old one with a reset.
-A relay that splices on Origin MUST therefore fetch TRACK_INFO for the replacement rather than reuse a cached one.
-
 ## SUBSCRIBE_OK {#subscribe-ok}
 A SUBSCRIBE_OK message confirms a subscription and resolves its absolute start position.
 It is the first message the publisher sends on the Subscribe Stream, once the start position is known.
 
-This is the trimmed-down counterpart of MoqTransport's SUBSCRIBE_OK: it retains the name and the role of the publisher's positive response, but carries only the resolved start position (all other per-track properties live in [TRACK_INFO](#track-info)).
+This is the trimmed-down counterpart of MoqTransport's SUBSCRIBE_OK: it retains the name and the role of the publisher's positive response, but carries only the resolved start position and who serves it (all other per-track properties live in [TRACK_INFO](#track-info)).
 
 ~~~
 SUBSCRIBE_OK Message {
   Type (i) = 0x0
   Message Length (i)
   Group (i)
+  Origin (i)
 }
 ~~~
 
@@ -1160,6 +1154,11 @@ The subscriber derives the start frame from `Group` and its own request:
 
 The second case is easy to get wrong, so to be explicit: a subscriber that requested group 5 frame 15 and receives `Group` = 6 starts at **frame 0** of group 6, not frame 15.
 The frame offset belonged to group 5 and is gone along with the rest of it; it does not carry forward to whichever group the publisher resolved to.
+
+**Origin**:
+The Hop ID of the origin serving the subscription, which relays splice failover on (see [Routing](#routing)).
+A publisher names itself for content it produces; a relay names the origin its own source's reply named, or for a source reached over an earlier version, the first hop of that source's route.
+A value of 0 names nobody, and a relay never splices across it.
 
 ## SUBSCRIBE_END {#subscribe-end}
 A SUBSCRIBE_END message is sent by the publisher to signal that no group at or after a given sequence will be produced.
@@ -1227,12 +1226,26 @@ The last frame to return (inclusive), encoded as the absolute frame index + 1.
 A value of 0 means through the end of the group (default).
 A `Frame End` below `Frame Start` once decoded is a protocol violation; equal bounds are a legal single-frame range.
 
-The publisher responds with FRAME messages directly on the same stream — there is no response header.
-The subscriber parses them using the track's [TRACK_INFO](#track-info), which it MUST already have (see the [Track Stream](#track-stream)); the group sequence and the index of the first frame are implicit from the FETCH request.
+The publisher responds with a [FETCH_OK](#fetch-ok) followed by FRAME messages on the same stream.
+The subscriber parses the frames using the track's [TRACK_INFO](#track-info), which it MUST already have (see the [Track Stream](#track-stream)); the group sequence and the index of the first frame are implicit from the FETCH request.
 The publisher FINs the stream after the last frame, or resets on error.
 There is no FETCH_ERROR message — the publisher signals failure by resetting the stream.
 A publisher holding fewer frames than requested MUST reset rather than truncate, since a short response is indistinguishable from one that started elsewhere.
 A group that ends before `Frame End` is not a truncation: the publisher FINs after the last frame it has, provided the group is complete and it served everything from `Frame Start` onward.
+
+## FETCH_OK {#fetch-ok}
+FETCH_OK is the publisher's answer on a Fetch Stream, sent once the group is resolved and before its first FRAME.
+
+~~~
+FETCH_OK Message {
+  Message Length (i)
+  Origin (i)
+}
+~~~
+
+**Origin**:
+The Hop ID of the origin serving the group, as in [SUBSCRIBE_OK](#subscribe-ok).
+A relay that splices on Origin MUST NOT deliver the frames of a fetch whose Origin is not the one it serves.
 
 ## PROBE
 PROBE is used to measure the available bitrate of the connection.
@@ -1349,7 +1362,7 @@ The `Message Length` describes the payload size on the wire.
 - Added `Stream Count` to SUBSCRIBE_END: the number of Group Streams opened for the subscription. SUBSCRIBE_END is now sent once every counted Group Stream has opened, rather than as soon as the final group is known.
 - Removed SUBSCRIBE_DROP and its type 0x2; a group without a Group Stream is not counted.
 - The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
-- Added `Origin` to TRACK_INFO: the origin serving the track. A subscription's identity is now the Origin its TRACK_INFO names rather than its route's first hop, so a relay splices a failover only between sources naming the same non-zero Origin, including within a pool advertised by one route.
+- Added `Origin` to SUBSCRIBE_OK and the FETCH_OK message ahead of a fetch's frames: the origin serving the request. A subscription's identity is now the Origin its reply names rather than its route's first hop, so a relay splices a failover only between sources naming the same non-zero Origin, including within a pool advertised by one route, and holds a subscription's groups until its SUBSCRIBE_OK names their origin.
 - Added the Spread Hash tie-break after the shortest path: a hash of the requested path and the route's Hop IDs, so equal-cost advertisers of one prefix share its paths.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 

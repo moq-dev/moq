@@ -206,11 +206,11 @@ impl Version {
 		}
 	}
 
-	/// Whether TRACK_INFO names the origin serving the track, which is what a relay
-	/// stitches a failover on. Added in lite-07; older versions leave a relay the
-	/// route's first hop.
+	/// Whether SUBSCRIBE_OK and FETCH_OK name the origin serving the request, which is
+	/// what a relay stitches a failover on. Added in lite-07 (with FETCH_OK itself);
+	/// older versions leave a relay the route's first hop.
 	#[allow(clippy::match_like_matches_macro)]
-	pub(crate) fn has_track_origin(self) -> bool {
+	pub(crate) fn has_origin(self) -> bool {
 		// Match form so future versions default forward (CLAUDE.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,

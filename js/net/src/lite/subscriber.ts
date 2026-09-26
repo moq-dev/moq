@@ -23,7 +23,7 @@ import {
 } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import * as DatagramStream from "./datagram_stream.ts";
-import { Fetch as FetchMessage } from "./fetch.ts";
+import { Fetch as FetchMessage, FetchOk } from "./fetch.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import { sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
@@ -40,7 +40,15 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, restartSupported, Version } from "./version.ts";
+import {
+	hasAnnounceId,
+	hasAnnounceOk,
+	hasDatagrams,
+	hasOrigin,
+	hasProbeRtt,
+	restartSupported,
+	Version,
+} from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
 // drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC streams
@@ -768,6 +776,8 @@ export class Subscriber {
 	// FIN. A stream-level failure aborts the group so its reader observes the gap.
 	async #runFetchResponse(stream: Stream, group: netGroup.Producer, timescale: Time.Timescale): Promise<void> {
 		try {
+			// Draft-07 names the serving origin first; only relays stitch on it.
+			if (hasOrigin(this.version)) await FetchOk.decode(stream.reader, this.version);
 			let prevTs = 0n;
 
 			// Serve until the stream FINs, the group closes, or every reader leaves. A group can

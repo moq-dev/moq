@@ -90,6 +90,10 @@ struct TrackEntry {
 	timescale: Option<Timescale>,
 	/// The groups received so far, so the subscription's end can wait for the ones owed.
 	tail: kio::Producer<Tail>,
+	/// Whether this subscription's SUBSCRIBE_OK arrived. On a wire that names the
+	/// serving origin there, group streams wait for it: until then nobody knows
+	/// whose content they carry.
+	started: kio::Shared<bool>,
 }
 
 impl<S: crate::transport::poll::Session> Subscriber<S> {
@@ -695,6 +699,11 @@ struct GroupRecv<S: crate::transport::poll::Session> {
 enum GroupRecvState {
 	/// Reading the GROUP header.
 	Header,
+	/// Holding the group until its subscription's SUBSCRIBE_OK names the serving origin
+	/// and the front admits it, on a wire that names one.
+	Hold {
+		header: lite::Group,
+	},
 	/// Filling the group, bailing if the track or group dies first.
 	Serve {
 		/// Guarded: dropping this machine mid-group is a cancellation, not a clean end.
@@ -719,7 +728,31 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 			match &mut self.state {
 				GroupRecvState::Header => {
 					let mut cx = std::task::Context::from_waker(waiter.waker());
-					let hdr = ready!(self.reader.poll_decode::<lite::Group>(&mut cx))?;
+					let header = ready!(self.reader.poll_decode::<lite::Group>(&mut cx))?;
+					self.state = GroupRecvState::Hold { header };
+				}
+				GroupRecvState::Hold { header } => {
+					if self.subscriber.version.has_origin() {
+						let entry = self
+							.subscriber
+							.subscribes
+							.lock()
+							.get(&header.subscribe)
+							.cloned()
+							.ok_or(Error::Cancel)?;
+						if let Poll::Ready(err) = entry.producer.poll_closed(waiter) {
+							return Poll::Ready(Err(err));
+						}
+						ready!(entry.started.poll(waiter, |started| match **started {
+							true => Poll::Ready(()),
+							false => Poll::Pending,
+						}));
+						ready!(entry.producer.provenance().poll_admitted(waiter))?;
+					}
+					let GroupRecvState::Hold { header: hdr } = std::mem::replace(&mut self.state, GroupRecvState::Done)
+					else {
+						unreachable!()
+					};
 
 					let (group, track, timescale) = {
 						let mut subs = self.subscriber.subscribes.lock();
@@ -1369,6 +1402,7 @@ mod tests {
 				producer,
 				timescale: Some(Timescale::default()),
 				tail: Default::default(),
+				started: kio::Shared::new(true),
 			},
 		);
 
@@ -2543,6 +2577,8 @@ struct SubStream<S: crate::transport::poll::Session> {
 	requested: Option<Position>,
 	/// The groups received for this subscription, shared with its [`TrackEntry`].
 	tail: kio::Producer<Tail>,
+	/// Whether SUBSCRIBE_OK arrived, shared with its [`TrackEntry`].
+	started: kio::Shared<bool>,
 	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
 	served: Option<u64>,
 	/// The track's exclusive end (SUBSCRIBE_END), once declared.
@@ -2912,12 +2948,14 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
 		let tail = kio::Producer::new(Tail::default());
+		let started = kio::Shared::new(!self.subscriber.version.has_origin());
 		self.subscriber.subscribes.lock().insert(
 			id,
 			TrackEntry {
 				producer: producer.clone(),
 				timescale,
 				tail: tail.clone(),
+				started: started.clone(),
 			},
 		);
 
@@ -2929,6 +2967,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			id,
 			subscription,
 			tail,
+			started,
 			state: EstablishState::Open,
 		}
 	}
@@ -3029,6 +3068,7 @@ struct Establish<S: crate::transport::poll::Session> {
 	id: u64,
 	subscription: Subscription,
 	tail: kio::Producer<Tail>,
+	started: kio::Shared<bool>,
 	state: EstablishState<S>,
 }
 
@@ -3114,6 +3154,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 			priority: self.subscription.priority,
 			requested: self.subscription.start,
 			tail: self.tail.clone(),
+			started: self.started.clone(),
 			served: None,
 			end: None,
 		}
@@ -3288,7 +3329,7 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 						.with_timescale(info.timescale)
 						.with_max_age(info.max_age)
 						.with_priority(info.priority);
-					model.origin = serve.subscriber.version.has_track_origin().then_some(info.origin);
+					model.names_origin = serve.subscriber.version.has_origin();
 					return Poll::Ready(Ok(model));
 				}
 			}
@@ -3426,8 +3467,12 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					match self.dynamic.poll_requested_group(waiter) {
 						Poll::Ready(Ok(req)) => {
 							if self.supports_fetch {
-								self.fetches
-									.push(FetchServeRun::new(serve.clone(), req, self.timescale));
+								self.fetches.push(FetchServeRun::new(
+									serve.clone(),
+									req,
+									self.timescale,
+									self.serving.provenance(),
+								));
 							} else {
 								req.reject(Error::Version);
 							}
@@ -3505,6 +3550,18 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 									// signal, so a spliced reader waiting on a skipped group
 									// fails over instead of stalling on a live route.
 									lite::SubscribeResponse::Start(start) => {
+										// The reply names whose content this subscription
+										// carries. A copy has one origin, so another one is a
+										// different track: hand it back. The held group
+										// streams go ahead, and still wait on the front
+										// admitting that origin.
+										if serve.subscriber.version.has_origin() {
+											if let Err(err) = self.serving.provenance().name(start.origin) {
+												tracing::debug!(track = %serve.name, origin = start.origin.id(), "subscription changed origin");
+												return Poll::Ready(ServeEnd::GiveBack(err));
+											}
+											*active.started.lock() = true;
+										}
 										// A START describes the demand the SUBSCRIBE carried.
 										// It applies only while the current start still matches
 										// that demand (updates get no fresh START, so an update
@@ -3587,6 +3644,8 @@ struct FetchServeRun<S: crate::transport::poll::Session> {
 	session: S,
 	timescale: Option<Timescale>,
 	group: u64,
+	/// The copy's origin, which FETCH_OK names on lite-07.
+	provenance: track::Provenance,
 	state: FetchRunState<S>,
 }
 
@@ -3608,6 +3667,12 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 		stream: Stream<S, Version>,
 		frame_start: u64,
 	},
+	/// FETCH_OK named the origin: hold the frames until the front admits it.
+	Admit {
+		request: Option<group::Request>,
+		stream: Stream<S, Version>,
+		frame_start: u64,
+	},
 	Ingest {
 		stream: Stream<S, Version>,
 		producer: group::Producer,
@@ -3617,7 +3682,12 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> FetchServeRun<S> {
-	fn new(serve: TrackServe<S>, request: group::Request, timescale: Option<Timescale>) -> Self {
+	fn new(
+		serve: TrackServe<S>,
+		request: group::Request,
+		timescale: Option<Timescale>,
+		provenance: track::Provenance,
+	) -> Self {
 		let session = serve.subscriber.session.clone();
 		let group = request.sequence();
 		Self {
@@ -3625,6 +3695,7 @@ impl<S: crate::transport::poll::Session> FetchServeRun<S> {
 			session,
 			timescale,
 			group,
+			provenance,
 			state: FetchRunState::Open { request: Some(request) },
 		}
 	}
@@ -3725,11 +3796,16 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					};
 				}
 				FetchRunState::Answer { stream, .. } => {
-					// Lite has no FETCH_OK: a publisher without the group resets the
-					// stream instead. Accepting before the first byte (or a FIN, for an
-					// empty group) would resolve every joined `fetch_group` to a group
-					// that only fails on its first read, so wait for the answer.
-					let answered = ready!(stream.reader.poll_has_more(&mut cx));
+					// A publisher without the group resets the stream. Accepting before
+					// its answer (FETCH_OK on lite-07, the first byte or a FIN before)
+					// would resolve every joined `fetch_group` to a group that only fails
+					// on its first read, so wait for it. FETCH_OK names whose content
+					// follows, which a copy only takes from one origin.
+					let answered = match self.serve.subscriber.version.has_origin() {
+						true => ready!(stream.reader.poll_decode::<lite::FetchOk>(&mut cx))
+							.and_then(|ok| self.provenance.name(ok.origin)),
+						false => ready!(stream.reader.poll_has_more(&mut cx)).map(|_| ()),
+					};
 					let FetchRunState::Answer {
 						request,
 						stream,
@@ -3738,9 +3814,34 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					else {
 						unreachable!()
 					};
-					let request = request.expect("request pending");
 					if let Err(err) = answered {
 						tracing::debug!(track = %self.serve.name, group = self.group, %err, "fetch refused");
+						stream.writer.abort(&err);
+						request.expect("request pending").reject(err);
+						return Poll::Ready(());
+					}
+					self.state = FetchRunState::Admit {
+						request,
+						stream,
+						frame_start,
+					};
+				}
+				FetchRunState::Admit { .. } => {
+					let admitted = match self.serve.subscriber.version.has_origin() {
+						true => ready!(self.provenance.poll_admitted(waiter)),
+						false => Ok(()),
+					};
+					let FetchRunState::Admit {
+						request,
+						stream,
+						frame_start,
+					} = std::mem::replace(&mut self.state, FetchRunState::Done)
+					else {
+						unreachable!()
+					};
+					let request = request.expect("request pending");
+					if let Err(err) = admitted {
+						tracing::debug!(track = %self.serve.name, group = self.group, %err, "fetch from another origin");
 						stream.writer.abort(&err);
 						request.reject(err);
 						return Poll::Ready(());

@@ -3,10 +3,10 @@
 //! Workers claim the same prefix, so the pool relay advertises one route for all
 //! of them, labelled by whichever member ranks first for the prefix. Which member
 //! serves a path is the relay's per-path choice, so the label cannot say what a
-//! downstream relay is receiving; the TRACK_INFO reply does. When the serving
-//! worker dies, the pool relay re-serves the path from another worker, and the
-//! downstream relay must end its subscription rather than splice that worker's
-//! frames onto the first one's.
+//! downstream relay is receiving; the SUBSCRIBE_OK and FETCH_OK replies do. When
+//! the serving worker dies, the pool relay re-serves the path from another worker,
+//! and the downstream relay must end its subscription rather than splice that
+//! worker's frames onto the first one's.
 
 mod support;
 
@@ -100,9 +100,16 @@ async fn downstream_failover_never_splices_another_pool_member() {
 		let (hop, ..) = &members[0];
 		let survivor = format!("w{hop}").into_bytes();
 		let remote = consumer.request_broadcast("pool/job").await.unwrap();
-		let mut subscription = remote.track("video").unwrap().subscribe(None).await.unwrap();
+		let track = remote.track("video").unwrap();
+		let mut subscription = track.subscribe(None).await.unwrap();
 		let mut group = subscription.recv_group().await.unwrap().expect("a group");
 		let frame = group.read_frame().await.unwrap().expect("a frame");
+		assert_eq!(frame.payload.to_vec(), survivor);
+
+		// A group from before the subscription is fetched through both relays, each
+		// FETCH_OK naming the survivor.
+		let mut fetched = track.fetch_group(0, None).await.unwrap();
+		let frame = fetched.read_frame().await.unwrap().expect("a frame");
 		assert_eq!(frame.payload.to_vec(), survivor);
 	})
 	.await

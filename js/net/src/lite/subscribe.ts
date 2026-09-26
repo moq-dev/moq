@@ -1,7 +1,8 @@
+import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
-import { hasFrameBounds, hasGroupOrder, hasStreamCount, resolvesStart, Version } from "./version.ts";
+import { hasFrameBounds, hasGroupOrder, hasOrigin, hasStreamCount, resolvesStart, Version } from "./version.ts";
 
 /**
  * Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
@@ -432,19 +433,30 @@ export class SubscribeOk {
  */
 export class SubscribeStart {
 	group: number;
+	/**
+	 * The origin serving the subscription: the Hop ID a relay stitches failover on.
+	 * {@link UNKNOWN_HOP} names nobody. Draft-07+; older versions decode it as unknown.
+	 */
+	origin: Hop;
 
-	constructor(group: number) {
+	constructor(group: number, origin: Hop = UNKNOWN_HOP) {
 		this.group = group;
+		this.origin = origin;
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, version: Version): Promise<void> {
 		return Message.encode(w, async (w) => {
 			await w.u53(this.group);
+			if (hasOrigin(version)) await w.u62(this.origin);
 		});
 	}
 
-	static async decode(r: Reader): Promise<SubscribeStart> {
-		return Message.decode(r, async (r) => new SubscribeStart(await r.u53()));
+	static async decode(r: Reader, version: Version): Promise<SubscribeStart> {
+		return Message.decode(r, async (r) => {
+			const group = await r.u53();
+			const origin = hasOrigin(version) ? HopSchema.parse(await r.u62()) : UNKNOWN_HOP;
+			return new SubscribeStart(group, origin);
+		});
 	}
 }
 
@@ -557,7 +569,7 @@ export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse
 			// Draft-05+: SUBSCRIBE_OK is gone; START/END/DROP carry the resolved range.
 			if ("start" in resp) {
 				await w.u53(0x0);
-				await resp.start.encode(w);
+				await resp.start.encode(w, version);
 			} else if ("end" in resp) {
 				await w.u53(0x1);
 				await resp.end.encode(w, version);
@@ -592,7 +604,7 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 			const typ = await r.u53();
 			switch (typ) {
 				case 0x0:
-					return { start: await SubscribeStart.decode(r) };
+					return { start: await SubscribeStart.decode(r, version) };
 				case 0x1:
 					return { end: await SubscribeEnd.decode(r, version) };
 				case 0x2:

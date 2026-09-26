@@ -249,8 +249,8 @@ export function hasStreamCount(version: Version): boolean {
 	}
 }
 
-/** Whether TRACK_INFO names the origin serving the track, which relays stitch failover on. Added in lite-07. */
-export function hasTrackOrigin(version: Version): boolean {
+/** Whether SUBSCRIBE_OK and FETCH_OK name the origin serving the request, which relays stitch failover on. Added in lite-07, with FETCH_OK itself. */
+export function hasOrigin(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:

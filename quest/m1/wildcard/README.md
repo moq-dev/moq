@@ -63,7 +63,7 @@ path (`rs/moq-net/src/model/front.rs`) that selects through `best_route`: a
 local broadcast first, then the longest covering prefix, filtered by the
 requester's excluded hop and ordered by `route_order`, whose hash is keyed on
 the requested path so one prefix's pool shares its paths. A refusal from that
-tier is final, a front resumes only onto a source whose TRACK_INFO names the
+tier is final, a front resumes only onto a source whose SUBSCRIBE_OK names the
 same origin (the route's first hop on wires older than lite-07), and FETCH
 resolves the same way. The pattern matcher itself exists:
 `moq_net::{Pattern, Patterns, Segment}` and `Path.Pattern` /
@@ -76,7 +76,7 @@ Announcement `Epoch` was specified into lite-06 by
 removed from the draft by #3225, which retired `draft-lcurley-moq-broadcast`
 with it. [moq#3312](https://github.com/moq-dev/moq/pull/3312) restored per-path identity
 from the route's first hop, reversing #3225's no-splice rule, and lite-07 moved
-it to the origin a TRACK_INFO reply names, since a pool's one route labels
+it to the origin a SUBSCRIBE_OK or FETCH_OK names, since a pool's one route labels
 many origins. This questline builds its collision handling on that rather than
 on a generation field.
 
@@ -150,7 +150,7 @@ on a generation field.
   can hash one path to different workers before either concrete announcement
   propagates, and both land at the SAME literal path. Whichever route wins
   selection serves it, and a consumer moves between them only when the winner's
-  identity is preserved, per the resume rule (the origin a TRACK_INFO reply
+  identity is preserved, per the resume rule (the origin a SUBSCRIBE_OK
   names on lite-07, the route's first hop before it); two distinct workers are two identities,
   so the loser's subscribers end and resubscribe rather than being spliced onto
   another worker's frames mid-group. Claim routing invents neither a lease

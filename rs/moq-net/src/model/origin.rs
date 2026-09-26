@@ -2009,6 +2009,18 @@ struct TrackIo {
 	head: Option<WarmGroup>,
 	/// Whether the track had a reader as of the last demand edge.
 	used: bool,
+	/// Whether the spliced copy's named origin was handed to the machine.
+	reported: bool,
+}
+
+impl TrackIo {
+	/// Every copy the driver holds for the track, with its source.
+	fn copies(&self) -> impl Iterator<Item = (u64, &track::Consumer)> {
+		let query = self.query.as_ref().map(|(source, copy, _)| (*source, copy));
+		let staged = self.staged.as_ref().map(|(source, copy)| (*source, copy));
+		let copy = self.copy.as_ref().map(|(source, copy)| (*source, copy));
+		query.into_iter().chain(staged).chain(copy)
+	}
 }
 
 /// Drives one front: feeds the world's events to a [`Front`] and performs the
@@ -2032,6 +2044,7 @@ async fn run_front(task: FrontTask) {
 		Resolved(u64, Result<broadcast::Consumer, Error>),
 		SourceClosed(u64),
 		Info(Arc<str>, u64, Result<track::Info, Error>),
+		Origin(Arc<str>, u64, Hop),
 		Ended(Arc<str>, u64, Result<(), Error>),
 		Demand(Arc<str>),
 		Deadline,
@@ -2077,10 +2090,19 @@ async fn run_front(task: FrontTask) {
 	loop {
 		while let Some(event) = events.pop_front() {
 			let actions = front.step(event);
-			// Published before any action runs: a splice below makes a track's
-			// info visible, and a reply for it names this origin.
+			// Published before any copy is admitted below: once a copy's content
+			// flows, a reply for it names this origin.
 			*pin.lock() = front.pin();
 			broadcast.set_origin(front.origin());
+			if let Some(origin) = front.admit() {
+				for io in tracks.values() {
+					for (_, copy) in io.copies() {
+						if let Some(provenance) = copy.provenance() {
+							provenance.admit(origin);
+						}
+					}
+				}
+			}
 			for action in actions {
 				match action {
 					Action::Reselect => events.push_back(select(&mut front, &sources, &mut seen)),
@@ -2186,8 +2208,14 @@ async fn run_front(task: FrontTask) {
 					Action::Detach { source } => {
 						sources.remove(&source);
 						// Its copies go with it; the segments they delivered stay
-						// spliced until a replacement resumes past them.
+						// spliced until a replacement resumes past them. Whatever they
+						// still hold for admission never will be.
 						for io in tracks.values_mut() {
+							for (_, copy) in io.copies().filter(|(s, _)| *s == source) {
+								if let Some(provenance) = copy.provenance() {
+									provenance.refuse();
+								}
+							}
 							if io.copy.as_ref().is_some_and(|(s, _)| *s == source) {
 								io.copy = None;
 							}
@@ -2244,6 +2272,7 @@ async fn run_front(task: FrontTask) {
 						// edge the copy is asked to advance.
 						io.edge = io.resume.resume_position();
 						io.copy = Some((source, copy));
+						io.reported = false;
 					}
 					Action::Park { track: name } => {
 						let Some(io) = tracks.get_mut(&name) else { continue };
@@ -2282,6 +2311,12 @@ async fn run_front(task: FrontTask) {
 					Action::Abort { track: name, err } => {
 						if let Some(mut io) = tracks.remove(&name) {
 							tracing::debug!(name = %name, %err, "aborting track");
+							// Nothing a copy still holds for admission will be read.
+							for (_, copy) in io.copies() {
+								if let Some(provenance) = copy.provenance() {
+									provenance.refuse();
+								}
+							}
 							let _ = io.resume.abort(err);
 						}
 					}
@@ -2304,6 +2339,16 @@ async fn run_front(task: FrontTask) {
 							// ends as that copy does.
 							let waiting = io.staged.take().map(|(_, copy)| copy);
 							let waiting = waiting.or_else(|| io.query.take().map(|(_, copy, _)| copy));
+							// Whatever a copy still holds is only delivered if it is the
+							// front's origin; with none established, nobody vouches for it.
+							for copy in waiting.iter().chain(io.copy.as_ref().map(|(_, copy)| copy)) {
+								if let Some(provenance) = copy.provenance() {
+									match front.admit() {
+										Some(origin) => provenance.admit(origin),
+										None => provenance.refuse(),
+									}
+								}
+							}
 							if let Some(copy) = waiting
 								&& io.resume.is_used()
 							{
@@ -2359,6 +2404,12 @@ async fn run_front(task: FrontTask) {
 				{
 					return Poll::Ready(Step::Ended(name.clone(), *source, result));
 				}
+				if let Some((source, copy)) = &io.copy
+					&& !io.reported && let Some(provenance) = copy.provenance()
+					&& let Poll::Ready(origin) = provenance.poll_named(waiter)
+				{
+					return Poll::Ready(Step::Origin(name.clone(), *source, origin));
+				}
 				// Watch the demand edge in whichever direction is unmet.
 				let edge = match io.used {
 					true => io.resume.poll_unused(waiter),
@@ -2388,6 +2439,7 @@ async fn run_front(task: FrontTask) {
 						warm: None,
 						head: None,
 						used: false,
+						reported: false,
 					},
 				);
 				Event::TrackAssigned { track: name }
@@ -2415,6 +2467,15 @@ async fn run_front(task: FrontTask) {
 				}
 			}
 			Step::SourceClosed(source) => Event::SourceClosed { source },
+			Step::Origin(name, source, origin) => {
+				let Some(io) = tracks.get_mut(&name) else { continue };
+				io.reported = true;
+				Event::Origin {
+					track: name,
+					source,
+					origin,
+				}
+			}
 			Step::Info(name, source, result) => {
 				let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 				let Some(io) = tracks.get_mut(&name) else { continue };
@@ -6060,12 +6121,31 @@ mod tests {
 		pending.await.expect("re-request resolves through the rival");
 	}
 
-	/// Track metadata whose reply named `origin`, as a Lite07 copy's does.
-	fn named(origin: u64) -> track::Info {
-		track::Info {
-			origin: Some(Hop::from_wire(origin).unwrap()),
+	/// A copy of "video" whose reply named `member`, as a Lite07 session's is.
+	fn vouching(source: &broadcast::Producer, member: u64) -> track::Producer {
+		let info = track::Info {
+			names_origin: true,
 			..Default::default()
-		}
+		};
+		let track = source.create_track("video", info).unwrap();
+		track.provenance().name(origin(member)).unwrap();
+		track
+	}
+
+	/// Wait for the front to admit or refuse a vouching copy, which a Lite07 session
+	/// waits on before delivering anything.
+	async fn admission(track: &track::Producer) -> Result<(), Error> {
+		let provenance = track.provenance();
+		let mut admitted = None;
+		settle(|| match provenance.poll_admitted(&kio::Waiter::noop()) {
+			Poll::Ready(result) => {
+				admitted = Some(result);
+				true
+			}
+			Poll::Pending => false,
+		})
+		.await;
+		admitted.unwrap()
 	}
 
 	/// A pool front: "room/alice" served through a route labelled `first` (at
@@ -6080,10 +6160,7 @@ mod tests {
 		let pending = consumer.request_broadcast("room/alice");
 		let request = queued(&server).await;
 		let source = broadcast::Info::new().produce();
-		let track = source.create_track("video", named(member)).unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		let track = vouching(&source, member);
 		request.accept(&source);
 
 		let resolved = pending.await.expect("resolves");
@@ -6093,6 +6170,12 @@ mod tests {
 			.subscribe(None)
 			.await
 			.expect("subscribe");
+		admission(&track)
+			.await
+			.expect("the first reply names the front's origin");
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
+		group.finish().unwrap();
 		let mut group = subscription
 			.recv_group()
 			.await
@@ -6126,11 +6209,12 @@ mod tests {
 
 		let request = queued(&standby_server).await;
 		let replacement = broadcast::Info::new().produce();
-		let track = replacement.create_track("video", named(20)).unwrap();
+		let track = vouching(&replacement, 20);
+		request.accept(&replacement);
+		admission(&track).await.expect("the same origin is admitted");
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
 		group.finish().unwrap();
-		request.accept(&replacement);
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"resumed".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -6158,11 +6242,12 @@ mod tests {
 
 		let request = queued(&standby_server).await;
 		let rival = broadcast::Info::new().produce();
-		let track = rival.create_track("video", named(21)).unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"rival".as_ref()).unwrap();
-		group.finish().unwrap();
+		let track = vouching(&rival, 21);
 		request.accept(&rival);
+		assert!(
+			admission(&track).await.is_err(),
+			"another member's content is never admitted"
+		);
 
 		let err = rig.subscription.recv_group().await.err().expect("subscription ends");
 		assert!(matches!(err, Error::Dropped), "unexpected end: {err}");

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import {
@@ -149,6 +150,19 @@ test("SubscribeStart round-trips on draft-05", async () => {
 	expect("start" in got).toBe(true);
 	if (!("start" in got)) throw new Error("expected start");
 	expect(got.start.group).toBe(42);
+});
+
+test("SubscribeStart names the origin on draft-07", async () => {
+	const start = new SubscribeStart(7, HopSchema.parse(42n));
+	// Type, length, group, origin; draft-06 has no room for the origin.
+	expect(await encode(Version.DRAFT_07, { start })).toEqual(new Uint8Array([0, 2, 7, 42]));
+	expect(await encode(Version.DRAFT_06, { start })).toEqual(new Uint8Array([0, 1, 7]));
+	const got = await responseRoundtrip(Version.DRAFT_07, { start });
+	if (!("start" in got)) throw new Error("expected start");
+	expect([got.start.group, got.start.origin]).toEqual([7, HopSchema.parse(42n)]);
+	const old = await responseRoundtrip(Version.DRAFT_06, { start });
+	if (!("start" in old)) throw new Error("expected start");
+	expect(old.start.origin).toBe(UNKNOWN_HOP);
 });
 
 test("SubscribeEnd round-trips on draft-05", async () => {

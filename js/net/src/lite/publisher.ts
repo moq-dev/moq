@@ -13,7 +13,7 @@ import { type Advertised, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import * as DatagramStream from "./datagram_stream.ts";
-import type { Fetch } from "./fetch.ts";
+import { type Fetch, FetchOk } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Priority, sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
@@ -31,6 +31,7 @@ import {
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasDatagrams,
+	hasOrigin,
 	hasProbeRtt,
 	hasStreamCount,
 	resolvesStart,
@@ -705,6 +706,7 @@ export class Publisher {
 			// come off the same front, so the metadata and the frames are one generation.
 			const info = await this.#resolveTrackInfo(front, msg.track);
 			group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
+			if (hasOrigin(this.version)) await new FetchOk(this.hop).encode(stream.writer, this.version);
 			await this.#runFetchGroup(group, stream.writer, {
 				timescale: Timescale(info.timescale),
 				start: msg.startFrame,
@@ -879,7 +881,8 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(group.sequence) },
+								// This session names itself: it serves what its application publishes.
+								{ start: new SubscribeStart(group.sequence, this.hop) },
 								this.version,
 							),
 						))
@@ -962,8 +965,6 @@ export class Publisher {
 				// Lite05 mandates per-frame timestamps. Advertise the track's timescale;
 				// `#serveGroup` emits each frame converted to it.
 				timescale: info.timescale,
-				// This session names itself: it serves what its application publishes.
-				origin: this.hop,
 			});
 		})();
 
