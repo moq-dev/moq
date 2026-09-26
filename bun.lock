@@ -74,7 +74,7 @@
     },
     "js/auth": {
       "name": "@moq/auth",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "bin": {
         "moq-auth": "./src/cli.ts",
       },
@@ -95,7 +95,7 @@
     },
     "js/binary": {
       "name": "@moq/binary",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "dependencies": {
         "@moq/flate": "workspace:^",
         "@moq/net": "workspace:^",
@@ -138,7 +138,7 @@
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.10.9",
@@ -162,7 +162,7 @@
     },
     "js/json": {
       "name": "@moq/json",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "dependencies": {
         "@moq/flate": "workspace:^",
         "@moq/net": "workspace:^",
@@ -192,7 +192,7 @@
     },
     "js/moq-boy": {
       "name": "@moq/boy",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "dependencies": {
         "@moq/json": "workspace:^",
         "@moq/net": "workspace:^",
@@ -226,7 +226,7 @@
     },
     "js/net": {
       "name": "@moq/net",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "dependencies": {
         "@moq/pattern": "workspace:^",
         "@moq/qmux": "^0.3.3",
@@ -258,7 +258,7 @@
     },
     "js/publish": {
       "name": "@moq/publish",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",
@@ -278,7 +278,7 @@
     },
     "js/room": {
       "name": "@moq/room",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",
@@ -298,7 +298,7 @@
     },
     "js/signals": {
       "name": "@moq/signals",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "devDependencies": {
         "@types/bun": "^1.4.2",
         "@types/react": "^19.3.0",
@@ -324,7 +324,7 @@
     },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.6.0",
+      "version": "0.6.1",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",
