@@ -237,7 +237,7 @@ web-transport-iroh = "0.8"
 # default-features off so the QUIC crypto provider is chosen by moq-tokio's
 # aws-lc-rs / ring features.
 # The WebTransport adapter released with moq-noq, from the same repository.
-web-transport-moq = { version = "1.3.1", default-features = false }
+web-transport-moq = { version = "1.3.2", default-features = false }
 web-transport-proto = "0.6"
 web-transport-trait = "0.5"
 web-transport-wasm = "0.7"
