@@ -36,6 +36,8 @@ pub(crate) struct Pipeline {
 	source: moq_net::broadcast::Consumer,
 	config: Config,
 	active: active::Producer,
+	/// Which codecs this host decodes, so a catalog edit never probes again.
+	decoders: catalog::Decoders,
 
 	/// The source rendition the rungs are sized against.
 	name: String,
@@ -62,6 +64,7 @@ impl Pipeline {
 		source: moq_net::broadcast::Consumer,
 		config: Config,
 		active: active::Producer,
+		decoders: catalog::Decoders,
 		name: String,
 		rendition: VideoConfig,
 	) -> Result<Self, Error> {
@@ -73,6 +76,7 @@ impl Pipeline {
 			source,
 			config,
 			active,
+			decoders,
 			name,
 			rendition,
 			feed,
@@ -165,7 +169,7 @@ impl Pipeline {
 
 	/// Resolve the ladder again against a new source catalog snapshot.
 	pub(crate) async fn follow(&mut self, video: &Video) -> Result<(), Error> {
-		let (name, rendition) = match catalog::follow_source(video, &self.name) {
+		let (name, rendition) = match catalog::follow_source(video, &self.name, &mut self.decoders).await {
 			Ok(chosen) => chosen,
 			// Nothing transcodable in this snapshot: keep serving the ladder we
 			// have rather than tearing it down over an edit the source may undo.

@@ -1214,12 +1214,16 @@ impl Group {
 			Some((_, err)) => {
 				// The only place a spliced group's loss becomes visible, so say which
 				// frames went missing rather than leaving a stuck group to explain itself.
-				tracing::warn!(
-					group = self.sequence,
-					frame = self.index,
-					%err,
-					"no route can serve the rest of this group"
-				);
+				// An old group was skipped on purpose (something newer superseded it), so
+				// it is not a loss worth reporting.
+				if !matches!(crate::StreamError::from(err), crate::StreamError::Old) {
+					tracing::warn!(
+						group = self.sequence,
+						frame = self.index,
+						%err,
+						"no route can serve the rest of this group"
+					);
+				}
 				Err(err.clone())
 			}
 			None => Ok(false),

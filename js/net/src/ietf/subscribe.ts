@@ -276,10 +276,9 @@ export class SubscribeOk {
 		let properties: Properties.Properties = {};
 
 		if (version === Version.DRAFT_14) {
-			const expires = await r.u62();
-			if (expires !== BigInt(0)) {
-				throw new Error(`unsupported expires: ${expires}`);
-			}
+			// EXPIRES is when the publisher expects to end the subscription. That end
+			// arrives as PUBLISH_DONE regardless, so there is nothing to act on.
+			await r.u62();
 
 			await r.u8(); // Don't care about group order
 

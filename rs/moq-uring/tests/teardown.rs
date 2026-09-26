@@ -103,7 +103,9 @@ fn a_published_close_has_already_left_the_client() {
 	let server_addr = server_sock.local_addr().expect("server addr");
 
 	// The server outlives the client's teardown, so its verdict is only about
-	// what the client managed to send.
+	// what the client managed to send. It reports in once serving, so a setup
+	// failure fails here instead of as a dial that idles out.
+	let (ready, started) = std::sync::mpsc::channel();
 	let server = std::thread::spawn(move || -> quic::Error {
 		let mut worker = Worker::new(Config::default()).expect("server worker");
 		let handle = worker.handle();
@@ -113,6 +115,7 @@ fn a_published_close_has_already_left_the_client() {
 			quic::endpoint::Config::default().with_server(server_config(&certs)),
 		)
 		.expect("endpoint");
+		ready.send(()).expect("test alive");
 		worker
 			.block_on(async move {
 				let mut conn = endpoint.accept().await.expect("accept");
@@ -120,6 +123,7 @@ fn a_published_close_has_already_left_the_client() {
 			})
 			.expect("server worker")
 	});
+	started.recv().expect("the server thread failed to start");
 
 	let handle = client_worker.handle();
 	let sock = handle

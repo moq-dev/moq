@@ -43,7 +43,7 @@ async fn connect_datagram_track() -> Fixture {
 	broadcast.announce(Default::default()).unwrap();
 
 	let mut options = MockConnectOptions::new("moq-lite-05".parse::<Version>().unwrap());
-	options.server_publish = Some(publisher);
+	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(consumer_origin.clone());
 	let pair = connect_mock(options).await;
 
@@ -122,7 +122,7 @@ async fn ietf_does_not_deliver_datagrams() {
 		broadcast.announce(Default::default()).unwrap();
 
 		let mut options = MockConnectOptions::new("moq-transport-19".parse::<Version>().unwrap());
-		options.server_publish = Some(publisher);
+		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(consumer_origin.clone());
 		let _pair = connect_mock(options).await;
 

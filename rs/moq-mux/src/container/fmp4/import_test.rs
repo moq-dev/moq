@@ -1192,3 +1192,157 @@ fn fragment_jitter_uses_sample_endpoints() {
 		assert_eq!(jitter.as_nanos().div_ceil(1_000_000), expected);
 	}
 }
+
+/// One encoder session of bbb-shaped fragments: `frames` 100ms video fragments from `start_us`,
+/// a keyframe each second, interleaved with audio fragments up to 300ms earlier in PTS.
+fn live_session(start_us: u64, frames: u64) -> Vec<u8> {
+	let (_, (video_id, video_scale), (audio_id, audio_scale)) = bbb_init();
+	let lead = start_us.min(300_000);
+	let mut out = Vec::new();
+	for j in 0..frames {
+		let pts = start_us + j * 100_000;
+		let video = sample(pts, j % 10 == 0, Some(100_000));
+		out.extend_from_slice(&super::encode_fragment(info(video_id, video_scale, j as u32), &[video]).unwrap());
+		let audio = sample(pts - lead, true, Some(100_000));
+		out.extend_from_slice(&super::encode_fragment(info(audio_id, audio_scale, j as u32), &[audio]).unwrap());
+	}
+	out
+}
+
+/// What an fMP4 import published, plus the broadcast clock's reading around the first chunk.
+struct LiveImport {
+	published: std::collections::BTreeMap<String, Vec<u128>>,
+	video: String,
+	clock: crate::Clock,
+	before: u128,
+	after: u128,
+	/// The first segment the broadcast timeline recorded, the index an archive replays from.
+	record: moq_net::Timestamp,
+}
+
+/// Import bbb's init then `chunks`, idling `idle` between them, on a clock that began `ago`
+/// earlier. `live` translates onto that clock; otherwise decode times publish verbatim.
+async fn live_import(
+	chunks: &[Vec<u8>],
+	live: bool,
+	ago: std::time::Duration,
+	idle: std::time::Duration,
+) -> LiveImport {
+	let (init, _, _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let config = crate::catalog::Config::default().with_clock(crate::container::test_util::late_clock(ago));
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
+	let clock = catalog.clock();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	if live {
+		fmp4 = fmp4.live();
+	}
+	fmp4.decode(&init).unwrap();
+
+	let snapshot = catalog.snapshot();
+	let section = snapshot.archive.clone().expect("the import advertises a timeline");
+	let mut timeline = crate::timeline::Consumer::<()>::subscribe(&consumer, &section)
+		.await
+		.unwrap();
+
+	let before = clock.now().as_micros();
+	let mut after = before;
+	for (i, chunk) in chunks.iter().enumerate() {
+		if i > 0 {
+			std::thread::sleep(idle);
+		}
+		fmp4.decode(chunk).unwrap();
+		if i == 0 {
+			after = clock.now().as_micros();
+		}
+	}
+	fmp4.finish().unwrap();
+	catalog.finish().unwrap();
+
+	let event = timeline.next().await.unwrap().expect("a recorded segment");
+	let crate::timeline::Event::Push { entry, .. } = event else {
+		panic!("the first timeline event was not a segment");
+	};
+
+	LiveImport {
+		published: crate::container::test_util::published(&consumer, &snapshot).await,
+		video: snapshot.video.renditions.keys().next().unwrap().clone(),
+		clock,
+		before,
+		after,
+		record: entry.pts,
+	}
+}
+
+/// A feed an hour into its own decode timeline, arriving 30s after the broadcast began, publishes
+/// on the broadcast clock: the `tfdt` a decoder reads is rewritten so the first fragment is live
+/// on arrival, and every track moves by the one offset. The archive index records the same times,
+/// so a replay names each segment's real wall time.
+#[tokio::test]
+async fn live_import_rewrites_tfdt_onto_the_broadcast_clock() {
+	let input = [live_session(3_600_000_000, 20)];
+	let ago = std::time::Duration::from_secs(30);
+	let verbatim = live_import(&input, false, ago, std::time::Duration::ZERO).await;
+	let wall_before = std::time::SystemTime::now();
+	let live = live_import(&input, true, ago, std::time::Duration::ZERO).await;
+	let wall_after = std::time::SystemTime::now();
+
+	crate::container::test_util::common_offset(&verbatim.published, &live.published);
+	let first = live.published[&live.video][0];
+	assert!(
+		(live.before..=live.after).contains(&first),
+		"the first fragment is live on arrival: {first} not in {}..={}",
+		live.before,
+		live.after
+	);
+
+	// The timeline records at a coarser scale, so allow its rounding.
+	let tick = std::time::Duration::from_millis(1);
+	assert!(
+		first.abs_diff(live.record.as_micros()) < tick.as_micros(),
+		"the archive indexes the translated time"
+	);
+	let wall = live.clock.wall_clock(live.record).unwrap();
+	assert!(
+		wall_before - tick <= wall && wall <= wall_after,
+		"a replayed segment names the wall time it went live"
+	);
+}
+
+/// A source whose decode times restart at zero continues forward after the real idle gap rather
+/// than being refused as non-monotonic, with every track moving onto one new mapping.
+#[tokio::test]
+async fn live_import_restarts_forward_after_idle() {
+	for idle in [std::time::Duration::ZERO, std::time::Duration::from_millis(300)] {
+		let input = [live_session(5_000_000, 20), live_session(0, 20)];
+		let live = live_import(&input, true, std::time::Duration::from_secs(30), idle).await;
+
+		// The restart lands the arrival gap after the first session's last fragment, and never on
+		// top of it: that fragment lasts 100ms.
+		let last = live
+			.published
+			.values()
+			.map(|t| t[..20].iter().max().unwrap())
+			.max()
+			.unwrap();
+		let gap = live.published[&live.video][20] as i128 - *last as i128;
+		let floor = idle.max(std::time::Duration::from_millis(100));
+		assert!(
+			gap >= floor.as_micros() as i128,
+			"the restart lands after the idle gap: {gap}us after {idle:?}"
+		);
+		assert!(
+			gap < (idle + std::time::Duration::from_secs(5)).as_micros() as i128,
+			"the restart is not pushed further: {gap}us"
+		);
+
+		let verbatim = live_import(&input[1..], false, std::time::Duration::ZERO, std::time::Duration::ZERO).await;
+		let second = live
+			.published
+			.iter()
+			.map(|(name, t)| (name.clone(), t[20..].to_vec()))
+			.collect();
+		crate::container::test_util::common_offset(&verbatim.published, &second);
+	}
+}

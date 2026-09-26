@@ -165,11 +165,11 @@ mod tests {
 	use super::*;
 	use crate::server::{Reject, Request, Server};
 
-	/// Grab a free UDP port by binding `:0` and releasing it. Racy in principle, but
-	/// the window before the SRT server rebinds it is tiny; good enough for a test.
-	async fn free_udp_addr() -> SocketAddr {
-		let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-		sock.local_addr().unwrap()
+	/// An SRT server on an ephemeral loopback port.
+	async fn loopback() -> (Server, SocketAddr) {
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), None).await.unwrap();
+		let addr = server.local_addr();
+		(server, addr)
 	}
 
 	/// Loopback: dial the crate's own server with `m=publish`. The server classifies it
@@ -179,8 +179,7 @@ mod tests {
 	/// integration coverage; the TS bridge itself is shared with the tested server path.)
 	#[tokio::test]
 	async fn publish_caller_connects_and_routes() {
-		let addr = free_udp_addr().await;
-		let mut server = Server::bind(addr, None).await.unwrap();
+		let (mut server, addr) = loopback().await;
 
 		// Server accepts the publish so the caller's handshake completes; it ingests into
 		// a throwaway origin and returns the routed direction + resource.
@@ -219,8 +218,7 @@ mod tests {
 	/// routes to a server [`Request::Subscribe`].
 	#[tokio::test]
 	async fn request_caller_connects_and_routes() {
-		let addr = free_udp_addr().await;
-		let mut server = Server::bind(addr, None).await.unwrap();
+		let (mut server, addr) = loopback().await;
 
 		// Empty origin: the subscribe accept parks waiting for the broadcast, which is
 		// fine -- the caller still connects, and the test aborts the wait.
@@ -260,8 +258,7 @@ mod tests {
 	/// caller's handshake completes stops the listener that still owes it the
 	/// rejection packet, and the caller times out instead.
 	async fn rejected(mode: Mode, reason: Reject, code: i32) {
-		let addr = free_udp_addr().await;
-		let mut server = Server::bind(addr, None).await.unwrap();
+		let (mut server, addr) = loopback().await;
 		let client = Client::new(addr, "cam0");
 
 		let (_, err) = tokio::join!(

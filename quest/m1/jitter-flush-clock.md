@@ -34,13 +34,11 @@ media span of each emitted batch and advertise no `delay`.
   it. The provisional PTS-gap floor is gone, and `moq_mux::Error::JitterDecreased`
   plus zero-as-absent text jitter enforce never-lower in Rust and JS.
   `moq-gst` pads opt in with `encoder=true`; imports stay clock-free.
-  What remains below is `delay` and the player. libmoq and moq-ffi expose
-  `flush` but no discontinuity, so a binding publisher that pauses and resumes
-  on a re-anchored PTS within the window would count the pause; add one when
-  such a caller appears. A `moq-gst` encoder pad has the same gap across a
-  `PLAYING -> PAUSED -> PLAYING` cycle (running time stops, the wall clock
-  does not) and a flushing seek, since `import::Track` forwards no
-  discontinuity.
+  What remains below is `delay` and the player. A seek or pause resetting the
+  baseline from moqsink and the bindings is
+  [Import discontinuity](/quest/m1/import-discontinuity.md), including a
+  `moq-gst` encoder pad across a `PLAYING -> PAUSED -> PLAYING` cycle (running
+  time stops, the wall clock does not) and a flushing seek.
 - **Measurement.** Lateness is `now - timestamp`, observed by the existing
   `flush` calls, so no call site changes. Each rendition keeps its own
   baseline, the minimum lateness over a sliding window (about 10 s), so a media

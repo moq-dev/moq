@@ -484,13 +484,14 @@ impl Server {
 		health
 	}
 
-	/// Start serving: bind whatever is still unbound and hand back the
-	/// [`Listener`] to accept sessions from.
+	/// Bind whatever is still unbound and hand back the [`Listener`], without
+	/// accepting.
 	///
-	/// Terminal, and that is the point: it consumes the `Server`, so the builders
-	/// above cannot run afterwards and every session is served the configuration
-	/// this call captured. The QUIC socket is bound by [`crate::listen::Config::init`], but
-	/// the stream (`tcp`/`unix`) listeners need a runtime, so they bind here.
+	/// Same terminal bind as [`listen`](Self::listen), including ephemeral ports
+	/// via [`Listener::tcp_local_addr`]. Stream accept loops stay stopped until
+	/// [`Listener::accept`], so nothing is read off the socket before the caller
+	/// is ready to take sessions. [`listen`](Self::listen) is this plus starting
+	/// those loops immediately.
 	///
 	/// A bind failure is the error, not a silent `None` from a later accept. It
 	/// leaves nothing bound: the partially built `Listener` drops here, closing
@@ -498,18 +499,48 @@ impl Server {
 	/// again.
 	// `mut` is only needed to bind the stream listeners, which a QUIC-only build has none of.
 	#[allow(unused_mut)]
-	pub async fn listen(mut self) -> crate::Result<Listener> {
+	pub async fn bind(mut self) -> crate::Result<Listener> {
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-		{
-			// The stream listeners offer a wider version set than the server's own
-			// (see `stream_versions`), against the same configuration.
-			let server = self.moq.clone().with_versions(self.streams.versions.clone());
-			self.streams.start(&server).await?;
-		}
+		self.streams.bind().await?;
 		Ok(Listener { server: self })
 	}
 
-	/// The body of [`Listener::accept`]; the listeners are already running.
+	/// Start serving: bind whatever is still unbound and hand back the
+	/// [`Listener`] to accept sessions from.
+	///
+	/// Terminal, and that is the point: it consumes the `Server`, so the builders
+	/// above cannot run afterwards and every session is served the configuration
+	/// this call captured. The QUIC socket is bound by [`crate::listen::Config::init`], but
+	/// the stream (`tcp`/`unix`) listeners need a runtime, so they bind here, and
+	/// their accept loops start here too. Use [`bind`](Self::bind) to learn the
+	/// port without accepting yet.
+	///
+	/// A bind failure is the error, not a silent `None` from a later accept. It
+	/// leaves nothing bound: the partially built `Listener` drops here, closing
+	/// whatever it opened. Build a fresh `Server` from the (cloneable) config to try
+	/// again.
+	pub async fn listen(self) -> crate::Result<Listener> {
+		#[cfg(not(any(feature = "tcp", all(feature = "uds", unix))))]
+		{
+			self.bind().await
+		}
+		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+		{
+			let mut listener = self.bind().await?;
+			// Accept immediately, so a dial can finish its handshake before the
+			// caller polls `accept`. `bind` leaves that until the first accept.
+			let server = listener
+				.server
+				.moq
+				.clone()
+				.with_versions(listener.server.streams.versions.clone());
+			listener.server.streams.serve(&server);
+			Ok(listener)
+		}
+	}
+
+	/// The body of [`Listener::accept`]. Stream accept loops start here if
+	/// [`Server::bind`] left them stopped; [`Server::listen`] already started them.
 	#[cfg(any(
 		feature = "noq",
 		feature = "iroh",
@@ -518,6 +549,14 @@ impl Server {
 		all(feature = "uds", unix)
 	))]
 	async fn accept_next(&mut self) -> Option<Request> {
+		// A `bind` (rather than `listen`) leaves the stream loops stopped so an
+		// embedder can read the port before it is willing to take sessions.
+		// Starting them here, on the first accept, is that moment.
+		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+		{
+			let server = self.moq.clone().with_versions(self.streams.versions.clone());
+			self.streams.serve(&server);
+		}
 		loop {
 			// The QUIC endpoint address, reported as a QUIC session's local side.
 			#[cfg(feature = "noq")]
@@ -825,10 +864,11 @@ impl StreamBind {
 
 /// The stream (`tcp`/`unix`) listeners owned by a [`Server`].
 ///
-/// Bound by [`Server::listen`] (they need a runtime), after which each runs an
-/// accept loop in its own task and feeds completed [`Request`]s back over a channel.
-/// The tasks own their listeners and are stopped when the [`Listener`] closes or
-/// drops, so bound sockets don't linger.
+/// Bound by [`Server::bind`] (they need a runtime). [`Server::listen`] then starts
+/// each accept loop; a bind-only listener starts them on the first
+/// [`Listener::accept`] instead. Each loop feeds completed [`Request`]s back over
+/// a channel. The tasks own their listeners and are stopped when the [`Listener`]
+/// closes or drops, so bound sockets don't linger.
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 struct StreamListeners {
 	binds: Vec<StreamBind>,
@@ -839,7 +879,10 @@ struct StreamListeners {
 	versions: moq_net::Versions,
 	#[cfg(all(feature = "uds", unix))]
 	unix_allow: Option<crate::unix::Allow>,
-	/// The address the TCP listener bound, once [`Self::start`] has run.
+	/// Bound sockets whose accept loops have not started. Empty once [`Self::serve`]
+	/// runs, and when nothing was configured.
+	pending: Vec<BoundListener>,
+	/// The address the TCP listener bound, once [`Self::bind`] has run.
 	#[cfg(feature = "tcp")]
 	tcp_local_addr: Option<net::SocketAddr>,
 	rx: Option<tokio::sync::mpsc::Receiver<Request>>,
@@ -863,6 +906,7 @@ impl StreamListeners {
 			versions,
 			#[cfg(all(feature = "uds", unix))]
 			unix_allow,
+			pending: Vec::new(),
 			#[cfg(feature = "tcp")]
 			tcp_local_addr: None,
 			rx: None,
@@ -870,21 +914,17 @@ impl StreamListeners {
 		}
 	}
 
-	/// Bind every configured listener and spawn its accept loop.
+	/// Bind every configured listener without accepting.
 	///
-	/// Called once, from [`Server::listen`]. Everything binds before anything is
-	/// spawned, so a failure part-way drops the listeners already opened and frees
-	/// their sockets there and then, rather than leaving accept loops to be aborted
-	/// at some later point.
-	///
-	/// `server` is the configuration each accepted session handshakes against,
-	/// already fixed by the time this runs.
-	async fn start(&mut self, server: &moq_net::Server) -> crate::Result<()> {
+	/// Everything binds before [`Self::serve`] starts a loop, so a failure
+	/// part-way drops the listeners already opened and frees their sockets there
+	/// and then, rather than leaving accept loops to be aborted later.
+	async fn bind(&mut self) -> crate::Result<()> {
 		if self.binds.is_empty() {
 			return Ok(());
 		}
 
-		let mut bound = Vec::with_capacity(self.binds.len());
+		let mut pending = Vec::with_capacity(self.binds.len());
 		for (bind, health) in self.binds.drain(..).zip(self.health.iter().cloned()) {
 			let alpns = self.versions.alpns();
 			match bind {
@@ -900,7 +940,7 @@ impl StreamListeners {
 					let local = listener.local_addr()?;
 					tracing::info!(addr = %local, "listening (tcp)");
 					self.tcp_local_addr = Some(local);
-					bound.push(BoundListener::Tcp(listener));
+					pending.push(BoundListener::Tcp(listener));
 				}
 				#[cfg(all(feature = "uds", unix))]
 				StreamBind::Unix(path) => {
@@ -912,13 +952,26 @@ impl StreamListeners {
 					// directory or uid/gid/pid allowlist is the access gate.
 					listener.set_mode(0o666)?;
 					tracing::info!(path = %path.display(), allow = ?self.unix_allow, "listening (unix)");
-					bound.push(BoundListener::Unix(listener));
+					pending.push(BoundListener::Unix(listener));
 				}
 			}
 		}
+		self.pending = pending;
+		Ok(())
+	}
+
+	/// Spawn an accept loop for every listener [`Self::bind`] opened.
+	///
+	/// No-op when nothing is waiting: either nothing was configured, or the loops
+	/// are already running. `server` is the configuration each accepted session
+	/// handshakes against, fixed by the time this runs.
+	fn serve(&mut self, server: &moq_net::Server) {
+		if self.pending.is_empty() {
+			return;
+		}
 
 		let (tx, rx) = tokio::sync::mpsc::channel(16);
-		for listener in bound {
+		for listener in self.pending.drain(..) {
 			let task = match listener {
 				#[cfg(feature = "tcp")]
 				BoundListener::Tcp(listener) => spawn_tcp_loop(listener, server.clone(), tx.clone()),
@@ -927,9 +980,7 @@ impl StreamListeners {
 			};
 			self.tasks.push(task);
 		}
-
 		self.rx = Some(rx);
-		Ok(())
 	}
 
 	/// Yield the next stream [`Request`], or `None` if no listener is running:
@@ -944,6 +995,9 @@ impl StreamListeners {
 	/// Stop every accept loop and wait until its listener has released the socket.
 	async fn shutdown(&mut self) {
 		self.binds.clear();
+		// Drop sockets that were bound but never accepted, so the address frees
+		// even when `run` never started the loops.
+		self.pending.clear();
 		self.rx = None;
 		for task in self.tasks.drain(..) {
 			task.abort();
@@ -1506,30 +1560,6 @@ mod tests {
 		std::net::TcpListener::bind(("127.0.0.1", port)).expect("the tcp port must be free again");
 	}
 
-	/// Closing consumes the listener and immediately releases its stream sockets.
-	#[cfg(feature = "tcp")]
-	#[tokio::test]
-	async fn close_releases_stream_listeners() {
-		let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe");
-		let addr = probe.local_addr().expect("probe addr");
-		drop(probe);
-
-		let mut config = crate::listen::Config::default();
-		config.tcp.bind = Some(addr);
-		let listener = Config {
-			listen: config,
-			..Default::default()
-		}
-		.init()
-		.expect("stream-only server")
-		.listen()
-		.await
-		.expect("listen");
-
-		listener.close().await;
-		std::net::TcpListener::bind(addr).expect("close must release the tcp port");
-	}
-
 	/// The stream listeners must hand accepted sessions to the *configured*
 	/// [`moq_net::Server`]. [`Server::serve_publish`] sets the publisher there
 	/// rather than on the request, so a session that handshakes against any other
@@ -1632,12 +1662,8 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn close_releases_stream_listener_socket() {
-		let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let addr = probe.local_addr().unwrap();
-		drop(probe);
-
 		let mut config = crate::listen::Config::default();
-		config.tcp.bind = Some(addr);
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		let server = Config {
 			listen: config,
 			..Default::default()
@@ -1645,6 +1671,7 @@ mod tests {
 		.init()
 		.expect("stream-only server");
 		let listener = server.listen().await.expect("listen");
+		let addr = listener.tcp_local_addr().expect("tcp listener bound");
 		assert!(tokio::net::TcpListener::bind(addr).await.is_err(), "listener is bound");
 
 		listener.close().await;

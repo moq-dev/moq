@@ -42,7 +42,7 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 			broadcast.announce(Default::default()).unwrap();
 
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
-			options.server_publish = Some(publisher);
+			options.server_publish = Some(publisher.consume());
 			options.client_subscribe = Some(relay.clone());
 			let _pair = connect_mock(options).await;
 
