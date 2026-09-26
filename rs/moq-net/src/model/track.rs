@@ -241,6 +241,10 @@ pub(crate) struct TrackState {
 	// The error that caused the track to be aborted, if any.
 	abort: Option<Error>,
 
+	// Whether the declared end still stands after an abort: every group below it was
+	// produced and finished before the abort landed. See [`Self::is_complete`].
+	settled: bool,
+
 	// Active subscriptions, in their own [`kio::Shared`] so a read-only `Consumer`
 	// registers under that lock instead of writing back into the track state.
 	// Kept here (rather than threaded through every handle) so any holder reaches it.
@@ -1077,9 +1081,25 @@ impl TrackState {
 	/// until the remaining groups are produced, or until the last producer drops without
 	/// them. Drives the end-of-stream signal from
 	/// the read methods (`recv_group` / `next_group` / `read_frame` return `None`).
+	///
+	/// An abort before the end settled wins over it: a group below the boundary was
+	/// still open, so the track was cut off rather than ended.
 	fn is_complete(&self) -> bool {
-		self.final_sequence
-			.is_some_and(|fin| self.sealed || self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin)
+		// `sealed` is a clean end when the last producer drops. An abort still wins
+		// unless that end had already settled: a group below it was still open.
+		let reached = self
+			.final_sequence
+			.is_some_and(|fin| self.sealed || self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin);
+		reached && (self.abort.is_none() || self.settled)
+	}
+
+	/// Whether the declared end is reached and every cached group below it finished,
+	/// so nothing the end promised is still in flight.
+	fn is_settled(&self) -> bool {
+		let Some(fin) = self.final_sequence else {
+			return false;
+		};
+		self.is_complete() && self.lookup.range(..fin).all(|(_, slot)| slot.group.is_finished())
 	}
 
 	/// Where a replacement route should pick this track up: one past the last frame
@@ -1172,6 +1192,8 @@ fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) {
 	// Snapshot the frame boundary before the cache it's derived from goes away: an
 	// abort is exactly when a replacement route asks where to resume.
 	state.resume = state.resume_position();
+	// Decided before the cache goes: the groups below the end are the evidence.
+	state.settled = state.is_settled();
 	state.abort = Some(err);
 	state.clear_cache();
 	state.datagrams.clear();
@@ -6892,6 +6914,43 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored");
 		assert!(done.is_none(), "track completes once the boundary is reached");
+	}
+
+	/// An abort before the declared end settled wins over it: the boundary was reached,
+	/// but a group below it was still open, so the track was cut off rather than ended.
+	#[tokio::test]
+	async fn abort_before_the_end_settles_wins() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+
+		let head = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		head.finish().unwrap();
+		let _tail = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		producer.finish_at(2).unwrap();
+		assert_eq!(consumer.assert_group().sequence, 0);
+
+		producer.abort(Error::Timeout).unwrap();
+		let res = consumer.recv_group().now_or_never().expect("should not block");
+		assert!(matches!(res, Err(Error::Timeout)));
+	}
+
+	/// An abort after every group below the declared end finished leaves the end standing.
+	#[tokio::test]
+	async fn abort_after_the_end_settles_ends_clean() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+
+		for sequence in 0..2 {
+			let group = producer.create_group(group::Info { sequence }).unwrap();
+			group.finish().unwrap();
+		}
+		producer.finish_at(2).unwrap();
+		assert_eq!(consumer.assert_group().sequence, 0);
+		assert_eq!(consumer.assert_group().sequence, 1);
+
+		producer.abort(Error::Timeout).unwrap();
+		let res = consumer.recv_group().now_or_never().expect("should not block");
+		assert!(matches!(res, Ok(None)));
 	}
 
 	#[tokio::test]

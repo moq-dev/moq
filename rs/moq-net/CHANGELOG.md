@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/moq-dev/moq/compare/moq-net-v0.3.4...moq-net-v0.3.5) - 2026-09-26
+
+### Added
+
+- *(net)* count lite-07 group streams in SUBSCRIBE_END ([#4118](https://github.com/moq-dev/moq/pull/4118))
+
+### Fixed
+
+- *(net)* accept EXPIRES in SUBSCRIBE_OK, PUBLISH_OK, and REQUEST_OK ([#4195](https://github.com/moq-dev/moq/pull/4195))
+
 ## [0.3.4](https://github.com/moq-dev/moq/compare/moq-net-v0.3.3...moq-net-v0.3.4) - 2026-09-25
 
 ### Fixed
