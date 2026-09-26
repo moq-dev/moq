@@ -21,6 +21,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [lite-07 count settle](/quest/m1/lite-count-settle.md) - moq-lite-07 subscribers stop waiting for a subscription's tail once SUBSCRIBE_END's stream count is reached
 - [Dropped sources](/quest/m1/dropped-sources.md) - consumers see the producer's real error on every end path, never `Dropped`
 - [JS bare FIN](/quest/m1/js-bare-fin.md) - a `@moq/net` subscriber aborts a track whose subscribe stream FINs before its declared end, like Rust
+- [JS group guard](/quest/m1/js-group-guard.md) - a `@moq/net` publisher abandons a group past its max age without an unhandled rejection
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
 - [Interop flakes](/quest/m1/interop-flakes.md) - the interop harness passes with other runs sharing the machine
 - [Signal.race cleanup](/quest/m1/signal-race.md) - `Signal.race` releases its signal listeners when its result loses a race
@@ -33,6 +34,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [CLI inspection](/quest/m1/cli-inspect/README.md) - `moq ls` lists what is live and `moq fetch` reads a group over MoQ, and a guide shows how to inspect a relay
 - [JS origin scope](/quest/m1/js-origin-scope.md) - a scoped `@moq/net` origin subscribes only to its allowed prefixes
 - [Session close](/quest/m1/session-close.md) - a graceful session end withdraws announces and waits one second for the ack
+- [Close codes](/quest/m1/close-codes.md) - a client sees the peer's application close code over WebSocket and raw QUIC, like WebTransport
 - [JS caught up](/quest/m1/js-announce-caught-up.md) - @moq/net's announce consumer says when the initial set has landed, like Rust
 - [Bindings caught up](/quest/m1/announce-live-bindings.md) - moq-ffi, libmoq, and every wrapper yield the same flat announce event, `Live` included
 - [Optional max age](/quest/m1/ietf-max-age.md) - max age is optional, set only by the publisher, and crosses moq-transport as MAX_CACHE_DURATION
@@ -54,6 +56,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - generated C++ over moq-ffi with futures and expected-style errors, shipped as a tarball, vcpkg, and Conan, and adopted by the OBS plugin
 - [moq-c](/quest/m1/moq-c.md) - libmoq ships as `moq-c`, beside `moq-cpp`, with its C header and library unchanged
 - [OBS native codecs](/quest/m1/obs-moq-video/README.md) - remove FFmpeg decoding dependencies, deliver GPU frames, and use native audio/video encoders
+- [Opus concealment](/quest/m1/opus-conceal.md) - a lost Opus packet conceals the last packet's length, not 120 ms
 - [Audio codecs](/quest/m1/audio-codecs/README.md) - platform audio codecs, explicit unsupported cases, and channel layouts up to 7.1
 - [CMAF Opus](/quest/m1/cmaf-opus-dops.md) - fMP4 import and export keep the Opus pre-skip and gain
 - [NVDEC teardown](/quest/m1/nvdec-teardown.md) - dropping an NVDEC decoder no longer segfaults
@@ -67,11 +70,13 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Own the QUIC stack](/quest/m1/quic/README.md) - the moq-noq fork carries
   ACK progress, reliable reset, hierarchical scheduling, deadlines, probing,
   keep-alive, peer limits, careful resume, ECN, and qmux
+- [BBR idle burst](/quest/m1/bbr-idle-burst.md) - a BBRv3 burst after a long idle paces near the learned bandwidth, proven by a fork regression
 - [P2P](/quest/m1/p2p/README.md) - opted-in clients serve each other over data channels and iroh while the relay stays the rendezvous and the fallback, under application policy
 - [One port](/quest/m1/one-port/README.md) - a relay speaks QUIC, STUN, WebRTC media, and SRT on one UDP port and HTTP, RTMP, and RTMPS on one TCP port
 - [Scope track priority](/quest/m1/track-priority-scope.md) - priority orders one owner's streams, and a shared cluster session is fair across tenants
 - [Stream sessions](/quest/m1/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [IETF on the ring](/quest/m1/uring-ietf.md) - the io_uring workers serve moq-transport sessions too, so a uring relay drops no client protocol
+- [JS timeline scans](/quest/m1/js-timeline-scans.md) - a `@moq/net` publisher's per-group cost stays flat as the retained window grows
 - [Perf](/quest/m1/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
 - [#2924](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every listener on both runtimes shares one reloadable served identity, so rotation is atomic and generate works with workers
 - [#2964](/quest/m1/2964-quic-workers-dropping-one-split-server-resizes-the.md) - integrate the dev worker owner with hardened socket-group formation
