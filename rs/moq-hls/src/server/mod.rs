@@ -260,8 +260,8 @@ mod tests {
 		let broadcaster = Broadcaster::new(source, Config::default())
 			.await
 			.expect("catalog broadcast resolves while announced");
-		// Finish the publisher so the resolved broadcast (and the broadcaster) reports closed.
-		producer.finish();
+		// Close the publisher so the resolved broadcast (and the broadcaster) reports closed.
+		producer.close();
 		settle().await;
 		broadcaster
 	}
@@ -311,6 +311,6 @@ mod tests {
 
 		let cached = server.inner.broadcasters.lock().unwrap().get("live").cloned();
 		assert!(cached.is_some_and(|cached| Arc::ptr_eq(&cached, &new)));
-		new_producer.finish();
+		new_producer.close();
 	}
 }

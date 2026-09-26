@@ -485,11 +485,11 @@ async fn client_handshake<S: Stream>(stream: &mut S) -> anyhow::Result<Vec<u8>> 
 
 /// An active pull: the moq-mux FLV importer publishing into the origin. Mirrors the
 /// server's publisher; either [`Self::finish`] or dropping it unannounces the
-/// path, the former without the dropped-without-finish warning.
+/// path.
 struct Publisher {
 	importer: FlvImport,
-	// A clone of the importer's producer, so a deliberate end can finish() the
-	// broadcast (prompt unannounce) even though the importer owns it.
+	// A clone of the importer's producer, so an end can close the broadcast
+	// (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
 }
 
@@ -522,16 +522,17 @@ impl Publisher {
 
 	fn finish(&mut self) -> anyhow::Result<()> {
 		self.importer.finish()?;
-		self.broadcast.finish();
+		self.broadcast.close();
 		Ok(())
 	}
 
 	/// Abort the published tracks with `err` so subscribers see the real cause
 	/// (the remote dropped, a protocol error) rather than a generic `Error::Dropped`.
 	///
-	/// Consumes the publisher: the broadcast is done.
+	/// Consumes the publisher and closes the broadcast.
 	fn abort(self, err: moq_net::Error) {
 		self.importer.abort(err);
+		self.broadcast.close();
 	}
 }
 

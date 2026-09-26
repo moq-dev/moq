@@ -361,8 +361,8 @@ fn bench_handoff(c: &mut Criterion) {
 						total += started.elapsed();
 
 						drop(subscription);
-						incumbent.finish();
-						standby.finish();
+						incumbent.close();
+						standby.close();
 						// Wait for the front to close so the next iteration starts a fresh one.
 						resolved.closed().await;
 					}
