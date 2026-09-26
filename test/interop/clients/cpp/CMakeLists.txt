@@ -10,4 +10,4 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(moq-cpp REQUIRED)
 
 add_executable(cpp-interop main.cpp)
-target_link_libraries(cpp-interop PRIVATE moq-cpp::moq)
+target_link_libraries(cpp-interop PRIVATE moq::cpp)
