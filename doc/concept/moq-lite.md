@@ -143,7 +143,11 @@ member. The Rust consumer is a `Stream` and the TypeScript one an async iterable
 
 Announcements are hints; requests are the authority. When a subscriber asks
 for a covered path the advertiser will not serve, the advertiser refuses that
-request rather than narrowing the claim, and no message narrows a route. Token
+request rather than narrowing the claim, and no message narrows a route. A
+refusal is final: a relay resolves a request against the longest covering
+prefix and never retries another advertiser or a broader prefix. An advertiser
+running out of capacity withdraws or re-prices its route instead, leaving
+headroom for requests already in flight. Token
 scope is any pattern union; the session asks for each member's literal head on
 the prefix-only wire and filters locally.
 
