@@ -129,26 +129,26 @@ samples, not that a machine played them.
 
 Each run covers, against a real local relay:
 
-* **capabilities** - probes every platform API the player needs, and fails
+- **capabilities** - probes every platform API the player needs, and fails
   naming what is missing rather than skipping a case.
-* **cold start** - the publisher reports when it is announced and encoding, then
+- **cold start** - the publisher reports when it is announced and encoding, then
   a fresh page joins. No reload, unlike the matrix driver: a subscriber that
   needs a second page load is an initialization bug, not a race.
-* **user gesture** - Chromium is launched with
+- **user gesture** - Chromium is launched with
   `--autoplay-policy=document-user-activation-required`, which applies to
   top-level Web Audio contexts. The fixture and player graphs must be suspended
   before either page is clicked, then both must carry audio afterwards. Harness
   state probes use CDP with `userGesture: false`: Playwright's usual page reads
   themselves grant activation and would invalidate this assertion.
-* **capture permission** - the camera case uses a fake device for deterministic
+- **capture permission** - the camera case uses a fake device for deterministic
   input, while Playwright denies and then grants permissions. Both source errors
   must be visible; neither a full nor a microphone-only denial may announce a
   broadcast. Granting both permissions must recover and encode without reload.
   The fake device is not physical hardware, and the headless permission decision
   is not a person clicking a browser prompt.
-* **pause and resume**, **unsubscribe and rejoin**, **detach and reattach**,
+- **pause and resume**, **unsubscribe and rejoin**, **detach and reattach**,
   **publisher stop and same-path republish**, and **late join**.
-* **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
+- **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
   `AudioContext`, and `Worker` to count live instances, so a detach that leaks a
   session is visible rather than merely invisible.
 
