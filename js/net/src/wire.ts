@@ -25,6 +25,10 @@ export interface Broadcast {
 
 /** The protocol-facing operations behind an origin producer. */
 export interface OriginProducer {
+	/** Minimal root-relative namespace prefixes that cover this origin scope. */
+	interests(): readonly Path.Valid[];
+	/** Whether an advertised prefix overlaps the handle's allowed paths. */
+	accepts(prefix: Path.Valid): boolean;
 	receive(
 		prefix: Path.Valid,
 		route?: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint },
