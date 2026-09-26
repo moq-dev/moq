@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7](https://github.com/moq-dev/moq/compare/moq-stats-v0.2.6...moq-stats-v0.2.7) - 2026-09-26
+
+### Added
+
+- end a broadcast with close() in every language ([#4031](https://github.com/moq-dev/moq/pull/4031))
+
 ## [0.2.6](https://github.com/moq-dev/moq/compare/moq-stats-v0.2.5...moq-stats-v0.2.6) - 2026-09-26
 
 ### Other
