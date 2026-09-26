@@ -9,8 +9,6 @@
 
 #![cfg(feature = "_quic")]
 
-#[cfg(target_os = "linux")]
-use std::net::UdpSocket;
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
@@ -18,23 +16,6 @@ use moq_relay::{Config, Relay};
 use moq_tokio::moq_net;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-
-fn free_tcp_port() -> u16 {
-	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-	let port = probe.local_addr().expect("local addr").port();
-	drop(probe);
-	port
-}
-
-/// Only used by the Linux-only worker/uring tests below; without the gate the
-/// macOS test build fails `-D warnings` on dead code.
-#[cfg(target_os = "linux")]
-fn free_udp_port() -> u16 {
-	let probe = UdpSocket::bind("127.0.0.1:0").expect("bind probe");
-	let port = probe.local_addr().expect("local addr").port();
-	drop(probe);
-	port
-}
 
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
 	let key = rcgen::KeyPair::generate().expect("keypair");
@@ -57,19 +38,6 @@ fn client() -> moq_tokio::Client {
 	config.once = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	config.init(Default::default()).expect("client init")
-}
-
-async fn wait_for_http(port: u16) {
-	let deadline = std::time::Instant::now() + Duration::from_secs(5);
-	loop {
-		if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-			return;
-		}
-		if std::time::Instant::now() >= deadline {
-			panic!("relay http listener never became ready on port {port}");
-		}
-		tokio::time::sleep(Duration::from_millis(25)).await;
-	}
 }
 
 async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
@@ -109,17 +77,17 @@ async fn embed_and_stop(mut config: Config) {
 	// No drain window: the sessions are already gone by the time the owner
 	// stops, and the test should not wait out the default.
 	config.drain_timeout = Duration::ZERO;
-	let http = config.web.http.listen.expect("http listener configured");
 	let relay = Relay::load(config.clone()).await.expect("load relay");
 	let quic = relay.quic_addr().expect("quic listener bound");
-	assert_eq!(relay.web_addrs().http, Some(http));
+	let http = relay.web_addrs().http.expect("http listener bound");
 	assert_eq!(
 		relay.config().quic.max_streams,
 		Some(moq_tokio::quic::DEFAULT_MAX_STREAMS)
 	);
 	assert_eq!(relay.cluster().id(), relay.cluster().origin.hop().id());
-	// Pin the replacement to the same ports, including a `:0` first bind.
+	// Pin the replacement to the same ports the `:0` first binds got.
 	config.listen.bind = Some(moq_tokio::listen::Bind::Addr(quic));
+	config.web.http.listen = Some(http);
 
 	// The application handles: in-process workers publish into the origin the
 	// QUIC sessions see, and the trigger stops the owner from any task. Both
@@ -138,8 +106,6 @@ async fn embed_and_stop(mut config: Config) {
 		.route("/plain-post", axum::routing::post(|| async { "plain" }));
 	let running = tokio::spawn(relay.with_web(web).run());
 	ready.wait().await.expect("relay ready");
-
-	wait_for_http(http.port()).await;
 	assert!(!running.is_finished(), "the relay stopped while serving");
 
 	let body = reqwest::get(format!("http://127.0.0.1:{}/embedded", http.port()))
@@ -287,7 +253,6 @@ async fn embed_and_stop(mut config: Config) {
 	assert_eq!(replacement.addr(), Some(quic), "replacement bound a different address");
 	let trigger = replacement.shutdown_trigger().clone();
 	let replacing = tokio::spawn(replacement.run());
-	wait_for_http(http.port()).await;
 	let health = reqwest::get(format!("http://127.0.0.1:{}/health", http.port()))
 		.await
 		.expect("replacement health")
@@ -304,55 +269,39 @@ fn http_and_quic(cert: &std::path::Path, key: &std::path::Path, quic_bind: Strin
 	config.listen.bind = Some(quic_bind.parse().unwrap());
 	config.listen.tls.cert = vec![cert.to_path_buf()];
 	config.listen.tls.key = vec![key.to_path_buf()];
-	config.web.http.listen = Some(format!("127.0.0.1:{}", free_tcp_port()).parse().expect("parse http"));
+	config.web.http.listen = Some("127.0.0.1:0".parse().expect("parse http"));
 	config.web.ws = false;
 	public_auth(&mut config);
 	config
 }
 
-/// A late TCP bind failure must close readiness without reporting success.
+/// An occupied TCP port fails `load`, before anything could report readiness.
 #[tokio::test]
-async fn tcp_bind_failure_does_not_report_ready() {
+async fn tcp_bind_failure_fails_load() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let occupied = TcpListener::bind("127.0.0.1:0").expect("reserve TCP port");
 	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
 	config.listen.tcp.bind = Some(occupied.local_addr().expect("reserved address"));
-	let relay = Relay::load(config).await.expect("load relay before TCP bind");
-	let ready = relay.ready();
-	let running = tokio::spawn(relay.run());
-
-	let result = tokio::time::timeout(TIMEOUT, ready.wait())
+	let error = Relay::load(config)
 		.await
-		.expect("readiness never resolved");
-	assert!(result.is_err(), "failed TCP bind reported readiness");
-	let error = running
-		.await
-		.expect("run panicked")
-		.expect_err("run accepted an occupied TCP port");
+		.err()
+		.expect("load accepted an occupied TCP port");
 	assert!(error.to_string().contains("failed to bind listeners"), "{error:#}");
 }
 
-/// An occupied internal port must fail before the relay reports readiness.
+/// An occupied internal port fails `load`, before anything could report readiness.
 #[tokio::test]
-async fn internal_bind_failure_does_not_report_ready() {
+async fn internal_bind_failure_fails_load() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let occupied = TcpListener::bind("127.0.0.1:0").expect("reserve internal port");
 	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
 	config.internal.listen = Some(occupied.local_addr().expect("reserved address"));
-	let relay = Relay::load(config).await.expect("load relay before internal bind");
-	let ready = relay.ready();
-	let running = tokio::spawn(relay.run());
-
-	let result = tokio::time::timeout(TIMEOUT, ready.wait())
+	let error = Relay::load(config)
 		.await
-		.expect("readiness never resolved");
-	assert!(result.is_err(), "failed internal bind reported readiness");
-	let error = running
-		.await
-		.expect("run panicked")
-		.expect_err("run accepted an occupied internal port");
+		.err()
+		.expect("load accepted an occupied internal port");
 	assert!(
 		error.to_string().contains("failed to bind internal listener"),
 		"{error:#}"
@@ -373,7 +322,7 @@ async fn shared_tokio_custom_route_and_quic() {
 async fn worker_tokio_custom_route_and_quic() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let mut config = http_and_quic(&cert, &key, format!("127.0.0.1:{}", free_udp_port()));
+	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
 	config.runtime.workers = Some(2);
 	config.runtime.pin = false;
 	embed_and_stop(config).await;
@@ -395,7 +344,7 @@ async fn uring_custom_route_and_quic() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let mut config = http_and_quic(&cert, &key, format!("127.0.0.1:{}", free_udp_port()));
+	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
 	config.runtime.workers = Some(2);
 	config.runtime.pin = false;
 	config.runtime.io_uring = true;
@@ -408,10 +357,10 @@ async fn embedded_listener_health_reaches_metrics() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
-	config.internal.listen = Some(format!("127.0.0.1:{}", free_tcp_port()).parse().unwrap());
+	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
 	config.drain_timeout = Duration::ZERO;
-	let internal = config.internal.listen.unwrap();
 	let relay = Relay::load(config).await.expect("load relay");
+	let internal = relay.internal().addr().expect("internal listener bound");
 	let ready = relay.ready();
 	let trigger = relay.shutdown_trigger().clone();
 	let health = moq_tokio::accept::Health::new("embedded");

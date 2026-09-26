@@ -14,7 +14,7 @@
 
 #![cfg(unix)]
 
-use std::{net::TcpListener, time::Duration};
+use std::time::Duration;
 
 use moq_relay::{Config, Relay, auth};
 
@@ -51,10 +51,9 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 	let _interrupt =
 		tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).expect("register SIGINT");
 
-	let (port, config) = relay_config();
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(relay_config()).await.expect("load relay");
+	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let run = tokio::spawn(relay.run());
-	wait_listening(port).await;
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
@@ -106,37 +105,16 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 	);
 }
 
-/// A stream-only relay on a free loopback TCP port, fully public, with a short
-/// drain window. Returns the port and the config to hand [`Relay::load`].
-fn relay_config() -> (u16, Config) {
-	// The listener is bound by `Relay::run`, not here, so this leaves the usual
-	// probe/bind gap; on loopback it is not worth retrying around.
-	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-	let port = probe.local_addr().expect("local addr").port();
-	drop(probe);
-
+/// A stream-only relay on an ephemeral loopback TCP port, fully public, with a
+/// short drain window, to hand [`Relay::load`].
+fn relay_config() -> Config {
 	// Fully public auth: any no-JWT stream client gets the whole root.
 	let mut auth = auth::Config::default();
 	auth.public = vec![moq_auth::Pattern::all()];
 
 	let mut config = Config::default();
-	config.listen.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
+	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	config.auth = auth;
 	config.drain_timeout = DRAIN_TIMEOUT;
-
-	(port, config)
-}
-
-async fn wait_listening(port: u16) {
-	let deadline = std::time::Instant::now() + Duration::from_secs(5);
-	loop {
-		if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-			break;
-		}
-		assert!(
-			std::time::Instant::now() < deadline,
-			"relay never became ready on port {port}"
-		);
-		tokio::time::sleep(Duration::from_millis(25)).await;
-	}
+	config
 }

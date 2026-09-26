@@ -823,30 +823,19 @@ mod tests {
 		request.query = Some("jwt=secret".into());
 		let _reg = sessions.register(request);
 
-		let listen = std::net::TcpListener::bind("127.0.0.1:0")
-			.expect("probe bind")
-			.local_addr()
-			.expect("probe addr");
 		let mut internal_config = moq_relay::internal::Config::default();
-		internal_config.listen = Some(listen);
+		internal_config.listen = Some("127.0.0.1:0".parse().unwrap());
 		let internal =
 			moq_relay::internal::Internal::new(internal_config, moq_tokio::moq_net::stats::Registry::disabled())
-				.with_sessions(sessions);
+				.with_sessions(sessions)
+				.bind()
+				.expect("bind internal listener");
+		let listen = internal.addr().expect("internal listener is configured");
 		tokio::spawn(async move {
 			let _ = internal.run().await;
 		});
 
 		let url = format!("http://{listen}");
-		let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-		while reqwest::Client::new()
-			.get(format!("{url}/health"))
-			.send()
-			.await
-			.is_err()
-		{
-			assert!(std::time::Instant::now() < deadline, "internal listener never came up");
-			tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-		}
 
 		run(&["moq", "auth", "revalidate", "--internal-url", &url, "--id", "abc"])
 			.await
