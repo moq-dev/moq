@@ -45,9 +45,8 @@ Decisions settled while planning, recorded so review does not relitigate them:
 - **A public grant contains publish patterns, subscribe patterns, and an
   expiry**, in the presenter's own root; the presenter never sees the relay-side
   root, and every token in a union shares the connection's root. Unscoped
-  permission is `**`; an empty union grants nothing. [Path patterns](/quest/m1/auth/patterns.md)
-  ships with AUTH, so AUTH_OK carries those patterns, wildcards and literals
-  alike, from the first release. There is no prefix-only AUTH_OK and no
+  permission is `**`; an empty union grants nothing. AUTH_OK carries those
+  patterns, wildcards and literals alike, from the first release. There is no prefix-only AUTH_OK and no
   covering-prefix workaround. Announce stays a prefix: ANNOUNCE_REQUEST and
   SUBSCRIBE_NAMESPACE do not gain patterns in that change. The public grant
   type stays pattern-valued.
@@ -90,8 +89,6 @@ existing lite-06 ALPN.
 
 ## Quests
 
-- [Path patterns](/quest/m1/auth/patterns.md) - one matcher for every path
-  predicate, and AUTH_OK carries pattern grants from AUTH's first release
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every

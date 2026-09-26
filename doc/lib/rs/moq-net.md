@@ -92,9 +92,10 @@ origin handles allow and refuses any other token as unsupported. To verify
 tokens yourself, take `handshake.auth().requests()` on the `server::Handshake`
 before `ok()` (or `session.auth().requests()` before first polling the driver)
 and answer every `auth::Request` with `accept(grant)`, which returns an
-`auth::Issued` you can `update` or `revoke`, or `reject`. Both wires carry
-prefix grants for now, so a grant that is not a union of subtrees is refused
-and the presenter sees `Unsupported`; after a grant, such an update revokes it.
+`auth::Issued` you can `update` or `revoke`, or `reject`. moq-lite carries any
+pattern grant as issued. moq-transport carries namespace prefixes, so there a
+grant that is not a union of subtrees is refused and the presenter sees
+`Unsupported`; after a grant, such an update revokes it.
 
 A client whose origin publishes a broadcast outside its grant closes the
 session with `Unauthorized`, naming the path in the close reason. A grant that

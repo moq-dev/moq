@@ -636,13 +636,15 @@ run_cell() {
 }
 
 # run_round <round> <broadcast> <pub_pid> <want_pass>: every subscriber dials with a
-# token for <broadcast> alone, and must see data (want_pass=1) or time out (0).
+# token for <broadcast> alone, and must see data (want_pass=1) or time out (0). The
+# leading `**` matches zero segments, so the grant reaches every client as a pattern
+# no prefix could carry.
 # <round> names the publisher in the output and the logs.
 run_round() {
     local pub="$1" broadcast="$2" pub_pid="$3" want_pass="$4"
     local pids=() names=() i sub sub_url sub_grant why
-    sub_url=$(token_url --subscribe "$broadcast/**")
-    sub_grant=$(grant_line "" "$broadcast/**")
+    sub_url=$(token_url --subscribe "**/$broadcast")
+    sub_grant=$(grant_line "" "**/$broadcast")
     for sub in "${SUB_LIST[@]}"; do
         if is_broken "$sub"; then
             echo "  FAIL  $pub -> $sub (subscriber client unavailable)"
@@ -759,9 +761,10 @@ else
             overall=1
             continue
         fi
-        start_publisher "$pub" "$pub" "$broadcast" "$(token_url --publish "$broadcast/**")"
+        # The exact broadcast, not its subtree.
+        start_publisher "$pub" "$pub" "$broadcast" "$(token_url --publish "$broadcast")"
         run_round "$pub" "$broadcast" "$PUB_PID" 1
-        if why=$(check_grant "$pub" "$HARNESS_RUN/pub-$pub.log" "$(grant_line "$broadcast/**" "")"); then
+        if why=$(check_grant "$pub" "$HARNESS_RUN/pub-$pub.log" "$(grant_line "$broadcast" "")"); then
             prints_grant "$pub" && echo "  PASS  $pub grant"
         else
             echo "  FAIL  $pub $why"
@@ -774,16 +777,16 @@ else
     for pub in "${PUB_LIST[@]}"; do
         if ! enforces_grant "$pub" || is_broken "$pub"; then continue; fi
         broadcast="interop-denied-${pub}-$$-${RANDOM}.hang"
-        allowed="interop-allowed-$$"
-        echo "=== publisher: $pub  broadcast: $broadcast (token grants only $allowed/**) ==="
-        start_publisher "$pub-denied" "$pub" "$broadcast" "$(token_url --publish "$allowed/**")"
+        allowed="interop-allowed-*.hang"
+        echo "=== publisher: $pub  broadcast: $broadcast (token grants only $allowed) ==="
+        start_publisher "$pub-denied" "$pub" "$broadcast" "$(token_url --publish "$allowed")"
         run_round "$pub-denied" "$broadcast" "$PUB_PID" 0
         log="$HARNESS_RUN/pub-$pub-denied.log"
         if ! check_denied "$log" "$broadcast"; then
             echo "  FAIL  $pub publisher did not fail with Unauthorized naming $broadcast:"
             sed 's/^/        /' "$log" 2>/dev/null || true
             overall=1
-        elif ! why=$(check_grant "$pub" "$log" "$(grant_line "$allowed/**" "")"); then
+        elif ! why=$(check_grant "$pub" "$log" "$(grant_line "$allowed" "")"); then
             echo "  FAIL  $pub $why"
             overall=1
         else

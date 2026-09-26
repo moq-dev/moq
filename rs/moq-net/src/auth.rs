@@ -15,7 +15,9 @@
 //! moq-transport draft-17+ carries the same exchange when both sides negotiate the
 //! MoQ Auth extension. Older versions, and peers that do not negotiate it, carry no
 //! AUTH exchange: there the grant stays `None` and [`add`](Handle::add) fails with
-//! [`Error::Unsupported`].
+//! [`Error::Unsupported`]. moq-lite carries a grant's patterns as they are;
+//! moq-transport carries namespace prefixes, so it refuses a grant that is not a
+//! union of subtrees rather than widen it.
 
 use std::{
 	collections::{BTreeMap, VecDeque},

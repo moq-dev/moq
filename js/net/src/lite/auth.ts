@@ -43,23 +43,21 @@ export class AuthMessage {
 	}
 }
 
-// The wire carries prefixes, the ANNOUNCE_REQUEST encoding, so only a union of subtrees is
-// representable. Anything else is refused rather than widened to its head.
-async function encodePrefixes(w: Writer, patterns: Path.Patterns) {
-	const prefixes = patterns.toArray().map((pattern) => {
-		const prefix = pattern.asPrefix();
-		if (prefix === undefined) throw new Unsupported(`grant not representable as prefixes: ${pattern}`);
-		return prefix;
-	});
-	await w.u53(prefixes.length);
-	for (const prefix of prefixes) await w.string(prefix);
+// Each pattern travels as its canonical text.
+async function encodePatterns(w: Writer, patterns: Path.Patterns) {
+	await w.u53(patterns.size);
+	for (const pattern of patterns) await w.string(pattern.text);
 }
 
-async function decodePrefixes(r: Reader): Promise<Path.Patterns> {
+async function decodePatterns(r: Reader): Promise<Path.Patterns> {
 	const count = await r.u53();
 	const patterns = new Path.Patterns();
 	for (let i = 0; i < count; i++) {
-		patterns.insert(Path.Pattern.subtree(await r.string()));
+		const text = await r.string();
+		const pattern = Path.Pattern.parse(text);
+		// Only the canonical spelling is valid, so each pattern has one encoding.
+		if (pattern.text !== text) throw new Error(`non-canonical pattern: ${text}`);
+		patterns.insert(pattern);
 	}
 	return patterns;
 }
@@ -78,8 +76,8 @@ export class AuthOk {
 	}
 
 	async #encode(w: Writer) {
-		await encodePrefixes(w, this.publish);
-		await encodePrefixes(w, this.subscribe);
+		await encodePatterns(w, this.publish);
+		await encodePatterns(w, this.subscribe);
 		// 0 means never, so a lapsed grant rounds up to the smallest real expiry.
 		const expires =
 			this.expires === undefined ? 0 : Math.min(Math.max(Math.ceil(this.expires), 1), Number.MAX_SAFE_INTEGER);
@@ -87,8 +85,8 @@ export class AuthOk {
 	}
 
 	static async #decode(r: Reader): Promise<AuthOk> {
-		const publish = await decodePrefixes(r);
-		const subscribe = await decodePrefixes(r);
+		const publish = await decodePatterns(r);
+		const subscribe = await decodePatterns(r);
 		const expires = await r.u53();
 		return new AuthOk(publish, subscribe, expires === 0 ? undefined : expires);
 	}

@@ -3,7 +3,7 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::coding::*;
-use crate::{Path, Pattern, Patterns};
+use crate::{Pattern, Patterns};
 
 use super::{Message, Version};
 
@@ -48,29 +48,27 @@ pub struct AuthOk {
 /// Largest millisecond count every implementation carries losslessly.
 const MAX_EXPIRES_MS: u64 = (1 << 53) - 1;
 
-/// Encode a grant's patterns as the wire's prefix list.
-///
-/// The wire carries prefixes, the ANNOUNCE_REQUEST encoding, so only a union of
-/// subtrees is representable. Anything else is refused rather than widened:
-/// sending `room/**` for a grant of the literal `room/alice` would hand out more
-/// than was granted.
-fn encode_prefixes<W: bytes::BufMut>(patterns: &Patterns, w: &mut W, version: Version) -> Result<(), EncodeError> {
+/// Encode a grant's patterns as their canonical text.
+fn encode_patterns<W: bytes::BufMut>(patterns: &Patterns, w: &mut W, version: Version) -> Result<(), EncodeError> {
 	patterns.len().encode(w, version)?;
 	for pattern in patterns {
-		let prefix = pattern.as_prefix().ok_or(EncodeError::Unsupported)?;
-		Path::new(prefix).encode(w, version)?;
+		pattern.as_str().encode(w, version)?;
 	}
 	Ok(())
 }
 
-fn decode_prefixes<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Patterns, DecodeError> {
+fn decode_patterns<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Patterns, DecodeError> {
 	let count = usize::decode(r, version)?;
 	let mut patterns = Patterns::new();
 	// No preallocation: the count is peer-controlled, and the message size limit
-	// is what bounds how many prefixes actually fit.
+	// is what bounds how many patterns actually fit.
 	for _ in 0..count {
-		let prefix = Path::decode(r, version)?;
-		let pattern = Pattern::subtree(prefix.as_str()).map_err(|_| DecodeError::InvalidValue)?;
+		let text = String::decode(r, version)?;
+		let pattern = Pattern::try_from(text.as_str()).map_err(|_| DecodeError::InvalidValue)?;
+		// Only the canonical spelling is valid, so each pattern has one encoding.
+		if pattern.as_str() != text {
+			return Err(DecodeError::InvalidValue);
+		}
 		patterns.insert(pattern);
 	}
 	Ok(patterns)
@@ -81,8 +79,8 @@ impl Message for AuthOk {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
 		}
-		let publish = decode_prefixes(r, version)?;
-		let subscribe = decode_prefixes(r, version)?;
+		let publish = decode_patterns(r, version)?;
+		let subscribe = decode_patterns(r, version)?;
 		let expires = match u64::decode(r, version)? {
 			0 => None,
 			ms => Some(Duration::from_millis(ms)),
@@ -98,8 +96,8 @@ impl Message for AuthOk {
 		if !version.has_auth() {
 			return Err(EncodeError::Version);
 		}
-		encode_prefixes(&self.publish, w, version)?;
-		encode_prefixes(&self.subscribe, w, version)?;
+		encode_patterns(&self.publish, w, version)?;
+		encode_patterns(&self.subscribe, w, version)?;
 		// 0 means never, so a grant that has already lapsed rounds up to the
 		// smallest value that still reads as an expiry.
 		let expires = match self.expires {
@@ -196,8 +194,8 @@ impl Decode<Version> for AuthReply {
 mod tests {
 	use super::*;
 
-	fn patterns(prefixes: &[&str]) -> Patterns {
-		prefixes.iter().map(|p| Pattern::subtree(p).unwrap()).collect()
+	fn patterns(texts: &[&str]) -> Patterns {
+		texts.iter().map(|text| Pattern::try_from(*text).unwrap()).collect()
 	}
 
 	fn round_trip<T: Encode<Version> + Decode<Version>>(msg: &T) -> T {
@@ -217,15 +215,16 @@ mod tests {
 		}
 	}
 
-	/// The empty prefix grants everything and the empty list grants nothing; both
-	/// spellings survive the trip distinctly.
+	/// `**` grants everything, the empty pattern only the root, and the empty list
+	/// nothing; literals and wildcards travel exactly, never widened to a prefix.
 	#[test]
 	fn auth_ok_round_trips() {
 		for (publish, subscribe, expires) in [
-			(patterns(&[""]), patterns(&[]), None),
+			(patterns(&["**"]), patterns(&[]), None),
+			(patterns(&[""]), patterns(&["room/**"]), None),
 			(
-				patterns(&["room/alice", "room/bob"]),
-				patterns(&["room"]),
+				patterns(&["room/alice", "room/*/cam", "**/demo.hang"]),
+				patterns(&["room/cam-*.hang", "lobby/**"]),
 				Some(Duration::from_secs(60)),
 			),
 		] {
@@ -236,7 +235,53 @@ mod tests {
 			});
 			assert_eq!(round_trip(&msg), msg);
 		}
-		assert_eq!(patterns(&[""]), Patterns::from(Pattern::all()));
+	}
+
+	/// The exact bytes, shared with `js/net/src/lite/auth.test.ts` so both encoders agree.
+	#[test]
+	fn auth_ok_golden() {
+		let msg = AuthReply::Ok(AuthOk {
+			publish: patterns(&["room/*/cam", "**/b.hang"]),
+			subscribe: patterns(&[""]),
+			expires: Some(Duration::from_millis(1000)),
+		});
+		let mut buf = bytes::BytesMut::new();
+		msg.encode(&mut buf, Version::Lite06).unwrap();
+		#[rustfmt::skip]
+		let want: &[u8] = &[
+			0x00, // AUTH_OK
+			0x1a, // length
+			0x02, // publish count, in canonical order
+			0x09, b'*', b'*', b'/', b'b', b'.', b'h', b'a', b'n', b'g',
+			0x0a, b'r', b'o', b'o', b'm', b'/', b'*', b'/', b'c', b'a', b'm',
+			0x01, // subscribe count
+			0x00, // the empty pattern: the root alone
+			0x43, 0xe8, // expires: 1000ms
+		];
+		assert_eq!(&buf[..], want);
+	}
+
+	/// Only valid, canonical text decodes: each pattern has exactly one encoding.
+	#[test]
+	fn invalid_patterns_are_refused() {
+		for text in ["*/**", "/room", "room/", "room//a", "a*b*c", "**/**", "a**"] {
+			let mut buf = bytes::BytesMut::new();
+			AUTH_OK.encode(&mut buf, Version::Lite06).unwrap();
+			let mut body = bytes::BytesMut::new();
+			1usize.encode(&mut body, Version::Lite06).unwrap();
+			text.encode(&mut body, Version::Lite06).unwrap();
+			0usize.encode(&mut body, Version::Lite06).unwrap();
+			0u64.encode(&mut body, Version::Lite06).unwrap();
+			body.len().encode(&mut buf, Version::Lite06).unwrap();
+			buf.extend_from_slice(&body);
+			assert!(
+				matches!(
+					AuthReply::decode(&mut &buf[..], Version::Lite06),
+					Err(DecodeError::InvalidValue)
+				),
+				"{text} decoded"
+			);
+		}
 	}
 
 	#[test]
@@ -260,24 +305,6 @@ mod tests {
 			panic!("expected AUTH_OK");
 		};
 		assert_eq!(got.expires, Some(Duration::from_millis(1)));
-	}
-
-	/// Only subtrees fit the prefix encoding; anything narrower is refused, never
-	/// widened to its head.
-	#[test]
-	fn unrepresentable_grants_are_refused() {
-		for pattern in ["room/alice", "room/*/cam", "*/**"] {
-			let msg = AuthReply::Ok(AuthOk {
-				publish: Patterns::from(Pattern::try_from(pattern).unwrap()),
-				subscribe: Patterns::new(),
-				expires: None,
-			});
-			let mut buf = bytes::BytesMut::new();
-			assert!(
-				matches!(msg.encode(&mut buf, Version::Lite06), Err(EncodeError::Unsupported)),
-				"{pattern} encoded"
-			);
-		}
 	}
 
 	#[test]

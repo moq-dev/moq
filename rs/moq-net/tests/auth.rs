@@ -52,10 +52,36 @@ cases!(
 	a_closed_session_holds_no_grant,
 	a_reset_auth_stream_reports_unsupported,
 	a_revoked_grant_cancels_its_subscriptions,
-	an_unrepresentable_grant_is_unsupported,
-	an_unrepresentable_update_revokes_only_its_token,
 	nothing_outside_the_grant_reaches_the_peer,
 );
+
+/// Run each case on moq-transport alone, whose namespace prefixes cannot carry every
+/// pattern.
+macro_rules! prefix_cases {
+	($($case:ident),* $(,)?) => {
+		mod moqt_17_prefixes {
+			$(#[tokio::test] async fn $case() { super::$case(super::MOQT_17).await })*
+		}
+		mod moqt_22_prefixes {
+			$(#[tokio::test] async fn $case() { super::$case(super::MOQT_22).await })*
+		}
+	};
+}
+
+prefix_cases!(
+	an_unrepresentable_grant_is_unsupported,
+	an_unrepresentable_update_revokes_only_its_token,
+);
+
+#[tokio::test]
+async fn lite_06_carries_pattern_grants() {
+	pattern_grants_arrive_exactly(LITE_06).await
+}
+
+#[tokio::test]
+async fn lite_06_enforces_a_wildcard_grant() {
+	a_wildcard_grant_is_enforced(LITE_06).await
+}
 
 #[tokio::test]
 async fn lite_05_has_no_grant() {
@@ -690,8 +716,8 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 	.expect("timed out");
 }
 
-/// A grant the wire cannot carry as prefixes is never widened: the token is refused as
-/// unsupported, promptly, and the union stays unknown rather than empty.
+/// A grant moq-transport cannot carry as prefixes is never widened: the token is refused
+/// as unsupported, promptly, and the union stays unknown rather than empty.
 async fn an_unrepresentable_grant_is_unsupported(version: &'static str) {
 	within(async {
 		let mut pair = connect(Options {
@@ -739,8 +765,8 @@ async fn an_unrepresentable_grant_is_unsupported(version: &'static str) {
 	.expect("timed out");
 }
 
-/// An update the wire cannot carry revokes that token's earlier grant, and only that
-/// token's: the rest of the union and the session stay.
+/// An update moq-transport cannot carry revokes that token's earlier grant, and only
+/// that token's: the rest of the union and the session stay.
 async fn an_unrepresentable_update_revokes_only_its_token(version: &'static str) {
 	within(async {
 		let mut pair = connect(Options {
@@ -766,11 +792,97 @@ async fn an_unrepresentable_update_revokes_only_its_token(version: &'static str)
 			subscribe: Patterns::new(),
 			expires: None,
 		});
-		// Lite resets the stream and moq-transport answers NOT_SUPPORTED; either ends it.
 		t1.closed().await;
 		assert_eq!(t1.grant().peek(), None);
 		wait_for(pair.client.auth().grant(), |g| g == &Some(grant(&["a"], &[]))).await;
 		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+fn pattern_set(texts: &[&str]) -> Patterns {
+	texts.iter().map(|text| Pattern::try_from(*text).unwrap()).collect()
+}
+
+/// Literal, wildcard, and mixed grants reach the presenter exactly as issued, never
+/// widened to a covering prefix.
+async fn pattern_grants_arrive_exactly(version: &'static str) {
+	within(async {
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(produce_origin(2)),
+			server_subscribe: Some(produce_origin(1)),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let table = |token: &[u8]| -> Option<Grant> {
+			let (publish, subscribe) = match token {
+				b"" => (pattern_set(&["a/**"]), pattern_set(&[])),
+				b"exact" => (pattern_set(&["room/alice"]), pattern_set(&[])),
+				b"wildcard" => (pattern_set(&["room/*/cam"]), pattern_set(&["**/demo.hang"])),
+				b"mixed" => (pattern_set(&["room/**", "lobby", "cam-*.hang"]), pattern_set(&[])),
+				b"root" => (pattern_set(&[""]), pattern_set(&["**"])),
+				_ => return None,
+			};
+			Some(Grant {
+				publish,
+				subscribe,
+				expires: None,
+			})
+		};
+		let mut issued = serve(pair.requests.take().unwrap(), table);
+		let (_, _setup) = issued.recv().await.unwrap();
+		assert_eq!(granted(&pair.client).await, table(b"").unwrap());
+
+		let mut held = Vec::new();
+		for token in ["exact", "wildcard", "mixed", "root"] {
+			let added = pair.client.auth().add(token).await.expect(token);
+			assert_eq!(added.grant().peek(), table(token.as_bytes()), "{token}");
+			held.push(added);
+		}
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A wildcard grant admits what it matches, including a leading `**` matching zero
+/// segments, and a publish outside it still aborts naming the path.
+async fn a_wildcard_grant_is_enforced(version: &'static str) {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let scope = pattern_set(&["room/*/cam", "**/b.hang"]);
+		let pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.scope("", &scope).unwrap()),
+			..Default::default()
+		})
+		.await;
+		assert_eq!(granted(&pair.client).await.publish, scope);
+
+		let mut held = Vec::new();
+		for path in ["room/alice/cam", "b.hang", "deep/x/b.hang"] {
+			let broadcast = publisher.create_broadcast(path).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+			wait_announced(&relay.consume(), path, true).await;
+			held.push(broadcast);
+		}
+		assert_eq!(pair.client_transport.close_reason(), None);
+
+		let bad = publisher.create_broadcast("room/alice/mic").unwrap();
+		bad.announce(Default::default()).unwrap();
+		assert!(matches!(
+			pair.server.closed().await,
+			Error::Session(SessionError::Unauthorized)
+		));
+		assert_eq!(
+			pair.client_transport.close_reason().map(|(_, reason)| reason),
+			Some("unauthorized: room/alice/mic".to_string())
+		);
 	})
 	.await
 	.expect("timed out");
