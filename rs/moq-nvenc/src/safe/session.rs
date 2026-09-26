@@ -114,9 +114,12 @@ impl Session {
 	/// # Errors
 	///
 	/// Returns [`ErrorKind::InvalidParam`] when the session was started without
-	/// an encode config, since there is then no config to resubmit. Otherwise
-	/// returns whatever `NvEncReconfigureEncoder` reports, e.g.
+	/// an encode config, since there is then no config to resubmit, when
+	/// `bitrate` is zero, when a nonzero VBV would scale to zero, or when the
+	/// proportionally scaled VBV overflows.
+	/// Otherwise returns whatever `NvEncReconfigureEncoder` reports, e.g.
 	/// [`ErrorKind::UnsupportedParam`] if the driver rejects the rate change.
+	/// After any error the session keeps its last accepted rate settings.
 	pub fn reconfigure(&mut self, bitrate: u32) -> Result<(), EncodeError> {
 		let Some(config) = self.config.as_mut() else {
 			return Err(EncodeError::new(
@@ -124,32 +127,16 @@ impl Session {
 				Some("session was started without an encode config to reconfigure".into()),
 			));
 		};
-
-		// Keep a caller-sized VBV proportional to the rate, so a buffer sized to
-		// one frame at open stays one frame: left alone it would loosen the
-		// keyframe cap as the bitrate falls, right when the link can least afford it.
-		if config.rcParams.vbvBufferSize != 0 && config.rcParams.averageBitRate != 0 {
-			let scale = |v: u32| (u64::from(v) * u64::from(bitrate) / u64::from(config.rcParams.averageBitRate)) as u32;
-			config.rcParams.vbvBufferSize = scale(config.rcParams.vbvBufferSize);
-			config.rcParams.vbvInitialDelay = scale(config.rcParams.vbvInitialDelay);
-		}
-		config.rcParams.averageBitRate = bitrate;
 		debug_assert_eq!(
 			self.init.encodeConfig,
 			std::ptr::from_mut::<NV_ENC_CONFIG>(&mut **config),
 			"init.encodeConfig must point at our owned copy, not the caller's dead one"
 		);
 
-		let mut params = NV_ENC_RECONFIGURE_PARAMS {
-			version: NV_ENC_RECONFIGURE_PARAMS_VER,
-			reInitEncodeParams: self.init,
-			..unsafe { std::mem::zeroed() }
-		};
-		// Leave resetEncoder and forceIDR clear: retune in place, no keyframe.
-		params.set_resetEncoder(0);
-		params.set_forceIDR(0);
-
-		unsafe { (self.encoder.api.reconfigure_encoder)(self.encoder.ptr, &mut params) }.result(&self.encoder)
+		let encoder = &self.encoder;
+		retune(&self.init, config, bitrate, |params| {
+			unsafe { (encoder.api.reconfigure_encoder)(encoder.ptr, params) }.result(encoder)
+		})
 	}
 
 	/// Encode a frame.
@@ -362,6 +349,60 @@ fn same_session<T>(input: &Arc<T>, output: &Arc<T>, session: &Arc<T>) -> bool {
 	Arc::ptr_eq(input, session) && Arc::ptr_eq(output, session)
 }
 
+/// Submit `config` retuned to `bitrate` and commit it only once `submit`
+/// accepts, so a rejected change cannot skew the basis of the next one.
+fn retune(
+	init: &NV_ENC_INITIALIZE_PARAMS,
+	config: &mut NV_ENC_CONFIG,
+	bitrate: u32,
+	submit: impl FnOnce(&mut NV_ENC_RECONFIGURE_PARAMS) -> Result<(), EncodeError>,
+) -> Result<(), EncodeError> {
+	let invalid = |reason: &str| EncodeError::new(ErrorKind::InvalidParam, Some(reason.into()));
+	// A zero rate would also zero a proportional VBV, which no later rate could scale back up.
+	if bitrate == 0 {
+		return Err(invalid("bitrate must be nonzero"));
+	}
+
+	let mut candidate = *config;
+	let rc = &mut candidate.rcParams;
+	// Keep a caller-sized VBV proportional to the rate, so a buffer sized to
+	// one frame at open stays one frame: left alone it would loosen the
+	// keyframe cap as the bitrate falls, right when the link can least afford it.
+	if rc.vbvBufferSize != 0 && rc.averageBitRate != 0 {
+		let basis = u64::from(rc.averageBitRate);
+		let scale = |v: u32| {
+			let scaled = u64::from(v) * u64::from(bitrate) / basis;
+			// Rounding a nonzero VBV to zero is the same dead end as a zero rate:
+			// the next retune would skip this branch and could never restore it.
+			if v != 0 && scaled == 0 {
+				return Err(invalid("scaled VBV must be nonzero"));
+			}
+			u32::try_from(scaled).map_err(|_| invalid("scaled VBV exceeds u32"))
+		};
+		rc.vbvBufferSize = scale(rc.vbvBufferSize)?;
+		rc.vbvInitialDelay = scale(rc.vbvInitialDelay)?;
+	}
+	rc.averageBitRate = bitrate;
+
+	// NVENC copies the config during the call, so pointing it at the local
+	// candidate is sound; `init` keeps pointing at the committed copy.
+	let mut params = NV_ENC_RECONFIGURE_PARAMS {
+		version: NV_ENC_RECONFIGURE_PARAMS_VER,
+		reInitEncodeParams: NV_ENC_INITIALIZE_PARAMS {
+			encodeConfig: &mut candidate,
+			..*init
+		},
+		..unsafe { std::mem::zeroed() }
+	};
+	// Leave resetEncoder and forceIDR clear: retune in place, no keyframe.
+	params.set_resetEncoder(0);
+	params.set_forceIDR(0);
+
+	submit(&mut params)?;
+	*config = candidate;
+	Ok(())
+}
+
 trait CompletionDriver {
 	type Input;
 	type Output;
@@ -511,6 +552,73 @@ mod tests {
 		let events = Events::default();
 		drop(pending(&events, false));
 		assert_eq!(*events.lock().unwrap(), ["wait", "input", "output"]);
+	}
+
+	fn rate_config(bitrate: u32, vbv: u32) -> NV_ENC_CONFIG {
+		let mut config = NV_ENC_CONFIG::default();
+		config.rcParams.averageBitRate = bitrate;
+		config.rcParams.vbvBufferSize = vbv;
+		config.rcParams.vbvInitialDelay = vbv;
+		config
+	}
+
+	/// The (average, VBV size, VBV delay) a reconfigure submitted.
+	fn submitted(params: &NV_ENC_RECONFIGURE_PARAMS) -> (u32, u32, u32) {
+		let rc = unsafe { &(*params.reInitEncodeParams.encodeConfig).rcParams };
+		(rc.averageBitRate, rc.vbvBufferSize, rc.vbvInitialDelay)
+	}
+
+	fn rates(config: &NV_ENC_CONFIG) -> (u32, u32, u32) {
+		let rc = &config.rcParams;
+		(rc.averageBitRate, rc.vbvBufferSize, rc.vbvInitialDelay)
+	}
+
+	#[test]
+	fn rejected_rate_change_keeps_the_last_accepted_basis() {
+		let init = NV_ENC_INITIALIZE_PARAMS {
+			encodeWidth: 1280,
+			..Default::default()
+		};
+		let mut config = rate_config(1_000_000, 100_000);
+
+		let error = retune(&init, &mut config, 500_000, |params| {
+			assert_eq!(submitted(params), (500_000, 50_000, 50_000));
+			assert_eq!(params.reInitEncodeParams.encodeWidth, 1280);
+			Err(EncodeError::new(ErrorKind::UnsupportedParam, None))
+		})
+		.expect_err("the driver rejected the change");
+		assert_eq!(error.kind(), ErrorKind::UnsupportedParam);
+		assert_eq!(rates(&config), (1_000_000, 100_000, 100_000));
+
+		// Scaled from the last accepted rate, not the rejected one.
+		retune(&init, &mut config, 2_000_000, |params| {
+			assert_eq!(submitted(params), (2_000_000, 200_000, 200_000));
+			Ok(())
+		})
+		.unwrap();
+		assert_eq!(rates(&config), (2_000_000, 200_000, 200_000));
+	}
+
+	#[test]
+	fn rate_that_zeroes_a_nonzero_vbv_is_refused_before_the_driver() {
+		let init = NV_ENC_INITIALIZE_PARAMS::default();
+		let mut config = rate_config(1_000, 1);
+		let error =
+			retune(&init, &mut config, 1, |_| panic!("submitted a zero VBV")).expect_err("the scaled VBV is zero");
+		assert_eq!(error.kind(), ErrorKind::InvalidParam);
+		assert_eq!(rates(&config), (1_000, 1, 1));
+	}
+
+	#[test]
+	fn invalid_rate_change_is_refused_before_the_driver() {
+		let init = NV_ENC_INITIALIZE_PARAMS::default();
+		let mut config = rate_config(1, u32::MAX);
+		for bitrate in [0, 2] {
+			let error = retune(&init, &mut config, bitrate, |_| panic!("submitted an invalid rate"))
+				.expect_err("the rate is invalid");
+			assert_eq!(error.kind(), ErrorKind::InvalidParam);
+			assert_eq!(rates(&config), (1, u32::MAX, u32::MAX));
+		}
 	}
 
 	#[test]

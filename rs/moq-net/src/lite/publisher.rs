@@ -583,8 +583,8 @@ struct AnnounceRun {
 	// Lite06+: announce ids. Every `active` we send implicitly assigns the next
 	// per-stream ordinal, and `ended` references the id instead of repeating the
 	// path. Only announces that actually hit the wire get an id (filtered ones
-	// were never seen by the peer).
-	next_announce_id: u64,
+	// were never seen by the peer). Lite07 also picks compression bases here.
+	encoder: lite::AnnounceEncoder,
 	// The routes the peer currently holds, keyed by the suffix under the requested
 	// prefix. The value is the announce id on versions that assign them.
 	live: HashMap<crate::PathOwned, Option<u64>>,
@@ -605,7 +605,7 @@ impl AnnounceRun {
 			prefix,
 			self_origin,
 			version,
-			next_announce_id: 0,
+			encoder: lite::AnnounceEncoder::new(version),
 			live: HashMap::new(),
 			phase: AnnouncePhase::Init,
 		}
@@ -613,7 +613,7 @@ impl AnnounceRun {
 
 	/// Where an update travels on this stream: its prefix relative to the requested
 	/// prefix, which the origin's scope guarantees it sits under.
-	fn suffix(&self, update: &announce::Update) -> crate::PathOwned {
+	fn suffix(&self, update: &announce::Announce) -> crate::PathOwned {
 		update
 			.prefix
 			.strip_prefix(&self.prefix)
@@ -650,14 +650,22 @@ impl AnnounceRun {
 		Some((hops, cost))
 	}
 
-	/// The next announce id, on versions that assign them.
-	fn assign_id(&mut self) -> Option<u64> {
-		if !self.version.has_announce_id() {
-			return None;
-		}
-		let id = self.next_announce_id;
-		self.next_announce_id += 1;
-		Some(id)
+	/// Start advertising `suffix`, recording its announce id.
+	fn start<S: crate::transport::poll::Session>(
+		&mut self,
+		stream: &mut Stream<S, Version>,
+		suffix: crate::PathOwned,
+		hops: Hops,
+		cost: crate::origin::Cost,
+	) -> Result<(), Error> {
+		let (id, wire, hops) = self.encoder.start(suffix.clone(), hops);
+		self.live.insert(suffix, id);
+		stream.writer.buffer(&lite::AnnounceBroadcast::Active {
+			suffix: wire,
+			hops,
+			cost,
+		})?;
+		Ok(())
 	}
 
 	/// Retract the peer's advertisement for `suffix`, if it holds one.
@@ -673,7 +681,10 @@ impl AnnounceRun {
 		};
 		tracing::debug!(route = %absolute, "unannounce");
 		match id {
-			Some(id) => stream.writer.buffer(&lite::AnnounceBroadcast::EndedId { id })?,
+			Some(id) => {
+				self.encoder.end(id);
+				stream.writer.buffer(&lite::AnnounceBroadcast::EndedId { id })?
+			}
 			// An ended announce doesn't need hops; the receiver matches on path only.
 			None => stream.writer.buffer(&lite::AnnounceBroadcast::Ended {
 				suffix,
@@ -697,11 +708,18 @@ impl AnnounceRun {
 
 				// Send ANNOUNCE_INIT as the first message with all currently active routes.
 				// We use `try_next()` to synchronously get the initial updates.
-				while let Some(update) = announced.try_next() {
+				while let Some(event) = announced.try_next() {
+					let (update, active) = match event {
+						announce::Event::Announced(update) | announce::Event::Updated(update) => (update, true),
+						announce::Event::Retracted(update) => (update, false),
+						// The marker only says the origin caught up; the peer learns the
+						// initial set's end from the version's own framing.
+						announce::Event::Live => continue,
+					};
 					let absolute = origin.absolute(&update.prefix);
 					let suffix = self.suffix(&update);
 
-					if update.kind.is_active() {
+					if active {
 						if self.outgoing(&update.route, &absolute).is_none() {
 							continue;
 						}
@@ -725,11 +743,18 @@ impl AnnounceRun {
 				// them afterward. The receiver stamps our origin onto each hop chain, so we
 				// forward the stored chain as-is (no self push here).
 				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
-				while let Some(update) = announced.try_next() {
+				while let Some(event) = announced.try_next() {
+					let (update, active) = match event {
+						announce::Event::Announced(update) | announce::Event::Updated(update) => (update, true),
+						announce::Event::Retracted(update) => (update, false),
+						// The marker only says the origin caught up; the peer learns the
+						// initial set's end from the version's own framing.
+						announce::Event::Live => continue,
+					};
 					let absolute = origin.absolute(&update.prefix);
 					let suffix = self.suffix(&update);
 
-					if update.kind.is_active() {
+					if active {
 						let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
 							continue;
 						};
@@ -751,11 +776,7 @@ impl AnnounceRun {
 				};
 				stream.writer.buffer(&ok)?;
 				for (suffix, hops, cost) in initial {
-					let id = self.assign_id();
-					self.live.insert(suffix.clone(), id);
-					stream
-						.writer
-						.buffer(&lite::AnnounceBroadcast::Active { suffix, hops, cost })?;
+					self.start(stream, suffix, hops, cost)?;
 				}
 			}
 			_ => {
@@ -797,18 +818,23 @@ impl AnnounceRun {
 				return Poll::Pending;
 			};
 
-			let Some(update) = next else {
-				// The buffer is empty (flushed at the loop top), so FIN now and
-				// wait for the acknowledgement.
-				stream.writer.finish()?;
-				self.phase = AnnouncePhase::Closing;
-				continue;
+			let (update, active) = match next {
+				Some(announce::Event::Announced(update) | announce::Event::Updated(update)) => (update, true),
+				Some(announce::Event::Retracted(update)) => (update, false),
+				Some(announce::Event::Live) => continue,
+				None => {
+					// The buffer is empty (flushed at the loop top), so FIN now and
+					// wait for the acknowledgement.
+					stream.writer.finish()?;
+					self.phase = AnnouncePhase::Closing;
+					continue;
+				}
 			};
 
 			let absolute = origin.absolute(&update.prefix);
 			let suffix = self.suffix(&update);
 
-			if !update.kind.is_active() {
+			if !active {
 				self.retract(stream, suffix, &absolute)?;
 				continue;
 			}
@@ -820,12 +846,18 @@ impl AnnounceRun {
 					Some(&id) if lite::restart_supported(self.version) => {
 						tracing::debug!(route = %absolute, "reannounce");
 						match id {
-							Some(id) => stream
-								.writer
-								.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?,
-							None => stream
-								.writer
-								.buffer(&lite::AnnounceBroadcast::Active { suffix, hops, cost })?,
+							Some(id) => {
+								let hops = self.encoder.update(id, hops);
+								stream
+									.writer
+									.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?
+							}
+							// lite-05: a duplicate ANNOUNCE, which assigns no id.
+							None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
+								suffix: lite::PathRef::literal(suffix),
+								hops: lite::HopsRef::literal(hops),
+								cost,
+							})?,
 						}
 					}
 					// Pre-restart versions have no way to update a live
@@ -833,11 +865,7 @@ impl AnnounceRun {
 					Some(_) => {}
 					None => {
 						tracing::debug!(route = %absolute, "announce");
-						let id = self.assign_id();
-						self.live.insert(suffix.clone(), id);
-						stream
-							.writer
-							.buffer(&lite::AnnounceBroadcast::Active { suffix, hops, cost })?;
+						self.start(stream, suffix, hops, cost)?;
 					}
 				},
 				// The chain must not be forwarded (reflected, or full): retract
@@ -1686,9 +1714,11 @@ mod announce_test {
 			let mut slice = &buf[..];
 			let mut msgs = Vec::new();
 			while !slice.is_empty() {
-				msgs.push(own(
-					lite::AnnounceBroadcast::decode(&mut slice, VERSION).expect("announce message")
-				));
+				msgs.push(
+					lite::AnnounceBroadcast::decode(&mut slice, VERSION)
+						.expect("announce message")
+						.into_owned(),
+				);
 			}
 			self.cursor += buf.len();
 			msgs
@@ -1698,24 +1728,6 @@ mod announce_test {
 		fn assert_quiet(&self) {
 			let pending = self.pending();
 			assert!(pending.is_empty(), "unexpected wire bytes: {pending:?}");
-		}
-	}
-
-	/// Re-own a decoded message so it can outlive the decode buffer.
-	fn own(msg: lite::AnnounceBroadcast<'_>) -> lite::AnnounceBroadcast<'static> {
-		match msg {
-			lite::AnnounceBroadcast::Active { suffix, hops, cost } => lite::AnnounceBroadcast::Active {
-				suffix: suffix.to_owned(),
-				hops,
-				cost,
-			},
-			lite::AnnounceBroadcast::Ended { suffix, hops } => lite::AnnounceBroadcast::Ended {
-				suffix: suffix.to_owned(),
-				hops,
-			},
-			lite::AnnounceBroadcast::EndedId { id } => lite::AnnounceBroadcast::EndedId { id },
-			lite::AnnounceBroadcast::Restart { id, hops, cost } => lite::AnnounceBroadcast::Restart { id, hops, cost },
-			lite::AnnounceBroadcast::Skipped => lite::AnnounceBroadcast::Skipped,
 		}
 	}
 
@@ -1771,8 +1783,8 @@ mod announce_test {
 		assert_eq!(wire.take_ok().active, 1, "expected one initial announce");
 		match wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Active { suffix, hops, cost }] => {
-				assert_eq!(suffix.as_str(), "cam");
-				assert_eq!(hops, &pub_hops());
+				assert_eq!(suffix.rest.as_str(), "cam");
+				assert_eq!(hops, &lite::HopsRef::literal(pub_hops()));
 				assert_eq!(*cost, crate::origin::Cost::new(7));
 			}
 			other => panic!("expected the initial announce, got {other:?}"),
@@ -1798,7 +1810,7 @@ mod announce_test {
 			.unwrap();
 		settle().await;
 		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Active { suffix, .. }] => assert_eq!(suffix.as_str(), "mic"),
+			[lite::AnnounceBroadcast::Active { suffix, .. }] => assert_eq!(suffix.rest.as_str(), "mic"),
 			other => panic!("expected an announce, got {other:?}"),
 		}
 
@@ -1823,7 +1835,7 @@ mod announce_test {
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Restart { id: 0, hops, cost }] => {
-				assert_eq!(hops, &pub_hops());
+				assert_eq!(hops, &lite::HopsRef::literal(pub_hops()));
 				assert_eq!(*cost, crate::origin::Cost::new(3));
 			}
 			other => panic!("expected a restart, got {other:?}"),
@@ -1874,7 +1886,7 @@ mod announce_test {
 		let mut wire = Wire { writes, cursor: 0 };
 		assert_eq!(wire.take_ok().active, 1, "only the clean route is announced");
 		match wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Active { suffix, .. }] => assert_eq!(suffix.as_str(), "local"),
+			[lite::AnnounceBroadcast::Active { suffix, .. }] => assert_eq!(suffix.rest.as_str(), "local"),
 			other => panic!("expected the clean announce, got {other:?}"),
 		}
 		task.abort();
@@ -1890,7 +1902,7 @@ mod announce_test {
 			.unwrap();
 		settle().await;
 		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Active { suffix, .. }] => assert_eq!(suffix.as_str(), "mic"),
+			[lite::AnnounceBroadcast::Active { suffix, .. }] => assert_eq!(suffix.rest.as_str(), "mic"),
 			other => panic!("expected ANNOUNCE_START, got {other:?}"),
 		}
 		h.assert_idle();

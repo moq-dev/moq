@@ -242,11 +242,8 @@ fn bench_serve_idle(c: &mut Criterion) {
 				})
 				.collect();
 			b.iter(|| {
-				// A fresh waiter per sweep. A live registration keeps the waiter's
-				// `Weak` in each route's list until it drops, so a waiter reused
-				// across sweeps would stack one per route per iteration. Production
-				// retires the parked waiter the same way: `Park::hold` drops a
-				// still-registered waiter before the next poll registers again.
+				// A fresh waiter per sweep, so every poll pays a real registration: a
+				// reused one would find itself still parked on each route and skip it.
 				let waiter = kio::Waiter::noop();
 				// Nothing is queued, so every poll parks again: the idle sweep.
 				for dynamic in &dynamics {
@@ -269,7 +266,7 @@ fn bench_subscribe(c: &mut Criterion) {
 			b.iter(|| {
 				let mut cursor = fleet.consumer.announced();
 				let mut replayed = 0;
-				while cursor.next().now_or_never().flatten().is_some() {
+				while let Some(announce::Event::Announced(_)) = cursor.next().now_or_never().flatten() {
 					replayed += 1;
 				}
 				assert_eq!(replayed, publishers);

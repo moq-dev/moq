@@ -132,7 +132,11 @@ export default defineConfig({
 								{ text: "Deployment", link: "/setup/prod" },
 							],
 						},
-						{ text: "moq-cli", link: "/bin/cli" },
+						{
+							text: "moq-cli",
+							link: "/bin/cli",
+							items: [{ text: "Inspect a relay", link: "/bin/inspect" }],
+						},
 						{
 							text: "Gateways",
 							items: [

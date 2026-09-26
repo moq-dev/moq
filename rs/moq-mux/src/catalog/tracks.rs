@@ -190,6 +190,8 @@ pub struct VideoHint {
 	pub optimize_for_latency: Option<bool>,
 	/// The maximum jitter before the next frame is emitted.
 	pub jitter: Option<Duration>,
+	/// How far this rendition trails the broadcast's earliest rendition.
+	pub delay: Option<Duration>,
 	/// The container wrapping each frame on the wire.
 	///
 	/// Unlike the other fields this is a choice, not a hint: the bitstream never reveals a
@@ -224,6 +226,7 @@ impl From<hang::catalog::VideoConfig> for VideoHint {
 			framerate: config.framerate,
 			optimize_for_latency: config.optimize_for_latency,
 			jitter: config.jitter,
+			delay: config.delay,
 			container: config.container,
 		}
 	}
@@ -247,6 +250,7 @@ impl VideoHint {
 		fill(&mut config.framerate, self.framerate);
 		fill(&mut config.optimize_for_latency, self.optimize_for_latency);
 		fill(&mut config.jitter, self.jitter);
+		fill(&mut config.delay, self.delay);
 		config.container = self.container.clone();
 	}
 
@@ -276,11 +280,15 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::VideoConfig {
 	}
 
 	fn estimate(&self) -> Estimate {
-		Estimate::default().with_jitter(self.jitter).with_bitrate(self.bitrate)
+		Estimate::default()
+			.with_jitter(self.jitter)
+			.with_bitrate(self.bitrate)
+			.with_delay(self.delay)
 	}
 	fn set_estimate(&mut self, estimate: Estimate) {
 		self.jitter = estimate.jitter;
 		self.bitrate = estimate.bitrate;
+		self.delay = estimate.delay;
 	}
 }
 
@@ -300,11 +308,15 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::AudioConfig {
 	}
 
 	fn estimate(&self) -> Estimate {
-		Estimate::default().with_jitter(self.jitter).with_bitrate(self.bitrate)
+		Estimate::default()
+			.with_jitter(self.jitter)
+			.with_bitrate(self.bitrate)
+			.with_delay(self.delay)
 	}
 	fn set_estimate(&mut self, estimate: Estimate) {
 		self.jitter = estimate.jitter;
 		self.bitrate = estimate.bitrate;
+		self.delay = estimate.delay;
 	}
 }
 
@@ -319,10 +331,11 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 		catalog.text.renditions.remove(name);
 	}
 	fn estimate(&self) -> Estimate {
-		Estimate::default().with_jitter(self.jitter)
+		Estimate::default().with_jitter(self.jitter).with_delay(self.delay)
 	}
 	fn set_estimate(&mut self, estimate: Estimate) {
 		self.jitter = estimate.jitter;
+		self.delay = estimate.delay;
 	}
 }
 
@@ -518,6 +531,11 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		&self.name
 	}
 
+	/// A fresh estimator measuring `delay` against the catalog's other renditions.
+	pub(crate) fn estimator(&self) -> super::Estimator {
+		self.catalog.estimator()
+	}
+
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
 	pub fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
 		self.catalog.timestamp(hint)
@@ -533,7 +551,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	pub(crate) fn set(&mut self, mut config: C) -> crate::Result<()> {
 		let supplied = config.estimate();
 		let resolved = Self::resolved(&supplied, &self.detected);
-		self.check_jitter(&resolved)?;
+		self.check_decrease(&resolved)?;
 		config.set_estimate(resolved.clone());
 		{
 			let mut guard = self.catalog.modify()?;
@@ -560,6 +578,9 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if estimate.bitrate.is_none() {
 			estimate.bitrate = detected.bitrate;
 		}
+		if estimate.delay.is_none() {
+			estimate.delay = detected.delay;
+		}
 		estimate
 	}
 
@@ -581,10 +602,11 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			return Ok(());
 		}
 		let mut resolved = Self::resolved(&self.supplied, &estimate);
-		// A measurement never lowers the published jitter, including one raised through `modify`.
-		if let Some(published) = self.config()?.estimate().jitter {
-			resolved.jitter = Some(resolved.jitter.map_or(published, |jitter| jitter.max(published)));
-		}
+		// A measurement never lowers the published jitter or delay, including one raised through
+		// `modify`.
+		let published = self.config()?.estimate();
+		resolved.jitter = resolved.jitter.max(published.jitter);
+		resolved.delay = resolved.delay.max(published.delay);
 		self.detected = estimate;
 		if self.published.as_ref() != Some(&resolved) {
 			let mut config = self.config()?;
@@ -595,12 +617,17 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		Ok(())
 	}
 
-	fn check_jitter(&self, next: &Estimate) -> crate::Result<()> {
-		if self.present
-			&& let Some(previous) = self.config()?.estimate().jitter
-			&& next.jitter.is_none_or(|jitter| jitter < previous)
-		{
+	/// Refuse a config that lowers the jitter or delay already advertised to subscribers.
+	fn check_decrease(&self, next: &Estimate) -> crate::Result<()> {
+		if !self.present {
+			return Ok(());
+		}
+		let previous = self.config()?.estimate();
+		if next.jitter < previous.jitter {
 			return Err(crate::Error::JitterDecreased);
+		}
+		if next.delay < previous.delay {
+			return Err(crate::Error::DelayDecreased);
 		}
 		Ok(())
 	}
@@ -620,7 +647,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if !self.present {
 			return Err(crate::Error::NotPublished);
 		}
-		self.check_jitter(&config.estimate())?;
+		self.check_decrease(&config.estimate())?;
 		let mut guard = self.catalog.modify()?;
 		let mut next = (*guard).clone();
 		config.insert(&mut next, &self.name);
@@ -720,6 +747,45 @@ mod tests {
 		assert_eq!(
 			catalog.snapshot().video.renditions["v"].jitter,
 			Some(Duration::from_millis(100))
+		);
+	}
+
+	#[test]
+	fn published_delay_never_decreases() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		let delayed = |delay| {
+			let mut config = config(None, None);
+			config.delay = delay;
+			config
+		};
+		rendition.set(delayed(Some(Duration::from_millis(200)))).unwrap();
+		for smaller in [Some(Duration::from_millis(100)), None] {
+			assert!(matches!(
+				rendition.set(delayed(smaller)),
+				Err(crate::Error::DelayDecreased)
+			));
+			assert!(matches!(
+				rendition.replace(delayed(smaller)),
+				Err(crate::Error::DelayDecreased)
+			));
+		}
+		assert_eq!(
+			catalog.snapshot().video.renditions["v"].delay,
+			Some(Duration::from_millis(200))
+		);
+
+		let (_broadcast, catalog, mut detected) = video_track();
+		detected.set(config(None, None)).unwrap();
+		detected
+			.estimate(Estimate::default().with_delay(Duration::from_millis(200)))
+			.unwrap();
+		// A lower measurement holds the published value rather than failing the write path.
+		detected
+			.estimate(Estimate::default().with_delay(Duration::from_millis(100)))
+			.unwrap();
+		assert_eq!(
+			catalog.snapshot().video.renditions["v"].delay,
+			Some(Duration::from_millis(200))
 		);
 	}
 

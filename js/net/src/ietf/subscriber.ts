@@ -2,7 +2,7 @@ import { race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
-import { controlTimeout, error, ProtocolViolation, reason } from "../error.ts";
+import { closeError, controlTimeout, error, ProtocolViolation, reason, sessionCause } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
@@ -97,6 +97,10 @@ function sees(filter: Filter, path: Path.Valid): boolean {
 export class Subscriber {
 	#session: Session;
 
+	// The transport, so a request cut off by the session's close ends with the session's
+	// error. Optional for tests that drive a bare session.
+	#quic?: WebTransport;
+
 	// The Hop IDs this session declared; see {@link Cluster}. What the peer declared is what
 	// says whether an advertisement carries a hop path, and ours is what a path looping back
 	// to us contains.
@@ -140,17 +144,21 @@ export class Subscriber {
 	 */
 	constructor({
 		session,
+		quic,
 		cluster,
 		hidden = false,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
+		/** The transport the session runs on. */
+		quic?: WebTransport;
 		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
 		cluster?: Cluster.Hops;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
 	}) {
 		this.#session = session;
+		this.#quic = quic;
 		this.#cluster = cluster;
 		this.#hidden = hidden;
 	}
@@ -479,10 +487,22 @@ export class Subscriber {
 		return consumer;
 	}
 
+	// The adapter is gone. If the transport has already closed, that close is the
+	// error. A still-open transport, such as a GOAWAY drain, has no peer code yet,
+	// so this does not wait for it.
+	async #closedSession(): Promise<Error> {
+		const quic = this.#quic;
+		if (!quic) return new Error("session closed");
+		return Promise.race([
+			closeError(quic),
+			new Promise<Error>((resolve) => queueMicrotask(() => resolve(new Error("session closed")))),
+		]);
+	}
+
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) {
-			request.reject(new Error("session closed"));
+			request.reject(await this.#closedSession());
 			return;
 		}
 
@@ -533,7 +553,7 @@ export class Subscriber {
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			// A control request that timed out is not late content, so it carries its own code.
-			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
+			const e = err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err);
 			request.reject(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
@@ -617,7 +637,7 @@ export class Subscriber {
 			stream.close();
 			console.debug(`subscribe close: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
-			const e = error(err);
+			const e = await sessionCause(this.#quic, err);
 			producer.close(e);
 			stream.abort(e);
 			console.warn(

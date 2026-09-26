@@ -794,6 +794,9 @@ pub struct Registry {
 
 /// State shared by every clone of a [`Registry`].
 struct Shared {
+	/// Completed entries folded by tier before pruning. Lock before either map
+	/// so a snapshot sees each entry either here or live, never both or neither.
+	retired: Lock<Snapshot>,
 	entries: Lock<HashMap<PathOwned, Arc<BroadcastEntry>>>,
 	/// Connected-session gauges keyed by `(tier, auth root)`. Independent of any
 	/// broadcast; surfaced on the per-tier session tracks. A tier's inner map is
@@ -844,6 +847,7 @@ impl Registry {
 		Self {
 			exclude,
 			shared: Some(Arc::new(Shared {
+				retired: Lock::default(),
 				entries: Lock::default(),
 				sessions: Default::default(),
 			})),
@@ -922,12 +926,14 @@ impl Registry {
 	/// all-zero snapshot for a disabled registry.
 	///
 	/// Unlike [`Registry::report`], this collapses per-broadcast detail into
-	/// node totals (what a `/metrics`-style scrape wants) and never prunes.
+	/// node lifetime totals (what a `/metrics`-style scrape wants) and never prunes.
+	/// Retired entries remain in these totals after [`Self::report`] prunes them.
 	pub fn snapshot(&self) -> Snapshot {
-		let mut snap = Snapshot::default();
 		let Some(shared) = self.shared.as_ref() else {
-			return snap;
+			return Snapshot::default();
 		};
+		let retired = shared.retired.lock();
+		let mut snap = retired.clone();
 		{
 			let entries = shared.entries.lock();
 			for entry in entries.values() {
@@ -967,6 +973,7 @@ impl Registry {
 		let Some(shared) = self.shared.as_ref() else {
 			return;
 		};
+		let mut retired = shared.retired.lock();
 		{
 			let mut entries = shared.entries.lock();
 			for (path, entry) in entries.iter() {
@@ -989,7 +996,15 @@ impl Registry {
 					return true;
 				}
 				let mut tiers = entry.tiers.lock().expect("stats tiers poisoned");
-				tiers.retain(|_, counters| Arc::strong_count(counters) > 1);
+				tiers.retain(|tier, counters| {
+					if Arc::strong_count(counters) > 1 {
+						return true;
+					}
+					let totals = retired.traffic.entry(tier.clone()).or_default();
+					totals[Role::Publisher.idx()].add(counters.publisher.snapshot());
+					totals[Role::Subscriber.idx()].add(counters.subscriber.snapshot());
+					false
+				});
 				!tiers.is_empty()
 			});
 		}
@@ -1004,8 +1019,18 @@ impl Registry {
 					});
 				}
 			}
-			for roots in sessions.values_mut() {
-				roots.retain(|_, counters| Arc::strong_count(counters) > 1);
+			for (tier, roots) in sessions.iter_mut() {
+				roots.retain(|_, counters| {
+					if Arc::strong_count(counters) > 1 {
+						return true;
+					}
+					retired
+						.sessions
+						.entry(tier.clone())
+						.or_default()
+						.add(counters.snapshot());
+					false
+				});
 			}
 			sessions.retain(|_, roots| !roots.is_empty());
 		}
@@ -1733,6 +1758,93 @@ mod tests {
 		assert_eq!(row.presence.active(), 0);
 		assert!(drain(&stats).sessions.is_empty(), "root pruned after the last drain");
 		assert!(session_snapshot(&stats, &Tier::default(), "acme").is_none());
+	}
+
+	#[test]
+	fn snapshot_preserves_retired_counters() {
+		let stats = test_stats();
+		let tier = Tier::default();
+		let live = stats.tier(tier.clone()).session("live");
+		let scope = live.egress("live/video");
+		let _live_sub = scope.subscribe();
+		for _ in 0..2 {
+			let session = stats.tier(tier.clone()).session("retired");
+			let scope = session.egress("retired/video");
+			let sub = scope.subscribe();
+			scope.meter().bytes(100);
+			drop(sub);
+			drop(scope);
+			drop(session);
+			let before = stats.snapshot();
+			drain(&stats);
+			assert_eq!(stats.snapshot(), before, "pruning must not reset host counters");
+		}
+		let snap = stats.snapshot();
+		let traffic = snap
+			.traffic()
+			.into_iter()
+			.find(|(_, role, _)| *role == Role::Publisher)
+			.unwrap()
+			.2;
+		assert_eq!(traffic.bytes, 200);
+		assert_eq!(traffic.subscriptions_started, 3);
+		assert_eq!(traffic.subscriptions_ended, 2);
+		let sessions = snap.sessions().into_iter().find(|(label, _)| label == &tier).unwrap().1;
+		assert_eq!(sessions.sessions_started, 3);
+		assert_eq!(sessions.sessions_ended, 2);
+		assert_eq!(stats.shared().entries.lock().len(), 1, "retired paths are still pruned");
+		assert_eq!(
+			stats.shared().sessions.lock()[&tier].len(),
+			1,
+			"retired roots are still pruned"
+		);
+		let retired = stats.shared().retired.lock();
+		assert_eq!(retired.traffic.len(), 1, "retain only a total per tier");
+		assert_eq!(retired.sessions.len(), 1);
+	}
+
+	#[cfg(not(target_family = "wasm"))]
+	#[test]
+	fn snapshot_and_report_transfer_counters_once() {
+		let stats = test_stats();
+		let worker_stats = stats.clone();
+		let worker = std::thread::spawn(move || {
+			for i in 0..256 {
+				let path = format!("root/{i}");
+				let session = worker_stats.tier(Tier::default()).session(path.as_str());
+				session.ingress(path.as_str()).meter().bytes(1);
+				drop(session);
+				drain(&worker_stats);
+			}
+		});
+		let mut previous = 0;
+		while !worker.is_finished() {
+			let bytes: u64 = stats
+				.snapshot()
+				.traffic()
+				.iter()
+				.map(|(_, _, traffic)| traffic.bytes)
+				.sum();
+			assert!(
+				bytes >= previous,
+				"retiring an entry must not double-count or lose its bytes"
+			);
+			assert!(bytes <= 256);
+			previous = bytes;
+		}
+		worker.join().unwrap();
+		let snap = stats.snapshot();
+		assert_eq!(
+			snap.traffic().iter().map(|(_, _, traffic)| traffic.bytes).sum::<u64>(),
+			256
+		);
+		assert_eq!(snap.sessions()[0].1.sessions_started, 256);
+		assert_eq!(snap.sessions()[0].1.sessions_ended, 256);
+		assert!(stats.shared().entries.lock().is_empty());
+		assert!(stats.shared().sessions.lock().is_empty());
+		let retired = stats.shared().retired.lock();
+		assert_eq!(retired.traffic.len(), 1);
+		assert_eq!(retired.sessions.len(), 1);
 	}
 
 	#[test]

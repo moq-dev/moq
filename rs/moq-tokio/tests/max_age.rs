@@ -95,10 +95,14 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 				.established()
 				.await?,
 		);
-		announced
-			.next()
-			.await
-			.ok_or_else(|| anyhow::anyhow!("announcements closed"))?;
+		// The `Live` marker can come first while the publisher is still connecting.
+		while !matches!(
+			announced
+				.next()
+				.await
+				.ok_or_else(|| anyhow::anyhow!("announcements closed"))?,
+			moq_net::announce::Event::Announced(_)
+		) {}
 		let front = consumer.request_broadcast("age").await?;
 		for (i, age) in AGES.into_iter().enumerate() {
 			let track = front.track(&i.to_string())?.subscribe(None).await?;

@@ -18,7 +18,3 @@ instead of the settle timer. Without the extension the timer stays.
   an un-negotiated one still clears on the timer.
 
 Public API: none. Wire: a new opt-in extension.
-
-## Required
-
-- [Caught up](/quest/m1/cli-inspect/caught-up.md) - the per-source clear this feeds

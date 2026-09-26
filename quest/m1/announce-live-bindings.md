@@ -9,8 +9,7 @@ been delivered. A binding app can list what is live and stop, with no timer.
 
 ## Plan
 
-Mirror the Rust `announce::Event` from
-[Caught up](/quest/m1/cli-inspect/caught-up.md) one to one:
+Mirror moq-net's `announce::Event` one to one:
 
 - moq-ffi: `MoqAnnounceConsumer::next` returns `MoqAnnounceEvent`, a uniffi
   enum with the four variants, replacing `MoqAnnounceUpdate::active()`. Stop
@@ -23,10 +22,6 @@ Mirror the Rust `announce::Event` from
 
 Public API: breaking in moq-ffi, libmoq's C ABI, and every wrapper, so it
 retargets to `dev` with the Rust break. Wire: none.
-
-## Required
-
-- [Caught up](/quest/m1/cli-inspect/caught-up.md) - settles the event shape this mirrors
 
 ## Related
 

@@ -4,7 +4,6 @@
 //! certificate is reported to whoever decides as a fact.
 
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use axum::http;
 use moq_auth::{Bytes, Grant, Request, lease};
@@ -253,7 +252,7 @@ impl Lease {
 		let grant = consumer.grant();
 		Self {
 			token: Token::new(path, &grant),
-			expires: deadline(&grant),
+			expires: grant.deadline(),
 			consumer,
 			stats: Default::default(),
 		}
@@ -311,7 +310,7 @@ impl Lease {
 							self.stats.set_tier(fresh.tier.clone());
 							self.token.tier = fresh.tier;
 						}
-						self.expires = deadline(&grant);
+						self.expires = grant.deadline();
 					},
 					Err(reason) => return reason,
 				},
@@ -326,12 +325,6 @@ impl Lease {
 	pub fn close(self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
 		self.consumer.close(reason, bytes)
 	}
-}
-
-/// The grant's `expires` as a deadline on tokio's clock, counted from now.
-fn deadline(grant: &Grant) -> Option<tokio::time::Instant> {
-	let at = grant.expires?;
-	Some(tokio::time::Instant::now() + at.duration_since(SystemTime::now()).unwrap_or_default())
 }
 
 /// Run gateway work while its admission lease still covers the session.
@@ -539,6 +532,7 @@ pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::time::SystemTime;
 
 	fn patterns(texts: &[&str]) -> Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
@@ -671,6 +665,29 @@ mod tests {
 			.await
 			.expect("expired at the deadline despite re-polling");
 		assert_eq!(reason, lease::Reason::Expired);
+	}
+
+	#[tokio::test]
+	async fn a_grant_within_clock_skew_stays_live() {
+		tokio::time::pause();
+		use std::time::Duration;
+
+		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
+		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
+		grant.validate().expect("accepted inside the skew window");
+		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant));
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), lease.ended())
+				.await
+				.is_err(),
+			"still live inside the skew window"
+		);
+		assert_eq!(
+			tokio::time::timeout(Duration::from_secs(4), lease.ended())
+				.await
+				.expect("expired once the skew window ended"),
+			lease::Reason::Expired
+		);
 	}
 
 	#[test]

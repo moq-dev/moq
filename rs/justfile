@@ -969,7 +969,7 @@ loom *args:
 # run, and libFuzzer writes what it discovers to the FIRST corpus directory, which is
 # why the generated seeds are passed second and stay read-only.
 #
-# TARGET is lite, ietf, varint, or path. Arguments pass through, so
+# TARGET is lite, announce, ietf, varint, path, or pattern. Arguments pass through, so
 # `just rs fuzz lite -- -max_total_time=300` bounds a run. See rs/moq-net/fuzz/README.md.
 fuzz target *args:
     #!/usr/bin/env bash

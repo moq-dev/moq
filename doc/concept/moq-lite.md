@@ -56,6 +56,11 @@ anonymous mark and travels the chain unchanged. A route that passed through an
 anonymous hop at any depth ranks below every fully identified route, whatever
 the costs say; among anonymous routes, cost keeps ordering.
 
+On moq-lite 07, an announcement may copy the head of its path and the tail of
+its relay chain from one still live on the same stream, so many broadcasts
+from a few origins behind the same relays stop repeating those bytes. Rust
+compresses when it helps; TypeScript decodes it but always sends literally.
+
 A broadcast exists only while it is announced, for consumers in the same
 process and across a session alike: one that is created but never announced
 can be neither discovered nor requested. A broadcast published locally
@@ -129,12 +134,17 @@ prefixes it is told about.
 A subscriber watching under a root sees advertisements named relative to that
 root. The pattern scope filters which prefixes are visible without changing a
 route's prefix. Announce events carry the covered path, captures, and what
-happened to it: Rust
-`announce::Update { path, captures: Option<Vec<Pattern>>, route, kind }` and
-TypeScript `Announce.Update { path, captures, route, kind }`, where the kind is
-announced, updated (a reprice in place), or retracted. Captures are present when
-the announced prefix pins every wildcard in the most-specific matching scope
-member. The Rust consumer is a `Stream` and the TypeScript one an async iterable.
+happened to it: Rust `announce::Event::{Announced, Updated, Retracted}`, each
+holding an `announce::Announce { prefix, captures: Option<Vec<Pattern>>, route }`,
+and TypeScript `Announce.Update { path, captures, route, kind }`, where the kind
+is announced, updated (a reprice in place), or retracted. Captures are present
+when the announced prefix pins every wildcard in the most-specific matching
+scope member. The Rust consumer is a `Stream` and the TypeScript one an async
+iterable. The Rust consumer also yields one `announce::Event::Live` once the
+routes live at subscribe time have all been delivered, including those a peer
+session was still sending: moq-lite-05+ counts them in `ANNOUNCE_OK`,
+moq-lite-01/02 send them in `ANNOUNCE_INIT`, and older or IETF sessions wait
+for the stream to go quiet.
 
 Announcements are hints; requests are the authority. When a subscriber asks
 for a covered path the advertiser will not serve, the advertiser refuses that

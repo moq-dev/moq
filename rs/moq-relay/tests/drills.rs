@@ -696,11 +696,11 @@ lanes!(interrupted_publisher_republishes_new_content);
 /// Wait for `path` to be announced (`want`) or unannounced (`!want`).
 async fn expect_announce(announced: &mut moq_net::announce::Consumer, path: &str, want: bool, who: &str) {
 	loop {
-		let update = tokio::time::timeout(TIMEOUT, announced.next())
+		let (update, active) = tokio::time::timeout(TIMEOUT, next_update(announced))
 			.await
 			.unwrap_or_else(|_| panic!("{who}: no announcement change within {TIMEOUT:?}"))
 			.unwrap_or_else(|| panic!("{who}: the announcement stream closed"));
-		if update.prefix.as_str() == path && update.kind.is_active() == want {
+		if update.prefix.as_str() == path && active == want {
 			return;
 		}
 	}
@@ -736,8 +736,8 @@ async fn no_publisher_never_delivers(lane: Lane) {
 	let quiet = Duration::from_secs(2);
 
 	let mut announced = subscribed.announced();
-	if let Ok(update) = tokio::time::timeout(quiet, announced.next()).await {
-		let path = update.map(|update| update.prefix.to_string());
+	if let Ok(update) = tokio::time::timeout(quiet, next_update(&mut announced)).await {
+		let path = update.map(|(update, _)| update.prefix.to_string());
 		panic!("the announcement stream reported {path:?} with no publisher");
 	}
 
@@ -754,3 +754,16 @@ async fn no_publisher_never_delivers(lane: Lane) {
 }
 
 lanes!(no_publisher_never_delivers);
+
+/// The next route and whether it is active, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
+				Some((route, true))
+			}
+			moq_net::announce::Event::Retracted(route) => Some((route, false)),
+			moq_net::announce::Event::Live => continue,
+		};
+	}
+}

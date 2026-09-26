@@ -279,8 +279,9 @@ fn wake(list: &Lock<WaiterList>) {
 	waiters.wake();
 }
 
-/// A partial wake retires the waiter still parked on the quiet list. The new
-/// registration must hear a terminal wake on the drained list or the task hangs.
+/// A partial wake re-polls a waiter still parked on the quiet list. Its registration
+/// on the drained list must be real, not skipped as a duplicate, or the terminal
+/// wake is lost and the task hangs.
 #[test]
 fn a_replaced_waiter_hears_the_drained_list_again() {
 	loom::model(|| {

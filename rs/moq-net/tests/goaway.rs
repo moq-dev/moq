@@ -336,7 +336,7 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		let sub_origin = produce_origin(Hop::random());
 
 		let mut opts = MockConnectOptions::new(version);
-		opts.server_publish = Some(pub_origin.clone());
+		opts.server_publish = Some(pub_origin.consume());
 		opts.client_subscribe = Some(sub_origin.clone());
 		let MockPair { client, server, .. } = connect_mock(opts).await;
 
@@ -423,7 +423,7 @@ async fn goaway_drains_routes(version: Version) {
 		let sub_origin = produce_origin(Hop::random());
 
 		let mut opts = MockConnectOptions::new(version);
-		opts.server_publish = Some(pub_origin.clone());
+		opts.server_publish = Some(pub_origin.consume());
 		opts.client_subscribe = Some(sub_origin.clone());
 		let MockPair { client, server, .. } = connect_mock(opts).await;
 
@@ -443,11 +443,12 @@ async fn goaway_drains_routes(version: Version) {
 		// re-prices the route in place, which arrives as another active update.
 		let mut announced = sub.announced();
 		loop {
-			let update = announced.next().await.expect("update");
-			if update.kind.is_active()
-				&& update.prefix.as_str() == "test"
-				&& update.route.cost == moq_net::origin::Cost::DRAIN
-			{
+			let (moq_net::announce::Event::Announced(update) | moq_net::announce::Event::Updated(update)) =
+				announced.next().await.expect("update")
+			else {
+				continue;
+			};
+			if update.prefix.as_str() == "test" && update.route.cost == moq_net::origin::Cost::DRAIN {
 				break;
 			}
 		}

@@ -35,11 +35,19 @@ enum Observer {
 	Remote(&'static str),
 }
 
-/// Drain every update the cursor has pending, as `kind prefix` lines.
+/// Drain every route event the cursor has pending, as `kind prefix` lines.
 fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
+	use moq_net::announce::Event;
+
 	let mut seen = Vec::new();
-	while let Some(update) = announced.try_next() {
-		seen.push(format!("{:?} {}", update.kind, update.prefix));
+	while let Some(event) = announced.try_next() {
+		let (kind, announce) = match event {
+			Event::Announced(announce) => ("Announced", announce),
+			Event::Updated(announce) => ("Updated", announce),
+			Event::Retracted(announce) => ("Retracted", announce),
+			Event::Live => continue,
+		};
+		seen.push(format!("{kind} {}", announce.prefix));
 	}
 	seen
 }
@@ -119,7 +127,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 		Observer::Remote(version) => {
 			let subscriber = produce_origin(2);
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
-			options.server_publish = Some(publisher.clone());
+			options.server_publish = Some(publisher.consume());
 			options.client_subscribe = Some(subscriber.clone());
 			let pair = connect_mock(options).await;
 			(subscriber.consume(), Some(pair))
