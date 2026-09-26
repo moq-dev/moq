@@ -48,7 +48,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Path patterns](/quest/m1/path-patterns.md) - one matcher for every predicate over broadcast paths: tokens, origins, interest
 - [Setup token](/quest/m1/setup-token.md) - a moq-transport SETUP `AUTHORIZATION TOKEN` reaches the accepted handshake and the relay's auth request, so a verifier can run on it
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
-- [Tests under load](/quest/m1/test-flakes.md) - three tests that time out or run out of file descriptors under `just check` are fixed at the cause
 - [Decoded frame ownership](/quest/m1/decoded-frames.md) - retain moq-video Frames across bindings, with native views or CPU conversion as needed
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - generated C++ over moq-ffi with futures and expected-style errors, shipped as a tarball, vcpkg, and Conan, and adopted by the OBS plugin
 - [moq-c](/quest/m1/moq-c.md) - libmoq ships as `moq-c`, beside `moq-cpp`, with its C header and library unchanged

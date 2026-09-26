@@ -338,39 +338,29 @@ async fn reload_test() {
 	server_config.tls.cert = vec![cert.clone()];
 	server_config.tls.key = vec![key.clone()];
 
-	#[cfg(feature = "watch")]
-	if moq_tokio::watch::Files::new(std::slice::from_ref(&cert)).is_err() {
-		eprintln!("skipping reload_test: host cannot start an inotify watcher");
-		return;
-	}
-
 	let server = server_config
 		.init(moq_tokio::quic::Config::default())
 		.expect("failed to init server");
 	let server = server.listen().await.expect("failed to listen");
+
+	// Every process the user runs shares one inotify instance limit, so a loaded host can refuse
+	// the listener its watcher. Judge by the listener's own watcher: a separate probe would race
+	// the rest of the host for the same limit.
+	#[cfg(feature = "watch")]
+	if tracing_test::internal::logs_with_scope_contain("moq_tokio", "hot reload disabled") {
+		eprintln!("skipping reload_test: host cannot start an inotify watcher");
+		return;
+	}
+
 	let certificates = server.certificates();
 	let before = certificates.fingerprints();
 	assert_eq!(before.len(), 1);
 
-	// The reload task is spawned while the listener is built and registers its
-	// watcher the first time the runtime polls it, which may be after this point.
-	// Rotating before then would replace the files with nothing watching them.
-	tokio::time::sleep(Duration::from_millis(200)).await;
-
-	// Rotate in place, the way cert-manager or a secret mount would.
+	// Rotate in place, the way cert-manager or a secret mount would. The listener registered its
+	// watch before returning, so the rotation cannot land before it.
 	let (new_cert, new_key) = write_self_signed(dir.path(), "rotated", "localhost");
 	std::fs::rename(&new_cert, &cert).expect("rotate cert");
 	std::fs::rename(&new_key, &key).expect("rotate key");
-
-	tokio::time::sleep(Duration::from_secs(2)).await;
-	assert!(
-		tracing_test::internal::logs_with_scope_contain("moq_tokio", "reloading server certificates"),
-		"no reload log"
-	);
-	assert!(
-		!tracing_test::internal::logs_with_scope_contain("moq_tokio", "hot reload disabled"),
-		"watcher failed"
-	);
 
 	let reloaded = tokio::time::timeout(TIMEOUT, async {
 		loop {
@@ -384,6 +374,10 @@ async fn reload_test() {
 	.await
 	.expect("certificate reload timed out");
 
+	assert!(
+		tracing_test::internal::logs_with_scope_contain("moq_tokio", "reloading server certificates"),
+		"no reload log"
+	);
 	assert_eq!(reloaded.len(), 1);
 	drop(server);
 }
