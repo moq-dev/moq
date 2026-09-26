@@ -123,7 +123,8 @@ impl WaiterList {
 	///
 	/// Each call probes at most two slots at the rotating cursor and reuses
 	/// a dead one in place. The cursor advances on each live probe so the
-	/// window covers the list over time.
+	/// window covers the list over time. A list about to grow sweeps every
+	/// dead slot first.
 	pub fn register(&mut self, waiter: &Waiter) {
 		let new_weak = Arc::downgrade(waiter.shared());
 
@@ -139,6 +140,15 @@ impl WaiterList {
 			self.cursor = (self.cursor + 1) % self.entries.len();
 		}
 
+		if self.entries.len() == self.entries.capacity() {
+			// Probing alone loses to a list that many live waiters keep re-registering on
+			// and nothing wakes: each retired waiter leaves a dead slot the probe window
+			// rarely lands on, so the list grows for as long as it lives.
+			self.entries.retain(|entry| entry.strong_count() > 0);
+			// Leave at least half free, so each sweep is paid for by the pushes before it.
+			self.entries.reserve(self.entries.len());
+			self.cursor = 0;
+		}
 		self.entries.push(new_weak);
 	}
 
@@ -794,6 +804,30 @@ mod tests {
 			Waiter::noop().register(&mut list);
 		}
 		assert!(list.entries.len() <= 2);
+	}
+
+	/// Tasks parked on one list are retired and re-register in whatever order they
+	/// wake, while the list itself is never woken (a rarely-changing value many tasks
+	/// watch). The probe window alone let such a list grow without bound.
+	#[test]
+	fn retired_live_waiters_do_not_grow_the_list() {
+		const LIVE: usize = 64;
+		let mut list = WaiterList::new();
+		let mut waiters: Vec<Waiter> = (0..LIVE).map(|_| Waiter::noop()).collect();
+		for waiter in &waiters {
+			waiter.register(&mut list);
+		}
+
+		let mut seed = 1u64;
+		for _ in 0..100_000 {
+			seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+			let i = (seed >> 33) as usize % LIVE;
+			waiters[i] = Waiter::noop();
+			waiters[i].register(&mut list);
+		}
+
+		let len = list.entries.len();
+		assert!(len <= 4 * LIVE, "{len} slots for {LIVE} live waiters");
 	}
 
 	#[test]

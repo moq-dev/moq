@@ -14,7 +14,13 @@ import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
-import { AnnounceInit, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcastMaybe } from "./announce.ts";
+import {
+	AnnounceHistory,
+	AnnounceInit,
+	AnnounceOk,
+	AnnounceRequest,
+	decodeAnnounceBroadcastMaybe,
+} from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import * as DatagramStream from "./datagram_stream.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
@@ -273,10 +279,10 @@ export class Subscriber {
 			}
 
 			// Lite06+: announce ids. Each received `active` implicitly assigns the next
-			// per-stream ordinal; `endedId`/`restart` reference it. Tracked even for
-			// announces we skip as reflected, since the sender doesn't know we skipped.
-			let nextAnnounceId = 0n;
-			const announcedById = new Map<bigint, Path.Valid | null>();
+			// per-stream ordinal; `endedId`/`restart` reference it, and lite-07 bases copy
+			// from it. Tracked even for announces we skip as reflected, since the sender
+			// doesn't know we skipped.
+			const history = new AnnounceHistory();
 
 			// Receive announce updates (for Draft03, this includes initial state)
 			for (;;) {
@@ -295,39 +301,31 @@ export class Subscriber {
 				let cost: Cost | undefined;
 
 				switch (announce.status) {
-					case "active":
+					case "active": {
+						const resolved = hasAnnounceId(this.version) ? history.start(announce) : announce;
 						// The wire names the suffix beneath the interest prefix; the consumer
 						// sees the covered path from the session root.
-						path = Path.join(prefix, announce.suffix);
+						path = Path.join(prefix, resolved.suffix);
 						active = true;
-						hops = announce.hops;
+						hops = resolved.hops;
 						cost = announce.cost;
-						if (hasAnnounceId(this.version)) {
-							announcedById.set(nextAnnounceId++, path);
-						}
 						break;
+					}
 					case "ended":
 						path = Path.join(prefix, announce.suffix);
 						active = false;
 						break;
-					case "endedId": {
+					case "endedId":
 						// Resolve and retire the id; an unknown or retired id is a protocol violation.
-						const resolved = announcedById.get(announce.id);
-						if (resolved === undefined) throw new ProtocolViolation(`unknown announce id: ${announce.id}`);
-						announcedById.delete(announce.id);
-						if (resolved === null) continue;
-						path = resolved;
+						path = Path.join(prefix, history.end(announce.id));
 						active = false;
 						break;
-					}
 					case "restart": {
 						// Resolve the id; it stays live (the replacement reuses it).
-						const resolved = announcedById.get(announce.id);
-						if (resolved === undefined) throw new ProtocolViolation(`unknown announce id: ${announce.id}`);
-						if (resolved === null) continue;
-						path = resolved;
+						const resolved = history.update(announce);
+						path = Path.join(prefix, resolved.suffix);
 						active = true;
-						hops = announce.hops;
+						hops = resolved.hops;
 						cost = announce.cost;
 						break;
 					}

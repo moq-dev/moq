@@ -121,7 +121,7 @@ dispatch2 = "0.3.1"
 flate2 = { version = "1.1", default-features = false }
 futures = "0.3"
 getrandom = { version = "0.4", features = ["wasm_js"] }
-hang = { version = "0.21.4", path = "rs/hang" }
+hang = { version = "0.21.5", path = "rs/hang" }
 hex = "0.4"
 # HMAC-SHA256 for the mDNS membership proofs (moq-tokio's `mdns` feature).
 hmac = "0.13"
@@ -139,42 +139,42 @@ loom = { version = "0.7.2", features = ["futures"] }
 # DNS-SD advertisement and browsing for LAN peer discovery (moq-tokio's `mdns` feature).
 # `async` awaits the event channel instead of blocking a thread on it.
 mdns-sd = { version = "0.21", features = ["async"] }
-moq-audio = { version = "0.1.3", path = "rs/moq-audio", default-features = false }
-moq-auth = { version = "0.1.1", path = "rs/moq-auth" }
-moq-binary = { version = "0.1.3", path = "rs/moq-binary" }
+moq-audio = { version = "0.1.4", path = "rs/moq-audio", default-features = false }
+moq-auth = { version = "0.1.2", path = "rs/moq-auth" }
+moq-binary = { version = "0.1.4", path = "rs/moq-binary" }
 moq-flate = { version = "0.2.0", path = "rs/moq-flate" }
-moq-hls = { version = "0.5.4", path = "rs/moq-hls", default-features = false }
-moq-json = { version = "0.5.1", path = "rs/moq-json" }
-moq-loc = { version = "0.2.12", path = "rs/moq-loc" }
+moq-hls = { version = "0.5.5", path = "rs/moq-hls", default-features = false }
+moq-json = { version = "0.5.2", path = "rs/moq-json" }
+moq-loc = { version = "0.2.13", path = "rs/moq-loc" }
 moq-msf = { version = "0.5.0", path = "rs/moq-msf" }
-moq-mux = { version = "0.10.4", path = "rs/moq-mux" }
-moq-net = { version = "0.3.3", path = "rs/moq-net" }
+moq-mux = { version = "0.10.5", path = "rs/moq-mux" }
+moq-net = { version = "0.3.4", path = "rs/moq-net" }
 # The MoQ fork of noq (moq-dev/noq). iroh keeps upstream noq, so a build with the
 # iroh feature carries both stacks.
-moq-noq-proto = { version = "1.3", default-features = false }
-moq-noq-udp = "1.3"
+moq-noq-proto = { version = "1.3.1", default-features = false }
+moq-noq-udp = "1.3.1"
 # NVENC bindings, forked from ViliamVadocz/nvidia-video-codec-sdk to dlopen the
 # driver at runtime. Compiles on any platform (macOS included) but only actually
 # used by moq-video on Linux.
-moq-nvenc = { version = "0.1.0", path = "rs/moq-nvenc" }
+moq-nvenc = { version = "0.1.1", path = "rs/moq-nvenc" }
 moq-pattern = { version = "0.1.0", path = "rs/moq-pattern" }
-moq-relay = { version = "0.15.4", path = "rs/moq-relay", default-features = false }
-moq-rtc = { version = "0.3.4", path = "rs/moq-rtc" }
-moq-rtmp = { version = "0.3.4", path = "rs/moq-rtmp" }
+moq-relay = { version = "0.15.5", path = "rs/moq-relay", default-features = false }
+moq-rtc = { version = "0.3.5", path = "rs/moq-rtc" }
+moq-rtmp = { version = "0.3.5", path = "rs/moq-rtmp" }
 moq-sock = { version = "0.1.0", path = "rs/moq-sock" }
-moq-srt = { version = "0.3.4", path = "rs/moq-srt" }
-moq-stats = { version = "0.2.4", path = "rs/moq-stats" }
-moq-tokio = { version = "0.19.15", path = "rs/moq-tokio", default-features = false }
+moq-srt = { version = "0.3.5", path = "rs/moq-srt" }
+moq-stats = { version = "0.2.5", path = "rs/moq-stats" }
+moq-tokio = { version = "0.19.16", path = "rs/moq-tokio", default-features = false }
 # Default features off on moq-transcode and moq-video so each workspace consumer
 # chooses native codecs, OpenH264, and rendering explicitly. Both crates still
 # provide working native plus software defaults when depended on directly.
 # VAAPI is opt-in everywhere; its decoder is hardware-validated, while its
 # encoder is not yet.
-moq-transcode = { version = "0.1.3", path = "rs/moq-transcode", default-features = false }
+moq-transcode = { version = "0.1.4", path = "rs/moq-transcode", default-features = false }
 # default-features off (the noq backend) so the consumer picks which QUIC
 # stack the io_uring path compiles; cargo features are additive, so a default-on
 # backend could not be opted out of.
-moq-uring = { version = "0.0.5", path = "rs/moq-uring", default-features = false }
+moq-uring = { version = "0.0.6", path = "rs/moq-uring", default-features = false }
 # In-tree fork of `v4l` with the videodev2.h bindings checked in, so moq-video's
 # `capture` and `v4l2` need no libclang or kernel headers. Linux only; an empty
 # stub elsewhere.
@@ -187,7 +187,7 @@ moq-vaapi = "0.1.0"
 # `features = ["capture"]` to a consumer that ships in those bindings pulls the
 # whole device graph into every one of them. Codec features are independent of
 # that argument, so moq-ffi and libmoq opt NVIDIA, OpenH264, and VAAPI back in.
-moq-video = { version = "0.1.3", path = "rs/moq-video", default-features = false }
+moq-video = { version = "0.1.4", path = "rs/moq-video", default-features = false }
 nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
 # Upstream noq-proto, only for iroh's controller factory types.
 noq-proto = { version = "1.2", default-features = false }
@@ -237,7 +237,7 @@ web-transport-iroh = "0.7"
 # default-features off so the QUIC crypto provider is chosen by moq-tokio's
 # aws-lc-rs / ring features.
 # The WebTransport adapter released with moq-noq, from the same repository.
-web-transport-moq = { version = "1.3", default-features = false }
+web-transport-moq = { version = "1.3.1", default-features = false }
 web-transport-proto = "0.6"
 web-transport-trait = "0.4"
 web-transport-wasm = "0.6"

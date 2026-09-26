@@ -227,8 +227,8 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		Poll::Ready(Ok(()))
 	}
 
-	/// Poll for whether data is available in the buffer or stream.
-	fn poll_has_more(&mut self, cx: &mut Context<'_>) -> Poll<Result<bool, Error>> {
+	/// Poll for whether data is available in the buffer or stream: `false` once it finishes.
+	pub(crate) fn poll_has_more(&mut self, cx: &mut Context<'_>) -> Poll<Result<bool, Error>> {
 		if !self.buffer.is_empty() {
 			return Poll::Ready(Ok(true));
 		}

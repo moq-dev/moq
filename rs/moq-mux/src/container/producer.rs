@@ -490,6 +490,12 @@ where
 	/// must be a keyframe. An explicit bound before the last ordered video frame
 	/// returns [`InvalidEnd`](super::InvalidEnd) without flushing or closing the group.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
+		let marker_at = end.or_else(|| self.estimated_end());
+		self.close(end, marker_at)
+	}
+
+	/// Close the current group, ending a video track's group with a duration marker at `marker_at`.
+	fn close(&mut self, end: Option<moq_net::Timestamp>, marker_at: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		if self.container.kind() == Kind::Video
 			&& !self.reordered
 			&& let Some((end, previous)) = end.zip(self.previous_timestamp)
@@ -502,8 +508,6 @@ where
 		// into the next group anyway, so cutting often costs the catalog nothing.
 		self.estimator.cut(end);
 		self.claim();
-
-		let marker_at = end.or_else(|| self.estimated_end());
 
 		// Tell the timeline where this group's content stops: the duration marker when we
 		// write one, else the caller's bound, else the furthest point we wrote.
@@ -603,11 +607,12 @@ where
 	/// an empty payload is data. The next [`write`](Self::write) opens the group after the
 	/// marker and must continue forward from the live edge; it cannot rewind.
 	///
-	/// To bound the closing group's final frame, [`cut(end)`](Self::cut) before calling this;
-	/// the open group is closed either way (an unbounded [`cut`](Self::cut) here is a no-op
-	/// after yours).
+	/// To bound the closing group's final frame, [`cut(end)`](Self::cut) before calling this.
+	/// Otherwise the open group closes without a duration marker: what resumes may land sooner
+	/// than one estimated frame later (a capture that reopens at once), and a guessed end past
+	/// it would read as a rewind to every consumer.
 	pub fn discontinuity(&mut self) -> crate::Result<()> {
-		self.cut(None)?;
+		self.close(None, None)?;
 		// Nothing is measured across the break: the frames still open on this side have no end, and
 		// the gap to the far side is not a frame duration.
 		self.estimator.discontinuity();
@@ -1487,5 +1492,29 @@ mod tests {
 		producer.finish().unwrap();
 		let groups = collect_payloads(consumer).await;
 		assert_eq!(groups.last().unwrap().last(), Some(&(1_060_000, 0)));
+	}
+
+	/// A capture that reopens at once resumes sooner than one frame after the break. Guessing
+	/// the closing group's end from its cadence would put a duration marker past the resumed
+	/// keyframe, which a consumer reads as a rewind and refuses.
+	#[tokio::test]
+	async fn a_prompt_resume_after_a_discontinuity_is_not_a_rewind() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let subscriber = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(1_000_000, true)).unwrap();
+		producer.write(frame(1_040_000, false)).unwrap();
+		producer.discontinuity().unwrap();
+		// Resumed 10ms later, inside the 40ms cadence measured before the break.
+		producer.write(frame(1_050_000, true)).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer =
+			crate::container::Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Video));
+		let mut timestamps = Vec::new();
+		while let Some(frame) = consumer.read().await.unwrap() {
+			timestamps.push(frame.timestamp.as_micros());
+		}
+		assert_eq!(timestamps, [1_000_000, 1_040_000, 1_050_000]);
 	}
 }

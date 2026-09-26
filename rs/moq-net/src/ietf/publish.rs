@@ -444,7 +444,9 @@ impl Message for PublishOk {
 				})
 			}
 			_ => {
+				// EXPIRES is ignored, as in SUBSCRIBE_OK.
 				decode_params!(r, version,
+					0x08 => _expires: Option<u64>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => filter: Option<Filter>,
@@ -919,6 +921,16 @@ mod tests {
 		assert_eq!(decoded.request_id, None);
 		assert!(decoded.forward);
 		assert_eq!(decoded.subscriber_priority, 128);
+	}
+
+	/// Draft-18 lets PUBLISH_OK carry EXPIRES; it is ignored rather than rejected.
+	#[test]
+	fn test_publish_ok_ignores_expires() {
+		let bytes = [0x04, 0x01, 0x08, 0x05];
+
+		let decoded: PublishOk = decode_message(&bytes, Version::Draft16).unwrap();
+		assert_eq!(decoded.request_id, Some(RequestId(4)));
+		assert!(decoded.forward);
 	}
 
 	#[test]

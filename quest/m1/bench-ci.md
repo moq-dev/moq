@@ -50,5 +50,4 @@ a GitHub App:
 ## Related
 
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - extends the same `bench/run.sh` with repeated paired rounds
-- [Sans-IO session bench](/quest/m1/bench-session.md) - a low-noise end-to-end bench this job picks up
 - [Bench coverage](/quest/m1/bench-coverage.md) - more targets for this job to track

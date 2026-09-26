@@ -80,6 +80,14 @@ The producer sets the entry's `mode` and encodes the track with its
 `compression`. Read it back from `Catalog<Ext>` and subscribe with
 `catalog::Entry::new(name, &entry.binary)`.
 
+The fMP4, MPEG-TS, and FLV importers publish the source's own timestamps unless
+built with `live()`, which translates them onto the catalog's broadcast clock:
+the first frame is live on arrival, every track of the input shares that one
+mapping, and a source that restarts its timestamps continues forward after the
+real idle gap. fMP4 passthrough rewrites each fragment's `tfdt` to match. Use
+it for a live feed with its own zero; publish verbatim only when the catalog's
+clock (`Config::with_clock`) already names the source's zero.
+
 ```bash
 cargo add moq-mux
 ```

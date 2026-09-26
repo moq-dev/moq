@@ -1729,43 +1729,47 @@ mod tests {
 		value.parse().expect("valid url")
 	}
 
-	/// A loopback TCP port with nothing on it, which refuses instantly.
+	/// A loopback TCP port with nothing listening on it, which refuses instantly.
 	///
 	/// A dead address that *refuses* rather than black-holes is what keeps these
 	/// tests fast and deterministic: the walk itself is what's under test, and
 	/// bounding a black-holed attempt is covered by
 	/// [`only_a_candidate_with_a_fallback_is_bounded`] as a pure function.
+	///
+	/// The returned socket is bound but never listens, so the port refuses while
+	/// staying reserved: no other listener (or an ephemeral self-connect) can take
+	/// it mid-test. Hold it for as long as the URL is dialed.
 	#[cfg(feature = "tcp")]
-	fn refused() -> Url {
-		let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
-		let port = probe.local_addr().expect("local addr").port();
-		drop(probe);
-		url(&format!("tcp://127.0.0.1:{port}/"))
+	fn refused() -> (tokio::net::TcpSocket, Url) {
+		let socket = tokio::net::TcpSocket::new_v4().expect("tcp socket");
+		socket.bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+		let addr = socket.local_addr().expect("local addr");
+		(socket, url(&format!("tcp://{addr}/")))
 	}
 
-	/// A bound stream listener, the URL that reaches it, and a client for it.
+	/// A bound stream listener and the URL that reaches it.
 	#[cfg(feature = "tcp")]
-	fn pair() -> (crate::Server, Url, Client) {
+	async fn live() -> (crate::Listener, Url) {
+		let mut config = crate::listen::Config::default();
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let listener = config
+			.init(Default::default())
+			.expect("build server")
+			.listen()
+			.await
+			.expect("listen");
+		let addr = listener.tcp_local_addr().expect("tcp listener bound");
+		(listener, url(&format!("tcp://{addr}/")))
+	}
+
+	/// A client that trusts the self-signed [`live`] listener.
+	#[cfg(feature = "tcp")]
+	fn client() -> Client {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-		for _ in 0..20 {
-			let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
-			let port = probe.local_addr().expect("local addr").port();
-			drop(probe);
-
-			let mut config = crate::listen::Config::default();
-			config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("valid address"));
-			let Ok(server) = config.init(Default::default()) else {
-				continue;
-			};
-
-			let mut config = crate::connect::Config::default();
-			config.tls.insecure = Some(true);
-			let client = config.init(Default::default()).expect("build client");
-
-			return (server, url(&format!("tcp://127.0.0.1:{port}/")), client);
-		}
-		panic!("could not bind a free TCP port after 20 attempts");
+		let mut config = crate::connect::Config::default();
+		config.tls.insecure = Some(true);
+		config.init(Default::default()).expect("build client")
 	}
 
 	fn shared() -> Shared {
@@ -1783,11 +1787,13 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn dial_any_walks_past_the_dead_addresses() {
-		let (server, live, client) = pair();
-		let mut server = server.listen().await.expect("listen");
+		let client = client();
+		let (mut server, live) = live().await;
 		tokio::spawn(async move { while server.accept().await.is_some() {} });
 
-		let addrs = Addrs::collect([refused(), refused(), live.clone()]).expect("not empty");
+		let (_a, dead_a) = refused();
+		let (_b, dead_b) = refused();
+		let addrs = Addrs::collect([dead_a, dead_b, live.clone()]).expect("not empty");
 		let shared = shared();
 		let mut draining = None;
 
@@ -1805,9 +1811,11 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn dial_any_reports_failure_when_nothing_answers() {
-		let (_server, _live, client) = pair();
+		let client = client();
 
-		let addrs = Addrs::collect([refused(), refused()]).expect("not empty");
+		let (_a, dead_a) = refused();
+		let (_b, dead_b) = refused();
+		let addrs = Addrs::collect([dead_a, dead_b]).expect("not empty");
 		let shared = shared();
 		let mut draining = None;
 
@@ -1833,8 +1841,8 @@ mod tests {
 	async fn dialing_never_logs_the_credential() {
 		const SECRET: &str = "b91d7fe20c4a";
 
-		let (_server, _live, client) = pair();
-		let mut target = refused();
+		let client = client();
+		let (_dead, mut target) = refused();
 		target.set_path(&format!("/.cluster/{SECRET}"));
 
 		let addrs = Addrs::new(target);

@@ -322,7 +322,7 @@ pub async fn publish_capture<E: CatalogExt>(
 	let mut producer = Producer::new(broadcast, catalog, rendition)?;
 	let demand = producer.demand();
 
-	let result = capture_loop(&mut producer, &demand, &capture, &encode, &clock).await;
+	let result = capture_loop(&mut producer, &demand, &mut DeviceSource, &capture, &encode, &clock).await;
 
 	// This runs only when the loop ends on its own (the track is usually already
 	// going away by then); a Ctrl+C cancels the future before this point, since
@@ -356,6 +356,23 @@ fn assert_publish_capture_send(
 ) {
 	fn is_send<T: Send>(_: &T) {}
 	is_send(&publish_capture(broadcast, catalog, capture, encode, clock));
+}
+
+/// Where the capture loop opens its camera. Kept apart from the device backends so
+/// the clock fixtures can drive the real loop from a synthetic source.
+#[cfg(feature = "capture")]
+trait CaptureSource {
+	async fn open(&mut self, config: &capture::Config) -> Result<capture::Stream, Error>;
+}
+
+#[cfg(feature = "capture")]
+struct DeviceSource;
+
+#[cfg(feature = "capture")]
+impl CaptureSource for DeviceSource {
+	async fn open(&mut self, config: &capture::Config) -> Result<capture::Stream, Error> {
+		capture::open(config).await
+	}
 }
 
 /// The live rate control state: the estimate source paired with the policy tracking
@@ -473,9 +490,10 @@ async fn wait_capture<E: CatalogExt, T>(
 /// so their joins return promptly unless the underlying device or encoder is
 /// itself wedged.
 #[cfg(feature = "capture")]
-async fn capture_loop<E: CatalogExt>(
+async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 	producer: &mut Producer<E>,
 	demand: &moq_net::track::Demand,
+	source: &mut S,
 	capture: &capture::Config,
 	encode: &Options,
 	clock: &moq_mux::Clock,
@@ -495,7 +513,7 @@ async fn capture_loop<E: CatalogExt>(
 		}
 
 		// Open the camera and an encoder sized to its negotiated mode.
-		let Some(mut camera) = wait_capture(producer, demand, capture::open(capture)).await? else {
+		let Some(mut camera) = wait_capture(producer, demand, source.open(capture)).await? else {
 			continue;
 		};
 		// Capture timestamps use a private monotonic timeline. Sample both clocks
@@ -857,5 +875,365 @@ mod tests {
 		assert!(name.ends_with(".hev1"));
 		assert_eq!(config.coded_width, Some(320));
 		assert_eq!(config.coded_height, Some(240));
+	}
+
+	/// Clock fixtures: the real capture loop, fed by a synthetic camera against a pinned
+	/// broadcast clock, graded on the timestamps a subscriber reads back.
+	///
+	/// Each expectation is the acquisition instant measured on the broadcast clock. The loop
+	/// samples the broadcast clock and then the camera's timeline when it opens a camera, so a
+	/// published timestamp may land up to `SAMPLING` early, never late.
+	#[cfg(all(feature = "capture", feature = "openh264"))]
+	mod clock {
+		use std::time::{Duration, Instant, SystemTime};
+
+		use super::*;
+		use crate::capture::Synthetic;
+
+		/// How early a mapped timestamp may land: the gap between the loop's two clock samples.
+		const SAMPLING: Duration = Duration::from_millis(250);
+		/// Rounding slack on the late side: each clock reading truncates to a microsecond.
+		const ROUNDING: u64 = 2;
+		/// Retain every fixture group, so a slow runner never evicts one before it is read.
+		const RETAIN: Duration = Duration::from_secs(600);
+
+		/// Hands the loop one fixture-supplied stream per camera open.
+		struct Opens(tokio::sync::mpsc::UnboundedReceiver<capture::Stream>);
+
+		impl CaptureSource for Opens {
+			async fn open(&mut self, _config: &capture::Config) -> Result<capture::Stream, Error> {
+				self.0
+					.recv()
+					.await
+					.ok_or_else(|| Error::SourceUnavailable("the fixture stopped opening cameras".to_string()))
+			}
+		}
+
+		struct Fixture {
+			epoch: Instant,
+			clock: moq_mux::Clock,
+			catalog: moq_mux::catalog::Producer,
+			consumer: moq_net::broadcast::Consumer,
+			_broadcast: moq_net::broadcast::Producer,
+			opens: tokio::sync::mpsc::UnboundedSender<capture::Stream>,
+			stop: Option<tokio::sync::oneshot::Sender<()>>,
+			task: tokio::task::JoinHandle<Result<(), Error>>,
+		}
+
+		impl Fixture {
+			/// Start the capture loop on a broadcast whose clock began `behind` ago, at `wall`.
+			async fn start(behind: Duration, wall: SystemTime) -> Self {
+				let epoch = Instant::now()
+					.checked_sub(behind)
+					.expect("a monotonic clock that far back");
+				let clock = moq_mux::Clock::at(epoch, wall).unwrap();
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let consumer = broadcast.consume();
+				let config = moq_mux::catalog::Config::default()
+					.with_clock(clock)
+					.with_max_age(RETAIN);
+				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
+				let track = broadcast
+					.create_track(
+						"video",
+						catalog.track_info(hang::catalog::PRIORITY.video).with_max_age(RETAIN),
+					)
+					.unwrap();
+
+				let mut probe = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+				probe.kind = encoder::Kind::Software;
+				let mut producer = Producer::with_track(track, catalog.clone(), probe.probe().await.unwrap()).unwrap();
+				let demand = producer.demand();
+
+				let (opens, rx) = tokio::sync::mpsc::unbounded_channel();
+				let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+				// Local: a capture stream is `!Send` on macOS, so each test runs on a `LocalSet`.
+				let task = tokio::task::spawn_local(async move {
+					let mut source = Opens(rx);
+					let options = Options {
+						kind: encoder::Kind::Software,
+						..Options::default()
+					};
+					let config = capture::Config::default();
+					tokio::select! {
+						res = capture_loop(&mut producer, &demand, &mut source, &config, &options, &clock) => res?,
+						_ = stopped => {}
+					}
+					producer.finish()
+				});
+
+				Self {
+					epoch,
+					clock,
+					catalog,
+					consumer,
+					_broadcast: broadcast,
+					opens,
+					stop: Some(stop),
+					task,
+				}
+			}
+
+			/// Subscribe to the video track, which is what opens the camera.
+			async fn subscribe(&self) -> moq_mux::container::Consumer<moq_mux::catalog::hang::Container> {
+				let snapshot = self.catalog.snapshot();
+				let (name, rendition) = snapshot.video.renditions.iter().next().expect("the probed rendition");
+				let container = moq_mux::catalog::hang::Container::try_from(rendition).unwrap();
+				let track = self
+					.consumer
+					.track(name)
+					.unwrap()
+					.subscribe(moq_net::track::Subscription::default().with_max_age(RETAIN))
+					.await
+					.unwrap();
+				moq_mux::container::Consumer::new(track, container)
+			}
+
+			/// Plug in the camera the loop opens next.
+			fn camera(&self) -> Synthetic {
+				let (camera, stream) = Synthetic::open(crate::Size::new(320, 240), crate::Rate::new(30, 1).unwrap());
+				self.opens.send(stream).unwrap();
+				camera
+			}
+
+			/// `instant` on the broadcast clock, in microseconds.
+			fn at(&self, instant: Instant) -> u64 {
+				u64::try_from(instant.duration_since(self.epoch).as_micros()).unwrap()
+			}
+
+			/// Stop the loop and finalize the track, as a clean end of capture does.
+			async fn finish(mut self) -> (moq_mux::catalog::Producer, moq_net::broadcast::Consumer) {
+				let _ = self.stop.take().expect("finished once").send(());
+				self.task.await.unwrap().unwrap();
+				(self.catalog, self.consumer)
+			}
+
+			/// A frame acquired at `captured` publishes at that instant on the broadcast clock.
+			fn assert_acquired(&self, published: u64, captured: Instant) {
+				let exact = self.at(captured);
+				let early = u64::try_from(SAMPLING.as_micros()).unwrap();
+				assert!(
+					published + early >= exact && published <= exact + ROUNDING,
+					"published {published}us, acquired at {exact}us on the broadcast clock"
+				);
+			}
+		}
+
+		fn surface() -> crate::frame::Surface {
+			crate::frame::Surface::I420(crate::frame::I420 {
+				width: 320,
+				height: 240,
+				data: vec![0x80; 320 * 240 * 3 / 2],
+				color: None,
+			})
+		}
+
+		fn us(micros: u64) -> Timestamp {
+			Timestamp::from_micros(micros).unwrap()
+		}
+
+		async fn read(track: &mut moq_mux::container::Consumer<moq_mux::catalog::hang::Container>) -> u64 {
+			let frame = track.read().await.unwrap().expect("a published frame");
+			u64::try_from(frame.timestamp.as_micros()).unwrap()
+		}
+
+		/// Read the next frame not already in `seen`: a resubscription replays retained groups first.
+		async fn read_new(
+			track: &mut moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
+			seen: &[u64],
+		) -> u64 {
+			loop {
+				let timestamp = read(track).await;
+				if !seen.contains(&timestamp) {
+					return timestamp;
+				}
+			}
+		}
+
+		/// A camera whose first frame arrives long after the broadcast began stamps it at its
+		/// acquisition: not zero, and not the later instant the loop dequeued it.
+		#[tokio::test]
+		async fn a_late_first_frame_publishes_its_acquisition() {
+			tokio::task::LocalSet::new()
+				.run_until(async {
+					let fixture = Fixture::start(Duration::from_secs(5), SystemTime::now()).await;
+					let mut track = fixture.subscribe().await;
+					let camera = fixture.camera();
+
+					let captured = Instant::now();
+					// Delivered well after acquisition: dequeue time must not leak into the timestamp.
+					tokio::time::sleep(Duration::from_millis(50)).await;
+					camera.push_at(surface(), captured);
+					let published = read(&mut track).await;
+
+					assert!(published >= 4_000_000, "{published}us restarted the broadcast at zero");
+					fixture.assert_acquired(published, captured);
+					fixture.finish().await;
+				})
+				.await
+		}
+
+		/// A device clock that restarts at zero, mid-stream or across a reopen, continues the
+		/// broadcast forward with the device's spacing instead of rewinding it.
+		#[tokio::test]
+		async fn a_device_clock_restart_continues_forward() {
+			tokio::task::LocalSet::new()
+				.run_until(async {
+					let fixture = Fixture::start(Duration::from_secs(1), SystemTime::now()).await;
+					let mut track = fixture.subscribe().await;
+					let camera = fixture.camera();
+
+					// The device numbers from zero, and real time keeps pace with it.
+					camera.push_native(surface(), us(0));
+					let first = read(&mut track).await;
+					tokio::time::sleep(Duration::from_millis(40)).await;
+					camera.push_native(surface(), us(40_000));
+					let second = read(&mut track).await;
+					assert_eq!(second - first, 40_000, "the device's spacing survives");
+
+					// The device restarts its clock without the stream ending.
+					camera.push_native(surface(), us(0));
+					let restarted = read(&mut track).await;
+					assert!(restarted >= second, "{restarted}us rewound behind {second}us");
+					tokio::time::sleep(Duration::from_millis(40)).await;
+					camera.push_native(surface(), us(40_000));
+					let resumed = read(&mut track).await;
+					assert_eq!(resumed - restarted, 40_000, "the device's spacing resumes");
+
+					// The device goes away and comes back numbering from zero again.
+					camera.close();
+					let camera = fixture.camera();
+					let pushed = Instant::now();
+					camera.push_native(surface(), us(0));
+					let reopened = read(&mut track).await;
+					let arrived = fixture.at(Instant::now());
+					assert!(reopened >= resumed, "{reopened}us rewound across the reopen");
+					let early = u64::try_from(SAMPLING.as_micros()).unwrap();
+					assert!(reopened + early >= fixture.at(pushed) && reopened <= arrived + ROUNDING);
+					fixture.finish().await;
+				})
+				.await
+		}
+
+		/// Releasing the camera while nobody watches keeps the broadcast clock running: the
+		/// frame after a resume lands after the real idle gap, at its own acquisition.
+		#[tokio::test]
+		async fn a_restart_after_idle_keeps_the_gap() {
+			tokio::task::LocalSet::new()
+				.run_until(async {
+					let idle = Duration::from_millis(300);
+					let fixture = Fixture::start(Duration::from_secs(1), SystemTime::now()).await;
+
+					let mut track = fixture.subscribe().await;
+					let camera = fixture.camera();
+					let captured = Instant::now();
+					camera.push_at(surface(), captured);
+					let before = read(&mut track).await;
+					fixture.assert_acquired(before, captured);
+					drop(track);
+					drop(camera);
+
+					tokio::time::sleep(idle).await;
+
+					let mut track = fixture.subscribe().await;
+					let camera = fixture.camera();
+					let captured = Instant::now();
+					camera.push_at(surface(), captured);
+					let after = read_new(&mut track, &[before]).await;
+					fixture.assert_acquired(after, captured);
+					assert!(
+						after - before >= u64::try_from(idle.as_micros()).unwrap(),
+						"the {idle:?} idle gap collapsed to {}us",
+						after - before
+					);
+					fixture.finish().await;
+				})
+				.await
+		}
+
+		/// The wall mapping is pinned when the broadcast clock is built. A system clock stepped
+		/// an hour since then retimes neither the published timestamps nor the advertised mapping.
+		#[tokio::test]
+		async fn a_system_wall_adjustment_retimes_nothing() {
+			tokio::task::LocalSet::new()
+				.run_until(async {
+					// Whole seconds, so the advertised mapping holds it exactly.
+					let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+					let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
+					let fixture = Fixture::start(Duration::from_secs(1), wall).await;
+					let advertised = fixture.catalog.snapshot().clock;
+					assert_eq!(advertised, Some(fixture.clock.wall()));
+
+					let mut track = fixture.subscribe().await;
+					let camera = fixture.camera();
+					let captured = Instant::now();
+					camera.push_at(surface(), captured);
+					let published = read(&mut track).await;
+
+					// Timestamps follow the monotonic epoch and map to walls under the pinned mapping.
+					fixture.assert_acquired(published, captured);
+					let mapped = advertised.unwrap().wall_clock(us(published)).unwrap();
+					// The catalog maps to walls at millisecond precision.
+					assert_eq!(mapped, wall + Duration::from_millis(published / 1000));
+					assert_eq!(fixture.catalog.snapshot().clock, advertised);
+					fixture.finish().await;
+				})
+				.await
+		}
+
+		/// A recording replays what the live edge published: the archive's segment records
+		/// carry the live timestamps across an idle restart, with the idle gap left in.
+		#[tokio::test]
+		async fn retained_archive_playback_keeps_the_live_timestamps() {
+			tokio::task::LocalSet::new()
+				.run_until(async {
+					let fixture = Fixture::start(Duration::from_secs(1), SystemTime::now()).await;
+					let section = fixture
+						.catalog
+						.snapshot()
+						.archive
+						.expect("the video track enrolls an archive");
+					let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section)
+						.await
+						.unwrap();
+
+					let mut live = Vec::new();
+					for _ in 0..2 {
+						let mut track = fixture.subscribe().await;
+						let camera = fixture.camera();
+						let captured = Instant::now();
+						camera.push_at(surface(), captured);
+						let published = read_new(&mut track, &live).await;
+						fixture.assert_acquired(published, captured);
+						live.push(published);
+						drop(track);
+						// Idle past the minimum segment, so each run is archived as its own segment.
+						tokio::time::sleep(moq_mux::timeline::DEFAULT_DURATION_MIN + Duration::from_millis(100)).await;
+					}
+
+					let (catalog, _consumer) = fixture.finish().await;
+					catalog.timeline().finish().unwrap();
+					let mut archived = Vec::new();
+					while let Some(event) = timeline.next().await.unwrap() {
+						match event {
+							moq_mux::timeline::Event::Push { entry, .. } => archived.push(entry),
+							other => panic!("unexpected timeline event {other:?}"),
+						}
+					}
+
+					assert_eq!(archived.len(), live.len(), "one segment per capture run: {archived:?}");
+					for (entry, live) in archived.iter().zip(&live) {
+						// The archive keeps millisecond precision.
+						assert_eq!(entry.pts.as_micros() / 1000, u128::from(*live / 1000), "{archived:?}");
+						assert!(entry.tracks.contains_key("video"), "{archived:?}");
+					}
+					let first = &archived[0];
+					assert!(
+						archived[1].pts.as_micros() >= first.pts.as_micros() + first.duration.as_micros(),
+						"the resumed segment overlaps the one before it: {archived:?}"
+					);
+				})
+				.await
+		}
 	}
 }
