@@ -3045,6 +3045,53 @@ mod tests {
 
 	use super::*;
 
+	async fn check_publish_fin(responses: Vec<u8>, clean: bool) {
+		use crate::lite::test_transport::ScriptedSession;
+		use crate::transport::poll::Session as _;
+		let mut session = ScriptedSession::eof(responses);
+		let (_, recv) = session.open_bi().await.unwrap();
+		let mut reader = Reader::new(recv, Version::Draft19);
+		let result = Subscriber::<ScriptedSession>::read_publish_done(&mut reader, Version::Draft19).await;
+		if clean {
+			assert_eq!(result.unwrap(), 0);
+		} else {
+			assert!(matches!(result, Err(Error::ProtocolViolation)));
+		}
+	}
+
+	fn fin_responses(clean: bool) -> Vec<u8> {
+		use crate::coding::Encode;
+		let mut responses = Vec::new();
+		if clean {
+			ietf::PublishDone::ID.encode(&mut responses, Version::Draft19).unwrap();
+			ietf::PublishDone {
+				request_id: None,
+				status_code: ietf::PublishDoneStatus::TrackEnded.code(Version::Draft19),
+				stream_count: 0,
+				reason_phrase: "done".into(),
+			}
+			.encode(&mut responses, Version::Draft19)
+			.unwrap();
+		}
+		responses
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn bare_fin_requires_publish_done() {
+		for clean in [false, true] {
+			check_publish_fin(fin_responses(clean), clean).await;
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	#[ignore = "requires Bun; run by just test bare-fin in interop CI"]
+	async fn bare_fin_interop() {
+		for clean in [false, true] {
+			let responses = crate::test_interop::fin("moqt-19", false, clean, fin_responses(clean));
+			check_publish_fin(responses, clean).await;
+		}
+	}
+
 	/// The tokio-backed test runtime. Its transport parameter is phantom, so one
 	/// type serves every fake session in this module.
 
