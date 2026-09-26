@@ -11,8 +11,12 @@ cargo build --release
 This will:
 
 - Build the static library (`libmoq.a` on Unix-like systems, `moq.lib` on Windows)
-- Generate the C header file at `target/include/moq.h`
-- Generate the pkg-config file at `target/release/lib/pkgconfig/moq.pc`
+- Generate the C header file at `$OUT_DIR/include/moq.h`
+- Generate the pkg-config file at `$OUT_DIR/lib/pkgconfig/moq.pc`
+
+`OUT_DIR` is the build script's hashed output directory, which
+`cargo build --message-format=json` reports as `out_dir` on the
+`build-script-executed` message for libmoq.
 
 There's also a [CMakeLists.txt](CMakeLists.txt) file that can be used to import/build the library.
 

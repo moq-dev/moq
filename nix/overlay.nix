@@ -167,29 +167,15 @@ let
 
       mkdir -p $out/lib/pkgconfig $out/include $out/lib/cmake/moq
 
-      # build.rs derives its output dir from OUT_DIR, so a cross --target
-      # build puts the staticlib and pkgconfig (under <profile>/lib/) below
-      # target/<triple>/, and the shared header under target/<triple>/include/.
-      # Keep the prefix target-aware so the native and cross outputs share one
-      # installPhase.
-      tdir="target''${CARGO_BUILD_TARGET:+/$CARGO_BUILD_TARGET}"
-      cp "$tdir/release/libmoq.a" $out/lib/
-      cp "$tdir/include/moq.h" $out/include/
-      cp "$tdir/release/lib/pkgconfig/moq.pc" $out/lib/pkgconfig/
-
-      # build.rs points libdir at the raw cargo target tree's profile dir
-      # (../.. from the .pc). The installPhase puts the staticlib in $out/lib
-      # alongside pkgconfig/, so rewrite libdir one level up. Match the whole
-      # line so this is independent of the profile name and the exact .pc
-      # template. Stays relocatable; no build-time path leaks into the store.
-      sed -i 's#^libdir=.*#libdir=''${pcfiledir}/..#' $out/lib/pkgconfig/moq.pc
-
-      # Same relocation for includedir: the template points at the cargo tree's
-      # shared target/include (../../../ from the .pc). Here the header lives in
-      # $out/include, one level up from $out/lib, so it's ../../ from the .pc.
-      # Without this, pkg-config --cflags emits a bogus -I above $out and
-      # consumers fail with "moq.h: No such file or directory".
-      sed -i 's#^includedir=.*#includedir=''${pcfiledir}/../../include#' $out/lib/pkgconfig/moq.pc
+      # Ask cargo's build log where it put things instead of reconstructing the
+      # paths, which a cross --target build moves. build.rs lays out its
+      # OUT_DIR like this prefix, minus the staticlib.
+      jq=${final.lib.getExe final.jq}
+      lib=$($jq -r 'select(.reason == "compiler-artifact") | .filenames[] | select(endswith("/libmoq.a"))' "$cargoBuildLog")
+      gen=$($jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("libmoq")) | .out_dir' "$cargoBuildLog")
+      cp "$lib" $out/lib/
+      cp "$gen/include/moq.h" $out/include/
+      cp "$gen/lib/pkgconfig/moq.pc" $out/lib/pkgconfig/
 
       major_version="$(echo "${libmoqInfo.version}" | cut -d. -f1)"
       substitute ${../rs/libmoq/cmake/moq-config.cmake.in} \
