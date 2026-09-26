@@ -126,6 +126,9 @@ struct Shared<S> {
 	recovered: Mutex<HashMap<String, Resume>>,
 	/// Every name ever enrolled. A name is never reused, so its records stay consecutive.
 	enrolled: Mutex<HashSet<String>>,
+	/// Enrollments between their first check and their command, so the recording does not end
+	/// under one that is about to arrive.
+	enrolling: watch::Sender<usize>,
 }
 
 enum Command<S> {
@@ -167,6 +170,7 @@ impl<S: ObjectStore> Writer<S> {
 			timelines: broadcast::Info::new().produce(),
 			recovered: Mutex::new(recovery.tracks),
 			enrolled: Mutex::new(HashSet::new()),
+			enrolling: watch::Sender::new(0),
 		});
 		let (commands, receiver) = mpsc::unbounded_channel();
 		Ok(Self {
@@ -196,6 +200,7 @@ impl<S: ObjectStore> Writer<S> {
 		let shared = control.shared.clone();
 		let source = shared.source.clone();
 		let grace = shared.retention.as_ref().map(|retention| retention.grace);
+		let mut enrolling = shared.enrolling.subscribe();
 		drop(control);
 
 		let mut tracks: HashMap<String, Box<Track<S>>> = HashMap::new();
@@ -213,7 +218,8 @@ impl<S: ObjectStore> Writer<S> {
 			}
 			tracks.retain(|_, track| !track.finish());
 
-			if closed && tracks.is_empty() && commits.is_empty() {
+			let idle = closed && tracks.is_empty() && commits.is_empty();
+			if idle && *enrolling.borrow_and_update() == 0 {
 				// Refuse late commands, so an enrollment racing the end fails instead of vanishing.
 				commands.close();
 				if !accepting {
@@ -255,6 +261,7 @@ impl<S: ObjectStore> Writer<S> {
 					}
 				}
 				_ = source.closed(), if !closed => closed = true,
+				_ = enrolling.changed(), if idle && accepting => {}
 				_ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
 					let (_, keys) = deletions.pop_front().unwrap();
 					delete(&shared.store, keys).await;
@@ -308,7 +315,9 @@ impl<S: ObjectStore> Control<S> {
 		if name.ends_with(hang::timeline::SUFFIX) || !self.shared.enrolled.lock().unwrap().insert(name.to_string()) {
 			return Err(Error::Enrolled(name.to_string()));
 		}
+		self.shared.enrolling.send_modify(|count| *count += 1);
 		let result = self.subscribe(name, config).await;
+		self.shared.enrolling.send_modify(|count| *count -= 1);
 		if result.is_err() {
 			self.shared.enrolled.lock().unwrap().remove(name);
 		}
