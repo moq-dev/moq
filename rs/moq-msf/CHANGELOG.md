@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/moq-dev/moq/compare/moq-msf-v0.5.0...moq-msf-v0.5.1) - 2026-09-26
+
+### Added
+
+- *(moq-mux)* catalog delay measures cross-rendition encoder lateness ([#4170](https://github.com/moq-dev/moq/pull/4170))
+
 ## [0.5.0](https://github.com/moq-dev/moq/compare/moq-msf-v0.4.2...moq-msf-v0.5.0) - 2026-09-23
 
 ### Added

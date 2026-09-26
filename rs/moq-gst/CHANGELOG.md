@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.6...moq-gst-v0.4.7) - 2026-09-26
+
+### Added
+
+- end a broadcast with close() in every language ([#4031](https://github.com/moq-dev/moq/pull/4031))
+- *(mux)* forward importer discontinuities through publishers ([#4239](https://github.com/moq-dev/moq/pull/4239))
+
 ## [0.4.6](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.5...moq-gst-v0.4.6) - 2026-09-26
 
 ### Other

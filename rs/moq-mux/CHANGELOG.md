@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.7](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.6...moq-mux-v0.10.7) - 2026-09-26
+
+### Added
+
+- *(mux)* forward importer discontinuities through publishers ([#4239](https://github.com/moq-dev/moq/pull/4239))
+- *(moq-mux)* catalog delay measures cross-rendition encoder lateness ([#4170](https://github.com/moq-dev/moq/pull/4170))
+
+### Other
+
+- rename CLAUDE.md to AGENTS.md ([#4235](https://github.com/moq-dev/moq/pull/4235))
+
 ## [0.10.6](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.5...moq-mux-v0.10.6) - 2026-09-26
 
 ### Other
