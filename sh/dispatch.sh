@@ -21,6 +21,16 @@ case "$action" in
         ;;
 esac
 
+# A host toolchain fails deep in a build instead: its gcc keeps the
+# _FORTIFY_SOURCE the dev shell disables, which breaks jemalloc's -Werror
+# configure probes. `nix develop` and direnv both set IN_NIX_SHELL. Windows has
+# no Nix, so it always runs on the host.
+if [[ -z "${IN_NIX_SHELL:-}" && -z "${MOQ_ALLOW_HOST:-}" && "$OSTYPE" != msys && "$OSTYPE" != cygwin ]]; then
+    echo "error: run inside the Nix dev shell ('nix develop' or direnv) so tools match CI" >&2
+    echo "       or set MOQ_ALLOW_HOST=1 to use the host toolchain anyway" >&2
+    exit 1
+fi
+
 cd "$(git rev-parse --show-toplevel)"
 
 changed=$(mktemp)
