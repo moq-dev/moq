@@ -17,7 +17,7 @@ def create_announced(origin: moq.OriginProducer, path: str) -> moq.BroadcastProd
 async def routes(announced: moq.AnnounceConsumer):
     """Yield each newly announced route, skipping the other events such as LIVE."""
     async for event in announced:
-        if isinstance(event, moq.AnnounceEvent.ANNOUNCED):
+        if isinstance(event, moq.AnnounceEventAnnounced):
             yield event.announce
 
 
@@ -25,7 +25,7 @@ async def next_route(announced: moq.AnnounceConsumer) -> moq.AnnounceEvent:
     """The next announce event that is not LIVE, which lands wherever the backlog ends."""
     while True:
         event = await asyncio.wait_for(anext(announced), timeout=5.0)
-        if not isinstance(event, moq.AnnounceEvent.LIVE):
+        if not isinstance(event, moq.AnnounceEventLive):
             return event
 
 
@@ -1152,19 +1152,19 @@ async def test_broadcast_is_reachable_only_while_announced():
     broadcast.announce()
     announced = consumer.announced()
     first = await next_route(announced)
-    assert isinstance(first, moq.AnnounceEvent.ANNOUNCED)
+    assert isinstance(first, moq.AnnounceEventAnnounced)
     assert first.announce.prefix == "live"
 
     broadcast.unannounce()
     retracted = await next_route(announced)
-    assert isinstance(retracted, moq.AnnounceEvent.RETRACTED)
+    assert isinstance(retracted, moq.AnnounceEventRetracted)
     assert retracted.announce.prefix == "live"
     with pytest.raises(Exception):
         await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
 
     broadcast.announce()
     back = await next_route(announced)
-    assert isinstance(back, moq.AnnounceEvent.ANNOUNCED)
+    assert isinstance(back, moq.AnnounceEventAnnounced)
     await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
     announced.cancel()
     track.finish()
@@ -1177,7 +1177,7 @@ async def test_announced_yields_live_once_caught_up():
     consumer = origin.consume()
 
     empty = consumer.announced()
-    assert isinstance(await asyncio.wait_for(anext(empty), timeout=5.0), moq.AnnounceEvent.LIVE)
+    assert isinstance(await asyncio.wait_for(anext(empty), timeout=5.0), moq.AnnounceEventLive)
     empty.cancel()
 
     broadcast = create_announced(origin, "cam")
@@ -1186,9 +1186,9 @@ async def test_announced_yields_live_once_caught_up():
     listed = []
     async with consumer.announced() as announced:
         async for event in announced:
-            if isinstance(event, moq.AnnounceEvent.LIVE):
+            if isinstance(event, moq.AnnounceEventLive):
                 break
-            assert isinstance(event, moq.AnnounceEvent.ANNOUNCED)
+            assert isinstance(event, moq.AnnounceEventAnnounced)
             listed.append(event.announce.prefix)
     assert listed == ["cam"]
     broadcast.finish()
@@ -1201,14 +1201,14 @@ async def test_announced_pattern_captures():
 
     dynamic = origin.dynamic("room")
     overlap = await next_route(announced)
-    assert isinstance(overlap, moq.AnnounceEvent.ANNOUNCED)
+    assert isinstance(overlap, moq.AnnounceEventAnnounced)
     assert overlap.announce.prefix == "room"
     assert overlap.announce.captures is None
 
     audio = create_announced(origin, "room/alice/audio")
     chat = create_announced(origin, "room/alice/chat")
     match = await next_route(announced)
-    assert isinstance(match, moq.AnnounceEvent.ANNOUNCED)
+    assert isinstance(match, moq.AnnounceEventAnnounced)
     assert match.announce.prefix == "room/alice/chat"
     assert match.announce.captures == ["alice"]
 

@@ -12,7 +12,7 @@ import pytest
 async def routes(announced: moq.AnnounceConsumer):
     """Yield each newly announced route, skipping the other events such as LIVE."""
     async for event in announced:
-        if isinstance(event, moq.AnnounceEvent.ANNOUNCED):
+        if isinstance(event, moq.AnnounceEventAnnounced):
             yield event.announce
 
 
@@ -20,7 +20,7 @@ async def next_route(announced: moq.AnnounceConsumer) -> moq.AnnounceEvent:
     """The next announce event that is not LIVE, which lands wherever the backlog ends."""
     while True:
         event = await asyncio.wait_for(anext(announced), timeout=5.0)
-        if not isinstance(event, moq.AnnounceEvent.LIVE):
+        if not isinstance(event, moq.AnnounceEventLive):
             return event
 
 
@@ -335,7 +335,7 @@ async def test_broadcast_route_over_wire():
 
 
 async def test_route_update_observes_restart():
-    """A route metadata update arrives as an UPDATED event.
+    """A route metadata update arrives as an AnnounceEventUpdated.
 
     The publisher re-prices its announced route; the subscriber observes the new
     hop chain in place (no retraction), and cancelling retracts it.
@@ -353,7 +353,7 @@ async def test_route_update_observes_restart():
             ) as client:
                 announced = client.announced()
                 first = await next_route(announced)
-                assert isinstance(first, moq.AnnounceEvent.ANNOUNCED)
+                assert isinstance(first, moq.AnnounceEventAnnounced)
                 assert first.announce.prefix == "routed"
                 assert 42 in first.announce.route.hops
                 assert 77 not in first.announce.route.hops
@@ -361,14 +361,14 @@ async def test_route_update_observes_restart():
                 # The publisher advertises a longer chain: an in-place update.
                 announce.update(moq.Route(hops=[42, 77]))
                 updated = await next_route(announced)
-                assert isinstance(updated, moq.AnnounceEvent.UPDATED)
+                assert isinstance(updated, moq.AnnounceEventUpdated)
                 assert updated.announce.prefix == "routed"
                 assert 77 in updated.announce.route.hops
 
                 # Cancelling retracts the route.
                 announce.cancel()
                 ended = await next_route(announced)
-                assert isinstance(ended, moq.AnnounceEvent.RETRACTED)
+                assert isinstance(ended, moq.AnnounceEventRetracted)
                 assert ended.announce.prefix == "routed"
         finally:
             serve_task.cancel()

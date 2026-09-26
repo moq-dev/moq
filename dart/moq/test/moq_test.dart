@@ -11,7 +11,7 @@ Future<AnnounceEvent> nextRoute(AnnounceConsumer announced) async {
   while (true) {
     final event = await announced.next().timeout(timeout);
     if (event == null) throw StateError('announce stream ended');
-    if (event is! LiveAnnounceEvent) return event;
+    if (event is! AnnounceEventLive) return event;
   }
 }
 
@@ -39,13 +39,13 @@ void main() {
     expect(client.bandwidth(), isA<MoqBandwidth>());
 
     final announcement = client.announcements().firstWhere(
-      (event) => event is AnnouncedAnnounceEvent,
+      (event) => event is AnnounceEventAnnounced,
     );
     final broadcast = relay.createBroadcast(path: 'live');
     final track = broadcast.publishTrack(name: 'events', info: null);
     broadcast.announce(route: MoqRoute());
     final announced =
-        (await announcement.timeout(timeout) as AnnouncedAnnounceEvent)
+        (await announcement.timeout(timeout) as AnnounceEventAnnounced)
             .announce;
     expect(announced.prefix, 'live');
 
@@ -106,13 +106,13 @@ void main() {
     final serverSession = await accepted;
 
     final announcement = client.announcements().firstWhere(
-      (event) => event is AnnouncedAnnounceEvent,
+      (event) => event is AnnounceEventAnnounced,
     );
     final broadcast = server.createBroadcast('live');
     final track = broadcast.publishTrack(name: 'events', info: null);
     broadcast.announce(route: MoqRoute());
     final announced =
-        (await announcement.timeout(timeout) as AnnouncedAnnounceEvent)
+        (await announcement.timeout(timeout) as AnnounceEventAnnounced)
             .announce;
     expect(announced.prefix, 'live');
 
@@ -183,20 +183,20 @@ void main() {
     broadcast.announce(route: MoqRoute());
     final announced = consumer.announced(config: MoqAnnounceConfig());
     final first = await nextRoute(announced);
-    expect(first, isA<AnnouncedAnnounceEvent>());
-    expect((first as AnnouncedAnnounceEvent).announce.prefix, 'live');
+    expect(first, isA<AnnounceEventAnnounced>());
+    expect((first as AnnounceEventAnnounced).announce.prefix, 'live');
 
     broadcast.unannounce();
     final retracted = await nextRoute(announced);
-    expect(retracted, isA<RetractedAnnounceEvent>());
-    expect((retracted as RetractedAnnounceEvent).announce.prefix, 'live');
+    expect(retracted, isA<AnnounceEventRetracted>());
+    expect((retracted as AnnounceEventRetracted).announce.prefix, 'live');
     await expectLater(
       consumer.requestBroadcast(path: 'live').timeout(timeout),
       throwsA(anything),
     );
 
     broadcast.announce(route: MoqRoute());
-    expect(await nextRoute(announced), isA<AnnouncedAnnounceEvent>());
+    expect(await nextRoute(announced), isA<AnnounceEventAnnounced>());
     await consumer.requestBroadcast(path: 'live').timeout(timeout);
     announced.cancel();
     announced.dispose();
@@ -210,7 +210,7 @@ void main() {
     final broadcast = origin.createBroadcast(path: 'room/alice/chat');
     broadcast.announce(route: MoqRoute());
 
-    final update = await nextRoute(announced) as AnnouncedAnnounceEvent;
+    final update = await nextRoute(announced) as AnnounceEventAnnounced;
     expect(update.announce.prefix, 'room/alice/chat');
     expect(update.announce.captures, ['alice']);
   });
@@ -220,7 +220,7 @@ void main() {
     final consumer = origin.consume();
 
     final empty = consumer.announced(config: MoqAnnounceConfig());
-    expect(await empty.next().timeout(timeout), isA<LiveAnnounceEvent>());
+    expect(await empty.next().timeout(timeout), isA<AnnounceEventLive>());
     empty.cancel();
     empty.dispose();
 
@@ -230,8 +230,8 @@ void main() {
 
     final announced = consumer.announced(config: MoqAnnounceConfig());
     final first = await announced.next().timeout(timeout);
-    expect((first as AnnouncedAnnounceEvent).announce.prefix, 'cam');
-    expect(await announced.next().timeout(timeout), isA<LiveAnnounceEvent>());
+    expect((first as AnnounceEventAnnounced).announce.prefix, 'cam');
+    expect(await announced.next().timeout(timeout), isA<AnnounceEventLive>());
     announced.cancel();
     announced.dispose();
     broadcast.finish();

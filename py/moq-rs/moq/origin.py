@@ -31,18 +31,29 @@ each broadcast's exact path, so subscribers can enumerate broadcasts from routes
 """
 
 AnnounceEvent = MoqAnnounceEvent
-"""What :class:`AnnounceConsumer` yields: ``AnnounceEvent.ANNOUNCED``,
-``AnnounceEvent.UPDATED``, or ``AnnounceEvent.RETRACTED`` carrying an
-:data:`Announce` as ``announce``, or ``AnnounceEvent.LIVE`` once every route
-live at subscribe time has been delivered.
+"""What :class:`AnnounceConsumer` yields: :data:`AnnounceEventAnnounced`,
+:data:`AnnounceEventUpdated`, or :data:`AnnounceEventRetracted` carrying an
+:data:`Announce` as ``announce``, or :data:`AnnounceEventLive`.
 """
+
+AnnounceEventAnnounced = MoqAnnounceEvent.ANNOUNCED
+"""A route now covers the prefix; the stream had none there."""
+
+AnnounceEventUpdated = MoqAnnounceEvent.UPDATED
+"""The route covering the prefix changed hops or cost."""
+
+AnnounceEventRetracted = MoqAnnounceEvent.RETRACTED
+"""No route covers the prefix any more; carries its last route."""
+
+AnnounceEventLive = MoqAnnounceEvent.LIVE
+"""Every route live at subscribe time has been delivered; what follows is live changes."""
 
 
 class AnnounceConsumer:
     """Async-iterable stream of :data:`AnnounceEvent` as they arrive.
 
     Usable as an async context manager; iterate with ``async for`` and it keeps
-    yielding events until cancelled. Break on ``AnnounceEvent.LIVE`` to list
+    yielding events until cancelled. Break on :data:`AnnounceEventLive` to list
     what is live and stop.
     """
 

@@ -52,21 +52,21 @@ typedef AnnouncedBroadcast = MoqAnnouncedBroadcast;
 /// A route over a prefix: its origin-relative path, wildcard captures, and route metadata.
 typedef Announce = MoqAnnounce;
 
-/// What an [AnnounceConsumer] yields: [AnnouncedAnnounceEvent],
-/// [UpdatedAnnounceEvent], [RetractedAnnounceEvent], or [LiveAnnounceEvent].
+/// What an [AnnounceConsumer] yields: [AnnounceEventAnnounced],
+/// [AnnounceEventUpdated], [AnnounceEventRetracted], or [AnnounceEventLive].
 typedef AnnounceEvent = MoqAnnounceEvent;
 
 /// A route now covers the prefix; the stream had none there.
-typedef AnnouncedAnnounceEvent = AnnouncedMoqAnnounceEvent;
+typedef AnnounceEventAnnounced = AnnouncedMoqAnnounceEvent;
 
 /// The route covering the prefix changed hops or cost.
-typedef UpdatedAnnounceEvent = UpdatedMoqAnnounceEvent;
+typedef AnnounceEventUpdated = UpdatedMoqAnnounceEvent;
 
 /// No route covers the prefix any more; carries its last route.
-typedef RetractedAnnounceEvent = RetractedMoqAnnounceEvent;
+typedef AnnounceEventRetracted = RetractedMoqAnnounceEvent;
 
 /// Every route live at subscribe time has been delivered; what follows is live changes.
-typedef LiveAnnounceEvent = LiveMoqAnnounceEvent;
+typedef AnnounceEventLive = LiveMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;
