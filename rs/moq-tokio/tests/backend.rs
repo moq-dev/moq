@@ -670,6 +670,64 @@ async fn iroh_connect() {
 
 // ── Noq backend ─────────────────────────────────────────────────────
 
+/// A client that closes before its runtime stops tells the server at once, instead of
+/// leaving it to the idle timeout, which is what a process exiting on a signal does.
+#[cfg(feature = "noq")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn noq_client_close_reaches_server() {
+	let quic = moq_tokio::quic::Config::default();
+	assert!(
+		quic.idle_timeout > TIMEOUT,
+		"an idle timeout inside TIMEOUT would hide a lost close"
+	);
+
+	let mut server_config = moq_tokio::listen::Config::default();
+	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
+	server_config.tls.generate = vec!["localhost".into()];
+	let server = server_config.init(quic.clone()).expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
+	let url: url::Url = format!("moqt://localhost:{}", server.local_addr().unwrap().port())
+		.parse()
+		.unwrap();
+
+	// The client gets a runtime of its own, gone as soon as the client returns: nothing
+	// drives its endpoint afterwards, exactly as when a process exits.
+	let client = std::thread::spawn(move || {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("client runtime");
+		runtime.block_on(async move {
+			let mut config = moq_tokio::connect::Config::default();
+			config.tls.insecure = Some(true);
+			config.bind = Some("127.0.0.1:0".parse().unwrap());
+			let client = config
+				.init(quic)
+				.expect("failed to init client")
+				.with_subscriber(moq_tokio::origin::spawn());
+			let (client, connection) = connect_once(client, url).await.expect("client connect failed");
+			drop(connection);
+			client.close().await;
+		});
+	});
+
+	let request = tokio::time::timeout(TIMEOUT, server.accept())
+		.await
+		.expect("accept timed out")
+		.expect("no incoming connection");
+	let session = request.ok().await.expect("server handshake failed");
+	tokio::task::spawn_blocking(move || client.join())
+		.await
+		.unwrap()
+		.expect("client thread panicked");
+
+	let err = tokio::time::timeout(TIMEOUT, session.closed())
+		.await
+		.expect("the server never heard the close");
+	assert!(!err.to_string().contains("timed out"), "{err}");
+}
+
 #[cfg(feature = "noq")]
 #[tracing_test::traced_test]
 #[tokio::test]

@@ -237,6 +237,19 @@ impl Client {
 		Connection::new(self.clone(), addrs.into())
 	}
 
+	/// Close every connection this client dialed, once each QUIC peer has been sent the
+	/// close.
+	///
+	/// Clones share one endpoint, so this closes theirs too. Dropping the connections
+	/// only queues the close, which nothing sends once the runtime stops: a process
+	/// that exits without this leaves each peer waiting out its idle timeout.
+	pub async fn close(self) {
+		#[cfg(feature = "noq")]
+		if let Some(noq) = self.noq {
+			noq.close().await;
+		}
+	}
+
 	/// Connect to the configured [`connect.url`](crate::connect::Config::url) URL, publishing
 	/// `origin` to it.
 	///

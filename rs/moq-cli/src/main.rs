@@ -402,12 +402,12 @@ impl Directions {
 async fn spawn_moq(
 	moq: &MoqSide,
 	net: &Net,
+	client: moq_tokio::Client,
 	cluster: moq_relay::cluster::Cluster,
 	directions: Directions,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<(moq_net::bandwidth::Allocator, moq_net::origin::Producer)> {
 	let mut bandwidth = moq_net::bandwidth::Allocator::unlimited();
-	let client = net.client(moq.client.clone())?;
 	let cluster = cluster
 		.with_client(client.clone())
 		.with_client_tls(moq.client.tls.build()?)
@@ -471,7 +471,8 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 		consume: true,
 		..Default::default()
 	};
-	let (_, origin) = spawn_moq(&moq, &net, cluster, directions, &mut tasks).await?;
+	let client = net.client(moq.client.clone())?;
+	let (_, origin) = spawn_moq(&moq, &net, client, cluster, directions, &mut tasks).await?;
 
 	play::run(origin.consume(), name, args, tasks)
 }
@@ -479,7 +480,7 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 /// Run every stage over one Origin and one MoQ attachment.
 ///
 /// Stages are independent: each names its own broadcast and owns its own endpoint,
-/// and the first to finish (stdin EOF, Ctrl-C, or an error) ends the process.
+/// and the first to finish (stdin EOF, SIGINT, SIGTERM, or an error) ends the process.
 async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Result<()> {
 	let cluster = moq.cluster()?;
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
@@ -489,7 +490,9 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 
 	// The stage combinations were refused up front by `Invocation::validate`, before
 	// anything bound a port or dialed out.
-	let (bandwidth, origin) = spawn_moq(&moq, &net, cluster, Directions::of(&stages), &mut tasks).await?;
+	let client = net.client(moq.client.clone())?;
+	let (bandwidth, origin) =
+		spawn_moq(&moq, &net, client.clone(), cluster, Directions::of(&stages), &mut tasks).await?;
 
 	// stdin and stdout are one resource each, so two stages can't share them.
 	let mut stdin = None;
@@ -516,13 +519,17 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 		}
 	}
 
-	if locals.is_empty() {
-		return drive(tasks).await;
-	}
+	let result = if locals.is_empty() {
+		drive(tasks).await
+	} else {
+		let local = tokio::task::LocalSet::new();
+		supervise(&local, locals.into_iter().map(Publish::run), &mut tasks);
+		local.run_until(drive(tasks)).await
+	};
 
-	let local = tokio::task::LocalSet::new();
-	supervise(&local, locals.into_iter().map(Publish::run), &mut tasks);
-	local.run_until(drive(tasks)).await
+	// The process exits next, so the relay only hears we left if the close goes out now.
+	client.close().await;
+	result
 }
 
 /// Run the non-Send pipelines on `local`, reporting each into `tasks`.
@@ -740,13 +747,10 @@ async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: Sub
 	Subscribe::new(source, catalog, args).run().await
 }
 
-/// Run every endpoint until the first finishes (stdin EOF, Ctrl-C, or an error),
-/// then drop the rest.
+/// Run every endpoint until the first finishes (stdin EOF, SIGINT, SIGTERM, or an
+/// error), then drop the rest.
 async fn drive(mut tasks: JoinSet<anyhow::Result<()>>) -> anyhow::Result<()> {
-	tasks.spawn(async {
-		let _ = tokio::signal::ctrl_c().await;
-		Ok(())
-	});
+	tasks.spawn(shutdown_signal());
 
 	while let Some(res) = tasks.join_next().await {
 		match res {
@@ -758,6 +762,24 @@ async fn drive(mut tasks: JoinSet<anyhow::Result<()>>) -> anyhow::Result<()> {
 	}
 
 	Ok(())
+}
+
+/// Resolve on SIGINT or, on unix, SIGTERM (what process supervisors send on stop).
+async fn shutdown_signal() -> anyhow::Result<()> {
+	#[cfg(unix)]
+	{
+		let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+			.context("failed to listen for SIGTERM")?;
+		tokio::select! {
+			res = tokio::signal::ctrl_c() => res.context("failed to listen for SIGINT")?,
+			_ = term.recv() => {}
+		}
+		Ok(())
+	}
+	#[cfg(not(unix))]
+	{
+		tokio::signal::ctrl_c().await.context("failed to listen for SIGINT")
+	}
 }
 
 /// The listener / HTTP-serving endpoints bridge one named broadcast, so an
