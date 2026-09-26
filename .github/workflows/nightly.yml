@@ -77,6 +77,15 @@ jobs:
           nix develop --command bun install --frozen-lockfile
           nix develop --command bun js/net/bench/broadcasts.ts
 
+      # Runs each moq-net Criterion routine once, so a bench that panics (an
+      # unparsable version, a shape that deadlocks) fails here instead of on the
+      # next manual run. Timing is not compared; nextest never runs a
+      # `harness = false` target. `fuzz` enables the announce bench, which the
+      # `'*'` glob otherwise refuses.
+      - name: moq-net benchmark smoke
+        if: ${{ !cancelled() }}
+        run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
+
       - name: Audit
         if: ${{ !cancelled() }}
         run: nix develop --command just rs audit

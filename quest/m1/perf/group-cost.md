@@ -8,10 +8,11 @@ change to what is delivered.
 
 ## Plan
 
-`session_delivery_viewers` (2026-09) spends about 32 µs per viewer per
-4-frame, 64-byte group over the in-memory transport, through a publisher
-session, a relay origin, and a viewer session. No single function dominates.
-The profile spreads it over `kio` waiter registration and parking,
+`session_delivery_viewers` spends about 26 µs per viewer per 4-frame,
+64-byte group over the in-memory transport, through a publisher session, a
+relay origin, and a viewer session: ~420 µs at 16 viewers on every version
+(2026-09-25, Apple M4; the 256-viewer point is too noisy on that machine to
+quote). No single function dominates. An earlier Linux profile spread it over `kio` waiter registration and parking,
 `TrackState::evict_expired_scan` (4-5%), `Waiter`'s lazily allocated shared
 waker (`Once::call`, about 3%, so waiters are created per poll), and
 malloc/free (10-12%).
