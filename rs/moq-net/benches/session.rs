@@ -381,7 +381,8 @@ impl Room {
 			let frame = reading.as_mut().unwrap().read_frame().await.unwrap();
 			bytes += frame.expect("group ended early").payload.len();
 			if last {
-				*reading = None;
+				let end = reading.take().unwrap().read_frame().await.unwrap();
+				assert!(end.is_none(), "group did not end after its last frame");
 			}
 		}
 		assert_eq!(bytes, self.shape.expected());
