@@ -61,7 +61,7 @@ pub(crate) fn decode_error(code: i32) -> Error {
 	if code == unsafe_libopus::OPUS_INVALID_PACKET {
 		return Error::Decode(format!("libopus rejected the packet (code {code})"));
 	}
-	error(code, "opus_decode_float")
+	error(code, "opus_multistream_decode_float")
 }
 
 /// Classify a packet, preserving DTX across packet loss.
@@ -77,6 +77,171 @@ pub(crate) fn activity(packet: &[u8], in_dtx: bool) -> Activity {
 		Activity::Dtx
 	} else {
 		Activity::Active
+	}
+}
+
+/// Classify a multistream packet, preserving DTX across packet loss.
+///
+/// Every stream but the last is self-delimited (RFC 6716 framing plus the length
+/// libopus writes ahead of that stream's payload). One `opus_packet_parse` of the
+/// whole buffer treats the later streams as payload, so an all-DTX surround
+/// packet reads as active. DTX means every stream coded nothing.
+pub(crate) fn multistream_activity(packet: &[u8], streams: u8, in_dtx: bool) -> Activity {
+	if packet.is_empty() {
+		return if in_dtx { Activity::Dtx } else { Activity::Active };
+	}
+	if streams <= 1 {
+		return activity(packet, in_dtx);
+	}
+	if streams_carry_nothing(packet, streams) {
+		Activity::Dtx
+	} else {
+		Activity::Active
+	}
+}
+
+/// Whether every stream in a multistream packet coded no audio.
+fn streams_carry_nothing(mut packet: &[u8], streams: u8) -> bool {
+	for index in 0..streams {
+		let last = index + 1 == streams;
+		if last {
+			return carries_nothing(packet);
+		}
+		let Some((silent, offset)) = self_delimited(packet) else {
+			return false;
+		};
+		if !silent {
+			return false;
+		}
+		packet = &packet[offset..];
+	}
+	false
+}
+
+/// One self-delimited Opus packet at the front of `data`: whether every frame is
+/// empty, and how many bytes it occupies, including its trailing padding.
+///
+/// `None` when the bytes are not that packet. The length of the last frame is
+/// coded where libopus puts it, before the frame payloads.
+fn self_delimited(data: &[u8]) -> Option<(bool, usize)> {
+	if data.is_empty() {
+		return None;
+	}
+	let framesize = unsafe { unsafe_libopus::opus_packet_get_samples_per_frame(data.as_ptr(), 48_000) };
+	if framesize <= 0 {
+		return None;
+	}
+
+	let toc = data[0];
+	let mut pos = 1usize;
+	let mut len = data.len() - 1;
+	let mut last_size = len;
+	let mut cbr = false;
+	let mut pad = 0usize;
+	let mut sizes = [0i32; 48];
+
+	let count = match toc & 0x3 {
+		0 => 1,
+		1 => {
+			cbr = true;
+			2
+		}
+		2 => {
+			let (bytes, size) = parse_size(data.get(pos..pos.checked_add(len)?)?)?;
+			len = len.checked_sub(bytes)?;
+			if size as usize > len {
+				return None;
+			}
+			sizes[0] = size;
+			pos += bytes;
+			last_size = len - size as usize;
+			2
+		}
+		_ => {
+			if len < 1 {
+				return None;
+			}
+			let ch = data[pos];
+			pos += 1;
+			len -= 1;
+			let count = (ch & 0x3f) as usize;
+			if count == 0 || count > sizes.len() || framesize as usize * count > 5760 {
+				return None;
+			}
+			if ch & 0x40 != 0 {
+				loop {
+					if len == 0 {
+						return None;
+					}
+					let p = data[pos] as usize;
+					pos += 1;
+					len -= 1;
+					let tmp = if p == 255 { 254 } else { p };
+					len = len.checked_sub(tmp)?;
+					pad += tmp;
+					if p != 255 {
+						break;
+					}
+				}
+			}
+			cbr = ch & 0x80 == 0;
+			if !cbr {
+				last_size = len;
+				for slot in &mut sizes[..count - 1] {
+					let (bytes, size) = parse_size(data.get(pos..pos.checked_add(len)?)?)?;
+					len = len.checked_sub(bytes)?;
+					if size as usize > len {
+						return None;
+					}
+					*slot = size;
+					pos += bytes;
+					last_size = last_size.checked_sub(bytes + size as usize)?;
+				}
+			}
+			count
+		}
+	};
+
+	let (bytes, size) = parse_size(data.get(pos..pos.checked_add(len)?)?)?;
+	len = len.checked_sub(bytes)?;
+	if size as usize > len {
+		return None;
+	}
+	sizes[count - 1] = size;
+	pos += bytes;
+	if cbr {
+		if size as usize * count > len {
+			return None;
+		}
+		for slot in &mut sizes[..count - 1] {
+			*slot = size;
+		}
+	} else if bytes + size as usize > last_size {
+		return None;
+	}
+
+	for &frame in &sizes[..count] {
+		pos = pos.checked_add(frame as usize)?;
+		if pos > data.len() {
+			return None;
+		}
+	}
+	let offset = pad.checked_add(pos)?;
+	if offset == 0 || offset > data.len() {
+		return None;
+	}
+	let silent = sizes[..count].iter().all(|&frame| frame == 0);
+	Some((silent, offset))
+}
+
+/// The self-delimited length prefix (RFC 6716 §3.2.5), or `None` when it is cut off.
+fn parse_size(data: &[u8]) -> Option<(usize, i32)> {
+	let first = *data.first()?;
+	if first < 252 {
+		Some((1, i32::from(first)))
+	} else {
+		let second = *data.get(1)?;
+		Some((2, 4 * i32::from(second) + i32::from(first)))
 	}
 }
 
@@ -166,6 +331,38 @@ mod tests {
 		// Loss carries the last real packet's classification.
 		assert_eq!(activity(&[], true), Activity::Dtx);
 		assert_eq!(activity(&[], false), Activity::Active);
+	}
+
+	/// A surround packet is one self-delimited Opus packet per stream, then a
+	/// normal packet for the last. DTX is all of them empty; one coded frame is
+	/// audio. Parsing the buffer as a single stream would read the later
+	/// subpackets as that frame's payload.
+	#[test]
+	fn multistream_activity_requires_every_stream_empty() {
+		// 5.1: two coupled streams, then two mono. Code 0, empty frame.
+		let dtx = [0xfc, 0x00, 0xfc, 0x00, 0xf8, 0x00, 0xf8];
+		assert_eq!(multistream_activity(&dtx, 4, false), Activity::Dtx);
+		// A coded frame on the last stream.
+		let last = [0xfc, 0x00, 0xfc, 0x00, 0xf8, 0x00, 0xf8, 0xaa];
+		assert_eq!(multistream_activity(&last, 4, false), Activity::Active);
+		// A coded frame on an earlier stream. The length byte is the payload size.
+		let early = [0xfc, 0x01, 0xaa, 0xfc, 0x00, 0xf8, 0x00, 0xf8];
+		assert_eq!(multistream_activity(&early, 4, false), Activity::Active);
+		// Two empty frames in one self-delimited code-1 packet, then a bare TOC.
+		let cbr = [0xf9, 0x00, 0xf8];
+		assert_eq!(multistream_activity(&cbr, 2, false), Activity::Dtx);
+		let cbr_payload = [0xf9, 0x01, 0xaa, 0xbb, 0xf8];
+		assert_eq!(multistream_activity(&cbr_payload, 2, false), Activity::Active);
+		// Code 3 packs the 60 ms case: three empty frames, self-delimited, then a bare TOC.
+		let code3 = [0xfb, 0x03, 0x00, 0xf8];
+		assert_eq!(multistream_activity(&code3, 2, false), Activity::Dtx);
+		let code3_payload = [0xfb, 0x03, 0x01, 0xaa, 0xbb, 0xcc, 0xf8];
+		assert_eq!(multistream_activity(&code3_payload, 2, false), Activity::Active);
+		// Loss still carries the previous classification, whatever the layout.
+		assert_eq!(multistream_activity(&[], 4, true), Activity::Dtx);
+		assert_eq!(multistream_activity(&[], 4, false), Activity::Active);
+		// One stream is an ordinary packet.
+		assert_eq!(multistream_activity(&[0xf8], 1, false), Activity::Dtx);
 	}
 
 	/// A silence run's periodic refresh is an ordinarily coded frame, and a

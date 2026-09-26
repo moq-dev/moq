@@ -44,9 +44,9 @@ its own decode and encode quest so verification stays per host.
 ## Quests
 
 - [AudioToolbox decode](/quest/m1/audio-codecs/decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
-- [Opus surround](/quest/m1/audio-codecs/opus-surround.md) - mapping family 1 decodes on every host through the multistream decoder
 - [ADTS refusals](/quest/m1/audio-codecs/adts-refusals.md) - the ADTS writer refuses channel counts and object types it cannot label instead of mislabeling them
 - [AudioToolbox encode](/quest/m1/audio-codecs/encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
+- [TS surround Opus](/quest/m1/audio-codecs/ts-opus-surround.md) - a 3 to 8 channel Opus stream from MPEG-TS imports with a family 1 OpusHead that decodes
 
 ## Related
 
