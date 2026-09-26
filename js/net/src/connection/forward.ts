@@ -6,7 +6,7 @@
 import { type Dispose, race } from "@moq/signals";
 import { isActive } from "../announced.ts";
 import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
-import type * as Path from "../path.ts";
+import * as Path from "../path.ts";
 import { wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 
@@ -35,6 +35,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	let detach = originWire.attach(conn.discovery);
 
 	let dead = false;
+	let discovering = conn.discovery;
 	void conn.closed.then(() => {
 		dead = true;
 		detach();
@@ -47,57 +48,61 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		return;
 	}
 
-	// Hidden routes are mirrored too; each local reader opts in on its own.
-	const announced = conn.announced(undefined, { hidden: true });
-	const inserted = new Map<Path.Valid, Dynamic>();
+	for (const prefix of originWire.interests()) {
+		// Hidden routes are mirrored too; each local reader opts in on its own.
+		const announced = conn.announced(Path.Pattern.subtree(prefix), { hidden: true });
+		const inserted = new Map<Path.Valid, Dynamic>();
 
-	// End the stream the moment the session closes rather than waiting for the wire to
-	// error it, so the retractions below land promptly.
-	void conn.closed.then(() => announced.close());
+		// End the stream the moment the session closes rather than waiting for the wire to
+		// error it, so the retractions below land promptly.
+		void conn.closed.then(() => announced.close());
 
-	void (async () => {
-		let failure: unknown;
-		try {
-			for (;;) {
-				const event = await announced.next();
-				if (!event) break;
+		void (async () => {
+			let failure: unknown;
+			try {
+				for (;;) {
+					const event = await announced.next();
+					if (!event) break;
+					if (!originWire.accepts(event.prefix)) continue;
 
-				if (isActive(event.kind)) {
-					const existing = inserted.get(event.prefix);
-					if (existing) {
-						existing.update(event.route);
+					if (isActive(event.kind)) {
+						const existing = inserted.get(event.prefix);
+						if (existing) {
+							existing.update(event.route);
+						} else {
+							const handle = originWire.receive(event.prefix, event.route);
+							inserted.set(event.prefix, handle);
+							void drive(handle, conn);
+						}
 					} else {
-						const handle = originWire.receive(event.prefix, event.route);
-						inserted.set(event.prefix, handle);
-						void drive(handle, conn);
+						const handle = inserted.get(event.prefix);
+						inserted.delete(event.prefix);
+						handle?.close();
 					}
-				} else {
-					const handle = inserted.get(event.prefix);
-					inserted.delete(event.prefix);
-					handle?.close();
+				}
+			} catch (err) {
+				// The session died mid-stream, or the relay refused or reset the stream. The
+				// cleanup below retracts everything this stream fed either way.
+				failure = err;
+			} finally {
+				for (const handle of inserted.values()) handle.close();
+				inserted.clear();
+				announced.close();
+
+				// Discovery ended while the session lives, and nothing reopens the stream on this
+				// connection. Downgrade the attachment rather than leaving the origin claiming a
+				// discovery that no longer works: announcement-gated consumers would wait forever
+				// on a table this session can no longer fill. Now they fall back to standing
+				// requests, which this session still answers.
+				if (!dead && discovering) {
+					discovering = false;
+					console.warn("broadcast discovery failed; broadcasts resolve on request only.", failure);
+					detach();
+					detach = originWire.attach(false);
 				}
 			}
-		} catch (err) {
-			// The session died mid-stream, or the relay refused or reset the stream. The
-			// cleanup below retracts everything this stream fed either way.
-			failure = err;
-		} finally {
-			for (const handle of inserted.values()) handle.close();
-			inserted.clear();
-			announced.close();
-
-			// Discovery ended while the session lives, and nothing reopens the stream on this
-			// connection. Downgrade the attachment rather than leaving the origin claiming a
-			// discovery that no longer works: announcement-gated consumers would wait forever
-			// on a table this session can no longer fill. Now they fall back to standing
-			// requests, which this session still answers.
-			if (!dead) {
-				console.warn("broadcast discovery failed; broadcasts resolve on request only.", failure);
-				detach();
-				detach = originWire.attach(false);
-			}
-		}
-	})();
+		})();
+	}
 }
 
 /**

@@ -1368,7 +1368,9 @@ async fn dynamic_track_request_can_publish_media() {
 	assert_eq!(frame.payload, payload);
 	assert_eq!(frame.timestamp_us, 20_000);
 
+	media.discontinuity().unwrap();
 	media.finish().unwrap();
+	assert!(matches!(media.discontinuity(), Err(MoqError::Closed)));
 }
 
 #[tokio::test]

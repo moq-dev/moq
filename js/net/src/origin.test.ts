@@ -1422,3 +1422,98 @@ test("announced filters by arbitrary patterns and reports captures", async () =>
 	broadcast.close();
 	origin.close();
 });
+
+test("a rooted producer shares the table and enforces its pattern union", async () => {
+	const origin = new Producer();
+	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*")]));
+	const broadcast = publish(scoped, Path.from("room/alice"));
+	expect(origin.broadcasts().peek().has(Path.from("tenant/room/alice"))).toBe(true);
+	expect([...scoped.broadcasts().peek().keys()]).toEqual([Path.from("room/alice")]);
+	const request = scoped.consume().request(Path.from("room/alice"));
+	expect(request.path).toBe(Path.from("room/alice"));
+	expect(request.active.peek()).toBeDefined();
+	expect(() => scoped.createBroadcast(Path.from("other"))).toThrow("outside the origin scope");
+	expect(() => scoped.request(Path.from("room/alice/deep"))).toThrow("outside the origin scope");
+	expect(() => scoped.dynamic(Path.from("other"))).toThrow("outside the origin scope");
+	expect(() => scoped.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("other/**")]))).toThrow(
+		"do not overlap",
+	);
+	expect(() => origin.scope(Path.empty(), new Path.Patterns())).toThrow("do not overlap");
+
+	const nested = scoped.scope(Path.from("room"), new Path.Patterns([Path.Pattern.all()]));
+	expect([...nested.broadcasts().peek().keys()]).toEqual([Path.from("alice")]);
+	expect(() => nested.createBroadcast(Path.from("alice/deep"))).toThrow("outside the origin scope");
+	const announced = nested.announced();
+	expect((await announced.next())?.prefix).toBe(Path.from("alice"));
+	announced.close();
+	request.close();
+	broadcast.close();
+	origin.close();
+});
+
+test("a scoped dynamic only serves allowed paths and presents relative requests", async () => {
+	const origin = new Producer();
+	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
+	const dynamic = scoped.dynamic(Path.from("room"));
+	expect(dynamic.prefix).toBe(Path.from("room"));
+	const denied = origin.request(Path.from("tenant/room/alice/video"));
+	expect(denied.unroutable.peek()).toBe(true);
+	const request = origin.request(Path.from("tenant/room/alice/chat"));
+	const requests = dynamic.requested();
+	const pending = await requests.next();
+	expect(pending.value?.path).toBe(Path.from("room/alice/chat"));
+	const broadcast = new BroadcastProducer();
+	pending.value?.accept(broadcast);
+	expect(request.active.peek()).toBeDefined();
+	dynamic.update({ cost: 2n });
+	expect(origin.broadcasts().peek().get(Path.from("tenant/room"))?.cost.warm).toBe(2n);
+	await requests.return?.();
+	dynamic.close();
+	request.close();
+	denied.close();
+	broadcast.close();
+	origin.close();
+});
+
+test("scoped wire views filter and rebase advertisements and blind requests", () => {
+	const origin = new Producer();
+	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/**")]));
+	const local = publish(origin, Path.from("tenant/room/live"));
+	const hidden = publish(origin, Path.from("tenant/other/live"));
+	const allowed = origin.request(Path.from("tenant/room/missing"));
+	const denied = origin.request(Path.from("tenant/other/missing"));
+	expect([...(wireOf(scoped).requests.peek()?.keys() ?? [])]).toEqual([Path.from("room/missing")]);
+	expect([...(wireOf(scoped.consume()).advertised.peek()?.keys() ?? [])]).toEqual([Path.from("room/live")]);
+	expect(wireOf(scoped.consume()).local(Path.from("room/live"))).toBeDefined();
+	expect(() => wireOf(scoped.consume()).local(Path.from("other/live"))).toThrow("outside the origin scope");
+	allowed.close();
+	denied.close();
+	local.close();
+	hidden.close();
+	origin.close();
+});
+
+test("a scoped dynamic is announced only to readers its scope can serve", () => {
+	const origin = new Producer();
+	const dynamic = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/chat")])).dynamic(Path.empty());
+	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/chat")]));
+	const video = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/video")]));
+	expect([...chat.broadcasts().peek().keys()]).toEqual([Path.empty()]);
+	expect([...video.broadcasts().peek().keys()]).toEqual([]);
+	expect([...(wireOf(chat.consume()).advertised.peek()?.keys() ?? [])]).toEqual([Path.empty()]);
+	expect([...(wireOf(video.consume()).advertised.peek()?.keys() ?? [])]).toEqual([]);
+	dynamic.close();
+	origin.close();
+});
+
+test("a rooted reader presents the most specific covering route", () => {
+	const origin = new Producer();
+	const narrow = origin.dynamic(Path.from("room/alice"), { cost: 9n });
+	const broad = origin.dynamic(Path.from("room"), { cost: 1n });
+	const rooted = origin.scope(Path.from("room/alice"), new Path.Patterns([Path.Pattern.all()]));
+	expect(rooted.broadcasts().peek().get(Path.empty())?.cost.warm).toBe(9n);
+	expect(wireOf(rooted.consume()).advertised.peek()?.get(Path.empty())?.route.cost.warm).toBe(9n);
+	broad.close();
+	narrow.close();
+	origin.close();
+});
