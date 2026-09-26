@@ -1493,6 +1493,144 @@ mod tests {
 	// The property HLS needs from the timeline rework: audio and video renditions share one
 	// segment numbering, cut at the same boundaries. Video is one group per segment; an audio
 	// segment packs every audio group inside the video segment's span.
+	// Every rendition has its own timeline. The reference (the first video rendition by name) sets
+	// the segment boundaries; another rendition snaps them to its own keyframes, and a boundary with
+	// no keyframe nearby, such as before a rendition starts, is a gap.
+	#[tokio::test]
+	async fn renditions_snap_to_their_own_keyframes() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+
+		let reserved = catalog.reserve();
+		let mut registrations = Vec::new();
+		for name in ["video0", "video1", "video2"] {
+			let mut registration = catalog.test_video(name).unwrap();
+			registration.set(video_config()).unwrap();
+			registrations.push(registration);
+		}
+		drop(reserved);
+
+		let mut producers = Vec::new();
+		// The reference cuts every 2s; video1's GOPs sit 300ms later; video2 starts at 4s.
+		for (name, gops) in [
+			("video0", &[0u64, 2_000, 4_000, 6_000, 8_000][..]),
+			("video1", &[300, 2_300, 4_300, 6_300, 8_300]),
+			("video2", &[4_000, 6_000, 8_000]),
+		] {
+			let track = broadcast.create_track(name, None).unwrap();
+			let mut media = catalog
+				.media_producer(
+					track,
+					moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+				)
+				.unwrap();
+			for ms in gops {
+				media.write(frame(ms * 1_000, true)).unwrap();
+			}
+			producers.push(media);
+		}
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let listed = |name: &'static str, count: usize| {
+			let broadcaster = broadcaster.clone();
+			async move {
+				for _ in 0..500 {
+					if let Some(rendition) = broadcaster.rendition(Kind::Video, name) {
+						let snapshot = rendition.snapshot();
+						if snapshot.segments.len() >= count {
+							return snapshot;
+						}
+					}
+					tokio::time::sleep(Duration::from_millis(10)).await;
+				}
+				panic!("{name} never listed {count} segments");
+			}
+		};
+
+		let reference = listed("video0", 4).await;
+		assert_eq!(
+			reference.segments.iter().map(|s| s.segment).collect::<Vec<_>>(),
+			vec![0, 1, 2, 3]
+		);
+
+		// A segment is listed once the rendition's own timeline is a tolerance past its end.
+		let offset = listed("video1", 3).await;
+		assert_eq!(offset.media_sequence, reference.media_sequence, "one numbering");
+		assert!(offset.segments.iter().all(|s| !s.gap), "every boundary snaps");
+		let snapped = broadcaster
+			.rendition(Kind::Video, "video1")
+			.unwrap()
+			.segment(1)
+			.await
+			.unwrap()
+			.expect("the snapped segment is served");
+		assert_eq!(&snapped[4..8], b"moof");
+
+		let late = listed("video2", 3).await;
+		assert_eq!(
+			late.segments.iter().map(|s| s.gap).collect::<Vec<_>>(),
+			vec![true, true, false],
+			"nothing to serve before the rendition starts"
+		);
+		let video2 = broadcaster.rendition(Kind::Video, "video2").unwrap();
+		assert!(video2.segment(0).await.unwrap().is_none(), "a gap is never fetched");
+
+		drop((producers, registrations, broadcast));
+	}
+
+	// A broadcast without video takes its boundaries from its first audio rendition.
+	#[tokio::test]
+	async fn an_audio_only_broadcast_segments_on_its_audio() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+
+		let reserved = catalog.reserve();
+		let mut registration = catalog.test_audio("audio0").unwrap();
+		registration
+			.set(hang::catalog::AudioConfig::new(
+				hang::catalog::AudioCodec::Opus,
+				48_000,
+				2,
+			))
+			.unwrap();
+		drop(reserved);
+
+		let track = broadcast.create_track("audio0", None).unwrap();
+		let mut audio = catalog
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
+			.unwrap();
+		// 500ms groups pack into one-second records.
+		for micros in (0..=3_000_000u64).step_by(500_000) {
+			let keyframe = audio.needs_keyframe();
+			audio.write(frame(micros, keyframe)).unwrap();
+			audio.cut(None).unwrap();
+		}
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
+		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+
+		let playlist = rendition.snapshot();
+		assert_eq!(playlist.segments.iter().map(|s| s.segment).collect::<Vec<_>>(), vec![0, 1, 2]);
+		assert_eq!(playlist.segments[0].duration, Duration::from_secs(1));
+		let segment = rendition.segment(1).await.unwrap().expect("audio segment");
+		assert_eq!(&segment[4..8], b"moof");
+
+		drop((audio, registration, broadcast));
+	}
+
 	// The catalog's durationMax is the record split ceiling, far above a GOP, so the exporter
 	// derives EXT-X-TARGETDURATION from the segments it has: a playlist whose EXTINF exceeds its
 	// target duration is invalid, and one far above them delays every player.
