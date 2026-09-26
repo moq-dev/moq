@@ -1,4 +1,4 @@
-The `/js` TypeScript workspace. Extends the root `CLAUDE.md`.
+The `/js` TypeScript workspace. Extends the root `AGENTS.md`.
 
 # Packages
 

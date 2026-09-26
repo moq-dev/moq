@@ -243,6 +243,13 @@ impl Publish {
 		Ok(())
 	}
 
+	/// Mark a timeline break on this media importer.
+	pub fn media_discontinuity(&mut self, media: Id) -> Result<(), Error> {
+		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
+		track.discontinuity()?;
+		Ok(())
+	}
+
 	/// Draw a group boundary on this media importer.
 	///
 	/// This ends the open group; the next frame starts a new one. Audio has no boundary of its own

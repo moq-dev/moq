@@ -980,6 +980,17 @@ impl MoqMediaProducer {
 		Ok(())
 	}
 
+	/// Mark a timeline break and restart handoff measurement without lowering advertised jitter.
+	///
+	/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock.
+	pub fn discontinuity(&self) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let media = guard.as_mut().ok_or(MoqError::Closed)?;
+		media.import.discontinuity()?;
+		Ok(())
+	}
+
 	/// Draw a group boundary here.
 	///
 	/// Audio has no boundary of its own (every packet is independently decodable), so this is the

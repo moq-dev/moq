@@ -103,6 +103,10 @@ class MediaProducer:
         """
         self._inner.flush(timestamp_us)
 
+    def discontinuity(self) -> None:
+        """Mark a timeline break and restart handoff measurement, preserving advertised jitter."""
+        self._inner.discontinuity()
+
     def cut(self) -> None:
         """Draw a group boundary here.
 

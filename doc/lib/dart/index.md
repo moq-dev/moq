@@ -110,6 +110,8 @@ catalog and container types are there, so already-encoded frames flow through
 
 `MediaProducer.flush(timestampUs: ...)` records the handoff of a locally encoded frame on the broadcast media clock. Call it after `writeFrame` only for live encoder output; file, pipe, and network imports stay clock-free. `MediaProducer` aliases the generated FFI object, so its method is available directly.
 
+Call `media.discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds.
+
 ## Connection stats
 
 `session.stats()` returns a `ConnectionStats` snapshot. Each field is `null`

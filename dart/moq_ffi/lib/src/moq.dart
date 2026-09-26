@@ -6879,6 +6879,7 @@ class FfiConverterMoqGroupRequest {
 abstract class MoqMediaProducerInterface {
   void cut();
   MoqTrackDemand demand();
+  void discontinuity();
   void finish();
   void flush({required int timestampUs});
   String name();
@@ -6929,6 +6930,15 @@ class MoqMediaProducer implements MoqMediaProducerInterface {
       FfiConverterMoqTrackDemand.lift,
       moqExceptionErrorHandler,
     );
+  }
+
+  void discontinuity() {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqmediaproducer_discontinuity(
+        uniffiClonePointer(),
+        status,
+      );
+    }, moqExceptionErrorHandler);
   }
 
   void finish() {
@@ -10931,6 +10941,14 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqmediaproducer_demand(
 @Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
+external void uniffi_moq_ffi_fn_method_moqmediaproducer_discontinuity(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
 external void uniffi_moq_ffi_fn_method_moqmediaproducer_finish(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
@@ -12329,6 +12347,9 @@ external int uniffi_moq_ffi_checksum_method_moqmediaproducer_cut();
 external int uniffi_moq_ffi_checksum_method_moqmediaproducer_demand();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqmediaproducer_discontinuity();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqmediaproducer_finish();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -12929,6 +12950,10 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediaproducer_demand() != 44491) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqmediaproducer_discontinuity() !=
+      37570) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediaproducer_finish() != 38480) {

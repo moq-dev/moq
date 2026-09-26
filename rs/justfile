@@ -730,7 +730,7 @@ relay-minimal:
 #
 # Outside nextest on purpose. The staticlib link alone takes ~2 minutes, past the
 # hang budget in `.config/nextest.toml` once the rest of the workspace builds
-# beside it, and `rs/CLAUDE.md` says to make a slow test fast, not to raise the
+# beside it, and `rs/AGENTS.md` says to make a slow test fast, not to raise the
 # ceiling. obs.yml runs this on every PR that touches rs/libmoq, right after it
 # has built the same debug libmoq.a for the plugin, and nightly.yml covers the
 # paths that filter misses.
