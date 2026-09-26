@@ -34,18 +34,21 @@ export { isAnonymous } from "./hop.ts";
  * `answer` outlives a session: the answering session clears it when it dies and the next one
  * answers again, which is what makes a request span reconnects.
  *
- * `refused` holds the route entries whose handler rejected the path. A refusal is
- * authoritative: the entry is never asked again while it stands (a reconnect is a fresh
- * entry), and the path resolves through the next-best route or to nothing. Without it a
- * rejection would refresh the path straight back onto the same queue, and a handler that
- * keeps saying no would be asked forever.
+ * `handles` holds the `closed` of each open {@link Requesting} on the path.
+ *
+ * A refusal is terminal. With nothing serving, the slot ends: every handle closes with the
+ * handler's error and the slot leaves the table, so the next request asks afresh. While
+ * another source still serves (a better route was asked and said no), the refuser joins
+ * `refused` and is skipped for as long as it stands (a reconnect is a fresh entry), so the
+ * current source carries on. A refusal never falls through to a broader prefix or another
+ * advertiser.
  *
  * @internal
  */
 export interface RequestSlot {
-	count: number;
 	blind: number;
 	answer?: broadcast.Consumer;
+	readonly handles: Set<Once<Error | null>>;
 	readonly refused: Set<RouteEntry>;
 	readonly route: Signal<broadcast.Consumer | undefined>;
 }
@@ -115,7 +118,7 @@ class ServeState {
 	closed = new Once<Error | null>();
 	settled = new Signal(0);
 	onChange: (path: Path.Valid) => void = () => {};
-	onReject: (path: Path.Valid) => void = () => {};
+	onReject: (path: Path.Valid, err: Error) => void = () => {};
 
 	enqueue(path: Path.Valid): void {
 		if (this.closed.peek() !== undefined) return;
@@ -157,7 +160,7 @@ class ServeState {
 		if (this.pending.get(request.path) !== request) return;
 		this.pending.delete(request.path);
 		if (this.demanding.has(request.path)) this.rejected.set(request.path, err);
-		this.onReject(request.path);
+		this.onReject(request.path, err);
 		this.settled.update((n) => n + 1);
 	}
 
@@ -303,31 +306,42 @@ class OriginState {
 		slot.route.set(this.route(path, slot));
 	}
 
-	/** Record that `entry` refused `path` and re-route the requests watching it. */
-	refuse(path: Path.Valid, entry: RouteEntry): void {
+	/**
+	 * `entry` refused `path` with `err`. A request still serving another source skips the
+	 * refuser; one with nothing serving ends with `err`.
+	 */
+	refuse(path: Path.Valid, entry: RouteEntry, err: Error): void {
 		const slot = this.requests.peek()?.get(path);
 		if (!slot) return;
-		slot.refused.add(entry);
-		slot.route.set(this.route(path, slot));
+		// Only the route the request is waiting on speaks for it; a superseded one's answer is moot.
+		if (this.bestEntry(path, (candidate) => slot.refused.has(candidate)) !== entry) return;
+
+		const serving = slot.route.peek();
+		if (serving && serving.closed.peek() === undefined) {
+			slot.refused.add(entry);
+			slot.route.set(this.route(path, slot));
+			return;
+		}
+
+		this.requests.mutate((map) => {
+			if (map?.get(path) === slot) map.delete(path);
+		});
+		slot.answer?.close();
+		slot.answer = undefined;
+		slot.route.set(undefined);
+		this.releaseMaterialized(path);
+		for (const closed of slot.handles) closed.set(err);
+		slot.handles.clear();
 	}
 
 	/**
 	 * Recompute every open request covered by `prefix`, after a route was inserted or
 	 * removed there: a route covers many paths, so a single-path refresh is not enough.
-	 * Materialized broadcasts whose provider changed are released here too, so a
-	 * retracted route's session subscription closes even when nothing reads it again.
+	 * Every materialized broadcast belongs to an open request, so rerouting them also
+	 * releases a retracted route's session subscription even when nothing reads it again.
 	 */
 	refreshPrefix(prefix: Path.Valid): void {
-		const requests = this.requests.peek();
-		for (const [path, cached] of [...this.materialized]) {
-			if (!Path.hasPrefix(prefix, path)) continue;
-			const refused = requests?.get(path)?.refused;
-			if (cached.entry !== this.bestEntry(path, (entry) => refused?.has(entry) ?? false)) {
-				this.materialized.delete(path);
-				cached.front.close();
-			}
-		}
-		for (const [path, slot] of requests ?? []) {
+		for (const [path, slot] of this.requests.peek() ?? []) {
 			if (Path.hasPrefix(prefix, path)) slot.route.set(this.route(path, slot));
 		}
 	}
@@ -404,8 +418,9 @@ class OriginState {
 	 * the best covering route, or the blind answer.
 	 *
 	 * Materialization is lazy and cached per path: the first request under a route opens
-	 * the providing session's subscription, repeats share it, and a provider change (the
-	 * route retracting, a better session taking over) swaps it out.
+	 * the providing session's subscription and repeats share it. A better route is made
+	 * before the old one breaks: the current front keeps serving until the new route
+	 * answers (then swaps) or refuses (then is skipped). A retracted route swaps at once.
 	 */
 	route(path: Path.Valid, slot: Pick<RequestSlot, "answer" | "refused">): broadcast.Consumer | undefined {
 		const entry = this.bestEntry(path, (candidate) => slot.refused.has(candidate));
@@ -416,24 +431,26 @@ class OriginState {
 			return local;
 		}
 
-		const cached = this.materialized.get(path);
-		if (cached && cached.entry === entry) {
-			if (cached.front.closed.peek() === undefined) return cached.front;
+		let cached = this.materialized.get(path);
+		if (cached && cached.front.closed.peek() !== undefined) {
 			this.materialized.delete(path);
-		} else if (cached) {
-			this.materialized.delete(path);
-			cached.front.close();
+			cached = undefined;
 		}
-		if (!entry?.server) return slot.answer;
+		if (cached && cached.entry === entry) return cached.front;
+		if (!entry?.server) {
+			this.releaseMaterialized(path);
+			return slot.answer;
+		}
 
 		const served = entry.server.served.get(path);
 		if (served && served.closed.peek() === undefined) {
+			cached?.front.close();
 			this.materialized.set(path, { entry, front: served });
 			return served;
 		}
 
 		entry.server.enqueue(path);
-		return undefined;
+		return cached?.front;
 	}
 }
 
@@ -629,7 +646,7 @@ export class Producer implements Table {
 			originated,
 			server,
 		};
-		server.onReject = (path) => this.#state.refuse(path, entry);
+		server.onReject = (path, err) => this.#state.refuse(path, entry, err);
 
 		let closed = false;
 		this.#state.routes.mutate((routes) => {
@@ -830,6 +847,7 @@ let makeRequesting: (
 	path: Path.Valid,
 	active: Getter<broadcast.Consumer | undefined>,
 	unroutable: Getter<boolean>,
+	closed: Once<Error | null>,
 	dispose: Dispose,
 ) => Requesting;
 
@@ -870,33 +888,43 @@ export class Requesting {
 	 * set, and false while a connection is still coming up, so the ordinary page-load window
 	 * before the first handshake reads as pending rather than as a missing broadcast. Waiting
 	 * on this is futile by definition; wait for an announcement instead, via the origin's
-	 * `announced`.
+	 * `announced`. True once the request is refused.
 	 */
 	readonly unroutable: Getter<boolean>;
 
+	/**
+	 * Settles with the error a route's handler refused the path with, or `null` once you
+	 * {@link close} the request. A refusal is final: no other route is asked, and a fresh
+	 * request is needed to try again.
+	 */
+	readonly closed: GetPromise<Error | null>;
+
 	#dispose: Dispose;
-	#closed = false;
+	#disposed = false;
 
 	private constructor(
 		path: Path.Valid,
 		active: Getter<broadcast.Consumer | undefined>,
 		unroutable: Getter<boolean>,
+		closed: GetPromise<Error | null>,
 		dispose: Dispose,
 	) {
 		this.path = path;
 		this.active = active;
 		this.unroutable = unroutable;
+		this.closed = closed;
 		this.#dispose = dispose;
 	}
 
 	static {
-		makeRequesting = (path, active, unroutable, dispose) => new Requesting(path, active, unroutable, dispose);
+		makeRequesting = (path, active, unroutable, closed, dispose) =>
+			new Requesting(path, active, unroutable, closed, dispose);
 	}
 
 	/** Withdraw the request. The path stays routed for any other open request. Idempotent. */
 	close(): void {
-		if (this.#closed) return;
-		this.#closed = true;
+		if (this.#disposed) return;
+		this.#disposed = true;
 		this.#dispose();
 	}
 }
@@ -1000,7 +1028,14 @@ export class Consumer {
 		const requests = this.#state.requests.peek();
 		if (!requests) {
 			// Closed origin: a request that can never resolve, and says so.
-			return makeRequesting(path, new Signal<broadcast.Consumer | undefined>(undefined), getter(true), () => {});
+			const closed = new Once<Error | null>();
+			return makeRequesting(
+				path,
+				new Signal<broadcast.Consumer | undefined>(undefined),
+				getter(true),
+				closed,
+				() => closed.set(null),
+			);
 		}
 
 		let slot = requests.get(path);
@@ -1012,8 +1047,8 @@ export class Consumer {
 			// notify nobody.
 			const refused = new Set<RouteEntry>();
 			const created: RequestSlot = {
-				count: 0,
 				blind: 0,
+				handles: new Set(),
 				refused,
 				route: new Signal(this.#state.route(path, { refused })),
 			};
@@ -1022,7 +1057,8 @@ export class Consumer {
 				map?.set(path, created);
 			});
 		}
-		slot.count += 1;
+		const closed = new Once<Error | null>();
+		slot.handles.add(closed);
 		let blind = !options.announced || this.#discovery.peek() === false;
 		if (blind) slot.blind += 1;
 		this.#state.requests.mutate(() => {});
@@ -1075,9 +1111,12 @@ export class Consumer {
 		// Only meaningful while nothing is routed, so it reads the route rather than `active`:
 		// the two cannot disagree, since a routed path always has an answerer-independent
 		// answer.
-		const unroutable = new Derived([route, this.#state.answerers], (front, answerers) => !front && answerers === 0);
+		const unroutable = new Derived(
+			[route, this.#state.answerers, closed],
+			(front, answerers, ended) => ended !== undefined || (!front && answerers === 0),
+		);
 
-		return makeRequesting(path, active, unroutable, () => {
+		return makeRequesting(path, active, unroutable, closed, () => {
 			// Releases this request's handle; the route itself belongs to the table.
 			released = true;
 			unsubscribeDiscovery();
@@ -1086,18 +1125,21 @@ export class Consumer {
 			handle = undefined;
 			source = undefined;
 
-			taken.count -= 1;
+			taken.handles.delete(closed);
+			if (closed.peek() === undefined) closed.set(null);
 			if (blind) taken.blind -= 1;
 			this.#state.requests.mutate(() => {});
-			if (taken.count > 0) return;
+			if (taken.handles.size > 0) return;
 
 			// Defer the teardown a microtask: an effect whose rerun was triggered by the
 			// answer resolving closes its old request and takes a new one in the same tick,
 			// and tearing down in between would drop the answer it is about to read.
 			queueMicrotask(() => {
-				if (taken.count > 0) return;
+				if (taken.handles.size > 0) return;
+				// A refused slot already tore itself down, and the path may hold a newer one.
+				if (this.#state.requests.peek()?.get(path) !== taken) return;
 				this.#state.requests.mutate((map) => {
-					if (map?.get(path) === taken) map.delete(path);
+					map?.delete(path);
 				});
 				taken.answer?.close();
 				taken.answer = undefined;
