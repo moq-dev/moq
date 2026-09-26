@@ -135,8 +135,8 @@ A subscriber watching under a root sees advertisements named relative to that
 root. The pattern scope filters which prefixes are visible without changing a
 route's prefix. Announce events carry the covered path, captures, and what
 happened to it: Rust
-`announce::Update { path, captures: Option<Vec<Pattern>>, route, kind }` and
-TypeScript `Announce.Update { path, captures, route, kind }`, where the kind is
+`announce::Update { prefix, captures: Option<Vec<Pattern>>, route, kind }` and
+TypeScript `Announce.Update { prefix, captures, route, kind }`, where the kind is
 announced, updated (a reprice in place), or retracted. Captures are present when
 the announced prefix pins every wildcard in the most-specific matching scope
 member. The Rust consumer is a `Stream` and the TypeScript one an async iterable.
@@ -145,7 +145,13 @@ Announcements are hints; requests are the authority. When a subscriber asks
 for a covered path the advertiser will not serve, the advertiser refuses that
 request rather than narrowing the claim, and no message narrows a route. Token
 scope is any pattern union; the session asks for each member's literal head on
-the prefix-only wire and filters locally.
+the prefix-only wire and filters locally. In Rust and TypeScript,
+`origin.scope(root, patterns)` narrows the handle's permissions and presents paths
+relative to `root`. Nested scopes intersect with their parent. A session receiving
+into that scoped origin asks for the literal heads of its allowed patterns,
+coalescing duplicate or nested heads. An unscoped origin still asks for the empty
+prefix, covering every namespace. These subscriptions include hidden routes;
+each local announcement reader decides whether to show them.
 
 ```typescript
 import { Path } from "@moq/net";
