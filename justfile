@@ -248,7 +248,7 @@ install:
 # Resolve BASE: arg > $GITHUB_BASE_REF > upstream > origin/main. A branch's
 # upstream is the branch it merges into, which is the base a `dev`-targeted
 # branch needs. `git push -u` repoints upstream at the branch's own remote copy,
-# which would diff HEAD against itself, so ignore that case (see CLAUDE.md).
+# which would diff HEAD against itself, so ignore that case (see AGENTS.md).
 # GITHUB_BASE_REF outranks the upstream because a PR checkout has no upstream
 # configured, and the branch being merged into is exactly the base GitHub is
 # asking about.
@@ -535,6 +535,7 @@ _check $BASE $TEST:
         just drafts check
         if [[ "$TEST" == true ]]; then
             just rs check-test --workspace --exclude moq-net-fuzz
+            just rs play
         else
             just rs check --workspace --exclude moq-net-fuzz
         fi
@@ -640,6 +641,7 @@ _test $BASE:
     if [[ "$files" == ALL ]]; then
     	just js test
     	just rs test --workspace --exclude moq-net-fuzz
+    	just rs play
     	just py test
     elif [[ -n "$files" ]]; then
     	just js test "$files"

@@ -115,10 +115,14 @@ fn an_endpoint_runs_on_the_worker_that_adopted_its_socket() {
 	// A client on its own thread and worker, dialing the endpoint. Its
 	// Initial reaches the socket immediately; only the owner can read it.
 	// The client is driven until the server closes on it: its side of the
-	// handshake completes before the server's, so it cannot stop earlier.
+	// handshake completes before the server's, so it cannot stop earlier. It
+	// reports in before dialing, so a setup failure fails here instead of as
+	// an accept that never arrives.
+	let (ready, started) = std::sync::mpsc::channel();
 	let client = std::thread::spawn(move || {
 		let mut worker = Worker::new(Config::default()).expect("client worker");
 		let sock = socket(&worker.handle());
+		ready.send(()).expect("test alive");
 		worker
 			.block_on(async move {
 				let mut conn = quic::client::connect(sock, &dial_config(addr)).await.expect("dial");
@@ -126,6 +130,7 @@ fn an_endpoint_runs_on_the_worker_that_adopted_its_socket() {
 			})
 			.expect("client loop")
 	});
+	started.recv().expect("the client thread failed to start");
 
 	// Driving the bystander polls the accept from its loop, but the demux
 	// that would feed it is a task on the owner, which is not running.

@@ -576,6 +576,48 @@ mod tests {
 		}
 	}
 
+	/// An imported 44.1 kHz Opus stream decodes on the 48 kHz clock: the pre-skip
+	/// is trimmed once as padding before the first packet, and every later frame
+	/// is stamped where its samples fall.
+	#[tokio::test]
+	async fn opus_timestamps_follow_the_48k_clock() {
+		use crate::decode::decoder::tests::{opus_catalog, opus_packets};
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let subscriber = broadcast.consume();
+
+		let catalog = opus_catalog(moq_mux::codec::opus::Config::new(44_100, 1).with_pre_skip(312));
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Options::new())
+			.await
+			.unwrap();
+		assert_eq!(consumer.sample_rate(), 48_000);
+
+		for (packet, payload) in opus_packets(3).into_iter().enumerate() {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(packet as u64 * 20_000).unwrap(),
+					duration: None,
+					payload,
+					keyframe: packet == 0,
+				})
+				.unwrap();
+		}
+
+		// 312 samples at 48 kHz is 6.5 ms.
+		for (micros, frames) in [(0, 960 - 312), (13_500, 960), (33_500, 960)] {
+			let frame = consumer.read().await.unwrap().expect("decoded frame");
+			assert_eq!(frame.timestamp.as_micros(), micros);
+			assert_eq!(frame.data.len() / size_of::<f32>(), frames);
+		}
+	}
+
 	/// A packet whose sample count isn't a multiple of the resampler's chunk leaves
 	/// samples buffered, and the next output starts with those. Stamping that
 	/// output with the packet that completed the chunk puts it up to a chunk late,

@@ -136,6 +136,11 @@ public final class MediaProducer: Sendable {
         try ffi.flush(timestampUs: timestampUs)
     }
 
+    /// Mark a timeline break and restart handoff measurement, preserving advertised jitter.
+    public func discontinuity() throws {
+        try ffi.discontinuity()
+    }
+
     /// Draw a group boundary here.
     ///
     /// Audio has no boundary of its own (every packet is independently decodable), so this is the

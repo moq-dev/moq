@@ -21,7 +21,6 @@ releases it.
 
 ## Required
 
-- [Jitter clock](/quest/m1/jitter-flush-clock.md) - the `delay` field and `Sync` sizing this registers into
 - [Data jitter](/quest/m1/data-jitter.md) - data tracks advertise the `delay` and `jitter` this reads
 
 ## Related

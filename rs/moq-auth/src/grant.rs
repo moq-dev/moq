@@ -9,7 +9,7 @@ pub(crate) const CLOCK_SKEW: Duration = Duration::from_secs(5);
 /// How long until `at`. A deadline up to [`CLOCK_SKEW`] in the past still has the
 /// remaining window; anything older is zero. Future deadlines are unchanged, so a
 /// grant that expires in ten seconds still expires in ten seconds.
-pub(crate) fn until(at: SystemTime) -> Duration {
+fn until(at: SystemTime) -> Duration {
 	match at.duration_since(SystemTime::now()) {
 		Ok(remaining) => remaining,
 		Err(late) => CLOCK_SKEW.saturating_sub(late.duration()),
@@ -65,6 +65,12 @@ impl Grant {
 			subscribe,
 			..Default::default()
 		}
+	}
+
+	/// Snapshot the expiry on Tokio's clock, allowing five seconds of past clock skew.
+	#[cfg(feature = "tokio")]
+	pub fn deadline(&self) -> Option<tokio::time::Instant> {
+		self.expires.map(|at| tokio::time::Instant::now() + until(at))
 	}
 
 	/// Refuse a grant that admits nothing, asks to be revalidated without a bound or

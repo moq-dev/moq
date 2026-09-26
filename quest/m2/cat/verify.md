@@ -85,5 +85,5 @@ gain flags. Wire: none.
 
 ## Required
 
-- [Setup token](/quest/m2/cat/setup-token.md) - the token reaches the
+- [Setup token](/quest/m1/setup-token.md) - the token reaches the
   server's request

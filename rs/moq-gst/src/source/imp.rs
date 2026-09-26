@@ -1271,7 +1271,7 @@ mod session_tests {
 		// End the served rendition and the broadcast, which answers for the reserved one.
 		catalog.finish().unwrap();
 		video.finish().unwrap();
-		broadcast.finish();
+		broadcast.close();
 
 		// No shutdown is sent: the session has to end on the media draining alone.
 		super::RUNTIME

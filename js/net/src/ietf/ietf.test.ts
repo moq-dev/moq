@@ -551,20 +551,19 @@ test("Subscribe v14: rejects invalid filter type", async () => {
 	).rejects.toThrow();
 });
 
-test("SubscribeOk v14: rejects non-zero expires", async () => {
-	const invalidBytes = new Uint8Array([
-		0x01, // subscribe_id
-		0x05, // INVALID: expires = 5
+test("SubscribeOk v14: ignores non-zero expires", async () => {
+	const body = [
+		0x01, // request_id
+		0x00, // track_alias
+		0x05, // expires = 5
 		0x02, // group_order
 		0x00, // content_exists
 		0x00, // num_params
-	]);
+	];
+	const bytes = new Uint8Array([0x00, body.length, ...body]);
 
-	await expect(
-		(async () => {
-			await decodeVersioned(invalidBytes, Subscribe.SubscribeOk.decode, Version.DRAFT_14);
-		})(),
-	).rejects.toThrow();
+	const decoded = await decodeVersioned(bytes, Subscribe.SubscribeOk.decode, Version.DRAFT_14);
+	expect(decoded.requestId).toBe(1n);
 });
 
 // Unicode tests

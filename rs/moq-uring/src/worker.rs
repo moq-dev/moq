@@ -20,13 +20,17 @@ const SQ_ENTRIES: u32 = 256;
 
 /// Completion queue depth. Every in-flight operation can post a completion
 /// (one per send buffer with GSO on, one per provided receive buffer, the
-/// park futex, transient cancels), so this covers a few sockets at the
-/// default pool ceilings in [`udp::Config`]. Running past it is not fatal:
-/// the kernel backlogs completions (`IORING_FEAT_NODROP`) rather than drop
-/// them. But the backlog is an allocation-per-CQE slow path and it ends any
-/// armed multishot receive, so the CQ is sized to keep it out of steady
-/// state.
-const CQ_ENTRIES: u32 = 4096;
+/// park futex, transient cancels), so this covers one socket at the default
+/// pool ceilings in [`udp::Config`], the one-socket-per-worker layout the
+/// relay runs. Running past it is not fatal: the kernel backlogs completions
+/// (`IORING_FEAT_NODROP`) rather than drop them. But the backlog is an
+/// allocation-per-CQE slow path and it ends any armed multishot receive, so
+/// the CQ is sized to keep it out of steady state.
+///
+/// No larger: the ring is charged to `RLIMIT_MEMLOCK` at 16 bytes per entry,
+/// most of each worker's footprint, and that budget is shared by every
+/// io_uring the user runs.
+const CQ_ENTRIES: u32 = 2048;
 
 /// Maximum completions copied at once while teardown is deadline-bounded.
 const TEARDOWN_CQE_BATCH: usize = 64;
@@ -118,7 +122,7 @@ impl Worker {
 						kernel_release()
 					))
 				}
-				_ => Error::Io(err),
+				_ => Error::ring(err),
 			})?;
 
 		// One feature bit gates the whole floor: MIN_TIMEOUT landed in 6.12
@@ -891,14 +895,14 @@ mod tests {
 
 	#[test]
 	fn cq_covers_the_default_pool_ceilings() {
-		// The completion queue must cover at least two sockets at their
-		// default pool ceilings (plus the futex), or the kernel's overflow
-		// slow path becomes steady state for the workload the ceilings exist
-		// to serve. Fails when someone raises the udp defaults without
-		// revisiting CQ_ENTRIES.
+		// The completion queue must cover a socket at its default pool
+		// ceilings (plus the futex), or the kernel's overflow slow path
+		// becomes steady state for the workload the ceilings exist to serve.
+		// Fails when someone raises the udp defaults without revisiting
+		// CQ_ENTRIES.
 		let config = udp::Config::default();
 		let per_socket = u32::from(config.tx_buffers_max) + u32::from(config.rx_buffers_max);
-		assert!(CQ_ENTRIES > 2 * per_socket, "CQ_ENTRIES fell behind the pool defaults");
+		assert!(CQ_ENTRIES > per_socket, "CQ_ENTRIES fell behind the pool defaults");
 	}
 
 	#[test]

@@ -59,12 +59,12 @@ trips, and the moq-net fuzz harness's `pattern` target prevent semantic drift at
 the authorization boundary. Matching is linear and inherits `Path::MAX_PARTS`
 (32), which also bounds residual expansion.
 
-Grants and claims carry no version. `moq-auth` reads patterns only: `foo` means exactly `foo`, a
-subtree is `foo/**`, and an unversioned prefix credential fails verification.
-Translating the prefix credentials a deployment already issued is that
-deployment's job at its own edge for a deprecation window, which is what
-moq.pro (downstream) does. A wire message that carried prefixes keeps them on
-the protocol versions that defined them; only new versions carry patterns.
+Grants and claims carry no version. `moq-auth` grants are patterns: `foo`
+means exactly `foo` and a subtree is `foo/**`. The published `put`/`get`
+prefix encoding stays readable as subtrees, and subtree-only grants are still
+written in it so older verifiers keep working. A wire message that carried
+prefixes keeps them on the protocol versions that defined them; only new
+versions carry patterns.
 
 The syntax follows Ant-style path patterns without `?`, classes, or braces.
 NATS subjects motivate segment wildcards and reserved wildcard bytes; Vault
