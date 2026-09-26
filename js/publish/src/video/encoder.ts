@@ -147,6 +147,9 @@ export class Encoder {
 	// doesn't re-probe the hardware.
 	#codecFilter: Computed<string>;
 
+	// A keyframe asked for by {@link cut} and not yet encoded.
+	#cut = false;
+
 	#signals = new Effect();
 	#stalled = new Catalog.Stalled.Detector();
 	#firstCaptured?: Time.Micro;
@@ -326,11 +329,17 @@ export class Encoder {
 
 							const interval = config?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
 
-							// Force a keyframe if this is the first frame (no group yet), or GOP elapsed.
+							// Force a keyframe if this is the first frame (no group yet), the GOP elapsed, or
+							// the caller asked for one and the last is old enough.
+							const since = lastKeyframe === undefined ? undefined : frame.timestamp - lastKeyframe;
 							const keyFrame =
-								!lastKeyframe || lastKeyframe + Time.Micro.fromMilli(interval) <= frame.timestamp;
+								since === undefined ||
+								since >= Time.Micro.fromMilli(interval) ||
+								(this.#cut && since >= Time.Micro.fromMilli(MIN_CUT_INTERVAL));
 							if (keyFrame) {
 								lastKeyframe = frame.timestamp as Time.Micro;
+								// Any keyframe serves an outstanding request.
+								this.#cut = false;
 							}
 
 							encoder.encode(frame, { keyFrame });
@@ -664,10 +673,26 @@ export class Encoder {
 		throw new Error("no supported codec");
 	}
 
+	/**
+	 * Request a keyframe, opening a new group at a frame no earlier than this call.
+	 *
+	 * For a resume, a recording cut, or a known tune-in moment; {@link Config.keyframeInterval} is the
+	 * cadence. Requests coalesce into the next keyframe, and forced keyframes land at least 500ms
+	 * apart so a caller in a loop cannot pin the encoder at all-keyframe. A request while not encoding
+	 * is served by the keyframe every encode starts with.
+	 */
+	cut(): void {
+		this.#cut = true;
+	}
+
 	close() {
 		this.#signals.close();
 	}
 }
+
+// The closest two requested keyframes may land. A keyframe costs several times a predicted frame,
+// and this stays well under the default two-second GOP so a request still beats the cadence.
+const MIN_CUT_INTERVAL = 500 as Time.Milli;
 
 // The source's nominal frame rate: what the capture device settled on, or what a frame stream
 // declared. Undefined when nothing reports one.

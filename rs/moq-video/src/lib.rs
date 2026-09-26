@@ -24,7 +24,9 @@
 //!   the matching `moq_mux::codec` importer, which handles catalog registration
 //!   and framing. The codec is chosen via [`encode::Codec`]: H.264 (openh264 /
 //!   VideoToolbox / Media Foundation / NVENC / VAAPI / V4L2) or H.265
-//!   (VideoToolbox / Media Foundation / NVENC). Two entry points:
+//!   (VideoToolbox / Media Foundation / NVENC). Entry points:
+//!   - `encode::Control::new` returns a `Control` handle (ask for a keyframe
+//!     with `cut`) and the `Driver` that captures and publishes the webcam.
 //!   - `encode::publish_capture` captures a webcam and publishes it (turnkey).
 //!     It encodes strictly on demand: the track and catalog are advertised up
 //!     front (the camera opens once at startup so they can be exact), and the
