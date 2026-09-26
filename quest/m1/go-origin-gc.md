@@ -16,8 +16,10 @@ the origin's driver finishes once every producer handle is gone
 on the consumer or the dynamic handle gets `Error::Closed`. The collector runs
 more often under load, which fits.
 
-- Reproduce first: a `runtime.GC()` right after `cancel()`, or `GOGC=1`,
-  should fail it every time.
+- Reproduce first. `runtime.GC()` after `cancel()` or `GOGC=1` only makes the
+  collection likely: finalizers run later on their own goroutine. For a
+  deterministic failure, do what the finalizer does: an internal test calls
+  the inner handle's `Destroy` before the next call.
 - Keep the producer reachable to the end of the test (`runtime.KeepAlive`, as
   the file already does for `pending`), and audit the other `go/wrapper` tests
   that hold an `OriginProducer` only for setup.

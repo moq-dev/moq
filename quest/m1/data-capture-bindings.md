@@ -33,8 +33,10 @@ not libmoq.
   past capture time is accepted and a future one refused. Update
   `doc/lib/{py,swift,kt,go,dart}`.
 
-Public API: additive broadcast clock `now()` and an optional capture time on
-moq-ffi's data producers and every wrapper; `window::Producer::push` accepts `Timed`, source-compatible.
+Public API: breaking, so it lands on `dev`. A new parameter on the generated
+`update` and `append` breaks every published binding caller (Go, for one, has
+no optional arguments), and a `_with_x` twin is ruled out. The broadcast clock
+`now()` is additive; `window::Producer::push` accepts `Timed`, source-compatible.
 Wire: none.
 
 ## Required

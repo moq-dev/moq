@@ -14,13 +14,24 @@ skipping inside the Nix shell.
   in `rs/moq-nvenc/src/cuvid.rs`), and the tests return early when they are
   missing (`hw_available` in `rs/moq-video/src/decode/backend/nvdec.rs`). The
   Nix shell's loader path lacks Ubuntu's `/usr/lib/x86_64-linux-gnu`.
+- Select every test that needs the GPU, not only names containing `nvdec`,
+  `nvenc`, or `cuda`: `safe::session::tests::failed_submission_releases_the_session`
+  in `rs/moq-nvenc` needs hardware and matches none of them. Find them by
+  their driver probes (`hw_available`, `driver_libs_present`, `Api::get` and
+  friends in `moq-nvenc` and `moq-video`). Recommendation: follow the
+  existing `#[ignore = "requires ..."]` convention (as `frame/vulkan_test.rs`
+  does) and put them in `nvidia` test modules, so hosted CI reports them
+  ignored instead of passed and one filter, `--run-ignored only -E
+  'test(/::nvidia::/)'`, selects them all without the other ignored hardware
+  tests (Android, D3D11, PipeWire). Inside that selection a missing GPU fails
+  the test instead of returning early. Keep the no-driver tests
+  (`missing_driver_errors_instead_of_panicking`) outside it.
 - `just rs nvidia`: symlink only those three libraries (by soname) from
   `/usr/lib/x86_64-linux-gnu` into a private directory, put that on
-  `LD_LIBRARY_PATH`, and run `cargo nextest run -E 'test(/nvdec|nvenc|cuda/)'`.
-  Fail when a library is missing instead of skipping. `just rs vulkan-cuda`
-  puts the whole host directory on the path, which lets host libraries shadow
-  the Nix ones; move it onto the same directory, and decide whether the
-  nightly also runs its ignored `vulkan_cuda_` tests.
+  `LD_LIBRARY_PATH`, and run that selection. Fail when a library is missing
+  instead of skipping. `just rs vulkan-cuda` puts the whole host directory on
+  the path, which lets host libraries shadow the Nix ones; fold it into this
+  recipe, since its `vulkan_cuda_` tests are the same kind.
 - Nightly: a job in `.github/workflows/nightly.yml` runs `just rs nvidia` on
   the self-hosted runner. A self-hosted runner on a public repository must
   never run untrusted code: only `schedule` and `workflow_dispatch`, with the

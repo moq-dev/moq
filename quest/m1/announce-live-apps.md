@@ -19,6 +19,10 @@ origin stream opened before the first connection goes live.
   which already answers requests through `expect()`, holds the marker until
   its first session lands `live` or its first dial gives up. An empty list
   then means the relay said so or is unreachable, which a UI can tell apart.
+  Once a session is up, its own `live` ends the hold: every wire guarantees
+  one (ANNOUNCE_OK, ANNOUNCE_INIT, or the quiet-stream fallback). A peer that
+  accepts the announce stream and never answers is a peer bug, so no extra
+  timeout.
   Check whether Rust's reconnecting client has the same gap.
 - Apps: loading before `live`, an explicit empty state after it with nothing
   announced, and an error state when the connection gives up. Libraries
