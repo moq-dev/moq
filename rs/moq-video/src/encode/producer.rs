@@ -663,10 +663,10 @@ mod tests {
 		producer.publish(&encoder.finish().unwrap()).unwrap();
 
 		let (name, resolved) = rendition(&catalog).expect("the importer should have registered a video rendition");
-		// Jitter aside, which is measured from the frames rather than declared by either.
+		// Jitter and delay aside, which are measured from the frames rather than declared by either.
 		let (mut before, mut after) = (advertised, resolved.clone());
-		before.jitter = None;
-		after.jitter = None;
+		(before.jitter, before.delay) = (None, None);
+		(after.jitter, after.delay) = (None, None);
 		assert_eq!(
 			before, after,
 			"the first keyframe should confirm the advertised rendition, not correct it"

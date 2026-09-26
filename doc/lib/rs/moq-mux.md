@@ -41,9 +41,11 @@ retires the entry. Calling `modify` before the first `set` returns
 `Error::NotPublished`. Container writes measure bitrate; importers can also
 measure batch span or reorder delay for jitter. Locally encoded frames call
 `container::Producer::flush(timestamp, Instant::now())`; jitter is the spread
-above that track's own recent minimum lateness, published as soon as it rises.
-Generic imports remain clock-free. Invalid or decreasing jitter is rejected
-before the edit is retained, including while the initial catalog is reserved.
+above that track's own recent minimum lateness, and delay is how far that
+minimum trails the earliest track on the same catalog. Both are published as
+soon as they rise. Generic imports remain clock-free. Invalid or decreasing
+jitter or delay is rejected before the edit is retained, including while the
+initial catalog is reserved.
 Codec importers propagate catalog and media errors through their configuration
 and frame-writing methods.
 

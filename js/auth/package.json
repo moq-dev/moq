@@ -1,7 +1,7 @@
 {
 	"name": "@moq/auth",
 	"type": "module",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "Media over QUIC - the authorization contract: requests, grants, and the JWT that rides them",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": {
