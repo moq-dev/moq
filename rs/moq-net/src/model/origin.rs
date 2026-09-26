@@ -2934,7 +2934,8 @@ impl OriginState {
 	}
 
 	/// The best served route covering `path` (absolute) for a requester seeing
-	/// `horizon`, skipping the `refused` entry ids.
+	/// `horizon`, skipping the `refused` entry ids. Skipping never falls through
+	/// to a broader prefix.
 	///
 	/// The most specific covering prefix wins outright, so a narrow advertise-only
 	/// announcement shadows a broad served one: requests under it resolve
@@ -2961,10 +2962,12 @@ impl OriginState {
 				.filter(|entry| entry.scope.matches(path.as_str()))
 				.filter(|entry| horizon.admits(entry))
 				.filter(|entry| entry.qualifies(pin))
-				.filter(|entry| !refused.contains(&entry.id))
 				.peekable();
+			// A tier whose every route refused is still the tier: its refusal is
+			// final and never falls through to a less specific prefix.
 			if candidates.peek().is_some() {
 				best = candidates
+					.filter(|entry| !refused.contains(&entry.id))
 					.filter(|entry| entry.serves(path))
 					.min_by_key(|entry| route_order(&entry.prefix, entry));
 			}
@@ -5586,6 +5589,32 @@ mod tests {
 			let frame = group.read_frame().await.expect("read frame").expect("frame");
 			assert_eq!(&frame.payload[..], name.as_bytes());
 		}
+	}
+
+	#[tokio::test]
+	async fn refusal_while_serving_does_not_fall_through_to_a_broader_route() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let broad = producer.dynamic("", Route::default().with_hops(hops(&[10]))).unwrap();
+
+		let pending = consumer.request_broadcast("jobs/a");
+		let served = broadcast::Info::new().produce();
+		queued(&broad).await.accept(&served);
+		let resolved = pending.await.expect("the broad route serves it");
+
+		// The same publisher claims a narrower prefix, which wins selection and refuses.
+		let narrow = producer
+			.dynamic("jobs", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		queued(&narrow).await.reject(Error::NotFound);
+
+		tokio::time::timeout(Duration::from_secs(5), resolved.closed())
+			.await
+			.expect("the narrower refusal must end the front, not keep the broader route");
+		assert!(
+			broad.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"the refusal fell through to the broader route"
+		);
 	}
 
 	#[tokio::test]
