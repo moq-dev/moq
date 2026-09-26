@@ -43,8 +43,7 @@ pub struct Waiter {
 
 	// The list tag each registration was made under, so registering on a list that
 	// still holds this waiter is a no-op. Filled from the front, zero past the end,
-	// and cleared all at once. Atomic only to keep
-	// the waiter `Sync`: one poll at a time registers it.
+	// and cleared all at once.
 	parked: [AtomicU64; PARKED],
 
 	// A registration found no free slot in `parked`, so a list may hold this waiter
@@ -111,8 +110,18 @@ impl Waiter {
 			let old = slot.load(Ordering::Relaxed);
 			// The first empty slot ends the records. A record of the same list in an
 			// older round is stale: the drain that ended that round took the entry.
-			if old == 0 || old >> ROUND_BITS == serial {
+			if old >> ROUND_BITS == serial {
+				// Only a registration on this list, under its lock, writes this slot.
 				slot.store(tag, Ordering::Relaxed);
+				return true;
+			}
+			// Claimed, not stored: another thread registering this waiter on another
+			// list may be taking the same empty slot.
+			if old == 0
+				&& slot
+					.compare_exchange(0, tag, Ordering::Relaxed, Ordering::Relaxed)
+					.is_ok()
+			{
 				return true;
 			}
 		}
@@ -259,8 +268,9 @@ impl WaiterList {
 	/// Start a new round, so no record of an entry made in the last one matches.
 	fn drained(&mut self) {
 		self.cursor = 0;
-		if self.entries.is_empty() {
-			// No entry, so no record can match the current tag.
+		if self.tag == 0 || self.entries.is_empty() {
+			// No serial yet (a `take` snapshot, say) or no entry: no record can match
+			// the current tag, and a zero tag must stay zero to draw a fresh serial.
 			return;
 		}
 		self.tag += 1;
@@ -1001,6 +1011,23 @@ mod tests {
 		// The emptied original is a different list now.
 		waiter.register(&mut list);
 		assert_eq!(list.entries.len(), 1);
+	}
+
+	/// A `take` snapshot has no serial, and waking it must not invent one: every
+	/// snapshot would share it, and a reused one would skip a real registration.
+	#[test]
+	fn a_woken_snapshot_draws_a_fresh_serial() {
+		let waiter = Waiter::new(Waker::noop().clone());
+		let mut snapshots = [WaiterList::new(), WaiterList::new()].map(|mut list| {
+			Waiter::new(Waker::noop().clone()).register(&mut list);
+			let mut snapshot = list.take();
+			snapshot.wake();
+			snapshot
+		});
+		for snapshot in &mut snapshots {
+			waiter.register(snapshot);
+			assert_eq!(snapshot.entries.len(), 1, "a snapshot skipped a real registration");
+		}
 	}
 
 	/// A tag must never repeat, or a stale record would skip a registration the list
