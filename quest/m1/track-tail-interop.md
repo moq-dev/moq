@@ -14,19 +14,34 @@ Both moq-net and `@moq/net` wait for a track's tail once the publisher ends a
 subscription, and each is covered by its own in-process tests. Nothing checks
 that the two agree across a relay on real QUIC.
 
-What stood in the way when the Rust half landed:
+The finite interop clients use raw groups and hold the publishing session open
+until the harness acknowledges that the reader verified all payloads and a clean
+end. `just test interop --tail` runs Rust-to-Rust and both Rust/JS directions under
+Node and Bun; the full interop matrix also runs them. This avoids requiring a new
+CLI drain API to exercise the transport.
 
-- `moq import` exits the moment stdin ends, closing its session with the tail
-  still in flight, so a finite CLI publisher cannot end a track cleanly. The
-  fix is a publisher that waits for its subscriptions to drain before it
-  closes; `moq export`'s linger ([Export linger](/quest/m1/export-linger.md)) is
-  the reader-side cousin.
-- The native JS subscriber (`test/interop/clients/js-native`) returns on the
-  first frame. It needs a mode that reads a track to its end and reports how it
-  ended and which groups it saw.
+The test exposes a remaining relay bug: a JS publisher emits four 256 KiB groups
+with an end of 4, but the Rust reader can receive only groups 2 and 3 before a clean
+end. `rs/moq-net/src/lite/publisher.rs` resolves SUBSCRIBE_START to the first group
+that arrives, then raises its read floor to that sequence. QUIC's newer-group
+priority can deliver that stream before older groups still in flight, which the
+relay then discards.
 
-QUIC on localhost rarely reorders, so this is a smoke check that the end is
-delivered and clean. The ordering race itself stays in the unit tests.
+Preserving the source's declared start requires carrying it through the origin's
+resume/splice model. `track::Consumer::poll_start` currently returns no declared
+start for spliced tracks. Resolve how that start combines segment boundaries and
+warm-cache handoffs, retain a private model interface if possible, and add a
+source-level regression before changing the relay. Do not replace it with a
+constant zero floor or weaken the finite interop assertion. A diagnostic mutation
+that advertised zero and kept the read floor at zero made all five lanes pass;
+that mutation was reverted.
+
+`moq import` still exits at stdin EOF before its subscriptions drain. An actual CLI
+publisher drain API remains a separate follow-up; model demand ending when tracks
+close is not proof of transport completion.
+
+QUIC ordering races remain covered by unit tests, with this test covering the
+observable real-relay failure as well.
 
 ## Related
 
