@@ -1963,14 +1963,6 @@ pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 	})
 }
 
-/// Deprecated: use [moq_publish_close]. A broadcast end carries no cause.
-///
-/// Returns a zero on success, or a negative code on failure.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_finish(broadcast: u32) -> i32 {
-	moq_publish_close(broadcast)
-}
-
 /// Publish one audio codec as a new media track.
 ///
 /// The track is named after the format (`0.opus`), so a subscriber finds it

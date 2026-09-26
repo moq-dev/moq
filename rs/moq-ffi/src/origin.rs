@@ -314,9 +314,8 @@ impl MoqOriginProducer {
 	/// tracks; an on-demand handler is [`Self::dynamic`]. Create, `dynamic()` if
 	/// tracks are served on demand, populate, then announce.
 	///
-	/// [`MoqBroadcastProducer::finish`] unpublishes immediately. Dropping the producer
-	/// without finishing also unpublishes, but subscribers observe the end as a
-	/// failure rather than a deliberate one.
+	/// [`MoqBroadcastProducer::close`] ends it for good; dropping its last handle,
+	/// `dynamic()` included, does the same.
 	pub fn create_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
