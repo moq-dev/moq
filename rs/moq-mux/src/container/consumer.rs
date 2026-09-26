@@ -122,7 +122,9 @@ impl<F: Container> Consumer<F> {
 		// since history the publisher no longer keeps can't be waited for and would
 		// otherwise stall the catch-up by the excess.
 		let start = subscription.start.map(|position| position.group);
-		let max_age = subscription.max_age.min(track.info().max_age);
+		let max_age = subscription
+			.max_age
+			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		Self {
 			track,
 			format,
@@ -494,7 +496,7 @@ impl<F: Container> Consumer<F> {
 	/// [`new`](Self::new). The subscription keeps the requested value verbatim,
 	/// matching [`moq_net::track::Subscription::max_age`].
 	pub fn set_max_age(&mut self, max_age: std::time::Duration) {
-		self.max_age = max_age.min(self.track.info().max_age);
+		self.max_age = max_age.min(self.track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		// The transport enforces the same budget on the subscription itself, so a
 		// tolerance set here has to reach it: otherwise moq-net skips the very groups
 		// this consumer was told to wait for, before they ever get here.

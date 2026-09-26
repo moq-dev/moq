@@ -24,9 +24,6 @@ export type { Datagram } from "./datagram.ts";
 // and fires right away.
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
-/** Default {@link Info.maxAge} window (milliseconds) when the publisher does not set one. */
-export const DEFAULT_MAX_AGE_MS = Milli(5000);
-
 /** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
 const MAX_DATAGRAMS = 64;
 
@@ -62,11 +59,12 @@ export interface Info {
 	/**
 	 * Publisher Max Age: the maximum age (milliseconds) of a non-latest group before
 	 * the publisher evicts it. Reported in TRACK_INFO (Lite05+) so relays re-serve with the
-	 * same bound. The publisher-side half of the budget a subscriber sets for itself.
+	 * same bound. Omission sets no publisher limit; zero keeps only the live edge.
+	 * The publisher-side half of the budget a subscriber sets for itself.
 	 * Rounded up to a whole millisecond by {@link infoDefaults}, which refuses a negative
 	 * or non-finite value and a result past `Number.MAX_SAFE_INTEGER`.
 	 */
-	maxAge: Milli;
+	maxAge?: Milli;
 	/** Tie-break priority between subscriptions of equal subscriber priority (`0..=255`). */
 	priority: number;
 }
@@ -99,7 +97,7 @@ function priorityByte(value: number): number {
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	return {
 		timescale: Timescale(info.timescale ?? Timescale.MILLI),
-		maxAge: maxAgeMillis(info.maxAge ?? DEFAULT_MAX_AGE_MS),
+		maxAge: info.maxAge === undefined ? undefined : maxAgeMillis(info.maxAge),
 		priority: priorityByte(info.priority ?? 0),
 	};
 }
@@ -610,7 +608,8 @@ export class Producer {
 	// written, so an abandoned open group ages out instead of pinning its buffer (and
 	// any reader parked in it) forever.
 	#prune(): void {
-		const maxAgeMs = this.#state.info.peek()?.maxAge ?? DEFAULT_MAX_AGE_MS;
+		const maxAgeMs = this.#state.info.peek()?.maxAge;
+		if (maxAgeMs === undefined) return;
 		const cutoff = performance.now() - maxAgeMs;
 		const live = this.#liveEdge();
 
@@ -644,7 +643,8 @@ export class Producer {
 		}
 		if (oldest === undefined) return;
 
-		const maxAgeMs = this.#state.info.peek()?.maxAge ?? DEFAULT_MAX_AGE_MS;
+		const maxAgeMs = this.#state.info.peek()?.maxAge;
+		if (maxAgeMs === undefined) return;
 		// setTimeout truncates its delay to a signed 32-bit int, so a longer window
 		// would fire immediately and spin. Wake at the cap instead and re-arm: #prune
 		// retains anything still fresh, so the extra wakeups are the only cost.

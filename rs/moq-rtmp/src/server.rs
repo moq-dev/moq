@@ -1661,7 +1661,7 @@ mod tests {
 		consumer.routed("live/cam0").await.unwrap();
 		let broadcast = consumer.request_broadcast("live/cam0").await.unwrap();
 		let info = broadcast.track("0.flv-v").unwrap().query().await.unwrap();
-		assert_eq!(info.max_age, Duration::from_secs(3));
+		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
 
 	/// End-to-end play: publish a real broadcast into an origin (via the FLV importer, so it

@@ -9,7 +9,7 @@ import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
 import { TAIL_GRACE_MS, Tail } from "../tail.ts";
-import { type Timescale, Timestamp } from "../time.ts";
+import { Milli, type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
@@ -743,7 +743,14 @@ export class Subscriber {
 
 		const ok = await SubscribeOk.decode(state.stream.reader, version);
 		if (state.cancelled) throw new Error("subscribe cancelled before acceptance");
-		request.accept({ priority: fromWire(ok.properties.priority ?? 128) });
+		const maxCacheDuration = ok.properties.maxCacheDuration;
+		if (maxCacheDuration !== undefined && maxCacheDuration > BigInt(Number.MAX_SAFE_INTEGER)) {
+			throw new RangeError("max cache duration exceeds safe milliseconds");
+		}
+		request.accept({
+			priority: fromWire(ok.properties.priority ?? 128),
+			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
+		});
 
 		try {
 			this.#aliases.set(ok.trackAlias, subscription, { broadcast, name: request.name });

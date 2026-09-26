@@ -7,6 +7,9 @@ use crate::{
 
 use super::{Message, Version};
 
+// Older JS readers use safe integer milliseconds; larger legacy ages mean no limit.
+const LEGACY_UNLIMITED: u64 = (1u64 << 53) - 1;
+
 /// Sent by the subscriber on a Track Stream (0x6) to request a track's immutable
 /// publisher properties, without subscribing or fetching.
 ///
@@ -51,7 +54,7 @@ pub struct TrackInfo {
 	pub priority: u8,
 	/// Publisher Max Age: an upper bound on how long the publisher caches a
 	/// non-latest group past the arrival of a newer one. Encoded as milliseconds.
-	pub max_age: Duration,
+	pub max_age: Option<Duration>,
 	/// Per-frame timestamp scale (units per second). Mandatory on Lite05+: every track
 	/// is timed, so this is always a real scale on the wire (never zero).
 	pub timescale: Timescale,
@@ -65,7 +68,11 @@ impl Message for TrackInfo {
 
 		let priority = u8::decode(r, version)?;
 		super::subscribe::skip_group_order(r, version)?;
-		let max_age = Duration::decode(r, version)?;
+		let encoded = u64::decode(r, version)?;
+		let max_age = match version {
+			Version::Lite05 | Version::Lite06 => (encoded < LEGACY_UNLIMITED).then(|| Duration::from_millis(encoded)),
+			_ => encoded.checked_sub(1).map(Duration::from_millis),
+		};
 		let timescale = Timescale::new(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
 
 		Ok(Self {
@@ -82,7 +89,13 @@ impl Message for TrackInfo {
 
 		self.priority.encode(w, version)?;
 		super::subscribe::pad_group_order(w, version)?;
-		self.max_age.encode(w, version)?;
+		let encoded = match (version, self.max_age) {
+			(Version::Lite05 | Version::Lite06, None) => LEGACY_UNLIMITED,
+			(Version::Lite05 | Version::Lite06, Some(age)) => age.as_millis().min(u128::from(LEGACY_UNLIMITED)) as u64,
+			(_, None) => 0,
+			(_, Some(age)) => u64::try_from(age.as_millis() + 1).map_err(|_| EncodeError::BoundsExceeded)?,
+		};
+		encoded.encode(w, version)?;
 		u64::from(self.timescale).encode(w, version)?;
 		Ok(())
 	}
@@ -95,7 +108,7 @@ mod test {
 	fn info_sample() -> TrackInfo {
 		TrackInfo {
 			priority: 7,
-			max_age: Duration::from_millis(2000),
+			max_age: Some(Duration::from_millis(2000)),
 			timescale: Timescale::MICRO,
 		}
 	}
@@ -108,10 +121,72 @@ mod test {
 	}
 
 	#[test]
+	fn optional_max_age_roundtrips() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for max_age in [None, Some(Duration::ZERO), Some(Duration::from_secs(30))] {
+				let info = TrackInfo {
+					max_age,
+					..info_sample()
+				};
+				assert_eq!(info_roundtrip(version, &info).max_age, max_age);
+			}
+		}
+	}
+
+	#[test]
+	fn lite07_reserves_zero_for_none_and_offsets_finite_ages() {
+		for (age, encoded) in [
+			(None, 0),
+			(Some(Duration::ZERO), 1),
+			(Some(Duration::from_millis(10)), 11),
+		] {
+			let mut buf = Vec::new();
+			TrackInfo {
+				max_age: age,
+				..info_sample()
+			}
+			.encode_msg(&mut buf, Version::Lite07)
+			.unwrap();
+			assert_eq!(buf[1], encoded);
+		}
+	}
+
+	#[test]
+	fn legacy_unlimited_range_stays_safe_for_old_readers() {
+		for version in [Version::Lite05, Version::Lite06] {
+			for millis in [LEGACY_UNLIMITED - 1, LEGACY_UNLIMITED, 1 << 53, 1 << 60, (1 << 62) - 1] {
+				let mut raw = Vec::new();
+				0u8.encode(&mut raw, version).unwrap();
+				super::super::subscribe::pad_group_order(&mut raw, version).unwrap();
+				millis.encode(&mut raw, version).unwrap();
+				1000u64.encode(&mut raw, version).unwrap();
+				let decoded = TrackInfo::decode_msg(&mut raw.as_slice(), version).unwrap();
+				assert_eq!(
+					decoded.max_age,
+					(millis < LEGACY_UNLIMITED).then(|| Duration::from_millis(millis))
+				);
+				let info = TrackInfo {
+					max_age: Some(Duration::from_millis(millis)),
+					..info_sample()
+				};
+				let mut encoded = Vec::new();
+				info.encode_msg(&mut encoded, version).unwrap();
+				let mut old_reader = encoded.as_slice();
+				u8::decode(&mut old_reader, version).unwrap();
+				super::super::subscribe::skip_group_order(&mut old_reader, version).unwrap();
+				assert_eq!(
+					u64::decode(&mut old_reader, version).unwrap(),
+					millis.min(LEGACY_UNLIMITED)
+				);
+			}
+		}
+	}
+
+	#[test]
 	fn track_info_roundtrips_on_lite05() {
 		let got = info_roundtrip(Version::Lite05, &info_sample());
 		assert_eq!(got.priority, 7);
-		assert_eq!(got.max_age, Duration::from_millis(2000));
+		assert_eq!(got.max_age, Some(Duration::from_millis(2000)));
 		assert_eq!(got.timescale, Timescale::MICRO);
 	}
 
@@ -133,7 +208,12 @@ mod test {
 		let mut buf = Vec::new();
 		info.encode(&mut buf, Version::Lite05).unwrap();
 
-		assert_eq!(buf, [0x06, 0x00, 0x00, 0x53, 0x88, 0x43, 0xe8]);
+		assert_eq!(
+			buf,
+			[
+				0x0c, 0x00, 0x00, 0xc0, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x43, 0xe8
+			]
+		);
 	}
 
 	#[test]
@@ -146,7 +226,7 @@ mod test {
 	fn track_info_roundtrips_varint_and_priority_bounds() {
 		let info = TrackInfo {
 			priority: 255,
-			max_age: Duration::from_millis((1u64 << 62) - 1),
+			max_age: None,
 			timescale: Timescale::new((1u64 << 62) - 1).unwrap(),
 		};
 		let got = info_roundtrip(Version::Lite05, &info);
@@ -159,22 +239,22 @@ mod test {
 	fn track_info_encodes_sub_millisecond_max_age_as_zero() {
 		let info = TrackInfo {
 			priority: 0,
-			max_age: Duration::from_nanos(999_999),
+			max_age: Some(Duration::from_nanos(999_999)),
 			timescale: Timescale::MILLI,
 		};
 		let got = info_roundtrip(Version::Lite05, &info);
-		assert_eq!(got.max_age, Duration::ZERO);
+		assert_eq!(got.max_age, Some(Duration::ZERO));
 	}
 
 	#[test]
 	fn track_info_encode_rejects_max_age_past_varint_without_writing() {
 		let info = TrackInfo {
 			priority: 7,
-			max_age: Duration::from_millis(1u64 << 62),
+			max_age: Some(Duration::from_millis(1u64 << 62)),
 			timescale: Timescale::MILLI,
 		};
 		let mut buf = Vec::new();
-		assert!(info.encode(&mut buf, Version::Lite05).is_err());
+		assert!(info.encode(&mut buf, Version::Lite07).is_err());
 		assert!(buf.is_empty());
 	}
 

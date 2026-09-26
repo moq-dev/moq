@@ -1020,13 +1020,12 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 
 		// Unset, a catalog mints hang's media defaults, sized so a segmented egress can serve a
-		// full playlist window rather than moq-net's live-edge default.
+		// full playlist window. Raw tracks impose no publisher age limit.
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		assert_eq!(
 			catalog.track_info(hang::catalog::PRIORITY.video).max_age,
 			hang::container::track_info(hang::catalog::PRIORITY.video).max_age
 		);
-		assert!(catalog.track_info(hang::catalog::PRIORITY.video).max_age > moq_net::track::DEFAULT_MAX_AGE);
 
 		// An override reaches every media track this catalog mints, and does NOT disturb the
 		// timescale hang pins (or survive a retimescale for a source-scale container).
@@ -1035,22 +1034,22 @@ mod test {
 		let catalog = Producer::new(&mut broadcast, config).unwrap();
 
 		let info = catalog.track_info(hang::catalog::PRIORITY.video);
-		assert_eq!(info.max_age, std::time::Duration::from_secs(3));
+		assert_eq!(info.max_age, Some(std::time::Duration::from_secs(3)));
 		assert_eq!(info.timescale, hang::container::TIMESCALE);
 
 		let at = info.with_timescale(moq_net::Timescale::MILLI);
-		assert_eq!(at.max_age, std::time::Duration::from_secs(3));
+		assert_eq!(at.max_age, Some(std::time::Duration::from_secs(3)));
 		assert_eq!(at.timescale, moq_net::Timescale::MILLI);
 
 		// Every handle mints under the same policy, whatever order it was taken in: the codec
 		// paths hold a reservation and the container paths hold a clone.
 		assert_eq!(
 			catalog.reserve().track_info(hang::catalog::PRIORITY.video).max_age,
-			std::time::Duration::from_secs(3)
+			Some(std::time::Duration::from_secs(3))
 		);
 		assert_eq!(
 			catalog.clone().track_info(hang::catalog::PRIORITY.video).max_age,
-			std::time::Duration::from_secs(3)
+			Some(std::time::Duration::from_secs(3))
 		);
 	}
 

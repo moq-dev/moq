@@ -577,6 +577,7 @@ where
 						// object Timestamp below is in these units.
 						// We serve the newest group first, matching moq-lite.
 						true => ietf::Properties {
+							max_cache_duration: track.info().max_age,
 							timescale: Some(track.info().timescale),
 							priority: Some(super::priority::to_wire(track.info().priority)),
 							group_order: Some(GroupOrder::Descending),

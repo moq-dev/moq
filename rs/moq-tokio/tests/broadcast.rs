@@ -1585,26 +1585,14 @@ async fn broadcast_negotiate_client_all_server_transport_19() {
 
 // ── Retention window (track::Info::max_age) ─────────────────────
 
-/// The window the publisher advertises, distinct from both the model default and
-/// the accepting side's [`MAX_AGE_DEFAULT`] so the assertions can tell them apart.
-const MAX_AGE_PUBLISHED: Duration = Duration::from_secs(2);
-
-/// The window the subscribing origin assigns to a track whose publisher advertises
-/// none. Deliberately longer than the publisher's, like a relay fronting a
-/// segmented egress that serves a playlist window's worth of history.
-const MAX_AGE_DEFAULT: Duration = Duration::from_secs(30);
-
-/// Publish a track advertising [`MAX_AGE_PUBLISHED`], subscribe to it through an
-/// origin configured with [`MAX_AGE_DEFAULT`], and return the window the subscriber
-/// ends up with.
-async fn max_age_test(version: &str) -> Duration {
+async fn max_age_test(version: &str, published: Option<Duration>) -> Option<Duration> {
 	let version: moq_net::Version = version.parse().expect("invalid version");
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let info = moq_net::track::Info::default().with_max_age(MAX_AGE_PUBLISHED);
+	let info = moq_net::track::Info::default().with_max_age(published);
 	let track = broadcast.create_track("video", info).expect("create track");
 
 	let mut server_config = moq_tokio::listen::Config::default();
@@ -1625,13 +1613,7 @@ async fn max_age_test(version: &str) -> Duration {
 	});
 
 	// ── subscriber (client) ─────────────────────────────────────────
-	// The origin the session writes remote broadcasts into decides the window for
-	// tracks whose protocol can't carry the publisher's.
-	let sub_origin = {
-		let mut config = moq_net::origin::Config::default();
-		config.default_max_age = MAX_AGE_DEFAULT;
-		moq_tokio::origin::spawn_config(config)
-	};
+	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
 	let mut announcements = sub_consumer.announced();
 
@@ -1677,29 +1659,36 @@ async fn max_age_test(version: &str) -> Duration {
 	max_age
 }
 
-/// moq-lite-05 carries the publisher's window in TRACK_INFO, so it wins over the
-/// subscribing origin's default.
-#[tracing_test::traced_test]
 #[tokio::test]
-async fn broadcast_max_age_lite_05() {
-	assert_eq!(max_age_test("moq-lite-05").await, MAX_AGE_PUBLISHED);
+async fn broadcast_max_age() {
+	for version in [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-17",
+		"moq-transport-18",
+		"moq-transport-22",
+	] {
+		for age in [None, Some(Duration::ZERO), Some(Duration::from_secs(30))] {
+			assert_eq!(max_age_test(version, age).await, age, "{version}");
+		}
+	}
 }
 
-/// moq-lite-01 has no TRACK stream, so the publisher's window never reaches us and
-/// the subscribing origin's default applies.
-#[tracing_test::traced_test]
 #[tokio::test]
-async fn broadcast_max_age_lite_01() {
-	assert_eq!(max_age_test("moq-lite-01").await, MAX_AGE_DEFAULT);
-}
-
-/// moq-transport carries no publisher retention property at all, so an IETF-relayed
-/// track used to fall back to the 5s model default no matter how the deployment was
-/// configured (issue #2645).
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_max_age_transport_18() {
-	assert_eq!(max_age_test("moq-transport-18").await, MAX_AGE_DEFAULT);
+async fn broadcast_max_age_legacy_omits_property() {
+	for version in [
+		"moq-lite-01",
+		"moq-transport-14",
+		"moq-transport-15",
+		"moq-transport-16",
+	] {
+		assert_eq!(
+			max_age_test(version, Some(Duration::from_secs(30))).await,
+			None,
+			"{version}"
+		);
+	}
 }
 
 // ── WebTransport (https://) – same version on both sides ────────────

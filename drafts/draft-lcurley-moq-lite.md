@@ -1087,8 +1087,12 @@ It is an upper bound on retention, the inverse of an HTTP `Cache-Control: max-ag
 - A subscriber MAY issue a SUBSCRIBE or FETCH with an older `Group Start`, but the publisher MAY have already dropped any group whose age exceeds `Publisher Max Age`.
 - The publisher MAY drop groups sooner than `Publisher Max Age` under resource pressure; subscribers MUST NOT assume older groups within the bound are still available.
 
-A value of `0` means the publisher caches only the latest group (older groups MAY be dropped as soon as a newer group arrives).
+Encoded as the duration in milliseconds plus one; `0` means no publisher limit.
+An encoded value of `1` declares a duration of zero, so the publisher caches only the latest group (older groups MAY be dropped as soon as a newer group arrives).
 The unit is milliseconds, matching `Subscriber Max Age`.
+
+When interoperating with lite-05/06, which encode milliseconds without the offset, implementations represent no limit as `2^53 - 1` and interpret values at or above it as no limit.
+Older implementations interpret this as a finite duration; the sentinel fits the safe integer range of older JavaScript readers.
 See the [Expiration](#expiration) section for more information.
 
 **Timescale**:
@@ -1309,6 +1313,8 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-07
+
+- Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
 - Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.

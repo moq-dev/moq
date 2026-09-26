@@ -283,6 +283,7 @@ enum JoiningFetch {
 
 /// What a SUBSCRIBE_OK told us about the track it accepted.
 struct Accepted {
+	max_age: Option<std::time::Duration>,
 	/// The Track Alias the publisher bound to this subscription.
 	alias: u64,
 
@@ -1712,6 +1713,7 @@ where
 			}
 		};
 		let Accepted {
+			max_age,
 			alias,
 			timescale,
 			priority,
@@ -1719,7 +1721,7 @@ where
 		} = accepted;
 		let info = track::Info::default()
 			.with_timescale(Timescale::MICRO)
-			.with_max_age(self.origin.default_max_age())
+			.with_max_age(max_age)
 			.with_priority(super::priority::from_wire(priority.unwrap_or(128)));
 		// Declared before the track is released to readers, so a warm cache waiting on
 		// this copy judges itself against where the live feed actually starts.
@@ -2086,6 +2088,7 @@ where
 				let msg = ietf::SubscribeOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "received subscribe ok");
 				Ok(Some(Accepted {
+					max_age: msg.properties.max_cache_duration,
 					alias: msg.track_alias,
 					timescale: msg.properties.timescale,
 					priority: msg.properties.priority,

@@ -301,8 +301,10 @@ impl Pad {
 			let request = broadcast
 				.reserve_track(name.clone())
 				.with_context(|| format!("cannot reserve track {name}"))?;
-			// Followed at the live edge, so it keeps the default retention the media helper raises.
-			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
+			// Raw data keeps a short explicit window for subscribers that buffer its samples.
+			let info = moq_net::track::Info::default()
+				.with_timescale(moq_net::Timescale::MICRO)
+				.with_max_age(std::time::Duration::from_secs(5));
 			self.track = Some(Sink::Opaque(request.accept(info)));
 			self.caps = Some(caps.clone());
 			return Ok(name);
@@ -1177,7 +1179,7 @@ mod tests {
 	// The opaque track declares microseconds so the PTS maps 1:1, and keeps moq-net's retention: the
 	// media helper raises it to 30s for a segmented egress reading history, which a data track never is.
 	#[tokio::test]
-	async fn an_opaque_track_declares_micros_and_the_default_retention() {
+	async fn an_opaque_track_declares_micros_and_a_retention_window() {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
@@ -1197,8 +1199,8 @@ mod tests {
 		assert_eq!(subscriber.info().timescale, moq_net::Timescale::MICRO);
 		assert_eq!(
 			subscriber.info().max_age,
-			moq_net::track::DEFAULT_MAX_AGE,
-			"an opaque track keeps the default retention"
+			Some(std::time::Duration::from_secs(5)),
+			"an opaque track declares a short retention window"
 		);
 	}
 

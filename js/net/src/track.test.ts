@@ -1634,3 +1634,28 @@ test("finished rejects when the track aborts or closes without an end", async ()
 	clean.close();
 	expect(await reader.finished()).toBe(1);
 });
+
+test("publisher max age is absent unless explicitly declared", () => {
+	expect(infoDefaults().maxAge).toBeUndefined();
+	expect(infoDefaults({ maxAge: Milli.zero }).maxAge).toBe(Milli.zero);
+	expect(infoDefaults({ maxAge: Milli(30_000) }).maxAge).toBe(Milli(30_000));
+});
+
+test("an omitted publisher limit retains old groups", async () => {
+	const clock = mockMonotonicTime(10_000);
+	const producer = new TrackProducer("unlimited").accept();
+	try {
+		const source = producer.appendGroup();
+		source.writeString("old");
+		source.close();
+		clock.set(100_000);
+		producer.appendGroup();
+		const subscriber = producer.subscribe({ maxAge: Milli(100_000) });
+		const cached = await subscriber.recvGroup();
+		expect(await cached?.readString()).toBe("old");
+		subscriber.close();
+	} finally {
+		producer.close();
+		clock.restore();
+	}
+});

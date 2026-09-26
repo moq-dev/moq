@@ -225,7 +225,7 @@ mod tests {
 		consumer.routed("live/cam0").await.unwrap();
 		let broadcast = consumer.request_broadcast("live/cam0").await.unwrap();
 		let info = broadcast.track("0.avc3").unwrap().query().await.unwrap();
-		assert_eq!(info.max_age, Duration::from_secs(3));
+		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
 
 	/// SRT is a contribution protocol, so SCTE-35 cues survive ingest and egress.

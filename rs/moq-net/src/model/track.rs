@@ -31,9 +31,6 @@ use std::{
 	time::Duration,
 };
 
-/// Default [`Info::max_age`] when the publisher doesn't set one.
-pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(5);
-
 /// Maximum number of datagrams retained in the per-track send buffer.
 ///
 /// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
@@ -73,7 +70,7 @@ pub(super) struct ExpiryScan {
 // Deliberately not `Copy`, even though it's now a plain value: adding `Copy` turns
 // every existing `info.clone()` in a consumer's code into a `clippy::clone_on_copy`
 // error under `-D warnings`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Info {
 	/// Units per second for per-frame timestamps on this track.
@@ -89,7 +86,8 @@ pub struct Info {
 	/// A retention bound rather than a delivery one, the inverse of an HTTP
 	/// `Cache-Control: max-age`. [`Subscription::max_age`] is clamped to this, since a
 	/// group can't be waited for longer than it's kept around. Reported in TRACK_INFO so
-	/// relays re-serve with the same window. Defaults to [`DEFAULT_MAX_AGE`].
+	/// relays re-serve with the same window. `None` (the default) sets no limit;
+	/// the origin cache ceiling and pool still apply. `Some(Duration::ZERO)` keeps the live edge.
 	///
 	/// Measured against timestamps rather than the wall clock, so a congestion stall
 	/// (timestamps stop advancing) can't age content out. Wall-clock reclamation of
@@ -100,22 +98,13 @@ pub struct Info {
 	/// budget [`Subscription::max_age`] sets for a subscriber.
 	///
 	/// Encoded as milliseconds in a QUIC varint, so a duration of `2^62` milliseconds
-	/// or more cannot be put on the wire. Sub-millisecond precision is truncated
+	/// or more cannot be put on lite-07 or IETF wires. Lite05/06 map values at or above
+	/// `2^53 - 1` milliseconds to no limit for older JavaScript readers. Sub-millisecond precision is truncated
 	/// (`Duration::as_millis`) at encode time.
-	pub max_age: Duration,
+	pub max_age: Option<Duration>,
 	/// The publisher's priority for this track, used only to break ties between
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
 	pub priority: u8,
-}
-
-impl Default for Info {
-	fn default() -> Self {
-		Self {
-			timescale: Timescale::default(),
-			max_age: DEFAULT_MAX_AGE,
-			priority: 0,
-		}
-	}
 }
 
 impl Info {
@@ -129,8 +118,8 @@ impl Info {
 	}
 
 	/// Set how old a non-latest group may get before eviction, returning `self` for chaining.
-	pub fn with_max_age(mut self, max_age: Duration) -> Self {
-		self.max_age = max_age;
+	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
+		self.max_age = max_age.into();
 		self
 	}
 
@@ -154,7 +143,7 @@ pub(crate) struct TrackState {
 	claimed: bool,
 
 	// The broadcast this track belongs to. Supplies the cache pool its groups charge
-	// into and the `cache_duration` ceiling clamping `Info::max_age`.
+	// into and the local `cache_duration` ceiling.
 	broadcast: Arc<broadcast::Info>,
 
 	// This track's account against the shared cache pool, shared with every group it
@@ -314,11 +303,6 @@ pub(crate) struct FetchOutcome {
 }
 
 impl TrackState {
-	fn normalize_info(broadcast: &broadcast::Info, mut info: Info) -> Info {
-		info.max_age = info.max_age.min(broadcast.cache_duration);
-		info
-	}
-
 	fn accept(&mut self, info: Info) {
 		self.published = true;
 		self.install(info);
@@ -463,10 +447,15 @@ impl TrackState {
 		(first as u64 <= frame_start).then_some(&slot.group)
 	}
 
-	/// The publisher's max age window, or `None` while the info is unknown (an
-	/// unaccepted [`Request`]). Bounds the aggregate subscription; see [`clamp_combined`].
+	/// The local retention bound, or `None` when unknown or unlimited.
+	/// Bounds the aggregate subscription without changing the publisher's metadata.
 	fn max_age_bound(&self) -> Option<Duration> {
-		self.info.as_ref().map(|info| info.max_age)
+		let published = self.info.as_ref()?.max_age;
+		let ceiling = self.broadcast.cache_duration;
+		match published {
+			Some(age) => Some(age.min(ceiling)),
+			None => (ceiling != Duration::MAX).then_some(ceiling),
+		}
 	}
 
 	/// The live edge a subscription bounded at `cap` measures drift against: the
@@ -829,13 +818,8 @@ impl TrackState {
 		self.debt = 0;
 	}
 
-	/// Attach `info` to this track, clamping the publisher's window down to the
-	/// origin's [`cache_duration`](crate::origin::Config::cache_duration) ceiling so a
-	/// group is never retained longer than the origin allows. Every path that binds an
-	/// info to a track funnels through here, covering local publishers and relayed
-	/// (lite / IETF) tracks alike.
+	/// Attach the publisher's immutable metadata without replacing it with local cache policy.
 	fn install(&mut self, info: Info) {
-		let info = Self::normalize_info(&self.broadcast, info);
 		self.info = Some(info);
 	}
 
@@ -1215,7 +1199,7 @@ impl Producer {
 		info: impl Into<Option<Info>>,
 	) -> Self {
 		let name = name.into();
-		let info = TrackState::normalize_info(&broadcast, info.into().unwrap_or_default());
+		let info = info.into().unwrap_or_default();
 		let state = TrackState::spawn(broadcast.clone());
 		state.write().ok().expect("a new track is open").accept(info.clone());
 		let alive = Alive::new(name.clone(), state.clone());
@@ -4291,7 +4275,7 @@ impl Request {
 	/// [`Producer`] is inert: writes fail with the abort error, as if it had been
 	/// aborted immediately after accepting.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
-		let info = TrackState::normalize_info(&self.broadcast, info.into().unwrap_or_default());
+		let info = info.into().unwrap_or_default();
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.
 		if let Ok(mut state) = self.state.write() {
@@ -5392,7 +5376,7 @@ mod test {
 	}
 
 	/// Mint a track under an origin whose retention ceiling is `cap`, so the
-	/// track's own window is clamped down to it on bind.
+	/// local delivery budget is capped without rewriting the publisher's window.
 	fn track_producer_capped(name: impl Into<Arc<str>>, info: Info, cap: Duration) -> Producer {
 		Producer::new(
 			Arc::new(broadcast::Info {
@@ -5405,6 +5389,20 @@ mod test {
 	}
 
 	#[test]
+	fn optional_age_keeps_publisher_metadata_and_local_policy_separate() {
+		assert_eq!(Info::default().max_age, None);
+		for age in [None, Some(Duration::ZERO), Some(Duration::from_secs(30))] {
+			let producer = track_producer_capped("optional", Info::default().with_max_age(age), Duration::from_secs(1));
+			assert_eq!(producer.info.max_age, age);
+			assert_eq!(producer.subscribe(None).info().max_age, age);
+			assert_eq!(
+				producer.state.read().max_age_bound(),
+				Some(age.unwrap_or(Duration::MAX).min(Duration::from_secs(1)))
+			);
+		}
+	}
+
+	#[test]
 	fn origin_cache_duration_clamps_max_age() {
 		// A publisher asking to keep groups for a minute is capped to the origin's 1s
 		// ceiling; a publisher already below the ceiling is left alone (it's a min).
@@ -5414,7 +5412,7 @@ mod test {
 			Duration::from_secs(1),
 		);
 		assert_eq!(capped.state.read().max_age_bound(), Some(Duration::from_secs(1)));
-		assert_eq!(capped.subscribe(None).info().max_age, Duration::from_secs(1));
+		assert_eq!(capped.subscribe(None).info().max_age, Some(Duration::from_secs(60)));
 
 		let under = track_producer_capped(
 			"test",
