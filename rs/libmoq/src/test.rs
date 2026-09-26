@@ -367,7 +367,7 @@ fn publish_media_lifecycle() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"publish-media-lifecycle");
 	let _guard = Guard(Some(|| {
-		moq_publish_finish(broadcast);
+		moq_publish_close(broadcast);
 	}));
 
 	let init = opus_head();
@@ -379,7 +379,7 @@ fn publish_media_lifecycle() {
 	assert_eq!(ret, 0, "moq_publish_media_frame should succeed");
 
 	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
 #[test]
@@ -389,7 +389,7 @@ fn publish_media_rejects_a_null_config() {
 
 	assert!(unsafe { moq_publish_audio(broadcast, std::ptr::null()) } < 0);
 
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -424,7 +424,7 @@ fn container_and_media_handles_are_not_interchangeable() {
 
 	assert_eq!(moq_publish_container_finish(container), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -511,7 +511,7 @@ fn publish_media_labels_config_without_naming_track() {
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media1), 0);
 	assert_eq!(moq_publish_media_finish(media2), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -621,7 +621,7 @@ fn publish_media_owns_its_rendition_before_the_first_keyframe() {
 		"finishing the media track releases its rendition name"
 	);
 
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -667,7 +667,7 @@ fn publish_video_config_replaces_its_own_rendition() {
 		"the name is free once the caller removes its rendition"
 	);
 
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -690,7 +690,7 @@ fn publish_catalog_config_null_pointer() {
 		-6,
 		"null config should return InvalidPointer (-6)"
 	);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
 #[test]
@@ -891,7 +891,7 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -963,13 +963,13 @@ fn a_half_specified_coded_size_round_trips() {
 	assert_eq!(moq_consume_catalog_cancel(forwarded_task), 0);
 	assert_eq!(forwarded_cb.recv_catalog_terminal(), 0);
 	assert_eq!(moq_consume_close(forwarded), 0);
-	assert_eq!(moq_publish_finish(forward), 0);
+	assert_eq!(moq_publish_close(forward), 0);
 
 	assert_eq!(moq_consume_catalog_free(catalog), 0);
 	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1065,7 +1065,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 	assert_eq!(catalog_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1129,7 +1129,7 @@ fn cmaf_catalog_container_carries_its_init_segment() {
 	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1189,7 +1189,7 @@ fn unpublishable_catalog_containers_are_rejected() {
 		"cmaf without an init segment should return InvalidPointer (-6)"
 	);
 
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1344,7 +1344,7 @@ fn catalog_section_roundtrip() {
 	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1391,7 +1391,7 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 	};
 
 	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
 #[test]
@@ -1491,7 +1491,7 @@ fn raw_track_publish_consume() {
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert!(moq_publish_track_finish(track) < 0, "double-close should fail");
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1553,7 +1553,7 @@ fn raw_track_datagram_publish_consume() {
 	assert!(moq_consume_datagrams_cancel(consumer) < 0, "double-close should fail");
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1572,7 +1572,7 @@ fn raw_track_sparse_groups_and_known_end() {
 	assert_eq!(moq_publish_group_finish(group), 0);
 	assert!(moq_publish_track_group_at(track, 5) < 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
 #[test]
@@ -1587,7 +1587,7 @@ fn raw_track_and_group_abort_consume_their_handles() {
 	assert!(moq_publish_group_finish(group) < 0);
 	assert_eq!(moq_publish_track_abort(track, 410), 0);
 	assert!(moq_publish_track_finish(track) < 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
 #[test]
@@ -1673,7 +1673,7 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1739,7 +1739,7 @@ fn json_snapshot_publish_consume() {
 		"double-close should fail"
 	);
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1799,7 +1799,7 @@ fn json_stream_publish_consume() {
 	assert_eq!(moq_publish_json_stream_finish(producer), 0);
 	assert!(moq_publish_json_stream_finish(producer) < 0, "double-close should fail");
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1807,13 +1807,26 @@ fn json_stream_publish_consume() {
 fn close_invalid_or_zero_ids() {
 	assert!(moq_origin_close(9999) < 0);
 	assert!(moq_session_close(9999) < 0);
-	assert!(moq_publish_finish(9999) < 0);
+	assert!(moq_publish_close(9999) < 0);
 	assert!(moq_consume_close(9999) < 0);
 	assert!(moq_consume_frame_free(9999) < 0);
 
 	assert!(moq_origin_close(0) < 0);
 	assert!(moq_session_close(0) < 0);
-	assert!(moq_publish_finish(0) < 0);
+	assert!(moq_publish_close(0) < 0);
+}
+
+#[test]
+fn publish_close_releases_the_handle() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"close/twice");
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert!(moq_publish_close(broadcast) < 0, "a closed handle is released");
+
+	// The deprecated alias still ends a broadcast.
+	let broadcast = publish_broadcast(origin, b"close/finish");
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
 }
 
 #[test]
@@ -1865,7 +1878,7 @@ fn announced_free_lifecycle() {
 	ann_cb.recv_terminal();
 
 	assert_eq!(moq_origin_close(origin), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
 #[test]
@@ -1882,7 +1895,7 @@ fn double_close_all_resource_types() {
 
 	assert_eq!(moq_publish_media_finish(media), 0);
 	assert!(moq_publish_media_finish(media) < 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 
 	let origin = id(moq_origin_create());
 	let path = b"double-close-test";
@@ -1922,7 +1935,7 @@ fn double_close_all_resource_types() {
 
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1953,15 +1966,18 @@ fn media_cut_bounds_audio_groups() {
 		0
 	);
 	assert_eq!(moq_publish_media_seek(media, 42), 0);
+	assert_eq!(moq_publish_media_discontinuity(media), 0);
 
 	// Both report a missing importer rather than panicking on an unknown id.
 	assert!(moq_publish_media_flush(9999, 0) < 0);
 	assert!(moq_publish_media_flush(media, u64::MAX) < 0);
+	assert!(moq_publish_media_discontinuity(9999) < 0);
+	assert!(moq_publish_media_discontinuity(0) < 0);
 	assert!(moq_publish_media_cut(9999) < 0);
 	assert!(moq_publish_media_seek(9999, 0) < 0);
 
 	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1970,7 +1986,7 @@ fn unknown_format() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"unknown-format");
 	let _guard = Guard(Some(|| {
-		moq_publish_finish(broadcast);
+		moq_publish_close(broadcast);
 	}));
 
 	// A format is an enum now, so the only bad value C can still supply is an out-of-range
@@ -2025,7 +2041,7 @@ fn local_announce() {
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2072,8 +2088,8 @@ fn announced_filters_patterns_and_reports_captures() {
 	assert_eq!(moq_origin_announced_free(announced_id), 0);
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0);
-	assert_eq!(moq_publish_finish(audio), 0);
-	assert_eq!(moq_publish_finish(chat), 0);
+	assert_eq!(moq_publish_close(audio), 0);
+	assert_eq!(moq_publish_close(chat), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2125,7 +2141,7 @@ fn announced_deactivation() {
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2166,7 +2182,7 @@ fn create_broadcast_is_unroutable_until_announced() {
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2184,7 +2200,7 @@ fn announce_accepts_an_anonymous_hop() {
 		has_cold: false,
 	};
 	assert_eq!(unsafe { moq_publish_announce(broadcast, &route) }, 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2233,7 +2249,7 @@ fn dynamic_serves_a_request_under_a_prefix() {
 	assert_eq!(moq_origin_dynamic_cancel(dynamic), 0);
 	assert!(moq_origin_dynamic_cancel(dynamic) < 0, "double-cancel should fail");
 	assert_eq!(cb.recv_terminal(), 0);
-	assert_eq!(moq_publish_finish(served), 0);
+	assert_eq!(moq_publish_close(served), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2363,7 +2379,7 @@ fn track_demand_follows_subscribers() {
 	);
 
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2396,7 +2412,7 @@ fn track_demand_reports_current_state_before_close() {
 	);
 
 	assert_eq!(moq_publish_track_finish(track), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2419,7 +2435,7 @@ fn track_demand_reports_an_abort() {
 	assert_eq!(protocol.kind, moq_protocol_kind::MOQ_PROTOCOL_KIND_APP as u32);
 	assert_eq!(protocol.code, 64 + 7);
 
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2456,7 +2472,7 @@ fn media_demand_refuses_a_container() {
 	assert_eq!(cb.recv_terminal(), 0);
 
 	assert_eq!(moq_publish_container_finish(container), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2559,7 +2575,7 @@ fn dynamic_serves_track_requests() {
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(demand_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2603,7 +2619,7 @@ fn dynamic_track_request_publishes_media() {
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
 	assert_eq!(moq_publish_media_finish(media), 0);
 	assert_eq!(demand_cb.recv_terminal(), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(request_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -2688,7 +2704,7 @@ fn track_dynamic_serves_a_fetch_miss() {
 	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2723,7 +2739,7 @@ fn track_dynamic_serves_a_fetch_from_frame_start() {
 	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2757,7 +2773,7 @@ fn track_request_dynamic_survives_accept() {
 	assert_eq!(moq_publish_dynamic_cancel(track_dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(request_cb.recv_terminal(), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -2855,7 +2871,7 @@ fn local_publish_consume() {
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2912,7 +2928,7 @@ fn consume_announced_local() {
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -3014,8 +3030,8 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
-	assert_eq!(moq_publish_finish(source), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_close(source), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -3142,7 +3158,7 @@ fn video_publish_consume() {
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -3197,7 +3213,7 @@ fn audio_raw_publish() {
 		"a finished producer should take no more frames"
 	);
 
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -3252,7 +3268,7 @@ fn audio_raw_publish_frame_durations() {
 	assert_eq!(moq_encode_audio_finish(id(encode(b"default", 0))), 0, "0 = 20 ms");
 	assert!(encode(b"rounded", 2_000) < 0, "2 ms is not an opus frame duration");
 
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -3355,7 +3371,7 @@ fn video_raw_publish_consume() {
 	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_encode_video_finish(producer), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -3493,7 +3509,7 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_encode_video_finish(producer), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 	result
 }
@@ -3578,7 +3594,7 @@ fn video_raw_publish_from_many_threads() {
 		.join()
 		.unwrap();
 
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -3674,7 +3690,7 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 	assert_eq!(moq_origin_close(id(created)), 0);
 	assert_eq!(moq_encode_video_finish(stalled), 0);
 	assert_eq!(moq_encode_video_finish(other), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -3712,7 +3728,7 @@ fn video_raw_publish_rejects_frame_size_mismatch() {
 	assert!(unsafe { moq_encode_video_frame(producer, &frame) } < 0);
 
 	assert_eq!(moq_encode_video_finish(producer), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -3801,7 +3817,7 @@ fn video_raw_publish_rejects_invalid_config() {
 	assert!(moq_encode_video_bitrate(0, 1_000_000) < 0);
 	assert!(moq_encode_video_finish(0) < 0);
 
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -3901,7 +3917,7 @@ fn video_raw_decode() {
 	}
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -3961,7 +3977,7 @@ fn multiple_frames_ordering() {
 	);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -4010,7 +4026,7 @@ fn catalog_update_on_new_track() {
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media1), 0);
 	assert_eq!(moq_publish_media_finish(media2), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -4549,7 +4565,7 @@ fn bandwidth_reservations_split_the_estimate() {
 	let _ = first_cb.recv_terminal();
 	let _ = second_cb.recv_terminal();
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -4592,7 +4608,7 @@ fn bandwidth_handles_share_the_registry() {
 	let _ = first_cb.recv_terminal();
 	let _ = second_cb.recv_terminal();
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -4642,7 +4658,7 @@ fn encode_video_bitrate_caps_the_reservation() {
 	assert_eq!(moq_encode_video_finish(producer), 0);
 	assert_eq!(moq_bandwidth_close(bandwidth), 0);
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -4761,7 +4777,7 @@ fn server_accepts_a_session() {
 		"the server handle is gone after its terminal callback"
 	);
 
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(served), 0);
 	assert_eq!(moq_origin_close(received), 0);
 }
@@ -4931,7 +4947,7 @@ fn json_tracks_are_advertised_in_the_catalog() {
 	assert_eq!(moq_publish_json_stream_finish(stream), 0);
 	assert!(published_catalog(broadcast).json.tracks.is_empty());
 
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -4979,7 +4995,7 @@ fn binary_snapshot_is_advertised_and_delivered() {
 	assert!(published_catalog(broadcast).binary.tracks.is_empty());
 
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -5025,7 +5041,7 @@ fn binary_stream_is_advertised_and_delivered() {
 	assert!(published_catalog(broadcast).binary.tracks.is_empty());
 
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -5087,6 +5103,6 @@ fn data_track_names_cannot_collide() {
 	);
 
 	assert_eq!(moq_publish_json_snapshot_finish(first), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }

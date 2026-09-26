@@ -22,7 +22,8 @@ class Moq internal constructor(
     /**
      * Create an unannounced broadcast at [path], invisible to everyone until announced.
      *
-     * Advertise it with `announce` after populating tracks. `finish()` unpublishes immediately.
+     * Advertise it with `announce` after populating tracks. `close()` (or `use`) ends it once no
+     * `dynamic()` handle remains.
      */
     fun createBroadcast(path: String): BroadcastProducer = session.publish().createBroadcast(path)
 

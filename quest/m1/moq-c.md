@@ -19,7 +19,7 @@ release that points users at `moq-c`.
   tooling (release-plz, alert and nightly workflows, cachix) must follow the
   new name and tag; check every workflow that names libmoq.
 - Update every consumer and reference: `cpp/obs` (`find_package`), interop
-  clients, `doc/lib/c`, `doc/bin/obs.md`, the root `CLAUDE.md` Cross-Package
+  clients, `doc/lib/c`, `doc/bin/obs.md`, the root `AGENTS.md` Cross-Package
   Sync table, and quests that name libmoq. Grep the whole repository.
 - Publish a final `libmoq` release whose README and description point at
   `moq-c`, then stop publishing it. The maintainer cuts releases; the PR only

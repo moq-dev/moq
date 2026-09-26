@@ -281,10 +281,10 @@ prepare_go() {
 }
 
 # Build libmoq (the C staticlib + cbindgen header) and compile the C subscriber
-# against it. cargo writes moq.h to $TARGET_BASE/include and libmoq.a to the
-# profile dir.
+# against it. cargo writes libmoq.a to the profile dir, and build.rs writes
+# moq.h into its OUT_DIR, which only cargo's JSON messages name.
 prepare_c() {
-    local cc="${CC:-cc}" header lib os_libs
+    local cc="${CC:-cc}" out_dir header lib os_libs
     have "$cc" || {
         mark_broken c "no C compiler ($cc) on PATH"
         return
@@ -292,12 +292,14 @@ prepare_c() {
     echo "building c client (workspace libmoq + cc)..."
     local flag=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
-    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p libmoq) >"$HARNESS_RUN/c-build.log" 2>&1; then
+    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p libmoq --message-format=json-render-diagnostics) >"$HARNESS_RUN/c-build.json" 2>"$HARNESS_RUN/c-build.log"; then
         mark_broken c "cargo build -p libmoq failed"
         sed 's/^/        /' "$HARNESS_RUN/c-build.log" >&2 || true
         return
     fi
-    header="$TARGET_BASE/include/moq.h"
+    out_dir=$(grep '"reason":"build-script-executed"' "$HARNESS_RUN/c-build.json" | grep libmoq |
+        sed -n 's/.*"out_dir":"\([^"]*\)".*/\1/p' | tail -1) || true
+    header="$out_dir/include/moq.h"
     lib="$TARGET_BASE/$PROFILE/libmoq.a"
     [[ -f "$header" && -f "$lib" ]] || {
         mark_broken c "libmoq artifacts missing ($header / $lib)"
@@ -319,7 +321,7 @@ prepare_c() {
         esac
     done <"$native_libs"
     C_INTEROP="$HARNESS_RUN/c-interop"
-    if ! "$cc" "$CLIENTS/c/subscribe.c" -I"$TARGET_BASE/include" -L"$TARGET_BASE/$PROFILE" -lmoq "${os_libs[@]}" -o "$C_INTEROP" >"$HARNESS_RUN/c-compile.log" 2>&1; then
+    if ! "$cc" "$CLIENTS/c/subscribe.c" -I"$out_dir/include" -L"$TARGET_BASE/$PROFILE" -lmoq "${os_libs[@]}" -o "$C_INTEROP" >"$HARNESS_RUN/c-compile.log" 2>&1; then
         mark_broken c "cc compile failed"
         sed 's/^/        /' "$HARNESS_RUN/c-compile.log" >&2 || true
     fi
