@@ -1,4 +1,0 @@
-interface:
-  display_name: "plan-issues"
-  short_description: "Turn unplanned GitHub issues into repository quests"
-  default_prompt: "Use $plan-issues to invoke $plan-quests for open GitHub issues without the quest label."

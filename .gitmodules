@@ -1,3 +1,6 @@
 [submodule ".claude/shared"]
 	path = .claude/shared
 	url = https://github.com/kixelated/skills
+[submodule ".quest"]
+	path = .quest
+	url = https://github.com/kixelated/quest
