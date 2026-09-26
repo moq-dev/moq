@@ -3,7 +3,7 @@ name: spawn-quests
 description: Spawn background agents work on quests in parallel.
 ---
 
-Before you begin, read `quest/CLAUDE.md` completely.
+Before you begin, read `quest/AGENTS.md` completely.
 
 Your goal is to execute, plan, and/or merge quests in parallel.
 If you are unsure of the best course of action, ask the user for clarification before proceeding.

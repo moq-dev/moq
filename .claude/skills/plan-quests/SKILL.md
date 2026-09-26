@@ -3,7 +3,7 @@ name: plan-quests
 description: Scope, create, and publish a quest through an interactive grilling interview. Use when the user invokes /plan-quests, asks to plan a quest, or wants unsettled work split into quests.
 ---
 
-Before you begin, read `quest/CLAUDE.md` completely.
+Before you begin, read `quest/AGENTS.md` completely.
 
 Interview the user until you reach a shared understanding.
 
