@@ -298,7 +298,7 @@ class ServeState {
 			finishRequest(request, err);
 		}
 		for (const [path, front] of this.served) {
-			front.close(abort);
+			front.close();
 			this.onChange(path);
 		}
 		this.served.clear();
@@ -953,7 +953,7 @@ export class Producer implements Table {
 		if (this.#state.closed.peek() !== undefined) return;
 		this.#state.closed.set(abort ?? null);
 		for (const front of this.#state.created?.values() ?? []) {
-			front.close(abort);
+			front.close();
 		}
 		this.#state.created = undefined;
 		this.#state.local.update(() => undefined);

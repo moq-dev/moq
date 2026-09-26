@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6](https://github.com/moq-dev/moq/compare/moq-net-v0.3.5...moq-net-v0.3.6) - 2026-09-26
+
+### Added
+
+- end a broadcast with close() in every language ([#4031](https://github.com/moq-dev/moq/pull/4031))
+
+### Fixed
+
+- *(net)* reject undeclared subscription ends ([#4231](https://github.com/moq-dev/moq/pull/4231))
+- *(net)* retain retired counters in host snapshots ([#4238](https://github.com/moq-dev/moq/pull/4238))
+- *(net)* end a track with its session's error when the session dies ([#4120](https://github.com/moq-dev/moq/pull/4120))
+
+### Other
+
+- rename CLAUDE.md to AGENTS.md ([#4235](https://github.com/moq-dev/moq/pull/4235))
+- *(moq-net)* model the dash aggregator's stats load in the session bench ([#4233](https://github.com/moq-dev/moq/pull/4233))
+- *(kio)* keep a parked waiter that quiet lists still hold ([#4240](https://github.com/moq-dev/moq/pull/4240))
+- *(moq-net)* bench lite-06, smoke-run benches nightly, refresh perf quests ([#4229](https://github.com/moq-dev/moq/pull/4229))
+
 ## [0.3.5](https://github.com/moq-dev/moq/compare/moq-net-v0.3.4...moq-net-v0.3.5) - 2026-09-26
 
 ### Added

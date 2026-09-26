@@ -34,10 +34,8 @@ public final class OriginProducer: Sendable {
     ///
     /// The broadcast is invisible and unroutable, for this origin's consumers
     /// and peers alike, until `BroadcastProducer.announce(route:)`. Announce it
-    /// after populating tracks. `finish()`
-    /// unpublishes immediately, while releasing the producer without finishing
-    /// also unpublishes but reads to subscribers as a failure rather than a
-    /// deliberate end.
+    /// after populating tracks. `BroadcastProducer.close()` ends it for good;
+    /// releasing the last handle does the same.
     public func createBroadcast(path: String) throws -> BroadcastProducer {
         BroadcastProducer(try ffi.createBroadcast(path: path))
     }
