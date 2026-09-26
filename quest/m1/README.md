@@ -39,7 +39,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Optional max age](/quest/m1/ietf-max-age.md) - max age is optional, set only by the publisher, and crosses moq-transport as MAX_CACHE_DURATION
 - [IETF announce count](/quest/m1/ietf-announce-count.md) - an opt-in moq-transport extension carries the replay count, so IETF announce consumers go live without a timer
 
-- [Jitter clock](/quest/m1/jitter-flush-clock.md) - renditions advertise `delay` (lag behind the earliest track) and `jitter` (spread), measured at encoder flush, never lowered; js/watch sizes playout over what it subscribes
+- [Publish delay](/quest/m1/publish-delay.md) - js/publish encoders advertise `delay` behind the earliest rendition, like moq-mux
 - [Import discontinuity](/quest/m1/import-discontinuity.md) - a seek or pause resets the flush jitter baseline, from moqsink, libmoq, and moq-ffi
 - [Data jitter](/quest/m1/data-jitter.md) - JSON and binary tracks with a capture time advertise a detected `delay` and `jitter`
 - [Moxygen compatibility](/quest/m1/moxygen/README.md) - one subgroup per group, whole-group FETCH, and one datagram per group, never a full moxygen pass

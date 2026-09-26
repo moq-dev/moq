@@ -481,6 +481,7 @@ type CommonExtensions = {
   "label": string | undefined,
   "container": Container,
   "jitter": number | undefined,
+  "delay": number | undefined,
 }
 ~~~
 
@@ -531,6 +532,19 @@ For example:
 - An encoder that consistently flushes 200 milliseconds late contributes no `jitter`; only variation above its own minimum counts.
 - A fragment or packet batch contributes the media span between its earliest timestamp and flush point.
 - Reordered frames contribute the delay they were held before flushing, without treating a decode-order presentation timestamp gap as delay by itself.
+
+### delay {#field-delay}
+The maximum amount, in milliseconds, by which a rendition's minimum flush lateness ({{field-jitter}}) has trailed the smallest minimum among the broadcast's renditions that measure it.
+If absent, a consumer SHOULD assume the rendition does not trail the others.
+
+A publisher measures each rendition's minimum over the same recent window it uses for `jitter`, from one clock shared by every rendition, and advertises the largest difference observed.
+A container importer does not measure `delay`.
+The rounding, `0`, and never-lower rules of `jitter` apply unchanged.
+
+A consumer SHOULD hold at least the largest `delay` plus `jitter` among the renditions it plays together.
+A consumer MUST NOT subtract one rendition's `delay` from another's: each is a maximum over the life of the stream, so two values need not share an origin.
+
+For example, a video encoder that flushes 200 milliseconds after the audio encoder for the same media time advertises a video `delay` of 200 and no audio `delay`.
 
 # Container {#container}
 Audio, video, and text tracks use a container to encapsulate the media payload.
@@ -1085,6 +1099,7 @@ A publisher MAY estimate an unknown final duration from the frame cadence, but M
 - An audio endpoint bounds only the terminal packets that follow it in its own group.
 - Replaced the archive timeline `wall` field with a root `clock` section (`wall` plus `timescale`): one fixed broadcast mapping every track and the archive index convert into, independent of any archive. Zero timescales and walls past the JSON-safe integer range are refused.
 - Added optional `bitrate` and `jitter` fields to `json` and `binary` track entries.
+- Added the optional `delay` rendition field: how far a rendition's minimum flush lateness trails the broadcast's earliest rendition, never lowered once advertised and never subtracted across renditions.
 - Recommended namespaced keys for application root sections.
 
 # Acknowledgments
