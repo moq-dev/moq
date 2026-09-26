@@ -2041,4 +2041,268 @@ mod tests {
 
 		assert_eq!(drops.load(Ordering::SeqCst), 1);
 	}
+
+	/// Clock fixtures: the real publication driver, fed by synthetic microphones against a
+	/// pinned broadcast clock, graded on the timestamps a subscriber reads back.
+	///
+	/// Capture stamps a buffer when the driver reads it, so each expectation is bracketed by
+	/// the broadcast clock just before the fixture delivers the buffer and just after the
+	/// published packet is read back.
+	mod clock {
+		use std::time::{Duration, Instant, SystemTime};
+
+		use super::*;
+
+		/// Retain every fixture group, so a slow runner never evicts one before it is read.
+		const RETAIN: Duration = Duration::from_secs(600);
+
+		type Samples = kio::Queue<Result<capture::Samples, capture::Failure>>;
+		type Track = moq_mux::container::Consumer<moq_mux::container::legacy::Wire>;
+
+		struct Fixture {
+			epoch: Instant,
+			clock: moq_mux::Clock,
+			catalog: moq_mux::catalog::Producer,
+			consumer: moq_net::broadcast::Consumer,
+			publication: Publication,
+			task: tokio::task::JoinHandle<Result<(), Error>>,
+		}
+
+		impl Fixture {
+			/// Run a publication over `opens` on a broadcast whose clock began `behind` ago, at `wall`.
+			fn start(behind: Duration, wall: SystemTime, opens: impl IntoIterator<Item = Open>) -> Self {
+				let epoch = Instant::now()
+					.checked_sub(behind)
+					.expect("a monotonic clock that far back");
+				let clock = moq_mux::Clock::at(epoch, wall).unwrap();
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let consumer = broadcast.consume();
+				let config = moq_mux::catalog::Config::default()
+					.with_clock(clock)
+					.with_max_age(RETAIN);
+				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
+				let mut options = PublicationOptions::default();
+				options.encode.track = Some("audio".into());
+				// The broadcast's own clock, as `moq import capture` hands it.
+				options.clock = catalog.clock();
+				let (publication, driver) =
+					Publication::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
+				let task = tokio::spawn(driver.run_with(source(opens, false)));
+				Self {
+					epoch,
+					clock,
+					catalog,
+					consumer,
+					publication,
+					task,
+				}
+			}
+
+			/// Subscribe to the audio track, which is what opens the microphone.
+			async fn subscribe(&mut self) -> Track {
+				let track = self
+					.consumer
+					.track("audio")
+					.unwrap()
+					.subscribe(moq_net::track::Subscription::default().with_max_age(RETAIN))
+					.await
+					.unwrap();
+				wait_for(&mut self.publication, Status::Live).await;
+				moq_mux::container::Consumer::new(
+					track,
+					moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio),
+				)
+			}
+
+			/// `instant` on the broadcast clock, in microseconds.
+			fn at(&self, instant: Instant) -> u64 {
+				u64::try_from(instant.duration_since(self.epoch).as_micros()).unwrap()
+			}
+
+			/// Deliver one Opus frame of stereo audio and read back the first packet not in
+			/// `seen`, asserting it is stamped while the driver held the buffer.
+			async fn deliver(&self, samples: &Samples, track: &mut Track, seen: &[u64]) -> u64 {
+				let pushed = self.at(Instant::now());
+				samples
+					.try_push(Ok(capture::Samples::plain(vec![0.1; 1920], false)))
+					.unwrap();
+				let published = loop {
+					let packet = track.read().await.unwrap().expect("a published packet");
+					let timestamp = u64::try_from(packet.timestamp.as_micros()).unwrap();
+					if !seen.contains(&timestamp) {
+						break timestamp;
+					}
+				};
+				let read = self.at(Instant::now());
+				assert!(
+					(pushed..=read).contains(&published),
+					"published {published}us, delivered within {pushed}..={read}us on the broadcast clock"
+				);
+				published
+			}
+
+			/// Stop the publication, as dropping its last control does.
+			async fn finish(self) -> (moq_mux::catalog::Producer, moq_net::broadcast::Consumer) {
+				drop(self.publication);
+				self.task.await.unwrap().unwrap();
+				(self.catalog, self.consumer)
+			}
+		}
+
+		/// A microphone whose first buffer arrives long after the broadcast began stamps it
+		/// then, rather than restarting the broadcast at zero.
+		#[tokio::test]
+		async fn a_late_first_buffer_publishes_its_arrival() {
+			let (samples, input) = stream(None);
+			let mut fixture = Fixture::start(Duration::from_secs(5), SystemTime::now(), [Open::Stream(input)]);
+			let mut track = fixture.subscribe().await;
+
+			let published = fixture.deliver(&samples, &mut track, &[]).await;
+			assert!(published >= 5_000_000, "{published}us restarted the broadcast at zero");
+			fixture.finish().await;
+		}
+
+		/// A device that fails and reopens counts its samples from zero again. The broadcast
+		/// continues forward from the reopen instead of rewinding to the old epoch.
+		#[tokio::test]
+		async fn a_device_restart_continues_forward() {
+			let (first, failing) = stream(None);
+			let (second, reopened) = stream(None);
+			let mut fixture = Fixture::start(
+				Duration::from_secs(1),
+				SystemTime::now(),
+				[Open::Stream(failing), Open::Stream(reopened)],
+			);
+			let mut track = fixture.subscribe().await;
+
+			let before = fixture.deliver(&first, &mut track, &[]).await;
+			first
+				.try_push(Err(capture::Failure::retry(Error::Capture("unplugged".into()))))
+				.unwrap();
+			wait_for(&mut fixture.publication, Status::Failed).await;
+			// The supervisor backs off before reopening, so the restart lands at least that late.
+			let after = fixture.deliver(&second, &mut track, &[before]).await;
+			let backoff = u64::try_from(RETRY_MIN.as_micros()).unwrap();
+			assert!(
+				after >= before + backoff,
+				"{after}us rewound or collapsed the {backoff}us backoff"
+			);
+			fixture.finish().await;
+		}
+
+		/// Releasing the microphone while nobody listens keeps the broadcast clock running:
+		/// the buffer after a resume lands after the real idle gap.
+		#[tokio::test]
+		async fn a_restart_after_idle_keeps_the_gap() {
+			let idle = Duration::from_millis(300);
+			let (first, input) = stream(None);
+			let (second, resumed) = stream(None);
+			let mut fixture = Fixture::start(
+				Duration::from_secs(1),
+				SystemTime::now(),
+				[Open::Stream(input), Open::Stream(resumed)],
+			);
+
+			let mut track = fixture.subscribe().await;
+			let before = fixture.deliver(&first, &mut track, &[]).await;
+			drop(track);
+			wait_for(&mut fixture.publication, Status::Waiting).await;
+
+			tokio::time::sleep(idle).await;
+
+			let mut track = fixture.subscribe().await;
+			let after = fixture.deliver(&second, &mut track, &[before]).await;
+			assert!(
+				after - before >= u64::try_from(idle.as_micros()).unwrap(),
+				"the {idle:?} idle gap collapsed to {}us",
+				after - before
+			);
+			fixture.finish().await;
+		}
+
+		/// The wall mapping is pinned when the broadcast clock is built. A system clock stepped
+		/// an hour since then retimes neither the published timestamps nor the advertised mapping.
+		#[tokio::test]
+		async fn a_system_wall_adjustment_retimes_nothing() {
+			// Whole seconds, so the advertised mapping holds it exactly.
+			let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+			let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
+			let (samples, input) = stream(None);
+			let mut fixture = Fixture::start(Duration::from_secs(1), wall, [Open::Stream(input)]);
+			let advertised = fixture.catalog.snapshot().clock;
+			assert_eq!(advertised, Some(fixture.clock.wall()));
+
+			let mut track = fixture.subscribe().await;
+			let published = fixture.deliver(&samples, &mut track, &[]).await;
+
+			// The catalog maps to walls at millisecond precision.
+			let mapped = advertised
+				.unwrap()
+				.wall_clock(moq_net::Timestamp::from_micros(published).unwrap())
+				.unwrap();
+			assert_eq!(mapped, wall + Duration::from_millis(published / 1000));
+			assert_eq!(fixture.catalog.snapshot().clock, advertised);
+			fixture.finish().await;
+		}
+
+		/// A recording replays what the live edge published: the archive's segment records
+		/// carry the live timestamps across an idle restart, with the idle gap left in.
+		#[tokio::test]
+		async fn retained_archive_playback_keeps_the_live_timestamps() {
+			let (first, input) = stream(None);
+			let (second, resumed) = stream(None);
+			let mut fixture = Fixture::start(
+				Duration::from_secs(1),
+				SystemTime::now(),
+				[Open::Stream(input), Open::Stream(resumed)],
+			);
+			let mut live = Vec::new();
+			let mut timeline = None;
+
+			for samples in [&first, &second] {
+				let mut track = fixture.subscribe().await;
+				live.push(fixture.deliver(samples, &mut track, &live).await);
+				// The rendition, and with it the archive, registers once the input is discovered.
+				if timeline.is_none() {
+					let section = fixture
+						.catalog
+						.snapshot()
+						.archive
+						.expect("the audio track enrolls an archive");
+					timeline = Some(
+						moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section)
+							.await
+							.unwrap(),
+					);
+				}
+				drop(track);
+				wait_for(&mut fixture.publication, Status::Waiting).await;
+				// Idle past the minimum segment, so each run is archived as its own segment.
+				tokio::time::sleep(moq_mux::timeline::DEFAULT_DURATION_MIN + Duration::from_millis(100)).await;
+			}
+
+			let (catalog, _consumer) = fixture.finish().await;
+			catalog.timeline().finish().unwrap();
+			let mut timeline = timeline.unwrap();
+			let mut archived = Vec::new();
+			while let Some(event) = timeline.next().await.unwrap() {
+				match event {
+					moq_mux::timeline::Event::Push { entry, .. } => archived.push(entry),
+					other => panic!("unexpected timeline event {other:?}"),
+				}
+			}
+
+			assert_eq!(archived.len(), live.len(), "one segment per capture run: {archived:?}");
+			for (entry, live) in archived.iter().zip(&live) {
+				// The archive keeps millisecond precision.
+				assert_eq!(entry.pts.as_micros() / 1000, u128::from(*live / 1000), "{archived:?}");
+				assert!(entry.tracks.contains_key("audio"), "{archived:?}");
+			}
+			let first = &archived[0];
+			assert!(
+				archived[1].pts.as_micros() >= first.pts.as_micros() + first.duration.as_micros(),
+				"the resumed segment overlaps the one before it: {archived:?}"
+			);
+		}
+	}
 }

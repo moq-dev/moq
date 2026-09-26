@@ -9,7 +9,7 @@
 
 use moq_net::{Client, Server, Session, Version, origin};
 
-use super::mock::create_mock_session_pair;
+use super::mock::{MockSession, create_mock_session_pair};
 
 pub use moq_net::time::run;
 
@@ -22,11 +22,11 @@ pub struct MockConnectOptions {
 	/// The MoQ version to negotiate (determines the ALPN protocol string).
 	pub version: Version,
 	/// Origin whose broadcasts the client publishes to the server.
-	pub client_publish: Option<origin::Producer>,
+	pub client_publish: Option<origin::Consumer>,
 	/// Origin the client inserts remote broadcasts into.
 	pub client_subscribe: Option<origin::Producer>,
 	/// Origin whose broadcasts the server publishes to the client.
-	pub server_publish: Option<origin::Producer>,
+	pub server_publish: Option<origin::Consumer>,
 	/// Origin the server inserts remote broadcasts into.
 	pub server_subscribe: Option<origin::Producer>,
 }
@@ -49,6 +49,10 @@ impl MockConnectOptions {
 pub struct MockPair {
 	pub client: Session,
 	pub server: Session,
+	/// The client's end of the mock transport, for steering delivery.
+	pub client_transport: MockSession,
+	/// The server's end of the mock transport, for steering delivery.
+	pub server_transport: MockSession,
 }
 
 /// Run the MoQ handshake over the mock transport, returning connected sessions.
@@ -63,6 +67,7 @@ pub struct MockPair {
 pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	let protocol = opts.version.alpn();
 	let (client_transport, server_transport) = create_mock_session_pair(Some(protocol));
+	let transports = (client_transport.clone(), server_transport.clone());
 
 	let mut client = Client::new().with_versions(opts.version.into());
 	if let Some(publish) = &opts.client_publish {
@@ -105,5 +110,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	MockPair {
 		client: client_session,
 		server: server_session,
+		client_transport: transports.0,
+		server_transport: transports.1,
 	}
 }

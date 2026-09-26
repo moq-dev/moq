@@ -189,6 +189,7 @@ fn normalize_video(config: &VideoConfig) -> VideoConfig {
 	let mut config = config.clone();
 	config.bitrate = None;
 	config.jitter = None;
+	config.delay = None;
 	config.label = None;
 	config.stalled = None;
 	// The muxer ignores a non-finite framerate, and NaN never equals itself, so a catalog
@@ -202,6 +203,7 @@ fn normalize_audio(config: &AudioConfig) -> AudioConfig {
 	let mut config = config.clone();
 	config.bitrate = None;
 	config.jitter = None;
+	config.delay = None;
 	config.label = None;
 	config
 }

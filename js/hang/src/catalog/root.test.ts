@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import * as z from "@zod/mini";
 import { ARCHIVE_VERSION } from "./archive.ts";
+import { u53 } from "./integers.ts";
 import type { RelativeBroadcast } from "./path.ts";
 import { RootSchema } from "./root.ts";
 
@@ -93,6 +94,29 @@ test("legacy zero jitter is absent for audio and video", () => {
 	expect(parsed.audio?.renditions.audio?.jitter).toBeUndefined();
 	expect(parsed.video?.renditions.video?.jitter).toBeUndefined();
 	expect(JSON.stringify(parsed)).not.toContain('"jitter"');
+});
+
+test("delay parses beside jitter and zero is absent", () => {
+	const parsed = RootSchema.parse({
+		audio: {
+			renditions: {
+				audio: {
+					codec: "opus",
+					container: { kind: "legacy" },
+					sampleRate: 48000,
+					numberOfChannels: 2,
+					delay: 0,
+				},
+			},
+		},
+		video: {
+			renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" }, jitter: 34, delay: 200 } },
+		},
+		text: { renditions: { captions: { format: "vtt", container: { kind: "legacy" }, delay: 120 } } },
+	});
+	expect(parsed.audio?.renditions.audio?.delay).toBeUndefined();
+	expect(parsed.video?.renditions.video?.delay).toBe(u53(200));
+	expect(parsed.text?.renditions.captions?.delay).toBe(u53(120));
 });
 
 test("clock round-trips at the root", () => {

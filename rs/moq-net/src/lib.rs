@@ -86,6 +86,7 @@ mod model;
 pub mod path;
 mod recv;
 mod setup;
+mod tail;
 mod util;
 mod version;
 

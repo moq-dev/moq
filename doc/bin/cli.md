@@ -53,6 +53,13 @@ moq --connect https://relay.example.com/anon --broadcast my-stream.hang export t
 moq --connect "https://relay.example.com/rooms/1?jwt=$TOKEN" --broadcast alice.hang import ts
 ```
 
+The `ts`, `fmp4`, and `flv` imports publish on the broadcast clock the catalog
+advertises, not the input's own timestamps. The first frame is stamped when it
+arrives, every track keeps its offset from the others, and an input that
+restarts its timestamps, such as a restarted encoder, continues forward
+after the real gap rather than rewinding. So a feed whose PTS starts hours in,
+or whose first frame arrives late, still names the right wall time.
+
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, passes SCTE-35 and
 subtitle PIDs through as tracks, and round-trips the service tables. A
 `discontinuity_indicator` on the program's PCR PID is a system time-base reset,
@@ -99,6 +106,14 @@ actually is. While video owns the clock, a frame arriving earlier than predicted
 pulls playback forward, so a late start catches up to live instead of staying
 behind it. Once the speaker owns the clock, video follows the speaker instead.
 
+Video receives encoded frames independently of decoding, so a tune-in burst can
+update that clock even while the window is waiting for its first picture.
+Encoded video is retained within the delay budget with byte accounting; a skip
+resumes at a keyframe. Decoding starts at most 100 ms before presentation, and
+the window holds at most three decoded pictures. A stalled window loses its
+oldest picture instead of blocking reception. The configured delay therefore
+does not turn into seconds of raw video surfaces.
+
 Each role follows the catalog for as long as it lasts. Each decoder starts at
 the newest cached group, including when a rendition is reopened, so playback
 does not replay the retained backlog. A publisher that retires the rendition
@@ -144,6 +159,11 @@ watches them. On NVIDIA the whole pipeline stays on the GPU; `--frames cpu`
 forces decoded frames into CPU memory instead of the default `native`.
 Requires the `transcode` feature.
 
+The source is the tallest rendition this host can decode with `--decoder`, so a
+software-only host transcodes from an H.264 rendition rather than a taller H.265
+or AV1 one. When no rendition decodes, the command exits naming the decoder's
+refusal.
+
 The ladder is sized against the source picture and follows it, so a source that
 changes resolution mid-stream (a window capture renegotiated by a resize, a
 publisher reconnecting at a new size) resolves the rungs again. Rungs that still
@@ -175,8 +195,8 @@ zero-based `frame` and padded standard base64.
 `<track>` is the literal track name. `/fetch` splits its path on the last `/`,
 so the two agree only for names without one. Fetch only dials `--connect`, and
 refuses a listener or cluster flag. It gives up after 30 seconds, as `/fetch`
-does, and exits non-zero when the broadcast or group is not found, the relay
-refuses, or the deadline passes.
+does, and exits non-zero when the broadcast or group is not found (before
+writing anything), the relay refuses, or the deadline passes.
 
 ## Multiple stages
 

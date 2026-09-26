@@ -724,16 +724,29 @@ async fn next_announce(announcements: &mut moq_net::announce::Consumer) -> moq_n
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_06_announce_lifecycle() {
+	announce_lifecycle_test("moq-lite-06").await;
+}
+
+/// The same lifecycle on lite-07, where every path shares its head with a live one,
+/// so the announcements after the first copy it from a base that the retractions
+/// keep moving.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_moq_lite_07_announce_lifecycle() {
+	announce_lifecycle_test("moq-lite-07-wip").await;
+}
+
+async fn announce_lifecycle_test(version: &str) {
 	let pub_origin = moq_tokio::origin::spawn();
 
 	// Announced before the client connects, so it rides the initial set.
-	let first = pub_origin.create_broadcast("first").expect("create broadcast");
+	let first = pub_origin.create_broadcast("room/first").expect("create broadcast");
 	first.announce(Default::default()).expect("create broadcast");
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
-	server_config.version = vec!["moq-lite-06".parse().unwrap()];
+	server_config.version = vec![version.parse().unwrap()];
 	let server = server_config.init(Default::default()).expect("init server");
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("local addr");
@@ -744,7 +757,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.version = vec!["moq-lite-06".parse().unwrap()];
+	client_config.version = vec![version.parse().unwrap()];
 	let client = client_config.init(Default::default()).expect("init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
 
@@ -764,28 +777,28 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 
 	// The initial set: "first" was announced before the session existed.
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.prefix.as_str(), "first");
+	assert_eq!(update.prefix.as_str(), "room/first");
 	assert!(update.kind.is_active(), "expected initial announce");
 
 	// A live announce after the initial set.
-	let second = pub_origin.create_broadcast("second").expect("create broadcast");
+	let second = pub_origin.create_broadcast("room/second").expect("create broadcast");
 	second.announce(Default::default()).expect("create broadcast");
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.prefix.as_str(), "second");
+	assert_eq!(update.prefix.as_str(), "room/second");
 	assert!(update.kind.is_active(), "expected live announce");
 
 	// Unannounce: retracted by announce id on the wire. Dropping the announcement
 	// retracts the route; the broadcast's own end is independent.
 	second.close();
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.prefix.as_str(), "second");
+	assert_eq!(update.prefix.as_str(), "room/second");
 	assert!(!update.kind.is_active(), "expected retraction");
 
 	// Re-announce the same path: a fresh announce assigning a fresh id.
-	let _second = pub_origin.create_broadcast("second").expect("create broadcast");
+	let _second = pub_origin.create_broadcast("room/second").expect("create broadcast");
 	_second.announce(Default::default()).expect("create broadcast");
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.prefix.as_str(), "second");
+	assert_eq!(update.prefix.as_str(), "room/second");
 	assert!(update.kind.is_active(), "expected re-announce");
 
 	// Replace the route at "first": retract the original (retiring its announce
@@ -793,19 +806,19 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	// Await the retraction first so the events cannot coalesce away.
 	first.close();
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.prefix.as_str(), "first");
+	assert_eq!(update.prefix.as_str(), "room/first");
 	assert!(!update.kind.is_active(), "expected the replaced retraction");
-	let _replacement = pub_origin.create_broadcast("first").expect("create replacement");
+	let _replacement = pub_origin.create_broadcast("room/first").expect("create replacement");
 	_replacement.announce(Default::default()).expect("create replacement");
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.prefix.as_str(), "first");
+	assert_eq!(update.prefix.as_str(), "room/first");
 	assert!(update.kind.is_active(), "expected the replacement announce");
 
 	// A sentinel proves no stray event for "first" snuck in behind the replacement.
-	let _sentinel = pub_origin.create_broadcast("sentinel").expect("create broadcast");
+	let _sentinel = pub_origin.create_broadcast("room/sentinel").expect("create broadcast");
 	_sentinel.announce(Default::default()).expect("create broadcast");
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.prefix.as_str(), "sentinel");
+	assert_eq!(update.prefix.as_str(), "room/sentinel");
 	assert!(update.kind.is_active(), "expected sentinel announce");
 
 	drop(connection);
@@ -995,15 +1008,31 @@ async fn broadcast_route_migration() {
 }
 
 /// A subscriber returning to a parked track is not handed the parked cache when the
-/// upstream resolves its start past it (lite-06+ resolves the start from the budget).
+/// upstream resolves its start past it: lite-06+ resolves the start from the budget, and
+/// an IETF live join starts at the group SUBSCRIBE_OK names as Largest.
 ///
 /// The front keeps what an unread track delivered as a warm cache. While parked, the
 /// publisher moved on, so the resumed upstream subscription starts well past that cache.
 /// The cache was only fresh against its own frozen edge; serving it first put a
 /// rejoining player seconds behind live.
+///
+/// Pre-06 lite is skipped: nothing on those wires says where a subscription starts.
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_rejoin_skips_a_stale_warm_cache() {
+	let pre06 = [
+		"moq-lite-01",
+		"moq-lite-02",
+		"moq-lite-03",
+		"moq-lite-04",
+		"moq-lite-05",
+	];
+	for version in moq_net::Version::names().filter(|version| !pre06.contains(version)) {
+		rejoin_skips_a_stale_warm_cache(version).await;
+	}
+}
+
+async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 	use moq_net::Timestamp;
 
 	let ms = |ms: u64| Timestamp::from_millis(ms).unwrap();
@@ -1027,6 +1056,7 @@ async fn broadcast_rejoin_skips_a_stale_warm_cache() {
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("[::]:0".parse().unwrap());
 	config.tls.generate = vec!["localhost".into()];
+	config.version = vec![version.parse().unwrap()];
 	let mut server = config
 		.init(Default::default())
 		.expect("init server")
@@ -1048,6 +1078,7 @@ async fn broadcast_rejoin_skips_a_stale_warm_cache() {
 	let mut announcements = sub_consumer.announced();
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
+	config.version = vec![version.parse().unwrap()];
 	let client = config.init(Default::default()).expect("init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
 	let (_client, session) = tokio::time::timeout(TIMEOUT, connect_once(client.with_subscriber(sub_origin), url))
@@ -1097,12 +1128,15 @@ async fn broadcast_rejoin_skips_a_stale_warm_cache() {
 	let first = recv(&mut sub).await;
 	assert!(
 		first > 4,
-		"a rejoining reader was served the stale cache first: group {first}"
+		"{version}: a rejoining reader was served the stale cache first: group {first}"
 	);
 	let mut sequence = first;
 	while sequence < 20 {
 		sequence = recv(&mut sub).await;
-		assert!(sequence >= 4, "a rejoining reader was served stale group {sequence}");
+		assert!(
+			sequence >= 4,
+			"{version}: a rejoining reader was served stale group {sequence}"
+		);
 	}
 
 	drop(sub);

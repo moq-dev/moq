@@ -241,6 +241,10 @@ pub enum Error {
 	/// A rendition tried to lower jitter already advertised to subscribers.
 	#[error("catalog jitter cannot decrease for a published rendition")]
 	JitterDecreased,
+
+	/// A rendition tried to lower delay already advertised to subscribers.
+	#[error("catalog delay cannot decrease for a published rendition")]
+	DelayDecreased,
 }
 
 impl Error {

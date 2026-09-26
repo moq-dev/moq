@@ -119,7 +119,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 		Observer::Remote(version) => {
 			let subscriber = produce_origin(2);
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
-			options.server_publish = Some(publisher.clone());
+			options.server_publish = Some(publisher.consume());
 			options.client_subscribe = Some(subscriber.clone());
 			let pair = connect_mock(options).await;
 			(subscriber.consume(), Some(pair))

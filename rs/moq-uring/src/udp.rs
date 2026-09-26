@@ -576,7 +576,8 @@ impl Socket {
 				unsafe {
 					io_ring
 						.submitter()
-						.register_buf_ring_with_flags(ring.ptr.as_ptr() as u64, rx_cap, bgid, 0)?;
+						.register_buf_ring_with_flags(ring.ptr.as_ptr() as u64, rx_cap, bgid, 0)
+						.map_err(Error::ring)?;
 				}
 			}
 			for (bid, buf) in bufs.iter_mut().enumerate() {
