@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# The shared skills in .claude/skills are symlinks into the .claude/shared
-# submodule. git leaves that unpopulated in a new worktree, and a dangling
-# symlink is silently skipped. A checkout on the wrong commit stays stale too.
+# The shared and quest skills in .claude/skills are symlinks into the
+# .claude/shared and .claude/quest submodules. git leaves those unpopulated in a
+# new worktree, and a dangling symlink is silently skipped. A checkout on the
+# wrong commit stays stale too.
 
 set -eu
 
@@ -9,12 +10,14 @@ set -eu
 [ -n "${CLAUDE_PROJECT_DIR:-}" ] || exit 0
 cd "$CLAUDE_PROJECT_DIR" || exit 0
 
-# '-' is uninitialized. '+' is populated at a commit other than the gitlink.
-# A matching checkout has no prefix.
-case "$(git submodule status .claude/shared 2>/dev/null)" in
-    -* | +*) ;;
-    *) exit 0 ;;
-esac
+for path in .claude/shared .claude/quest; do
+    # '-' is uninitialized. '+' is populated at a commit other than the gitlink.
+    # A matching checkout has no prefix.
+    case "$(git submodule status "$path" 2>/dev/null)" in
+        -* | +*) ;;
+        *) continue ;;
+    esac
 
-echo "submodule hook: updating .claude/shared to the pinned skills." >&2
-git submodule update --init .claude/shared >&2
+    echo "submodule hook: updating $path to the pinned commit." >&2
+    git submodule update --init "$path" >&2
+done

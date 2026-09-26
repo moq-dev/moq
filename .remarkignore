@@ -16,9 +16,10 @@ doc/draft/
 # Quests use a constrained Markdown dialect checked by the quest validator.
 quest/
 
-# Skills are symlinks into the kixelated/skills submodule, which formats its
-# own files; remark would follow them (and .agents, Codex's link to the same
-# directory) and rewrite the pinned checkout.
+# Skills are symlinks into the kixelated/skills and kixelated/quest submodules,
+# which format their own files; remark would follow them (and .agents, Codex's
+# link to the same directory) and rewrite the pinned checkouts.
 .claude/shared/
+.claude/quest/
 .claude/skills/
 .agents/

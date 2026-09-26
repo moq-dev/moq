@@ -240,6 +240,16 @@ worktree ACTION="check" $BASE="":
     	echo "recorded:    $(git rev-parse --short "$recorded") (STALE; $base has moved since setup)"
     fi
 
+# Run the quest CLI pinned by the .claude/quest submodule: `just quest ready`.
+[positional-arguments]
+quest *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # A fresh worktree or CI checkout leaves the submodule empty. Only an empty
+    # one is initialized, so an unstaged bump under test is left alone.
+    [[ -e .claude/quest/Cargo.toml ]] || git submodule update --init .claude/quest
+    cargo run --quiet --locked --manifest-path .claude/quest/Cargo.toml -- "$@"
+
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
     bun install
@@ -441,7 +451,7 @@ _tools $FILES="":
     # `_check-common` runs on every invocation, so its tools are unconditional.
     tools=(actionlint bun jq nix nixfmt shellcheck shfmt taplo python3 nfpm dpkg-deb envsubst rpm)
     scoped '^(drafts/|doc/\.vitepress/drafts\.ts$)' && tools+=(kramdown-rfc xml2rfc)
-    scoped '^(bench/|quest/|rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo envsubst)
+    scoped '^(bench/|quest/|\.claude/quest$|rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo envsubst)
     scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/lib/samples\.sh$)' && tools+=(uv)
     scoped '^(kt/|rs/moq-ffi/|doc/lib/kt/|doc/lib/samples\.sh$)' && tools+=(gradle java)
     # cargo because `go check` builds moq-ffi for the host, and skips on a
@@ -542,7 +552,7 @@ _check $BASE $TEST:
         just rs tokio-features
         just rs media-features
         just --justfile bench/justfile check
-        cargo run --quiet --locked --package quest -- check
+        just quest check
         # Not covered by the line above: moq-wasm only exists on the wasm32 target.
         just rs wasm
         just py check
@@ -565,9 +575,9 @@ _check $BASE $TEST:
             just drafts check
         fi
         # Quest documents form one graph, so validate the whole living tree when
-        # either a quest or its validator changes.
-        if echo "$files" | grep -qE '^(quest/|rs/quest/)'; then
-            cargo run --quiet --locked --package quest -- check
+        # either a quest or the pinned validator changes.
+        if echo "$files" | grep -qE '^(quest/|\.claude/quest$)'; then
+            just quest check
         fi
         just py check "$files"
         just kt check "$files"
