@@ -497,11 +497,10 @@ impl<E: catalog::Catalog> Import<E> {
 			// by an 'Opus' registration descriptor. Channels and the (always 48 kHz) rate
 			// come from the descriptors, so the importer is built up front.
 			StreamType::Mpeg2PacketizedData if registration_format(descriptors) == Some(*b"Opus") => {
-				let channel_count = opus_channel_count(descriptors).unwrap_or(2);
+				let config = opus_config(descriptors)?;
 				let track = self
 					.broadcast
 					.unique_track(".opus", self.catalog.track_info(hang::catalog::PRIORITY.audio))?;
-				let config = opus::Config::new(48_000, channel_count);
 				let mut config: hang::catalog::AudioConfig = config.into();
 				config.container = self.container.clone();
 				Stream::Opus(Box::new(OpusStream {
@@ -2342,14 +2341,15 @@ fn registration_format(descriptors: &[mpeg2ts::ts::Descriptor]) -> Option<[u8; 4
 		.and_then(|s| s.try_into().ok())
 }
 
-/// The Opus channel count from the DVB extension descriptor (tag 0x7f, ext tag 0x80).
+/// The OpusHead implied by the DVB extension descriptor (tag 0x7f, ext tag 0x80).
 ///
 /// `channel_config_code` follows the Opus-in-TS mapping (and ffmpeg's demuxer): 0 is dual
-/// mono (decoded as stereo), 1..=8 is the channel count directly. Higher codes (0x81
-/// explicitly-coded layouts, reserved values) aren't supported, so they fall back to the
-/// caller's default rather than being read as a raw 129..=255 count.
-fn opus_channel_count(descriptors: &[mpeg2ts::ts::Descriptor]) -> Option<u32> {
-	descriptors
+/// mono (decoded as stereo), 1..=8 is the channel count directly, with family 0 for mono and
+/// stereo and the Vorbis family 1 mapping above that. Higher codes (0x81 explicitly-coded
+/// layouts, reserved values) aren't supported, so they fall back to stereo rather than being
+/// read as a raw 129..=255 count.
+fn opus_config(descriptors: &[mpeg2ts::ts::Descriptor]) -> crate::Result<opus::Config> {
+	let channels = descriptors
 		.iter()
 		.find(|d| d.tag == 0x7f && d.data.first() == Some(&0x80))
 		.and_then(|d| d.data.get(1))
@@ -2358,6 +2358,13 @@ fn opus_channel_count(descriptors: &[mpeg2ts::ts::Descriptor]) -> Option<u32> {
 			1..=8 => Some(cc as u32),
 			_ => None,
 		})
+		.unwrap_or(2);
+
+	let mut config = opus::Config::new(48_000, channels);
+	if channels > 2 {
+		config.mapping = Some(opus::Mapping::vorbis(channels as u8)?);
+	}
+	Ok(config)
 }
 
 /// Parse one Opus-in-TS access-unit control header, returning `(header_len, payload_size)`.
