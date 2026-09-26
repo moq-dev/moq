@@ -4,8 +4,10 @@ import { Reader } from "../src/stream.ts";
 const frameSizes = [16 * 1024, 256 * 1024, 1024 * 1024];
 const chunkSizes = [1200, 16 * 1024, 1024 * 1024];
 const bytes = 16 * 1024 * 1024; // Read about this many bytes per case so each row takes similar time.
-// Per-byte cost must not grow with frame size, or reassembly has gone quadratic. The margin is
-// loose because the smallest frame pays the fixed per-read overhead over the fewest bytes.
+// Per-byte cost must not grow with frame size, or reassembly has gone quadratic. Each chunk size
+// compares against its smallest frame that spans several chunks, since a single chunk skips the
+// copy entirely. The margin is loose because that frame pays the fixed per-read overhead over the
+// fewest bytes.
 const maxSlope = 4;
 let checksum = 0;
 
@@ -42,8 +44,9 @@ for (const frameSize of frameSizes) {
 		console.log(`${frameSize},${chunkSize},${chunks.length},${ns.toFixed(3)}`);
 
 		const baseline = smallest.get(chunkSize);
-		if (baseline === undefined) smallest.set(chunkSize, ns);
-		else if (ns > baseline * maxSlope) {
+		if (baseline === undefined) {
+			if (chunks.length > 1) smallest.set(chunkSize, ns);
+		} else if (ns > baseline * maxSlope) {
 			throw new Error(
 				`${frameSize} byte frames cost ${ns.toFixed(3)} ns/byte, over ${maxSlope}x ${baseline.toFixed(3)}`,
 			);
