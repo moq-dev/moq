@@ -982,7 +982,8 @@ impl MoqMediaProducer {
 
 	/// Mark a timeline break and restart handoff measurement without lowering advertised jitter.
 	///
-	/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock.
+	/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock,
+	/// and video must resume on a keyframe.
 	pub fn discontinuity(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
