@@ -26,11 +26,10 @@ both branches and the change is additive.
   called from a host thread, never from a libmoq callback. Native codec and
   capture threads belong to their handles and end with them; this call does
   not reach into them.
-- The OBS wiring (`obs_module_unload` calling the shutdown after the outputs
-  and sources are destroyed) belongs to [OBS migration](/quest/m1/cpp/obs.md),
-  where the plugin reaches moq-ffi through the generated C++ and calls
-  `moq_ffi_shutdown`; this quest gives the plain-C ABI the same call for the
-  hosts that stay on libmoq.
+- The OBS plugin no longer links libmoq: it reaches moq-ffi through the
+  generated C++ and calls `moq::shutdown()` from `obs_module_unload`
+  ([C++ through moq-ffi](/quest/m1/cpp/README.md)). This quest gives the
+  plain-C ABI the same call for the hosts that stay on libmoq.
 - Regression tests: a `rs/libmoq/c-tests` fixture that builds libmoq as a
   cdylib, `dlopen`s it, opens a session, and `dlclose`s once without
   `moq_shutdown` (must fail, proving the hazard) and once with it (clean

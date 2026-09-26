@@ -118,8 +118,10 @@ Futures are polled, and continuations run, on one process-wide executor
 thread unless you install your own with `moq::set_executor(executor,
 shutdown)` before the first async call. An `Executor` takes a `moq::Task` and
 returns true once it has accepted it; `shutdown` stops accepting and returns
-once no task can still run. A host with its own threads (a game engine, OBS)
-installs one that hops onto them.
+once no task can still run. A host with its own threads (a game engine)
+installs one that hops onto them. The executor passed to `then()` is separate:
+the [OBS plugin](/bin/obs) gives each output and source a thread of its own
+there, so one slow continuation never delays another.
 
 Never block the executor. A continuation or resumed coroutine that calls
 `get()` on another future waits for a poll that only the executor can run,

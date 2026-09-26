@@ -23,4 +23,4 @@ whether a second binding wants it. Verify against a shaped uplink and with
 
 ## Required
 
-- [OBS migration](/quest/m1/cpp/obs.md) - the plugin is on the generated C++ first
+- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the plugin is on the generated C++ first

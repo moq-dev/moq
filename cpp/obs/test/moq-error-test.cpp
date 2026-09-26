@@ -10,17 +10,19 @@ int main()
 	for (const char *failure :
 	     {"fingerprint request failed", "failed to read fingerprint", "failed to fetch certificate fingerprint",
 	      "certificate fingerprint request failed"}) {
-		if (Classify(-5, failure) != Kind::Network ||
-		    Classify(-5, std::string("reconnect timed out: ") + failure) != Kind::Timeout)
+		if (Classify(MoQError::Connect, failure) != Kind::Network ||
+		    Classify(MoQError::Connect, std::string("reconnect timed out: ") + failure) != Kind::Timeout)
 			return 1;
 	}
 	const char *outage = "connect error: reconnect timed out after 10s: failed to connect to server: "
 			     "QUIC failed: failed to fetch fingerprint; WebSocket failed: failed to connect WebSocket";
-	if (Classify(-5, outage) != Kind::Timeout || Classify(-5, "failed to fetch fingerprint") != Kind::Network ||
-	    Classify(-5, "reconnect timed out after 10s: invalid peer certificate: UnknownIssuer") !=
+	if (Classify(MoQError::Connect, outage) != Kind::Timeout ||
+	    Classify(MoQError::Connect, "failed to fetch fingerprint") != Kind::Network ||
+	    Classify(MoQError::Connect, "reconnect timed out after 10s: invalid peer certificate: UnknownIssuer") !=
 		    Kind::Certificate ||
-	    Classify(-34, "reconnect timed out after 10s") != Kind::Unauthorized ||
-	    Classify(-35, "forbidden") != Kind::Forbidden || Classify(-17, "offline") != Kind::Offline) {
+	    Classify(MoQError::Unauthorized, "reconnect timed out after 10s") != Kind::Unauthorized ||
+	    Classify(MoQError::Forbidden, "forbidden") != Kind::Forbidden ||
+	    Classify(MoQError::Offline, "offline") != Kind::Offline) {
 		std::fprintf(stderr, "FAIL: connection failure classification\n");
 		return 1;
 	}

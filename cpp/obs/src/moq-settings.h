@@ -2,22 +2,20 @@
 #pragma once
 #include <obs-module.h>
 
+#include <moq/moq.hpp>
+
 #include <string>
 #include <vector>
-
-extern "C" {
-#include "moq.h"
-}
 
 // Advanced MoQ connection settings.
 //
 // One set of keys on an obs_data_t backs every surface that edits them: the service
 // properties page, the dock's advanced dialog, and the output that reads them at connect
 // time. The fields are described once in Fields() so both UIs are generated from the
-// same list; adding a knob means adding a Field entry and one assignment in BuildConfig.
+// same list; adding a knob means adding a Field entry and one setter call in Configure.
 namespace MoQSettings {
 
-// Whether any of this applies. With it off the output dials with libmoq's defaults and
+// Whether any of this applies. With it off the output dials with the library defaults and
 // ignores every other key.
 inline constexpr const char *ENABLED = "advanced";
 
@@ -71,9 +69,6 @@ struct Field {
 };
 
 // Every advanced setting, in display order.
-//
-// Built on first call because the protocol version menu is populated from libmoq, so it
-// can't drift from what the library actually accepts.
 const std::vector<Field> &Fields();
 
 // Register the defaults from Fields(). Call from the service's get_defaults.
@@ -82,32 +77,11 @@ void Defaults(obs_data_t *settings);
 // Add the checkable "Advanced" group to a properties list.
 void AddProperties(obs_properties_t *props);
 
-// A moq_client_config plus the storage its pointers borrow.
+// Apply these settings to a client before it connects.
 //
-// libmoq reads the strings while dialing rather than copying them up front, so this
-// has to outlive the moq_session_connect call it is passed to. Keep it on the stack
-// across the dial and let it go afterwards.
-struct Config {
-	// What to pass to moq_session_connect: NULL when the advanced group is off,
-	// which dials with the library defaults.
-	const moq_client_config *Pointer() const { return enabled ? &value : nullptr; }
-
-	moq_client_config value{};
-	bool enabled = false;
-
-	// Backing storage for the pointers in `value`. Held by value so a settings
-	// object released after BuildConfig can't dangle them.
-	std::string version, bind, fingerprint, root, host_name, congestion, qlog;
-	moq_string version_item{}, fingerprint_item{}, root_item{};
-};
-
-// Fill `out` from these settings.
-//
-// Returns false if libmoq never reported the defaults the fields are built from; the
-// caller should refuse to start rather than dial with a setting the user asked for
-// silently dropped. Values themselves are validated by the dial, not here, so a bad
-// fingerprint or bind address surfaces as a moq_session_connect failure with the
-// reason in moq_error().
-bool BuildConfig(obs_data_t *settings, Config *out);
+// Returns false with the offending setting and moq-ffi's reason in `error` when a value
+// is rejected, such as a bind address that doesn't parse; the caller should refuse to
+// start rather than dial with a setting the user asked for silently dropped.
+bool Configure(obs_data_t *settings, moq::Client &client, std::string *error);
 
 } // namespace MoQSettings

@@ -13,7 +13,7 @@ Subscribed MoQ audio plays through OBS alongside video using statically linked m
 
 ## Required
 
-- [OBS migration](/quest/m1/cpp/obs.md) - the plugin is on the generated C++ first
+- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the plugin is on the generated C++ first
 
 ## Related
 

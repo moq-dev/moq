@@ -1,30 +1,26 @@
 cmake_minimum_required(VERSION 3.28)
 
-# Build the in-tree libmoq by default. Release-only builds clear MOQ_LOCAL and
-# must select the published archive explicitly, so this never silently drifts
-# to an old static version.
-set(MOQ_LOCAL "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Path to the moq repo (builds rs/libmoq in-tree)")
-set(MOQ_VERSION "" CACHE STRING "Published libmoq version (required without MOQ_LOCAL)")
+# Build the in-tree C++ package (cpp/moq) by default. Release-only builds clear
+# MOQ_LOCAL and must select the published archive explicitly, so this never
+# silently drifts to an old static version.
+set(MOQ_LOCAL "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Path to the moq repo (builds cpp/moq in-tree)")
+set(MOQ_VERSION "" CACHE STRING "Published moq-cpp version (required without MOQ_LOCAL)")
 
 # One predicate for both the version derivation here and the link/fetch choice
 # below, so the two can't drift apart.
 set(_moq_local_build FALSE)
-if(MOQ_LOCAL AND EXISTS "${MOQ_LOCAL}/rs/libmoq/CMakeLists.txt")
+if(MOQ_LOCAL AND EXISTS "${MOQ_LOCAL}/cpp/moq/CMakeLists.txt")
   set(_moq_local_build TRUE)
 endif()
 
 if(_moq_local_build)
-  set(_moq_manifest "${MOQ_LOCAL}/rs/libmoq/Cargo.toml")
-  file(STRINGS "${_moq_manifest}" _moq_version_lines REGEX "^version = \"[^\"]+\"$")
-  list(LENGTH _moq_version_lines _moq_version_count)
-  if(NOT _moq_version_count EQUAL 1)
-    message(FATAL_ERROR "Expected one package version in ${_moq_manifest}, found ${_moq_version_count}")
+  file(STRINGS "${MOQ_LOCAL}/cpp/moq/VERSION" _moq_link_version LIMIT_COUNT 1)
+  if(NOT _moq_link_version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "Unsupported version '${_moq_link_version}' in ${MOQ_LOCAL}/cpp/moq/VERSION")
   endif()
-  list(GET _moq_version_lines 0 _moq_version_line)
-  string(REGEX REPLACE "^version = \"([^\"]+)\"$" "\\1" _moq_link_version "${_moq_version_line}")
 else()
   if(NOT MOQ_VERSION)
-    message(FATAL_ERROR "MOQ_VERSION is required when MOQ_LOCAL does not contain rs/libmoq")
+    message(FATAL_ERROR "MOQ_VERSION is required when MOQ_LOCAL does not contain cpp/moq")
   endif()
   set(_moq_link_version "${MOQ_VERSION}")
 endif()
@@ -67,36 +63,20 @@ endif()
 target_link_libraries(obs-moq PRIVATE OBS::libobs)
 
 if(_moq_local_build)
-  add_subdirectory("${MOQ_LOCAL}/rs/libmoq" moq)
-  target_link_libraries(obs-moq PRIVATE moq)
+  add_subdirectory("${MOQ_LOCAL}/cpp/moq" moq-cpp)
 else()
   include(FetchContent)
   FetchContent_Declare(
-    moq
+    moq-cpp
     URL
-      https://github.com/moq-dev/moq/releases/download/libmoq-v${_moq_link_version}/moq-${_moq_link_version}-${MOQ_TARGET}.${MOQ_ARCHIVE}
+      https://github.com/moq-dev/moq/releases/download/cpp-v${_moq_link_version}/moq-cpp-${_moq_link_version}-${MOQ_TARGET}.${MOQ_ARCHIVE}
   )
-  FetchContent_MakeAvailable(moq)
+  FetchContent_MakeAvailable(moq-cpp)
 
-  find_package(moq REQUIRED PATHS ${moq_SOURCE_DIR} NO_DEFAULT_PATH)
-  target_link_libraries(obs-moq PRIVATE moq::moq)
+  find_package(moq-cpp REQUIRED PATHS ${moq-cpp_SOURCE_DIR} NO_DEFAULT_PATH)
 endif()
-
-# libmoq is a Rust static library; its std runtime pulls in symbols from Windows
-# system libraries (e.g. NtCreateNamedPipeFile from ntdll) that MSVC does not
-# auto-resolve when the archive is linked into this module. These are the OS
-# import libraries reported by `rustc --print native-static-libs` that aren't
-# linked by default; they resolve by name from the Windows SDK (no hard-coded
-# paths). The libmoq package config also declares these, but linking them here
-# keeps the plugin buildable against any libmoq (local dev tree or prebuilt
-# release) whose config may predate that declaration. Duplicate links are
-# harmless.
-if(WIN32)
-  target_link_libraries(
-    obs-moq
-    PRIVATE ntdll userenv ws2_32 dbghelp bcrypt
-  )
-endif()
+# The package carries the system libraries its Rust staticlib needs, on every platform.
+target_link_libraries(obs-moq PRIVATE moq-cpp::moq)
 
 # The obs-deps Qt6 build references the AGL framework transitively (via
 # WrapOpenGL), but recent macOS SDKs ship no linkable AGL binary -- it exists
@@ -150,6 +130,8 @@ target_sources(
   obs-moq
   PRIVATE
     src/obs-moq.cpp
+    src/moq-describe.h
+    src/moq-worker.h
     src/moq-output.h
     src/moq-service.h
     src/moq-output.cpp

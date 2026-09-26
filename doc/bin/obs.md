@@ -28,12 +28,12 @@ OBS Studio install.
   frames internally. Keyframe join delay and viewer buffering are separate.
   Custom profiles offer Auto, Quality, or Performance, with hardware/software,
   video codec, encoder, and audio codec choices.
-  **Stats** shows the active encoding, negotiated draft, dial scheme, and one
-  minute of RTT, estimated send/receive bandwidth, packet loss, and bytes sent.
-  **About** lists plugin and libmoq versions, documentation links, and available
+  **Stats** shows the active encoding, dial scheme, and one minute of RTT,
+  estimated send/receive bandwidth, packet loss, and bytes sent.
+  **About** lists plugin and moq-cpp versions, documentation links, and available
   video encoders.
 
-OBS reports each locally encoded packet's handoff to libmoq against the shared
+OBS reports each locally encoded packet's handoff to MoQ against the shared
 broadcast media clock. Each track's catalog `jitter` is the largest measured
 delay above that track's own recent minimum, rounded up to milliseconds.
 
@@ -71,18 +71,18 @@ just obs build
 ```
 
 macOS and Windows source builds use `just obs setup && just obs build` with
-Xcode or Visual Studio 2022; see
+Xcode or Visual Studio 2022, plus Rust and
+[`uniffi-bindgen-cpp`](/lib/cpp/) to build the C++ package in-tree; see
 [`cpp/obs/`](https://github.com/moq-dev/moq/tree/main/cpp/obs).
 
 ## Advanced settings
 
 Off by default; the defaults suit a normal relay. When enabled they cover the
-things you'd otherwise pass to `moq` on the command line: pinning a protocol
-draft or QUIC backend, trusting a self-signed relay by fingerprint or a
-private CA, an SNI override, reconnect pacing, congestion control (delay-based
-BBR or loss-based CUBIC), stream limits and timeouts, qlog traces for
-diagnosing stalls, and the WebSocket fallback race. A rejected value stops the
-stream with the reason in the log rather than silently using a default.
+things you'd otherwise pass to `moq` on the command line: the local bind
+address, trusting a self-signed relay by fingerprint or a private CA, reconnect
+pacing, the QUIC stream limit, and the WebSocket fallback race. A rejected
+value stops the stream with the reason in the log rather than silently using a
+default.
 
-The plugin is C++ over [libmoq](/lib/c/)'s C ABI and ships with every libmoq
-release.
+The plugin is C++ over the [generated C++ bindings](/lib/cpp/) and ships with
+every moq-cpp release.
