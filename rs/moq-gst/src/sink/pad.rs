@@ -51,16 +51,25 @@ struct Media {
 	encoder: bool,
 	/// Apply a timeline break before the next valid frame, using the normal write error path.
 	discontinuity: bool,
+	/// A video break closed the group, and a pause resumes mid-GOP, so deltas drop until a keyframe
+	/// opens the next one.
+	keyframe: bool,
 }
 
 impl Media {
-	/// Publish one frame at `micros` on the media clock, handed over at `now`.
-	fn write(&mut self, data: &Bytes, micros: u64, now: Instant) -> Result<()> {
+	/// Publish one frame at `micros` on the media clock, handed over at `now`. Returns false when a
+	/// delta frame is dropped while waiting for the keyframe after a break.
+	fn write(&mut self, data: &Bytes, micros: u64, now: Instant) -> Result<bool> {
 		if std::mem::take(&mut self.discontinuity) {
 			self.track.discontinuity()?;
+			self.keyframe = !self.audio;
 		}
 		let ts = hang::container::Timestamp::from_micros(micros).ok();
-		self.track.decode(data, ts)?;
+		match self.track.decode(data, ts) {
+			Err(moq_mux::Error::MissingKeyframe(_)) if self.keyframe => return Ok(false),
+			result => result?,
+		}
+		self.keyframe = false;
 		// One group (one QUIC stream) per audio packet, so the relay forwards it without waiting for
 		// the next.
 		if self.audio {
@@ -71,7 +80,7 @@ impl Media {
 			let ts = ts.context("encoder frame timestamp out of range")?;
 			self.track.flush(ts, now)?;
 		}
-		Ok(())
+		Ok(true)
 	}
 }
 
@@ -474,6 +483,7 @@ impl Pad {
 			audio,
 			encoder,
 			discontinuity: false,
+			keyframe: false,
 		})));
 		self.caps = Some(caps.clone());
 		Ok(name)
@@ -693,7 +703,13 @@ impl Pad {
 		match timestamp {
 			Ok(micros) => {
 				let result: Result<()> = match self.track.as_mut().expect("track present") {
-					Sink::Media(media) => media.write(&data, micros, now),
+					Sink::Media(media) => match media.write(&data, micros, now) {
+						Ok(false) => {
+							gst::debug!(CAT, "dropping delta frame until the keyframe after a break");
+							return Ok(PushOutcome::Dropped);
+						}
+						result => result.map(|_| ()),
+					},
 					Sink::Text(text) => match std::str::from_utf8(&data) {
 						// A cue with no duration would never be dismissed, so drop it rather than pin it
 						// on screen; the demuxer supplies one for every real subtitle sample.
@@ -1716,6 +1732,30 @@ mod tests {
 				"boundary={boundary}"
 			);
 		}
+	}
+
+	// A pause resumes mid-GOP: the break closed the group, so deltas drop until the next keyframe
+	// instead of invalidating the pad.
+	#[test]
+	fn video_pause_drops_deltas_until_the_next_keyframe() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("video")));
+		pad.observe_segment(time_segment());
+		let delta = Bytes::from_static(&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]);
+		let now = Instant::now();
+		let push = |pad: &mut Pad, data: Bytes, pts: u64| {
+			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
+				.unwrap()
+		};
+		assert_eq!(push(&mut pad, h264_keyframe_au(), 0), PushOutcome::Published);
+		assert_eq!(push(&mut pad, delta.clone(), 33), PushOutcome::Published);
+		pad.discontinuity();
+		assert_eq!(push(&mut pad, delta.clone(), 66), PushOutcome::Dropped);
+		assert_eq!(push(&mut pad, delta.clone(), 100), PushOutcome::Dropped);
+		assert_eq!(push(&mut pad, h264_keyframe_au(), 133), PushOutcome::Published);
+		assert_eq!(push(&mut pad, delta, 166), PushOutcome::Published);
 	}
 
 	// Text and opaque tracks carry no codec jitter, so asking them to measure one is a mistake to report
