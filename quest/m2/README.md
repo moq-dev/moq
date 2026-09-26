@@ -53,7 +53,6 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Compressed tracks](/quest/m2/flate/README.md) - any track compresses per group from every language, not only the JSON modes
 - [Binary delta stats](/quest/m2/stats-delta.md) - an on-demand varint delta flavor of every stats track, if relay encode CPU still matters after the JSON fixes
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
-- [Plan: routing without a hop list](/quest/m2/plan-routing-origin.md) - whether announcements can drop the hop list and stay loop-free once stitching keys on the subscribe reply
 - [Redundant ingest](/quest/m2/redundant-ingest.md) - decide whether two publishers sharing one epoch may splice, and who declares the incumbent dead before the keep-alive does
 - [Multipath spike](/quest/m2/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends
 - [Receive timestamps](/quest/m2/quic-receive-ts.md) - per-packet arrival times in ACKs, the feedback GCC and deadlines need

@@ -64,7 +64,7 @@ the requester's excluded hop, ordered by `route_order`
 (`rs/moq-net/src/model/origin.rs:633`), served on demand by the session that
 announced it and cached per prefix in `ServeState.served` (`:764`). That is the split-horizon-safe
 lookup the old `origin::Dynamic` could not provide, and it is what
-[Resolve](/quest/m1/wildcard/resolve.md) now extends rather than replaces.
+[Resolve](/quest/m0/wildcard/resolve.md) now extends rather than replaces.
 
 Request resolution, by contrast, is still prefix-only (`best_server` in
 `rs/moq-net/src/model/origin.rs`). The pattern matcher itself exists:
@@ -154,7 +154,7 @@ field.
   composer waiting for an announcement that only demand would produce. The
   browser player currently enforces the opposite (`js/watch`'s
   `#isPathAnnounced` hides a catalog rendition with no exact-path
-  announcement); [Demand](/quest/m1/wildcard/demand.md) makes a covering wildcard count as
+  announcement); [Demand](/quest/m0/wildcard/demand.md) makes a covering wildcard count as
   availability there.
 - **Refusal is a typed stream reset, with no negative cache.** An advertiser
   resets a subscribe it will not serve, and the reset carries which KIND of
@@ -258,9 +258,9 @@ than announce state.
 
 ## Quests
 
-- [Resolve](/quest/m1/wildcard/resolve.md) - a relay resolves a subscribe or
+- [Resolve](/quest/m0/wildcard/resolve.md) - a relay resolves a subscribe or
   FETCH for an unannounced path against the best matching wildcard
-- [Demand](/quest/m1/wildcard/demand.md) - the browser player subscribes to a
+- [Demand](/quest/m0/wildcard/demand.md) - the browser player subscribes to a
   catalog-referenced broadcast a wildcard covers, breaking the lazy-rendition
   deadlock
 

@@ -42,7 +42,7 @@ Decided:
   prefix route. Document this rather than promise it works.
 - Derived output lives under the epoch it came from
   (`pid/foo.hang/@e/transcode.pro`), so nested epochs must parse. This moves
-  the [wildcard](/quest/m1/wildcard/README.md) line's derived-output example
+  the [wildcard](/quest/m0/wildcard/README.md) line's derived-output example
   down one segment, and its suffix patterns still match.
 
 This README owns:
