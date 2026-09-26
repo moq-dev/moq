@@ -14,16 +14,27 @@ fn produce_origin(hop: Hop) -> origin::Producer {
 	producer
 }
 
-/// Versions whose wire says where the initial set ends: ANNOUNCE_INIT or
-/// ANNOUNCE_OK's count.
-const COUNTED: &[&str] = &["moq-lite-01", "moq-lite-02", "moq-lite-05", "moq-lite-06"];
+/// Versions whose wire says where the initial set ends: ANNOUNCE_INIT, ANNOUNCE_OK's
+/// count, or REQUEST_OK's (MoQ Namespace Count, negotiated from draft-16).
+const COUNTED: &[&str] = &[
+	"moq-lite-01",
+	"moq-lite-02",
+	"moq-lite-05",
+	"moq-lite-06",
+	"moq-transport-16",
+	"moq-transport-19",
+];
 
 /// Versions that land the initial set once the stream goes quiet instead.
-const QUIET: &[&str] = &["moq-lite-03", "moq-lite-04", "moq-transport-14", "moq-transport-19"];
+const QUIET: &[&str] = &["moq-lite-03", "moq-lite-04", "moq-transport-14", "moq-transport-15"];
+
+/// The shortest a quiet stream can take to land: the gap after its last announcement.
+const QUIET_GAP: Duration = Duration::from_millis(30);
 
 /// Connect a subscriber to a peer publishing `paths`, then read its cursor up to
-/// the marker, returning the paths delivered before it.
-async fn caught_up(version: &str, paths: &[&str]) -> Vec<String> {
+/// the marker, returning the paths delivered before it and how long the marker took
+/// after the session was up.
+async fn caught_up(version: &str, paths: &[&str]) -> (Vec<String>, Duration) {
 	let version: Version = version.parse().unwrap();
 	let published = produce_origin(Hop::new(1).unwrap());
 	let broadcasts: Vec<_> = paths
@@ -40,6 +51,7 @@ async fn caught_up(version: &str, paths: &[&str]) -> Vec<String> {
 	options.server_publish = Some(published.consume());
 	options.client_subscribe = Some(subscribed.clone());
 	let _pair = connect_mock(options).await;
+	let start = tokio::time::Instant::now();
 
 	let mut announced = subscribed.consume().announced();
 	let mut live = Vec::new();
@@ -56,21 +68,37 @@ async fn caught_up(version: &str, paths: &[&str]) -> Vec<String> {
 		.await
 		.unwrap_or_else(|_| panic!("{version}: never caught up"));
 
+	let elapsed = start.elapsed();
+
 	drop(broadcasts);
 	live.sort();
-	live
+	(live, elapsed)
 }
 
-#[tokio::test]
+// Paused, so time only moves when every task waits on a timer: a counted set lands
+// without one, and a quiet one has to wait out the gap.
+#[tokio::test(start_paused = true)]
 async fn the_marker_follows_the_whole_initial_set() {
 	for version in COUNTED.iter().chain(QUIET) {
-		assert_eq!(caught_up(version, &["a", "b", "c"]).await, ["a", "b", "c"], "{version}");
+		let (live, elapsed) = caught_up(version, &["a", "b", "c"]).await;
+		assert_eq!(live, ["a", "b", "c"], "{version}");
+		assert_eq!(
+			QUIET.contains(version),
+			elapsed >= QUIET_GAP,
+			"{version}: took {elapsed:?}"
+		);
 	}
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_empty_peer_is_caught_up() {
 	for version in COUNTED.iter().chain(QUIET) {
-		assert!(caught_up(version, &[]).await.is_empty(), "{version}");
+		let (live, elapsed) = caught_up(version, &[]).await;
+		assert!(live.is_empty(), "{version}");
+		assert_eq!(
+			QUIET.contains(version),
+			elapsed >= QUIET_GAP,
+			"{version}: took {elapsed:?}"
+		);
 	}
 }

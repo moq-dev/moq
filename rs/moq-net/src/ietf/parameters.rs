@@ -28,6 +28,8 @@ pub enum ParameterVarInt {
 	Solicit = super::solicit::SOLICIT,
 	/// HIDDEN, from the MoQ Hidden extension.
 	Hidden = super::hidden::HIDDEN,
+	/// NAMESPACE_COUNT, from the MoQ Namespace Count extension.
+	NamespaceCount = super::namespace_count::NAMESPACE_COUNT,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }

@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 
 use super::Message;
+use super::namespace_count::NAMESPACE_COUNT_PARAM;
 
 use super::Version;
 
@@ -85,6 +86,9 @@ impl Message for RequestsBlocked {
 #[derive(Clone, Debug)]
 pub struct RequestOk {
 	pub request_id: Option<RequestId>,
+	/// MoQ Namespace Count: how many NAMESPACE messages immediately follow, when this
+	/// answers a SUBSCRIBE_NAMESPACE on a session that negotiated the extension.
+	pub namespace_count: Option<u64>,
 }
 
 impl Message for RequestOk {
@@ -98,7 +102,7 @@ impl Message for RequestOk {
 		} else {
 			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
 		}
-		encode_params!(w, version,);
+		encode_params!(w, version, NAMESPACE_COUNT_PARAM => self.namespace_count);
 		Ok(())
 	}
 
@@ -111,8 +115,12 @@ impl Message for RequestOk {
 		// A REQUEST_UPDATE_OK may refresh EXPIRES, which is ignored like SUBSCRIBE_OK's.
 		decode_params!(r, version,
 			0x08 => _expires: Option<u64>,
+			NAMESPACE_COUNT_PARAM => namespace_count: Option<u64>,
 		);
-		Ok(Self { request_id })
+		Ok(Self {
+			request_id,
+			namespace_count,
+		})
 	}
 }
 
@@ -188,6 +196,7 @@ mod tests {
 	fn test_request_ok_round_trip() {
 		let msg = RequestOk {
 			request_id: Some(RequestId(42)),
+			namespace_count: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -203,6 +212,20 @@ mod tests {
 
 		let decoded: RequestOk = decode_message(&bytes, Version::Draft16).unwrap();
 		assert_eq!(decoded.request_id, Some(RequestId(7)));
+	}
+
+	#[test]
+	fn test_request_ok_namespace_count_round_trips() {
+		for (version, request_id) in [(Version::Draft16, Some(RequestId(3))), (Version::Draft22, None)] {
+			for count in [None, Some(0), Some(7)] {
+				let msg = RequestOk {
+					request_id,
+					namespace_count: count,
+				};
+				let decoded: RequestOk = decode_message(&encode_message(&msg, version), version).unwrap();
+				assert_eq!(decoded.namespace_count, count, "{version:?}");
+			}
+		}
 	}
 
 	#[test]
@@ -243,7 +266,10 @@ mod tests {
 
 	#[test]
 	fn test_request_ok_v17_round_trip() {
-		let msg = RequestOk { request_id: None };
+		let msg = RequestOk {
+			request_id: None,
+			namespace_count: None,
+		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
 		let decoded: RequestOk = decode_message(&encoded, Version::Draft17).unwrap();
@@ -271,7 +297,10 @@ mod tests {
 
 	#[test]
 	fn test_request_ok_v18_round_trip() {
-		let msg = RequestOk { request_id: None };
+		let msg = RequestOk {
+			request_id: None,
+			namespace_count: None,
+		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
 		let decoded: RequestOk = decode_message(&encoded, Version::Draft18).unwrap();
@@ -283,7 +312,10 @@ mod tests {
 	/// treated as Draft14-16 and panic in the encoder.
 	#[test]
 	fn test_request_ok_v18_wire_matches_v17() {
-		let msg = RequestOk { request_id: None };
+		let msg = RequestOk {
+			request_id: None,
+			namespace_count: None,
+		};
 		let v17 = encode_message(&msg, Version::Draft17);
 		let v18 = encode_message(&msg, Version::Draft18);
 		assert_eq!(v17, v18);

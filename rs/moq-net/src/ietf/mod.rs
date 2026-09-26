@@ -18,6 +18,7 @@ pub mod hidden;
 mod location;
 pub mod message;
 mod namespace;
+pub mod namespace_count;
 pub mod peer;
 mod priority;
 mod properties;

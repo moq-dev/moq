@@ -24,4 +24,4 @@ origin's scope. No new page.
 ## Related
 
 - [JS caught up](/quest/m1/js-announce-caught-up.md) - when the replay of those prefixes has landed
-- [IETF announce count](/quest/m1/ietf-announce-count.md) - how an IETF consumer knows that replay is finished
+- [JS IETF announce count](/quest/m1/js-ietf-announce-count.md) - how an IETF consumer knows that replay is finished
