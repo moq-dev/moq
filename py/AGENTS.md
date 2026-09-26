@@ -1,4 +1,4 @@
-The `/py` uv workspace. Extends the root `CLAUDE.md` and `rs/moq-ffi/CLAUDE.md`.
+The `/py` uv workspace. Extends the root `AGENTS.md` and `rs/moq-ffi/AGENTS.md`.
 
 # Packages
 

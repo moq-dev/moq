@@ -39,7 +39,7 @@ class FakeSession {
 		});
 	}
 
-	announced(): Announce.Consumer {
+	announced(_scope?: Path.Pattern, _options?: Announce.Options): Announce.Consumer {
 		return this.announces.consume();
 	}
 
@@ -186,5 +186,100 @@ test("a request replaced across one coalesced wakeup still gets answered", async
 	expect(session.consumes(path)).toBe(2);
 
 	second.close();
+	origin.close();
+});
+
+test("scoped origins subscribe to disjoint literal heads with hidden routes", () => {
+	const origin = new OriginProducer().scope(
+		Path.empty(),
+		new Path.Patterns(["room/*/chat", "room/nested/**", "other/**"].map(Path.Pattern.parse)),
+	);
+	const session = new FakeSession();
+	const interests: { scope: string | undefined; hidden: boolean | undefined }[] = [];
+	session.announced = (scope?: Path.Pattern, options?: Announce.Options) => {
+		interests.push({ scope: scope?.text, hidden: options?.hidden });
+		return session.announces.consume();
+	};
+	forwardAnnounced(session.session, origin);
+	expect(interests).toEqual([
+		{ scope: "other/**", hidden: true },
+		{ scope: "room/**", hidden: true },
+	]);
+	session.die();
+	origin.close();
+});
+
+test("an unscoped origin retains its subscription to every namespace", () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	const interests: string[] = [];
+	session.announced = (scope?: Path.Pattern) => {
+		interests.push(scope?.text ?? "**");
+		return session.announces.consume();
+	};
+	forwardAnnounced(session.session, origin);
+	expect(interests).toEqual(["**"]);
+	session.die();
+	origin.close();
+});
+
+test("a scoped session filters announcements and blind requests under its root", async () => {
+	const origin = new OriginProducer();
+	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
+	const session = new FakeSession();
+	forwardAnnounced(session.session, scoped);
+	for (const prefix of ["room/alice/video", "room/alice/chat"]) {
+		session.announces.append({
+			prefix: Path.from(prefix),
+			captures: undefined,
+			kind: "announced",
+			route: Route.default,
+		});
+	}
+	const allowed = origin.request(Path.from("tenant/room/bob/chat"));
+	const denied = origin.request(Path.from("tenant/room/bob/video"));
+	await settle();
+	expect([...origin.broadcasts().peek().keys()]).toEqual([Path.from("tenant/room/alice/chat")]);
+	expect(session.consumes(Path.from("room/bob/chat"))).toBe(1);
+	expect(session.consumes(Path.from("room/bob/video"))).toBe(0);
+	const routed = origin.request(Path.from("tenant/room/alice/chat"));
+	await settle();
+	expect(session.consumes(Path.from("room/alice/chat"))).toBe(1);
+	expect(routed.active.peek()).toBeDefined();
+	allowed.close();
+	denied.close();
+	routed.close();
+	session.die();
+	origin.close();
+});
+
+test("one failed scoped interest leaves the other routes live until the session ends", async () => {
+	const origin = new OriginProducer().scope(
+		Path.empty(),
+		new Path.Patterns(["a/**", "b/**"].map(Path.Pattern.parse)),
+	);
+	const session = new FakeSession();
+	const sources = new Map<string, Announce.Producer>();
+	session.announced = (scope?: Path.Pattern) => {
+		const producer = new Announce.Producer();
+		sources.set(scope?.text ?? "**", producer);
+		return producer.consume();
+	};
+	forwardAnnounced(session.session, origin);
+	for (const name of ["a", "b"]) {
+		sources
+			.get(`${name}/**`)
+			?.append({ prefix: Path.from(name), captures: undefined, kind: "announced", route: Route.default });
+	}
+	await settle();
+	expect(origin.broadcasts().peek().size).toBe(2);
+	sources.get("a/**")?.close(new Error("namespace rejected"));
+	await settle();
+	expect([...origin.broadcasts().peek().keys()]).toEqual([Path.from("b")]);
+	expect(origin.discovery.peek()).toBe(false);
+	session.die();
+	await settle();
+	expect(origin.broadcasts().peek().size).toBe(0);
+	expect(origin.discovery.peek()).toBeUndefined();
 	origin.close();
 });
