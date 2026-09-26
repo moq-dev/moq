@@ -1,62 +1,47 @@
-//! Timeline publish/subscribe: the broadcast's segment index HLS/DASH export is built from.
+//! Per-track timelines: each track's index of spans, which HLS/DASH export and recordings use.
 //!
-//! A broadcast has one timeline track, carrying one [`hang::timeline::Record`] per *segment*:
-//! a span of content time shared by every media track, mapped to the group ranges that carry
-//! it on each track. A consumer can answer "which groups cover segment N on track X" and
-//! "where is the live edge" from a few bytes per segment without subscribing to media, which
-//! is the primitive a playlist server (HLS/DASH), a seek bar, or a recorder index needs.
+//! Every indexed track gets its own timeline track carrying one [`hang::timeline::Record`] per
+//! *span*: a run of the track's frames mapped to their content time. A consumer can answer "which
+//! groups cover time T on track X" and "where is the live edge" from a few bytes per span
+//! without subscribing to media, which is the primitive a playlist server (HLS/DASH), a seek bar,
+//! or a recorder index needs.
 //!
-//! ## Facts up, policy down
+//! ## Cutting
 //!
-//! The write side splits into facts, policy, and publication:
+//! Tracks cut independently; nothing waits for another track.
 //!
-//! - **Tracks report facts.** Each media track enrolls via [`Producer::pacing_track`], and its
-//!   [`Recorder`] reports every group open (sequence, timestamp, keyframe) plus where its
-//!   content ends. A container import never decides where segments fall; it only states what
-//!   it published.
-//! - **The timeline sets policy.** A segment ends at the first group boundary that gives it at
-//!   least [`Config::duration_min`] on every enrolled pacing track (see [`Config`] for the exact
-//!   rule). An application that knows its own boundaries overrides that with [`Producer::cut`].
-//! - **Pacing is explicit.** [`Producer::track`] safely enrolls a catalog or metadata track
-//!   without giving it control over segmentation. Continuous media opts in through
-//!   [`Producer::pacing_track`], which lets it vote on boundaries and gate completeness.
-//! - **Records close on completeness.** A segment's record is ready only once every
-//!   enrolled pacing track has reported a group at or past the segment's end (or closed), proving
-//!   the segment's group ranges are final on every track that paces. The record is then
-//!   self-contained. [`Producer::reserve`] extends that across a batch
-//!   of enrollments, the way the catalog's own reservation does.
-//! - **Publication is a commit.** [`Deferred`] yields complete records without publishing them.
-//!   A recorder can first persist the media groups they name, then pass the [`Pending`] handle to
-//!   [`Producer::push`] to make the record visible. The convenience methods on [`Producer`] commit
-//!   immediately for live publishers that need no asynchronous work between those steps.
-//!
-//! Alignment falls out of construction: every track maps its groups onto the same boundary
-//! list, so segment N covers the same span of content time on every track, which is what HLS
-//! requires of switchable renditions.
+//! - A record closes at the first group start at least [`Config::duration_min`] past its own start,
+//!   so short groups (audio) pack into one record and long ones (video GOPs) get one each.
+//! - With a zero minimum every group is its own record, closed as soon as the group finishes. That
+//!   suits a sparse track such as a catalog, which may not publish again for the rest of the
+//!   broadcast.
+//! - A group still open [`Config::duration_max`] past the record's start is split at the next
+//!   reported frame, so an append-only group that never closes is still indexed as it grows.
+//! - A skipped group sequence always closes the record, so a record's groups are contiguous.
+//! - [`Segmenter::cut`] adds an application boundary, such as a video keyframe cutting audio so a
+//!   derived segment needs fewer objects. The first cut takes over from minimum-duration pacing.
 //!
 //! ## Wiring
 //!
-//! [`catalog::Producer`](crate::catalog::Producer) owns the broadcast's timeline (the catalog
-//! is what owns the broadcast's shape) and wires all of this up:
-//! The catalog's role-specific track constructors enroll the track, which
-//! creates the timeline track on first use and advertises it in the catalog's root
-//! [`hang::catalog::Archive`] entry. A broadcast that never enrolls a track publishes no
-//! timeline at all: segmentation is opt-in per broadcast, never per track.
+//! [`catalog::Producer`](crate::catalog::Producer) owns the broadcast's [`Timelines`] and advertises
+//! them in the catalog's root [`hang::catalog::Archive`] entry. Its role-specific track
+//! constructors enroll each media track, and the catalog enrolls itself as a sparse track.
 //!
-//! On the read side, [`Consumer::subscribe`] reads the timeline straight from the catalog's
-//! [`hang::catalog::Archive`] entry (so the track name and timescale can't be mismatched)
-//! and yields decoded [`Event`]s. On the wire the track is a DEFLATE-compressed
-//! [`moq_json::window`], so a DVR can trim old records while an unbounded timeline simply never
-//! pops them (see [`hang::timeline`] for the record schema).
+//! A [`Segmenter`] builds records from a track's frame reports without publishing them, and a
+//! [`Producer`] publishes records onto a timeline track. A [`Recorder`] pairs the two for live
+//! publishing; a recording writer drives them separately so it can store the media a record names
+//! before publishing it. On the read side, [`Consumer::subscribe`] reads one track's timeline from
+//! the catalog's [`Archive`] entry and yields decoded [`Event`]s. On the wire each timeline is a
+//! DEFLATE-compressed [`moq_json::window`], so a DVR can trim old records while an unbounded
+//! timeline simply never pops them.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::ops::Deref;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
 use hang::catalog::Archive;
-use hang::timeline::{DEFAULT_NAME, Range, Record, RecordExt};
+use hang::timeline::{Position, Record, RecordExt};
 use moq_json::window::Checkpoint;
 
 use moq_net::{Timescale, Timestamp};
@@ -64,698 +49,326 @@ use moq_net::{Timescale, Timestamp};
 /// The conventional [`Config::duration_min`] (1 second), for callers with no opinion.
 pub const DEFAULT_DURATION_MIN: Duration = Duration::from_secs(1);
 
-/// Recent segment records repeated when the Window track rolls to a new group.
+/// The conventional [`Config::duration_max`] (10 seconds), for callers with no opinion.
+pub const DEFAULT_DURATION_MAX: Duration = Duration::from_secs(10);
+
+/// Recent records repeated when the window track rolls to a new group.
 const CHECKPOINT_RECORDS: usize = 256;
 
-/// How a [`Producer`] paces its segments.
+/// How a track's records are cut.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
-	/// The shortest a segment may be.
+	/// The shortest a record may be before a group start closes it.
 	///
-	/// A segment ends at the first point that is a group boundary on every enrolled track and
-	/// at least this far past the segment's start, so the track with the coarsest groups paces
-	/// the broadcast. A 2 second GOP against a 1 second minimum yields 2 second segments; a
-	/// real-time encoder with a 10 minute GOP yields one 10 minute segment, because there is
-	/// nowhere else a segment could start and stay decodable.
-	///
-	/// A floor rather than a target on purpose: a floor is always satisfiable (wait longer),
-	/// while a ceiling is not (a single group longer than it can't be split).
+	/// A floor rather than a target on purpose: a floor is always satisfiable (wait for the next
+	/// group), so no group is split to honor it. Zero makes every group its own record.
 	pub duration_min: Duration,
 
-	/// The longest a segment may be, advertised in the catalog when set.
+	/// The longest a record may run before a frame inside a group splits it.
 	///
-	/// Set it only when the publisher can actually promise one, i.e. it controls the encoder's
-	/// keyframe cadence. Consumers that need a bound up front use it (an HLS exporter's
-	/// `EXT-X-TARGETDURATION`), so it is a contract rather than a hint: a segment that would
-	/// exceed it fails the timeline instead of publishing a record that contradicts the
-	/// catalog. Leave it `None` when the media decides, which is the common case for real-time
-	/// and for anything importing a source it doesn't control.
-	pub duration_max: Option<Duration>,
+	/// Advertised in the catalog, so a consumer can size an HLS `EXT-X-TARGETDURATION` up front.
+	pub duration_max: Duration,
+}
+
+impl Config {
+	/// Set [`duration_min`](Self::duration_min).
+	pub fn with_duration_min(mut self, duration: Duration) -> Self {
+		self.duration_min = duration;
+		self
+	}
+
+	/// Set [`duration_max`](Self::duration_max).
+	pub fn with_duration_max(mut self, duration: Duration) -> Self {
+		self.duration_max = duration;
+		self
+	}
+
+	/// The catalog section advertising timelines cut by this config, with no timelines yet.
+	pub fn section(&self) -> Archive {
+		let mut section = Archive::new();
+		section.timescale = TIMESCALE.as_u64() as u32;
+		section.duration_max = Some(units(self.duration_max));
+		section
+	}
 }
 
 impl Default for Config {
 	fn default() -> Self {
 		Self {
 			duration_min: DEFAULT_DURATION_MIN,
-			duration_max: None,
+			duration_max: DEFAULT_DURATION_MAX,
 		}
 	}
 }
 
-/// One enrolled track's report state.
-#[derive(Default)]
-struct TrackState {
-	/// Group opens reported and not yet flushed into a record: (sequence, pts, keyframe).
-	pending: VecDeque<(u64, Timestamp, bool)>,
-	/// The newest reported timestamp: everything earlier is known, which is what lets a
-	/// segment ending at or before it flush. Advanced by a group open (the group starts there)
-	/// and by [`Recorder::end`] (the content stops there).
-	frontier: Option<Timestamp>,
-	/// The recorder was dropped; this track no longer paces boundaries or gates completeness.
-	closed: bool,
-	/// Whether this track paces boundaries and gates completeness while open.
-	pacing: bool,
+/// The wire timescale for record `pts`/`duration`: the catalog section's default, milliseconds.
+const TIMESCALE: Timescale = Timescale::MILLI;
+
+/// A duration in wire units, rounded up so a bound never understates itself.
+fn units(duration: Duration) -> u64 {
+	(duration.as_micros() * TIMESCALE.as_u64() as u128).div_ceil(1_000_000) as u64
 }
 
-impl TrackState {
-	/// The first unflushed group starting at or after `threshold` micros: this track's vote for
-	/// where the open segment can end.
-	fn candidate(&self, threshold: u128) -> Option<Timestamp> {
-		self.pending
-			.iter()
-			.map(|&(_, pts, _)| pts)
-			.find(|pts| pts.as_micros() >= threshold)
-	}
+fn wire(pts: Timestamp) -> u64 {
+	pts.as_scale(TIMESCALE) as u64
 }
 
-/// The state one [`Segmenter`] guards.
-struct State {
-	config: Config,
-	/// Complete records waiting for the caller to commit.
-	ready: VecDeque<Record>,
-	/// Deferred records handed to the caller but not yet committed to the visible timeline.
-	committing: BTreeSet<u64>,
-	/// Persisted deferred records waiting for every earlier segment to be persisted too.
-	committed: BTreeMap<u64, Record>,
-	/// Where the open (unflushed) segment starts; `None` until the first report.
-	start: Option<Timestamp>,
-	/// Explicit [`Producer::cut`] boundaries not yet reached, in order.
-	cuts: VecDeque<Timestamp>,
-	/// A [`Producer::cut`] arrived, so the application owns the boundaries from here on and the
-	/// `duration_min` pacing stops. Without this the pacing races ahead of a source whose
-	/// segments are longer than the minimum, closing one before its real boundary is declared.
-	manual: bool,
-	/// The number the next flushed record gets.
-	next_segment: u64,
-	/// Every enrolled track, keyed by media track name.
-	tracks: BTreeMap<String, TrackState>,
-	/// Live [`Reserved`] handles: while any exists, no record flushes (more tracks are still
-	/// enrolling). Mirrors the catalog's own reservation gate.
-	reservers: usize,
-	/// A segment overran [`Config::duration_max`]: `(segment, duration)`. The timeline stops
-	/// publishing, since the catalog's promise is already broken.
-	overrun: Option<(u64, Duration)>,
-	/// The terminal flush ran; surviving clones and recorders can no longer mutate segmentation.
-	finished: bool,
-	/// The owning [`Producer`] stopped auto-publishing ready records.
-	deferred: bool,
-	/// The wire timescale for `pts`/`duration` (the catalog section's default: milliseconds).
-	timescale: Timescale,
+/// The record being built.
+struct Open {
+	start: Position,
+	pts: Timestamp,
+	keyframe: bool,
 }
 
-impl State {
-	/// Return an abandoned deferred record to its segment-ordered ready queue.
-	fn requeue(&mut self, record: Record) {
-		self.committing.remove(&record.segment);
-		let index = self
-			.ready
-			.iter()
-			.position(|ready| ready.segment > record.segment)
-			.unwrap_or(self.ready.len());
-		self.ready.insert(index, record);
-	}
-
-	/// A group open reported by `name`: record the fact and close whatever became complete.
-	fn report(&mut self, name: &str, sequence: u64, pts: Timestamp, keyframe: bool) {
-		if self.finished {
-			return;
-		}
-		let Some(track) = self.tracks.get_mut(name) else {
-			return;
-		};
-		track.pending.push_back((sequence, pts, keyframe));
-		self.advance(name, pts);
-	}
-
-	/// `name`'s content ends at `pts`, without a group opening there. This is what gives the
-	/// final segment an honest duration, since its end is not a boundary anybody cut.
-	fn report_end(&mut self, name: &str, pts: Timestamp) {
-		if self.finished {
-			return;
-		}
-		if self.tracks.contains_key(name) {
-			self.advance(name, pts);
-		}
-	}
-
-	/// Raise `name`'s frontier to `pts`, then close whatever that completed.
-	fn advance(&mut self, name: &str, pts: Timestamp) {
-		if let Some(track) = self.tracks.get_mut(name)
-			&& track.frontier.is_none_or(|f| pts.as_micros() > f.as_micros())
-		{
-			track.frontier = Some(pts);
-		}
-
-		// The first thing a pacing track reports anchors the first segment, so content produced
-		// before any boundary exists belongs to the oldest segment rather than to nowhere. A
-		// non-pacing track must not anchor it: a catalog published while the encoder is still warming
-		// up would otherwise stretch segment 0 across the whole startup gap.
-		if self.start.is_none() && self.tracks.get(name).is_some_and(|t| t.pacing) {
-			self.start = Some(pts);
-		}
-
-		self.pump(false);
-	}
-
-	/// A track's recorder was dropped: stop gating completeness on it.
-	fn close(&mut self, name: &str) {
-		if self.finished {
-			return;
-		}
-		if let Some(track) = self.tracks.get_mut(name) {
-			track.closed = true;
-		}
-		self.pump(false);
-	}
-
-	/// Close every segment the media has finalized.
-	///
-	/// `finished` is the terminal pass: no track will report again, so a track that never
-	/// reached a boundary stops voting instead of holding the timeline open forever.
-	fn pump(&mut self, finished: bool) {
-		// With nothing enrolled there is nothing to describe. A record is immutable once
-		// published, so a caller that knows more tracks are still enrolling withholds it (see
-		// [`Producer::reserve`]), and an overrun has already broken the catalog's promise.
-		if self.finished || self.tracks.is_empty() || self.reservers > 0 || self.overrun.is_some() {
-			return;
-		}
-
-		while self.close_segment(finished) {
-			// A segment that broke the declared maximum ends the timeline; every later record
-			// would inherit the same broken promise.
-			if self.overrun.is_some() {
-				break;
-			}
-		}
-	}
-
-	/// Close the open segment if the media has finalized it, returning whether it did.
-	fn close_segment(&mut self, finished: bool) -> bool {
-		let Some(start) = self.start else {
-			return false;
-		};
-
-		// Discard boundaries the timeline has already reached. Only the front is ever consulted,
-		// so leaving a spent one there would block every later cut behind it and silently drop
-		// the caller back to `duration_min` pacing.
-		while self.cuts.front().is_some_and(|c| c.as_micros() <= start.as_micros()) {
-			self.cuts.pop_front();
-		}
-
-		let Some((end, cut)) = self.boundary(start, finished) else {
-			return false;
-		};
-
-		// Every open pacing track has to have reported at or past the boundary, proving its ranges
-		// for this segment are final. The track that voted for `end` has by construction; a track
-		// with shorter groups can still be behind it. A non-pacing track is excluded: it may publish
-		// rarely or never again, so waiting on it would stall the timeline for good.
-		let complete = finished
-			|| self
-				.tracks
-				.values()
-				.all(|t| !t.pacing || t.closed || t.frontier.is_some_and(|f| f.as_micros() >= end.as_micros()));
-		if !complete {
-			return false;
-		}
-
-		self.flush_segment(start, Some(end));
-		if cut {
-			self.cuts.pop_front();
-		}
-		self.start = Some(end);
-		true
-	}
-
-	/// Where the segment starting at `start` ends, once the media says so: an explicit cut when
-	/// one is registered, otherwise the first group boundary shared by every track that gives
-	/// the segment its minimum duration. The bool reports which.
-	fn boundary(&self, start: Timestamp, finished: bool) -> Option<(Timestamp, bool)> {
-		if let Some(&cut) = self.cuts.front()
-			&& cut.as_micros() > start.as_micros()
-		{
-			return Some((cut, true));
-		}
-
-		// The application declared a boundary at some point, so it owns them all: pacing here
-		// would close a segment the caller is about to cut somewhere else.
-		if self.manual {
-			return None;
-		}
-
-		let threshold = start.as_micros() + self.config.duration_min.as_micros();
-
-		let mut end: Option<Timestamp> = None;
-		for track in self.tracks.values().filter(|t| t.pacing) {
-			match track.candidate(threshold) {
-				// The latest vote wins: it is a group boundary on the coarsest track, and every
-				// finer track assigns its groups by start, so no group is split. A closed track
-				// still votes: it can't report more, but the groups it did report are boundaries
-				// like any other, and without them a backlog would collapse into one segment.
-				Some(pts) => {
-					if end.is_none_or(|e| pts.as_micros() > e.as_micros()) {
-						end = Some(pts);
-					}
-				}
-				// This track has produced nothing past the minimum yet, so ending the segment
-				// would strand it. A closed track never will, and neither does anything on the
-				// terminal pass, so neither one blocks.
-				None if finished || track.closed => continue,
-				None => return None,
-			}
-		}
-
-		end.map(|end| (end, false))
-	}
-
-	/// Build the record for the segment starting at `start`: drain every track's groups before
-	/// `end` (all of them for the final, unbounded segment) into ranges.
-	fn flush_segment(&mut self, start: Timestamp, end: Option<Timestamp>) {
-		let pts = start.as_scale(self.timescale) as u64;
-		let duration = match end {
-			Some(end) => (end.as_scale(self.timescale) as u64).saturating_sub(pts),
-			// The final segment has no end boundary, so it runs to the newest thing any track
-			// reported: its end of content when the track reported one (a finished
-			// `container::Producer` does), otherwise the last group it opened, which
-			// undercounts that group's tail.
-			None => self
-				.tracks
-				.values()
-				.filter(|t| t.pacing)
-				.filter_map(|t| t.frontier)
-				.map(|f| f.as_scale(self.timescale) as u64)
-				.max()
-				.unwrap_or(pts)
-				.saturating_sub(pts),
-		};
-
-		// The catalog promised a bound and this segment breaks it, so the record would
-		// contradict what consumers were told. Fail the timeline rather than publish it: a
-		// declared maximum the media can't honor is a bug in the publisher, and nothing a
-		// consumer reading the catalog can work around.
-		if let Some(max) = self.config.duration_max
-			&& duration > self.units(max)
-		{
-			let observed = Duration::from_nanos(duration * (1_000_000_000 / self.timescale.as_u64()));
-			tracing::error!(
-				segment = self.next_segment,
-				duration = ?observed,
-				duration_max = ?max,
-				"segment exceeded the declared duration_max; dropping the timeline track"
-			);
-			self.overrun = Some((self.next_segment, observed));
-			return;
-		}
-
-		let mut record = Record::new(self.next_segment, pts, duration);
-		self.next_segment += 1;
-
-		for (name, track) in &mut self.tracks {
-			let mut ranges: Vec<Range> = Vec::new();
-			while let Some(&(sequence, group_pts, keyframe)) = track.pending.front() {
-				// A pacing track is assigned by content time. A non-pacing track is assigned by
-				// arrival, so every group pending when the segment closes belongs to it regardless
-				// of the timestamp basis carried by that track.
-				if track.pacing && end.is_some_and(|end| group_pts.as_micros() >= end.as_micros()) {
-					break;
-				}
-				track.pending.pop_front();
-				match ranges.last_mut() {
-					// Contiguous sequences extend the run; a skip starts a new range (a gap:
-					// groups that never existed).
-					Some(last) if last.end + 1 == sequence => last.end = sequence,
-					_ => {
-						let mut range = Range::new(sequence, sequence);
-						range.keyframe = keyframe;
-						ranges.push(range);
-					}
-				}
-			}
-			if !ranges.is_empty() {
-				record.tracks.insert(name.clone(), ranges);
-			}
-		}
-
-		self.ready.push_back(record);
-	}
-
-	/// A duration in the wire timescale's units, rounded up so a bound never understates itself.
-	fn units(&self, duration: Duration) -> u64 {
-		(duration.as_micros() * self.timescale.as_u64() as u128).div_ceil(1_000_000) as u64
-	}
-
-	/// The terminal flush: close what the media finalized, then the open tail.
-	fn finish(&mut self) {
-		if self.finished {
-			return;
-		}
-
-		// Nothing more will enroll, so an outstanding reservation has nothing left to wait for.
-		self.reservers = 0;
-		self.pump(true);
-
-		// Skip an empty tail: a boundary with no content after it describes nothing.
-		if self.overrun.is_none()
-			&& let Some(start) = self.start.take()
-			&& self.tracks.values().any(|t| !t.pending.is_empty())
-		{
-			self.flush_segment(start, None);
-		}
-
-		self.finished = true;
-	}
-
-	/// The error a segment overrunning [`Config::duration_max`] left behind, if any.
-	fn failure(&self) -> Option<crate::Error> {
-		let (segment, duration) = self.overrun?;
-		Some(crate::Error::TimelineOverrun {
-			segment,
-			duration,
-			duration_max: self.config.duration_max.unwrap_or_default(),
-		})
-	}
-
-	/// The catalog section advertising this timeline.
-	///
-	/// Carries the track name, timescale, and duration bound. Wall-clock mapping is the
-	/// catalog root clock's job ([`Clock`](crate::Clock)), not this section's.
-	fn section(&self) -> Archive {
-		let mut section = Archive::new(DEFAULT_NAME);
-		section.timescale = self.timescale.as_u64() as u32;
-		section.duration_max = self.config.duration_max.map(|max| self.units(max));
-		section
-	}
-}
-
-/// Builds complete segment records without publishing them.
+/// Builds one track's records from reports of the frames it published.
 ///
-/// Use this directly to build records without a broadcast. An archive writer instead obtains a
-/// cancellation-safe [`Deferred`] from [`Producer::deferred`], stores the groups named by each
-/// [`Pending`] record, and passes that handle to [`Producer::push`]. `Clone` shares the
-/// segmentation state.
-#[derive(Clone)]
+/// Reports arrive in position order: [`frame`](Self::frame) for each frame that may start a record
+/// (every frame, or at least the first of each group), [`finish_group`](Self::finish_group) once a
+/// group can gain no more frames, and [`end`](Self::end) wherever the content is known to stop.
+/// Closed records queue until [`Iterator::next`] takes them.
 pub struct Segmenter {
-	state: Arc<Mutex<State>>,
+	config: Config,
+	/// The number the next closed record gets.
+	sequence: u64,
+	open: Option<Open>,
+	/// The newest reported frame position.
+	last: Option<Position>,
+	/// Whether the group of `last` has finished.
+	finished: bool,
+	/// The newest reported content time in the open record.
+	frontier: Option<Timestamp>,
+	/// Application boundaries not yet reached, in order.
+	cuts: VecDeque<Timestamp>,
+	/// A cut arrived, so the application owns the group boundaries from here on.
+	manual: bool,
+	ready: VecDeque<Record>,
+	closed: bool,
 }
 
 impl Segmenter {
-	/// Create a segmenter paced by `config`.
+	/// A segmenter numbering its records from zero.
 	pub fn new(config: Config) -> Self {
-		// The contents are `Send + Sync` natively; on wasm moq-net's handles are
-		// `Rc`-backed, so clippy sees a pointlessly atomic `Arc`. Keeping one type for
-		// both targets is worth the unused atomics on the single-threaded one.
-		#[allow(clippy::arc_with_non_send_sync)]
 		Self {
-			state: Arc::new(Mutex::new(State {
-				config,
-				ready: VecDeque::new(),
-				committing: BTreeSet::new(),
-				committed: BTreeMap::new(),
-				start: None,
-				cuts: VecDeque::new(),
-				manual: false,
-				next_segment: 0,
-				tracks: BTreeMap::new(),
-				reservers: 0,
-				overrun: None,
-				finished: false,
-				deferred: false,
-				timescale: Timescale::MILLI,
-			})),
+			config,
+			sequence: 0,
+			open: None,
+			last: None,
+			finished: false,
+			frontier: None,
+			cuts: VecDeque::new(),
+			manual: false,
+			ready: VecDeque::new(),
+			closed: false,
 		}
 	}
 
-	/// Enroll `name` without letting it influence segmentation.
-	pub fn track(&self, name: &str) -> Recorder {
-		self.enroll(name, false, None)
+	/// Number the next record `sequence`, continuing a resumed timeline.
+	pub fn with_sequence(mut self, sequence: u64) -> Self {
+		self.sequence = sequence;
+		self
 	}
 
-	/// Enroll `name` as a pacing track.
-	pub fn pacing_track(&self, name: &str) -> Recorder {
-		self.enroll(name, true, None)
+	/// The number the next closed record gets.
+	pub fn sequence(&self) -> u64 {
+		self.sequence
 	}
 
-	fn enroll(&self, name: &str, pacing: bool, output: Option<Arc<Mutex<Output>>>) -> Recorder {
-		let mut state = self.state.lock().unwrap();
-		let output = if state.finished {
-			None
-		} else {
-			state.tracks.insert(
-				name.to_string(),
-				TrackState {
-					pacing,
-					..Default::default()
-				},
-			);
-			output
-		};
-		drop(state);
-
-		Recorder {
-			segmenter: self.clone(),
-			output,
-			name: name.to_string(),
+	/// Report the frame at `position`, presented at `pts`.
+	///
+	/// A report at or before the previous position is ignored: records never overlap.
+	pub fn frame(&mut self, position: Position, pts: Timestamp, keyframe: bool) {
+		if self.closed {
+			return;
 		}
+		if let Some(last) = self.last
+			&& position <= last
+		{
+			tracing::warn!(?position, ?last, "ignoring a timeline report that does not advance");
+			return;
+		}
+
+		if let (Some(start), Some(last)) = (self.open.as_ref().map(|open| open.pts), self.last) {
+			let elapsed = pts.as_micros().saturating_sub(start.as_micros());
+			let end = if position.group != last.group {
+				let contiguous = position.group == last.group + 1 && position.frame == 0;
+				// A skipped sequence or a group joined mid-way always closes, so a record's groups are
+				// contiguous and the reader never has to guess what lies between.
+				let boundary = !contiguous
+					|| elapsed >= self.config.duration_max.as_micros()
+					|| self.boundary(start, pts, elapsed);
+				boundary.then_some(Position::group(last.group + 1))
+			} else {
+				(elapsed >= self.config.duration_max.as_micros()).then_some(position)
+			};
+			if let Some(end) = end {
+				self.emit(end, pts);
+			}
+		}
+
+		if self.open.is_none() {
+			self.open = Some(Open {
+				start: position,
+				pts,
+				keyframe,
+			});
+			self.frontier = None;
+		}
+		self.last = Some(position);
+		self.finished = false;
+		self.advance(pts);
 	}
 
-	/// Declare a segment boundary at `pts`, overriding automatic minimum-duration pacing.
-	pub fn cut(&self, pts: Timestamp) -> crate::Result<()> {
-		let mut state = self.state.lock().unwrap();
-		if let Some(err) = state.failure() {
-			return Err(err);
-		}
-		if state.finished {
-			return Err(moq_net::Error::Closed.into());
-		}
-
-		state.manual = true;
-		let floor = state
+	/// Whether a group starting at `pts` ends the record that started at `start`.
+	fn boundary(&mut self, start: Timestamp, pts: Timestamp, elapsed: u128) -> bool {
+		while self
 			.cuts
-			.back()
-			.copied()
-			.or(state.start)
-			.map(|since| since.as_micros() + state.config.duration_min.as_micros());
-		if floor.is_none_or(|floor| pts.as_micros() >= floor) {
-			state.cuts.push_back(pts);
-			state.pump(false);
+			.front()
+			.is_some_and(|cut| cut.as_micros() <= start.as_micros())
+		{
+			self.cuts.pop_front();
 		}
-
-		Ok(())
-	}
-
-	/// Withhold complete records while a batch of tracks enrolls.
-	pub fn reserve(&self) -> Reserved {
-		let mut state = self.state.lock().unwrap();
-		if !state.finished {
-			state.reservers += 1;
+		if self.cuts.front().is_some_and(|cut| cut.as_micros() <= pts.as_micros()) {
+			while self.cuts.front().is_some_and(|cut| cut.as_micros() <= pts.as_micros()) {
+				self.cuts.pop_front();
+			}
+			return true;
 		}
-		Reserved {
-			segmenter: self.clone(),
-			output: None,
-		}
+		!self.manual && elapsed >= self.config.duration_min.as_micros()
 	}
 
-	/// The catalog section describing records built by this segmenter.
-	pub fn section(&self) -> Archive {
-		self.state.lock().unwrap().section()
-	}
-
-	/// Flush the final open segment and return a handle that can only drain records.
-	pub fn finish(self) -> Drain {
-		let mut state = self.state.lock().unwrap();
-		state.finish();
-		drop(state);
-		Drain { segmenter: self }
-	}
-
-	/// Take the next complete segment record, if one is ready.
-	pub fn next(&self) -> Option<Record> {
-		self.state.lock().unwrap().ready.pop_front()
-	}
-}
-
-/// A finished segmenter that can only drain its final complete records.
-pub struct Drain {
-	segmenter: Segmenter,
-}
-
-impl Drain {
-	/// Report whether terminal segmentation exceeded the declared duration bound.
-	pub fn result(&self) -> crate::Result<()> {
-		result(&self.segmenter)
-	}
-
-	/// Take the next complete segment record, if one is ready.
-	pub fn next(&self) -> Option<Record> {
-		self.segmenter.next()
-	}
-}
-
-/// A deferred segmenter whose records must be persisted before publication.
-///
-/// [`next`](Self::next) returns a cancellation-safe [`Pending`] handle. Dropping the handle puts
-/// the record back at the front of the ready queue so another storage task can retry it.
-#[derive(Clone)]
-pub struct Deferred {
-	segmenter: Segmenter,
-}
-
-impl Deferred {
-	/// Enroll `name` without letting it influence segmentation.
-	pub fn track(&self, name: &str) -> Recorder {
-		self.segmenter.track(name)
-	}
-
-	/// Enroll `name` as a pacing track.
-	pub fn pacing_track(&self, name: &str) -> Recorder {
-		self.segmenter.pacing_track(name)
-	}
-
-	/// Declare a segment boundary at `pts`, overriding automatic minimum-duration pacing.
-	pub fn cut(&self, pts: Timestamp) -> crate::Result<()> {
-		self.segmenter.cut(pts)
-	}
-
-	/// Withhold complete records while a batch of tracks enrolls.
-	pub fn reserve(&self) -> Reserved {
-		self.segmenter.reserve()
-	}
-
-	/// The catalog's root `archive` entry describing records built by this segmenter.
-	pub fn section(&self) -> Archive {
-		self.segmenter.section()
-	}
-
-	/// Flush the final open segment and return a handle that can only drain pending records.
-	pub fn finish(self) -> DeferredDrain {
-		let drain = self.segmenter.finish();
-		DeferredDrain {
-			segmenter: drain.segmenter,
-		}
-	}
-
-	/// Take the next complete record for storage, if one is ready.
-	pub fn next(&self) -> Option<Pending> {
-		pending(&self.segmenter)
-	}
-}
-
-/// A finished deferred segmenter that can only drain its final records for storage.
-pub struct DeferredDrain {
-	segmenter: Segmenter,
-}
-
-impl DeferredDrain {
-	/// Report whether terminal segmentation exceeded the declared duration bound.
-	pub fn result(&self) -> crate::Result<()> {
-		result(&self.segmenter)
-	}
-
-	/// Take the next complete record for storage, if one is ready.
-	pub fn next(&self) -> Option<Pending> {
-		pending(&self.segmenter)
-	}
-}
-
-fn result(segmenter: &Segmenter) -> crate::Result<()> {
-	match segmenter.state.lock().unwrap().failure() {
-		Some(err) => Err(err),
-		None => Ok(()),
-	}
-}
-
-fn pending(segmenter: &Segmenter) -> Option<Pending> {
-	let mut state = segmenter.state.lock().unwrap();
-	let record = state.ready.pop_front()?;
-	state.committing.insert(record.segment);
-	drop(state);
-	Some(Pending {
-		segmenter: segmenter.clone(),
-		record: Some(record),
-	})
-}
-
-/// A complete deferred record being stored before timeline publication.
-///
-/// Dereference it to inspect or serialize the [`Record`]. Pass ownership to [`Producer::push`]
-/// only after storage succeeds. Dropping it requeues the record for another attempt.
-pub struct Pending {
-	segmenter: Segmenter,
-	record: Option<Record>,
-}
-
-impl Pending {
-	/// Convert a record whose media could not be stored into a gap.
+	/// Report that group `group` can gain no more frames.
 	///
-	/// Its segment number and timing stay intact, so committing it unblocks later segments without
-	/// advertising media objects that are not durable.
-	pub fn gap(mut self) -> Self {
-		self.record
-			.as_mut()
-			.expect("a pending record is present until commit")
-			.tracks
-			.clear();
-		self
+	/// With a zero [`Config::duration_min`] this closes the record, so a sparse track's newest
+	/// group is indexed without waiting for the next one.
+	pub fn finish_group(&mut self, group: u64) {
+		if self.closed || self.last.is_none_or(|last| last.group != group) {
+			return;
+		}
+		self.finished = true;
+		if self.config.duration_min.is_zero() && self.open.is_some() {
+			let pts = self.frontier.expect("an open record has a frontier");
+			self.emit(Position::group(group + 1), pts);
+		}
 	}
 
-	/// Drop one track whose media could not be stored, keeping every other track's ranges.
+	/// Report that the content extends to `pts`, without a frame starting there.
 	///
-	/// Like [`gap`](Self::gap) for a single track: the record stays committable without advertising
-	/// objects that are not durable.
-	pub fn omit(mut self, track: &str) -> Self {
-		self.record
-			.as_mut()
-			.expect("a pending record is present until commit")
-			.tracks
-			.remove(track);
-		self
+	/// A frame report says where content starts; the last record has no successor to bound it, so
+	/// its duration would otherwise stop at its last frame's start.
+	pub fn end(&mut self, pts: Timestamp) {
+		if !self.closed && self.open.is_some() {
+			self.advance(pts);
+		}
 	}
-}
 
-impl Deref for Pending {
-	type Target = Record;
-
-	fn deref(&self) -> &Self::Target {
-		self.record.as_ref().expect("a pending record is present until commit")
+	fn advance(&mut self, pts: Timestamp) {
+		if self
+			.frontier
+			.is_none_or(|frontier| pts.as_micros() > frontier.as_micros())
+		{
+			self.frontier = Some(pts);
+		}
 	}
-}
 
-impl Drop for Pending {
-	fn drop(&mut self) {
-		let Some(record) = self.record.take() else {
+	/// Declare a boundary at `pts`: the record closes at the first group starting at or after it.
+	///
+	/// The first cut takes over from [`Config::duration_min`] pacing for good, since pacing would
+	/// otherwise close a record just before the caller declares where it really ends. A cut at or
+	/// before an earlier one is ignored, so several producers declaring the same boundaries (the
+	/// renditions of one import) cost nothing.
+	pub fn cut(&mut self, pts: Timestamp) {
+		if self.closed {
+			return;
+		}
+		self.manual = true;
+		if self.cuts.back().is_none_or(|back| pts.as_micros() > back.as_micros()) {
+			self.cuts.push_back(pts);
+		}
+	}
+
+	/// Close the open record now, at the end of the newest reported frame.
+	///
+	/// The record ends after the newest group when that group finished, otherwise after the newest
+	/// reported frame. Later reports start a new record.
+	pub fn flush(&mut self) {
+		let (Some(last), Some(frontier)) = (self.last, self.frontier) else {
 			return;
 		};
-		let mut state = self.segmenter.state.lock().unwrap();
-		state.requeue(record);
-	}
-}
-
-struct Output {
-	broadcast: moq_net::broadcast::Producer,
-	sink: Option<moq_json::window::Producer<Record>>,
-	closed: bool,
-}
-
-impl Output {
-	fn prepare(&mut self) -> crate::Result<()> {
-		if self.sink.is_none() && !self.closed {
-			let net = self.create_track()?;
-			self.sink = Some(moq_json::window::Producer::new(net, Self::config()));
+		if self.open.is_none() {
+			return;
 		}
-		Ok(())
+		let end = match self.finished {
+			true => Position::group(last.group + 1),
+			false => Position::new(last.group, last.frame + 1),
+		};
+		self.emit(end, frontier);
 	}
 
-	/// Create the timeline track now, continuing `checkpoint`.
-	fn resume(&mut self, checkpoint: &Checkpoint<Record>) -> crate::Result<()> {
-		let net = self.create_track()?;
-		self.sink = Some(moq_json::window::Producer::resume(net, Self::config(), checkpoint)?);
-		Ok(())
+	/// Flush, then ignore every later report.
+	pub fn close(&mut self) {
+		self.flush();
+		self.closed = true;
 	}
 
-	fn create_track(&self) -> crate::Result<moq_net::track::Producer> {
-		let info = moq_net::track::Info::default().with_priority(hang::catalog::PRIORITY.catalog);
-		Ok(self.broadcast.create_track(DEFAULT_NAME, info)?)
+	/// Close the open record at `end`, its content running to `pts`.
+	fn emit(&mut self, end: Position, pts: Timestamp) {
+		let Some(open) = self.open.take() else {
+			return;
+		};
+		let start = wire(open.pts);
+		let duration = wire(pts).saturating_sub(start);
+		let mut record = Record::new(self.sequence, start, duration, open.start, end);
+		record.keyframe = open.keyframe;
+		self.sequence += 1;
+		self.ready.push_back(record);
+	}
+}
+
+/// Yields each closed record once; `None` means none is ready yet, not that none ever will be.
+impl Iterator for Segmenter {
+	type Item = Record;
+
+	fn next(&mut self) -> Option<Record> {
+		self.ready.pop_front()
+	}
+}
+
+/// Publishes one track's records onto its timeline track.
+///
+/// Records must be pushed in sequence order, starting at the window's next index.
+pub struct Producer {
+	sink: moq_json::window::Producer<Record>,
+}
+
+impl Producer {
+	/// The properties a timeline track is created with.
+	pub fn info() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_priority(hang::catalog::PRIORITY.catalog)
+	}
+
+	/// Publish onto `track`, starting at record zero.
+	pub fn new(track: moq_net::track::Producer) -> Self {
+		Self {
+			sink: moq_json::window::Producer::new(track, Self::config()),
+		}
+	}
+
+	/// Publish onto `track`, continuing `checkpoint`, such as a window recovered from storage.
+	///
+	/// The track's first group restates the checkpoint, and the next record is sequence
+	/// `checkpoint.range.end`. Fails when a checkpoint record is not the sequence at its index or the
+	/// checkpoint is malformed.
+	pub fn resume(track: moq_net::track::Producer, checkpoint: &Checkpoint<Record>) -> crate::Result<Self> {
+		let sink = moq_json::window::Producer::resume(track, Self::config(), checkpoint).map_err(json)?;
+		// The encoder accepted the checkpoint, so the records fit before `range.end`.
+		let start = checkpoint.range.end - checkpoint.records.len() as u64;
+		for (index, record) in (start..).zip(&checkpoint.records) {
+			if record.sequence != index {
+				return Err(crate::Error::TimelineCheckpoint(index));
+			}
+		}
+		Ok(Self { sink })
 	}
 
 	fn config() -> moq_json::window::ProducerConfig {
@@ -764,468 +377,264 @@ impl Output {
 			.with_checkpoint_records(CHECKPOINT_RECORDS)
 	}
 
-	fn push(&mut self, record: &Record) -> crate::Result<()> {
-		self.prepare()?;
-		let Some(sink) = self.sink.as_mut() else {
-			return Err(moq_net::Error::Closed.into());
-		};
-		match sink.push(record) {
-			Ok(()) => Ok(()),
-			Err(moq_json::Error::Net(err)) => Err(err.into()),
-			Err(err) => Err(err.into()),
+	/// The window indices currently retained.
+	pub fn range(&self) -> std::ops::Range<u64> {
+		self.sink.range()
+	}
+
+	/// Append `record`, which must be the window's next sequence.
+	pub fn push(&mut self, record: &Record) -> crate::Result<()> {
+		let next = self.sink.range().end;
+		if record.sequence != next {
+			return Err(crate::Error::TimelineSequence {
+				expected: next,
+				actual: record.sequence,
+			});
 		}
+		self.sink.push(record).map_err(json)
 	}
 
-	fn pop(&mut self, count: u64) -> crate::Result<()> {
-		let Some(sink) = self.sink.as_mut() else {
-			return Ok(());
-		};
-		match sink.pop(count) {
-			Ok(()) => Ok(()),
-			Err(moq_json::Error::Net(err)) => Err(err.into()),
-			Err(err) => Err(err.into()),
-		}
+	/// Remove up to `count` oldest records from the window.
+	pub fn pop(&mut self, count: u64) -> crate::Result<()> {
+		self.sink.pop(count).map_err(json)
 	}
 
-	fn flush(&mut self) -> crate::Result<()> {
-		let Some(sink) = self.sink.as_mut() else {
-			return Ok(());
-		};
-		match sink.cut() {
-			Ok(()) => Ok(()),
-			Err(moq_json::Error::Net(err)) => Err(err.into()),
-			Err(err) => Err(err.into()),
-		}
-	}
-
-	fn finish(&mut self) -> crate::Result<()> {
-		self.closed = true;
-		let Some(sink) = self.sink.as_mut() else {
-			return Ok(());
-		};
-		// Keep this handle alive after closing so the finished track remains discoverable for
-		// subscribers.
-		match sink.finish() {
-			Ok(()) => Ok(()),
-			Err(moq_json::Error::Net(err)) => Err(err.into()),
-			Err(err) => Err(err.into()),
-		}
-	}
-}
-
-/// The broadcast's timeline: a segmenter plus the track committed records are published on.
-///
-/// Its enrollment methods commit complete records immediately. Use [`deferred`](Self::deferred)
-/// when media must be stored before the corresponding record becomes visible.
-#[derive(Clone)]
-pub struct Producer {
-	segmenter: Segmenter,
-	output: Arc<Mutex<Output>>,
-}
-
-impl Producer {
-	/// A timeline for `broadcast`, paced by `config`.
-	pub fn new(broadcast: &moq_net::broadcast::Producer, config: Config) -> Self {
-		// Like Segmenter, the output is Send + Sync natively and Rc-backed on single-threaded wasm.
-		#[allow(clippy::arc_with_non_send_sync)]
-		let output = Arc::new(Mutex::new(Output {
-			broadcast: broadcast.clone(),
-			sink: None,
-			closed: false,
-		}));
-		Self {
-			segmenter: Segmenter::new(config),
-			output,
-		}
-	}
-
-	/// A timeline for `broadcast` continuing `checkpoint`, such as a window recovered from storage.
+	/// Close the track's open group, so every push and pop so far sits in a complete group.
 	///
-	/// A timeline's window index is its segment number, so the next record is segment
-	/// `checkpoint.range.end`. Creates the timeline track immediately; its first group restates the
-	/// checkpoint. Fails when a checkpoint record is not the segment at its index, the checkpoint
-	/// is malformed, or the track cannot be created.
-	pub fn resume(
-		broadcast: &moq_net::broadcast::Producer,
-		config: Config,
-		checkpoint: &Checkpoint<Record>,
-	) -> crate::Result<Self> {
-		let producer = Self::new(broadcast, config);
-		producer.output.lock().unwrap().resume(checkpoint)?;
-
-		// The encoder accepted the checkpoint, so the records fit before `range.end`.
-		let start = checkpoint.range.end - checkpoint.records.len() as u64;
-		for (index, record) in (start..).zip(&checkpoint.records) {
-			if record.segment != index {
-				return Err(crate::Error::TimelineCheckpoint(index));
-			}
-		}
-		producer.segmenter.state.lock().unwrap().next_segment = checkpoint.range.end;
-		Ok(producer)
-	}
-
-	/// Enroll `name` without letting it influence segmentation, returning its [`Recorder`].
-	///
-	/// Its groups are recorded into whichever segment is open when they arrive, but the track
-	/// never votes on where a boundary falls and never holds a record back. This safe default is
-	/// for a catalog that emits only when renditions change, or an application's metadata track.
-	///
-	/// Placement is by arrival rather than by content time: nothing waits for the track, so a group
-	/// that arrives after its segment flushed is recorded in the next one. Frames still carry
-	/// their own timestamps. A group that never closes (a `moq_json::stream` log) is recorded once,
-	/// in the segment its group opened in.
-	///
-	/// This does not create the timeline track, so enrolling only non-pacing tracks publishes no
-	/// timeline. One recorder per track: enrolling the same name again resets its state.
-	pub fn track(&self, name: &str) -> Recorder {
-		self.segmenter.enroll(name, false, Some(self.output.clone()))
-	}
-
-	/// Enroll the media track `name` as a pacing track, returning the [`Recorder`] it reports
-	/// through.
-	///
-	/// The segment records key ranges by this name, and the track votes on boundaries and gates
-	/// completeness until its recorder drops. Enroll it when it is about to produce: an enrolled
-	/// but silent pacing track holds every record back, by design, since a segment is not complete
-	/// until every pacing track's content is known.
-	///
-	/// This opt-in is for continuously publishing media. A sparse track belongs in
-	/// [`track`](Self::track), otherwise it can stall the timeline when it goes quiet.
-	///
-	/// Creates the timeline track on first use, which errors if the broadcast cannot because
-	/// something else already took the name.
-	pub fn pacing_track(&self, name: &str) -> crate::Result<Recorder> {
-		self.output.lock().unwrap().prepare()?;
-		Ok(self.segmenter.enroll(name, true, Some(self.output.clone())))
-	}
-
-	/// Declare a segment boundary at `pts`, overriding the [`Config::duration_min`] pacing.
-	///
-	/// For applications that know their own boundaries (an HLS import following the source
-	/// playlist, CMAF segments on disk, an encoder placing keyframes). Cutting ahead of the
-	/// media is fine: the segment's record still waits for every track's groups. A cut that
-	/// would make a segment shorter than [`Config::duration_min`] is ignored, so several
-	/// producers declaring the same boundaries (the renditions of one import) cost nothing.
-	///
-	/// The first call takes over for good: [`Config::duration_min`] pacing stops, since it would
-	/// otherwise close a segment just before the caller declares where it really ends. Segments
-	/// then last exactly as long as the caller says, and the final one runs to the end of the
-	/// media.
-	///
-	/// Errors if a segment already overran [`Config::duration_max`].
-	pub fn cut(&self, pts: Timestamp) -> crate::Result<()> {
-		self.segmenter.cut(pts)?;
-		self.publish_ready();
-		Ok(())
-	}
-
-	/// Begin reserving the track set, returning a clonable [`Reserved`].
-	///
-	/// The counterpart to [`catalog::Producer::reserve`](crate::catalog::Producer::reserve), for
-	/// the same reason: while any `Reserved` clone is alive the track set may still grow, so
-	/// records are withheld from the broadcast. A record is immutable once published and its
-	/// completeness is judged against the tracks enrolled *at that moment*, so a segment that
-	/// flushes while a sibling rendition is still enrolling omits it for good, and that
-	/// rendition's earlier groups then land in whatever segment flushes next.
-	///
-	/// Hand it (or clones) to whatever brings the tracks up, so an importer that enrolls its
-	/// renditions one at a time publishes nothing until they are all in. Unlike the catalog's,
-	/// this gate is not one-shot: the catalog is a snapshot, so only its *first* publish needs
-	/// protecting, while every timeline record is an immutable log entry. Take a fresh
-	/// reservation around every batch.
-	pub fn reserve(&self) -> Reserved {
-		let mut state = self.segmenter.state.lock().unwrap();
-		let output = if state.finished {
-			None
-		} else {
-			state.reservers += 1;
-			Some(self.output.clone())
-		};
-		Reserved {
-			segmenter: self.segmenter.clone(),
-			output,
-		}
-	}
-
-	/// The catalog's root `archive` entry advertising this timeline.
-	pub fn section(&self) -> Archive {
-		self.segmenter.section()
-	}
-
-	/// Create a handle that closes segments without publishing them automatically.
-	///
-	/// Drain it with [`Deferred::next`], perform any asynchronous storage, then commit the final
-	/// record with [`push`](Self::push). Preparing the timeline track here makes that later commit
-	/// infallible with respect to track-name ownership. This switches the shared producer for good:
-	/// recorders and reservations minted before this call also stop auto-publishing.
-	pub fn deferred(&self) -> crate::Result<Deferred> {
-		// Match publish_ready's output-then-state lock order. Once this returns, no auto-publisher can
-		// still be between dequeuing a record and making it visible.
-		let mut output = self.output.lock().unwrap();
-		let mut state = self.segmenter.state.lock().unwrap();
-		if state.finished {
-			return Err(moq_net::Error::Closed.into());
-		}
-		output.prepare()?;
-		state.deferred = true;
-		Ok(Deferred {
-			segmenter: self.segmenter.clone(),
-		})
-	}
-
-	/// Reacquire the drain for a finished deferred segmenter.
-	///
-	/// This is cancellation recovery for the task that owned [`DeferredDrain`]. It is rejected
-	/// until deferred segmentation has completed.
-	pub fn drain(&self) -> crate::Result<DeferredDrain> {
-		let state = self.segmenter.state.lock().unwrap();
-		if !state.deferred || !state.finished {
-			return Err(crate::Error::TimelineDeferredPending);
-		}
-		drop(state);
-		Ok(DeferredDrain {
-			segmenter: self.segmenter.clone(),
-		})
-	}
-
-	/// Mark one complete record committed, publishing it once every earlier record is committed.
-	pub fn push(&self, mut pending: Pending) -> crate::Result<()> {
-		if !Arc::ptr_eq(&self.segmenter.state, &pending.segmenter.state) {
-			return Err(crate::Error::TimelineDeferredRecord(pending.segment));
-		}
-
-		let mut output = self.output.lock().unwrap();
-		let mut state = self.segmenter.state.lock().unwrap();
-		if !state.deferred || !state.committing.contains(&pending.segment) {
-			return Err(crate::Error::TimelineDeferredRecord(pending.segment));
-		}
-
-		let record = pending.record.take().expect("a pending record is present until commit");
-		state.committing.remove(&record.segment);
-		state.committed.insert(record.segment, record);
-
-		while let Some((&segment, record)) = state.committed.first_key_value() {
-			let earlier_ready = state.ready.front().is_some_and(|record| record.segment < segment);
-			let earlier_committing = state.committing.first().is_some_and(|pending| *pending < segment);
-			if earlier_ready || earlier_committing {
-				break;
-			}
-
-			let record = record.clone();
-			if let Err(err) = output.push(&record) {
-				let record = state.committed.remove(&segment).unwrap();
-				state.requeue(record);
-				return Err(err);
-			}
-			state.committed.remove(&segment);
-		}
-
-		Ok(())
-	}
-
-	/// Remove up to `count` oldest records from the visible timeline window.
-	pub fn pop(&self, count: u64) -> crate::Result<()> {
-		self.output.lock().unwrap().pop(count)
-	}
-
-	/// Close the timeline track's open group, so every push and pop so far sits in a complete group.
-	///
-	/// A recorder stores those groups before committing the next segment. The next edit opens a
+	/// A recorder stores those groups before committing the next record. The next edit opens a
 	/// new group restating the window.
-	pub fn flush(&self) -> crate::Result<()> {
-		self.output.lock().unwrap().flush()
+	pub fn flush(&mut self) -> crate::Result<()> {
+		self.sink.cut().map_err(json)
 	}
 
-	fn publish_ready(&self) {
-		// Serialize the dequeue and publish steps together. Recorders can report from different
-		// tasks, and taking one record before locking the output would let a later record win the
-		// output lock and become visible first.
-		let mut output = self.output.lock().unwrap();
-		if self.segmenter.state.lock().unwrap().deferred {
-			return;
-		}
-		while let Some(record) = self.segmenter.next() {
+	/// Finish the timeline track.
+	pub fn finish(&mut self) -> crate::Result<()> {
+		self.sink.finish().map_err(json)
+	}
+}
+
+/// Surface a transport failure as one, rather than wrapped in the JSON layer.
+fn json(err: moq_json::Error) -> crate::Error {
+	match err {
+		moq_json::Error::Net(err) => err.into(),
+		err => err.into(),
+	}
+}
+
+/// A live track's segmenter and the timeline it publishes to.
+struct Live {
+	segmenter: Segmenter,
+	/// `None` once a publish failed: the timeline is an optional sidecar, so it stops instead.
+	output: Option<Producer>,
+}
+
+impl Live {
+	fn publish(&mut self) {
+		for record in self.segmenter.by_ref() {
+			let Some(output) = self.output.as_mut() else {
+				continue;
+			};
 			if let Err(err) = output.push(&record) {
 				tracing::warn!(%err, "timeline publish failed; dropping the timeline track");
 				let _ = output.finish();
-				return;
+				self.output = None;
 			}
-		}
-		if self.segmenter.state.lock().unwrap().failure().is_some() {
-			let _ = output.finish();
 		}
 	}
 
-	/// Flush the final (still open) segment and finish the track.
-	///
-	/// In deferred mode, first call [`Deferred::finish`] and use its returned drain handle to store
-	/// and [`push`](Self::push) every remaining record, then call this to close the timeline track.
-	/// Calling this before the deferred segmenter finishes or while any record remains uncommitted
-	/// is rejected without changing state.
-	///
-	/// Also errors if a segment overran [`Config::duration_max`], or if the track can't be finished.
-	pub fn finish(&mut self) -> crate::Result<()> {
-		// Serialize both the mode decision and terminal flush with deferred(), which takes these
-		// locks in the same order. Either deferred mode wins before finishing starts, or finishing
-		// closes the output and a later deferred() is rejected.
-		let mut output = self.output.lock().unwrap();
-		let mut state = self.segmenter.state.lock().unwrap();
-		if state.deferred {
-			if !state.finished || !state.ready.is_empty() || !state.committing.is_empty() || !state.committed.is_empty()
-			{
-				return Err(crate::Error::TimelineDeferredPending);
-			}
-			if let Some(err) = state.failure() {
-				drop(state);
-				let _ = output.finish();
-				return Err(err);
-			}
-			drop(state);
-			return output.finish();
-		}
-
-		state.finish();
-		if let Some(err) = state.failure() {
-			drop(state);
+	fn finish(&mut self) {
+		self.segmenter.close();
+		self.publish();
+		if let Some(output) = self.output.as_mut() {
 			let _ = output.finish();
-			return Err(err);
 		}
-		while let Some(record) = state.ready.pop_front() {
-			if let Err(err) = output.push(&record) {
-				drop(state);
-				let _ = output.finish();
-				return Err(err);
-			}
-		}
-		drop(state);
-		output.finish()
 	}
 }
 
-/// A clonable reservation withholding [`Producer`] records while tracks are still enrolling.
+struct Registry {
+	/// Each enrolled track's timeline, by track name. Kept after its recorder drops, so a finished
+	/// span stays discoverable and a re-enrolled track continues its numbering.
+	tracks: BTreeMap<String, (String, Arc<Mutex<Live>>)>,
+	finished: bool,
+}
+
+/// A broadcast's timelines, one per enrolled track.
 ///
-/// Made via [`Producer::reserve`], mirroring [`catalog::Reserved`](crate::catalog::Reserved).
-/// Whatever became complete meanwhile flushes once the last clone drops.
-pub struct Reserved {
-	segmenter: Segmenter,
-	output: Option<Arc<Mutex<Output>>>,
+/// Each enrollment creates the track's timeline track and returns the [`Recorder`] its producer
+/// reports through. `Clone` shares the set.
+#[derive(Clone)]
+pub struct Timelines {
+	broadcast: moq_net::broadcast::Producer,
+	config: Config,
+	registry: Arc<Mutex<Registry>>,
 }
 
-impl Clone for Reserved {
-	fn clone(&self) -> Self {
-		let mut state = self.segmenter.state.lock().unwrap();
-		if !state.finished {
-			state.reservers += 1;
-		}
+impl Timelines {
+	/// Timelines for tracks of `broadcast`, cut by `config`.
+	pub fn new(broadcast: &moq_net::broadcast::Producer, config: Config) -> Self {
+		// The contents are `Send + Sync` natively; on wasm moq-net's handles are `Rc`-backed, so
+		// clippy sees a pointlessly atomic `Arc`. One type for both targets is worth it.
+		#[allow(clippy::arc_with_non_send_sync)]
+		let registry = Arc::new(Mutex::new(Registry {
+			tracks: BTreeMap::new(),
+			finished: false,
+		}));
 		Self {
-			segmenter: self.segmenter.clone(),
-			output: self.output.clone(),
+			broadcast: broadcast.clone(),
+			config,
+			registry,
+		}
+	}
+
+	/// Enroll the media track `name`, cut by the configured durations.
+	///
+	/// Creates its timeline track, named by [`hang::timeline::default_name`], on first enrollment.
+	/// Enrolling a name again continues its timeline's numbering for a new producer. Errors when
+	/// the timeline track name is taken or the timelines finished.
+	pub fn track(&self, name: &str) -> crate::Result<Recorder> {
+		self.enroll(name, self.config.clone())
+	}
+
+	/// Enroll the sparse track `name`, such as a catalog: every group is its own record.
+	pub fn sparse(&self, name: &str) -> crate::Result<Recorder> {
+		self.enroll(name, self.config.clone().with_duration_min(Duration::ZERO))
+	}
+
+	fn enroll(&self, name: &str, config: Config) -> crate::Result<Recorder> {
+		let mut registry = self.registry.lock().unwrap();
+		if registry.finished {
+			return Err(moq_net::Error::Closed.into());
+		}
+		if let Some((_, existing)) = registry.tracks.get(name) {
+			// A re-enrolled track is a new producer whose group sequences may restart, so it gets a
+			// fresh segmenter continuing the record numbering.
+			let mut live = existing.lock().unwrap();
+			live.segmenter.flush();
+			live.publish();
+			let sequence = live.segmenter.sequence();
+			live.segmenter = Segmenter::new(config).with_sequence(sequence);
+			drop(live);
+			return Ok(Recorder { live: existing.clone() });
+		}
+
+		let timeline = hang::timeline::default_name(name);
+		let track = self.broadcast.create_track(timeline.as_str(), Producer::info())?;
+		#[allow(clippy::arc_with_non_send_sync)]
+		let live = Arc::new(Mutex::new(Live {
+			segmenter: Segmenter::new(config),
+			output: Some(Producer::new(track)),
+		}));
+		registry.tracks.insert(name.to_string(), (timeline, live.clone()));
+		Ok(Recorder { live })
+	}
+
+	/// The catalog's root `archive` entry advertising every enrolled track's timeline.
+	pub fn section(&self) -> Archive {
+		let registry = self.registry.lock().unwrap();
+		let mut section = self.config.section();
+		section.timelines = registry
+			.tracks
+			.iter()
+			.map(|(name, (timeline, _))| (name.clone(), timeline.clone()))
+			.collect();
+		section
+	}
+
+	/// Flush every open record and finish every timeline track. Later enrollments fail.
+	pub fn finish(&self) {
+		let mut registry = self.registry.lock().unwrap();
+		registry.finished = true;
+		for (_, live) in registry.tracks.values() {
+			live.lock().unwrap().finish();
 		}
 	}
 }
 
-impl Drop for Reserved {
-	fn drop(&mut self) {
-		let mut state = self.segmenter.state.lock().unwrap();
-		state.reservers = state.reservers.saturating_sub(1);
-		state.pump(false);
-		drop(state);
-		if let Some(output) = &self.output {
-			Producer {
-				segmenter: self.segmenter.clone(),
-				output: output.clone(),
-			}
-			.publish_ready();
-		}
-	}
-}
-
-/// Reports one media track's group opens into the shared [`Producer`].
+/// Reports one track's frames into its live timeline.
 ///
-/// Move-only: it is the track's single reporting handle, and dropping it closes the track's
-/// enrollment (segments stop waiting on it). Minted by [`Producer::track`] and held by a
-/// rendition's [`container::Producer`](crate::container::Producer).
+/// Move-only: it is the track's reporting handle, minted by [`Timelines::track`] and held by a
+/// rendition's [`container::Producer`](crate::container::Producer). Dropping it flushes the open
+/// record; the timeline track stays open until [`Timelines::finish`].
 pub struct Recorder {
-	segmenter: Segmenter,
-	output: Option<Arc<Mutex<Output>>>,
-	name: String,
+	live: Arc<Mutex<Live>>,
 }
 
 impl Recorder {
-	/// Report that group `sequence` opened at presentation time `pts`, `keyframe` stating
-	/// whether its first frame is one (i.e. whether a player could join here).
-	///
-	/// Reports must be in group order with monotonic timestamps; this is the fact the timeline
-	/// builds ranges, boundaries and completeness from.
-	pub fn record(&mut self, sequence: u64, pts: Timestamp, keyframe: bool) {
-		self.segmenter
-			.state
-			.lock()
-			.unwrap()
-			.report(&self.name, sequence, pts, keyframe);
-		self.publish_ready();
+	fn report(&mut self, f: impl FnOnce(&mut Segmenter)) {
+		let mut live = self.live.lock().unwrap();
+		f(&mut live.segmenter);
+		live.publish();
 	}
 
-	/// Report that this track's content extends to `pts`, without a group opening there.
-	///
-	/// A group open says where content *starts*; the last group of a broadcast has no successor
-	/// to bound it, so its segment would otherwise be published a group short (zero for a
-	/// segment that is a single group). Report the end whenever you know it: closing a group,
-	/// finishing a track.
+	/// Report the frame at `position`, presented at `pts`; see [`Segmenter::frame`].
+	pub fn frame(&mut self, position: Position, pts: Timestamp, keyframe: bool) {
+		self.report(|segmenter| segmenter.frame(position, pts, keyframe));
+	}
+
+	/// Report that group `group` can gain no more frames; see [`Segmenter::finish_group`].
+	pub fn finish_group(&mut self, group: u64) {
+		self.report(|segmenter| segmenter.finish_group(group));
+	}
+
+	/// Report that the content extends to `pts`; see [`Segmenter::end`].
 	pub fn end(&mut self, pts: Timestamp) {
-		self.segmenter.state.lock().unwrap().report_end(&self.name, pts);
-		self.publish_ready();
+		self.report(|segmenter| segmenter.end(pts));
 	}
 
-	fn publish_ready(&self) {
-		if let Some(output) = &self.output {
-			Producer {
-				segmenter: self.segmenter.clone(),
-				output: output.clone(),
-			}
-			.publish_ready();
-		}
+	/// Declare a boundary at `pts` on this track; see [`Segmenter::cut`].
+	pub fn cut(&mut self, pts: Timestamp) {
+		self.report(|segmenter| segmenter.cut(pts));
 	}
 }
 
 impl Drop for Recorder {
 	fn drop(&mut self) {
-		self.segmenter.state.lock().unwrap().close(&self.name);
-		self.publish_ready();
+		self.report(Segmenter::flush);
 	}
 }
 
-/// One decoded timeline entry: a complete aligned segment with real [`Timestamp`]s and the
-/// group ranges each track contributes.
+/// One decoded timeline record, with real [`Timestamp`]s.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry<E: RecordExt = ()> {
-	/// The segment's number, consecutive within the broadcast.
-	pub segment: u64,
+	/// The record's number, consecutive within its track's timeline.
+	pub sequence: u64,
 
-	/// The segment's start.
+	/// The span's start.
 	pub pts: Timestamp,
 
-	/// The segment's duration. The next entry starts at `pts + duration` unless content time
-	/// itself jumped (a discontinuity).
+	/// The span's duration. The next entry starts at `pts + duration` unless content time itself
+	/// jumped (a discontinuity).
 	pub duration: Duration,
 
-	/// The group ranges each participating media track contributes, keyed by track name. A
-	/// track absent from the map has no content in this span (HLS `EXT-X-GAP`).
-	pub tracks: BTreeMap<String, Vec<Range>>,
+	/// The first frame of the span, inclusive.
+	pub start: Position,
+
+	/// The end of the span, exclusive.
+	pub end: Position,
+
+	/// Whether the span's first frame is a keyframe.
+	pub keyframe: bool,
 
 	/// The record's application extension (nothing for the default `()`).
 	pub ext: E,
+}
+
+impl<E: RecordExt> Entry<E> {
+	/// The span's exclusive end time.
+	pub fn end_time(&self) -> Duration {
+		Duration::from(self.pts) + self.duration
+	}
 }
 
 /// One change to the visible timeline window.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Event<E: RecordExt = ()> {
-	/// A complete segment record became visible at this window index.
+	/// A record became visible at this window index, which equals its sequence.
 	Push {
 		/// Absolute window index assigned to the record.
 		index: u64,
-		/// The decoded segment entry.
+		/// The decoded record.
 		entry: Entry<E>,
 	},
 	/// These previously visible window indices were removed.
@@ -1234,7 +643,7 @@ pub enum Event<E: RecordExt = ()> {
 	Skip(std::ops::Range<u64>),
 }
 
-/// Reads a broadcast's timeline, yielding decoded [`Event`]s in window order.
+/// Reads one track's timeline, yielding decoded [`Event`]s in window order.
 ///
 /// Generic over the record extension `E` (see [`RecordExt`]).
 pub struct Consumer<E: RecordExt = ()> {
@@ -1243,20 +652,27 @@ pub struct Consumer<E: RecordExt = ()> {
 }
 
 impl<E: RecordExt> Consumer<E> {
-	/// Subscribe to the timeline advertised by the catalog's [`Archive`] entry.
+	/// Subscribe to `track`'s timeline as advertised by the catalog's [`Archive`] entry.
 	///
-	/// The section supplies both the track name and the timescale, so a reader can't pair the
-	/// wrong scale with the track. Errors if the section declares a timescale that isn't
-	/// representable.
-	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer, section: &Archive) -> crate::Result<Self> {
-		let track = broadcast.track(&section.track)?.subscribe(None).await?;
-
+	/// The section supplies both the timeline name and the timescale, so a reader can't pair the
+	/// wrong scale with the track. Errors if the section indexes no such track or declares a
+	/// timescale that isn't representable.
+	pub async fn subscribe(
+		broadcast: &moq_net::broadcast::Consumer,
+		section: &Archive,
+		track: &str,
+	) -> crate::Result<Self> {
+		let name = section
+			.timelines
+			.get(track)
+			.ok_or_else(|| crate::Error::TimelineMissing(track.to_string()))?;
+		let timescale =
+			Timescale::new(section.timescale as u64).map_err(|_| crate::Error::InvalidTimescale(section.timescale))?;
+		let track = broadcast.track(name)?.subscribe(None).await?;
 		let config = moq_json::window::ConsumerConfig::default().with_compression(true);
-
 		Ok(Self {
 			inner: moq_json::window::Consumer::new(track, config),
-			timescale: Timescale::new(section.timescale as u64)
-				.map_err(|_| crate::Error::InvalidTimescale(section.timescale))?,
+			timescale,
 		})
 	}
 
@@ -1268,10 +684,12 @@ impl<E: RecordExt> Consumer<E> {
 		let scale = self.timescale.as_u64() as u128;
 		let nanos = (record.duration as u128) * 1_000_000_000 / scale;
 		Ok(Entry {
-			segment: record.segment,
+			sequence: record.sequence,
 			pts: Timestamp::new(record.pts, self.timescale)?,
 			duration: Duration::from_nanos(nanos as u64),
-			tracks: record.tracks,
+			start: record.start,
+			end: record.end,
+			keyframe: record.keyframe,
 			ext: record.ext,
 		})
 	}
@@ -1314,964 +732,369 @@ mod test {
 		Timestamp::from_millis(v).unwrap()
 	}
 
-	/// Build an Entry the tests compare against.
-	fn entry(segment: u64, pts_ms: u64, duration_ms: u64, tracks: &[(&str, &[(u64, u64)])]) -> Entry {
-		Entry {
-			segment,
-			pts: ms(pts_ms),
-			duration: Duration::from_millis(duration_ms),
-			tracks: tracks
-				.iter()
-				.map(|(name, ranges)| {
-					(
-						name.to_string(),
-						ranges.iter().map(|&(start, end)| Range::new(start, end)).collect(),
-					)
-				})
-				.collect(),
-			ext: (),
+	fn at(group: u64) -> Position {
+		Position::group(group)
+	}
+
+	/// A record's `(pts, duration, start, end)` in wire units, for compact comparisons.
+	fn span(record: &Record) -> (u64, u64, Position, Position) {
+		(record.pts, record.duration, record.start, record.end)
+	}
+
+	fn drain(segmenter: &mut Segmenter) -> Vec<(u64, u64, Position, Position)> {
+		let mut out = Vec::new();
+		let mut sequence = None;
+		for record in segmenter.by_ref() {
+			if let Some(previous) = sequence {
+				assert_eq!(record.sequence, previous + 1, "records are numbered consecutively");
+			}
+			sequence = Some(record.sequence);
+			out.push(span(&record));
+		}
+		out
+	}
+
+	/// One frame per group, one group every `step` ms.
+	fn groups(segmenter: &mut Segmenter, groups: std::ops::Range<u64>, step: u64) {
+		for group in groups {
+			segmenter.frame(at(group), ms(group * step), true);
+			segmenter.finish_group(group);
 		}
 	}
 
-	/// Drain a finished timeline track by subscribing to the producer's advertised section.
-	async fn drain(broadcast: &moq_net::broadcast::Producer, producer: &Producer) -> Vec<Entry> {
-		let mut consumer = Consumer::subscribe(&broadcast.consume(), &producer.section())
-			.await
-			.unwrap();
-		drain_consumer(&mut consumer)
+	#[test]
+	fn long_groups_get_a_record_each() {
+		let mut video = Segmenter::new(Config::default());
+		groups(&mut video, 0..3, 2_000);
+		video.end(ms(6_000));
+		video.close();
+
+		assert_eq!(
+			drain(&mut video),
+			vec![
+				(0, 2_000, at(0), at(1)),
+				(2_000, 2_000, at(1), at(2)),
+				(4_000, 2_000, at(2), at(3)),
+			]
+		);
 	}
 
-	fn drain_consumer(consumer: &mut Consumer<()>) -> Vec<Entry> {
+	#[test]
+	fn short_groups_pack_up_to_the_minimum() {
+		let mut audio = Segmenter::new(Config::default().with_duration_min(Duration::from_millis(1_500)));
+		groups(&mut audio, 0..8, 500);
+		audio.close();
+
+		assert_eq!(
+			drain(&mut audio),
+			vec![
+				(0, 1_500, at(0), at(3)),
+				(1_500, 1_500, at(3), at(6)),
+				(3_000, 500, at(6), at(8)),
+			]
+		);
+	}
+
+	#[test]
+	fn a_long_group_splits_by_frame_at_the_maximum() {
+		let mut video = Segmenter::new(Config::default().with_duration_max(Duration::from_secs(3)));
+		for frame in 0..8 {
+			video.frame(Position::new(0, frame), ms(frame * 1_000), frame == 0);
+		}
+		video.close();
+
+		let records: Vec<Record> = std::iter::from_fn(|| video.next()).collect();
+		assert_eq!(
+			records.iter().map(span).collect::<Vec<_>>(),
+			vec![
+				(0, 3_000, Position::new(0, 0), Position::new(0, 3)),
+				(3_000, 3_000, Position::new(0, 3), Position::new(0, 6)),
+				(6_000, 1_000, Position::new(0, 6), Position::new(0, 8)),
+			]
+		);
+		assert!(records[0].keyframe);
+		assert!(
+			!records[1].keyframe,
+			"a split inside a group does not start on a keyframe"
+		);
+	}
+
+	#[test]
+	fn a_sparse_track_records_each_group_when_it_finishes() {
+		let mut catalog = Segmenter::new(Config::default().with_duration_min(Duration::ZERO));
+		catalog.frame(at(0), ms(0), true);
+		assert!(catalog.next().is_none(), "the group may still grow");
+		catalog.finish_group(0);
+		assert_eq!(drain(&mut catalog), vec![(0, 0, at(0), at(1))]);
+
+		catalog.frame(at(1), ms(60_000), true);
+		catalog.finish_group(1);
+		assert_eq!(drain(&mut catalog), vec![(60_000, 0, at(1), at(2))]);
+	}
+
+	#[test]
+	fn an_append_only_group_is_indexed_as_it_grows() {
+		// A never-closing log: one frame a second, split every three seconds.
+		let mut log = Segmenter::new(
+			Config::default()
+				.with_duration_min(Duration::ZERO)
+				.with_duration_max(Duration::from_secs(3)),
+		);
+		for frame in 0..7 {
+			log.frame(Position::new(0, frame), ms(frame * 1_000), true);
+		}
+		assert_eq!(
+			drain(&mut log),
+			vec![
+				(0, 3_000, Position::new(0, 0), Position::new(0, 3)),
+				(3_000, 3_000, Position::new(0, 3), Position::new(0, 6)),
+			]
+		);
+
+		// The tail ends after the newest frame, since the group never finished.
+		log.close();
+		assert_eq!(
+			drain(&mut log),
+			vec![(6_000, 0, Position::new(0, 6), Position::new(0, 7))]
+		);
+	}
+
+	#[test]
+	fn a_skipped_sequence_closes_the_record() {
+		let mut audio = Segmenter::new(Config::default());
+		audio.frame(at(0), ms(0), true);
+		audio.frame(at(1), ms(300), true);
+		audio.frame(at(5), ms(600), true);
+		audio.frame(at(6), ms(1_700), true);
+		audio.close();
+
+		assert_eq!(
+			drain(&mut audio),
+			vec![
+				(0, 600, at(0), at(2)),
+				(600, 1_100, at(5), at(6)),
+				(1_700, 0, at(6), Position::new(6, 1))
+			]
+		);
+	}
+
+	#[test]
+	fn explicit_cuts_override_the_pacing() {
+		let mut video = Segmenter::new(Config::default());
+		// Keyframes every second, cut every three: the records follow the cuts, not the GOPs.
+		video.cut(ms(3_000));
+		video.cut(ms(3_000));
+		video.cut(ms(6_000));
+		groups(&mut video, 0..7, 1_000);
+
+		assert_eq!(
+			drain(&mut video),
+			vec![(0, 3_000, at(0), at(3)), (3_000, 3_000, at(3), at(6))]
+		);
+	}
+
+	#[test]
+	fn a_cut_on_the_first_group_does_not_poison_later_cuts() {
+		let mut video = Segmenter::new(Config::default());
+		video.cut(ms(0));
+		for group in 0..10u64 {
+			if group % 3 == 0 {
+				video.cut(ms(group * 1_000));
+			}
+			video.frame(at(group), ms(group * 1_000), true);
+		}
+
+		assert_eq!(drain(&mut video)[0], (0, 3_000, at(0), at(3)));
+	}
+
+	#[test]
+	fn a_non_keyframe_start_is_flagged() {
+		let mut video = Segmenter::new(Config::default());
+		video.frame(at(0), ms(0), true);
+		// A mid-stream join: the group doesn't open on an IDR.
+		video.frame(at(1), ms(2_000), false);
+		video.frame(at(2), ms(4_000), true);
+
+		let records: Vec<Record> = std::iter::from_fn(|| video.next()).collect();
+		assert!(records[0].keyframe);
+		assert!(!records[1].keyframe);
+	}
+
+	#[test]
+	fn a_report_that_does_not_advance_is_ignored() {
+		let mut video = Segmenter::new(Config::default());
+		video.frame(at(3), ms(0), true);
+		video.frame(at(2), ms(2_000), true);
+		video.frame(at(4), ms(2_000), true);
+		assert_eq!(drain(&mut video), vec![(0, 2_000, at(3), at(4))]);
+	}
+
+	#[test]
+	fn a_resumed_segmenter_continues_the_numbering() {
+		let mut video = Segmenter::new(Config::default()).with_sequence(7);
+		groups(&mut video, 10..12, 2_000);
+		assert_eq!(video.next().unwrap().sequence, 7);
+	}
+
+	/// Drain a finished timeline track.
+	async fn read(broadcast: &moq_net::broadcast::Producer, section: &Archive, track: &str) -> Vec<Entry> {
+		let mut consumer = Consumer::<()>::subscribe(&broadcast.consume(), section, track)
+			.await
+			.unwrap();
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
 		while let Poll::Ready(Ok(Some(event))) = consumer.poll_next(&waiter) {
-			if let Event::Push { entry, .. } = event {
+			if let Event::Push { index, entry } = event {
+				assert_eq!(index, entry.sequence);
 				out.push(entry);
 			}
 		}
 		out
 	}
 
-	fn setup() -> (moq_net::broadcast::Producer, Producer) {
-		setup_with(Config::default())
-	}
-
-	fn setup_with(config: Config) -> (moq_net::broadcast::Producer, Producer) {
+	#[tokio::test]
+	async fn tracks_publish_independent_timelines() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timeline = Producer::new(&broadcast, config);
-		(broadcast, timeline)
+		let timelines = Timelines::new(&broadcast, Config::default());
+		let mut video = timelines.track("video0").unwrap();
+		let mut catalog = timelines.sparse("catalog.json").unwrap();
+
+		catalog.frame(at(0), ms(0), true);
+		catalog.finish_group(0);
+		for group in 0..3 {
+			video.frame(at(group), ms(group * 2_000), true);
+			video.finish_group(group);
+		}
+		video.end(ms(6_000));
+		drop(video);
+		timelines.finish();
+
+		let section = timelines.section();
+		assert_eq!(section.timelines["video0"], "video0.timeline.z");
+		assert_eq!(section.timelines["catalog.json"], "catalog.json.timeline.z");
+		assert_eq!(section.duration_max, Some(10_000));
+
+		let video = read(&broadcast, &section, "video0").await;
+		assert_eq!(video.len(), 3);
+		assert_eq!(video[2].end, at(3), "the terminal flush ends after the finished group");
+		let catalog = read(&broadcast, &section, "catalog.json").await;
+		assert_eq!(catalog.len(), 1, "the catalog does not wait for the video");
 	}
 
 	#[tokio::test]
-	async fn a_resumed_timeline_continues_the_checkpoint() {
+	async fn a_sparse_record_publishes_before_the_track_ends() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let checkpoint = Checkpoint {
-			range: 1..3,
-			records: vec![Record::new(1, 1_000, 1_000), Record::new(2, 2_000, 1_000)],
-		};
-		let mut timeline = Producer::resume(&broadcast, Config::default(), &checkpoint).unwrap();
+		let timelines = Timelines::new(&broadcast, Config::default());
+		let mut catalog = timelines.sparse("catalog.json").unwrap();
+		catalog.frame(at(0), ms(0), true);
+		catalog.finish_group(0);
 
-		let mut video = timeline.pacing_track("video0").unwrap();
-		video.record(10, ms(3_000), true);
-		video.record(11, ms(4_000), true);
-		video.end(ms(5_000));
-		drop(video);
-		timeline.finish().unwrap();
+		assert_eq!(read(&broadcast, &timelines.section(), "catalog.json").await.len(), 1);
+		drop(catalog);
+	}
 
+	#[tokio::test]
+	async fn re_enrolling_continues_the_timeline() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let timelines = Timelines::new(&broadcast, Config::default());
+		let mut first = timelines.track("video0").unwrap();
+		first.frame(at(0), ms(0), true);
+		drop(first);
+		let mut second = timelines.track("video0").unwrap();
+		// The new producer restarts its group sequences.
+		second.frame(at(0), ms(2_000), true);
+		drop(second);
+		timelines.finish();
+
+		let entries = read(&broadcast, &timelines.section(), "video0").await;
 		assert_eq!(
-			drain(&broadcast, &timeline).await,
-			vec![
-				entry(1, 1_000, 1_000, &[]),
-				entry(2, 2_000, 1_000, &[]),
-				entry(3, 3_000, 1_000, &[("video0", &[(10, 10)])]),
-				entry(4, 4_000, 1_000, &[("video0", &[(11, 11)])]),
-			]
+			entries.iter().map(|entry| entry.sequence).collect::<Vec<_>>(),
+			vec![0, 1]
 		);
 	}
 
 	#[test]
-	fn a_checkpoint_record_must_be_the_segment_at_its_index() {
+	fn a_taken_timeline_name_fails_enrollment() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
+		let _squat = broadcast.create_track("video0.timeline.z", None).unwrap();
+		let timelines = Timelines::new(&broadcast, Config::default());
+		assert!(timelines.track("video0").is_err());
+		assert!(timelines.section().timelines.is_empty());
+	}
+
+	#[test]
+	fn enrollment_after_finish_is_refused() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let timelines = Timelines::new(&broadcast, Config::default());
+		timelines.finish();
+		assert!(matches!(
+			timelines.track("video0"),
+			Err(crate::Error::Moq(moq_net::Error::Closed))
+		));
+	}
+
+	#[tokio::test]
+	async fn a_resumed_producer_continues_the_checkpoint() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("video0.timeline.z", Producer::info()).unwrap();
+		let checkpoint = Checkpoint {
+			range: 1..3,
+			records: vec![
+				Record::new(1, 1_000, 1_000, at(1), at(2)),
+				Record::new(2, 2_000, 1_000, at(2), at(3)),
+			],
+		};
+		let mut producer = Producer::resume(track, &checkpoint).unwrap();
+		assert!(matches!(
+			producer.push(&Record::new(4, 3_000, 1_000, at(3), at(4))),
+			Err(crate::Error::TimelineSequence { expected: 3, actual: 4 })
+		));
+		producer.push(&Record::new(3, 3_000, 1_000, at(3), at(4))).unwrap();
+		producer.finish().unwrap();
+
+		let mut section = Config::default().section();
+		section
+			.timelines
+			.insert("video0".to_string(), "video0.timeline.z".to_string());
+		let entries = read(&broadcast, &section, "video0").await;
+		assert_eq!(
+			entries.iter().map(|entry| entry.sequence).collect::<Vec<_>>(),
+			vec![1, 2, 3]
+		);
+	}
+
+	#[test]
+	fn a_checkpoint_record_must_be_the_sequence_at_its_index() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("video0.timeline.z", Producer::info()).unwrap();
 		let checkpoint = Checkpoint {
 			range: 0..1,
-			records: vec![Record::new(5, 0, 1_000)],
+			records: vec![Record::new(5, 0, 1_000, at(0), at(1))],
 		};
 		assert!(matches!(
-			Producer::resume(&broadcast, Config::default(), &checkpoint),
+			Producer::resume(track, &checkpoint),
 			Err(crate::Error::TimelineCheckpoint(0))
 		));
 	}
 
 	#[tokio::test]
-	async fn deferred_records_are_invisible_until_committed() {
-		let (broadcast, timeline) = setup();
-		let segmenter = timeline.deferred().unwrap();
-		let mut video = segmenter.pacing_track("video0");
-		let mut consumer = Consumer::<()>::subscribe(&broadcast.consume(), &timeline.section())
-			.await
-			.unwrap();
-		let waiter = kio::Waiter::noop();
-
-		video.record(0, ms(0), true);
-		video.record(1, ms(2_000), true);
-		let record = segmenter.next().expect("the complete segment is ready for storage");
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
-
-		timeline.push(record).unwrap();
-		let Poll::Ready(Ok(Some(Event::Push { index, entry: actual }))) = consumer.poll_next(&waiter) else {
-			panic!("the committed segment was not visible");
-		};
-		assert_eq!(index, 0);
-		assert_eq!(actual, entry(0, 0, 2_000, &[("video0", &[(0, 0)])]));
-
-		timeline.pop(1).unwrap();
-		assert!(matches!(
-			consumer.poll_next(&waiter),
-			Poll::Ready(Ok(Some(Event::Pop(range)))) if range == (0..1)
-		));
-
-		video.end(ms(4_000));
-		drop(video);
-		segmenter.finish().result().unwrap();
-	}
-
-	#[tokio::test]
-	async fn deferred_disables_existing_auto_publishing_recorders() {
-		let (broadcast, timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-		let segmenter = timeline.deferred().unwrap();
-		let mut consumer = Consumer::<()>::subscribe(&broadcast.consume(), &timeline.section())
-			.await
-			.unwrap();
-		let waiter = kio::Waiter::noop();
-
-		video.record(0, ms(0), true);
-		video.record(1, ms(2_000), true);
-		let record = segmenter.next().expect("the complete segment is ready for storage");
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
-
-		timeline.push(record).unwrap();
-		assert!(matches!(
-			consumer.poll_next(&waiter),
-			Poll::Ready(Ok(Some(Event::Push { index: 0, .. })))
-		));
-	}
-
-	#[tokio::test]
-	async fn omitting_a_track_keeps_the_others() {
-		let (broadcast, mut timeline) = setup();
-		let segmenter = timeline.deferred().unwrap();
-		let mut video = segmenter.pacing_track("video0");
-		let mut audio = segmenter.pacing_track("audio0");
-		video.record(0, ms(0), true);
-		audio.record(0, ms(0), true);
-		video.record(1, ms(2_000), true);
-		audio.record(1, ms(2_000), true);
-
-		let pending = segmenter.next().expect("the complete segment is ready for storage");
-		timeline.push(pending.omit("audio0")).unwrap();
-		drop((video, audio));
-		let tail = segmenter.finish();
-		while let Some(pending) = tail.next() {
-			timeline.push(pending).unwrap();
-		}
-		timeline.finish().unwrap();
-
-		assert_eq!(
-			drain(&broadcast, &timeline).await,
-			vec![
-				entry(0, 0, 2_000, &[("video0", &[(0, 0)])]),
-				entry(1, 2_000, 0, &[("audio0", &[(1, 1)]), ("video0", &[(1, 1)])]),
-			]
-		);
-	}
-
-	#[test]
-	fn flush_closes_the_timeline_group() {
-		let (broadcast, timeline) = setup();
-		let segmenter = timeline.deferred().unwrap();
-		let replay = moq_net::track::Subscription::default().with_max_age(Duration::from_secs(30));
-		let groups = broadcast.consume().track(DEFAULT_NAME).unwrap().subscribe(replay);
-		let waiter = kio::Waiter::noop();
-		let Poll::Ready(Ok(mut groups)) = groups.poll_ok(&waiter) else {
-			panic!("the deferred timeline track exists");
-		};
-
-		let mut video = segmenter.pacing_track("video0");
-		video.record(0, ms(0), true);
-		video.record(1, ms(2_000), true);
-		timeline.push(segmenter.next().unwrap()).unwrap();
-		timeline.pop(1).unwrap();
-		timeline.flush().unwrap();
-
-		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
-			panic!("the pushed record opened a group");
-		};
-		assert_eq!(group.frame_count(), 2, "the push header and the pop share one group");
-		assert!(group.poll_finished(&waiter).is_ready(), "flush closes it");
-		assert!(groups.poll_recv_group(&waiter).is_pending());
-	}
-
-	#[test]
-	fn dropping_a_pending_record_requeues_it() {
-		let (_broadcast, timeline) = setup();
-		let segmenter = timeline.deferred().unwrap();
-		let mut video = segmenter.pacing_track("video0");
-		video.record(0, ms(0), true);
-		video.record(1, ms(2_000), true);
-
-		let pending = segmenter.next().expect("the complete segment is ready for storage");
-		assert_eq!(pending.segment, 0);
-		drop(pending);
-
-		let retry = segmenter.next().expect("the abandoned segment is ready to retry");
-		assert_eq!(retry.segment, 0);
-		timeline.push(retry).unwrap();
-	}
-
-	#[test]
-	fn ordinary_producer_rejects_a_deferred_record() {
-		let (_ordinary_broadcast, ordinary) = setup();
-		let (_deferred_broadcast, deferred) = setup();
-		let segmenter = deferred.deferred().unwrap();
-		let mut video = segmenter.pacing_track("video0");
-		video.record(0, ms(0), true);
-		video.record(1, ms(2_000), true);
-
-		let pending = segmenter.next().expect("the complete segment is ready for storage");
-		assert!(matches!(
-			ordinary.push(pending),
-			Err(crate::Error::TimelineDeferredRecord(0))
-		));
-		assert_eq!(
-			segmenter
-				.next()
-				.expect("the rejected segment returns to its producer")
-				.segment,
-			0
-		);
-	}
-
-	#[test]
-	fn deferred_mode_is_rejected_after_finishing_starts() {
-		let (_broadcast, mut timeline) = setup();
-		timeline.finish().unwrap();
-		assert!(matches!(
-			timeline.deferred(),
-			Err(crate::Error::Moq(moq_net::Error::Closed))
-		));
-	}
-
-	#[tokio::test]
-	async fn deferred_records_publish_in_segment_order_before_finish() {
-		let (broadcast, mut timeline) = setup();
-		let segmenter = timeline.deferred().unwrap();
-		let mut video = segmenter.pacing_track("video0");
-		video.record(0, ms(0), true);
-		video.record(1, ms(2_000), true);
-		video.end(ms(4_000));
-		drop(video);
-		let mut consumer = Consumer::<()>::subscribe(&broadcast.consume(), &timeline.section())
-			.await
-			.unwrap();
-		let waiter = kio::Waiter::noop();
-
-		assert!(matches!(timeline.finish(), Err(crate::Error::TimelineDeferredPending)));
-		let drain = segmenter.finish();
-		drain.result().unwrap();
-		drop(drain);
-		let drain = timeline.drain().expect("a cancelled terminal drain is recoverable");
-		assert!(matches!(timeline.finish(), Err(crate::Error::TimelineDeferredPending)));
-		// Storage failed for the first segment, so publish its timing as a gap. It must still
-		// unblock the successfully stored segment behind it.
-		let first = drain.next().expect("the first record is ready for storage").gap();
-		let second = drain.next().expect("the final record is ready for storage");
-		assert!(matches!(timeline.finish(), Err(crate::Error::TimelineDeferredPending)));
-
-		timeline.push(second).unwrap();
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
-		assert!(matches!(timeline.finish(), Err(crate::Error::TimelineDeferredPending)));
-
-		timeline.push(first).unwrap();
-		timeline.finish().unwrap();
-
-		assert_eq!(
-			drain_consumer(&mut consumer),
-			vec![
-				entry(0, 0, 2_000, &[]),
-				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]),
-			]
-		);
-	}
-
-	#[test]
-	fn segmenter_finish_is_terminal() {
-		let segmenter = Segmenter::new(Config::default());
-		let late_segmenter = segmenter.clone();
-		let mut video = segmenter.pacing_track("video0");
-		video.record(0, ms(0), true);
-		video.end(ms(2_000));
-
-		let drain = segmenter.finish();
-		drain.result().unwrap();
-		assert!(drain.next().is_some(), "the terminal flush keeps its final record");
-
-		video.record(1, ms(2_000), true);
-		video.end(ms(4_000));
-		let mut late = late_segmenter.pacing_track("late");
-		late.record(0, ms(2_000), true);
-		late.end(ms(4_000));
-
-		assert!(drain.next().is_none(), "surviving recorders cannot reopen the timeline");
-		assert!(matches!(
-			late_segmenter.cut(ms(4_000)),
-			Err(crate::Error::Moq(moq_net::Error::Closed))
-		));
-	}
-
-	// The coarsest track paces: video GOPs are longer than duration_min, so segments are GOPs.
-	#[tokio::test]
-	async fn the_coarsest_track_paces_the_segments() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-		let mut audio = timeline.pacing_track("audio0").unwrap();
-
-		// Video keyframes every 2s, audio groups every 500ms, minimum 1s.
-		video.record(0, ms(0), true);
-		for (seq, t) in [(0u64, 0u64), (1, 500), (2, 1_000), (3, 1_500)] {
-			audio.record(seq, ms(t), true);
-		}
-		video.record(1, ms(2_000), true);
-		for (seq, t) in [(4u64, 2_000u64), (5, 2_500), (6, 3_000), (7, 3_500)] {
-			audio.record(seq, ms(t), true);
-		}
-		video.record(2, ms(4_000), true);
-		audio.record(8, ms(4_000), true);
-		drop(video);
-		drop(audio);
-		timeline.finish().unwrap();
-
-		// Audio's own candidate (1s) loses to video's (2s), so no segment splits a GOP. Every
-		// record is self-contained: start AND end groups, explicit duration.
-		assert_eq!(
-			drain(&broadcast, &timeline).await,
-			vec![
-				entry(0, 0, 2_000, &[("video0", &[(0, 0)]), ("audio0", &[(0, 3)])]),
-				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)]), ("audio0", &[(4, 7)])]),
-				entry(2, 4_000, 0, &[("video0", &[(2, 2)]), ("audio0", &[(8, 8)])]),
-			]
-		);
-	}
-
-	// A real-time encoder's GOP can dwarf the minimum. Nothing is violated: there is nowhere
-	// else a segment could start and stay decodable, so the segment is simply long.
-	#[tokio::test]
-	async fn a_gop_longer_than_the_minimum_is_one_segment() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-
-		video.record(0, ms(0), true);
-		video.record(1, ms(30_000), true);
-		video.end(ms(60_000));
-		drop(video);
-		timeline.finish().unwrap();
-
-		assert_eq!(
-			drain(&broadcast, &timeline).await,
-			vec![
-				entry(0, 0, 30_000, &[("video0", &[(0, 0)])]),
-				entry(1, 30_000, 30_000, &[("video0", &[(1, 1)])]),
-			]
-		);
-	}
-
-	// Groups shorter than the minimum pack into one segment rather than each becoming one.
-	#[tokio::test]
-	async fn short_groups_pack_up_to_the_minimum() {
-		let (broadcast, mut timeline) = setup_with(Config {
-			duration_min: Duration::from_millis(1_500),
-			..Default::default()
-		});
-		let mut audio = timeline.pacing_track("audio0").unwrap();
-
-		for seq in 0..8u64 {
-			audio.record(seq, ms(seq * 500), true);
-		}
-		drop(audio);
-		timeline.finish().unwrap();
-
-		let entries = drain(&broadcast, &timeline).await;
-		// The first group at or past 1500ms ends segment 0, so it holds groups 0..=2.
-		assert_eq!(entries[0], entry(0, 0, 1_500, &[("audio0", &[(0, 2)])]));
-		assert_eq!(entries[1], entry(1, 1_500, 1_500, &[("audio0", &[(3, 5)])]));
-	}
-
-	// A track that hasn't reached the minimum yet holds the segment open, so a record never
-	// omits a rendition that was about to contribute to it.
-	#[tokio::test]
-	async fn a_segment_waits_for_every_track() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-		let mut audio = timeline.pacing_track("audio0").unwrap();
-
-		video.record(0, ms(0), true);
-		audio.record(0, ms(0), true);
-		video.record(1, ms(2_000), true);
-		// Video alone would close segment 0 here, but audio hasn't crossed 2s.
-		assert!(drain(&broadcast, &timeline).await.is_empty());
-
-		audio.record(1, ms(2_000), true);
-		let entries = drain(&broadcast, &timeline).await;
-		assert_eq!(
-			entries,
-			vec![entry(0, 0, 2_000, &[("video0", &[(0, 0)]), ("audio0", &[(0, 0)])])]
-		);
-		drop(video);
-		drop(audio);
-		timeline.finish().unwrap();
-	}
-
-	// An application that knows its own boundaries overrides the pacing.
-	#[tokio::test]
-	async fn explicit_cuts_override_the_pacing() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-
-		// Keyframes every second, cut every three: the segments follow the cuts, not the GOPs.
-		timeline.cut(ms(3_000)).unwrap();
-		timeline.cut(ms(6_000)).unwrap();
-		for seq in 0..7u64 {
-			video.record(seq, ms(seq * 1_000), true);
-		}
-		drop(video);
-		timeline.finish().unwrap();
-
-		let entries = drain(&broadcast, &timeline).await;
-		assert_eq!(entries[0], entry(0, 0, 3_000, &[("video0", &[(0, 2)])]));
-		assert_eq!(entries[1], entry(1, 3_000, 3_000, &[("video0", &[(3, 5)])]));
-	}
-
-	// Every rendition of one import declares the same boundaries, so a cut that would make a
-	// segment shorter than the minimum is dropped rather than producing a stray segment.
-	#[tokio::test]
-	async fn a_cut_below_the_minimum_is_ignored() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-
-		video.record(0, ms(0), true);
-		timeline.cut(ms(2_000)).unwrap();
-		// A sibling rendition's duplicate, and a boundary too close to be a segment.
-		timeline.cut(ms(2_000)).unwrap();
-		timeline.cut(ms(2_500)).unwrap();
-		timeline.cut(ms(4_000)).unwrap();
-		video.record(1, ms(2_000), true);
-		video.record(2, ms(4_000), true);
-		drop(video);
-		timeline.finish().unwrap();
-
-		let entries = drain(&broadcast, &timeline).await;
-		assert_eq!(entries.len(), 3, "the duplicate and the 500ms cut are both dropped");
-		assert_eq!(entries[0], entry(0, 0, 2_000, &[("video0", &[(0, 0)])]));
-		assert_eq!(entries[1], entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]));
-	}
-
-	// The declared maximum is a contract with consumers (an HLS EXT-X-TARGETDURATION), so a
-	// segment that breaks it fails the timeline rather than publishing a record that
-	// contradicts the catalog.
-	#[tokio::test]
-	async fn exceeding_the_declared_maximum_fails_the_timeline() {
-		let (broadcast, mut timeline) = setup_with(Config {
-			duration_min: Duration::from_secs(1),
-			duration_max: Some(Duration::from_secs(3)),
-			..Default::default()
-		});
-		let mut video = timeline.pacing_track("video0").unwrap();
-
-		let mut consumer = {
-			video.record(0, ms(0), true);
-			video.record(1, ms(2_000), true);
-			Consumer::<()>::subscribe(&broadcast.consume(), &timeline.section())
-				.await
-				.unwrap()
-		};
-
-		// A 4s GOP against a declared 3s maximum.
-		video.record(2, ms(6_000), true);
-		drop(video);
-
-		let err = timeline.finish().unwrap_err();
-		assert!(
-			matches!(err, crate::Error::TimelineOverrun { segment: 1, .. }),
-			"unexpected error: {err}"
-		);
-
-		// The record that was still true published; the one that would have contradicted the
-		// catalog did not, and the track ended there.
-		let waiter = kio::Waiter::noop();
-		let mut entries = Vec::new();
-		while let Poll::Ready(Ok(Some(event))) = consumer.poll_next(&waiter) {
-			if let Event::Push { entry, .. } = event {
-				entries.push(entry);
-			}
-		}
-		assert_eq!(entries, vec![entry(0, 0, 2_000, &[("video0", &[(0, 0)])])]);
-	}
-
-	#[test]
-	fn a_deferred_overrun_is_reported_when_the_output_finishes() {
-		let (_broadcast, mut timeline) = setup_with(Config {
-			duration_min: Duration::from_secs(1),
-			duration_max: Some(Duration::from_secs(3)),
-			..Default::default()
-		});
-		let deferred = timeline.deferred().unwrap();
-		let mut video = deferred.pacing_track("video0");
-
-		video.record(0, ms(0), true);
-		video.record(1, ms(2_000), true);
-
-		video.record(2, ms(6_000), true);
-		drop(video);
-		let drain = deferred.finish();
-		assert!(matches!(
-			drain.result(),
-			Err(crate::Error::TimelineOverrun { segment: 1, .. })
-		));
-		// The overrun does not consume the only path to the valid prefix.
-		timeline.push(drain.next().unwrap()).unwrap();
-		assert!(matches!(
-			timeline.finish(),
-			Err(crate::Error::TimelineOverrun { segment: 1, .. })
-		));
-	}
-
-	#[tokio::test]
-	async fn an_undeclared_maximum_is_omitted_from_the_catalog() {
-		let (_broadcast, timeline) = setup();
-		assert_eq!(timeline.section().duration_max, None);
-
-		let (_broadcast, timeline) = setup_with(Config {
-			duration_max: Some(Duration::from_millis(2_500)),
-			..Default::default()
-		});
-		assert_eq!(timeline.section().duration_max, Some(2_500));
-	}
-
-	// The last group of a broadcast has no successor to bound it, so without a reported end the
-	// final segment's duration collapses to zero (an HLS EXTINF:0).
-	#[tokio::test]
-	async fn the_final_segment_runs_to_the_reported_end() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-
-		video.record(0, ms(0), true);
-		video.record(1, ms(2_000), true);
-		// A finished `container::Producer` reports where its content stops.
-		video.end(ms(4_000));
-		drop(video);
-		timeline.finish().unwrap();
-
-		assert_eq!(
-			drain(&broadcast, &timeline).await,
-			vec![
-				entry(0, 0, 2_000, &[("video0", &[(0, 0)])]),
-				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]),
-			]
-		);
-	}
-
-	// A record is immutable and judged against the tracks enrolled when it flushes, so a
-	// producer that enrolls its tracks one batch at a time (an HLS import walking its
-	// renditions) holds flushing back until they are all in.
-	#[tokio::test]
-	async fn a_reservation_defers_flushing_until_every_track_enrolls() {
-		let (broadcast, mut timeline) = setup();
-		let reserved = timeline.reserve();
-
-		// The primary rendition runs a whole batch of segments through before its sibling has
-		// even loaded an init segment.
-		let mut first = timeline.pacing_track("video0").unwrap();
-		for (seq, t) in [(0u64, 0u64), (1, 2_000), (2, 4_000)] {
-			first.record(seq, ms(t), true);
-		}
-
-		let mut second = timeline.pacing_track("video1").unwrap();
-		for (seq, t) in [(0u64, 0u64), (1, 2_000), (2, 4_000)] {
-			second.record(seq, ms(t), true);
-		}
-
-		drop(reserved);
-		drop(first);
-		drop(second);
-		timeline.finish().unwrap();
-
-		// Both renditions are indexed from segment 0. Without the reservation, segments 0 and 1 would
-		// have flushed knowing only video0 (a permanent gap for video1), and video1's first two
-		// groups would have folded into segment 2.
-		let entries = drain(&broadcast, &timeline).await;
-		assert_eq!(
-			entries[0],
-			entry(0, 0, 2_000, &[("video0", &[(0, 0)]), ("video1", &[(0, 0)])])
-		);
-		assert_eq!(
-			entries[1],
-			entry(1, 2_000, 2_000, &[("video0", &[(1, 1)]), ("video1", &[(1, 1)])])
-		);
-	}
-
-	// A track that races ahead of the others still lands in the segment its content falls in.
-	#[tokio::test]
-	async fn groups_before_the_first_boundary_join_the_first_segment() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-		let mut audio = timeline.pacing_track("audio0").unwrap();
-
-		// Audio races ahead of video's first keyframe (the startup race): its early group
-		// belongs to segment 0, which starts where the earliest content does.
-		audio.record(0, ms(0), true);
-		video.record(0, ms(30), true);
-		for (seq, t) in [(1u64, 500u64), (2, 1_000), (3, 1_500), (4, 2_000)] {
-			audio.record(seq, ms(t), true);
-		}
-		video.record(1, ms(2_030), true);
-		audio.record(5, ms(2_500), true);
-		drop(video);
-		drop(audio);
-		timeline.finish().unwrap();
-
-		let entries = drain(&broadcast, &timeline).await;
-		assert_eq!(
-			entries[0],
-			entry(0, 0, 2_030, &[("video0", &[(0, 0)]), ("audio0", &[(0, 4)])]),
-		);
-	}
-
-	#[tokio::test]
-	async fn sequence_gaps_split_ranges() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-		let mut audio = timeline.pacing_track("audio0").unwrap();
-
-		// Elemental-style gap: audio groups 2..=4 never existed inside segment 0.
-		video.record(0, ms(0), true);
-		audio.record(0, ms(0), true);
-		audio.record(1, ms(300), true);
-		audio.record(5, ms(1_500), true);
-		video.record(1, ms(2_000), true);
-		audio.record(6, ms(2_100), true);
-		drop(video);
-		drop(audio);
-		timeline.finish().unwrap();
-
-		let entries = drain(&broadcast, &timeline).await;
-		assert_eq!(
-			entries[0],
-			entry(0, 0, 2_000, &[("video0", &[(0, 0)]), ("audio0", &[(0, 1), (5, 5)])]),
-		);
-	}
-
-	// A track with nothing to contribute is a whole-segment gap: the record simply omits it
-	// (an HLS exporter renders EXT-X-GAP). Only a *closed* track produces one, since a live
-	// track that has merely gone quiet still gets to say where the boundary is.
-	#[tokio::test]
-	async fn a_closed_track_leaves_a_whole_segment_gap() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-		let mut audio = timeline.pacing_track("audio0").unwrap();
-
-		video.record(0, ms(0), true);
-		audio.record(0, ms(0), true);
-		drop(audio);
-		video.record(1, ms(2_000), true);
-		video.record(2, ms(4_000), true);
-		drop(video);
-		timeline.finish().unwrap();
-
-		let entries = drain(&broadcast, &timeline).await;
-		assert_eq!(entries[1], entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]));
-	}
-
-	#[tokio::test]
-	async fn a_non_keyframe_range_start_is_flagged() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-
-		video.record(0, ms(0), true);
-		// A mid-stream join: the group doesn't open on an IDR.
-		video.record(1, ms(2_000), false);
-		video.record(2, ms(4_000), true);
-		drop(video);
-		timeline.finish().unwrap();
-
-		let entries = drain(&broadcast, &timeline).await;
-		let range = entries[1].tracks["video0"][0];
-		assert!(!range.keyframe, "a range whose first group isn't an IDR says so");
-	}
-
-	// A dead track would otherwise hold every later segment: dropping its recorder is what
-	// says it will never report again.
-	#[tokio::test]
-	async fn a_closed_track_stops_gating() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-		let mut audio = timeline.pacing_track("audio0").unwrap();
-
-		video.record(0, ms(0), true);
-		audio.record(0, ms(0), true);
-		video.record(1, ms(2_000), true);
-		assert!(drain(&broadcast, &timeline).await.is_empty(), "audio still gates");
-
-		drop(audio);
-		let entries = drain(&broadcast, &timeline).await;
-		assert_eq!(
-			entries,
-			vec![entry(0, 0, 2_000, &[("video0", &[(0, 0)]), ("audio0", &[(0, 0)])])]
-		);
-		drop(video);
-		timeline.finish().unwrap();
-	}
-
-	// The timeline track (and its catalog section) exist only once a media track enrolls.
-	#[tokio::test]
-	async fn the_track_is_created_on_first_enrollment() {
+	async fn a_missing_timeline_is_an_error() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timeline = Producer::new(&broadcast, Config::default());
-		assert!(
-			broadcast.create_track(DEFAULT_NAME, None).is_ok(),
-			"nothing took the name yet"
-		);
-
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timeline2 = Producer::new(&broadcast, Config::default());
-		let _recorder = timeline2.pacing_track("video0").unwrap();
-		assert!(
-			broadcast.create_track(DEFAULT_NAME, None).is_err(),
-			"the timeline took the name once a track enrolled"
-		);
-		drop(timeline);
-	}
-
-	#[tokio::test]
-	async fn section_advertises_track_without_wall() {
-		// Wall mapping moved to the catalog root clock: the timeline section carries the track,
-		// timescale, and duration bound, and nothing else time-anchoring.
-		let (_broadcast, timeline) = setup();
-		let section = timeline.section();
-		assert_eq!(section.track, DEFAULT_NAME);
-		assert_eq!(section.timescale, 1000);
-		assert_eq!(section.duration_max, None);
-	}
-
-	// Clones nest like the catalog's, so the first batch to finish doesn't publish records the
-	// others are still filling in.
-	#[tokio::test]
-	async fn reservations_nest() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-
-		let outer = timeline.reserve();
-		let inner = outer.clone();
-
-		for (seq, t) in [(0u64, 0u64), (1, 2_000), (2, 4_000)] {
-			video.record(seq, ms(t), true);
-		}
-
-		drop(inner);
-		assert!(
-			drain(&broadcast, &timeline).await.is_empty(),
-			"the other clone still gates"
-		);
-
-		drop(outer);
-		assert_eq!(
-			drain(&broadcast, &timeline).await.len(),
-			2,
-			"the last clone dropped flushes"
-		);
-
-		drop(video);
-		timeline.finish().unwrap();
-	}
-
-	// A reservation outstanding when the broadcast ends must not strand the terminal flush.
-	#[tokio::test]
-	async fn finish_overrides_an_outstanding_reservation() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-		let reserved = timeline.reserve();
-
-		video.record(0, ms(0), true);
-		video.record(1, ms(2_000), true);
-		video.end(ms(4_000));
-		drop(video);
-
-		timeline.finish().unwrap();
-		assert_eq!(
-			drain(&broadcast, &timeline).await,
-			vec![
-				entry(0, 0, 2_000, &[("video0", &[(0, 0)])]),
-				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]),
-			]
-		);
-
-		// Dropping it afterwards is a no-op rather than an underflow.
-		drop(reserved);
+		let section = Config::default().section();
+		assert!(matches!(
+			Consumer::<()>::subscribe(&broadcast.consume(), &section, "video0").await,
+			Err(crate::Error::TimelineMissing(_))
+		));
 	}
 
 	#[tokio::test]
 	async fn rejects_an_invalid_timescale() {
-		let (broadcast, timeline) = setup();
-		let _recorder = timeline.pacing_track("video0").unwrap();
-		let mut section = timeline.section();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let timelines = Timelines::new(&broadcast, Config::default());
+		let _recorder = timelines.track("video0").unwrap();
+		let mut section = timelines.section();
 		section.timescale = 0;
-		let err = Consumer::<()>::subscribe(&broadcast.consume(), &section).await;
+		let err = Consumer::<()>::subscribe(&broadcast.consume(), &section, "video0").await;
 		assert!(matches!(err, Err(crate::Error::InvalidTimescale(0))));
-	}
-
-	// A cut registered before the media, landing exactly on the first reported group (what the
-	// fMP4 importer does: it cuts at the keyframe fragment's timestamp, then records that group).
-	#[tokio::test]
-	async fn a_cut_on_the_first_group_does_not_poison_later_cuts() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-
-		// Source segments every 3s, keyframes every 1s: 3s segments, not the 1s the
-		// duration_min pacing would produce on its own.
-		timeline.cut(ms(0)).unwrap();
-		video.record(0, ms(0), true);
-		for seq in 1..10u64 {
-			if seq % 3 == 0 {
-				timeline.cut(ms(seq * 1_000)).unwrap();
-			}
-			video.record(seq, ms(seq * 1_000), true);
-		}
-		drop(video);
-		timeline.finish().unwrap();
-
-		let entries = drain(&broadcast, &timeline).await;
-		assert_eq!(
-			entries[0],
-			entry(0, 0, 3_000, &[("video0", &[(0, 2)])]),
-			"the source's 3s boundaries should be reproduced, not duration_min pacing"
-		);
-	}
-
-	// A catalog publishes a group only when the renditions change, so it can go quiet for the
-	// rest of the broadcast. Enrolled as a pacing track it would stall the timeline for good;
-	// non-pacing, it rides along in whichever segment is open.
-	#[tokio::test]
-	async fn a_non_pacing_track_neither_paces_nor_gates() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-		let mut catalog = timeline.track("catalog.json");
-
-		catalog.record(0, ms(0), true);
-		for (seq, t) in [(0u64, 0u64), (1, 2_000), (2, 4_000)] {
-			video.record(seq, ms(t), true);
-		}
-		video.end(ms(6_000));
-		timeline.finish().unwrap();
-
-		let entries = drain(&broadcast, &timeline).await;
-		assert_eq!(
-			entries,
-			vec![
-				entry(0, 0, 2_000, &[("catalog.json", &[(0, 0)]), ("video0", &[(0, 0)])]),
-				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]),
-				entry(2, 4_000, 2_000, &[("video0", &[(2, 2)])]),
-			],
-			"the silent catalog should neither hold records back nor move a boundary"
-		);
-	}
-
-	// Nothing waits for a non-pacing track, so a group arriving after its segment already flushed
-	// is recorded in the next one. Placement is by arrival; the frames still carry their own
-	// timestamps.
-	#[tokio::test]
-	async fn a_late_non_pacing_group_lands_in_the_next_segment() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-		let mut catalog = timeline.track("catalog.json");
-
-		video.record(0, ms(0), true);
-		// Flushes segment 0, which the catalog has contributed nothing to.
-		video.record(1, ms(2_000), true);
-
-		// The update happened a second in, but only reaches the timeline now.
-		catalog.record(0, ms(1_000), true);
-
-		video.record(2, ms(4_000), true);
-		video.end(ms(6_000));
-		timeline.finish().unwrap();
-
-		let entries = drain(&broadcast, &timeline).await;
-		assert_eq!(entries[0], entry(0, 0, 2_000, &[("video0", &[(0, 0)])]));
-		assert_eq!(
-			entries[1],
-			entry(1, 2_000, 2_000, &[("catalog.json", &[(0, 0)]), ("video0", &[(1, 1)])]),
-			"the late group belongs to the segment that was open when it arrived"
-		);
-	}
-
-	// Non-pacing placement is by arrival rather than timestamp. A catalog can stamp snapshots from a
-	// wall-clock basis while imported media starts at PTS zero, so its frontier must neither hold
-	// the group for a much later segment nor stretch the final media segment to that timestamp.
-	#[tokio::test]
-	async fn a_non_pacing_track_uses_arrival_and_does_not_extend_the_tail() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.pacing_track("video0").unwrap();
-		let mut catalog = timeline.track("catalog.json");
-
-		video.record(0, ms(0), true);
-		catalog.record(0, ms(10_000), true);
-		video.record(1, ms(2_000), true);
-		video.end(ms(4_000));
-		timeline.finish().unwrap();
-
-		assert_eq!(
-			drain(&broadcast, &timeline).await,
-			vec![
-				entry(0, 0, 2_000, &[("catalog.json", &[(0, 0)]), ("video0", &[(0, 0)])]),
-				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]),
-			]
-		);
-	}
-
-	#[tokio::test]
-	async fn the_built_in_catalog_is_recorded_without_pacing() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-		let timeline = catalog.timeline();
-		let mut video = catalog.enroll("video0").unwrap();
-
-		video.record(0, ms(0), true);
-		video.record(1, ms(2_000), true);
-		video.end(ms(4_000));
-		drop(video);
-		catalog.finish().unwrap();
-
-		assert_eq!(
-			drain(&broadcast, &timeline).await,
-			vec![
-				entry(0, 0, 2_000, &[("catalog.json", &[(0, 0)]), ("video0", &[(0, 0)])]),
-				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]),
-			]
-		);
-	}
-
-	// Segmentation stays opt-in by pacing track: non-pacing tracks alone describe nothing, so the
-	// timeline track is never created and its name stays free.
-	#[tokio::test]
-	async fn non_pacing_tracks_alone_publish_no_timeline() {
-		let (broadcast, mut timeline) = setup();
-		let mut catalog = timeline.track("catalog.json");
-
-		catalog.record(0, ms(0), true);
-		timeline.finish().unwrap();
-
-		assert!(
-			broadcast.create_track(DEFAULT_NAME, None).is_ok(),
-			"the timeline track should never have been created"
-		);
 	}
 }

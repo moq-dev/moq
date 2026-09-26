@@ -1,21 +1,20 @@
-//! One rendition's view of the broadcast timeline, as a `Producer`/[`Consumer`] pair.
+//! One rendition's view of the broadcast's segments, as a `Producer`/[`Consumer`] pair.
 //!
-//! The broadcast has a single timeline track; the catalog watcher reads it and fans each
-//! record out to every rendition as a row: the segment's number, timing, and this
-//! rendition's group ranges (empty when the record carries no content for it, a gap). Records
-//! are self-contained (the timeline only publishes a segment once its content is final on
-//! every track), so every row is immediately listable and fetchable. Two things read the
-//! window:
+//! Segments are derived from one reference rendition's timeline: each of its records is a
+//! segment, numbered by the record's sequence. The catalog watcher reads that timeline and fans
+//! each record out to every rendition as a row: the segment's number and timing, plus the
+//! reference record's frames. Each rendition resolves a row against its own timeline. Two things
+//! read the window:
 //!
-//! * the HTTP serve path, synchronously, to render a media playlist and look up a segment's
-//!   group ranges (nothing here touches media bytes on that path); and
+//! * the HTTP serve path, synchronously, to render a media playlist and resolve a segment's
+//!   frames (nothing here touches media bytes on that path); and
 //! * a [`Consumer`] cursor, for a recorder that wants every segment *with its media*, in
-//!   order, exactly once. `next()` waits for the next row, FETCHes and transmuxes its groups
-//!   (via [`Rendition`]), and yields the CMAF bytes.
+//!   order, exactly once. `next()` waits for the next resolved row, FETCHes and transmuxes its
+//!   frames (via [`Rendition`]), and yields the CMAF bytes.
 //!
-//! Rows carry the broadcast's aligned segment numbers, so a segment is addressed by that
-//! number everywhere (the `seg/{segment}.m4s` URI, `EXT-X-MEDIA-SEQUENCE`, the recorder
-//! cursor), and the same number names the same span of content time on every rendition.
+//! A segment is addressed by its number everywhere (the `seg/{segment}.m4s` URI,
+//! `EXT-X-MEDIA-SEQUENCE`, the recorder cursor), and the same number names the same span of
+//! content time on every rendition, on every edge, and after every reload.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -23,9 +22,8 @@ use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
-use hang::timeline::Range;
 
-use super::Rendition;
+use super::{Kind, Rendition};
 use crate::Result;
 
 /// The producing side of a rendition's timeline window.
@@ -81,16 +79,22 @@ impl Discontinuities {
 	}
 }
 
-/// One playlist segment: its aligned number, timing, and this rendition's group ranges.
+/// The rendition a broadcast's segment boundaries come from.
+pub(crate) type Reference = Arc<(Kind, String)>;
+
+/// One playlist segment: its number, timing, and the reference record's frames.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Row {
-	/// The source timeline record index, used to mirror exact window trims.
+	/// The reference timeline's record index, used to mirror exact window trims.
 	pub index: u64,
-	/// The aligned segment number (its URI: `seg/{segment}.m4s`), shared across renditions.
+	/// The segment number (its URI: `seg/{segment}.m4s`), shared across renditions.
 	pub segment: u64,
-	/// This rendition's group ranges within the segment. Empty means the rendition has no
-	/// content for the span (`EXT-X-GAP`).
-	pub ranges: Vec<Range>,
+	/// The rendition the boundaries come from.
+	pub reference: Reference,
+	/// The reference record's frames, which the reference rendition serves as is.
+	pub frames: std::ops::Range<hang::timeline::Position>,
+	/// Whether the reference record starts on a keyframe.
+	pub keyframe: bool,
 	/// Presentation duration.
 	pub duration: Duration,
 	/// The segment's starting presentation timestamp.
@@ -247,12 +251,10 @@ impl Producer {
 		self.state.read().window()
 	}
 
-	/// The group ranges segment `segment` covers for this rendition, or `None` if it isn't in
-	/// the window. An empty vec means the segment is a gap for this rendition.
-	pub fn segment_ranges(&self, segment: u64) -> Option<Vec<Range>> {
+	/// Segment `segment`'s row, or `None` if it isn't in the window.
+	pub fn row(&self, segment: u64) -> Option<Row> {
 		let state = self.state.read();
-		let row = state.rows.iter().find(|r| r.segment == segment)?;
-		Some(row.ranges.clone())
+		state.rows.iter().find(|r| r.segment == segment).cloned()
 	}
 
 	/// The number of the segment whose `pts` is exactly `time` in the timeline's timescale
@@ -269,17 +271,17 @@ impl Producer {
 			.map(|row| row.segment)
 	}
 
-	/// The newest group known to start with a keyframe, used to bootstrap an init segment for
-	/// inline-parameter-set codecs.
-	pub fn latest_keyframe_group(&self) -> Option<u64> {
+	/// The newest group of `reference` a row starts on a keyframe, used to bootstrap an init
+	/// segment for inline-parameter-set codecs.
+	pub fn latest_keyframe_group(&self, reference: &(Kind, String)) -> Option<u64> {
 		let state = self.state.read();
 		state
 			.rows
 			.iter()
 			.rev()
-			.flat_map(|row| row.ranges.iter().rev())
-			.find(|range| range.keyframe)
-			.map(|range| range.start)
+			.filter(|row| *row.reference == *reference)
+			.find(|row| row.keyframe && row.frames.start.frame == 0)
+			.map(|row| row.frames.start.group)
 	}
 
 	/// Whether the playlist has anything to serve yet (at least one segment, or the broadcast
@@ -381,16 +383,17 @@ impl Consumer {
 
 	/// The next segment, with its media; `None` once the rendition ends.
 	///
-	/// Waits for the next segment, then FETCHes and transmuxes its groups. A segment whose
-	/// groups already left the relay cache (or that is a gap for this rendition) is skipped,
-	/// resuming at the next one, rather than surfaced as an error; a real fetch/transmux
-	/// failure is returned, leaving the cursor to retry it on the next call.
+	/// Waits for the next segment to resolve on this rendition, then FETCHes and transmuxes its
+	/// frames. A segment whose groups already left the relay cache (or that is a gap for this
+	/// rendition) is skipped, resuming at the next one, rather than surfaced as an error; a real
+	/// fetch/transmux failure is returned, leaving the cursor to retry it on the next call.
 	pub async fn next(&mut self) -> Result<Option<Segment>> {
 		loop {
 			let Some(row) = kio::wait(|waiter| self.poll_next(waiter)).await else {
 				return Ok(None);
 			};
-			match self.rendition.segment(row.segment).await? {
+			kio::wait(|waiter| self.rendition.poll_resolved(waiter, &row)).await;
+			match self.rendition.fetch(&row).await? {
 				Some(media) => {
 					return Ok(Some(Segment {
 						segment: row.segment,
@@ -431,7 +434,9 @@ mod tests {
 		Row {
 			index: segment,
 			segment,
-			ranges: vec![Range::new(group, group)],
+			reference: Arc::new((Kind::Video, "video".to_string())),
+			frames: hang::timeline::Position::group(group)..hang::timeline::Position::group(group + 1),
+			keyframe: true,
 			duration: Duration::from_millis(duration_ms),
 			pts,
 			end: Duration::from(pts) + Duration::from_millis(duration_ms),
@@ -568,31 +573,30 @@ mod tests {
 	}
 
 	#[test]
-	fn segment_ranges_and_gaps() {
+	fn rows_and_the_keyframe_group() {
 		let live = Producer::new();
 		let window = Some(Duration::from_secs(30));
 		live.push(row(0, 0, 0, 1_000), window);
-		// Segment 1 is a gap for this rendition: no ranges.
 		live.push(
 			Row {
-				index: 1,
-				segment: 1,
-				ranges: Vec::new(),
-				duration: Duration::from_secs(1),
-				pts: moq_net::Timestamp::from_millis(1_000).unwrap(),
-				end: Duration::from_millis(2_000),
-				discontinuity: 0,
+				keyframe: false,
+				..row(1, 1, 1_000, 1_000)
 			},
 			window,
 		);
-		live.push(row(2, 100, 2_000, 1_000), window);
 
-		assert_eq!(live.segment_ranges(0), Some(vec![Range::new(0, 0)]));
-		assert_eq!(live.segment_ranges(1), Some(vec![]), "a gap is present but empty");
-		assert_eq!(live.segment_ranges(7), None, "unknown segments miss");
-
-		// The gap row carries no keyframe group; the bootstrap group comes from segment 2.
-		assert_eq!(live.latest_keyframe_group(), Some(100));
+		assert_eq!(
+			live.row(0).unwrap().frames,
+			hang::timeline::Position::group(0)..hang::timeline::Position::group(1)
+		);
+		assert_eq!(live.row(7), None, "unknown segments miss");
+		let video = (Kind::Video, "video".to_string());
+		assert_eq!(
+			live.latest_keyframe_group(&video),
+			Some(0),
+			"row 1 does not start on a keyframe"
+		);
+		assert_eq!(live.latest_keyframe_group(&(Kind::Audio, "video".to_string())), None);
 	}
 
 	#[test]

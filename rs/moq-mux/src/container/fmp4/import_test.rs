@@ -419,10 +419,34 @@ async fn test_msf_catalog_roundtrip() {
 	assert!(matches!(audio.container, Container::Cmaf { .. }));
 }
 
-/// Passthrough writes groups by hand (no `container::Producer`), so the timeline recorder is fed
-/// directly. This guards that the import advertises the broadcast's timeline at the catalog root
-/// and actually records both renditions' group opens into it, the index the VOD/playlist export
-/// reads. Regression for the missing-timeline break that skipped VOD renditions.
+/// Subscribe to `track`'s timeline as `section` advertises it.
+async fn subscribe(
+	consumer: &moq_net::broadcast::Consumer,
+	section: &hang::catalog::Archive,
+	track: &str,
+) -> crate::timeline::Consumer {
+	crate::timeline::Consumer::<()>::subscribe(consumer, section, track)
+		.await
+		.unwrap()
+}
+
+/// Every record a finished timeline published, as `(start group, end group)`.
+async fn groups(timeline: &mut crate::timeline::Consumer) -> Vec<(u64, u64)> {
+	let mut out = Vec::new();
+	while let Some(event) = timeline.next().await.unwrap() {
+		if let crate::timeline::Event::Push { entry, .. } = event {
+			assert_eq!(entry.start.frame, 0, "fragments never split a group here");
+			assert_eq!(entry.end.frame, 0, "fragments never split a group here");
+			out.push((entry.start.group, entry.end.group));
+		}
+	}
+	out
+}
+
+/// Passthrough writes groups by hand (no `container::Producer`), so the timeline recorders are fed
+/// directly. This guards that the import advertises both renditions' timelines at the catalog root
+/// and actually records their groups, the index the VOD/playlist export reads. Regression for the
+/// missing-timeline break that skipped VOD renditions.
 #[tokio::test]
 async fn import_populates_the_broadcast_timeline() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -442,31 +466,21 @@ async fn import_populates_the_broadcast_timeline() {
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
 
-	// The one timeline is advertised at the catalog root, named by convention.
-	let section = snapshot.archive.clone().expect("the import advertises a timeline");
-	assert_eq!(section.track, hang::timeline::DEFAULT_NAME);
+	// Each rendition's timeline is advertised at the catalog root.
+	let section = snapshot.archive.clone().expect("the import advertises its timelines");
+	assert_eq!(
+		section.timelines[&video_name],
+		hang::timeline::default_name(&video_name)
+	);
 
-	// Subscribe while the producer is alive, then finish so the timeline group closes and the
-	// reader terminates rather than blocking.
-	let mut timeline = crate::timeline::Consumer::<()>::subscribe(&consumer, &section)
-		.await
-		.unwrap();
+	// Subscribe while the producer is alive, then finish so the timeline groups close and the
+	// readers terminate rather than blocking.
+	let mut video = subscribe(&consumer, &section, &video_name).await;
+	let mut audio = subscribe(&consumer, &section, &audio_name).await;
 	catalog.finish().unwrap();
 
-	// The first record indexes both renditions from their first group (sequence 0).
-	let event = timeline
-		.next()
-		.await
-		.unwrap()
-		.expect("a segment should be recorded in the timeline");
-	let crate::timeline::Event::Push { entry: first, .. } = event else {
-		panic!("the first timeline event was not a segment");
-	};
-	assert_eq!(first.segment, 0);
-	let video_ranges = first.tracks.get(&video_name).expect("video is indexed");
-	assert_eq!(video_ranges[0].start, 0, "the first video group is sequence 0");
-	let audio_ranges = first.tracks.get(&audio_name).expect("audio is indexed");
-	assert_eq!(audio_ranges[0].start, 0, "the first audio group is sequence 0");
+	assert_eq!(groups(&mut video).await[0].0, 0, "the first video group is sequence 0");
+	assert_eq!(groups(&mut audio).await[0].0, 0, "the first audio group is sequence 0");
 }
 
 // ---- Sample-duration handling in decode() ----
@@ -705,12 +719,11 @@ async fn segmented_source_groups_per_segment() {
 	);
 }
 
-/// The timeline indexes each segment as one group range per track, which is what makes the
-/// segment servable: an HLS/DASH export fetches `start..=end` and concatenates it into one CMAF
-/// segment. With audio grouping per fragment those ranges spanned many short groups, one FETCH
-/// round-trip each, and the two tracks' boundaries no longer coincided.
+/// Each declared segment is one group per track, and each track's timeline indexes it as one
+/// record. With audio grouping per fragment those records spanned many short groups, one FETCH
+/// round-trip each.
 #[tokio::test]
-async fn segmented_source_indexes_one_group_range_per_track() {
+async fn segmented_source_indexes_one_group_per_record() {
 	let (init, (video_id, video_scale), (audio_id, audio_scale)) = bbb_init();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -722,12 +735,11 @@ async fn segmented_source_indexes_one_group_range_per_track() {
 	let snapshot = catalog.snapshot();
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
-	let section = snapshot.archive.clone().expect("the import advertises a timeline");
+	let section = snapshot.archive.clone().expect("the import advertises its timelines");
 
-	// Subscribe while the producer is alive so the reader terminates on finish rather than blocking.
-	let mut timeline = crate::timeline::Consumer::<()>::subscribe(&consumer, &section)
-		.await
-		.unwrap();
+	// Subscribe while the producer is alive so the readers terminate on finish rather than blocking.
+	let mut video = subscribe(&consumer, &section, &video_name).await;
+	let mut audio = subscribe(&consumer, &section, &audio_name).await;
 
 	for segment in 0..3u64 {
 		let base = segment * 1_000_000;
@@ -752,47 +764,22 @@ async fn segmented_source_indexes_one_group_range_per_track() {
 	fmp4.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let mut records = Vec::new();
-	while let Some(event) = timeline.next().await.unwrap() {
-		if let crate::timeline::Event::Push { entry, .. } = event {
-			records.push(entry);
-		}
-	}
-	assert_eq!(records.len(), 3, "one record per declared segment");
-
-	for (i, record) in records.iter().enumerate() {
-		assert_eq!(record.segment, i as u64);
-		let video = record.tracks.get(&video_name).expect("video is indexed");
-		let audio = record.tracks.get(&audio_name).expect("audio is indexed");
-		assert_eq!(video.len(), 1, "segment {i}: video is one contiguous group range");
-		assert_eq!(audio.len(), 1, "segment {i}: audio is one contiguous group range");
-		assert_eq!(
-			(video[0].start, video[0].end),
-			(i as u64, i as u64),
-			"segment {i}: one video group"
-		);
-		assert_eq!(
-			(audio[0].start, audio[0].end),
-			(i as u64, i as u64),
-			"segment {i}: one audio group, not one per fragment"
-		);
-	}
+	let expected = vec![(0, 1), (1, 2), (2, 3)];
+	assert_eq!(groups(&mut video).await, expected, "one video group per record");
+	assert_eq!(
+		groups(&mut audio).await,
+		expected,
+		"one audio group per record, not one per fragment"
+	);
 }
 
 /// Audio and video rarely start a segment at exactly the same timestamp: the boundary is nominal
-/// and each track begins at its own nearest sample. The timeline files a group under a segment by
-/// the group's start, so a boundary declared later than any track's first group files that whole
-/// group under the previous segment.
-///
-/// That was survivable when audio groups were one fragment. Now a group is a whole segment, so a
-/// 20ms skew moves an entire segment of audio into the wrong record: the previous segment gets a
-/// second copy's worth and the next one opens with no audio at all.
+/// and each track begins at its own nearest sample. Each track cuts its own timeline where it opens
+/// its group for a declared segment, so a skew between them moves no group into another record.
 ///
 /// `video_offset_us` shifts video relative to audio, so the same source is exercised with audio
-/// leading and lagging.
-async fn segment_ranges_with_skew(
-	video_offset_us: i64,
-) -> Vec<(Vec<hang::timeline::Range>, Vec<hang::timeline::Range>)> {
+/// leading and lagging. Returns each track's records as `(start group, end group)`.
+async fn records_with_skew(video_offset_us: i64) -> (Vec<(u64, u64)>, Vec<(u64, u64)>) {
 	let (init, (video_id, video_scale), (audio_id, audio_scale)) = bbb_init();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -805,9 +792,8 @@ async fn segment_ranges_with_skew(
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
 	let section = snapshot.archive.clone().unwrap();
-	let mut timeline = crate::timeline::Consumer::<()>::subscribe(&consumer, &section)
-		.await
-		.unwrap();
+	let mut video = subscribe(&consumer, &section, &video_name).await;
+	let mut audio = subscribe(&consumer, &section, &audio_name).await;
 
 	for segment in 0..3u64 {
 		let base = segment * 1_000_000;
@@ -815,7 +801,7 @@ async fn segment_ranges_with_skew(
 		fmp4.decode(&styp()).unwrap();
 
 		// Audio first, so the segment transition is detected on the audio fragment and video's
-		// IDR lands after it. Two fragments each keeps the ranges unambiguous.
+		// IDR lands after it. Two fragments each keeps the records unambiguous.
 		for offset in [0u64, 500_000] {
 			let frag = super::encode_fragment(
 				info(audio_id, audio_scale, segment as u32),
@@ -836,58 +822,21 @@ async fn segment_ranges_with_skew(
 	fmp4.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let mut out = Vec::new();
-	while let Some(event) = timeline.next().await.unwrap() {
-		if let crate::timeline::Event::Push { entry, .. } = event {
-			out.push((
-				entry.tracks.get(&video_name).cloned().unwrap_or_default(),
-				entry.tracks.get(&audio_name).cloned().unwrap_or_default(),
-			));
-		}
-	}
-	out
+	(groups(&mut video).await, groups(&mut audio).await)
 }
 
 /// Video's IDR lands 20ms AFTER audio's first sample of the segment, the normal interleave.
 #[tokio::test]
 async fn audio_leading_video_still_indexes_one_group_each() {
-	let records = segment_ranges_with_skew(20_000).await;
-	assert_eq!(records.len(), 3, "one record per segment");
-	for (i, (video, audio)) in records.iter().enumerate() {
-		assert_eq!(video.len(), 1, "segment {i}: one video range, got {video:?}");
-		assert_eq!(audio.len(), 1, "segment {i}: one audio range, got {audio:?}");
-		assert_eq!(
-			(audio[0].start, audio[0].end),
-			(i as u64, i as u64),
-			"segment {i} audio"
-		);
-		assert_eq!(
-			(video[0].start, video[0].end),
-			(i as u64, i as u64),
-			"segment {i} video"
-		);
-	}
+	let expected = vec![(0, 1), (1, 2), (2, 3)];
+	assert_eq!(records_with_skew(20_000).await, (expected.clone(), expected));
 }
 
 /// Video's IDR lands 20ms BEFORE audio's first sample, the other side of the same skew.
 #[tokio::test]
 async fn audio_lagging_video_still_indexes_one_group_each() {
-	let records = segment_ranges_with_skew(-20_000).await;
-	assert_eq!(records.len(), 3, "one record per segment");
-	for (i, (video, audio)) in records.iter().enumerate() {
-		assert_eq!(video.len(), 1, "segment {i}: one video range, got {video:?}");
-		assert_eq!(audio.len(), 1, "segment {i}: one audio range, got {audio:?}");
-		assert_eq!(
-			(audio[0].start, audio[0].end),
-			(i as u64, i as u64),
-			"segment {i} audio"
-		);
-		assert_eq!(
-			(video[0].start, video[0].end),
-			(i as u64, i as u64),
-			"segment {i} video"
-		);
-	}
+	let expected = vec![(0, 1), (1, 2), (2, 3)];
+	assert_eq!(records_with_skew(-20_000).await, (expected.clone(), expected));
 }
 
 /// A source that emits one leading `styp` and then never another still segments on its video
@@ -1216,7 +1165,7 @@ struct LiveImport {
 	clock: crate::Clock,
 	before: u128,
 	after: u128,
-	/// The first segment the broadcast timeline recorded, the index an archive replays from.
+	/// The first record the video timeline published, the index an archive replays from.
 	record: moq_net::Timestamp,
 }
 
@@ -1241,10 +1190,9 @@ async fn live_import(
 	fmp4.decode(&init).unwrap();
 
 	let snapshot = catalog.snapshot();
-	let section = snapshot.archive.clone().expect("the import advertises a timeline");
-	let mut timeline = crate::timeline::Consumer::<()>::subscribe(&consumer, &section)
-		.await
-		.unwrap();
+	let video = snapshot.video.renditions.keys().next().unwrap().clone();
+	let section = snapshot.archive.clone().expect("the import advertises its timelines");
+	let mut timeline = subscribe(&consumer, &section, &video).await;
 
 	let before = clock.now().as_micros();
 	let mut after = before;
@@ -1260,14 +1208,14 @@ async fn live_import(
 	fmp4.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let event = timeline.next().await.unwrap().expect("a recorded segment");
+	let event = timeline.next().await.unwrap().expect("a recorded span");
 	let crate::timeline::Event::Push { entry, .. } = event else {
-		panic!("the first timeline event was not a segment");
+		panic!("the first timeline event was not a record");
 	};
 
 	LiveImport {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
-		video: snapshot.video.renditions.keys().next().unwrap().clone(),
+		video,
 		clock,
 		before,
 		after,

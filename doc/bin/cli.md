@@ -211,19 +211,22 @@ moq --connect https://relay.example.com/anon --broadcast event-replay.hang impor
 ```
 
 `export archive` records one broadcast with
-[moq-archive](https://docs.rs/moq-archive), reading its catalog as it changes:
-video and audio renditions pace the segments, and the catalog plus every text,
-JSON, and binary track are recorded alongside. It refuses a rendition served
+[moq-archive](https://docs.rs/moq-archive), reading its catalog as it changes.
+Every track gets its own timeline: video and audio renditions are stored in
+spans of about a second or more, and the catalog plus every text, JSON, and
+binary track store each group as it finishes (a group that never closes is
+stored in pieces as it grows). It refuses a rendition served
 from another broadcast, and one that returns after the catalog dropped it. The
 stage ends once the broadcast does, and it refuses a store URL that already
 holds a recording. `--retention 1h` keeps only the last hour (a DVR),
 deleting expired objects `--retention-grace` (default 30s) after the timeline
-stops advertising them.
+stops advertising them. Every track keeps at least its newest span, so a catalog
+that never changes outlives the video it was published with.
 
-`import archive` republishes a recording: the timeline replays as a live track
-and every other track's groups are served on request, one object GET per group
-range. By default it replays what is stored and ends the timeline there;
-`--follow 2s` keeps checking for new segments of a recording still being made.
+`import archive` republishes a recording: each track's timeline replays as a
+live track and every track's groups are served on request, one object GET per
+stored span. By default it replays what is stored and ends the timelines there;
+`--follow 2s` keeps checking for new spans of a recording still being made.
 
 Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
 `gs://bucket/prefix`, or `az://container/prefix`. Cloud credentials come from

@@ -180,34 +180,23 @@ pub enum Error {
 		composition_time_ms: i32,
 	},
 
-	/// A segment ran past the [`duration_max`](crate::timeline::Config::duration_max) the
-	/// catalog advertised, so the timeline stopped publishing rather than contradict it. The
-	/// publisher declared a bound its media can't honor.
-	#[error("timeline segment {segment} lasted {duration:?}, over the declared maximum {duration_max:?}")]
-	TimelineOverrun {
-		/// The segment that broke the bound.
-		segment: u64,
-		/// How long it actually ran.
-		duration: std::time::Duration,
-		/// The bound the catalog advertised.
-		duration_max: std::time::Duration,
+	/// [`timeline::Producer::resume`](crate::timeline::Producer::resume) received a checkpoint
+	/// whose record at this window index has a different sequence.
+	#[error("timeline checkpoint record at index {0} has a different sequence")]
+	TimelineCheckpoint(u64),
+
+	/// [`timeline::Producer::push`](crate::timeline::Producer::push) received a record out of order.
+	#[error("timeline record {actual} pushed where {expected} was next")]
+	TimelineSequence {
+		/// The window's next index.
+		expected: u64,
+		/// The pushed record's sequence.
+		actual: u64,
 	},
 
-	/// [`timeline::Producer::finish`](crate::timeline::Producer::finish) was called before its
-	/// deferred [`timeline::Segmenter`](crate::timeline::Segmenter) completed and every record
-	/// was committed.
-	#[error("finish and commit every deferred timeline record before closing the Producer")]
-	TimelineDeferredPending,
-
-	/// [`timeline::Producer::push`](crate::timeline::Producer::push) received a pending record that
-	/// its [`timeline::Deferred`](crate::timeline::Deferred) did not yield.
-	#[error("timeline segment {0} was not yielded for deferred publication")]
-	TimelineDeferredRecord(u64),
-
-	/// [`timeline::Producer::resume`](crate::timeline::Producer::resume) received a checkpoint
-	/// whose record at this window index is a different segment.
-	#[error("timeline checkpoint record at index {0} is a different segment")]
-	TimelineCheckpoint(u64),
+	/// The catalog's `archive` entry indexes no timeline for this track.
+	#[error("no timeline for track {0}")]
+	TimelineMissing(String),
 
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently MPEG-TS).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).

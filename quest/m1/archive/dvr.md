@@ -31,10 +31,6 @@ whether expiry during a seek needs a group eviction API in `moq-net`.
 broadcast's exporter follows `replay` to the recording for rewind, or whether
 viewers address the replay broadcast directly.
 
-## Required
-
-- [Rust per-track timelines](/quest/m1/archive/track-timeline/core.md) - seeks through per-track timelines
-
 ## Closes
 
 - [#2275](https://github.com/moq-dev/moq/issues/2275) - close this issue when the quest finishes

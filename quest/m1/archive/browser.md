@@ -15,8 +15,7 @@ timelines from [JS per-track timelines](/quest/m1/archive/track-timeline/js.md).
 Commit each track independently: persist each stored span, including a frame
 range of a still-open group, then publish that track's timeline record. Match
 the object keys, envelope bytes, `.info` property values, and timeline
-discovery the Rust writer uses after
-[Rust per-track timelines](/quest/m1/archive/track-timeline/core.md), per the
+discovery the Rust writer uses, per the
 [Recording section](/drafts/draft-lcurley-moq-hang.md#recording), without
 inferring catalog-to-group applicability.
 [Catalog track identity](/quest/m2/catalog-tracks.md) addresses that separately.

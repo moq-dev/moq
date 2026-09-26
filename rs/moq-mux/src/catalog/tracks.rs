@@ -1111,21 +1111,18 @@ mod tests {
 		);
 	}
 
-	/// The broadcast has one timeline: every rendition's groups index into the same track, so
-	/// an aligned ladder (source + rung) shares it by construction.
+	/// Every rendition gets its own timeline, advertised together at the catalog root.
 	#[test]
-	fn renditions_share_the_broadcast_timeline() {
+	fn renditions_get_their_own_timelines() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
 
-		let _recorder = catalog.enroll("video0").unwrap();
-		let timeline = catalog.timeline();
-		assert_eq!(timeline.section().track, hang::timeline::DEFAULT_NAME);
-		assert_eq!(
-			catalog.snapshot().archive,
-			Some(timeline.section()),
-			"the one timeline is advertised at the catalog root"
-		);
+		let _video0 = catalog.enroll("video0").unwrap();
+		let _video1 = catalog.enroll("video1").unwrap();
+		let section = catalog.timeline().section();
+		assert_eq!(section.timelines["video0"], "video0.timeline.z");
+		assert_eq!(section.timelines["video1"], "video1.timeline.z");
+		assert_eq!(catalog.snapshot().archive, Some(section));
 	}
 
 	mod custom {

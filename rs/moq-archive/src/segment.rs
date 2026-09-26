@@ -1,12 +1,11 @@
-use std::ops::RangeInclusive;
-
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use hang::timeline::Position;
 use moq_net::VarInt;
 
-use crate::path::{check_id, check_range};
+use crate::path::check_id;
 use crate::{Error, Result, VERSION};
 
-/// One complete group in a segment object, in sequence order.
+/// One group's stored frames in a segment object, in sequence order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Group {
 	/// Group sequence number.
@@ -27,15 +26,50 @@ pub struct Frame {
 /// A versioned group/frame table followed by concatenated payload bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Object {
+	/// The index of the first group's first stored frame within that group; later groups start at
+	/// frame zero.
+	pub frame_start: u64,
 	/// Groups in strictly ascending sequence order.
 	pub groups: Vec<Group>,
 }
 
 impl Object {
-	/// Inclusive group sequences from first to last.
-	pub fn bounds(&self) -> Result<RangeInclusive<u64>> {
+	/// An object whose first group starts at frame zero.
+	pub fn new(groups: Vec<Group>) -> Self {
+		Self { frame_start: 0, groups }
+	}
+
+	/// The position of the first stored frame.
+	pub fn start(&self) -> Result<Position> {
 		validate(&self.groups)?;
-		Ok(self.groups[0].sequence..=self.groups.last().unwrap().sequence)
+		Ok(Position::new(self.groups[0].sequence, self.frame_start))
+	}
+
+	/// Require this object to hold exactly the frames `start..end` of a record, with no group
+	/// missing or empty.
+	pub fn check_span(&self, start: Position, end: Position) -> Result<()> {
+		if self.start()? != start {
+			return Err(Error::Span);
+		}
+		for (expected, group) in (start.group..).zip(&self.groups) {
+			if group.sequence != expected || group.frames.is_empty() {
+				return Err(Error::Span);
+			}
+		}
+		let last = self.groups.last().expect("validated as non-empty");
+		let first = match self.groups.len() {
+			1 => self.frame_start,
+			_ => 0,
+		};
+		let stop = first.checked_add(last.frames.len() as u64).ok_or(Error::Overflow)?;
+		let exact = match end.frame {
+			0 => end.group == last.sequence + 1,
+			frame => end.group == last.sequence && frame == stop,
+		};
+		if !exact {
+			return Err(Error::Span);
+		}
+		Ok(())
 	}
 
 	/// Encode the binary envelope. The first sequence is absolute; later ones are `current - previous - 1`.
@@ -44,6 +78,7 @@ impl Object {
 
 		let mut table = BytesMut::new();
 		write_varint(&mut table, VERSION)?;
+		write_varint(&mut table, self.frame_start)?;
 		write_varint(&mut table, self.groups.len() as u64)?;
 
 		let mut payload = BytesMut::new();
@@ -82,6 +117,7 @@ impl Object {
 			return Err(Error::Version(version));
 		}
 
+		let frame_start = read_varint(&mut buf)?;
 		let group_count = read_count(&mut buf, 2)?;
 		if group_count == 0 {
 			return Err(Error::Empty);
@@ -157,28 +193,7 @@ impl Object {
 			return Err(Error::Table);
 		}
 
-		Ok(Self { groups })
-	}
-
-	/// Decode and require the table's sequences to match `range`.
-	pub fn decode_groups(buf: impl Buf, range: RangeInclusive<u64>) -> Result<Self> {
-		check_range(&range)?;
-		let object = Self::decode(buf)?;
-		object.check_bounds(range)?;
-		Ok(object)
-	}
-
-	/// Require this object's sequences to match a range-named key.
-	pub fn check_bounds(&self, range: RangeInclusive<u64>) -> Result<()> {
-		check_range(&range)?;
-		let got = self.bounds()?;
-		if got != range {
-			return Err(Error::Bounds {
-				smallest: *got.start(),
-				largest: *got.end(),
-			});
-		}
-		Ok(())
+		Ok(Self { frame_start, groups })
 	}
 }
 
@@ -233,7 +248,14 @@ mod tests {
 	}
 
 	fn object(groups: Vec<Group>) -> Object {
-		Object { groups }
+		Object::new(groups)
+	}
+
+	fn group(sequence: u64, frames: usize) -> Group {
+		Group {
+			sequence,
+			frames: (0..frames as u64).map(|i| frame(i, b"x")).collect(),
+		}
 	}
 
 	#[test]
@@ -254,8 +276,14 @@ mod tests {
 		]);
 		let bytes = original.encode().unwrap();
 		assert_eq!(Object::decode(&bytes[..]).unwrap(), original);
-		assert_eq!(original.bounds().unwrap(), 0..=4);
-		original.check_bounds(0..=4).unwrap();
+		assert_eq!(original.start().unwrap(), Position::group(0));
+
+		let split = Object {
+			frame_start: 300,
+			..original
+		};
+		assert_eq!(Object::decode(split.encode().unwrap()).unwrap(), split);
+		assert_eq!(split.start().unwrap(), Position::new(0, 300));
 	}
 
 	#[test]
@@ -278,7 +306,8 @@ mod tests {
 		.unwrap();
 
 		let mut buf = &bytes[..];
-		assert_eq!(read_varint(&mut buf).unwrap(), 1); // version
+		assert_eq!(read_varint(&mut buf).unwrap(), 2); // version
+		assert_eq!(read_varint(&mut buf).unwrap(), 0); // frame start
 		assert_eq!(read_varint(&mut buf).unwrap(), 3); // group count
 		assert_eq!(read_varint(&mut buf).unwrap(), 5); // absolute
 		assert_eq!(read_varint(&mut buf).unwrap(), 1); // one frame
@@ -297,7 +326,8 @@ mod tests {
 	fn empty_object_is_rejected() {
 		assert!(matches!(object(vec![]).encode(), Err(Error::Empty)));
 		let mut bytes = BytesMut::new();
-		write_varint(&mut bytes, 1).unwrap();
+		write_varint(&mut bytes, VERSION).unwrap();
+		write_varint(&mut bytes, 0).unwrap();
 		write_varint(&mut bytes, 0).unwrap();
 		assert!(matches!(Object::decode(bytes.freeze()), Err(Error::Empty)));
 	}
@@ -337,7 +367,8 @@ mod tests {
 	#[test]
 	fn reconstructed_ids_must_stay_in_range() {
 		let mut bytes = BytesMut::new();
-		write_varint(&mut bytes, 1).unwrap();
+		write_varint(&mut bytes, VERSION).unwrap();
+		write_varint(&mut bytes, 0).unwrap();
 		write_varint(&mut bytes, 2).unwrap();
 		write_varint(&mut bytes, ID_MAX).unwrap();
 		write_varint(&mut bytes, 0).unwrap(); // no frames
@@ -349,7 +380,8 @@ mod tests {
 	/// A table with one frameless group per delta.
 	fn deltas(deltas: &[u64]) -> Bytes {
 		let mut bytes = BytesMut::new();
-		write_varint(&mut bytes, 1).unwrap();
+		write_varint(&mut bytes, VERSION).unwrap();
+		write_varint(&mut bytes, 0).unwrap();
 		write_varint(&mut bytes, deltas.len() as u64).unwrap();
 		for &delta in deltas {
 			write_varint(&mut bytes, delta).unwrap();
@@ -401,10 +433,13 @@ mod tests {
 
 	#[test]
 	fn unknown_version_is_refused() {
-		let mut bytes = BytesMut::new();
-		write_varint(&mut bytes, 2).unwrap();
-		write_varint(&mut bytes, 1).unwrap();
-		assert!(matches!(Object::decode(bytes.freeze()), Err(Error::Version(2))));
+		// Version 1 objects held whole groups under range-named keys.
+		for version in [1, 3] {
+			let mut bytes = BytesMut::new();
+			write_varint(&mut bytes, version).unwrap();
+			write_varint(&mut bytes, 1).unwrap();
+			assert!(matches!(Object::decode(bytes.freeze()), Err(Error::Version(v)) if v == version));
+		}
 	}
 
 	#[test]
@@ -425,7 +460,8 @@ mod tests {
 		// group_count equals remaining bytes, so a remaining-bytes check would
 		// accept it, but each group needs at least two varints.
 		let mut bytes = BytesMut::new();
-		write_varint(&mut bytes, 1).unwrap();
+		write_varint(&mut bytes, VERSION).unwrap();
+		write_varint(&mut bytes, 0).unwrap();
 		write_varint(&mut bytes, 4).unwrap();
 		bytes.extend_from_slice(&[0, 0, 0, 0]);
 		assert!(matches!(Object::decode(bytes.freeze()), Err(Error::Table)));
@@ -434,16 +470,12 @@ mod tests {
 	#[test]
 	fn offset_overflow_and_truncated_table() {
 		let mut bytes = BytesMut::new();
-		write_varint(&mut bytes, 1).unwrap();
-		write_varint(&mut bytes, 1).unwrap();
-		write_varint(&mut bytes, 0).unwrap();
-		write_varint(&mut bytes, 1).unwrap();
-		write_varint(&mut bytes, 0).unwrap();
-		write_varint(&mut bytes, 0).unwrap();
-		write_varint(&mut bytes, 4).unwrap(); // length 4, no payload
+		for value in [VERSION, 0, 1, 0, 1, 0, 0, 4] {
+			write_varint(&mut bytes, value).unwrap(); // length 4, no payload
+		}
 		assert!(matches!(Object::decode(bytes.freeze()), Err(Error::Table)));
 
-		assert!(matches!(Object::decode(&b"\x01"[..]), Err(Error::Table)));
+		assert!(matches!(Object::decode(&b"\x02"[..]), Err(Error::Table)));
 	}
 
 	#[test]
@@ -451,7 +483,7 @@ mod tests {
 		// One group of two frames at (offset, length), followed by `payload` bytes.
 		let table = |frames: [(u64, u64); 2], payload: usize| {
 			let mut bytes = BytesMut::new();
-			for value in [1, 1, 0, 2] {
+			for value in [VERSION, 0, 1, 0, 2] {
 				write_varint(&mut bytes, value).unwrap();
 			}
 			for (offset, length) in frames {
@@ -475,34 +507,50 @@ mod tests {
 	}
 
 	#[test]
-	fn filename_bounds_must_match_the_table() {
-		let object = object(vec![
-			Group {
-				sequence: 5,
-				frames: vec![frame(0, b"a")],
-			},
-			Group {
-				sequence: 7,
-				frames: vec![frame(1, b"b")],
-			},
-		]);
-		let bytes = object.encode().unwrap();
-		assert!(Object::decode_groups(&bytes[..], 5..=7).is_ok());
-		assert!(matches!(
-			Object::decode_groups(&bytes[..], 6..=7),
-			Err(Error::Bounds {
-				smallest: 5,
-				largest: 7
-			})
-		));
-		let (smallest, largest) = (7, 5);
-		assert!(matches!(
-			Object::decode_groups(&bytes[..], smallest..=largest),
-			Err(Error::Bounds {
-				smallest: 7,
-				largest: 5
-			})
-		));
+	fn a_span_must_match_the_record() {
+		let whole = object(vec![group(5, 2), group(6, 1)]);
+		whole.check_span(Position::group(5), Position::group(7)).unwrap();
+		assert_eq!(
+			whole.check_span(Position::group(5), Position::group(8)),
+			Err(Error::Span)
+		);
+		assert_eq!(
+			whole.check_span(Position::group(4), Position::group(7)),
+			Err(Error::Span)
+		);
+		assert_eq!(
+			whole.check_span(Position::group(5), Position::new(6, 2)),
+			Err(Error::Span),
+			"a partial end names its frame count"
+		);
+
+		// A frame split: frames 3..5 of group 7.
+		let split = Object {
+			frame_start: 3,
+			groups: vec![group(7, 2)],
+		};
+		split.check_span(Position::new(7, 3), Position::new(7, 5)).unwrap();
+		assert_eq!(
+			split.check_span(Position::new(7, 3), Position::new(7, 4)),
+			Err(Error::Span)
+		);
+
+		// A split's tail continues into whole groups.
+		let tail = Object {
+			frame_start: 3,
+			groups: vec![group(7, 2), group(8, 4)],
+		};
+		tail.check_span(Position::new(7, 3), Position::new(8, 4)).unwrap();
+		tail.check_span(Position::new(7, 3), Position::group(9)).unwrap();
+
+		// Gaps and empty groups never appear inside a record.
+		let gap = object(vec![group(5, 1), group(7, 1)]);
+		assert_eq!(gap.check_span(Position::group(5), Position::group(8)), Err(Error::Span));
+		let empty = object(vec![group(5, 1), group(6, 0)]);
+		assert_eq!(
+			empty.check_span(Position::group(5), Position::group(7)),
+			Err(Error::Span)
+		);
 	}
 
 	#[test]

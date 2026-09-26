@@ -1,47 +1,47 @@
-//! The timeline track: the broadcast's segment index, one record per aligned segment.
+//! Per-track timelines: each track's index of stored spans, one record per span.
 //!
 //! MoQ groups carry only an opaque sequence number; the timestamps live inside the media
-//! frames. The timeline track republishes the broadcast's segmentation as metadata: each
-//! record describes one *segment*, a span of content time shared by every media track, and
-//! maps it to the group ranges that carry it on each track. A consumer can answer "which
-//! groups cover time T on track X" (and "where is the live edge") from a few bytes per
-//! segment without downloading media. That is exactly what an HLS/DASH origin needs to render
-//! playlists without touching media bytes, and the index a VOD player seeks with.
+//! frames. A timeline track republishes one track's spans as metadata: each record maps a span
+//! of content time to the group and frame positions that carry it. A consumer can answer
+//! "which groups cover time T on track X" (and "where is the live edge") from a few bytes per
+//! span without downloading media. That is what an HLS/DASH origin needs to render playlists
+//! without touching media bytes, the index a VOD player seeks with, and the object index of a
+//! recording.
 //!
-//! ## Segments
+//! ## Spans
 //!
-//! A segment covers the same span of content time on every track of the broadcast, which is
-//! what HLS requires of switchable renditions. Segment boundaries land on video keyframes
-//! (every group already opens on one), so a video track contributes whole groups to each
-//! segment; an audio track packs however many of its shorter groups fall inside the span.
-//! A record is published once the segment is *complete*: every participating track's groups
-//! for the span are known, so the record is self-contained and immediately servable.
+//! Every track has its own timeline, so tracks cut, commit, and expire independently. A span
+//! usually holds whole groups; a group that outlives the publisher's maximum span is split by
+//! frame, so an append-only group that never closes is still indexed as its frames arrive.
+//! Spans are contiguous in position: a record starts where the previous one ended unless the
+//! track skipped group sequences in between.
 //!
-//! There is one timeline per broadcast, advertised by the catalog's root
-//! [`Archive`](crate::catalog::Archive) entry (its `track` field names this track,
-//! [`DEFAULT_NAME`](crate::timeline::DEFAULT_NAME) by convention). A broadcast that doesn't need aligned segments simply
-//! doesn't publish one.
+//! The catalog's root [`Archive`](crate::catalog::Archive) entry maps each track to its
+//! timeline track, conventionally the track name plus [`SUFFIX`](crate::timeline::SUFFIX).
 //!
-//! On the wire the track is a DEFLATE-compressed `moq-json` window (see `moq_json::window`).
+//! On the wire each timeline is a DEFLATE-compressed `moq-json` window (see `moq_json::window`).
 //! Each group starts with a checkpoint and continues with push/pop operations; group rolls are an
 //! encoding detail that consumers do not surface as duplicate records. Like the catalog, a record
 //! tolerates and preserves unknown fields: extend it by flattening a
 //! [`Record`](crate::timeline::Record) into your own struct via
 //! [`RecordExt`](crate::timeline::RecordExt).
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
-/// The conventional name for a broadcast's timeline track (the `.z` marks the
-/// DEFLATE-compressed stream, like the catalog's `.json.z` sibling).
+/// The conventional suffix appended to a track name to name its timeline track (the `.z` marks
+/// the DEFLATE-compressed stream, like the catalog's `.json.z` sibling).
 ///
-/// A publisher records the actual name in the catalog's root
-/// [`Archive`](crate::catalog::Archive) entry (`timeline.track`); a consumer reads it from the
-/// catalog rather than assuming, so this is only a default.
-pub const DEFAULT_NAME: &str = "timeline.z";
+/// A publisher records the actual names in the catalog's root
+/// [`Archive`](crate::catalog::Archive) entry; a consumer reads them from the catalog rather than
+/// assuming, so this is only a default.
+pub const SUFFIX: &str = ".timeline.z";
+
+/// The conventional timeline track name for `track`: the name plus [`SUFFIX`].
+pub fn default_name(track: &str) -> String {
+	format!("{track}{SUFFIX}")
+}
 
 /// The application extension carried alongside a record's base fields.
 ///
@@ -51,74 +51,69 @@ pub const DEFAULT_NAME: &str = "timeline.z";
 pub trait RecordExt: serde::Serialize + serde::de::DeserializeOwned + Default + Clone + Send + Unpin + 'static {}
 impl RecordExt for () {}
 
-/// A contiguous run of groups a track contributes to a segment, `start` through `end`
-/// inclusive.
+/// A frame position within a track: frame `frame` of group `group`.
 ///
-/// A track's segment entry is an array of these: more than one range means the group
-/// sequence is discontinuous inside the segment (groups that never existed, e.g. a gappy
-/// source).
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct Range {
-	/// The first group of the run, as used by FETCH/SUBSCRIBE on the media track.
-	pub start: u64,
+/// Positions order by group, then frame. `frame` is omitted from the JSON when zero, so a
+/// position at a group start reads as just the group.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Position {
+	/// The group sequence, as used by FETCH/SUBSCRIBE on the track.
+	pub group: u64,
 
-	/// The last group of the run, inclusive.
-	pub end: u64,
-
-	/// Whether the run's first group starts with a keyframe, i.e. whether a player can join or
-	/// switch renditions at this range. Defaults to `true` (and is omitted from the JSON when
-	/// true); a publisher sets `false` when a source resumes without one, so an exporter knows
-	/// not to advertise the segment as independently decodable.
-	#[serde(default = "Range::default_keyframe", skip_serializing_if = "Clone::clone")]
-	pub keyframe: bool,
+	/// The frame index within the group.
+	#[serde(default, skip_serializing_if = "is_zero")]
+	pub frame: u64,
 }
 
-impl Range {
-	fn default_keyframe() -> bool {
-		true
+fn is_zero(v: &u64) -> bool {
+	*v == 0
+}
+
+impl Position {
+	/// Frame `frame` of group `group`.
+	pub const fn new(group: u64, frame: u64) -> Self {
+		Self { group, frame }
 	}
 
-	/// A range covering groups `start` through `end` inclusive, starting on a keyframe.
-	pub fn new(start: u64, end: u64) -> Self {
-		Self {
-			start,
-			end,
-			keyframe: true,
-		}
+	/// The start of group `group`.
+	pub const fn group(group: u64) -> Self {
+		Self { group, frame: 0 }
 	}
 }
 
-/// One timeline record: a complete aligned segment, mapping its span of content time to the
-/// group ranges that carry it on each track.
+/// One timeline record: a span of one track, mapping its content time to frame positions.
 ///
-/// Records are self-contained: `pts` and `duration` bound the span (no peeking at the next
-/// record), and `tracks` names every participating media track's group ranges. A track absent
-/// from `tracks` has no content for the span (a gap; HLS `EXT-X-GAP`). `pts`/`duration` are in
-/// the timescale declared by the catalog's [`Archive`](crate::catalog::Archive) entry
-/// (default milliseconds). Extend with a typed [`RecordExt`].
+/// The span holds every frame from [`start`](Self::start) (inclusive) to [`end`](Self::end)
+/// (exclusive). An `end` at frame zero of group `g` means the span holds every frame of group
+/// `g - 1` and nothing of `g`, whether or not `g` exists. `pts`/`duration` are in the timescale
+/// declared by the catalog's [`Archive`](crate::catalog::Archive) entry (default milliseconds).
+/// Extend with a typed [`RecordExt`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(
 	rename_all = "camelCase",
 	bound(serialize = "E: serde::Serialize", deserialize = "E: serde::de::DeserializeOwned")
 )]
 pub struct Record<E: RecordExt = ()> {
-	/// The segment's number. Consecutive within a broadcast, so it anchors HLS
-	/// `EXT-X-MEDIA-SEQUENCE`; explicit (rather than implied by record order) so a reader
-	/// joining mid-stream or across a windowed recording keeps stable numbering.
-	pub segment: u64,
+	/// The record's number, consecutive within its track's timeline and equal to its window index.
+	pub sequence: u64,
 
-	/// The segment's start, in the timeline's timescale.
+	/// The span's start, the timestamp of its first frame, in the timeline's timescale.
 	pub pts: u64,
 
-	/// The segment's duration, in the timeline's timescale. The next record's `pts` is
+	/// The span's duration, in the timeline's timescale. The next record's `pts` is
 	/// `pts + duration` unless content time itself jumped (a discontinuity).
 	pub duration: u64,
 
-	/// The group ranges each participating media track contributes to this segment, keyed by
-	/// track name. A track absent from the map has no content in this span.
-	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-	pub tracks: BTreeMap<String, Vec<Range>>,
+	/// The first frame of the span, inclusive.
+	pub start: Position,
+
+	/// The end of the span, exclusive.
+	pub end: Position,
+
+	/// Whether the span's first frame is a keyframe, i.e. whether a player can join or switch
+	/// renditions at this record. Defaults to `true` (and is omitted from the JSON when true).
+	#[serde(default = "default_keyframe", skip_serializing_if = "Clone::clone")]
+	pub keyframe: bool,
 
 	/// The application extension, flattened into the record's JSON object (nothing for the
 	/// default `()`). See [`RecordExt`].
@@ -126,17 +121,31 @@ pub struct Record<E: RecordExt = ()> {
 	pub ext: E,
 }
 
+fn default_keyframe() -> bool {
+	true
+}
+
 impl<E: RecordExt> Record<E> {
-	/// A record with no tracks and the default (empty) extension; fill in
-	/// [`tracks`](Self::tracks) afterward.
-	pub fn new(segment: u64, pts: u64, duration: u64) -> Self {
+	/// A keyframe record spanning `start..end` with the default (empty) extension.
+	pub fn new(sequence: u64, pts: u64, duration: u64, start: Position, end: Position) -> Self {
 		Self {
-			segment,
+			sequence,
 			pts,
 			duration,
-			tracks: BTreeMap::new(),
+			start,
+			end,
+			keyframe: true,
 			ext: E::default(),
 		}
+	}
+
+	/// The groups holding at least one frame of the span, in order.
+	pub fn groups(&self) -> std::ops::RangeInclusive<u64> {
+		let last = match self.end.frame {
+			0 => self.end.group.saturating_sub(1),
+			_ => self.end.group,
+		};
+		self.start.group..=last
 	}
 
 	/// Parse a record from a slice of bytes.
@@ -156,54 +165,38 @@ mod test {
 
 	#[test]
 	fn roundtrip() {
-		let mut record = Record::<()>::new(3, 84_000, 6_000);
-		record.tracks.insert("video".to_string(), vec![Range::new(42, 42)]);
-		record
-			.tracks
-			.insert("audio".to_string(), vec![Range::new(512, 540), Range::new(550, 560)]);
-
+		let record = Record::<()>::new(3, 84_000, 6_000, Position::group(42), Position::group(44));
 		let json = record.to_vec().unwrap();
 		assert_eq!(
 			std::str::from_utf8(&json).unwrap(),
-			concat!(
-				r#"{"segment":3,"pts":84000,"duration":6000,"tracks":{"#,
-				r#""audio":[{"start":512,"end":540},{"start":550,"end":560}],"#,
-				r#""video":[{"start":42,"end":42}]}}"#
-			)
+			r#"{"sequence":3,"pts":84000,"duration":6000,"start":{"group":42},"end":{"group":44}}"#
 		);
 		assert_eq!(Record::<()>::from_slice(&json).unwrap(), record);
+		assert_eq!(record.groups(), 42..=43);
 	}
 
 	#[test]
-	fn keyframe_false_roundtrips_and_true_is_omitted() {
-		let mut range = Range::new(7, 9);
-		range.keyframe = false;
-		let mut record = Record::<()>::new(0, 0, 2_000);
-		record.tracks.insert("video".to_string(), vec![range]);
-
+	fn a_frame_split_roundtrips() {
+		let mut record = Record::<()>::new(0, 0, 10_000, Position::new(7, 300), Position::new(7, 600));
+		record.keyframe = false;
 		let json = record.to_vec().unwrap();
 		assert_eq!(
 			std::str::from_utf8(&json).unwrap(),
-			r#"{"segment":0,"pts":0,"duration":2000,"tracks":{"video":[{"start":7,"end":9,"keyframe":false}]}}"#
+			r#"{"sequence":0,"pts":0,"duration":10000,"start":{"group":7,"frame":300},"end":{"group":7,"frame":600},"keyframe":false}"#
 		);
+		assert_eq!(Record::<()>::from_slice(&json).unwrap(), record);
+		assert_eq!(record.groups(), 7..=7);
 
-		let decoded = Record::<()>::from_slice(&json).unwrap();
-		assert_eq!(decoded, record);
 		// An omitted flag decodes as the keyframe default.
 		let plain: Record =
-			Record::from_slice(br#"{"segment":0,"pts":0,"duration":1,"tracks":{"v":[{"start":1,"end":1}]}}"#).unwrap();
-		assert!(plain.tracks["v"][0].keyframe);
+			Record::from_slice(br#"{"sequence":0,"pts":0,"duration":1,"start":{"group":1},"end":{"group":2}}"#)
+				.unwrap();
+		assert!(plain.keyframe);
 	}
 
 	#[test]
-	fn empty_tracks_is_omitted() {
-		let record = Record::<()>::new(1, 1_000, 500);
-		let json = record.to_vec().unwrap();
-		assert_eq!(
-			std::str::from_utf8(&json).unwrap(),
-			r#"{"segment":1,"pts":1000,"duration":500}"#
-		);
-		assert_eq!(Record::<()>::from_slice(&json).unwrap(), record);
+	fn default_name_appends_the_suffix() {
+		assert_eq!(default_name("video0"), "video0.timeline.z");
 	}
 
 	#[test]
@@ -216,17 +209,12 @@ mod test {
 		}
 		impl RecordExt for Ext {}
 
-		let record = Record {
-			segment: 2,
-			pts: 14_000,
-			duration: 2_000,
-			tracks: BTreeMap::new(),
-			ext: Ext { discontinuity: true },
-		};
+		let mut record = Record::<Ext>::new(2, 14_000, 2_000, Position::group(1), Position::group(2));
+		record.ext.discontinuity = true;
 		let json = record.to_vec().unwrap();
 		assert_eq!(
 			std::str::from_utf8(&json).unwrap(),
-			r#"{"segment":2,"pts":14000,"duration":2000,"discontinuity":true}"#
+			r#"{"sequence":2,"pts":14000,"duration":2000,"start":{"group":1},"end":{"group":2},"discontinuity":true}"#
 		);
 		assert_eq!(Record::<Ext>::from_slice(&json).unwrap(), record);
 	}
