@@ -113,8 +113,9 @@ jobs:
   # The OBS plugin (cpp/obs) statically links the C++ package, so it ships with
   # every release: rebuild it against the release just published (no second
   # cargo build, guaranteed-matching bindings) and cut a parallel
-  # obs-moq-v<version> release. Runs after `release` so the archives the
-  # plugin's CMake fetches are already live.
+  # obs-moq-v<version> release. The plugin's version is its own,
+  # cpp/obs/VERSION. Runs after `release` so the archives
+  # the plugin's CMake fetches are already live.
   obs-build:
     name: OBS plugin (${{ matrix.target }})
     needs: release
@@ -147,13 +148,14 @@ jobs:
 
       # Native Xcode / Visual Studio; libobs/Qt6/ffmpeg come from the obs-deps
       # bundle and the C++ package from the release just published (--moq-release).
+      # build.sh versions the plugin from cpp/obs/VERSION.
       - name: Build and package
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          VERSION: ${{ steps.parse.outputs.version }}
+          MOQ_RELEASE: ${{ steps.parse.outputs.version }}
         run: |
-          ./cpp/obs/build.sh --target "$TARGET" --moq-release "$VERSION" --output dist
+          ./cpp/obs/build.sh --target "$TARGET" --moq-release "$MOQ_RELEASE" --output dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -174,9 +176,23 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Parse version
+      - name: Read plugin version
         id: parse
-        run: .github/scripts/release.sh parse-version cpp
+        run: echo "version=$(tr -d '[:space:]' < cpp/obs/VERSION)" >>"$GITHUB_OUTPUT"
+
+      # An obs-moq tag names one build. A later C++ release without a plugin
+      # version bump would overwrite that release's archives, so refuse it; a
+      # re-run of this same release finds its tag on this commit and carries on.
+      - name: Refuse a reused plugin version
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          tag="obs-moq-v${VERSION}"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null &&
+              [ "$(git rev-parse "refs/tags/$tag^{commit}")" != "$(git rev-parse HEAD)" ]; then
+              echo "::error::$tag already names another commit; bump cpp/obs/VERSION"
+              exit 1
+          fi
 
       # Only the obs-moq archives: the moq-cpp-* artifacts from the build job
       # belong to the C++ release, not this one.

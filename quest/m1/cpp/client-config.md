@@ -12,12 +12,14 @@ again, under the same keys.
 
 ## Plan
 
-- moq-ffi: the setters map onto the same `moq_tokio` `connect::Config` and
-  `quic::Config` fields `rs/libmoq/src/client.rs` fills. The shape is the
-  maintainer's call: one setter per knob, matching the existing `set_*`, or a
-  `MoqClientConfig` record whose generated defaults are the library's, which
-  would also replace `moq_client_defaults`. A backend-dependent default (GSO,
-  MTU discovery, congestion control) stays absent rather than guessed.
+- moq-ffi: the knobs map onto the same `moq_tokio` `connect::Config` and
+  `quic::Config` fields `rs/libmoq/src/client.rs` fills. Settle the shape with
+  the maintainer first: one setter per knob, matching the existing `set_*`, or
+  a `MoqClientConfig` record whose generated defaults are the library's. The
+  record is the recommendation, since it also gives a settings UI its defaults
+  in every language, the way `moq_client_defaults` does for C. A
+  backend-dependent default (GSO, MTU discovery, congestion control) stays
+  absent rather than guessed.
 - Also report what libmoq enumerates today: the supported protocol versions
   (`moq_versions`) for the version menu, and whether this build can write qlog
   (`moq_qlog_supported`), so the plugin hides a field it can't honor.

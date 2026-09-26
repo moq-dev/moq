@@ -2,22 +2,19 @@
 
 ## Goal
 
-OBS exits without a crash whether a moq output is running, was just stopped,
-or a source still has terminal callbacks outstanding. libmoq parks a
-process-wide `libmoq` thread in `block_on` on first use and has no way to
-stop it, while OBS `dlclose`s each plugin at shutdown; the plugin links
-libmoq statically, so the thread's code is unmapped under it. Any host that
-unloads the library has the same exposure.
+A host that unloads libmoq can stop it first. libmoq parks a process-wide
+`libmoq` thread in `block_on` on first use and has no way to stop it, so a
+host that `dlclose`s the library, or a plugin that links it statically and is
+unloaded by its host, unmaps code that thread is still running and crashes on
+exit. moq-ffi already has `moq_ffi_shutdown` for this; the C ABI needs the same.
 
 ## Plan
 
 Starts on `main`; libmoq's runtime (`rs/libmoq/src/ffi.rs`) is the same on
 both branches and the change is additive.
 
-- Reproduce first: exit OBS with the plugin loaded and an output running,
-  then again right after stopping it, and again with a source whose
-  `moq_source_destroy` hit its two-second backstop. Record which of these
-  crashes, and how, in the PR before changing anything.
+- Reproduce first with a fixture that `dlopen`s libmoq, opens a session, and
+  `dlclose`s it, and record how it fails in the PR before changing anything.
 - Add `moq_shutdown()` to the C ABI, mirroring `moq_ffi_shutdown` in
   `rs/moq-ffi`: it stops and joins the `libmoq` thread. Pending calls resolve
   as cancelled, the terminal callback for every still-open handle fires with
@@ -26,10 +23,6 @@ both branches and the change is additive.
   called from a host thread, never from a libmoq callback. Native codec and
   capture threads belong to their handles and end with them; this call does
   not reach into them.
-- The OBS plugin no longer links libmoq: it reaches moq-ffi through the
-  generated C++ and calls `moq::shutdown()` from `obs_module_unload`
-  ([C++ through moq-ffi](/quest/m1/cpp/README.md)). This quest gives the
-  plain-C ABI the same call for the hosts that stay on libmoq.
 - Regression tests: a `rs/libmoq/c-tests` fixture that builds libmoq as a
   cdylib, `dlopen`s it, opens a session, and `dlclose`s once without
   `moq_shutdown` (must fail, proving the hazard) and once with it (clean
@@ -48,4 +41,5 @@ Public API: additive on the libmoq C ABI (`moq_shutdown`). Wire: none.
 
 ## Related
 
+- [C++ through moq-ffi](/quest/m1/cpp/README.md) - moves the OBS plugin, the host that found this, onto moq-ffi, whose unload calls `moq::shutdown()`
 - [Kotlin JVM exit](/quest/m1/kt-jvm-exit.md) - the same hazard class for the moq-ffi bindings

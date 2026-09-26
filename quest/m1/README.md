@@ -126,7 +126,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [FLV script tags](/quest/m1/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
 - [Release size](/quest/m1/release-size.md) - the release scripts' LTO exports become the workspace release profile, and a nightly report shows what each moq-ffi build ships
 - [Dart on iOS](/quest/m1/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
-- [libmoq shutdown](/quest/m1/libmoq-shutdown.md) - OBS exits cleanly with the plugin loaded: a C ABI `moq_shutdown` stops the libmoq thread before the module is unloaded
+- [libmoq shutdown](/quest/m1/libmoq-shutdown.md) - a C ABI `moq_shutdown` stops the libmoq thread before a host unloads the library
 - [Kotlin JVM exit](/quest/m1/kt-jvm-exit.md) - a Kotlin/JVM program exits cleanly whatever the moq-ffi runtime thread is doing, like Python does since #3766
 - [Dart publish](/quest/m1/dart-publish.md) - the packages are built and dry-run clean but exist nowhere consumers can install from
 - [Dart codec parity](/quest/m1/dart-codecs.md) - Dart is the one binding that cannot originate media

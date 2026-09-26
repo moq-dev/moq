@@ -39,8 +39,8 @@ while [[ $# -gt 0 ]]; do
         --moq-release)
             # Link a published moq-cpp release of this version instead of
             # building cpp/moq from source. CMake fetches the matching
-            # moq-cpp-<version>-<target> archive from the GitHub release and the
-            # plugin is versioned to match. Used by CI on a cpp-v* tag.
+            # moq-cpp-<version>-<target> archive from the GitHub release. The
+            # plugin keeps its own version. Used by CI on a cpp-v* tag.
             MOQ_RELEASE="$2"
             shift 2
             ;;
@@ -55,20 +55,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# In moq-release mode the plugin version tracks the moq-cpp version.
-if [[ -n "$MOQ_RELEASE" ]]; then
-    VERSION="$MOQ_RELEASE"
-fi
-
 if [[ -z "$TARGET" ]]; then
     TARGET=$(cc -dumpmachine 2>/dev/null || echo unknown)
     echo "Detected target: $TARGET"
 fi
 
-# Default the version from buildspec.json's top-level "version" (the nested
-# dependency entries also have "version" keys, hence the leading-indent anchor).
+# Default to the plugin's own version.
 if [[ -z "$VERSION" ]]; then
-    VERSION=$(grep -E '^[[:space:]]{4}"version"' "$SCRIPT_DIR/buildspec.json" | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
+    VERSION=$(tr -d '[:space:]' <"$SCRIPT_DIR/VERSION")
     echo "Detected version: $VERSION"
 fi
 

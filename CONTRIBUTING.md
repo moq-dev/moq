@@ -57,3 +57,10 @@ For non-trivial tasks, file an issue or offer to run `/plan-quests`.
 Its `moq-sync` workflow merges n0-computer/noq weekly as a PR; review it like any other, and `PARENT` names the upstream commit each release includes.
 A carried change lists its upstream PR, or the reason it has none, in the fork PR.
 For an advisory against noq or Quinn, compare the pinned release's `PARENT` with the fixing upstream commit, then sync, release the fork, and bump the pin here.
+
+# Versions
+
+Releases are cut separately; bump only when asked. Each package's version lives in one place:
+
+- **C++**: `cpp/moq/VERSION`, human-owned; a `cpp-v<version>` tag releases it.
+- **OBS**: `cpp/obs/VERSION`, human-owned; each C++ release also cuts `obs-moq-v<version>`, and refuses one whose version already names an earlier release.
