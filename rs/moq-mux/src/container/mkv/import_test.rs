@@ -434,10 +434,10 @@ fn rendition_is_not_published_when_the_media_track_fails() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
-	// Squat the broadcast's timeline track, so building the media producer (which creates it
-	// on first use) fails. The handle must stay alive: the broadcast tracks names weakly, so
+	// Squat the catalog's timeline track, so building the media producer (whose enrollment
+	// enrolls the catalog too) fails. The handle must stay alive: the broadcast tracks names weakly, so
 	// dropping it frees the name.
-	let _squat = broadcast.create_track(hang::timeline::DEFAULT_NAME, None).unwrap();
+	let _squat = broadcast.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None).unwrap();
 
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 	let buf = bytes::BytesMut::from(&data[..]);

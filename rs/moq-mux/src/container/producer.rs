@@ -58,13 +58,13 @@ pub struct Producer<C: Container, R = ()> {
 	/// Set by [`Self::seek`] and consumed on the next group creation.
 	pending_sequence: Option<u64>,
 
-	/// Records each group open (sequence + keyframe timestamp) into this rendition's
-	/// timeline track, when the producer was built with one.
+	/// Reports each written frame and finished group into this rendition's timeline, when the
+	/// producer was built with one.
 	recorder: Option<crate::timeline::Recorder>,
 
 	/// The furthest presentation point written, i.e. `max(timestamp + duration)`. Reported to
 	/// `recorder` on each [`cut`](Self::cut), since the last group of a track has no successor
-	/// to bound it and its segment would otherwise be published a group short. Also the base
+	/// to bound it and its record would otherwise end at its last frame's start. Also the base
 	/// for a duration marker when the caller does not pass a bound.
 	end: Option<moq_net::Timestamp>,
 
@@ -340,11 +340,10 @@ where
 		self
 	}
 
-	/// Report each group open (sequence, timestamp, keyframe) through `recorder`, enrolling
-	/// this track in the broadcast's timeline so consumers can index the media without
-	/// downloading it.
+	/// Report each written frame and finished group through `recorder`, enrolling this track in
+	/// its timeline so consumers can index the media without downloading it.
 	///
-	/// Mint the recorder from the broadcast's [`timeline::Producer`](crate::timeline::Producer).
+	/// Mint the recorder from the broadcast's [`Timelines`](crate::timeline::Timelines).
 	pub fn with_recorder(mut self, recorder: crate::timeline::Recorder) -> Self {
 		self.recorder = Some(recorder);
 		self
@@ -433,14 +432,6 @@ where
 				Some(sequence) => self.inner.create_group(moq_net::group::Info { sequence })?,
 				None => self.inner.append_group()?,
 			};
-
-			// Report the group the moment it opens: its start is this frame's timestamp. The
-			// timeline absorbs publish failures itself (it is an optional sidecar),
-			// so reporting can't abort the media write.
-			if let Some(recorder) = self.recorder.as_mut() {
-				recorder.record(group.sequence, frame.timestamp, frame.keyframe);
-			}
-
 			self.group = Some(group);
 		}
 
@@ -448,7 +439,13 @@ where
 		if self.buffer_duration.is_zero() {
 			let group = self.group.as_mut().unwrap();
 			let (timestamp, duration, bytes) = (frame.timestamp, frame.duration, frame.payload.len());
+			let (position, keyframe) = (position(group), frame.keyframe);
 			self.container.write(group, &[frame])?;
+			// The timeline absorbs publish failures itself (it is an optional sidecar), so
+			// reporting can't abort the media write.
+			if let Some(recorder) = self.recorder.as_mut() {
+				recorder.frame(position, timestamp, keyframe);
+			}
 
 			// Only what the container accepted is measured. A rejected frame (too large for the
 			// group, a timestamp that won't convert) leaves the producer usable, and the estimate's
@@ -524,6 +521,9 @@ where
 		}
 		if let Some(group) = self.group.take() {
 			group.finish()?;
+			if let Some(recorder) = self.recorder.as_mut() {
+				recorder.finish_group(group.sequence);
+			}
 		}
 		if let Some(end) = self.end {
 			self.raise_live_edge(end);
@@ -632,7 +632,7 @@ where
 		};
 		let timestamp = self.live_edge.unwrap_or(moq_net::Timestamp::ZERO);
 		if let Some(recorder) = self.recorder.as_mut() {
-			recorder.record(group.sequence, timestamp, false);
+			recorder.frame(hang::timeline::Position::group(group.sequence), timestamp, false);
 			recorder.end(timestamp);
 		}
 		self.container.write(
@@ -645,6 +645,9 @@ where
 			}],
 		)?;
 		group.finish()?;
+		if let Some(recorder) = self.recorder.as_mut() {
+			recorder.finish_group(group.sequence);
+		}
 		Ok(())
 	}
 
@@ -686,7 +689,11 @@ where
 			None => return Ok(()),
 		};
 
+		let position = position(group);
 		self.container.write(group, &self.buffer)?;
+		if let Some(recorder) = self.recorder.as_mut() {
+			recorder.frame(position, self.buffer[0].timestamp, self.buffer[0].keyframe);
+		}
 		self.buffer.clear();
 
 		Ok(())
@@ -1519,4 +1526,9 @@ mod tests {
 		}
 		assert_eq!(timestamps, [1_000_000, 1_040_000, 1_050_000]);
 	}
+}
+
+/// Where the next frame written to `group` lands.
+fn position(group: &moq_net::group::Producer) -> hang::timeline::Position {
+	hang::timeline::Position::new(group.sequence, group.frame_count() as u64)
 }
