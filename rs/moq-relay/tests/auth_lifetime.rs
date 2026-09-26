@@ -705,25 +705,28 @@ async fn http_routes_hold_a_lease() {
 
 /// An outage keeps the session until `expires`, then closes it as expired.
 ///
-/// Paused: the relay times the lease and its re-checks on tokio's clock, so the
-/// minutes below pass virtually. `expires` is wall-clock, so the relay's deadline
-/// comes early by the setup's real time, which the slack absorbs.
-#[tokio::test(start_paused = true)]
+/// On the real clock: a paused one jumps to the next timer whenever the runtime
+/// waits on a socket, and macOS delivers loopback asynchronously, so a virtual
+/// timeout can fire before the relay answers. Load only delays the close, so
+/// asserting it never lands before `expires` holds on a busy machine.
+#[tokio::test]
 async fn an_outage_keeps_the_session_until_expires() {
-	const EXPIRES: Duration = Duration::from_secs(120);
-	const SLACK: Duration = Duration::from_secs(30);
+	// Whole seconds, as the grant crosses the wire, so the relay sees this exact instant.
+	let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+	let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() + 3);
 
-	let mut grant = grant(EXPIRES);
-	grant.revalidate = Some(Duration::from_secs(10));
+	let mut grant = grant(Duration::ZERO);
+	grant.expires = Some(expires);
 	let script = Script::new(grant);
-	// Down from the start: a re-check that succeeded would restart the deadline
-	// at whatever the virtual clock had reached.
 	script.on_revalidate(Answer::Status(503));
 	let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
 	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
 
-	// Through every failed re-check up to just short of expires, the session is up...
-	tokio::time::sleep(EXPIRES - SLACK).await;
+	assert_closed(pub_session, TIMEOUT, "publisher").await;
+	assert!(
+		SystemTime::now() >= expires,
+		"an outage must not close the publisher before expires"
+	);
 	let outages = script
 		.seen
 		.lock()
@@ -732,16 +735,7 @@ async fn an_outage_keeps_the_session_until_expires() {
 		.filter(|r| r.event == Event::Revalidate)
 		.count();
 	assert!(outages > 0, "no re-check reached the server during the outage");
-	assert!(
-		tokio::time::timeout(Duration::from_millis(100), pub_session.closed())
-			.await
-			.is_err(),
-		"an outage must not close the publisher before expires"
-	);
-
-	// ...and it closes once the grant expires, not later.
-	assert_closed(pub_session, SLACK, "publisher").await;
-	assert_closed(sub_session, SLACK, "subscriber").await;
+	assert_closed(sub_session, TIMEOUT, "subscriber").await;
 
 	let ends = tokio::time::timeout(TIMEOUT, async {
 		loop {

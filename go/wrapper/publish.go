@@ -262,9 +262,17 @@ func (b *BroadcastProducer) RemoveCatalogSection(name string) error {
 	return b.inner.RemoveCatalogSection(name)
 }
 
-// Finish closes the broadcast.
+// Close ends the broadcast for good: it retracts and serves no new tracks.
+// Tracks already subscribed carry on to their own end. Closing again is a no-op.
+func (b *BroadcastProducer) Close() error {
+	return b.inner.Close()
+}
+
+// Finish ends the broadcast.
+//
+// Deprecated: use [BroadcastProducer.Close]; a broadcast end carries no cause.
 func (b *BroadcastProducer) Finish() error {
-	return b.inner.Finish()
+	return b.inner.Close()
 }
 
 // BroadcastDynamic is a stream of subscriber-requested tracks.
@@ -363,6 +371,11 @@ func (m *MediaProducer) WriteFrame(frame Frame) error {
 // Call after WriteFrame only for local encoder output, not file or network imports.
 func (m *MediaProducer) Flush(timestampUs uint64) error {
 	return m.inner.Flush(timestampUs)
+}
+
+// Discontinuity marks a timeline break and restarts handoff measurement, preserving advertised jitter.
+func (m *MediaProducer) Discontinuity() error {
+	return m.inner.Discontinuity()
 }
 
 // Cut draws a group boundary here.

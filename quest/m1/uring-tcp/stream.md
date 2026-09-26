@@ -23,7 +23,7 @@ local task set, so a connection never leaves the thread that accepted it.
 
 hyper becomes a first direct dependency. Today it reaches the workspace only
 through `axum` and `axum-server`; add it to `[workspace.dependencies]` at the
-newest stable version, per `rs/CLAUDE.md`.
+newest stable version, per `rs/AGENTS.md`.
 
 Cover it the way the UDP path is covered: tests that run against whichever
 backend is compiled, an HTTP round trip through hyper on the worker, and a

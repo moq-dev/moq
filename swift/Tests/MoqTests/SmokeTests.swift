@@ -135,7 +135,14 @@ final class SmokeTests: XCTestCase {
         let track = try broadcast.publishTrack(name: "events")
         XCTAssertEqual(try track.name, "events")
         try track.finish()
-        try broadcast.finish()
+        try broadcast.close()
+    }
+
+    func testBroadcastCloseTwiceIsNoop() throws {
+        let broadcast = try BroadcastProducer()
+        try broadcast.close()
+        try broadcast.close()
+        XCTAssertThrowsError(try broadcast.publishTrack(name: "events"))
     }
 
     func testVideoHintsReachMediaPublishApi() throws {
@@ -148,13 +155,13 @@ final class SmokeTests: XCTestCase {
         )
         let media = try broadcast.publishVideo(format: .avc3, hint: hint)
         try media.finish()
-        try broadcast.finish()
+        try broadcast.close()
     }
 
     func testVideoPropertiesUseDefaultedFields() throws {
         let broadcast = try BroadcastProducer()
         try broadcast.setVideoProperties(VideoProperties(rotation: 315))
-        try broadcast.finish()
+        try broadcast.close()
     }
 
     func testBroadcastConsumerFetchesCachedGroup() async throws {
@@ -199,7 +206,7 @@ final class SmokeTests: XCTestCase {
 
         consumer.cancel()
         try producer.finish()
-        try broadcast.finish()
+        try broadcast.close()
     }
 
     func testJsonStreamRoundTrip() async throws {
@@ -220,7 +227,7 @@ final class SmokeTests: XCTestCase {
 
         consumer.cancel()
         try producer.finish()
-        try broadcast.finish()
+        try broadcast.close()
     }
 
     func testJsonProducersReportDemand() async throws {
@@ -244,7 +251,7 @@ final class SmokeTests: XCTestCase {
         try await snapshotDemand.unused()
         try await streamDemand.unused()
 
-        try broadcast.finish()
+        try broadcast.close()
     }
 
     func testRawTrackTimestamps() async throws {
@@ -270,7 +277,7 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(groupFrame?.timestampUs, 23_456)
 
         try track.finish()
-        try broadcast.finish()
+        try broadcast.close()
     }
 
     func testReadFrameSkipsEmptyThenPopulatedGroups() async throws {
@@ -287,7 +294,7 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(frame?.timestampUs, 2_000)
 
         try track.finish()
-        try broadcast.finish()
+        try broadcast.close()
     }
 
     func testSparseGroupsAndKnownEnd() throws {
@@ -301,7 +308,7 @@ final class SmokeTests: XCTestCase {
         try track.createGroup(sequence: 4).finish()
         XCTAssertThrowsError(try track.createGroup(sequence: 5))
         try track.finish()
-        try broadcast.finish()
+        try broadcast.close()
     }
 
     /// `frameDurationUs` is microseconds so Opus' 2.5 ms frame is expressible at
@@ -331,7 +338,7 @@ final class SmokeTests: XCTestCase {
             XCTFail("2 ms is not an opus frame duration: \(error)")
         }
 
-        try broadcast.finish()
+        try broadcast.close()
     }
 
     /// A decoded frame owns its picture: it converts to either CPU layout on
@@ -379,7 +386,7 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(stride(from: 3, to: packed.count, by: 4).allSatisfy { packed[$0] == 0xFF })
 
         try video.finish()
-        try broadcast.finish()
+        try broadcast.close()
     }
 
     func testEncodeAudioWithOpusObject() throws {
@@ -399,7 +406,7 @@ final class SmokeTests: XCTestCase {
             try producer.write(silence)
             XCTAssertEqual(try producer.name, "mic")
             try producer.finish()
-            try broadcast.finish()
+            try broadcast.close()
         }
 
         // Release the config before finishing: the producer retains what it needs.
@@ -413,7 +420,7 @@ final class SmokeTests: XCTestCase {
             }
             try producer.write(silence)
             try producer.finish()
-            try broadcast.finish()
+            try broadcast.close()
         }
     }
 }

@@ -100,3 +100,7 @@ wasm *args:
 # Optional publisher retention across Rust/JS sessions through a Rust relay.
 max-age:
     cargo nextest run --locked -p moq-tokio --test max_age --run-ignored all
+
+# Cross-language subscription termination over in-memory transports.
+bare-fin:
+    just rs test -p moq-net --lib bare_fin_interop --run-ignored all

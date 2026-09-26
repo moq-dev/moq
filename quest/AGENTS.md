@@ -20,7 +20,7 @@ durable scope or coordination.
   merges into its line's branch, a line into its parent's, and a milestone's
   direct children into `main`. Milestones have no branch.
 - A published API or wire break retargets to `dev` at PR time, per the root
-  `CLAUDE.md`; a quest's Plan may note it.
+  `AGENTS.md`; a quest's Plan may note it.
 - Every `Quests` list is ordered by priority. Insert at rank, never append.
 - Link with root-absolute paths. Finished documents are deleted; git history
   keeps them. Merge conflicts are expected; resolve them by aligning quests.
