@@ -1,4 +1,5 @@
-# find_package(moq-c): the C bindings as the moq-c::moq target.
+# find_package(moq-c): the C bindings as the moq::c target. The moq:: namespace is
+# shared with moq-cpp (moq::cpp), so the two packages install side by side.
 
 # Compute installation prefix relative to this file
 get_filename_component(_moq_prefix "${CMAKE_CURRENT_LIST_FILE}" PATH)
@@ -14,10 +15,10 @@ set(_moq_libdir "${_moq_prefix}/lib")
 set(_moq_lib_name "@LIB_FILE@")
 
 # Create imported target
-if(NOT TARGET moq-c::moq)
-    add_library(moq-c::moq STATIC IMPORTED)
+if(NOT TARGET moq::c)
+    add_library(moq::c STATIC IMPORTED)
 
-    set_target_properties(moq-c::moq PROPERTIES
+    set_target_properties(moq::c PROPERTIES
         IMPORTED_LOCATION "${_moq_libdir}/${_moq_lib_name}"
         INTERFACE_INCLUDE_DIRECTORIES "${_moq_includedir}"
     )
@@ -26,7 +27,7 @@ if(NOT TARGET moq-c::moq)
     # staticlib needs these spelled out; cargo can't inject them. Baked in at
     # install time from rs/moq-c/native-libs/ for the platform this was built
     # for, which is the only platform the installed static library works on.
-    set_property(TARGET moq-c::moq APPEND PROPERTY
+    set_property(TARGET moq::c APPEND PROPERTY
         INTERFACE_LINK_LIBRARIES @MOQ_NATIVE_LIBS_QUOTED@
     )
 endif()

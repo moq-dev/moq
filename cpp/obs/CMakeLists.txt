@@ -68,7 +68,7 @@ target_link_libraries(obs-moq PRIVATE OBS::libobs)
 
 if(_moq_local_build)
   add_subdirectory("${MOQ_LOCAL}/rs/moq-c" moq)
-  target_link_libraries(obs-moq PRIVATE moq)
+  target_link_libraries(obs-moq PRIVATE moq::c)
 else()
   include(FetchContent)
   FetchContent_Declare(
@@ -79,7 +79,7 @@ else()
   FetchContent_MakeAvailable(moq)
 
   find_package(moq-c REQUIRED PATHS ${moq_SOURCE_DIR} NO_DEFAULT_PATH)
-  target_link_libraries(obs-moq PRIVATE moq-c::moq)
+  target_link_libraries(obs-moq PRIVATE moq::c)
 endif()
 
 # moq-c is a Rust static library; its std runtime pulls in symbols from Windows

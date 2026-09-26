@@ -62,6 +62,8 @@ file(MAKE_DIRECTORY ${RUST_INCLUDE_DIR})
 
 # Create interface library target that wraps the Rust static library
 add_library(moq INTERFACE)
+# The name find_package(moq-c) exports, so a consumer links one target either way.
+add_library(moq::c ALIAS moq)
 target_include_directories(moq INTERFACE ${RUST_INCLUDE_DIR})
 
 # Link the static library - must use target_link_libraries so it appears

@@ -27,10 +27,10 @@ cc app.c $(pkg-config --cflags --libs --static moq-c) -o app
 ```
 
 With CMake, point `CMAKE_PREFIX_PATH` at the extracted archive, then
-`find_package(moq-c)` and link `moq-c::moq`.
+`find_package(moq-c)` and link `moq::c`.
 
-From source, `add_subdirectory(rs/moq-c)` in CMake gives a `moq` target to
-link. A bare `cargo build --release -p moq-c` writes `target/release/libmoq.a`,
+From source, `add_subdirectory(rs/moq-c)` in CMake gives the same `moq::c`
+target. A bare `cargo build --release -p moq-c` writes `target/release/libmoq.a`,
 and `moq.h` plus `moq-c.pc` land in the build script's `OUT_DIR` under `include/`
 and `lib/pkgconfig/`, a hashed path that `--message-format=json` reports as
 `out_dir`. That `moq-c.pc` expects the install layout, with `libmoq.a` in `lib/`
