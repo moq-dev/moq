@@ -12,7 +12,7 @@ cd "$CLAUDE_PROJECT_DIR" || exit 0
 # '-' is uninitialized. '+' is populated at a commit other than the gitlink.
 # A matching checkout has no prefix.
 case "$(git submodule status .claude/shared 2>/dev/null)" in
-    -*|+*) ;;
+    -* | +*) ;;
     *) exit 0 ;;
 esac
 
