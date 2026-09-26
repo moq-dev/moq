@@ -25,7 +25,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Session death error](/quest/m1/session-death-error.md) - a dying session ends its tracks with its own error in Rust and JS, never a clean end, `Dropped`, or `Cancel`
 - [JS bare FIN](/quest/m1/js-bare-fin.md) - a `@moq/net` subscriber aborts a track whose subscribe stream FINs before its declared end, like Rust
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
-- [Signal.race cleanup](/quest/m1/signal-race.md) - `Signal.race` releases its signal listeners when its result loses a race
 - [Origin narrowing](/quest/m1/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
 - [Origin mount](/quest/m1/origin-mount.md) - a session sees a granted subtree from outside its root under a path inside it, read-only
 - [Auth expiry clock](/quest/m1/auth-expiry-clock.md) - moq-auth and the relay hold one fixed expiry deadline and honour the same skew allowance

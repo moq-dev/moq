@@ -722,7 +722,7 @@ export class Producer implements Table {
 	 *
 	 * @internal
 	 */
-	#changed(): Promise<unknown> {
+	#changed(): GetPromise<unknown> {
 		return Signal.race(this.#state.requests, this.#state.local, this.#state.routes, this.#state.advertisedLocal);
 	}
 
