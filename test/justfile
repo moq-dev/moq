@@ -29,6 +29,7 @@ default:
 # client, and the GStreamer moqsrc plugin). --timeout 30 gives headless Chromium
 # cold-start headroom. Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
+# Finite track tails run too; `--tail` selects just Rust/Node/Bun tail checks.
 interop *args:
     #!/usr/bin/env bash
     set -euo pipefail
