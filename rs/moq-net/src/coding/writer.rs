@@ -174,7 +174,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// where higher values preempt lower ones. The lite priority queue's rank is the
 	/// opposite (0 = most urgent); rank holders convert via `PriorityHandle::send_order`.
 	pub fn set_priority(&mut self, send_order: u8) {
-		self.stream.as_mut().unwrap().set_priority(send_order);
+		self.stream.as_mut().unwrap().set_priority(send_order.into());
 	}
 
 	/// Cast the writer to a different version, used during version negotiation.
@@ -235,7 +235,7 @@ mod tests {
 			Poll::Ready(Err(self.clone()))
 		}
 
-		fn set_priority(&mut self, _: u8) {}
+		fn set_priority(&mut self, _: i32) {}
 
 		fn finish(&mut self) -> Result<(), Self::Error> {
 			Err(self.clone())
