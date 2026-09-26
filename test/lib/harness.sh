@@ -105,13 +105,11 @@ harness_begin() {
 # Where port reservations live. Shared across worktrees on purpose: the point is
 # that a run in one worktree cannot hand out a port another already took.
 #
-# The default is suffixed with the user id, like the run root. On Linux TMPDIR is
-# usually unset, so both would land in a world-writable /tmp under a fixed name
-# owned by whoever ran first: a second user's `mkdir` would then fail for every
-# port and the walk would report the whole range taken with nothing reserved. Two
-# worktrees still share, because they run as the same user.
+# Nix shells give TMPDIR a private directory, but their sockets still share the
+# host network. Keep claims in /tmp regardless of each shell's scratch root.
+# The user id avoids ownership conflicts with another user's harnesses.
 harness_port_root() {
-    local root="${MOQ_TEST_PORTS:-${TMPDIR:-/tmp}}"
+    local root="${MOQ_TEST_PORTS:-/tmp}"
     root="${root%/}"
     [[ -n "${MOQ_TEST_PORTS:-}" ]] || root="$root/moq-test-ports-$(id -u)"
     echo "$root"
@@ -146,7 +144,13 @@ harness_port() {
     local label="$1" wanted="${2:-}"
     local root port last status
     root=$(harness_port_root)
-    mkdir -p "$root"
+    # Only the reservation root needs private permissions, not its parents.
+    # shellcheck disable=SC2174
+    mkdir -m 700 -p "$root"
+    if [[ -L "$root" || ! -O "$root" ]]; then
+        echo "error: port reservation root must be owned by this user and not a symlink: $root" >&2
+        return 2
+    fi
 
     if [[ -n "$wanted" ]]; then
         harness_valid_port "$wanted" || {

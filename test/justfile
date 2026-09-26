@@ -22,6 +22,11 @@ set working-directory := '.'
 default:
     @just --justfile {{ justfile() }} --list test
 
+# Port isolation across private temp roots and keyboard activation under a canvas.
+harness:
+    ./lib/harness.test.sh
+    bun test interop/clients/js/harness.test.ts
+
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
 # sanity check). `interop --all` runs the full matrix: rust + python + go +

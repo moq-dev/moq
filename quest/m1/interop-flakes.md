@@ -16,6 +16,16 @@ pause click is sometimes blocked by the canvas (`js -> js`).
   keyboard path, or waiting for the element to be actionable), not a retry.
 - Prove it by running two `--all` harnesses at once, several times.
 
+Current implementation fixes the two known failures and isolates Go staging in
+per-run output. Focused regressions pass. Concurrent full matrices with pinned
+Nix Cargo and a private target directory passed 32/32 and 31/32 cells; the
+remaining `python -> js` failure stalled while processing 2.5 ms Opus groups.
+The Pause button remained in the trace, but page snapshots stopped progressing
+for tens of seconds. Diagnose that browser stall before declaring the parallel
+proof complete. The external mbx cache also omits `target/include/moq.h` when
+replaying libmoq's build-script side effects; uncached validation isolates that
+separate tooling limitation.
+
 Public API: none. Wire: none.
 
 ## Related
