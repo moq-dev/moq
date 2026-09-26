@@ -23,7 +23,7 @@ check $FILES="":
     fi
     if ! command -v uniffi-bindgen-cpp >/dev/null 2>&1; then
     	echo "cpp check: uniffi-bindgen-cpp not on PATH, skipping" >&2
-    	echo "  install: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.1+v0.32.2" >&2
+    	echo "  install: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.2+v0.32.2" >&2
     	exit 0
     fi
 
