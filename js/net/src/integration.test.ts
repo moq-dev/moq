@@ -9,7 +9,7 @@ import {
 	connect as connectSession,
 	type Established,
 } from "./connection/index.ts";
-import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
+import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
@@ -2214,6 +2214,103 @@ test("a handle serves a request under live/** over the wire", async () => {
 	announced.close();
 	handle.close();
 	await serving;
+	client.close();
+	server.close();
+	origin.close();
+});
+
+// The peer's close code a killed session carries.
+const DEATH = SessionCode(71);
+
+/**
+ * Serve one track with a group left open, kill the publisher's session once the subscriber has
+ * read into it, and return how the subscriber's track ended.
+ */
+async function runSessionDeath(protocol: string, version?: number): Promise<Error | null> {
+	const pair = createMockTransportPair(protocol);
+	const origin = new OriginProducer();
+
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { version, publish: origin.consume() }),
+	]);
+
+	const broadcast = publish(origin, Path.from("test"));
+	const serving = (async () => {
+		for (;;) {
+			const req = await wireOf(broadcast).requested();
+			if (!req) break;
+			req.accept().appendGroup().writeString("head");
+		}
+	})();
+
+	const remote = wireOf(client).consume(Path.from("test"));
+	const track = remote.track("video").subscribe();
+	const group = await track.recvGroup();
+	expect(await group?.readString()).toBe("head");
+
+	pair.server.close({ closeCode: DEATH, reason: "killed" });
+	const closed = await withTimeout(Promise.resolve(track.closed), 2000, "the track never ended");
+
+	broadcast.close();
+	await serving;
+	remote.close();
+	client.close();
+	server.close();
+	origin.close();
+	return closed;
+}
+
+for (const [name, protocol, version] of [
+	["lite draft-03", Lite.ALPN_03, undefined],
+	["lite draft-05", Lite.ALPN_05, undefined],
+	["ietf draft-14", "", Ietf.Version.DRAFT_14],
+	["ietf draft-17", Ietf.ALPN.DRAFT_17, undefined],
+] as const) {
+	test(`integration: ${name} ends a track with its session's error`, async () => {
+		const closed = await runSessionDeath(protocol, version);
+		expect(closed).toBeInstanceOf(SessionError);
+		expect((closed as SessionError).code).toBe(DEATH);
+	});
+}
+
+// On lite-05+ the subscribe stream carries responses until its FIN, so a reset of it is how the
+// publisher ends a subscription with an error, and the track ends with that error.
+test("integration: lite draft-05 ends a track with the publisher's reset", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_05);
+	const origin = new OriginProducer();
+
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const broadcast = publish(origin, Path.from("test"));
+	const served: TrackProducer[] = [];
+	const serving = (async () => {
+		for (;;) {
+			const req = await wireOf(broadcast).requested();
+			if (!req) break;
+			const producer = req.accept();
+			producer.appendGroup().writeString("head");
+			served.push(producer);
+		}
+	})();
+
+	const remote = wireOf(client).consume(Path.from("test"));
+	const track = remote.track("video").subscribe();
+	const group = await track.recvGroup();
+	expect(await group?.readString()).toBe("head");
+
+	const reset = StreamCode(70);
+	for (const producer of served) producer.close(new StreamError(reset));
+	const closed = await withTimeout(Promise.resolve(track.closed), 2000, "the track never ended");
+	expect(closed).toBeInstanceOf(StreamError);
+	expect((closed as StreamError).code).toBe(reset);
+
+	broadcast.close();
+	await serving;
+	remote.close();
 	client.close();
 	server.close();
 	origin.close();
