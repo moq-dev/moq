@@ -74,7 +74,8 @@ registration directly. There is no software H.265 encoder (it's hardware-only).
 
 `encode::Encoder::encode` takes a raw `Frame` (a timestamp plus a `Surface`
 holding the pixels) and returns `encode::Encoded`s: one whole access unit each,
-carrying the timestamp of the picture it was encoded from. That matters for a
+carrying the timestamp of the picture it was encoded from and whether it is a
+keyframe, forced by `cut()` or on the GOP cadence. The timestamp matters for a
 backend that buffers, which hands back an earlier frame's access unit while a
 later one goes in, and for the tail `finish()` drains. Bring your own pixels with
 `Surface::rgba(...)`, or feed a frame straight from capture or `decode`.
@@ -98,7 +99,8 @@ Public entry points:
   only while a subscriber is watching and is released when the last one leaves.
 - `encode::Control::new(...)` does the same but returns a `Control` handle with
   the `Driver` that runs it, like `moq-audio`'s. `Control::cut()` asks for a
-  keyframe: requests coalesce, and forced keyframes land at least 500ms apart.
+  keyframe: requests coalesce, any keyframe serves them (the GOP cadence
+  included), and a forced one lands at least 500ms after any other.
 - `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
   handling the catalog and framing. Each is published at its own timestamp.
 

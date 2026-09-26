@@ -751,10 +751,12 @@ mod tests {
 		let good = moq_video::encode::Encoded::new(
 			Bytes::from_static(b"hello"),
 			moq_net::Timestamp::from_micros(0).unwrap(),
+			true,
 		);
 		let bad = moq_video::encode::Encoded::new(
 			Bytes::from_static(b"world"),
 			moq_net::Timestamp::from_secs(1 << 60).unwrap(),
+			false,
 		);
 
 		assert!(write(&mut group, &guard, vec![good, bad]).is_err());
