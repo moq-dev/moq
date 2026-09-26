@@ -41,6 +41,11 @@ because they do not issue joining fetches. Other publishers may replay a cached
 backlog for that filter; selecting the next group instead would leave static
 tracks waiting for a group that never arrives.
 
+A moq-lite datagram is a single-frame group, so on moq-transport it travels
+as an `OBJECT_DATAGRAM` at object 0 whose Group ID is the sequence, and a relay
+forwards it without renumbering. A datagram carrying any other Object ID, or a
+status other than Normal, is dropped.
+
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [solicit](/draft/moq-solicit) to make announcements opt-in,

@@ -72,7 +72,7 @@ Incoming server `Request` values expose the query-free `path` before acceptance.
 Raw tracks also expose best-effort datagrams: `TrackProducer.appendDatagram(_:timestampUs:)`
 returns the assigned sequence number, `TrackConsumer.recvDatagram()` receives one datagram,
 and `TrackConsumer.datagrams` streams them in arrival order. Payloads are capped at 1200 bytes.
-Datagrams require a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport,
+Datagrams require a datagram-capable transport and lite-05 or newer moq-lite, or moq-transport;
 pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
 
 JSON tracks carry your own `Codable` types with the framing handled for you. You opt into one of two

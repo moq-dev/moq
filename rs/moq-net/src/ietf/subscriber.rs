@@ -2279,6 +2279,61 @@ where
 
 		Ok(())
 	}
+
+	/// Deliver one OBJECT_DATAGRAM as a datagram on its subscription's track: a
+	/// single-frame group at the Group ID.
+	///
+	/// A malformed datagram is the peer breaking the protocol, so it errors. One the model
+	/// cannot carry is dropped like any lost datagram: an Object past ID 0 (the group would
+	/// need a second object), a status other than Normal, or an alias that is not bound
+	/// yet (the draft lets us drop rather than buffer).
+	pub fn recv_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
+		let mut buf = payload;
+		let datagram = ietf::ObjectDatagram::decode(&mut buf, self.version)?;
+		let (alias, sequence) = (datagram.track_alias, datagram.group_id);
+
+		if datagram.object_id.unwrap_or(0) != 0 {
+			tracing::debug!(alias, sequence, "dropping a datagram past object 0");
+			return Ok(());
+		}
+		let payload = match datagram.body {
+			ietf::DatagramBody::Payload(payload) => payload,
+			ietf::DatagramBody::Status(0) => bytes::Bytes::new(),
+			ietf::DatagramBody::Status(status) => {
+				tracing::debug!(alias, sequence, status, "dropping a datagram status");
+				return Ok(());
+			}
+		};
+
+		let mut state = self.state.lock();
+		let request_id = match state.aliases.read().map.get(&alias) {
+			Some(Alias::Active(request_id)) => *request_id,
+			_ => {
+				tracing::debug!(alias, sequence, "dropping a datagram for an unbound alias");
+				return Ok(());
+			}
+		};
+		let Some(track) = state.subscribes.get_mut(&request_id) else {
+			return Ok(());
+		};
+
+		// Like a subgroup object: a track that declared no timescale is stamped on arrival.
+		let timestamp = match (track.timescale, &datagram.properties) {
+			(Some(timescale), Some(properties)) => {
+				ietf::decode_object_time(&mut properties.as_slice(), timescale, self.version)?
+			}
+			_ => None,
+		};
+		let timestamp = timestamp.unwrap_or_else(|| crate::Timestamp::from(self.runtime.now()));
+
+		let Some(producer) = track.producer.as_mut() else {
+			return Ok(());
+		};
+		if let Err(err) = producer.insert_datagram(sequence, timestamp, payload) {
+			tracing::debug!(%err, alias, sequence, "dropping datagram");
+		}
+		Ok(())
+	}
 }
 
 /// Mark where the track ends, as an END_OF_TRACK object said.
@@ -3462,6 +3517,67 @@ mod tests {
 			matches!(subscriber.register_alias(RequestId(13), 7), Err(Error::Unsupported)),
 			"a shared alias must not be reported as the fatal collision",
 		);
+	}
+
+	/// An OBJECT_DATAGRAM at object 0 is a datagram group at its Group ID; anything the model
+	/// cannot carry as one is dropped, and a malformed one is the peer's violation.
+	#[tokio::test]
+	async fn an_object_datagram_is_a_datagram_group() {
+		use crate::coding::Encode as _;
+		use futures::FutureExt as _;
+
+		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "audio")]);
+		subscriber.register_alias(RequestId(11), 7).unwrap();
+		let mut consumer = {
+			let mut state = subscriber.state.lock();
+			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
+			track.timescale = Some(Timescale::default());
+			track.producer.as_ref().unwrap().subscribe(None)
+		};
+
+		let timestamp = crate::Timestamp::new(96_000, Timescale::default()).unwrap();
+		let datagram = |alias: u64, group_id: u64, object_id: Option<u64>, body: ietf::DatagramBody| {
+			let mut properties = Vec::new();
+			ietf::encode_object_time(&mut properties, timestamp, Timescale::default(), Version::Draft19).unwrap();
+			ietf::ObjectDatagram {
+				track_alias: alias,
+				group_id,
+				object_id,
+				publisher_priority: None,
+				// Only a Normal Object may carry Properties, and a status cannot end the group.
+				end_of_group: matches!(body, ietf::DatagramBody::Payload(_)),
+				properties: matches!(body, ietf::DatagramBody::Payload(_)).then_some(properties),
+				body,
+			}
+			.encode_bytes(Version::Draft19)
+			.unwrap()
+		};
+		let payload = |bytes: &'static [u8]| ietf::DatagramBody::Payload(bytes::Bytes::from_static(bytes));
+
+		// Dropped: a second object in the group, an unbound alias, and a status.
+		subscriber
+			.recv_datagram(datagram(7, 4, Some(1), payload(b"no")))
+			.unwrap();
+		subscriber.recv_datagram(datagram(8, 4, None, payload(b"no"))).unwrap();
+		subscriber
+			.recv_datagram(datagram(7, 4, None, ietf::DatagramBody::Status(END_OF_TRACK)))
+			.unwrap();
+
+		subscriber
+			.recv_datagram(datagram(7, 9, Some(0), payload(b"yes")))
+			.unwrap();
+		let received = consumer.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(received.sequence, 9, "the Group ID is the sequence");
+		assert_eq!(received.timestamp, timestamp);
+		assert_eq!(&received.payload[..], b"yes");
+		assert!(
+			consumer.recv_datagram().now_or_never().is_none(),
+			"only one got through"
+		);
+
+		// A status datagram cannot end the group.
+		let malformed = bytes::Bytes::from_static(&[0x22, 0x07, 0x04, 0x00]);
+		assert!(is_protocol_violation(&subscriber.recv_datagram(malformed).unwrap_err()));
 	}
 
 	/// One alias naming two different tracks is the collision section 11.1 makes fatal.
