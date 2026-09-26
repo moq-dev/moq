@@ -2,7 +2,7 @@ use crate::{broadcast, cache, group, stats, track};
 use kio::Pollable;
 use std::{
 	cmp::Reverse,
-	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+	collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
 	fmt,
 	sync::Arc,
 	sync::atomic::{AtomicU64, Ordering},
@@ -2053,9 +2053,8 @@ async fn run_front(task: FrontTask) {
 		}
 		// Read alongside the decision, under the lock a poke takes first.
 		*seen = watch.seen();
-		front.retain_routes(|route| table.routes.covers(&path.as_path(), route));
 		let best = table
-			.best_route(&path.as_path(), horizon, front.pin(), front.refused_routes())
+			.best_route(&path.as_path(), horizon, front.pin())
 			.map(|entry| Candidate {
 				route: entry.id,
 				first: entry.hops.iter().next().copied(),
@@ -2934,8 +2933,7 @@ impl OriginState {
 	}
 
 	/// The best served route covering `path` (absolute) for a requester seeing
-	/// `horizon`, skipping the `refused` entry ids. Skipping never falls through
-	/// to a broader prefix.
+	/// `horizon`.
 	///
 	/// The most specific covering prefix wins outright, so a narrow advertise-only
 	/// announcement shadows a broad served one: requests under it resolve
@@ -2948,7 +2946,7 @@ impl OriginState {
 	/// else is different content rather than an alternate path (see [`Front`]).
 	/// A broadcast published on this origin competes on cost like any other
 	/// route and wins a tie.
-	fn best_route(&self, path: &Path, horizon: Horizon, pin: Pin, refused: &HashSet<u64>) -> Option<&RouteEntry> {
+	fn best_route(&self, path: &Path, horizon: Horizon, pin: Pin) -> Option<&RouteEntry> {
 		// Covering prefixes of one path form a chain, so the deepest node with a
 		// candidate holds the unique longest prefix; walking down, the last such
 		// node decides.
@@ -2963,11 +2961,8 @@ impl OriginState {
 				.filter(|entry| horizon.admits(entry))
 				.filter(|entry| entry.qualifies(pin))
 				.peekable();
-			// A tier whose every route refused is still the tier: its refusal is
-			// final and never falls through to a less specific prefix.
 			if candidates.peek().is_some() {
 				best = candidates
-					.filter(|entry| !refused.contains(&entry.id))
 					.filter(|entry| entry.serves(path))
 					.min_by_key(|entry| route_order(&entry.prefix, entry));
 			}
@@ -3655,10 +3650,7 @@ impl Consumer {
 		// Nothing serves the path: no announced broadcast and no served route.
 		// Checked before joining a front, so a front still draining after its
 		// route retracted takes no newcomers.
-		if state
-			.best_route(&absolute.as_path(), self.horizon, Pin::Any, &HashSet::new())
-			.is_none()
-		{
+		if state.best_route(&absolute.as_path(), self.horizon, Pin::Any).is_none() {
 			return kio::Pending::new(Requesting::failed(Error::Unroutable));
 		}
 
@@ -3673,7 +3665,7 @@ impl Consumer {
 		if let Some(front) = state.fronts.get(&key) {
 			let pin = *front.pin.lock();
 			let current = state
-				.best_route(&absolute.as_path(), self.horizon, Pin::Any, &HashSet::new())
+				.best_route(&absolute.as_path(), self.horizon, Pin::Any)
 				.is_some_and(|entry| entry.qualifies(pin));
 			if current {
 				let pending = Requesting::queued(front.request.consume())
@@ -5614,6 +5606,35 @@ mod tests {
 		assert!(
 			broad.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
 			"the refusal fell through to the broader route"
+		);
+	}
+
+	#[tokio::test]
+	async fn refusal_while_serving_does_not_move_to_a_sibling() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let broad = producer.dynamic("", Route::default().with_hops(hops(&[10]))).unwrap();
+
+		let pending = consumer.request_broadcast("jobs/a");
+		let served = broadcast::Info::new().produce();
+		queued(&broad).await.accept(&served);
+		let resolved = pending.await.expect("the broad route serves it");
+
+		// Two paths from the same publisher claim a narrower prefix; the cheaper refuses.
+		let cheap = producer
+			.dynamic("jobs", Route::default().with_hops(hops(&[10])).with_cost(1))
+			.unwrap();
+		let sibling = producer
+			.dynamic("jobs", Route::default().with_hops(hops(&[10])).with_cost(2))
+			.unwrap();
+		queued(&cheap).await.reject(Error::NotFound);
+
+		tokio::time::timeout(Duration::from_secs(5), resolved.closed())
+			.await
+			.expect("the refusal must end the front");
+		assert!(
+			sibling.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"the refusal moved to a sibling in the tier"
 		);
 	}
 
