@@ -87,14 +87,14 @@ fn timeline(track: &str) -> String {
 	hang::timeline::default_name(track)
 }
 
-#[allow(deprecated)]
-fn end(source: &broadcast::Producer) {
-	source.finish();
-}
-
 /// Every recorded track's timeline, as the catalog's `archive` entry names them.
 fn config() -> ReaderConfig {
-	ReaderConfig::new(TRACKS.iter().map(|track| (track.to_string(), timeline(track))).collect())
+	ReaderConfig::new(
+		TRACKS
+			.iter()
+			.map(|track| (track.to_string(), timeline(track)))
+			.collect(),
+	)
 }
 
 /// Record every segment of [`plan`] into `store`.
@@ -132,7 +132,7 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 	for track in tracks.values() {
 		track.finish().unwrap();
 	}
-	end(&source);
+	source.close();
 	run.await.unwrap().unwrap();
 }
 
@@ -384,6 +384,6 @@ async fn an_offline_reader_follows_dvr_expiry() {
 	}
 
 	video.finish().unwrap();
-	end(&source);
+	source.close();
 	run.await.unwrap().unwrap();
 }

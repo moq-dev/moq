@@ -585,7 +585,10 @@ mod tests {
 			window,
 		);
 
-		assert_eq!(live.row(0).unwrap().frames, hang::timeline::Position::group(0)..hang::timeline::Position::group(1));
+		assert_eq!(
+			live.row(0).unwrap().frames,
+			hang::timeline::Position::group(0)..hang::timeline::Position::group(1)
+		);
 		assert_eq!(live.row(7), None, "unknown segments miss");
 		let video = (Kind::Video, "video".to_string());
 		assert_eq!(

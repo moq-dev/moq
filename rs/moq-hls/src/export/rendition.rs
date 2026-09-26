@@ -766,7 +766,8 @@ impl Rendition {
 				let Some((broadcast, track)) = self.track(&binding).await else {
 					return Ok(None);
 				};
-				let Ok(mut group) = fetch(&track, hang::timeline::Position::group(sequence), None, &broadcast).await? else {
+				let Ok(mut group) = fetch(&track, hang::timeline::Position::group(sequence), None, &broadcast).await?
+				else {
 					return Ok(None);
 				};
 				// A cache eviction mid-read leaves the init unbuildable for now, not an error.

@@ -51,12 +51,10 @@ impl Object {
 		if self.start()? != start {
 			return Err(Error::Span);
 		}
-		let mut expected = start.group;
-		for group in &self.groups {
+		for (expected, group) in (start.group..).zip(&self.groups) {
 			if group.sequence != expected || group.frames.is_empty() {
 				return Err(Error::Span);
 			}
-			expected += 1;
 		}
 		let last = self.groups.last().expect("validated as non-empty");
 		let first = match self.groups.len() {
@@ -549,7 +547,10 @@ mod tests {
 		let gap = object(vec![group(5, 1), group(7, 1)]);
 		assert_eq!(gap.check_span(Position::group(5), Position::group(8)), Err(Error::Span));
 		let empty = object(vec![group(5, 1), group(6, 0)]);
-		assert_eq!(empty.check_span(Position::group(5), Position::group(7)), Err(Error::Span));
+		assert_eq!(
+			empty.check_span(Position::group(5), Position::group(7)),
+			Err(Error::Span)
+		);
 	}
 
 	#[test]

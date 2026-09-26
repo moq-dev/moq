@@ -122,10 +122,12 @@ impl Spans {
 
 	/// Poll until the segment spanning `span` stops being [`Content::Pending`].
 	pub fn poll_resolved(&self, waiter: &kio::Waiter, video: bool, span: Range<Duration>) -> Poll<()> {
-		let poll = self.state.poll_ref(waiter, |state| match state.resolve(video, span.clone()) {
-			Content::Pending => Poll::Pending,
-			_ => Poll::Ready(()),
-		});
+		let poll = self
+			.state
+			.poll_ref(waiter, |state| match state.resolve(video, span.clone()) {
+				Content::Pending => Poll::Pending,
+				_ => Poll::Ready(()),
+			});
 		match poll {
 			Poll::Ready(_) => Poll::Ready(()),
 			Poll::Pending => Poll::Pending,
@@ -251,7 +253,13 @@ mod tests {
 			.map(|(i, &pts)| {
 				let next = starts.get(i + 1).copied().unwrap_or(end);
 				let group = i as u64;
-				record(i as u64, pts, next - pts, Position::group(group), Position::group(group + 1))
+				record(
+					i as u64,
+					pts,
+					next - pts,
+					Position::group(group),
+					Position::group(group + 1),
+				)
 			})
 			.collect()
 	}
@@ -312,23 +320,12 @@ mod tests {
 	fn audio_takes_every_overlapping_record() {
 		// 1s audio records against 2.5s segments.
 		let records: Vec<Entry> = (0..6)
-			.map(|i| {
-				record(
-					i,
-					i * 1_000,
-					1_000,
-					Position::group(i * 2),
-					Position::group(i * 2 + 2),
-				)
-			})
+			.map(|i| record(i, i * 1_000, 1_000, Position::group(i * 2), Position::group(i * 2 + 2)))
 			.collect();
 		let refs: Vec<&Entry> = records.iter().collect();
 		assert_eq!(
 			audio(refs.clone(), false, secs(2.5)..secs(5.0)),
-			frames(
-				&[(Position::group(4), Position::group(10))],
-				Some(secs(2.5)..secs(5.0))
-			)
+			frames(&[(Position::group(4), Position::group(10))], Some(secs(2.5)..secs(5.0)))
 		);
 		assert_eq!(audio(refs.clone(), false, secs(5.0)..secs(7.5)), Content::Pending);
 		assert_eq!(audio(refs, true, secs(7.0)..secs(9.0)), Content::Gap);
@@ -336,7 +333,7 @@ mod tests {
 
 	#[test]
 	fn a_frame_split_record_is_not_a_video_boundary() {
-		let records = vec![
+		let records = [
 			record(0, 0, 10_000, Position::group(0), Position::new(0, 300)),
 			record(1, 10_000, 2_000, Position::new(0, 300), Position::group(1)),
 			record(2, 12_000, 2_000, Position::group(1), Position::group(2)),

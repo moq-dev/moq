@@ -397,11 +397,21 @@ async fn watch_catalog(
 fn reference(catalog: &moq_mux::catalog::hang::Catalog) -> Option<Reference> {
 	let archive = catalog.archive.as_ref()?;
 	let indexed = |name: &&String| archive.timelines.contains_key(*name);
-	let video = catalog.video.renditions.keys().find(indexed).map(|name| (Kind::Video, name));
-	let audio = || catalog.audio.renditions.keys().find(indexed).map(|name| (Kind::Audio, name));
-	video
-		.or_else(audio)
-		.map(|(kind, name)| Arc::new((kind, name.clone())))
+	let video = catalog
+		.video
+		.renditions
+		.keys()
+		.find(indexed)
+		.map(|name| (Kind::Video, name));
+	let audio = || {
+		catalog
+			.audio
+			.renditions
+			.keys()
+			.find(indexed)
+			.map(|name| (Kind::Audio, name))
+	};
+	video.or_else(audio).map(|(kind, name)| Arc::new((kind, name.clone())))
 }
 
 /// Whether every range `archive` advertises stays FETCHable from this broadcast until the
@@ -1623,7 +1633,10 @@ mod tests {
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
 
 		let playlist = rendition.snapshot();
-		assert_eq!(playlist.segments.iter().map(|s| s.segment).collect::<Vec<_>>(), vec![0, 1, 2]);
+		assert_eq!(
+			playlist.segments.iter().map(|s| s.segment).collect::<Vec<_>>(),
+			vec![0, 1, 2]
+		);
 		assert_eq!(playlist.segments[0].duration, Duration::from_secs(1));
 		let segment = rendition.segment(1).await.unwrap().expect("audio segment");
 		assert_eq!(&segment[4..8], b"moof");

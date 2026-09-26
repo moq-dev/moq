@@ -269,10 +269,10 @@ impl<S: ObjectStore> Writer<S> {
 			delete(&shared.store, keys).await;
 		}
 
-		if source.is_finished() {
-			Ok(())
-		} else {
-			Err(source_error(source.closed().await))
+		// A broadcast ends without a cause unless it was aborted.
+		match source.closed().await {
+			moq_net::Error::Dropped => Ok(()),
+			err => Err(source_error(err)),
 		}
 	}
 }
@@ -355,7 +355,13 @@ impl<S: ObjectStore> Control<S> {
 				let window = resume.checkpoint.records.into();
 				(output, segmenter, window, resume.sequence, floor)
 			}
-			None => (timeline::Producer::new(output), Segmenter::new(config), VecDeque::new(), 0, None),
+			None => (
+				timeline::Producer::new(output),
+				Segmenter::new(config),
+				VecDeque::new(),
+				0,
+				None,
+			),
 		};
 
 		let (cancel, cancelled) = watch::channel(());
@@ -484,9 +490,7 @@ impl<S: ObjectStore> Track<S> {
 			self.segmenter.close();
 			self.closed = true;
 		}
-		while let Some(record) = self.segmenter.next() {
-			self.records.push_back(record);
-		}
+		self.records.extend(self.segmenter.by_ref());
 		if self.committer.is_none() {
 			return Ok(None);
 		}
@@ -829,11 +833,6 @@ mod tests {
 		group.finish().unwrap();
 	}
 
-	#[allow(deprecated)]
-	fn end(source: &broadcast::Producer) {
-		source.finish();
-	}
-
 	/// Replay every stored timeline object of `track`, returning the records still in its window.
 	async fn window<S: ObjectStore>(store: &Store<S>, track: &str) -> Vec<Record> {
 		let timeline = timeline(track);
@@ -912,7 +911,8 @@ mod tests {
 		store
 			.list(&Query::new())
 			.try_filter_map(|entry| async move {
-				let media = matches!(&entry.key, Key::Segments { track, .. } if !track.ends_with(hang::timeline::SUFFIX));
+				let media =
+					matches!(&entry.key, Key::Segments { track, .. } if !track.ends_with(hang::timeline::SUFFIX));
 				Ok(media.then_some(entry.key))
 			})
 			.try_collect()
@@ -949,7 +949,7 @@ mod tests {
 		}
 		video.finish().unwrap();
 		catalog.finish().unwrap();
-		end(&source);
+		source.close();
 
 		tokio::spawn(writer.run()).await.unwrap().unwrap();
 
@@ -992,7 +992,7 @@ mod tests {
 		}
 		video.finish().unwrap();
 		audio.finish().unwrap();
-		end(&source);
+		source.close();
 		writer.run().await.unwrap();
 
 		let video = window(&store, "video").await;
@@ -1008,7 +1008,8 @@ mod tests {
 		let log = track(&source, "log");
 
 		let store = Store::new(InMemory::new(), "rec");
-		let config = Config::default().with_timeline(timeline::Config::default().with_duration_max(Duration::from_secs(3)));
+		let config =
+			Config::default().with_timeline(timeline::Config::default().with_duration_max(Duration::from_secs(3)));
 		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
 		writer.control().sparse("log").await.unwrap();
 		let run = tokio::spawn(writer.run());
@@ -1024,7 +1025,10 @@ mod tests {
 		}
 		let records = window(&store, "log").await;
 		assert_eq!(
-			records.iter().map(|record| (record.start, record.end)).collect::<Vec<_>>(),
+			records
+				.iter()
+				.map(|record| (record.start, record.end))
+				.collect::<Vec<_>>(),
 			vec![
 				(Position::new(0, 0), Position::new(0, 3)),
 				(Position::new(0, 3), Position::new(0, 6)),
@@ -1035,7 +1039,7 @@ mod tests {
 
 		open.finish().unwrap();
 		log.finish().unwrap();
-		end(&source);
+		source.close();
 		run.await.unwrap().unwrap();
 
 		let records = window(&store, "log").await;
@@ -1066,7 +1070,7 @@ mod tests {
 		}
 		video.finish().unwrap();
 		audio.finish().unwrap();
-		end(&source);
+		source.close();
 
 		writer.run().await.unwrap();
 
@@ -1095,7 +1099,7 @@ mod tests {
 		}
 		video.finish().unwrap();
 		catalog.finish().unwrap();
-		end(&source);
+		source.close();
 
 		writer.run().await.unwrap();
 
@@ -1130,7 +1134,7 @@ mod tests {
 			group(&video, sequence, &[sequence * 1000]);
 		}
 		video.finish().unwrap();
-		end(&source);
+		source.close();
 
 		let run = tokio::spawn(writer.run());
 		while window(&store, "video").await.last().map(|record| record.sequence) != Some(5) {
@@ -1163,7 +1167,7 @@ mod tests {
 		first.write_frame(ms(500), "0@500").unwrap();
 		first.finish().unwrap();
 		video.finish().unwrap();
-		end(&source);
+		source.close();
 		run.await.unwrap().unwrap();
 
 		let records = window(&store, "video").await;
@@ -1190,7 +1194,7 @@ mod tests {
 		group(&video, 1, &[500]);
 		group(&video, 3, &[2000]);
 		video.finish().unwrap();
-		end(&source);
+		source.close();
 
 		writer.run().await.unwrap();
 
@@ -1213,7 +1217,7 @@ mod tests {
 		// One past the recording's largest group ID.
 		group(&video, 1 << 53, &[1000]);
 		video.finish().unwrap();
-		end(&source);
+		source.close();
 
 		assert_eq!(
 			writer.run().await,
@@ -1237,7 +1241,7 @@ mod tests {
 		group(&video, 0, &[1000]);
 		group(&video, 1, &[500]);
 		video.finish().unwrap();
-		end(&source);
+		source.close();
 
 		assert_eq!(
 			writer.run().await,
@@ -1269,7 +1273,7 @@ mod tests {
 			group(&video, sequence, &[sequence * 1000]);
 		}
 		video.finish().unwrap();
-		end(&source);
+		source.close();
 
 		// Video commits without waiting for the stalled audio.
 		while window(&store, "video").await.len() < 4 {
@@ -1283,7 +1287,10 @@ mod tests {
 		// What arrived of the stalled group is stored; the group queued behind it is dropped.
 		let records = window(&store, "audio").await;
 		assert_eq!(
-			records.iter().map(|record| (record.start, record.end)).collect::<Vec<_>>(),
+			records
+				.iter()
+				.map(|record| (record.start, record.end))
+				.collect::<Vec<_>>(),
 			vec![
 				(Position::group(0), Position::group(1)),
 				(Position::group(1), Position::new(1, 1))
@@ -1335,7 +1342,7 @@ mod tests {
 			group(&video, sequence, &[sequence * 1000, sequence * 1000 + 500]);
 		}
 		video.finish().unwrap();
-		end(&source);
+		source.close();
 		writer.run().await.unwrap();
 	}
 
@@ -1373,12 +1380,15 @@ mod tests {
 	#[tokio::test]
 	async fn a_resumed_append_only_group_continues_mid_group() {
 		let store = Store::new(InMemory::new(), "rec");
-		let config = Config::default().with_timeline(timeline::Config::default().with_duration_max(Duration::from_secs(3)));
+		let config =
+			Config::default().with_timeline(timeline::Config::default().with_duration_max(Duration::from_secs(3)));
 
 		// The first run stores frames 0..6 of a group that never closes, then stops.
 		let source = broadcast::Info::new().produce();
 		let log = track(&source, "log");
-		let writer = Writer::new(store.clone(), source.consume(), config.clone()).await.unwrap();
+		let writer = Writer::new(store.clone(), source.consume(), config.clone())
+			.await
+			.unwrap();
 		writer.control().sparse("log").await.unwrap();
 		let mut open = log.create_group(group::Info { sequence: 0 }).unwrap();
 		for second in 0..7 {
@@ -1399,16 +1409,21 @@ mod tests {
 		writer.control().sparse("log").await.unwrap();
 		let mut replayed = log.create_group(group::Info { sequence: 0 }).unwrap();
 		for second in 0..8 {
-			replayed.write_frame(ms(second * 1000), format!("line {second}")).unwrap();
+			replayed
+				.write_frame(ms(second * 1000), format!("line {second}"))
+				.unwrap();
 		}
 		replayed.finish().unwrap();
 		log.finish().unwrap();
-		end(&source);
+		source.close();
 		writer.run().await.unwrap();
 
 		let records = window(&store, "log").await;
 		assert_eq!(
-			records.iter().map(|record| (record.start, record.end)).collect::<Vec<_>>(),
+			records
+				.iter()
+				.map(|record| (record.start, record.end))
+				.collect::<Vec<_>>(),
 			vec![
 				(Position::new(0, 0), Position::new(0, 3)),
 				(Position::new(0, 3), Position::new(0, 6)),
@@ -1491,7 +1506,7 @@ mod tests {
 			group(&video, sequence, &[sequence * 1000, sequence * 1000 + 500]);
 		}
 		video.finish().unwrap();
-		end(&source);
+		source.close();
 		writer.run().await.unwrap();
 		assert!(started.elapsed() >= grace);
 
@@ -1534,7 +1549,10 @@ mod tests {
 		assert!(matches!(result, Err(Error::Store(_))));
 
 		// A missing timeline object leaves the retained window unrecoverable.
-		store.delete(&Key::segments(timeline("video"), 3).unwrap()).await.unwrap();
+		store
+			.delete(&Key::segments(timeline("video"), 3).unwrap())
+			.await
+			.unwrap();
 		let result = Writer::new(store.clone(), source.consume(), config).await;
 		assert!(matches!(result, Err(Error::Timeline(_))));
 
@@ -1567,7 +1585,10 @@ mod tests {
 		// `segments/5` still decodes, but it restates an earlier window, so resuming would write the
 		// next record on top of it.
 		let older = store.get_segments(&timeline("video"), 0).await.unwrap();
-		store.delete(&Key::segments(timeline("video"), 5).unwrap()).await.unwrap();
+		store
+			.delete(&Key::segments(timeline("video"), 5).unwrap())
+			.await
+			.unwrap();
 		store.put_segments(&timeline("video"), 5, &older).await.unwrap();
 
 		let source = broadcast::Info::new().produce();

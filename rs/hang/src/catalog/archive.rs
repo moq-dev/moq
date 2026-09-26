@@ -84,10 +84,7 @@ mod test {
 	#[test]
 	fn live_publisher_is_timeline_fields_alone() {
 		let json = serde_json::to_string(&live()).unwrap();
-		assert_eq!(
-			json,
-			r#"{"timelines":{"video":"video.timeline.z"},"timescale":1000}"#
-		);
+		assert_eq!(json, r#"{"timelines":{"video":"video.timeline.z"},"timescale":1000}"#);
 		assert_eq!(serde_json::from_str::<Archive>(&json).unwrap(), live());
 	}
 

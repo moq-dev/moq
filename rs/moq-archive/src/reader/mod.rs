@@ -218,7 +218,12 @@ impl Timeline {
 				match event {
 					window::Event::Push { index: at, value } if at == value.sequence => index.push(&self.track, &value),
 					window::Event::Push { index: at, value } => {
-						tracing::warn!(track = self.track, at, sequence = value.sequence, "ignoring a misnumbered record");
+						tracing::warn!(
+							track = self.track,
+							at,
+							sequence = value.sequence,
+							"ignoring a misnumbered record"
+						);
 					}
 					window::Event::Pop(range) | window::Event::Skip(range) => {
 						for span in index.pop(&self.track, range) {
@@ -337,7 +342,10 @@ async fn serve_group<T: ObjectStore>(
 	let mut spans = shared.index.lock().unwrap().group(&track, sequence);
 
 	// The earliest retained record must hold the requested frame; an expired head is gone.
-	if spans.first().is_none_or(|span| span.start > Position::new(sequence, start)) {
+	if spans
+		.first()
+		.is_none_or(|span| span.start > Position::new(sequence, start))
+	{
 		request.reject(moq_net::Error::NotFound);
 		return;
 	}

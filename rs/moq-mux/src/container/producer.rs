@@ -735,6 +735,11 @@ impl<C: Container, R> std::ops::Deref for Producer<C, R> {
 	}
 }
 
+/// Where the next frame written to `group` lands.
+fn position(group: &moq_net::group::Producer) -> hang::timeline::Position {
+	hang::timeline::Position::new(group.sequence, group.frame_count() as u64)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1526,9 +1531,4 @@ mod tests {
 		}
 		assert_eq!(timestamps, [1_000_000, 1_040_000, 1_050_000]);
 	}
-}
-
-/// Where the next frame written to `group` lands.
-fn position(group: &moq_net::group::Producer) -> hang::timeline::Position {
-	hang::timeline::Position::new(group.sequence, group.frame_count() as u64)
 }

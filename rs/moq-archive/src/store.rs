@@ -1,8 +1,8 @@
 use std::num::NonZeroUsize;
 
 use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt};
 use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
 use object_store::list::{PaginatedListOptions, PaginatedListResult, PaginatedListStore};
 use object_store::path::Path;
 use object_store::{ListResult, ObjectMeta, ObjectStore, ObjectStoreExt, PutMode, PutPayload};

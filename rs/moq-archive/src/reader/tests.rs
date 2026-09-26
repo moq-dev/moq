@@ -101,7 +101,12 @@ impl Archive {
 	/// Store and commit a record of whole groups `groups`, each holding `frames` frames.
 	async fn add(&mut self, track: &str, groups: std::ops::Range<u64>, frames: u64) -> Record {
 		let record = self
-			.record(track, Position::group(groups.start), Position::group(groups.end), frames)
+			.record(
+				track,
+				Position::group(groups.start),
+				Position::group(groups.end),
+				frames,
+			)
 			.await;
 		self.commit(track, &record, 0).await;
 		record
@@ -256,7 +261,9 @@ async fn a_group_split_across_records_is_served_whole() {
 		.record("video", Position::group(7), Position::new(7, 3), 5)
 		.await;
 	archive.commit("video", &head, 0).await;
-	let tail = archive.record("video", Position::new(7, 3), Position::group(9), 5).await;
+	let tail = archive
+		.record("video", Position::new(7, 3), Position::group(9), 5)
+		.await;
 	archive.commit("video", &tail, 0).await;
 
 	let (broadcast, _reader) = open(&archive).await;
@@ -315,7 +322,9 @@ async fn an_expired_head_is_not_found() {
 		.record("video", Position::group(7), Position::new(7, 3), 5)
 		.await;
 	archive.commit("video", &head, 0).await;
-	let tail = archive.record("video", Position::new(7, 3), Position::group(8), 5).await;
+	let tail = archive
+		.record("video", Position::new(7, 3), Position::group(8), 5)
+		.await;
 	archive.commit("video", &tail, 1).await;
 
 	let (broadcast, _reader) = open(&archive).await;
@@ -424,7 +433,9 @@ async fn a_missing_timeline_segment_recovers_from_the_next_checkpoint() {
 	// Record 1 is committed to the window but its timeline object is unreadable.
 	let lost = archive.record("video", Position::group(1), Position::group(2), 1).await;
 	archive.edit("video", &lost, 0).await;
-	archive.raw(&Key::segments(timeline("video"), 1).unwrap(), b"\x02").await;
+	archive
+		.raw(&Key::segments(timeline("video"), 1).unwrap(), b"\x02")
+		.await;
 	archive.add("video", 2..3, 1).await;
 
 	let (broadcast, _reader) = open(&archive).await;

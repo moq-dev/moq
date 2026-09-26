@@ -59,7 +59,11 @@ impl Index {
 		let spans = self.tracks.entry(track.to_string()).or_default();
 		let before = spans.spans.range(..span.end).next_back();
 		if before.is_some_and(|(_, prev)| prev.end > span.start) || spans.sequences.contains_key(&span.sequence) {
-			tracing::warn!(track, sequence = record.sequence, "ignoring an overlapping archive record");
+			tracing::warn!(
+				track,
+				sequence = record.sequence,
+				"ignoring an overlapping archive record"
+			);
 			return;
 		}
 		spans.spans.insert(span.start, span);
@@ -71,7 +75,11 @@ impl Index {
 		let Some(spans) = self.tracks.get_mut(track) else {
 			return Vec::new();
 		};
-		let popped: Vec<u64> = spans.sequences.range(sequences).map(|(sequence, _)| *sequence).collect();
+		let popped: Vec<u64> = spans
+			.sequences
+			.range(sequences)
+			.map(|(sequence, _)| *sequence)
+			.collect();
 		popped
 			.into_iter()
 			.filter_map(|sequence| {

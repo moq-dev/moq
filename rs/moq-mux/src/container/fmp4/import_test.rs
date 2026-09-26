@@ -468,7 +468,10 @@ async fn import_populates_the_broadcast_timeline() {
 
 	// Each rendition's timeline is advertised at the catalog root.
 	let section = snapshot.archive.clone().expect("the import advertises its timelines");
-	assert_eq!(section.timelines[&video_name], hang::timeline::default_name(&video_name));
+	assert_eq!(
+		section.timelines[&video_name],
+		hang::timeline::default_name(&video_name)
+	);
 
 	// Subscribe while the producer is alive, then finish so the timeline groups close and the
 	// readers terminate rather than blocking.

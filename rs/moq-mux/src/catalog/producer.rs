@@ -81,7 +81,11 @@ impl CatalogTimeline {
 		}
 
 		self.last_sequence = Some(sequence);
-		recorder.frame(hang::timeline::Position::group(sequence), moq_net::Timestamp::now(), true);
+		recorder.frame(
+			hang::timeline::Position::group(sequence),
+			moq_net::Timestamp::now(),
+			true,
+		);
 		recorder.finish_group(sequence);
 	}
 }
@@ -1249,7 +1253,10 @@ mod test {
 		// A broadcast that never segments never advertises an archive.
 		assert_eq!(catalog.snapshot().archive, None);
 		let _recorder = catalog.enroll("video0").unwrap();
-		let archive = catalog.snapshot().archive.expect("the root archive advertises the timelines");
+		let archive = catalog
+			.snapshot()
+			.archive
+			.expect("the root archive advertises the timelines");
 		assert_eq!(archive, catalog.timeline().section());
 		assert_eq!(
 			archive.timelines.keys().collect::<Vec<_>>(),

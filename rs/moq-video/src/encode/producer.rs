@@ -1193,9 +1193,10 @@ mod tests {
 						.snapshot()
 						.archive
 						.expect("the video track enrolls an archive");
-					let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section, "video")
-						.await
-						.unwrap();
+					let mut timeline =
+						moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section, "video")
+							.await
+							.unwrap();
 
 					let mut live = Vec::new();
 					for _ in 0..2 {

@@ -117,7 +117,9 @@ async fn rendition_is_not_published_when_the_media_track_fails() {
 	// Squat the catalog's timeline track, so enrolling the first rendition (which enrolls the catalog
 	// too, and with it building its media producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
 	// dropping it frees the name.
-	let _squat = broadcast.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None).unwrap();
+	let _squat = broadcast
+		.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None)
+		.unwrap();
 
 	let mut importer = Import::new(broadcast, catalog.reserve());
 	// A track it cannot build surfaces in the catalog rather than in this result.

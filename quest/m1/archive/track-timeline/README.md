@@ -15,11 +15,13 @@ so Rust and JS reach `main` together.
 
 ## Plan
 
-Today one timeline numbers aligned segments for every track. A DVR pops whole
-segments, so a static catalog expires with the first video segment, and the
-writer only records a non-pacing group once it completes, so a group that never
-closes is never stored. `moq_json::window` pops from the front, so one shared
-timeline cannot keep an old catalog record while dropping newer video.
+The Rust side has landed: a `hang::timeline::Record` is one span of its own
+track (`sequence`, `pts`, `duration`, `start`/`end` group and frame positions),
+`moq_mux::timeline::Timelines` publishes one timeline per enrolled track,
+`moq-archive` writes recording version 2 (`<track>/segments/<n>` beside its
+timeline's `segments/<n>`), and `moq-hls` derives segments from a reference
+rendition's records (`rs/moq-hls/src/export/spans.rs`). The draft is updated
+in moq-hang-04.
 
 Decisions:
 
@@ -38,7 +40,6 @@ Decisions:
 
 ## Quests
 
-- [Rust per-track timelines](/quest/m1/archive/track-timeline/core.md) - the draft, `hang`, `moq-mux`, `moq-archive`, and `moq-hls` move to per-track timelines in one change
 - [JS per-track timelines](/quest/m1/archive/track-timeline/js.md) - `@moq/hang` publishes and reads the same per-track timelines as Rust
 
 ## Related

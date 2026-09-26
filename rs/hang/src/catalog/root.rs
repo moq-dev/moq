@@ -715,7 +715,10 @@ mod test {
 		};
 
 		let json = catalog.to_json().expect("failed to encode");
-		assert!(json.contains(r#""archive":{"timelines":{"video":"video.timeline.z"}"#), "{json}");
+		assert!(
+			json.contains(r#""archive":{"timelines":{"video":"video.timeline.z"}"#),
+			"{json}"
+		);
 		assert!(
 			!json.contains(r#""timeline":"#),
 			"the old root key must not appear: {json}"

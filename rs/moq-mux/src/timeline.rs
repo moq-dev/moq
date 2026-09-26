@@ -126,7 +126,7 @@ struct Open {
 /// Reports arrive in position order: [`frame`](Self::frame) for each frame that may start a record
 /// (every frame, or at least the first of each group), [`finish_group`](Self::finish_group) once a
 /// group can gain no more frames, and [`end`](Self::end) wherever the content is known to stop.
-/// Closed records queue until [`next`](Self::next) takes them.
+/// Closed records queue until [`Iterator::next`] takes them.
 pub struct Segmenter {
 	config: Config,
 	/// The number the next closed record gets.
@@ -221,7 +221,11 @@ impl Segmenter {
 
 	/// Whether a group starting at `pts` ends the record that started at `start`.
 	fn boundary(&mut self, start: Timestamp, pts: Timestamp, elapsed: u128) -> bool {
-		while self.cuts.front().is_some_and(|cut| cut.as_micros() <= start.as_micros()) {
+		while self
+			.cuts
+			.front()
+			.is_some_and(|cut| cut.as_micros() <= start.as_micros())
+		{
 			self.cuts.pop_front();
 		}
 		if self.cuts.front().is_some_and(|cut| cut.as_micros() <= pts.as_micros()) {
@@ -259,7 +263,10 @@ impl Segmenter {
 	}
 
 	fn advance(&mut self, pts: Timestamp) {
-		if self.frontier.is_none_or(|frontier| pts.as_micros() > frontier.as_micros()) {
+		if self
+			.frontier
+			.is_none_or(|frontier| pts.as_micros() > frontier.as_micros())
+		{
 			self.frontier = Some(pts);
 		}
 	}
@@ -316,9 +323,13 @@ impl Segmenter {
 		self.sequence += 1;
 		self.ready.push_back(record);
 	}
+}
 
-	/// Take the next closed record, if one is ready.
-	pub fn next(&mut self) -> Option<Record> {
+/// Yields each closed record once; `None` means none is ready yet, not that none ever will be.
+impl Iterator for Segmenter {
+	type Item = Record;
+
+	fn next(&mut self) -> Option<Record> {
 		self.ready.pop_front()
 	}
 }
@@ -419,7 +430,7 @@ struct Live {
 
 impl Live {
 	fn publish(&mut self) {
-		while let Some(record) = self.segmenter.next() {
+		for record in self.segmenter.by_ref() {
 			let Some(output) = self.output.as_mut() else {
 				continue;
 			};
@@ -743,7 +754,7 @@ mod test {
 	fn drain(segmenter: &mut Segmenter) -> Vec<(u64, u64, Position, Position)> {
 		let mut out = Vec::new();
 		let mut sequence = None;
-		while let Some(record) = segmenter.next() {
+		for record in segmenter.by_ref() {
 			if let Some(previous) = sequence {
 				assert_eq!(record.sequence, previous + 1, "records are numbered consecutively");
 			}
@@ -812,7 +823,10 @@ mod test {
 			]
 		);
 		assert!(records[0].keyframe);
-		assert!(!records[1].keyframe, "a split inside a group does not start on a keyframe");
+		assert!(
+			!records[1].keyframe,
+			"a split inside a group does not start on a keyframe"
+		);
 	}
 
 	#[test]
@@ -849,7 +863,10 @@ mod test {
 
 		// The tail ends after the newest frame, since the group never finished.
 		log.close();
-		assert_eq!(drain(&mut log), vec![(6_000, 0, Position::new(0, 6), Position::new(0, 7))]);
+		assert_eq!(
+			drain(&mut log),
+			vec![(6_000, 0, Position::new(0, 6), Position::new(0, 7))]
+		);
 	}
 
 	#[test]
@@ -863,7 +880,11 @@ mod test {
 
 		assert_eq!(
 			drain(&mut audio),
-			vec![(0, 600, at(0), at(2)), (600, 1_100, at(5), at(6)), (1_700, 0, at(6), Position::new(6, 1))]
+			vec![
+				(0, 600, at(0), at(2)),
+				(600, 1_100, at(5), at(6)),
+				(1_700, 0, at(6), Position::new(6, 1))
+			]
 		);
 	}
 
@@ -996,7 +1017,10 @@ mod test {
 		timelines.finish();
 
 		let entries = read(&broadcast, &timelines.section(), "video0").await;
-		assert_eq!(entries.iter().map(|entry| entry.sequence).collect::<Vec<_>>(), vec![0, 1]);
+		assert_eq!(
+			entries.iter().map(|entry| entry.sequence).collect::<Vec<_>>(),
+			vec![0, 1]
+		);
 	}
 
 	#[test]
@@ -1043,7 +1067,10 @@ mod test {
 			.timelines
 			.insert("video0".to_string(), "video0.timeline.z".to_string());
 		let entries = read(&broadcast, &section, "video0").await;
-		assert_eq!(entries.iter().map(|entry| entry.sequence).collect::<Vec<_>>(), vec![1, 2, 3]);
+		assert_eq!(
+			entries.iter().map(|entry| entry.sequence).collect::<Vec<_>>(),
+			vec![1, 2, 3]
+		);
 	}
 
 	#[test]

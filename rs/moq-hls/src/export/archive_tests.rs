@@ -525,9 +525,7 @@ async fn a_growing_recording_ends_only_on_caller_finality() {
 	replay.playlist(Kind::Video, "1080p").await;
 
 	// A DVR commit: segment 3 arrives and segment 0 expires.
-	recording
-		.add("1080p", 6000, 2000, &[(3, &[6_000_000])], 1)
-		.await;
+	recording.add("1080p", 6000, 2000, &[(3, &[6_000_000])], 1).await;
 	recording.gets();
 	let mut reader = replay.reader.take().unwrap();
 	reader.refresh().await.unwrap();
