@@ -766,7 +766,11 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						}
 					};
 
-					let GroupRecvState::Serve { group, .. } = std::mem::replace(&mut self.state, GroupRecvState::Done)
+					// Held until the group settles below, so a frame the track or group cut
+					// short drops into an already-aborted group instead of reporting a loss.
+					let GroupRecvState::Serve {
+						group, ingest: _ingest, ..
+					} = std::mem::replace(&mut self.state, GroupRecvState::Done)
 					else {
 						unreachable!()
 					};
