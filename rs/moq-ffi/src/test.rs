@@ -350,7 +350,7 @@ async fn announced_route_keeps_cold_cost_on_reannounce() {
 	assert_eq!(back.cost, moq_net::origin::Cost { warm: 0, cold: 9 });
 	assert_eq!(MoqRoute::from(back), route);
 
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 #[test]
@@ -365,7 +365,7 @@ fn publish_media_lifecycle() {
 		})
 		.unwrap();
 	media.finish().unwrap();
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 #[tokio::test]
@@ -485,7 +485,7 @@ async fn raw_audio_activity() {
 	assert_eq!(resumed.timestamp_us, RESUMED_TIMESTAMP_US);
 
 	audio.finish().unwrap();
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 /// `frame_duration_us` is microseconds so Opus' 2.5 ms frame survives the trip, where
@@ -527,7 +527,7 @@ async fn raw_audio_frame_durations() {
 		"2 ms is not an opus frame duration"
 	);
 
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 #[tokio::test]
@@ -1386,7 +1386,9 @@ async fn dynamic_track_request_can_publish_media() {
 	assert_eq!(frame.payload, payload);
 	assert_eq!(frame.timestamp_us, 20_000);
 
+	media.discontinuity().unwrap();
 	media.finish().unwrap();
+	assert!(matches!(media.discontinuity(), Err(MoqError::Closed)));
 }
 
 #[tokio::test]
@@ -1503,7 +1505,7 @@ async fn create_broadcast_is_invisible_until_announced() {
 		matches!(&update, MoqAnnounceEvent::Announced { announce } if announce.prefix == "live"),
 		"{update:?}"
 	);
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 /// Waiting for an exact path must hand the broadcast back named by that path, the base a
@@ -1530,7 +1532,7 @@ async fn announced_broadcast_keeps_the_requested_path() {
 		.unwrap();
 	assert_eq!(requested.inner().info().path.as_str(), "a/pub");
 
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 /// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
@@ -1571,8 +1573,8 @@ async fn decode_audio_follows_a_sibling_broadcast_reference() {
 		"the catalog broadcast does not serve the track itself"
 	);
 
-	catalog.finish().unwrap();
-	source.finish().unwrap();
+	catalog.close().unwrap();
+	source.close().unwrap();
 }
 
 /// Announcement filters do not re-root the origin, so relative broadcast references
@@ -1622,8 +1624,8 @@ async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
 		.expect("timed out subscribing on the resolved broadcast")
 		.unwrap();
 
-	catalog.finish().unwrap();
-	source.finish().unwrap();
+	catalog.close().unwrap();
+	source.close().unwrap();
 }
 
 #[tokio::test]
@@ -1650,7 +1652,7 @@ async fn announced_filters_patterns_and_reports_captures() {
 	assert_eq!(update.prefix, "room/alice/chat");
 	assert_eq!(update.captures, Some(vec!["alice".into()]));
 
-	chat.finish().unwrap();
+	chat.close().unwrap();
 }
 
 /// `Live` marks the end of the routes live at subscribe time: at once on an empty
@@ -1757,8 +1759,8 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 		.unwrap();
 	assert_eq!(back.inner().info().path.as_str(), "a/pub");
 
-	catalog.finish().unwrap();
-	source.finish().unwrap();
+	catalog.close().unwrap();
+	source.close().unwrap();
 }
 
 #[tokio::test]
@@ -1799,7 +1801,7 @@ async fn announce_and_unannounce_toggles_discovery() {
 		.expect("timed out requesting the reannounced broadcast")
 		.expect("a reannounced broadcast resolves");
 
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 #[tokio::test]
@@ -1816,7 +1818,7 @@ async fn finish_unpublishes() {
 
 	// A graceful finish detaches immediately; the path stops resolving. Removal is
 	// asynchronous, so poll until it takes effect.
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 	let removed = tokio::time::timeout(TIMEOUT, async {
 		loop {
 			if consumer.request_broadcast("live".into()).await.is_err() {
@@ -1826,7 +1828,7 @@ async fn finish_unpublishes() {
 		}
 	})
 	.await;
-	assert!(removed.is_ok(), "finish should unpublish the broadcast");
+	assert!(removed.is_ok(), "close should unpublish the broadcast");
 }
 
 #[tokio::test]
@@ -1881,7 +1883,7 @@ async fn local_publish_consume_audio() {
 	assert_eq!(frame.payload, payload);
 	assert_eq!(frame.timestamp_us, 1_000_000);
 
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 #[tokio::test]
@@ -1939,7 +1941,7 @@ async fn video_publish_consume() {
 	assert_eq!(frame.timestamp_us, 0);
 	assert!(!frame.payload.is_empty(), "frame should have payload data");
 
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 /// The raw-video publish path: hand mid-gray RGBA to `encode_video` and check
@@ -2048,7 +2050,7 @@ async fn video_raw_publish_consume() {
 	assert!(!frame.payload.is_empty(), "frame should carry encoded video");
 
 	video.finish().unwrap();
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 /// A decoded frame owns its surface and converts on demand: one frame yields
@@ -2147,7 +2149,7 @@ async fn video_decode_frame_ownership() {
 	native.cancel();
 	drop((portable, native));
 	video.finish().unwrap();
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 
 	assert_eq!((retained.width(), retained.height()), (320, 240));
 	assert_eq!(
@@ -2252,7 +2254,7 @@ async fn video_raw_publish_from_many_threads() {
 	let closer = video.clone();
 	std::thread::spawn(move || closer.finish()).join().unwrap().unwrap();
 
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 /// A raw video producer rejects a buffer that isn't one picture at the
@@ -2316,7 +2318,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 		Err(MoqError::Closed)
 	));
 
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 #[tokio::test]
@@ -2367,7 +2369,7 @@ async fn multiple_frames_ordering() {
 		assert_eq!(frame.payload, expected.as_bytes(), "frame {i} has wrong payload");
 	}
 
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 #[tokio::test]
@@ -2405,17 +2407,22 @@ async fn catalog_update_on_new_track() {
 	assert_eq!(catalog2.audio["0.opus"].label.as_deref(), Some("English"));
 	assert_eq!(catalog2.audio["1.opus"].label, None);
 
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 #[test]
-fn finish_closes_producer() {
+fn close_twice_is_a_noop() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let _media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
-	broadcast.finish().unwrap();
+	let _media = broadcast
+		.publish_audio(audio_init(MoqAudioFormat::Opus, init.clone()))
+		.unwrap();
+	broadcast.close().unwrap();
+	broadcast.close().unwrap();
 
-	let err = broadcast.finish().unwrap_err();
+	let Err(err) = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)) else {
+		panic!("publishing after close succeeded");
+	};
 	assert!(
 		matches!(err, crate::error::MoqError::Closed),
 		"expected Closed error, got {err}"
@@ -2440,7 +2447,7 @@ async fn announced_broadcast() {
 		.unwrap();
 	// Finish so consumers observe a deliberate end (the canonical end for a
 	// publisher; dropping without finish reads as a failure).
-	_broadcast.finish().unwrap();
+	_broadcast.close().unwrap();
 }
 
 fn serve(origin: &MoqOriginProducer, prefix: &str) -> Arc<MoqOriginDynamic> {
@@ -2493,7 +2500,7 @@ async fn dynamic_broadcast_request() {
 	assert_eq!(frame.timestamp_us, 20_000);
 
 	track.finish().unwrap();
-	served.finish().unwrap();
+	served.close().unwrap();
 }
 
 /// A prefix serves requests beneath it; cancelling the handle
@@ -2533,7 +2540,7 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 		crate::error::MoqProtocolKind::Unroutable,
 	);
 
-	served.finish().unwrap();
+	served.close().unwrap();
 }
 
 /// Tearing the origin down ends every handler with `Closed`. A parked request
@@ -3281,7 +3288,7 @@ fn without_runtime() {
 		announced.cancel();
 		client.cancel();
 		media.finish().unwrap();
-		broadcast.finish().unwrap();
+		broadcast.close().unwrap();
 		drop(client);
 		drop(consumer);
 		drop(announcement);
@@ -3378,7 +3385,7 @@ async fn server_client_roundtrip() {
 	// Clean up. Exercise `shutdown()` on the client side and the underlying
 	// `cancel(code)` on the server side, so both shutdown paths run.
 	media.finish().unwrap();
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 	cs.shutdown();
 	server_session.cancel(0);
 	server.cancel();
@@ -3446,10 +3453,10 @@ async fn server_client_roundtrip_auto_origin() {
 		.await
 		.expect("timed out waiting for the loopback broadcast")
 		.expect("an auto-origin session should discover its own announcement");
-	local_broadcast.finish().unwrap();
+	local_broadcast.close().unwrap();
 
 	media.finish().unwrap();
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 	cs.shutdown();
 	server_session.cancel(0);
 	server.cancel();
@@ -3651,7 +3658,7 @@ async fn request_per_session_publish_override() {
 	let announcement = next_announced(&announced).await;
 	assert_eq!(announcement.prefix, "override-only");
 
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 	cs.cancel(0);
 	server_session.cancel(0);
 	server.cancel();
@@ -3775,7 +3782,7 @@ async fn client_reconnects_and_resumes_announcements() {
 	let announcement = next_announced(&announced).await;
 	assert_eq!(announcement.prefix, "after-reconnect");
 
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 	cs.cancel(0);
 	server_session.cancel(0);
 	server.cancel();
@@ -4039,7 +4046,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 	}
 
 	video.finish().unwrap();
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 #[cfg(feature = "video")]
@@ -4116,7 +4123,7 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 	assert_eq!(video.applied_bitrate(), 1_000_000);
 
 	video.finish().unwrap();
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 async fn one_shot_peers() -> (Arc<MoqSession>, Arc<MoqSession>, Arc<MoqServer>) {

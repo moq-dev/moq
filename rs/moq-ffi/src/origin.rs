@@ -338,9 +338,8 @@ impl MoqOriginProducer {
 	/// tracks; an on-demand handler is [`Self::dynamic`]. Create, `dynamic()` if
 	/// tracks are served on demand, populate, then announce.
 	///
-	/// [`MoqBroadcastProducer::finish`] unpublishes immediately. Dropping the producer
-	/// without finishing also unpublishes, but subscribers observe the end as a
-	/// failure rather than a deliberate one.
+	/// [`MoqBroadcastProducer::close`] ends it for good; dropping its last handle,
+	/// `dynamic()` included, does the same.
 	pub fn create_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
@@ -515,7 +514,7 @@ impl MoqAnnounceConsumer {
 impl MoqAnnouncedBroadcast {
 	/// Wait until the broadcast is announced. Returns `Closed` if cancelled or the origin is closed.
 	///
-	/// Use `broadcast.closed()` to learn when the broadcast ends.
+	/// Its end arrives as an inactive [`MoqAnnounceUpdate`] on the origin's announcements.
 	pub async fn available(&self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		self.task.run(|mut state| async move { state.available().await }).await
 	}

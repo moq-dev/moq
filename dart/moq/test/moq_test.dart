@@ -119,7 +119,8 @@ void main() {
     client.close();
     serverSession.cancel(code: 0);
     track.finish();
-    broadcast.finish();
+    broadcast.close();
+    broadcast.close(); // a second close is a no-op
     server.close();
   });
 
@@ -234,7 +235,7 @@ void main() {
     expect(await announced.next().timeout(timeout), isA<AnnounceEventLive>());
     announced.cancel();
     announced.dispose();
-    broadcast.finish();
+    broadcast.close();
   });
 
   test('dynamic serves a request under a prefix', () async {

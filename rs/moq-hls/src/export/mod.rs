@@ -2293,11 +2293,11 @@ mod tests {
 
 		// Tear down the publisher mid-group. The track ends abruptly (the cursor drains the
 		// segments it already saw and ends; the still-open live-edge group is NOT finalized,
-		// since a reset can't vouch that its media is complete), while finishing the broadcast
-		// ends it cleanly rather than as a failure. (Clean-end finalization of the
+		// since a reset can't vouch that its media is complete), and the broadcast closes.
+		// (Clean-end finalization of the
 		// live edge is covered by segments::tests::next_after_walks_finalized_segments.)
 		drop((catalog, media, registration));
-		broadcast.finish();
+		broadcast.close();
 
 		let end = tokio::time::timeout(Duration::from_secs(5), segments.next())
 			.await

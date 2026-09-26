@@ -1,0 +1,5 @@
+# Kotlin objects are AutoCloseable, and `close()` there releases the handle,
+# which ends the broadcast only once no `dynamic()` handle remains. The
+# generated forced end is `end()` so it doesn't collide with it.
+[bindings.kotlin.rename]
+"MoqBroadcastProducer.close" = "end"

@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -6295,9 +6293,9 @@ abstract class MoqBroadcastProducerInterface {
     required MoqJsonStreamConfig config,
   });
   void announce({required MoqRoute route});
+  void close();
   MoqBroadcastConsumer consume();
   MoqBroadcastDynamic dynamic_();
-  void finish();
   MoqMediaProducer publishAudio({required MoqAudioInit init});
   MoqMediaProducer publishAudioOnTrack({
     required MoqTrackRequest request,
@@ -6436,6 +6434,15 @@ class MoqBroadcastProducer implements MoqBroadcastProducerInterface {
     }, moqExceptionErrorHandler);
   }
 
+  void close() {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqbroadcastproducer_close(
+        uniffiClonePointer(),
+        status,
+      );
+    }, moqExceptionErrorHandler);
+  }
+
   MoqBroadcastConsumer consume() {
     return rustCallWithLifter(
       (status) => uniffi_moq_ffi_fn_method_moqbroadcastproducer_consume(
@@ -6456,15 +6463,6 @@ class MoqBroadcastProducer implements MoqBroadcastProducerInterface {
       FfiConverterMoqBroadcastDynamic.lift,
       moqExceptionErrorHandler,
     );
-  }
-
-  void finish() {
-    return rustCall((status) {
-      uniffi_moq_ffi_fn_method_moqbroadcastproducer_finish(
-        uniffiClonePointer(),
-        status,
-      );
-    }, moqExceptionErrorHandler);
   }
 
   MoqMediaProducer publishAudio({required MoqAudioInit init}) {
@@ -7041,6 +7039,7 @@ class FfiConverterMoqGroupRequest {
 abstract class MoqMediaProducerInterface {
   void cut();
   MoqTrackDemand demand();
+  void discontinuity();
   void finish();
   void flush({required int timestampUs});
   String name();
@@ -7091,6 +7090,15 @@ class MoqMediaProducer implements MoqMediaProducerInterface {
       FfiConverterMoqTrackDemand.lift,
       moqExceptionErrorHandler,
     );
+  }
+
+  void discontinuity() {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqmediaproducer_discontinuity(
+        uniffiClonePointer(),
+        status,
+      );
+    }, moqExceptionErrorHandler);
   }
 
   void finish() {
@@ -10652,6 +10660,14 @@ external void uniffi_moq_ffi_fn_method_moqbroadcastproducer_announce(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqbroadcastproducer_close(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -10664,14 +10680,6 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqbroadcastproducer_consume(
   assetId: _uniffiAssetId,
 )
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqbroadcastproducer_dynamic(
-  Pointer<Void> ptr,
-  Pointer<RustCallStatus> uniffiStatus,
-);
-
-@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
-  assetId: _uniffiAssetId,
-)
-external void uniffi_moq_ffi_fn_method_moqbroadcastproducer_finish(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -11030,6 +11038,14 @@ external void uniffi_moq_ffi_fn_method_moqmediaproducer_cut(
   assetId: _uniffiAssetId,
 )
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqmediaproducer_demand(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqmediaproducer_discontinuity(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -12313,13 +12329,13 @@ uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_json_stream();
 external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_announce();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_close();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_consume();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_dynamic();
-
-@Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_finish();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int
@@ -12418,6 +12434,9 @@ external int uniffi_moq_ffi_checksum_method_moqmediaproducer_cut();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqmediaproducer_demand();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqmediaproducer_discontinuity();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqmediaproducer_finish();
@@ -12825,7 +12844,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqannouncedbroadcast_available() !=
-      42497) {
+      37458) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqannouncedbroadcast_cancel() != 63175) {
@@ -12865,7 +12884,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginproducer_create_broadcast() !=
-      48971) {
+      45756) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginproducer_dynamic() != 56233) {
@@ -12897,13 +12916,13 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_announce() != 13700) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
+  if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_close() != 19191) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_consume() != 27634) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_dynamic() != 55635) {
-    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
-  }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_finish() != 7183) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_audio() !=
@@ -13005,6 +13024,10 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediaproducer_demand() != 44491) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqmediaproducer_discontinuity() !=
+      37570) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediaproducer_finish() != 38480) {

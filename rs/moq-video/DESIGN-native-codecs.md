@@ -283,7 +283,7 @@ A backend "fails to open" (driver missing, no device) the same way an ffmpeg
    hardware).
 4. **NVENC backend** on Linux behind its feature.
 5. **Capture swap to nokhwa; drop `ffmpeg-next`.** Delete the ffmpeg capture +
-   scaler, remove the dep from `Cargo.toml`, update \[CLAUDE.md cross-package
+   scaler, remove the dep from `Cargo.toml`, update \[AGENTS.md cross-package
    notes], `doc/bin/cli.md`, the `capture` feature wiring in `moq-cli`, and the
    packaging recipes. After this ffmpeg is gone and the binary is GPU-accelerated
    on macOS/NVIDIA, software (openh264) elsewhere.

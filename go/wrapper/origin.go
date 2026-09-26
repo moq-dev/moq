@@ -49,9 +49,8 @@ func (o *OriginProducer) Dynamic(prefix string, route Route) (*OriginDynamic, er
 //
 // The broadcast is invisible and unroutable, for this origin's consumers and
 // peers alike, until [BroadcastProducer.Announce]. Announce it after
-// populating tracks. Finish unpublishes immediately, while dropping the
-// producer without finishing also unpublishes but reads to subscribers as a
-// failure rather than a deliberate end.
+// populating tracks. [BroadcastProducer.Close] ends it for good; dropping the
+// last handle does the same.
 func (o *OriginProducer) CreateBroadcast(path string) (*BroadcastProducer, error) {
 	inner, err := o.inner.CreateBroadcast(path)
 	if err != nil {

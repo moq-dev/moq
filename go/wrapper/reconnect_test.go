@@ -166,7 +166,7 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer broadcast.Finish()
+	defer broadcast.Close()
 
 	track, err := broadcast.PublishTrack("data", nil)
 	if err != nil {

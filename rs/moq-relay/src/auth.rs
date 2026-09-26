@@ -278,7 +278,7 @@ impl Lease {
 	/// revoked, or was re-checked into one that no longer covers the token.
 	///
 	/// A changed root or a narrower grant ends it: origin handles cannot yet narrow
-	/// a live scope in place (tracked by `quest/m1/origin-narrowing.md`). A flipped
+	/// a live scope in place (tracked by `quest/m1/auth/narrowing.md`). A flipped
 	/// `peer` ends it too, since the routes it already announced would be
 	/// misreported as entering here or from a peer. A changed tier keeps the
 	/// session and moves its [stats](Self::with_stats) to the new tier.

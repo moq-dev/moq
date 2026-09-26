@@ -18,7 +18,7 @@ capture quests in this questline start only once this is settled.
   Kotlin over `moq-ffi`, what the iroh-live reimplementation says about the
   Rust-native audience, and the copy cost of byte-array frames measured on a
   device.
-- Record the verdict here and in `rs/moq-ffi/CLAUDE.md`, and re-estimate
+- Record the verdict here and in `rs/moq-ffi/AGENTS.md`, and re-estimate
   [Android capture](/quest/m2/mobile-capture-android.md) and
   [iOS capture](/quest/m2/mobile-capture-ios.md) against it; both target
   `moq-video`, so replace them with the required platform-owned implementation

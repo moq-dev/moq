@@ -40,7 +40,7 @@ on the unknown key, and the legacy drafts silently ignore it.
   until it lapses. When a request's grant expires or is revoked, that request
   alone ends with `EXPIRED_AUTH_TOKEN` or `UNAUTHORIZED`. A session grant
   that shrinks cancels the requests it covered, as for any request, through
-  [Origin narrowing](/quest/m1/origin-narrowing.md).
+  [Origin narrowing](/quest/m1/auth/narrowing.md).
 - Relay: each such request attaches its own lease through the
   `Client::attach` path [Relay tokens](/quest/m1/auth/relay-refresh.md)
   builds, once per request, with no sharing across requests carrying the

@@ -102,6 +102,10 @@ class MediaProducer:
         """
         self._inner.flush(timestamp_us)
 
+    def discontinuity(self) -> None:
+        """Mark a timeline break and restart handoff measurement, preserving advertised jitter."""
+        self._inner.discontinuity()
+
     def cut(self) -> None:
         """Draw a group boundary here.
 
@@ -839,6 +843,9 @@ class BroadcastProducer:
 
         return BroadcastConsumer(self._inner.consume())
 
-    def finish(self) -> None:
-        """Finish the broadcast, closing its tracks and unpublishing it."""
-        self._inner.finish()
+    def close(self) -> None:
+        """End the broadcast for good: retract it and serve no new tracks.
+
+        Tracks already subscribed carry on to their own end. Closing again is a no-op.
+        """
+        self._inner.close()

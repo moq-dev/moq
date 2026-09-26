@@ -77,7 +77,7 @@ typealias GroupProducer = uniffi.moq.MoqGroupProducer
 typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 
 // Media (codec-aware) producers and consumers.
-/** The write side of a media track fed pre-framed payloads. */
+/** The write side of a media track; discontinuity() marks a break between pre-framed payloads. */
 typealias MediaProducer = uniffi.moq.MoqMediaProducer
 /** The write side of a media track fed a raw byte stream, with frame boundaries inferred. */
 typealias MediaStreamProducer = uniffi.moq.MoqMediaStreamProducer

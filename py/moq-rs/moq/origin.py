@@ -241,8 +241,7 @@ class OriginProducer:
         and peers alike, until :meth:`BroadcastProducer.announce`. Announce it
         after populating tracks. Create,
         :meth:`dynamic` if tracks are served on demand, populate, then announce.
-        ``finish()`` unpublishes immediately, while dropping the producer without
-        finishing also unpublishes but reads to subscribers as a failure rather
-        than a deliberate end.
+        :meth:`BroadcastProducer.close` ends it for good; dropping the last
+        handle does the same.
         """
         return BroadcastProducer._from_inner(self._inner.create_broadcast(path))

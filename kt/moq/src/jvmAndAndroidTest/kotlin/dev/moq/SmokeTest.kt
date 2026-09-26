@@ -144,6 +144,29 @@ class SmokeTest {
     }
 
     @Test
+    fun `closing a broadcast ends it, and closing again is a no-op`() = runTest {
+        val broadcast = BroadcastProducer()
+        val consumer = broadcast.consume()
+        // AutoCloseable.close() releases the last producer handle, which ends the broadcast.
+        broadcast.close()
+        broadcast.close()
+        assertFailsWith<MoqException> { consumer.subscribeTrack("events", null) }
+    }
+
+    @Test
+    fun `ending a broadcast ends it while a dynamic handle remains`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            broadcast.dynamic().use {
+                val consumer = broadcast.consume()
+                // Releasing the producer alone would leave the dynamic handle holding it open.
+                broadcast.end()
+                broadcast.end()
+                assertFailsWith<MoqException> { consumer.subscribeTrack("events", null) }
+            }
+        }
+    }
+
+    @Test
     fun `broadcast updates shared video properties`() {
         BroadcastProducer().use { broadcast ->
             broadcast.setVideoProperties(VideoProperties(rotation = 315.0))
@@ -313,7 +336,6 @@ class SmokeTest {
             server.createBroadcast("live").use { broadcast ->
                 broadcast.announce(Route())
                 broadcast.unannounce()
-                broadcast.finish()
             }
         }
     }
