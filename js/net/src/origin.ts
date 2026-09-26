@@ -291,6 +291,10 @@ class OriginState {
 	// this is coming" and "nothing here can ever serve you".
 	answerers = new Signal(0);
 
+	// Sessions still replaying the peer's initial announce set into the table. An
+	// announcement stream opened while one replays withholds its live marker until it lands.
+	replaying = new Signal<Set<object>>(new Set());
+
 	closed = new Once<Error | null>();
 
 	/**
@@ -521,6 +525,7 @@ export class Producer implements Table {
 			receive: (prefix, route) => this.#receive(prefix, route),
 			attach: (discovery) => this.#attach(discovery),
 			expect: () => this.#expect(),
+			replaying: () => this.#replaying(),
 			get requests() {
 				return thisProducer.#state.requests;
 			},
@@ -730,6 +735,25 @@ export class Producer implements Table {
 			// Clamped because closing the origin zeroes the count, and the sessions attached at
 			// the time still release afterwards.
 			this.#state.answerers.update((count) => Math.max(0, count - 1));
+		};
+	}
+
+	/**
+	 * Register a session replaying the peer's initial announce set into the table. Returns
+	 * the release; call it once the set has landed, or the session dies. Idempotent.
+	 *
+	 * @internal
+	 */
+	#replaying(): Dispose {
+		const source = {};
+		this.#state.replaying.mutate((sources) => {
+			sources.add(source);
+		});
+		return () => {
+			if (!this.#state.replaying.peek().has(source)) return;
+			this.#state.replaying.mutate((sources) => {
+				sources.delete(source);
+			});
 		};
 	}
 
@@ -1168,7 +1192,9 @@ export class Consumer {
 
 	/**
 	 * The announced routes matching `scope`, as a live stream: every currently advertised
-	 * route arrives first as active, then additions and retractions as they happen.
+	 * route arrives first as `announced`, then the `live` marker, then changes as they
+	 * happen. The marker also waits for every session still replaying its peer's initial
+	 * set when the stream opened, so a caller listing what is live stops there.
 	 * Any pattern is accepted. A local broadcast appears once it announces, exactly as a
 	 * peer sees it. A dynamic or received route announces the prefix it covers when its
 	 * subtree overlaps the scope. The stream ends when the origin closes or the consumer is
@@ -1205,6 +1231,10 @@ export class Consumer {
 		// update.
 		let active = new Map<Path.Valid, Presented>();
 
+		// The sessions replaying into the table when the stream opened; the live marker
+		// follows the diff after the last of them lands. Undefined once it was delivered.
+		let waiting: Set<object> | undefined = new Set(this.#state.replaying.peek());
+
 		try {
 			for (;;) {
 				const local = this.#state.local.peek();
@@ -1239,7 +1269,24 @@ export class Consumer {
 				}
 				active = next;
 
-				await Signal.race(this.#state.local, this.#state.advertisedLocal, this.#state.routes, producer.closed);
+				if (waiting) {
+					const replaying = this.#state.replaying.peek();
+					for (const source of waiting) {
+						if (!replaying.has(source)) waiting.delete(source);
+					}
+					if (waiting.size === 0) {
+						producer.append({ kind: "live" });
+						waiting = undefined;
+					}
+				}
+
+				await Signal.race(
+					this.#state.local,
+					this.#state.advertisedLocal,
+					this.#state.routes,
+					this.#state.replaying,
+					producer.closed,
+				);
 				if (producer.closed.peek() !== undefined) return;
 			}
 		} catch {

@@ -4,7 +4,6 @@
  * @module
  */
 import { type Dispose, race } from "@moq/signals";
-import { isActive } from "../announced.ts";
 import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import type * as Path from "../path.ts";
 import { wireOf } from "../wire.ts";
@@ -51,6 +50,10 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	const announced = conn.announced(undefined, { hidden: true });
 	const inserted = new Map<Path.Valid, Dynamic>();
 
+	// Taken before the session is handed out, so no announcement stream on the origin misses
+	// it: each one opened now withholds its live marker until the peer's initial set lands.
+	const landed = originWire.replaying();
+
 	// End the stream the moment the session closes rather than waiting for the wire to
 	// error it, so the retractions below land promptly.
 	void conn.closed.then(() => announced.close());
@@ -62,7 +65,9 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				const event = await announced.next();
 				if (!event) break;
 
-				if (isActive(event.kind)) {
+				if (event.kind === "live") {
+					landed();
+				} else if (event.kind !== "retracted") {
 					const existing = inserted.get(event.prefix);
 					if (existing) {
 						existing.update(event.route);
@@ -82,6 +87,8 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 			// cleanup below retracts everything this stream fed either way.
 			failure = err;
 		} finally {
+			// A dead stream cannot hold the marker back.
+			landed();
 			for (const handle of inserted.values()) handle.close();
 			inserted.clear();
 			announced.close();

@@ -22,7 +22,3 @@ Mirror moq-net's `announce::Event` one to one:
 
 Public API: breaking in moq-ffi, libmoq's C ABI, and every wrapper, so it
 retargets to `dev` with the Rust break. Wire: none.
-
-## Related
-
-- [JS caught up](/quest/m1/js-announce-caught-up.md) - the same event in `@moq/net`

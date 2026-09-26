@@ -131,11 +131,12 @@ discovery.run((effect) => {
 		for (;;) {
 			const entry = await Promise.race([effect.cancel, announced.next()]);
 			if (!entry) break;
+			if (entry.kind === "live") continue;
 			const path = entry.prefix;
 			const node = Net.Path.stripPrefix(prefix, path);
 			if (!node) continue;
 
-			if (Net.Announce.isActive(entry.kind)) {
+			if (entry.kind !== "retracted") {
 				if (subs.has(node)) continue;
 				const ne = new Signals.Effect();
 				subs.set(node, ne);

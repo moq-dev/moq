@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
-import { Announce, Error as NetError, Path } from "@moq/net";
+import { Error as NetError, Path } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
@@ -202,10 +202,11 @@ export class Broadcast {
 			for (;;) {
 				const entry = await effect.race(announced.next());
 				if (!entry) break;
+				if (entry.kind === "live") continue;
 				this.#announced.mutate((active) => {
 					if (!active) return;
-					if (Announce.isActive(entry.kind)) active.add(entry.prefix);
-					else active.delete(entry.prefix);
+					if (entry.kind === "retracted") active.delete(entry.prefix);
+					else active.add(entry.prefix);
 				});
 			}
 		});

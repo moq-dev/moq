@@ -137,13 +137,14 @@ export default class MoqBoy extends HTMLElement {
 			for (;;) {
 				const entry = await effect.race(announced.next());
 				if (!entry) break;
+				if (entry.kind === "live") continue;
 
 				// A broad route that cannot pin the game id names nothing to open.
 				const capture = entry.captures?.[0];
 				if (!capture?.isLiteral) continue;
 
 				const id = capture.text;
-				if (Moq.Announce.isActive(entry.kind) && !this.#sessions.has(id)) {
+				if (entry.kind !== "retracted" && !this.#sessions.has(id)) {
 					const config: GameConfig = {
 						sessionId: id,
 						connection: this.connection,
