@@ -5,23 +5,29 @@
 A track or broadcast that ends because its source ended reports the source's
 own error to every consumer, locally and across a relay. `Dropped` means only
 that a handle was dropped without an end, which a correct producer never does.
-#4179 fixed one path (a revoked upstream subscription now reads
-`Unauthorized`); the rest still surface `Dropped`.
+The open #4179 fixes revoked upstream subscriptions. The merged #4120 preserves
+session death and resumed-track errors; remaining paths still need verification.
 
 ## Plan
 
-- Known sources, from #4179: a source closing, a route leaving the origin's
-  table, and a withdrawn source broadcast. Find each place a consumer can
-  observe `Dropped` and make the ending side carry its real error (an explicit
-  `abort` or a preserved cause), at the source rather than by remapping at the
-  consumer.
-- moq-transport: a `PUBLISH_DONE` carrying Unauthorized arrives as
-  `Error::Remote(1)`. Map it to the same error lite reports.
-- Regression tests per path, each failing on `Dropped` today, in-process and
-  over a mock session.
+- Origin broadcasts now preserve an aborted source's cause through local and
+  routed fronts, including a concurrent route withdrawal and later track lookup.
+  A closed source's standing route is excluded from that front's failover.
+- Rust maps IETF `PUBLISH_DONE` Unauthorized to `Error::Unauthorized`.
+- After #4179 lands, verify the combined track paths locally and over
+  mock sessions, and map JS `PUBLISH_DONE` Unauthorized to the shared error from
+  #4179. Do not duplicate the resume changes those PRs own.
+
+- Complete the remaining source-close, route-removal, and broadcast-withdrawal
+  track regressions locally and over a mock session. Preserve causes at the
+  source rather than remapping `Dropped` at consumers.
 
 Public API: none expected; error values consumers observe change. Wire: none.
 
+## Required
+
+- [Unauthorized](/quest/m1/auth/unauthorized.md) - #4179 supplies shared Unauthorized errors and revoked-stream handling
+
 ## Related
 
-- [#4179](https://github.com/moq-dev/moq/pull/4179) - fixed the revoked-upstream path
+- [#4179](https://github.com/moq-dev/moq/pull/4179) - owns the revoked-upstream path

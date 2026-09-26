@@ -163,6 +163,7 @@ impl PublishDone<'_> {
 	/// How the publisher ended the subscription: cleanly, or with the error its status names.
 	pub(crate) fn end(&self, version: Version) -> Result<(), crate::Error> {
 		match self.status_code {
+			0x1 => Err(crate::Error::Unauthorized),
 			code if code == PublishDoneStatus::TrackEnded.code(version) => Ok(()),
 			// SUBSCRIPTION_ENDED: the subscription reached the end its filter asked for.
 			// Draft-20 removed it and left 0x3 unassigned.
@@ -731,6 +732,10 @@ mod tests {
 
 		for version in [Version::Draft14, Version::Draft19, Version::Draft20, Version::Draft22] {
 			assert!(done(0x2).end(version).is_ok(), "{version:?}");
+			assert!(
+				matches!(done(0x1).end(version), Err(crate::Error::Unauthorized)),
+				"{version:?}"
+			);
 			assert!(
 				matches!(done(0x0).end(version), Err(crate::Error::Remote(0x0))),
 				"{version:?}"

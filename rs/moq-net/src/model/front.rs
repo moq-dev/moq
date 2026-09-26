@@ -52,7 +52,7 @@ pub(super) enum Event {
 	/// given id by the driver) or was refused.
 	Resolved { route: u64, result: Result<u64, Refusal> },
 	/// A source closed: it will never serve again.
-	SourceClosed { source: u64 },
+	SourceClosed { source: u64, err: Error },
 	/// The spliced broadcast handed out a new logical track to serve.
 	TrackAssigned { track: Arc<str> },
 	/// A source answered a track query: its copy's metadata, or a refusal.
@@ -274,7 +274,7 @@ impl Front {
 		match event {
 			Event::Selected { best, serving_closing } => self.selected(best, serving_closing, &mut actions),
 			Event::Resolved { route, result } => self.resolved(route, result, &mut actions),
-			Event::SourceClosed { source } => self.source_closed(source, &mut actions),
+			Event::SourceClosed { source, err } => self.source_closed(source, err, &mut actions),
 			// A fresh logical track, even under a name served before: an earlier
 			// verdict belonged to that request, and a later one asks afresh. The
 			// broadcast's track metadata is what persists.
@@ -428,13 +428,16 @@ impl Front {
 		};
 	}
 
-	fn source_closed(&mut self, source: u64, actions: &mut Vec<Action>) {
-		let Some((serving, _)) = self.serving else {
+	fn source_closed(&mut self, source: u64, err: Error, actions: &mut Vec<Action>) {
+		let Some((serving, route)) = self.serving else {
 			return;
 		};
 		if serving != source {
 			return;
 		}
+		// A standing route can still advertise a source that ended. This front
+		// must not ask it for new content; another route may resume the old source.
+		self.refused.insert(route);
 		self.serving = None;
 		self.serving_closing = false;
 		actions.push(Action::Detach { source });
@@ -444,11 +447,11 @@ impl Front {
 				track.state = TrackState::Idle;
 			}
 		}
-		self.last_err = Some(Error::Dropped);
+		self.last_err = Some(err.clone());
 		match self.identity {
 			// A local publisher ending ends its broadcast; a newcomer at the
 			// path gets a fresh one. An anonymous source can never be resumed.
-			Identity::Local | Identity::Anonymous { .. } | Identity::Undetermined => self.end(Error::Dropped, actions),
+			Identity::Local | Identity::Anonymous { .. } | Identity::Undetermined => self.end(err, actions),
 			Identity::Publisher(_) => actions.push(Action::Reselect),
 		}
 	}
@@ -810,9 +813,13 @@ mod tests {
 	fn dead_source_reselects_through_the_same_publisher() {
 		let mut front = serving(remote(1, 10), 100);
 		assert_actions(
-			front.step(Event::SourceClosed { source: 100 }),
+			front.step(Event::SourceClosed {
+				source: 100,
+				err: Error::Dropped,
+			}),
 			&[Action::Detach { source: 100 }, Action::Reselect],
 		);
+		assert!(front.refused_routes().contains(&1));
 		assert_actions(
 			front.step(Event::Selected {
 				best: Some(remote(3, 10)),
@@ -875,7 +882,10 @@ mod tests {
 	#[test]
 	fn dead_source_with_no_replacement_ends() {
 		let mut front = serving(remote(1, 10), 100);
-		front.step(Event::SourceClosed { source: 100 });
+		front.step(Event::SourceClosed {
+			source: 100,
+			err: Error::Dropped,
+		});
 		assert_actions(
 			front.step(Event::Selected {
 				best: None,
@@ -895,7 +905,10 @@ mod tests {
 		let mut front = serving(candidate, 100);
 		assert_eq!(front.pin(), Pin::Route(1));
 		assert_actions(
-			front.step(Event::SourceClosed { source: 100 }),
+			front.step(Event::SourceClosed {
+				source: 100,
+				err: Error::Dropped,
+			}),
 			&[Action::Detach { source: 100 }, Action::End { err: Error::Dropped }],
 		);
 	}
@@ -997,7 +1010,10 @@ mod tests {
 		);
 		assert!(front.tracks[&name("audio")].refused.is_empty());
 		// The replacement is asked afresh.
-		front.step(Event::SourceClosed { source: 100 });
+		front.step(Event::SourceClosed {
+			source: 100,
+			err: Error::Dropped,
+		});
 		front.step(Event::Selected {
 			best: Some(remote(2, 10)),
 			serving_closing: false,
@@ -1186,7 +1202,10 @@ mod tests {
 	fn local_incumbent_ending_ends_the_front() {
 		let mut front = serving(local(1), 100);
 		assert_actions(
-			front.step(Event::SourceClosed { source: 100 }),
+			front.step(Event::SourceClosed {
+				source: 100,
+				err: Error::Dropped,
+			}),
 			&[Action::Detach { source: 100 }, Action::End { err: Error::Dropped }],
 		);
 	}
@@ -1230,7 +1249,10 @@ mod tests {
 					standing: true,
 				}),
 			},
-			Event::SourceClosed { source: 100 },
+			Event::SourceClosed {
+				source: 100,
+				err: Error::Dropped,
+			},
 			Event::TrackAssigned { track: name("v") },
 			Event::Used { track: name("v") },
 			Event::Unused {

@@ -818,7 +818,7 @@ impl Consumer {
 	fn track_inner(&self, name: &str) -> Result<track::Consumer, Error> {
 		// A closed broadcast (every producer and handler gone) serves nothing.
 		if self.is_closed() {
-			return Err(Error::Dropped);
+			return Err(self.error());
 		}
 
 		let mut state = self.state.lock();
@@ -927,6 +927,11 @@ impl Consumer {
 	/// tell those apart).
 	pub async fn closed(&self) -> Error {
 		self.alive.closed().await;
+		self.error()
+	}
+
+	/// The recorded source error, or `Dropped` when no abort was recorded.
+	pub(crate) fn error(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 

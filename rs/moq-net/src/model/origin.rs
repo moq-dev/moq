@@ -2025,7 +2025,7 @@ async fn run_front(task: FrontTask) {
 	enum Step {
 		Assigned(Arc<str>, super::resume::Producer),
 		Resolved(u64, Result<broadcast::Consumer, Error>),
-		SourceClosed(u64),
+		SourceClosed(u64, Error),
 		Info(Arc<str>, u64, Result<track::Info, Error>),
 		Ended(Arc<str>, u64, Result<(), Error>),
 		Demand(Arc<str>),
@@ -2050,6 +2050,17 @@ async fn run_front(task: FrontTask) {
 		let table = shared.read();
 		if table.closed {
 			return Event::Closed;
+		}
+		// A table withdrawal can race the close wakeup. Preserve the source's cause
+		// before selecting a replacement or ending a front with no remaining route.
+		if let Some(source) = front.serving()
+			&& let Some(broadcast) = sources.get(&source)
+			&& broadcast.is_closed()
+		{
+			return Event::SourceClosed {
+				source,
+				err: broadcast.error(),
+			};
 		}
 		// Read alongside the decision, under the lock a poke takes first.
 		*seen = watch.seen();
@@ -2286,7 +2297,11 @@ async fn run_front(task: FrontTask) {
 						// subscriptions already in flight): dropping their producers
 						// leaves each reader on the copy it was spliced from, ending
 						// when and as that copy ends.
-						broadcast.finish();
+						if matches!(err, Error::Dropped) {
+							broadcast.finish();
+						} else {
+							let _ = broadcast.clone().abort(err.clone());
+						}
 						broadcast.release_spliced(err.clone());
 						for (_, mut io) in tracks.drain() {
 							// A reader still waiting on its source's answer is in flight
@@ -2336,7 +2351,7 @@ async fn run_front(task: FrontTask) {
 				&& let Some(source) = sources.get(&id)
 				&& source.poll_closed(waiter).is_ready()
 			{
-				return Poll::Ready(Step::SourceClosed(id));
+				return Poll::Ready(Step::SourceClosed(id, source.error()));
 			}
 			for (name, io) in &tracks {
 				if let Some((source, _, query)) = &io.query
@@ -2404,7 +2419,7 @@ async fn run_front(task: FrontTask) {
 					}
 				}
 			}
-			Step::SourceClosed(source) => Event::SourceClosed { source },
+			Step::SourceClosed(source, err) => Event::SourceClosed { source, err },
 			Step::Info(name, source, result) => {
 				let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 				let Some(io) = tracks.get_mut(&name) else { continue };
@@ -6226,6 +6241,36 @@ mod tests {
 			.await
 			.expect("a cleanly finished track ended as an error");
 		assert!(end.is_none(), "a group followed the final one");
+	}
+
+	#[tokio::test]
+	async fn an_aborted_source_preserves_its_broadcast_error() {
+		let producer = origin(1).produce();
+		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
+		let resolved = producer.consume().request_broadcast("room/alice").await.unwrap();
+		broadcast.abort(Error::Unauthorized).unwrap();
+		assert!(matches!(resolved.closed().await, Error::Unauthorized));
+		assert!(matches!(resolved.track("video"), Err(Error::Unauthorized)));
+	}
+
+	#[tokio::test]
+	async fn an_aborted_routed_source_preserves_its_broadcast_error() {
+		for withdraw in [false, true] {
+			let producer = origin(1).produce();
+			let server = producer
+				.dynamic("room", Route::default().with_hops(hops(&[10])))
+				.unwrap();
+			let pending = producer.consume().request_broadcast("room/alice");
+			let source = broadcast::Info::new().produce();
+			queued(&server).await.accept(&source);
+			let resolved = pending.await.unwrap();
+			source.abort(Error::Unauthorized).unwrap();
+			if withdraw {
+				drop(server);
+			}
+			assert!(matches!(resolved.closed().await, Error::Unauthorized));
+			assert!(matches!(resolved.track("video"), Err(Error::Unauthorized)));
+		}
 	}
 
 	/// An origin front drops the source track as soon as its last reader leaves,
