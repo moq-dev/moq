@@ -2,14 +2,14 @@
 
 ## Goal
 
-A consumer adds the moq Conan remote, requires `moq/<version>`, and gets the
+A consumer adds the moq Conan remote, requires `moq-cpp/<version>`, and gets the
 prebuilt package for their `os`, `arch`, and `compiler` without a Rust
 toolchain or the bindgen fork. A fresh consumer project installs it in CI on
 Windows, macOS, and Linux.
 
 ## Plan
 
-- A `moq` recipe on a moq-dev remote (Artifactory or a GitHub-hosted `conan`
+- A `moq-cpp` recipe on a moq-dev remote (Artifactory or a GitHub-hosted `conan`
   index) that packages the prebuilt release tarball per setting and exports
   the CMake target from `package_info`.
 - The recipe reads the release manifest the vcpkg quest introduced, so one

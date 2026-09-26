@@ -195,7 +195,7 @@ generate_bindings() {
     if command -v uniffi-bindgen-cpp >/dev/null 2>&1; then
         echo "  Generating cpp bindings..."
         uniffi-bindgen-cpp --library "$lib_path" \
-            --config "$WORKSPACE_DIR/cpp/ffi/uniffi.toml" \
+            --config "$WORKSPACE_DIR/cpp/moq/uniffi.toml" \
             --out-dir "$OUTPUT_DIR/bindings/cpp"
     else
         echo "  Skipping cpp bindings: uniffi-bindgen-cpp not on PATH"

@@ -25,5 +25,5 @@ editor stability across a play-stop-play cycle.
 
 ## Required
 
-- [Package](/quest/m1/cpp/package.md) - the tarball the module links
+- The first `cpp-v*` release from `release-cpp.yml`, the tarball the module links
 - [Decoded frame ownership](/quest/m1/decoded-frames.md) - the decoded frames the texture needs
