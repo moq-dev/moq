@@ -33,8 +33,8 @@ every version (a client may send one with an empty URI; only a redirect URI is
 forbidden to a moq-transport client). The origin's multi-route front prefers
 the newest of two equal routes and `resume` splices each track at a group
 boundary, capping the old segment so the old session's subscription ends at the
-boundary on its own. The JavaScript handover ships with the
-[drain](/quest/m1/drain/README.md) line, so the JS half requires it.
+boundary on its own. The JavaScript half reuses `Reload`'s GOAWAY migration in
+`js/net`.
 
 Shared decisions:
 
@@ -57,8 +57,4 @@ Shared decisions:
 ## Quests
 
 - [Rust](/quest/m1/transport-upgrade/rust.md) - moq-tokio keeps the QUIC dial after WebSocket wins and migrates through the existing Draining path
-- [JavaScript](/quest/m1/transport-upgrade/js.md) - js/net keeps the WebTransport dial after WebSocket wins and migrates through the drain line's GOAWAY handover
-
-## Related
-
-- [Drain](/quest/m1/drain/README.md) - the peer-initiated half of the same handover
+- [JavaScript](/quest/m1/transport-upgrade/js.md) - js/net keeps the WebTransport dial after WebSocket wins and migrates through its GOAWAY handover

@@ -62,7 +62,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Keyframe trigger](/quest/m1/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
 - [Video keyframe flag](/quest/m1/video-keyframe-flag.md) - encoded video marks its keyframes, so a requested cut never forces an extra one after a cadence keyframe
 - [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms, and client stats broadcasts from publishers and viewers
-- [Drain](/quest/m1/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - a session that came up over WebSocket moves to QUIC once the QUIC dial lands, handing over at a group boundary
 - [Own the QUIC stack](/quest/m1/quic/README.md) - the moq-noq fork carries
   ACK progress, reliable reset, hierarchical scheduling, deadlines, probing,
