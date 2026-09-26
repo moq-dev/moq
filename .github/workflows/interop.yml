@@ -82,8 +82,22 @@ jobs:
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
         shell: bash -leo pipefail {0}
 
-      - name: Interop (full matrix)
-        run: nix develop --command just test interop --all
+      - name: Harness regressions
+        run: nix develop --command just test harness
+        shell: bash -leo pipefail {0}
+
+      - name: Interop (concurrent full matrices)
+        run: |
+          mkdir -p "$MOQ_TEST_RUNS"
+          nix develop --command just test interop --all >"$MOQ_TEST_RUNS/parallel-a.log" 2>&1 &
+          first=$!
+          nix develop --command just test interop --all >"$MOQ_TEST_RUNS/parallel-b.log" 2>&1 &
+          second=$!
+          status=0
+          wait "$first" || status=1
+          wait "$second" || status=1
+          cat "$MOQ_TEST_RUNS/parallel-a.log" "$MOQ_TEST_RUNS/parallel-b.log"
+          exit "$status"
         shell: bash -leo pipefail {0}
         env:
           # The run writes its directory here, so a failed one is uploaded below

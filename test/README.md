@@ -21,7 +21,7 @@ Every run owns three things and touches nothing else.
 holding every log, generated config, and capture. `MOQ_TEST_RUNS` moves the root.
 
 **Reserved ports.** A port is claimed by creating a directory under
-`$TMPDIR/moq-test-ports-<uid>` (`MOQ_TEST_PORTS`), held for the whole run, and
+`/tmp/moq-test-ports-<uid>` (`MOQ_TEST_PORTS`), held for the whole run, and
 released on the way out. That reservation is the point: probing for a free port and then
 releasing it is a race, and two runs that probe at the same moment pick the same
 number. The walk starts at `MOQ_TEST_PORT_BASE` (4500). A reservation whose owner
@@ -30,10 +30,12 @@ Replacement is serialized by `flock` on Linux or `lockf` on macOS, and the
 reservation records the owner's process start so a reused PID is not mistaken
 for the original run.
 
-Both roots carry the user id because `TMPDIR` is usually unset on Linux: a fixed
-name in a world-writable `/tmp` belongs to whoever ran first, and everyone else
-would fail to create anything under it. Two worktrees still share, since they run
-as the same user, which is what makes the reservations mean anything.
+The reservation root ignores `TMPDIR`: Nix shells have private temporary
+directories but share the host's ports. The user id avoids ownership conflicts in
+world-writable `/tmp`. `MOQ_TEST_PORTS` must name the same root for all of a user's runs sharing the
+network. A reservation root must belong to the
+current user and cannot be a symlink; new roots are private. Runs by different
+users still need disjoint ports.
 
 The reservation settles contention between harness runs, not with the rest of the
 machine, so each harness still refuses a port something unrelated is already

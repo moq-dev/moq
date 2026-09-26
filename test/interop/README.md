@@ -180,6 +180,6 @@ clients/
 
 ## CI
 
-`.github/workflows/interop.yml` runs the full matrix nightly (and on demand, and on
+`.github/workflows/interop.yml` runs two full matrices concurrently in separate Nix shells nightly (and on demand, and on
 PRs that touch `test/interop/`). A red cell means a real interop break in the
 current tree.

@@ -22,6 +22,7 @@ import {
 	type PlayerState,
 	POLL_INTERVAL_MS,
 	pageUrl,
+	pause,
 	readPlayerState,
 	SELECTORS,
 	serve,
@@ -88,7 +89,12 @@ const browser = await launch([
 
 let code = 1;
 try {
-	const [page, errors] = await open(browser, pageUrl(server.origin, role, { url, broadcast }), role, role === "subscribe");
+	const [page, errors] = await open(
+		browser,
+		pageUrl(server.origin, role, { url, broadcast }),
+		role,
+		role === "subscribe",
+	);
 	if (role === "subscribe") await waitForWatch(page);
 
 	if (role === "publish") {
@@ -129,10 +135,7 @@ try {
 			});
 		}
 
-		// The chrome auto-hides while playing. Pointer activity reveals the real
-		// control, then the click must flow through the public player API.
-		await page.dispatchEvent(SELECTORS.ui, "pointermove");
-		await page.locator(SELECTORS.ui).locator(SELECTORS.pauseControl).click();
+		await pause(page);
 		await waitForState(page, errors, {
 			deadline: interactionDeadline,
 			description: "paused player UI",
