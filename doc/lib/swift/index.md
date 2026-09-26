@@ -28,8 +28,9 @@ import Moq
 let client = Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
-for try await announcement in try session.consume.announced(prefix: "live/", filter: "*/camera") {
-    // Updates stay origin-relative; captures reports what each wildcard matched.
+for try await event in try session.consume.announced(prefix: "live/", filter: "*/camera") {
+    guard case .announced(let announcement) = event else { continue } // .updated, .retracted, or .live
+    // Prefixes stay origin-relative; captures reports what each wildcard matched.
     print(announcement.captures ?? [])
     let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
     for try await catalog in try await broadcast.subscribeCatalog() {
@@ -67,8 +68,10 @@ returns an unannounced producer, invisible to everyone; `broadcast.announce(rout
 beneath it (`""` for everything). Hold the returned `OriginDynamic` while the
 claim should stay advertised, and reject the requests you will not serve. A
 route is a capability, not an inventory. `announced(prefix:filter:)` combines a
-literal root with an optional relative pattern; `announcement.prefix` stays
-relative to the origin and `captures` reports what the wildcards matched.
+literal root with an optional relative pattern and yields `AnnounceEvent`s:
+`.announced`, `.updated`, or `.retracted` carrying an `Announce`, whose `prefix`
+stays relative to the origin and whose `captures` reports what the wildcards
+matched, or `.live` once every route live at subscribe time has been delivered.
 Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
 `hidden: true`.
 

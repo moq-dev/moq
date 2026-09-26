@@ -34,7 +34,10 @@ let session = try await client.connect(to: "https://relay.example.com")
 // auto-created one. The duplex no-config path (the typical client) shares one
 // origin between both sides.
 let announced = try session.consume.announced(prefix: "demos/", filter: "*/camera")
-for try await announcement in announced {
+for try await event in announced {
+    // `.live` follows the routes live at subscribe time; `.updated` and
+    // `.retracted` report later changes.
+    guard case .announced(let announcement) = event else { continue }
     // Prefix stays origin-relative; captures reports what * matched.
     print("got broadcast \(announcement.prefix)")
     print("captures \(announcement.captures ?? [])")

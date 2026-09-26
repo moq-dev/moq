@@ -3,6 +3,8 @@ package dev.moq
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
@@ -11,6 +13,7 @@ import uniffi.moq.MoqException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -19,6 +22,14 @@ import kotlin.time.Duration.Companion.milliseconds
 
 @Serializable
 private data class Status(val state: String)
+
+/** The next announce event that is not Live, which lands wherever the backlog ends. */
+private suspend fun AnnounceConsumer.nextRoute(): AnnounceEvent {
+    while (true) {
+        val event = checkNotNull(next()) { "announce stream ended" }
+        if (event !is AnnounceEventLive) return event
+    }
+}
 
 private fun opusHead(): ByteArray =
     "OpusHead".encodeToByteArray() + byteArrayOf(
@@ -351,18 +362,16 @@ class SmokeTest {
 
                 broadcast.announce(Route())
                 val announced = consumer.announced(AnnounceConfig())
-                val first = announced.next()!!
-                assertEquals("live", first.prefix())
-                assertTrue(first.active())
+                val first = assertIs<AnnounceEventAnnounced>(announced.nextRoute())
+                assertEquals("live", first.announce.prefix)
 
                 broadcast.unannounce()
-                val retracted = announced.next()!!
-                assertEquals("live", retracted.prefix())
-                assertTrue(!retracted.active())
+                val retracted = assertIs<AnnounceEventRetracted>(announced.nextRoute())
+                assertEquals("live", retracted.announce.prefix)
                 assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
 
                 broadcast.announce(Route())
-                assertTrue(announced.next()!!.active())
+                assertIs<AnnounceEventAnnounced>(announced.nextRoute())
                 consumer.requestBroadcast("live")
             }
         }
@@ -374,9 +383,30 @@ class SmokeTest {
             val announced = origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
             origin.createBroadcast("room/alice/chat").use { broadcast ->
                 broadcast.announce(Route())
-                val update = announced.next()!!
-                assertEquals("room/alice/chat", update.prefix())
-                assertEquals(listOf("alice"), update.captures())
+                val update = assertIs<AnnounceEventAnnounced>(announced.nextRoute())
+                assertEquals("room/alice/chat", update.announce.prefix)
+                assertEquals(listOf("alice"), update.announce.captures)
+            }
+        }
+    }
+
+    @Test
+    fun `announced yields Live once caught up`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            val consumer = origin.consume()
+            val empty = consumer.announced(AnnounceConfig())
+            assertEquals(AnnounceEventLive, empty.next())
+            empty.cancel()
+
+            origin.createBroadcast("cam").use { broadcast ->
+                broadcast.announce(Route())
+                consumer.announcedBroadcast("cam").available()
+
+                val listed = consumer.announcements()
+                    .takeWhile { it !is AnnounceEventLive }
+                    .map { (it as AnnounceEventAnnounced).announce.prefix }
+                    .toList()
+                assertEquals(listOf("cam"), listed)
             }
         }
     }

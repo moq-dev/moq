@@ -143,7 +143,8 @@ and TypeScript `Announce.Update { prefix, captures, route, kind }`, where the ki
 is announced, updated (a reprice in place), or retracted. Captures are present
 when the announced prefix pins every wildcard in the most-specific matching
 scope member. The Rust consumer is a `Stream` and the TypeScript one an async
-iterable. The Rust consumer also yields one `announce::Event::Live` once the
+iterable. The Rust consumer, and every binding over moq-ffi or libmoq, also
+yields one `announce::Event::Live` once the
 routes live at subscribe time have all been delivered, including those a peer
 session was still sending: moq-lite-05+ counts them in `ANNOUNCE_OK`,
 moq-lite-01/02 send them in `ANNOUNCE_INIT`, and older or IETF sessions wait

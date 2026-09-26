@@ -20,7 +20,7 @@ class Client:
     announced here is also discoverable here:
 
         async with Client("https://relay.example.com") as client:
-            async for ann in client.announced():
+            async for event in client.announced():
                 ...
 
     In advanced mode, provide your own origin for full control:

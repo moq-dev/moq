@@ -28,14 +28,14 @@ class Moq internal constructor(
     fun createBroadcast(path: String): BroadcastProducer = session.publish().createBroadcast(path)
 
     /**
-     * Discover routes matching [config] as a [Flow]. Each update stays relative
-     * to the origin. The subscription is acquired on
+     * Discover routes matching [config] as a [Flow] of [AnnounceEvent]. Prefixes stay
+     * relative to the origin. The subscription is acquired on
      * collection and cancelled when collection ends. Use [announced] for the raw handle.
      */
-    fun announcements(config: AnnounceConfig = AnnounceConfig()): Flow<AnnounceUpdate> =
+    fun announcements(config: AnnounceConfig = AnnounceConfig()): Flow<AnnounceEvent> =
         session.consume().announcements(config)
 
-    /** Raw announcement handle for [config]; update prefixes stay relative to the origin. */
+    /** Raw announcement handle for [config]; prefixes stay relative to the origin. */
     fun announced(config: AnnounceConfig = AnnounceConfig()): AnnounceConsumer =
         session.consume().announced(config)
 

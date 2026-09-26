@@ -165,65 +165,34 @@ func (o *OriginConsumer) RequestBroadcast(ctx context.Context, path string) (*Br
 	return &BroadcastConsumer{inner: inner}, nil
 }
 
-// AnnounceUpdate is a route announcement or retraction. A route claims that
-// Prefix and every path beneath it can be served; it carries no broadcast. Resolve a specific
-// path with [OriginConsumer.RequestBroadcast]. By convention a publisher
-// announces each broadcast's exact path.
-type AnnounceUpdate struct {
-	inner *ffi.MoqAnnounceUpdate
-}
-
-// Prefix is the covered prefix, relative to the origin.
-func (a *AnnounceUpdate) Prefix() string {
-	return a.inner.Prefix()
-}
-
-// Captures reports what each filter wildcard matched. Nil means the route only
-// overlaps the scope without pinning every wildcard.
-func (a *AnnounceUpdate) Captures() []string {
-	captures := a.inner.Captures()
-	if captures == nil {
-		return nil
-	}
-	result := make([]string, len(*captures))
-	copy(result, *captures)
-	return result
-}
-
-// Active reports whether the route is active (true) or was retracted (false).
-// A repeated active announcement for the same prefix is a metadata update.
-func (a *AnnounceUpdate) Active() bool {
-	return a.inner.Active()
-}
-
-// Route is the route serving the prefix: its relay hops and costs (warm Cost, undiscounted Cold).
-func (a *AnnounceUpdate) Route() Route {
-	return a.inner.Route()
-}
-
-// AnnounceConsumer is a stream of route announcements and retractions.
+// AnnounceConsumer is a stream of announce events.
 type AnnounceConsumer struct {
 	inner *ffi.MoqAnnounceConsumer
 }
 
-// Next returns the next announcement, or (nil, nil) when the stream ends.
-func (a *AnnounceConsumer) Next(ctx context.Context) (*AnnounceUpdate, error) {
-	res, err := runHandle(ctx, a.inner.Cancel, func(ctx context.Context) (*ffi.MoqAnnounceUpdate, error) {
-		res, err := a.inner.Next(ctx)
-		if err != nil || res == nil {
-			return nil, err
-		}
-		return *res, nil
-	})
+// Next returns the next announce event, or (nil, nil) when the stream ends.
+func (a *AnnounceConsumer) Next(ctx context.Context) (AnnounceEvent, error) {
+	res, err := runCancellable(ctx, a.inner.Cancel, a.inner.Next)
 	if err != nil || res == nil {
 		return nil, err
 	}
-	return &AnnounceUpdate{inner: res}, nil
+	return *res, nil
 }
 
-// All ranges over announcements until the stream ends or the loop breaks.
-func (a *AnnounceConsumer) All(ctx context.Context) iter.Seq2[*AnnounceUpdate, error] {
-	return streamSeq(ctx, a.Next)
+// All ranges over announce events until the stream ends or the loop breaks.
+func (a *AnnounceConsumer) All(ctx context.Context) iter.Seq2[AnnounceEvent, error] {
+	return func(yield func(AnnounceEvent, error) bool) {
+		for {
+			event, err := a.Next(ctx)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if event == nil || !yield(event, nil) {
+				return
+			}
+		}
+	}
 }
 
 // Cancel stops the announcement stream.

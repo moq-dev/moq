@@ -28,9 +28,11 @@ import moq
 
 async def main():
     async with moq.connect("https://cdn.moq.dev/anon") as client:
-        async for announcement in client.announced():
+        async for event in client.announced():
+            if not isinstance(event, moq.AnnounceEventAnnounced):
+                continue  # AnnounceEventUpdated, AnnounceEventRetracted, or AnnounceEventLive
             # A route covers a prefix and carries no broadcast, so resolve the path.
-            broadcast = await client.request_broadcast(announcement.prefix)
+            broadcast = await client.request_broadcast(event.announce.prefix)
             catalog = await broadcast.catalog()
 
             for name, track in catalog.audio.items():
@@ -203,7 +205,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
   - `await .requested_broadcast() → BroadcastRequest`. Call `.accept(broadcast)` to serve it, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
-  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator); `filter` is a pattern relative to the literal prefix, while each update's `.prefix` stays origin-relative and `.captures` reports wildcard matches
+  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventAnnounced`, `AnnounceEventUpdated`, or `AnnounceEventRetracted` carrying an `Announce`, or `AnnounceEventLive` once caught up); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches
   - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable, waits until something serves the path)
   - `.request_broadcast(path) → BroadcastConsumer` (awaitable; announced now or a dynamic fallback, else raises)
 
