@@ -70,6 +70,10 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// assigned id stays local and is never written into a hop chain.
 	session_origin: crate::Hop,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
+	/// Why this session ended, once it has. A track still waiting on TRACK_INFO is
+	/// not in [`Self::subscribes`], so dropping its request reads this instead of
+	/// becoming [`Error::Dropped`].
+	ended: Lock<Option<Error>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
 	/// The peer's advertised SETUP (lite-05+), set when its Setup stream is read.
@@ -107,6 +111,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			self_origin,
 			session_origin: config.peer_hop.unwrap_or(crate::Hop::UNKNOWN),
 			subscribes: Default::default(),
+			ended: Default::default(),
 			next_id: Default::default(),
 			version: config.version,
 			peer_setup: config.peer_setup,
@@ -114,6 +119,20 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			sources: kio::Queue::new(),
 			going_away: config.going_away,
 		}
+	}
+
+	/// Record the error that ended the session. The first one wins: a later cancel
+	/// from dropping the driver must not replace it.
+	fn note_end(&self, err: &Error) {
+		let mut slot = self.ended.lock();
+		if slot.is_none() {
+			*slot = Some(err.clone());
+		}
+	}
+
+	/// The recorded session end, or [`Error::Dropped`] when nothing recorded one.
+	fn end_reason(&self) -> Error {
+		self.ended.lock().clone().unwrap_or(Error::Dropped)
 	}
 
 	/// Reject a new request once the peer has sent a GOAWAY: it told us to stop
@@ -518,6 +537,9 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 
 	/// End every active subscription with the error that ended the session.
 	pub fn abort(&self, err: &Error) {
+		// Before the subscribe map, so a TRACK_INFO request dropped with this driver
+		// rejects with `err` rather than `Dropped`.
+		self.subscriber.note_end(err);
 		self.cleanup.abort(err);
 	}
 
@@ -559,6 +581,14 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 		let _ = self.sources.poll(waiter);
 
 		Poll::Pending
+	}
+}
+
+impl<S: crate::transport::poll::Session> Drop for SubscriberDriver<S> {
+	fn drop(&mut self) {
+		// `abort` already recorded a session error when the driver failed. A driver
+		// dropped without that still has to name an end before its setup machines drop.
+		self.subscriber.note_end(&Error::Cancel);
 	}
 }
 
@@ -1426,6 +1456,51 @@ mod tests {
 		assert!(
 			matches!(received.recv_datagram().now_or_never(), Some(Err(Error::Dropped))),
 			"the track outlived its subscription"
+		);
+	}
+
+	/// A lite-05 subscribe still waiting on TRACK_INFO is not in the subscribe map.
+	/// Dropping that machine must reject the origin request with the session's error.
+	#[tokio::test]
+	async fn session_death_rejects_a_track_waiting_for_info() {
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
+			session: SinkSession::default(),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+		});
+
+		let broadcast = crate::broadcast::Info::new().produce();
+		let mut dynamic = broadcast.dynamic();
+		let consumer = broadcast.consume();
+		let mut waiting = std::pin::pin!(consumer.track("video").unwrap().subscribe(None));
+		assert!(
+			futures::poll!(waiting.as_mut()).is_pending(),
+			"waiting on the publisher"
+		);
+		let request = dynamic.requested_track().now_or_never().unwrap().expect("request");
+
+		let run = TrackServeRun::new(
+			TrackServe {
+				subscriber: subscriber.clone(),
+				path: Path::new("room").to_owned(),
+				name: "video".to_string(),
+			},
+			request,
+		);
+		let death = Error::Session(crate::SessionError::App(7));
+		subscriber.note_end(&death);
+		drop(run);
+
+		let ended = waiting.now_or_never().expect("subscribe must end");
+		assert!(
+			matches!(ended, Err(Error::Session(crate::SessionError::App(7)))),
+			"waiting track did not end with the session error"
 		);
 	}
 
@@ -3143,6 +3218,20 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 				TrackRunState::Done => return Poll::Ready(()),
 			}
 		}
+	}
+}
+
+impl<S: crate::transport::poll::Session> Drop for TrackServeRun<S> {
+	fn drop(&mut self) {
+		// Still waiting on TRACK_INFO: the request never reached the subscribe map,
+		// so the driver's abort cannot see it. Reject with the session's error.
+		let TrackRunState::Info { request, .. } = &mut self.state else {
+			return;
+		};
+		let Some(request) = request.take() else {
+			return;
+		};
+		request.reject(self.serve.subscriber.end_reason());
 	}
 }
 
