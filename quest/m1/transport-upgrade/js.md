@@ -11,8 +11,10 @@ nothing changes.
 
 ## Plan
 
-Lands in `js/net`, reusing the GOAWAY handover (`Reload`'s migration in
-`js/net/src/connection/reload.ts`): dial the replacement while the old session
+Lands in `js/net`, reusing the [drain](/quest/m1/drain/README.md) line's
+GOAWAY handover (`Reload`'s migration in
+`js/net/src/connection/reload.ts`), once its group-boundary handover keeps a
+watched track's groups across the route swap: dial the replacement while the old session
 keeps serving, let both feed the origin (a request holds the outranked route
 until the new one answers), leave the old session to close on its own or at the
 handover cap. See the
@@ -38,6 +40,10 @@ handover cap. See the
   group across the upgrade, the WebSocket session closes within the cap, and
   the next connect to the same URL gives WebTransport the head start again;
   with no delay, WebTransport wins and no WebSocket session is ever opened.
-- Public API: none; `transportOf` already
+- Public API: none beyond what the drain line adds; `transportOf` already
   reports the live transport. Update `doc/lib/js` where the fallback race is
   described.
+
+## Required
+
+- [JS group-boundary handover](/quest/m1/drain/js-group-handover.md) - a watched track keeps every group across a route swap, which the upgrade is one of

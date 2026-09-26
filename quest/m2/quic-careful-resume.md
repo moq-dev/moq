@@ -34,3 +34,4 @@ only when the jump never makes the first second worse than slow start.
 
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - one of the
   reconnects this speeds up
+- [Drain](/quest/m1/drain/README.md) - GOAWAY redials are the other
