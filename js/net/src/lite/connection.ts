@@ -4,15 +4,7 @@ import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import {
-	closeError,
-	error,
-	fromClose,
-	ProtocolViolation,
-	StreamCode,
-	StreamError,
-	sessionCause,
-} from "../error.ts";
+import { closeError, error, fromClose, ProtocolViolation, StreamCode, StreamError, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
