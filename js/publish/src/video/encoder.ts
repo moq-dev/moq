@@ -13,7 +13,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { RenditionJitter } from "../jitter";
+import { type Baseline, Estimator } from "../jitter";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";
@@ -153,7 +153,7 @@ export class Encoder {
 	#lastCaptured?: Time.Micro;
 	#lastAccepted?: Time.Micro;
 	#lastCaptureWall?: number;
-	#jitter = new RenditionJitter();
+	#estimator = new Estimator();
 
 	constructor(name: string, props?: EncoderProps) {
 		this.name = name;
@@ -195,7 +195,7 @@ export class Encoder {
 				return;
 			}
 
-			this.#encode(track, effect);
+			this.#encode(track, broadcast.baseline, effect);
 		});
 
 		// Reserve against the connection for as long as this track is live. Wait
@@ -226,7 +226,7 @@ export class Encoder {
 	}
 
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
-	#encode(track: Moq.Track.Producer, effect: Effect): void {
+	#encode(track: Moq.Track.Producer, baseline: Baseline, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		if (!capture) {
 			this.#observe({ demand: true, idle: true });
@@ -263,10 +263,9 @@ export class Encoder {
 					}));
 
 					producer.encode(frame, frame.timestamp as Time.Micro, key);
-					const jitter = this.#jitter.observe(frame.timestamp);
-					if (jitter !== undefined) {
+					if (this.#estimator.flush(frame.timestamp, baseline)) {
 						const catalog = this.#out.catalog.peek();
-						if (catalog) this.#out.catalog.set({ ...catalog, jitter: Catalog.u53(jitter) });
+						if (catalog) this.#out.catalog.set({ ...catalog, ...this.#estimator.estimate });
 					}
 					this.#lastAccepted = frame.timestamp as Time.Micro;
 					this.#observe({ demand: true, idle: false, frame: true });
@@ -395,7 +394,7 @@ export class Encoder {
 			codedHeight: Catalog.u53(config.height),
 			optimizeForLatency: true,
 			container: { kind: "legacy" } as const,
-			jitter: this.#jitter.current ? Catalog.u53(this.#jitter.current) : undefined,
+			...this.#estimator.estimate,
 			stalled: this.#stalled.flag(),
 		};
 

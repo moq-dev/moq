@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Signal } from "@moq/signals";
+import { Baseline } from "../jitter";
 import { Encoder } from "./encoder";
 
 class FakeVideoEncoder {
@@ -63,7 +64,7 @@ test("encoding tracks encoder config in its child effect", async () => {
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => track.close(),
 	};
-	const broadcast = { video: () => rendition };
+	const broadcast = { video: () => rendition, baseline: new Baseline() };
 	const capture = {
 		in: { source: new Signal(undefined) },
 		out: {
@@ -110,7 +111,7 @@ test("a demand gap cuts the group and leaves the broadcast-owned track open for 
 	};
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition } as never,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
 		capture: capture as never,
 	});
 
@@ -167,7 +168,7 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition } as never,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
 		capture: capture as never,
 		bandwidth,
 	});
@@ -248,7 +249,7 @@ test("every published config was probed for its own codec and dimensions", async
 
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition } as never,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
 		capture: capture as never,
 		bandwidth,
 	});
@@ -509,7 +510,7 @@ test.each(["encoder lag", "quiet startup"])("marks a rendition stalled for %s", 
 	};
 	const encoder = new Encoder("video/hd", {
 		enabled: true,
-		broadcast: { video: () => rendition } as never,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
 		capture: capture as never,
 	});
 
