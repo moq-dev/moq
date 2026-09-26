@@ -114,6 +114,8 @@ export const GrantSchema = z
 		subscribe: z.optional(PatternListSchema),
 		/** The path the patterns are relative to, replacing the dialed one. Absent means the dialed path. */
 		root: z.optional(z.string()),
+		/** Subtrees read from elsewhere: each path, relative to the root, resolves at the absolute path it maps to. Read-only. */
+		mounts: z.optional(z.record(z.string(), z.string())),
 		/** When the session closes, as whole unix seconds. */
 		expires: z.optional(z.int()),
 		/** How long until the relay asks again, in whole seconds. Zero would be a tight loop. */
