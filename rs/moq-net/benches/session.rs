@@ -10,6 +10,8 @@
 //! as a slope. Unwatched broadcasts stay announced and silent: their cost is the
 //! route table they occupy, not a publisher writing into its own cache.
 //!
+//! `SESSION_ALLOCS=1` prints allocations per viewer-group instead of timing.
+//!
 //! `session_join_*` times a new viewer connecting, resolving a broadcast, and
 //! receiving its latest group, swept over what the relays already announce.
 //!
@@ -21,11 +23,13 @@
 #[path = "../tests/support/mod.rs"]
 mod support;
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{Hop, Timestamp, Version, broadcast, cache, origin, track};
+use moq_net::{Hop, Timestamp, Version, broadcast, cache, group, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// The lite draft production negotiates, the next one (opt-in), and the newest
@@ -59,6 +63,8 @@ struct Shape {
 	watch: usize,
 	/// Payload bytes per frame.
 	frame: usize,
+	/// Write one frame per round, as a live source does, instead of a whole group.
+	paced: bool,
 }
 
 impl Shape {
@@ -71,22 +77,70 @@ impl Shape {
 		viewers: 16,
 		watch: 1,
 		frame: 64,
+		paced: false,
 	};
 
 	fn total(&self) -> usize {
 		self.publishers * self.broadcasts
 	}
 
+	/// Frames each group gets per round.
+	fn frames(&self) -> usize {
+		if self.paced { 1 } else { FRAMES }
+	}
+
 	/// Payload bytes every viewer reads in one round.
 	fn expected(&self) -> usize {
-		self.viewers * self.watch * FRAMES * self.frame
+		self.viewers * self.watch * self.frames() * self.frame
 	}
 
 	fn id(&self, version: &str) -> String {
 		format!(
-			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}",
-			self.relays, self.publishers, self.broadcasts, self.viewers, self.watch, self.frame
+			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}",
+			self.relays,
+			self.publishers,
+			self.broadcasts,
+			self.viewers,
+			self.watch,
+			self.frame,
+			if self.paced { "/paced" } else { "" },
 		)
+	}
+}
+
+struct Counter;
+
+static COUNTING: AtomicBool = AtomicBool::new(false);
+static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+#[global_allocator]
+static ALLOCATOR: Counter = Counter;
+
+// Counting only. Every call forwards to the system allocator unchanged.
+unsafe impl GlobalAlloc for Counter {
+	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+		if COUNTING.load(Ordering::Relaxed) {
+			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+		}
+		unsafe { System.alloc(layout) }
+	}
+
+	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+		if COUNTING.load(Ordering::Relaxed) {
+			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+		}
+		unsafe { System.alloc_zeroed(layout) }
+	}
+
+	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+		if COUNTING.load(Ordering::Relaxed) {
+			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+		}
+		unsafe { System.realloc(ptr, layout, new_size) }
+	}
+
+	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+		unsafe { System.dealloc(ptr, layout) }
 	}
 }
 
@@ -229,7 +283,13 @@ struct Room {
 	/// Broadcasts at least one viewer watches; only these write each round.
 	watched: Vec<usize>,
 	payload: Bytes,
-	expected: usize,
+	shape: Shape,
+	/// Frames written so far, so paced rounds know where each group starts and ends.
+	written: usize,
+	/// The group each watched broadcast is writing, when paced.
+	writing: Vec<Option<group::Producer>>,
+	/// The group each viewer's subscriber is reading, when paced, flattened in viewer order.
+	reading: Vec<Option<group::Consumer>>,
 }
 
 impl Room {
@@ -267,14 +327,24 @@ impl Room {
 				.map(|(i, _)| i)
 				.collect(),
 			payload: Bytes::from(vec![0; shape.frame]),
-			expected: shape.expected(),
+			shape,
+			written: 0,
+			writing: Vec::new(),
+			reading: Vec::new(),
 		};
+		room.writing.resize_with(room.watched.len(), || None);
+		room.reading.resize_with(shape.viewers * shape.watch, || None);
 		// Warm every path so the timed rounds skip first-group setup.
-		room.round().await;
+		for _ in 0..FRAMES / shape.frames() {
+			room.round().await;
+		}
 		room
 	}
 
 	async fn round(&mut self) {
+		if self.shape.paced {
+			return self.paced_round().await;
+		}
 		for &broadcast in &self.watched {
 			write_group(&self.cluster.tracks[broadcast], &self.payload);
 		}
@@ -284,7 +354,38 @@ impl Room {
 				bytes += read_group(subscriber).await;
 			}
 		}
-		assert_eq!(bytes, self.expected);
+		assert_eq!(bytes, self.shape.expected());
+	}
+
+	/// One frame into every watched group and one frame out to every viewer, so each
+	/// hop serves a group frame by frame across [`FRAMES`] rounds.
+	async fn paced_round(&mut self) {
+		let last = self.written % FRAMES == FRAMES - 1;
+		self.written += 1;
+
+		for (writing, &broadcast) in self.writing.iter_mut().zip(&self.watched) {
+			let group = writing.get_or_insert_with(|| self.cluster.tracks[broadcast].append_group().unwrap());
+			group.write_frame(Timestamp::ZERO, self.payload.clone()).unwrap();
+			if last {
+				group.finish().unwrap();
+				*writing = None;
+			}
+		}
+
+		let mut bytes = 0;
+		let subscribers = self.viewers.iter_mut().flat_map(|viewer| &mut viewer.subscribers);
+		for (subscriber, reading) in subscribers.zip(&mut self.reading) {
+			if reading.is_none() {
+				*reading = Some(subscriber.recv_group().await.unwrap().expect("track ended"));
+			}
+			let frame = reading.as_mut().unwrap().read_frame().await.unwrap();
+			bytes += frame.expect("group ended early").payload.len();
+			if last {
+				let end = reading.take().unwrap().read_frame().await.unwrap();
+				assert!(end.is_none(), "group did not end after its last frame");
+			}
+		}
+		assert_eq!(bytes, self.shape.expected());
 	}
 
 	async fn measure(&mut self, iters: u64) -> Duration {
@@ -362,7 +463,39 @@ fn join(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) 
 	group.finish();
 }
 
+/// Print allocations per viewer-group instead of timing, to compare across revisions.
+fn allocations() {
+	const ROUNDS: usize = 256;
+
+	let rt = runtime();
+	let fanout = Shape {
+		publishers: 1,
+		viewers: 256,
+		..Shape::BASE
+	};
+	for version in VERSIONS {
+		for shape in [Shape::BASE, fanout] {
+			for paced in [false, true] {
+				let shape = Shape { paced, ..shape };
+				let mut room = rt.block_on(Room::new(version, shape));
+				ALLOCATIONS.store(0, Ordering::Relaxed);
+				COUNTING.store(true, Ordering::Relaxed);
+				rt.block_on(room.measure(ROUNDS as u64));
+				COUNTING.store(false, Ordering::Relaxed);
+
+				let groups = ROUNDS * shape.viewers * shape.watch * shape.frames() / FRAMES;
+				let allocations = ALLOCATIONS.load(Ordering::Relaxed) as f64 / groups as f64;
+				println!("{}: {allocations:.1} allocations per viewer-group", shape.id(version));
+			}
+		}
+	}
+}
+
 fn session(c: &mut Criterion) {
+	if std::env::var_os("SESSION_ALLOCS").is_some() {
+		allocations();
+		return;
+	}
 	let base = Shape::BASE;
 
 	delivery(
@@ -371,6 +504,16 @@ fn session(c: &mut Criterion) {
 		[1, 16, 256].map(|publishers| Shape { publishers, ..base }),
 	);
 	delivery(c, "viewers", [1, 16, 256].map(|viewers| Shape { viewers, ..base }));
+	// Live media: every hop serves each group frame by frame.
+	delivery(
+		c,
+		"paced",
+		[1, 16, 256].map(|viewers| Shape {
+			viewers,
+			paced: true,
+			..base
+		}),
+	);
 	delivery(
 		c,
 		"scale",
