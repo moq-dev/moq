@@ -31,9 +31,10 @@ Open questions, to settle with the maintainer:
 - What the stats and sidecar consumers lose without a path, and whether
   anything besides the origin must stay on the wire.
 - The version it lands in (lite-07 is `moq-lite-07-wip` today) and the
-  bridge to versions that still carry a hop list.
+  bridge to versions that still carry a hop list. lite-07 already compresses
+  each announcement's hop chain against a live base (#4196,
+  `rs/moq-net/src/lite/compress.rs`); dropping the hop list removes that too.
 
 ## Related
 
 - [Wildcard advertisements](/quest/m1/wildcard/README.md) - its Spread quest moves stitching identity to the subscribe reply, which this builds on
-- [Announce compression](/quest/m1/announce-compression.md) - reuses the hop-chain tail this would remove
