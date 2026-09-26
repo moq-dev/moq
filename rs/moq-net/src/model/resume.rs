@@ -2523,18 +2523,15 @@ mod test {
 		let mut producer = Producer::new();
 		producer.switch(&consumer_a, None).unwrap();
 
-		let mut sub = track::Consumer::spliced("video".into(), Arc::new(broadcast::Info::default()), producer.consume())
-			.with_stats(session.egress("demo"))
-			.subscribe(replay())
-			.now_or_never()
-			.unwrap()
-			.unwrap();
+		let mut sub =
+			track::Consumer::spliced("video".into(), Arc::new(broadcast::Info::default()), producer.consume())
+				.with_stats(session.egress("demo"))
+				.subscribe(replay())
+				.now_or_never()
+				.unwrap()
+				.unwrap();
 		let pending = |sub: &mut track::Subscriber| {
-			assert!(
-				kio::wait(|waiter| sub.poll_recv_group(waiter))
-					.now_or_never()
-					.is_none()
-			);
+			assert!(kio::wait(|waiter| sub.poll_recv_group(waiter)).now_or_never().is_none());
 		};
 		// Polling activates the segment's cursor, which names its track to the frontier.
 		pending(&mut sub);

@@ -117,7 +117,11 @@ fn sample(c: &mut Criterion) {
 		let mut report = stats::Report::default();
 		fixture.registry.report(&mut report);
 		let subscribed: u64 = report.traffic.iter().map(|e| e.publisher.subscriptions_started).sum();
-		assert_eq!(subscribed, (broadcasts * subscriptions) as u64, "every subscription is tagged");
+		assert_eq!(
+			subscribed,
+			(broadcasts * subscriptions) as u64,
+			"every subscription is tagged"
+		);
 
 		group.bench_with_input(
 			BenchmarkId::from_parameter(format!("{broadcasts}x{subscriptions}")),

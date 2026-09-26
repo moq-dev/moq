@@ -325,7 +325,7 @@ impl Histogram {
 	}
 
 	/// Fold another readout into this one, bucket by bucket.
-	pub fn add(&mut self, other: &Histogram) {
+	pub(crate) fn add(&mut self, other: &Histogram) {
 		for (bucket, other) in self.buckets.iter_mut().zip(other.buckets) {
 			*bucket += other;
 		}
@@ -1784,9 +1784,7 @@ impl Production {
 	}
 
 	fn load(cell: &AtomicU64) -> Option<Duration> {
-		cell.load(Ordering::Relaxed)
-			.checked_sub(1)
-			.map(Duration::from_nanos)
+		cell.load(Ordering::Relaxed).checked_sub(1).map(Duration::from_nanos)
 	}
 }
 
@@ -1845,7 +1843,12 @@ impl Frontier {
 	pub(crate) fn watch(&self, track: &Arc<cache::Track>) {
 		let Some(inner) = &self.0 else { return };
 		let mut state = inner.state.lock().expect("stats frontier poisoned");
-		if state.sources.iter().any(|s| std::ptr::eq(s.track.as_ptr(), Arc::as_ptr(track))) {
+		// Only a live source can match: a dead one's address may be reused.
+		if state
+			.sources
+			.iter()
+			.any(|s| s.track.upgrade().is_some_and(|live| Arc::ptr_eq(&live, track)))
+		{
 			return;
 		}
 		let production = track.production();

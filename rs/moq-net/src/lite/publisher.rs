@@ -3046,7 +3046,12 @@ mod serve_group_test {
 		let row = || {
 			let mut report = crate::stats::Report::default();
 			registry.report(&mut report);
-			report.traffic.iter().find(|e| e.path.as_str() == "demo").unwrap().publisher
+			report
+				.traffic
+				.iter()
+				.find(|e| e.path.as_str() == "demo")
+				.unwrap()
+				.publisher
 		};
 		let subscription = || Subscription {
 			session: SinkSession::new(Log::default()),
@@ -3057,7 +3062,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
-		opens: Default::default(),
+			opens: Default::default(),
 		};
 		let ms = |ms| Timestamp::from_millis(ms).unwrap();
 
@@ -3135,7 +3140,10 @@ mod serve_group_test {
 		group.finish().unwrap();
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
-		subscription.serve_group(0, 0, handle, consumer, Default::default()).await.unwrap();
+		subscription
+			.serve_group(0, 0, handle, consumer, Default::default())
+			.await
+			.unwrap();
 
 		assert_eq!(log.resets(), Vec::<u32>::new(), "clean completion must not reset");
 

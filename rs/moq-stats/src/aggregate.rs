@@ -669,12 +669,18 @@ mod tests {
 		};
 		node_a.frame.insert(
 			"acme/room".to_string(),
-			entry(r#"{"50ms":10,"1s":3}"#, r#""dropped_duration":1.5,"dropped_bytes":7,"dropped_groups":1"#),
+			entry(
+				r#"{"50ms":10,"1s":3}"#,
+				r#""dropped_duration":1.5,"dropped_bytes":7,"dropped_groups":1"#,
+			),
 		);
 		node_a.traffic.update(&node_a.frame).expect("publish");
 		node_b.frame.insert(
 			"acme/room".to_string(),
-			entry(r#"{"50ms":5,"inf":2}"#, r#""dropped_duration":2,"dropped_bytes":3,"dropped_groups":2"#),
+			entry(
+				r#"{"50ms":5,"inf":2}"#,
+				r#""dropped_duration":2,"dropped_bytes":3,"dropped_groups":2"#,
+			),
 		);
 		node_b.traffic.update(&node_b.frame).expect("publish");
 

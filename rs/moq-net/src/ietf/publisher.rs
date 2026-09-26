@@ -2088,9 +2088,9 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 							self.timescale,
 							self.version,
 							slice,
-							self.track.delivery(),
 						)
-						.counted(self.opened.clone()),
+						.counted(self.opened.clone())
+						.delivered(self.track.delivery()),
 					);
 				}
 				Poll::Ready(Ok(None)) => {
@@ -2169,7 +2169,6 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		timescale: Option<Timescale>,
 		version: Version,
 		slice: GroupSlice,
-		delivery: crate::stats::Delivery,
 	) -> Self {
 		group.skip_to(slice.skip);
 		group.end_at(slice.until.map_or(Bound::Unbounded, Bound::Excluded));
@@ -2183,7 +2182,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			timescale,
 			version,
 			object_delta,
-			delivery,
+			delivery: Default::default(),
 			state: GroupState::Open,
 		}
 	}
@@ -2191,6 +2190,12 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 	/// Count this group's stream into `opened` once it opens.
 	fn counted(mut self, opened: Arc<AtomicU64>) -> Self {
 		self.opened = opened;
+		self
+	}
+
+	/// Report what this stream writes to its subscription's acknowledged frontier.
+	fn delivered(mut self, delivery: crate::stats::Delivery) -> Self {
+		self.delivery = delivery;
 		self
 	}
 
@@ -2469,7 +2474,6 @@ mod group_priority_test {
 			Some(Timescale::default()),
 			Version::Draft14,
 			GroupSlice::default(),
-			Default::default(),
 		);
 		kio::wait(|waiter| serve.poll_serve(waiter)).await.unwrap();
 
@@ -2566,8 +2570,8 @@ mod group_priority_test {
 				Some(Timescale::default()),
 				Version::Draft14,
 				GroupSlice::default(),
-				sub.delivery(),
 			)
+			.delivered(sub.delivery())
 		};
 		let ms = |ms| crate::Timestamp::from_millis(ms).unwrap();
 
@@ -2582,7 +2586,11 @@ mod group_priority_test {
 		group.write_frame(ms(1000), b"hi".as_slice()).unwrap();
 		group.write_frame(ms(1250), b"yo".as_slice()).unwrap();
 		let mut abandoned = serve(group.consume());
-		assert!(kio::wait(|waiter| abandoned.poll_serve(waiter)).now_or_never().is_none());
+		assert!(
+			kio::wait(|waiter| abandoned.poll_serve(waiter))
+				.now_or_never()
+				.is_none()
+		);
 		drop(abandoned);
 
 		let mut report = crate::stats::Report::default();
@@ -2623,7 +2631,6 @@ mod group_priority_test {
 			Some(Timescale::default()),
 			Version::Draft19,
 			GroupSlice::default(),
-			Default::default(),
 		);
 		let mut serving = std::pin::pin!(kio::wait(|waiter| serve.poll_serve(waiter)));
 		assert!(
@@ -2672,7 +2679,6 @@ mod group_priority_test {
 			Some(Timescale::default()),
 			Version::Draft19,
 			GroupSlice::default(),
-			Default::default(),
 		);
 		let mut serving = std::pin::pin!(kio::wait(|waiter| serve.poll_serve(waiter)));
 		// Let it run until it blocks on the rest of the frame.
@@ -3625,7 +3631,6 @@ mod serve_tests {
 				Some(Timescale::default()),
 				Version::Draft20,
 				slice,
-				Default::default(),
 			);
 			kio::wait(|waiter| serve.poll_serve(waiter)).await.unwrap();
 
