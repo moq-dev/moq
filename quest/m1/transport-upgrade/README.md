@@ -58,6 +58,7 @@ Shared decisions:
 
 ## Quests
 
+- [Rust edge cases](/quest/m1/transport-upgrade/polish.md) - no false GOAWAY warning on upgrade, and a failed WebSocket handshake falls back to the pending QUIC dial
 - [JavaScript](/quest/m1/transport-upgrade/js.md) - js/net keeps the WebTransport dial after WebSocket wins and migrates through the client-goaway handover
 
 ## Related
