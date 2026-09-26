@@ -926,7 +926,10 @@ async fn serve_fetch(
 		};
 		let group = match async { crate::fetch_group(&broadcast.track(&track)?, sequence).await }.await {
 			Ok(group) => group,
-			Err(moq_net::Error::NotFound) => return Err(StatusCode::NOT_FOUND),
+			// A miss upstream arrives as the stream reset that refused the FETCH.
+			Err(moq_net::Error::NotFound | moq_net::Error::Stream(moq_net::StreamError::NotFound)) => {
+				return Err(StatusCode::NOT_FOUND);
+			}
 			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
 		};
 
