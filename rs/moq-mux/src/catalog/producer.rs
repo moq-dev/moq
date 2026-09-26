@@ -951,6 +951,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 		track.max_grp_sap_starting_type = sap_type;
 		track.max_obj_sap_starting_type = sap_type;
 		track.jitter = config.jitter;
+		track.delay = config.delay;
 		tracks.push(track);
 	}
 
@@ -981,6 +982,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 		track.max_grp_sap_starting_type = Some(1);
 		track.max_obj_sap_starting_type = Some(1);
 		track.jitter = config.jitter;
+		track.delay = config.delay;
 		tracks.push(track);
 	}
 
@@ -1618,6 +1620,7 @@ mod test {
 		video_config.framerate = Some(30.0);
 		video_config.container = Container::Legacy;
 		video_config.jitter = Some(std::time::Duration::from_millis(100));
+		video_config.delay = Some(std::time::Duration::from_millis(200));
 
 		let mut video_renditions = BTreeMap::new();
 		video_renditions.insert("video0".to_string(), video_config);
@@ -1625,6 +1628,7 @@ mod test {
 		let mut audio_config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		audio_config.container = Container::Legacy;
 		audio_config.jitter = Some(std::time::Duration::from_millis(40));
+		audio_config.delay = Some(std::time::Duration::from_millis(80));
 
 		let mut audio_renditions = BTreeMap::new();
 		audio_renditions.insert("audio0".to_string(), audio_config);
@@ -1641,12 +1645,14 @@ mod test {
 		assert_eq!(video.max_grp_sap_starting_type, Some(2));
 		assert_eq!(video.max_obj_sap_starting_type, Some(2));
 		assert_eq!(video.jitter, Some(std::time::Duration::from_millis(100)));
+		assert_eq!(video.delay, Some(std::time::Duration::from_millis(200)));
 
 		let audio = &msf.tracks[1];
 		assert_eq!(audio.role, Some(moq_msf::Role::Audio));
 		assert_eq!(audio.max_grp_sap_starting_type, Some(1));
 		assert_eq!(audio.max_obj_sap_starting_type, Some(1));
 		assert_eq!(audio.jitter, Some(std::time::Duration::from_millis(40)));
+		assert_eq!(audio.delay, Some(std::time::Duration::from_millis(80)));
 	}
 
 	#[test]

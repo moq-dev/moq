@@ -62,6 +62,7 @@ function toVideoConfig(track: Msf.Track): Catalog.VideoConfig | undefined {
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
 		stalled: track.stalled,
 		jitter: track.jitter != null ? u53(track.jitter) : undefined,
+		delay: track.delay != null ? u53(track.delay) : undefined,
 	};
 }
 
@@ -85,6 +86,7 @@ function toAudioConfig(track: Msf.Track): Catalog.AudioConfig | undefined {
 		numberOfChannels: u53(channels),
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
 		jitter: track.jitter != null ? u53(track.jitter) : undefined,
+		delay: track.delay != null ? u53(track.delay) : undefined,
 	};
 }
 

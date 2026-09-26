@@ -1,6 +1,33 @@
 import { expect, test } from "bun:test";
+import { u53 } from "@moq/hang/catalog";
 import type * as Msf from "@moq/msf";
 import { toHang } from "./msf";
+
+test("copies delay onto the hang rendition", () => {
+	const catalog: Msf.Catalog = {
+		tracks: [
+			{
+				name: "video",
+				packaging: "loc",
+				role: "video",
+				codec: "vp09.00.10.08",
+				delay: 200,
+				jitter: 40,
+			},
+			{
+				name: "audio",
+				packaging: "loc",
+				role: "audio",
+				codec: "opus",
+				delay: 80,
+			},
+		],
+	};
+
+	expect(toHang(catalog).video?.renditions.video?.delay).toBe(u53(200));
+	expect(toHang(catalog).video?.renditions.video?.jitter).toBe(u53(40));
+	expect(toHang(catalog).audio?.renditions.audio?.delay).toBe(u53(80));
+});
 
 test("preserves stalled video renditions", () => {
 	const catalog: Msf.Catalog = {

@@ -94,6 +94,9 @@ export class Decoder {
 	#active = new Signal<DecoderTrack | undefined>(undefined);
 	// The track preparing to replace the active one, if a switch is in flight.
 	#pending = new Signal<string | undefined>(undefined);
+	// Catalog of the broadcast `#pending` subscribed to. Not `source.out.catalog`, which already
+	// follows the next source while the previous frames are still on screen.
+	#pendingCatalog: Getter<Catalog.Root | undefined> | undefined;
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
 
 	#signals = new Effect();
@@ -127,14 +130,19 @@ export class Decoder {
 	}
 
 	// Read from the full catalog entry, which the decoder config omits, so a rising entry resizes Sync.
+	// Each in-flight rendition stays tied to the catalog it subscribed to: during a source switch the
+	// shared catalog already describes the next broadcast, and the same track name there is a
+	// different rendition.
 	#runJitter(effect: Effect): void {
-		const renditions = effect.get(this.source.out.catalog)?.renditions;
-		const jitter = (track: string | undefined) => {
-			const config = track === undefined ? undefined : renditions?.[track];
+		const floor = (track: string | undefined, catalog: Getter<Catalog.Root | undefined> | undefined) => {
+			if (track === undefined || catalog === undefined) return undefined;
+			const config = effect.get(catalog)?.video?.renditions?.[track];
 			return config && renditionJitter(config);
 		};
-		const active = jitter(effect.get(this.#active)?.track);
-		const pending = jitter(effect.get(this.#pending));
+		const activeTrack = effect.get(this.#active);
+		const active = floor(activeTrack?.track, activeTrack?.catalog);
+		const pendingName = effect.get(this.#pending);
+		const pending = floor(pendingName, pendingName === undefined ? undefined : this.#pendingCatalog);
 		effect.set(this.#out.jitter, switchJitter({ active, pending }));
 	}
 
@@ -149,6 +157,7 @@ export class Decoder {
 			// Close the active track when disabled (e.g. paused or not visible).
 			// The pending cleanup won't do this because it was already promoted to #active.
 			this.#active.set(undefined);
+			this.#pendingCatalog = undefined;
 			return;
 		}
 		const [_, broadcast, track, identity] = values;
@@ -159,6 +168,7 @@ export class Decoder {
 		if (!active) {
 			// Going offline should clear the last rendered frame.
 			this.#active.set(undefined);
+			this.#pendingCatalog = undefined;
 			this.#clearCurrentFrame();
 			this.#out.buffered.set([]);
 			return;
@@ -171,7 +181,10 @@ export class Decoder {
 			track,
 			config: identity.decoder,
 			stats: this.#out.stats,
+			catalog: broadcast.out.catalog,
 		});
+		// Assign before the signal write: the jitter effect reads this when `#pending` notifies.
+		this.#pendingCatalog = broadcast.out.catalog;
 		effect.set(this.#pending, track);
 
 		effect.cleanup(() => pending?.close());
@@ -274,6 +287,9 @@ interface DecoderTrackProps {
 	broadcast: Moq.Broadcast.Consumer;
 	track: string;
 	config: DecoderConfig;
+	// The broadcast catalog this subscription started from. Updates on that broadcast still apply;
+	// a later source does not.
+	catalog: Getter<Catalog.Root | undefined>;
 
 	stats: Signal<Stats | undefined>;
 }
@@ -283,6 +299,7 @@ class DecoderTrack {
 	broadcast: Moq.Broadcast.Consumer;
 	track: string;
 	config: DecoderConfig;
+	catalog: Getter<Catalog.Root | undefined>;
 	stats: Signal<Stats | undefined>;
 
 	timestamp = new Signal<Time.Milli | undefined>(undefined);
@@ -305,6 +322,7 @@ class DecoderTrack {
 		this.broadcast = props.broadcast;
 		this.track = props.track;
 		this.config = props.config;
+		this.catalog = props.catalog;
 		this.stats = props.stats;
 
 		this.#signals.run(this.#run.bind(this));
