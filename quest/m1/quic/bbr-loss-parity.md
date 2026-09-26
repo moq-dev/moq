@@ -24,8 +24,7 @@ Two gaps remain after the seven correctness fixes, both in
 While in the file, move the remaining draft-05 links and renamed pseudocode
 identifiers (such as `probe_up_acked_per_inc`) to draft-06; comment-only.
 
-This stacks on the seven fixes' noq branches until they merge, and does not
-gate [the BBR release](/quest/m1/quic/bbr-release.md). Add a failing
+This builds on the released BBR fixes (noq 1.3.1). Add a failing
 regression for each behavior on the shared test `Sim`: a loss before the
 first ACK sample, a loss between ACKs that must not alter the next ACK's
 sample, and a spurious-loss undo that passes through Refill. Internal only;
@@ -33,5 +32,4 @@ no `Controller` or wire change.
 
 ## Related
 
-- [Release BBR fixes](/quest/m1/quic/bbr-release.md) - the corrected baseline this builds on
 - [Upstream the fork](/quest/m1/quic/upstream.md) - offers this fix alongside the seven

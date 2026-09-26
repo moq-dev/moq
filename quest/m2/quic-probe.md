@@ -44,10 +44,6 @@ is not proof of full path capacity. Persist regressions in CI and broader
 network scenarios at least nightly. A measured no-go is a valid outcome;
 retain the baseline and record why before exposing an ineffective option.
 
-## Required
-
-- [Release BBR fixes](/quest/m1/quic/bbr-release.md) - exclude known controller defects from the experiment
-
 ## Related
 
 - [Natural media drains](/quest/m2/quic-bbr-app-limited.md) - separate ProbeRTT policy experiment
