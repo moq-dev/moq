@@ -59,7 +59,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [NVENC recovery](/quest/m1/nvenc-recovery.md) - partial initialization and rejected rate changes preserve valid state
 - [Transcode source](/quest/m1/transcode-source.md) - select a rendition the chosen backend can actually decode
 - [Egress rendition pick](/quest/m1/egress-rendition-pick.md) - WHEP and single-track RTMP/FLV serve the best rendition, not the first by name
-- [Keyframe trigger](/quest/m1/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
 - [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms, and client stats broadcasts from publishers and viewers
 - [Drain](/quest/m1/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - a session that came up over WebSocket moves to QUIC once the QUIC dial lands, handing over at a group boundary
