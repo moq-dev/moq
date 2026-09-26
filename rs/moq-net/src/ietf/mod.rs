@@ -6,6 +6,7 @@
 
 #[macro_use]
 mod parameters;
+pub mod active_count;
 mod adapter;
 pub mod cluster;
 mod control;

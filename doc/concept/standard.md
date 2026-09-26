@@ -44,7 +44,9 @@ tracks waiting for a group that never arrives.
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [solicit](/draft/moq-solicit) to make announcements opt-in,
-[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery, and
+[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery,
+[active-count](/draft/moq-active-count) to count the active namespaces a
+`SUBSCRIBE_NAMESPACE` replays, and
 [probe](/draft/moq-probe) for bandwidth estimation.
 [moq-e2ee](/draft/moq-e2ee) is not a transport extension: it encrypts application
 payloads so relays still forward named tracks they cannot read.
