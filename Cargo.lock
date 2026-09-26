@@ -2835,7 +2835,7 @@ dependencies = [
 
 [[package]]
 name = "hang"
-version = "0.21.5"
+version = "0.21.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3884,7 +3884,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4155,7 +4155,7 @@ dependencies = [
 
 [[package]]
 name = "moq-archive"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4172,7 +4172,7 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "block2 0.6.2",
  "bytes",
@@ -4203,7 +4203,7 @@ dependencies = [
 
 [[package]]
 name = "moq-auth"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -4251,7 +4251,7 @@ dependencies = [
 
 [[package]]
 name = "moq-binary"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bytes",
  "kio 0.6.0",
@@ -4263,7 +4263,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4283,7 +4283,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -4321,7 +4321,7 @@ dependencies = [
 
 [[package]]
 name = "moq-e2ee"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
@@ -4340,7 +4340,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -4374,7 +4374,7 @@ dependencies = [
 
 [[package]]
 name = "moq-gst"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4393,7 +4393,7 @@ dependencies = [
 
 [[package]]
 name = "moq-hls"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "axum",
  "bytes",
@@ -4417,7 +4417,7 @@ dependencies = [
 
 [[package]]
 name = "moq-json"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "bytes",
  "criterion",
@@ -4434,7 +4434,7 @@ dependencies = [
 
 [[package]]
 name = "moq-loc"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "bytes",
  "moq-net",
@@ -4452,7 +4452,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.10.5"
+version = "0.10.6"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4489,7 +4489,7 @@ version = "0.20.0"
 
 [[package]]
 name = "moq-net"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "arrayvec",
  "bytes",
@@ -4588,7 +4588,7 @@ dependencies = [
 
 [[package]]
 name = "moq-nvenc"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cudarc",
  "libloading 0.9.0",
@@ -4606,7 +4606,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -4649,7 +4649,7 @@ dependencies = [
 
 [[package]]
 name = "moq-room"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "kio 0.6.0",
  "moq-auth",
@@ -4663,7 +4663,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtc"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -4683,7 +4683,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtmp"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -4731,7 +4731,7 @@ dependencies = [
 
 [[package]]
 name = "moq-srt"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "bytes",
  "futures",
@@ -4747,7 +4747,7 @@ dependencies = [
 
 [[package]]
 name = "moq-stats"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "futures",
  "moq-json",
@@ -4762,7 +4762,7 @@ dependencies = [
 
 [[package]]
 name = "moq-tokio"
-version = "0.19.16"
+version = "0.19.17"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4815,7 +4815,7 @@ dependencies = [
 
 [[package]]
 name = "moq-transcode"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4834,7 +4834,7 @@ dependencies = [
 
 [[package]]
 name = "moq-uring"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4891,7 +4891,7 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "ash",
