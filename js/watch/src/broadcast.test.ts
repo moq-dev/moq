@@ -343,6 +343,108 @@ describe("cross-broadcast renditions", () => {
 	});
 });
 
+// A derived rendition produced only on demand by a service that claims a covering prefix (a
+// wildcard) instead of announcing each path. Nothing announces the rendition until something
+// subscribes to it, so the player must list it from the claim alone. The rendition is a sibling:
+// one beneath its source is already covered by the source's own announcement.
+describe("wildcard renditions", () => {
+	const name = Path.from("live/foo.hang");
+	const derived = Path.from("transcode/foo.hang");
+	const rel = Path.normalizeRelative("../transcode/foo.hang");
+
+	const watch = (owner: Origin.Producer) =>
+		new Broadcast({
+			origin: owner,
+			name,
+			enabled: true,
+			catalogFormat: "manual",
+			catalog: {
+				video: {
+					renditions: {
+						source: video("avc1.64001e"),
+						transcode: video("avc1.640028", rel),
+					},
+				},
+			} as Catalog.Root,
+		});
+
+	it("lists and demands a rendition only a wildcard covers", async () => {
+		const owner = new Origin.Producer();
+		const main = publish(owner, name);
+		const source = watch(owner);
+		const effect = new Effect();
+
+		try {
+			await settle();
+			expect(videoRenditions(source)).toEqual(["source"]);
+
+			const worker = owner.dynamic(Path.from("transcode"));
+			const requests = worker.requested();
+			await settle();
+			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
+
+			// Selecting the rendition is what asks the worker to start, before anything announces it.
+			let active: Moq.Broadcast.Consumer | undefined;
+			effect.run((nested) => {
+				active = source.relativeBroadcast(nested, rel);
+			});
+			const { value: request } = await requests.next();
+			expect(request?.path).toBe(derived);
+			expect(active).toBeUndefined();
+
+			const produced = new Moq.Broadcast.Producer();
+			produced.createTrack("video").writeString("frame");
+			request?.accept(produced);
+			await settle();
+			expect(active).toBeDefined();
+			const track = active?.track("video").subscribe().ordered();
+			expect(await track?.readString()).toBe("frame");
+			track?.close();
+
+			// The worker announcing the path it now serves leaves the rendition where it was.
+			const concrete = owner.createBroadcast(derived);
+			concrete.announce();
+			await settle();
+			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
+			expect(active).toBeDefined();
+
+			concrete.close();
+			worker.close();
+		} finally {
+			effect.close();
+			source.close();
+			main.close();
+			owner.close();
+		}
+	});
+
+	it("hides the rendition once the last covering wildcard is withdrawn", async () => {
+		const owner = new Origin.Producer();
+		const main = publish(owner, name);
+		const source = watch(owner);
+
+		try {
+			// A catch-all (an archive) and a narrower pool both cover the derived path.
+			const archive = owner.dynamic(Path.empty());
+			const worker = owner.dynamic(Path.from("transcode"));
+			await settle();
+			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
+
+			worker.close();
+			await settle();
+			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
+
+			archive.close();
+			await settle();
+			expect(videoRenditions(source)).toEqual(["source"]);
+		} finally {
+			source.close();
+			main.close();
+			owner.close();
+		}
+	});
+});
+
 describe("manual catalog", () => {
 	it("republishes a manual catalog mutated in place", async () => {
 		const owner = new Origin.Producer();

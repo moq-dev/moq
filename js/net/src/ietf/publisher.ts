@@ -224,7 +224,9 @@ export class Publisher {
 		} catch (err: unknown) {
 			const e = error(err);
 			const condition =
-				e instanceof StreamError && e.code === StreamCode.NotFound ? "does_not_exist" : "internal";
+				e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
+					? "does_not_exist"
+					: "internal";
 			refusal = { errorCode: toRequestCode(condition, "subscribe", version), reasonPhrase: reason(e) };
 		}
 

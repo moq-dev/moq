@@ -202,8 +202,6 @@ pub(super) struct Front {
 	serving_closing: bool,
 	/// The route an upstream request is in flight through.
 	upstream: Option<u64>,
-	/// Routes that refused the path while another source was serving.
-	refused: HashSet<u64>,
 	/// Why the last candidate fell through, reported if the front ends unresolved.
 	last_err: Option<Error>,
 	/// Whether the parked requesters were resolved (the first source attached).
@@ -228,7 +226,6 @@ impl Front {
 			serving: None,
 			serving_closing: false,
 			upstream: None,
-			refused: HashSet::new(),
 			last_err: None,
 			resolved: false,
 			tracks: BTreeMap::new(),
@@ -242,16 +239,6 @@ impl Front {
 	/// Which routes qualify for the next selection.
 	pub(super) fn pin(&self) -> Pin {
 		self.identity.pin()
-	}
-
-	/// The routes that refused the path; the driver skips them when selecting.
-	pub(super) fn refused_routes(&self) -> &HashSet<u64> {
-		&self.refused
-	}
-
-	/// Forget refused routes that left the table (a reconnect is a fresh entry).
-	pub(super) fn retain_routes(&mut self, standing: impl Fn(u64) -> bool) {
-		self.refused.retain(|route| standing(*route));
 	}
 
 	/// The attached source, if any.
@@ -369,18 +356,11 @@ impl Front {
 				self.last_err = Some(Error::Unroutable);
 				actions.push(Action::Reselect);
 			}
-			// An authoritative refusal of the path. It ends a front with no
-			// other source; a serving front merely skips the refuser.
+			// An authoritative refusal of the path ends the front, serving or
+			// not: a refusal never moves to another route.
 			Err(Refusal { err, standing: true }) => {
 				self.upstream = None;
-				match self.serving {
-					Some(_) => {
-						self.refused.insert(route);
-						self.last_err = Some(err);
-						actions.push(Action::Reselect);
-					}
-					None => self.end(err, actions),
-				}
+				self.end(err, actions);
 			}
 		}
 	}
@@ -920,7 +900,7 @@ mod tests {
 	}
 
 	#[test]
-	fn standing_refusal_while_serving_skips_the_refuser() {
+	fn standing_refusal_while_serving_ends_the_front() {
 		let mut front = serving(remote(1, 10), 100);
 		front.step(Event::Selected {
 			best: Some(remote(2, 10)),
@@ -934,10 +914,9 @@ mod tests {
 					standing: true,
 				}),
 			}),
-			&[Action::Reselect],
+			&[Action::End { err: Error::NotFound }],
 		);
-		assert!(front.refused_routes().contains(&2));
-		assert_eq!(front.serving, Some((100, 1)));
+		assert!(front.ended());
 	}
 
 	#[test]
@@ -957,7 +936,6 @@ mod tests {
 			}),
 			&[Action::Reselect],
 		);
-		assert!(front.refused_routes().is_empty());
 		assert!(!front.ended());
 	}
 
