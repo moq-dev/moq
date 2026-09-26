@@ -21,7 +21,8 @@ use std::{
 use crate::{Error, Hop, runtime::Instant, track};
 
 /// A route the table selected for the front: the entry id, the endpoint that
-/// originated it, and whether it is a broadcast published on this origin.
+/// originated it (`None` for an empty chain: announced on this origin), and
+/// whether it is a broadcast published on this origin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Candidate {
 	pub route: u64,
@@ -57,7 +58,8 @@ pub(super) enum Event {
 	TrackAssigned { track: Arc<str> },
 	/// A source answered a track query: its copy's metadata, or a refusal.
 	/// `closing` is whether the source has begun closing, in which case a
-	/// refusal is not held against it: it is on its way out.
+	/// refusal is not held against it: it is on its way out. The metadata's
+	/// `origin` is the origin the source's reply named, if its wire carries one.
 	TrackInfo {
 		track: Arc<str>,
 		source: u64,
@@ -131,13 +133,20 @@ pub(super) enum Identity {
 	/// closing the front ends instead, so a newcomer gets a fresh broadcast
 	/// rather than being spliced into one that is over.
 	Local,
-	/// The serving route's first hop was absent or [`Hop::UNKNOWN`], which
-	/// identifies nobody: the front cannot resume through any other route, so
-	/// its source ending, or `route` leaving the table, ends it.
-	Anonymous { route: u64 },
-	/// The first hop of the serving route. Routes sharing it are the same
-	/// origin reached another way and safe to resume through.
+	/// The serving route names no other origin: its chain is empty (a handler on
+	/// this origin, `here`) or its first hop is [`Hop::UNKNOWN`], which
+	/// identifies nobody. The front cannot resume through any other route, so its
+	/// source ending, or `route` leaving the table, ends it.
+	Anonymous { route: u64, here: bool },
+	/// The first hop of the serving route, for sources whose replies name no
+	/// origin (older wires). Routes sharing it are the same origin reached
+	/// another way and safe to resume through.
 	Publisher(Hop),
+	/// The origin the replies named before anything spliced. Any route may lead back to
+	/// it, since an advertiser serving a prefix from a pool advertises one route
+	/// for many origins, so a replacement source is verified by its own replies
+	/// instead of by its route.
+	Origin(Hop),
 }
 
 /// Which routes qualify for a front's (re)selection.
@@ -151,15 +160,19 @@ pub(super) enum Pin {
 	Publisher(Hop),
 	/// Only this route: the front never fails over.
 	Route(u64),
+	/// Any served route, but this one while it stands: a replacement's content
+	/// is only known once it replies, so a live source is not traded for it.
+	Stay(u64),
 }
 
 impl Identity {
-	fn pin(self) -> Pin {
+	/// The origin the front's content comes from, as its own replies name it:
+	/// `None` for this origin, [`Hop::UNKNOWN`] for nobody identifiable.
+	fn origin(self) -> Option<Hop> {
 		match self {
-			Self::Undetermined => Pin::Any,
-			Self::Local => Pin::Local,
-			Self::Anonymous { route } => Pin::Route(route),
-			Self::Publisher(hop) => Pin::Publisher(hop),
+			Self::Local | Self::Anonymous { here: true, .. } => None,
+			Self::Undetermined | Self::Anonymous { here: false, .. } => Some(Hop::UNKNOWN),
+			Self::Publisher(hop) | Self::Origin(hop) => Some(hop),
 		}
 	}
 }
@@ -238,7 +251,22 @@ impl Front {
 
 	/// Which routes qualify for the next selection.
 	pub(super) fn pin(&self) -> Pin {
-		self.identity.pin()
+		match self.identity {
+			Identity::Undetermined => Pin::Any,
+			Identity::Local => Pin::Local,
+			Identity::Anonymous { route, .. } => Pin::Route(route),
+			Identity::Publisher(hop) => Pin::Publisher(hop),
+			Identity::Origin(_) => match self.serving {
+				Some((_, route)) => Pin::Stay(route),
+				None => Pin::Any,
+			},
+		}
+	}
+
+	/// The origin this front's replies name: `None` for this origin, see
+	/// [`Identity::origin`].
+	pub(super) fn origin(&self) -> Option<Hop> {
+		self.identity.origin()
 	}
 
 	/// The attached source, if any.
@@ -404,7 +432,10 @@ impl Front {
 		self.identity = match (candidate.local, candidate.first) {
 			(true, _) => Identity::Local,
 			(false, Some(hop)) if hop != Hop::UNKNOWN => Identity::Publisher(hop),
-			(false, _) => Identity::Anonymous { route: candidate.route },
+			(false, first) => Identity::Anonymous {
+				route: candidate.route,
+				here: first.is_none(),
+			},
 		};
 	}
 
@@ -429,7 +460,7 @@ impl Front {
 			// A local publisher ending ends its broadcast; a newcomer at the
 			// path gets a fresh one. An anonymous source can never be resumed.
 			Identity::Local | Identity::Anonymous { .. } | Identity::Undetermined => self.end(Error::Dropped, actions),
-			Identity::Publisher(_) => actions.push(Action::Reselect),
+			Identity::Publisher(_) | Identity::Origin(_) => actions.push(Action::Reselect),
 		}
 	}
 
@@ -441,10 +472,17 @@ impl Front {
 		result: Result<track::Info, Error>,
 		actions: &mut Vec<Action>,
 	) {
-		let Some(track) = self.tracks.get_mut(&name) else {
+		if self.tracks.get(&name).map(|track| &track.state) != Some(&TrackState::Querying { source }) {
 			return;
-		};
-		if track.state != (TrackState::Querying { source }) {
+		}
+		// A copy from another origin is different content: splicing it would
+		// join two streams mid-track. Let the copy go, so the end cannot splice
+		// it either, and end the front; a re-request gets a fresh one.
+		if let Ok(info) = &result
+			&& !self.vouch(info.origin)
+		{
+			actions.push(Action::Detach { source });
+			self.end(Error::Dropped, actions);
 			return;
 		}
 		let verdict = match result {
@@ -468,6 +506,7 @@ impl Front {
 		};
 		match verdict {
 			Ok(()) => {
+				let track = self.tracks.get_mut(&name).expect("querying a known track");
 				track.state = TrackState::Spliced { source };
 				actions.push(Action::Splice {
 					track: name.clone(),
@@ -475,6 +514,38 @@ impl Front {
 				});
 			}
 			Err(err) => self.refuse(name, source, closing, err, actions),
+		}
+	}
+
+	/// Whether a copy whose reply named `origin` carries the front's content,
+	/// adopting the reply's identity while nothing has been spliced.
+	fn vouch(&mut self, origin: Option<Hop>) -> bool {
+		match (self.identity, origin) {
+			(Identity::Origin(hop), Some(origin)) => hop == origin,
+			// A reply that names no origin cannot vouch for one.
+			(Identity::Origin(_), None) => false,
+			// No reply to check (an older wire, or a local source): the route
+			// identity stands, as before replies named origins.
+			(_, None) => true,
+			// Nothing spliced yet: the reply names what the route could only
+			// label, since an advertiser serving a pool advertises one route for
+			// all of it.
+			(Identity::Publisher(_) | Identity::Anonymous { .. }, Some(origin)) if self.info.is_empty() => {
+				self.identity = match origin {
+					Hop::UNKNOWN => Identity::Anonymous {
+						route: self
+							.serving
+							.map(|(_, route)| route)
+							.expect("a reply comes from a serving source"),
+						here: false,
+					},
+					origin => Identity::Origin(origin),
+				};
+				true
+			}
+			// Already serving under the route's label: only that origin matches.
+			(Identity::Publisher(hop), Some(origin)) => hop == origin,
+			(Identity::Undetermined | Identity::Local | Identity::Anonymous { .. }, Some(_)) => false,
 		}
 	}
 
@@ -652,6 +723,14 @@ mod tests {
 		track::Info::default()
 	}
 
+	/// Track metadata whose reply named `origin`.
+	fn named(origin: u64) -> track::Info {
+		track::Info {
+			origin: Some(Hop::from_wire(origin).unwrap()),
+			..info()
+		}
+	}
+
 	fn name(s: &str) -> Arc<str> {
 		Arc::from(s)
 	}
@@ -664,6 +743,11 @@ mod tests {
 
 	/// A front serving `source` through `candidate`, with `video` spliced and read.
 	fn serving(candidate: Candidate, source: u64) -> Front {
+		serving_with(candidate, source, info())
+	}
+
+	/// [`serving`], with the reply for `video` carrying `info`.
+	fn serving_with(candidate: Candidate, source: u64, info: track::Info) -> Front {
 		let mut front = Front::new(LINGER);
 		assert_actions(
 			front.step(Event::Selected {
@@ -693,7 +777,7 @@ mod tests {
 				track: name("video"),
 				source,
 				closing: false,
-				result: Ok(info()),
+				result: Ok(info),
 			}),
 			&[Action::Splice {
 				track: name("video"),
@@ -708,6 +792,131 @@ mod tests {
 		let front = serving(remote(1, 10), 100);
 		assert_eq!(front.identity, Identity::Publisher(hop(10)));
 		assert_eq!(front.pin(), Pin::Publisher(hop(10)));
+	}
+
+	/// An advertiser serving a pool advertises one route for all of it, so the
+	/// reply, not the route, names what the front serves.
+	#[test]
+	fn the_first_reply_names_the_origin() {
+		let front = serving_with(remote(1, 10), 100, named(20));
+		assert_eq!(front.identity, Identity::Origin(hop(20)));
+		assert_eq!(front.origin(), Some(hop(20)));
+		// Any route may lead back to that origin, but the serving one stays.
+		assert_eq!(front.pin(), Pin::Stay(1));
+
+		// A reply naming nobody pins the front to its route.
+		let front = serving_with(remote(1, 10), 100, named(0));
+		assert_eq!(front.identity, Identity::Anonymous { route: 1, here: false });
+		assert_eq!(front.origin(), Some(Hop::UNKNOWN));
+	}
+
+	/// The serving source dies and the best remaining route has another first
+	/// hop, but its reply names the same origin: the front resumes there.
+	#[test]
+	fn a_replacement_naming_the_same_origin_resumes() {
+		let mut front = serving_with(remote(1, 10), 100, named(20));
+		assert_actions(
+			front.step(Event::SourceClosed { source: 100 }),
+			&[Action::Detach { source: 100 }, Action::Reselect],
+		);
+		assert_eq!(front.pin(), Pin::Any);
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(2, 11)),
+				serving_closing: false,
+			}),
+			&[Action::Request { route: 2 }],
+		);
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Ok(named(20)),
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+		assert_eq!(front.pin(), Pin::Stay(2));
+	}
+
+	/// A replacement whose reply names another origin, or none, is different
+	/// content: its copy is let go unspliced and the front ends.
+	#[test]
+	fn a_replacement_naming_another_origin_ends_the_front() {
+		for reply in [named(21), named(0), info()] {
+			let mut front = serving_with(remote(1, 10), 100, named(20));
+			front.step(Event::SourceClosed { source: 100 });
+			front.step(Event::Selected {
+				best: Some(remote(2, 10)),
+				serving_closing: false,
+			});
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			});
+			assert_actions(
+				front.step(Event::TrackInfo {
+					track: name("video"),
+					source: 200,
+					closing: false,
+					result: Ok(reply),
+				}),
+				&[Action::Detach { source: 200 }, Action::End { err: Error::Dropped }],
+			);
+		}
+	}
+
+	/// Once content spliced under a route's label, a reply can only confirm the
+	/// label, never replace it.
+	#[test]
+	fn a_reply_after_splicing_must_match_the_route_label() {
+		let mut front = serving(remote(1, 10), 100);
+		front.step(Event::SourceClosed { source: 100 });
+		front.step(Event::Selected {
+			best: Some(remote(2, 10)),
+			serving_closing: false,
+		});
+		front.step(Event::Resolved {
+			route: 2,
+			result: Ok(200),
+		});
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Ok(named(20)),
+			}),
+			&[Action::Detach { source: 200 }, Action::End { err: Error::Dropped }],
+		);
+	}
+
+	/// A handler on this origin has an empty chain: its content is named by this
+	/// origin, though the front still never leaves its route.
+	#[test]
+	fn an_empty_chain_originates_here() {
+		let candidate = Candidate {
+			route: 1,
+			first: None,
+			local: false,
+		};
+		let front = serving(candidate, 100);
+		assert_eq!(front.identity, Identity::Anonymous { route: 1, here: true });
+		assert_eq!(front.origin(), None);
+		assert_eq!(front.pin(), Pin::Route(1));
 	}
 
 	#[test]
@@ -1227,6 +1436,18 @@ mod tests {
 				closing: false,
 				result: Err(Error::NotFound),
 			},
+			Event::TrackInfo {
+				track: name("v"),
+				source: 100,
+				closing: false,
+				result: Ok(named(20)),
+			},
+			Event::TrackInfo {
+				track: name("v"),
+				source: 200,
+				closing: false,
+				result: Ok(named(21)),
+			},
 			Event::TrackEnded {
 				track: name("v"),
 				source: 100,
@@ -1275,6 +1496,14 @@ mod tests {
 					.filter(|action| matches!(action, Action::Splice { .. }))
 					.count();
 				assert!(splices <= 1);
+				// A copy whose reply named an origin only splices into a front
+				// serving that origin.
+				if splices > 0
+					&& let Event::TrackInfo { result: Ok(info), .. } = event
+					&& let Some(origin) = info.origin
+				{
+					assert_eq!(next.origin(), Some(origin));
+				}
 				// A Detach names a source the front no longer serves from.
 				for action in &actions {
 					if let Action::Detach { source } = action {

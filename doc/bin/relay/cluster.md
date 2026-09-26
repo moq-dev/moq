@@ -16,7 +16,10 @@ same way so the cluster converges instead of flapping. Both wire protocols
 carry it: natively on moq-lite, and via the [cluster extension](/draft/moq-cluster)
 on moq-transport 17+.
 
-Failover routes must carry copies of the same broadcast. For each track, the
+Failover routes must carry copies of the same broadcast. A relay moves a
+subscription only between sources from the same origin: on moq-lite-07 the one a
+source's TRACK\_INFO names, otherwise the first hop of its route. A change of
+origin ends the subscription and the viewer re-subscribes. For each track, the
 relay requires matching timescale, retention window, publisher priority, and
 group ordering. A source with different properties is refused before its groups
 are spliced in. If no compatible source remains, the track fails with
@@ -50,11 +53,14 @@ prefixes (`grant/**`); an over-wide pattern is refused rather than clamped.
 
 Routing prefers the most specific pattern, then a fully identified hop list
 over one that holds a 0 (an anonymous hop) at any depth, then the lowest cost,
-then the shortest hop list, breaking any remaining tie toward the newest
-announcement so a reconnecting publisher isn't outranked by the session it
-replaced. An assigned identity for an anonymous peer is local selection state
-and is never written into the hop list. Resolving a non-prefix pattern into a
-subscription is not implemented yet.
+then the shortest hop list, then a hash of the requested path and the hop list,
+breaking any remaining tie toward the newest announcement so a reconnecting
+publisher isn't outranked by the session it replaced. Hashing the requested
+path spreads equal-cost advertisers of one prefix, such as a transcode pool,
+across its paths instead of sending every path to one of them, and every relay
+picks the same one for a given path. An assigned identity for an anonymous peer
+is local selection state and is never written into the hop list. Resolving a
+non-prefix pattern into a subscription is not implemented yet.
 
 ```toml
 [cluster]
