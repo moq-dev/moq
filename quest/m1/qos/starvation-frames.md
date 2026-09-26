@@ -3,7 +3,7 @@
 ## Goal
 
 Each subscription's acknowledged frontier moves at every frame boundary
-instead of once per group, so the `lag` histogram and `dropped_*` counters
+instead of once per group, so the `lag` histogram and `dropped` counters
 on `stats::Traffic` read a frontier at most one frame stale, and a second
 histogram reports per-frame delivery delay so viewer jitter is visible per
 broadcast. The wire shape is unchanged apart from the new histogram.
@@ -28,7 +28,7 @@ pending frame and retire everything at or below the acknowledged offset.
 Each acknowledged frame moves the subscription's frontier to that frame's
 timestamp, so the interval samples read a frontier that
 is at most one frame stale instead of one group. When a stream
-is reset before a frame is acknowledged, `dropped_duration` now grows by the
+is reset before a frame is acknowledged, `dropped.duration` now grows by the
 span from the newest acknowledged frame to the newest written one, which is
 the exact media the viewer lost.
 
@@ -46,7 +46,7 @@ a browser transport; document which resolution a node offers.
 Tests: the frontier tracking frame ends under a peer that acknowledges in
 bursts, with interval samples landing one bucket lower than group-granularity
 tracking of the same run; a reset mid-group attributing only the
-unacknowledged span to `dropped_duration`; delivery delay under an injected ACK delay staying inside one bucket of the
+unacknowledged span to `dropped.duration`; delivery delay under an injected ACK delay staying inside one bucket of the
 true RTT; and fallback to group-granularity frontier tracking when the hook is
 unsupported.
 

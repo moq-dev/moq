@@ -3099,10 +3099,10 @@ mod serve_group_test {
 		drop(serve);
 
 		let after = row();
-		assert_eq!(before.dropped_groups, 0);
-		assert_eq!(after.dropped_groups, 2);
-		assert_eq!(after.dropped_bytes, 5 + 4);
-		assert_eq!(after.dropped_duration, Duration::from_millis(100));
+		assert_eq!(before.dropped.groups, 0);
+		assert_eq!(after.dropped.groups, 2);
+		assert_eq!(after.dropped.bytes, 5 + 4);
+		assert_eq!(after.dropped.duration, Duration::from_millis(100));
 		// The newest frame is at 2100ms and the frontier at 500ms: 1.6s behind, for
 		// the 9 bytes produced since the last sample.
 		assert_eq!(before.lag.buckets(), &[2, 0, 0, 0, 0, 0, 0, 0]);

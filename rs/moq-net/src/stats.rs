@@ -68,8 +68,7 @@
 //!   frontier, wall time the frontier has stood still while behind)` weighted
 //!   by the bytes the track produced since the previous call. A paused source
 //!   produces nothing, so it adds no weight.
-//! * `dropped_duration` / `dropped_bytes` / `dropped_groups` (egress only):
-//!   media written toward a peer on a group stream that was reset or abandoned
+//! * `dropped` (egress only, a [`Dropped`]): media written toward a peer on a group stream that was reset or abandoned
 //!   before its FIN was acknowledged. The duration is the span between the
 //!   group's oldest and newest written frame timestamps; nothing inside a group
 //!   is known to be acknowledged, so the whole written span counts.
@@ -235,9 +234,11 @@ impl Counters {
 		let datagrams = self.datagrams.load(Ordering::Relaxed);
 		let stale = self.stale.snapshot();
 		let lag = self.lag.snapshot();
-		let dropped_duration = Duration::from_nanos(self.dropped_duration_nanos.load(Ordering::Relaxed));
-		let dropped_bytes = self.dropped_bytes.load(Ordering::Relaxed);
-		let dropped_groups = self.dropped_groups.load(Ordering::Relaxed);
+		let dropped = Dropped {
+			duration: Duration::from_nanos(self.dropped_duration_nanos.load(Ordering::Relaxed)),
+			bytes: self.dropped_bytes.load(Ordering::Relaxed),
+			groups: self.dropped_groups.load(Ordering::Relaxed),
+		};
 		Traffic {
 			announces_started,
 			announces_ended,
@@ -253,9 +254,7 @@ impl Counters {
 			datagrams,
 			stale,
 			lag,
-			dropped_duration,
-			dropped_bytes,
-			dropped_groups,
+			dropped,
 		}
 	}
 
@@ -431,6 +430,40 @@ impl Content {
 	}
 }
 
+/// Media written toward a peer on group streams that were reset or abandoned
+/// before the peer acknowledged them. The nested shape of [`Traffic::dropped`].
+///
+/// Group granularity counts each group's whole written span, so this over-reports
+/// media that did arrive.
+#[serde_as]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct Dropped {
+	/// Cumulative media time: each group's oldest to newest written frame.
+	/// Fractional milliseconds on the wire.
+	#[serde_as(as = "DurationMilliSecondsWithFrac<f64>")]
+	pub duration: Duration,
+	/// Cumulative bytes written on those streams.
+	pub bytes: u64,
+	/// Cumulative streams abandoned after writing at least one frame.
+	pub groups: u64,
+}
+
+impl Dropped {
+	/// True when nothing has been dropped.
+	pub fn is_empty(&self) -> bool {
+		self.duration.is_zero() && self.bytes == 0 && self.groups == 0
+	}
+
+	/// Fold another readout into this one, counter by counter.
+	pub(crate) fn add(&mut self, other: Self) {
+		self.duration += other.duration;
+		self.bytes += other.bytes;
+		self.groups += other.groups;
+	}
+}
+
 /// Per-(tier, root) session gauge. One of these is shared (via `Arc`) by every
 /// [`Session`] guard for the same auth root on the same tier: `sessions_started`
 /// bumps on connect, `sessions_ended` on disconnect.
@@ -509,13 +542,8 @@ pub struct Traffic {
 	/// [`Registry::report`]; see the module docs.
 	pub lag: Histogram,
 	/// Egress only: media written on group streams that were reset or abandoned
-	/// before the peer acknowledged them. Group granularity counts each group's
-	/// whole written span, so this over-reports media that did arrive.
-	pub dropped_duration: Duration,
-	/// Egress only: bytes written on those abandoned group streams.
-	pub dropped_bytes: u64,
-	/// Egress only: group streams abandoned after writing at least one frame.
-	pub dropped_groups: u64,
+	/// before the peer acknowledged them.
+	pub dropped: Dropped,
 }
 
 /// One spelling of a counter edge on the wire: absent, or a present integer.
@@ -537,7 +565,6 @@ fn counter_edge(canonical: Edge, legacy: Edge) -> u64 {
 	canonical.0.or(legacy.0).unwrap_or(0)
 }
 
-#[serde_as]
 #[derive(Serialize)]
 struct TrafficSer {
 	announces_started: u64,
@@ -561,13 +588,8 @@ struct TrafficSer {
 	stale: Content,
 	#[serde(skip_serializing_if = "Histogram::is_empty")]
 	lag: Histogram,
-	#[serde_as(as = "DurationMilliSecondsWithFrac<f64>")]
-	#[serde(skip_serializing_if = "Duration::is_zero")]
-	dropped_duration: Duration,
-	#[serde(skip_serializing_if = "is_zero")]
-	dropped_bytes: u64,
-	#[serde(skip_serializing_if = "is_zero")]
-	dropped_groups: u64,
+	#[serde(skip_serializing_if = "Dropped::is_empty")]
+	dropped: Dropped,
 }
 
 impl From<Traffic> for TrafficSer {
@@ -593,14 +615,11 @@ impl From<Traffic> for TrafficSer {
 			datagrams: t.datagrams,
 			stale: t.stale,
 			lag: t.lag,
-			dropped_duration: t.dropped_duration,
-			dropped_bytes: t.dropped_bytes,
-			dropped_groups: t.dropped_groups,
+			dropped: t.dropped,
 		}
 	}
 }
 
-#[serde_as]
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct TrafficDe {
@@ -624,10 +643,7 @@ struct TrafficDe {
 	datagrams: u64,
 	stale: Content,
 	lag: Histogram,
-	#[serde_as(as = "DurationMilliSecondsWithFrac<f64>")]
-	dropped_duration: Duration,
-	dropped_bytes: u64,
-	dropped_groups: u64,
+	dropped: Dropped,
 }
 
 impl From<TrafficDe> for Traffic {
@@ -647,9 +663,7 @@ impl From<TrafficDe> for Traffic {
 			datagrams: d.datagrams,
 			stale: d.stale,
 			lag: d.lag,
-			dropped_duration: d.dropped_duration,
-			dropped_bytes: d.dropped_bytes,
-			dropped_groups: d.dropped_groups,
+			dropped: d.dropped,
 		}
 	}
 }
@@ -683,9 +697,7 @@ impl Traffic {
 		self.datagrams += other.datagrams;
 		self.stale.add(other.stale);
 		self.lag.add(&other.lag);
-		self.dropped_duration += other.dropped_duration;
-		self.dropped_bytes += other.dropped_bytes;
-		self.dropped_groups += other.dropped_groups;
+		self.dropped.add(other.dropped);
 	}
 
 	/// True while the broadcast is announced (an announce guard is open).
@@ -2869,7 +2881,7 @@ mod lag_tests {
 			assert_eq!(grew(&last, &now), vec![(0, GROUP_BYTES)]);
 			last = now;
 		}
-		assert_eq!(last.dropped_groups, 0);
+		assert_eq!(last.dropped.groups, 0);
 	}
 
 	#[test]
@@ -2997,9 +3009,9 @@ mod lag_tests {
 		drop(sub.delivery());
 
 		let after = h.tick();
-		assert_eq!(after.dropped_groups, 1);
-		assert_eq!(after.dropped_bytes, 15 * 100);
-		assert_eq!(after.dropped_duration, Duration::from_millis(14 * 33));
+		assert_eq!(after.dropped.groups, 1);
+		assert_eq!(after.dropped.bytes, 15 * 100);
+		assert_eq!(after.dropped.duration, Duration::from_millis(14 * 33));
 		// The drop itself adds nothing to the histogram beyond the tick's own sample.
 		assert_eq!(after.lag.total() - before.lag.total(), GROUP_BYTES);
 	}
@@ -3042,17 +3054,20 @@ mod lag_tests {
 		let mut traffic = Traffic::default();
 		traffic.lag.buckets[0] = 7;
 		traffic.lag.buckets[7] = 9;
-		traffic.dropped_duration = Duration::from_micros(1500);
-		traffic.dropped_bytes = 3;
-		traffic.dropped_groups = 1;
+		traffic.dropped.duration = Duration::from_micros(1500);
+		traffic.dropped.bytes = 3;
+		traffic.dropped.groups = 1;
 		let json = serde_json::to_string(&traffic).unwrap();
 		assert!(json.contains(r#""lag":{"50ms":7,"inf":9}"#), "{json}");
-		assert!(json.contains(r#""dropped_duration":1.5"#), "{json}");
+		assert!(
+			json.contains(r#""dropped":{"duration":1.5,"bytes":3,"groups":1}"#),
+			"{json}"
+		);
 		assert_eq!(serde_json::from_str::<Traffic>(&json).unwrap(), traffic);
 
 		let mut sum = traffic;
 		sum.add(traffic);
 		assert_eq!(sum.lag.buckets(), &[14, 0, 0, 0, 0, 0, 0, 18]);
-		assert_eq!(sum.dropped_duration, Duration::from_millis(3));
+		assert_eq!(sum.dropped.duration, Duration::from_millis(3));
 	}
 }

@@ -2596,9 +2596,9 @@ mod group_priority_test {
 		let mut report = crate::stats::Report::default();
 		registry.report(&mut report);
 		let row = report.traffic[0].publisher;
-		assert_eq!(row.dropped_groups, 1);
-		assert_eq!(row.dropped_bytes, 4);
-		assert_eq!(row.dropped_duration, Duration::from_millis(250));
+		assert_eq!(row.dropped.groups, 1);
+		assert_eq!(row.dropped.bytes, 4);
+		assert_eq!(row.dropped.duration, Duration::from_millis(250));
 		// 1250ms produced against a 500ms frontier: the [500ms, 1s) bucket.
 		assert_eq!(row.lag.buckets(), &[0, 0, 0, 0, 6, 0, 0, 0]);
 	}

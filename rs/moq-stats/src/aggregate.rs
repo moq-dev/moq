@@ -671,7 +671,7 @@ mod tests {
 			"acme/room".to_string(),
 			entry(
 				r#"{"50ms":10,"1s":3}"#,
-				r#""dropped_duration":1.5,"dropped_bytes":7,"dropped_groups":1"#,
+				r#""dropped":{"duration":1.5,"bytes":7,"groups":1}"#,
 			),
 		);
 		node_a.traffic.update(&node_a.frame).expect("publish");
@@ -679,7 +679,7 @@ mod tests {
 			"acme/room".to_string(),
 			entry(
 				r#"{"50ms":5,"inf":2}"#,
-				r#""dropped_duration":2,"dropped_bytes":3,"dropped_groups":2"#,
+				r#""dropped":{"duration":2,"bytes":3,"groups":2}"#,
 			),
 		);
 		node_b.traffic.update(&node_b.frame).expect("publish");
@@ -689,9 +689,9 @@ mod tests {
 		let frame = read_until_bytes(&mut traffic, "acme/room", 2).await;
 		let merged = frame.get("acme/room").expect("entry");
 		assert_eq!(merged.lag.buckets(), &[15, 0, 0, 0, 3, 0, 0, 2]);
-		assert_eq!(merged.dropped_duration, Duration::from_micros(3500));
-		assert_eq!(merged.dropped_bytes, 10);
-		assert_eq!(merged.dropped_groups, 3);
+		assert_eq!(merged.dropped.duration, Duration::from_micros(3500));
+		assert_eq!(merged.dropped.bytes, 10);
+		assert_eq!(merged.dropped.groups, 3);
 	}
 
 	#[tokio::test(start_paused = true)]

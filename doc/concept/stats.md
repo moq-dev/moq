@@ -85,7 +85,7 @@ return later as a new broadcast.
     "bytes": 1048576, "frames": 900, "groups": 30, "datagrams": 0,
     "stale": { "bytes": 0, "frames": 0, "groups": 0, "datagrams": 0 },
     "lag": { "50ms": 1040000, "1s": 8576 },
-    "dropped_duration": 966.5, "dropped_bytes": 8576, "dropped_groups": 1,
+    "dropped": { "duration": 966.5, "bytes": 8576, "groups": 1 },
     "announced": 1, "announced_closed": 0,
     "broadcasts": 3, "broadcasts_closed": 1,
     "subscriptions": 6, "subscriptions_closed": 2
@@ -104,7 +104,7 @@ return later as a new broadcast.
 | `datagrams` | Groups delivered as an unreliable datagram. A subset of `groups`. |
 | `stale` | Payload skipped because it aged past a subscriber's latency budget, with the same four fields. Disjoint from the top-level payload counters. |
 | `lag` | `publisher.json` only: how far behind the viewers' acknowledged media is, as bytes per bucket of media time. See [Lag](#lag). Omitted while empty. |
-| `dropped_duration` / `dropped_bytes` / `dropped_groups` | `publisher.json` only: media written to a viewer on a group stream that was reset or abandoned before the viewer acknowledged it. The duration is fractional milliseconds. Omitted while zero. |
+| `dropped` | `publisher.json` only: media written to a viewer on a group stream that was reset or abandoned before the viewer acknowledged it, as `duration` (fractional milliseconds), `bytes`, and `groups`. Omitted while empty. |
 
 The last six fields in the example are legacy spellings of the `*_started` and `*_ended`
 counters, still written so an older consumer reads a newer relay. A reader
@@ -155,7 +155,7 @@ ends on the old one and starts on the new.
 ### Counters
 
 Every counter is cumulative and monotonic: an unsigned integer, apart from
-`dropped_duration` in fractional milliseconds. A rate is the
+`dropped.duration` in fractional milliseconds. A rate is the
 difference between two frames divided by the time between them, and a live
 count is started minus ended. A frame never shows ended above started.
 
