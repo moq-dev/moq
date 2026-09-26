@@ -365,6 +365,11 @@ func (m *MediaProducer) Flush(timestampUs uint64) error {
 	return m.inner.Flush(timestampUs)
 }
 
+// Discontinuity marks a timeline break and restarts handoff measurement, preserving advertised jitter.
+func (m *MediaProducer) Discontinuity() error {
+	return m.inner.Discontinuity()
+}
+
 // Cut draws a group boundary here.
 //
 // Audio has no boundary of its own (every packet is independently decodable), so this is

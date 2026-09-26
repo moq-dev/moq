@@ -17,6 +17,9 @@ RestartSec=5s
 RestartSteps=5
 RestartMaxDelaySec=1min
 LimitNOFILE=1048576
+# io_uring workers charge their rings to RLIMIT_MEMLOCK (~56 KiB each), and hosts still on the old
+# 64 KiB default fit one worker at most.
+LimitMEMLOCK=infinity
 
 # Sandboxing. DynamicUser allocates a transient UID, StateDirectory creates
 # /var/lib/moq-relay owned by that UID so cert/key/jwk files placed there are

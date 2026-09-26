@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/moq-dev/moq/compare/moq-nvenc-v0.1.1...moq-nvenc-v0.1.2) - 2026-09-26
+
+### Fixed
+
+- *(nvenc)* commit rate changes and cleanup only once the driver accepts ([#4146](https://github.com/moq-dev/moq/pull/4146))
+
 ## [0.1.1](https://github.com/moq-dev/moq/compare/moq-nvenc-v0.1.0...moq-nvenc-v0.1.1) - 2026-09-25
 
 ### Fixed

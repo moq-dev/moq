@@ -185,6 +185,30 @@ test("preserves SAP fields through decode and encode", () => {
 	expect(wireTracks[0].jitter).toBe(15);
 });
 
+test("preserves delay through decode and encode", () => {
+	const catalog = decode(
+		encodeJson({
+			version: "draft-01",
+			tracks: [
+				{
+					name: "video0",
+					packaging: "loc",
+					isLive: true,
+					role: "video",
+					codec: "avc1.640028",
+					delay: 200,
+				},
+			],
+		}),
+	);
+
+	expect(catalog.tracks[0].delay).toBe(200);
+
+	const wire = decodeJson(encode(catalog));
+	const wireTracks = wire.tracks as { delay?: number }[];
+	expect(wireTracks[0].delay).toBe(200);
+});
+
 test.each([
 	["omitted", undefined],
 	["false", false],

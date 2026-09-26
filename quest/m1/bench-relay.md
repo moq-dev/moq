@@ -16,9 +16,11 @@ transport session without widening the public API. If the seam costs more
 than the bench is worth, say so and stop.
 
 Reuse the scenario, the publisher and subscriber sweeps, and the delivery
-accounting from the `moq-net` bench so the two results line up, and the
-difference is the relay layer.
+accounting from `rs/moq-net/benches/session.rs` so the two results line up, and
+the difference is the relay layer.
 
-## Required
-
-- [Sans-IO session bench](/quest/m1/bench-session.md) - supplies the scenario and harness this bench reuses
+Run the dash shape (`session_dash_*`) first. In the model bench, the production
+point (34 peer nodes x 5 projects x 24 tracks) costs about 100 ms of one core
+per 1 s stats tick, for the whole mesh. In production, moving that one session
+off a relay saved 50-90% of a core on that relay alone (2026-09-25). The gap is
+the relay layer or the transport, not the model.

@@ -16,13 +16,25 @@
 slow-timeout = { period = "30s", terminate-after = 2 }
 
 # Retries hide flakes, and this repo treats an intermittent failure as a real
-# race until proven otherwise (see Root Cause First in CLAUDE.md).
+# race until proven otherwise (see Root Cause First in AGENTS.md).
 retries = 0
 
 # `--all-targets` still compiles the criterion benches, which is what catches a
 # bench that no longer builds. Running them in test mode only replays the
 # workload once, and the large origin fan-outs take ~20s each for no signal.
 default-filter = "not kind(bench)"
+
+# Every io_uring ring is charged to the user's `RLIMIT_MEMLOCK` (8 MiB by
+# default), a budget shared with every other process that user runs, and
+# desktop apps built on libuv already spend most of it. A worker's ring is
+# ~84 KiB, so a parallel run of tests holding a few workers each exhausts it
+# and fails with `ENOMEM`. Four at a time stays near 1 MiB.
+[[profile.default.overrides]]
+filter = "package(moq-uring) | binary_id(moq-relay::runtime_uring) | (binary_id(moq-relay::embed) & test(/uring/))"
+test-group = "io-uring"
+
+[test-groups]
+io-uring = { max-threads = 4 }
 
 # CI has noisier neighbours and cold caches, so give a test longer before
 # calling it wedged.

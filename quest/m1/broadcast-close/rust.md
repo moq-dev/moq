@@ -24,7 +24,7 @@ In `rs/moq-net/src/model/broadcast.rs`:
   new publisher at the path is never spliced into it, so a consumer that should
   not care about its source goes through an origin.
 - Mark `finish`, `abort`, and `Consumer::is_finished` `#[deprecated]` and
-  `#[doc(hidden)]` per `rs/CLAUDE.md`. `finish` forwards to `close`. Leave
+  `#[doc(hidden)]` per `rs/AGENTS.md`. `finish` forwards to `close`. Leave
   `abort`'s behavior alone until the `dev` removal.
 - Drop the "dropped without finish()" warning in `Drop for Alive`.
 - `SourceGuard` (the lite and IETF subscribers' source handle) closes on both

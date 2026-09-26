@@ -76,8 +76,8 @@ make MoQ's common case.
 - Sharding registries by HRW over a prefix key once one registry cannot hold
   everything, and what that key is.
 - A mixed-version bridge, if a fleet cannot switch at once.
-- What remains of [Announce compression](/quest/m1/announce-compression.md)'s
-  hop-tail half once only cluster boundaries carry hops.
+- What remains of announce compression's hop-tail half (`Hop Base` and
+  `Hop Keep` in the lite draft) once only cluster boundaries carry hops.
 
 ## Required
 

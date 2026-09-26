@@ -146,6 +146,8 @@ def test_publish_media_cut_and_seek():
     # The same boundary, with the next group explicitly numbered.
     media.write_frame(b"opus frame", 60_000)
     media.seek(42)
+    media.discontinuity()
+    media.write_frame(b"resumed opus frame", 100_000)
 
     media.finish()
     broadcast.finish()
