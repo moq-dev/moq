@@ -807,7 +807,7 @@ test("a handed-out frame cancels its in-flight operation when it expires", async
 	const operation = new Promise<void>((resolve) => {
 		release = resolve;
 	});
-	const guarded = hooks.guardGroup(group, operation);
+	const guarded = hooks.guardGroup(group, () => operation);
 	producer.writeString("new");
 
 	await expect(guarded).rejects.toThrow("max age budget");
@@ -830,7 +830,7 @@ test("a guarded write keeps the position of the frame removed from the buffer", 
 	const operation = new Promise<void>((resolve) => {
 		release = resolve;
 	});
-	const guarded = hooks.guardGroup(group, operation);
+	const guarded = hooks.guardGroup(group, () => operation);
 
 	producer.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(1_000) });
 	// A group beyond the edge, so group 0's reach (1s) is provably behind it: a group is
@@ -859,7 +859,7 @@ test("clean source closure stays provisional while a frame write can expire", as
 	const operation = new Promise<void>((resolve) => {
 		release = resolve;
 	});
-	const guarded = hooks.guardGroup(group, operation);
+	const guarded = hooks.guardGroup(group, () => operation);
 
 	const edge = producer.appendGroup();
 	edge.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(1_000) });

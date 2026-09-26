@@ -1084,13 +1084,10 @@ export class Publisher {
 			// follows it too rather than keeping a stale rank until it finishes.
 			priority.add(stream, group.sequence);
 
-			await hooks.guardGroup(
-				group,
-				(async () => {
-					await stream.u53(0); // stream type
-					await msg.encode(stream, this.version);
-				})(),
-			);
+			await hooks.guardGroup(group, async () => {
+				await stream.u53(0); // stream type
+				await msg.encode(stream, this.version);
+			});
 
 			// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
 			// advertised timescale; older drafts omit it.
@@ -1122,12 +1119,12 @@ export class Publisher {
 					if (timestamps) {
 						// Convert each frame to the track's advertised timescale.
 						const ts = BigInt(Math.round(read.frame.timestamp.as(timescale)));
-						await hooks.guardGroup(group, stream.u62(zigzag(ts - prevTs)));
+						await hooks.guardGroup(group, () => stream.u62(zigzag(ts - prevTs)));
 						prevTs = ts;
 					}
 
-					await hooks.guardGroup(group, stream.u53(read.frame.payload.byteLength));
-					await hooks.guardGroup(group, stream.write(read.frame.payload));
+					await hooks.guardGroup(group, () => stream.u53(read.frame.payload.byteLength));
+					await hooks.guardGroup(group, () => stream.write(read.frame.payload));
 				} finally {
 					read.complete();
 				}

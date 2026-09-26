@@ -258,6 +258,86 @@ test("a blocked group header is reset when the group expires", async () => {
 	}
 });
 
+// A group can go stale while its stream is still opening. Serving it must abandon the group
+// without starting a write: an abandoned write rejects once the stream resets, and nothing
+// would handle it (Node exits on the first unhandled rejection).
+test("a group that goes stale while its stream opens writes nothing", async () => {
+	const unhandled: unknown[] = [];
+	const onUnhandled = (reason: unknown) => unhandled.push(reason);
+	process.on("unhandledRejection", onUnhandled);
+
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	let requested!: () => void;
+	const opening = new Promise<void>((resolve) => {
+		requested = resolve;
+	});
+	let open!: () => void;
+	const opened = new Promise<void>((resolve) => {
+		open = resolve;
+	});
+	let reset!: (reason: unknown) => void;
+	const streamReset = new Promise<unknown>((resolve) => {
+		reset = resolve;
+	});
+	let writes = 0;
+	const stale = new WritableStream<Uint8Array>({
+		write() {
+			writes++;
+			throw new Error("write into an abandoned stream");
+		},
+		abort: (reason) => reset(reason),
+	});
+	spyOn(pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => {
+		requested();
+		await opened;
+		return stale;
+	});
+
+	const { pub, origin } = publisher(pair.server);
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video");
+	const client = await Stream.open(pair.client, { version: VERSION });
+	const server = await Stream.accept(pair.server, VERSION);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	try {
+		void pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+			}),
+			server,
+		);
+
+		const write = (sequence: number, ms: number) => {
+			const group = new GroupProducer(sequence);
+			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(ms) });
+			group.close();
+			track.writeGroup(group);
+		};
+		write(0, 0);
+		await opening;
+
+		// A group beyond the edge, so group 0's reach (where group 1 begins) is provably past
+		// the budget: a successor alone never convicts it.
+		write(1, 10_000);
+		write(2, 20_000);
+		open();
+
+		expect(String(await streamReset)).toContain("max age budget");
+		expect(writes).toBe(0);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(unhandled).toEqual([]);
+	} finally {
+		process.off("unhandledRejection", onUnhandled);
+		client.close();
+		broadcast.close();
+		origin.close();
+	}
+});
+
 test.each(["acknowledged", "rejected"] as const)(
 	"a replacement waits until its predecessor's FIN is %s",
 	async (result) => {
