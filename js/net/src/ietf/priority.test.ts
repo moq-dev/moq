@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { infoDefaults } from "../track.ts";
 import { fromWire, toWire } from "./priority.ts";
 
 test("IETF subscriber priority is lower first", () => {
@@ -16,4 +17,8 @@ test("subscriber priority round trips", () => {
 	for (let priority = 0; priority <= 0xff; priority++) {
 		expect(fromWire(toWire(priority))).toBe(priority);
 	}
+});
+
+test("an unset track priority is the draft's usual publisher priority", () => {
+	expect(toWire(infoDefaults().priority)).toBe(128);
 });
