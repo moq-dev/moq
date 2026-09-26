@@ -1431,3 +1431,28 @@ test("scoped wire views filter and rebase advertisements and blind requests", ()
 	hidden.close();
 	origin.close();
 });
+
+test("a scoped dynamic is announced only to readers its scope can serve", () => {
+	const origin = new Producer();
+	const dynamic = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/chat")])).dynamic(Path.empty());
+	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/chat")]));
+	const video = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/video")]));
+	expect([...chat.broadcasts().peek().keys()]).toEqual([Path.empty()]);
+	expect([...video.broadcasts().peek().keys()]).toEqual([]);
+	expect([...(wireOf(chat.consume()).advertised.peek()?.keys() ?? [])]).toEqual([Path.empty()]);
+	expect([...(wireOf(video.consume()).advertised.peek()?.keys() ?? [])]).toEqual([]);
+	dynamic.close();
+	origin.close();
+});
+
+test("a rooted reader presents the most specific covering route", () => {
+	const origin = new Producer();
+	const narrow = origin.dynamic(Path.from("room/alice"), { cost: 9n });
+	const broad = origin.dynamic(Path.from("room"), { cost: 1n });
+	const rooted = origin.scope(Path.from("room/alice"), new Path.Patterns([Path.Pattern.all()]));
+	expect(rooted.broadcasts().peek().get(Path.empty())?.cost.warm).toBe(9n);
+	expect(wireOf(rooted.consume()).advertised.peek()?.get(Path.empty())?.route.cost.warm).toBe(9n);
+	broad.close();
+	narrow.close();
+	origin.close();
+});

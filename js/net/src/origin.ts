@@ -72,16 +72,65 @@ class Scope {
 		return heads.filter((head) => !heads.some((other) => other !== head && Path.hasPrefix(other, head)));
 	}
 
-	project<T>(values: ReadonlyMap<Path.Valid, T> | undefined, exact: boolean): ReadonlyMap<Path.Valid, T> | undefined {
+	/** The exact paths within this scope, relative to its root. */
+	projectPaths<T>(values: ReadonlyMap<Path.Valid, T> | undefined): ReadonlyMap<Path.Valid, T> | undefined {
 		if (!values || this === Scope.all) return values;
 		const out = new Map<Path.Valid, T>();
 		for (const [path, value] of values) {
-			if (exact ? !this.matches(path) : !this.allowed?.overlaps(Path.Pattern.subtree(path))) continue;
+			if (!this.matches(path)) continue;
 			const relative = Path.stripPrefix(this.root, path);
 			if (relative !== null) out.set(relative, value);
-			else if (!exact && Path.hasPrefix(path, this.root)) out.set(Path.empty(), value);
 		}
 		return out;
+	}
+
+	/** The advertised prefixes that may serve this scope, relative to its root. */
+	projectRoutes(
+		values: ReadonlyMap<Path.Valid, Advertised> | undefined,
+	): ReadonlyMap<Path.Valid, Advertised> | undefined {
+		if (!values || this === Scope.all) return values;
+		const out = new Map<Path.Valid, Advertised>();
+		const covering = new CoveringRoot(this.root);
+		for (const [path, value] of values) {
+			if (this.allowed && ![...this.allowed].some((pattern) => advertOverlaps(value, path, pattern))) continue;
+			const relative = covering.relative(path);
+			if (relative !== undefined) out.set(relative, value);
+		}
+		return out;
+	}
+}
+
+/** Whether the route advertised at `prefix` may serve any path `pattern` admits. */
+function advertOverlaps(advert: Advertised, prefix: Path.Valid, pattern: Path.Pattern): boolean {
+	return advert.claim ? advert.claim.overlaps(pattern) : scopeOverlaps(pattern, prefix);
+}
+
+/** The paths `entry` may serve beneath `prefix`, when its producer is scoped. */
+function claimOf(entry: RouteEntry, prefix: Path.Valid): Path.Patterns | undefined {
+	return entry.scope.allowed?.intersect(new Path.Patterns([Path.Pattern.subtree(prefix)]));
+}
+
+/**
+ * Presents advertised prefixes relative to a root. Every prefix at or above the root
+ * collapses to the empty path, where the most specific one wins, since that is the route
+ * a request beneath the root resolves through.
+ */
+class CoveringRoot {
+	readonly #root: Path.Valid;
+	#covering?: Path.Valid;
+
+	constructor(root: Path.Valid) {
+		this.#root = root;
+	}
+
+	/** The presented path for `path`, or undefined when it is outside the root or a broader cover. */
+	relative(path: Path.Valid): Path.Valid | undefined {
+		const relative = Path.stripPrefix(this.#root, path);
+		if (relative !== null && relative !== Path.empty()) return relative;
+		if (relative === null && !Path.hasPrefix(path, this.#root)) return undefined;
+		if (this.#covering !== undefined && !Path.hasPrefix(this.#covering, path)) return undefined;
+		this.#covering = path;
+		return Path.empty();
 	}
 }
 
@@ -315,7 +364,7 @@ class OriginState {
 		for (const [path, routes] of this.routes.peek() ?? []) {
 			const entry = preferredEntry(routes);
 			if (!entry) continue;
-			const value = { identity: entry.identity, route: entry.route.peek() };
+			const value = { identity: entry.identity, route: entry.route.peek(), claim: claimOf(entry, path) };
 			remote.set(path, value);
 			available.set(path, value.route);
 		}
@@ -416,7 +465,8 @@ class OriginState {
 		const next = new Map<Path.Valid, Advertised>();
 		for (const [prefix, entries] of routes ?? []) {
 			const mine = preferredEntry(entries, received);
-			if (mine) next.set(prefix, { identity: mine.identity, route: mine.route.peek() });
+			if (mine)
+				next.set(prefix, { identity: mine.identity, route: mine.route.peek(), claim: claimOf(mine, prefix) });
 		}
 		// A local broadcast and an originated dynamic at one path compete on cost, as they do for requests.
 		for (const [path, route] of advertised ?? []) {
@@ -588,7 +638,7 @@ export class Producer implements Table {
 			get requests() {
 				if (thisProducer.#scope === Scope.all) return thisProducer.#state.requests;
 				thisProducer.#requests ??= new Derived([thisProducer.#state.requests], (requests) =>
-					thisProducer.#scope.project(requests, true),
+					thisProducer.#scope.projectPaths(requests),
 				);
 				return thisProducer.#requests;
 			},
@@ -1024,11 +1074,11 @@ export class Consumer {
 		registerWire(this, {
 			routes: (path) => this.#routes(scope.path(path)),
 			broadcasts:
-				scope === Scope.all ? state.local : new Derived([state.local], (local) => scope.project(local, true)),
+				scope === Scope.all ? state.local : new Derived([state.local], (local) => scope.projectPaths(local)),
 			advertised:
 				scope === Scope.all
 					? state.originated
-					: new Derived([state.originated], (routes) => scope.project(routes, false)),
+					: new Derived([state.originated], (routes) => scope.projectRoutes(routes)),
 			local: (path) => this.#local(scope.path(path)),
 			demand: (path) => this.#demand(scope.path(path)),
 		});
@@ -1249,6 +1299,7 @@ export class Consumer {
 	/** One snapshot shared by map readers and announcement-stream diffing. */
 	#listed(patterns: Path.Patterns, hidden: boolean): Map<Path.Valid, Presented> {
 		const next = new Map<Path.Valid, Presented>();
+		const covering = new CoveringRoot(this.#scope.root);
 		const { remote, local } = this.#state.snapshot();
 		const scopes = [...patterns]
 			.sort((a, b) => Path.compareSpecificity(b.specificity(), a.specificity()))
@@ -1260,13 +1311,13 @@ export class Consumer {
 			for (const [path, entry] of table) {
 				const scope = scopes.find(
 					({ pattern, head }) =>
-						(exact ? pattern.matches(path) : scopeOverlaps(pattern, path)) &&
+						(exact ? pattern.matches(path) : advertOverlaps(entry, path, pattern)) &&
 						(hidden || !hiddenBelow(head, path)),
 				);
 				if (!scope) continue;
-				const relative = this.#scope.root === Path.empty() ? path : Path.stripPrefix(this.#scope.root, path);
-				if (relative === null && !Path.hasPrefix(path, this.#scope.root)) continue;
-				next.set(relative ?? Path.empty(), {
+				const relative = covering.relative(path);
+				if (relative === undefined) continue;
+				next.set(relative, {
 					identity: entry.identity,
 					route: entry.route,
 					captures: scopeCaptures(scope.pattern, path),
