@@ -18,13 +18,13 @@ Mocking up an API makes a lot of sense but again, it should be flexible enough t
 
 # Context
 
-This includes editing any `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, etc.
+This includes editing any `AGENTS.md`, `CONTRIBUTING.md`, etc.
 
 These files need to be light because they're loaded into every prompt.
 More specific context (ex. per language or project) should exist in optional files/folders.
 
 These base prompts are meant to fix regular agent mistakes.
-If there is a history of bad practices, or sub-optimal behavior, update `CLAUDE.md` to steer away from them.
+If there is a history of bad practices, or sub-optimal behavior, update `AGENTS.md` to steer away from them.
 If you think a slight tweak to the base prompt would help, propose it.
 
 Focus on best practices and conventions.

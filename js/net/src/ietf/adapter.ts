@@ -1,7 +1,7 @@
 import { Once } from "@moq/signals";
 import { Mutex } from "async-mutex";
 import type { Drain } from "../connection/goaway.ts";
-import { ProtocolViolation } from "../error.ts";
+import { error, ProtocolViolation } from "../error.ts";
 import { Reader, Stream, type Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { GoAway } from "./goaway.ts";
@@ -257,6 +257,8 @@ export class ControlStreamAdapter implements Session {
 	 * Must be called after construction. Runs until the control stream closes.
 	 */
 	async run(): Promise<void> {
+		// Why the virtual streams end: undefined only for a GOAWAY, which is not a failure.
+		let cause: Error | undefined;
 		try {
 			// v16: also accept real bidi streams (for SubscribeNamespace)
 			if (this.version === Version.DRAFT_16) {
@@ -265,7 +267,10 @@ export class ControlStreamAdapter implements Session {
 
 			for (;;) {
 				const done = await this.#reader.done();
-				if (done) break;
+				if (done) {
+					cause = new ProtocolViolation("control stream closed");
+					break;
+				}
 
 				const typeId = await this.#reader.u53();
 				const size = await this.#reader.u16();
@@ -311,8 +316,11 @@ export class ControlStreamAdapter implements Session {
 						break;
 				}
 			}
+		} catch (err: unknown) {
+			cause = error(err);
+			throw err;
 		} finally {
-			this.close();
+			this.close(cause);
 		}
 	}
 
@@ -737,15 +745,19 @@ export class ControlStreamAdapter implements Session {
 		}
 	}
 
-	close() {
+	/**
+	 * Ends every virtual stream: cleanly for a deliberate close, or with `err` when the
+	 * control stream died under them, since every request riding it was cut off.
+	 */
+	close(err?: Error) {
 		if (this.#closed) return;
 		this.#closed = true;
 		console.debug("adapter: close() called");
 
-		// Close all virtual streams
 		for (const entry of this.#streams.values()) {
 			try {
-				entry.controller.close();
+				if (err) entry.controller.error(err);
+				else entry.controller.close();
 			} catch {
 				// Already closed
 			}

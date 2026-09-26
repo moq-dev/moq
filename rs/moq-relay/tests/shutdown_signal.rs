@@ -26,7 +26,7 @@
 
 #![cfg(unix)]
 
-use std::{net::TcpListener, time::Duration};
+use std::time::Duration;
 
 use moq_relay::{Config, Relay, auth};
 
@@ -88,10 +88,9 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 	let _interrupt =
 		tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).expect("register SIGINT");
 
-	let (port, config) = relay_config();
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(relay_config()).await.expect("load relay");
+	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let run = tokio::spawn(relay.run());
-	wait_listening(port).await;
 	let client = client(Vec::new());
 
 	let connection = connect(&client, port).await;
@@ -144,11 +143,10 @@ async fn an_embedder_owns_the_signals_inner() {
 	let mut interrupt =
 		tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).expect("register SIGINT");
 
-	let (port, config) = relay_config();
-	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let relay = Relay::load(relay_config()).await.expect("load relay").with_signals(false);
+	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let trigger = relay.shutdown_trigger().clone();
 	let run = tokio::spawn(relay.run());
-	wait_listening(port).await;
 	let client = client(Vec::new());
 
 	let connection = connect(&client, port).await;
@@ -195,11 +193,10 @@ async fn an_embedder_owns_the_signals_inner() {
 async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let (port, config) = relay_config();
-	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let relay = Relay::load(relay_config()).await.expect("load relay").with_signals(false);
+	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let trigger = relay.shutdown_trigger().clone();
 	let run = tokio::spawn(relay.run());
-	wait_listening(port).await;
 	// moq-transport-17 is the first version whose GOAWAY carries its deadline on
 	// the wire, which is what this test reads.
 	let client = client(vec!["moq-transport-17".parse().expect("parse version")]);
@@ -252,14 +249,14 @@ async fn a_drain_ends_once_every_session_leaves_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	// A window the test would time out long before, so only an early exit passes.
-	let (port, mut config) = relay_config();
+	let mut config = relay_config();
 	config.drain_timeout = Duration::from_secs(600);
-	let internal = free_port();
-	config.internal.listen = Some(format!("127.0.0.1:{internal}").parse().expect("parse addr"));
+	config.internal.listen = Some("127.0.0.1:0".parse().expect("parse addr"));
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let port = relay.tcp_addr().expect("TCP listener bound").port();
+	let internal = relay.internal().addr().expect("internal listener bound").port();
 	let trigger = relay.shutdown_trigger().clone();
 	let run = tokio::spawn(relay.run());
-	wait_listening(port).await;
 
 	let left = connect(&client(Vec::new()), port).await;
 	let straggler = straggler(port).await;
@@ -284,8 +281,7 @@ async fn a_drain_ends_once_every_session_leaves_inner() {
 async fn a_trigger_before_run_keeps_the_deadline_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let (_port, config) = relay_config();
-	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let relay = Relay::load(relay_config()).await.expect("load relay").with_signals(false);
 	let trigger = relay.shutdown_trigger().clone();
 
 	// Fired while `run` is still starting. The session deadline is this instant;
@@ -332,29 +328,18 @@ async fn connect(client: &moq_tokio::Client, port: u16) -> moq_tokio::Connection
 	client.connect(url).established().await.expect("connect")
 }
 
-/// A free loopback TCP port. The listener is bound by `Relay::run`, not here,
-/// so this leaves the usual probe/bind gap; on loopback it is not worth
-/// retrying around.
-fn free_port() -> u16 {
-	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-	probe.local_addr().expect("local addr").port()
-}
-
-/// A stream-only relay on a free loopback TCP port, fully public, with a short
-/// drain window. Returns the port and the config to hand [`Relay::load`].
-fn relay_config() -> (u16, Config) {
-	let port = free_port();
-
+/// A stream-only relay on an ephemeral loopback TCP port, fully public, with a
+/// short drain window, to hand [`Relay::load`].
+fn relay_config() -> Config {
 	// Fully public auth: any no-JWT stream client gets the whole root.
 	let mut auth = auth::Config::default();
 	auth.public = vec![moq_auth::Pattern::all()];
 
 	let mut config = Config::default();
-	config.listen.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
+	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	config.auth = auth;
 	config.drain_timeout = DRAIN_TIMEOUT;
-
-	(port, config)
+	config
 }
 
 /// Wait until the internal listener on `port` reports `line` at `/metrics`.
@@ -371,20 +356,6 @@ async fn wait_metric(port: u16, line: &str) {
 			break;
 		}
 		assert!(std::time::Instant::now() < deadline, "never saw {line} in:\n{metrics}");
-		tokio::time::sleep(Duration::from_millis(25)).await;
-	}
-}
-
-async fn wait_listening(port: u16) {
-	let deadline = std::time::Instant::now() + Duration::from_secs(5);
-	loop {
-		if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-			break;
-		}
-		assert!(
-			std::time::Instant::now() < deadline,
-			"relay never became ready on port {port}"
-		);
 		tokio::time::sleep(Duration::from_millis(25)).await;
 	}
 }

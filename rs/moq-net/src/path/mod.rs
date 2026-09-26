@@ -150,7 +150,7 @@ impl<'a> Path<'a> {
 	}
 
 	// A copy of this path skipping the first `n` bytes, reusing the shared buffer when possible.
-	fn slice_from(&'a self, n: usize) -> Path<'a> {
+	pub(crate) fn slice_from(&'a self, n: usize) -> Path<'a> {
 		match &self.0 {
 			Repr::Borrowed(s) => Path(Repr::Borrowed(&s[n..])),
 			Repr::Shared { buf, start } => Path(Repr::Shared {

@@ -1804,8 +1804,10 @@ impl Fetch {
 /// The handler fulfills it by calling [`Self::accept`], which inserts the group
 /// into the track cache (resolving every [`track::Consumer::fetch_group`] that joined the
 /// attempt) and returns a [`Producer`] to fill. A relay typically opens a wire
-/// FETCH, reads FETCH_OK, then accepts. The request carries its own producer handle,
-/// so it works the same whether or not the track has been accepted yet.
+/// FETCH and waits for the publisher to answer before accepting, so a group the
+/// publisher lacks is rejected rather than accepted and then aborted. The request
+/// carries its own producer handle, so it works the same whether or not the track
+/// has been accepted yet.
 pub struct Request {
 	pub(crate) state: kio::Producer<track::TrackState>,
 	pub(crate) fetch: kio::Shared<track::FetchState>,

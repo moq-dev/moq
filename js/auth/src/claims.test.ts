@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { authorize, type Claims, ClaimsSchema, ScopeSchema } from "./claims.ts";
+import { encodeGrants } from "./wire.ts";
 
 // These cases mirror the Rust moq-auth crate's claims::tests one-for-one, so both
 // sides stay pinned to the same authorization semantics.
@@ -23,11 +24,35 @@ test("claims granting nothing are rejected, matching Rust's useless-token rule",
 	expect(ClaimsSchema.parse({ root: "demo", publish: ["**"] }).publish).toEqual(["**"]);
 });
 
-test("claims refuse the retired put/get prefix fields", () => {
-	expect(() => ClaimsSchema.parse({ root: "demo", put: ["alice"] })).toThrow();
-	expect(() => ClaimsSchema.parse({ root: "demo", get: "" })).toThrow();
+test("claims read legacy put/get prefixes as subtrees", () => {
+	const claims = ClaimsSchema.parse({ root: "demo", put: ["alice", "/a//b/"], get: "" });
+	expect(claims.publish).toEqual(["alice/**", "a/b/**"]);
+	expect(claims.subscribe).toEqual(["**"]);
+	expect(ScopeSchema.parse({ root: "demo", put: ["room"] }).publish).toEqual(["room/**"]);
+});
+
+test("claims refuse mixed encodings and wildcard legacy prefixes", () => {
 	expect(() => ClaimsSchema.parse({ root: "demo", publish: ["alice"], get: [""] })).toThrow();
-	expect(() => ScopeSchema.parse({ root: "demo", put: ["alice"] })).toThrow();
+	expect(() => ClaimsSchema.parse({ root: "demo", put: [], subscribe: ["alice"] })).toThrow();
+	expect(() => ClaimsSchema.parse({ root: "demo", put: ["a/*"] })).toThrow();
+	expect(() => ScopeSchema.parse({ root: "demo", put: ["room"], publish: ["x"] })).toThrow();
+	// A legacy scope held only lists.
+	expect(() => ScopeSchema.parse({ root: "demo", put: "room" })).toThrow();
+});
+
+test("grants are written the legacy way only when faithful", () => {
+	expect(encodeGrants({ root: "live", publish: ["camera1/**"], subscribe: ["**"] })).toEqual({
+		root: "live",
+		put: ["camera1"],
+		get: [""],
+	});
+	// One grant a prefix can't say moves the whole document to patterns.
+	expect(encodeGrants({ root: "live", publish: ["camera1/**"], subscribe: ["*/chat"] })).toEqual({
+		root: "live",
+		publish: ["camera1/**"],
+		subscribe: ["*/chat"],
+	});
+	expect(encodeGrants({ root: "live", publish: ["camera1"] })).toEqual({ root: "live", publish: ["camera1"] });
 });
 
 test("claims exp and iat are whole seconds", () => {

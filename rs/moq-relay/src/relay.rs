@@ -71,7 +71,7 @@ impl Ready {
 pub struct Relay {
 	ready: tokio::sync::watch::Sender<bool>,
 	config: Config,
-	server: moq_tokio::Server,
+	server: moq_tokio::Listener,
 	client: moq_tokio::Client,
 	auth: auth::Auth,
 	/// The sessions the embedder decides, until it takes them. `None` when the
@@ -110,10 +110,10 @@ impl Relay {
 	/// Assemble a relay from its configuration: bind the listeners, resolve
 	/// auth, and build the cluster with its cache and stats attached.
 	///
-	/// This performs the side effects of starting up (binding sockets, reading
-	/// key material, spawning the cache governor), so a returned `Relay` is
-	/// ready to serve; nothing accepts a connection until [`Self::run`] drives
-	/// it.
+	/// This performs the side effects of starting up (binding every socket,
+	/// reading key material, spawning the cache governor), so a returned `Relay`
+	/// reports its ephemeral ports and a taken port fails here; no session is
+	/// admitted until [`Self::run`] drives it.
 	pub async fn load(mut config: Config) -> anyhow::Result<Self> {
 		config.resolve()?;
 		let resolved_config = config.clone();
@@ -278,6 +278,10 @@ impl Relay {
 			.with_versions(server_versions)
 			.with_sessions(sessions.clone())
 			.bind()?;
+		// `bind`, not `listen`: the TCP/Unix accept loops handshake as soon as
+		// they run, and `load` is not yet willing to take a session. `run`
+		// starts them on its first accept.
+		let server = server.bind().await.context("failed to bind listeners")?;
 
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
@@ -289,7 +293,8 @@ impl Relay {
 			.with_sessions(sessions.clone())
 			.with_shutdown(shutdown.clone())
 			.with_listeners(web.accept_health())
-			.with_listeners(server.accept_health());
+			.with_listeners(server.accept_health())
+			.bind()?;
 		// Bound but not yet serving: registering here (rather than after the
 		// threads start) is what gives every worker a series from the first
 		// scrape, including one that is about to fail setup.
@@ -356,6 +361,11 @@ impl Relay {
 	/// The actual bound HTTP and HTTPS addresses, including ephemeral ports.
 	pub fn web_addrs(&self) -> web::Addrs {
 		self.web.addrs()
+	}
+
+	/// The bound plain TCP (qmux) address, or `None` when `listen.tcp.bind` is unset.
+	pub fn tcp_addr(&self) -> Option<std::net::SocketAddr> {
+		self.server.tcp_local_addr()
 	}
 
 	/// The client used to dial cluster peers. Already handed to [`Self::cluster`];
@@ -523,10 +533,6 @@ impl Relay {
 				.context("failed to start the io_uring QUIC workers")?;
 		}
 
-		// Bind the shared TCP/Unix and optional internal sockets before reporting
-		// readiness, so an unavailable port cannot leave a falsely ready relay.
-		let server = server.listen().await.context("failed to bind listeners")?;
-		let internal_listener = internal.bind()?;
 		ready.send_replace(true);
 
 		#[cfg(unix)]
@@ -634,7 +640,7 @@ impl Relay {
 		let result = tokio::select! {
 			Err(err) = started.run() => Err(err).context("cluster failed"),
 			Err(err) = web.serve(web_routes) => Err(err).context("web server failed"),
-			Err(err) = internal.serve_bound(internal_routes, internal_listener) => Err(err).context("internal server failed"),
+			Err(err) = internal.serve(internal_routes) => Err(err).context("internal server failed"),
 			Err(err) = serve_shared => Err(err).context("server failed"),
 			Err(err) = quic_workers => Err(err).context("QUIC workers failed"),
 			err = uring_failed => Err(err).context("io_uring QUIC workers failed"),

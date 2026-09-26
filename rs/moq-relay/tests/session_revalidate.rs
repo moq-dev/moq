@@ -5,7 +5,6 @@
 //! an authority: the server's next word is what kicks, reties, or keeps the
 //! session.
 
-use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -113,22 +112,6 @@ fn build_auth(url: url::Url) -> moq_relay::auth::Auth {
 		.expect("auth init")
 }
 
-async fn wait_for_listener(port: u16) {
-	let deadline = std::time::Instant::now() + Duration::from_secs(5);
-	while tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
-		assert!(
-			std::time::Instant::now() < deadline,
-			"listener never became ready on port {port}"
-		);
-		tokio::time::sleep(Duration::from_millis(25)).await;
-	}
-}
-
-fn free_port() -> u16 {
-	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-	probe.local_addr().expect("local addr").port()
-}
-
 struct Fixture {
 	url: url::Url,
 	internal: url::Url,
@@ -148,19 +131,18 @@ impl Fixture {
 	async fn spawn(auth: moq_relay::auth::Auth, websocket: bool) -> Self {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 		let sessions = moq_relay::session::Registry::new();
-		let internal_port = free_port();
-		let internal_addr: std::net::SocketAddr = format!("127.0.0.1:{internal_port}").parse().unwrap();
 		let mut internal_config = internal::Config::default();
-		internal_config.listen = Some(internal_addr);
+		internal_config.listen = Some("127.0.0.1:0".parse().unwrap());
 		let internal = internal::Internal::new(internal_config, moq_net::stats::Registry::disabled())
-			.with_sessions(sessions.clone());
+			.with_sessions(sessions.clone())
+			.bind()
+			.expect("bind internal listener");
+		let internal_addr = internal.addr().expect("internal listener is configured");
 		tokio::spawn(async move {
 			let _ = internal.run().await;
 		});
-		wait_for_listener(internal_port).await;
 
 		let (url, handle) = if websocket {
-			let port = free_port();
 			let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
 			let mut server_config = moq_tokio::listen::Config::default();
 			server_config.bind = Some("[::]:0".parse().unwrap());
@@ -171,19 +153,22 @@ impl Fixture {
 				.certificates();
 			let mut web_config = web::Config::default();
 			web_config.ws = true;
-			web_config.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
-			let web = web::Web::new(auth, cluster, certificates, web_config).with_sessions(sessions.clone());
+			web_config.http.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
+			let web = web::Web::new(auth, cluster, certificates, web_config)
+				.with_sessions(sessions.clone())
+				.bind()
+				.expect("bind web listener");
+			let port = web.addrs().http.expect("HTTP listener is configured").port();
 			let handle = tokio::spawn(async move {
 				let _ = web.run().await;
 			});
-			wait_for_listener(port).await;
 			(format!("ws://127.0.0.1:{port}").parse().unwrap(), handle)
 		} else {
-			let port = free_port();
 			let mut config = moq_tokio::listen::Config::default();
-			config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
+			config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 			let server = config.init(Default::default()).expect("server init");
 			let mut server = server.listen().await.expect("listen");
+			let port = server.tcp_local_addr().expect("TCP listener is configured").port();
 			let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
 			let sessions = sessions.clone();
 			let handle = tokio::spawn(async move {
@@ -198,13 +183,12 @@ impl Fixture {
 					});
 				}
 			});
-			wait_for_listener(port).await;
 			(format!("tcp://127.0.0.1:{port}").parse().unwrap(), handle)
 		};
 
 		Self {
 			url,
-			internal: format!("http://127.0.0.1:{internal_port}").parse().unwrap(),
+			internal: format!("http://{internal_addr}").parse().unwrap(),
 			sessions,
 			_relay: handle,
 		}

@@ -359,11 +359,16 @@ impl<G: std::borrow::BorrowMut<group::Producer>> Drop for Raw<G> {
 		if !self.done {
 			// An unfinished frame leaves the group stream broken; fail the group so
 			// consumers surface an error instead of hanging on the partial forever.
-			tracing::warn!(
-				group = self.group.borrow_mut().info().sequence,
-				"frame::Producer dropped before writing all bytes"
-			);
-			self.group.borrow_mut().frame_abort(Error::Dropped);
+			// A group already aborted (superseded, evicted, cancelled) carries its own
+			// reason, so cutting its in-flight frame short is expected.
+			let group = self.group.borrow_mut();
+			if !group.is_aborted() {
+				tracing::warn!(
+					group = group.info().sequence,
+					"frame::Producer dropped before writing all bytes"
+				);
+			}
+			group.frame_abort(Error::Dropped);
 		}
 	}
 }

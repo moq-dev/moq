@@ -96,3 +96,7 @@ ts-eit *args:
 # Browser coverage for the @moq/wasm bindings.
 wasm *args:
     ./wasm/run.sh {{ args }}
+
+# Cross-language subscription termination over in-memory transports.
+bare-fin:
+    just rs test -p moq-net --lib bare_fin_interop --run-ignored all

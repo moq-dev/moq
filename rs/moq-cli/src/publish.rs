@@ -255,6 +255,9 @@ impl Publish {
 	/// `broadcast`. Announce the broadcast afterwards: this constructor creates
 	/// the catalog tracks, so announcing after it lands the advertisement with
 	/// the tracks already in place.
+	///
+	/// Stdin is a live feed with its own zero, so the container importers translate its
+	/// timestamps onto the broadcast clock the catalog advertises (`live`).
 	pub fn new(
 		mut broadcast: moq_net::broadcast::Producer,
 		format: &PublishFormat,
@@ -267,7 +270,7 @@ impl Publish {
 		if let PublishFormat::Ts = format {
 			let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
-			let ts = ts::Import::new(broadcast.clone(), catalog.reserve());
+			let ts = ts::Import::new(broadcast.clone(), catalog.reserve()).live();
 			return Ok(Self {
 				source: Source::Stream(PublishDecoder::Ts(Box::new(ts))),
 				broadcast,
@@ -286,12 +289,12 @@ impl Publish {
 				})
 			}
 			PublishFormat::Fmp4 => {
-				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.reserve());
+				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.reserve()).live();
 				Source::Stream(PublishDecoder::Fmp4(Box::new(fmp4)))
 			}
 			PublishFormat::Ts => unreachable!("TS is handled above with the mpegts catalog extension"),
 			PublishFormat::Flv => {
-				let flv = flv::Import::new(broadcast.clone(), catalog.reserve());
+				let flv = flv::Import::new(broadcast.clone(), catalog.reserve()).live();
 				Source::Stream(PublishDecoder::Flv(Box::new(flv)))
 			}
 		};
@@ -754,6 +757,54 @@ mod tests {
 			read_frame(&consumer, &pes_name).await,
 			PES_PAYLOAD,
 			"verbatim PES payload round-trips byte-for-byte"
+		);
+	}
+
+	/// `moq import ts` publishes on the broadcast clock it advertises: a feed arriving a minute
+	/// after the broadcast began is live on arrival, not stamped with its own PTS (1.4s into bbb).
+	#[tokio::test]
+	async fn ts_import_publishes_on_the_broadcast_clock() {
+		let ago = Duration::from_secs(60);
+		let clock = moq_mux::Clock::at(std::time::Instant::now() - ago, std::time::SystemTime::now() - ago).unwrap();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let config = moq_mux::catalog::Config::default().with_clock(clock);
+		let mut publish = Publish::new(broadcast, &PublishFormat::Ts, config).unwrap();
+		#[allow(irrefutable_let_patterns)]
+		let Source::Stream(decoder) = &mut publish.source else {
+			panic!("expected a stream source");
+		};
+		let before = clock.now();
+		decoder.decode_chunk(BBB).unwrap();
+		let after = clock.now();
+		decoder.finish().unwrap();
+
+		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
+			.await
+			.unwrap()
+			.next()
+			.await
+			.unwrap()
+			.expect("a catalog");
+		assert_eq!(
+			catalog.clock,
+			Some(clock.wall()),
+			"the advertised clock is the one stamped on"
+		);
+		let (name, config) = catalog.video.renditions.iter().next().expect("a video rendition");
+		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
+		let first = Consumer::new(track, container)
+			.read()
+			.await
+			.unwrap()
+			.expect("a video frame")
+			.timestamp;
+		// The PES that anchors the mapping need not be this frame: the mux spaces them apart.
+		let skew = Duration::from_secs(2).as_micros();
+		assert!(
+			before.as_micros() - skew <= first.as_micros() && first.as_micros() <= after.as_micros() + skew,
+			"the first frame is live on arrival: {first:?} not in {before:?}..={after:?}"
 		);
 	}
 
