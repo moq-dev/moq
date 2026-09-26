@@ -350,7 +350,7 @@ test("Reader stream with partial reads", async () => {
 	expect(await reader.done()).toBe(true);
 });
 
-test("Reader owns streamed chunks and preserves returned views across fills", async () => {
+test("Reader preserves returned views across fills", async () => {
 	const first = new Uint8Array([99, 1, 2, 99]);
 	const second = new Uint8Array([99, 3, 4, 5, 99]);
 	const stream = new ReadableStream<Uint8Array>({
@@ -362,14 +362,42 @@ test("Reader owns streamed chunks and preserves returned views across fills", as
 	});
 	const reader = new Reader(stream);
 	const head = await reader.read(1);
-	first.fill(0);
 	expect(head).toEqual(new Uint8Array([1]));
 	const joined = await reader.read(3);
-	second.fill(0);
 	expect(joined).toEqual(new Uint8Array([2, 3, 4]));
 	joined.fill(0);
 	expect(head).toEqual(new Uint8Array([1]));
 	expect(await reader.read(1)).toEqual(new Uint8Array([5]));
+	expect(await reader.done()).toBe(true);
+});
+
+test("Reader returns a view of a chunk that already holds the read", async () => {
+	const chunk = new Uint8Array([1, 2, 3, 4]);
+	const stream = new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(chunk);
+			controller.close();
+		},
+	});
+	const reader = new Reader(stream);
+	const read = await reader.read(3);
+	expect(read.buffer).toBe(chunk.buffer);
+	expect(read).toEqual(new Uint8Array([1, 2, 3]));
+	expect(await reader.readAll()).toEqual(new Uint8Array([4]));
+});
+
+test("Reader joins every chunk a read spans", async () => {
+	const stream = new ReadableStream<Uint8Array>({
+		start(controller) {
+			for (let value = 0; value < 100; value++) controller.enqueue(new Uint8Array([value]));
+			controller.close();
+		},
+	});
+	const reader = new Reader(stream);
+	expect(await reader.u8()).toBe(0);
+	expect(await reader.read(98)).toEqual(Uint8Array.from({ length: 98 }, (_, index) => index + 1));
+	expect(await reader.done()).toBe(false);
+	expect(await reader.readAll()).toEqual(new Uint8Array([99]));
 	expect(await reader.done()).toBe(true);
 });
 
