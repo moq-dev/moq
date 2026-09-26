@@ -4,6 +4,7 @@
  * @module
  */
 import { type GetPromise, Once, Signal } from "@moq/signals";
+import { NotFound } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import { Route } from "./hop.ts";
 import { hooks, type TrackSequence } from "./internal.ts";
@@ -131,7 +132,7 @@ async function fetchGroup(
 	try {
 		for (;;) {
 			const group = await subscriber.recvGroup();
-			if (!group) throw new Error(`group not found: ${sequence}`);
+			if (!group) throw new NotFound(`group ${sequence}`);
 			if (group.sequence === sequence) {
 				// Close the subscription when the returned group finishes, not now: an
 				// in-progress group must keep receiving frames for its lifetime (mirrors
@@ -141,7 +142,7 @@ async function fetchGroup(
 			}
 
 			group.close();
-			if (group.sequence > sequence) throw new Error(`group not found: ${sequence}`);
+			if (group.sequence > sequence) throw new NotFound(`group ${sequence}`);
 		}
 	} catch (err) {
 		subscriber.close();
