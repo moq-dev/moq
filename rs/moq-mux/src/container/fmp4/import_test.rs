@@ -554,7 +554,24 @@ fn test_flac_catalog() {
 		},
 	};
 
-	let trak = super::build_audio_trak(1, 96_000, mp4_atom::Codec::from(flac));
+	let data = audio_init(super::build_audio_trak(1, 96_000, mp4_atom::Codec::from(flac)));
+
+	let catalog = run_fmp4(&data);
+	assert_eq!(catalog.audio.renditions.len(), 1);
+
+	let a = catalog.audio.renditions.values().next().unwrap();
+	assert!(matches!(a.codec, hang::catalog::AudioCodec::Flac));
+	assert_eq!(a.sample_rate, 96_000);
+	assert_eq!(a.channel_count, 2);
+	// fmp4 import is CMAF passthrough.
+	assert!(matches!(a.container, Container::Cmaf { .. }));
+	// The WebCodecs FLAC description: `fLaC` marker + STREAMINFO.
+	let desc = a.description.as_ref().expect("flac description");
+	assert_eq!(&desc[..4], b"fLaC");
+}
+
+/// An init segment (ftyp + moov) holding a single audio trak with track ID 1.
+fn audio_init(trak: mp4_atom::Trak) -> Vec<u8> {
 	let moov = mp4_atom::Moov {
 		mvhd: mp4_atom::Mvhd {
 			timescale: 1000,
@@ -580,19 +597,73 @@ fn test_flac_catalog() {
 	let mut data = Vec::new();
 	ftyp.encode(&mut data).unwrap();
 	moov.encode(&mut data).unwrap();
+	data
+}
+
+/// An Opus init segment whose dOps declares a 44.1 kHz input, 312 samples of pre-skip,
+/// and -6 dB of gain.
+fn opus_init() -> (mp4_atom::Dops, Vec<u8>) {
+	let dops = mp4_atom::Dops {
+		output_channel_count: 2,
+		pre_skip: 312,
+		input_sample_rate: 44_100,
+		output_gain: -1536,
+	};
+	let opus = mp4_atom::Opus {
+		audio: mp4_atom::Audio {
+			data_reference_index: 1,
+			channel_count: 2,
+			sample_size: 16,
+			sample_rate: mp4_atom::FixedPoint::from(48_000u16),
+		},
+		dops: dops.clone(),
+		btrt: None,
+	};
+	let data = audio_init(super::build_audio_trak(1, 48_000, mp4_atom::Codec::from(opus)));
+	(dops, data)
+}
+
+/// dOps becomes the OpusHead description, and a track re-exported from that description
+/// writes the same dOps back, so pre-skip and gain survive the round trip.
+#[test]
+fn opus_dops_round_trips() {
+	let (dops, data) = opus_init();
 
 	let catalog = run_fmp4(&data);
-	assert_eq!(catalog.audio.renditions.len(), 1);
-
-	let a = catalog.audio.renditions.values().next().unwrap();
-	assert!(matches!(a.codec, hang::catalog::AudioCodec::Flac));
-	assert_eq!(a.sample_rate, 96_000);
+	let a = catalog.audio.renditions.values().next().expect("opus rendition");
+	assert!(matches!(a.codec, hang::catalog::AudioCodec::Opus));
+	assert_eq!(a.sample_rate, 48_000);
 	assert_eq!(a.channel_count, 2);
-	// fmp4 import is CMAF passthrough.
-	assert!(matches!(a.container, Container::Cmaf { .. }));
-	// The WebCodecs FLAC description: `fLaC` marker + STREAMINFO.
-	let desc = a.description.as_ref().expect("flac description");
-	assert_eq!(&desc[..4], b"fLaC");
+
+	let desc = a.description.as_ref().expect("opus description");
+	let head = crate::codec::opus::Config::parse(&mut desc.as_ref()).unwrap();
+	assert_eq!(head.sample_rate, 44_100);
+	assert_eq!(head.channel_count, 2);
+	assert_eq!(head.pre_skip, 312);
+	assert_eq!(head.output_gain, -1536);
+
+	let trak = super::synthesize_audio_trak(1, 48_000, a).expect("synthesize Opus trak");
+	match &trak.mdia.minf.stbl.stsd.codecs[0] {
+		mp4_atom::Codec::Opus(opus) => assert_eq!(opus.dops, dops),
+		other => panic!("expected Opus sample entry, got {other:?}"),
+	}
+}
+
+/// A dOps with a channel mapping table is refused rather than imported without it.
+#[test]
+fn opus_dops_mapping_family_is_refused() {
+	let (_, mut data) = opus_init();
+
+	// The mapping family byte follows version, channels, pre-skip, rate, and gain.
+	let at = data.windows(4).position(|w| w == b"dOps").unwrap() + 4 + 10;
+	assert_eq!(data[at], 0);
+	data[at] = 1;
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	assert!(fmp4.decode(&bytes::BytesMut::from(data.as_slice())).is_err());
+	assert!(catalog.snapshot().audio.renditions.is_empty());
 }
 
 // ---- Segment-driven grouping ----

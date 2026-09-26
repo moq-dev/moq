@@ -18,3 +18,4 @@ the milestone its priority belongs in.
 - [#2907](/quest/m4/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md) - the browser reaches moq-ffi through a generated TypeScript binding once a JS generator is stable
 - [Safari WebTransport](/quest/m4/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
 - [MSFTS convergence](/quest/m4/msfts-convergence.md) - the demultiplexed TS lane maps onto MSFTS ES-level carriage once msfts#33 settles the payload unit
+- [CMAF surround Opus](/quest/m4/cmaf-opus-surround.md) - fMP4 import and export carry an Opus channel mapping table once mp4-atom exposes it in `dOps`
