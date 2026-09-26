@@ -29,7 +29,7 @@ Other sessions share this machine: hold new agents while the load average exceed
 Each agent keeps its PR a draft while any decision is open, and lists those decisions in its report.
 Report each sub-agent's final status, staying silent on interim notifications, but do not monitor their PRs.
 
-At the end, surface every open decision as an interactive prompt: opinions (naming, API shape, branch), blockers (releases, approvals, manual steps), and follow-ups to /plan-quests.
+When an agent finishes, surface its open decisions as interactive prompts: opinions (naming, API shape, branch), blockers (releases, approvals, manual steps), and follow-ups to /plan-quests.
 Batch a few per prompt, each with the PR, a short summary, and your recommendation.
 Relay each answer to the agent that owns the PR; it marks the PR ready only once all of its decisions are resolved.
 
