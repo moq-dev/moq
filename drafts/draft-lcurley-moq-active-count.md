@@ -23,8 +23,8 @@ informative:
 
 --- abstract
 
-This document defines an extension for MoQ Transport {{moqt}} that tells a subscriber how many NAMESPACE messages a publisher sends in answer to its SUBSCRIBE_NAMESPACE before the subscription is caught up.
-The subscriber then knows when that is, instead of guessing from a quiet stream.
+This document defines an extension for MoQ Transport {{moqt}} that tells a subscriber how many NAMESPACE messages answering its SUBSCRIBE_NAMESPACE come before the first change.
+The subscriber then knows when it has caught up, instead of guessing from a quiet stream.
 
 --- note_Note_to_Readers
 
@@ -37,7 +37,7 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 {::boilerplate bcp14-tagged}
 
 A suffix is **active** on a SUBSCRIBE_NAMESPACE stream from a NAMESPACE message carrying it until a NAMESPACE_DONE message carrying it.
-A subscription is **caught up** once every suffix the publisher advertised to it when it sent REQUEST_OK is active.
+A subscriber is **caught up** on a SUBSCRIBE_NAMESPACE once it has read Count ({{count}}) NAMESPACE messages after REQUEST_OK, immediately on a Count of 0.
 
 
 # Introduction
@@ -45,7 +45,7 @@ A publisher answers SUBSCRIBE_NAMESPACE with a NAMESPACE message for each suffix
 Nothing on the wire separates the two, so a subscriber cannot tell "there are no broadcasts" from "they have not arrived yet".
 The best it can do is wait for the stream to go quiet, which is slow when there is nothing to send and wrong when the network stalls partway.
 
-This extension has the publisher put the number of NAMESPACE messages that precede the subscription being caught up on its REQUEST_OK.
+This extension has the publisher put on its REQUEST_OK how many NAMESPACE messages come before the first change.
 
 
 # Setup Negotiation
@@ -75,12 +75,10 @@ ACTIVE_COUNT Parameter {
 }
 ~~~
 
-Count is the number of suffixes the publisher makes active before the subscription is caught up, one NAMESPACE message each.
-The publisher MUST send exactly Count NAMESPACE messages, each with a distinct suffix, immediately after REQUEST_OK and before any other message on the stream; later changes follow as usual.
+The publisher MUST send exactly Count NAMESPACE messages immediately after REQUEST_OK, before any other message on the stream, making active each suffix it advertises to the subscriber when it answers, one message per suffix; later changes follow as usual.
 A suffix the publisher does not advertise to this subscriber, such as one whose path loops back through it, is neither sent nor counted.
 
-A subscriber is caught up once it has read Count NAMESPACE messages, immediately on a Count of 0.
-It counts every one of them, including any it discards on receipt.
+A subscriber counts every NAMESPACE message toward Count, including any it discards on receipt.
 
 A subscriber MUST close the session with a PROTOCOL_VIOLATION if the REQUEST_OK answering a SUBSCRIBE_NAMESPACE omits the parameter when the extension is negotiated, or carries it when it is not.
 An endpoint MUST close the session with a PROTOCOL_VIOLATION if a REQUEST_OK answering any other request carries the parameter.

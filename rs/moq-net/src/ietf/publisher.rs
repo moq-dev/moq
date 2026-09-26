@@ -4723,6 +4723,66 @@ mod tests {
 		assert_eq!(log.bi_opens(), 1, "the update rode the request's own stream");
 	}
 
+	/// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count), so one on the OK
+	/// to a REQUEST_UPDATE is the peer breaking the extension too.
+	#[tokio::test]
+	async fn a_counted_update_ok_is_a_violation() {
+		const VERSION: Version = Version::Draft19;
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let _cold = origin
+			.announce("cam", crate::origin::Route::default().with_cost(4))
+			.unwrap();
+		settle().await;
+
+		// The PUBLISH_NAMESPACE is answered cleanly; its update's OK carries a count.
+		let counted = crate::lite::test_transport::Log::default();
+		let mut writer =
+			crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(counted.clone()), VERSION);
+		writer.encode(&ietf::RequestOk::ID).await.unwrap();
+		writer
+			.encode(&ietf::RequestOk {
+				request_id: None,
+				active: Some(0),
+			})
+			.await
+			.unwrap();
+		let counted = counted.writes.lock().unwrap().clone();
+		let ok = publish_namespace_ok(VERSION).await;
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![[ok, counted].concat()]);
+		let log = session.log.clone();
+
+		let publisher = Publisher::new(
+			crate::time::Clock::tokio(),
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			clustered(Some(false)),
+			VERSION,
+		);
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"cam") >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
+
+		// Repricing sends the REQUEST_UPDATE whose OK is counted.
+		let _warm = origin
+			.announce("cam", crate::origin::Route::default().with_cost(0))
+			.unwrap();
+
+		let res = tokio::time::timeout(Duration::from_secs(5), run)
+			.await
+			.expect("the violation ends the loop");
+		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
+	}
+
 	/// A route from a different original publisher is not an update: its content is not
 	/// continuous with what the peer holds, so the draft has the advertisement withdrawn
 	/// and made again rather than repriced in place.
