@@ -9,7 +9,6 @@
 //! The last tests swap the server for an in-process decider answering
 //! `Admissions`, and prove the lease it drives reaches the session the same way.
 
-use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -125,23 +124,6 @@ fn build_auth(url: url::Url) -> moq_relay::auth::Auth {
 		.expect("auth init")
 }
 
-/// Wait for a TCP listener to become dialable, or panic.
-async fn wait_for_listener(port: u16) {
-	let deadline = std::time::Instant::now() + Duration::from_secs(5);
-	while tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
-		assert!(
-			std::time::Instant::now() < deadline,
-			"relay listener never became ready on port {port}"
-		);
-		tokio::time::sleep(Duration::from_millis(25)).await;
-	}
-}
-
-fn free_port() -> u16 {
-	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-	probe.local_addr().expect("local addr").port()
-}
-
 /// Stand up the relay's accept loop on a plain-TCP qmux listener and return the
 /// port plus an abort handle.
 async fn spawn_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinHandle<()>) {
@@ -155,12 +137,12 @@ async fn spawn_relay_with(
 	cluster: cluster::Cluster,
 ) -> (u16, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-	let port = free_port();
 
 	let mut config = moq_tokio::listen::Config::default();
-	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
+	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	let server = config.init(Default::default()).expect("server init");
 	let mut server = server.listen().await.expect("listen");
+	let port = server.tcp_local_addr().expect("TCP listener is configured").port();
 
 	let handle = tokio::spawn(async move {
 		let mut id = 0;
@@ -173,7 +155,6 @@ async fn spawn_relay_with(
 		}
 	});
 
-	wait_for_listener(port).await;
 	(port, handle)
 }
 
@@ -181,7 +162,6 @@ async fn spawn_relay_with(
 /// port plus an abort handle.
 async fn spawn_ws_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-	let port = free_port();
 	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
 
 	// Stream listeners bind lazily, so this server never opens a socket; only
@@ -196,14 +176,16 @@ async fn spawn_ws_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinH
 
 	let mut web_config = web::Config::default();
 	web_config.ws = true;
-	web_config.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
-	let web = web::Web::new(auth, cluster, certificates, web_config);
+	web_config.http.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
+	let web = web::Web::new(auth, cluster, certificates, web_config)
+		.bind()
+		.expect("bind web listener");
+	let port = web.addrs().http.expect("HTTP listener is configured").port();
 
 	let handle = tokio::spawn(async move {
 		let _ = web.run().await;
 	});
 
-	wait_for_listener(port).await;
 	(port, handle)
 }
 
@@ -1025,26 +1007,25 @@ async fn a_fixed_lease_still_expires() {
 #[tokio::test]
 async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-	let config = |port: u16| {
+	let config = || {
 		let mut config = Config::default();
-		config.listen.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 		// The sessions are gone by the time the trigger fires; no need to wait out the default window.
 		config.drain_timeout = Duration::from_millis(100);
 		config
 	};
 
-	let untaken = Relay::load(config(free_port())).await.expect("load relay");
+	let untaken = Relay::load(config()).await.expect("load relay");
 	let err = untaken.run().await.expect_err("nobody can authenticate");
 	assert!(err.to_string().contains("nobody can authenticate"), "{err}");
 
-	let port = free_port();
-	let mut relay = Relay::load(config(port)).await.expect("load relay");
+	let mut relay = Relay::load(config()).await.expect("load relay");
+	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let admissions = relay.admissions().expect("an empty [auth] hands over the admissions");
 	assert!(relay.admissions().is_none(), "taken once");
 	let decider = Decider::spawn(admissions, grant(Duration::from_secs(3600)));
 	let trigger = relay.shutdown_trigger().clone();
 	let running = tokio::spawn(relay.run());
-	wait_for_listener(port).await;
 
 	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
 	assert_eq!(decider.seen.lock().unwrap().len(), 2, "one admission per session");

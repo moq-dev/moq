@@ -94,7 +94,6 @@ async fn fetch(
 				None => format!("no group of `{}` found", args.track),
 			})?;
 
-		// A missing sequence can resolve to a group that fails on its first read.
 		let sequence = group.sequence;
 		let mut index = 0;
 		while let Some(frame) = group
@@ -236,13 +235,13 @@ mod tests {
 			(result, out)
 		}
 
-		/// The relay's HTTP `/fetch` body for the same group.
-		async fn curl(&self, query: &str) -> Vec<u8> {
+		/// The relay's HTTP `/fetch` status and body for the same group.
+		async fn curl(&self, query: &str) -> (u16, Vec<u8>) {
 			let response = reqwest::get(format!("http://{}/fetch/demo/data{query}", self.http))
 				.await
 				.expect("HTTP fetch");
-			assert_eq!(response.status(), 200);
-			response.bytes().await.expect("HTTP body").to_vec()
+			let status = response.status().as_u16();
+			(status, response.bytes().await.expect("HTTP body").to_vec())
 		}
 	}
 
@@ -281,7 +280,7 @@ mod tests {
 		let (result, out) = fixture.fetch(&["data", "--group", "1"], TIMEOUT).await;
 		result.expect("fetch");
 		assert_eq!(out, frames(1).concat());
-		assert_eq!(out, fixture.curl("?group=1").await);
+		assert_eq!(fixture.curl("?group=1").await, (200, out));
 	}
 
 	/// No `--group` reads the newest group, as `/fetch` does by default.
@@ -293,7 +292,7 @@ mod tests {
 		let (result, out) = fixture.fetch(&["data"], TIMEOUT).await;
 		result.expect("fetch");
 		assert_eq!(out, frames(2).concat());
-		assert_eq!(out, fixture.curl("").await);
+		assert_eq!(fixture.curl("").await, (200, out));
 	}
 
 	/// A hidden broadcast such as `.stats` is fetched by name, as `/fetch` serves it.
@@ -307,6 +306,8 @@ mod tests {
 		assert_eq!(out, b"secret");
 	}
 
+	/// A missing sequence fails the lookup itself, before any output, as `/fetch`
+	/// answers 404 rather than starting a body.
 	#[tokio::test]
 	async fn a_missing_sequence_fails() {
 		let _env = EnvGuard::clear(ENV);
@@ -314,9 +315,9 @@ mod tests {
 
 		let (result, out) = fixture.fetch(&["data", "--group", "99"], TIMEOUT).await;
 		let err = result.expect_err("group 99 does not exist");
-		let err = format!("{err:#}");
-		assert!(err.contains("group 99") && err.contains("not found"), "{err}");
+		assert_eq!(err.to_string(), "group 99 of `data` not found", "{err:#}");
 		assert!(out.is_empty());
+		assert_eq!(fixture.curl("?group=99").await, (404, Vec::new()));
 	}
 
 	/// A track with no group never resolves "newest", so the deadline ends it.

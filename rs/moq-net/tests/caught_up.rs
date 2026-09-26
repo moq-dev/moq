@@ -37,7 +37,7 @@ async fn caught_up(version: &str, paths: &[&str]) -> Vec<String> {
 
 	let subscribed = produce_origin(Hop::new(2).unwrap());
 	let mut options = MockConnectOptions::new(version);
-	options.server_publish = Some(published.clone());
+	options.server_publish = Some(published.consume());
 	options.client_subscribe = Some(subscribed.clone());
 	let _pair = connect_mock(options).await;
 

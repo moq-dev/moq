@@ -152,19 +152,32 @@ struct State {
 	broadcasts: HashMap<PathOwned, BroadcastState>,
 }
 
-impl Drop for State {
-	fn drop(&mut self) {
-		// The session dispatcher owns this state and can be dropped at any await.
-		// Active receive tasks abort their own groups. Cancel any head waiting for
-		// its tail here, along with the track. Ordinary unsubscribe removes its entry.
-		for (_, track) in self.subscribes.drain() {
+impl State {
+	/// End every active subscription with the error that ended the session.
+	///
+	/// Active receive tasks abort their own groups. Abort any head waiting for its
+	/// tail here, along with the track. Ordinary unsubscribe removes its entry.
+	fn abort(&mut self, err: &Error) {
+		for (_, mut track) in self.subscribes.drain() {
+			if let Some(request) = track.pending.take() {
+				request.reject(err.clone());
+			}
 			if let Fill::Ready { producer, .. } = &*track.fill.read() {
-				let _ = producer.clone().abort(Error::Cancel);
+				let _ = producer.clone().abort(err.clone());
 			}
 			if let Some(producer) = track.producer {
-				let _ = producer.abort(Error::Cancel);
+				let _ = producer.abort(err.clone());
 			}
 		}
+	}
+}
+
+impl Drop for State {
+	fn drop(&mut self) {
+		// The session dispatcher owns this state and can be dropped at any await. A
+		// session that ended with an error already aborted these with it; what
+		// remains was cancelled with the dispatcher.
+		self.abort(&Error::Cancel);
 	}
 }
 
@@ -299,6 +312,9 @@ struct Accepted {
 
 struct TrackState {
 	producer: Option<track::Producer>,
+	/// The origin request, until SUBSCRIBE_OK accepts it. Abort rejects this: the
+	/// producer does not exist yet, and dropping the setup task would be `Dropped`.
+	pending: Option<track::Request>,
 	name: String,
 	alias: Option<u64>,
 
@@ -345,6 +361,7 @@ impl TrackState {
 	fn pending(name: String, broadcast: PathOwned, fill: kio::Producer<Fill>, joining: Option<JoiningFetch>) -> Self {
 		Self {
 			producer: None,
+			pending: None,
 			name,
 			alias: None,
 			broadcast,
@@ -535,6 +552,11 @@ where
 		}
 	}
 
+	/// End every active subscription with the error that ended the session.
+	pub fn abort(&self, err: &Error) {
+		self.state.lock().abort(err);
+	}
+
 	/// Leave `alias` in the state a cancelled subscription leaves behind: bound to a
 	/// subscription, then retired.
 	///
@@ -661,6 +683,11 @@ where
 		};
 
 		held.broadcast == new.broadcast && held.name == new.name
+	}
+
+	/// Take the origin request back out of a subscription that is still setting up.
+	fn take_pending(&self, request_id: RequestId) -> Option<track::Request> {
+		self.state.lock().subscribes.get_mut(&request_id)?.pending.take()
 	}
 
 	fn remove_subscribe(&self, request_id: RequestId) -> Option<TrackState> {
@@ -1674,6 +1701,19 @@ where
 
 		tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %request.name(), "subscribe started");
 
+		// Park the origin request where a session abort can reject it. The producer
+		// does not exist until SUBSCRIBE_OK, and dropping this task would otherwise
+		// end the track as `Dropped`.
+		let track_name = request.name().to_owned();
+		{
+			let mut state = self.state.lock();
+			let Some(held) = state.subscribes.get_mut(&request_id) else {
+				request.reject(Error::Cancel);
+				return;
+			};
+			held.pending = Some(request);
+		}
+
 		// A publisher can be serving before its SUBSCRIBE_OK reaches us, since the data
 		// streams are independent of the request stream. Waiting for the response alone would
 		// miss the local side going away in that window and leave the publisher serving a
@@ -1683,9 +1723,10 @@ where
 		enum Setup {
 			Response(Result<Option<Accepted>, Error>),
 			Unused,
+			/// `abort` already rejected the parked request.
+			Gone,
 		}
 
-		let track_name = request.name().to_owned();
 		let setup = {
 			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream));
 			loop {
@@ -1697,7 +1738,15 @@ where
 					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
 						return Poll::Ready(Setup::Response(res));
 					}
-					if request.poll_unused(waiter).is_ready() {
+					let mut state = self.state.lock();
+					let Some(pending) = state
+						.subscribes
+						.get_mut(&request_id)
+						.and_then(|held| held.pending.as_mut())
+					else {
+						return Poll::Ready(Setup::Gone);
+					};
+					if pending.poll_unused(waiter).is_ready() {
 						return Poll::Ready(Setup::Unused);
 					}
 					Poll::Pending
@@ -1705,23 +1754,36 @@ where
 				.await;
 
 				match setup {
-					Setup::Response(res) => break Some((res, request)),
+					Setup::Response(res) => break Some(res),
+					Setup::Gone => break None,
 					Setup::Unused => {
-						if request.reject_unused(Error::Cancel) {
+						let mut state = self.state.lock();
+						let Some(pending) = state
+							.subscribes
+							.get_mut(&request_id)
+							.and_then(|held| held.pending.take())
+						else {
 							break None;
+						};
+						if pending.reject_unused(Error::Cancel) {
+							break None;
+						}
+						if let Some(held) = state.subscribes.get_mut(&request_id) {
+							held.pending = Some(pending);
 						}
 					}
 				}
 			}
 		};
 
-		let Some((response, request)) = setup else {
+		let Some(response) = setup else {
 			tracing::info!(
 				broadcast = %self.origin.absolute(&broadcast_path),
 				track = %track_name,
 				"subscribe abandoned before it was accepted"
 			);
-			// The publisher may already be serving before it answers.
+			// The publisher may already be serving before it answers. A session abort
+			// already rejected the parked request; dropping what remains is not a second one.
 			self.remove_subscribe(request_id);
 			self.cancel_subscribe(stream, request_id).await;
 			return;
@@ -1732,14 +1794,18 @@ where
 		let accepted = match response {
 			Ok(Some(accepted)) => accepted,
 			Ok(None) => {
+				if let Some(pending) = self.take_pending(request_id) {
+					pending.reject(Error::UnexpectedMessage);
+				}
 				self.remove_subscribe(request_id);
-				request.reject(Error::UnexpectedMessage);
 				return;
 			}
 			Err(err) => {
 				tracing::debug!(%err, "subscribe response error");
+				if let Some(pending) = self.take_pending(request_id) {
+					pending.reject(err);
+				}
 				self.remove_subscribe(request_id);
-				request.reject(err);
 				return;
 			}
 		};
@@ -1756,6 +1822,11 @@ where
 			.with_priority(super::priority::from_wire(priority.unwrap_or(128)));
 		// Declared before the track is released to readers, so a warm cache waiting on
 		// this copy judges itself against where the live feed actually starts.
+		let Some(request) = self.take_pending(request_id) else {
+			// Aborted while the answer was in hand. The parked request is already rejected.
+			self.remove_subscribe(request_id);
+			return;
+		};
 		let request = match live {
 			true => request.resolving_start(),
 			false => request,
@@ -3023,6 +3094,45 @@ mod tests {
 		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
 
 		assert_eq!(pending.await.unwrap(), RequestId(11));
+	}
+
+	/// SUBSCRIBE_OK has not accepted the track, so the map holds no producer.
+	/// Abort still has to reject the parked origin request with the session error.
+	#[tokio::test]
+	async fn session_death_rejects_a_subscribe_still_setting_up() {
+		let broadcast = crate::broadcast::Info::new().produce();
+		let mut dynamic = broadcast.dynamic();
+		let consumer = broadcast.consume();
+		let mut waiting = std::pin::pin!(consumer.track("video").unwrap().subscribe(None));
+		assert!(poll!(&mut waiting).is_pending());
+
+		let mut requested = std::pin::pin!(dynamic.requested_track());
+		let std::task::Poll::Ready(Ok(request)) = poll!(&mut requested) else {
+			panic!("the subscribe did not request a track");
+		};
+
+		let mut state = State::default();
+		state.subscribes.insert(
+			RequestId(1),
+			TrackState {
+				pending: Some(request),
+				..TrackState::pending(
+					"video".to_string(),
+					crate::Path::new("bcast").to_owned(),
+					kio::Producer::new(Fill::Done),
+					None,
+				)
+			},
+		);
+		state.abort(&Error::Session(crate::SessionError::App(7)));
+
+		assert!(
+			matches!(
+				poll!(&mut waiting),
+				std::task::Poll::Ready(Err(Error::Session(crate::SessionError::App(7))))
+			),
+			"setup was not rejected with the session error"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]

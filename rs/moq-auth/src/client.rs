@@ -266,6 +266,37 @@ mod tests {
 		server
 	}
 
+	/// Keep HTTP handling on the paused test clock instead of wiremock's separate runtime.
+	async fn clock_server(log: Log, grant: Grant, stall: bool) -> Client {
+		use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
+		let router = Router::new()
+			.route(
+				"/",
+				post(
+					|State((log, grant, stall)): State<(Log, Grant, bool)>, Json(request): Json<Request>| async move {
+						let event = request.event.clone();
+						log.0.lock().push(request);
+						match event {
+							Event::Connect => Json(grant).into_response(),
+							Event::Revalidate if stall => std::future::pending().await,
+							Event::Revalidate => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+							Event::End { .. } => StatusCode::OK.into_response(),
+						}
+					},
+				),
+			)
+			.with_state((log, grant, stall));
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = format!("http://{}/", listener.local_addr().unwrap());
+		tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+		// Only the lease clock is under test; an HTTP timeout can auto-advance
+		// Tokio's paused clock before loopback I/O gets its first reactor turn.
+		Client {
+			http: reqwest::Client::builder().no_proxy().build().unwrap(),
+			url: url.parse().unwrap(),
+		}
+	}
+
 	fn client(server: &MockServer) -> Client {
 		Client::new(server.uri().parse().unwrap(), None).unwrap()
 	}
@@ -413,14 +444,12 @@ mod tests {
 
 	#[tokio::test]
 	async fn a_grant_within_clock_skew_stays_live() {
-		let server = server(Log::default(), |_| {
-			let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
-			grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
-			ResponseTemplate::new(200).set_body_json(grant)
-		})
-		.await;
+		tokio::time::pause();
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
+		let client = clock_server(Log::default(), grant, false).await;
+		let consumer = client.connect(request()).await.unwrap();
 
-		let consumer = client(&server).connect(request()).await.unwrap();
 		tokio::time::sleep(Duration::from_millis(500)).await;
 		assert!(
 			tokio::time::timeout(Duration::from_millis(100), consumer.closed())
@@ -437,15 +466,16 @@ mod tests {
 
 	#[tokio::test]
 	async fn an_outage_keeps_the_grant_until_expires() {
+		tokio::time::pause();
 		let log = Log::default();
-		let server = server(log.clone(), |request| match request.event {
-			Event::Connect => ResponseTemplate::new(200)
-				.set_body_json(grant(Some(Duration::from_secs(3)), Some(Duration::from_secs(1)))),
-			_ => ResponseTemplate::new(503),
-		})
+		let client = clock_server(
+			log.clone(),
+			grant(Some(Duration::from_secs(3)), Some(Duration::from_secs(1))),
+			false,
+		)
 		.await;
+		let consumer = client.connect(request()).await.unwrap();
 
-		let consumer = client(&server).connect(request()).await.unwrap();
 		tokio::time::sleep(Duration::from_millis(1500)).await;
 		assert!(log.revalidates() >= 1, "re-checks happened");
 		assert_eq!(
@@ -469,16 +499,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn expiry_fires_while_a_recheck_is_stalled() {
-		let server = server(Log::default(), |request| match request.event {
-			Event::Connect => ResponseTemplate::new(200)
-				.set_body_json(grant(Some(Duration::from_secs(3)), Some(Duration::from_secs(1)))),
-			_ => ResponseTemplate::new(200)
-				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(60))))
-				.set_delay(Duration::from_secs(30)),
-		})
+		tokio::time::pause();
+		let client = clock_server(
+			Log::default(),
+			grant(Some(Duration::from_secs(3)), Some(Duration::from_secs(1))),
+			true,
+		)
 		.await;
+		let consumer = client.connect(request()).await.unwrap();
 
-		let consumer = client(&server).connect(request()).await.unwrap();
 		let reason = tokio::time::timeout(Duration::from_secs(5), consumer.closed())
 			.await
 			.expect("expired while the re-check was in flight");

@@ -243,7 +243,7 @@ where
 					Ok(())
 				}));
 
-				kio::wait(|waiter| {
+				let res = kio::wait(|waiter| {
 					use std::task::Poll;
 					if let Poll::Ready(err) = waiter.poll_future(adapter_run.as_mut()) {
 						return Poll::Ready(Err::<(), Error>(err));
@@ -265,7 +265,12 @@ where
 					}
 					Poll::Pending
 				})
-				.await
+				.await;
+				if let Err(err) = &res {
+					// Every track this session was receiving ends with its error.
+					subscriber.abort(err);
+				}
+				res
 			}
 			_ => {
 				// Send SETUP and keep the stream alive: it is also our GOAWAY channel.
@@ -369,7 +374,7 @@ where
 					Ok(())
 				}));
 
-				kio::wait(|waiter| {
+				let res = kio::wait(|waiter| {
 					use std::task::Poll;
 					if let Poll::Ready(err) = waiter.poll_future(unis.as_mut()) {
 						return Poll::Ready(Err::<(), Error>(err));
@@ -394,7 +399,12 @@ where
 					}
 					Poll::Pending
 				})
-				.await
+				.await;
+				if let Err(err) = &res {
+					// Every track this session was receiving ends with its error.
+					subscriber.abort(err);
+				}
+				res
 			}
 		};
 

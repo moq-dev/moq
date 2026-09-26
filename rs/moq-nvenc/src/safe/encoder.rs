@@ -94,7 +94,6 @@ impl Encoder {
 	/// ```
 	pub fn initialize_with_cuda(cuda_ctx: Arc<CudaContext>) -> Result<Self, LoadError> {
 		let api = api::get()?;
-		let mut encoder = ptr::null_mut();
 		let mut session_params = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS {
 			version: NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
 			deviceType: NV_ENC_DEVICE_TYPE::NV_ENC_DEVICE_TYPE_CUDA,
@@ -104,14 +103,10 @@ impl Encoder {
 			device: cuda_ctx.cu_ctx().cast::<c_void>(),
 			..Default::default()
 		};
-
-		if let err @ Err(_) =
-			unsafe { (api.open_encode_session_ex)(&mut session_params, &mut encoder) }.result_without_string()
-		{
-			// We are required to destroy the encoder if there was an error.
-			unsafe { (api.destroy_encoder)(encoder) }.result_without_string()?;
-			err?;
-		}
+		let encoder = open_session(
+			|encoder| unsafe { (api.open_encode_session_ex)(&mut session_params, encoder) }.result_without_string(),
+			|encoder| unsafe { (api.destroy_encoder)(encoder) }.result_without_string(),
+		)?;
 
 		Ok(Self {
 			ptr: encoder,
@@ -460,6 +455,26 @@ impl Encoder {
 	}
 }
 
+/// Open an encode session, destroying whatever a failed open left behind as
+/// NVENC requires. A failed destroy is attached to the open error, not
+/// reported in its place.
+fn open_session(
+	open: impl FnOnce(&mut *mut c_void) -> Result<(), EncodeError>,
+	destroy: impl FnOnce(*mut c_void) -> Result<(), EncodeError>,
+) -> Result<*mut c_void, EncodeError> {
+	let mut encoder = ptr::null_mut();
+	let Err(primary) = open(&mut encoder) else {
+		return Ok(encoder);
+	};
+	if encoder.is_null() {
+		return Err(primary);
+	}
+	match destroy(encoder) {
+		Ok(()) => Err(primary),
+		Err(cleanup) => Err(primary.with_cleanup(cleanup)),
+	}
+}
+
 /// A safe wrapper for [`NV_ENC_INITIALIZE_PARAMS`], which is the encoder
 /// initialize parameter.
 pub struct EncoderInitParams {
@@ -552,5 +567,74 @@ impl EncoderInitParams {
 	pub fn enable_picture_type_decision(&mut self) -> &mut Self {
 		self.param.enablePTD = 1;
 		self
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::cell::RefCell;
+
+	use super::*;
+	use crate::safe::result::ErrorKind;
+
+	fn handle() -> *mut c_void {
+		ptr::NonNull::<u8>::dangling().as_ptr().cast()
+	}
+
+	fn fail(kind: ErrorKind) -> Result<(), EncodeError> {
+		Err(EncodeError::new(kind, None))
+	}
+
+	#[test]
+	fn failed_open_destroys_the_partial_session() {
+		let destroyed = RefCell::new(Vec::new());
+		let error = open_session(
+			|encoder| {
+				*encoder = handle();
+				fail(ErrorKind::InvalidVersion)
+			},
+			|encoder| {
+				destroyed.borrow_mut().push(encoder);
+				Ok(())
+			},
+		)
+		.expect_err("open failed");
+		assert_eq!(error.kind(), ErrorKind::InvalidVersion);
+		assert!(error.cleanup().is_none());
+		assert_eq!(*destroyed.borrow(), [handle()]);
+	}
+
+	#[test]
+	fn failed_destroy_keeps_the_open_error() {
+		let error = open_session(
+			|encoder| {
+				*encoder = handle();
+				fail(ErrorKind::NoEncodeDevice)
+			},
+			|_| fail(ErrorKind::InvalidPtr),
+		)
+		.expect_err("open failed");
+		assert_eq!(error.kind(), ErrorKind::NoEncodeDevice);
+		assert_eq!(error.cleanup().map(EncodeError::kind), Some(ErrorKind::InvalidPtr));
+	}
+
+	#[test]
+	fn failed_open_without_a_handle_destroys_nothing() {
+		let error = open_session(|_| fail(ErrorKind::OutOfMemory), |_| panic!("destroyed a null session"))
+			.expect_err("open failed");
+		assert_eq!(error.kind(), ErrorKind::OutOfMemory);
+	}
+
+	#[test]
+	fn successful_open_destroys_nothing() {
+		let encoder = open_session(
+			|encoder| {
+				*encoder = handle();
+				Ok(())
+			},
+			|_| panic!("destroyed a live session"),
+		)
+		.unwrap();
+		assert_eq!(encoder, handle());
 	}
 }

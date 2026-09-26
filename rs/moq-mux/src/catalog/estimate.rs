@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use moq_net::Timestamp;
@@ -19,6 +20,8 @@ pub struct Estimate {
 	pub jitter: Option<Duration>,
 	/// The maximum bitrate in bits per second.
 	pub bitrate: Option<u64>,
+	/// The most this track's minimum flush lateness has trailed the broadcast's earliest track.
+	pub delay: Option<Duration>,
 }
 
 impl Estimate {
@@ -31,6 +34,12 @@ impl Estimate {
 	/// Set the bitrate in bits per second (or clear it with `None`).
 	pub fn with_bitrate(mut self, bitrate: impl Into<Option<u64>>) -> Self {
 		self.bitrate = bitrate.into();
+		self
+	}
+
+	/// Set the delay behind the broadcast's earliest track (or clear it with `None`).
+	pub fn with_delay(mut self, delay: impl Into<Option<Duration>>) -> Self {
+		self.delay = delay.into();
 		self
 	}
 }
@@ -76,13 +85,27 @@ impl Estimate {
 pub struct Estimator {
 	jitter: Jitter,
 	bitrate: Bitrate,
-	baseline: Baseline,
+	/// This track's recent minimum flush lateness.
+	baseline: Window,
+	/// The recent minimum across every track sharing it. A standalone estimator's is its own, so
+	/// it never measures a delay.
+	broadcast: Baseline,
+	/// The largest amount [`baseline`](Self::baseline) has trailed [`broadcast`](Self::broadcast).
+	delay: Duration,
 }
 
 impl Estimator {
 	/// Create an empty estimator.
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Measure `delay` against the tracks sharing `broadcast`.
+	pub(crate) fn with_broadcast(broadcast: Baseline) -> Self {
+		Self {
+			broadcast,
+			..Self::default()
+		}
 	}
 
 	/// Observe a frame of `bytes` encoded bytes at presentation time `timestamp`, as written by
@@ -94,10 +117,13 @@ impl Estimator {
 
 	/// Measure when an encoder handed a frame to the transport. Only locally encoded frames should
 	/// call this; imports keep clock-free batch and reorder estimates. Jitter is the spread above
-	/// this track's own recent minimum lateness, so a constant encoder delay is not jitter.
+	/// this track's own recent minimum lateness, so a constant encoder delay is not jitter. Delay
+	/// is how far that minimum trails the earliest track on the same catalog.
 	pub fn flush(&mut self, timestamp: Timestamp, now: Instant) {
-		let spread = self.baseline.observe(timestamp, now);
-		self.jitter.max = self.jitter.max.max(spread);
+		let (lateness, earliest) = self.broadcast.observe(timestamp, now);
+		let minimum = self.baseline.observe(now, lateness);
+		self.jitter.max = self.jitter.max.max(nanos_between(minimum, lateness));
+		self.delay = self.delay.max(nanos_between(earliest, minimum));
 	}
 
 	/// Close the current span at `end`, as [`container::Producer::cut`](crate::container::Producer::cut)
@@ -110,11 +136,15 @@ impl Estimator {
 		self.bitrate.cut(end.map(nanos));
 	}
 
-	/// Discard the open bitrate span and the flush baseline, so nothing is measured across a break
+	/// Discard the open bitrate span and the flush baselines, so nothing is measured across a break
 	/// in the timeline. See [`container::Producer::discontinuity`](crate::container::Producer::discontinuity).
+	///
+	/// The broadcast baseline is cleared too: a pause usually stops every track, and the others'
+	/// pre-pause minimum would otherwise read as a delay until it left the window.
 	pub fn discontinuity(&mut self) {
 		self.bitrate.discontinuity();
-		self.baseline = Baseline::default();
+		self.baseline = Window::default();
+		self.broadcast.discontinuity();
 	}
 
 	/// Observe a frame's reorder delay (`PTS - DTS`), which raises the jitter to the decode buffer a
@@ -137,6 +167,7 @@ impl Estimator {
 		Estimate {
 			jitter: self.jitter.current(),
 			bitrate: self.bitrate.current(),
+			delay: (!self.delay.is_zero()).then_some(self.delay),
 		}
 	}
 }
@@ -258,14 +289,43 @@ impl Jitter {
 	}
 }
 
-/// One track's minimum encode lateness over the recent window.
+/// The flush clock shared by every track on one catalog: a common epoch, so lateness compares
+/// across tracks, and the minimum lateness any of them flushed with over the recent window.
 ///
 /// An `Instant` has no public mapping to the broadcast's media epoch. The first observation
-/// chooses a local origin; its unknown offset cancels when subtracting the recent minimum. A
-/// monotonic deque makes insertion and expiry amortized O(1).
+/// chooses a local origin; its unknown offset cancels when subtracting one minimum from another.
+#[derive(Clone, Default)]
+pub(crate) struct Baseline(Arc<Mutex<Shared>>);
+
 #[derive(Default)]
-struct Baseline {
+struct Shared {
 	epoch: Option<Instant>,
+	window: Window,
+}
+
+impl Baseline {
+	/// Return the frame's lateness on the shared epoch and the broadcast's minimum including it.
+	fn observe(&self, timestamp: Timestamp, now: Instant) -> (i128, i128) {
+		let mut shared = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		let epoch = *shared.epoch.get_or_insert(now);
+		let elapsed = match now.checked_duration_since(epoch) {
+			Some(duration) => duration.as_nanos() as i128,
+			None => -(epoch.duration_since(now).as_nanos() as i128),
+		};
+		let lateness = elapsed - timestamp.as_nanos() as i128;
+		(lateness, shared.window.observe(now, lateness))
+	}
+
+	fn discontinuity(&self) {
+		self.0.lock().unwrap_or_else(PoisonError::into_inner).window = Window::default();
+	}
+}
+
+/// The minimum lateness over the last [`JITTER_WINDOW`], so a media clock drifting against the
+/// wall clock does not ratchet forever. A monotonic deque makes insertion and expiry amortized
+/// O(1).
+#[derive(Default)]
+struct Window {
 	samples: VecDeque<Sample>,
 }
 
@@ -274,30 +334,27 @@ struct Sample {
 	lateness: i128,
 }
 
-impl Baseline {
-	fn observe(&mut self, timestamp: Timestamp, now: Instant) -> Duration {
-		let epoch = *self.epoch.get_or_insert(now);
+impl Window {
+	/// Insert a lateness observed at `now` and return the window's minimum.
+	fn observe(&mut self, now: Instant, lateness: i128) -> i128 {
 		while self
 			.samples
 			.front()
-			.is_some_and(|sample| now.duration_since(sample.at) > JITTER_WINDOW)
+			.is_some_and(|sample| now.saturating_duration_since(sample.at) > JITTER_WINDOW)
 		{
 			self.samples.pop_front();
 		}
-
-		let elapsed = match now.checked_duration_since(epoch) {
-			Some(duration) => duration.as_nanos() as i128,
-			None => -(epoch.duration_since(now).as_nanos() as i128),
-		};
-		let lateness = elapsed - timestamp.as_nanos() as i128;
 		while self.samples.back().is_some_and(|sample| sample.lateness >= lateness) {
 			self.samples.pop_back();
 		}
 		self.samples.push_back(Sample { at: now, lateness });
-		let minimum = self.samples.front().expect("the current sample was inserted").lateness;
-		let spread = u64::try_from(lateness - minimum).unwrap_or(u64::MAX);
-		Duration::from_nanos(spread)
+		self.samples.front().expect("the current sample was inserted").lateness
 	}
+}
+
+/// `to - from` as a duration, clamped at zero.
+fn nanos_between(from: i128, to: i128) -> Duration {
+	Duration::from_nanos(u64::try_from(to - from).unwrap_or(if to > from { u64::MAX } else { 0 }))
 }
 
 #[cfg(test)]
@@ -355,34 +412,94 @@ mod tests {
 
 	#[test]
 	fn baseline_expires_drift() {
+		let mut estimator = Estimator::new();
 		let anchor = Instant::now();
-
-		let mut drift = Baseline::default();
-		let maximum = (0..100u128)
-			.map(|second| {
-				drift.observe(
-					micros((second * 1_000_000) as u64),
-					anchor + Duration::from_millis((second * 1_001) as u64),
-				)
-			})
-			.max()
-			.unwrap();
-		assert!(maximum <= Duration::from_millis(10), "{maximum:?}");
+		for second in 0..100u64 {
+			estimator.flush(
+				micros(second * 1_000_000),
+				anchor + Duration::from_millis(second * 1_001),
+			);
+		}
+		let jitter = estimator.estimate().jitter.unwrap();
+		assert!(jitter <= Duration::from_millis(10), "{jitter:?}");
 	}
 
 	#[test]
 	fn early_flush_keeps_lowering_the_baseline() {
-		let mut baseline = Baseline::default();
+		let mut estimator = Estimator::new();
 		let anchor = Instant::now();
-		for second in 0..100u128 {
-			assert_eq!(
-				baseline.observe(
-					micros((second * 2_000_000) as u64),
-					anchor + Duration::from_secs(second as u64)
-				),
-				Duration::ZERO
-			);
+		for second in 0..100u64 {
+			estimator.flush(micros(second * 2_000_000), anchor + Duration::from_secs(second));
 		}
+		assert_eq!(estimator.estimate(), Estimate::default());
+	}
+
+	/// Two tracks on one broadcast baseline, flushed every 100 ms for `seconds` with the lateness
+	/// each closure returns (in ms) at a given frame's media time.
+	fn pair(seconds: u64, fast: impl Fn(u64) -> u64, slow: impl Fn(u64) -> u64) -> (Estimate, Estimate) {
+		let broadcast = Baseline::default();
+		let mut estimators = [
+			Estimator::with_broadcast(broadcast.clone()),
+			Estimator::with_broadcast(broadcast),
+		];
+		let anchor = Instant::now();
+		for frame in 0..seconds * 10 {
+			let pts = frame * 100;
+			for (estimator, lateness) in estimators.iter_mut().zip([fast(pts), slow(pts)]) {
+				estimator.flush(micros(pts * 1_000), anchor + Duration::from_millis(pts + lateness));
+			}
+		}
+		let [fast, slow] = estimators.map(|estimator| estimator.estimate());
+		(fast, slow)
+	}
+
+	#[test]
+	fn a_constant_offset_is_delay_on_the_slower_track() {
+		let (fast, slow) = pair(5, |_| 0, |_| 200);
+		assert_eq!(fast, Estimate::default());
+		assert_eq!(slow, Estimate::default().with_delay(Duration::from_millis(200)));
+	}
+
+	#[test]
+	fn a_common_drift_stays_bounded() {
+		// Both media clocks run 0.1% slow for 100 s, so each lateness climbs 100 ms together.
+		let (fast, slow) = pair(100, |pts| pts / 1_000, |pts| 200 + pts / 1_000);
+		assert_eq!(fast.delay, None);
+		assert_eq!(slow.delay, Some(Duration::from_millis(200)));
+		for jitter in [fast.jitter, slow.jitter] {
+			assert!(jitter.unwrap() <= Duration::from_millis(10), "{jitter:?}");
+		}
+	}
+
+	/// The earliest track starts at 0 and the other at 200 ms, then the first drifts to 500 ms. The
+	/// delays no longer share an origin, but the drifting track's own `delay` covers the new offset,
+	/// so the largest `delay + jitter` never falls below the real spread.
+	#[test]
+	fn the_earliest_track_changing_does_not_under_buffer() {
+		let drift = |pts: u64| pts.saturating_sub(10_000).min(50_000) / 100;
+		let (drifted, steady) = pair(80, drift, |_| 200);
+		assert_eq!(steady.delay, Some(Duration::from_millis(200)));
+		assert_eq!(drifted.delay, Some(Duration::from_millis(300)));
+	}
+
+	#[test]
+	fn a_discontinuity_clears_the_broadcast_baseline() {
+		let broadcast = Baseline::default();
+		let mut audio = Estimator::with_broadcast(broadcast.clone());
+		let mut video = Estimator::with_broadcast(broadcast);
+		let anchor = Instant::now();
+		audio.flush(micros(0), anchor);
+		video.flush(micros(0), anchor + Duration::from_millis(50));
+		assert_eq!(video.estimate().delay, Some(Duration::from_millis(50)));
+
+		// Both resume at the previous live edge after a 2 s pause: the pause is not a delay.
+		audio.discontinuity();
+		video.discontinuity();
+		video.flush(micros(40_000), anchor + Duration::from_millis(2_090));
+		audio.flush(micros(40_000), anchor + Duration::from_millis(2_040));
+		video.flush(micros(80_000), anchor + Duration::from_millis(2_130));
+		assert_eq!(video.estimate().delay, Some(Duration::from_millis(50)));
+		assert_eq!(audio.estimate().delay, None);
 	}
 
 	#[test]

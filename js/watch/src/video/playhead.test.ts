@@ -4,7 +4,7 @@ import type { Time } from "@moq/net";
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
 
 // `jitter` is a branded u53 in the catalog schema, so build the config through a cast.
-function config(props: { jitter?: number; framerate?: number }): Catalog.VideoConfig {
+function config(props: { jitter?: number; delay?: number; framerate?: number }): Catalog.VideoConfig {
 	return { codec: "avc1.640028", container: { kind: "legacy" }, ...props } as Catalog.VideoConfig;
 }
 
@@ -25,6 +25,12 @@ describe("renditionJitter", () => {
 
 	it("is undefined when the catalog declares neither", () => {
 		expect(renditionJitter(config({}))).toBeUndefined();
+	});
+
+	it("adds the delay behind the earliest rendition", () => {
+		expect(renditionJitter(config({ delay: 200, jitter: 60 }))).toBe(ms(260));
+		expect(renditionJitter(config({ delay: 200, framerate: 30 }))).toBe(ms(234));
+		expect(renditionJitter(config({ delay: 200 }))).toBe(ms(200));
 	});
 });
 

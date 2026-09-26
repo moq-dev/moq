@@ -336,7 +336,7 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		let sub_origin = produce_origin(Hop::random());
 
 		let mut opts = MockConnectOptions::new(version);
-		opts.server_publish = Some(pub_origin.clone());
+		opts.server_publish = Some(pub_origin.consume());
 		opts.client_subscribe = Some(sub_origin.clone());
 		let MockPair { client, server, .. } = connect_mock(opts).await;
 
@@ -423,7 +423,7 @@ async fn goaway_drains_routes(version: Version) {
 		let sub_origin = produce_origin(Hop::random());
 
 		let mut opts = MockConnectOptions::new(version);
-		opts.server_publish = Some(pub_origin.clone());
+		opts.server_publish = Some(pub_origin.consume());
 		opts.client_subscribe = Some(sub_origin.clone());
 		let MockPair { client, server, .. } = connect_mock(opts).await;
 

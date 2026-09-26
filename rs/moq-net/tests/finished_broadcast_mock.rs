@@ -38,7 +38,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new("moq-lite-05".parse::<Version>().unwrap());
-	options.server_publish = Some(publisher.clone());
+	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(subscriber.clone());
 	let pair: MockPair = connect_mock(options).await;
 
