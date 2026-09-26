@@ -162,16 +162,19 @@ final class Moq {
   BroadcastProducer createBroadcast(String path) =>
       session.publish().createBroadcast(path: path);
 
-  /// Stream routes matching [options]; update prefixes stay relative to the origin.
-  Stream<AnnounceUpdate> announcements({
+  /// Stream announce events matching [options]; prefixes stay relative to the origin.
+  ///
+  /// A [LiveAnnounceEvent] follows the routes live at subscribe time, so a
+  /// listener can collect what is live and stop there.
+  Stream<AnnounceEvent> announcements({
     AnnounceOptions options = const AnnounceOptions(),
   }) async* {
     final announced = session.consume().announced(config: options._ffi);
     try {
       while (true) {
-        final announcement = await announced.next();
-        if (announcement == null) return;
-        yield announcement;
+        final event = await announced.next();
+        if (event == null) return;
+        yield event;
       }
     } finally {
       announced.cancel();

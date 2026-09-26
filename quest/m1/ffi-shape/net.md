@@ -14,7 +14,7 @@ are renamed.
   nested TLS, QUIC, and backoff records. Validate in `new`. Resolve defaults
   in Rust, since Go gets none; Option fields keep additions additive. This
   also retires Kotlin `Moq.connect`'s twelve named parameters.
-- Objects that are only getters become records (`AnnounceUpdate` today).
+- Objects that are only getters become records.
   Handles with verbs (`Request`, `TrackRequest`, `GroupRequest`) stay objects.
 - `TrackProducer` drops `name`/`is_used`/`used`/`unused` for `demand()`.
 - The renames no additive change could make:

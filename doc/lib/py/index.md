@@ -22,8 +22,11 @@ import asyncio, moq
 
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        # The filter is relative to the literal prefix; updates stay origin-relative.
-        async for announcement in client.announced("live/", filter="*/camera"):
+        # The filter is relative to the literal prefix; prefixes stay origin-relative.
+        async for event in client.announced("live/", filter="*/camera"):
+            if not isinstance(event, moq.AnnounceEvent.ANNOUNCED):
+                continue  # UPDATED, RETRACTED, or LIVE
+            announcement = event.announce
             print(announcement.captures)  # what * matched, or None for a partial overlap
             broadcast = await client.request_broadcast(announcement.prefix)
             catalog = await broadcast.catalog()
@@ -79,8 +82,11 @@ an unannounced producer, invisible to everyone; `broadcast.announce(route)` /
 (`""` for everything). Hold the returned handle while the claim should stay
 advertised, and reject the requests you will not serve. A route is a
 capability, not an inventory. `announced(prefix, filter=...)` combines a literal
-root with an optional relative pattern; each announcement `.prefix` stays
-relative to the origin and `.captures` reports what the pattern wildcards matched.
+root with an optional relative pattern and yields `AnnounceEvent`s:
+`ANNOUNCED`, `UPDATED`, or `RETRACTED` carrying an `Announce` as `.announce`,
+whose `.prefix` stays relative to the origin and whose `.captures` reports what
+the pattern wildcards matched, or `LIVE` once every route live at subscribe
+time has been delivered. Break on `LIVE` to list what is live and stop.
 Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
 `hidden=True`.
 

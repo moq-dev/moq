@@ -9,6 +9,21 @@ import moq_ffi
 import pytest
 
 
+async def routes(announced: moq.AnnounceConsumer):
+    """Yield each newly announced route, skipping the other events such as LIVE."""
+    async for event in announced:
+        if isinstance(event, moq.AnnounceEvent.ANNOUNCED):
+            yield event.announce
+
+
+async def next_route(announced: moq.AnnounceConsumer) -> moq.AnnounceEvent:
+    """The next announce event that is not LIVE, which lands wherever the backlog ends."""
+    while True:
+        event = await asyncio.wait_for(anext(announced), timeout=5.0)
+        if not isinstance(event, moq.AnnounceEvent.LIVE):
+            return event
+
+
 def opus_head() -> bytes:
     return (
         b"OpusHead"
@@ -46,7 +61,7 @@ async def test_server_client_roundtrip():
                 tls_verify=False,
                 bind="127.0.0.1:0",
             ) as client:
-                async for announcement in client.announced():
+                async for announcement in routes(client.announced()):
                     assert announcement.prefix == "hello"
 
                     broadcast_consumer = await client.request_broadcast(announcement.prefix)
@@ -124,7 +139,7 @@ async def test_client_reconnects_and_resumes_announcements():
                 # A broadcast published only after the reconnect still arrives.
                 broadcast = server.create_broadcast("after-reconnect")
                 broadcast.announce()
-                async for announcement in client.announced():
+                async for announcement in routes(client.announced()):
                     assert announcement.prefix == "after-reconnect"
                     break
                 broadcast.finish()
@@ -278,7 +293,7 @@ async def test_serve_helper_accepts_clients():
                 tls_verify=False,
                 bind="127.0.0.1:0",
             ) as client:
-                async for announcement in client.announced():
+                async for announcement in routes(client.announced()):
                     assert announcement.prefix == "via-serve"
                     break
         finally:
@@ -303,9 +318,8 @@ async def test_broadcast_route_over_wire():
                 tls_verify=False,
                 bind="127.0.0.1:0",
             ) as client:
-                async for announcement in client.announced():
+                async for announcement in routes(client.announced()):
                     assert announcement.prefix == "with-route"
-                    assert announcement.active
                     route = announcement.route
                     assert all(isinstance(h, int) for h in route.hops)
                     # A route crossing at least one session carries a non-empty hop chain.
@@ -321,7 +335,7 @@ async def test_broadcast_route_over_wire():
 
 
 async def test_route_update_observes_restart():
-    """A route metadata update arrives as another active announcement.
+    """A route metadata update arrives as an UPDATED event.
 
     The publisher re-prices its announced route; the subscriber observes the new
     hop chain in place (no retraction), and cancelling retracts it.
@@ -338,24 +352,24 @@ async def test_route_update_observes_restart():
                 bind="127.0.0.1:0",
             ) as client:
                 announced = client.announced()
-                first = await asyncio.wait_for(announced.__anext__(), timeout=5.0)
-                assert first.prefix == "routed"
-                assert first.active
-                assert 42 in first.route.hops
-                assert 77 not in first.route.hops
+                first = await next_route(announced)
+                assert isinstance(first, moq.AnnounceEvent.ANNOUNCED)
+                assert first.announce.prefix == "routed"
+                assert 42 in first.announce.route.hops
+                assert 77 not in first.announce.route.hops
 
                 # The publisher advertises a longer chain: an in-place update.
                 announce.update(moq.Route(hops=[42, 77]))
-                updated = await asyncio.wait_for(announced.__anext__(), timeout=5.0)
-                assert updated.prefix == "routed"
-                assert updated.active
-                assert 77 in updated.route.hops
+                updated = await next_route(announced)
+                assert isinstance(updated, moq.AnnounceEvent.UPDATED)
+                assert updated.announce.prefix == "routed"
+                assert 77 in updated.announce.route.hops
 
                 # Cancelling retracts the route.
                 announce.cancel()
-                ended = await asyncio.wait_for(announced.__anext__(), timeout=5.0)
-                assert ended.prefix == "routed"
-                assert not ended.active
+                ended = await next_route(announced)
+                assert isinstance(ended, moq.AnnounceEvent.RETRACTED)
+                assert ended.announce.prefix == "routed"
         finally:
             serve_task.cancel()
             try:

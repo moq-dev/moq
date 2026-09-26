@@ -2,7 +2,7 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, moq_announce_update, moq_string};
+use crate::{Error, Id, NonZeroSlab, State, moq_announce_kind, moq_announce_update, moq_string};
 
 /// A spawned task entry: `close` signals shutdown, `callback` delivers status.
 ///
@@ -25,7 +25,7 @@ pub struct Origin {
 	/// Active origin producers for publishing and consuming broadcasts.
 	active: NonZeroSlab<moq_net::origin::Producer>,
 
-	/// Broadcast announcement information (path, active status).
+	/// Delivered announce events, freed by the caller.
 	announced: NonZeroSlab<AnnouncedRecord>,
 
 	/// Announcement listener tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
@@ -41,12 +41,12 @@ pub struct Origin {
 	broadcast_request: NonZeroSlab<Option<moq_net::origin::Request>>,
 }
 
-/// One announcement and the C string views borrowed from it.
+/// One announce event and the C string views borrowed from it.
 struct AnnouncedRecord {
 	prefix: String,
 	captures: Option<Vec<String>>,
 	capture_views: Vec<moq_string>,
-	active: bool,
+	kind: moq_announce_kind,
 }
 
 // The raw pointers only borrow immutable String allocations owned by this record.
@@ -54,7 +54,21 @@ struct AnnouncedRecord {
 unsafe impl Send for AnnouncedRecord {}
 
 impl AnnouncedRecord {
-	fn new(update: moq_net::announce::Announce, active: bool) -> Self {
+	fn new(event: moq_net::announce::Event) -> Self {
+		use moq_net::announce::Event;
+		let (update, kind) = match event {
+			Event::Announced(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_ANNOUNCED),
+			Event::Updated(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_UPDATED),
+			Event::Retracted(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_RETRACTED),
+			Event::Live => {
+				return Self {
+					prefix: String::new(),
+					captures: None,
+					capture_views: Vec::new(),
+					kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_LIVE,
+				};
+			}
+		};
 		let captures = update.captures.map(|captures| {
 			captures
 				.into_iter()
@@ -75,7 +89,7 @@ impl AnnouncedRecord {
 			prefix: update.prefix.to_string(),
 			captures,
 			capture_views,
-			active,
+			kind,
 		}
 	}
 }
@@ -139,25 +153,17 @@ impl Origin {
 	) -> Result<(), Error> {
 		loop {
 			// `biased` so a pending close always wins over a ready announcement.
-			let (update, active) = tokio::select! {
+			let event = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
 				next = consumer.next() => match next {
-					Some(moq_net::announce::Event::Announced(update) | moq_net::announce::Event::Updated(update)) => {
-						(update, true)
-					}
-					Some(moq_net::announce::Event::Retracted(update)) => (update, false),
-					// The C API has no caught-up callback yet.
-					Some(moq_net::announce::Event::Live) => continue,
+					Some(event) => event,
 					None => return Ok(()),
 				},
 			};
 
-			// Hold the lock only to buffer the announcement; release it before the callback.
-			let announced_id = State::lock()
-				.origin
-				.announced
-				.insert(AnnouncedRecord::new(update, active))?;
+			// Hold the lock only to buffer the event; release it before the callback.
+			let announced_id = State::lock().origin.announced.insert(AnnouncedRecord::new(event))?;
 			callback.call(announced_id);
 		}
 	}
@@ -170,14 +176,14 @@ impl Origin {
 			captures: announced.capture_views.as_ptr(),
 			captures_len: announced.capture_views.len(),
 			has_captures: announced.captures.is_some(),
-			active: announced.active,
+			kind: announced.kind,
 		};
 		Ok(())
 	}
 
 	/// Free a single announcement record delivered to an `on_announce` callback.
 	///
-	/// Each announce/unannounce event allocates a record (read via [`Self::announced_info`]);
+	/// Each announce event allocates a record (read via [`Self::announced_info`]);
 	/// the caller releases it here once done. This is per-record, distinct from
 	/// [`Self::announced_close`], which stops the whole listener. Records are freed explicitly
 	/// rather than on unannounce: an unannounce is its own delivered record, and auto-freeing

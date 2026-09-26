@@ -2,6 +2,16 @@ import Foundation
 import XCTest
 @testable import Moq
 
+/// The next announce event that is not `.live`, which lands wherever the backlog ends.
+private func nextRoute(_ announced: AnnounceConsumer) async throws -> AnnounceEvent {
+    while true {
+        let event = try XCTUnwrap(try await announced.next(), "announce stream ended")
+        if event != .live {
+            return event
+        }
+    }
+}
+
 final class SmokeTests: XCTestCase {
     func testStreamAbortPreservesProtocolDetails() async throws {
         let broadcast = try BroadcastProducer()
@@ -85,22 +95,25 @@ final class SmokeTests: XCTestCase {
 
         try broadcast.announce()
         let announced = try consumer.announced(prefix: "")
-        let first = try await announced.next()
-        XCTAssertEqual(first?.prefix, "live")
-        XCTAssertEqual(first?.active, true)
+        guard case .announced(let first) = try await nextRoute(announced) else {
+            return XCTFail("expected an announcement")
+        }
+        XCTAssertEqual(first.prefix, "live")
 
         try broadcast.unannounce()
-        let retracted = try await announced.next()
-        XCTAssertEqual(retracted?.prefix, "live")
-        XCTAssertEqual(retracted?.active, false)
+        guard case .retracted(let retracted) = try await nextRoute(announced) else {
+            return XCTFail("expected a retraction")
+        }
+        XCTAssertEqual(retracted.prefix, "live")
         do {
             _ = try await consumer.requestBroadcast(path: "live")
             XCTFail("an unannounced broadcast must be unroutable")
         } catch {}
 
         try broadcast.announce()
-        let back = try await announced.next()
-        XCTAssertEqual(back?.active, true)
+        guard case .announced = try await nextRoute(announced) else {
+            return XCTFail("expected a reannouncement")
+        }
         _ = try await consumer.requestBroadcast(path: "live")
     }
 
@@ -110,9 +123,35 @@ final class SmokeTests: XCTestCase {
         let chat = try origin.createBroadcast(path: "room/alice/chat")
         try chat.announce()
 
-        let update = try await announced.next()
-        XCTAssertEqual(update?.prefix, "room/alice/chat")
-        XCTAssertEqual(update?.captures, ["alice"])
+        guard case .announced(let update) = try await nextRoute(announced) else {
+            return XCTFail("expected an announcement")
+        }
+        XCTAssertEqual(update.prefix, "room/alice/chat")
+        XCTAssertEqual(update.captures, ["alice"])
+    }
+
+    func testAnnouncedYieldsLiveOnceCaughtUp() async throws {
+        let origin = OriginProducer()
+        let consumer = origin.consume()
+
+        let empty = try consumer.announced()
+        let first = try await empty.next()
+        XCTAssertEqual(first, .live)
+        empty.cancel()
+
+        let broadcast = try origin.createBroadcast(path: "cam")
+        try broadcast.announce()
+        _ = try await consumer.announcedBroadcast(path: "cam").available()
+
+        var listed: [String] = []
+        for try await event in try consumer.announced() {
+            if case .announced(let announce) = event {
+                listed.append(announce.prefix)
+            } else if event == .live {
+                break
+            }
+        }
+        XCTAssertEqual(listed, ["cam"])
     }
 
     func testDynamicServesARequestUnderAPrefix() async throws {

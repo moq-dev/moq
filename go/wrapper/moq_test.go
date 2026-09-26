@@ -458,24 +458,15 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	}
 	defer announced.Cancel()
 
-	ann, err := announced.Next(ctx)
-	if err != nil {
-		t.Fatal(err)
+	ann := nextAnnounced(t, ctx, announced)
+	if ann.Prefix != "live" {
+		t.Fatalf("prefix = %q, want %q", ann.Prefix, "live")
 	}
-	if ann == nil {
-		t.Fatal("expected an announcement")
-	}
-	if ann.Prefix() != "live" {
-		t.Fatalf("prefix = %q, want %q", ann.Prefix(), "live")
-	}
-	if !ann.Active() {
-		t.Fatal("expected an active announcement")
-	}
-	if route := ann.Route(); len(route.Hops) != 0 {
-		t.Fatalf("route hops = %v, want empty for local origin", route.Hops)
+	if len(ann.Route.Hops) != 0 {
+		t.Fatalf("route hops = %v, want empty for local origin", ann.Route.Hops)
 	}
 
-	bc, err := consumer.RequestBroadcast(ctx, ann.Prefix())
+	bc, err := consumer.RequestBroadcast(ctx, ann.Prefix)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1301,17 +1292,16 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	}
 	defer announced.Cancel()
 
-	ann, err := announced.Next(ctx)
-	if err != nil || ann == nil || ann.Prefix() != "live" || !ann.Active() || ann.Route().Cost != 3 {
-		t.Fatalf("announce: ann=%+v err=%v", ann, err)
+	if ann := nextAnnounced(t, ctx, announced); ann.Prefix != "live" || ann.Route.Cost != 3 {
+		t.Fatalf("announce: ann=%+v", ann)
 	}
 
 	if err := broadcast.Unannounce(); err != nil {
 		t.Fatal(err)
 	}
-	ann, err = announced.Next(ctx)
-	if err != nil || ann == nil || ann.Prefix() != "live" || ann.Active() {
-		t.Fatalf("unannounce: ann=%+v err=%v", ann, err)
+	event := nextRoute(t, ctx, announced)
+	if retracted, ok := event.(moq.AnnounceEventRetracted); !ok || retracted.Announce.Prefix != "live" {
+		t.Fatalf("unannounce: event=%+v", event)
 	}
 	if _, err := consumer.RequestBroadcast(ctx, "live"); err == nil {
 		t.Fatal("an unannounced broadcast must be unroutable")
@@ -1320,10 +1310,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	if err := broadcast.Announce(moq.Route{}); err != nil {
 		t.Fatal(err)
 	}
-	ann, err = announced.Next(ctx)
-	if err != nil || ann == nil || !ann.Active() {
-		t.Fatalf("reannounce: ann=%+v err=%v", ann, err)
-	}
+	nextAnnounced(t, ctx, announced)
 	if _, err := consumer.RequestBroadcast(ctx, "live"); err != nil {
 		t.Fatal(err)
 	}
@@ -1359,16 +1346,12 @@ func TestAnnouncedPatternCaptures(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	update, err := announced.Next(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if update == nil || update.Prefix() != "room/alice/chat" {
+	update := nextAnnounced(t, ctx, announced)
+	if update.Prefix != "room/alice/chat" {
 		t.Fatalf("update = %+v, want room/alice/chat", update)
 	}
-	captures := update.Captures()
-	if len(captures) != 1 || captures[0] != "alice" {
-		t.Fatalf("captures = %v, want [alice]", captures)
+	if update.Captures == nil || len(*update.Captures) != 1 || (*update.Captures)[0] != "alice" {
+		t.Fatalf("captures = %v, want [alice]", update.Captures)
 	}
 }
 
@@ -1394,16 +1377,101 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	update, err := announced.Next(ctx)
+	update := nextAnnounced(t, ctx, announced)
+	if update.Prefix != "room/alice/chat" {
+		t.Fatalf("update = %+v, want room/alice/chat", update)
+	}
+	if update.Captures == nil || len(*update.Captures) != 0 {
+		t.Fatalf("captures = %#v, want a non-nil empty slice", update.Captures)
+	}
+}
+
+// Live marks the end of the routes live at subscribe time: at once on an empty
+// origin, and after the existing routes otherwise, so an app can list and stop.
+func TestAnnouncedYieldsLiveOnceCaughtUp(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := moq.NewOriginProducer()
+	consumer := origin.Consume()
+
+	empty, err := consumer.Announced(moq.AnnounceOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if update == nil || update.Prefix() != "room/alice/chat" {
-		t.Fatalf("update = %+v, want room/alice/chat", update)
+	defer empty.Cancel()
+	if event, err := empty.Next(ctx); err != nil || event != (moq.AnnounceEventLive{}) {
+		t.Fatalf("empty origin: event=%+v err=%v, want Live", event, err)
 	}
-	if captures := update.Captures(); captures == nil || len(captures) != 0 {
-		t.Fatalf("captures = %#v, want a non-nil empty slice", captures)
+
+	broadcast, err := origin.CreateBroadcast("cam")
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer func() { _ = broadcast.Finish() }()
+	if err := broadcast.Announce(moq.Route{}); err != nil {
+		t.Fatal(err)
+	}
+	available, err := consumer.AnnouncedBroadcast("cam")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer available.Cancel()
+	if _, err := available.Available(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	announced, err := consumer.Announced(moq.AnnounceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer announced.Cancel()
+
+	var listed []string
+	for event, err := range announced.All(ctx) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a, ok := event.(moq.AnnounceEventAnnounced); ok {
+			listed = append(listed, a.Announce.Prefix)
+		}
+		if _, ok := event.(moq.AnnounceEventLive); ok {
+			break
+		}
+	}
+	if len(listed) != 1 || listed[0] != "cam" {
+		t.Fatalf("listed = %v, want [cam]", listed)
+	}
+}
+
+// nextRoute returns the next announce event that is not Live, skipping Live wherever it lands.
+func nextRoute(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer) moq.AnnounceEvent {
+	t.Helper()
+
+	for {
+		event, err := announced.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event == nil {
+			t.Fatal("announcement stream ended")
+		}
+		if _, live := event.(moq.AnnounceEventLive); !live {
+			return event
+		}
+	}
+}
+
+// nextAnnounced returns the next newly announced route, skipping Live.
+func nextAnnounced(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer) moq.Announce {
+	t.Helper()
+
+	event := nextRoute(t, ctx, announced)
+	announcedEvent, ok := event.(moq.AnnounceEventAnnounced)
+	if !ok {
+		t.Fatalf("expected an announcement, got %+v", event)
+	}
+	return announcedEvent.Announce
 }
 
 func TestDynamicServesARequestUnderAPrefix(t *testing.T) {

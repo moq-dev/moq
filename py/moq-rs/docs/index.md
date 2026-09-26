@@ -16,9 +16,10 @@ import moq
 
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        async for announcement in client.announced():
-            broadcast = await client.request_broadcast(announcement.prefix)
-            print(await broadcast.catalog())
+        async for event in client.announced():
+            if isinstance(event, moq.AnnounceEvent.ANNOUNCED):
+                broadcast = await client.request_broadcast(event.announce.prefix)
+                print(await broadcast.catalog())
 
 
 asyncio.run(main())
@@ -100,7 +101,8 @@ asyncio.run(main())
    OriginDynamic
    AnnounceConsumer
    AnnouncedBroadcast
-   AnnounceUpdate
+   Announce
+   AnnounceEvent
 ```
 
 ## Data types

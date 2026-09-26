@@ -14,6 +14,21 @@ def create_announced(origin: moq.OriginProducer, path: str) -> moq.BroadcastProd
     return broadcast
 
 
+async def routes(announced: moq.AnnounceConsumer):
+    """Yield each newly announced route, skipping the other events such as LIVE."""
+    async for event in announced:
+        if isinstance(event, moq.AnnounceEvent.ANNOUNCED):
+            yield event.announce
+
+
+async def next_route(announced: moq.AnnounceConsumer) -> moq.AnnounceEvent:
+    """The next announce event that is not LIVE, which lands wherever the backlog ends."""
+    while True:
+        event = await asyncio.wait_for(anext(announced), timeout=5.0)
+        if not isinstance(event, moq.AnnounceEvent.LIVE):
+            return event
+
+
 def opus_head() -> bytes:
     """Build a valid OpusHead init buffer (RFC 7845)."""
     return (
@@ -175,7 +190,7 @@ async def test_local_publish_consume_audio():
 
     consumer = origin.consume()
 
-    async for announcement in consumer.announced():
+    async for announcement in routes(consumer.announced()):
         assert announcement.prefix == "live"
 
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
@@ -210,7 +225,7 @@ async def test_video_publish_consume():
 
     consumer = origin.consume()
 
-    async for announcement in consumer.announced():
+    async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         catalog = await broadcast_consumer.catalog()
 
@@ -245,7 +260,7 @@ async def test_video_publish_named_track():
 
     consumer = origin.consume()
 
-    async for announcement in consumer.announced():
+    async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         catalog = await broadcast_consumer.catalog()
         assert list(catalog.video.keys()) == ["hd"]
@@ -259,7 +274,7 @@ async def test_multiple_frames_ordering():
 
     consumer = origin.consume()
 
-    async for announcement in consumer.announced():
+    async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         catalog = await broadcast_consumer.catalog()
         track_name = list(catalog.audio.keys())[0]
@@ -286,7 +301,7 @@ async def test_catalog_update_on_new_track():
 
     consumer = origin.consume()
 
-    async for announcement in consumer.announced():
+    async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         cat_consumer = await broadcast_consumer.subscribe_catalog()
 
@@ -318,7 +333,7 @@ async def test_announced_broadcast():
 
     consumer = origin.consume()
 
-    async for announcement in consumer.announced():
+    async for announcement in routes(consumer.announced()):
         assert announcement.prefix == "test/broadcast"
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         _catalog = await broadcast_consumer.subscribe_catalog()
@@ -673,7 +688,7 @@ async def test_subscribe_media_default_latency_and_context_manager():
 
     consumer = origin.consume()
 
-    async for announcement in consumer.announced():
+    async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         catalog = await broadcast_consumer.catalog()
         track_name, audio = next(iter(catalog.audio.items()))
@@ -697,7 +712,7 @@ async def test_raw_publish_consume():
 
     consumer = origin.consume()
 
-    async for announcement in consumer.announced():
+    async for announcement in routes(consumer.announced()):
         assert announcement.prefix == "robot/arm"
 
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
@@ -722,7 +737,7 @@ async def test_raw_multiple_frames():
 
     consumer = origin.consume()
 
-    async for announcement in consumer.announced():
+    async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         raw_consumer = await broadcast_consumer.subscribe_track("commands", moq.Subscription(max_age_us=1_000_000))
 
@@ -804,7 +819,7 @@ async def test_raw_group_sequence():
 
     consumer = origin.consume()
 
-    async for announcement in consumer.announced():
+    async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         raw_consumer = await broadcast_consumer.subscribe_track("seq", moq.Subscription(max_age_us=1_000_000))
 
@@ -871,7 +886,7 @@ async def test_raw_multi_frame_group():
 
     consumer = origin.consume()
 
-    async for announcement in consumer.announced():
+    async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         raw_consumer = await broadcast_consumer.subscribe_track("chunks")
 
@@ -1136,23 +1151,46 @@ async def test_broadcast_is_reachable_only_while_announced():
 
     broadcast.announce()
     announced = consumer.announced()
-    first = await asyncio.wait_for(anext(announced), timeout=5.0)
-    assert first.prefix == "live"
-    assert first.active
+    first = await next_route(announced)
+    assert isinstance(first, moq.AnnounceEvent.ANNOUNCED)
+    assert first.announce.prefix == "live"
 
     broadcast.unannounce()
-    retracted = await asyncio.wait_for(anext(announced), timeout=5.0)
-    assert retracted.prefix == "live"
-    assert not retracted.active
+    retracted = await next_route(announced)
+    assert isinstance(retracted, moq.AnnounceEvent.RETRACTED)
+    assert retracted.announce.prefix == "live"
     with pytest.raises(Exception):
         await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
 
     broadcast.announce()
-    back = await asyncio.wait_for(anext(announced), timeout=5.0)
-    assert back.active
+    back = await next_route(announced)
+    assert isinstance(back, moq.AnnounceEvent.ANNOUNCED)
     await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
     announced.cancel()
     track.finish()
+    broadcast.finish()
+
+
+async def test_announced_yields_live_once_caught_up():
+    """LIVE ends the backlog: at once on an empty origin, after existing routes otherwise."""
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+
+    empty = consumer.announced()
+    assert isinstance(await asyncio.wait_for(anext(empty), timeout=5.0), moq.AnnounceEvent.LIVE)
+    empty.cancel()
+
+    broadcast = create_announced(origin, "cam")
+    await asyncio.wait_for(consumer.announced_broadcast("cam"), timeout=5.0)
+
+    listed = []
+    async with consumer.announced() as announced:
+        async for event in announced:
+            if isinstance(event, moq.AnnounceEvent.LIVE):
+                break
+            assert isinstance(event, moq.AnnounceEvent.ANNOUNCED)
+            listed.append(event.announce.prefix)
+    assert listed == ["cam"]
     broadcast.finish()
 
 
@@ -1162,15 +1200,17 @@ async def test_announced_pattern_captures():
     announced = consumer.announced("room", filter="*/chat")
 
     dynamic = origin.dynamic("room")
-    overlap = await asyncio.wait_for(anext(announced), timeout=5.0)
-    assert overlap.prefix == "room"
-    assert overlap.captures is None
+    overlap = await next_route(announced)
+    assert isinstance(overlap, moq.AnnounceEvent.ANNOUNCED)
+    assert overlap.announce.prefix == "room"
+    assert overlap.announce.captures is None
 
     audio = create_announced(origin, "room/alice/audio")
     chat = create_announced(origin, "room/alice/chat")
-    match = await asyncio.wait_for(anext(announced), timeout=5.0)
-    assert match.prefix == "room/alice/chat"
-    assert match.captures == ["alice"]
+    match = await next_route(announced)
+    assert isinstance(match, moq.AnnounceEvent.ANNOUNCED)
+    assert match.announce.prefix == "room/alice/chat"
+    assert match.announce.captures == ["alice"]
 
     announced.cancel()
     dynamic.cancel()

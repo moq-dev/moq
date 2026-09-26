@@ -122,6 +122,46 @@ impl Callback {
 	}
 }
 
+impl Callback {
+	/// Wait for the next announce event that is not `LIVE`, freeing any `LIVE` ahead of it.
+	fn recv_route(&self) -> (u32, moq_announce_update) {
+		loop {
+			let announced = id(self.recv());
+			let info = announce_info(announced);
+			if info.kind != moq_announce_kind::MOQ_ANNOUNCE_KIND_LIVE {
+				return (announced, info);
+			}
+			assert_eq!(moq_origin_announced_free(announced), 0);
+		}
+	}
+
+	/// Like [`recv_terminal`](Self::recv_terminal), but first frees any announce
+	/// events (such as a late `LIVE`) still queued ahead of it.
+	fn recv_announce_terminal(&self) -> i32 {
+		loop {
+			let code = self.recv();
+			if code <= 0 {
+				return code;
+			}
+			assert_eq!(moq_origin_announced_free(id(code)), 0);
+		}
+	}
+}
+
+/// Read an announce event delivered to an `on_announce` callback.
+fn announce_info(announced: u32) -> moq_announce_update {
+	let mut info = moq_announce_update {
+		prefix: std::ptr::null(),
+		prefix_len: 0,
+		captures: std::ptr::null(),
+		captures_len: 0,
+		has_captures: false,
+		kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_LIVE,
+	};
+	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
+	info
+}
+
 impl Drop for Callback {
 	fn drop(&mut self) {
 		unsafe { drop(Box::from_raw(self.ptr as *mut mpsc::Sender<i32>)) };
@@ -1826,19 +1866,8 @@ fn announced_free_lifecycle() {
 	let ann_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), ann_cb.ptr) });
 
 	// The first callback is the announcement for our broadcast.
-	let announced = id(ann_cb.recv());
-
-	// Its info reports our path, active.
-	let mut info = moq_announce_update {
-		prefix: std::ptr::null(),
-		prefix_len: 0,
-		captures: std::ptr::null(),
-		captures_len: 0,
-		has_captures: false,
-		active: false,
-	};
-	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
-	assert!(info.active, "broadcast should be active");
+	let (announced, mut info) = ann_cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_ANNOUNCED);
 	let got = unsafe { std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len) };
 	assert_eq!(got, path, "announced prefix should match");
 
@@ -1852,7 +1881,7 @@ fn announced_free_lifecycle() {
 
 	// Stop the listener and drain its terminal callback before the Callback drops.
 	assert_eq!(moq_origin_announced_cancel(ann_task), 0);
-	ann_cb.recv_terminal();
+	ann_cb.recv_announce_terminal();
 
 	assert_eq!(moq_origin_close(origin), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
@@ -1976,6 +2005,45 @@ fn unknown_format() {
 	assert!(ret < 0, "an out-of-range format code should fail");
 }
 
+/// `LIVE` marks the end of the routes live when the listener started: at once on
+/// an empty origin, and after the existing routes otherwise.
+#[test]
+fn announced_delivers_live_once_caught_up() {
+	let origin = id(moq_origin_create());
+
+	let empty_cb = Callback::new();
+	let empty = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), empty_cb.ptr) });
+	let live = id(empty_cb.recv());
+	let info = announce_info(live);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_LIVE);
+	assert_eq!(info.prefix_len, 0);
+	assert!(!info.has_captures);
+	assert_eq!(moq_origin_announced_free(live), 0);
+	assert_eq!(moq_origin_announced_cancel(empty), 0);
+	assert_eq!(empty_cb.recv_announce_terminal(), 0);
+
+	let path = b"cam";
+	let broadcast = publish_broadcast(origin, path);
+	let _ = request_broadcast(origin, path);
+
+	let cb = Callback::new();
+	let task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
+	let announced = id(cb.recv());
+	let info = announce_info(announced);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_ANNOUNCED);
+	let got = unsafe { std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len) };
+	assert_eq!(got, path);
+	let live = id(cb.recv());
+	assert_eq!(announce_info(live).kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_LIVE);
+	assert_eq!(moq_origin_announced_free(announced), 0);
+	assert_eq!(moq_origin_announced_free(live), 0);
+
+	assert_eq!(moq_origin_announced_cancel(task), 0);
+	assert_eq!(cb.recv_announce_terminal(), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn local_announce() {
 	let origin = id(moq_origin_create());
@@ -1986,25 +2054,16 @@ fn local_announce() {
 	let path = b"test/broadcast";
 	let broadcast = publish_broadcast(origin, path);
 
-	let announced_id = id(cb.recv());
-
-	let mut info = moq_announce_update {
-		prefix: std::ptr::null(),
-		prefix_len: 0,
-		captures: std::ptr::null(),
-		captures_len: 0,
-		has_captures: false,
-		active: false,
-	};
-	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
-	assert!(info.active, "broadcast should be active");
+	let (announced_id, info) = cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_ANNOUNCED);
 
 	let announced_prefix =
 		unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len)).unwrap() };
 	assert_eq!(announced_prefix, "test/broadcast");
+	assert_eq!(moq_origin_announced_free(announced_id), 0);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
-	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
+	assert_eq!(cb.recv_announce_terminal(), 0, "announced close delivers terminal 0");
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -2026,16 +2085,7 @@ fn announced_filters_patterns_and_reports_captures() {
 
 	let audio = publish_broadcast(origin, b"room/alice/audio");
 	let chat = publish_broadcast(origin, b"room/alice/chat");
-	let announced_id = id(cb.recv());
-	let mut info = moq_announce_update {
-		prefix: std::ptr::null(),
-		prefix_len: 0,
-		captures: std::ptr::null(),
-		captures_len: 0,
-		has_captures: false,
-		active: false,
-	};
-	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
+	let (announced_id, info) = cb.recv_route();
 
 	let announced_prefix =
 		unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len)).unwrap() };
@@ -2048,7 +2098,7 @@ fn announced_filters_patterns_and_reports_captures() {
 
 	assert_eq!(moq_origin_announced_free(announced_id), 0);
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
-	assert_eq!(cb.recv_terminal(), 0);
+	assert_eq!(cb.recv_announce_terminal(), 0);
 	assert_eq!(moq_publish_finish(audio), 0);
 	assert_eq!(moq_publish_finish(chat), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -2077,30 +2127,14 @@ fn announced_hides_dot_paths_unless_asked() {
 		let task = id(unsafe { moq_origin_announced(origin, &config, Some(channel_callback), cb.ptr) });
 
 		// Updates arrive in path order, and `.` sorts before letters.
-		let announced = id(cb.recv());
-		let mut info = moq_announce_update {
-			prefix: std::ptr::null(),
-			prefix_len: 0,
-			captures: std::ptr::null(),
-			captures_len: 0,
-			has_captures: false,
-			active: false,
-		};
-		assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
+		let (announced, info) = cb.recv_route();
 		let got = unsafe { std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len) };
 		assert_eq!(got, expected.as_bytes(), "prefix {prefix:?}, hidden {hidden}");
 
 		assert_eq!(moq_origin_announced_free(announced), 0);
 		assert_eq!(moq_origin_announced_cancel(task), 0);
-		// Later announcements may be queued ahead of the terminal; free them.
-		loop {
-			let code = cb.recv();
-			if code <= 0 {
-				assert_eq!(code, 0);
-				break;
-			}
-			assert_eq!(moq_origin_announced_free(code as u32), 0);
-		}
+		// Later events may be queued ahead of the terminal; free them.
+		assert_eq!(cb.recv_announce_terminal(), 0);
 	}
 
 	assert_eq!(moq_publish_finish(stats), 0);
@@ -2117,35 +2151,27 @@ fn announced_deactivation() {
 	let path = b"deactivate/test";
 	let broadcast = publish_broadcast(origin, path);
 
-	let announced_id = id(cb.recv());
-	let mut info = moq_announce_update {
-		prefix: std::ptr::null(),
-		prefix_len: 0,
-		captures: std::ptr::null(),
-		captures_len: 0,
-		has_captures: false,
-		active: false,
-	};
-	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
-	assert!(info.active);
+	let (announced_id, info) = cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_ANNOUNCED);
+	assert_eq!(moq_origin_announced_free(announced_id), 0);
 
 	// Going non-live unannounces the broadcast without tearing it down: local
 	// consumers stop reaching it, exactly as peers do, until it announces again.
 	assert_eq!(moq_publish_unannounce(broadcast), 0);
 
-	let deactivated_id = id(cb.recv());
-	assert_eq!(unsafe { moq_origin_announced_info(deactivated_id, &mut info) }, 0);
-	assert!(!info.active, "broadcast should be inactive after unannounce");
+	let (deactivated_id, info) = cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_RETRACTED);
+	assert_eq!(moq_origin_announced_free(deactivated_id), 0);
 	assert!(request_once(origin, path) < 0, "an unannounced broadcast is unroutable");
 
 	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
-	let reannounced_id = id(cb.recv());
-	assert_eq!(unsafe { moq_origin_announced_info(reannounced_id, &mut info) }, 0);
-	assert!(info.active, "broadcast should be active again after announce");
+	let (reannounced_id, info) = cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_ANNOUNCED);
+	assert_eq!(moq_origin_announced_free(reannounced_id), 0);
 	let _ = request_broadcast(origin, path);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
-	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
+	assert_eq!(cb.recv_announce_terminal(), 0, "announced close delivers terminal 0");
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -2163,20 +2189,12 @@ fn create_broadcast_is_unroutable_until_announced() {
 
 	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
 	let _ = request_broadcast(origin, path);
-	let announced_id = id(cb.recv());
-	let mut info = moq_announce_update {
-		prefix: std::ptr::null(),
-		prefix_len: 0,
-		captures: std::ptr::null(),
-		captures_len: 0,
-		has_captures: false,
-		active: false,
-	};
-	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
-	assert!(info.active);
+	let (announced_id, info) = cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_ANNOUNCED);
+	assert_eq!(moq_origin_announced_free(announced_id), 0);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
-	assert_eq!(cb.recv_terminal(), 0);
+	assert_eq!(cb.recv_announce_terminal(), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }

@@ -32,14 +32,18 @@ announced, err := client.Announced(moq.AnnounceOptions{Prefix: "live/", Filter: 
 if err != nil {
     log.Fatal(err)
 }
-for ann, err := range announced.All(ctx) {
+for event, err := range announced.All(ctx) {
     if err != nil {
         if moq.IsShutdown(err) { break }
         log.Fatal(err)
     }
-    // Updates stay origin-relative; Captures reports what each wildcard matched.
-    fmt.Printf("captures: %v\n", ann.Captures())
-    broadcast, err := client.RequestBroadcast(ctx, ann.Prefix())
+    ann, ok := event.(moq.AnnounceEventAnnounced)
+    if !ok {
+        continue // AnnounceEventUpdated, AnnounceEventRetracted, or AnnounceEventLive
+    }
+    // Prefix stays origin-relative; Captures reports what each wildcard matched.
+    fmt.Printf("captures: %v\n", ann.Announce.Captures)
+    broadcast, err := client.RequestBroadcast(ctx, ann.Announce.Prefix)
     if err != nil {
         log.Fatal(err)
     }
@@ -78,8 +82,12 @@ advertisement; `origin.Dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
 serve. A route is a capability, not an inventory. `Announced(options)` combines
-a literal prefix with an optional relative pattern; `ann.Prefix()` stays
-relative to the origin and `ann.Captures()` reports the wildcard matches.
+a literal prefix with an optional relative pattern and yields an `AnnounceEvent`:
+`AnnounceEventAnnounced`, `AnnounceEventUpdated`, or `AnnounceEventRetracted`
+carrying an `Announce`, whose `Prefix` stays relative to the origin and whose
+`Captures` reports the wildcard matches, or `AnnounceEventLive` once every route
+live at subscribe time has been delivered. Break on `AnnounceEventLive` to list
+what is live and stop.
 Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
 `Hidden: true`.
 

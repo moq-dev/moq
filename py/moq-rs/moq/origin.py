@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from moq_ffi import (
+    MoqAnnounce,
     MoqAnnounceConfig,
     MoqAnnounceConsumer,
     MoqAnnouncedBroadcast,
-    MoqAnnounceUpdate,
+    MoqAnnounceEvent,
     MoqBroadcastRequest,
     MoqOriginConfig,
     MoqOriginConsumer,
@@ -20,48 +21,29 @@ from moq_ffi import (
 from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
 
+Announce = MoqAnnounce
+"""A route over a prefix: the origin-relative ``prefix``, what each filter wildcard
+matched (``captures``, ``None`` for a partial overlap), and the ``route`` serving it.
 
-class AnnounceUpdate:
-    """A route announcement (or retraction) from :meth:`OriginConsumer.announced`.
+It carries no broadcast. Resolve a specific path with
+:meth:`OriginConsumer.request_broadcast`. By convention a publisher announces
+each broadcast's exact path, so subscribers can enumerate broadcasts from routes.
+"""
 
-    A route claims that :attr:`prefix` and every path beneath it can be served; it
-    carries no broadcast. Resolve a specific path with :meth:`OriginConsumer.request_broadcast`.
-    By convention a publisher announces each broadcast's exact path, so
-    subscribers can enumerate broadcasts from routes.
-    """
-
-    def __init__(self, inner: MoqAnnounceUpdate) -> None:
-        self._inner = inner
-
-    @property
-    def prefix(self) -> str:
-        """The covered prefix, relative to the origin."""
-        return self._inner.prefix()
-
-    @property
-    def captures(self) -> list[str] | None:
-        """What each filter wildcard matched, or ``None`` for a partial overlap."""
-        return self._inner.captures()
-
-    @property
-    def active(self) -> bool:
-        """Whether the route is active (``True``) or was retracted (``False``).
-
-        A repeated active announcement for the same prefix is a metadata update.
-        """
-        return self._inner.active()
-
-    @property
-    def route(self) -> Route:
-        """The route serving the prefix: its relay hops and costs (warm `cost`, undiscounted `cold`)."""
-        return self._inner.route()
+AnnounceEvent = MoqAnnounceEvent
+"""What :class:`AnnounceConsumer` yields: ``AnnounceEvent.ANNOUNCED``,
+``AnnounceEvent.UPDATED``, or ``AnnounceEvent.RETRACTED`` carrying an
+:data:`Announce` as ``announce``, or ``AnnounceEvent.LIVE`` once every route
+live at subscribe time has been delivered.
+"""
 
 
 class AnnounceConsumer:
-    """Async-iterable stream of :class:`AnnounceUpdate` route updates as they arrive.
+    """Async-iterable stream of :data:`AnnounceEvent` as they arrive.
 
     Usable as an async context manager; iterate with ``async for`` and it keeps
-    yielding announcements and retractions until cancelled.
+    yielding events until cancelled. Break on ``AnnounceEvent.LIVE`` to list
+    what is live and stop.
     """
 
     def __init__(self, inner: MoqAnnounceConsumer) -> None:
@@ -76,11 +58,11 @@ class AnnounceConsumer:
     def __aiter__(self):
         return self
 
-    async def __anext__(self) -> AnnounceUpdate:
+    async def __anext__(self) -> MoqAnnounceEvent:
         result = await self._inner.next()
         if result is None:
             raise StopAsyncIteration
-        return AnnounceUpdate(result)
+        return result
 
     def cancel(self) -> None:
         """Stop iterating and release the underlying announcement stream."""

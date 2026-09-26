@@ -146,29 +146,8 @@ impl OriginDynamic {
 }
 
 impl Announced {
-	async fn next(&mut self) -> Result<Option<Arc<MoqAnnounceUpdate>>, MoqError> {
-		// The bindings have no caught-up marker yet.
-		let update = loop {
-			match self.inner.next().await {
-				Some(moq_net::announce::Event::Announced(update) | moq_net::announce::Event::Updated(update)) => {
-					break Some((update, true));
-				}
-				Some(moq_net::announce::Event::Retracted(update)) => break Some((update, false)),
-				Some(moq_net::announce::Event::Live) => continue,
-				None => break None,
-			}
-		};
-		match update {
-			Some((update, active)) => Ok(Some(Arc::new(MoqAnnounceUpdate {
-				prefix: update.prefix.to_string(),
-				captures: update
-					.captures
-					.map(|captures| captures.into_iter().map(|capture| capture.to_string()).collect()),
-				route: update.route.into(),
-				active,
-			}))),
-			None => Ok(None),
-		}
+	async fn next(&mut self) -> Result<Option<MoqAnnounceEvent>, MoqError> {
+		Ok(self.inner.next().await.map(Into::into))
 	}
 }
 
@@ -188,18 +167,63 @@ impl AnnouncedBroadcast {
 	}
 }
 
-/// A route announcement (or retraction) from an origin.
+/// A route over a prefix, carried by a [`MoqAnnounceEvent`].
 ///
 /// Carries no broadcast: resolve a specific path with
-/// `MoqOriginConsumer::request_broadcast` (after this update proves it is
-/// covered). Its prefix is relative to the origin. The application decides
-/// which paths name broadcasts.
-#[derive(uniffi::Object)]
-pub struct MoqAnnounceUpdate {
-	prefix: String,
-	captures: Option<Vec<String>>,
-	route: MoqRoute,
-	active: bool,
+/// `MoqOriginConsumer::request_broadcast` (after an event proves it is
+/// covered). The application decides which paths name broadcasts.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MoqAnnounce {
+	/// The covered prefix, relative to the origin.
+	pub prefix: String,
+	/// What each wildcard matched, or `None` when the route only overlaps the scope.
+	pub captures: Option<Vec<String>>,
+	/// The route serving the prefix: its hops and costs.
+	pub route: MoqRoute,
+}
+
+impl From<moq_net::announce::Announce> for MoqAnnounce {
+	fn from(announce: moq_net::announce::Announce) -> Self {
+		Self {
+			prefix: announce.prefix.to_string(),
+			captures: announce
+				.captures
+				.map(|captures| captures.into_iter().map(|capture| capture.to_string()).collect()),
+			route: announce.route.into(),
+		}
+	}
+}
+
+/// What a [`MoqAnnounceConsumer`] yields.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqAnnounceEvent {
+	/// A route now covers the prefix; the stream had none there.
+	Announced { announce: MoqAnnounce },
+	/// The route covering the prefix changed hops or cost.
+	Updated { announce: MoqAnnounce },
+	/// No route covers the prefix any more. Carries its last advertised route.
+	Retracted { announce: MoqAnnounce },
+	/// Every route live at subscribe time has been delivered; what follows is
+	/// live changes. Yielded once.
+	Live,
+}
+
+impl From<moq_net::announce::Event> for MoqAnnounceEvent {
+	fn from(event: moq_net::announce::Event) -> Self {
+		use moq_net::announce::Event;
+		match event {
+			Event::Announced(announce) => Self::Announced {
+				announce: announce.into(),
+			},
+			Event::Updated(announce) => Self::Updated {
+				announce: announce.into(),
+			},
+			Event::Retracted(announce) => Self::Retracted {
+				announce: announce.into(),
+			},
+			Event::Live => Self::Live,
+		}
+	}
 }
 
 /// Waits for a specific broadcast to be announced.
@@ -472,8 +496,8 @@ impl MoqBroadcastRequest {
 
 #[uniffi::export]
 impl MoqAnnounceConsumer {
-	/// Get the next route announcement or retraction. Returns `None` when the origin is closed.
-	pub async fn next(&self) -> Result<Option<Arc<MoqAnnounceUpdate>>, MoqError> {
+	/// Get the next announce event. Returns `None` when the origin is closed.
+	pub async fn next(&self) -> Result<Option<MoqAnnounceEvent>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
 	}
 
@@ -482,30 +506,6 @@ impl MoqAnnounceConsumer {
 	/// Terminal: the announcement stream is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
-	}
-}
-
-#[uniffi::export]
-impl MoqAnnounceUpdate {
-	/// The covered prefix, relative to the origin.
-	pub fn prefix(&self) -> String {
-		self.prefix.clone()
-	}
-
-	/// What each wildcard matched, or `None` when the route only overlaps the scope.
-	pub fn captures(&self) -> Option<Vec<String>> {
-		self.captures.clone()
-	}
-
-	/// The route serving the prefix: its hops and costs.
-	pub fn route(&self) -> MoqRoute {
-		self.route.clone()
-	}
-
-	/// Whether the route is active (`true`) or was retracted (`false`). A repeated
-	/// active announcement for the same prefix is a metadata update.
-	pub fn active(&self) -> bool {
-		self.active
 	}
 }
 

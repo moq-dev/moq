@@ -29,14 +29,29 @@ typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
 typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
 /** A requested broadcast not yet accepted: fulfill it with a producer or reject it. */
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
-/** A stream of route announcements and retractions under a prefix. */
+/** A stream of announce events under a prefix. */
 typealias AnnounceConsumer = uniffi.moq.MoqAnnounceConsumer
 /** A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery. */
 typealias AnnounceConfig = uniffi.moq.MoqAnnounceConfig
 /** A pending wait for a route to cover a specific path. */
 typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
-/** A single route announcement or retraction: its path, route metadata, and active flag. */
-typealias AnnounceUpdate = uniffi.moq.MoqAnnounceUpdate
+/** A route over a prefix: its origin-relative path, wildcard captures, and route metadata. */
+typealias Announce = uniffi.moq.MoqAnnounce
+/**
+ * What an [AnnounceConsumer] yields: [AnnounceEventAnnounced], [AnnounceEventUpdated],
+ * [AnnounceEventRetracted], or [AnnounceEventLive].
+ */
+typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
+// Kotlin cannot reach a sealed class's subtypes through its typealias, so each
+// variant gets its own.
+/** A route now covers the prefix; the stream had none there. */
+typealias AnnounceEventAnnounced = uniffi.moq.MoqAnnounceEvent.Announced
+/** The route covering the prefix changed hops or cost. */
+typealias AnnounceEventUpdated = uniffi.moq.MoqAnnounceEvent.Updated
+/** No route covers the prefix any more; carries its last route. */
+typealias AnnounceEventRetracted = uniffi.moq.MoqAnnounceEvent.Retracted
+/** Every route live at subscribe time has been delivered; what follows is live changes. */
+typealias AnnounceEventLive = uniffi.moq.MoqAnnounceEvent.Live
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
 typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer

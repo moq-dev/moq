@@ -109,14 +109,14 @@ func awaitAnnouncement(t *testing.T, ctx context.Context, announced *moq.Announc
 	t.Helper()
 
 	for {
-		ann, err := announced.Next(ctx)
+		event, err := announced.Next(ctx)
 		if err != nil {
 			t.Fatalf("waiting for %q: %v", path, err)
 		}
-		if ann == nil {
+		if event == nil {
 			t.Fatalf("announcement stream ended before %q", path)
 		}
-		if ann.Active() && ann.Prefix() == path {
+		if ann, ok := event.(moq.AnnounceEventAnnounced); ok && ann.Announce.Prefix == path {
 			return
 		}
 	}
