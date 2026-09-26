@@ -16,23 +16,21 @@ use crate::reader::Config as ReaderConfig;
 use crate::writer::{Config, Retention};
 use crate::{Reader, Store, Writer};
 
-const TIMELINE: &str = hang::timeline::DEFAULT_NAME;
 const RENDITIONS: [&str; 2] = ["video/1080p", "video/360p"];
-const PACING: [&str; 3] = ["video/1080p", "video/360p", "audio"];
+const MEDIA: [&str; 3] = ["video/1080p", "video/360p", "audio"];
 const TRACKS: [&str; 5] = ["video/1080p", "video/360p", "audio", "catalog.json", "chat"];
 
 /// Frames of one source group: (millisecond timestamp, payload).
 type Frames = Vec<(u64, Bytes)>;
 
-/// Recorded segments: three 2s segments, then a one-frame tail.
+/// Source segments: three 2s segments, then a one-frame tail.
 const SEGMENTS: u64 = 4;
 
 /// The source groups of one segment: (track, sequence, frames).
 ///
-/// Video renditions share a 2s GOP and audio has four groups per segment. The catalog and a
-/// non-media chat track publish sparsely, including a sequence skip inside one segment and an
-/// empty payload. The tail keeps any single track from cutting the final segment once the others
-/// end.
+/// Video renditions share a 2s GOP and audio has four 500ms groups per segment, which its own
+/// timeline packs two to a record. The catalog and a non-media chat track publish sparsely,
+/// including a sequence skip and an empty payload.
 fn plan(segment: u64) -> Vec<(&'static str, u64, Frames)> {
 	let pts = segment * 2000;
 	let (frames, audio) = if segment + 1 < SEGMENTS { (4, 4) } else { (1, 1) };
@@ -85,6 +83,20 @@ async fn settle() {
 	}
 }
 
+fn timeline(track: &str) -> String {
+	hang::timeline::default_name(track)
+}
+
+#[allow(deprecated)]
+fn end(source: &broadcast::Producer) {
+	source.finish();
+}
+
+/// Every recorded track's timeline, as the catalog's `archive` entry names them.
+fn config() -> ReaderConfig {
+	ReaderConfig::new(TRACKS.iter().map(|track| (track.to_string(), timeline(track))).collect())
+}
+
 /// Record every segment of [`plan`] into `store`.
 async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 	let source = broadcast::Info::new().produce();
@@ -103,24 +115,16 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 		.unwrap();
 	let control = writer.control();
 	for name in TRACKS {
-		match PACING.contains(&name) {
-			true => control.pacing_track(name).await.unwrap(),
-			false => control.track(name).await.unwrap(),
+		match MEDIA.contains(&name) {
+			true => control.track(name).await.unwrap(),
+			false => control.sparse(name).await.unwrap(),
 		}
 	}
 	let run = tokio::spawn(writer.run());
 
-	// A non-pacing track joins whichever segment is open when its group arrives, so publish each
-	// segment's pacing groups (closing the previous segment) before its sparse groups.
+	// Each track cuts its own timeline, so the interleave across tracks changes nothing stored.
 	for segment in 0..SEGMENTS {
-		let (pacing, sparse): (Vec<_>, Vec<_>) = plan(segment)
-			.into_iter()
-			.partition(|(name, _, _)| PACING.contains(name));
-		for (name, sequence, frames) in pacing {
-			write(&tracks[name], sequence, &frames);
-		}
-		settle().await;
-		for (name, sequence, frames) in sparse {
+		for (name, sequence, frames) in plan(segment) {
 			write(&tracks[name], sequence, &frames);
 		}
 		settle().await;
@@ -128,7 +132,7 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 	for track in tracks.values() {
 		track.finish().unwrap();
 	}
-	source.finish();
+	end(&source);
 	run.await.unwrap().unwrap();
 }
 
@@ -147,26 +151,24 @@ fn id(value: u64) -> String {
 	format!("{value:019}")
 }
 
+/// Each track's record count: a GOP per video record, two audio groups per record, and a group per
+/// sparse record.
+const RECORDS: [(&str, u64); 5] = [
+	("video%2F1080p", 4),
+	("video%2F360p", 4),
+	("audio", 7),
+	("catalog%2Ejson", 2),
+	("chat", 3),
+];
+
 /// The exact layout [`plan`] produces: no manifest, index, or completion marker.
 fn layout() -> Vec<String> {
 	let mut keys = Vec::new();
-	let groups = |track: &str, ranges: &[(u64, u64)]| {
-		ranges
-			.iter()
-			.map(|&(smallest, largest)| format!("rec/{track}/groups/{}.{}", id(largest), id(smallest)))
-			.collect::<Vec<_>>()
-	};
-	keys.push("rec/audio/.info".to_string());
-	keys.extend(groups("audio", &[(0, 3), (4, 7), (8, 11), (12, 12)]));
-	keys.push("rec/catalog%2Ejson/.info".to_string());
-	keys.extend(groups("catalog%2Ejson", &[(0, 0), (1, 1)]));
-	keys.push("rec/chat/.info".to_string());
-	keys.extend(groups("chat", &[(0, 0), (3, 5)]));
-	keys.push("rec/timeline%2Ez/.info".to_string());
-	keys.extend((0..SEGMENTS).map(|segment| format!("rec/timeline%2Ez/segments/{}", id(segment))));
-	for track in ["video%2F1080p", "video%2F360p"] {
-		keys.push(format!("rec/{track}/.info"));
-		keys.extend(groups(track, &[(0, 0), (1, 1), (2, 2), (3, 3)]));
+	for (track, records) in RECORDS {
+		for directory in [track.to_string(), format!("{track}%2Etimeline%2Ez")] {
+			keys.push(format!("rec/{directory}/.info"));
+			keys.extend((0..records).map(|record| format!("rec/{directory}/segments/{}", id(record))));
+		}
 	}
 	keys.sort();
 	keys
@@ -194,7 +196,7 @@ async fn recordings_are_byte_identical_on_every_backend() {
 	assert_eq!(expected.keys().cloned().collect::<Vec<_>>(), layout());
 	assert_eq!(
 		&expected["rec/video%2F360p/.info"][..],
-		br#"{"version":1,"priority":0,"timescale":1000}"#
+		br#"{"version":2,"priority":0,"timescale":1000}"#
 	);
 
 	let dir = tempfile::tempdir().unwrap();
@@ -212,12 +214,15 @@ async fn recordings_are_byte_identical_on_every_backend() {
 	assert_eq!(objects(&unordered).await, expected, "unordered listing");
 	assert_eq!(objects(&sibling).await.len(), expected.len());
 
-	// Every group object holds exactly the source groups, in order, byte for byte.
+	// The media objects hold exactly the source groups, in order, byte for byte.
 	let mut stored: BTreeMap<(String, u64), Frames> = BTreeMap::new();
 	for (path, bytes) in &expected {
 		let key = crate::Key::parse(&Path::from("rec"), &Path::parse(path).unwrap()).unwrap();
-		if let crate::Key::Groups { track, range } = key {
-			let object = crate::Object::decode_groups(bytes.clone(), range).unwrap();
+		if let crate::Key::Segments { track, .. } = key
+			&& !track.ends_with(hang::timeline::SUFFIX)
+		{
+			let object = crate::Object::decode(bytes.clone()).unwrap();
+			assert_eq!(object.frame_start, 0, "no source group outlived the maximum");
 			for group in object.groups {
 				let frames = group.frames.into_iter().map(|f| (f.timestamp, f.payload)).collect();
 				stored.insert((track.clone(), group.sequence), frames);
@@ -238,9 +243,7 @@ async fn fetch_replays_the_recording_and_reads_only_the_requested_rendition() {
 	record(&store).await;
 
 	let broadcast = broadcast::Info::new().produce();
-	let reader = Reader::open(store, &broadcast, ReaderConfig::new(TIMELINE))
-		.await
-		.unwrap();
+	let reader = Reader::open(store, &broadcast, config()).await.unwrap();
 	tokio::spawn(reader.serve());
 	mock.take();
 
@@ -253,27 +256,21 @@ async fn fetch_replays_the_recording_and_reads_only_the_requested_rendition() {
 			.2;
 		assert_eq!(fetch(&broadcast, "video/360p", sequence).await.unwrap(), expected);
 	}
-	let object =
-		|track: &str, smallest: u64, largest: u64| format!("rec/{track}/groups/{}.{}", id(largest), id(smallest));
+	let object = |track: &str, record: u64| format!("rec/{track}/segments/{}", id(record));
 	// Each track request also GETs that track's `.info`, but nothing of another track.
 	let media = |gets: Vec<String>, track: &str| {
 		let prefix = format!("rec/{track}/");
 		assert!(gets.iter().all(|path| path.starts_with(&prefix)), "{gets:?}");
 		gets.into_iter()
-			.filter(|path| path.contains("/groups/"))
+			.filter(|path| path.contains("/segments/"))
 			.collect::<Vec<_>>()
 	};
 	assert_eq!(
 		media(mock.gets(), "video%2F360p"),
-		[
-			object("video%2F360p", 0, 0),
-			object("video%2F360p", 1, 1),
-			object("video%2F360p", 2, 2),
-			object("video%2F360p", 3, 3),
-		]
+		(0..4).map(|record| object("video%2F360p", record)).collect::<Vec<_>>()
 	);
 
-	// Audio-only playback: four adjacent groups per GET, the rest from the cache.
+	// Audio-only playback: two adjacent groups per GET, the rest from the cache.
 	for segment in 0..SEGMENTS {
 		for (_, sequence, frames) in plan(segment).into_iter().filter(|(name, ..)| *name == "audio") {
 			assert_eq!(fetch(&broadcast, "audio", sequence).await.unwrap(), frames);
@@ -281,12 +278,7 @@ async fn fetch_replays_the_recording_and_reads_only_the_requested_rendition() {
 	}
 	assert_eq!(
 		media(mock.gets(), "audio"),
-		[
-			object("audio", 0, 3),
-			object("audio", 4, 7),
-			object("audio", 8, 11),
-			object("audio", 12, 12),
-		]
+		(0..7).map(|record| object("audio", record)).collect::<Vec<_>>()
 	);
 
 	// Every other enrolled group replays its original sequence, timestamps, and payloads.
@@ -322,14 +314,14 @@ async fn an_offline_reader_follows_dvr_expiry() {
 	let video = source.create_track("video", info).unwrap();
 	let config = Config::default().with_retention(Retention::new(Duration::from_secs(2), Duration::ZERO));
 	let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
-	writer.control().pacing_track("video").await.unwrap();
+	writer.control().track("video").await.unwrap();
 	let run = tokio::spawn(writer.run());
 
 	let frames = |sequence: u64| vec![(sequence * 1000, Bytes::from(format!("video {sequence}")))];
 	let committed = |segment: u64| {
 		let store = store.clone();
 		async move {
-			while store.get_segments(TIMELINE, segment).await.is_err() {
+			while store.get_segments(&timeline("video"), segment).await.is_err() {
 				tokio::time::sleep(Duration::from_millis(5)).await;
 			}
 		}
@@ -341,19 +333,18 @@ async fn an_offline_reader_follows_dvr_expiry() {
 	committed(1).await;
 
 	let broadcast = broadcast::Info::new().produce();
-	let mut reader = Reader::open(store.clone(), &broadcast, ReaderConfig::new(TIMELINE))
-		.await
-		.unwrap();
+	let config = ReaderConfig::new([("video".to_string(), timeline("video"))].into());
+	let mut reader = Reader::open(store.clone(), &broadcast, config).await.unwrap();
 	tokio::spawn(reader.serve());
 	assert_eq!(fetch(&broadcast, "video", 0).await.unwrap(), frames(0));
 
-	// The reader is offline while the DVR commits and expires several segments.
+	// The reader is offline while the DVR commits and expires several records.
 	for sequence in 3..10 {
 		write(&video, sequence, &frames(sequence));
 	}
 	committed(8).await;
-	// Segments 7 and 8 hold the 2s window.
-	while store.get_groups("video", 6..=6).await.is_ok() {
+	// Records 7 and 8 hold the 2s window.
+	while store.get_segments("video", 6).await.is_ok() {
 		tokio::time::sleep(Duration::from_millis(5)).await;
 	}
 
@@ -364,12 +355,12 @@ async fn an_offline_reader_follows_dvr_expiry() {
 	assert_eq!(
 		list,
 		&Op::List {
-			prefix: "rec/timeline%2Ez/segments".to_string(),
-			offset: Some(format!("rec/timeline%2Ez/segments/{}", id(1))),
+			prefix: "rec/video%2Etimeline%2Ez/segments".to_string(),
+			offset: Some(format!("rec/video%2Etimeline%2Ez/segments/{}", id(1))),
 		}
 	);
 	let segments: Vec<_> = (2..=8)
-		.map(|segment| Op::Get(format!("rec/timeline%2Ez/segments/{}", id(segment))))
+		.map(|segment| Op::Get(format!("rec/video%2Etimeline%2Ez/segments/{}", id(segment))))
 		.collect();
 	assert_eq!(gets, segments, "only the new timeline keys are read");
 
@@ -384,12 +375,15 @@ async fn an_offline_reader_follows_dvr_expiry() {
 		);
 	}
 	let gets = mock.gets();
-	assert!(!gets.iter().any(|path| path.contains("/groups/")), "{gets:?}");
+	assert!(
+		!gets.iter().any(|path| path.starts_with("rec/video/segments/")),
+		"{gets:?}"
+	);
 	for sequence in 7..9 {
 		assert_eq!(fetch(&broadcast, "video", sequence).await.unwrap(), frames(sequence));
 	}
 
 	video.finish().unwrap();
-	source.finish();
+	end(&source);
 	run.await.unwrap().unwrap();
 }
