@@ -49,8 +49,9 @@ pub struct ImportArgs {
 
 /// Record the broadcast `name` into `args.store` until the broadcast ends.
 ///
-/// Reads the broadcast's own catalog: every track gets its own timeline, video and audio renditions
-/// cut by duration, while the catalog and every other track record each group as it finishes.
+/// Reads the broadcast's own catalog: every track gets its own timeline, cut at group boundaries
+/// between 2s and 10s, while the catalog and data tracks use a zero minimum and record each group
+/// as it finishes.
 pub async fn export(
 	origin: moq_net::origin::Consumer,
 	name: String,
@@ -77,7 +78,7 @@ pub async fn export(
 		.await
 		.with_context(|| format!("failed to start recording into {}", args.store))?;
 	let control = writer.control();
-	control.sparse(catalog_track).await?;
+	control.track(catalog_track, sparse()).await?;
 	let catalog = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await?;
 
 	tracing::info!(%name, store = %args.store, "recording");
@@ -142,6 +143,11 @@ fn open(url: &Url) -> anyhow::Result<moq_archive::Store<Box<dyn ObjectStore>>> {
 	Ok(moq_archive::Store::new(store, prefix))
 }
 
+/// How sparse data, such as a catalog, is cut: every group is its own record.
+fn sparse() -> moq_mux::timeline::Config {
+	moq_mux::timeline::Config::default().with_duration_min(Duration::ZERO)
+}
+
 /// The track carrying the catalog `format` reads.
 fn catalog_track(format: CatalogFormat) -> anyhow::Result<&'static str> {
 	Ok(match format {
@@ -161,8 +167,8 @@ async fn enroll<S: ObjectStore>(
 	while let Some(snapshot) = catalog.next().await? {
 		for change in tracks.update(&snapshot)? {
 			match change {
-				Change::Media(name) => control.track(&name).await?,
-				Change::Sparse(name) => control.sparse(&name).await?,
+				Change::Media(name) => control.track(&name, moq_mux::timeline::Config::default()).await?,
+				Change::Sparse(name) => control.track(&name, sparse()).await?,
 				Change::Remove(name) => control.remove(&name)?,
 			}
 		}

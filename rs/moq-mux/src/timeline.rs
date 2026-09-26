@@ -10,13 +10,16 @@
 //!
 //! Tracks cut independently; nothing waits for another track.
 //!
-//! - A record closes at the first group start at least [`Config::duration_min`] past its own start,
-//!   so short groups (audio) pack into one record and long ones (video GOPs) get one each.
-//! - With a zero minimum every group is its own record, closed as soon as the group finishes. That
-//!   suits a sparse track such as a catalog, which may not publish again for the rest of the
-//!   broadcast.
-//! - A group still open [`Config::duration_max`] past the record's start is split at the next
-//!   reported frame, so an append-only group that never closes is still indexed as it grows.
+//! Every track follows one rule, parameterized by its [`Config`]:
+//!
+//! - A record ends at the first group boundary at least [`Config::duration_min`] (2s by default)
+//!   past its own start, so short groups (audio) pack into one record and long ones (video GOPs)
+//!   get one each. Only sparse data, such as a catalog that may not publish again for the rest of
+//!   the broadcast, uses a zero minimum: every group is then its own record, ended as soon as the
+//!   group finishes.
+//! - A group still open [`Config::duration_max`] (10s by default) past the record's start is split
+//!   at the next reported frame, so an append-only group that never closes is still indexed as it
+//!   grows.
 //! - A skipped group sequence always closes the record, so a record's groups are contiguous.
 //! - [`Segmenter::cut`] adds an application boundary, such as a video keyframe cutting audio so a
 //!   derived segment needs fewer objects. The first cut takes over from minimum-duration pacing.
@@ -25,7 +28,7 @@
 //!
 //! [`catalog::Producer`](crate::catalog::Producer) owns the broadcast's [`Timelines`] and advertises
 //! them in the catalog's root [`hang::catalog::Archive`] entry. Its role-specific track
-//! constructors enroll each media track, and the catalog enrolls itself as a sparse track.
+//! constructors enroll each media track, and the catalog enrolls itself with a zero minimum.
 //!
 //! A [`Segmenter`] builds records from a track's frame reports without publishing them, and a
 //! [`Producer`] publishes records onto a timeline track. A [`Recorder`] pairs the two for live
@@ -46,28 +49,33 @@ use moq_json::window::Checkpoint;
 
 use moq_net::{Timescale, Timestamp};
 
-/// The conventional [`Config::duration_min`] (1 second), for callers with no opinion.
-pub const DEFAULT_DURATION_MIN: Duration = Duration::from_secs(1);
+/// The default [`Config::duration_min`] (2 seconds). Only sparse data, such as a catalog, uses zero.
+pub const DEFAULT_DURATION_MIN: Duration = Duration::from_secs(2);
 
-/// The conventional [`Config::duration_max`] (10 seconds), for callers with no opinion.
+/// The default [`Config::duration_max`] (10 seconds).
 pub const DEFAULT_DURATION_MAX: Duration = Duration::from_secs(10);
 
 /// Recent records repeated when the window track rolls to a new group.
 const CHECKPOINT_RECORDS: usize = 256;
 
 /// How a track's records are cut.
+///
+/// Every track follows one rule: a record ends at the first group boundary at least
+/// [`duration_min`](Self::duration_min) past its start, and a group still open
+/// [`duration_max`](Self::duration_max) past it is split between frames.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
-	/// The shortest a record may be before a group start closes it.
+	/// The shortest a record may be before a group boundary ends it.
 	///
 	/// A floor rather than a target on purpose: a floor is always satisfiable (wait for the next
-	/// group), so no group is split to honor it. Zero makes every group its own record.
+	/// group), so no group is split to honor it. Zero, for sparse data such as a catalog, makes
+	/// every group its own record, ended as soon as the group finishes.
 	pub duration_min: Duration,
 
 	/// The longest a record may run before a frame inside a group splits it.
 	///
-	/// Advertised in the catalog, so a consumer can size an HLS `EXT-X-TARGETDURATION` up front.
+	/// The longest enrolled maximum is advertised in the catalog as `durationMax`.
 	pub duration_max: Duration,
 }
 
@@ -82,14 +90,6 @@ impl Config {
 	pub fn with_duration_max(mut self, duration: Duration) -> Self {
 		self.duration_max = duration;
 		self
-	}
-
-	/// The catalog section advertising timelines cut by this config, with no timelines yet.
-	pub fn section(&self) -> Archive {
-		let mut section = Archive::new();
-		section.timescale = TIMESCALE.as_u64() as u32;
-		section.duration_max = Some(units(self.duration_max));
-		section
 	}
 }
 
@@ -465,13 +465,12 @@ struct Registry {
 #[derive(Clone)]
 pub struct Timelines {
 	broadcast: moq_net::broadcast::Producer,
-	config: Config,
 	registry: Arc<Mutex<Registry>>,
 }
 
 impl Timelines {
-	/// Timelines for tracks of `broadcast`, cut by `config`.
-	pub fn new(broadcast: &moq_net::broadcast::Producer, config: Config) -> Self {
+	/// Timelines for tracks of `broadcast`.
+	pub fn new(broadcast: &moq_net::broadcast::Producer) -> Self {
 		// The contents are `Send + Sync` natively; on wasm moq-net's handles are `Rc`-backed, so
 		// clippy sees a pointlessly atomic `Arc`. One type for both targets is worth it.
 		#[allow(clippy::arc_with_non_send_sync)]
@@ -481,26 +480,16 @@ impl Timelines {
 		}));
 		Self {
 			broadcast: broadcast.clone(),
-			config,
 			registry,
 		}
 	}
 
-	/// Enroll the media track `name`, cut by the configured durations.
+	/// Enroll the track `name`, its records cut by `config`.
 	///
 	/// Creates its timeline track, named by [`hang::timeline::default_name`], on first enrollment.
-	/// Enrolling a name again continues its timeline's numbering for a new producer. Errors when
-	/// the timeline track name is taken or the timelines finished.
-	pub fn track(&self, name: &str) -> crate::Result<Recorder> {
-		self.enroll(name, self.config.clone())
-	}
-
-	/// Enroll the sparse track `name`, such as a catalog: every group is its own record.
-	pub fn sparse(&self, name: &str) -> crate::Result<Recorder> {
-		self.enroll(name, self.config.clone().with_duration_min(Duration::ZERO))
-	}
-
-	fn enroll(&self, name: &str, config: Config) -> crate::Result<Recorder> {
+	/// Enrolling a name again continues its timeline's numbering for a new producer, cut by the new
+	/// `config`. Errors when the timeline track name is taken or the timelines finished.
+	pub fn track(&self, name: &str, config: Config) -> crate::Result<Recorder> {
 		let mut registry = self.registry.lock().unwrap();
 		if registry.finished {
 			return Err(moq_net::Error::Closed.into());
@@ -528,10 +517,17 @@ impl Timelines {
 		Ok(Recorder { live })
 	}
 
-	/// The catalog's root `archive` entry advertising every enrolled track's timeline.
+	/// The catalog's root `archive` entry advertising every enrolled track's timeline, bounded by
+	/// the longest maximum any of them is cut by.
 	pub fn section(&self) -> Archive {
 		let registry = self.registry.lock().unwrap();
-		let mut section = self.config.section();
+		let mut section = Archive::new();
+		section.timescale = TIMESCALE.as_u64() as u32;
+		section.duration_max = registry
+			.tracks
+			.values()
+			.map(|(_, live)| units(live.lock().unwrap().segmenter.config.duration_max))
+			.max();
 		section.timelines = registry
 			.tracks
 			.iter()
@@ -728,6 +724,11 @@ impl<E: RecordExt> Consumer<E> {
 mod test {
 	use super::*;
 
+	/// Sparse data: every group is its own record.
+	fn sparse() -> Config {
+		Config::default().with_duration_min(Duration::ZERO)
+	}
+
 	fn ms(v: u64) -> Timestamp {
 		Timestamp::from_millis(v).unwrap()
 	}
@@ -821,7 +822,7 @@ mod test {
 
 	#[test]
 	fn a_sparse_track_records_each_group_when_it_finishes() {
-		let mut catalog = Segmenter::new(Config::default().with_duration_min(Duration::ZERO));
+		let mut catalog = Segmenter::new(sparse());
 		catalog.frame(at(0), ms(0), true);
 		assert!(catalog.next().is_none(), "the group may still grow");
 		catalog.finish_group(0);
@@ -835,11 +836,7 @@ mod test {
 	#[test]
 	fn an_append_only_group_is_indexed_as_it_grows() {
 		// A never-closing log: one frame a second, split every three seconds.
-		let mut log = Segmenter::new(
-			Config::default()
-				.with_duration_min(Duration::ZERO)
-				.with_duration_max(Duration::from_secs(3)),
-		);
+		let mut log = Segmenter::new(sparse().with_duration_max(Duration::from_secs(3)));
 		for frame in 0..7 {
 			log.frame(Position::new(0, frame), ms(frame * 1_000), true);
 		}
@@ -861,7 +858,7 @@ mod test {
 
 	#[test]
 	fn a_skipped_sequence_closes_the_record() {
-		let mut audio = Segmenter::new(Config::default());
+		let mut audio = Segmenter::new(Config::default().with_duration_min(Duration::from_secs(1)));
 		audio.frame(at(0), ms(0), true);
 		audio.frame(at(1), ms(300), true);
 		audio.frame(at(5), ms(600), true);
@@ -955,9 +952,9 @@ mod test {
 	#[tokio::test]
 	async fn tracks_publish_independent_timelines() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timelines = Timelines::new(&broadcast, Config::default());
-		let mut video = timelines.track("video0").unwrap();
-		let mut catalog = timelines.sparse("catalog.json").unwrap();
+		let timelines = Timelines::new(&broadcast);
+		let mut video = timelines.track("video0", Config::default()).unwrap();
+		let mut catalog = timelines.track("catalog.json", sparse()).unwrap();
 
 		catalog.frame(at(0), ms(0), true);
 		catalog.finish_group(0);
@@ -984,8 +981,8 @@ mod test {
 	#[tokio::test]
 	async fn a_sparse_record_publishes_before_the_track_ends() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timelines = Timelines::new(&broadcast, Config::default());
-		let mut catalog = timelines.sparse("catalog.json").unwrap();
+		let timelines = Timelines::new(&broadcast);
+		let mut catalog = timelines.track("catalog.json", sparse()).unwrap();
 		catalog.frame(at(0), ms(0), true);
 		catalog.finish_group(0);
 
@@ -996,11 +993,11 @@ mod test {
 	#[tokio::test]
 	async fn re_enrolling_continues_the_timeline() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timelines = Timelines::new(&broadcast, Config::default());
-		let mut first = timelines.track("video0").unwrap();
+		let timelines = Timelines::new(&broadcast);
+		let mut first = timelines.track("video0", Config::default()).unwrap();
 		first.frame(at(0), ms(0), true);
 		drop(first);
-		let mut second = timelines.track("video0").unwrap();
+		let mut second = timelines.track("video0", Config::default()).unwrap();
 		// The new producer restarts its group sequences.
 		second.frame(at(0), ms(2_000), true);
 		drop(second);
@@ -1017,18 +1014,18 @@ mod test {
 	fn a_taken_timeline_name_fails_enrollment() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let _squat = broadcast.create_track("video0.timeline.z", None).unwrap();
-		let timelines = Timelines::new(&broadcast, Config::default());
-		assert!(timelines.track("video0").is_err());
+		let timelines = Timelines::new(&broadcast);
+		assert!(timelines.track("video0", Config::default()).is_err());
 		assert!(timelines.section().timelines.is_empty());
 	}
 
 	#[test]
 	fn enrollment_after_finish_is_refused() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timelines = Timelines::new(&broadcast, Config::default());
+		let timelines = Timelines::new(&broadcast);
 		timelines.finish();
 		assert!(matches!(
-			timelines.track("video0"),
+			timelines.track("video0", Config::default()),
 			Err(crate::Error::Moq(moq_net::Error::Closed))
 		));
 	}
@@ -1052,7 +1049,7 @@ mod test {
 		producer.push(&Record::new(3, 3_000, 1_000, at(3), at(4))).unwrap();
 		producer.finish().unwrap();
 
-		let mut section = Config::default().section();
+		let mut section = Archive::new();
 		section
 			.timelines
 			.insert("video0".to_string(), "video0.timeline.z".to_string());
@@ -1080,7 +1077,7 @@ mod test {
 	#[tokio::test]
 	async fn a_missing_timeline_is_an_error() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let section = Config::default().section();
+		let section = Archive::new();
 		assert!(matches!(
 			Consumer::<()>::subscribe(&broadcast.consume(), &section, "video0").await,
 			Err(crate::Error::TimelineMissing(_))
@@ -1090,8 +1087,8 @@ mod test {
 	#[tokio::test]
 	async fn rejects_an_invalid_timescale() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let timelines = Timelines::new(&broadcast, Config::default());
-		let _recorder = timelines.track("video0").unwrap();
+		let timelines = Timelines::new(&broadcast);
+		let _recorder = timelines.track("video0", Config::default()).unwrap();
 		let mut section = timelines.section();
 		section.timescale = 0;
 		let err = Consumer::<()>::subscribe(&broadcast.consume(), &section, "video0").await;

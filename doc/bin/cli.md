@@ -212,10 +212,10 @@ moq --connect https://relay.example.com/anon --broadcast event-replay.hang impor
 
 `export archive` records one broadcast with
 [moq-archive](https://docs.rs/moq-archive), reading its catalog as it changes.
-Every track gets its own timeline: video and audio renditions are stored in
-spans of about a second or more, and the catalog plus every text, JSON, and
-binary track store each group as it finishes (a group that never closes is
-stored in pieces as it grows). It refuses a rendition served
+Every track gets its own timeline, stored in spans cut at group boundaries
+between 2s and 10s. The catalog and every text, JSON, and binary track are
+sparse data, so each of their groups is stored as soon as it finishes, and a
+group that never closes is stored in pieces as it grows. It refuses a rendition served
 from another broadcast, and one that returns after the catalog dropped it. The
 stage ends once the broadcast does, and it refuses a store URL that already
 holds a recording. `--retention 1h` keeps only the last hour (a DVR),

@@ -179,6 +179,9 @@ pub struct Producer<E: CatalogExt = ()> {
 
 	/// The broadcast's per-track timelines. See [`timeline`](Self::timeline).
 	timeline: crate::timeline::Timelines,
+	/// How each media track's timeline is cut. The catalog's own uses a zero minimum.
+	/// See [`Config::with_timeline`].
+	cutting: crate::timeline::Config,
 	/// Retention override for the media tracks minted under this catalog, or `None` to keep
 	/// hang's default. Fixed at construction, so every clone and every
 	/// [`Reserved`](super::Reserved) mints tracks under one policy. See
@@ -200,6 +203,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			current: self.current.clone(),
 			clock: self.clock,
 			timeline: self.timeline.clone(),
+			cutting: self.cutting.clone(),
 			max_age: self.max_age,
 			bandwidth: self.bandwidth.clone(),
 			baseline: self.baseline.clone(),
@@ -287,7 +291,7 @@ impl<E: CatalogExt> Config<E> {
 		self
 	}
 
-	/// Cut the broadcast's timelines with `timeline`.
+	/// Cut each media track's timeline with `timeline`; the catalog's own always uses a zero minimum.
 	pub fn with_timeline(mut self, timeline: crate::timeline::Config) -> Self {
 		self.timeline = timeline;
 		self
@@ -316,7 +320,7 @@ impl<E: CatalogExt> Producer<E> {
 		json_config.compression = moq_json::Compression::Deflate;
 		let hangz = moq_json::snapshot::Producer::new(hangz_track, json_config);
 
-		let timeline = crate::timeline::Timelines::new(broadcast, config.timeline);
+		let timeline = crate::timeline::Timelines::new(broadcast);
 		#[allow(clippy::arc_with_non_send_sync)]
 		let catalog_timeline = Arc::new(Mutex::new(CatalogTimeline::default()));
 
@@ -346,6 +350,7 @@ impl<E: CatalogExt> Producer<E> {
 			})),
 			clock: config.clock,
 			timeline,
+			cutting: config.timeline,
 			max_age: config.max_age,
 			bandwidth: config.bandwidth,
 			baseline: Default::default(),
@@ -638,11 +643,13 @@ impl<E: CatalogExt> Producer<E> {
 	/// The role-specific track constructors call this for you. fMP4 passthrough calls it directly
 	/// because it writes groups by hand instead of using a [`container::Producer`](crate::container::Producer).
 	pub(crate) fn enroll(&mut self, track: &str) -> crate::Result<crate::timeline::Recorder> {
-		let recorder = self.timeline.track(track)?;
+		let recorder = self.timeline.track(track, self.cutting.clone())?;
 		{
 			let mut catalog = self.outputs.catalog_timeline.lock().unwrap();
 			if catalog.recorder.is_none() {
-				catalog.recorder = Some(self.timeline.sparse(hang::Catalog::DEFAULT_NAME)?);
+				// Sparse data: a catalog may not change again, so each group is its own record.
+				let cutting = self.cutting.clone().with_duration_min(std::time::Duration::ZERO);
+				catalog.recorder = Some(self.timeline.track(hang::Catalog::DEFAULT_NAME, cutting)?);
 			}
 		}
 
@@ -1020,7 +1027,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let _recorder = catalog.timeline().track("video").unwrap();
+		let _recorder = catalog.timeline().track("video", Default::default()).unwrap();
 
 		let consumer = broadcast.consume();
 		for name in [

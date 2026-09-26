@@ -574,7 +574,7 @@ mod tests {
 
 	impl CatalogTestExt for moq_mux::catalog::Producer {
 		fn enroll_test(&self, track: &str) -> moq_mux::Result<moq_mux::timeline::Recorder> {
-			let recorder = self.timeline().track(track)?;
+			let recorder = self.timeline().track(track, moq_mux::timeline::Config::default())?;
 			let section = self.timeline().section();
 			let mut producer = self.clone();
 			let mut catalog = producer.modify()?;
@@ -1619,8 +1619,8 @@ mod tests {
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 			)
 			.unwrap();
-		// 500ms groups pack into one-second records.
-		for micros in (0..=3_000_000u64).step_by(500_000) {
+		// 500ms groups pack into records of the default 2s minimum.
+		for micros in (0..=6_000_000u64).step_by(500_000) {
 			let keyframe = audio.needs_keyframe();
 			audio.write(frame(micros, keyframe)).unwrap();
 			audio.cut(None).unwrap();
@@ -1637,7 +1637,7 @@ mod tests {
 			playlist.segments.iter().map(|s| s.segment).collect::<Vec<_>>(),
 			vec![0, 1, 2]
 		);
-		assert_eq!(playlist.segments[0].duration, Duration::from_secs(1));
+		assert_eq!(playlist.segments[0].duration, Duration::from_secs(2));
 		let segment = rendition.segment(1).await.unwrap().expect("audio segment");
 		assert_eq!(&segment[4..8], b"moof");
 

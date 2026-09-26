@@ -16,9 +16,11 @@
 //! let store = moq_archive::Store::new(InMemory::new(), "recordings/demo");
 //! let writer = moq_archive::Writer::new(store, source, Default::default()).await?;
 //! let control = writer.control();
-//! control.track("video").await?;
-//! control.track("audio").await?;
-//! control.sparse("catalog.json").await?;
+//! let media = moq_mux::timeline::Config::default();
+//! control.track("video", media.clone()).await?;
+//! control.track("audio", media.clone()).await?;
+//! // Sparse data: each catalog group is its own record.
+//! control.track("catalog.json", media.with_duration_min(std::time::Duration::ZERO)).await?;
 //! writer.run().await?;
 //! # Ok(())
 //! # }
@@ -47,23 +49,15 @@ use crate::{Error, Info, Key, Result, Store};
 /// Subscribers ask for every cached group; the publisher clamps this to its own max age.
 const REPLAY: Duration = Duration::from_secs(u32::MAX as u64);
 
-/// How a [`Writer`] cuts and retains its recording.
+/// How a [`Writer`] retains its recording. Each track's cutting is chosen when it enrolls.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Config {
-	/// How each track's records are cut.
-	pub timeline: timeline::Config,
 	/// Expire old records (a DVR), or keep everything when `None` (an archive).
 	pub retention: Option<Retention>,
 }
 
 impl Config {
-	/// Set [`timeline`](Self::timeline).
-	pub fn with_timeline(mut self, timeline: timeline::Config) -> Self {
-		self.timeline = timeline;
-		self
-	}
-
 	/// Set [`retention`](Self::retention).
 	pub fn with_retention(mut self, retention: impl Into<Option<Retention>>) -> Self {
 		self.retention = retention.into();
@@ -118,7 +112,6 @@ impl<S> Clone for Control<S> {
 struct Shared<S> {
 	store: Store<S>,
 	source: broadcast::Consumer,
-	config: timeline::Config,
 	retention: Option<Retention>,
 	/// Owns the recording's timeline tracks, read back to store their groups.
 	timelines: broadcast::Producer,
@@ -165,7 +158,6 @@ impl<S: ObjectStore> Writer<S> {
 		let shared = Arc::new(Shared {
 			store,
 			source,
-			config: config.timeline,
 			retention: config.retention,
 			timelines: broadcast::Info::new().produce(),
 			recovered: Mutex::new(recovery.tracks),
@@ -285,19 +277,23 @@ impl<S: ObjectStore> Writer<S> {
 }
 
 impl<S: ObjectStore> Control<S> {
-	/// Enroll the media track `name`, its records cut by the configured durations.
+	/// Enroll the track `name`, its records cut by `config`.
 	///
-	/// Subscribes to the track and creates its `.info` and its timeline's before accepting any
-	/// group. Fails when the name was already enrolled, names a timeline, or `.info` conflicts.
-	pub async fn track(&self, name: &str) -> Result<()> {
-		self.enroll(name, self.shared.config.clone()).await
-	}
-
-	/// Enroll the sparse track `name`, such as a catalog or metadata track: every group is its own
-	/// record, stored as soon as it finishes.
-	pub async fn sparse(&self, name: &str) -> Result<()> {
-		let config = self.shared.config.clone().with_duration_min(Duration::ZERO);
-		self.enroll(name, config).await
+	/// Media keeps the default minimum; sparse data such as a catalog uses zero, so each group is
+	/// stored as soon as it finishes. Subscribes to the track and creates its `.info` and its
+	/// timeline's before accepting any group. Fails when the name was already enrolled, names a
+	/// timeline, or `.info` conflicts.
+	pub async fn track(&self, name: &str, config: timeline::Config) -> Result<()> {
+		if name.ends_with(hang::timeline::SUFFIX) || !self.shared.enrolled.lock().unwrap().insert(name.to_string()) {
+			return Err(Error::Enrolled(name.to_string()));
+		}
+		self.shared.enrolling.send_modify(|count| *count += 1);
+		let result = self.subscribe(name, config).await;
+		self.shared.enrolling.send_modify(|count| *count -= 1);
+		if result.is_err() {
+			self.shared.enrolled.lock().unwrap().remove(name);
+		}
+		result
 	}
 
 	/// Declare a boundary at `pts` on every enrolled track; see [`Segmenter::cut`].
@@ -309,19 +305,6 @@ impl<S: ObjectStore> Control<S> {
 	/// indexed yet. The name cannot be enrolled again.
 	pub fn remove(&self, name: &str) -> Result<()> {
 		self.send(Command::Remove(name.to_string()))
-	}
-
-	async fn enroll(&self, name: &str, config: timeline::Config) -> Result<()> {
-		if name.ends_with(hang::timeline::SUFFIX) || !self.shared.enrolled.lock().unwrap().insert(name.to_string()) {
-			return Err(Error::Enrolled(name.to_string()));
-		}
-		self.shared.enrolling.send_modify(|count| *count += 1);
-		let result = self.subscribe(name, config).await;
-		self.shared.enrolling.send_modify(|count| *count -= 1);
-		if result.is_err() {
-			self.shared.enrolled.lock().unwrap().remove(name);
-		}
-		result
 	}
 
 	async fn subscribe(&self, name: &str, config: timeline::Config) -> Result<()> {
@@ -819,6 +802,21 @@ mod tests {
 		Timestamp::from_millis(v).unwrap()
 	}
 
+	/// Media cut at 1s, so one-second test groups get a record each.
+	fn media() -> timeline::Config {
+		timeline::Config::default().with_duration_min(Duration::from_secs(1))
+	}
+
+	/// Sparse data: every group is its own record.
+	fn sparse() -> timeline::Config {
+		timeline::Config::default().with_duration_min(Duration::ZERO)
+	}
+
+	/// An append-only log, split every three seconds.
+	fn append_only() -> timeline::Config {
+		sparse().with_duration_max(Duration::from_secs(3))
+	}
+
 	fn timeline(track: &str) -> String {
 		hang::timeline::default_name(track)
 	}
@@ -949,8 +947,8 @@ mod tests {
 			.await
 			.unwrap();
 		let control = writer.control();
-		control.track("video").await.unwrap();
-		control.sparse("catalog.json").await.unwrap();
+		control.track("video", media()).await.unwrap();
+		control.track("catalog.json", sparse()).await.unwrap();
 
 		group(&catalog, 0, &[0]);
 		for sequence in 0..6 {
@@ -989,10 +987,11 @@ mod tests {
 			.await
 			.unwrap();
 		let control = writer.control();
-		control.track("video").await.unwrap();
-		control.track("audio").await.unwrap();
+		control.track("video", timeline::Config::default()).await.unwrap();
+		control.track("audio", timeline::Config::default()).await.unwrap();
 
-		// Two second GOPs, 400ms audio groups: audio packs by its own minimum, not video's GOPs.
+		// Two second GOPs, 400ms audio groups: with the default 2s minimum, audio packs by its own
+		// boundaries, not video's GOPs.
 		for sequence in 0..3 {
 			group(&video, sequence, &[sequence * 2000, sequence * 2000 + 1000]);
 		}
@@ -1007,7 +1006,7 @@ mod tests {
 		let video = window(&store, "video").await;
 		assert_eq!(groups(&video), vec![(0, 0), (1, 1), (2, 2)]);
 		let audio = window(&store, "audio").await;
-		assert_eq!(groups(&audio), vec![(0, 2), (3, 5), (6, 8), (9, 11), (12, 14)]);
+		assert_eq!(groups(&audio), vec![(0, 4), (5, 9), (10, 14)]);
 		check_objects(&store, "audio", &audio).await;
 	}
 
@@ -1017,10 +1016,9 @@ mod tests {
 		let log = track(&source, "log");
 
 		let store = Store::new(InMemory::new(), "rec");
-		let config =
-			Config::default().with_timeline(timeline::Config::default().with_duration_max(Duration::from_secs(3)));
+		let config = Config::default();
 		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
-		writer.control().sparse("log").await.unwrap();
+		writer.control().track("log", append_only()).await.unwrap();
 		let run = tokio::spawn(writer.run());
 
 		// One group that never closes, a frame a second.
@@ -1070,8 +1068,8 @@ mod tests {
 			.await
 			.unwrap();
 		let control = writer.control();
-		control.track("video").await.unwrap();
-		control.track("audio").await.unwrap();
+		control.track("video", media()).await.unwrap();
+		control.track("audio", media()).await.unwrap();
 
 		for sequence in 0..3 {
 			group(&video, sequence, &[sequence * 1000]);
@@ -1098,8 +1096,8 @@ mod tests {
 		let store = Store::new(InMemory::new(), "rec");
 		let config = Config::default().with_retention(Retention::new(Duration::from_secs(2), Duration::ZERO));
 		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
-		writer.control().track("video").await.unwrap();
-		writer.control().sparse("catalog.json").await.unwrap();
+		writer.control().track("video", media()).await.unwrap();
+		writer.control().track("catalog.json", sparse()).await.unwrap();
 
 		// A static catalog published once, then six seconds of video.
 		group(&catalog, 0, &[0]);
@@ -1137,7 +1135,7 @@ mod tests {
 			Config::default().with_retention(Retention::new(Duration::from_secs(2), Duration::from_secs(3600)));
 		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
 		let control = writer.control();
-		control.track("video").await.unwrap();
+		control.track("video", media()).await.unwrap();
 
 		for sequence in 0..6 {
 			group(&video, sequence, &[sequence * 1000]);
@@ -1163,7 +1161,7 @@ mod tests {
 		let writer = Writer::new(store.clone(), source.consume(), Config::default())
 			.await
 			.unwrap();
-		writer.control().track("video").await.unwrap();
+		writer.control().track("video", media()).await.unwrap();
 		let run = tokio::spawn(writer.run());
 
 		let mut first = video.create_group(group::Info { sequence: 0 }).unwrap();
@@ -1196,7 +1194,7 @@ mod tests {
 		let writer = Writer::new(store.clone(), source.consume(), Config::default())
 			.await
 			.unwrap();
-		writer.control().track("video").await.unwrap();
+		writer.control().track("video", media()).await.unwrap();
 
 		group(&video, 0, &[0]);
 		group(&video, 2, &[1000]);
@@ -1220,7 +1218,7 @@ mod tests {
 
 		let store = Store::new(InMemory::new(), "rec");
 		let writer = Writer::new(store, source.consume(), Config::default()).await.unwrap();
-		writer.control().track("video").await.unwrap();
+		writer.control().track("video", media()).await.unwrap();
 
 		group(&video, 0, &[0]);
 		// One past the recording's largest group ID.
@@ -1245,7 +1243,7 @@ mod tests {
 
 		let store = Store::new(InMemory::new(), "rec");
 		let writer = Writer::new(store, source.consume(), Config::default()).await.unwrap();
-		writer.control().track("video").await.unwrap();
+		writer.control().track("video", media()).await.unwrap();
 
 		group(&video, 0, &[1000]);
 		group(&video, 1, &[500]);
@@ -1269,8 +1267,8 @@ mod tests {
 			.await
 			.unwrap();
 		let control = writer.control();
-		control.track("video").await.unwrap();
-		control.track("audio").await.unwrap();
+		control.track("video", media()).await.unwrap();
+		control.track("audio", media()).await.unwrap();
 		let run = tokio::spawn(writer.run());
 
 		group(&audio, 0, &[0]);
@@ -1317,10 +1315,13 @@ mod tests {
 		let store = Store::new(InMemory::new(), "rec");
 		let writer = Writer::new(store, source.consume(), Config::default()).await.unwrap();
 		let control = writer.control();
-		control.track("video").await.unwrap();
-		assert_eq!(control.sparse("video").await, Err(Error::Enrolled("video".into())));
+		control.track("video", media()).await.unwrap();
+		assert_eq!(
+			control.track("video", sparse()).await,
+			Err(Error::Enrolled("video".into()))
+		);
 		let timeline = timeline("video");
-		assert_eq!(control.track(&timeline).await, Err(Error::Enrolled(timeline)));
+		assert_eq!(control.track(&timeline, media()).await, Err(Error::Enrolled(timeline)));
 	}
 
 	#[tokio::test]
@@ -1333,7 +1334,7 @@ mod tests {
 		let writer = Writer::new(store, source.consume(), Config::default()).await.unwrap();
 		let control = writer.control();
 		assert_eq!(
-			control.track("video").await,
+			control.track("video", media()).await,
 			Err(Error::Priority {
 				existing: 7,
 				intended: 0
@@ -1346,7 +1347,7 @@ mod tests {
 		let source = broadcast::Info::new().produce();
 		let video = track(&source, "video");
 		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
-		writer.control().track("video").await.unwrap();
+		writer.control().track("video", media()).await.unwrap();
 		for sequence in sequences {
 			group(&video, sequence, &[sequence * 1000, sequence * 1000 + 500]);
 		}
@@ -1389,8 +1390,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_resumed_append_only_group_continues_mid_group() {
 		let store = Store::new(InMemory::new(), "rec");
-		let config =
-			Config::default().with_timeline(timeline::Config::default().with_duration_max(Duration::from_secs(3)));
+		let config = Config::default();
 
 		// The first run stores frames 0..6 of a group that never closes, then stops.
 		let source = broadcast::Info::new().produce();
@@ -1398,7 +1398,7 @@ mod tests {
 		let writer = Writer::new(store.clone(), source.consume(), config.clone())
 			.await
 			.unwrap();
-		writer.control().sparse("log").await.unwrap();
+		writer.control().track("log", append_only()).await.unwrap();
 		let mut open = log.create_group(group::Info { sequence: 0 }).unwrap();
 		for second in 0..7 {
 			open.write_frame(ms(second * 1000), format!("line {second}")).unwrap();
@@ -1415,7 +1415,7 @@ mod tests {
 		let source = broadcast::Info::new().produce();
 		let log = track(&source, "log");
 		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
-		writer.control().sparse("log").await.unwrap();
+		writer.control().track("log", append_only()).await.unwrap();
 		let mut replayed = log.create_group(group::Info { sequence: 0 }).unwrap();
 		for second in 0..8 {
 			replayed
@@ -1475,7 +1475,7 @@ mod tests {
 		let config =
 			Config::default().with_retention(Retention::new(Duration::from_secs(2), Duration::from_secs(3600)));
 		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
-		writer.control().track("video").await.unwrap();
+		writer.control().track("video", media()).await.unwrap();
 		let run = tokio::spawn(writer.run());
 		for sequence in 0..6 {
 			group(&video, sequence, &[sequence * 1000, sequence * 1000 + 500]);
@@ -1509,7 +1509,7 @@ mod tests {
 			"the uncommitted upload is cleared before its key is reused"
 		);
 
-		writer.control().track("video").await.unwrap();
+		writer.control().track("video", media()).await.unwrap();
 		// The source replays groups the recording already holds; they are refused.
 		for sequence in 4..9 {
 			group(&video, sequence, &[sequence * 1000, sequence * 1000 + 500]);

@@ -29,9 +29,10 @@ Decisions:
   every broadcast; an unsubscribed track costs nothing.
 - The catalog's root `archive` entry maps each track to its timeline, including
   the catalog track itself. `replay`, `store`, and `version` stay beside it.
-- Each track cuts on its own: automatically at a group boundary between a
-  minimum and maximum duration (roughly 1s and 10s), splitting a long-lived
-  group by frame at the maximum. Manual cuts stay as an optimization, such as a
+- Each track cuts on its own by one rule: at a group boundary between a
+  minimum and maximum duration (2s and 10s by default, a zero minimum only for
+  sparse data such as the catalog), splitting a long-lived group by frame at
+  the maximum. Manual cuts stay as an optimization, such as a
   video keyframe cutting audio so derived segments need fewer objects.
 - A stored object may hold a frame range of a group, not only whole groups.
 - HLS and DASH segments are derived at the edge from group timestamps, not

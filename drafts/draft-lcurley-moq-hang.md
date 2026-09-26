@@ -746,12 +746,14 @@ Where a span ends is publisher policy.
 A publisher MUST NOT publish a record until its span is final: every frame between `start` and `end` has been published.
 The newest record is therefore the live edge of its track.
 
-The RECOMMENDED policy is:
+The RECOMMENDED policy is one rule for every track:
 
-- A record ends at the first group start at least a minimum duration past its own start, so short groups (audio) pack into one record and long ones (video) get one each. A minimum of about 1 second is RECOMMENDED.
-- A sparse track that publishes on its own schedule, such as a catalog, ends a record as soon as each group finishes, so its newest group is indexed without waiting for another that may never come.
-- A group still open `durationMax` past the record's start is split between frames, so a group that never closes (an append-log such as a `moq-json` stream) is indexed as it grows. A maximum of about 10 seconds is RECOMMENDED.
+- A record ends at the first group boundary at least a minimum duration past its own start, so short groups (audio) pack into one record and long ones (video) get one each.
+- A group still open a maximum duration past the record's start is split between frames, so a group that never closes (an append-log such as a `moq-json` stream) is indexed as it grows; `durationMax` advertises this maximum.
 - A skipped group sequence ends the record.
+
+A minimum of 2 seconds and a maximum of 10 seconds are RECOMMENDED.
+Sparse data that publishes on its own schedule, such as a catalog, SHOULD use a minimum of zero: each group is then its own record, ended as soon as the group finishes, so its newest group is indexed without waiting for another that may never come.
 
 A publisher MAY add boundaries of its own, such as following a source's segmentation or cutting audio where video starts a group, so a derived segment needs fewer records.
 The final record of an ended track has no successor; its `duration` runs to the newest known content, which a publisher SHOULD carry past the start of the last frame when it knows where that frame ends.
@@ -1052,7 +1054,7 @@ This document has no IANA actions.
 
 - Replaced the broadcast's one aligned timeline with one timeline per track: the catalog `archive` entry's `track` became a `timelines` map from each indexed track, the catalog included, to its timeline track.
 - Replaced the segment record with a per-track record: `sequence`, `pts`, `duration`, and a `start`/`end` range of group and frame positions, dropping cross-track pacing and completeness.
-- A record may split a group between frames, so a group that never closes is indexed as it grows, and `durationMax` bounds every record.
+- One cutting rule for every track: a record ends at the first group boundary past a minimum (2 seconds RECOMMENDED, zero for sparse data such as a catalog) and splits a group between frames at a maximum (10 seconds RECOMMENDED), so a group that never closes is indexed as it grows and `durationMax` bounds every record.
 - Recording format version 2: each track stores record N at `segments/N`, beside its timeline's `segments/N`, with a `Frame Start` field in the segment object. Tracks commit and expire independently, and a DVR keeps each track's newest record.
 - Described deriving HLS and DASH at the edge from a reference rendition's records.
 

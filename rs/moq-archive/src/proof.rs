@@ -29,7 +29,7 @@ const SEGMENTS: u64 = 4;
 /// The source groups of one segment: (track, sequence, frames).
 ///
 /// Video renditions share a 2s GOP and audio has four 500ms groups per segment, which its own
-/// timeline packs two to a record. The catalog and a non-media chat track publish sparsely,
+/// timeline packs into 2s records by the default minimum. The catalog and a non-media chat track publish sparsely,
 /// including a sequence skip and an empty payload.
 fn plan(segment: u64) -> Vec<(&'static str, u64, Frames)> {
 	let pts = segment * 2000;
@@ -83,6 +83,11 @@ async fn settle() {
 	}
 }
 
+/// Media cut at 1s, so one-second test groups get a record each.
+fn media() -> moq_mux::timeline::Config {
+	moq_mux::timeline::Config::default().with_duration_min(Duration::from_secs(1))
+}
+
 fn timeline(track: &str) -> String {
 	hang::timeline::default_name(track)
 }
@@ -115,10 +120,11 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 		.unwrap();
 	let control = writer.control();
 	for name in TRACKS {
-		match MEDIA.contains(&name) {
-			true => control.track(name).await.unwrap(),
-			false => control.sparse(name).await.unwrap(),
-		}
+		let config = match MEDIA.contains(&name) {
+			true => moq_mux::timeline::Config::default(),
+			false => moq_mux::timeline::Config::default().with_duration_min(Duration::ZERO),
+		};
+		control.track(name, config).await.unwrap();
 	}
 	let run = tokio::spawn(writer.run());
 
@@ -151,12 +157,12 @@ fn id(value: u64) -> String {
 	format!("{value:019}")
 }
 
-/// Each track's record count: a GOP per video record, two audio groups per record, and a group per
+/// Each track's record count: a GOP per video record, four audio groups per record, and a group per
 /// sparse record.
 const RECORDS: [(&str, u64); 5] = [
 	("video%2F1080p", 4),
 	("video%2F360p", 4),
-	("audio", 7),
+	("audio", 4),
 	("catalog%2Ejson", 2),
 	("chat", 3),
 ];
@@ -270,7 +276,7 @@ async fn fetch_replays_the_recording_and_reads_only_the_requested_rendition() {
 		(0..4).map(|record| object("video%2F360p", record)).collect::<Vec<_>>()
 	);
 
-	// Audio-only playback: two adjacent groups per GET, the rest from the cache.
+	// Audio-only playback: four adjacent groups per GET, the rest from the cache.
 	for segment in 0..SEGMENTS {
 		for (_, sequence, frames) in plan(segment).into_iter().filter(|(name, ..)| *name == "audio") {
 			assert_eq!(fetch(&broadcast, "audio", sequence).await.unwrap(), frames);
@@ -278,7 +284,7 @@ async fn fetch_replays_the_recording_and_reads_only_the_requested_rendition() {
 	}
 	assert_eq!(
 		media(mock.gets(), "audio"),
-		(0..7).map(|record| object("audio", record)).collect::<Vec<_>>()
+		(0..4).map(|record| object("audio", record)).collect::<Vec<_>>()
 	);
 
 	// Every other enrolled group replays its original sequence, timestamps, and payloads.
@@ -314,7 +320,7 @@ async fn an_offline_reader_follows_dvr_expiry() {
 	let video = source.create_track("video", info).unwrap();
 	let config = Config::default().with_retention(Retention::new(Duration::from_secs(2), Duration::ZERO));
 	let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
-	writer.control().track("video").await.unwrap();
+	writer.control().track("video", media()).await.unwrap();
 	let run = tokio::spawn(writer.run());
 
 	let frames = |sequence: u64| vec![(sequence * 1000, Bytes::from(format!("video {sequence}")))];
