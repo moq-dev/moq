@@ -98,8 +98,8 @@ function received(entry: RouteEntry): boolean {
 	return !entry.originated;
 }
 
-function noCapacity(): StreamError {
-	return new StreamError(StreamCode.NoCapacity, { message: "no capacity" });
+function unroutable(): StreamError {
+	return new StreamError(StreamCode.Unroutable, { message: "unroutable" });
 }
 
 /** A served route from {@link Producer.dynamic}: the queue a handler drains. */
@@ -163,7 +163,7 @@ class ServeState {
 
 	close(abort?: Error): void {
 		if (this.closed.peek() !== undefined) return;
-		const err = abort ?? noCapacity();
+		const err = abort ?? unroutable();
 		this.closed.set(err);
 		const queued = [...this.pending.values()];
 		this.pending.clear();
@@ -1279,7 +1279,7 @@ export class Consumer {
  * requests beneath it.
  *
  * Drop it (or {@link close}) to retract the route and reject anything still waiting
- * with {@link StreamCode.NoCapacity}. {@link update} re-prices it in place.
+ * with {@link StreamCode.Unroutable}. {@link update} re-prices it in place.
  *
  * @public
  */
@@ -1325,7 +1325,7 @@ export class Dynamic {
 		if (!server) return;
 		let current: Request | undefined;
 		const drop = () => {
-			current?.reject(noCapacity());
+			current?.reject(unroutable());
 			current = undefined;
 		};
 		try {

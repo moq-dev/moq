@@ -1165,7 +1165,7 @@ test("reject surfaces the error from demand", async () => {
 	const it = handle.requested();
 	const pending = wireOf(consumer).demand(Path.from("live/cam"));
 	const { value: req } = await it.next();
-	const err = new StreamError(StreamCode.NoCapacity, { message: "full" });
+	const err = new StreamError(StreamCode.NotFound, { message: "not here" });
 	req?.reject(err);
 	await expect(pending).rejects.toBe(err);
 
@@ -1261,7 +1261,7 @@ test("advancing requested without settling rejects the previous request", async 
 	const second = await it.next();
 	expect(second.value?.path).toBe(Path.from("live/other"));
 
-	await expect(firstDemand).rejects.toMatchObject({ code: StreamCode.NoCapacity });
+	await expect(firstDemand).rejects.toMatchObject({ code: StreamCode.Unroutable });
 	const produced = new BroadcastProducer();
 	second.value?.accept(produced);
 	await expect(secondDemand).resolves.toBeDefined();
@@ -1325,7 +1325,7 @@ test("a rejected request falls through to the next-best route", async () => {
 	origin.close();
 });
 
-test("close rejects queued requests with NoCapacity", async () => {
+test("close rejects queued requests as unroutable", async () => {
 	const origin = new Producer();
 	const handle = origin.dynamic(Path.from("live"));
 	const waiting = handle.requested().next();
@@ -1341,7 +1341,6 @@ test("close rejects queued requests with NoCapacity", async () => {
 	req?.accept(new BroadcastProducer());
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
-	expect(Number(new StreamError(StreamCode.NoCapacity).code)).toBe(0x30);
 
 	request.close();
 	origin.close();

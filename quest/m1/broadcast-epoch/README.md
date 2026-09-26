@@ -40,10 +40,10 @@ Decided:
   bare `foo`, since a route covers its descendants, not its parent. A
   bare-name viewer behind one needs a publisher that opts out with the raw
   prefix route. Document this rather than promise it works.
-- Derived output lives under the epoch it came from
-  (`pid/foo.hang/@e/transcode.pro`), so nested epochs must parse. This moves
-  the [wildcard](/quest/m1/wildcard/README.md) line's derived-output example
-  down one segment, and its suffix patterns still match.
+- Derived output mirrors the epoch it came from
+  (`.transcode/pid/foo.hang/@e`, per the
+  [wildcard](/quest/m1/wildcard/README.md) line's derived-output layout), so
+  the service's prefix claim still covers it.
 
 This README owns:
 
