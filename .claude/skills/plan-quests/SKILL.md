@@ -26,7 +26,7 @@ When the work changes what a user sees (a wire, an API, a flag, a dashboard), as
 When the frontier disagrees with a settled quest/plan, challenge the user and resolve the conflict.
 
 Begin the interview by scoping the goal: the observable outcome, why it matters, and its important boundaries and non-goals.
-Do not move on to implementation decisions until the goal is settled.
+Restate the goal in one sentence and get it confirmed before moving on to implementation decisions.
 If the goal contains independently completable outcomes, split them before planning.
 Map the implementation plan as a design tree: every material decision branches into the decisions that hang off it.
 
@@ -34,6 +34,7 @@ The session is done when the frontier is empty.
 The result may be one quest or multiple quests and questlines, split based on what can be completed independently.
 Prefix each quest title with `[XS]`, `[S]`, `[M]`, `[L]`, or `[XL]`, including implementation, verification, and landing work.
 Once complete, create, update, or delete the relevant quests and questlines.
+Record each settled decision and its reason in the quest's Plan, so later sessions don't ask it again.
 New work joins the milestone matching its priority, at its rank; a questline groups only quests that ship together, and its README holds the work no child owns (the end-to-end test, the docs page).
 
 When done, commit and create a draft PR following `CONTRIBUTING.md`.
