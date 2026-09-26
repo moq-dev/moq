@@ -28,8 +28,9 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use moq_net::{Hop, Timestamp, Version, broadcast, cache, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
-/// Newest lite draft (`moq-lite-07-wip`, opt-in) and newest IETF draft.
-const VERSIONS: [&str; 2] = ["moq-lite-07-wip", "moq-transport-22"];
+/// The lite draft production negotiates, the next one (opt-in), and the newest
+/// IETF draft.
+const VERSIONS: [&str; 3] = ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
 
 /// Frames per group, so per-frame and per-group costs both appear.
 const FRAMES: usize = 4;
