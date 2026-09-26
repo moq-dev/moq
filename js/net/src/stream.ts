@@ -180,7 +180,11 @@ export class Stream {
 // Reader wraps a stream and provides convience methods for reading pieces from a stream
 // Unfortunately we can't use a BYOB reader because it's not supported with WebTransport+WebWorkers yet.
 export class Reader {
+	// Contiguous unread bytes, followed by chunks not yet joined onto it. Joining only once a
+	// read needs the bytes keeps a frame arriving in N chunks linear rather than quadratic.
 	#buffer: Uint8Array;
+	#chunks: Uint8Array[] = [];
+	#chunked = 0; // bytes across #chunks
 	#stream?: ReadableStream<Uint8Array>; // if undefined, the buffer is consumed then EOF
 	#reader?: ReadableStreamDefaultReader<Uint8Array>;
 	#closed?: Promise<void>;
@@ -216,16 +220,8 @@ export class Reader {
 			throw new Error("unexpected empty chunk");
 		}
 
-		const buffer = result.value;
-
-		if (this.#buffer.byteLength === 0) {
-			this.#buffer = new Uint8Array(buffer);
-		} else {
-			const temp = new Uint8Array(this.#buffer.byteLength + buffer.byteLength);
-			temp.set(this.#buffer);
-			temp.set(buffer, this.#buffer.byteLength);
-			this.#buffer = temp;
-		}
+		this.#chunks.push(result.value);
+		this.#chunked += result.value.byteLength;
 
 		return true;
 	}
@@ -236,11 +232,36 @@ export class Reader {
 			throw new Error(`read size ${size} exceeds max size ${MAX_READ_SIZE}`);
 		}
 
-		while (this.#buffer.byteLength < size) {
+		if (this.#buffer.byteLength >= size) return;
+
+		while (this.#buffer.byteLength + this.#chunked < size) {
 			if (!(await this.#fill())) {
 				throw new Error("unexpected end of stream");
 			}
 		}
+
+		this.#join();
+	}
+
+	// Move every pending chunk into the buffer, copying only when there's more than one piece.
+	#join() {
+		if (this.#chunks.length === 0) return;
+
+		if (this.#buffer.byteLength === 0 && this.#chunks.length === 1) {
+			this.#buffer = this.#chunks[0];
+		} else {
+			const joined = new Uint8Array(this.#buffer.byteLength + this.#chunked);
+			joined.set(this.#buffer);
+			let offset = this.#buffer.byteLength;
+			for (const chunk of this.#chunks) {
+				joined.set(chunk, offset);
+				offset += chunk.byteLength;
+			}
+			this.#buffer = joined;
+		}
+
+		this.#chunks = [];
+		this.#chunked = 0;
 	}
 
 	// Consumes the first size bytes of the buffer.
@@ -266,6 +287,7 @@ export class Reader {
 		while (await this.#fill()) {
 			// keep going
 		}
+		this.#join();
 		return this.#slice(this.#buffer.byteLength);
 	}
 
@@ -373,7 +395,7 @@ export class Reader {
 
 	// Returns false if there is more data to read, blocking if it hasn't been received yet.
 	async done(): Promise<boolean> {
-		if (this.#buffer.byteLength > 0) return false;
+		if (this.#buffer.byteLength > 0 || this.#chunked > 0) return false;
 		return !(await this.#fill());
 	}
 
