@@ -2,16 +2,17 @@
 
 ## Goal
 
-moq-lite-07 announcements drop the hop list. A route carries a source id, a
-per-route sequence number, and its warm and cold cost, and relays stay
-loop-free with Babel's feasibility condition
-([RFC 8966](https://www.rfc-editor.org/rfc/rfc8966) section 3.5) instead of
-path inspection. A reroute that leaves a relay's advertised cost unchanged no
-longer propagates, and every announce stops paying for its path. lite-06 and
-older, and the IETF cluster extension, keep today's hop lists.
+A route change stops flooding the cluster with announce updates, and the
+routing algorithm that achieves it is chosen by simulation before any wire
+format is committed. Babel is the leading candidate: moq-lite-07 announcements
+drop the hop list, and a route carries a source id, a per-route sequence
+number, and its warm and cold cost. Relays stay loop-free with Babel's
+feasibility condition ([RFC 8966](https://www.rfc-editor.org/rfc/rfc8966)
+section 3.5) instead of path inspection. lite-06 and older, and the IETF
+cluster extension, keep today's hop lists.
 
 Non-goals: fewer routes per relay (tree routing was dropped), and a
-permanently mixed mesh. Mixing pre-07 and lite-07 relays is a rollout window.
+permanently mixed mesh.
 
 ## Plan
 
@@ -22,6 +23,24 @@ change to the chain emits an update, and a relay forwards that update to every
 peer that isn't excluded. [Wildcard](/quest/m0/wildcard/README.md)'s Spread
 quest moves identity onto the subscribe and fetch reply, so this line only
 replaces the first two jobs.
+
+### Gate
+
+The [Routing simulator](/quest/m0/babel/simulator.md) decides whether the wire
+quests below go ahead as written. Babel proceeds if, on the same workloads, it
+sends clearly fewer announce messages than today's path vector, never holds a
+persistent forwarding loop, and bounds transient loops and unavailability. If
+the simulator shows fan-out driven by topology dominates instead (every relay
+re-advertising every route to every peer), propose a line that separates relay
+topology from broadcast reachability, and replace the wire quests with it.
+
+Babel's weak spot is the MoQ common case. RFC 8966 section 2.7 does not
+guarantee loop freedom when several routers originate the same prefix, and
+MoQ has overlapping prefixes, several publishers, warm relays that
+re-originate, and per-request pool selection. Lite SUBSCRIBE carries no path,
+so a forwarding loop is not caught at subscribe time; it stalls the
+subscription until the route changes. The proof obligation is on the actual
+subscribe and fetch forwarding decisions, not on converged announce tables.
 
 ### Wire (lite-07, still `moq-lite-07-wip`)
 
@@ -47,6 +66,12 @@ replaces the first two jobs.
   `(seqno, warm, cold)` it has advertised. It accepts a route only with a newer
   seqno, or the same seqno and a lexicographically lower cost. A saturated cost
   cannot drop, so it is infeasible, which is safe.
+- Feasibility state outlives the route (RFC 8966 section 3.7.3): an entry is
+  dropped on a timer long enough for any delayed advertisement of that seqno
+  to have expired, never because the last route went away.
+- A withdrawn prefix is held unreachable (RFC 8966 section 3.5.4) until a
+  feasible route returns or every neighbour has stopped routing through this
+  relay, so a covering prefix cannot take over and loop back.
 - A relay with no feasible route sends ANNOUNCE_REFRESH on the streams offering
   an infeasible one. A publisher that already holds a new enough seqno
   re-announces. Otherwise it forwards the request toward its own upstream, and
@@ -61,11 +86,14 @@ replaces the first two jobs.
 - [Warm advertise](/quest/m1/pop-skipping/warm-advertise.md) re-originates the
   exact path as the relay's own source, so its warm-zero price is compatible.
 
-### Bridge
+### Rollout
 
-Routes from a pre-07 or IETF peer take `hops[0]` (or a minted id) as source.
-Routes sent to one carry a hop list the bridge synthesizes. The bridge may be
-conservative, but it must never hold a persistent loop.
+The cluster switches to lite-07 routing as a whole; pre-07 and IETF sessions
+stay at its edges, where a route from one takes `hops[0]` (or a minted id) as
+its source and a route to one carries a single-hop list. Mixed pre-07 and
+lite-07 transit inside the cluster is out of scope. If a fleet cannot switch
+at once, the bridge is designed and proven in the simulator before either
+wire quest starts.
 
 ### Line work
 
@@ -74,18 +102,14 @@ This README owns the draft and the end-to-end proof:
 - Lite draft Routing, ANNOUNCE_START/UPDATE/REFRESH, Cost Parameter, and the
   lite-07 changelog.
 - `doc/concept/moq-lite.md`.
-- A mixed ring of pre-07 and lite-07 relays that converges with no persistent
-  loop, fails over when a mid-path relay dies, and recovers a starved route
-  through REFRESH.
+- A lite-07 ring that converges with no persistent loop, fails over when a
+  mid-path relay dies, and recovers a starved route through REFRESH.
 
 ## Quests
 
-- [Rust routing](/quest/m0/babel/rust.md) - moq-net's route model, the lite-07 codec, ANNOUNCE_REFRESH, and the pre-07/IETF bridge
+- [Routing simulator](/quest/m0/babel/simulator.md) - a deterministic simulator runs today's path vector, Babel, and a topology split under the same workloads, and decides whether the wire quests go ahead
+- [Rust routing](/quest/m0/babel/rust.md) - moq-net's route model, the lite-07 codec, ANNOUNCE_REFRESH, and the cluster edge
 - [JS codec](/quest/m0/babel/js.md) - `@moq/net` speaks the lite-07 route fields and answers ANNOUNCE_REFRESH as a source
-
-## Required
-
-- [Wildcard](/quest/m0/wildcard/README.md) - its Spread quest moves stitching identity onto the reply, which this line stops carrying in announcements
 
 ## Related
 

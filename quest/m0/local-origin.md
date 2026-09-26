@@ -14,10 +14,13 @@ internal hop is me"), which [Babel routing](/quest/m0/babel/README.md) removes.
   peers attach through `origin.peer()` (`rs/moq-relay/src/cluster.rs`). Build
   an `origin::Consumer` that admits only routes from customer-tier sessions,
   without copying the table.
-- The internal listener (`rs/moq-relay/src/internal.rs`) is localhost HTTP
+- The internal listener (`rs/moq-relay/src/internal.rs`) is plain HTTP
   today (`/metrics`, `/health`, `/nodes`, `/sessions`). Serve a moq session on
   it over the WebSocket transport the relay already accepts. It is
-  unauthenticated, like `/sessions`, because only local processes reach it.
+  unauthenticated, so serve it only when the internal listener is loopback or
+  a Unix socket. The listener may also bind a private-overlay address, which
+  would expose customer media to the overlay; config load fails if the local
+  origin is enabled there.
 - Open question: Voice publishes responses. Decide whether this session
   may publish into the relay origin, and under which grant.
 - Document it in `doc/bin/relay/`.
