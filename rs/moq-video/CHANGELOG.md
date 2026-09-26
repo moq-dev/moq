@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/moq-dev/moq/compare/moq-video-v0.1.4...moq-video-v0.1.5) - 2026-09-26
+
+### Fixed
+
+- *(nvenc)* commit rate changes and cleanup only once the driver accepts ([#4146](https://github.com/moq-dev/moq/pull/4146))
+
 ## [0.1.4](https://github.com/moq-dev/moq/compare/moq-video-v0.1.3...moq-video-v0.1.4) - 2026-09-25
 
 ### Other
