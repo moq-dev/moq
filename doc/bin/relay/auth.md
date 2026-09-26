@@ -40,7 +40,11 @@ received.
 
 **Grant.** `publish` and `subscribe` as pattern unions (`foo/**` is a subtree,
 `**` is everything, an empty list is nothing), `root` (optional; replaces the
-dialed path, which is how a slug aliases to a canonical id), `expires`
+dialed path, which is how a slug aliases to a canonical id), `mounts`
+(optional object; each key, a path relative to the root, reads from the
+absolute path it maps to: `{".svc": ".svc/pid"}` resolves `.svc/foo` at
+`.svc/pid/foo` and presents its announcements under `.svc`, the patterns still
+authorize `.svc/foo`, and nothing may be published beneath a key), `expires`
 (optional unix seconds; the session closes then), `revalidate` (optional
 seconds until the relay asks again), `tier` (optional label handed to
 [stats](/bin/relay/config#stats)), and `peer` (optional; `true` marks another
@@ -55,7 +59,7 @@ The client and relay snapshot each accepted grant's deadline on a monotonic
 clock, so later polls, outages, and wall-clock adjustments do not restart it.
 
 **Revalidate and outage.** On the cadence the relay POSTs `revalidate` with the
-same request. A grant applies: a changed `root` or one that no longer covers
+same request. A grant applies: a changed `root` or `mounts`, or one that no longer covers
 what the session holds closes it with `Unauthorized` (the live session is not
 resized in place), and so does a flipped `peer`; a changed `tier` keeps the
 session and moves its stats: its presence counts under the new tier from then

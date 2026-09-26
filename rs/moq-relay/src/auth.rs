@@ -179,6 +179,9 @@ pub struct Token {
 	pub(crate) path: String,
 	/// The root the session is scoped to: the grant's `root` alias, else the dialed path.
 	pub root: PathOwned,
+	/// Subtrees read from elsewhere on the origin: each path, relative to `root`,
+	/// resolves at the absolute path it maps to.
+	pub mounts: Vec<(PathOwned, PathOwned)>,
 	/// The patterns the holder may subscribe to, relative to `root`.
 	pub subscribe: Patterns,
 	/// The patterns the holder may publish to, relative to `root`.
@@ -200,6 +203,11 @@ impl Token {
 		Self {
 			path: path.to_string(),
 			root: Path::new(root).to_owned(),
+			mounts: grant
+				.mounts
+				.iter()
+				.map(|(at, target)| (Path::new(at).to_owned(), Path::new(target).to_owned()))
+				.collect(),
 			subscribe: grant.subscribe.clone(),
 			publish: grant.publish.clone(),
 			tier: crate::configured_tier(grant.tier.clone()),
@@ -214,10 +222,13 @@ impl Token {
 	}
 
 	/// Whether `other` still covers everything this token scopes: the same root and
-	/// every grant still held. A narrower re-check closes the session until
+	/// mounts, and every grant still held. A narrower re-check closes the session until
 	/// pattern scopes can resize it in place.
 	pub(crate) fn covered_by(&self, other: &Self) -> bool {
-		self.root == other.root && other.subscribe.covers(&self.subscribe) && other.publish.covers(&self.publish)
+		self.root == other.root
+			&& self.mounts == other.mounts
+			&& other.subscribe.covers(&self.subscribe)
+			&& other.publish.covers(&self.publish)
 	}
 }
 
@@ -272,7 +283,7 @@ impl Lease {
 	/// Wait for the lease to stop covering the session: the grant expired, was
 	/// revoked, or was re-checked into one that no longer covers the token.
 	///
-	/// A changed root or a narrower grant ends it: origin handles cannot yet narrow
+	/// A changed root or mounts, or a narrower grant, ends it: origin handles cannot yet narrow
 	/// a live scope in place (tracked by `quest/m1/auth/narrowing.md`). A flipped
 	/// `peer` ends it too, since the routes it already announced would be
 	/// misreported as entering here or from a peer. A changed tier keeps the
@@ -291,6 +302,9 @@ impl Lease {
 						let fresh = self.token.recheck(&grant);
 						if fresh.root != self.token.root {
 							return "root changed".into();
+						}
+						if fresh.mounts != self.token.mounts {
+							return "mounts changed".into();
 						}
 						// Routes the session already announced were recorded as
 						// entering here or from a peer; a flip would misreport them.
@@ -681,10 +695,20 @@ mod tests {
 		let wide = Token::new("/room", &Grant::new(patterns(&["**"]), patterns(&["**"])));
 		let narrow = Token::new("/room", &Grant::new(patterns(&["alice/**"]), patterns(&["**"])));
 		let moved = Token::new("/other", &Grant::new(patterns(&["**"]), patterns(&["**"])));
+		let mut mounted = Grant::new(patterns(&["**"]), patterns(&["**"]));
+		mounted.mounts.insert(".svc".into(), ".svc/room".into());
+		let mounted = Token::new("/room", &mounted);
+		assert_eq!(
+			mounted.mounts,
+			[(Path::new(".svc").to_owned(), Path::new(".svc/room").to_owned())]
+		);
 		assert!(wide.covered_by(&wide));
 		assert!(narrow.covered_by(&wide));
 		assert!(!wide.covered_by(&narrow));
 		assert!(!wide.covered_by(&moved));
+		// A mount moves what a path resolves to, so either way it is a new scope.
+		assert!(!wide.covered_by(&mounted));
+		assert!(!mounted.covered_by(&wide));
 	}
 
 	/// Routes a session announced were recorded as a peer's or not; a re-check that
