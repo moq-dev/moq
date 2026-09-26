@@ -29,11 +29,8 @@ Other sessions share this machine: hold new agents while the load average exceed
 Each agent opens its PR as a draft, lists every open decision in its report with a recommendation, and never marks it ready itself.
 Report each sub-agent's final status, staying silent on interim notifications, but do not monitor their PRs.
 
-As each agent reports, explain its result in a few lines, then prompt the user inline without waiting for the rest.
-Ask about its decisions (naming, API shape, branch, blockers, manual steps), each with the PR, a short summary, and your recommendation, then offer its follow-ups as a multi-select to /plan-quests.
-When nothing is open, ask whether to mark the PR ready.
-Resume the owning agent with each answer, and prompt again on anything its next report raises.
-Mark the PR ready yourself once all of its decisions are resolved.
+As each agent reports, follow /decisions without waiting for the rest, offering its follow-ups to /plan-quests.
+Resume the owning agent with each answer, and mark its PR ready yourself once all of its decisions are resolved.
 
 Run /plan-quests for any selected quests in the foreground.
 Perform any research and monitoring in the background.
