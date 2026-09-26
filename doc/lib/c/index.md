@@ -29,7 +29,8 @@ From source, `add_subdirectory(rs/libmoq)` in CMake gives a `moq` target to
 link. A bare `cargo build --release -p libmoq` writes `target/release/libmoq.a`,
 and `moq.h` plus `moq.pc` land in the build script's `OUT_DIR` under `include/`
 and `lib/pkgconfig/`, a hashed path that `--message-format=json` reports as
-`out_dir`.
+`out_dir`. That `moq.pc` expects the install layout, with `libmoq.a` in `lib/`
+beside `pkgconfig/`.
 
 ## Shape of the API
 

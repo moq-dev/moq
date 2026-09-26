@@ -17,6 +17,8 @@ This will:
 `OUT_DIR` is the build script's hashed output directory, which
 `cargo build --message-format=json` reports as `out_dir` on the
 `build-script-executed` message for libmoq.
+`moq.pc` assumes the install layout (`lib/libmoq.a` beside `lib/pkgconfig/`), so
+copy the staticlib into `$OUT_DIR/lib/` or a prefix before using it.
 
 There's also a [CMakeLists.txt](CMakeLists.txt) file that can be used to import/build the library.
 
