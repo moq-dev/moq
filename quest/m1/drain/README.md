@@ -29,6 +29,11 @@ them (a planned-drain health state, the SIGTERM sequencing and stop timeouts,
 per-PoP serial deploys, a two-node PoP floor, and the gateway drain contract)
 is moq.pro's (downstream) fleet drain work, which consumes these quests.
 
+Drain stays at the MoQ layer. WebTransport's `WT_DRAIN_SESSION` capsule and
+the browser `draining` promise are advisory and carry no redirect URI or
+timeout, and qmux and WebSocket have no equivalent, so neither the relay nor
+the clients send or act on them (decided 2026-09-26).
+
 **relay-drain-api.** A drain hook that GOAWAYs every established session and
 immediately GOAWAYs any new arrival, so an embedding process can enter drain
 on SIGTERM after the DNS window and still bound the total stop time. Expose
