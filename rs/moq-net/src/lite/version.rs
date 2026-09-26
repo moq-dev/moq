@@ -206,6 +206,18 @@ impl Version {
 		}
 	}
 
+	/// Whether TRACK_INFO names the origin serving the track, which is what a relay
+	/// stitches a failover on. Added in lite-07; older versions leave a relay the
+	/// route's first hop.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_track_origin(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether announcements carry the route cost: the marginal cost of pulling
 	/// the broadcast via this route, accumulated per link. Added in lite-06.
 	/// Older versions carry nothing, so a received route stays at zero and ranks

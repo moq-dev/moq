@@ -1,4 +1,4 @@
-# Wildcard advertisements
+# [S] Wildcard advertisements
 
 ## Goal
 
@@ -40,7 +40,6 @@ claims resolved against pattern interest. The three workloads above still
 hold: the transcoder claims its service prefix
 ([Where derived output lives](#where-derived-output-lives)), and the archive
 claims the root and refuses what it does not have.
-Spread and Demand are additive and land on main.
 
 ### What already exists, and what does not
 
@@ -62,10 +61,11 @@ interest locally.
 Request resolution exists too. `Consumer::request_broadcast` mints a front per
 path (`rs/moq-net/src/model/front.rs`) that selects through `best_route`: a
 local broadcast first, then the longest covering prefix, filtered by the
-requester's excluded hop and ordered by `route_order`. A refusal from that tier
-is final, a front resumes only through routes sharing its first hop, and FETCH
-resolves the same way. What remains is spreading one prefix's pool across
-requested paths ([Spread](/quest/m1/wildcard/spread.md)). The pattern matcher itself exists:
+requester's excluded hop and ordered by `route_order`, whose hash is keyed on
+the requested path so one prefix's pool shares its paths. A refusal from that
+tier is final, a front resumes only onto a source whose TRACK_INFO names the
+same origin (the route's first hop on wires older than lite-07), and FETCH
+resolves the same way. The pattern matcher itself exists:
 `moq_net::{Pattern, Patterns, Segment}` and `Path.Pattern` /
 `Path.Patterns` in `js/net/src/path.ts` own the shared matching, containment,
 specificity, and rebasing tokens and filters reuse.
@@ -75,9 +75,10 @@ Announcement `Epoch` was specified into lite-06 by
 [#2611](https://github.com/moq-dev/moq/pull/2611), never implemented, and
 removed from the draft by #3225, which retired `draft-lcurley-moq-broadcast`
 with it. [moq#3312](https://github.com/moq-dev/moq/pull/3312) restored per-path identity
-from the route's first hop, reversing #3225's no-splice rule, and this
-questline builds its collision handling on that rather than on a generation
-field.
+from the route's first hop, reversing #3225's no-splice rule, and lite-07 moved
+it to the origin a TRACK_INFO reply names, since a pool's one route labels
+many origins. This questline builds its collision handling on that rather than
+on a generation field.
 
 ### Decisions
 
@@ -149,7 +150,8 @@ field.
   can hash one path to different workers before either concrete announcement
   propagates, and both land at the SAME literal path. Whichever route wins
   selection serves it, and a consumer moves between them only when the winner's
-  identity is preserved, per the first-hop resume rule ([moq#3312](https://github.com/moq-dev/moq/pull/3312)); two distinct workers are two identities,
+  identity is preserved, per the resume rule (the origin a TRACK_INFO reply
+  names on lite-07, the route's first hop before it); two distinct workers are two identities,
   so the loser's subscribers end and resubscribe rather than being spliced onto
   another worker's frames mid-group. Claim routing invents neither a lease
   nor a generation. This is weaker than the retired `Epoch` design, which could
@@ -180,11 +182,6 @@ served from storage through the root claim, and a live publisher's concrete
 announcement shadows it. A claim names no generation, so a client that must
 distinguish recording generations reads the catalog's archive entry
 ([archive](/quest/m1/archive/README.md)) rather than announce state.
-
-## Quests
-
-- [Spread](/quest/m1/wildcard/spread.md) - equal-cost advertisers of one
-  prefix share its paths instead of the first one taking them all
 
 ## Related
 

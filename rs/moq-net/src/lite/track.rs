@@ -1,7 +1,7 @@
 use std::{borrow::Cow, time::Duration};
 
 use crate::{
-	Path, Timescale,
+	Hop, Path, Timescale,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 };
 
@@ -55,6 +55,10 @@ pub struct TrackInfo {
 	/// Per-frame timestamp scale (units per second). Mandatory on Lite05+: every track
 	/// is timed, so this is always a real scale on the wire (never zero).
 	pub timescale: Timescale,
+	/// The origin serving the track: the Hop ID a relay stitches failover on.
+	/// [`Hop::UNKNOWN`] names nobody. Lite07+; older versions carry none and
+	/// decode as [`Hop::UNKNOWN`].
+	pub origin: Hop,
 }
 
 impl Message for TrackInfo {
@@ -67,11 +71,16 @@ impl Message for TrackInfo {
 		super::subscribe::skip_group_order(r, version)?;
 		let max_age = Duration::decode(r, version)?;
 		let timescale = Timescale::new(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
+		let origin = match version.has_track_origin() {
+			true => Hop::from_wire(u64::decode(r, version)?)?,
+			false => Hop::UNKNOWN,
+		};
 
 		Ok(Self {
 			priority,
 			max_age,
 			timescale,
+			origin,
 		})
 	}
 
@@ -84,6 +93,9 @@ impl Message for TrackInfo {
 		super::subscribe::pad_group_order(w, version)?;
 		self.max_age.encode(w, version)?;
 		u64::from(self.timescale).encode(w, version)?;
+		if version.has_track_origin() {
+			self.origin.id().encode(w, version)?;
+		}
 		Ok(())
 	}
 }
@@ -97,6 +109,7 @@ mod test {
 			priority: 7,
 			max_age: Duration::from_millis(2000),
 			timescale: Timescale::MICRO,
+			origin: Hop::UNKNOWN,
 		}
 	}
 
@@ -129,11 +142,44 @@ mod test {
 			priority: info.priority,
 			max_age: info.max_age,
 			timescale: info.timescale,
+			origin: Hop::UNKNOWN,
 		};
 		let mut buf = Vec::new();
 		info.encode(&mut buf, Version::Lite05).unwrap();
 
 		assert_eq!(buf, [0x06, 0x00, 0x00, 0x53, 0x88, 0x43, 0xe8]);
+	}
+
+	#[test]
+	fn track_info_carries_the_origin_on_lite07() {
+		let mut info = info_sample();
+		info.origin = Hop::new(42).unwrap();
+		let got = info_roundtrip(Version::Lite07, &info);
+		assert_eq!(got.origin, info.origin);
+		assert_eq!(got.timescale, Timescale::MICRO);
+
+		// Hop 0 is legal on the wire: it names nobody.
+		info.origin = Hop::UNKNOWN;
+		assert_eq!(info_roundtrip(Version::Lite07, &info).origin, Hop::UNKNOWN);
+
+		// Older versions have no room for it.
+		info.origin = Hop::new(42).unwrap();
+		assert_eq!(info_roundtrip(Version::Lite06, &info).origin, Hop::UNKNOWN);
+	}
+
+	#[test]
+	fn track_info_origin_matches_cross_language_wire_bytes() {
+		let info = TrackInfo {
+			priority: 0,
+			max_age: crate::track::DEFAULT_MAX_AGE,
+			timescale: Timescale::MILLI,
+			origin: Hop::new(7).unwrap(),
+		};
+		let mut buf = Vec::new();
+		info.encode(&mut buf, Version::Lite07).unwrap();
+
+		// Lite07 drops the Ordered byte and appends the origin.
+		assert_eq!(buf, [0x06, 0x00, 0x53, 0x88, 0x43, 0xe8, 0x07]);
 	}
 
 	#[test]
@@ -148,6 +194,7 @@ mod test {
 			priority: 255,
 			max_age: Duration::from_millis((1u64 << 62) - 1),
 			timescale: Timescale::new((1u64 << 62) - 1).unwrap(),
+			origin: Hop::UNKNOWN,
 		};
 		let got = info_roundtrip(Version::Lite05, &info);
 		assert_eq!(got.priority, 255);
@@ -161,6 +208,7 @@ mod test {
 			priority: 0,
 			max_age: Duration::from_nanos(999_999),
 			timescale: Timescale::MILLI,
+			origin: Hop::UNKNOWN,
 		};
 		let got = info_roundtrip(Version::Lite05, &info);
 		assert_eq!(got.max_age, Duration::ZERO);
@@ -172,6 +220,7 @@ mod test {
 			priority: 7,
 			max_age: Duration::from_millis(1u64 << 62),
 			timescale: Timescale::MILLI,
+			origin: Hop::UNKNOWN,
 		};
 		let mut buf = Vec::new();
 		assert!(info.encode(&mut buf, Version::Lite05).is_err());

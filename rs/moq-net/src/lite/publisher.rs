@@ -1,5 +1,5 @@
 use crate::runtime::Timers as _;
-use crate::{SessionError, announce, frame, group, origin, track};
+use crate::{SessionError, announce, broadcast, frame, group, origin, track};
 use std::{
 	collections::HashMap,
 	ops::Bound,
@@ -878,6 +878,7 @@ enum TrackInfoState {
 	},
 	/// Waiting for the track's info.
 	Query {
+		broadcast: broadcast::Consumer,
 		querying: track::Querying,
 	},
 	/// TRACK_INFO buffered: flush, FIN, and wait for the acknowledgement.
@@ -951,19 +952,22 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 				TrackInfoState::Request { msg, requesting } => {
 					let broadcast = ready!(requesting.poll_ok(waiter))?;
 					let querying = broadcast.track(&msg.track)?.query().into_inner();
-					self.state = TrackInfoState::Query { querying };
+					self.state = TrackInfoState::Query { broadcast, querying };
 				}
-				TrackInfoState::Query { querying } => {
+				TrackInfoState::Query { broadcast, querying } => {
 					let info = ready!(querying.poll_ok(waiter))?;
 
 					// TRACK_INFO only flows on Lite05+ (the encode errors otherwise), where every
 					// track is timed, so the model's timescale and retention bound go on the wire
-					// verbatim.
+					// verbatim. The origin is the one the broadcast's front serves, read once the
+					// info resolves (a copy only splices after its origin checks out): content
+					// originating here is named by the id we stamp on our announcements.
 					let stream = self.stream.as_mut().expect("stream present");
 					stream.writer.buffer(&lite::TrackInfo {
 						priority: info.priority,
 						max_age: info.max_age,
 						timescale: info.timescale,
+						origin: broadcast.origin().unwrap_or(self.shared.self_origin),
 					})?;
 					self.state = TrackInfoState::Finish { finished: false };
 				}

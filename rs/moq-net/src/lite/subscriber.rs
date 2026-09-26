@@ -3284,10 +3284,11 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 					// window matches what the upstream advertises (relays re-serve with
 					// the same bound). `broadcast` is left at its default here;
 					// `track::Request::accept` stamps the track's real broadcast.
-					let model = track::Info::default()
+					let mut model = track::Info::default()
 						.with_timescale(info.timescale)
 						.with_max_age(info.max_age)
 						.with_priority(info.priority);
+					model.origin = serve.subscriber.version.has_track_origin().then_some(info.origin);
 					return Poll::Ready(Ok(model));
 				}
 			}
@@ -3589,6 +3590,9 @@ struct FetchServeRun<S: crate::transport::poll::Session> {
 	state: FetchRunState<S>,
 }
 
+// A state machine's enum is its storage: one transient instance per stream, so the
+// big variant is the working state, not padding held in bulk.
+#[allow(clippy::large_enum_variant)]
 enum FetchRunState<S: crate::transport::poll::Session> {
 	Open {
 		request: Option<group::Request>,

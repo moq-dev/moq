@@ -106,6 +106,10 @@ pub struct Info {
 	/// The publisher's priority for this track, used only to break ties between
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
 	pub priority: u8,
+	/// The origin a copy's reply named as serving it, when its wire carries one
+	/// (TRACK_INFO on Lite07+). The origin's failover splices only copies naming
+	/// the same origin; `None` falls back to the route's first hop.
+	pub(crate) origin: Option<crate::Hop>,
 }
 
 impl Default for Info {
@@ -114,6 +118,7 @@ impl Default for Info {
 			timescale: Timescale::default(),
 			max_age: DEFAULT_MAX_AGE,
 			priority: 0,
+			origin: None,
 		}
 	}
 }

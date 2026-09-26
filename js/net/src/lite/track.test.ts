@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { infoDefaults } from "../track.ts";
@@ -45,6 +46,19 @@ test("TrackInfo defaults match cross-language wire bytes", async () => {
 	expect(await bytes((w) => info.encode(w, Version.DRAFT_05))).toEqual(
 		new Uint8Array([0x06, 0x00, 0x00, 0x53, 0x88, 0x43, 0xe8]),
 	);
+});
+
+test("TrackInfo carries the origin on draft-07", async () => {
+	const info = new TrackInfo({ ...infoDefaults(), origin: HopSchema.parse(7n) });
+	const buf = await bytes((w) => info.encode(w, Version.DRAFT_07));
+	// Draft-07 drops the Ordered byte and appends the origin.
+	expect(buf).toEqual(new Uint8Array([0x06, 0x00, 0x53, 0x88, 0x43, 0xe8, 0x07]));
+	const got = await TrackInfo.decode(new Reader(undefined, buf), Version.DRAFT_07);
+	expect(got.origin).toBe(HopSchema.parse(7n));
+
+	// Draft-06 has no room for it.
+	const old = await bytes((w) => info.encode(w, Version.DRAFT_06));
+	expect((await TrackInfo.decode(new Reader(undefined, old), Version.DRAFT_06)).origin).toBe(UNKNOWN_HOP);
 });
 
 test("Track request round-trips on draft-05", async () => {

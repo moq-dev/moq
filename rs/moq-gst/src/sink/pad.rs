@@ -29,12 +29,12 @@ enum PadState {
 
 /// Where a pad's buffers land: a codec importer, a subtitle track, or opaque data.
 ///
-/// Both payloads are large (a codec importer, a container producer), so each is boxed to keep the
-/// enum small.
+/// Every payload is large (a codec importer, a container producer, a track producer), so
+/// each is boxed to keep the enum small.
 enum Sink {
 	Media(Box<Media>),
 	Text(Box<Text>),
-	Opaque(moq_net::track::Producer),
+	Opaque(Box<moq_net::track::Producer>),
 }
 
 /// An audio or video pad, published through a codec importer.
@@ -303,7 +303,7 @@ impl Pad {
 				.with_context(|| format!("cannot reserve track {name}"))?;
 			// Followed at the live edge, so it keeps the default retention the media helper raises.
 			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
-			self.track = Some(Sink::Opaque(request.accept(info)));
+			self.track = Some(Sink::Opaque(Box::new(request.accept(info))));
 			self.caps = Some(caps.clone());
 			return Ok(name);
 		}

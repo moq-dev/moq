@@ -962,6 +962,8 @@ export class Publisher {
 				// Lite05 mandates per-frame timestamps. Advertise the track's timescale;
 				// `#serveGroup` emits each frame converted to it.
 				timescale: info.timescale,
+				// This session names itself: it serves what its application publishes.
+				origin: this.hop,
 			});
 		})();
 

@@ -117,6 +117,10 @@ struct SplicedState {
 
 	// Names awaiting assignment to a route, in request order.
 	pending: VecDeque<Arc<str>>,
+
+	// The origin the front serves, as its replies name it: `None` for content
+	// originating on this origin. Set by the front as its identity settles.
+	origin: Option<crate::Hop>,
 }
 
 impl BroadcastState {
@@ -411,6 +415,14 @@ impl Producer {
 		let name = spliced.pending.pop_front().expect("predicate guaranteed a request");
 		let producer = spliced.tracks.get(&name).expect("pending name without a track").clone();
 		Poll::Ready((name, producer))
+	}
+
+	/// Record the origin the front serves; see [`Consumer::origin`]. Route-fed
+	/// broadcasts only.
+	pub(crate) fn set_origin(&self, origin: Option<crate::Hop>) {
+		let mut state = self.state.lock();
+		let spliced = state.spliced.as_mut().expect("origin of a route-fed broadcast");
+		spliced.origin = origin;
 	}
 
 	/// Let go of every spliced track, aborting with `err` the ones never handed
@@ -941,6 +953,13 @@ impl Consumer {
 	/// than a strike.
 	pub(crate) fn is_closing(&self) -> bool {
 		self.is_closed() || self.state.read().closing
+	}
+
+	/// The origin serving this broadcast, as a reply for it names it: `None` for
+	/// content originating on this origin, including any broadcast that is not
+	/// route-fed.
+	pub(crate) fn origin(&self) -> Option<crate::Hop> {
+		self.state.read().spliced.as_ref().and_then(|spliced| spliced.origin)
 	}
 
 	/// Whether the broadcast ended via a deliberate [`Producer::finish`], as opposed
