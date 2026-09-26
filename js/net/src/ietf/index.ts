@@ -16,5 +16,6 @@ export * from "./solicit.ts";
 export * from "./subscribe.ts";
 export * from "./subscribe_namespace.ts";
 export * from "./subscriber.ts";
+export * from "./token.ts";
 export * from "./track.ts";
 export * from "./version.ts";

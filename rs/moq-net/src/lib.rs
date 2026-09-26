@@ -85,7 +85,7 @@ mod lite;
 mod model;
 pub mod path;
 mod recv;
-mod setup;
+pub mod setup;
 mod tail;
 #[cfg(test)]
 mod test_interop;

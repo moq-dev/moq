@@ -30,12 +30,14 @@ grant back. The schemas are `moq_auth::Request` and `moq_auth::Grant`
 `http` for a one-shot `/fetch` or `/announced` request), `remote` and `local`
 socket addresses, `server_name` (the SNI or the host the client addressed),
 `alpn` (the negotiated moq protocol), `path` exactly as dialed, `query` raw,
-`role` the client declared at SETUP (`publisher`, `subscriber`, absent for
-both), and `tls` with the verified client certificate when one was presented:
+`token` with the credential a moq-transport client put in its SETUP's
+`AUTHORIZATION TOKEN` option (`kind`, the draft's Token Type, and `value`, the
+bytes as unpadded base64url), `role` the client declared at SETUP
+(`publisher`, `subscriber`, absent for both), and `tls` with the verified client certificate when one was presented:
 `name` (first SAN DNS name, else CN, else the fingerprint; a server cannot tell which), `fingerprint`
 (SHA-256 of the leaf), `expires`, `issuer`. Nothing is parsed on the server's
 behalf: the `jwt` query parameter is a convention of `moq auth serve`, not of
-the relay. An `end` adds `reason`, `duration` in seconds, and `bytes` sent and
+the relay, and the relay forwards a SETUP token without reading it. An `end` adds `reason`, `duration` in seconds, and `bytes` sent and
 received.
 
 **Grant.** `publish` and `subscribe` as pattern unions (`foo/**` is a subtree,
@@ -98,7 +100,7 @@ moq auth sessions --internal-url http://127.0.0.1:9101 --path 'demo/**'
 ```
 
 `GET /sessions` is the dry run: the same matches, each request plus start
-time, with `query` omitted so a jwt on the plane cannot be replayed. A
+time, with `query` and `token` omitted so a credential on the plane cannot be replayed. A
 matching POST returns 202 and the ids; no match is 200 with an empty list.
 An unknown field, including `query`, is 400. One node, no cluster fan-out:
 the server already knows each session's `node` from `connect` and calls that
@@ -142,7 +144,9 @@ moq auth verify --key public.jwk --in alice.jwt
 moq auth serve --key public.jwk   # or --key-dir /etc/moq/keys/ for {kid}.jwk rotation
 ```
 
-The client dials `https://relay.example.com/rooms/123?jwt=<token>`. HMAC
+The client dials `https://relay.example.com/rooms/123?jwt=<token>`. A
+moq-transport client can instead put the JWT in its SETUP's `AUTHORIZATION
+TOKEN` option with Token Type 0; `moq auth serve` verifies it the same way. HMAC
 (HS256/384/512), RSA (RS/PS), ECDSA (ES256/384), and EdDSA keys all work. A key
 can itself be **scoped** at generation (`--root`, `--publish`, `--subscribe`),
 after which it can never sign a broader token.
@@ -237,14 +241,16 @@ moq auth serve --listen 127.0.0.1:4440 \
 
 Policy runs in this order and stops at the first that applies:
 
-1. A `jwt` in the query is verified against `--key FILE` or `--key-dir DIR`
+1. A JWT, from the `jwt` query or a SETUP `token` of `kind` 0, is verified
+   against `--key FILE` or `--key-dir DIR`
    (by `kid`, read per request so rotation needs no restart). Its claims
    are authorized at the dialed path (`Claims::authorize`): the path may
    equal the root, extend it (which narrows the grant), or be a parent of
    it (the grant stays anchored at the root). Residuals become the grant.
    An unrelated path, or one the token grants nothing at, is refused. A
    malformed, expired, or unknown-key token is refused; it never falls
-   through to the anonymous rules.
+   through to the anonymous rules. So is a SETUP token of any other `kind`,
+   and a session presenting both a SETUP token and a `jwt` query.
 2. A verified client certificate gets `--mtls-publish` and
    `--mtls-subscribe`, and nothing when they are empty. Cluster peers are
    admitted this way; a mesh needs `'**'` for both.

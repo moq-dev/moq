@@ -473,6 +473,10 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 	};
 	let mut out = auth.request(transport, path);
 	out.query = request.query().map(str::to_owned);
+	out.token = request.token().map(|token| moq_auth::Token {
+		kind: token.kind,
+		value: token.value.clone(),
+	});
 	out.remote = request.remote_addr();
 	out.local = request.local_addr();
 	out.server_name = request

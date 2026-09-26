@@ -435,6 +435,9 @@ pub struct PeerSetup<S: crate::transport::poll::Session> {
 	/// The request path the peer advertised, for URL-less transports.
 	pub path: Option<String>,
 
+	/// The credential the peer presented in its `AUTHORIZATION TOKEN` option.
+	pub token: Option<crate::setup::Token>,
+
 	/// The Setup Options it declared (see [`cluster`] and [`solicit`]).
 	pub declared: peer::Peer,
 }
@@ -485,11 +488,13 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 			),
 			None => None,
 		};
+		let token = super::token::from_setup(&params, version)?;
 		let declared = peer_from_params(&params, version)?;
 
 		return Ok(PeerSetup {
 			stream: reader,
 			path,
+			token,
 			declared,
 		});
 	}
