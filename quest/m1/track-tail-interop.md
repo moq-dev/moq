@@ -27,8 +27,3 @@ What stood in the way when the Rust half landed:
 
 QUIC on localhost rarely reorders, so this is a smoke check that the end is
 delivered and clean. The ordering race itself stays in the unit tests.
-
-## Related
-
-- [Session death error](/quest/m1/session-death-error.md) - the other way a
-  track ends wrong
