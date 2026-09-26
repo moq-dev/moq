@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -11631,6 +11629,14 @@ external RustBuffer uniffi_moq_ffi_fn_method_moqsession_stats(
 @Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqsession_status(
   Pointer<Void> ptr,
+);
+
+@Native<RustBuffer Function(RustBuffer, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external RustBuffer uniffi_moq_ffi_fn_method_moqerror_uniffi_trait_display(
+  RustBuffer ptr,
+  Pointer<RustCallStatus> uniffiStatus,
 );
 
 @Native<Void Function(RustBuffer, Pointer<RustCallStatus>)>(
