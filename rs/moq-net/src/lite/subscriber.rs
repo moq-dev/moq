@@ -309,7 +309,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(false);
 		};
 
-		announced.attach(path, AnnouncedRoute::new(route, dynamic));
+		announced.attach(path, route, dynamic);
 
 		Ok(true)
 	}
@@ -411,7 +411,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			announced.declined(path);
 			return Ok(false);
 		};
-		announced.attach(path, AnnouncedRoute::new(metadata, dynamic));
+		announced.attach(path, metadata, dynamic);
 
 		Ok(true)
 	}
@@ -1236,12 +1236,6 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					if self.subscriber.going_away.poll(waiter).is_ready() {
 						run.announced.drain();
 					}
-					// Drain every buffered announce BEFORE serving requests: a route
-					// this pass attaches must have its request queue polled (and this
-					// machine's waiter registered on it) below, in the same pass.
-					// Serving first and then parking on the decode would strand a
-					// request that arrives in between: its wake finds no waiter, and
-					// nothing else re-polls this machine.
 					loop {
 						match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(&mut cx) {
 							Poll::Ready(Ok(Some(announce))) => {
@@ -1261,8 +1255,8 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 							Poll::Pending => break,
 						}
 					}
-					// Materialize requested paths under the attached routes; leaves the
-					// waiter registered on every route's request queue.
+					// Serve the routes whose request queue woke, including any attached
+					// above. Each route parks on its own waker, so the rest cost nothing.
 					run.announced.poll_serve(&self.subscriber, waiter);
 					return Poll::Pending;
 				}
@@ -1975,6 +1969,58 @@ mod tests {
 		);
 	}
 
+	/// A serve pass polls only the routes whose request queue woke. The driver runs a
+	/// pass on every wake, which is once per group the session carries, so polling
+	/// every announced route there made each group cost the whole announce set.
+	#[tokio::test]
+	async fn a_request_readies_only_its_route() {
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let mut subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
+			session: SinkSession::new(Default::default()),
+			origin: origin.clone(),
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			cost: None,
+			peer_hop: Some(crate::Hop::new(777).unwrap()),
+			going_away: Default::default(),
+		});
+
+		let mut announced = Announced::default();
+		for i in 0..64 {
+			assert!(
+				subscriber
+					.start_announce(
+						Path::new(&format!("room/{i}")).to_owned(),
+						crate::Hops::new(),
+						crate::origin::Cost::default(),
+						0,
+						None,
+						&mut announced,
+					)
+					.unwrap()
+			);
+		}
+
+		// Attaching queues each route for its first pass, and that pass leaves none queued.
+		assert_eq!(announced.ready.len(), 64);
+		announced.poll_serve(&subscriber, &kio::Waiter::noop());
+		assert!(announced.ready.is_empty());
+
+		let consumer = origin.consume();
+		let request = tokio::spawn(async move { consumer.request_broadcast("room/7").await });
+
+		let ready = kio::wait(|waiter| announced.ready.poll_pop(waiter)).await.unwrap();
+		assert_eq!(ready.as_str(), "room/7");
+		assert!(announced.ready.is_empty(), "only the requested route is ready");
+
+		// Hand it back, as its waker did, and serve it.
+		announced.ready.try_push(ready).unwrap();
+		announced.poll_serve(&subscriber, &kio::Waiter::noop());
+		request.await.unwrap().expect("the requested route serves it");
+	}
+
 	/// Every path out of `start_announce` that declines an announce records it first.
 	///
 	/// The decline paths are a list one edit can fall off the end of, and a miss is silent:
@@ -2530,19 +2576,33 @@ enum Sub<S: crate::transport::poll::Session> {
 /// A declined advertisement remains present with no route because the peer still
 /// owns its path and announce id until it retracts or restarts it.
 #[derive(Default)]
-struct Announced(HashMap<PathOwned, Option<AnnouncedRoute>>);
+struct Announced {
+	routes: HashMap<PathOwned, Option<AnnouncedRoute>>,
+	/// Attached routes whose request queue woke since the last serve pass. The
+	/// driver wakes for every group the session carries, so a pass must cost what
+	/// was requested, not every route the peer announced.
+	ready: kio::Queue<PathOwned>,
+}
 
 impl Announced {
 	fn contains(&self, path: &PathOwned) -> bool {
-		self.0.contains_key(path)
+		self.routes.contains_key(path)
 	}
 
-	fn attach(&mut self, path: PathOwned, route: AnnouncedRoute) {
-		self.0.insert(path, Some(route));
+	/// Attach a route, queued for its first serve pass.
+	fn attach(&mut self, path: PathOwned, route: crate::origin::Route, dynamic: crate::origin::Dynamic) {
+		let wake = Arc::new(RouteWake {
+			path: path.clone(),
+			queued: atomic::AtomicBool::new(false),
+			ready: self.ready.clone(),
+		});
+		let route = AnnouncedRoute::new(route, dynamic, wake);
+		route.waker.wake_by_ref();
+		self.routes.insert(path, Some(route));
 	}
 
 	fn declined(&mut self, path: PathOwned) {
-		if let Some(Some(route)) = self.0.insert(path, None) {
+		if let Some(Some(route)) = self.routes.insert(path, None) {
 			route.finish();
 		}
 	}
@@ -2558,27 +2618,35 @@ impl Announced {
 	/// with [`Self::contains`]. Overwriting an attached route here would drop its source
 	/// without finishing it, which is [`Self::declined`]'s job.
 	fn reserve(&mut self, path: PathOwned) {
-		debug_assert!(!self.0.contains_key(&path), "reserved a prefix already advertised");
-		self.0.insert(path, None);
+		debug_assert!(!self.routes.contains_key(&path), "reserved a prefix already advertised");
+		self.routes.insert(path, None);
 	}
 
 	fn attached(&mut self, path: &PathOwned) -> Option<&mut AnnouncedRoute> {
-		self.0.get_mut(path)?.as_mut()
+		self.routes.get_mut(path)?.as_mut()
 	}
 
 	fn retire(&mut self, path: &PathOwned) {
-		if let Some(Some(route)) = self.0.remove(path) {
+		if let Some(Some(route)) = self.routes.remove(path) {
 			route.finish();
 		}
 	}
 
-	/// Serve queued requests on every attached route: mint a source per requested
+	/// Serve queued requests on every ready route: mint a source per requested
 	/// path, hand its dynamic to the driver's serve machines, and answer the
 	/// requester with its consumer.
 	fn poll_serve<S: crate::transport::poll::Session>(&mut self, subscriber: &Subscriber<S>, waiter: &kio::Waiter) {
 		let root = subscriber.origin.root().to_owned();
-		for entry in self.0.values_mut().flatten() {
-			while let Poll::Ready(Ok(request)) = entry.dynamic.poll_requested_broadcast(waiter) {
+		while let Poll::Ready(Ok(path)) = self.ready.poll_pop(waiter) {
+			// A route retired since it woke has nothing left to serve.
+			let Some(Some(entry)) = self.routes.get_mut(&path) else {
+				continue;
+			};
+			// Cleared before polling, so a request landing mid-pass queues the route again.
+			entry.wake.queued.store(false, atomic::Ordering::Release);
+			let cx = std::task::Context::from_waker(&entry.waker);
+			let route_waiter = entry.park.hold(&cx);
+			while let Poll::Ready(Ok(request)) = entry.dynamic.poll_requested_broadcast(route_waiter) {
 				// The request path is absolute; the wire (and our origin handle)
 				// speak paths relative to the session's root.
 				let Some(path) = request.path().strip_prefix(&root) else {
@@ -2598,7 +2666,7 @@ impl Announced {
 
 	/// Re-price every attached route to a draining cost (the peer sent a GOAWAY).
 	fn drain(&mut self) {
-		for entry in self.0.values_mut().flatten() {
+		for entry in self.routes.values_mut().flatten() {
 			entry.drain();
 		}
 	}
@@ -2618,15 +2686,23 @@ struct AnnouncedRoute {
 	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
 	/// Whether the GOAWAY drain already re-priced this route.
 	drained: bool,
+	/// Queues this route on its prefix's ready set when its request queue wakes.
+	wake: Arc<RouteWake>,
+	waker: std::task::Waker,
+	/// Keeps this route's registration on its request queue alive between passes.
+	park: kio::Park,
 }
 
 impl AnnouncedRoute {
-	fn new(route: crate::origin::Route, dynamic: crate::origin::Dynamic) -> Self {
+	fn new(route: crate::origin::Route, dynamic: crate::origin::Dynamic, wake: Arc<RouteWake>) -> Self {
 		Self {
 			route,
 			dynamic,
 			sources: HashMap::new(),
 			drained: false,
+			waker: std::task::Waker::from(wake.clone()),
+			wake,
+			park: kio::Park::default(),
 		}
 	}
 
@@ -2656,6 +2732,26 @@ impl AnnouncedRoute {
 		let mut route = self.route.clone();
 		route.cost = crate::origin::Cost::DRAIN;
 		let _ = self.dynamic.update(route);
+	}
+}
+
+/// One attached route's waker: queues the route for the next serve pass.
+struct RouteWake {
+	path: PathOwned,
+	/// Set while queued, so a burst of wakes queues the route once.
+	queued: atomic::AtomicBool,
+	ready: kio::Queue<PathOwned>,
+}
+
+impl std::task::Wake for RouteWake {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		if !self.queued.swap(true, atomic::Ordering::AcqRel) {
+			let _ = self.ready.try_push(self.path.clone());
+		}
 	}
 }
 
