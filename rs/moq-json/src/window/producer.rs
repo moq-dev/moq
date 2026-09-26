@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{Encoded, Encoder, ProducerConfig};
+use super::{Checkpoint, Encoded, Encoder, ProducerConfig};
 use crate::Result;
 
 /// Publishes a sliding window of JSON records over a track.
@@ -32,13 +32,17 @@ impl<T> Clone for Producer<T> {
 impl<T> Producer<T> {
 	/// Create a producer that publishes to the given track.
 	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
+		Self::with_encoder(track, Encoder::new(config))
+	}
+
+	fn with_encoder(track: moq_net::track::Producer, encoder: Encoder<T>) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
 				track: Track {
 					inner: track,
 					group: None,
 				},
-				encoder: Encoder::new(config),
+				encoder,
 				finished: false,
 			})),
 			_marker: PhantomData,
@@ -70,6 +74,14 @@ impl<T> Producer<T> {
 		self.inner.lock().unwrap().pop(count)
 	}
 
+	/// Finish the open group, leaving the next edit to open a replacement with a header.
+	///
+	/// Idempotent: cutting when no group is open does nothing. A caller that stores complete groups
+	/// cuts after its edits, so every edit so far sits in a group no later frame can extend.
+	pub fn cut(&mut self) -> Result<()> {
+		self.inner.lock().unwrap().cut()
+	}
+
 	/// Finish the track, closing any open group.
 	///
 	/// Borrows rather than consumes, matching snapshot and stream, so the handle stays
@@ -81,6 +93,14 @@ impl<T> Producer<T> {
 }
 
 impl<T: Serialize> Producer<T> {
+	/// Create a producer continuing `checkpoint` on the given track.
+	///
+	/// The first edit opens a group restating the checkpoint, so a reader that already holds those
+	/// records sees only what follows. Fails like [`Encoder::resume`].
+	pub fn resume(track: moq_net::track::Producer, config: ProducerConfig, checkpoint: &Checkpoint<T>) -> Result<Self> {
+		Ok(Self::with_encoder(track, Encoder::resume(config, checkpoint)?))
+	}
+
 	/// Append one record to the back of the window.
 	pub fn push(&mut self, value: &T) -> Result<()> {
 		self.inner.lock().unwrap().push(value)
@@ -112,6 +132,17 @@ impl<T> Inner<T> {
 		track.write(&frame)?;
 		frame.commit();
 
+		Ok(())
+	}
+
+	fn cut(&mut self) -> Result<()> {
+		let Some(group) = self.track.group.take() else {
+			return Ok(());
+		};
+		// The group closes either way, so reset first: a `finish` error must not leave the encoder
+		// appending ops to a group that is gone.
+		self.encoder.reset();
+		group.finish()?;
 		Ok(())
 	}
 

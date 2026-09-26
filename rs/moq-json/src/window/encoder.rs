@@ -86,6 +86,15 @@ impl ProducerConfig {
 	}
 }
 
+/// A retained window to continue, such as one replayed from stored groups.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Checkpoint<T> {
+	/// Absolute index of the oldest retained record, and of the next to be pushed.
+	pub range: std::ops::Range<u64>,
+	/// The newest retained records, oldest first, ending just before `range.end`.
+	pub records: Vec<T>,
+}
+
 /// One encoded frame, and the group boundary it implies.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -138,7 +147,7 @@ impl<T> Pending<'_, T> {
 impl<T> Drop for Pending<'_, T> {
 	fn drop(&mut self) {
 		if self.edit.is_some() {
-			self.encoder.resync();
+			self.encoder.reset();
 		}
 	}
 }
@@ -216,8 +225,11 @@ impl<T> Encoder<T> {
 		self.offset..self.start + self.window.len() as u64
 	}
 
-	/// Discard group-local state after an encoded frame did not reach the wire.
-	fn resync(&mut self) {
+	/// Discard group-local state, so the next edit opens a new group with a header.
+	///
+	/// Call this whenever the caller closes the current group behind the encoder's back. It is also
+	/// how the encoder recovers after an encoded frame did not reach the wire.
+	pub fn reset(&mut self) {
 		self.flate = None;
 		self.op_bytes = 0;
 		self.header_len = 0;
@@ -288,7 +300,7 @@ impl<T> Encoder<T> {
 		let encoded = self.frame(bytes)?;
 		let group_bytes = self.header_len.saturating_add(self.op_bytes);
 		if group_bytes > moq_net::group::MAX_CACHE_BYTES {
-			self.resync();
+			self.reset();
 			Ok(None)
 		} else {
 			Ok(Some(encoded))
@@ -404,6 +416,30 @@ impl<T> Encoder<T> {
 }
 
 impl<T: Serialize> Encoder<T> {
+	/// Create an encoder continuing `checkpoint`, so the first edit opens a group restating it.
+	///
+	/// Fails when the records outnumber the range, or the range exceeds the safe integer range.
+	pub fn resume(config: ProducerConfig, checkpoint: &Checkpoint<T>) -> Result<Self> {
+		let Checkpoint { range, records } = checkpoint;
+		if range.start > range.end || range.end > MAX_INDEX || records.len() as u64 > range.end - range.start {
+			return Err(Error::Json("invalid window checkpoint".into()));
+		}
+
+		let mut encoder = Self::new(config);
+		let skip = encoder
+			.config
+			.checkpoint_records
+			.map(|limit| records.len().saturating_sub(limit))
+			.unwrap_or_default();
+		encoder.window = records[skip..]
+			.iter()
+			.map(serde_json::to_value)
+			.collect::<std::result::Result<_, _>>()?;
+		encoder.offset = range.start;
+		encoder.start = range.end - encoder.window.len() as u64;
+		Ok(encoder)
+	}
+
 	/// Append one record to the back of the window.
 	///
 	/// Emits a push into the open group, or a header restating the window (the new record included)

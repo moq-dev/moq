@@ -34,11 +34,40 @@ The segment engine is in `rs/moq-mux/src/timeline.rs`:
 - `moq-hls` renders live playlists from the timeline alone and FETCHes media
   per HTTP request (`rs/moq-hls/src/export/mod.rs:3-8`). A clean timeline
   finish ends every window with `EXT-X-ENDLIST` (:325-327).
+- The same exporter serves a recording replayed through `moq_archive::Reader`
+  with no archive-specific code (`rs/moq-hls/src/export/archive_tests.rs`):
+  playlists read only the timeline (an inline parameter set also GETs one
+  keyframe group to build its init), and a segment GETs one object of its
+  rendition. The caller supplies the catalog.
+- A catalog `archive` entry with a `store` and no `replay` path declares its
+  ranges durable on that broadcast, so the exporter lists the whole retained
+  timeline and only its pops trim it (`durable` in
+  `rs/moq-hls/src/export/mod.rs`). DASH `timeShiftBufferDepth` becomes the
+  listed span, and `--window` still bounds live playlists and caps segment
+  `max-age`. The catalog already states durability, so no per-broadcast
+  option or separate server is needed.
 
 `rs/moq-archive` stores the versioned objects on any `object_store::ObjectStore`:
 percent-encoded track names, `.info` JSON, the binary envelope, and put/get/list/delete.
+`moq_archive::Writer` (`rs/moq-archive/src/writer.rs`) records enrolled tracks
+through `Deferred`, omits failed tracks with `Pending::omit`, stores each
+segment's timeline groups after `Producer::flush`, and expires DVR segments
+with a deletion grace. On a prefix that already holds a recording, it replays the
+retained timeline from a checkpoint through `timeline::Producer::resume`, refuses
+groups at or below each track's largest stored group, and a DVR deletes
+unreferenced group objects one grace period after recovery.
+`moq_archive::Reader` (`rs/moq-archive/src/reader/mod.rs`) replays the timeline onto a
+supplied `broadcast::Producer` and serves FETCH through `track::Dynamic` with a byte-bounded
+object LRU. `Reader::refresh` follows by listing timeline keys after its cursor, so gaps and
+DVR expiry recover from the next checkpoint; `Reader::finish` applies out-of-band finality.
+`rs/moq-archive/src/proof.rs` records one multi-rendition broadcast end to end: its exact keys and
+bytes match on memory, local disk, and an unordered listing, FETCH replays every group exactly,
+and a rendition's playback GETs only that rendition's objects.
 
 ### Format
+
+[Per-track timelines](/quest/m1/archive/track-timeline/README.md) replaces the
+aligned segments below with one timeline per track.
 
 The format is the draft's
 [Recording section](/drafts/draft-lcurley-moq-hang.md#recording).
@@ -103,14 +132,12 @@ owned by that prerequisite, not duplicated in archive storage.
 
 ## Quests
 
-- [Recording writer](/quest/m1/archive/writer.md) - feed the segmenter from a `broadcast::Consumer`, store each segment, then commit its record
-- [Recording reader](/quest/m1/archive/reader.md) - serve archived FETCH through a supplied `broadcast::Producer`
+- [Per-track timelines](/quest/m1/archive/track-timeline/README.md) - every track segments and expires on its own timeline, and HLS is derived from group timestamps at the edge
+- [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq import archive` publishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay
 - [Paced replay](/quest/m1/archive/paced-replay.md) - a replay pushes its groups to live subscribers on one shared clock, so any live player plays it
-- [Replay provenance](/quest/m1/archive/provenance.md) - a replay's catalog names its timeline, replay path, store URL, and format version
 - [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
-- [Offline archive HLS](/quest/m1/archive/hls.md) - render playlists from the archive timeline and fetch segment media lazily
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
-- [Archive proof](/quest/m1/archive/proof.md) - prove persistence ordering, selective reads, exact FETCH replay, and timeline-only HLS generation
+- [DVR timeline pruning](/quest/m1/archive/pruning.md) - a DVR deletes timeline objects no retained checkpoint needs
 
 ## Related
 

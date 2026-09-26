@@ -166,8 +166,9 @@ impl Producer {
 		}
 	}
 
-	/// Append a row, evicting the front of the window past `window`.
-	pub fn push(&self, row: Row, window: Duration) {
+	/// Append a row, evicting the front of the window past `window`. With no `window`, only
+	/// source timeline pops remove rows.
+	pub fn push(&self, row: Row, window: Option<Duration>) {
 		let Ok(mut state) = self.state.write() else {
 			return;
 		};
@@ -187,7 +188,9 @@ impl Producer {
 		state.rows.push_back(row);
 
 		// Evict from the front while the remaining rows still cover the window.
-		while state.rows.len() >= 2 {
+		while let Some(window) = window
+			&& state.rows.len() >= 2
+		{
 			let span = state.rows.back().unwrap().end.saturating_sub(state.rows[1].pts.into());
 			if span < window {
 				break;
@@ -439,8 +442,8 @@ mod tests {
 	#[test]
 	fn every_row_is_listed() {
 		let live = Producer::new();
-		live.push(row(0, 0, 0, 2_000), Duration::from_secs(30));
-		live.push(row(1, 1, 2_000, 2_000), Duration::from_secs(30));
+		live.push(row(0, 0, 0, 2_000), Some(Duration::from_secs(30)));
+		live.push(row(1, 1, 2_000, 2_000), Some(Duration::from_secs(30)));
 
 		let window = live.window();
 		assert_eq!(window.sequence, 0);
@@ -456,7 +459,7 @@ mod tests {
 	#[test]
 	fn window_evicts_and_advances_sequence() {
 		let live = Producer::new();
-		let window = Duration::from_secs(4);
+		let window = Some(Duration::from_secs(4));
 		for i in 0..6u64 {
 			live.push(row(i, i, i * 2_000, 2_000), window);
 		}
@@ -473,7 +476,7 @@ mod tests {
 	#[test]
 	fn source_window_pop_removes_playlist_rows() {
 		let live = Producer::new();
-		let window = Duration::from_secs(30);
+		let window = Some(Duration::from_secs(30));
 		for i in 0..4u64 {
 			let mut row = row(i, i, i * 2_000, 2_000);
 			row.index = i + 10;
@@ -497,9 +500,9 @@ mod tests {
 	#[test]
 	fn a_skipped_source_range_clears_rows_before_the_next_segment() {
 		let live = Producer::new();
-		live.push(row(4, 4, 8_000, 2_000), Duration::from_secs(10));
+		live.push(row(4, 4, 8_000, 2_000), Some(Duration::from_secs(10)));
 		live.clear();
-		live.push(row(10, 10, 20_000, 2_000), Duration::from_secs(10));
+		live.push(row(10, 10, 20_000, 2_000), Some(Duration::from_secs(10)));
 
 		let snapshot = live.window();
 		assert_eq!(snapshot.sequence, 10);
@@ -567,7 +570,7 @@ mod tests {
 	#[test]
 	fn segment_ranges_and_gaps() {
 		let live = Producer::new();
-		let window = Duration::from_secs(30);
+		let window = Some(Duration::from_secs(30));
 		live.push(row(0, 0, 0, 1_000), window);
 		// Segment 1 is a gap for this rendition: no ranges.
 		live.push(
@@ -595,7 +598,7 @@ mod tests {
 	#[test]
 	fn backwards_jump_resets_the_window() {
 		let live = Producer::new();
-		let window = Duration::from_secs(30);
+		let window = Some(Duration::from_secs(30));
 		live.push(row(0, 0, 10_000, 2_000), window);
 		live.push(row(1, 1, 12_000, 2_000), window);
 		live.push(row(2, 2, 1_000, 2_000), window); // restart: pts rewound
@@ -612,7 +615,7 @@ mod tests {
 	#[test]
 	fn next_after_walks_segments() {
 		let live = Producer::new();
-		let window = Duration::from_secs(30);
+		let window = Some(Duration::from_secs(30));
 		live.push(row(0, 0, 0, 2_000), window);
 		live.push(row(1, 1, 2_000, 2_000), window);
 

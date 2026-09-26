@@ -280,6 +280,10 @@ mod tests {
 			parse_id("0009007199254740992"),
 			Err(Error::Id(n)) if n == ID_MAX + 1
 		));
+		// The largest QUIC varint still fits the 19-digit field.
+		let varint = (1u64 << 62) - 1;
+		assert!(matches!(format_id(varint), Err(Error::Id(n)) if n == varint));
+		assert!(matches!(parse_id("4611686018427387903"), Err(Error::Id(n)) if n == varint));
 		assert!(matches!(parse_id("5"), Err(Error::Path(_))));
 		assert!(matches!(parse_id("000000000000000000X"), Err(Error::Path(_))));
 	}
@@ -332,6 +336,52 @@ mod tests {
 		);
 		assert!(matches!(Key::groups("v", 0..=ID_MAX + 1), Err(Error::Id(_))));
 		assert!(matches!(Key::groups("v", ID_MAX + 1..=ID_MAX + 1), Err(Error::Id(_))));
+	}
+
+	#[test]
+	fn direct_construction_is_validated_when_serialized() {
+		let prefix = Path::from("rec");
+		let empty = Key::Info { track: String::new() };
+		assert!(matches!(empty.path(&prefix), Err(Error::Track)));
+		let segment = Key::Segments {
+			track: "t".to_string(),
+			segment: ID_MAX + 1,
+		};
+		assert!(matches!(segment.path(&prefix), Err(Error::Id(_))));
+		let varint = Key::Groups {
+			track: "v".to_string(),
+			range: 0..=(1 << 62) - 1,
+		};
+		assert!(matches!(varint.path(&prefix), Err(Error::Id(_))));
+
+		// Everything that does serialize parses back to the same key.
+		for key in [
+			Key::Info {
+				track: "a/b".to_string(),
+			},
+			Key::Groups {
+				track: ".x".to_string(),
+				range: ID_MAX..=ID_MAX,
+			},
+			Key::Segments {
+				track: "é".to_string(),
+				segment: 0,
+			},
+		] {
+			let path = key.path(&prefix).unwrap();
+			assert_eq!(Key::parse(&prefix, &path).unwrap(), key);
+		}
+	}
+
+	#[test]
+	fn keys_parse_under_an_empty_prefix() {
+		let key = Key::groups("catalog.json", 1..=2).unwrap();
+		let path = key.path(&Path::ROOT).unwrap();
+		assert_eq!(
+			path.as_ref(),
+			"catalog%2Ejson/groups/0000000000000000002.0000000000000000001"
+		);
+		assert_eq!(Key::parse(&Path::ROOT, &path).unwrap(), key);
 	}
 
 	#[test]

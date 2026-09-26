@@ -18,6 +18,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [AV1 metadata separation](/quest/m2/av1-metadata.md) - retain metadata OBUs inline while evaluating separate delivery
 - [SEI separation](/quest/m2/sei/README.md) - retain inline SEI until measured savings or a metadata-only consumer justify a split
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - compare immutable track definitions with explicit catalog-to-group binding
+- [Archive S3 wire proof](/quest/m2/archive-s3.md) - the archive proof also runs through the S3 client against an in-process S3-compatible server
 - [Archive recovery listing](/quest/m2/archive-recovery-listing.md) - a resumed DVR lists what changed since its checkpoint, not every stored group
 - [Archive backward timestamps](/quest/m2/archive-backward-timestamps.md) - a resumed recording refuses a track whose timestamps go backward
 - [Mobile ownership](/quest/m2/mobile-ownership.md) - decide whether Rust or platform code owns mobile capture, codecs, and rendering

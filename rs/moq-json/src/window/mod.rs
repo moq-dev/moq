@@ -26,8 +26,9 @@
 //!
 //! The publisher rolls a group when the ops in it outgrow
 //! [`ProducerConfig::op_ratio`](ProducerConfig::op_ratio) times the header that opened it, exactly as
-//! [`snapshot`](crate::snapshot) rolls on its delta budget. That is purely a compression decision:
-//! there is no caller-driven cut and no age bound, and a [`Consumer`] never surfaces it. A header
+//! [`snapshot`](crate::snapshot) rolls on its delta budget. That is purely a compression decision
+//! with no age bound, and a [`Consumer`] never surfaces it. A caller that stores complete groups
+//! can also end one with [`Producer::cut`]; the next edit opens a new group with a header. A header
 //! restating records a reader already has yields nothing, so however often the publisher rolls, the
 //! reader sees one continuous stream of [`Event`]s. [`ProducerConfig::checkpoint_records`] bounds
 //! the suffix repeated on each roll for a long-lived window.
@@ -54,7 +55,7 @@ mod producer;
 
 pub use consumer::Consumer;
 pub use decoder::{ConsumerConfig, Decoder, Event, Group};
-pub use encoder::{Encoded, Encoder, Pending, ProducerConfig};
+pub use encoder::{Checkpoint, Encoded, Encoder, Pending, ProducerConfig};
 pub use producer::Producer;
 
 #[cfg(test)]
@@ -288,6 +289,53 @@ mod test {
 				},
 			]
 		);
+	}
+
+	#[test]
+	fn a_resumed_encoder_continues_the_window() {
+		let config = ProducerConfig::default().with_op_ratio(0).with_checkpoint_records(2);
+		let mut original = Encoder::<Value>::new(config.clone());
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		for n in 0..4 {
+			let frame = original.push(&rec(n)).unwrap();
+			decoder.group().decode(&frame.payload).unwrap();
+			frame.commit();
+		}
+		let frame = original.pop(1).unwrap().unwrap();
+		decoder.group().decode(&frame.payload).unwrap();
+		frame.commit();
+		std::iter::from_fn(|| decoder.next_event()).for_each(drop);
+
+		let checkpoint = Checkpoint {
+			range: 1..4,
+			records: vec![rec(1), rec(2), rec(3)],
+		};
+		let mut resumed = Encoder::resume(config, &checkpoint).unwrap();
+		assert_eq!(resumed.range(), 1..4);
+		assert_eq!(
+			resumed.window(),
+			vec![rec(2), rec(3)],
+			"trimmed to the checkpoint bound"
+		);
+
+		let frame = resumed.push(&rec(4)).unwrap();
+		assert!(frame.keyframe, "the first edit restates the window");
+		decoder.group().decode(&frame.payload).unwrap();
+		frame.commit();
+		assert_eq!(
+			std::iter::from_fn(|| decoder.next_event()).collect::<Vec<_>>(),
+			vec![Event::Push {
+				index: 4,
+				value: rec(4)
+			}],
+			"a reader that kept up sees only the new record"
+		);
+
+		let invalid = Checkpoint {
+			range: 3..4,
+			records: vec![rec(2), rec(3)],
+		};
+		assert!(Encoder::resume(ProducerConfig::default(), &invalid).is_err());
 	}
 
 	#[test]
@@ -602,6 +650,41 @@ mod test {
 		group.decode(br#"{"offset":0,"records":[]}"#).unwrap();
 
 		assert!(group.decode(br#"{"offset":0,"records":[]}"#).is_err());
+	}
+
+	#[test]
+	fn cut_finishes_the_group_and_the_next_edit_restates() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let replay = moq_net::track::Subscription::default().with_max_age(std::time::Duration::from_secs(30));
+		let mut groups = track.subscribe(replay);
+		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
+
+		producer.cut().unwrap();
+		producer.push(&rec(0)).unwrap();
+		producer.push(&rec(1)).unwrap();
+		producer.cut().unwrap();
+		producer.cut().unwrap();
+		producer.push(&rec(2)).unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut first))) = groups.poll_recv_group(&waiter) else {
+			panic!("the first group is published");
+		};
+		assert_eq!(first.frame_count(), 2);
+		assert!(first.poll_finished(&waiter).is_ready(), "cut finishes the open group");
+
+		let Poll::Ready(Ok(Some(mut second))) = groups.poll_recv_group(&waiter) else {
+			panic!("the next edit opens a group");
+		};
+		let Poll::Ready(Ok(Some(header))) = second.poll_read_frame(&waiter) else {
+			panic!("the group starts with a header");
+		};
+		let header: Value = serde_json::from_slice(&header.payload).unwrap();
+		assert_eq!(header, json!({ "offset": 0, "records": [rec(0), rec(1), rec(2)] }));
+		assert!(groups.poll_recv_group(&waiter).is_pending());
 	}
 
 	#[test]

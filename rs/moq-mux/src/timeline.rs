@@ -57,6 +57,7 @@ use std::time::Duration;
 
 use hang::catalog::Archive;
 use hang::timeline::{DEFAULT_NAME, Range, Record, RecordExt};
+use moq_json::window::Checkpoint;
 
 use moq_net::{Timescale, Timestamp};
 
@@ -697,6 +698,19 @@ impl Pending {
 			.clear();
 		self
 	}
+
+	/// Drop one track whose media could not be stored, keeping every other track's ranges.
+	///
+	/// Like [`gap`](Self::gap) for a single track: the record stays committable without advertising
+	/// objects that are not durable.
+	pub fn omit(mut self, track: &str) -> Self {
+		self.record
+			.as_mut()
+			.expect("a pending record is present until commit")
+			.tracks
+			.remove(track);
+		self
+	}
 }
 
 impl Deref for Pending {
@@ -726,14 +740,28 @@ struct Output {
 impl Output {
 	fn prepare(&mut self) -> crate::Result<()> {
 		if self.sink.is_none() && !self.closed {
-			let info = moq_net::track::Info::default().with_priority(hang::catalog::PRIORITY.catalog);
-			let net = self.broadcast.create_track(DEFAULT_NAME, info)?;
-			let config = moq_json::window::ProducerConfig::default()
-				.with_compression(true)
-				.with_checkpoint_records(CHECKPOINT_RECORDS);
-			self.sink = Some(moq_json::window::Producer::new(net, config));
+			let net = self.create_track()?;
+			self.sink = Some(moq_json::window::Producer::new(net, Self::config()));
 		}
 		Ok(())
+	}
+
+	/// Create the timeline track now, continuing `checkpoint`.
+	fn resume(&mut self, checkpoint: &Checkpoint<Record>) -> crate::Result<()> {
+		let net = self.create_track()?;
+		self.sink = Some(moq_json::window::Producer::resume(net, Self::config(), checkpoint)?);
+		Ok(())
+	}
+
+	fn create_track(&self) -> crate::Result<moq_net::track::Producer> {
+		let info = moq_net::track::Info::default().with_priority(hang::catalog::PRIORITY.catalog);
+		Ok(self.broadcast.create_track(DEFAULT_NAME, info)?)
+	}
+
+	fn config() -> moq_json::window::ProducerConfig {
+		moq_json::window::ProducerConfig::default()
+			.with_compression(true)
+			.with_checkpoint_records(CHECKPOINT_RECORDS)
 	}
 
 	fn push(&mut self, record: &Record) -> crate::Result<()> {
@@ -753,6 +781,17 @@ impl Output {
 			return Ok(());
 		};
 		match sink.pop(count) {
+			Ok(()) => Ok(()),
+			Err(moq_json::Error::Net(err)) => Err(err.into()),
+			Err(err) => Err(err.into()),
+		}
+	}
+
+	fn flush(&mut self) -> crate::Result<()> {
+		let Some(sink) = self.sink.as_mut() else {
+			return Ok(());
+		};
+		match sink.cut() {
 			Ok(()) => Ok(()),
 			Err(moq_json::Error::Net(err)) => Err(err.into()),
 			Err(err) => Err(err.into()),
@@ -798,6 +837,31 @@ impl Producer {
 			segmenter: Segmenter::new(config),
 			output,
 		}
+	}
+
+	/// A timeline for `broadcast` continuing `checkpoint`, such as a window recovered from storage.
+	///
+	/// A timeline's window index is its segment number, so the next record is segment
+	/// `checkpoint.range.end`. Creates the timeline track immediately; its first group restates the
+	/// checkpoint. Fails when a checkpoint record is not the segment at its index, the checkpoint
+	/// is malformed, or the track cannot be created.
+	pub fn resume(
+		broadcast: &moq_net::broadcast::Producer,
+		config: Config,
+		checkpoint: &Checkpoint<Record>,
+	) -> crate::Result<Self> {
+		let producer = Self::new(broadcast, config);
+		producer.output.lock().unwrap().resume(checkpoint)?;
+
+		// The encoder accepted the checkpoint, so the records fit before `range.end`.
+		let start = checkpoint.range.end - checkpoint.records.len() as u64;
+		for (index, record) in (start..).zip(&checkpoint.records) {
+			if record.segment != index {
+				return Err(crate::Error::TimelineCheckpoint(index));
+			}
+		}
+		producer.segmenter.state.lock().unwrap().next_segment = checkpoint.range.end;
+		Ok(producer)
 	}
 
 	/// Enroll `name` without letting it influence segmentation, returning its [`Recorder`].
@@ -962,6 +1026,14 @@ impl Producer {
 	/// Remove up to `count` oldest records from the visible timeline window.
 	pub fn pop(&self, count: u64) -> crate::Result<()> {
 		self.output.lock().unwrap().pop(count)
+	}
+
+	/// Close the timeline track's open group, so every push and pop so far sits in a complete group.
+	///
+	/// A recorder stores those groups before committing the next segment. The next edit opens a
+	/// new group restating the window.
+	pub fn flush(&self) -> crate::Result<()> {
+		self.output.lock().unwrap().flush()
 	}
 
 	fn publish_ready(&self) {
@@ -1291,6 +1363,46 @@ mod test {
 	}
 
 	#[tokio::test]
+	async fn a_resumed_timeline_continues_the_checkpoint() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let checkpoint = Checkpoint {
+			range: 1..3,
+			records: vec![Record::new(1, 1_000, 1_000), Record::new(2, 2_000, 1_000)],
+		};
+		let mut timeline = Producer::resume(&broadcast, Config::default(), &checkpoint).unwrap();
+
+		let mut video = timeline.pacing_track("video0").unwrap();
+		video.record(10, ms(3_000), true);
+		video.record(11, ms(4_000), true);
+		video.end(ms(5_000));
+		drop(video);
+		timeline.finish().unwrap();
+
+		assert_eq!(
+			drain(&broadcast, &timeline).await,
+			vec![
+				entry(1, 1_000, 1_000, &[]),
+				entry(2, 2_000, 1_000, &[]),
+				entry(3, 3_000, 1_000, &[("video0", &[(10, 10)])]),
+				entry(4, 4_000, 1_000, &[("video0", &[(11, 11)])]),
+			]
+		);
+	}
+
+	#[test]
+	fn a_checkpoint_record_must_be_the_segment_at_its_index() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let checkpoint = Checkpoint {
+			range: 0..1,
+			records: vec![Record::new(5, 0, 1_000)],
+		};
+		assert!(matches!(
+			Producer::resume(&broadcast, Config::default(), &checkpoint),
+			Err(crate::Error::TimelineCheckpoint(0))
+		));
+	}
+
+	#[tokio::test]
 	async fn deferred_records_are_invisible_until_committed() {
 		let (broadcast, timeline) = setup();
 		let segmenter = timeline.deferred().unwrap();
@@ -1343,6 +1455,61 @@ mod test {
 			consumer.poll_next(&waiter),
 			Poll::Ready(Ok(Some(Event::Push { index: 0, .. })))
 		));
+	}
+
+	#[tokio::test]
+	async fn omitting_a_track_keeps_the_others() {
+		let (broadcast, mut timeline) = setup();
+		let segmenter = timeline.deferred().unwrap();
+		let mut video = segmenter.pacing_track("video0");
+		let mut audio = segmenter.pacing_track("audio0");
+		video.record(0, ms(0), true);
+		audio.record(0, ms(0), true);
+		video.record(1, ms(2_000), true);
+		audio.record(1, ms(2_000), true);
+
+		let pending = segmenter.next().expect("the complete segment is ready for storage");
+		timeline.push(pending.omit("audio0")).unwrap();
+		drop((video, audio));
+		let tail = segmenter.finish();
+		while let Some(pending) = tail.next() {
+			timeline.push(pending).unwrap();
+		}
+		timeline.finish().unwrap();
+
+		assert_eq!(
+			drain(&broadcast, &timeline).await,
+			vec![
+				entry(0, 0, 2_000, &[("video0", &[(0, 0)])]),
+				entry(1, 2_000, 0, &[("audio0", &[(1, 1)]), ("video0", &[(1, 1)])]),
+			]
+		);
+	}
+
+	#[test]
+	fn flush_closes_the_timeline_group() {
+		let (broadcast, timeline) = setup();
+		let segmenter = timeline.deferred().unwrap();
+		let replay = moq_net::track::Subscription::default().with_max_age(Duration::from_secs(30));
+		let groups = broadcast.consume().track(DEFAULT_NAME).unwrap().subscribe(replay);
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(mut groups)) = groups.poll_ok(&waiter) else {
+			panic!("the deferred timeline track exists");
+		};
+
+		let mut video = segmenter.pacing_track("video0");
+		video.record(0, ms(0), true);
+		video.record(1, ms(2_000), true);
+		timeline.push(segmenter.next().unwrap()).unwrap();
+		timeline.pop(1).unwrap();
+		timeline.flush().unwrap();
+
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("the pushed record opened a group");
+		};
+		assert_eq!(group.frame_count(), 2, "the push header and the pop share one group");
+		assert!(group.poll_finished(&waiter).is_ready(), "flush closes it");
+		assert!(groups.poll_recv_group(&waiter).is_pending());
 	}
 
 	#[test]

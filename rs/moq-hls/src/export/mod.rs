@@ -6,7 +6,10 @@
 //! per-track group ranges), and media bytes move only when an HTTP client requests a segment,
 //! which FETCHes exactly the groups that segment covers from the relay cache and transmuxes
 //! them to CMAF. A broadcast whose catalog advertises no timeline can't be served this way and
-//! is skipped.
+//! is skipped. A `moq-archive` recording replayed onto a broadcast is served the same way: its
+//! playlists read only the stored timeline, and each segment GETs one stored object.
+//! An inline-parameter-set codec with no catalog `description` GETs one keyframe
+//! group on the first playlist render to build its init, then caches it.
 //!
 //! The same machinery serves two kinds of consumer:
 //!
@@ -18,6 +21,8 @@
 //!   yield every rendition and every finalized segment in order, for mirroring a broadcast to
 //!   storage.
 
+#[cfg(test)]
+mod archive_tests;
 pub mod master;
 mod mpd;
 mod playlist;
@@ -61,6 +66,10 @@ pub struct Config {
 	/// Minimum duration of media listed in each rendition's playlist window. Older timeline
 	/// records are evicted once the remaining segments still cover this span; keep it within
 	/// the relay's group-cache retention, since segments are fetched from there on request.
+	///
+	/// A durable timeline (its catalog `archive` entry names a `store` and no `replay` path)
+	/// lists everything it retains instead, since its own retention already bounds it. The
+	/// window still caps segment `Cache-Control: max-age` for every broadcast.
 	pub window: Duration,
 }
 
@@ -342,6 +351,9 @@ async fn watch_catalog(
 				// records out to every rendition.
 				if !timeline_started && let Some(archive) = catalog.archive.clone() {
 					timeline_started = true;
+					if durable(&archive) {
+						renditions.fanout().unbound();
+					}
 					let watcher = tokio::spawn(watch_timeline(broadcast.clone(), archive, renditions.fanout()));
 					*timeline_watcher.lock().unwrap() = Some(watcher);
 				}
@@ -356,6 +368,14 @@ async fn watch_catalog(
 
 	// The source is done (or errored): let recording cursors finish.
 	renditions.close();
+}
+
+/// Whether every range `archive` advertises stays FETCHable from this broadcast until the
+/// timeline pops it: a store makes the ranges durable, and no `replay` path means this
+/// broadcast serves them. The catalog states this, so the playlists follow the timeline's own
+/// retention rather than a window sized for relay caches.
+fn durable(archive: &hang::catalog::Archive) -> bool {
+	archive.store.is_some() && archive.replay.is_none()
 }
 
 /// The broadcast's timeline watcher: read the single timeline track and fan each record out

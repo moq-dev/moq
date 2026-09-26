@@ -139,6 +139,7 @@ loom = { version = "0.7.2", features = ["futures"] }
 # DNS-SD advertisement and browsing for LAN peer discovery (moq-tokio's `mdns` feature).
 # `async` awaits the event channel instead of blocking a thread on it.
 mdns-sd = { version = "0.21", features = ["async"] }
+moq-archive = { version = "0.0.6", path = "rs/moq-archive" }
 moq-audio = { version = "0.1.5", path = "rs/moq-audio", default-features = false }
 moq-auth = { version = "0.1.3", path = "rs/moq-auth" }
 moq-binary = { version = "0.1.5", path = "rs/moq-binary" }

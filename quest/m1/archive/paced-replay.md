@@ -25,3 +25,7 @@ who joins late joins mid-replay.
 - Test with paused time: record, replay paced, and assert a plain subscriber
   gets every group in order at media pace, that a late subscriber starts at the
   current group, and that two tracks stay aligned.
+
+## Required
+
+- [Rust per-track timelines](/quest/m1/archive/track-timeline/core.md) - the reader's per-track index this paces
