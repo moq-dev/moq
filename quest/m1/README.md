@@ -143,6 +143,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Kotlin JVM exit](/quest/m1/kt-jvm-exit.md) - a Kotlin/JVM program exits cleanly whatever the moq-ffi runtime thread is doing, like Python does since #3766
 - [Dart publish](/quest/m1/dart-publish.md) - the packages are built and dry-run clean but exist nowhere consumers can install from
 - [Dart codec parity](/quest/m1/dart-codecs.md) - Dart is the one binding that cannot originate media
+- [libmoq CMake library](/quest/m1/libmoq-cmake-lib.md) - the in-tree CMake build links the `libmoq.a` cargo reports, not a hardcoded `target/<profile>` path
 - [libmoq fetch](/quest/m1/libmoq-fetch.md) - libmoq gains an additive cached-group fetch entry point
 - [moq-mux on wasm32](/quest/m1/mux-wasm-target.md) - the crate's two wasm blockers are fixed and the target stays in the clippy lane
 - [#2850](/quest/m1/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - js/net: decode messages synchronously from buffered bytes and delete the publisher read-ahead queue
