@@ -43,7 +43,6 @@ row per io_uring worker.
 
 - [Open contract](/quest/m1/perf/uring-open-contract.md) - plan concurrent WebTransport opening and cancellation
 
-- [Lite route rescan](/quest/m1/perf/lite-route-rescan.md) - a moq-lite session's per-group cost stops growing with the routes its peer announced
 - [Announce replay](/quest/m1/perf/announce-replay.md) - the initial announce set replays in linear time, so joins don't slow with the route count
 - [Group cost](/quest/m1/perf/group-cost.md) - count and cut the allocations and time spent relaying one small group to one viewer
 - [One enter per turn](/quest/m1/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter
