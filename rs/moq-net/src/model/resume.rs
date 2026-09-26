@@ -630,6 +630,7 @@ impl Consumer {
 			end_sequence: None,
 			outer: Anchor::default(),
 			drift_anchor: kio::Producer::new(Anchor::default()),
+			frontier: Default::default(),
 		}
 	}
 
@@ -1381,6 +1382,9 @@ struct SegmentSub {
 	/// Set while this is a warm segment (see [`Producer::park`]) that has not been
 	/// cleared for live reads: the copy spliced after it, once there is one.
 	warm: Option<Warm>,
+	/// The logical subscription's acknowledged frontier, told about this segment's
+	/// track once its cursor activates.
+	frontier: crate::stats::Frontier,
 }
 
 /// A warm segment waiting on the copy spliced after it; see [`Subscriber::poll_activate`].
@@ -1497,6 +1501,22 @@ pub struct Subscriber {
 	/// with the newest edge across the segments), shared with groups that outlive this
 	/// cursor poll. Refreshed on every [`Self::poll_sync`].
 	drift_anchor: kio::Producer<Anchor>,
+	/// The acknowledged frontier of the logical subscription, told about every
+	/// segment's track so the lag sampler weighs what the splice produces.
+	frontier: crate::stats::Frontier,
+}
+
+impl Subscriber {
+	/// Report every segment's track, current and future, to `frontier`.
+	pub(crate) fn watch(&mut self, frontier: &crate::stats::Frontier) {
+		self.frontier = frontier.clone();
+		for seg in &mut self.segments {
+			seg.frontier = frontier.clone();
+			if let SubState::Active(sub) = &mut seg.sub {
+				sub.watch(frontier);
+			}
+		}
+	}
 }
 
 impl Subscriber {
@@ -1667,6 +1687,7 @@ impl Subscriber {
 							edge: segment.track.latest(),
 							next,
 						}),
+						frontier: self.frontier.clone(),
 					});
 				}
 			}
@@ -1845,6 +1866,7 @@ impl Subscriber {
 					sub.raise_start_to(seg.first_group().max(min_sequence));
 					sub.set_anchor(seg.anchor.clone());
 					let _ = sub.update(slice(prefs, seg.ask, seg.end));
+					sub.watch(&seg.frontier);
 					seg.sub = SubState::Active(Box::new(sub));
 				}
 				// The underlying track was rejected or closed: stall, not error.
@@ -2477,6 +2499,49 @@ mod test {
 		assert_eq!(recv(&mut sub), 2);
 		assert_eq!(recv(&mut sub), 3);
 		recv_pending(&mut sub);
+	}
+
+	/// A spliced subscription's lag weighs what every segment's track produces, so a
+	/// route-fed broadcast (every relay hop) is sampled across failovers.
+	#[tokio::test]
+	async fn lag_weighs_every_segment() {
+		use crate::stats;
+
+		let registry = stats::Registry::new(stats::Config::new());
+		let session = registry.tier(stats::Tier::default()).session("root");
+		let weight = || {
+			let mut report = stats::Report::default();
+			registry.report(&mut report);
+			report.traffic[0].publisher.lag.total()
+		};
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+
+		let mut sub = track::Consumer::spliced("video".into(), Arc::new(broadcast::Info::default()), producer.consume())
+			.with_stats(session.egress("demo"))
+			.subscribe(replay())
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let pending = |sub: &mut track::Subscriber| {
+			assert!(
+				kio::wait(|waiter| sub.poll_recv_group(waiter))
+					.now_or_never()
+					.is_none()
+			);
+		};
+		// Polling activates the segment's cursor, which names its track to the frontier.
+		pending(&mut sub);
+		write_group_at(&mut track_a, 0, "a0", Duration::ZERO);
+		assert_eq!(weight(), 2);
+
+		producer.switch(&consumer_b, Position::group(1)).unwrap();
+		let _ = kio::wait(|waiter| sub.poll_recv_group(waiter)).now_or_never();
+		pending(&mut sub);
+		write_group_at(&mut track_b, 1, "b1", Duration::from_secs(1));
+		assert_eq!(weight(), 4);
 	}
 
 	#[tokio::test]

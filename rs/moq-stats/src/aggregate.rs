@@ -657,6 +657,38 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
+	async fn merges_lag_bucket_by_bucket() {
+		// Each node's lag histogram and dropped media sum into the merged entry,
+		// bucket by bucket, like every other cumulative counter.
+		let origin = produce_origin();
+		let mut node_a = NodeBroadcast::new(&origin, "acme", "a");
+		let mut node_b = NodeBroadcast::new(&origin, "acme", "b");
+		let entry = |lag: &str, dropped: &str| {
+			let json = format!(r#"{{"bytes":1,"lag":{lag},{dropped}}}"#);
+			serde_json::from_str::<Traffic>(&json).expect("traffic")
+		};
+		node_a.frame.insert(
+			"acme/room".to_string(),
+			entry(r#"{"50ms":10,"1s":3}"#, r#""dropped_duration":1.5,"dropped_bytes":7,"dropped_groups":1"#),
+		);
+		node_a.traffic.update(&node_a.frame).expect("publish");
+		node_b.frame.insert(
+			"acme/room".to_string(),
+			entry(r#"{"50ms":5,"inf":2}"#, r#""dropped_duration":2,"dropped_bytes":3,"dropped_groups":2"#),
+		);
+		node_b.traffic.update(&node_b.frame).expect("publish");
+
+		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
+		let mut traffic = agg.traffic(&Tier::default(), Role::Publisher);
+		let frame = read_until_bytes(&mut traffic, "acme/room", 2).await;
+		let merged = frame.get("acme/room").expect("entry");
+		assert_eq!(merged.lag.buckets(), &[15, 0, 0, 0, 3, 0, 0, 2]);
+		assert_eq!(merged.dropped_duration, Duration::from_micros(3500));
+		assert_eq!(merged.dropped_bytes, 10);
+		assert_eq!(merged.dropped_groups, 3);
+	}
+
+	#[tokio::test(start_paused = true)]
 	async fn node_drop_keeps_the_traffic_total() {
 		// Dropping a node unannounces its broadcast, but traffic is sticky: its
 		// last contribution stays in the total, so a relay that returns with its

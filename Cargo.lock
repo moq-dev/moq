@@ -4503,6 +4503,7 @@ dependencies = [
  "rand 0.10.3",
  "serde",
  "serde_json",
+ "serde_with",
  "slab",
  "thiserror 2.0.21",
  "tokio",

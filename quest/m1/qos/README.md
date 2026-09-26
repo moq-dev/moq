@@ -33,9 +33,6 @@ preflight, consumes them downstream.
 
 ## Quests
 
-- [Starvation](/quest/m1/qos/starvation.md) - per broadcast, how far behind
-  the acknowledged frontier of its subscriptions is, in media time, plus the
-  media dropped before it was acknowledged
 - [Starvation at frame granularity](/quest/m1/qos/starvation-frames.md) - the
   acknowledged frontier moves at every frame boundary through `poll_acked`,
   with a delivery-delay histogram for jitter

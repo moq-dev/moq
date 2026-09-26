@@ -519,6 +519,7 @@ impl Producer {
 		// Ingress payload: one whole frame written.
 		self.stats.frames(1);
 		self.stats.bytes(size);
+		self.cache.production().record(timestamp, size);
 		Ok(())
 	}
 
@@ -571,6 +572,7 @@ impl Producer {
 			state.cache += size;
 			now = state.charge.add(size);
 			state.stamp(frame.timestamp);
+			self.cache.production().record(frame.timestamp, size);
 			state.frames.push_back(frame);
 		}
 		state.next_index = next_index;
@@ -632,8 +634,9 @@ impl Producer {
 		self.cache.settle(now);
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
-		// frame::Producer writes them.
+		// frame::Producer writes them. Production counts the declared size up front.
 		self.stats.frames(1);
+		self.cache.production().record(timestamp, frame.size);
 		let meter = self.stats.clone();
 
 		let info = frame::Info {
@@ -688,8 +691,9 @@ impl Producer {
 		self.cache.settle(now);
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
-		// producer writes them.
+		// producer writes them. Production counts the declared size up front.
 		self.stats.frames(1);
+		self.cache.production().record(timestamp, frame.size);
 		let meter = self.stats.clone();
 
 		let info = frame::Info {

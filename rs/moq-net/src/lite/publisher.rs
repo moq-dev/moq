@@ -2183,8 +2183,9 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 		frame_start: u64,
 		priority: PriorityHandle,
 		group: group::Consumer,
+		delivery: crate::stats::Delivery,
 	) -> Result<(), Error> {
-		let mut serve = Box::new(GroupServe::new(self, sequence, frame_start, priority, group));
+		let mut serve = Box::new(GroupServe::new(self, sequence, frame_start, priority, group, delivery));
 		kio::wait(move |waiter| serve.poll_serve(waiter)).await
 	}
 }
@@ -2341,8 +2342,15 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 							.ctx
 							.priority
 							.insert(Priority::new(current_priority, self.ctx.id, sequence));
-						self.children
-							.push(GroupServe::new(self.ctx.clone(), sequence, frame_start, handle, group));
+						let delivery = self.track.delivery();
+						self.children.push(GroupServe::new(
+							self.ctx.clone(),
+							sequence,
+							frame_start,
+							handle,
+							group,
+							delivery,
+						));
 					}
 					Recv::Datagram(datagram) => self.ctx.serve_datagram(datagram),
 					Recv::Boundary(group) => {
@@ -2376,6 +2384,9 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	// frame's delta is absolute (against an implicit prev value of 0), every
 	// subsequent delta is signed against the previous frame.
 	prev_ts: u64,
+	// What this stream wrote, for the subscription's acknowledged frontier: an
+	// acknowledged FIN advances it, anything else counts as dropped on drop.
+	delivery: crate::stats::Delivery,
 	state: GroupState<S>,
 }
 
@@ -2409,6 +2420,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		frame_start: u64,
 		priority: PriorityHandle,
 		group: group::Consumer,
+		delivery: crate::stats::Delivery,
 	) -> Self {
 		Self {
 			ctx,
@@ -2417,6 +2429,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			sequence,
 			frame_start,
 			prev_ts: 0,
+			delivery,
 			state: GroupState::Open,
 		}
 	}
@@ -2549,6 +2562,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 								if let Err(err) = buffered {
 									break 'serve Err(err);
 								}
+								self.delivery.wrote(batched.timestamp, batched.payload.len() as u64);
 								let payload = std::mem::take(&mut batched.payload);
 								if !payload.is_empty() {
 									*chunk = Some(payload);
@@ -2578,6 +2592,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 										if let Err(err) = buffered {
 											break 'serve Err(err);
 										}
+										self.delivery.wrote(next.timestamp, next.size);
 										*frame = Some(next);
 									}
 									Poll::Ready(Ok(None)) => break 'serve Ok(()),
@@ -2617,6 +2632,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					let res = ready!(writer.poll_close(&mut cx));
 					self.state = GroupState::Done;
 					return Poll::Ready(res.map(|()| {
+						std::mem::take(&mut self.delivery).acked();
 						tracing::debug!(sequence = self.sequence, "finished group");
 					}));
 				}
@@ -2777,7 +2793,7 @@ mod serve_group_test {
 			.unwrap();
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
-		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group.consume()));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group.consume(), Default::default()));
 
 		// Drain the frame, leaving the task parked awaiting the next one.
 		assert!(futures::poll!(serve.as_mut()).is_pending());
@@ -2818,7 +2834,7 @@ mod serve_group_test {
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
-		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group, Default::default()));
 		assert!(
 			futures::poll!(serve.as_mut()).is_pending(),
 			"transport write is blocked"
@@ -2867,7 +2883,7 @@ mod serve_group_test {
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
-		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group, Default::default()));
 		assert!(
 			futures::poll!(serve.as_mut()).is_pending(),
 			"waiting for the final byte"
@@ -2924,7 +2940,7 @@ mod serve_group_test {
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
-		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group, Default::default()));
 		assert!(
 			futures::poll!(serve.as_mut()).is_pending(),
 			"stream credit is exhausted"
@@ -2964,6 +2980,84 @@ mod serve_group_test {
 		);
 	}
 
+	/// An acknowledged FIN advances the subscription's frontier; a group reset or
+	/// abandoned mid-stream (the session closing drops its serve task) counts as
+	/// dropped instead.
+	#[tokio::test]
+	async fn group_streams_report_to_the_frontier() {
+		let registry = crate::stats::Registry::new(crate::stats::Config::new());
+		let session = registry.tier(crate::stats::Tier::default()).session("root");
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track("test", None).unwrap();
+		let sub = broadcast
+			.consume()
+			.with_stats(session.egress("demo"))
+			.track("test")
+			.unwrap()
+			.subscribe(None)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let row = || {
+			let mut report = crate::stats::Report::default();
+			registry.report(&mut report);
+			report.traffic.iter().find(|e| e.path.as_str() == "demo").unwrap().publisher
+		};
+		let subscription = || Subscription {
+			session: SinkSession::new(Log::default()),
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: kio::Producer::new(0u8).consume(),
+			track_priority_seen: 0,
+			version: Version::Lite06,
+			timescale: Some(crate::Timescale::default()),
+		};
+		let ms = |ms| Timestamp::from_millis(ms).unwrap();
+
+		// Served to completion: the frontier moves to its newest frame, 500ms.
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(ms(0), b"a".as_slice()).unwrap();
+		group.write_frame(ms(500), b"b".as_slice()).unwrap();
+		group.finish().unwrap();
+		let ctx = subscription();
+		let handle = ctx.priority.insert(Priority::new(0, 0, 0));
+		ctx.serve_group(0, 0, handle, group.consume(), sub.delivery())
+			.await
+			.unwrap();
+		let before = row();
+
+		// Aborted mid-stream after one frame.
+		let mut group = track.create_group(group::Info { sequence: 1 }).unwrap();
+		group.write_frame(ms(1000), b"hello".as_slice()).unwrap();
+		let ctx = subscription();
+		let handle = ctx.priority.insert(Priority::new(0, 0, 1));
+		let mut serve = std::pin::pin!(ctx.serve_group(1, 0, handle, group.consume(), sub.delivery()));
+		assert!(futures::poll!(serve.as_mut()).is_pending());
+		group.abort(Error::Old).unwrap();
+		assert!(matches!(serve.await, Err(Error::Old)));
+
+		// Abandoned mid-stream: the session closed and dropped the serve task.
+		let mut group = track.create_group(group::Info { sequence: 2 }).unwrap();
+		group.write_frame(ms(2000), b"hi".as_slice()).unwrap();
+		group.write_frame(ms(2100), b"yo".as_slice()).unwrap();
+		let ctx = subscription();
+		let handle = ctx.priority.insert(Priority::new(0, 0, 2));
+		let mut serve = Box::pin(ctx.serve_group(2, 0, handle, group.consume(), sub.delivery()));
+		assert!(futures::poll!(serve.as_mut()).is_pending());
+		drop(serve);
+
+		let after = row();
+		assert_eq!(before.dropped_groups, 0);
+		assert_eq!(after.dropped_groups, 2);
+		assert_eq!(after.dropped_bytes, 5 + 4);
+		assert_eq!(after.dropped_duration, Duration::from_millis(100));
+		// The newest frame is at 2100ms and the frontier at 500ms: 1.6s behind, for
+		// the 9 bytes produced since the last sample.
+		assert_eq!(before.lag.buckets(), &[2, 0, 0, 0, 0, 0, 0, 0]);
+		assert_eq!(after.lag.buckets(), &[2, 0, 0, 0, 0, 9, 0, 0]);
+	}
+
 	/// A group that completes cleanly must not reset at all. The completion path
 	/// releases the stream via `poll_close`; leaving the writer to drop after
 	/// `finish()` would fire the Drop fallback and tack a spurious Cancel reset
@@ -2994,7 +3088,7 @@ mod serve_group_test {
 		group.finish().unwrap();
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
-		subscription.serve_group(0, 0, handle, consumer).await.unwrap();
+		subscription.serve_group(0, 0, handle, consumer, Default::default()).await.unwrap();
 
 		assert_eq!(log.resets(), Vec::<u32>::new(), "clean completion must not reset");
 

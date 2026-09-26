@@ -64,8 +64,3 @@ what a subscriber received and played, per audio and video. The relay is
   `Traffic` and `Presence` serializers once a moq-stats release carrying both
   has shipped and the demo dashboard (and any moq.pro consumer) reads the
   `*_started` / `*_ended` names. Deserialize keeps accepting them. Wire only.
-
-## Related
-
-- [Starvation](/quest/m1/qos/starvation.md) - the relay's delivery counters,
-  the other half of a health verdict

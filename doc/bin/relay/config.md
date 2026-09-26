@@ -208,6 +208,15 @@ and auth root, split by a **tier** label chosen by the auth server's grant or
 possible. [Stats](/concept/stats) describes the paths, tracks, and encodings;
 read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
+`publisher.json` also reports how far behind each broadcast's viewers are. Every
+`interval` the relay samples each subscription's lag, the newest frame produced
+minus the newest frame the viewer acknowledged, into a byte-weighted `lag`
+histogram with buckets at 50 ms, 100 ms, 250 ms, 500 ms, 1 s, 2 s, 5 s, and above.
+`dropped_duration`, `dropped_bytes`, and `dropped_groups` count media written to a
+viewer on a group stream that ended before the viewer acknowledged it. Both
+resolve one group at a time, so they overstate lag and drops for long groups;
+see [Lag](/concept/stats#lag).
+
 ## \[iroh]
 
 ```toml

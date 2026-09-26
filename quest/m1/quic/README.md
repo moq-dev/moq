@@ -90,8 +90,6 @@ This is a transport API change, not a MoQ wire change.
 
 - [Scope track priority](/quest/m1/track-priority-scope.md) - the
   per-broadcast fairness policy on cluster sessions
-- [Starvation](/quest/m1/qos/starvation.md) - the first consumer of ACK
-  progress: how far behind viewers are, from the relay's point of view
 - [Receive timestamps](/quest/m2/quic-receive-ts.md) - per-packet arrival
   times for GCC and deadlines
 - [GCC egress experiment](/quest/m2/quic-gcc.md) - a measured verdict on

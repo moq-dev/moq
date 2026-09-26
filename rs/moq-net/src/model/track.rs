@@ -1632,7 +1632,7 @@ impl Producer {
 			}),
 			// A producer-side (in-process) subscribe is not egress: stay untagged.
 			stats: stats::Scope::default(),
-			_stats_sub: stats::Subscription::default(),
+			stats_sub: stats::Subscription::default(),
 		}
 	}
 
@@ -2761,6 +2761,9 @@ impl Subscribing {
 
 				let drift_anchor = kio::Producer::new(Anchor::default());
 				let min_sequence = floor_of(&self.subscription.read());
+				let stats_sub = self.stats.subscribe();
+				let cache = state.read().cache.clone();
+				stats_sub.frontier().watch(&cache);
 				Poll::Ready(Ok(Subscriber {
 					name: self.name.clone(),
 					broadcast: self.broadcast.clone(),
@@ -2780,7 +2783,7 @@ impl Subscribing {
 						seek_pending: BTreeMap::new(),
 					}),
 					stats: self.stats.clone(),
-					_stats_sub: self.stats.subscribe(),
+					stats_sub,
 				}))
 			}
 			SubscribingKind::Spliced(resume) => {
@@ -2788,13 +2791,16 @@ impl Subscribing {
 				// window is applied to each per-session aggregate, not here.
 				let info = ready!(resume.poll_info(waiter))?;
 
+				let stats_sub = self.stats.subscribe();
+				let mut spliced = resume.subscribe_shared(self.subscription.clone());
+				spliced.watch(stats_sub.frontier());
 				Poll::Ready(Ok(Subscriber {
 					name: self.name.clone(),
 					broadcast: self.broadcast.clone(),
 					info,
-					inner: SubscriberKind::Spliced(Box::new(resume.subscribe_shared(self.subscription.clone()))),
+					inner: SubscriberKind::Spliced(Box::new(spliced)),
 					stats: self.stats.clone(),
-					_stats_sub: self.stats.subscribe(),
+					stats_sub,
 				}))
 			}
 		}
@@ -3053,8 +3059,9 @@ pub struct Subscriber {
 	// (no-op) for an untagged track.
 	stats: stats::Scope,
 	// The subscription guard: bumps `subscriptions` (and the egress viewer refcount)
-	// while held, closing them on drop. Empty (no-op) for an untagged track.
-	_stats_sub: stats::Subscription,
+	// while held, closing them on drop, and carries the acknowledged frontier the
+	// lag sampler reads. Empty (no-op) for an untagged track.
+	stats_sub: stats::Subscription,
 }
 
 enum SubscriberKind {
@@ -4015,6 +4022,23 @@ impl Subscriber {
 			SubscriberKind::Spliced(spliced) => spliced.update(subscription),
 		}
 		Ok(())
+	}
+
+	/// Track one group stream written toward the peer against this subscription's
+	/// acknowledged frontier. A no-op for an untagged subscriber.
+	pub(crate) fn delivery(&self) -> stats::Delivery {
+		self.stats_sub.frontier().delivery()
+	}
+
+	/// Report the tracks feeding this cursor to `frontier`: its own, or each segment's.
+	pub(crate) fn watch(&mut self, frontier: &stats::Frontier) {
+		match &mut self.inner {
+			SubscriberKind::Plain(plain) => {
+				let cache = plain.state.read().cache.clone();
+				frontier.watch(&cache);
+			}
+			SubscriberKind::Spliced(spliced) => spliced.watch(frontier),
+		}
 	}
 
 	/// Return the latest sequence number in the track.
