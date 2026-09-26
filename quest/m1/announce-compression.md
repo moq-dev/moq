@@ -102,7 +102,5 @@ Hops {
 
 ## Related
 
-- [lite-07 stream count](/quest/m1/lite-stream-count.md) - the other lite-07
-  wire change, landing in the same unreleased version
 - [Relay memory](/quest/m1/relay-memory.md) - route state per relay, which
   this leaves unchanged

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.4...moq-ffi-v0.4.5) - 2026-09-25
+
+### Added
+
+- *(ffi)* advertise JSON tracks in the catalog, add binary data tracks ([#4137](https://github.com/moq-dev/moq/pull/4137))
+
+### Fixed
+
+- *(ffi)* name the binary config conversion so moq-ffi compiles ([#4157](https://github.com/moq-dev/moq/pull/4157))
+
 ## [0.4.4](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.3...moq-ffi-v0.4.4) - 2026-09-25
 
 ### Added

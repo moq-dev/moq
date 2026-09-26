@@ -7,6 +7,7 @@
 import { Pattern, Patterns } from "@moq/pattern";
 import * as z from "@zod/mini";
 import * as Path from "./path.ts";
+import { decodeGrants } from "./wire.ts";
 
 /** A list of pattern texts, each validated by `Pattern.parse`. */
 export const PatternListSchema = z.array(
@@ -30,29 +31,48 @@ export function patterns(texts: readonly string[] | undefined): Patterns {
 	return new Patterns((texts ?? []).map((text) => Pattern.parse(text)));
 }
 
+const ScopeFields = {
+	/** The root that `publish` and `subscribe` are relative to. Defaults to the empty string. */
+	root: z._default(z.string(), ""),
+	/** Patterns this key may grant to publishers, relative to `root`. */
+	publish: z.optional(PatternListSchema),
+	/** Patterns this key may grant to subscribers, relative to `root`. */
+	subscribe: z.optional(PatternListSchema),
+};
+
 /**
  * The immutable ceiling on what a key may grant, embedded in its JWK.
  *
  * `root` is optional on the wire to match the Rust `moq-auth` crate, which omits it
- * when the scope sits at the top level. Any other field, including the retired `put`
- * and `get` prefix lists, is refused.
+ * when the scope sits at the top level. A legacy `put`/`get` prefix scope reads as the
+ * subtree patterns it meant. Any other field is refused.
  */
 export const ScopeSchema = z
-	.strictObject({
-		/** The root that `publish` and `subscribe` are relative to. Defaults to the empty string. */
-		root: z._default(z.string(), ""),
-		/** Patterns this key may grant to publishers, relative to `root`. */
-		publish: z.optional(PatternListSchema),
-		/** Patterns this key may grant to subscribers, relative to `root`. */
-		subscribe: z.optional(PatternListSchema),
-	})
+	.pipe(
+		z.strictObject({
+			...ScopeFields,
+			put: z.optional(z.array(z.string())),
+			get: z.optional(z.array(z.string())),
+		}),
+		z.transform(decodeGrants),
+	)
 	.check(
 		z.refine((data) => (data.publish?.length ?? 0) > 0 || (data.subscribe?.length ?? 0) > 0, {
 			message: "Either publish or subscribe must contain at least one pattern",
 		}),
 	);
 
-export type Scope = z.infer<typeof ScopeSchema>;
+export type Scope = z.output<typeof ScopeSchema>;
+
+const ClaimsFields = {
+	...ScopeFields,
+	/** Expiration time, as a whole unix timestamp in seconds. */
+	exp: z.optional(z.int()),
+	/** Issued-at time, as a whole unix timestamp in seconds. */
+	iat: z.optional(z.int()),
+};
+
+const PrefixListSchema = z.union([z.string(), z.array(z.string())]);
 
 /**
  * The JWT claims structure for moq-auth.
@@ -60,22 +80,15 @@ export type Scope = z.infer<typeof ScopeSchema>;
  * `root` is optional on the wire: a token scoped to the top-level path omits it, so
  * it defaults to the empty string to match the Rust `moq-auth` crate. A pattern names
  * exactly what it says: `alice` is one broadcast, `alice/**` is a subtree, and `**` is
- * everything under the root. Any other field, including the retired `put` and `get`
- * prefix lists, fails verification.
+ * everything under the root. Legacy `moq-token` claims read too, each `put`/`get`
+ * prefix `p` as the subtree `p/**`, and signing writes that form whenever it says the
+ * same thing. Any other field fails verification.
  */
 export const ClaimsSchema = z
-	.strictObject({
-		/** The root that `publish` and `subscribe` are relative to. Defaults to the empty string. */
-		root: z._default(z.string(), ""),
-		/** Patterns the holder may publish to, relative to `root`. */
-		publish: z.optional(PatternListSchema),
-		/** Patterns the holder may subscribe to, relative to `root`. */
-		subscribe: z.optional(PatternListSchema),
-		/** Expiration time, as a whole unix timestamp in seconds. */
-		exp: z.optional(z.int()),
-		/** Issued-at time, as a whole unix timestamp in seconds. */
-		iat: z.optional(z.int()),
-	})
+	.pipe(
+		z.strictObject({ ...ClaimsFields, put: z.optional(PrefixListSchema), get: z.optional(PrefixListSchema) }),
+		z.transform(decodeGrants),
+	)
 	.check(
 		// Emptiness, not just presence: `publish: []` grants nothing, and the Rust crate
 		// rejects such a token as useless. Checking `!== undefined` here would mint
@@ -88,7 +101,7 @@ export const ClaimsSchema = z
 /**
  * JWT claims structure for moq-auth
  */
-export type Claims = z.infer<typeof ClaimsSchema>;
+export type Claims = z.output<typeof ClaimsSchema>;
 
 /**
  * The access a {@link Claims} grants at a specific path, with every pattern rebased so

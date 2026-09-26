@@ -328,7 +328,12 @@ export class Publisher {
 					? // Declaring the timescale is what opts the track into timestamps; every
 						// object Timestamp below is in these units. We serve the newest group
 						// first, matching moq-lite.
-						{ timescale, priority: publisherPriority, groupOrder: Properties.DESCENDING }
+						{
+							timescale,
+							priority: publisherPriority,
+							groupOrder: Properties.DESCENDING,
+							maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
+						}
 					: // INCLUDE_PROPERTIES=0. The block stays present but empty, which also means
 						// the track opts out of timestamps for this subscriber.
 						{},

@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version.workspace = true
 
@@ -31,7 +31,7 @@ default = ["mediacodec", "nvidia", "openh264"]
 # Linux goes through moq-v4l (bindings checked in), macOS and Windows use OS
 # frameworks. Still off by default until every distribution ships it, which is
 # a packaging decision rather than a build cost. moq-cli's `capture` turns it on.
-capture = ["dep:libc", "dep:moq-v4l", "dep:x11rb", "dep:zune-jpeg"]
+capture = ["dep:kio", "dep:libc", "dep:moq-v4l", "dep:x11rb", "dep:zune-jpeg"]
 # Android MediaCodec encode/decode and its AHardwareBuffer frame surface. Kept
 # behind a feature because these NDK entry points require API 26, while the
 # language-binding artifacts still support API 24 and disable default features.
@@ -106,6 +106,8 @@ bytes = { workspace = true }
 fast_image_resize = "6"
 # Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
 hang = { workspace = true }
+# The capture publish's control handle.
+kio = { workspace = true, optional = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Vendored, statically linked software H.264 fallback (no system dependency).

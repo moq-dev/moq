@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/moq-dev/moq/compare/moq-audio-v0.1.3...moq-audio-v0.1.4) - 2026-09-25
+
+### Fixed
+
+- *(audio)* honor and validate Opus stream descriptions ([#4130](https://github.com/moq-dev/moq/pull/4130))
+
+### Other
+
+- *(capture)* drive native capture through clock edge cases in CI ([#4125](https://github.com/moq-dev/moq/pull/4125))
+
 ## [0.1.3](https://github.com/moq-dev/moq/compare/moq-audio-v0.1.2...moq-audio-v0.1.3) - 2026-09-25
 
 ### Added

@@ -168,7 +168,7 @@ where
 					let runtime = runtime.clone();
 					tasks.push(async move {
 						let payload = kio::wait(|waiter| {
-							let mut cx = std::task::Context::from_waker(waiter.waker());
+							let mut cx = waiter.context();
 							if session.poll_closed(&mut cx).is_ready() {
 								return std::task::Poll::Ready(None);
 							}
@@ -543,7 +543,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	// drops without draining; keep holding either way (closing this stream
 	// mid-session is a protocol violation on strict peers).
 	let payload = kio::wait(|waiter| {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		if session.poll_closed(&mut cx).is_ready() {
 			return std::task::Poll::Ready(None);
 		}
@@ -609,7 +609,7 @@ where
 	loop {
 		let recv = tasks
 			.drive(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
+				let mut cx = waiter.context();
 				session.poll_accept_uni(&mut cx)
 			})
 			.await
@@ -623,7 +623,7 @@ where
 		// tolerated: bytes that arrive and do not parse stay session-fatal.
 		let kind: u64 = match tasks
 			.drive(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
+				let mut cx = waiter.context();
 				reader.poll_decode_peek(&mut cx)
 			})
 			.await
@@ -753,7 +753,7 @@ where
 	loop {
 		let mut stream = tasks
 			.drive(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
+				let mut cx = waiter.context();
 				Stream::poll_accept(&mut accept, version, &mut cx)
 			})
 			.await?;
@@ -764,7 +764,7 @@ where
 		let mut hdr_size: Option<u16> = None;
 		let header = tasks
 			.drive(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
+				let mut cx = waiter.context();
 				let id = match hdr_id {
 					Some(id) => id,
 					None => *hdr_id.insert(std::task::ready!(stream.reader.poll_decode(&mut cx))?),

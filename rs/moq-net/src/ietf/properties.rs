@@ -7,9 +7,10 @@
 /// Unlike Message Parameters which have a count prefix, Track Properties
 /// have no count and are read until the end of the message payload.
 ///
-/// TIMESCALE, DEFAULT_PUBLISHER_PRIORITY, and DEFAULT_PUBLISHER_GROUP_ORDER are understood;
+/// MAX_CACHE_DURATION, TIMESCALE, DEFAULT_PUBLISHER_PRIORITY, and DEFAULT_PUBLISHER_GROUP_ORDER are understood;
 /// the rest are parsed and discarded.
 use bytes::Buf;
+use std::time::Duration;
 
 use crate::Timescale;
 use crate::coding::{Decode, DecodeError, Encode, EncodeError};
@@ -37,6 +38,9 @@ const DEFAULT_PUBLISHER_GROUP_ORDER: u64 = 0x22;
 /// The Track Properties block carried at the end of SUBSCRIBE_OK, PUBLISH, and FETCH_OK.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Properties {
+	/// The publisher's cache window; omission leaves retention unconstrained.
+	pub max_cache_duration: Option<Duration>,
+
 	/// The track's Timescale, which declares the units of every object Timestamp on it.
 	///
 	/// `None` declares no timeline, so the subscriber times objects by arrival.
@@ -69,8 +73,14 @@ impl Properties {
 
 		let mut prev_type = 0;
 
+		if let Some(age) = self.max_cache_duration {
+			4u64.encode(w, version)?;
+			age.encode(w, version)?;
+			prev_type = 4;
+		}
+
 		if let Some(timescale) = self.timescale {
-			TIMESCALE.encode(w, version)?;
+			(TIMESCALE - prev_type).encode(w, version)?;
 			u64::from(timescale).encode(w, version)?;
 			prev_type = TIMESCALE;
 		}
@@ -130,6 +140,7 @@ impl Properties {
 				// Even type: single varint value
 				let value = u64::decode(r, version)?;
 				match abs {
+					4 => properties.max_cache_duration = Some(Duration::from_millis(value)),
 					TIMESCALE => {
 						// A zero timescale is invalid; treat it as no declaration rather than
 						// failing the whole message over one property we could have ignored.
@@ -226,6 +237,7 @@ mod tests {
 	#[test]
 	fn test_round_trip() {
 		let properties = Properties {
+			max_cache_duration: None,
 			timescale: Some(Timescale::MICRO),
 			priority: Some(37),
 			group_order: Some(GroupOrder::Descending),
@@ -291,6 +303,7 @@ mod tests {
 	#[test]
 	fn test_round_trip_group_order_only() {
 		let properties = Properties {
+			max_cache_duration: None,
 			timescale: None,
 			priority: None,
 			group_order: Some(GroupOrder::Descending),

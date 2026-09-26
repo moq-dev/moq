@@ -40,7 +40,7 @@ pub enum Status {
 
 /// The post-processing level of the most recently captured buffer.
 ///
-/// Zero while the input is closed. Read it with [`Publication::level`] at
+/// Zero while the input is closed. Read it with [`Control::level`] at
 /// whatever rate the meter draws at.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Level {
@@ -82,8 +82,8 @@ impl Level {
 /// A snapshot of a capture-backed publication's lifecycle.
 ///
 /// Levels are deliberately not here: they change every buffer, so they would
-/// drown out the transitions [`Publication::changed`] exists to report. Read
-/// them with [`Publication::level`] instead.
+/// drown out the transitions [`Control::changed`] exists to report. Read
+/// them with [`Control::level`] instead.
 #[derive(Clone, Debug)]
 pub struct State {
 	status: Status,
@@ -116,14 +116,14 @@ impl State {
 	}
 }
 
-/// Capture and encode settings for [`Publication`].
+/// Capture and encode settings for [`Control::new`] and [`publish_capture`].
 ///
-/// `#[non_exhaustive]`: construct via [`PublicationOptions::default`] and set
+/// `#[non_exhaustive]`: construct via [`CaptureOptions::default`] and set
 /// fields, so new publication settings can be added without changing
-/// [`Publication::new`].
+/// [`Control::new`].
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
-pub struct PublicationOptions {
+pub struct CaptureOptions {
 	/// The initial input and its capture processing.
 	pub capture: capture::Config,
 	/// The track's stable codec and encode settings.
@@ -145,13 +145,13 @@ struct PublishedState {
 	revision: u64,
 }
 
-/// A retained handle for a capture-backed audio publication.
+/// A handle for controlling a capture-backed audio publication.
 ///
 /// Clones control the same MoQ track. Stopping or replacing the input releases
 /// the device but leaves the track and catalog rendition intact, so restarting
 /// does not change the broadcast identity. Dropping the final clone stops the
 /// driver and releases the publication.
-pub struct Publication {
+pub struct Control {
 	desired: kio::Producer<Desired>,
 	state: kio::Consumer<PublishedState>,
 	level: kio::Consumer<Level>,
@@ -159,7 +159,7 @@ pub struct Publication {
 	track_name: Arc<str>,
 }
 
-impl Clone for Publication {
+impl Clone for Control {
 	fn clone(&self) -> Self {
 		Self {
 			desired: self.desired.clone(),
@@ -171,23 +171,23 @@ impl Clone for Publication {
 	}
 }
 
-impl fmt::Debug for Publication {
+impl fmt::Debug for Control {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("Publication")
+		f.debug_struct("Control")
 			.field("track_name", &self.track_name)
 			.field("state", &self.state.read().state)
 			.finish_non_exhaustive()
 	}
 }
 
-impl Publication {
+impl Control {
 	/// Register one stable audio track and return its control handle and driver.
 	///
 	/// The initial source is enabled, but opens only while the track has a
 	/// subscriber. On macOS the driver's future is `!Send`, because the permission
 	/// prompt and ScreenCaptureKit hold ObjC handles across an await, so await
 	/// [`Driver::run`] on a local task there; elsewhere it can be spawned.
-	/// [`Publication`] itself is `Send + Sync`, so the controls can live anywhere.
+	/// [`Control`] itself is `Send + Sync`, so the controls can live anywhere.
 	///
 	/// The track is registered here, but its catalog rendition describes the
 	/// source's PCM layout, so the driver probes for that first and registers the
@@ -197,7 +197,7 @@ impl Publication {
 	pub fn new<E: CatalogExt>(
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
-		options: PublicationOptions,
+		options: CaptureOptions,
 	) -> Result<(Self, Driver<E>), Error> {
 		Self::build(broadcast, catalog, options, Supervisor::default())
 	}
@@ -205,7 +205,7 @@ impl Publication {
 	fn build<E: CatalogExt>(
 		mut broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
-		options: PublicationOptions,
+		options: CaptureOptions,
 		supervisor: Supervisor,
 	) -> Result<(Self, Driver<E>), Error> {
 		let reserved = Reserved::new(&mut broadcast, catalog, &options.encode)?;
@@ -227,7 +227,7 @@ impl Publication {
 		let desired_tx = kio::Producer::new(desired);
 		let state_tx = kio::Producer::new(initial);
 		let level_tx = kio::Producer::new(Level::default());
-		let publication = Self {
+		let control = Self {
 			desired: desired_tx.clone(),
 			state: state_tx.consume(),
 			level: level_tx.consume(),
@@ -246,7 +246,7 @@ impl Publication {
 			level: level_tx,
 			park_on_failure: true,
 		};
-		Ok((publication, driver))
+		Ok((control, driver))
 	}
 
 	/// Enable capture using the selected source.
@@ -332,7 +332,7 @@ impl Publication {
 /// The task that opens the selected input and publishes its samples.
 ///
 /// The driver owns the broadcast producer so its identity remains alive through
-/// stop, failure, replacement, and restart. Dropping the final [`Publication`]
+/// stop, failure, replacement, and restart. Dropping the final [`Control`]
 /// ends the driver and releases that identity.
 pub struct Driver<E: CatalogExt = ()> {
 	_broadcast: moq_net::broadcast::Producer,
@@ -705,15 +705,16 @@ fn publish_state(
 
 /// Capture audio on demand and publish it as an encoded MoQ track.
 ///
-/// This convenience function runs a controllable [`Publication`] from
-/// `options`. Use [`Publication::new`] directly to retain controls.
+/// This convenience function runs a [`Control`] from
+/// `options` without handing back the handle. Use [`Control::new`] directly to
+/// retain controls.
 pub async fn publish_capture<E: CatalogExt>(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer<E>,
-	options: PublicationOptions,
+	options: CaptureOptions,
 ) -> Result<(), Error> {
 	// Held, not dropped: the driver ends as soon as the last control handle goes.
-	let (_publication, driver) = Publication::new(broadcast, catalog, options)?;
+	let (_control, driver) = Control::new(broadcast, catalog, options)?;
 	Driver {
 		park_on_failure: false,
 		..driver
@@ -731,7 +732,7 @@ pub async fn publish_capture<E: CatalogExt>(
 fn assert_publish_capture_send(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
-	options: PublicationOptions,
+	options: CaptureOptions,
 ) {
 	fn is_send<T: Send>(_: &T) {}
 	is_send(&publish_capture(broadcast, catalog, options));
@@ -876,7 +877,7 @@ impl<E: CatalogExt> Output for EncoderOutput<'_, E> {
 
 impl<E: CatalogExt> EncoderOutput<'_, E> {
 	/// Levels ride their own channel: they change every buffer, so folding them
-	/// into [`State`] would wake every [`Publication::changed`] waiter at the
+	/// into [`State`] would wake every [`Control::changed`] waiter at the
 	/// capture rate and rebuild the whole snapshot to do it.
 	fn publish_level(&self, level: Level) {
 		let Ok(mut published) = self.level.write() else { return };
@@ -1435,7 +1436,7 @@ mod tests {
 	async fn setup_publication(
 		opens: impl IntoIterator<Item = Open>,
 	) -> (
-		Publication,
+		Control,
 		Driver,
 		MockSource,
 		moq_net::track::Subscriber,
@@ -1444,13 +1445,12 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut options = PublicationOptions::default();
+		let mut options = CaptureOptions::default();
 		options.capture.source = capture::Source::Microphone(Some("first".into()));
 		options.encode.track = Some("audio".into());
-		let (publication, driver) =
-			Publication::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
+		let (control, driver) = Control::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
 		let subscription = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
-		(publication, driver, source(opens, false), subscription, catalog)
+		(control, driver, source(opens, false), subscription, catalog)
 	}
 
 	/// Same, with the caller's encode options, which `setup_publication` fixes.
@@ -1458,7 +1458,7 @@ mod tests {
 		channels: u32,
 		opens: impl IntoIterator<Item = Open>,
 	) -> (
-		Publication,
+		Control,
 		Driver,
 		MockSource,
 		moq_net::track::Subscriber,
@@ -1467,24 +1467,23 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut options = PublicationOptions::default();
+		let mut options = CaptureOptions::default();
 		options.capture.source = capture::Source::Microphone(Some("first".into()));
 		options.encode.track = Some("audio".into());
 		options.encode.settings.layout = PcmLayout::from_channels(channels).unwrap();
-		let (publication, driver) =
-			Publication::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
+		let (control, driver) = Control::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
 		let subscription = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
-		(publication, driver, source(opens, false), subscription, catalog)
+		(control, driver, source(opens, false), subscription, catalog)
 	}
 
-	async fn wait_for(publication: &mut Publication, status: Status) -> State {
+	async fn wait_for(control: &mut Control, status: Status) -> State {
 		tokio::time::timeout(Duration::from_secs(1), async {
 			loop {
-				let state = publication.state();
+				let state = control.state();
 				if state.status() == status {
 					return state;
 				}
-				publication.changed().await.expect("driver still running");
+				control.changed().await.expect("driver still running");
 			}
 		})
 		.await
@@ -1495,25 +1494,25 @@ mod tests {
 	async fn failed_publication_retries_but_duplicate_start_is_idempotent() {
 		let (_events, recovered) = stream(None);
 		let recovered = with_device(recovered, "allowed");
-		let (mut publication, driver, source, _subscription, _catalog) =
+		let (mut control, driver, source, _subscription, _catalog) =
 			setup_publication([Open::Fatal("permission denied"), Open::Stream(recovered)]).await;
 		let attempts = source.attempts.clone();
 		let task = tokio::spawn(driver.run_with(source));
 
-		let failed = wait_for(&mut publication, Status::Failed).await;
+		let failed = wait_for(&mut control, Status::Failed).await;
 		assert!(matches!(failed.failure(), Some(Error::Capture(message)) if message == "permission denied"));
 		assert_eq!(attempts.load(Ordering::SeqCst), 1);
 
-		publication.start();
-		let live = wait_for(&mut publication, Status::Live).await;
+		control.start();
+		let live = wait_for(&mut control, Status::Live).await;
 		assert_eq!(live.device().map(|device| device.id.as_str()), Some("allowed"));
 		assert_eq!(attempts.load(Ordering::SeqCst), 2);
 
-		publication.start();
+		control.start();
 		tokio::task::yield_now().await;
 		assert_eq!(attempts.load(Ordering::SeqCst), 2);
 
-		drop(publication);
+		drop(control);
 		task.await.unwrap().unwrap();
 	}
 
@@ -1524,40 +1523,40 @@ mod tests {
 		let first = with_device(first, "first");
 		let (_second_events, second) = stream(None);
 		let second = with_device(second, "second");
-		let (mut publication, driver, source, _subscription, _catalog) =
+		let (mut control, driver, source, _subscription, _catalog) =
 			setup_publication([Open::Stream(first), Open::Stream(second)]).await;
 		let task = tokio::spawn(driver.run_with(source));
 
-		wait_for(&mut publication, Status::Live).await;
-		publication.stop();
-		wait_for(&mut publication, Status::Stopped).await;
+		wait_for(&mut control, Status::Live).await;
+		control.stop();
+		wait_for(&mut control, Status::Stopped).await;
 		assert_eq!(first_drops.load(Ordering::SeqCst), 1);
-		let track = publication.track_name().to_string();
+		let track = control.track_name().to_string();
 
-		publication.replace(capture::Source::Microphone(Some("second".into())));
-		publication.start();
-		let live = wait_for(&mut publication, Status::Live).await;
+		control.replace(capture::Source::Microphone(Some("second".into())));
+		control.start();
+		let live = wait_for(&mut control, Status::Live).await;
 		assert_eq!(live.device().map(|device| device.id.as_str()), Some("second"));
-		assert_eq!(publication.track_name(), track);
+		assert_eq!(control.track_name(), track);
 
-		drop(publication);
+		drop(control);
 		task.await.unwrap().unwrap();
 	}
 
 	#[tokio::test]
 	async fn reports_post_processing_level() {
 		let (events, input) = stream(None);
-		let (mut publication, driver, source, _subscription, _catalog) = setup_publication([Open::Stream(input)]).await;
+		let (mut control, driver, source, _subscription, _catalog) = setup_publication([Open::Stream(input)]).await;
 		let task = tokio::spawn(driver.run_with(source));
-		wait_for(&mut publication, Status::Live).await;
-		assert_eq!(publication.level(), Level::default());
+		wait_for(&mut control, Status::Live).await;
+		assert_eq!(control.level(), Level::default());
 
 		events
 			.try_push(Ok(capture::Samples::plain(vec![0.25, -0.5, 1.0, -1.0], false)))
 			.unwrap();
 		let level = tokio::time::timeout(Duration::from_secs(1), async {
 			loop {
-				let level = publication.level();
+				let level = control.level();
 				if level != Level::default() {
 					return level;
 				}
@@ -1569,7 +1568,7 @@ mod tests {
 		assert!((level.rms() - 0.760_345_34).abs() < 0.000_001);
 		assert_eq!(level.peak(), 1.0);
 
-		drop(publication);
+		drop(control);
 		task.await.unwrap().unwrap();
 	}
 
@@ -1577,20 +1576,20 @@ mod tests {
 	#[tokio::test]
 	async fn level_updates_do_not_wake_state_waiters() {
 		let (events, input) = stream(None);
-		let (mut publication, driver, source, _subscription, _catalog) = setup_publication([Open::Stream(input)]).await;
+		let (mut control, driver, source, _subscription, _catalog) = setup_publication([Open::Stream(input)]).await;
 		let task = tokio::spawn(driver.run_with(source));
-		wait_for(&mut publication, Status::Live).await;
+		wait_for(&mut control, Status::Live).await;
 
 		for _ in 0..4 {
 			events
 				.try_push(Ok(capture::Samples::plain(vec![0.25, -0.5, 1.0, -1.0], false)))
 				.unwrap();
 		}
-		tokio::time::timeout(Duration::from_millis(100), publication.changed())
+		tokio::time::timeout(Duration::from_millis(100), control.changed())
 			.await
 			.expect_err("a level change woke a state waiter");
 
-		drop(publication);
+		drop(control);
 		task.await.unwrap().unwrap();
 	}
 
@@ -1598,7 +1597,7 @@ mod tests {
 	/// failure would hang `moq import capture` instead of reporting the denial.
 	#[tokio::test]
 	async fn a_publication_without_controls_returns_its_terminal_failure() {
-		let (mut publication, driver, source, _subscription, _catalog) =
+		let (mut control, driver, source, _subscription, _catalog) =
 			setup_publication([Open::Fatal("permission denied")]).await;
 		let driver = Driver {
 			park_on_failure: false,
@@ -1611,22 +1610,22 @@ mod tests {
 			.expect_err("the terminal failure was swallowed");
 
 		assert!(matches!(&err, Error::Capture(message) if message == "permission denied"));
-		assert!(publication.is_finished());
-		assert_eq!(publication.changed().await.unwrap().status(), Status::Failed);
-		assert!(publication.changed().await.is_none());
+		assert!(control.is_finished());
+		assert_eq!(control.changed().await.unwrap().status(), Status::Failed);
+		assert!(control.changed().await.is_none());
 	}
 
 	/// A retained publication keeps the track and waits to be told what to do.
 	#[tokio::test]
 	async fn a_terminal_failure_parks_a_retained_publication() {
-		let (mut publication, driver, source, _subscription, _catalog) =
+		let (mut control, driver, source, _subscription, _catalog) =
 			setup_publication([Open::Fatal("permission denied")]).await;
 		let task = tokio::spawn(driver.run_with(source));
 
-		wait_for(&mut publication, Status::Failed).await;
-		assert!(!publication.is_finished());
+		wait_for(&mut control, Status::Failed).await;
+		assert!(!control.is_finished());
 
-		drop(publication);
+		drop(control);
 		task.await.unwrap().unwrap();
 	}
 
@@ -1634,26 +1633,26 @@ mod tests {
 	#[tokio::test]
 	async fn stopping_zeroes_the_level() {
 		let (events, input) = stream(None);
-		let (mut publication, driver, source, _subscription, _catalog) = setup_publication([Open::Stream(input)]).await;
+		let (mut control, driver, source, _subscription, _catalog) = setup_publication([Open::Stream(input)]).await;
 		let task = tokio::spawn(driver.run_with(source));
-		wait_for(&mut publication, Status::Live).await;
+		wait_for(&mut control, Status::Live).await;
 
 		events
 			.try_push(Ok(capture::Samples::plain(vec![0.5, -0.5], false)))
 			.unwrap();
 		tokio::time::timeout(Duration::from_secs(1), async {
-			while publication.level() == Level::default() {
+			while control.level() == Level::default() {
 				tokio::task::yield_now().await;
 			}
 		})
 		.await
 		.expect("no level was measured");
 
-		publication.stop();
-		wait_for(&mut publication, Status::Stopped).await;
-		assert_eq!(publication.level(), Level::default());
+		control.stop();
+		wait_for(&mut control, Status::Stopped).await;
+		assert_eq!(control.level(), Level::default());
 
-		drop(publication);
+		drop(control);
 		task.await.unwrap().unwrap();
 	}
 
@@ -1663,20 +1662,20 @@ mod tests {
 	async fn a_terminal_live_failure_keeps_the_device_that_failed() {
 		let (events, input) = stream(None);
 		let input = with_device(input, "wired");
-		let (mut publication, driver, source, _subscription, _catalog) = setup_publication([Open::Stream(input)]).await;
+		let (mut control, driver, source, _subscription, _catalog) = setup_publication([Open::Stream(input)]).await;
 		let task = tokio::spawn(driver.run_with(source));
-		wait_for(&mut publication, Status::Live).await;
+		wait_for(&mut control, Status::Live).await;
 
 		events
 			.try_push(Err(capture::Failure::fatal(Error::Capture("device vanished".into()))))
 			.unwrap();
 
-		let failed = wait_for(&mut publication, Status::Failed).await;
+		let failed = wait_for(&mut control, Status::Failed).await;
 		assert_eq!(failed.device().map(|device| device.id.as_str()), Some("wired"));
 		assert!(matches!(failed.failure(), Some(Error::Capture(message)) if message == "device vanished"));
 
 		// Retained controls park rather than end, so dropping them is the clean exit.
-		drop(publication);
+		drop(control);
 		task.await.unwrap().unwrap();
 	}
 
@@ -1684,13 +1683,13 @@ mod tests {
 	/// construction must not wait on one and the controls must work meanwhile.
 	#[tokio::test]
 	async fn controls_are_live_before_the_input_is_discovered() {
-		let (mut publication, driver, mut source, _subscription, catalog) = setup_publication([]).await;
+		let (mut control, driver, mut source, _subscription, catalog) = setup_publication([]).await;
 		// Nothing ever answers a probe, which is a machine with no input device.
 		source.formats.clear();
 		let attempts = source.format_attempts.clone();
 		let task = tokio::spawn(driver.run_with(source));
 
-		assert_eq!(publication.track_name(), "audio");
+		assert_eq!(control.track_name(), "audio");
 		tokio::time::timeout(Duration::from_secs(1), async {
 			while attempts.load(Ordering::SeqCst) == 0 {
 				tokio::task::yield_now().await;
@@ -1699,16 +1698,16 @@ mod tests {
 		.await
 		.expect("the driver never probed the input");
 
-		assert_eq!(publication.state().status(), Status::Starting);
+		assert_eq!(control.state().status(), Status::Starting);
 		// The layout is unknown, so there is no rendition to advertise yet.
 		assert!(catalog.snapshot().audio.renditions.is_empty());
 
 		// A probe nothing answers is still cancellable by the controls.
-		publication.stop();
-		wait_for(&mut publication, Status::Stopped).await;
+		control.stop();
+		wait_for(&mut control, Status::Stopped).await;
 		assert_eq!(attempts.load(Ordering::SeqCst), 1);
 
-		drop(publication);
+		drop(control);
 		task.await.unwrap().unwrap();
 	}
 
@@ -1717,27 +1716,26 @@ mod tests {
 	#[tokio::test]
 	async fn discovery_registers_the_rendition() {
 		let (_events, input) = stream(None);
-		let (mut publication, driver, mut source, _subscription, catalog) =
-			setup_publication([Open::Stream(input)]).await;
+		let (mut control, driver, mut source, _subscription, catalog) = setup_publication([Open::Stream(input)]).await;
 		source.formats = [Discovery::Fatal("permission denied"), Discovery::Format(48_000, 2)]
 			.into_iter()
 			.collect();
 		let task = tokio::spawn(driver.run_with(source));
 
-		let failed = wait_for(&mut publication, Status::Failed).await;
+		let failed = wait_for(&mut control, Status::Failed).await;
 		assert!(matches!(failed.failure(), Some(Error::Capture(message)) if message == "permission denied"));
 		assert!(catalog.snapshot().audio.renditions.is_empty());
 
 		// A terminal probe failure parks like a terminal open failure, so `start`
 		// retries it rather than the driver ending with no track.
-		publication.start();
-		wait_for(&mut publication, Status::Live).await;
+		control.start();
+		wait_for(&mut control, Status::Live).await;
 		let renditions = catalog.snapshot().audio.renditions;
 		let config = renditions.get("audio").expect("the rendition was never registered");
 		assert_eq!(config.sample_rate, 48_000);
 		assert_eq!(config.channel_count, 2);
 
-		drop(publication);
+		drop(control);
 		task.await.unwrap().unwrap();
 	}
 
@@ -1748,23 +1746,22 @@ mod tests {
 	async fn a_rejected_layout_parks_the_publication() {
 		let (_events, input) = stream(None);
 		// A discrete source cannot be assigned stereo speaker positions implicitly.
-		let (mut publication, driver, mut source, _subscription, catalog) =
-			setup_encoding(2, [Open::Stream(input)]).await;
+		let (mut control, driver, mut source, _subscription, catalog) = setup_encoding(2, [Open::Stream(input)]).await;
 		source.formats = [Discovery::Format(48_000, 6), Discovery::Format(48_000, 2)]
 			.into_iter()
 			.collect();
 		let task = tokio::spawn(driver.run_with(source));
 
-		let failed = wait_for(&mut publication, Status::Failed).await;
+		let failed = wait_for(&mut control, Status::Failed).await;
 		assert!(failed.failure().is_some());
-		assert!(!publication.is_finished());
+		assert!(!control.is_finished());
 		assert!(catalog.snapshot().audio.renditions.is_empty());
 
-		publication.replace(capture::Source::Microphone(Some("second".into())));
-		wait_for(&mut publication, Status::Live).await;
+		control.replace(capture::Source::Microphone(Some("second".into())));
+		wait_for(&mut control, Status::Live).await;
 		assert_eq!(catalog.snapshot().audio.renditions.len(), 1);
 
-		drop(publication);
+		drop(control);
 		task.await.unwrap().unwrap();
 	}
 
@@ -1772,7 +1769,7 @@ mod tests {
 	#[test]
 	fn publication_controls_cross_threads() {
 		fn assert_send_sync<T: Send + Sync>() {}
-		assert_send_sync::<Publication>();
+		assert_send_sync::<Control>();
 		assert_send_sync::<State>();
 		assert_send_sync::<Level>();
 	}
@@ -2040,5 +2037,269 @@ mod tests {
 		}
 
 		assert_eq!(drops.load(Ordering::SeqCst), 1);
+	}
+
+	/// Clock fixtures: the real publication driver, fed by synthetic microphones against a
+	/// pinned broadcast clock, graded on the timestamps a subscriber reads back.
+	///
+	/// Capture stamps a buffer when the driver reads it, so each expectation is bracketed by
+	/// the broadcast clock just before the fixture delivers the buffer and just after the
+	/// published packet is read back.
+	mod clock {
+		use std::time::{Duration, Instant, SystemTime};
+
+		use super::*;
+
+		/// Retain every fixture group, so a slow runner never evicts one before it is read.
+		const RETAIN: Duration = Duration::from_secs(600);
+
+		type Samples = kio::Queue<Result<capture::Samples, capture::Failure>>;
+		type Track = moq_mux::container::Consumer<moq_mux::container::legacy::Wire>;
+
+		struct Fixture {
+			epoch: Instant,
+			clock: moq_mux::Clock,
+			catalog: moq_mux::catalog::Producer,
+			consumer: moq_net::broadcast::Consumer,
+			publication: Control,
+			task: tokio::task::JoinHandle<Result<(), Error>>,
+		}
+
+		impl Fixture {
+			/// Run a publication over `opens` on a broadcast whose clock began `behind` ago, at `wall`.
+			fn start(behind: Duration, wall: SystemTime, opens: impl IntoIterator<Item = Open>) -> Self {
+				let epoch = Instant::now()
+					.checked_sub(behind)
+					.expect("a monotonic clock that far back");
+				let clock = moq_mux::Clock::at(epoch, wall).unwrap();
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let consumer = broadcast.consume();
+				let config = moq_mux::catalog::Config::default()
+					.with_clock(clock)
+					.with_max_age(RETAIN);
+				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
+				let mut options = CaptureOptions::default();
+				options.encode.track = Some("audio".into());
+				// The broadcast's own clock, as `moq import capture` hands it.
+				options.clock = catalog.clock();
+				let (publication, driver) =
+					Control::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
+				let task = tokio::spawn(driver.run_with(source(opens, false)));
+				Self {
+					epoch,
+					clock,
+					catalog,
+					consumer,
+					publication,
+					task,
+				}
+			}
+
+			/// Subscribe to the audio track, which is what opens the microphone.
+			async fn subscribe(&mut self) -> Track {
+				let track = self
+					.consumer
+					.track("audio")
+					.unwrap()
+					.subscribe(moq_net::track::Subscription::default().with_max_age(RETAIN))
+					.await
+					.unwrap();
+				wait_for(&mut self.publication, Status::Live).await;
+				moq_mux::container::Consumer::new(
+					track,
+					moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio),
+				)
+			}
+
+			/// `instant` on the broadcast clock, in microseconds.
+			fn at(&self, instant: Instant) -> u64 {
+				u64::try_from(instant.duration_since(self.epoch).as_micros()).unwrap()
+			}
+
+			/// Deliver one Opus frame of stereo audio and read back the first packet not in
+			/// `seen`, asserting it is stamped while the driver held the buffer.
+			async fn deliver(&self, samples: &Samples, track: &mut Track, seen: &[u64]) -> u64 {
+				let pushed = self.at(Instant::now());
+				samples
+					.try_push(Ok(capture::Samples::plain(vec![0.1; 1920], false)))
+					.unwrap();
+				let published = loop {
+					let packet = track.read().await.unwrap().expect("a published packet");
+					let timestamp = u64::try_from(packet.timestamp.as_micros()).unwrap();
+					if !seen.contains(&timestamp) {
+						break timestamp;
+					}
+				};
+				let read = self.at(Instant::now());
+				assert!(
+					(pushed..=read).contains(&published),
+					"published {published}us, delivered within {pushed}..={read}us on the broadcast clock"
+				);
+				published
+			}
+
+			/// Stop the publication, as dropping its last control does.
+			async fn finish(self) -> (moq_mux::catalog::Producer, moq_net::broadcast::Consumer) {
+				drop(self.publication);
+				self.task.await.unwrap().unwrap();
+				(self.catalog, self.consumer)
+			}
+		}
+
+		/// A microphone whose first buffer arrives long after the broadcast began stamps it
+		/// then, rather than restarting the broadcast at zero.
+		#[tokio::test]
+		async fn a_late_first_buffer_publishes_its_arrival() {
+			let (samples, input) = stream(None);
+			let mut fixture = Fixture::start(Duration::from_secs(5), SystemTime::now(), [Open::Stream(input)]);
+			let mut track = fixture.subscribe().await;
+
+			let published = fixture.deliver(&samples, &mut track, &[]).await;
+			assert!(published >= 5_000_000, "{published}us restarted the broadcast at zero");
+			fixture.finish().await;
+		}
+
+		/// A device that fails and reopens counts its samples from zero again. The broadcast
+		/// continues forward from the reopen instead of rewinding to the old epoch.
+		#[tokio::test]
+		async fn a_device_restart_continues_forward() {
+			let (first, failing) = stream(None);
+			let (second, reopened) = stream(None);
+			let mut fixture = Fixture::start(
+				Duration::from_secs(1),
+				SystemTime::now(),
+				[Open::Stream(failing), Open::Stream(reopened)],
+			);
+			let mut track = fixture.subscribe().await;
+
+			let before = fixture.deliver(&first, &mut track, &[]).await;
+			first
+				.try_push(Err(capture::Failure::retry(Error::Capture("unplugged".into()))))
+				.unwrap();
+			wait_for(&mut fixture.publication, Status::Failed).await;
+			// The supervisor backs off before reopening, so the restart lands at least that late.
+			let after = fixture.deliver(&second, &mut track, &[before]).await;
+			let backoff = u64::try_from(RETRY_MIN.as_micros()).unwrap();
+			assert!(
+				after >= before + backoff,
+				"{after}us rewound or collapsed the {backoff}us backoff"
+			);
+			fixture.finish().await;
+		}
+
+		/// Releasing the microphone while nobody listens keeps the broadcast clock running:
+		/// the buffer after a resume lands after the real idle gap.
+		#[tokio::test]
+		async fn a_restart_after_idle_keeps_the_gap() {
+			let idle = Duration::from_millis(300);
+			let (first, input) = stream(None);
+			let (second, resumed) = stream(None);
+			let mut fixture = Fixture::start(
+				Duration::from_secs(1),
+				SystemTime::now(),
+				[Open::Stream(input), Open::Stream(resumed)],
+			);
+
+			let mut track = fixture.subscribe().await;
+			let before = fixture.deliver(&first, &mut track, &[]).await;
+			drop(track);
+			wait_for(&mut fixture.publication, Status::Waiting).await;
+
+			tokio::time::sleep(idle).await;
+
+			let mut track = fixture.subscribe().await;
+			let after = fixture.deliver(&second, &mut track, &[before]).await;
+			assert!(
+				after - before >= u64::try_from(idle.as_micros()).unwrap(),
+				"the {idle:?} idle gap collapsed to {}us",
+				after - before
+			);
+			fixture.finish().await;
+		}
+
+		/// The wall mapping is pinned when the broadcast clock is built. A system clock stepped
+		/// an hour since then retimes neither the published timestamps nor the advertised mapping.
+		#[tokio::test]
+		async fn a_system_wall_adjustment_retimes_nothing() {
+			// Whole seconds, so the advertised mapping holds it exactly.
+			let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+			let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
+			let (samples, input) = stream(None);
+			let mut fixture = Fixture::start(Duration::from_secs(1), wall, [Open::Stream(input)]);
+			let advertised = fixture.catalog.snapshot().clock;
+			assert_eq!(advertised, Some(fixture.clock.wall()));
+
+			let mut track = fixture.subscribe().await;
+			let published = fixture.deliver(&samples, &mut track, &[]).await;
+
+			// The catalog maps to walls at millisecond precision.
+			let mapped = advertised
+				.unwrap()
+				.wall_clock(moq_net::Timestamp::from_micros(published).unwrap())
+				.unwrap();
+			assert_eq!(mapped, wall + Duration::from_millis(published / 1000));
+			assert_eq!(fixture.catalog.snapshot().clock, advertised);
+			fixture.finish().await;
+		}
+
+		/// A recording replays what the live edge published: the archive's segment records
+		/// carry the live timestamps across an idle restart, with the idle gap left in.
+		#[tokio::test]
+		async fn retained_archive_playback_keeps_the_live_timestamps() {
+			let (first, input) = stream(None);
+			let (second, resumed) = stream(None);
+			let mut fixture = Fixture::start(
+				Duration::from_secs(1),
+				SystemTime::now(),
+				[Open::Stream(input), Open::Stream(resumed)],
+			);
+			let mut live = Vec::new();
+			let mut timeline = None;
+
+			for samples in [&first, &second] {
+				let mut track = fixture.subscribe().await;
+				live.push(fixture.deliver(samples, &mut track, &live).await);
+				// The rendition, and with it the archive, registers once the input is discovered.
+				if timeline.is_none() {
+					let section = fixture
+						.catalog
+						.snapshot()
+						.archive
+						.expect("the audio track enrolls an archive");
+					timeline = Some(
+						moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section)
+							.await
+							.unwrap(),
+					);
+				}
+				drop(track);
+				wait_for(&mut fixture.publication, Status::Waiting).await;
+				// Idle past the minimum segment, so each run is archived as its own segment.
+				tokio::time::sleep(moq_mux::timeline::DEFAULT_DURATION_MIN + Duration::from_millis(100)).await;
+			}
+
+			let (catalog, _consumer) = fixture.finish().await;
+			catalog.timeline().finish().unwrap();
+			let mut timeline = timeline.unwrap();
+			let mut archived = Vec::new();
+			while let Some(event) = timeline.next().await.unwrap() {
+				match event {
+					moq_mux::timeline::Event::Push { entry, .. } => archived.push(entry),
+					other => panic!("unexpected timeline event {other:?}"),
+				}
+			}
+
+			assert_eq!(archived.len(), live.len(), "one segment per capture run: {archived:?}");
+			for (entry, live) in archived.iter().zip(&live) {
+				// The archive keeps millisecond precision.
+				assert_eq!(entry.pts.as_micros() / 1000, u128::from(*live / 1000), "{archived:?}");
+				assert!(entry.tracks.contains_key("audio"), "{archived:?}");
+			}
+			let first = &archived[0];
+			assert!(
+				archived[1].pts.as_micros() >= first.pts.as_micros() + first.duration.as_micros(),
+				"the resumed segment overlaps the one before it: {archived:?}"
+			);
+		}
 	}
 }

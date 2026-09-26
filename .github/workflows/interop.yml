@@ -17,6 +17,8 @@ on:
     paths:
       - "test/lib/**"
       - "test/interop/**"
+      - "test/max-age/**"
+      - "rs/moq-tokio/tests/max_age.rs"
       # The TS/IRD compliance harness runs in the same job (see below).
       - "test/ts/**"
       # The interop job also depends on the recipe that invokes it and the
@@ -80,6 +82,10 @@ jobs:
       # `playwright install` then no-ops.
       - name: Playwright Chromium
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
+        shell: bash -leo pipefail {0}
+
+      - name: Optional publisher retention
+        run: nix develop --command just test max-age
         shell: bash -leo pipefail {0}
 
       - name: Interop (full matrix)

@@ -100,19 +100,15 @@ impl Origin {
 	pub fn announced(
 		&mut self,
 		origin: Id,
-		prefix: String,
-		filter: Option<String>,
+		scope: moq_net::Pattern,
+		hidden: bool,
 		on_announce: OnStatus,
 	) -> Result<Id, Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		let filter = match filter {
-			Some(filter) => filter.parse::<moq_net::Pattern>()?,
-			None => moq_net::Pattern::all(),
-		};
-		let filter = filter.rooted(&prefix)?;
 		let consumer = origin
 			.consume()
-			.scope("", &moq_net::Patterns::from(filter))?
+			.scope("", &moq_net::Patterns::from(scope))?
+			.with_hidden(hidden)
 			.announced();
 		let channel = oneshot::channel();
 

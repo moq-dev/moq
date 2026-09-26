@@ -447,7 +447,7 @@ A receiver SHOULD NOT cache refusals; rate limiting is the advertiser's concern.
 A subscriber opens Subscribe Streams to request a Track.
 
 The subscriber MUST start a Subscribe Stream with a SUBSCRIBE message followed by any number of SUBSCRIBE_UPDATE messages.
-The publisher replies with a SUBSCRIBE_OK message once the start group is resolved, followed by any number of SUBSCRIBE_END and SUBSCRIBE_DROP messages.
+The publisher replies with a SUBSCRIBE_OK message once the start group is resolved, followed by a SUBSCRIBE_END message once the subscription ends.
 For a live track the publisher MAY withhold SUBSCRIBE_OK until the first matching group resolves the start; if the track has already ended with no matching groups, it sends SUBSCRIBE_END with no preceding SUBSCRIBE_OK.
 A rejection is a stream reset: a publisher that cannot serve the subscription (no such track, an ended broadcast, or any other refusal) MUST promptly reset the stream rather than leave it pending, so a subscriber distinguishes "pending" from "refused" by the reset, not by a timeout.
 A route claims capability rather than inventory, so a subscription for a covered path that names nothing is refused this way too.
@@ -455,9 +455,8 @@ A route claims capability rather than inventory, so a subscription for a covered
 The track's immutable publisher properties are not carried here; they are fetched once via a [Track Stream](#track-stream).
 The subscriber needs the track's TRACK_INFO (notably its timescale) to interpret FRAME messages, and MAY open the Track and Subscribe streams concurrently, buffering frames until it arrives.
 
-The publisher sends SUBSCRIBE_OK once the absolute start position is resolved, and SUBSCRIBE_END once no further groups will be produced (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_END](#subscribe-end)).
-The publisher closes the stream (FIN) only once every group from start to end has been accounted for, either via a Group Stream (completed or reset) or a SUBSCRIBE_DROP message.
-This MAY occur after SUBSCRIBE_END, since stragglers within the range can still be dropped.
+The publisher sends SUBSCRIBE_OK once the absolute start position is resolved, and SUBSCRIBE_END once no further groups will be produced and every Group Stream it opens for the subscription has been opened (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_END](#subscribe-end)).
+The publisher closes the stream (FIN) after SUBSCRIBE_END, once every counted Group Stream has finished or been reset.
 Unbounded subscriptions stay open until SUBSCRIBE_END, and either endpoint MAY reset the stream at any time.
 
 ### Fetch
@@ -1088,8 +1087,12 @@ It is an upper bound on retention, the inverse of an HTTP `Cache-Control: max-ag
 - A subscriber MAY issue a SUBSCRIBE or FETCH with an older `Group Start`, but the publisher MAY have already dropped any group whose age exceeds `Publisher Max Age`.
 - The publisher MAY drop groups sooner than `Publisher Max Age` under resource pressure; subscribers MUST NOT assume older groups within the bound are still available.
 
-A value of `0` means the publisher caches only the latest group (older groups MAY be dropped as soon as a newer group arrives).
+Encoded as the duration in milliseconds plus one; `0` means no publisher limit.
+An encoded value of `1` declares a duration of zero, so the publisher caches only the latest group (older groups MAY be dropped as soon as a newer group arrives).
 The unit is milliseconds, matching `Subscriber Max Age`.
+
+When interoperating with lite-05/06, which encode milliseconds without the offset, implementations represent no limit as `2^53 - 1` and interpret values at or above it as no limit.
+Older implementations interpret this as a finite duration; the sentinel fits the safe integer range of older JavaScript readers.
 See the [Expiration](#expiration) section for more information.
 
 **Timescale**:
@@ -1116,7 +1119,7 @@ Set to 0x0 to indicate a SUBSCRIBE_OK message.
 
 **Group**:
 The absolute sequence number of the first group that will be delivered.
-It MUST be greater than or equal to the requested start group; any groups in between are unavailable and implicitly dropped, with no separate SUBSCRIBE_DROP required.
+It MUST be greater than or equal to the requested start group; any groups in between are unavailable.
 A subscriber that requested the latest group learns the resolved sequence here.
 
 There is no matching frame field, because the start frame is never in doubt: a partial group is only delivered when it was asked for, so the subscription starts either exactly where it asked or at the beginning of a later group (see [Positions](#positions)).
@@ -1136,6 +1139,7 @@ SUBSCRIBE_END Message {
   Type (i) = 0x1
   Message Length (i)
   Group (i)
+  Stream Count (i)
 }
 ~~~
 
@@ -1147,34 +1151,14 @@ The exclusive end of the range: the absolute sequence number of the first group 
 A value of 0 means the track ended before producing any groups.
 The subscriber MUST NOT wait for any group at or after this sequence.
 
-SUBSCRIBE_END bounds the range but does not by itself end the stream: the publisher MAY still send SUBSCRIBE_DROP for groups below this sequence that it cannot deliver, and FINs the stream only once every group below this sequence has been accounted for.
+**Stream Count**:
+The number of Group Streams the publisher opened for this subscription, whether they finished or were reset.
+A group that was skipped, never produced, delivered only as a datagram, or given up before its stream opened is not counted.
+A relay counts the Group Streams it opened itself, never the count it received upstream.
 
-## SUBSCRIBE_DROP
-A SUBSCRIBE_DROP message is sent by the publisher on the Subscribe Stream when groups cannot be served.
-It MAY arrive at any point after the subscription is opened, including after SUBSCRIBE_END for stragglers within the resolved range (a leading range is instead dropped implicitly by SUBSCRIBE_OK).
-
-~~~
-SUBSCRIBE_DROP Message {
-  Type (i) = 0x2
-  Message Length (i)
-  Group Start (i)
-  Group End (i)
-  Error Code (i)
-}
-~~~
-
-**Type**:
-Set to 0x2 to indicate a SUBSCRIBE_DROP message.
-
-**Group Start**:
-The first absolute group sequence in the dropped range.
-
-**Group End**:
-The last absolute group sequence in the dropped range (inclusive).
-
-**Error Code**:
-An application-specific error code.
-A value of 0 indicates no error; the groups are simply unavailable.
+The publisher MUST NOT send SUBSCRIBE_END until every Group Stream it will open for the subscription has been opened, so the count is final; it does not wait for them to finish.
+The subscriber has received every Group Stream once it has read the header of `Stream Count` of them, which MAY happen after SUBSCRIBE_END or the FIN since streams are not ordered.
+A Group Stream reset before its header arrived is never seen, so a subscriber SHOULD bound how long it waits for the rest, for example by `Subscriber Max Age`.
 
 ## FETCH
 FETCH is sent by a subscriber to request a single group from a track.
@@ -1330,8 +1314,13 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
+
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
 - Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
+- Added `Stream Count` to SUBSCRIBE_END: the number of Group Streams opened for the subscription. SUBSCRIBE_END is now sent once every counted Group Stream has opened, rather than as soon as the final group is known.
+- Removed SUBSCRIBE_DROP and its type 0x2; a group without a Group Stream is not counted.
+- The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
 
 ## moq-lite-06
 

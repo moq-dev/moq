@@ -154,7 +154,12 @@ after which it can never sign a broader token.
 | `subscribe` | Patterns the bearer may subscribe to under `root`. Same rules. |
 | `exp`, `iat` | Expiry and issue time. `exp` is enforced for the whole session, not just at connect. |
 
-A token carrying the retired `put` and `get` prefix lists fails verification.
+Tokens and key scopes from the older `moq-token` format still work: each `put`
+and `get` prefix `p` reads as the subtree `p/**`, and `""` as `**`. When every
+grant is a subtree, signing writes that older form so relays and auth servers
+that predate patterns accept it too. A grant only a pattern can express (an
+exact `foo`, or `*/chat`) is written as `publish`/`subscribe`, which an older
+verifier refuses.
 
 ### Path matching
 

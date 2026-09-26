@@ -1,5 +1,5 @@
 use crate::{broadcast, cache, group, stats, track};
-use kio::Pollable;
+use kio::Task;
 use std::{
 	cmp::Reverse,
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
@@ -107,24 +107,12 @@ pub struct Config {
 	pub pool: cache::Pool,
 
 	/// Ceiling on each track's media-timestamp retention window under this origin.
-	/// Each track's own [`max_age`](track::Info::max_age) is clamped down to this
-	/// when the track binds, so a subscriber is never promised more history than the
-	/// origin allows, regardless of what a publisher advertises. Wall-clock
+	/// This caps the local retention and delivery budget without changing the
+	/// publisher's [`max_age`](track::Info::max_age) metadata. Wall-clock
 	/// reclamation of idle content is separate: [`Self::pool`]'s
 	/// [`expiry`](cache::Pool::expiry) window. [`Duration::MAX`] (the default)
 	/// imposes no ceiling, leaving each track's own window in force.
 	pub cache_duration: Duration,
-
-	/// The retention window given to a track whose publisher advertises none.
-	///
-	/// moq-lite 05+ carries [`max_age`](track::Info::max_age) in TRACK_INFO, so a
-	/// track relayed over it keeps the window its publisher chose. Every moq-transport
-	/// draft and moq-lite 01-04 have no such wire property, so a track arriving over one
-	/// of them lands here instead. Raise it on a relay fronting a segmented egress
-	/// (HLS/DASH), which needs a playlist window's worth of history rather than the live
-	/// edge. Defaults to [`track::DEFAULT_MAX_AGE`], and [`Self::cache_duration`]
-	/// still caps it.
-	pub default_max_age: Duration,
 }
 
 impl Default for Config {
@@ -135,7 +123,6 @@ impl Default for Config {
 			hop: Hop::random(),
 			pool,
 			cache_duration: Duration::MAX,
-			default_max_age: track::DEFAULT_MAX_AGE,
 		}
 	}
 }
@@ -1143,10 +1130,6 @@ pub struct Producer {
 	// [`Config::cache_duration`]). `Duration::MAX` (no ceiling) by default.
 	cache_duration: Duration,
 
-	// Retention window for a track whose publisher advertises none (see
-	// [`Config::default_max_age`]).
-	default_max_age: Duration,
-
 	// Ingress stats context. Broadcasts created through this producer are attributed
 	// to it (writes counted on the subscriber/ingress side). Empty (no-op) unless a
 	// session tagged this handle via [`Self::with_stats`].
@@ -1185,7 +1168,6 @@ impl Producer {
 			shared: shared.clone(),
 			pool: config.pool,
 			cache_duration: config.cache_duration,
-			default_max_age: config.default_max_age,
 			stats: stats::Session::default(),
 			peer: false,
 			tasks,
@@ -1229,19 +1211,12 @@ impl Producer {
 			hop: self.hop,
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
-			default_max_age: self.default_max_age,
 		}
 	}
 
 	/// This origin's hop identity.
 	pub fn hop(&self) -> Hop {
 		self.hop
-	}
-
-	// The retention window for a track whose publisher advertises none (see
-	// [`Config::default_max_age`]). Cheaper than `config()`, which clones the pool.
-	pub(crate) fn default_max_age(&self) -> Duration {
-		self.default_max_age
 	}
 
 	/// A producer with *no* allowed prefixes: it can't publish anything and
@@ -1259,7 +1234,6 @@ impl Producer {
 			shared: kio::Shared::default(),
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
-			default_max_age: track::DEFAULT_MAX_AGE,
 			stats: stats::Session::default(),
 			peer: false,
 			tasks,
@@ -1484,7 +1458,6 @@ impl Producer {
 			shared: self.shared.clone(),
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
-			default_max_age: self.default_max_age,
 			stats: self.stats.clone(),
 			peer: self.peer,
 			tasks: self.tasks.clone(),
@@ -2417,8 +2390,8 @@ async fn run_front(task: FrontTask) {
 			{
 				return Poll::Ready(Step::SourceClosed(id));
 			}
-			for (name, io) in &tracks {
-				if let Some((source, _, query)) = &io.query
+			for (name, io) in &mut tracks {
+				if let Some((source, _, query)) = &mut io.query
 					&& let Poll::Ready(result) = query.poll(waiter)
 				{
 					return Poll::Ready(Step::Info(name.clone(), *source, result));
@@ -3408,10 +3381,10 @@ impl Requesting {
 	}
 }
 
-impl kio::Pollable for Requesting {
+impl kio::Task for Requesting {
 	type Output = Result<broadcast::Consumer, Error>;
 
-	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		self.poll_ok(waiter)
 	}
 }

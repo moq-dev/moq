@@ -1634,11 +1634,40 @@ mod tests {
 	}
 
 	#[test]
-	fn test_js_legacy_prefix_token_is_refused() {
-		// The signature is fine; the claims speak prefixes, which is no longer a token.
+	fn test_js_legacy_prefix_token_verifies_as_subtrees() {
 		let key = Key::from_str(JS_HS256_KEY).unwrap();
-		let err = key.verify(JS_HS256_LEGACY_TOKEN).unwrap_err();
-		assert!(err.to_string().contains("unknown field"), "{err}");
+		let claims = key.verify(JS_HS256_LEGACY_TOKEN).unwrap();
+		assert_eq!(claims.root, "live");
+		assert_eq!(claims.publish, patterns(&["camera1/**"]));
+		assert_eq!(claims.subscribe, patterns(&["camera1/**", "camera2/**"]));
+	}
+
+	#[test]
+	fn test_legacy_scoped_key_signs_within_its_prefixes() {
+		// A key minted by moq-token-cli with `--root demo --put room`.
+		let json = r#"{"kty":"oct","alg":"HS256","key_ops":["sign","verify"],"k":"Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68","scope":{"root":"demo","put":["room"]}}"#;
+		let key = Key::from_str(json).unwrap();
+		assert_eq!(key.scope.as_ref().unwrap().publish, patterns(&["room/**"]));
+
+		let inside = Claims {
+			root: "demo/room".into(),
+			publish: patterns(&["alice"]),
+			..Default::default()
+		};
+		let outside = Claims {
+			root: "demo".into(),
+			publish: patterns(&["lobby/**"]),
+			..Default::default()
+		};
+		assert!(key.verify(&key.sign(&inside).unwrap()).is_ok());
+		assert!(matches!(key.sign(&outside), Err(crate::Error::ScopeExceeded)));
+
+		// Written back the way it was read, so the old CLI still loads it.
+		assert!(
+			serde_json::to_string(&key)
+				.unwrap()
+				.contains(r#""scope":{"root":"demo","put":["room"]}"#)
+		);
 	}
 
 	#[test]

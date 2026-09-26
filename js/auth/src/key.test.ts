@@ -713,7 +713,7 @@ test("verify - claims validation during verification", async () => {
 	expect(verifiedClaims.root).toBe("test-path");
 });
 
-test("verify - a token carrying the retired put/get prefix fields is refused", async () => {
+test("verify - a legacy put/get prefix token reads as subtrees", async () => {
 	const key = Key.parse(encodeJwk(testKey));
 	const secret = await crypto.subtle.importKey(
 		"raw",
@@ -726,7 +726,25 @@ test("verify - a token carrying the retired put/get prefix fields is refused", a
 	const legacy = await new SignJWT({ root: "test-path", put: ["alice"], get: [""] })
 		.setProtectedHeader({ alg: "HS256", kid: testKey.kid })
 		.sign(secret);
-	await expect(Key.verify(key, legacy)).rejects.toThrow(/put|Unrecognized/);
+	const claims = await Key.verify(key, legacy);
+	expect(claims.publish).toEqual(["alice/**"]);
+	expect(claims.subscribe).toEqual(["**"]);
+});
+
+test("sign - subtree grants are written as legacy put/get", async () => {
+	const key = Key.parse(encodeJwk(testKey));
+	const token = await Key.sign(key, { root: "test-path", publish: ["alice/**"], subscribe: ["**"] });
+	const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString());
+	expect(payload).toEqual({ root: "test-path", put: ["alice"], get: [""] });
+});
+
+test("sign - legacy-shaped input cannot slip past a key scope", async () => {
+	const scoped: Key = {
+		...Key.parse(encodeJwk(testKey)),
+		scope: { root: "demo", publish: ["inside/**"] },
+	};
+	const legacy = { root: "demo", put: ["outside"] } as unknown as Parameters<typeof Key.sign>[1];
+	await expect(Key.sign(scoped, legacy)).rejects.toThrow(/scope/);
 });
 
 test("key scope is enforced when signing and verifying", async () => {

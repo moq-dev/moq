@@ -1076,7 +1076,7 @@ mod tests {
 			result: Ok(200),
 		});
 		let other = track::Info {
-			max_age: Duration::from_secs(1),
+			max_age: Some(Duration::from_secs(1)),
 			..track::Info::default()
 		};
 		assert_actions(

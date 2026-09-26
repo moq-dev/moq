@@ -41,6 +41,7 @@ removal.
 
 - [Rust close](/quest/m1/broadcast-close/rust.md) - moq-net gains `close()`, deprecates `finish`/`abort`/`is_finished`, and every Rust and JS caller moves over
 - [Binding close](/quest/m1/broadcast-close/bindings.md) - moq-ffi, libmoq, and every wrapper expose `close()` and deprecate `finish`
+- [Kotlin end](/quest/m1/broadcast-close/kotlin-end.md) - Kotlin exposes `close()` as `end()`, since `AutoCloseable.close()` takes the name
 - [Remove finish](/quest/m1/broadcast-close/remove.md) - on dev, the deprecated broadcast end APIs are gone and `closed()` carries no cause
 
 ## Related

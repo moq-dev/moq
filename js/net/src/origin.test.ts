@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { getter } from "@moq/signals";
+import { expect, spyOn, test } from "bun:test";
+import { getter, Once, race, Signal } from "@moq/signals";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { HopSchema, Route } from "./hop.ts";
@@ -668,7 +668,7 @@ test("a routed path needs no blind answer", async () => {
 
 	// The route going away is what makes the request need an answer, so the serving loop has
 	// to wake on the table, not just on the requests map.
-	const woken = wireOf(origin).changed();
+	const woken = race([wireOf(origin).changed()]);
 	dispose();
 	await woken;
 	expect(wireOf(origin).routes(path)).toBe(false);
@@ -1360,4 +1360,38 @@ test("announced filters by arbitrary patterns and reports captures", async () =>
 	announced.close();
 	broadcast.close();
 	origin.close();
+});
+
+test("a serving session closing releases quiet origin change listeners", async () => {
+	const origin = new Producer();
+	const changed = Signal.prototype.changed;
+	let listeners = 0;
+	const spy = spyOn(Signal.prototype, "changed").mockImplementation(function (
+		this: Signal<unknown>,
+		fn?: (value: unknown) => void,
+	) {
+		if (!fn) return new Promise((resolve) => changed.call(this, resolve));
+		listeners++;
+		let live = true;
+		const dispose = changed.call(this, fn);
+		return () => {
+			if (!live) return;
+			live = false;
+			listeners--;
+			dispose();
+		};
+	} as typeof changed);
+	try {
+		for (let i = 0; i < 10; i++) {
+			const closed = new Once<null>();
+			const pending = race([wireOf(origin).changed(), closed]);
+			expect(listeners).toBe(4);
+			closed.set(null);
+			expect(await pending).toBeNull();
+			expect(listeners).toBe(0);
+		}
+	} finally {
+		spy.mockRestore();
+		origin.close();
+	}
 });
