@@ -2,8 +2,8 @@
 
 ## Goal
 
-A nightly job reports the size of every artifact we ship, built the way the
-release builds it, and alerts when any of them grows. Size regressions show
+A nightly job reports the size of what we ship, built the way the release
+builds it, and alerts when any of it grows. Size regressions show
 up within a day instead of in an app store review or a user's bundle
 analyzer.
 
@@ -14,16 +14,26 @@ Decided in planning:
 - Nightly, not per PR. Size moves only on dependency bumps, feature flips, or
   profile changes, so a per-PR comment would say "no change" almost every
   time.
-- No hard budgets in CI. Instead, the job compares against the previous
-  run's numbers and fails when any artifact grows past a threshold (start at
-  5%). The existing `alert.yml` path turns the failure into a Discord alert.
-  Add the workflow to its list if needed.
-- Scope is every artifact: moq-ffi (default and `--no-default-features`,
-  cdylib and staticlib), libmoq, moq-relay, moq-cli, the moq-wasm module
-  (raw, gzip, brotli), and the consumer cost of the JS entries: `@moq/net`,
-  `@moq/watch/element` with and without `/ui`, and `@moq/publish/element`.
-  Measure the JS entries as a consumer sees them: bundled and minified from
-  the built packages, first-load chunks only, gzip and brotli.
+- No hard budgets in CI. The job keeps a rolling history and fails when an
+  artifact grows past a threshold against the previous run (start at 5%) or
+  against a longer window (for example 10% over 30 days). The window catches
+  slow drift, which night-to-night checks miss. The existing `alert.yml` path
+  turns the failure into a Discord alert. Add the workflow to its list if
+  needed.
+- Scope:
+  - moq-ffi, default and `--no-default-features`, as cdylib and staticlib
+  - libmoq, moq-relay, and moq-cli
+  - the moq-wasm module, raw, gzip, and brotli
+  - the consumer cost of the JS entries: `@moq/net`, `@moq/watch/element`
+    with and without `/ui`, and `@moq/publish/element`. Measure them the way
+    a consumer sees them: bundled and minified from the built packages,
+    first-load chunks only, gzip and brotli.
+  - the packaged outputs nightly already builds. `nightly.yml` runs the
+    Python, Kotlin, and Swift release builds, so read their wheel, AAR, and
+    xcframework sizes instead of rebuilding them.
+- Out of scope: Docker images, and per-target release assets nightly doesn't
+  build. The Docker quest measures its images once. Add others only if one of
+  them regresses unnoticed.
 - The job summary also carries `cargo bloat --crates` for the ffi build and a
   metafile breakdown for the publish element, so the cause of a jump is
   visible without a local rebuild. `cargo bloat` needs symbols, so build that
