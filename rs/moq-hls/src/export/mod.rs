@@ -11,7 +11,7 @@
 //! Segment boundaries come from one reference rendition's records (the first video rendition, or
 //! the first audio one when there is no video), numbered by record sequence, so every edge and
 //! every reload agree without the publisher cutting for HLS. Every other rendition resolves each
-//! segment against its own timeline (see [`spans`]).
+//! segment against its own timeline.
 //! An inline-parameter-set codec with no catalog `description` GETs one keyframe
 //! group on the first playlist render to build its init, then caches it.
 //!

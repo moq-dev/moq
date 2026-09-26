@@ -3,8 +3,8 @@
 //! Segments are derived from one reference rendition's timeline: each of its records is a
 //! segment, numbered by the record's sequence. The catalog watcher reads that timeline and fans
 //! each record out to every rendition as a row: the segment's number and timing, plus the
-//! reference record's frames. Each rendition resolves a row against its own timeline (see
-//! [`super::spans`]). Two things read the window:
+//! reference record's frames. Each rendition resolves a row against its own timeline. Two things
+//! read the window:
 //!
 //! * the HTTP serve path, synchronously, to render a media playlist and resolve a segment's
 //!   frames (nothing here touches media bytes on that path); and

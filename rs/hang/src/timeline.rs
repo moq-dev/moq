@@ -17,13 +17,14 @@
 //! track skipped group sequences in between.
 //!
 //! The catalog's root [`Archive`](crate::catalog::Archive) entry maps each track to its
-//! timeline track, conventionally the track name plus [`SUFFIX`].
+//! timeline track, conventionally the track name plus [`SUFFIX`](crate::timeline::SUFFIX).
 //!
 //! On the wire each timeline is a DEFLATE-compressed `moq-json` window (see `moq_json::window`).
 //! Each group starts with a checkpoint and continues with push/pop operations; group rolls are an
 //! encoding detail that consumers do not surface as duplicate records. Like the catalog, a record
-//! tolerates and preserves unknown fields: extend it by flattening a [`Record`] into your own
-//! struct via [`RecordExt`].
+//! tolerates and preserves unknown fields: extend it by flattening a
+//! [`Record`](crate::timeline::Record) into your own struct via
+//! [`RecordExt`](crate::timeline::RecordExt).
 
 use serde::{Deserialize, Serialize};
 
