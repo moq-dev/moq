@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(net)* end a track with its session's error when the session dies ([#4120](https://github.com/moq-dev/moq/pull/4120))
 
+### Other
+
+- release ([#4222](https://github.com/moq-dev/moq/pull/4222))
+
+## [0.19.18](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.17...moq-tokio-v0.19.18) - 2026-09-26
+
+### Added
+
+- end a broadcast with close() in every language ([#4031](https://github.com/moq-dev/moq/pull/4031))
+
+### Fixed
+
+- *(net)* end a track with its session's error when the session dies ([#4120](https://github.com/moq-dev/moq/pull/4120))
+
 ## [0.19.17](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.16...moq-tokio-v0.19.17) - 2026-09-26
 
 ### Other
