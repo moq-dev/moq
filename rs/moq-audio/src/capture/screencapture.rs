@@ -140,7 +140,7 @@ impl SystemAudio {
 		// backend that quietly picked a different layout would hand the encoder
 		// wrong-shaped frames. Fail loudly instead.
 		if pending.channels != channels {
-			return Err(Error::Capture(format!(
+			return Err(Error::Unsupported(format!(
 				"system audio delivered {} channels, not the {channels} requested",
 				pending.channels
 			)));

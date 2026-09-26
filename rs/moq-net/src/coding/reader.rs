@@ -227,8 +227,8 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		Poll::Ready(Ok(()))
 	}
 
-	/// Poll for whether data is available in the buffer or stream.
-	fn poll_has_more(&mut self, cx: &mut Context<'_>) -> Poll<Result<bool, Error>> {
+	/// Poll for whether data is available in the buffer or stream: `false` once it finishes.
+	pub(crate) fn poll_has_more(&mut self, cx: &mut Context<'_>) -> Poll<Result<bool, Error>> {
 		if !self.buffer.is_empty() {
 			return Poll::Ready(Ok(true));
 		}
@@ -460,7 +460,7 @@ mod tests {
 		type Error = crate::lite::test_transport::SinkError;
 
 		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-			// Like an executor poll, retire the previous turn's registrations first.
+			// Start each turn with none of the last turn's registrations left.
 			self.waiter = kio::Waiter::new(self.waiter.waker().clone());
 			while self.payload.poll_read_chunk(&self.waiter).is_ready() {}
 			self.chunks.poll_read(cx, dst)

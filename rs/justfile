@@ -291,6 +291,15 @@ _wants-capture $PACKAGES:
     set -euo pipefail
     grep -qwE '(moq-video|moq-audio)' <<< "$(just rs _names "$PACKAGES")"
 
+# True when the selection includes moq-cli, whose `play` media tasks are off the
+# default feature set. Selection pulls in dependents, so a diff to anything the
+# player is built from (moq-audio, moq-video, moq-mux) lands here too.
+[private]
+_wants-play $PACKAGES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    grep -qw 'moq-cli' <<< "$(just rs _names "$PACKAGES")"
+
 # True when the selection includes moq-relay, whose io_uring listener is off the
 # default feature set. Selection pulls in dependents, so a diff to any crate the
 # relay is built from (moq-uring, moq-sock, moq-tokio) lands here too.
@@ -495,9 +504,20 @@ check-changed $FILES $TEST="false":
 
     # moq-video's and moq-audio's device code is behind `capture`, which is off
     # by default, so the pass above never compiles it. Only nightly's
-    # `--all-features` did, and a break there lands on main.
+    # `--all-features` did, and a break there lands on main. With TEST=true the
+    # lint rides the test build, as in `check-test`.
     if [[ "$packages" == "ALL" ]] || just rs _wants-capture "$packages"; then
-    	just rs capture
+    	if [[ "$TEST" == true ]]; then
+    		CARGO_BUILD_WARNINGS=deny just rs capture-test
+    	else
+    		just rs capture
+    	fi
+    fi
+
+    # moq-cli's media tasks are behind `play`, off by default, so the test pass
+    # above never runs them. Only `check` tests, so the lint-only CI job skips it.
+    if [[ "$TEST" == true ]] && { [[ "$packages" == "ALL" ]] || just rs _wants-play "$packages"; }; then
+    	just rs play
     fi
 
     # moq-relay's io_uring listener is behind `io-uring`, off by default, so the
@@ -627,6 +647,13 @@ macos *args:
 # Compile and lint the capture feature, which the default check skips.
 capture *args:
     cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture {{ args }} -- -D warnings
+
+# The capture publishers' tests (the clock fixtures among them) drive synthetic
+# devices, so they need no hardware and run with every PR that reaches either crate.
+
+# Test the capture feature, which the default test pass skips.
+capture-test *args:
+    just rs test -p moq-video -p moq-audio --features moq-video/capture,moq-audio/capture {{ args }}
 
 # Same idea as `windows`/`macos`, for Android: moq-video's MediaCodec encoder and
 # decoder, its `Surface::HardwareBuffer` variant, and the `frame::android` module
@@ -886,6 +913,23 @@ test-changed $FILES:
     	*)     echo "rs: testing $(just rs _names "$packages")"; just rs test --no-tests=pass $packages ;;
     esac
 
+    # Mirrors `check-changed`: the capture tests are off the default feature set.
+    if [[ "$packages" == "ALL" ]] || just rs _wants-capture "$packages"; then
+    	just rs capture-test
+    fi
+
+    if [[ "$packages" == "ALL" ]] || just rs _wants-play "$packages"; then
+    	just rs play
+    fi
+
+# The media tasks run against a recorder rather than a device (see
+# `rs/moq-cli/src/play/fake.rs`), so this needs no speaker or display, only the
+# device crates' build dependencies, which the dev shell carries.
+
+# Test moq-cli's `play` feature, which default features leave out.
+play *args:
+    just rs test -p moq-cli --features play {{ args }}
+
 # Compile and run the `/// ```` examples, which nextest skips.
 doctest *args:
     cargo test --locked --doc {{ args }}
@@ -925,7 +969,7 @@ loom *args:
 # run, and libFuzzer writes what it discovers to the FIRST corpus directory, which is
 # why the generated seeds are passed second and stay read-only.
 #
-# TARGET is lite, ietf, varint, or path. Arguments pass through, so
+# TARGET is lite, announce, ietf, varint, path, or pattern. Arguments pass through, so
 # `just rs fuzz lite -- -max_total_time=300` bounds a run. See rs/moq-net/fuzz/README.md.
 fuzz target *args:
     #!/usr/bin/env bash

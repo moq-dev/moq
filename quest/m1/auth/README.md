@@ -101,6 +101,9 @@ existing lite-06 ALPN.
   revalidation stops closing the session
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
+- [Request tokens](/quest/m1/auth/request-token.md) - an `AUTHORIZATION
+  TOKEN` on a moq-transport request authorizes that request when the session
+  grant does not, and REQUEST_UPDATE refreshes it
 - [moq-transport](/quest/m1/auth/moq-transport.md) - the same exchange as a
   setup-option extension on draft-17+, specified in a new draft
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every

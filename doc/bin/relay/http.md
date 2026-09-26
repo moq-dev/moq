@@ -13,7 +13,7 @@ operational ones that must stay private.
 | Endpoint | Returns |
 | --- | --- |
 | `GET /announced/<prefix>` | Broadcasts announced under the prefix. |
-| `GET /fetch/<broadcast>/<track>?group=N` | One group from the cache, the latest by default. Useful for catch-up and debugging. |
+| `GET /fetch/<broadcast>/<track>?group=N` | One group from the cache, the latest by default, or `404` if the track has no such group. Useful for catch-up and debugging. |
 | `GET /certificate.sha256` | The fingerprint of the first configured TLS certificate, for pinning a self-signed dev certificate. |
 | `GET /health` | `200 ok`, unauthenticated, for load balancers. |
 

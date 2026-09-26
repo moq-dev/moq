@@ -484,59 +484,51 @@ mod tests {
 	}
 
 	async fn lite_pair_pub(config: impl Into<moq_net::origin::Config>) -> LitePair {
-		use std::net::TcpListener;
-
 		let lite: moq_net::Version = "moq-lite-05".parse().expect("lite version");
 		let pub_origin = moq_tokio::origin::spawn_config(config.into());
 		let sub_origin = moq_tokio::origin::spawn();
 
-		for _ in 0..20 {
-			let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-			let port = probe.local_addr().expect("local addr").port();
-			drop(probe);
+		let mut listen = moq_tokio::listen::Config::default();
+		listen.tcp.bind = Some("127.0.0.1:0".parse().expect("addr"));
+		listen.version = vec![lite];
+		let mut server = listen
+			.init(Default::default())
+			.expect("server")
+			.listen()
+			.await
+			.expect("listen");
+		let addr = server.tcp_local_addr().expect("tcp listener bound");
 
-			let mut listen = moq_tokio::listen::Config::default();
-			listen.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("addr"));
-			listen.version = vec![lite];
-			let Ok(server) = listen.init(Default::default()) else {
-				continue;
-			};
-			let Ok(mut server) = server.listen().await else {
-				continue;
-			};
-
-			let pub_for_accept = pub_origin.clone();
-			let accept = tokio::spawn(async move {
-				let request = server.accept().await.expect("accept");
-				let session = request
-					.with_publisher(&pub_for_accept)
-					.ok()
-					.await
-					.expect("publisher session");
-				let _ = session.closed().await;
-			});
-
-			let mut connect = moq_tokio::connect::Config::default();
-			connect.version = vec![lite];
-			let client = connect
-				.init(Default::default())
-				.expect("client")
-				.with_subscriber(sub_origin.clone())
-				.with_reconnect(false);
-			let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().expect("url");
-			let connection = tokio::time::timeout(TIMEOUT, client.connect(url).established())
+		let pub_for_accept = pub_origin.clone();
+		let accept = tokio::spawn(async move {
+			let request = server.accept().await.expect("accept");
+			let session = request
+				.with_publisher(&pub_for_accept)
+				.ok()
 				.await
-				.expect("connect timed out")
-				.expect("connect");
+				.expect("publisher session");
+			let _ = session.closed().await;
+		});
 
-			return LitePair {
-				pub_origin,
-				sub_origin,
-				_connection: connection,
-				accept,
-			};
+		let mut connect = moq_tokio::connect::Config::default();
+		connect.version = vec![lite];
+		let client = connect
+			.init(Default::default())
+			.expect("client")
+			.with_subscriber(sub_origin.clone())
+			.with_reconnect(false);
+		let url: url::Url = format!("tcp://{addr}/").parse().expect("url");
+		let connection = tokio::time::timeout(TIMEOUT, client.connect(url).established())
+			.await
+			.expect("connect timed out")
+			.expect("connect");
+
+		LitePair {
+			pub_origin,
+			sub_origin,
+			_connection: connection,
+			accept,
 		}
-		panic!("could not bind a free TCP port after 20 attempts");
 	}
 
 	async fn oneshot(app: axum::Router, uri: &str) -> axum::http::Response<axum::body::Body> {
