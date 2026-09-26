@@ -27,6 +27,8 @@ pub(super) struct Libopus {
 	layout: Layout,
 	/// For each canonical channel, the Vorbis-order channel it comes from, when they differ.
 	reorder: Option<&'static [usize]>,
+	/// Opus streams in one packet. Family 0 is one; the rest come from the mapping.
+	streams: u8,
 	pre_skip: usize,
 	max_frame_size: usize,
 	in_dtx: bool,
@@ -36,17 +38,19 @@ pub(super) struct Libopus {
 unsafe impl Send for Libopus {}
 
 impl Libopus {
-	/// Parses the OpusHead `description` if present; falls back to the catalog's
-	/// declared sample rate / channel count, which must then be mono or stereo.
+	/// Parses the OpusHead `description` when one is present. A missing description
+	/// falls back to the catalog's sample rate and channel count, which must then
+	/// be mono or stereo. A description that does not parse is refused: guessing
+	/// family 0 would decode those packets with the wrong stream layout.
 	///
 	/// Channel mapping family 1 decodes up to 7.1 in the canonical [`Layout`]
 	/// order; every other family is refused, since none declares speakers.
 	pub(super) fn open(catalog: &hang::catalog::AudioConfig) -> Result<Box<dyn Backend>, Error> {
-		let head = catalog
-			.description
-			.as_ref()
-			.and_then(|desc| moq_mux::codec::opus::Config::parse(&mut desc.as_ref()).ok())
-			.unwrap_or_else(|| moq_mux::codec::opus::Config::new(catalog.sample_rate, catalog.channel_count));
+		let head = match catalog.description.as_ref() {
+			Some(desc) => moq_mux::codec::opus::Config::parse(&mut desc.as_ref())
+				.map_err(|err| Error::Unsupported(format!("opus description: {err}")))?,
+			None => moq_mux::codec::opus::Config::new(catalog.sample_rate, catalog.channel_count),
+		};
 		let (sample_rate, channel_count, pre_skip) = (head.sample_rate, head.channel_count, head.pre_skip);
 
 		opus::validate_rate(sample_rate)?;
@@ -94,6 +98,7 @@ impl Libopus {
 			sample_rate,
 			layout,
 			reorder,
+			streams: streams as u8,
 			// OpusHead counts pre-skip at 48 kHz whatever rate the decoder runs at.
 			pre_skip: (pre_skip as usize * sample_rate as usize) / 48_000,
 			max_frame_size: (sample_rate as usize * MAX_FRAME_MS) / 1000,
@@ -165,7 +170,7 @@ impl Backend for Libopus {
 			}
 		}
 
-		let activity = opus::activity(packet, self.in_dtx);
+		let activity = opus::multistream_activity(packet, self.streams, self.in_dtx);
 		self.in_dtx = activity.is_dtx();
 		Ok(Decoded { samples: out, activity })
 	}
@@ -351,6 +356,43 @@ mod tests {
 				assert_eq!(loudest, tone(speaker), "{channels} channels, {speaker:?} at {index}");
 			}
 		}
+	}
+
+	/// An all-DTX surround packet is one empty Opus packet per stream. Read as a
+	/// single stream, the later subpackets look like payload and the span is lost.
+	#[test]
+	fn surround_silence_is_dtx() {
+		let (head, packets) = surround(6);
+		let mut decoder = Decoder::new(&catalog(head.clone(), 6), &Config::default()).unwrap();
+		let mid = decoder.decode(&packets[PACKETS / 2]).unwrap();
+		assert!(mid.activity.is_active(), "a coded surround frame must stay active");
+
+		// Two coupled streams, then two mono, each a 20 ms empty frame.
+		let dtx = [0xfc, 0x00, 0xfc, 0x00, 0xf8, 0x00, 0xf8];
+		let mut decoder = Decoder::new(&catalog(head, 6), &Config::default()).unwrap();
+		let decoded = decoder.decode(&dtx).expect("empty multistream packet");
+		assert!(decoded.activity.is_dtx(), "all-DTX surround packet read as active");
+		assert_eq!(decoded.samples.len() % 6, 0);
+	}
+
+	/// A description that is present but truncated used to be dropped, and a
+	/// stereo catalog then opened a family 0 decoder for a family 1 or 255 head.
+	#[test]
+	fn malformed_description_is_refused() {
+		for family in [1u8, 255] {
+			let mut head = moq_mux::codec::opus::Config::new(48_000, 2).encode().unwrap().to_vec();
+			head[18] = family;
+			let err = Decoder::new(&catalog(head.into(), 2), &Config::default())
+				.err()
+				.expect("refused");
+			assert!(
+				matches!(&err, Error::Unsupported(message) if message.contains("opus description")),
+				"family {family}: {err}"
+			);
+		}
+
+		let plain = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		assert!(Decoder::new(&plain, &Config::default()).is_ok());
 	}
 
 	/// Families other than 0 and 1 carry no speaker positions, so there is
