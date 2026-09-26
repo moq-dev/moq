@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <thread>
 #define MOQ_COROUTINES 1
 #endif
 
@@ -52,6 +53,8 @@ using AudioCodec = MoqAudioCodec;
 using AudioConsumer = MoqAudioConsumer;
 using AudioProducer = MoqAudioProducer;
 using Bandwidth = MoqBandwidth;
+using BinarySnapshotProducer = MoqBinarySnapshotProducer;
+using BinaryStreamProducer = MoqBinaryStreamProducer;
 using BroadcastConsumer = MoqBroadcastConsumer;
 using BroadcastDynamic = MoqBroadcastDynamic;
 using BroadcastProducer = MoqBroadcastProducer;
@@ -93,6 +96,7 @@ using AudioEncoderOutput = MoqAudioEncoderOutput;
 using AudioFrame = MoqAudioFrame;
 using AudioInit = MoqAudioInit;
 using Backoff = MoqBackoff;
+using BinaryConfig = MoqBinaryConfig;
 using Catalog = MoqCatalog;
 using ConnectionStats = MoqConnectionStats;
 using ContainerInit = MoqContainerInit;
@@ -178,8 +182,9 @@ inline expected<void> log_level(const std::string &level) {
 #ifdef MOQ_COROUTINES
 namespace detail {
 
-// Resumes a coroutine with a future's result. The state is shared with the continuation, so
-// whichever of completion and suspension comes second does the resuming.
+// Resumes a coroutine with a future's result. Completion and cancellation share
+// `state_`. The continuation resumes a claimed handle before it drops the mutex,
+// so the destructor cannot free the frame between the claim and the resume.
 template <typename T>
 class Awaiter {
 public:
@@ -195,7 +200,13 @@ public:
     ~Awaiter() {
         std::optional<Continuation> continuation;
         {
-            std::lock_guard<std::mutex> guard(state_->mutex);
+            // Recursive: resume() calls this on the completing thread while that
+            // thread still holds the mutex inside the continuation.
+            std::lock_guard<std::recursive_mutex> guard(state_->mutex);
+            if (state_->resuming && state_->resume_on == std::this_thread::get_id()) {
+                return;
+            }
+            state_->destroying = true;
             state_->handle = nullptr;
             continuation = std::move(state_->continuation);
         }
@@ -207,18 +218,24 @@ public:
 
     bool await_suspend(std::coroutine_handle<> handle) noexcept {
         auto continuation = std::move(future_).then(inline_executor, [state = state_](Output output) {
-            std::coroutine_handle<> resume;
-            {
-                std::lock_guard<std::mutex> guard(state->mutex);
-                state->output.emplace(std::move(output));
-                resume = std::exchange(state->handle, nullptr);
+            std::lock_guard<std::recursive_mutex> guard(state->mutex);
+            state->output.emplace(std::move(output));
+            if (state->destroying || !state->handle) {
+                return;
             }
-            if (resume) {
-                resume.resume();
-            }
+            auto resume = std::exchange(state->handle, nullptr);
+            state->resuming = true;
+            state->resume_on = std::this_thread::get_id();
+            struct Clear {
+                State &state;
+                ~Clear() {
+                    state.resuming = false;
+                }
+            } clear{*state};
+            resume.resume();
         });
 
-        std::lock_guard<std::mutex> guard(state_->mutex);
+        std::lock_guard<std::recursive_mutex> guard(state_->mutex);
         state_->continuation.emplace(std::move(continuation));
         if (state_->output) {
             // Completed before suspending: carry on without a round trip.
@@ -229,16 +246,19 @@ public:
     }
 
     Output await_resume() noexcept {
-        std::lock_guard<std::mutex> guard(state_->mutex);
+        std::lock_guard<std::recursive_mutex> guard(state_->mutex);
         return std::move(*state_->output);
     }
 
 private:
     struct State {
-        std::mutex mutex;
+        std::recursive_mutex mutex;
         std::coroutine_handle<> handle;
         std::optional<Output> output;
         std::optional<Continuation> continuation;
+        bool destroying = false;
+        bool resuming = false;
+        std::thread::id resume_on{};
     };
 
     Future<T> future_;
