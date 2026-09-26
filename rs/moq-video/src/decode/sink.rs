@@ -262,7 +262,7 @@ mod tests {
 	/// Regression: the Windows decoder opens a COM apartment on the thread that
 	/// builds it and closes it on the thread that drops it. Every owner holds the
 	/// codec across `.await` in a spawned task (`decode::Consumer`'s read loop,
-	/// which libmoq drives; moq-transcode's feed and fetch pipeline), so the
+	/// which moq-c drives; moq-transcode's feed and fetch pipeline), so the
 	/// future migrates between executor workers and the apartment is opened on
 	/// one and closed on another.
 	#[test]

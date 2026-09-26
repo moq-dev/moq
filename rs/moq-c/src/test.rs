@@ -3630,7 +3630,7 @@ fn publish_gray(producer: u32, rgba: &[u8]) -> i32 {
 }
 
 /// Regression: an encode is a round trip to the codec thread, and a wedged codec
-/// never comes back from it. It used to run under both of libmoq's process-wide
+/// never comes back from it. It used to run under both of moq-c's process-wide
 /// locks, the `State` mutex and one wrapping the runtime handle, so a single
 /// stalled producer parked every unrelated call in the process behind it: another
 /// broadcast's publish, a consumer's frame free, a session close.
@@ -4907,7 +4907,7 @@ fn read_raw_frames(consume: u32, name: &[u8], count: usize) -> Vec<Vec<u8>> {
 		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 	}
 	assert_eq!(moq_consume_track_cancel(track), 0);
-	// The callback context must outlive libmoq's last call into it: wait for the terminal.
+	// The callback context must outlive moq-c's last call into it: wait for the terminal.
 	assert_eq!(frame_cb.recv_terminal(), 0, "clean cancel delivers terminal 0");
 	payloads
 }

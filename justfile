@@ -456,7 +456,7 @@ _tools $FILES="":
     # cargo to regenerate moq.h and pkg-config to locate Qt6 and ffmpeg. Every
     # platform: the plugin type-checks against headers, and the dev shell ships
     # those even on Darwin, where obs-studio can't build.
-    scoped '^(cpp/obs/|rs/libmoq/|flake\.nix$)' && tools+=(pkg-config cargo)
+    scoped '^(cpp/obs/|rs/moq-c/|flake\.nix$)' && tools+=(pkg-config cargo)
     # `just obs check` lints with clang-format and gersemi, validates the CMake
     # release configuration, and compares the three OBS pins, one of which moves
     # on a flake.lock bump alone.
@@ -575,13 +575,13 @@ _check $BASE $TEST:
         just go check "$files"
         just dart check "$files"
     	# Type-checking the plugin and its unit tests needs only headers, so it
-    	# runs here rather than waiting for obs.yml to link them on Linux. libmoq
+    	# runs here rather than waiting for obs.yml to link them on Linux. moq-c
     	# is in scope because the plugin calls through its generated C header, and
     	# the tests restate those entry points as stubs, so an ABI change breaks
     	# both. flake.nix because it owns the libobs headers this compiles
     	# against -- obs.yml links against nixpkgs' obs-studio instead, so nothing
     	# else would notice that package going bad.
-    	if echo "$files" | grep -qE '^(cpp/obs/|rs/libmoq/|flake\.nix$)'; then
+    	if echo "$files" | grep -qE '^(cpp/obs/|rs/moq-c/|flake\.nix$)'; then
     		just obs compile
     	fi
     	# flake.nix is in scope because `just obs check` is what compares the OBS

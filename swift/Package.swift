@@ -22,8 +22,8 @@ let package = Package(
             linkerSettings: [
                 // A Rust staticlib does not carry the link options its dependencies
                 // declare, so an external linker has to name them. Mirrors
-                // rs/libmoq/native-libs/apple.txt, which solves the same problem for
-                // C consumers of libmoq. These cover moq-video / moq-audio: hardware
+                // rs/moq-c/native-libs/apple.txt, which solves the same problem for
+                // C consumers of moq-c. These cover moq-video / moq-audio: hardware
                 // H.264/H.265 encode and decode, plus capture. All macOS-only, since
                 // those backends are `cfg(target_os = "macos")`.
                 .linkedFramework("AVFoundation", .when(platforms: [.macOS])),

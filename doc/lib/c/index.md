@@ -1,40 +1,44 @@
 ---
 title: C
-description: libmoq, the stable C ABI over the Rust core
+description: moq-c, the stable C ABI over the Rust core
 ---
 
 # C
 
-[![GitHub release](https://img.shields.io/github/v/release/moq-dev/moq?filter=libmoq-v*\&label=libmoq)](https://github.com/moq-dev/moq/releases?q=libmoq)
+[![GitHub release](https://img.shields.io/github/v/release/moq-dev/moq?filter=moq-c-v*\&label=moq-c)](https://github.com/moq-dev/moq/releases?q=moq-c)
 
-`libmoq` exposes MoQ to C, C++, and any language with a C FFI through a
+`moq-c` exposes MoQ to C, C++, and any language with a C FFI through a
 stable ABI: a generated `moq.h`, a static `libmoq.a` that links the whole Rust
 runtime in, and a pkg-config file for its native link dependencies. The
-[OBS plugin](/bin/obs) is built on it.
+[OBS plugin](/bin/obs) is built on it. It was published as `libmoq` through
+0.6; the header and library file names did not change.
 
 ## Install
 
-Each [`libmoq-v*` release](https://github.com/moq-dev/moq/releases?q=libmoq)
-ships `moq-<version>-<target>.tar.gz` with `include/moq.h`, `lib/libmoq.a`, and
+Each [`moq-c-v*` release](https://github.com/moq-dev/moq/releases?q=moq-c)
+ships `moq-c-<version>-<target>.tar.gz` with `include/moq.h`, `lib/libmoq.a`, and
 a pkg-config file listing the system libraries the archive needs. They are a
 matched pair: compile against the header that came with the archive you link.
 Targets: Linux x86\_64 and aarch64, macOS arm64, Windows x64.
 
 ```bash
-export PKG_CONFIG_PATH="moq-$ver-$target/lib/pkgconfig"
-cc app.c $(pkg-config --cflags --libs --static moq) -o app
+export PKG_CONFIG_PATH="moq-c-$ver-$target/lib/pkgconfig"
+cc app.c $(pkg-config --cflags --libs --static moq-c) -o app
 ```
 
-From source, `add_subdirectory(rs/libmoq)` in CMake gives a `moq` target to
-link. A bare `cargo build --release -p libmoq` writes `target/release/libmoq.a`,
-and `moq.h` plus `moq.pc` land in the build script's `OUT_DIR` under `include/`
+With CMake, point `CMAKE_PREFIX_PATH` at the extracted archive, then
+`find_package(moq-c)` and link `moq-c::moq`.
+
+From source, `add_subdirectory(rs/moq-c)` in CMake gives a `moq` target to
+link. A bare `cargo build --release -p moq-c` writes `target/release/libmoq.a`,
+and `moq.h` plus `moq-c.pc` land in the build script's `OUT_DIR` under `include/`
 and `lib/pkgconfig/`, a hashed path that `--message-format=json` reports as
-`out_dir`. That `moq.pc` expects the install layout, with `libmoq.a` in `lib/`
+`out_dir`. That `moq-c.pc` expects the install layout, with `libmoq.a` in `lib/`
 beside `pkgconfig/`.
 
 ## Shape of the API
 
-- **Handles and callbacks.** Every object is an integer handle; every async result arrives on a required `moq_status_callback` with a `void *user_data`. A status `> 0` is a live result, `0` a clean close, `< 0` an error, and the last two are terminal: libmoq never touches `user_data` again, so free it there. `*_cancel` only requests shutdown; the terminal callback still fires.
+- **Handles and callbacks.** Every object is an integer handle; every async result arrives on a required `moq_status_callback` with a `void *user_data`. A status `> 0` is a live result, `0` a clean close, `< 0` an error, and the last two are terminal: moq-c never touches `user_data` again, so free it there. `*_cancel` only requests shutdown; the terminal callback still fires.
 - **Errors.** Negative return codes named by `MOQ_ERROR_*` in `moq.h`, with `moq_error()` giving the reason for the last failure on the calling thread. Auth rejections (401, 403) have their own codes so you don't retry them. A protocol failure also fills `moq_error_protocol()` with the session or stream scope, the verbatim wire code, and a known kind; do not parse `moq_error()` for that.
 - **Threading.** Any function from any thread. Raw publish calls block until the codec takes the frame, which paces a publisher.
 - **Connection health.** `moq_session_stats()` reports available metrics with per-field validity flags. `moq_session_snapshot()` samples those metrics and the negotiated draft name together from the same connection. Its protocol string is backed by static storage. Both return an offline error between reconnects and leave the destination untouched. `moq_session_bandwidth()` mints an allocator over the send estimate; `moq_bandwidth_reserve` claims a share for an app-owned track, and `moq_encode_video` / `moq_encode_audio` take the same handle so the built-in video encoder follows the grant.
@@ -62,7 +66,7 @@ if (session < 0)
     return fail(moq_error());
 ```
 
-For a locally encoded media track, call `moq_publish_media_flush(media, timestamp_us)` after `moq_publish_media_frame` with the same broadcast-clock PTS. The monotonic handoff time is sampled inside libmoq. Do not call it for file, pipe, or network imports; those remain clock-free. Invalid handles and unrepresentable timestamps return a negative error code.
+For a locally encoded media track, call `moq_publish_media_flush(media, timestamp_us)` after `moq_publish_media_frame` with the same broadcast-clock PTS. The monotonic handoff time is sampled inside moq-c. Do not call it for file, pipe, or network imports; those remain clock-free. Invalid handles and unrepresentable timestamps return a negative error code.
 
 Call `moq_publish_media_discontinuity(media)` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds.
 
@@ -86,7 +90,7 @@ reports few or none.
 | `packets_lost` | datagrams | Total datagrams detected as lost. |
 
 The header is the reference; each function carries a doc comment. Source and
-a worked example: [`rs/libmoq`](https://github.com/moq-dev/moq/tree/main/rs/libmoq),
-API docs on [docs.rs/libmoq](https://docs.rs/libmoq).
+a worked example: [`rs/moq-c`](https://github.com/moq-dev/moq/tree/main/rs/moq-c),
+API docs on [docs.rs/moq-c](https://docs.rs/moq-c).
 
 Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).

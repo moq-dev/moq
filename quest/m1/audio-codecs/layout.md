@@ -4,7 +4,7 @@
 
 `moq-audio` carries up to 7.1 end to end. A decoded frame says which layout
 it is in, the playback mixer downmixes it to whatever the device opened, a raw
-PCM consumer can ask for a layout, and the FFI and libmoq expose the same.
+PCM consumer can ask for a layout, and the FFI and moq-c expose the same.
 Proven with multichannel PCM, the one codec that needs no new decoder.
 
 ## Plan
@@ -29,7 +29,7 @@ positions from an arbitrary channel count.
   device chooser prefers the widest well-known layout the device offers (a
   5.1 HDMI sink opens at six channels, a headset at two), and each `Sink`
   remixes into the bus. Today's "silence past the front pair" fan-out goes.
-- moq-ffi and libmoq keep `channels` as a count, and the count means the
+- moq-ffi and moq-c keep `channels` as a count, and the count means the
   default layout for that count (the WAVE convention: 3 is 2.1, 4 is quad, 6
   is 5.1, 8 is 7.1), delivered or accepted in the canonical order. No record,
   `repr(C)` struct, or binding changes, so this stays on `main`; only the

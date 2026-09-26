@@ -259,7 +259,7 @@ impl Session {
 				connects += 1;
 				// Positive status carries the connection epoch, so callers can tell a
 				// reconnect (>1) from the first connect (1). No lock is held, so the C
-				// callback is free to re-enter libmoq.
+				// callback is free to re-enter moq-c.
 				let code = i32::try_from(connects)
 					.context("connection epoch exceeded i32::MAX")
 					.map_err(|err| Error::Connect(Arc::new(err)))?;

@@ -1692,7 +1692,7 @@ async fn resolve_rejects_a_reference_without_an_origin() {
 	consumer.resolve(Some(String::new())).await.unwrap();
 	consumer.resolve(Some("/".into())).await.unwrap();
 
-	// Reported in normalized form, matching `EscapingBroadcast` and libmoq: it names what the
+	// Reported in normalized form, matching `EscapingBroadcast` and moq-c: it names what the
 	// resolver actually tried to reach, not the caller's spelling of it.
 	match consumer.resolve(Some("./source".into())).await {
 		Err(MoqError::UnresolvableBroadcast(reference)) => assert_eq!(reference, "source"),

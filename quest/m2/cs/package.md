@@ -16,7 +16,7 @@ interop --all` and `doc/lib/cs` documents the package.
   over the consumer `next()` loops, `IAsyncDisposable` on handles. Nothing
   re-implements a method.
 - Package: one NuGet with managed code plus native `libmoq_ffi` per RID
-  (win-x64, osx-arm64, linux-x64, linux-arm64, matching `libmoq.yml`), built by
+  (win-x64, osx-arm64, linux-x64, linux-arm64, matching `moq-c.yml`), built by
   `release-cs.yml` on the nightly dry-run chain and published on a `cs-v*`
   tag.
 - Interop: `test/interop/clients/cs` publishes and subscribes like the Go client.
