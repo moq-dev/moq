@@ -347,6 +347,17 @@ mod tests {
 		}
 	}
 
+	/// Run `f` with the paused clock held still, so loopback I/O completes before any
+	/// lease timer can fire: Tokio never auto-advances while a blocking task runs.
+	async fn frozen<T>(f: impl Future<Output = T>) -> T {
+		let (release, hold) = std::sync::mpsc::channel::<()>();
+		let blocking = tokio::task::spawn_blocking(move || hold.recv().unwrap_err());
+		let output = f.await;
+		drop(release);
+		blocking.await.unwrap();
+		output
+	}
+
 	fn client(server: &MockServer) -> Client {
 		Client::new(server.uri().parse().unwrap(), None).unwrap()
 	}
@@ -526,17 +537,29 @@ mod tests {
 		.await;
 		let consumer = client.connect(request()).await.unwrap();
 
-		tokio::time::sleep(Duration::from_millis(1500)).await;
-		assert!(log.revalidates() >= 1, "re-checks happened");
+		frozen(async {
+			// Re-check one second short of expiry.
+			tokio::time::advance(Duration::from_secs(2)).await;
+			consumer.revalidate();
+			log.until(|log| log.iter().any(|r| r.event == Event::Revalidate)).await;
+			// A nudge now posts again only once that 503 lands, so a second re-check
+			// proves the outage left the lease alone.
+			consumer.revalidate();
+			tokio::select! {
+				() = log.until(|log| log.iter().filter(|r| r.event == Event::Revalidate).count() >= 2) => {}
+				reason = consumer.closed() => panic!("the outage ended the lease: {reason:?}"),
+			}
+		})
+		.await;
 		assert_eq!(
 			consumer.grant().publish,
 			patterns(&["**"]),
 			"the grant stands through the outage"
 		);
 
-		let reason = tokio::time::timeout(Duration::from_secs(5), consumer.closed())
+		let reason = tokio::time::timeout(Duration::from_secs(2), consumer.closed())
 			.await
-			.expect("expired");
+			.expect("the failed re-check left the deadline where it was");
 		assert_eq!(reason, Reason::Expired);
 		assert!(matches!(
 			log.end().await.event,
