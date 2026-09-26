@@ -91,6 +91,12 @@ interface SubscribeEntry {
 	// (SUBSCRIBE_END), once it declares them.
 	start?: number;
 	end?: number;
+	// The broadcast the subscription belongs to, which records the origin SUBSCRIBE_START
+	// names so a session republishing it names the same one.
+	broadcast: broadcast.Consumer;
+	// Whether SUBSCRIBE_START arrived. On draft-07, which names the serving origin there,
+	// group streams wait for it: until then nobody knows whose content they carry.
+	started: Signal<boolean>;
 }
 
 /**
@@ -507,14 +513,14 @@ export class Subscriber {
 			for (;;) {
 				const request = await wireOf(consumer).requested();
 				if (!request) break;
-				void this.#runSubscribe(path, request);
+				void this.#runSubscribe(consumer, path, request);
 			}
 		})();
 
 		return consumer;
 	}
 
-	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
+	async #runSubscribe(consumer: broadcast.Consumer, broadcast: Path.Valid, request: track.Request) {
 		const id = this.#subscribeNext++;
 		const subscription = request.subscription;
 		const initialBounds = groupBounds(subscription.groups);
@@ -543,7 +549,7 @@ export class Subscriber {
 		// Open the stream under a timeout. The stream handle flows back via `state`
 		// so the timeout path can abort it if it finishes opening after the deadline.
 		const state: { stream?: Stream } = {};
-		const setup = this.#openSubscribe(state, msg, request, id, timescale);
+		const setup = this.#openSubscribe(state, msg, request, id, timescale, consumer);
 
 		let opened: { stream: Stream; entry: SubscribeEntry };
 		try {
@@ -635,6 +641,7 @@ export class Subscriber {
 		request: track.Request,
 		id: bigint,
 		timescale: Signal<number | undefined>,
+		consumer: broadcast.Consumer,
 	): Promise<{ stream: Stream; entry: SubscribeEntry }> {
 		let producer: track.Producer;
 		let drainOk = false;
@@ -652,7 +659,13 @@ export class Subscriber {
 		}
 
 		// Register before opening SUBSCRIBE so a racing GROUP stream finds the entry.
-		const entry: SubscribeEntry = { track: producer, timescale, tail: new Tail() };
+		const entry: SubscribeEntry = {
+			track: producer,
+			timescale,
+			tail: new Tail(),
+			broadcast: consumer,
+			started: new Signal(!hasOrigin(this.version)),
+		};
 		this.#subscribes.set(id, entry);
 
 		state.stream = await Stream.open(this.#quic);
@@ -710,6 +723,7 @@ export class Subscriber {
 	// Open a FETCH stream for one group and stream its bare frames into a group, for the
 	// ConsumeBroadcast backing track.Consumer.fetchGroup() (lite-05+).
 	fetchGroup(
+		front: broadcast.Consumer,
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
@@ -729,12 +743,13 @@ export class Subscriber {
 			if (this.#fetches.get(key) === group) this.#fetches.delete(key);
 		});
 
-		return this.#runFetch(broadcast, track, sequence, options, group);
+		return this.#runFetch(front, broadcast, track, sequence, options, group);
 	}
 
 	// Open the FETCH stream and pump the response into the shared group. Setup errors close the
 	// group (so coalesced mirrors observe them and the entry evicts) and reject this caller.
 	async #runFetch(
+		front: broadcast.Consumer,
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
@@ -756,6 +771,12 @@ export class Subscriber {
 					stream.writer,
 					this.version,
 				);
+				// Draft-07 answers with FETCH_OK naming the serving origin before any frame;
+				// record it so a session republishing the broadcast names the same one.
+				if (hasOrigin(this.version)) {
+					const ok = await FetchOk.decode(stream.reader, this.version);
+					wireOf(front).name(ok.origin);
+				}
 			} catch (err: unknown) {
 				stream.abort(error(err));
 				throw err;
@@ -776,8 +797,6 @@ export class Subscriber {
 	// FIN. A stream-level failure aborts the group so its reader observes the gap.
 	async #runFetchResponse(stream: Stream, group: netGroup.Producer, timescale: Time.Timescale): Promise<void> {
 		try {
-			// Draft-07 names the serving origin first; only relays stitch on it.
-			if (hasOrigin(this.version)) await FetchOk.decode(stream.reader, this.version);
 			let prevTs = 0n;
 
 			// Serve until the stream FINs, the group closes, or every reader leaves. A group can
@@ -832,6 +851,10 @@ export class Subscriber {
 
 			if ("start" in resp) {
 				entry.start = resp.start.group;
+				if (hasOrigin(this.version)) {
+					wireOf(entry.broadcast).name(resp.start.origin);
+					entry.started.set(true);
+				}
 			} else if ("end" in resp) {
 				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
 				entry.end = resp.end.group;
@@ -961,11 +984,22 @@ export class Subscriber {
 			return;
 		}
 
-		const { track, timescale, tail } = entry;
+		const { track, timescale, tail, started } = entry;
 		const producer = new netGroup.Producer(group.sequence);
 		const read = tail.open(group.sequence);
 
 		try {
+			// Hold the group until SUBSCRIBE_START names whose content it is: the group's
+			// stream can arrive before the subscribe stream's.
+			while (!started.peek()) {
+				if (track.closed.peek() !== undefined) {
+					producer.close();
+					stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+					return;
+				}
+				await Signal.race(started, track.closed);
+			}
+
 			track.writeGroup(producer);
 
 			// Block until the timescale is known; the group's stream can arrive before
@@ -1173,7 +1207,7 @@ class ConsumeBroadcast extends broadcast.Consumer {
 		super(state);
 		overrideBroadcastWire(this, {
 			resolveTrackInfo: (name) => subscriber.resolveTrackInfo(path, name),
-			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options),
+			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(this, path, name, sequence, options),
 		});
 		this.#subscriber = subscriber;
 		this.#path = path;

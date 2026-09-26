@@ -645,6 +645,7 @@ export class Publisher {
 				},
 			});
 			await this.#runTrack(track, stream.writer, controls, {
+				front,
 				sub: msg.id,
 				broadcast: msg.broadcast,
 				timescale,
@@ -706,7 +707,9 @@ export class Publisher {
 			// come off the same front, so the metadata and the frames are one generation.
 			const info = await this.#resolveTrackInfo(front, msg.track);
 			group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
-			if (hasOrigin(this.version)) await new FetchOk(this.hop).encode(stream.writer, this.version);
+			if (hasOrigin(this.version)) {
+				await new FetchOk(wireOf(front).origin()).encode(stream.writer, this.version);
+			}
 			await this.#runFetchGroup(group, stream.writer, {
 				timescale: Timescale(info.timescale),
 				start: msg.startFrame,
@@ -738,9 +741,15 @@ export class Publisher {
 		track: track.Subscriber,
 		stream: Writer,
 		controls: SubscriptionControls,
-		serving: { sub: bigint; broadcast: Path.Valid; timescale: Timescale; bounds: FrameBounds },
+		serving: {
+			sub: bigint;
+			broadcast: Path.Valid;
+			timescale: Timescale;
+			bounds: FrameBounds;
+			front: broadcast.Consumer;
+		},
 	) {
-		const { sub, broadcast, timescale, bounds } = serving;
+		const { sub, broadcast, timescale, bounds, front } = serving;
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = supportsTrackStream(this.version);
@@ -881,8 +890,9 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								// This session names itself: it serves what its application publishes.
-								{ start: new SubscribeStart(group.sequence, this.hop) },
+								// Read once a group flowed: an upstream's SUBSCRIBE_START named the
+								// origin before any of its groups did.
+								{ start: new SubscribeStart(group.sequence, wireOf(front).origin()) },
 								this.version,
 							),
 						))

@@ -1157,7 +1157,8 @@ The frame offset belonged to group 5 and is gone along with the rest of it; it d
 
 **Origin**:
 The Hop ID of the origin serving the subscription, which relays splice failover on (see [Routing](#routing)).
-A publisher names itself for content it produces; a relay names the origin its own source's reply named, or for a source reached over an earlier version, the first hop of that source's route.
+An endpoint names the Origin its own source's reply named, or for a source reached over an earlier version, the first hop of that source's route, and for content it produces, its own Hop ID.
+Where none of these identifies anyone (0, or an endpoint without a stable Hop ID of its own), it SHOULD generate a random Hop ID for that content and name it for as long as the content lasts, so a relay downstream can still resume within it.
 A value of 0 names nobody, and a relay never splices across it.
 
 ## SUBSCRIBE_END {#subscribe-end}

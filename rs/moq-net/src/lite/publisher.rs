@@ -2171,8 +2171,8 @@ struct Subscription<S: crate::transport::poll::Session> {
 
 /// Names the origin serving a request, for SUBSCRIBE_OK and FETCH_OK: the one the
 /// broadcast's front serves, read when the reply goes out (a copy's content only
-/// reaches the front once its origin is admitted), or ours for content originating
-/// here.
+/// reaches the front once its origin is admitted), or ours for a broadcast that is
+/// not route-fed.
 #[derive(Clone)]
 struct Served {
 	broadcast: Option<broadcast::Consumer>,

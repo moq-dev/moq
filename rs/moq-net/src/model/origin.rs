@@ -1983,6 +1983,8 @@ struct FrontTask {
 	request: kio::Producer<PendingBroadcast>,
 	/// Published for requesters once the first source fixes it; see [`RemoteFront::pin`].
 	pin: kio::Lock<Pin>,
+	/// This origin's hop, which names content originating here.
+	hop: Hop,
 	timers: Clock,
 }
 
@@ -2035,6 +2037,7 @@ async fn run_front(task: FrontTask) {
 		watch,
 		request,
 		pin,
+		hop,
 		timers,
 	} = task;
 
@@ -2052,6 +2055,16 @@ async fn run_front(task: FrontTask) {
 	}
 
 	let mut front = Front::new(TRACK_IDLE_LINGER);
+	// The origin the front's replies name. Content nobody identifies (an anonymous
+	// source, or an origin without a hop) gets a random one for this front's life,
+	// rather than 0: a downstream relay can still resume within it, and nothing
+	// else ever names it.
+	let anonymous = Hop::random();
+	let named = |front: &Front| match front.origin() {
+		None if hop != Hop::UNKNOWN => hop,
+		Some(origin) if origin != Hop::UNKNOWN => origin,
+		_ => anonymous,
+	};
 	let mut sources: HashMap<u64, broadcast::Consumer> = HashMap::new();
 	let mut next_source = 0u64;
 	// The in-flight upstream request: the route and its pending channel.
@@ -2093,7 +2106,7 @@ async fn run_front(task: FrontTask) {
 			// Published before any copy is admitted below: once a copy's content
 			// flows, a reply for it names this origin.
 			*pin.lock() = front.pin();
-			broadcast.set_origin(front.origin());
+			broadcast.set_origin(named(&front));
 			if let Some(origin) = front.admit() {
 				for io in tracks.values() {
 					for (_, copy) in io.copies() {
@@ -2138,7 +2151,7 @@ async fn run_front(task: FrontTask) {
 						};
 						front.identify(candidate);
 						*pin.lock() = front.pin();
-						broadcast.set_origin(front.origin());
+						broadcast.set_origin(named(&front));
 						if let Some(source) = source {
 							let id = next_source;
 							next_source += 1;
@@ -3794,6 +3807,7 @@ impl Consumer {
 			watch,
 			request,
 			pin,
+			hop: self.hop,
 			timers: self.timers.clone(),
 		}));
 		kio::Pending::new(Requesting::queued(consumer).with_path(requested).with_stats(scope))
@@ -6274,6 +6288,21 @@ mod tests {
 			cheaper.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
 			"the front must not re-request through the new route"
 		);
+	}
+
+	/// A front names the origin of what it serves in its replies: this origin's hop
+	/// for content originating here, and a random hop of its own for content nobody
+	/// identifies, never 0.
+	#[tokio::test]
+	async fn a_front_names_an_origin_for_its_content() {
+		let (rig, _server, _source) = ResumeRig::new(&[0]).await;
+		let anonymous = rig.resolved.origin().expect("a front names its origin");
+		assert_ne!(anonymous, Hop::UNKNOWN);
+		assert_ne!(anonymous, origin(1));
+
+		// Content originating here is named by this origin.
+		let (rig, _server, _source) = ResumeRig::new(&[]).await;
+		assert_eq!(rig.resolved.origin(), Some(origin(1)));
 	}
 
 	#[tokio::test]
