@@ -1249,3 +1249,109 @@ describe("spawn retention", () => {
 		effect.close();
 	});
 });
+
+describe("Signal.race", () => {
+	test("starts lazily, shares listeners, and restarts after the last subscriber leaves", async () => {
+		const first = counted<number>();
+		const second = counted<string>();
+		const pending = Signal.race(first, second);
+		expect(first.listeners).toBe(0);
+		expect(second.listeners).toBe(0);
+		const stop = pending.subscribe(() => {});
+		const cancel = pending.changed(() => {});
+		expect(first.listeners).toBe(1);
+		expect(second.listeners).toBe(1);
+		stop();
+		expect(first.listeners).toBe(1);
+		cancel();
+		cancel();
+		expect(first.listeners).toBe(0);
+		expect(second.listeners).toBe(0);
+
+		const result = race([pending]);
+		expect(first.listeners).toBe(1);
+		second.once.set("changed");
+		expect(await result).toBe("changed");
+		expect(await pending).toBe("changed");
+		expect(pending.peek()).toBe("changed");
+		expect(first.listeners).toBe(0);
+		expect(second.listeners).toBe(0);
+	});
+
+	test("direct await releases every source", async () => {
+		const first = counted<number>();
+		const second = counted<string>();
+		const pending = Signal.race(first, second);
+		const result = (async () => await pending)();
+		await flush();
+		first.once.set(7);
+		expect(await result).toBe(7);
+		expect(first.listeners).toBe(0);
+		expect(second.listeners).toBe(0);
+	});
+
+	test("a losing outer race releases every source", async () => {
+		const source = counted<number>();
+		for (let i = 0; i < 1000; i++) {
+			expect(await race([Signal.race(source), Promise.resolve(i)])).toBe(i);
+			expect(source.listeners).toBe(0);
+		}
+	});
+
+	test("effect teardown releases every source", async () => {
+		const effect = new Effect();
+		const source = counted<number>();
+		const pending = effect.race(Signal.race(source));
+		expect(source.listeners).toBe(1);
+		effect.close();
+		expect(await pending).toBeUndefined();
+		expect(source.listeners).toBe(0);
+	});
+
+	test("one losing subscriber leaves another subscriber's wait alive", async () => {
+		const source = counted<number>();
+		const pending = Signal.race(source);
+		const remaining = race([pending]);
+		expect(await race([pending, Promise.resolve("other")])).toBe("other");
+		expect(source.listeners).toBe(1);
+		source.once.set(9);
+		expect(await remaining).toBe(9);
+		expect(source.listeners).toBe(0);
+	});
+
+	test("an undefined change settles direct and nested waits, including later waits", async () => {
+		const source = new Signal<number | undefined>(1);
+		const pending = Signal.race(source);
+		const nested = race([pending]);
+		source.set(undefined);
+		expect(await nested).toBeUndefined();
+		expect(await pending).toBeUndefined();
+		expect(await race([pending, "later"])).toBeUndefined();
+	});
+
+	test("promise-valued changes retain fulfillment and rejection", async () => {
+		const source = new Signal<Promise<number>>(Promise.resolve(0));
+		const changed: GetPromise<number> = Signal.race(source);
+		const fulfilled = race([changed]);
+		source.set(Promise.resolve(1));
+		expect(await fulfilled).toBe(1);
+		expect(changed.peek()).toBe(1);
+		const rejected = race([Signal.race(source)]);
+		source.set(Promise.reject(new Error("failed")));
+		await expect(rejected).rejects.toThrow("failed");
+	});
+});
+
+test("await Signal.race subscribes before already queued microtasks run", async () => {
+	const source = new Signal(0);
+	queueMicrotask(() => source.set(1));
+	expect(await Signal.race(source)).toBe(1);
+});
+
+test("races from another package copy release their source listeners", async () => {
+	const module = "./index.ts?signal-race-copy";
+	const copy = (await import(module)) as typeof import("./index.ts");
+	const source = counted<number>();
+	expect(await race([copy.Signal.race(source), Promise.resolve("other")])).toBe("other");
+	expect(source.listeners).toBe(0);
+});
