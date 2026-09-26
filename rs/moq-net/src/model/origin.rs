@@ -6238,7 +6238,7 @@ mod tests {
 		queued(&server).await.accept(&source);
 		let resolved = pending.await.unwrap();
 
-		drop(source);
+		source.close();
 		settle(|| resolved.is_closed()).await;
 		assert!(
 			server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),

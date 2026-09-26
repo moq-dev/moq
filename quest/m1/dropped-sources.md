@@ -5,8 +5,7 @@
 A track that ends because its source ended reports the source's own error to
 every consumer, locally and across a relay. `Dropped` means only that a handle
 was dropped without an end, which a correct producer never does. A broadcast
-end carries no cause ([Broadcast close](/quest/m1/broadcast-close/README.md)),
-so only track errors are in scope.
+end carries no cause since #4031, so only track errors are in scope.
 
 ## Plan
 
