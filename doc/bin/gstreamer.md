@@ -77,10 +77,16 @@ is at least 1, and a rate is the delta over any window you sample. Unlike
 Set `encoder=true` on audio and video pads a local encoder feeds
 (`x264enc`, `opusenc`, ...). The pad then measures how late each frame reaches
 the sink behind its running time and raises the catalog `jitter` by the spread,
-so players buffer for an encoder that delivers irregularly. Leave it off, the
+and `delay` by how far it trails the earliest such pad, so players buffer for an
+encoder that delivers irregularly or behind the others. Leave it off, the
 default, for file, demuxed, and network media: their arrival reflects the disk
 or the network, not the original encoder, and a GStreamer segment cannot tell
 the two apart. Text and opaque pads refuse it.
+
+After a pause, flush, or changed TIME segment, the next media buffer starts a new
+timeline epoch and resets the handoff baseline. The pause does not inflate
+advertised jitter, and previously measured maxima remain. Resumed timestamps
+must continue forward on the broadcast media clock.
 
 ## moqsrc
 

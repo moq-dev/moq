@@ -354,10 +354,10 @@ void MoQOutput::Reset()
 	}
 	audio_tracks.clear();
 
-	// Finish the broadcast so the origin unpublishes it immediately; Start()
+	// Close the broadcast so the origin retracts it immediately; Start()
 	// creates a fresh one on restart.
 	if (broadcast)
-		broadcast->finish();
+		broadcast->close();
 	broadcast.reset();
 	origin.reset();
 }

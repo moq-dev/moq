@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -74,6 +75,7 @@ async function subscribed(maxAge = GRACE) {
 		reader,
 		respond: (resp: SubscribeResponse) => encodeSubscribeResponse(sub.writer, resp, VERSION),
 		fin: () => sub.writer.close(),
+		reset: (error: Error) => sub.writer.reset(error),
 	};
 }
 
@@ -216,4 +218,23 @@ test("a SUBSCRIBE_END below a group already received aborts the track", async ()
 
 	const closed = await reader.closed;
 	expect(closed).toBeInstanceOf(Error);
+});
+
+for (const started of [false, true]) {
+	test(`a bare FIN ${started ? "after SUBSCRIBE_START" : "without responses"} aborts the track`, async () => {
+		const { reader, respond, fin } = await subscribed();
+		if (started) await respond({ start: new SubscribeStart(0) });
+		await fin();
+		expect(await reader.closed).toBeInstanceOf(ProtocolViolation);
+		await expect(reader.recvGroup()).rejects.toThrow(ProtocolViolation);
+	});
+}
+
+test("a subscribe stream reset preserves the publisher's failure", async () => {
+	const { reader, reset } = await subscribed();
+	reset(new StreamError(StreamCode.NotFound));
+	const closed = await reader.closed;
+	expect(closed).toBeInstanceOf(StreamError);
+	expect((closed as StreamError).code).toBe(StreamCode.NotFound);
+	await expect(reader.recvGroup()).rejects.toThrow(StreamError);
 });

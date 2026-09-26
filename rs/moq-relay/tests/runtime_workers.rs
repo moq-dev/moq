@@ -6,7 +6,6 @@
 //! a build without one refuses `runtime.workers` at load.
 #![cfg(all(target_os = "linux", feature = "_quic"))]
 
-use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
 use moq_relay::{Config, Relay};
@@ -14,17 +13,6 @@ use moq_tokio::moq_net;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const WORKERS: u16 = 4;
-
-/// A UDP port nothing is bound to.
-///
-/// Every worker binds the same port, so this cannot be `:0`: each would pick an
-/// ephemeral port of its own and they would not form a group.
-fn free_udp_port() -> u16 {
-	let probe = UdpSocket::bind("127.0.0.1:0").expect("bind probe");
-	let port = probe.local_addr().expect("local addr").port();
-	drop(probe);
-	port
-}
 
 /// A self-signed certificate on disk. Workers refuse `listen.tls.generate`,
 /// since each would generate one of its own and serve a different identity.
@@ -43,9 +31,9 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 ///
 /// Pinning is off because a CI container may restrict which cores it may run on,
 /// and none of these tests are about placement.
-fn worker_config(cert: &std::path::Path, key: &std::path::Path, port: u16, workers: u16) -> Config {
+fn worker_config(cert: &std::path::Path, key: &std::path::Path, workers: u16) -> Config {
 	let mut config = Config::default();
-	config.listen.bind = Some(format!("127.0.0.1:{port}").parse().unwrap());
+	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.cert = vec![cert.to_path_buf()];
 	config.listen.tls.key = vec![key.to_path_buf()];
 	config.runtime.workers = Some(workers);
@@ -82,13 +70,10 @@ async fn workers_serve_quic_and_share_one_origin() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-
-	let config = worker_config(&cert, &key, port, WORKERS);
+	let config = worker_config(&cert, &key, WORKERS);
 
 	let relay = Relay::load(config).await.expect("load relay");
-	let expected: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-	assert_eq!(relay.addr(), Some(expected), "workers bound a different address");
+	let port = relay.addr().expect("workers bound an address").port();
 
 	// The owner keeps the worker group; aborting this task is what joins them.
 	let running = tokio::spawn(relay.run());

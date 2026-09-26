@@ -504,7 +504,7 @@ public:
 		TestOk(broadcast->announce(moq::Route{}), "announce");
 	}
 
-	~Publisher() { (void)broadcast->finish(); }
+	~Publisher() { (void)broadcast->close(); }
 
 	// Write one keyframe and one audio frame, each a group of its own.
 	void Write()

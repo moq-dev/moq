@@ -68,7 +68,7 @@ async def main():
 
         # Clean up
         audio.finish()
-        broadcast.finish()
+        broadcast.close()
 
 
 asyncio.run(main())
@@ -132,7 +132,7 @@ client = moq.Client(
 - **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), publish=None, subscribe=None)`**. Async context manager + async iterator of incoming `Request`s.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
-  - `.create_broadcast(path) → BroadcastProducer`. Create an unannounced broadcast, invisible to everyone; `announce()` makes it discoverable and reachable; `finish()` unpublishes it.
+  - `.create_broadcast(path) → BroadcastProducer`. Create an unannounced broadcast, invisible to everyone; `announce()` makes it discoverable and reachable; `close()` ends it.
 - **`Request`**. An incoming session, yielded by `async for request in server`.
   - `.url`, `.path`, `.query`, `.transport`. The query-free path is uniform across transports; the root or missing path is `""`. The encoded query may contain credentials.
   - `.set_publish(origin)`, `.set_consume(origin)`. Per-request overrides, captured at `accept()`. Raise if the request is already answered, cancelled, or currently accepting.
@@ -155,7 +155,7 @@ client = moq.Client(
   - `.publish_video(format, init=b"", *, label=None, hint=None, track=None) → MediaProducer`. `init` may be empty for a format that resolves in band; a `VideoHint` pins catalog fields the stream can't reveal (bitrate) or publishes the catalog before the first keyframe. `track` names the track as in `publish_audio`.
   - `.encode_video(input, output, *, bandwidth=None) → VideoProducer`. Encode raw `VideoFrame`s inside the binding; `.write(frame)` each one.
   - `.encode_audio(name, input, output, *, bandwidth=None) → AudioProducer`. Encode raw PCM `AudioFrame`s; the codec is `output.codec`, e.g. `AudioCodec.opus()`, with `output.frame_duration_us` setting the Opus frame length.
-  - `.finish()`
+  - `.close()` ends the broadcast for good; a second call is a no-op. `.finish()` is its deprecated alias.
 - **`BroadcastDynamic`**. Async source of tracks requested by subscribers.
   - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.
   - Async iterator yielding `TrackRequest`
