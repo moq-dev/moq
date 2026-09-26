@@ -38,7 +38,5 @@ Record each settled decision and its reason in the quest's Plan, so later sessio
 New work joins the milestone matching its priority, at its rank; a questline groups only quests that ship together, and its README holds the work no child owns (the end-to-end test, the docs page).
 
 When done, commit and create a draft PR following `CONTRIBUTING.md`.
-After local checks pass, mark it ready and monitor CI and the automatic reviews.
+After local checks pass, run `/merge` on it.
 Address one review round, then stop and report if the next review still has findings.
-
-Merge the PR when ready.
