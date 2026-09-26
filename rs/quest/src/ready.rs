@@ -73,7 +73,7 @@ pub fn blockers(root: &Path, path: &Path) -> Result<Vec<Blocker>> {
 ///
 /// A questline is not listed while it still indexes children; a README with
 /// no `## Quests` left is the line's own remaining work and lists like any
-/// other quest. The absence of a `## Required` heading is what quest/CLAUDE.md
+/// other quest. The absence of a `## Required` heading is what quest/AGENTS.md
 /// defines as ready.
 pub fn quests(root: &Path) -> Result<Vec<PathBuf>> {
 	let docs = crate::load(root)?;

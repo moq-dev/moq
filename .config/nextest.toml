@@ -16,7 +16,7 @@
 slow-timeout = { period = "30s", terminate-after = 2 }
 
 # Retries hide flakes, and this repo treats an intermittent failure as a real
-# race until proven otherwise (see Root Cause First in CLAUDE.md).
+# race until proven otherwise (see Root Cause First in AGENTS.md).
 retries = 0
 
 # `--all-targets` still compiles the criterion benches, which is what catches a
