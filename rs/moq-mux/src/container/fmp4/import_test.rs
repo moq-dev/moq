@@ -601,8 +601,8 @@ fn audio_init(trak: mp4_atom::Trak) -> Vec<u8> {
 }
 
 /// An Opus init segment whose dOps declares a 44.1 kHz input, 312 samples of pre-skip,
-/// and -6 dB of gain.
-fn opus_init() -> (mp4_atom::Dops, Vec<u8>) {
+/// and -6 dB of gain, behind a sample entry claiming `entry_rate`.
+fn opus_init(entry_rate: u16) -> (mp4_atom::Dops, Vec<u8>) {
 	let dops = mp4_atom::Dops {
 		output_channel_count: 2,
 		pre_skip: 312,
@@ -614,7 +614,7 @@ fn opus_init() -> (mp4_atom::Dops, Vec<u8>) {
 			data_reference_index: 1,
 			channel_count: 2,
 			sample_size: 16,
-			sample_rate: mp4_atom::FixedPoint::from(48_000u16),
+			sample_rate: mp4_atom::FixedPoint::from(entry_rate),
 		},
 		dops: dops.clone(),
 		btrt: None,
@@ -627,7 +627,7 @@ fn opus_init() -> (mp4_atom::Dops, Vec<u8>) {
 /// writes the same dOps back, so pre-skip and gain survive the round trip.
 #[test]
 fn opus_dops_round_trips() {
-	let (dops, data) = opus_init();
+	let (dops, data) = opus_init(48_000);
 
 	let catalog = run_fmp4(&data);
 	let a = catalog.audio.renditions.values().next().expect("opus rendition");
@@ -649,10 +649,20 @@ fn opus_dops_round_trips() {
 	}
 }
 
+/// The catalog describes the decoder's 48 kHz output even when the sample entry claims
+/// another rate.
+#[test]
+fn opus_catalog_uses_the_decode_rate() {
+	let (_, data) = opus_init(44_100);
+	let catalog = run_fmp4(&data);
+	let a = catalog.audio.renditions.values().next().expect("opus rendition");
+	assert_eq!(a.sample_rate, 48_000);
+}
+
 /// A dOps with a channel mapping table is refused rather than imported without it.
 #[test]
 fn opus_dops_mapping_family_is_refused() {
-	let (_, mut data) = opus_init();
+	let (_, mut data) = opus_init(48_000);
 
 	// The mapping family byte follows version, channels, pre-skip, rate, and gain.
 	let at = data.windows(4).position(|w| w == b"dOps").unwrap() + 4 + 10;
