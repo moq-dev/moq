@@ -23,8 +23,8 @@ informative:
 
 --- abstract
 
-This document defines an extension for MoQ Transport {{moqt}} that tells a subscriber how many active namespaces a publisher replays in answer to its SUBSCRIBE_NAMESPACE.
-The subscriber knows when it has caught up once that many have arrived, instead of guessing from a quiet stream.
+This document defines an extension for MoQ Transport {{moqt}} that tells a subscriber how many NAMESPACE messages a publisher sends in answer to its SUBSCRIBE_NAMESPACE before the subscription is caught up.
+The subscriber then knows when that is, instead of guessing from a quiet stream.
 
 --- note_Note_to_Readers
 
@@ -36,17 +36,16 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 # Conventions and Definitions
 {::boilerplate bcp14-tagged}
 
-A namespace is **active** on a SUBSCRIBE_NAMESPACE stream from the NAMESPACE that advertises it until the NAMESPACE_DONE that ends it.
-The **replay** is the NAMESPACE messages a publisher sends for the namespaces it already advertises under the subscription's prefix when it answers, one per namespace.
+A suffix is **active** on a SUBSCRIBE_NAMESPACE stream from a NAMESPACE message carrying it until a NAMESPACE_DONE message carrying it.
+A subscription is **caught up** once every suffix the publisher advertised to it when it sent REQUEST_OK is active.
 
 
 # Introduction
-A publisher answers SUBSCRIBE_NAMESPACE with the replay, then keeps the stream open to report changes.
+A publisher answers SUBSCRIBE_NAMESPACE with a NAMESPACE message for each suffix it already advertises under the subscription's prefix, then keeps the stream open to report changes.
 Nothing on the wire separates the two, so a subscriber cannot tell "there are no broadcasts" from "they have not arrived yet".
-The best it can do is wait for the stream to go quiet, which is slow when there is nothing to replay and wrong when the network stalls mid-replay.
+The best it can do is wait for the stream to go quiet, which is slow when there is nothing to send and wrong when the network stalls partway.
 
-This extension has the publisher count the replay on its REQUEST_OK, as moq-lite's ANNOUNCE_OK does.
-The subscriber has caught up once that many namespaces are active.
+This extension has the publisher put the number of NAMESPACE messages that precede the subscription being caught up on its REQUEST_OK.
 
 
 # Setup Negotiation
@@ -62,7 +61,7 @@ ACTIVE_COUNT Setup Option {
 
 A receiver MUST ignore the value.
 The extension is negotiated when both endpoints declare the option, and applies to every SUBSCRIBE_NAMESPACE on the session in both directions.
-An endpoint MUST NOT declare the option on a version of {{moqt}} without NAMESPACE, where the replay does not ride the SUBSCRIBE_NAMESPACE stream.
+An endpoint MUST NOT declare the option on a version of {{moqt}} without the NAMESPACE message.
 
 
 # Counting {#count}
@@ -76,14 +75,15 @@ ACTIVE_COUNT Parameter {
 }
 ~~~
 
-Count is the number of namespaces in the replay.
-The publisher MUST send the replay on the stream immediately after REQUEST_OK, exactly Count NAMESPACE messages for distinct namespaces and nothing else in between; later changes follow as usual.
-A namespace the publisher does not advertise to this subscriber, such as one that loops back through it, is neither replayed nor counted.
+Count is the number of suffixes the publisher makes active before the subscription is caught up, one NAMESPACE message each.
+The publisher MUST send exactly Count NAMESPACE messages, each with a distinct suffix, immediately after REQUEST_OK and before any other message on the stream; later changes follow as usual.
+A suffix the publisher does not advertise to this subscriber, such as one whose path loops back through it, is neither sent nor counted.
 
-A subscriber has caught up once it has read Count NAMESPACE messages, immediately on a Count of 0.
+A subscriber is caught up once it has read Count NAMESPACE messages, immediately on a Count of 0.
 It counts every one of them, including any it discards on receipt.
 
-A subscriber MUST close the session with a PROTOCOL_VIOLATION if REQUEST_OK omits the parameter when the extension is negotiated, or carries it when it is not.
+A subscriber MUST close the session with a PROTOCOL_VIOLATION if the REQUEST_OK answering a SUBSCRIBE_NAMESPACE omits the parameter when the extension is negotiated, or carries it when it is not.
+An endpoint MUST close the session with a PROTOCOL_VIOLATION if a REQUEST_OK answering any other request carries the parameter.
 
 
 # Security Considerations

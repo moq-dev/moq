@@ -20,8 +20,8 @@ pub(crate) struct Peer {
 	/// SUBSCRIBE_NAMESPACE, so we may send it.
 	pub hidden: bool,
 
-	/// MoQ Active Count: whether the peer counts the active namespaces it replays on the REQUEST_OK
-	/// answering SUBSCRIBE_NAMESPACE, and reads ours.
+	/// MoQ Active Count: whether the REQUEST_OK answering SUBSCRIBE_NAMESPACE counts the
+	/// NAMESPACE messages before the subscription is caught up, in both directions.
 	pub active_count: bool,
 }
 

@@ -1496,6 +1496,10 @@ where
 			}
 			(_, ietf::RequestOk::ID) => {
 				let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
+				// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count).
+				if msg.active.is_some() {
+					return Err(Error::ProtocolViolation);
+				}
 				tracing::debug!(message = ?msg, "publish namespace ok");
 			}
 			(_, ietf::RequestError::ID) => {
@@ -1574,6 +1578,10 @@ where
 		match type_id {
 			ietf::RequestOk::ID => {
 				let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
+				// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count).
+				if msg.active.is_some() {
+					return Err(Error::ProtocolViolation);
+				}
 				tracing::debug!(message = ?msg, "publish_namespace update ok");
 				Ok(Refused::No)
 			}
@@ -1767,7 +1775,7 @@ where
 
 		// The extension changes what an advertisement carries, so nothing can be
 		// sent until the peer's SETUP says whether it speaks it. The same SETUP says
-		// whether the OK counts the active namespaces it replays (MoQ Active Count).
+		// whether the OK counts what it sends first (MoQ Active Count).
 		let peer = self.peer().await;
 		let declared = self.peer_setup.get().await;
 		// Register the split-horizon peer on the announce cursor too. The origin
@@ -1795,8 +1803,8 @@ where
 
 		let mut announced = origin.announced();
 
-		// MoQ Active Count: take what is active now, so the OK can say how many
-		// NAMESPACE messages replay it. They go out first, ahead of any change.
+		// MoQ Active Count: take what is advertised now, so the OK can say how many
+		// NAMESPACE messages carry it. They go out first, ahead of any change.
 		let (initial, active) = match declared.active_count {
 			true => {
 				let initial = Self::snapshot(&mut announced);
@@ -4291,6 +4299,50 @@ mod tests {
 			"PUBLISH_NAMESPACE without a SUBSCRIBE_NAMESPACE"
 		);
 		assert_eq!(log.bi_opens(), 1, "one request stream");
+	}
+
+	/// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count), so one on the OK
+	/// to a PUBLISH_NAMESPACE is the peer breaking the extension, negotiated or not.
+	#[tokio::test]
+	async fn a_counted_publish_namespace_ok_is_a_violation() {
+		const VERSION: Version = Version::Draft17;
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let _local = origin.announce("local-cam", crate::origin::Route::default()).unwrap();
+		settle().await;
+
+		let ok = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(ok.clone()), VERSION);
+		writer.encode(&ietf::RequestOk::ID).await.unwrap();
+		writer
+			.encode(&ietf::RequestOk {
+				request_id: None,
+				active: Some(0),
+			})
+			.await
+			.unwrap();
+		let ok = ok.writes.lock().unwrap().clone();
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![ok]);
+
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer {
+			active_count: true,
+			..Default::default()
+		});
+		let publisher = Publisher::new(
+			crate::time::Clock::tokio(),
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			VERSION,
+		);
+
+		let res = tokio::time::timeout(Duration::from_secs(5), publisher.run_publish_namespaces())
+			.await
+			.expect("the violation ends the loop");
+		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
 	}
 
 	/// Drive both announce loops at once against a peer that declared `solicit`,

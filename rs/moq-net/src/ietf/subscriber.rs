@@ -789,7 +789,7 @@ where
 
 		tracing::debug!(%prefix, ?count, "subscribe_namespace ok");
 
-		// MoQ Active Count says how many active namespaces the NAMESPACE messages replay.
+		// MoQ Active Count says how many NAMESPACE messages come before we are caught up.
 		// Without it nothing on this wire marks the end, so the set has landed once the
 		// stream goes quiet. A count the negotiation did not promise, or a missing one it
 		// did, is the peer breaking the extension.
