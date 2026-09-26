@@ -234,8 +234,8 @@ async fn uring_workers_report_link_facts() {
 
 /// The shutdown trigger drains sessions the io_uring workers serve as it does
 /// the shared runtime's: an established session and one arriving mid-drain
-/// are each sent a GOAWAY and leave, and `run` then returns with the worker
-/// threads joined and the port free.
+/// are each sent a GOAWAY and leave, and `run` then returns at the deadline
+/// with the worker threads joined and the port free.
 ///
 /// What an arrival is told is left of the window only reaches the wire on
 /// moq-transport-17+, which the workers do not speak; `shutdown_signal.rs`
@@ -257,6 +257,7 @@ async fn uring_workers_drain_on_the_trigger() {
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let trigger = relay.shutdown_trigger().clone();
+	let sessions = relay.sessions().clone();
 	let running = tokio::spawn(relay.run());
 
 	// One-shot (see `client`), so a session leaves on its GOAWAY rather than
@@ -265,6 +266,22 @@ async fn uring_workers_drain_on_the_trigger() {
 	let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().expect("parse url");
 
 	let established = connect(client.clone(), url.clone()).await;
+	// moq-lite-03 has no GOAWAY, so this peer stays until the deadline closes it,
+	// keeping the drain open for the arrival below once `established` leaves.
+	let mut straggler = moq_tokio::connect::Config::default();
+	straggler.tls.insecure = Some(true);
+	straggler.once = Some(true);
+	straggler.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
+	straggler.version = vec!["moq-lite-03".parse().expect("parse version")];
+	let _straggler = connect(straggler.init(Default::default()).expect("client init"), url.clone()).await;
+
+	// A client can see its session established before the relay counts it, and a
+	// drain with nothing counted ends at once.
+	let deadline = std::time::Instant::now() + TIMEOUT;
+	while sessions.list(&Default::default()).len() < 2 {
+		assert!(std::time::Instant::now() < deadline, "the relay never listed both sessions");
+		tokio::time::sleep(Duration::from_millis(25)).await;
+	}
 	trigger.start();
 	let goaway = tokio::time::timeout(TIMEOUT, established.draining().expect("connected").recv())
 		.await
