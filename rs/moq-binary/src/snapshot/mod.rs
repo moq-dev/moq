@@ -120,7 +120,7 @@ mod test {
 		let captured = moq_net::Timestamp::from_millis(1_234).unwrap();
 		let payload = Bytes::from(vec![7u8; 4096]);
 		let size = producer
-			.update(crate::Payload::from(payload.clone()).with_timestamp(captured))
+			.update(moq_net::Timed::from(payload.clone()).at(captured))
 			.unwrap();
 
 		let waiter = kio::Waiter::noop();

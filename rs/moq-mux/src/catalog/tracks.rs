@@ -548,6 +548,11 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		self.catalog.estimator()
 	}
 
+	/// The broadcast clock the catalog stamps its tracks on.
+	pub(crate) fn clock(&self) -> crate::Clock {
+		self.catalog.clock()
+	}
+
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
 	pub fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
 		self.catalog.timestamp(hint)

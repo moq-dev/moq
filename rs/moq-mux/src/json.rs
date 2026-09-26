@@ -31,19 +31,17 @@
 //! The catalog entry is written when the producer is created and removed when it drops, so a track
 //! is never advertised without a publisher behind it.
 //!
-//! A value that carries its capture time on the broadcast [`Clock`](crate::Clock) is written at
-//! that time, and the entry advertises how late values reach the transport as its `jitter` and
-//! `delay`, the way a media rendition does:
+//! A value that carries the [`Instant`] it was captured is written at that
+//! time on the broadcast [`Clock`](crate::Clock), and the entry advertises how late values reach
+//! the transport as its `jitter` and `delay`, the way a media rendition does:
 //!
 //! ```no_run
 //! # fn example(
 //! #     gps: &mut moq_mux::json::Stream<serde_json::Value>,
-//! #     catalog: &moq_mux::catalog::Producer,
 //! #     fix: serde_json::Value,
 //! #     received: std::time::Instant,
 //! # ) -> moq_mux::Result<()> {
-//! let capture = catalog.clock().capture(received)?;
-//! gps.append(moq_mux::json::Payload::from(&fix).with_capture(capture))?;
+//! gps.append(moq_net::Timed::from(&fix).at(received))?;
 //! # Ok(())
 //! # }
 //! ```
@@ -69,7 +67,9 @@
 //! ```
 
 use std::marker::PhantomData;
+use std::time::Instant;
 
+use moq_net::Timed;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -158,45 +158,6 @@ fn delta_ratio_of<C: std::any::Any>(config: &C) -> Option<u32> {
 		.and_then(|config| config.delta_ratio)
 }
 
-/// A value to publish, and optionally when it was captured.
-///
-/// Converts from a bare `&T`, so a plain value publishes as before and measures only the entry's
-/// bitrate.
-#[derive(Debug)]
-#[non_exhaustive]
-pub struct Payload<'a, T> {
-	/// The value to publish.
-	pub value: &'a T,
-
-	/// When the value was captured, written as its frame timestamp and measured as the entry's
-	/// `jitter` and `delay`. `None` stamps it when written and measures neither.
-	pub capture: Option<crate::Capture>,
-}
-
-impl<T> Payload<'_, T> {
-	/// Stamp the value with its capture time.
-	pub fn with_capture(mut self, capture: crate::Capture) -> Self {
-		self.capture = Some(capture);
-		self
-	}
-}
-
-impl<'a, T> From<&'a T> for Payload<'a, T> {
-	fn from(value: &'a T) -> Self {
-		Self { value, capture: None }
-	}
-}
-
-impl<'a, T> From<Payload<'a, T>> for moq_json::Payload<'a, T> {
-	fn from(payload: Payload<'a, T>) -> Self {
-		let inner = moq_json::Payload::from(payload.value);
-		match payload.capture {
-			Some(capture) => inner.with_timestamp(capture.timestamp()),
-			None => inner,
-		}
-	}
-}
-
 /// Publishes a latest-value JSON track, advertised in the catalog for as long as this handle lives.
 ///
 /// Every [`update`](Self::update) supersedes the last, so a consumer reads only the newest value.
@@ -204,6 +165,8 @@ impl<'a, T> From<Payload<'a, T>> for moq_json::Payload<'a, T> {
 pub struct Snapshot<T, E: CatalogExt = ()> {
 	inner: moq_json::snapshot::Producer<T>,
 	listing: Listing,
+	/// Maps a value's capture instant onto the broadcast timeline.
+	clock: crate::Clock,
 	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
 	_catalog: PhantomData<fn() -> E>,
 }
@@ -229,10 +192,12 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 			json.delta_ratio = delta_ratio;
 		}
 		let inner = moq_json::snapshot::Producer::new(track, json);
+		let clock = rendition.clock();
 		let listing = Listing::new(rendition, config)?;
 		Ok(Self {
 			inner,
 			listing,
+			clock,
 			_catalog: PhantomData,
 		})
 	}
@@ -254,15 +219,17 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 
 	/// Publish a new value, superseding the previous one.
 	///
-	/// An unchanged value writes nothing and measures nothing.
-	pub fn update<'a>(&mut self, value: impl Into<Payload<'a, T>>) -> crate::Result<()>
+	/// A value timed with its capture instant is written at that time and measures the entry's
+	/// `jitter` and `delay`; one ahead of now is refused before anything is written. An unchanged
+	/// value writes nothing and measures nothing.
+	pub fn update<'a>(&mut self, value: impl Into<Timed<&'a T, Instant>>) -> crate::Result<()>
 	where
 		T: 'a,
 	{
-		let payload = value.into();
-		let capture = payload.capture;
-		match self.inner.update(payload)? {
-			Some(size) => self.listing.record(size, capture),
+		let value = self.clock.stamp(value.into())?;
+		let captured = value.at;
+		match self.inner.update(value)? {
+			Some(size) => self.listing.record(size, captured),
 			None => Ok(()),
 		}
 	}
@@ -289,6 +256,8 @@ pub struct Stream<T, E: CatalogExt = ()> {
 	/// entry advertising a track that can no longer accept records only misleads a consumer that
 	/// discovers it afterwards.
 	listing: Option<Listing>,
+	/// Maps a record's capture instant onto the broadcast timeline.
+	clock: crate::Clock,
 	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
 	_catalog: PhantomData<fn() -> E>,
 }
@@ -304,11 +273,13 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 			json.compression = moq_json::Compression::Deflate;
 		}
 		let inner = moq_json::stream::Producer::new(track, json);
+		let clock = rendition.clock();
 		let listing = Listing::new(rendition, config)?;
 		Ok(Self {
 			inner,
 			name: listing.name().to_string(),
 			listing: Some(listing),
+			clock,
 			_catalog: PhantomData,
 		})
 	}
@@ -336,13 +307,13 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 	/// A record that cannot be written ends the track (see [`moq_json::stream::Producer::append`])
 	/// and retires the catalog entry with it. A catalog error publishing the measured bitrate is
 	/// returned after the record was written, so the track stays open and a retry would duplicate it.
-	pub fn append<'a>(&mut self, value: impl Into<Payload<'a, T>>) -> crate::Result<()>
+	pub fn append<'a>(&mut self, value: impl Into<Timed<&'a T, Instant>>) -> crate::Result<()>
 	where
 		T: 'a,
 	{
-		let payload = value.into();
-		let capture = payload.capture;
-		let size = match self.inner.append(payload) {
+		let value = self.clock.stamp(value.into())?;
+		let captured = value.at;
+		let size = match self.inner.append(value) {
 			Ok(size) => size,
 			Err(err) => {
 				// The inner producer has already ended the track. Dropping the listing retires the
@@ -355,7 +326,7 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 		};
 
 		match &mut self.listing {
-			Some(listing) => listing.record(size, capture),
+			Some(listing) => listing.record(size, captured),
 			None => Ok(()),
 		}
 	}
@@ -697,23 +668,16 @@ mod test {
 		let mut status = catalog
 			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default())
 			.unwrap();
-		let clock = catalog.clock();
 		let now = std::time::Instant::now();
-		let capture = |at| clock.capture(at).unwrap();
-
 		let value = serde_json::json!({ "armed": true });
-		status.update(Payload::from(&value).with_capture(capture(now))).unwrap();
+		status.update(Timed::from(&value).at(now)).unwrap();
 		let stale = now - std::time::Duration::from_secs(1);
-		status
-			.update(Payload::from(&value).with_capture(capture(stale)))
-			.unwrap();
+		status.update(Timed::from(&value).at(stale)).unwrap();
 		assert_eq!(entry(&catalog, "status").jitter, None);
 
 		// The same stale capture on a changed value is measured.
 		let changed = serde_json::json!({ "armed": false });
-		status
-			.update(Payload::from(&changed).with_capture(capture(stale)))
-			.unwrap();
+		status.update(Timed::from(&changed).at(stale)).unwrap();
 		let jitter = entry(&catalog, "status").jitter.expect("a late capture is jitter");
 		assert!(jitter >= std::time::Duration::from_secs(1), "{jitter:?}");
 	}

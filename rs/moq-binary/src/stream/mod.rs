@@ -103,7 +103,7 @@ mod test {
 		let mut groups = producer.consume();
 		let captured = moq_net::Timestamp::from_millis(1_234).unwrap();
 		let first = producer
-			.append(crate::Payload::from(vec![1u8; 4096]).with_timestamp(captured))
+			.append(moq_net::Timed::from(vec![1u8; 4096]).at(captured))
 			.unwrap();
 		producer.append(vec![2u8; 16]).unwrap();
 

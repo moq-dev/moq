@@ -40,7 +40,7 @@ pub mod select;
 mod source;
 pub mod timeline;
 
-pub use clock::{Capture, Clock, SourceMap};
+pub use clock::{Clock, SourceMap};
 pub use error::*;
 pub use pace::Pacer;
 pub use source::{Binding, Source};

@@ -86,14 +86,14 @@ The producer sets the entry's `mode` and encodes the track with its
 `catalog::Entry::new(name, &entry.binary)`.
 
 A payload that knows when it was captured (a datagram's arrival, a sensor read)
-maps that instant onto the broadcast clock and carries it. It is written as the
-frame timestamp, and the entry advertises `jitter` and `delay` the way a media
-rendition does, so telemetry lagging its video shows up as `delay`. A device's
-own clock is an unrelated epoch; keep it in the payload.
+carries that `Instant`. The producer maps it onto the broadcast clock and writes
+it as the frame timestamp, and the entry advertises `jitter` and `delay` the way
+a media rendition does, so telemetry lagging its video shows up as `delay`. An
+instant ahead of now is refused. A device's own clock is an unrelated epoch;
+keep it in the payload.
 
 ```rust
-let capture = catalog.clock().capture(received_at)?;
-telemetry.append(moq_mux::binary::Payload::from(packet).with_capture(capture))?;
+telemetry.append(moq_net::Timed::from(packet).at(received_at))?;
 ```
 
 The fMP4, MPEG-TS, and FLV importers publish the source's own timestamps unless

@@ -328,13 +328,9 @@ mod test {
 		let first = moq_net::Timestamp::from_millis(1_000).unwrap();
 		let second = moq_net::Timestamp::from_millis(2_000).unwrap();
 		let value = json!({ "a": 1, "b": "x".repeat(64) });
-		let size = producer
-			.update(crate::Payload::from(&value).with_timestamp(first))
-			.unwrap();
+		let size = producer.update(moq_net::Timed::from(&value).at(first)).unwrap();
 		let changed = json!({ "a": 2, "b": "x".repeat(64) });
-		let delta = producer
-			.update(crate::Payload::from(&changed).with_timestamp(second))
-			.unwrap();
+		let delta = producer.update(moq_net::Timed::from(&changed).at(second)).unwrap();
 
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {

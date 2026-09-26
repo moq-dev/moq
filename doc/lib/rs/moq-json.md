@@ -29,7 +29,7 @@ producer.update(&value)?;
 ```
 
 A value is stamped when written, unless it carries its capture time:
-`Payload::from(&value).with_timestamp(captured)`. Writes return the encoded frame
+`moq_net::Timed::from(&value).at(captured)`. Writes return the encoded frame
 size, and an unchanged snapshot `update` returns `None`.
 
 A snapshot producer also edits in place, so independent owners each touch only

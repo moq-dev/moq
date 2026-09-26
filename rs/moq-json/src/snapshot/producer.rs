@@ -8,7 +8,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::{Encoded, Encoder};
-use crate::{Error, Payload, Result};
+use moq_net::Timed;
+
+use crate::{Error, Result};
 
 pub use super::Config;
 
@@ -87,7 +89,7 @@ impl<T: Serialize> Producer<T> {
 	///
 	/// Returns the encoded size of the frame written, or `None` if the value is unchanged from the
 	/// previous publish and nothing was written.
-	pub fn update<'a>(&mut self, value: impl Into<Payload<'a, T>>) -> Result<Option<usize>>
+	pub fn update<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> Result<Option<usize>>
 	where
 		T: 'a,
 	{
@@ -230,7 +232,7 @@ impl<T: Serialize> Guard<'_, T> {
 		self.dirty = false;
 
 		// We already hold the lock, so publish through the held guard rather than re-locking.
-		self.inner.update(Payload::from(&self.value))?;
+		self.inner.update(Timed::from(&self.value))?;
 		Ok(())
 	}
 }
@@ -323,7 +325,7 @@ impl<T> Inner<T> {
 }
 
 impl<T: Serialize> Inner<T> {
-	fn update(&mut self, payload: Payload<'_, T>) -> Result<Option<usize>> {
+	fn update(&mut self, payload: Timed<&T>) -> Result<Option<usize>> {
 		// Split the borrow so `frame` can hold the encoder while `track` is written through.
 		let Inner { track, encoder, .. } = self;
 
@@ -334,7 +336,7 @@ impl<T: Serialize> Inner<T> {
 		// A failed write drops `frame` uncommitted, which resets the encoder so the next update
 		// resynchronizes with a fresh snapshot. Most failures kill the track outright, but a rejected
 		// frame (too large) doesn't, and a delta against a snapshot no consumer ever saw is unreadable.
-		let timestamp = payload.timestamp.unwrap_or_else(moq_net::Timestamp::now);
+		let timestamp = payload.at.unwrap_or_else(moq_net::Timestamp::now);
 		track.write(timestamp, &frame)?;
 		let size = frame.payload.len();
 		frame.commit();

@@ -2,7 +2,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::{Payload, Result};
+use bytes::Bytes;
+use moq_net::Timed;
+
+use crate::Result;
 
 pub use super::Config;
 
@@ -47,7 +50,7 @@ impl Producer {
 	/// Unlike [`moq-json`](https://docs.rs/moq-json), an identical value is republished rather than
 	/// skipped: comparing two opaque blobs costs a full scan, and only the caller knows whether its
 	/// bytes changed.
-	pub fn update(&mut self, payload: impl Into<Payload>) -> Result<usize> {
+	pub fn update(&mut self, payload: impl Into<Timed<Bytes>>) -> Result<usize> {
 		self.inner.lock().unwrap().update(payload.into())
 	}
 
@@ -64,9 +67,9 @@ struct Inner {
 }
 
 impl Inner {
-	fn update(&mut self, payload: Payload) -> Result<usize> {
-		let timestamp = payload.timestamp.unwrap_or_else(moq_net::Timestamp::now);
-		let payload = payload.data;
+	fn update(&mut self, payload: Timed<Bytes>) -> Result<usize> {
+		let timestamp = payload.at.unwrap_or_else(moq_net::Timestamp::now);
+		let payload = payload.value;
 
 		// One frame per group, so the window spans a single value and starts cold every time.
 		let payload = match self.compression {

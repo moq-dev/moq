@@ -2,7 +2,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::{Payload, Result};
+use bytes::Bytes;
+use moq_net::Timed;
+
+use crate::Result;
 
 pub use super::Config;
 
@@ -52,7 +55,7 @@ impl Producer {
 	/// instead of a log that merely looks complete. Every later append fails on the closed track.
 	///
 	/// Returns the frame's encoded size.
-	pub fn append(&mut self, payload: impl Into<Payload>) -> Result<usize> {
+	pub fn append(&mut self, payload: impl Into<Timed<Bytes>>) -> Result<usize> {
 		self.inner.lock().unwrap().append(payload.into())
 	}
 
@@ -74,9 +77,9 @@ struct Inner {
 }
 
 impl Inner {
-	fn append(&mut self, payload: Payload) -> Result<usize> {
-		let timestamp = payload.timestamp.unwrap_or_else(moq_net::Timestamp::now);
-		let payload = payload.data;
+	fn append(&mut self, payload: Timed<Bytes>) -> Result<usize> {
+		let timestamp = payload.at.unwrap_or_else(moq_net::Timestamp::now);
+		let payload = payload.value;
 
 		// A payload no consumer could decode is as terminal as one the track rejects: the log is
 		// missing a record either way, and carrying on would present that gap as a complete log.

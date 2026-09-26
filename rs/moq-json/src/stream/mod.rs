@@ -123,9 +123,7 @@ mod test {
 		let mut groups = producer.consume();
 		let captured = moq_net::Timestamp::from_millis(1_234).unwrap();
 		let record = json!({ "n": 1 });
-		let size = producer
-			.append(crate::Payload::from(&record).with_timestamp(captured))
-			.unwrap();
+		let size = producer.append(moq_net::Timed::from(&record).at(captured)).unwrap();
 
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {

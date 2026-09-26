@@ -34,6 +34,6 @@ for await (const value of consumer) {
 ```
 
 A value is stamped when written, unless you pass its capture time:
-`producer.update(value, captured)`.
+`producer.update(value, at)`.
 
 The Rust twin is [`moq-json`](/lib/rs/moq-json).

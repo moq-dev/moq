@@ -76,10 +76,11 @@ impl Listing {
 		self.rendition.name()
 	}
 
-	/// Measure a frame of `bytes` encoded bytes, just written, captured at `capture` if known.
-	pub(crate) fn record(&mut self, bytes: usize, capture: Option<crate::Capture>) -> crate::Result<()> {
+	/// Measure a frame of `bytes` encoded bytes, just written, captured at `captured` on the
+	/// broadcast clock if known.
+	pub(crate) fn record(&mut self, bytes: usize, captured: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		let now = self.rendition.timestamp()?;
-		let flush = capture.map(|capture| (capture.timestamp(), std::time::Instant::now()));
+		let flush = captured.map(|captured| (captured, std::time::Instant::now()));
 		self.record_at(now, bytes, flush)
 	}
 

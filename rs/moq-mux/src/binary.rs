@@ -30,19 +30,17 @@
 //! The catalog entry is written when the producer is created and removed when it drops, so a track
 //! is never advertised without a publisher behind it.
 //!
-//! A payload that carries its capture time on the broadcast [`Clock`](crate::Clock) is written at
-//! that time, and the entry advertises how late payloads reach the transport as its `jitter` and
-//! `delay`, the way a media rendition does:
+//! A payload that carries the [`Instant`] it was captured is written at that
+//! time on the broadcast [`Clock`](crate::Clock), and the entry advertises how late payloads reach
+//! the transport as its `jitter` and `delay`, the way a media rendition does:
 //!
 //! ```no_run
 //! # fn example(
 //! #     thumbnail: &mut moq_mux::binary::Snapshot,
-//! #     catalog: &moq_mux::catalog::Producer,
 //! #     jpeg: bytes::Bytes,
 //! #     captured: std::time::Instant,
 //! # ) -> moq_mux::Result<()> {
-//! let capture = catalog.clock().capture(captured)?;
-//! thumbnail.update(moq_mux::binary::Payload::from(jpeg).with_capture(capture))?;
+//! thumbnail.update(moq_net::Timed::from(jpeg).at(captured))?;
 //! # Ok(())
 //! # }
 //! ```
@@ -65,8 +63,10 @@
 //! ```
 
 use std::marker::PhantomData;
+use std::time::Instant;
 
 use bytes::Bytes;
+use moq_net::Timed;
 
 use hang::catalog::{BinaryConfig, Compression, Mode};
 
@@ -117,48 +117,6 @@ impl<E: CatalogExt> IntoRendition<E, BinaryConfig> for Config {
 	}
 }
 
-/// A payload to publish, and optionally when it was captured.
-///
-/// Converts from anything that converts into [`Bytes`], so a bare payload publishes as before and
-/// measures only the entry's bitrate.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct Payload {
-	/// The bytes to publish.
-	pub data: Bytes,
-
-	/// When the payload was captured, written as its frame timestamp and measured as the entry's
-	/// `jitter` and `delay`. `None` stamps it when written and measures neither.
-	pub capture: Option<crate::Capture>,
-}
-
-impl Payload {
-	/// Stamp the payload with its capture time.
-	pub fn with_capture(mut self, capture: crate::Capture) -> Self {
-		self.capture = Some(capture);
-		self
-	}
-}
-
-impl<B: Into<Bytes>> From<B> for Payload {
-	fn from(data: B) -> Self {
-		Self {
-			data: data.into(),
-			capture: None,
-		}
-	}
-}
-
-impl From<Payload> for moq_binary::Payload {
-	fn from(payload: Payload) -> Self {
-		let inner = moq_binary::Payload::from(payload.data);
-		match payload.capture {
-			Some(capture) => inner.with_timestamp(capture.timestamp()),
-			None => inner,
-		}
-	}
-}
-
 /// Fix `config`'s mode and return whether its frames are compressed.
 ///
 /// Errors on a compression this build can't write, rather than advertising one the frames don't use,
@@ -180,6 +138,8 @@ fn prepare(config: &mut impl AsMut<BinaryConfig>, mode: Mode) -> crate::Result<b
 pub struct Snapshot<E: CatalogExt = ()> {
 	inner: moq_binary::snapshot::Producer,
 	listing: Listing,
+	/// Maps a payload's capture instant onto the broadcast timeline.
+	clock: crate::Clock,
 	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
 	_catalog: PhantomData<fn() -> E>,
 }
@@ -195,10 +155,12 @@ impl<E: CatalogExt> Snapshot<E> {
 			binary.compression = moq_binary::Compression::Deflate;
 		}
 		let inner = moq_binary::snapshot::Producer::new(track, binary);
+		let clock = rendition.clock();
 		let listing = Listing::new(rendition, config)?;
 		Ok(Self {
 			inner,
 			listing,
+			clock,
 			_catalog: PhantomData,
 		})
 	}
@@ -214,11 +176,14 @@ impl<E: CatalogExt> Snapshot<E> {
 	}
 
 	/// Publish a new payload, superseding the previous one.
-	pub fn update(&mut self, payload: impl Into<Payload>) -> crate::Result<()> {
-		let payload = payload.into();
-		let capture = payload.capture;
+	///
+	/// A payload timed with its capture instant is written at that time and measures the entry's
+	/// `jitter` and `delay`; one ahead of now is refused before anything is written.
+	pub fn update(&mut self, payload: impl Into<Timed<Bytes, Instant>>) -> crate::Result<()> {
+		let payload = self.clock.stamp(payload.into())?;
+		let captured = payload.at;
 		let size = self.inner.update(payload)?;
-		self.listing.record(size, capture)
+		self.listing.record(size, captured)
 	}
 
 	/// Finish the track and retire its catalog entry.
@@ -243,6 +208,8 @@ pub struct Stream<E: CatalogExt = ()> {
 	/// entry advertising a track that can no longer accept records only misleads a consumer that
 	/// discovers it afterwards.
 	listing: Option<Listing>,
+	/// Maps a payload's capture instant onto the broadcast timeline.
+	clock: crate::Clock,
 	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
 	_catalog: PhantomData<fn() -> E>,
 }
@@ -258,11 +225,13 @@ impl<E: CatalogExt> Stream<E> {
 			binary.compression = moq_binary::Compression::Deflate;
 		}
 		let inner = moq_binary::stream::Producer::new(track, binary);
+		let clock = rendition.clock();
 		let listing = Listing::new(rendition, config)?;
 		Ok(Self {
 			inner,
 			name: listing.name().to_string(),
 			listing: Some(listing),
+			clock,
 			_catalog: PhantomData,
 		})
 	}
@@ -286,9 +255,9 @@ impl<E: CatalogExt> Stream<E> {
 	/// [`moq_binary::stream::Producer::append`]) and retires the catalog entry with it. A catalog
 	/// error publishing the measured bitrate is returned after the payload was written, so the track
 	/// stays open and a retry would duplicate it.
-	pub fn append(&mut self, payload: impl Into<Payload>) -> crate::Result<()> {
-		let payload = payload.into();
-		let capture = payload.capture;
+	pub fn append(&mut self, payload: impl Into<Timed<Bytes, Instant>>) -> crate::Result<()> {
+		let payload = self.clock.stamp(payload.into())?;
+		let captured = payload.at;
 		let size = match self.inner.append(payload) {
 			Ok(size) => size,
 			Err(err) => {
@@ -302,7 +271,7 @@ impl<E: CatalogExt> Stream<E> {
 		};
 
 		match &mut self.listing {
-			Some(listing) => listing.record(size, capture),
+			Some(listing) => listing.record(size, captured),
 			None => Ok(()),
 		}
 	}
@@ -501,15 +470,17 @@ mod test {
 			.binary_stream(track(&mut broadcast, "telemetry"), Config::default())
 			.unwrap();
 
-		let clock = catalog.clock();
 		let captured = std::time::Instant::now();
-		telemetry
-			.append(Payload::from(&b"now"[..]).with_capture(clock.capture(captured).unwrap()))
-			.unwrap();
+		telemetry.append(Timed::from(&b"now"[..]).at(captured)).unwrap();
 		let late = captured - std::time::Duration::from_secs(1);
-		telemetry
-			.append(Payload::from(&b"late"[..]).with_capture(clock.capture(late).unwrap()))
-			.unwrap();
+		telemetry.append(Timed::from(&b"late"[..]).at(late)).unwrap();
+
+		// A capture ahead of now is refused before anything is written.
+		let ahead = std::time::Instant::now() + std::time::Duration::from_secs(1);
+		assert!(matches!(
+			telemetry.append(Timed::from(&b"ahead"[..]).at(ahead)),
+			Err(crate::Error::InvalidCapture)
+		));
 
 		let jitter = entry(&catalog, "telemetry").jitter.expect("a late capture is jitter");
 		assert!(jitter >= std::time::Duration::from_secs(1), "{jitter:?}");

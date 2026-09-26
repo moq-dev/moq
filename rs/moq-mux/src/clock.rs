@@ -101,16 +101,21 @@ impl Clock {
 	///
 	/// Refuses an instant ahead of now, which would claim the payload reached the transport before
 	/// it existed, and one before the clock's epoch, which no timestamp can name.
-	pub fn capture(&self, at: Instant) -> crate::Result<Capture> {
+	pub(crate) fn capture(&self, at: Instant) -> crate::Result<moq_net::Timestamp> {
 		if at > Instant::now() {
 			return Err(crate::Error::InvalidCapture);
 		}
 		let elapsed = at
 			.checked_duration_since(self.epoch)
 			.ok_or(crate::Error::InvalidCapture)?;
-		let timestamp = moq_net::Timestamp::from_micros(elapsed.as_micros() as u64)
-			.expect("an instant elapsed duration fits in a timestamp");
-		Ok(Capture(timestamp))
+		Ok(moq_net::Timestamp::from_micros(elapsed.as_micros() as u64)
+			.expect("an instant elapsed duration fits in a timestamp"))
+	}
+
+	/// Map a payload's capture instant onto this clock, keeping the payload.
+	pub(crate) fn stamp<P>(&self, timed: moq_net::Timed<P, Instant>) -> crate::Result<moq_net::Timed<P>> {
+		let at = timed.at.map(|at| self.capture(at)).transpose()?;
+		Ok(moq_net::Timed { value: timed.value, at })
 	}
 
 	/// Units per second for [`wall`](Self::wall): [`TIMESCALE`](Self::TIMESCALE).
@@ -136,21 +141,6 @@ impl Clock {
 	/// Each adapter owns one per source; see [`SourceMap`]. The mapping itself is untouched.
 	pub fn source(&self) -> SourceMap {
 		SourceMap::new(*self)
-	}
-}
-
-/// When a payload was captured, on a broadcast's [`Clock`].
-///
-/// Only [`Clock::capture`] makes one, so it is always on the timeline the broadcast's media
-/// timestamps use. A [`Timestamp::now`](moq_net::Timestamp::now) or a device's own clock has an
-/// unrelated epoch, and would report a meaningless catalog `delay`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Capture(moq_net::Timestamp);
-
-impl Capture {
-	/// The capture time as a broadcast timestamp.
-	pub fn timestamp(&self) -> moq_net::Timestamp {
-		self.0
 	}
 }
 
@@ -420,8 +410,7 @@ mod tests {
 	fn a_capture_maps_onto_the_clock() {
 		let now = Instant::now();
 		let clock = Clock::at(now - Duration::from_secs(5), moq_epoch()).unwrap();
-		let capture = clock.capture(now - Duration::from_secs(2)).unwrap();
-		assert_eq!(capture.timestamp(), us(3_000_000));
+		assert_eq!(clock.capture(now - Duration::from_secs(2)).unwrap(), us(3_000_000));
 
 		assert!(matches!(
 			clock.capture(Instant::now() + Duration::from_secs(1)),

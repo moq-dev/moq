@@ -29,7 +29,7 @@ producer.update(payload)?;
 ```
 
 A payload is stamped when written, unless it carries its capture time:
-`Payload::from(bytes).with_timestamp(captured)`. Writes return the encoded frame
+`moq_net::Timed::from(bytes).at(captured)`. Writes return the encoded frame
 size.
 
 The TypeScript twin is [`@moq/binary`](/lib/js/binary). API:

@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 
 use super::Encoder;
-use crate::{Payload, Result};
+use moq_net::Timed;
+
+use crate::Result;
 
 pub use super::Config;
 
@@ -72,7 +74,7 @@ impl<T: Serialize> Producer<T> {
 	/// complete. Every later append fails on the ended track.
 	///
 	/// Returns the encoded size of the frame written.
-	pub fn append<'a>(&mut self, value: impl Into<Payload<'a, T>>) -> Result<usize>
+	pub fn append<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> Result<usize>
 	where
 		T: 'a,
 	{
@@ -96,7 +98,7 @@ struct Inner<T> {
 }
 
 impl<T: Serialize> Inner<T> {
-	fn append(&mut self, payload: Payload<'_, T>) -> Result<usize> {
+	fn append(&mut self, payload: Timed<&T>) -> Result<usize> {
 		// Split the borrow so `record` can hold the encoder while `track` is written through.
 		let Inner { track, encoder } = self;
 
@@ -117,10 +119,7 @@ impl<T: Serialize> Inner<T> {
 		let opened = track.open();
 		let published = opened.is_ok();
 		let result = match opened {
-			Ok(()) => track.write(
-				payload.timestamp.unwrap_or_else(moq_net::Timestamp::now),
-				record.payload(),
-			),
+			Ok(()) => track.write(payload.at.unwrap_or_else(moq_net::Timestamp::now), record.payload()),
 			Err(err) => Err(err),
 		};
 
