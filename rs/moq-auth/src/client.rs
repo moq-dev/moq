@@ -80,6 +80,7 @@ impl Client {
 			client: self.clone(),
 			request,
 			producer: Some(producer),
+			expires: grant.deadline(),
 			started: Instant::now(),
 		};
 		tokio::spawn(driver.run(grant));
@@ -115,6 +116,7 @@ struct Driver {
 	request: Request,
 	producer: Option<lease::Producer>,
 	started: Instant,
+	expires: Option<tokio::time::Instant>,
 }
 
 impl Driver {
@@ -140,7 +142,7 @@ impl Driver {
 			.take()
 			.expect("the driver owns the producer until it ends");
 		let mut failures = 0u32;
-		let mut next = grant.revalidate.map(|cadence| Instant::now() + cadence);
+		let mut next = grant.revalidate.map(|cadence| tokio::time::Instant::now() + cadence);
 		// The re-check in flight, kept out of the select so expiry and the session's
 		// close are still polled while a stalled server holds the reply.
 		let mut inflight: Option<Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>>> = None;
@@ -149,16 +151,15 @@ impl Driver {
 		let mut pending = false;
 
 		loop {
-			let expires = grant.expires.map(crate::grant::until);
 			let revalidate = async {
 				match next {
-					Some(at) => tokio::time::sleep_until(at.into()).await,
+					Some(at) => tokio::time::sleep_until(at).await,
 					None => std::future::pending().await,
 				}
 			};
 			let expire = async {
-				match expires {
-					Some(after) => tokio::time::sleep(after).await,
+				match self.expires {
+					Some(at) => tokio::time::sleep_until(at).await,
 					None => std::future::pending().await,
 				}
 			};
@@ -177,7 +178,8 @@ impl Driver {
 					match result {
 						Ok(fresh) => {
 							failures = 0;
-							next = fresh.revalidate.map(|cadence| Instant::now() + cadence);
+							self.expires = fresh.deadline();
+							next = fresh.revalidate.map(|cadence| tokio::time::Instant::now() + cadence);
 							producer.update(fresh.clone());
 							grant = fresh;
 						}
@@ -190,7 +192,7 @@ impl Driver {
 							failures += 1;
 							let delay = backoff(failures, grant.revalidate.unwrap_or(BACKOFF_MAX));
 							tracing::warn!(id = %self.request.id, %err, ?delay, "auth revalidation failed; retrying");
-							next = Some(Instant::now() + delay);
+							next = Some(tokio::time::Instant::now() + delay);
 						}
 					}
 					if pending {
@@ -312,6 +314,37 @@ mod tests {
 			.mount(&server)
 			.await;
 		server
+	}
+
+	/// Keep HTTP handling on the paused test clock instead of wiremock's separate runtime.
+	async fn clock_server(log: Log, grant: Grant, stall: bool) -> Client {
+		use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
+		let router = Router::new()
+			.route(
+				"/",
+				post(
+					|State((log, grant, stall)): State<(Log, Grant, bool)>, Json(request): Json<Request>| async move {
+						let event = request.event.clone();
+						log.0.lock().push(request);
+						match event {
+							Event::Connect => Json(grant).into_response(),
+							Event::Revalidate if stall => std::future::pending().await,
+							Event::Revalidate => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+							Event::End { .. } => StatusCode::OK.into_response(),
+						}
+					},
+				),
+			)
+			.with_state((log, grant, stall));
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = format!("http://{}/", listener.local_addr().unwrap());
+		tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+		// Only the lease clock is under test; an HTTP timeout can auto-advance
+		// Tokio's paused clock before loopback I/O gets its first reactor turn.
+		Client {
+			http: reqwest::Client::builder().no_proxy().build().unwrap(),
+			url: url.parse().unwrap(),
+		}
 	}
 
 	fn client(server: &MockServer) -> Client {
@@ -461,14 +494,12 @@ mod tests {
 
 	#[tokio::test]
 	async fn a_grant_within_clock_skew_stays_live() {
-		let server = server(Log::default(), |_| {
-			let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
-			grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
-			ResponseTemplate::new(200).set_body_json(grant)
-		})
-		.await;
+		tokio::time::pause();
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
+		let client = clock_server(Log::default(), grant, false).await;
+		let consumer = client.connect(request()).await.unwrap();
 
-		let consumer = client(&server).connect(request()).await.unwrap();
 		tokio::time::sleep(Duration::from_millis(500)).await;
 		assert!(
 			tokio::time::timeout(Duration::from_millis(100), consumer.closed())
@@ -485,15 +516,16 @@ mod tests {
 
 	#[tokio::test]
 	async fn an_outage_keeps_the_grant_until_expires() {
+		tokio::time::pause();
 		let log = Log::default();
-		let server = server(log.clone(), |request| match request.event {
-			Event::Connect => ResponseTemplate::new(200)
-				.set_body_json(grant(Some(Duration::from_secs(3)), Some(Duration::from_secs(1)))),
-			_ => ResponseTemplate::new(503),
-		})
+		let client = clock_server(
+			log.clone(),
+			grant(Some(Duration::from_secs(3)), Some(Duration::from_secs(1))),
+			false,
+		)
 		.await;
+		let consumer = client.connect(request()).await.unwrap();
 
-		let consumer = client(&server).connect(request()).await.unwrap();
 		tokio::time::sleep(Duration::from_millis(1500)).await;
 		assert!(log.revalidates() >= 1, "re-checks happened");
 		assert_eq!(
@@ -517,16 +549,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn expiry_fires_while_a_recheck_is_stalled() {
-		let server = server(Log::default(), |request| match request.event {
-			Event::Connect => ResponseTemplate::new(200)
-				.set_body_json(grant(Some(Duration::from_secs(3)), Some(Duration::from_secs(1)))),
-			_ => ResponseTemplate::new(200)
-				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(60))))
-				.set_delay(Duration::from_secs(30)),
-		})
+		tokio::time::pause();
+		let client = clock_server(
+			Log::default(),
+			grant(Some(Duration::from_secs(3)), Some(Duration::from_secs(1))),
+			true,
+		)
 		.await;
+		let consumer = client.connect(request()).await.unwrap();
 
-		let consumer = client(&server).connect(request()).await.unwrap();
 		let reason = tokio::time::timeout(Duration::from_secs(5), consumer.closed())
 			.await
 			.expect("expired while the re-check was in flight");
