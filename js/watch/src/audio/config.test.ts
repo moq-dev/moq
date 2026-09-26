@@ -68,6 +68,11 @@ test("an advertised jitter of zero falls back to the codec frame duration", () =
 	expect(playbackJitter(config({ jitter: 60 }))).toBe(Time.Milli(63));
 });
 
+test("a rendition's delay adds to its jitter", () => {
+	expect(playbackJitter(config({ delay: 200 }))).toBe(Time.Milli(223));
+	expect(playbackJitter(config({ delay: 200, jitter: 60 }))).toBe(Time.Milli(263));
+});
+
 test("AAC and MP3 jitter follows their codec frame sizes", () => {
 	expect(playbackJitter(config({ codec: "mp4a.40.2", sampleRate: 48000 }))).toBe(Time.Milli(25));
 	expect(playbackJitter(config({ codec: "mp4a.40.2", sampleRate: 24000 }))).toBe(Time.Milli(49));

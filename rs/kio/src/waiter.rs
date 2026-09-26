@@ -5,7 +5,10 @@ use std::{
 	pin::Pin,
 	// std, not `crate::sync`: loom's Arc has no `downgrade`, and `Waker::from` takes
 	// std's. See `sync.rs`.
-	sync::{Arc, OnceLock, Weak},
+	sync::{
+		Arc, OnceLock, Weak,
+		atomic::{AtomicBool, AtomicU64, Ordering},
+	},
 	task::{Context, Poll, Wake, Waker},
 };
 
@@ -37,7 +40,19 @@ pub struct Waiter {
 	// first `register` (a poll that never parks never allocates it), then reused so multiple
 	// lists in one poll share a single allocation whose `Weak`s die together when the waiter drops.
 	shared: OnceLock<Arc<Waker>>,
+
+	// The list tag each registration was made under, so registering on a list that
+	// still holds this waiter is a no-op. Filled from the front, zero past the end,
+	// and cleared all at once.
+	parked: [AtomicU64; PARKED],
+
+	// A registration found no free slot in `parked`, so a list may hold this waiter
+	// unrecorded and a later registration there would stack a duplicate.
+	lost: AtomicBool,
 }
+
+/// Lists a waiter remembers being parked on. A relay's busiest tasks park on up to 8.
+const PARKED: usize = 8;
 
 impl Waiter {
 	/// Create a new waiter from an async [`Waker`].
@@ -45,6 +60,8 @@ impl Waiter {
 		Self {
 			waker,
 			shared: OnceLock::new(),
+			parked: Default::default(),
+			lost: AtomicBool::new(false),
 		}
 	}
 
@@ -55,7 +72,7 @@ impl Waiter {
 
 	/// Register this waiter with a [`WaiterList`] for future notification.
 	///
-	/// Delegates to [`WaiterList::register`], which is not idempotent.
+	/// Delegates to [`WaiterList::register`], a no-op while the list still holds it.
 	pub fn register(&self, list: &mut WaiterList) {
 		list.register(self);
 	}
@@ -70,6 +87,63 @@ impl Waiter {
 	/// repeat registrations (across polls, or across lists in one poll) share one allocation.
 	fn shared(&self) -> &Arc<Waker> {
 		self.shared.get_or_init(|| Arc::new(self.waker.clone()))
+	}
+
+	/// Record a registration under `tag`, or report one already recorded there.
+	///
+	/// Returns whether the list needs an entry: false only when a record proves it
+	/// still holds this waiter. A record of an older round of the same list is
+	/// replaced, since the drain that ended that round took the entry with it.
+	fn record(&self, tag: u64) -> bool {
+		// Retiring anyway, so skip the bookkeeping: duplicates die with the waiter.
+		if self.lost.load(Ordering::Relaxed) {
+			return true;
+		}
+
+		// The common case, kept a tight loop of its own.
+		if self.parked.iter().any(|slot| slot.load(Ordering::Relaxed) == tag) {
+			return false;
+		}
+
+		let serial = tag >> ROUND_BITS;
+		for slot in &self.parked {
+			let old = slot.load(Ordering::Relaxed);
+			// The first empty slot ends the records. A record of the same list in an
+			// older round is stale: the drain that ended that round took the entry.
+			if old >> ROUND_BITS == serial {
+				// Only a registration on this list, under its lock, writes this slot.
+				slot.store(tag, Ordering::Relaxed);
+				return true;
+			}
+			// Claimed, not stored: another thread registering this waiter on another
+			// list may be taking the same empty slot.
+			if old == 0
+				&& slot
+					.compare_exchange(0, tag, Ordering::Relaxed, Ordering::Relaxed)
+					.is_ok()
+			{
+				return true;
+			}
+		}
+		self.lost.store(true, Ordering::Relaxed);
+		true
+	}
+
+	/// Whether every list holding this waiter is recorded, so registering it again
+	/// cannot stack a duplicate.
+	fn reusable(&self) -> bool {
+		if !self.lost.load(Ordering::Relaxed) {
+			return true;
+		}
+		if self.shared.get().is_some_and(|shared| Arc::weak_count(shared) > 0) {
+			return false;
+		}
+		// Every list let go, so every record is stale: start over.
+		for slot in &self.parked {
+			slot.store(0, Ordering::Relaxed);
+		}
+		self.lost.store(false, Ordering::Relaxed);
+		true
 	}
 
 	/// Poll a foreign [`Future`] against this waiter, so it re-wakes the enclosing
@@ -88,6 +162,8 @@ impl Clone for Waiter {
 		Self {
 			waker: self.waker.clone(),
 			shared: OnceLock::from(shared),
+			parked: std::array::from_fn(|i| AtomicU64::new(self.parked[i].load(Ordering::Relaxed))),
+			lost: AtomicBool::new(self.lost.load(Ordering::Relaxed)),
 		}
 	}
 }
@@ -102,6 +178,37 @@ pub struct WaiterList {
 	entries: SmallVec<[Weak<Waker>; INLINE_WAITERS]>,
 	/// Rotating cursor for opportunistic GC on `register`.
 	cursor: usize,
+	/// A serial unique to this list in the high bits and a drain count in the low
+	/// [`ROUND_BITS`], so an unchanged tag proves an entry made under it is still
+	/// here. Zero until the first registration.
+	tag: u64,
+}
+
+/// Low bits of a list tag that count drains. A wrap takes a fresh serial instead,
+/// so no tag is ever reused.
+const ROUND_BITS: u32 = 16;
+
+/// A serial for a list tag, unique for the life of the process. Handed out in
+/// per-thread blocks so lists created on many threads don't share a cache line.
+fn serial() -> u64 {
+	use std::cell::Cell;
+
+	const BLOCK: u64 = 1024;
+	static NEXT: AtomicU64 = AtomicU64::new(1);
+	thread_local! {
+		static RANGE: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+	}
+
+	RANGE.with(|range| {
+		let (mut next, mut end) = range.get();
+		if next == end {
+			next = NEXT.fetch_add(BLOCK, Ordering::Relaxed);
+			end = next + BLOCK;
+			assert!(end < 1 << (64 - ROUND_BITS), "waiter list serials exhausted");
+		}
+		range.set((next + 1, end));
+		next << ROUND_BITS
+	})
 }
 
 impl WaiterList {
@@ -110,22 +217,28 @@ impl WaiterList {
 		Self {
 			entries: SmallVec::new(),
 			cursor: 0,
+			tag: 0,
 		}
 	}
 
-	/// Register a waiter.
+	/// Register a waiter, a no-op while this list still holds it.
 	///
-	/// Not idempotent: a waiter already in the list is appended again.
-	/// [`Park::hold`] retires any waiter that still has live registrations
-	/// before the next poll, so the in-tree poll path never stacks
-	/// duplicates. Callers that retain a waiter across polls must drop it
-	/// before registering again.
+	/// The list's tag changes on every drain and the waiter records the tag it
+	/// joined under, so a matching record proves the entry is still here and a
+	/// waiter kept across polls re-registers for free.
 	///
 	/// Each call probes at most two slots at the rotating cursor and reuses
 	/// a dead one in place. The cursor advances on each live probe so the
 	/// window covers the list over time. A list about to grow sweeps every
 	/// dead slot first.
 	pub fn register(&mut self, waiter: &Waiter) {
+		if self.tag == 0 {
+			self.tag = serial();
+		}
+		if !waiter.record(self.tag) {
+			return;
+		}
+
 		let new_weak = Arc::downgrade(waiter.shared());
 
 		for _ in 0..self.entries.len().min(2) {
@@ -152,18 +265,34 @@ impl WaiterList {
 		self.entries.push(new_weak);
 	}
 
+	/// Start a new round, so no record of an entry made in the last one matches.
+	fn drained(&mut self) {
+		self.cursor = 0;
+		if self.tag == 0 || self.entries.is_empty() {
+			// No serial yet (a `take` snapshot, say) or no entry: no record can match
+			// the current tag, and a zero tag must stay zero to draw a fresh serial.
+			return;
+		}
+		self.tag += 1;
+		if self.tag & ((1 << ROUND_BITS) - 1) == 0 {
+			// The round wrapped: take a fresh serial rather than reuse a tag.
+			self.tag = 0;
+		}
+	}
+
 	/// Drain all entries into a new [`WaiterList`], leaving this one empty.
 	pub fn take(&mut self) -> Self {
-		self.cursor = 0;
+		self.drained();
 		Self {
 			entries: std::mem::take(&mut self.entries),
 			cursor: 0,
+			tag: 0,
 		}
 	}
 
 	/// Wake all live waiters, draining the list.
 	pub fn wake(&mut self) {
-		self.cursor = 0;
+		self.drained();
 		for waker in self.entries.drain(..).filter_map(|w| w.upgrade()) {
 			waker.wake_by_ref();
 		}
@@ -232,16 +361,21 @@ impl Park {
 	/// (the usual `ready!` on a nested poll) still leaves its registrations live.
 	/// There is no second call to forget.
 	///
-	/// The held waiter is reused when it would wake the same task *and* has no live
-	/// list registrations (the usual case after a wakeup, which drains every entry),
-	/// so a steady-state park allocates nothing. Otherwise it is retired for a fresh
-	/// one: a still-registered waiter must not be registered again, because
-	/// [`WaiterList`] reclaims a slot only once its `Arc` dies, so reusing one with
-	/// live entries would stack duplicates the list could never collect.
+	/// The held waiter is reused when it would wake the same task, so a steady-state
+	/// park allocates nothing even when one list woke it and others still hold it:
+	/// registering again on those is a no-op (see [`WaiterList::register`]). It is
+	/// retired for a fresh one when the task changed, or when it parked on more lists
+	/// than it can record while some still hold it, since re-registering there could
+	/// stack duplicates a list never collects: it reclaims a slot only once its `Arc`
+	/// dies.
+	///
+	/// A reused waiter keeps the registrations its next poll does not renew, so a
+	/// list it has moved on from may wake it once more, spuriously.
 	pub fn hold(&mut self, cx: &Context<'_>) -> &Waiter {
-		let reuse = self.0.as_ref().is_some_and(|waiter| {
-			cx.waker().will_wake(&waiter.waker) && waiter.shared.get().is_none_or(|shared| Arc::weak_count(shared) == 0)
-		});
+		let reuse = self
+			.0
+			.as_ref()
+			.is_some_and(|waiter| cx.waker().will_wake(&waiter.waker) && waiter.reusable());
 		if !reuse {
 			// The outgoing waiter drops here, killing its registrations so the lists
 			// can reclaim those slots.
@@ -721,10 +855,8 @@ mod tests {
 	/// anything ever parks. Growing either is invisible at the call site, so bound
 	/// them: a diff that has to raise these numbers should say why.
 	///
-	/// A bound and not an equality, because `SmallVec` stores its inline array in a
-	/// union or a tagged enum depending on whether anything else in the build graph
-	/// enabled `smallvec/union` (glib and wgpu-hal both do). That moves the list
-	/// between 48 B and 56 B for reasons that have nothing to do with kio.
+	/// kio enables `smallvec/union`, which drops the inline array's enum tag, so the
+	/// list costs the same whatever else is in the build graph.
 	#[test]
 	#[cfg(target_pointer_width = "64")]
 	fn the_list_stays_small() {
@@ -831,12 +963,90 @@ mod tests {
 	}
 
 	#[test]
-	fn register_appends_a_live_waiter() {
+	fn register_is_idempotent_until_the_list_drains() {
 		let mut list = WaiterList::new();
 		let waiter = Waiter::new(Waker::noop().clone());
 		waiter.register(&mut list);
 		waiter.register(&mut list);
-		assert_eq!(list.entries.len(), 2, "a live waiter must not dedup");
+		assert_eq!(list.entries.len(), 1, "a waiter the list holds must not stack");
+
+		list.wake();
+		waiter.register(&mut list);
+		assert_eq!(list.entries.len(), 1, "a drained waiter must register again");
+	}
+
+	/// The relay's shape: a task parks on a few lists, one of them wakes it, and the
+	/// rest stay quiet. Retiring the waiter there cost an `Arc` per poll.
+	#[test]
+	fn partial_wakes_reuse_the_waiter() {
+		let waker = Waker::from(Arc::new(Flag::default()));
+		let cx = Context::from_waker(&waker);
+		let mut park = Park::default();
+		let mut lists: Vec<_> = (0..PARKED).map(|_| WaiterList::new()).collect();
+		let first = park.hold(&cx).shared().clone();
+		for round in 0..100 {
+			let waiter = park.hold(&cx);
+			assert!(Arc::ptr_eq(&first, waiter.shared()), "retired a recorded waiter");
+			for list in &mut lists {
+				waiter.register(list);
+			}
+			lists[round % PARKED].wake();
+		}
+		for list in &lists {
+			assert!(list.entries.len() <= 1, "re-registration stacked a duplicate");
+		}
+	}
+
+	/// The tag moves with the list, so a list that moved still recognizes its waiter.
+	#[test]
+	fn a_moved_list_still_holds_its_waiter() {
+		let waiter = Waiter::new(Waker::noop().clone());
+		let mut list = WaiterList::new();
+		waiter.register(&mut list);
+
+		let mut moved = std::mem::take(&mut list);
+		waiter.register(&mut moved);
+		assert_eq!(moved.entries.len(), 1);
+
+		// The emptied original is a different list now.
+		waiter.register(&mut list);
+		assert_eq!(list.entries.len(), 1);
+	}
+
+	/// A `take` snapshot has no serial, and waking it must not invent one: every
+	/// snapshot would share it, and a reused one would skip a real registration.
+	#[test]
+	fn a_woken_snapshot_draws_a_fresh_serial() {
+		let waiter = Waiter::new(Waker::noop().clone());
+		let mut snapshots = [WaiterList::new(), WaiterList::new()].map(|mut list| {
+			Waiter::new(Waker::noop().clone()).register(&mut list);
+			let mut snapshot = list.take();
+			snapshot.wake();
+			snapshot
+		});
+		for snapshot in &mut snapshots {
+			waiter.register(snapshot);
+			assert_eq!(snapshot.entries.len(), 1, "a snapshot skipped a real registration");
+		}
+	}
+
+	/// A tag must never repeat, or a stale record would skip a registration the list
+	/// no longer holds and the wakeup would be lost.
+	#[test]
+	fn a_wrapped_round_takes_a_fresh_serial() {
+		let stale = Waiter::new(Waker::noop().clone());
+		let mut list = WaiterList::new();
+		stale.register(&mut list);
+		list.wake();
+
+		// Skip ahead to the last round, then drain once more.
+		list.tag |= (1 << ROUND_BITS) - 1;
+		let other = Waiter::new(Waker::noop().clone());
+		other.register(&mut list);
+		list.wake();
+
+		stale.register(&mut list);
+		assert_eq!(list.entries.len(), 1, "a wrapped round matched a stale record");
 	}
 
 	#[test]
