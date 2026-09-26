@@ -52,6 +52,27 @@ test("an end request carries its facts beside the rest", () => {
 	expect(invalid.reason).toBe("invalid");
 });
 
+test("a SETUP token parses as the Rust vector", () => {
+	// What `moq_auth::Request` serializes a CAT of bytes 00 fb ff to.
+	const request = RequestSchema.parse(
+		JSON.parse(
+			'{"id":"00ff","event":"connect","node":"relay-1","transport":"quic","path":"/demo/room","token":{"kind":1,"value":"APv_"}}',
+		),
+	);
+	expect(request.token).toEqual({ kind: 1, value: "APv_" });
+
+	expect(() =>
+		RequestSchema.parse({
+			id: "1",
+			event: "connect",
+			node: "n",
+			transport: "quic",
+			path: "/",
+			token: { kind: 0, value: "AP+/" },
+		}),
+	).toThrow();
+});
+
 test("a connect must not carry end facts, and an unknown transport is refused", () => {
 	expect(() => RequestSchema.parse({ id: "1", event: "end", node: "n", transport: "quic", path: "/" })).toThrow();
 	expect(() =>

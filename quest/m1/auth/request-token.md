@@ -16,8 +16,8 @@ on the unknown key, and the legacy drafts silently ignore it.
 
 ## Plan
 
-- Decode with the [Setup token](/quest/m1/setup-token.md) structure and
-  rules: `USE_VALUE` yields the token, `REGISTER` is a value since we
+- Decode with the SETUP option's structure and rules
+  (`rs/moq-net/src/ietf/token.rs`, `js/net/src/ietf/token.ts`): `USE_VALUE` yields the token, `REGISTER` is a value since we
   advertise no `MAX_AUTH_TOKEN_CACHE_SIZE`, and `DELETE` or `USE_ALIAS`
   closes with `PROTOCOL_VIOLATION`. Both decoder families change: the strict
   `decode_params!` path, which rejects the key today, and the generic KVP
@@ -64,6 +64,5 @@ to). Wire: none new; the parameter already exists in every supported draft.
 
 ## Required
 
-- [Setup token](/quest/m1/setup-token.md) - supplies the token decoder
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the per-token
   lease and `Client::attach` path each request uses

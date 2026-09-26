@@ -136,7 +136,7 @@ impl Registry {
 ///
 /// `id` and every scalar are exact. `path` is a [`Pattern`] against the dialed
 /// path. `remote` is an IP or CIDR with the port dropped and IPv4-mapped IPv6
-/// folded. `query` is not a field: it may carry the credential.
+/// folded. `query` and `token` are not fields: they carry the credential.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Filter {
 	/// Session id.
@@ -402,7 +402,7 @@ impl IntoResponse for Error {
 }
 
 /// One live session as the list route returns it: the request the server saw,
-/// minus `query`, plus when it was admitted.
+/// minus its credentials (`query` and `token`), plus when it was admitted.
 #[serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -453,7 +453,7 @@ impl View {
 /// `GET /sessions` body.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct List {
-	/// Matching sessions, `query` omitted.
+	/// Matching sessions, credentials omitted.
 	pub sessions: Vec<View>,
 }
 
@@ -530,14 +530,21 @@ mod tests {
 	}
 
 	#[test]
-	fn list_omits_query() {
+	fn list_omits_credentials() {
 		let registry = Registry::new();
-		let _reg = registry.register(request("abc", "/room", "127.0.0.1:1"));
+		let mut session = request("abc", "/room", "127.0.0.1:1");
+		session.query = Some("jwt=secret".into());
+		session.token = Some(moq_auth::Token {
+			kind: moq_auth::Token::OUT_OF_BAND,
+			value: b"secret".to_vec(),
+		});
+		let _reg = registry.register(session);
 		let list = registry.list(&Filter::default());
 		assert_eq!(list.len(), 1);
 		assert_eq!(list[0].id, "abc");
 		let json = serde_json::to_value(&list[0]).unwrap();
 		assert!(json.get("query").is_none());
+		assert!(json.get("token").is_none());
 	}
 
 	#[tokio::test]

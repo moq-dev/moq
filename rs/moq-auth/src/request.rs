@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use serde_with::base64::{Base64, UrlSafe};
+use serde_with::formats::Unpadded;
 use serde_with::{DurationSecondsWithFrac, TimestampSeconds, serde_as};
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime};
@@ -8,8 +10,8 @@ use crate::lease::Reason;
 /// Everything a relay knows about a session, sent to the auth server on every event.
 ///
 /// Nothing is parsed on the relay's behalf: the server keys policy on the raw
-/// [`path`](Self::path) and [`query`](Self::query), so no query parameter is special
-/// and a credential can be whatever the server understands. The same shape carries
+/// [`path`](Self::path), [`query`](Self::query), and [`token`](Self::token), so no
+/// query parameter is special and a credential can be whatever the server understands. The same shape carries
 /// every [`Event`]; an `end` adds what the session did.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -46,6 +48,9 @@ pub struct Request {
 	/// The raw query string, without the leading `?`.
 	pub query: Option<String>,
 
+	/// The credential a moq-transport client presented in its SETUP.
+	pub token: Option<Token>,
+
 	/// The direction the client declared at SETUP; absent means both.
 	pub role: Option<Role>,
 
@@ -73,10 +78,29 @@ impl Request {
 			alpn: None,
 			path: path.into(),
 			query: None,
+			token: None,
 			role: None,
 			tls: None,
 		}
 	}
+}
+
+/// A credential from a moq-transport SETUP's `AUTHORIZATION TOKEN` option, unparsed.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Token {
+	/// The moq-transport Token Type, naming how [`value`](Self::value) is encoded.
+	pub kind: u64,
+	/// The token bytes, base64url without padding on the wire.
+	#[serde_as(as = "Base64<UrlSafe, Unpadded>")]
+	pub value: Vec<u8>,
+}
+
+impl Token {
+	/// Token Type 0: a format negotiated out of band; `moq auth serve` reads it as a JWT.
+	pub const OUT_OF_BAND: u64 = 0x0;
+	/// Token Type 1: a Common Access Token.
+	pub const CAT: u64 = 0x1;
 }
 
 /// The lifecycle moment a [`Request`] reports.
@@ -257,6 +281,24 @@ mod tests {
 			serde_json::to_string(&request).unwrap(),
 			r#"{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}"#
 		);
+	}
+
+	/// The exact bytes `js/auth/src/contract.test.ts` parses: the value is base64url, so
+	/// bytes that are not text survive the JSON unchanged.
+	#[test]
+	fn a_setup_token_serializes_as_base64url() {
+		let mut request = Request::new("relay-1", Transport::Quic, "/demo/room");
+		request.id = "00ff".into();
+		request.token = Some(Token {
+			kind: Token::CAT,
+			value: vec![0x00, 0xfb, 0xff],
+		});
+		let json = serde_json::to_string(&request).unwrap();
+		assert_eq!(
+			json,
+			r#"{"id":"00ff","event":"connect","node":"relay-1","transport":"quic","path":"/demo/room","token":{"kind":1,"value":"APv_"}}"#
+		);
+		assert_eq!(serde_json::from_str::<Request>(&json).unwrap(), request);
 	}
 
 	#[test]
