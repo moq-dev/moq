@@ -26,4 +26,7 @@ const producer = new Snapshot.Producer({ track, compression: "deflate" });
 producer.update(payload);
 ```
 
+A payload is stamped when written, unless you pass its capture time:
+`producer.update(payload, captured)`.
+
 The Rust twin is [`moq-binary`](/lib/rs/moq-binary).

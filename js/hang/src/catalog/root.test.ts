@@ -113,7 +113,11 @@ test("delay parses beside jitter and zero is absent", () => {
 			renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" }, jitter: 34, delay: 200 } },
 		},
 		text: { renditions: { captions: { format: "vtt", container: { kind: "legacy" }, delay: 120 } } },
+		json: { tracks: { gps: { mode: "stream", jitter: 10, delay: 250 } } },
+		binary: { tracks: { frames: { mode: "snapshot", delay: 0 } } },
 	});
+	expect(parsed.json?.tracks.gps?.delay).toBe(u53(250));
+	expect(parsed.binary?.tracks.frames?.delay).toBeUndefined();
 	expect(parsed.audio?.renditions.audio?.delay).toBeUndefined();
 	expect(parsed.video?.renditions.video?.delay).toBe(u53(200));
 	expect(parsed.text?.renditions.captions?.delay).toBe(u53(120));

@@ -307,12 +307,46 @@ mod test {
 	#[test]
 	fn unchanged_value_writes_nothing() {
 		let (mut producer, track) = producer(Config::default());
-		producer.update(&json!({ "a": 1 })).unwrap();
-		producer.update(&json!({ "a": 1 })).unwrap();
+		assert_eq!(producer.update(&json!({ "a": 1 })).unwrap(), Some(7));
+		assert_eq!(
+			producer.update(&json!({ "a": 1 })).unwrap(),
+			None,
+			"an unchanged value reports that nothing was written"
+		);
 		producer.finish().unwrap();
 
 		assert_eq!(track.latest(), Some(0));
 		assert_eq!(drain(track), vec![json!({ "a": 1 })]);
+	}
+
+	/// A stamped value is written at its capture time, snapshot and delta alike, and the returned
+	/// size is the encoded frame.
+	#[test]
+	fn a_stamped_update_writes_its_capture_time() {
+		let (mut producer, _track) = producer(cfg(100));
+		let mut groups = producer.consume();
+		let first = moq_net::Timestamp::from_millis(1_000).unwrap();
+		let second = moq_net::Timestamp::from_millis(2_000).unwrap();
+		let value = json!({ "a": 1, "b": "x".repeat(64) });
+		let size = producer
+			.update(crate::Payload::from(&value).with_timestamp(first))
+			.unwrap();
+		let changed = json!({ "a": 2, "b": "x".repeat(64) });
+		let delta = producer
+			.update(crate::Payload::from(&changed).with_timestamp(second))
+			.unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected a group");
+		};
+		for (stamp, size) in [(first, size), (second, delta)] {
+			let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+				panic!("expected a frame");
+			};
+			assert_eq!(frame.timestamp.as_micros(), stamp.as_micros());
+			assert_eq!(size, Some(frame.payload.len()));
+		}
 	}
 
 	#[test]

@@ -30,6 +30,23 @@
 //! The catalog entry is written when the producer is created and removed when it drops, so a track
 //! is never advertised without a publisher behind it.
 //!
+//! A payload that carries its capture time on the broadcast [`Clock`](crate::Clock) is written at
+//! that time, and the entry advertises how late payloads reach the transport as its `jitter` and
+//! `delay`, the way a media rendition does:
+//!
+//! ```no_run
+//! # fn example(
+//! #     thumbnail: &mut moq_mux::binary::Snapshot,
+//! #     catalog: &moq_mux::catalog::Producer,
+//! #     jpeg: bytes::Bytes,
+//! #     captured: std::time::Instant,
+//! # ) -> moq_mux::Result<()> {
+//! let capture = catalog.clock().capture(captured)?;
+//! thumbnail.update(moq_mux::binary::Payload::from(jpeg).with_capture(capture))?;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! Read one back off the catalog, naming it once:
 //!
 //! ```no_run
@@ -100,6 +117,48 @@ impl<E: CatalogExt> IntoRendition<E, BinaryConfig> for Config {
 	}
 }
 
+/// A payload to publish, and optionally when it was captured.
+///
+/// Converts from anything that converts into [`Bytes`], so a bare payload publishes as before and
+/// measures only the entry's bitrate.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Payload {
+	/// The bytes to publish.
+	pub data: Bytes,
+
+	/// When the payload was captured, written as its frame timestamp and measured as the entry's
+	/// `jitter` and `delay`. `None` stamps it when written and measures neither.
+	pub capture: Option<crate::Capture>,
+}
+
+impl Payload {
+	/// Stamp the payload with its capture time.
+	pub fn with_capture(mut self, capture: crate::Capture) -> Self {
+		self.capture = Some(capture);
+		self
+	}
+}
+
+impl<B: Into<Bytes>> From<B> for Payload {
+	fn from(data: B) -> Self {
+		Self {
+			data: data.into(),
+			capture: None,
+		}
+	}
+}
+
+impl From<Payload> for moq_binary::Payload {
+	fn from(payload: Payload) -> Self {
+		let inner = moq_binary::Payload::from(payload.data);
+		match payload.capture {
+			Some(capture) => inner.with_timestamp(capture.timestamp()),
+			None => inner,
+		}
+	}
+}
+
 /// Fix `config`'s mode and return whether its frames are compressed.
 ///
 /// Errors on a compression this build can't write, rather than advertising one the frames don't use,
@@ -155,11 +214,11 @@ impl<E: CatalogExt> Snapshot<E> {
 	}
 
 	/// Publish a new payload, superseding the previous one.
-	pub fn update(&mut self, payload: impl Into<Bytes>) -> crate::Result<()> {
+	pub fn update(&mut self, payload: impl Into<Payload>) -> crate::Result<()> {
 		let payload = payload.into();
-		let len = payload.len();
-		self.inner.update(payload)?;
-		self.listing.record(|| len)
+		let capture = payload.capture;
+		let size = self.inner.update(payload)?;
+		self.listing.record(size, capture)
 	}
 
 	/// Finish the track and retire its catalog entry.
@@ -227,20 +286,23 @@ impl<E: CatalogExt> Stream<E> {
 	/// [`moq_binary::stream::Producer::append`]) and retires the catalog entry with it. A catalog
 	/// error publishing the measured bitrate is returned after the payload was written, so the track
 	/// stays open and a retry would duplicate it.
-	pub fn append(&mut self, payload: impl Into<Bytes>) -> crate::Result<()> {
+	pub fn append(&mut self, payload: impl Into<Payload>) -> crate::Result<()> {
 		let payload = payload.into();
-		let len = payload.len();
-		if let Err(err) = self.inner.append(payload) {
-			// The inner producer has already closed the track. Dropping the listing retires the
-			// catalog entry too: waiting for the handle to drop would keep advertising a track that
-			// can no longer accept records, so a consumer discovering it now would subscribe to an
-			// already-ended log.
-			self.listing = None;
-			return Err(err.into());
-		}
+		let capture = payload.capture;
+		let size = match self.inner.append(payload) {
+			Ok(size) => size,
+			Err(err) => {
+				// The inner producer has already closed the track. Dropping the listing retires the
+				// catalog entry too: waiting for the handle to drop would keep advertising a track
+				// that can no longer accept records, so a consumer discovering it now would subscribe
+				// to an already-ended log.
+				self.listing = None;
+				return Err(err.into());
+			}
+		};
 
 		match &mut self.listing {
-			Some(listing) => listing.record(|| len),
+			Some(listing) => listing.record(size, capture),
 			None => Ok(()),
 		}
 	}
@@ -388,6 +450,69 @@ mod test {
 			out.push(payload);
 		}
 		out
+	}
+
+	/// A track whose payloads reach the transport later than another's captures advertises the gap
+	/// as `delay`, while one written without capture times advertises neither `delay` nor `jitter`.
+	#[test]
+	fn a_late_capture_is_delay() {
+		let (mut broadcast, catalog) = catalog();
+		let mut fast = catalog
+			.binary_stream(track(&mut broadcast, "fast"), Config::default())
+			.unwrap();
+		let mut slow = catalog
+			.binary_stream(track(&mut broadcast, "slow"), Config::default())
+			.unwrap();
+		let mut bare = catalog
+			.binary_stream(track(&mut broadcast, "bare"), Config::default())
+			.unwrap();
+
+		let anchor = std::time::Instant::now();
+		for i in 0..20u64 {
+			let now = moq_net::Timestamp::from_micros(i * 100_000).unwrap();
+			let at = |late: u64| anchor + std::time::Duration::from_millis(i * 100 + late);
+			let fast = fast.listing.as_mut().unwrap();
+			fast.record_at(now, 100, Some((now, at(0)))).unwrap();
+			let slow = slow.listing.as_mut().unwrap();
+			slow.record_at(now, 100, Some((now, at(200)))).unwrap();
+			bare.listing.as_mut().unwrap().record_at(now, 100, None).unwrap();
+		}
+
+		assert_eq!(entry(&catalog, "fast").delay, None);
+		assert_eq!(
+			entry(&catalog, "slow").delay,
+			Some(std::time::Duration::from_millis(200))
+		);
+		assert_eq!(
+			entry(&catalog, "slow").jitter,
+			None,
+			"a constant lateness is not jitter"
+		);
+		let bare = entry(&catalog, "bare");
+		assert_eq!((bare.delay, bare.jitter), (None, None));
+	}
+
+	/// A captured payload measures through the real clock: written right after capture, it
+	/// advertises no delay beyond the scheduling noise of the test itself.
+	#[test]
+	fn a_capture_measures_through_the_clock() {
+		let (mut broadcast, catalog) = catalog();
+		let mut telemetry = catalog
+			.binary_stream(track(&mut broadcast, "telemetry"), Config::default())
+			.unwrap();
+
+		let clock = catalog.clock();
+		let captured = std::time::Instant::now();
+		telemetry
+			.append(Payload::from(&b"now"[..]).with_capture(clock.capture(captured).unwrap()))
+			.unwrap();
+		let late = captured - std::time::Duration::from_secs(1);
+		telemetry
+			.append(Payload::from(&b"late"[..]).with_capture(clock.capture(late).unwrap()))
+			.unwrap();
+
+		let jitter = entry(&catalog, "telemetry").jitter.expect("a late capture is jitter");
+		assert!(jitter >= std::time::Duration::from_secs(1), "{jitter:?}");
 	}
 
 	#[test]
@@ -632,7 +757,7 @@ mod test {
 			// 40ms payloads of 5 kB: 1 Mbps, over more than the bitrate window.
 			for i in 0..60u64 {
 				let now = moq_net::Timestamp::from_micros(i * 40_000).unwrap();
-				telemetry.listing.as_mut().unwrap().record_at(now, 5_000).unwrap();
+				telemetry.listing.as_mut().unwrap().record_at(now, 5_000, None).unwrap();
 			}
 
 			let entry = &catalog.snapshot().ext.mavlink["telemetry"];
@@ -640,10 +765,9 @@ mod test {
 			assert_eq!(entry.binary.jitter, None, "write spacing is not a flush delay");
 		}
 
-		/// A supplied bitrate is authoritative, so writes aren't measured at all: for JSON that would
-		/// be a second serialization per write, for nothing.
+		/// A supplied bitrate is authoritative, while a capture time still measures jitter and delay.
 		#[test]
-		fn a_supplied_bitrate_skips_measurement() {
+		fn a_supplied_bitrate_is_kept() {
 			let (mut broadcast, catalog) = catalog();
 			let mut entry = mavlink(1);
 			entry.binary.bitrate = Some(64_000);
@@ -652,9 +776,17 @@ mod test {
 				.unwrap();
 
 			let listing = telemetry.listing.as_mut().unwrap();
-			listing
-				.record(|| panic!("measured a write despite a supplied bitrate"))
-				.unwrap();
+			let anchor = std::time::Instant::now();
+			for i in 0..60u64 {
+				let now = moq_net::Timestamp::from_micros(i * 40_000).unwrap();
+				// Every other payload reaches the transport 10ms later than the rest.
+				let written = anchor + std::time::Duration::from_micros(i * 40_000 + (i % 2) * 10_000);
+				listing.record_at(now, 5_000, Some((now, written))).unwrap();
+			}
+
+			let entry = &catalog.snapshot().ext.mavlink["telemetry"];
+			assert_eq!(entry.binary.bitrate, Some(64_000));
+			assert_eq!(entry.binary.jitter, Some(std::time::Duration::from_millis(10)));
 			assert_eq!(catalog.snapshot().ext.mavlink["telemetry"].binary.bitrate, Some(64_000));
 		}
 	}

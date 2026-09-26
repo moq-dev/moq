@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 
 use super::Encoder;
-use crate::Result;
+use crate::{Payload, Result};
 
 pub use super::Config;
 
@@ -70,8 +70,13 @@ impl<T: Serialize> Producer<T> {
 	/// failure is surfaced rather than papered over with a second group. The track is aborted rather
 	/// than closed cleanly, so a consumer sees the failure instead of a log that merely looks
 	/// complete. Every later append fails on the ended track.
-	pub fn append(&mut self, value: &T) -> Result<()> {
-		self.inner.lock().unwrap().append(value)
+	///
+	/// Returns the encoded size of the frame written.
+	pub fn append<'a>(&mut self, value: impl Into<Payload<'a, T>>) -> Result<usize>
+	where
+		T: 'a,
+	{
+		self.inner.lock().unwrap().append(value.into())
 	}
 
 	/// Finish the track, closing the group.
@@ -91,14 +96,14 @@ struct Inner<T> {
 }
 
 impl<T: Serialize> Inner<T> {
-	fn append(&mut self, value: &T) -> Result<()> {
+	fn append(&mut self, payload: Payload<'_, T>) -> Result<usize> {
 		// Split the borrow so `record` can hold the encoder while `track` is written through.
 		let Inner { track, encoder } = self;
 
 		// Encode first, so a value that can't be serialized doesn't publish an empty group that
 		// subscribers would advance into and wait on. Opening the group afterwards is safe because
 		// `record` guards the window: any failure below drops it uncommitted.
-		let record = match encoder.encode(value) {
+		let record = match encoder.encode(payload.value) {
 			Ok(record) => record,
 			Err(err) => {
 				// A record that can't be encoded is as lost as one the group rejects: the log is
@@ -112,7 +117,10 @@ impl<T: Serialize> Inner<T> {
 		let opened = track.open();
 		let published = opened.is_ok();
 		let result = match opened {
-			Ok(()) => track.write(record.payload()),
+			Ok(()) => track.write(
+				payload.timestamp.unwrap_or_else(moq_net::Timestamp::now),
+				record.payload(),
+			),
 			Err(err) => Err(err),
 		};
 
@@ -138,8 +146,9 @@ impl<T: Serialize> Inner<T> {
 			return Err(err.into());
 		}
 
+		let size = record.payload().len();
 		record.commit();
-		Ok(())
+		Ok(size)
 	}
 
 	fn finish(&mut self) -> Result<()> {
@@ -164,10 +173,14 @@ impl Track {
 		Ok(())
 	}
 
-	/// Append one encoded record to the log's group.
-	fn write(&mut self, payload: &bytes::Bytes) -> std::result::Result<(), moq_net::Error> {
+	/// Append one encoded record to the log's group at `timestamp`.
+	fn write(
+		&mut self,
+		timestamp: moq_net::Timestamp,
+		payload: &bytes::Bytes,
+	) -> std::result::Result<(), moq_net::Error> {
 		let group = self.group.as_mut().expect("a group is open");
-		group.write_frame(moq_net::Timestamp::now(), payload.clone())
+		group.write_frame(timestamp, payload.clone())
 	}
 
 	/// End the track with an error, so a consumer sees the failure rather than a clean end.

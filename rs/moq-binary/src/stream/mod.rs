@@ -96,6 +96,32 @@ mod test {
 		assert_eq!(drain(track, false), expected);
 	}
 
+	/// Each record keeps its own capture time, and a bare payload is stamped when written.
+	#[test]
+	fn a_stamped_append_writes_its_capture_time() {
+		let (mut producer, _track) = producer(true);
+		let mut groups = producer.consume();
+		let captured = moq_net::Timestamp::from_millis(1_234).unwrap();
+		let first = producer
+			.append(crate::Payload::from(vec![1u8; 4096]).with_timestamp(captured))
+			.unwrap();
+		producer.append(vec![2u8; 16]).unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected a group");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("expected a frame");
+		};
+		assert_eq!(frame.timestamp.as_micros(), captured.as_micros());
+		assert_eq!(first, frame.payload.len(), "the size is the compressed frame");
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("expected a frame");
+		};
+		assert_ne!(frame.timestamp.as_micros(), captured.as_micros());
+	}
+
 	#[test]
 	fn compressed_roundtrip_in_order() {
 		let (mut producer, track) = producer(true);

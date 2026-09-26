@@ -402,3 +402,15 @@ test("snapshot consumer propagates a non-gap frame failure", async () => {
 	group.close(new NetError.Stream(StreamCode.Internal));
 	await expect(consumer.next()).rejects.toMatchObject({ code: StreamCode.Internal });
 });
+
+test("a capture timestamp is written on snapshots and deltas alike", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Value>({ track, deltaRatio: 100 });
+	producer.update({ a: 1, b: "x".repeat(64) }, Time.Timestamp.fromMillis(1_000));
+	producer.update({ a: 2, b: "x".repeat(64) }, Time.Timestamp.fromMillis(2_000));
+	producer.finish();
+
+	const group = await track.subscribe().ordered().nextGroup();
+	expect((await group?.readFrame())?.timestamp.as(Time.Timescale.MILLI)).toBe(1_000);
+	expect((await group?.readFrame())?.timestamp.as(Time.Timescale.MILLI)).toBe(2_000);
+});

@@ -19,10 +19,6 @@ releases it.
 - Take this up when an application needs synchronized data playback; until
   then, a raw consumer reads payloads as they arrive.
 
-## Required
-
-- [Data jitter](/quest/m1/data-jitter.md) - data tracks advertise the `delay` and `jitter` this reads
-
 ## Related
 
 - [Cross-track correlation](/quest/m2/teleop/correlation.md) - joins recordings on the broadcast clock rather than live playout

@@ -40,8 +40,10 @@ export class Producer {
 	 * log this mode promises, so the failure is surfaced rather than papered over with a second
 	 * group. The group is aborted rather than closed cleanly, so a consumer sees the failure
 	 * instead of a log that merely looks complete. Every later append fails on the closed track.
+	 *
+	 * `timestamp` is when the payload was captured, written as its frame timestamp. Defaults to now.
 	 */
-	append(payload: Uint8Array): void {
+	append(payload: Uint8Array, timestamp: Time.Timestamp = Time.Timestamp.now()): void {
 		// A payload no consumer could decode is as terminal as one the track rejects: consumers all
 		// decode with `@moq/flate`'s default cap, so this would publish a record none of them could
 		// read. Ends the track like any other lost record, and aborts the group the same way the
@@ -62,7 +64,7 @@ export class Producer {
 		const encoded = this.#flate ? this.#flate.frame(payload) : payload;
 
 		try {
-			this.#group.writeFrame({ payload: encoded, timestamp: Time.Timestamp.now() });
+			this.#group.writeFrame({ payload: encoded, timestamp });
 		} catch (err) {
 			// The payload never reached the wire, so the log has a hole in it, which is not the
 			// lossless log this mode promises. Continuing into a second group would hand consumers a

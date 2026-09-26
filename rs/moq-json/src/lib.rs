@@ -25,6 +25,34 @@ pub mod window;
 
 pub use crate::diff::{Diff, diff};
 
+/// A value to publish, and optionally when it was captured.
+///
+/// Converts from a bare `&T`, so a plain value publishes as before, stamped with
+/// [`Timestamp::now`](moq_net::Timestamp::now) when it is written.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Payload<'a, T> {
+	/// The value to publish.
+	pub value: &'a T,
+
+	/// When the value was captured, written as its frame timestamp. `None` stamps it when written.
+	pub timestamp: Option<moq_net::Timestamp>,
+}
+
+impl<T> Payload<'_, T> {
+	/// Stamp the value with its capture time instead of the time it is written.
+	pub fn with_timestamp(mut self, timestamp: moq_net::Timestamp) -> Self {
+		self.timestamp = Some(timestamp);
+		self
+	}
+}
+
+impl<'a, T> From<&'a T> for Payload<'a, T> {
+	fn from(value: &'a T) -> Self {
+		Self { value, timestamp: None }
+	}
+}
+
 /// How a JSON track compresses its frames.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Compression {

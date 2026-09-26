@@ -51,18 +51,22 @@ export class Producer<T> {
 		group.close();
 	}
 
-	/** Publish a new value, emitting a snapshot or delta automatically. No-op if unchanged. */
-	update(value: T): void {
+	/**
+	 * Publish a new value, emitting a snapshot or delta automatically. No-op if unchanged.
+	 *
+	 * `timestamp` is when the value was captured, written as its frame timestamp. Defaults to now.
+	 */
+	update(value: T, timestamp: Time.Timestamp = Time.Timestamp.now()): void {
 		const frame = this.#encoder.update(value);
 		if (!frame) return;
 
 		// A throw here leaves the frame uncommitted, so the next update resynchronizes with a fresh
 		// snapshot. A delta against a snapshot no consumer ever saw would be unreadable.
-		this.#write(frame);
+		this.#write(frame, timestamp);
 		frame.commit();
 	}
 
-	#write(encoded: Encoded): void {
+	#write(encoded: Encoded, timestamp: Time.Timestamp): void {
 		// Check before touching a group. A keyframe closes the previous group and publishes its
 		// replacement before the frame is written, so discovering the limit inside `writeFrame` would
 		// leave an empty newest group behind: a snapshot consumer jumps to the newest, so the last
@@ -77,7 +81,7 @@ export class Producer<T> {
 
 			const group = this.#track.appendGroup();
 			try {
-				group.writeFrame({ payload: encoded.payload, timestamp: Time.Timestamp.now() });
+				group.writeFrame({ payload: encoded.payload, timestamp });
 			} catch (err) {
 				// The group carries no frames, so close it rather than leaving it open on the track. A
 				// rejected frame doesn't close the track, and a consumer that already advanced into this
@@ -98,7 +102,7 @@ export class Producer<T> {
 		}
 
 		if (!this.#group) throw new Error("delta with no open group");
-		this.#group.writeFrame({ payload: encoded.payload, timestamp: Time.Timestamp.now() });
+		this.#group.writeFrame({ payload: encoded.payload, timestamp });
 	}
 
 	/**

@@ -44,6 +44,37 @@ impl Compression {
 	}
 }
 
+/// A payload to publish, and optionally when it was captured.
+///
+/// Converts from anything that converts into [`Bytes`](bytes::Bytes), so a bare payload publishes
+/// as before, stamped with [`Timestamp::now`](moq_net::Timestamp::now) when it is written.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Payload {
+	/// The bytes to publish.
+	pub data: bytes::Bytes,
+
+	/// When the payload was captured, written as its frame timestamp. `None` stamps it when written.
+	pub timestamp: Option<moq_net::Timestamp>,
+}
+
+impl Payload {
+	/// Stamp the payload with its capture time instead of the time it is written.
+	pub fn with_timestamp(mut self, timestamp: moq_net::Timestamp) -> Self {
+		self.timestamp = Some(timestamp);
+		self
+	}
+}
+
+impl<B: Into<bytes::Bytes>> From<B> for Payload {
+	fn from(data: B) -> Self {
+		Self {
+			data: data.into(),
+			timestamp: None,
+		}
+	}
+}
+
 /// Errors produced while publishing or consuming binary payloads.
 #[derive(thiserror::Error, Debug, Clone)]
 #[non_exhaustive]

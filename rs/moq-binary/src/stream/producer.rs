@@ -2,9 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use bytes::Bytes;
-
-use crate::Result;
+use crate::{Payload, Result};
 
 pub use super::Config;
 
@@ -52,7 +50,9 @@ impl Producer {
 	/// log this mode promises, so the failure is surfaced rather than papered over with a second
 	/// group. The group is aborted rather than closed cleanly, so a consumer sees the failure
 	/// instead of a log that merely looks complete. Every later append fails on the closed track.
-	pub fn append(&mut self, payload: impl Into<Bytes>) -> Result<()> {
+	///
+	/// Returns the frame's encoded size.
+	pub fn append(&mut self, payload: impl Into<Payload>) -> Result<usize> {
 		self.inner.lock().unwrap().append(payload.into())
 	}
 
@@ -74,7 +74,10 @@ struct Inner {
 }
 
 impl Inner {
-	fn append(&mut self, payload: Bytes) -> Result<()> {
+	fn append(&mut self, payload: Payload) -> Result<usize> {
+		let timestamp = payload.timestamp.unwrap_or_else(moq_net::Timestamp::now);
+		let payload = payload.data;
+
 		// A payload no consumer could decode is as terminal as one the track rejects: the log is
 		// missing a record either way, and carrying on would present that gap as a complete log.
 		// Checked before the group is opened, so nothing is published, and routed through the same
@@ -95,9 +98,10 @@ impl Inner {
 			None => payload,
 		};
 
+		let size = payload.len();
 		let group = self.group.as_mut().expect("a group is open");
-		let Err(err) = group.write_frame(moq_net::Timestamp::now(), payload) else {
-			return Ok(());
+		let Err(err) = group.write_frame(timestamp, payload) else {
+			return Ok(size);
 		};
 
 		// The payload never reached the wire, so the log has a hole in it, which is not the lossless
