@@ -21,4 +21,4 @@ endif()
 find_package(moq-cpp REQUIRED)
 
 add_executable(probe probe.cpp)
-target_link_libraries(probe PRIVATE moq-cpp::moq)
+target_link_libraries(probe PRIVATE moq::cpp)

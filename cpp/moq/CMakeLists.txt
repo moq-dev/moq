@@ -76,7 +76,7 @@ endforeach()
 # The bindings compile here with the including project's standard and flags; see src/moq.cpp.
 # Named moq-cpp so an in-tree build can sit beside libmoq's `moq` target.
 add_library(moq-cpp STATIC src/moq.cpp)
-add_library(moq-cpp::moq ALIAS moq-cpp)
+add_library(moq::cpp ALIAS moq-cpp)
 add_dependencies(moq-cpp moq_ffi)
 target_compile_features(moq-cpp PUBLIC cxx_std_17)
 target_include_directories(moq-cpp PUBLIC

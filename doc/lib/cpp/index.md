@@ -26,7 +26,7 @@ No Rust toolchain is needed to consume it.
 
 ```cmake ignore
 find_package(moq-cpp REQUIRED)   # with CMAKE_PREFIX_PATH at the unpacked archive
-target_link_libraries(app PRIVATE moq-cpp::moq)
+target_link_libraries(app PRIVATE moq::cpp)
 ```
 
 ```bash
@@ -44,7 +44,7 @@ release runtime (`/MD`), which the Rust library uses in every configuration.
 From source, `add_subdirectory(cpp/moq)` in a checkout builds `moq-ffi` with
 cargo and renders the bindings with the pinned `uniffi-bindgen-cpp` (see
 [`cpp/moq`](https://github.com/moq-dev/moq/tree/main/cpp/moq)), then exposes
-the same `moq-cpp::moq` target. The package is `moq-cpp`, so it installs beside
+the same `moq::cpp` target. The package is `moq-cpp`, so it installs beside
 libmoq's `moq` package without colliding.
 
 ## Example
