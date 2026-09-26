@@ -40,7 +40,15 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, restartSupported, Version } from "./version.ts";
+import {
+	hasAnnounceId,
+	hasAnnounceOk,
+	hasDatagrams,
+	hasProbeRtt,
+	hasStreamCount,
+	restartSupported,
+	Version,
+} from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
 // drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC streams
@@ -83,6 +91,8 @@ interface SubscribeEntry {
 	// (SUBSCRIBE_END), once it declares them.
 	start?: number;
 	end?: number;
+	// Group streams opened by the publisher, when SUBSCRIBE_END carries the count.
+	streams?: number;
 }
 
 /**
@@ -829,6 +839,7 @@ export class Subscriber {
 			} else if ("end" in resp) {
 				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
 				entry.end = resp.end.group;
+				if (hasStreamCount(this.version)) entry.streams = resp.end.streams;
 				// A local close can win the race with the response; there is nothing left to end.
 				if (entry.track.closed.peek() !== undefined) continue;
 				try {
@@ -844,13 +855,10 @@ export class Subscriber {
 
 	// Wait for the group streams the publisher still owes once it has ended the subscription.
 	//
-	// Its FIN says every group below the end is accounted for, but QUIC does not order streams,
-	// so one can still be in flight. Wait until each group from SUBSCRIBE_START to the end has
-	// a stream (read to its end) or a SUBSCRIBE_DROP. A group reset before its header arrived
-	// never shows up, so give up on missing groups after the subscription's effective max age,
-	// then end cleanly with them skipped like any stale group. That is a wall-clock stopgap for
-	// a presentation-time budget; a publisher sending SUBSCRIBE_DROP for every group it reset
-	// would account for them with no timer at all.
+	// lite-07 counts streams, so skipped sequences owe nothing. Older drafts account for
+	// the range using received headers and SUBSCRIBE_DROP. A counted stream reset before
+	// its header leaves no trace, so the grace still bounds that wait. Streams whose
+	// headers arrived keep reading until their own FIN or reset.
 	#settleTail(entry: SubscribeEntry): Promise<void> {
 		const { tail, track } = entry;
 		// Already the smaller of the subscriber's and the track's max age.
@@ -858,6 +866,7 @@ export class Subscriber {
 		const grace = maxAge > 0 ? maxAge : TAIL_GRACE_MS;
 
 		const complete = () => {
+			if (entry.streams !== undefined) return tail.streams >= entry.streams;
 			// Without SUBSCRIBE_END (older drafts) nothing says which groups are owed.
 			if (entry.end === undefined) return false;
 			// Without SUBSCRIBE_START the publisher served no group at all.
