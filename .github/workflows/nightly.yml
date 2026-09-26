@@ -77,6 +77,10 @@ jobs:
           nix develop --command bun install --frozen-lockfile
           nix develop --command bun js/net/bench/broadcasts.ts
 
+      - name: BBB rendition alignment
+        if: ${{ !cancelled() }}
+        run: nix develop --command just pub check-bbb
+
       - name: Audit
         if: ${{ !cancelled() }}
         run: nix develop --command just rs audit
