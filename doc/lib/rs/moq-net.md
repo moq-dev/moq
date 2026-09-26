@@ -20,6 +20,7 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 - **Patterns** (`Pattern`, `Patterns`) are re-exported from [`moq-pattern`](https://docs.rs/moq-pattern). Literal `Path` stays a coordinate.
 - **Tracks** carry groups with a priority, a retention window, and a timescale. Subscribers set their own priority and max age and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.
+- **Track ends**: `finish()` ends a track at its live edge, while `finish_at(n)` declares the exclusive end ahead of it and still accepts the groups below. A subscriber awaits it with `finished()`. A remote track ends only once every group below its end has arrived or was dropped; one reset before its header arrived is skipped after the subscription's max age on moq-lite (one second without one), or after one second on IETF.
 - **Datagrams** send a single small frame unreliably on moq-lite 05+.
 - **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one. `Route::source()` says where a delivered route entered: `Source::Local`, or `Source::Peer(hop)` when a handle marked `origin::Producer::peer()` announced it. `origin::Consumer::local()` sees only the local ones.
 - **Stats** counters per broadcast and session, drained by [`moq-stats`](https://docs.rs/moq-stats).
@@ -113,8 +114,12 @@ Three operations, on an origin:
 - `broadcast.announce(route)` / `broadcast.unannounce()` own that
   advertisement. Announcing again re-prices the standing route, which competes
   on cost with remote routes at the same path (a tie goes to the local
-  broadcast). The route retracts on `unannounce()`, `finish()`, or the last
+  broadcast). The route retracts on `unannounce()`, `close()`, or the last
   producer dropping; tracks already in flight carry on to their own end.
+- `broadcast.close()` ends the broadcast for good: it retracts, leaves local
+  discovery, and answers every later track lookup with `Unroutable`. Tracks
+  already subscribed carry on to their own end. It can never be announced
+  again. Dropping the last producer does the same.
 - `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
   (`""` claims everything). Hold the returned `origin::Dynamic` while the
   claim should stay advertised; drop it to retract. A request beneath it with

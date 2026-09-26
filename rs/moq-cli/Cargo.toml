@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.12.4"
+version = "0.12.6"
 edition = "2024"
 # Depends on moq-relay, whose sysinfo 0.39 needs 1.95, above the 1.91 workspace
 # floor. This binary is an application, so the bump stays here rather than
@@ -141,3 +141,7 @@ tempfile = { workspace = true }
 # `test-util` enables `tokio::time::pause` so the TS round-trip test simulates the
 # exporter drain timeouts instantly instead of waiting on the wall clock.
 tokio = { workspace = true, features = ["test-util"] }
+
+[[bench]]
+name = "play_buffer"
+harness = false

@@ -23,8 +23,9 @@ this by hand-building a catalog.
   one is at the live edge and a `--follow` replay picks up catalogs recorded
   after it opened.
 - Stamp `store` with the URL passed to `import archive`, and `version` with the
-  recording format. Refuse a URL carrying userinfo so credentials never land in
-  a catalog. `replay` stays unset: the timelines live on this broadcast.
+  recording format. Refuse a URL carrying userinfo and strip its query so
+  credentials never land in a catalog, and let the importer opt out of
+  advertising the URL at all. `replay` stays unset: the timelines live on this broadcast.
 - Keep the logic in `moq-cli`; `moq-archive` stays catalog-agnostic. Select the
   catalog track with the CLI's catalog format as `export archive` does: hang
   and hang.z are stamped, MSF is refused.

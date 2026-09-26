@@ -53,8 +53,8 @@ func ExampleClient_CreateBroadcast() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Finishing unpublishes the broadcast immediately.
-	defer broadcast.Finish()
+	// Closing ends the broadcast for good.
+	defer broadcast.Close()
 
 	media, err := broadcast.PublishAudio(moq.AudioFormatOpus, opusHead())
 	if err != nil {
@@ -91,7 +91,7 @@ func ExampleBroadcastProducer_PublishVideo_videoHint() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer broadcast.Finish()
+	defer broadcast.Close()
 
 	media, err := broadcast.PublishVideo(moq.VideoFormatAvc3, nil, moq.WithVideoHint(moq.VideoHint{}))
 	if err != nil {

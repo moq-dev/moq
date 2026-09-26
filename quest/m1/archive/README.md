@@ -134,6 +134,7 @@ owned by that prerequisite, not duplicated in archive storage.
 
 - [Per-track timelines](/quest/m1/archive/track-timeline/README.md) - every track segments and expires on its own timeline, and HLS is derived from group timestamps at the edge
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq import archive` publishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay
+- [Paced replay](/quest/m1/archive/paced-replay.md) - a replay pushes its groups to live subscribers on one shared clock, so any live player plays it
 - [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 - [DVR timeline pruning](/quest/m1/archive/pruning.md) - a DVR deletes timeline objects no retained checkpoint needs

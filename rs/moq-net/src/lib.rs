@@ -86,6 +86,9 @@ mod model;
 pub mod path;
 mod recv;
 mod setup;
+mod tail;
+#[cfg(test)]
+mod test_interop;
 mod util;
 mod version;
 

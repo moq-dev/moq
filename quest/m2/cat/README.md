@@ -15,10 +15,10 @@ the URL, and the JWT stays the URL credential.
 
 Boundaries decided while planning:
 
-- SETUP only. A token on SUBSCRIBE, PUBLISH, FETCH, or any other request is
-  refused; per-operation authorization is not planned. The relay authorizes
-  per session through origin scopes, and a token that arrives after SETUP is
-  the [in-band auth](/quest/m1/auth/README.md) line's problem.
+- SETUP only. Per-operation authorization is not planned: the relay
+  authorizes by path through origin scopes. A token on any other request is
+  [Request tokens](/quest/m1/auth/request-token.md)'s path-scoped fallback
+  for that request, and a CAT's per-message scope is never enforced.
 - A token whose `moqt` scope restricts the track name is refused naming the
   token. Grants are broadcast-path patterns and tracks are not scoped.
 - Core CWT claims plus `moqt` and `moqt-reval` are enforced; any other CAT
@@ -41,7 +41,8 @@ Boundaries decided while planning:
 
 ## Plan
 
-Order: the wire first so a token reaches the auth server; verification;
+Order: the wire first so a token reaches the auth server, which is the
+standalone [Setup token](/quest/m1/setup-token.md) quest; verification;
 then our clients present one. Everything rides `moq_auth::Request` and
 `moq auth serve`, which shipped on dev. The JWT types sit at the crate root;
 the verify quest moves them under `moq_auth::jwt` so `cat` is a sibling
@@ -49,18 +50,20 @@ module rather than a set of prefixed names.
 
 ## Quests
 
-- [Setup token](/quest/m2/cat/setup-token.md) - the SETUP `AUTHORIZATION
-  TOKEN` option is decoded on both IETF stacks, reaches `moq_auth::Request`
-  as `token`, and is refused on every other message
 - [Verify](/quest/m2/cat/verify.md) - `moq_auth::cat` turns a CAT into a
   grant and `moq auth serve` admits one; `moq auth sign|verify` mint and
   check the format
 - [Present](/quest/m2/cat/present.md) - a CAT is one kind of configured
   token, riding the SETUP option the in-band token quest already writes
 
+## Required
+
+- [Setup token](/quest/m1/setup-token.md) - the SETUP option reaches
+  `moq_auth::Request` as `token`
+
 ## Related
 
 - [In-band auth](/quest/m1/auth/README.md) - credentials presented after
-  SETUP, which this line refuses on the IETF wire; its [Token in
+  SETUP, including on IETF requests; its [Token in
   band](/quest/m1/auth/token-in-band.md) quest owns the client token
   configuration a CAT joins

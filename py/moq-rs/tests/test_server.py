@@ -72,7 +72,7 @@ async def test_server_client_roundtrip():
             except asyncio.CancelledError:
                 pass
             media.finish()
-            broadcast.finish()
+            broadcast.close()
 
 
 async def test_client_reconnects_and_resumes_announcements():
@@ -127,7 +127,7 @@ async def test_client_reconnects_and_resumes_announcements():
                 async for announcement in client.announced():
                     assert announcement.prefix == "after-reconnect"
                     break
-                broadcast.finish()
+                broadcast.close()
         finally:
             accept_task.cancel()
             try:
@@ -287,7 +287,7 @@ async def test_serve_helper_accepts_clients():
                 await serve_task
             except asyncio.CancelledError:
                 pass
-            broadcast.finish()
+            broadcast.close()
 
 
 async def test_broadcast_route_over_wire():
@@ -317,7 +317,7 @@ async def test_broadcast_route_over_wire():
                 await serve_task
             except asyncio.CancelledError:
                 pass
-            broadcast.finish()
+            broadcast.close()
 
 
 async def test_route_update_observes_restart():

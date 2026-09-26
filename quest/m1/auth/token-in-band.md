@@ -77,3 +77,5 @@ Additive.
   token setters sit beside
 - [moq-transport](/quest/m1/auth/moq-transport.md) - supplies the IETF AUTH
   exchange the setup-option token pairs with
+- [Setup token](/quest/m1/setup-token.md) - supplies `setup::Token` and the
+  setup-option encoder

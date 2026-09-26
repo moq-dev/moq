@@ -481,6 +481,35 @@ mod tests {
 		assert!(types.contains(&8), "forced IDR is missing inline PPS: {types:?}");
 	}
 
+	/// A refused retune leaves the session encoding at its last accepted rate,
+	/// and a later retune is accepted by the real driver. Same skip rule as the
+	/// H.264 test.
+	#[test]
+	fn nvenc_refused_retune_keeps_encoding() {
+		if !driver_available() {
+			return;
+		}
+		let mut config = crate::encode::Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		config.kind = crate::encode::Kind::Named(NAME.into());
+		config.bitrate = Some(moq_net::bandwidth::Rate::from_bps(1_000_000));
+		let Ok(mut encoder) = crate::encode::Encoder::new(&config) else {
+			return;
+		};
+
+		let frame = gray_rgba(320, 240);
+		assert!(!encoder.encode(&gray_frame(&frame, 0)).unwrap().is_empty());
+		encoder
+			.set_bitrate(moq_net::bandwidth::Rate::ZERO)
+			.expect_err("a zero rate must be refused");
+		assert_eq!(encoder.bitrate(), moq_net::bandwidth::Rate::from_bps(1_000_000));
+		encoder
+			.set_bitrate(moq_net::bandwidth::Rate::from_bps(500_000))
+			.unwrap();
+		for i in 1..5 {
+			assert!(!encoder.encode(&gray_frame(&frame, i)).unwrap().is_empty());
+		}
+	}
+
 	/// Real-hardware H.265 encode through NVENC. Same skip rule as the H.264 test.
 	/// Asserts the HEVC GUID path emits Annex-B with a self-contained IRAP
 	/// (VPS+SPS+PPS+IDR slice) and repeats them on a mid-stream forced keyframe,

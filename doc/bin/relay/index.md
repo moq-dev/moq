@@ -66,8 +66,9 @@ let web = relay.web().routes().route("/hello", get(|| async { "hello" }));
 relay.with_web(web).run().await?;
 ```
 
-`Relay::load` binds QUIC and web sockets. Read their actual addresses with
-`quic_addr()` and `web_addrs()`, including ports assigned for `:0`. Clone
+`Relay::load` binds every socket, so a taken port fails there. Read the actual
+addresses with `quic_addr()`, `tcp_addr()`, `web_addrs()`, and
+`internal().addr()`, including ports assigned for `:0`. Clone
 `ready()` before spawning `run`, then await `ready.wait()` when startup must
 finish before other workers begin. `config()` returns the resolved settings;
 `cluster().id()` returns the chosen origin ID. `with_listeners()` registers an

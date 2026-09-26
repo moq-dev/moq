@@ -39,7 +39,7 @@ mod tests {
 		assert_eq!(update.prefix.as_str(), "cam");
 		assert!(update.kind.is_active());
 
-		broadcast.finish();
+		broadcast.close();
 		let update = announced.next().await.expect("retraction");
 		assert!(!update.kind.is_active());
 	}

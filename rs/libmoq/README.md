@@ -11,8 +11,14 @@ cargo build --release
 This will:
 
 - Build the static library (`libmoq.a` on Unix-like systems, `moq.lib` on Windows)
-- Generate the C header file at `target/include/moq.h`
-- Generate the pkg-config file at `target/release/lib/pkgconfig/moq.pc`
+- Generate the C header file at `$OUT_DIR/include/moq.h`
+- Generate the pkg-config file at `$OUT_DIR/lib/pkgconfig/moq.pc`
+
+`OUT_DIR` is the build script's hashed output directory, which
+`cargo build --message-format=json` reports as `out_dir` on the
+`build-script-executed` message for libmoq.
+`moq.pc` assumes the install layout (`lib/libmoq.a` beside `lib/pkgconfig/`), so
+copy the staticlib into `$OUT_DIR/lib/` or a prefix before using it.
 
 There's also a [CMakeLists.txt](CMakeLists.txt) file that can be used to import/build the library.
 
@@ -63,7 +69,7 @@ int32_t moq_origin_announced_cancel(uint32_t announced);
 // Publishing
 int32_t moq_publish_announce(uint32_t broadcast, const moq_route *route);
 int32_t moq_publish_unannounce(uint32_t broadcast);
-int32_t moq_publish_finish(uint32_t broadcast);
+int32_t moq_publish_close(uint32_t broadcast);
 int32_t moq_publish_audio(uint32_t broadcast, const moq_audio_init *config);
 int32_t moq_publish_video(uint32_t broadcast, const moq_video_init *config);
 int32_t moq_publish_container(uint32_t broadcast, const moq_container_init *config);

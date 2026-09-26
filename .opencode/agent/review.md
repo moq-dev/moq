@@ -38,7 +38,7 @@ it like a prompt: terse, specific, and nothing the reader has to re-derive.
 ## Before reviewing
 
 Read `AGENTS.md`, `CONTRIBUTING.md`, and `PROMPTING.md` at the repo root, then
-the nested `CLAUDE.md` beside any touched code. They hold the rules you enforce
+the nested `AGENTS.md` beside any touched code. They hold the rules you enforce
 and how to write for an agent reader; cite them by file and heading.
 
 Confirm the base with `gh pr view <number> --json baseRefName`, then diff

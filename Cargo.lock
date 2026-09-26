@@ -1015,9 +1015,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.4.7"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54413ede23c2daf518f35156dfde027feb2374004d63bd497f983c8db9c0e313"
+checksum = "f360145194ee8e21db5ee7f3fcd4fe52210864c75c985dae33218202c8bbe040"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -2270,9 +2270,9 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.13"
+version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef25905e51abafe4dcea6c15fec58c57b601cdbd0ee53d22ea1d3016c587d39b"
+checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "fixed-resample"
@@ -2845,7 +2845,7 @@ dependencies = [
 
 [[package]]
 name = "hang"
-version = "0.21.4"
+version = "0.21.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3535,9 +3535,9 @@ dependencies = [
 
 [[package]]
 name = "is"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d08f9118d003d441f79c1070e84d0a2a89f35721ca8ae0cd5e1f9026dc4a2517"
+checksum = "b6edbbdc611843e8c65878ee735f68c495cede11ae5a9582b17fe0369c456ef5"
 dependencies = [
  "crc",
  "serde",
@@ -3894,7 +3894,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.6.4"
+version = "0.6.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4175,7 +4175,7 @@ dependencies = [
 
 [[package]]
 name = "moq-archive"
-version = "0.0.4"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4198,7 +4198,7 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "block2 0.6.2",
  "bytes",
@@ -4229,7 +4229,7 @@ dependencies = [
 
 [[package]]
 name = "moq-auth"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -4277,7 +4277,7 @@ dependencies = [
 
 [[package]]
 name = "moq-binary"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "bytes",
  "kio 0.6.0",
@@ -4289,7 +4289,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.5.4"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4309,7 +4309,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.12.4"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -4350,7 +4350,7 @@ dependencies = [
 
 [[package]]
 name = "moq-e2ee"
-version = "0.0.4"
+version = "0.0.6"
 dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
@@ -4369,7 +4369,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.4.4"
+version = "0.4.6"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -4403,7 +4403,7 @@ dependencies = [
 
 [[package]]
 name = "moq-gst"
-version = "0.4.4"
+version = "0.4.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4422,7 +4422,7 @@ dependencies = [
 
 [[package]]
 name = "moq-hls"
-version = "0.5.4"
+version = "0.5.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -4450,7 +4450,7 @@ dependencies = [
 
 [[package]]
 name = "moq-json"
-version = "0.5.1"
+version = "0.5.3"
 dependencies = [
  "bytes",
  "criterion",
@@ -4467,7 +4467,7 @@ dependencies = [
 
 [[package]]
 name = "moq-loc"
-version = "0.2.12"
+version = "0.2.14"
 dependencies = [
  "bytes",
  "moq-net",
@@ -4485,7 +4485,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.10.4"
+version = "0.10.6"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4522,7 +4522,7 @@ version = "0.20.0"
 
 [[package]]
 name = "moq-net"
-version = "0.3.3"
+version = "0.3.5"
 dependencies = [
  "arrayvec",
  "bytes",
@@ -4555,9 +4555,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq"
-version = "1.3.0"
+version = "1.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "274035555d1c26479ff5dabdf2e6d201fc2d9d1c1357993884eb72dfdc135392"
+checksum = "39e37523750e5f1313c3fd1798c4ffdb00218571054f601c3193ceb4e100e5ca"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -4577,9 +4577,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq-proto"
-version = "1.3.0"
+version = "1.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef835fcf9b92c0f04a77c2fc060cf2a23616ee15176bf41c09847b38186fcb36"
+checksum = "7448c4a6a6713b276b346931f3def60e0a89415cd8172d12f6465fed6501a261"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
@@ -4608,9 +4608,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq-udp"
-version = "1.3.0"
+version = "1.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41114fce0ba95fa5caf3efd62565e71a40da4c2e15f189f482d85db2970d2de5"
+checksum = "98e7d85788b7ec2437ac3dd83a231c4e403b96a5e53e39a8701ba5d1d4fad4a4"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -4621,7 +4621,7 @@ dependencies = [
 
 [[package]]
 name = "moq-nvenc"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "cudarc",
  "libloading 0.9.0",
@@ -4639,7 +4639,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.15.4"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -4682,7 +4682,7 @@ dependencies = [
 
 [[package]]
 name = "moq-room"
-version = "0.2.4"
+version = "0.2.6"
 dependencies = [
  "kio 0.6.0",
  "moq-auth",
@@ -4696,7 +4696,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtc"
-version = "0.3.4"
+version = "0.3.6"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -4716,7 +4716,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtmp"
-version = "0.3.4"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -4764,7 +4764,7 @@ dependencies = [
 
 [[package]]
 name = "moq-srt"
-version = "0.3.4"
+version = "0.3.6"
 dependencies = [
  "bytes",
  "futures",
@@ -4780,7 +4780,7 @@ dependencies = [
 
 [[package]]
 name = "moq-stats"
-version = "0.2.4"
+version = "0.2.6"
 dependencies = [
  "futures",
  "moq-json",
@@ -4795,7 +4795,7 @@ dependencies = [
 
 [[package]]
 name = "moq-tokio"
-version = "0.19.15"
+version = "0.19.17"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4848,7 +4848,7 @@ dependencies = [
 
 [[package]]
 name = "moq-transcode"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4867,7 +4867,7 @@ dependencies = [
 
 [[package]]
 name = "moq-uring"
-version = "0.0.5"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4924,7 +4924,7 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "ash",
@@ -8082,9 +8082,9 @@ dependencies = [
 
 [[package]]
 name = "siphasher"
-version = "1.0.3"
+version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "slab"
@@ -9905,9 +9905,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-moq"
-version = "1.3.0"
+version = "1.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cf318557d2c563036e914dc4282275e4196ea5cee22614075157f0d227dbeaf"
+checksum = "3d3bdb2400eb49f82b778165df8da318f94be5a667a840a94fe6fc32f3798746"
 dependencies = [
  "bytes",
  "futures",
@@ -10959,18 +10959,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.58"
+version = "0.8.59"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c17e8fafad82b542ff3717217ecdc736231b59e387768c9630123b4ce4d2db44"
+checksum = "6df92bf3d9227be3d53173901ddbffac2babc27ae50f397776ffd6dc33f800cb"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.58"
+version = "0.8.59"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "595f56e044df4f46a0c9a626f65c3d99eb8488f7e8a8baa12dd76326d9710bf2"
+checksum = "ac4f328cf2f05d084e496c3e9c3f33ed0a183656a16e1fcec4d464d8373aec82"
 dependencies = [
  "proc-macro2",
  "quote",
