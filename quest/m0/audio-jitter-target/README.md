@@ -71,7 +71,6 @@ buffer against uneven arrivals.
 
 ## Related
 
-- [Jitter clock](/quest/m1/jitter-flush-clock.md) - the advertised jitter (#3513 landed the flush span), which `doc/concept/audio-jitter.md` settles as a floor on the measured target
 - [Audio quality harness](/quest/m1/audio-quality-harness/README.md) - the automated proof, built on its own schedule
 - [Time stretch](/quest/m1/watch-audio-time-stretch.md) - inaudible convergence, on top of this
 - [Plan: A/V clock](/quest/m0/plan-av-clock.md) - the clock this target eventually feeds

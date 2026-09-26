@@ -3,7 +3,7 @@ import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
-import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
+import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
@@ -132,7 +132,7 @@ export class Subscriber {
 	// Dedup in-flight one-shot fetches, keyed by [broadcast, track, sequence]. Concurrent (or
 	// repeat, while still open) fetchGroup() calls for the same group share one FETCH stream and
 	// each get an independent mirror; the entry is evicted once the group closes.
-	#fetches = new Map<string, netGroup.Producer>();
+	#fetches = new Map<string, { group: netGroup.Producer; accepted: Promise<void> }>();
 
 	// The peer's PROBE estimates, written as they arrive (Lite03+ only).
 	#probe?: Signal<ProbeStats>;
@@ -548,7 +548,7 @@ export class Subscriber {
 		} catch (err) {
 			// The setup outlived its deadline waiting for the first response: a control
 			// timeout, not content that arrived late.
-			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
+			const e = err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err);
 			request.reject(e);
 			this.#subscribes.delete(id);
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
@@ -571,11 +571,14 @@ export class Subscriber {
 			//
 			// On lite-05+ the publisher sends SUBSCRIBE_START/END/DROP on this stream until
 			// its FIN; older drafts just close it. Either way group streams can still be in
-			// flight, so the track ends only once the tail is accounted for.
+			// flight, so the track ends only once the tail is accounted for. A reset rejects
+			// instead, so the track ends with that error rather than a clean tail.
 			const responses = supportsTrackStream(this.version)
 				? this.#runResponses(stream, entry)
 				: stream.reader.closed;
 			const closed = responses.then(() => this.#settleTail(entry));
+			// A reset that lands after the race below settled is moot; the race observes one before.
+			closed.catch(() => {});
 			const subscriptionUpdates =
 				this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02
 					? undefined
@@ -603,7 +606,7 @@ export class Subscriber {
 			stream.close();
 			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
-			const e = error(err);
+			const e = await sessionCause(this.#quic, err);
 			producer.close(e);
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
 			stream.abort(e);
@@ -701,7 +704,7 @@ export class Subscriber {
 
 	// Open a FETCH stream for one group and stream its bare frames into a group, for the
 	// ConsumeBroadcast backing track.Consumer.fetchGroup() (lite-05+).
-	fetchGroup(
+	async fetchGroup(
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
@@ -710,29 +713,37 @@ export class Subscriber {
 		// Coalesce onto a still-open fetch of the same group so we don't open a second FETCH
 		// stream (and re-download it); each caller reads an independent mirror.
 		const key = JSON.stringify([broadcast, track, sequence]);
-		const existing = this.#fetches.get(key);
-		if (existing && !existing.isClosed) return Promise.resolve(existing.mirror());
+		let entry = this.#fetches.get(key);
+		if (!entry || entry.group.isClosed) {
+			const group = new netGroup.Producer(sequence);
+			entry = { group, accepted: this.#runFetch(broadcast, track, sequence, options, group) };
+			this.#fetches.set(key, entry);
+			void group.closed.then(() => {
+				if (this.#fetches.get(key)?.group === group) this.#fetches.delete(key);
+			});
+		}
 
-		// Create and cache the group synchronously (before any await) so a concurrent fetch for
-		// the same group finds it and coalesces rather than racing to open its own stream.
-		const group = new netGroup.Producer(sequence);
-		this.#fetches.set(key, group);
-		void group.closed.then(() => {
-			if (this.#fetches.get(key) === group) this.#fetches.delete(key);
-		});
-
-		return this.#runFetch(broadcast, track, sequence, options, group);
+		// Reserve each caller's mirror before awaiting acceptance so the pump sees demand,
+		// and a fast FIN cannot discard frames before these callers receive their handles.
+		const consumer = entry.group.mirror();
+		try {
+			await entry.accepted;
+			return consumer;
+		} catch (err) {
+			consumer.close();
+			throw err;
+		}
 	}
 
 	// Open the FETCH stream and pump the response into the shared group. Setup errors close the
-	// group (so coalesced mirrors observe them and the entry evicts) and reject this caller.
+	// group, evict the entry, and reject every caller waiting for acceptance.
 	async #runFetch(
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
 		options: track.FetchGroupOptions,
 		group: netGroup.Producer,
-	): Promise<netGroup.Consumer> {
+	): Promise<void> {
 		try {
 			if (!supportsTrackStream(this.version)) {
 				throw new Error("fetch group requires moq-lite-05 or newer");
@@ -748,16 +759,15 @@ export class Subscriber {
 					stream.writer,
 					this.version,
 				);
+				// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
+				// done() buffers that byte so the response pump can decode it normally.
+				await stream.reader.done();
 			} catch (err: unknown) {
 				stream.abort(error(err));
 				throw err;
 			}
 
-			// Mint this caller's reader before starting the pump, so the group has demand when the
-			// pump begins watching it (an abandoned fetch cancels once every reader has left).
-			const consumer = group.mirror();
 			void this.#runFetchResponse(stream, group, Time.Timescale(info.timescale));
-			return consumer;
 		} catch (err: unknown) {
 			group.close(error(err));
 			throw err;
@@ -805,8 +815,10 @@ export class Subscriber {
 		}
 	}
 
-	// Reads SUBSCRIBE_START/END/DROP until FIN. The publisher must declare the end
-	// before FIN; resets and malformed responses preserve their failure.
+	// Reads SUBSCRIBE_START/END/DROP on the subscribe stream until FIN (lite-05+), recording
+	// the range the tail is accounted against. SUBSCRIBE_END declares the track's end right
+	// away, so a consumer learns it before the last groups arrive. The publisher must declare
+	// the end before FIN; resets and malformed responses reject with their failure.
 	async #runResponses(stream: Stream, entry: SubscribeEntry): Promise<void> {
 		for (;;) {
 			const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
@@ -1134,11 +1146,15 @@ export class Subscriber {
 		}
 	}
 
-	close() {
+	/**
+	 * Ends every subscribed track: cleanly for a deliberate close, or with `err` when the
+	 * session died, since those tracks were cut off rather than ended.
+	 */
+	close(err?: Error) {
 		this.#closed.abort();
 
 		for (const { track } of this.#subscribes.values()) {
-			track.close();
+			track.close(err);
 		}
 
 		this.#subscribes.clear();

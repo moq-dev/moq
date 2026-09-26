@@ -106,6 +106,14 @@ actually is. While video owns the clock, a frame arriving earlier than predicted
 pulls playback forward, so a late start catches up to live instead of staying
 behind it. Once the speaker owns the clock, video follows the speaker instead.
 
+Video receives encoded frames independently of decoding, so a tune-in burst can
+update that clock even while the window is waiting for its first picture.
+Encoded video is retained within the delay budget with byte accounting; a skip
+resumes at a keyframe. Decoding starts at most 100 ms before presentation, and
+the window holds at most three decoded pictures. A stalled window loses its
+oldest picture instead of blocking reception. The configured delay therefore
+does not turn into seconds of raw video surfaces.
+
 Each role follows the catalog for as long as it lasts. Each decoder starts at
 the newest cached group, including when a rendition is reopened, so playback
 does not replay the retained backlog. A publisher that retires the rendition
