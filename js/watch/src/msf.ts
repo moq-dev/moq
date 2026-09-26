@@ -46,6 +46,13 @@ function toContainer(track: Msf.Track): ContainerInfo | undefined {
 	}
 }
 
+// Hang stores delay as whole milliseconds rounded up, and zero means the rendition is not behind.
+// MSF writes a fractional millisecond, which u53 rejects.
+function delayMillis(value: number): ReturnType<typeof u53> | undefined {
+	if (value <= 0) return undefined;
+	return u53(Math.ceil(value));
+}
+
 function toVideoConfig(track: Msf.Track): Catalog.VideoConfig | undefined {
 	if (!track.codec) return undefined;
 
@@ -62,7 +69,7 @@ function toVideoConfig(track: Msf.Track): Catalog.VideoConfig | undefined {
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
 		stalled: track.stalled,
 		jitter: track.jitter != null ? u53(track.jitter) : undefined,
-		delay: track.delay != null ? u53(track.delay) : undefined,
+		delay: track.delay != null ? delayMillis(track.delay) : undefined,
 	};
 }
 
@@ -86,7 +93,7 @@ function toAudioConfig(track: Msf.Track): Catalog.AudioConfig | undefined {
 		numberOfChannels: u53(channels),
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
 		jitter: track.jitter != null ? u53(track.jitter) : undefined,
-		delay: track.delay != null ? u53(track.delay) : undefined,
+		delay: track.delay != null ? delayMillis(track.delay) : undefined,
 	};
 }
 

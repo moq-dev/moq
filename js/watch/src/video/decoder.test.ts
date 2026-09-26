@@ -85,6 +85,44 @@ describe("Decoder jitter across a source switch", () => {
 		}
 	});
 
+	it("follows a newer pending catalog when the track name stays the same", async () => {
+		const outgoing = new Signal<Catalog.Root>({
+			video: { renditions: { video: config({ jitter: 20 }) } },
+		});
+		const { broadcast, source, sync, decoder } = await play(outgoing);
+		try {
+			expect(decoder.out.jitter.peek()).toBe(Time.Milli(20));
+
+			broadcast.set(
+				watchBroadcast(
+					new Signal<Catalog.Root>({
+						video: { renditions: { video: config({ delay: 200 }) } },
+					}),
+				),
+			);
+			await settle();
+			expect(decoder.out.jitter.peek()).toBe(Time.Milli(200));
+
+			const newest = new Signal<Catalog.Root>({
+				video: { renditions: { video: config({ delay: 500 }) } },
+			});
+			broadcast.set(watchBroadcast(newest));
+			await settle();
+			// The first switch is still pending, so the name did not change. The new catalog still has to win.
+			expect(decoder.out.jitter.peek()).toBe(Time.Milli(500));
+
+			newest.set({
+				video: { renditions: { video: config({ delay: 700 }) } },
+			});
+			await settle();
+			expect(decoder.out.jitter.peek()).toBe(Time.Milli(700));
+		} finally {
+			decoder.close();
+			source.close();
+			sync.close();
+		}
+	});
+
 	it("keeps the outgoing floor when the next source uses a different name", async () => {
 		const outgoing = new Signal<Catalog.Root>({
 			video: { renditions: { hd: config({ delay: 200, jitter: 60 }) } },

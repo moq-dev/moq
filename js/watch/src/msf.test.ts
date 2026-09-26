@@ -29,6 +29,39 @@ test("copies delay onto the hang rendition", () => {
 	expect(toHang(catalog).audio?.renditions.audio?.delay).toBe(u53(80));
 });
 
+test("rounds a fractional MSF delay up, and drops zero", () => {
+	const catalog: Msf.Catalog = {
+		tracks: [
+			{
+				name: "video",
+				packaging: "loc",
+				role: "video",
+				codec: "vp09.00.10.08",
+				delay: 200.2,
+			},
+			{
+				name: "audio",
+				packaging: "loc",
+				role: "audio",
+				codec: "opus",
+				delay: 0.2,
+			},
+			{
+				name: "early",
+				packaging: "loc",
+				role: "audio",
+				codec: "opus",
+				delay: 0,
+			},
+		],
+	};
+
+	const hang = toHang(catalog);
+	expect(hang.video?.renditions.video?.delay).toBe(u53(201));
+	expect(hang.audio?.renditions.audio?.delay).toBe(u53(1));
+	expect(hang.audio?.renditions.early?.delay).toBeUndefined();
+});
+
 test("preserves stalled video renditions", () => {
 	const catalog: Msf.Catalog = {
 		tracks: [
