@@ -18,8 +18,9 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 - **Origins** scope what a session can see, and merge duplicate subscriptions so a broadcast is pulled upstream once no matter how many local readers.
 - **Broadcasts** are created unannounced and invisible to everyone, then announced as an exact route, or served below a prefix with `dynamic`. A consumer of the same origin sees exactly what a peer sees. Discovery accepts pattern unions; events carry the advertised prefix and captures for a complete match.
 - **Patterns** (`Pattern`, `Patterns`) are re-exported from [`moq-pattern`](https://docs.rs/moq-pattern). Literal `Path` stays a coordinate.
-- **Tracks** carry groups with a priority, a retention window, and a timescale. Subscribers set their own priority and max age and can change them live.
+- **Tracks** carry groups with a priority, an optional publisher retention window (`Info::max_age`), and a timescale. Subscribers set their own priority and max age and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.
+- **Track ends**: `finish()` ends a track at its live edge, while `finish_at(n)` declares the exclusive end ahead of it and still accepts the groups below. A subscriber awaits it with `finished()`. A remote track ends only once every group below its end has arrived or was dropped; one reset before its header arrived is skipped after the subscription's max age on moq-lite (one second without one), or after one second on IETF.
 - **Datagrams** send a single small frame unreliably on moq-lite 05+.
 - **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one. `Route::source()` says where a delivered route entered: `Source::Local`, or `Source::Peer(hop)` when a handle marked `origin::Producer::peer()` announced it. `origin::Consumer::local()` sees only the local ones.
 - **Stats** counters per broadcast and session, drained by [`moq-stats`](https://docs.rs/moq-stats).
@@ -132,14 +133,17 @@ overlaps that scope; exact creates and requests must match it, so a broad
 route can advertise the wire-compatible prefix while excluded requests are
 refused locally. A disjoint route is `Unauthorized`.
 
-`origin.consume().announced()` yields `announce::Update` values: `prefix` is the
-covered prefix relative to the consumer's root, `kind` is `Announced`,
-`Updated` (a reprice in place), or `Retracted`, `captures` reports what the
-most specific matching scope member's wildcards stood for when the prefix
-pins them, and `route` carries hops and cost (on a retraction, its last
-values). The consumer is also a `futures::Stream`. A prefix is not a
-broadcast name; sessions request each scope member's literal head and filter
-locally. Routes with a `.`-prefixed segment below that head are [hidden](/concept/moq-lite#hidden-broadcasts)
+`origin.consume().announced()` yields `announce::Event`s: `Announced`,
+`Updated` (a reprice in place), or `Retracted`, each holding an
+`announce::Announce` with `prefix`, the covered prefix relative to the
+consumer's root; `captures`, what the most specific matching scope member's
+wildcards stood for when the prefix pins them; and `route`, its hops and cost
+(on a retraction, its last values). A single `Event::Live` follows
+the routes live at subscribe time, including every route a connected peer
+was still sending, so a caller listing what is live stops there. The
+consumer is also a `futures::Stream`. A prefix is not a broadcast name;
+sessions request each scope member's literal head and filter locally. Routes
+with a `.`-prefixed segment below that head are [hidden](/concept/moq-lite#hidden-broadcasts)
 unless `with_hidden(true)` opts the consumer in. Sessions always ask the peer
 for hidden routes, so each local consumer decides.
 

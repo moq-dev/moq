@@ -117,10 +117,37 @@ test("a reconnecting subscriber is seeded with the full current catalog", async 
 	effect.close();
 });
 
-test("catalog producer refuses zero jitter before retaining an edit", () => {
-	const catalog = new CatalogProducer();
+for (const field of ["jitter", "delay"] as const) {
+	test(`catalog producer refuses zero ${field} before retaining an edit`, () => {
+		const catalog = new CatalogProducer();
+		for (const section of ["audio", "video", "text"] as const) {
+			expect(() =>
+				catalog.mutate((value) => {
+					Object.assign(value, {
+						[section]: {
+							renditions: {
+								media: {
+									codec: "opus",
+									container: { kind: "legacy" },
+									sampleRate: 48000,
+									numberOfChannels: 2,
+									[field]: 0,
+								},
+							},
+						},
+					});
+				}),
+			).toThrow(`omit ${field}`);
+		}
+		catalog.mutate((value) => {
+			expect(value.audio).toBeUndefined();
+			expect(value.video).toBeUndefined();
+		});
+	});
+
 	for (const section of ["audio", "video", "text"] as const) {
-		expect(() =>
+		test(`catalog refuses ${section} ${field} decreases without retaining them`, () => {
+			const catalog = new CatalogProducer();
 			catalog.mutate((value) => {
 				Object.assign(value, {
 					[section]: {
@@ -130,68 +157,85 @@ test("catalog producer refuses zero jitter before retaining an edit", () => {
 								container: { kind: "legacy" },
 								sampleRate: 48000,
 								numberOfChannels: 2,
-								jitter: 0,
+								[field]: 100,
 							},
 						},
 					},
 				});
-			}),
-		).toThrow("omit jitter");
-	}
-	catalog.mutate((value) => {
-		expect(value.audio).toBeUndefined();
-		expect(value.video).toBeUndefined();
-	});
-});
+			});
 
-for (const section of ["audio", "video", "text"] as const) {
-	test(`catalog refuses ${section} jitter decreases without retaining them`, () => {
-		const catalog = new CatalogProducer();
-		catalog.mutate((value) => {
-			Object.assign(value, {
-				[section]: {
-					renditions: {
-						media: {
-							codec: "opus",
-							container: { kind: "legacy" },
-							sampleRate: 48000,
-							numberOfChannels: 2,
-							jitter: 100,
-						},
+			// The section is optional on the loose root type, so re-read it through a guard.
+			const retained = (value: Catalog.Root) => {
+				const sectionValue = value[section];
+				if (!sectionValue) throw new Error(`expected a retained ${section} section`);
+				return sectionValue;
+			};
+			for (const estimate of [Catalog.u53(50), undefined]) {
+				expect(() =>
+					catalog.mutate((value) => {
+						retained(value).renditions.media[field] = estimate;
+					}),
+				).toThrow(`${field} cannot decrease`);
+				catalog.mutate((value) => {
+					expect(retained(value).renditions.media[field]).toBe(Catalog.u53(100));
+				});
+			}
+			catalog.mutate((value) => {
+				delete retained(value).renditions.media;
+			});
+			catalog.mutate((value) => {
+				Object.assign(retained(value).renditions, {
+					media: {
+						codec: "opus",
+						container: { kind: "legacy" },
+						sampleRate: 48000,
+						numberOfChannels: 2,
+						[field]: 50,
 					},
-				},
+				});
 			});
 		});
+	}
+}
 
-		// The section is optional on the loose root type, so re-read it through a guard.
-		const retained = (value: Catalog.Root) => {
+for (const section of ["json", "binary"] as const) {
+	test(`catalog refuses zero or decreasing ${section} jitter without retaining it`, () => {
+		const catalog = new CatalogProducer();
+		const tracks = (value: Catalog.Root) => {
 			const sectionValue = value[section];
 			if (!sectionValue) throw new Error(`expected a retained ${section} section`);
-			return sectionValue;
+			return sectionValue.tracks;
 		};
+
+		expect(() =>
+			catalog.mutate((value) => {
+				value[section] = { tracks: { data: { mode: "stream", jitter: Catalog.u53(0) } } };
+			}),
+		).toThrow("omit jitter");
+		catalog.mutate((value) => {
+			expect(value[section]).toBeUndefined();
+		});
+
+		catalog.mutate((value) => {
+			value[section] = { tracks: { data: { mode: "stream", jitter: Catalog.u53(100) } } };
+		});
 		for (const jitter of [Catalog.u53(50), undefined]) {
 			expect(() =>
 				catalog.mutate((value) => {
-					retained(value).renditions.media.jitter = jitter;
+					tracks(value).data.jitter = jitter;
 				}),
 			).toThrow("jitter cannot decrease");
 			catalog.mutate((value) => {
-				expect(retained(value).renditions.media.jitter).toBe(Catalog.u53(100));
+				expect(tracks(value).data.jitter).toBe(Catalog.u53(100));
 			});
 		}
+
+		// A new track under the same name, after the old one is gone, starts over.
 		catalog.mutate((value) => {
-			delete retained(value).renditions.media;
+			delete tracks(value).data;
 		});
 		catalog.mutate((value) => {
-			Object.assign(retained(value).renditions, {
-				media: {
-					codec: "opus",
-					container: { kind: "legacy" },
-					sampleRate: 48000,
-					numberOfChannels: 2,
-					jitter: 50,
-				},
-			});
+			tracks(value).data = { mode: "stream", jitter: Catalog.u53(50) };
 		});
 	});
 }

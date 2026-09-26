@@ -24,12 +24,15 @@ export class CatalogProducer {
 	mutate(fn: (catalog: Catalog.Root) => void): void {
 		const value = structuredClone(this.#value);
 		fn(value);
-		for (const section of ["audio", "video", "text"] as const) {
-			for (const [name, config] of Object.entries(value[section]?.renditions ?? {})) {
-				if (config.jitter === 0) throw new Error("omit jitter for a track flushed immediately");
-				const previous = this.#value[section]?.renditions[name]?.jitter;
-				if (previous !== undefined && (config.jitter === undefined || config.jitter < previous)) {
-					throw new Error("jitter cannot decrease for an existing rendition");
+		for (const field of ["jitter", "delay"] as const) {
+			const previous = advertised(this.#value, field);
+			for (const [section, next] of Object.entries(advertised(value, field))) {
+				for (const [name, estimate] of Object.entries(next)) {
+					if (estimate === 0) throw new Error(`omit ${field} rather than advertising 0`);
+					const before = previous[section]?.[name];
+					if (before !== undefined && (estimate === undefined || estimate < before)) {
+						throw new Error(`${field} cannot decrease for an existing track`);
+					}
 				}
 			}
 		}
@@ -57,6 +60,22 @@ export class CatalogProducer {
 			output.finish();
 		});
 	}
+}
+
+/** Every track's advertised `field`, by section and then track name. */
+function advertised(
+	catalog: Catalog.Root,
+	field: "jitter" | "delay",
+): Record<string, Record<string, number | undefined>> {
+	const pick = (tracks: Record<string, { jitter?: number; delay?: number }> | undefined) =>
+		Object.fromEntries(Object.entries(tracks ?? {}).map(([name, config]) => [name, config[field]]));
+	return {
+		audio: pick(catalog.audio?.renditions),
+		video: pick(catalog.video?.renditions),
+		text: pick(catalog.text?.renditions),
+		json: pick(catalog.json?.tracks),
+		binary: pick(catalog.binary?.tracks),
+	};
 }
 
 // The wall time of `performance.now() === 0`, the zero every js/publish timestamp counts from.

@@ -27,7 +27,15 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
-import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, resolvesStart, Version } from "./version.ts";
+import {
+	hasAnnounceId,
+	hasAnnounceOk,
+	hasDatagrams,
+	hasProbeRtt,
+	hasStreamCount,
+	resolvesStart,
+	Version,
+} from "./version.ts";
 
 // Where each originated route lands under the requested prefix: its suffix beneath
 // the prefix, or the empty suffix for a route above it, where the most specific
@@ -64,7 +72,7 @@ function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
 }
 
-/** What {@link Publisher.runGroup} needs to serve one group. */
+/** What {@link Publisher.openGroup} and {@link Publisher.serveGroup} need to serve one group. */
 interface RunGroup {
 	/** The subscription ID. */
 	sub: bigint;
@@ -243,6 +251,11 @@ class SubscriptionControls {
 		this.#writer.reset(result ?? new StreamError(StreamCode.Cancel, { message: "cancel" }));
 		if (result) throw result;
 		return false;
+	}
+
+	/** Settles once the stream is over: `null` when it ended cleanly, or the failure. */
+	get ended(): Promise<Error | null> {
+		return this.#ended;
 	}
 
 	#finish(end: Error | null) {
@@ -732,6 +745,13 @@ export class Publisher {
 		let startSent = false;
 		let endSent = false;
 
+		// Lite-07+ counts the group streams in SUBSCRIBE_END, so it goes out only once every
+		// served group has opened its stream or given up, and a cap holding groups back
+		// delays it until they are released.
+		const countStreams = hasStreamCount(this.version);
+		let streams = 0;
+		const opening = new Set<Promise<unknown>>();
+
 		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_END
 		// straight into finish_at, so it must name the track's boundary (which counts
 		// datagram sequences too), not the delivered range: a subscription cap can hold
@@ -739,21 +759,27 @@ export class Publisher {
 		// before the producer declared it.
 		const boundary = () => track.final() ?? (track.latest() ?? -1) + 1;
 
-		// SUBSCRIBE_END names that boundary, which a cap can hold groups back from, so it goes
-		// out as soon as the producer finishes and the subscription keeps serving whatever a
-		// later cap raise releases (see the Rust publisher's Recv::Boundary).
+		// Before lite-07, SUBSCRIBE_END names that boundary, which a cap can hold groups back
+		// from, so it goes out as soon as the producer finishes and the subscription keeps
+		// serving whatever a later cap raise releases (see the Rust publisher's Recv::Boundary).
 		const sendEnd = async (): Promise<boolean> => {
 			endSent = true;
-			if (emitRange) {
-				return controls.response(
-					encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary()) }, this.version),
-				);
-			}
-			return true;
+			if (!emitRange) return true;
+			return controls.response(
+				(async () => {
+					// A group that gives up before its stream opens is never counted.
+					if (countStreams) while (opening.size > 0) await Promise.all(opening);
+					const end = new SubscribeEnd(boundary(), streams);
+					await encodeSubscribeResponse(stream, { end }, this.version);
+				})(),
+			);
 		};
 
 		// One ranking for the whole subscription, shared by every group it serves.
 		const priority = new Priority(track);
+
+		// Every group this subscription started serving, until its stream finishes or resets.
+		const groups = new Set<Promise<void>>();
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
@@ -802,24 +828,39 @@ export class Publisher {
 					case "error":
 						throw recv.error;
 					case "idle":
+						// Before lite-07, an end declared ahead of the live edge goes out as
+						// soon as it is known, while the remaining groups are still being
+						// produced. The lite-07 count is not final until those groups open.
+						if (!endSent && !countStreams && track.final() !== undefined) {
+							if (!(await sendEnd())) return;
+							continue;
+						}
 						await waitForSubscription(controls, track);
 						continue;
 					case "boundary":
 						// The producer finished but is still holding groups above the cap.
 						// Declare the boundary, then wait for an update to release them.
-						if (!endSent) {
+						if (!endSent && !countStreams) {
 							if (!(await sendEnd())) return;
 							continue;
 						}
 						await waitForSubscription(controls, track);
 						continue;
-					case "done":
+					case "done": {
 						if (!endSent) {
 							if (!(await sendEnd())) return;
 							continue;
 						}
+						// The FIN tells the subscriber every group is accounted for, so it waits
+						// until each group stream finished or reset. The subscriber leaving
+						// instead cancels whatever is still queued.
+						const drained = Symbol("drained");
+						const end = await Promise.race([Promise.all(groups).then(() => drained), controls.ended]);
+						if (end instanceof Error) throw end;
+						if (end !== drained) return;
 						finished = true;
 						return;
+					}
 				}
 
 				const group = recv.group;
@@ -846,7 +887,7 @@ export class Publisher {
 						return;
 				}
 
-				void this.#runGroup({
+				const options: RunGroup = {
 					sub,
 					group,
 					timescale,
@@ -854,7 +895,20 @@ export class Publisher {
 					unsubscribed,
 					start: range.start,
 					end: range.end,
+				};
+				// `opening` settles when the stream opens so the lite-07 count can be sent.
+				// `groups` covers the serve too, so the FIN still waits for every stream to
+				// finish or reset, including one that has not opened yet.
+				const opened = this.#openGroup(options);
+				const task = opened.then(async (writer) => {
+					if (!writer) return;
+					streams += 1;
+					await this.#serveGroup(writer, options);
 				});
+				groups.add(task);
+				void task.finally(() => groups.delete(task));
+				opening.add(opened);
+				void opened.finally(() => opening.delete(opened));
 			}
 		} finally {
 			if (!finished) unsubscribe();
@@ -906,7 +960,7 @@ export class Publisher {
 				// relays re-serve with the same window.
 				maxAge: info.maxAge,
 				// Lite05 mandates per-frame timestamps. Advertise the track's timescale;
-				// `#runGroup` emits each frame converted to it.
+				// `#serveGroup` emits each frame converted to it.
 				timescale: info.timescale,
 			});
 		})();
@@ -935,7 +989,7 @@ export class Publisher {
 				const datagram = await track.recvDatagram();
 				if (!datagram) return; // Track finished; #runTrack tears the subscription down.
 
-				// Convert the timestamp to the track's advertised timescale, matching #runGroup.
+				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
 				const ts = Math.round(datagram.timestamp.as(timescale));
 				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode();
 
@@ -985,15 +1039,13 @@ export class Publisher {
 	}
 
 	/**
-	 * Serves one group on its own unidirectional stream.
+	 * Opens the unidirectional stream for one group, or closes the group and resolves
+	 * `undefined` when it cannot get one.
 	 *
 	 * @internal
 	 */
-	async #runGroup(options: RunGroup) {
-		const { sub, group, timescale, priority, unsubscribed, start: startFrame, end: endFrame } = options;
-		// This model holds whole groups, so frame `startFrame` is always reachable unless
-		// the group ends first. Declaring it up front keeps the stream self-describing.
-		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
+	async #openGroup(options: RunGroup): Promise<Writer | undefined> {
+		const { group, priority, unsubscribed } = options;
 		try {
 			// The transport drains streams by send order, so this is what makes a high-priority
 			// track (and a newer group within it) win the link when there isn't room for both.
@@ -1007,79 +1059,88 @@ export class Publisher {
 				cancel: unsubscribed,
 				waitUntilAvailable: false,
 			});
-			if (!stream) {
-				group.close(new Error("no stream slot"));
-				return;
-			}
+			if (!stream) group.close(new Error("no stream slot"));
+			return stream;
+		} catch (err: unknown) {
+			group.close(error(err));
+			return undefined;
+		}
+	}
 
-			// Everything past this point runs inside the cleanup scope, so a failure never leaves
-			// a finished group's stream being ranked.
-			try {
-				// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire
-				// follows it too rather than keeping a stale rank until it finishes.
-				priority.add(stream, group.sequence);
+	/**
+	 * Serves one group on the stream {@link #openGroup} opened for it.
+	 *
+	 * @internal
+	 */
+	async #serveGroup(stream: Writer, options: RunGroup) {
+		const { sub, group, timescale, priority, start: startFrame, end: endFrame } = options;
+		// This model holds whole groups, so frame `startFrame` is always reachable unless
+		// the group ends first. Declaring it up front keeps the stream self-describing.
+		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
+		// Everything past this point runs inside the cleanup scope, so a failure never leaves
+		// a finished group's stream being ranked.
+		try {
+			// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire
+			// follows it too rather than keeping a stale rank until it finishes.
+			priority.add(stream, group.sequence);
 
-				await hooks.guardGroup(
-					group,
-					(async () => {
-						await stream.u53(0); // stream type
-						await msg.encode(stream, this.version);
-					})(),
-				);
+			await hooks.guardGroup(
+				group,
+				(async () => {
+					await stream.u53(0); // stream type
+					await msg.encode(stream, this.version);
+				})(),
+			);
 
-				// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
-				// advertised timescale; older drafts omit it.
-				const timestamps = supportsTrackStream(this.version);
-				let prevTs = 0n;
-				// Whether the cursor ever reached the requested start, which decides how the
-				// end of the group is read below.
-				let reached = startFrame === 0;
+			// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
+			// advertised timescale; older drafts omit it.
+			const timestamps = supportsTrackStream(this.version);
+			let prevTs = 0n;
+			// Whether the cursor ever reached the requested start, which decides how the
+			// end of the group is read below.
+			let reached = startFrame === 0;
 
-				for (;;) {
-					const read = await race([hooks.readGroupFrame(group), stream.closed]);
-					if (!read) {
-						// The group ended before the frame the subscriber asked to start
-						// at, so this publisher can't serve the range at all. FINning here
-						// would claim an empty group under that index; reset so it reads
-						// as the gap it is.
-						if (!reached) throw new Error(`group ended before frame ${startFrame}`);
-						break;
-					}
-
-					try {
-						// A group that ends exactly at the start is a valid, empty range.
-						if (read.sequence + 1 >= startFrame) reached = true;
-						// Frames below the requested start were excluded, and the receiver
-						// numbers what it gets from `startFrame`.
-						if (read.sequence < startFrame) continue;
-						if (endFrame !== undefined && read.sequence > endFrame) break;
-
-						if (timestamps) {
-							// Convert each frame to the track's advertised timescale.
-							const ts = BigInt(Math.round(read.frame.timestamp.as(timescale)));
-							await hooks.guardGroup(group, stream.u62(zigzag(ts - prevTs)));
-							prevTs = ts;
-						}
-
-						await hooks.guardGroup(group, stream.u53(read.frame.payload.byteLength));
-						await hooks.guardGroup(group, stream.write(read.frame.payload));
-					} finally {
-						read.complete();
-					}
+			for (;;) {
+				const read = await race([hooks.readGroupFrame(group), stream.closed]);
+				if (!read) {
+					// The group ended before the frame the subscriber asked to start
+					// at, so this publisher can't serve the range at all. FINning here
+					// would claim an empty group under that index; reset so it reads
+					// as the gap it is.
+					if (!reached) throw new Error(`group ended before frame ${startFrame}`);
+					break;
 				}
 
-				stream.close();
-				group.close();
-			} catch (err: unknown) {
-				const e = error(err);
-				stream.reset(e);
-				group.close(e);
-			} finally {
-				priority.remove(stream);
+				try {
+					// A group that ends exactly at the start is a valid, empty range.
+					if (read.sequence + 1 >= startFrame) reached = true;
+					// Frames below the requested start were excluded, and the receiver
+					// numbers what it gets from `startFrame`.
+					if (read.sequence < startFrame) continue;
+					if (endFrame !== undefined && read.sequence > endFrame) break;
+
+					if (timestamps) {
+						// Convert each frame to the track's advertised timescale.
+						const ts = BigInt(Math.round(read.frame.timestamp.as(timescale)));
+						await hooks.guardGroup(group, stream.u62(zigzag(ts - prevTs)));
+						prevTs = ts;
+					}
+
+					await hooks.guardGroup(group, stream.u53(read.frame.payload.byteLength));
+					await hooks.guardGroup(group, stream.write(read.frame.payload));
+				} finally {
+					read.complete();
+				}
 			}
+
+			stream.close();
+			group.close();
 		} catch (err: unknown) {
 			const e = error(err);
+			stream.reset(e);
 			group.close(e);
+		} finally {
+			priority.remove(stream);
 		}
 	}
 

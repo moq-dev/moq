@@ -3,7 +3,7 @@ import type * as announce from "../announced.ts";
 import type { Established } from "../connection/established.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { error, fromClose, StreamCode, StreamError } from "../error.ts";
+import { closeError, error, fromClose, StreamCode, StreamError, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
@@ -161,11 +161,17 @@ export class Connection implements Established {
 			tasks.push(this.#subscriber.runDatagrams());
 		}
 
+		let fatal: Error | undefined;
 		try {
 			await Promise.all(tasks);
 		} catch (err) {
 			console.error("fatal error running connection", err);
+			// A session-sourced failure is the peer's close, not the raw transport error.
+			fatal = await sessionCause(this.#quic, err);
 		} finally {
+			// The session died under every track it was receiving, so they end with its
+			// error. A deliberate close() already ended them cleanly, which makes this a no-op.
+			this.#subscriber.close(fatal ?? (await closeError(this.#quic)));
 			this.close();
 		}
 	}

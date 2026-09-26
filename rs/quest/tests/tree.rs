@@ -167,16 +167,16 @@ fn dangling_absolute_link() {
 	tree.rejects("link does not resolve: /quest/m0/line/gone.md");
 }
 
-/// Relative links escape the tree (CLAUDE.md points at ../CONTRIBUTING.md), so
+/// Relative links escape the tree (AGENTS.md points at ../CONTRIBUTING.md), so
 /// they resolve against the LINKING FILE's directory. The pair of cases pins the
 /// direction: resolving against the wrong base would flip both verdicts.
 #[test]
 fn relative_link_resolves_against_the_linking_file() {
 	let tree = Tree::new();
-	tree.write("CLAUDE.md", "# Guide\n");
+	tree.write("AGENTS.md", "# Guide\n");
 	tree.append(
 		"quest/m0/line/one.md",
-		"\n## Plan\n\nSee [the guide](../../../CLAUDE.md).\n",
+		"\n## Plan\n\nSee [the guide](../../../AGENTS.md).\n",
 	);
 	tree.accepts();
 }
@@ -184,14 +184,14 @@ fn relative_link_resolves_against_the_linking_file() {
 #[test]
 fn relative_link_above_the_repository_root() {
 	let tree = Tree::new();
-	tree.write("CLAUDE.md", "# Guide\n");
+	tree.write("AGENTS.md", "# Guide\n");
 	// One `..` too many, which is exactly what a file flattened up a level
 	// keeps: it still renders, and points at nothing.
 	tree.append(
 		"quest/m0/line/one.md",
-		"\n## Plan\n\nSee [the guide](../../../../CLAUDE.md).\n",
+		"\n## Plan\n\nSee [the guide](../../../../AGENTS.md).\n",
 	);
-	tree.rejects("link does not resolve: ../../../../CLAUDE.md");
+	tree.rejects("link does not resolve: ../../../../AGENTS.md");
 }
 
 /// Quests reference each other root-absolutely. A relative one renders fine, so
@@ -203,7 +203,7 @@ fn relative_link_to_a_quest() {
 	tree.rejects("link to a quest must be root-absolute: two.md (write /quest/m0/line/two.md)");
 }
 
-/// Templates inside fenced blocks are illustrations. Flagging CLAUDE.md's own
+/// Templates inside fenced blocks are illustrations. Flagging AGENTS.md's own
 /// example would make this a check everyone learns to skip.
 #[test]
 fn fenced_templates_are_not_links() {
@@ -359,13 +359,13 @@ fn relative_index_entry() {
 }
 
 /// The index points readers at work to pick up, so a target that merely exists
-/// is not enough: quest/CLAUDE.md is a file under quest/ that is not a quest.
+/// is not enough: quest/AGENTS.md is a file under quest/ that is not a quest.
 #[test]
 fn index_entry_that_is_not_a_quest() {
 	let tree = Tree::new();
-	tree.write("quest/CLAUDE.md", "# Contract\n");
-	tree.append("quest/README.md", "- [Contract](/quest/CLAUDE.md)\n");
-	tree.rejects("lists /quest/CLAUDE.md, which is not a quest document");
+	tree.write("quest/AGENTS.md", "# Contract\n");
+	tree.append("quest/README.md", "- [Contract](/quest/AGENTS.md)\n");
+	tree.rejects("lists /quest/AGENTS.md, which is not a quest document");
 }
 
 /// The index is a list of entries, not prose that happens to link.
@@ -459,7 +459,7 @@ fn required_link_on_a_wrapped_bullet() {
 }
 
 /// The other half of that rule: an external condition with no link at all is the
-/// shape CLAUDE.md prescribes, and must stay legal.
+/// shape AGENTS.md prescribes, and must stay legal.
 #[test]
 fn required_external_condition() {
 	let tree = Tree::new();
@@ -571,28 +571,28 @@ fn blockquoted_required_entry() {
 #[test]
 fn repeated_parent_components() {
 	let tree = Tree::new();
-	tree.write("CLAUDE.md", "# Guide\n");
+	tree.write("AGENTS.md", "# Guide\n");
 	tree.append(
 		"quest/m0/line/one.md",
-		"\n## Plan\n\nSee [the guide](../../../../../CLAUDE.md).\n",
+		"\n## Plan\n\nSee [the guide](../../../../../AGENTS.md).\n",
 	);
-	tree.rejects("link does not resolve: ../../../../../CLAUDE.md");
+	tree.rejects("link does not resolve: ../../../../../AGENTS.md");
 }
 
 /// Escaping the root must fail even when the joined path happens to exist:
 /// the repository's own directory name (or a sibling worktree) sits beside the
-/// root, so `<root>/../<name>/CLAUDE.md` is a real file that readers of the
+/// root, so `<root>/../<name>/AGENTS.md` is a real file that readers of the
 /// repository-relative link can never reach.
 #[test]
 fn escaped_link_resolving_beside_the_root() {
 	let tree = Tree::new();
-	tree.write("CLAUDE.md", "# Guide\n");
+	tree.write("AGENTS.md", "# Guide\n");
 	let name = tree.path().file_name().unwrap().to_str().unwrap();
 	tree.append(
 		"quest/m0/line/one.md",
-		&format!("\n## Plan\n\nSee [the guide](../../../../{name}/CLAUDE.md).\n"),
+		&format!("\n## Plan\n\nSee [the guide](../../../../{name}/AGENTS.md).\n"),
 	);
-	tree.rejects(&format!("link does not resolve: ../../../../{name}/CLAUDE.md"));
+	tree.rejects(&format!("link does not resolve: ../../../../{name}/AGENTS.md"));
 }
 
 /// A bullet is not an entry. `- TBD` satisfies "the heading has a list" while

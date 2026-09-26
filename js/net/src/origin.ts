@@ -22,6 +22,118 @@ import { type Advertised, registerWire, wireOf } from "./wire.ts";
 export type { Cost, Hop, Route } from "./hop.ts";
 export { isAnonymous } from "./hop.ts";
 
+/** The rooted permissions shared by a handle and every route it inserts. */
+class Scope {
+	static readonly all = new Scope(Path.empty());
+
+	readonly root: Path.Valid;
+	readonly allowed?: Path.Patterns;
+
+	constructor(root: Path.Valid, allowed?: Path.Patterns) {
+		this.root = root;
+		this.allowed = allowed;
+	}
+
+	narrow(root: Path.Valid, patterns: Path.Patterns): Scope {
+		const joined = Path.encode(Path.join(this.root, root));
+		const rooted = patterns.rooted(joined);
+		const allowed = this.allowed?.intersect(rooted) ?? rooted;
+		if (allowed.size === 0) throw new Error("origin scopes do not overlap");
+		return new Scope(joined, allowed);
+	}
+
+	matches(path: Path.Valid): boolean {
+		return this.allowed?.matches(path) ?? true;
+	}
+
+	path(path: Path.Valid): Path.Valid {
+		const joined = Path.encode(Path.join(this.root, path));
+		if (!this.matches(joined)) throw new Error("path is outside the origin scope");
+		return joined;
+	}
+
+	prefix(prefix: Path.Valid): Path.Valid {
+		const joined = Path.encode(Path.join(this.root, prefix));
+		if (this.allowed && !this.allowed.overlaps(Path.Pattern.subtree(joined))) {
+			throw new Error("prefix is outside the origin scope");
+		}
+		return joined;
+	}
+
+	patterns(pattern: Path.Pattern = Path.Pattern.all()): Path.Patterns {
+		const rooted = new Path.Patterns([pattern.rooted(this.root)]);
+		return this.allowed?.intersect(rooted) ?? rooted;
+	}
+
+	/** Omit nested heads because the outer subscription already carries their routes. */
+	heads(): Path.Valid[] {
+		if (!this.allowed) return [Path.empty()];
+		const heads = [...new Set([...this.allowed.rebase(this.root)].map(scopeHead))].sort();
+		return heads.filter((head) => !heads.some((other) => other !== head && Path.hasPrefix(other, head)));
+	}
+
+	/** The exact paths within this scope, relative to its root. */
+	projectPaths<T>(values: ReadonlyMap<Path.Valid, T> | undefined): ReadonlyMap<Path.Valid, T> | undefined {
+		if (!values || this === Scope.all) return values;
+		const out = new Map<Path.Valid, T>();
+		for (const [path, value] of values) {
+			if (!this.matches(path)) continue;
+			const relative = Path.stripPrefix(this.root, path);
+			if (relative !== null) out.set(relative, value);
+		}
+		return out;
+	}
+
+	/** The advertised prefixes that may serve this scope, relative to its root. */
+	projectRoutes(
+		values: ReadonlyMap<Path.Valid, Advertised> | undefined,
+	): ReadonlyMap<Path.Valid, Advertised> | undefined {
+		if (!values || this === Scope.all) return values;
+		const out = new Map<Path.Valid, Advertised>();
+		const covering = new CoveringRoot(this.root);
+		for (const [path, value] of values) {
+			if (this.allowed && ![...this.allowed].some((pattern) => advertOverlaps(value, path, pattern))) continue;
+			const relative = covering.relative(path);
+			if (relative !== undefined) out.set(relative, value);
+		}
+		return out;
+	}
+}
+
+/** Whether the route advertised at `prefix` may serve any path `pattern` admits. */
+function advertOverlaps(advert: Advertised, prefix: Path.Valid, pattern: Path.Pattern): boolean {
+	return advert.claim ? advert.claim.overlaps(pattern) : scopeOverlaps(pattern, prefix);
+}
+
+/** The paths `entry` may serve beneath `prefix`, when its producer is scoped. */
+function claimOf(entry: RouteEntry, prefix: Path.Valid): Path.Patterns | undefined {
+	return entry.scope.allowed?.intersect(new Path.Patterns([Path.Pattern.subtree(prefix)]));
+}
+
+/**
+ * Presents advertised prefixes relative to a root. Every prefix at or above the root
+ * collapses to the empty path, where the most specific one wins, since that is the route
+ * a request beneath the root resolves through.
+ */
+class CoveringRoot {
+	readonly #root: Path.Valid;
+	#covering?: Path.Valid;
+
+	constructor(root: Path.Valid) {
+		this.#root = root;
+	}
+
+	/** The presented path for `path`, or undefined when it is outside the root or a broader cover. */
+	relative(path: Path.Valid): Path.Valid | undefined {
+		const relative = Path.stripPrefix(this.#root, path);
+		if (relative !== null && relative !== Path.empty()) return relative;
+		if (relative === null && !Path.hasPrefix(path, this.#root)) return undefined;
+		if (this.#covering !== undefined && !Path.hasPrefix(this.#covering, path)) return undefined;
+		this.#covering = path;
+		return Path.empty();
+	}
+}
+
 /**
  * One requested path: the notify node for everything watching it.
  *
@@ -34,18 +146,21 @@ export { isAnonymous } from "./hop.ts";
  * `answer` outlives a session: the answering session clears it when it dies and the next one
  * answers again, which is what makes a request span reconnects.
  *
- * `refused` holds the route entries whose handler rejected the path. A refusal is
- * authoritative: the entry is never asked again while it stands (a reconnect is a fresh
- * entry), and the path resolves through the next-best route or to nothing. Without it a
- * rejection would refresh the path straight back onto the same queue, and a handler that
- * keeps saying no would be asked forever.
+ * `handles` holds the `closed` of each open {@link Requesting} on the path.
+ *
+ * A refusal is terminal. With nothing serving, the slot ends: every handle closes with the
+ * handler's error and the slot leaves the table, so the next request asks afresh. While
+ * another source still serves (a better route was asked and said no), the refuser joins
+ * `refused` and is skipped for as long as it stands (a reconnect is a fresh entry), so the
+ * current source carries on. A refusal never falls through to a broader prefix or another
+ * advertiser.
  *
  * @internal
  */
 export interface RequestSlot {
-	count: number;
 	blind: number;
 	answer?: broadcast.Consumer;
+	readonly handles: Set<Once<Error | null>>;
 	readonly refused: Set<RouteEntry>;
 	readonly route: Signal<broadcast.Consumer | undefined>;
 }
@@ -62,6 +177,7 @@ export interface RequestSlot {
  */
 export interface RouteEntry {
 	readonly identity: object;
+	readonly scope: Scope;
 	readonly route: Signal<Route>;
 	readonly originated: boolean;
 	readonly server?: ServeState;
@@ -104,6 +220,12 @@ function noCapacity(): StreamError {
 
 /** A served route from {@link Producer.dynamic}: the queue a handler drains. */
 class ServeState {
+	readonly root: Path.Valid;
+
+	constructor(root: Path.Valid) {
+		this.root = root;
+	}
+
 	queue = new Signal<Request[]>([]);
 	pending = new Map<Path.Valid, Request>();
 	served = new Map<Path.Valid, broadcast.Consumer>();
@@ -115,7 +237,7 @@ class ServeState {
 	closed = new Once<Error | null>();
 	settled = new Signal(0);
 	onChange: (path: Path.Valid) => void = () => {};
-	onReject: (path: Path.Valid) => void = () => {};
+	onReject: (path: Path.Valid, err: Error) => void = () => {};
 
 	enqueue(path: Path.Valid): void {
 		if (this.closed.peek() !== undefined) return;
@@ -123,7 +245,7 @@ class ServeState {
 		if (this.pending.has(path)) return;
 		const live = this.served.get(path);
 		if (live && live.closed.peek() === undefined) return;
-		const request = makeRequest(path, this);
+		const request = makeRequest(Path.stripPrefix(this.root, path) ?? Path.empty(), this);
 		this.pending.set(path, request);
 		this.queue.mutate((queue) => {
 			queue.push(request);
@@ -131,33 +253,35 @@ class ServeState {
 	}
 
 	accept(request: Request, front: broadcast.Consumer): void {
-		if (this.closed.peek() !== undefined || this.pending.get(request.path) !== request) {
+		const path = Path.join(this.root, request.path);
+		if (this.closed.peek() !== undefined || this.pending.get(path) !== request) {
 			front.close();
 			return;
 		}
-		this.pending.delete(request.path);
-		const existing = this.served.get(request.path);
+		this.pending.delete(path);
+		const existing = this.served.get(path);
 		if (existing && existing.closed.peek() === undefined) {
 			front.close();
-			this.onChange(request.path);
+			this.onChange(path);
 			this.settled.update((n) => n + 1);
 			return;
 		}
-		this.served.set(request.path, front);
+		this.served.set(path, front);
 		void front.closed.then(() => {
-			if (this.served.get(request.path) !== front) return;
-			this.served.delete(request.path);
-			this.onChange(request.path);
+			if (this.served.get(path) !== front) return;
+			this.served.delete(path);
+			this.onChange(path);
 		});
-		this.onChange(request.path);
+		this.onChange(path);
 		this.settled.update((n) => n + 1);
 	}
 
 	reject(request: Request, err: Error): void {
-		if (this.pending.get(request.path) !== request) return;
-		this.pending.delete(request.path);
-		if (this.demanding.has(request.path)) this.rejected.set(request.path, err);
-		this.onReject(request.path);
+		const path = Path.join(this.root, request.path);
+		if (this.pending.get(path) !== request) return;
+		this.pending.delete(path);
+		if (this.demanding.has(path)) this.rejected.set(path, err);
+		this.onReject(path, err);
 		this.settled.update((n) => n + 1);
 	}
 
@@ -243,7 +367,7 @@ class OriginState {
 		for (const [path, routes] of this.routes.peek() ?? []) {
 			const entry = preferredEntry(routes);
 			if (!entry) continue;
-			const value = { identity: entry.identity, route: entry.route.peek() };
+			const value = { identity: entry.identity, route: entry.route.peek(), claim: claimOf(entry, path) };
 			remote.set(path, value);
 			available.set(path, value.route);
 		}
@@ -303,31 +427,42 @@ class OriginState {
 		slot.route.set(this.route(path, slot));
 	}
 
-	/** Record that `entry` refused `path` and re-route the requests watching it. */
-	refuse(path: Path.Valid, entry: RouteEntry): void {
+	/**
+	 * `entry` refused `path` with `err`. A request still serving another source skips the
+	 * refuser; one with nothing serving ends with `err`.
+	 */
+	refuse(path: Path.Valid, entry: RouteEntry, err: Error): void {
 		const slot = this.requests.peek()?.get(path);
 		if (!slot) return;
-		slot.refused.add(entry);
-		slot.route.set(this.route(path, slot));
+		// Only the route the request is waiting on speaks for it; a superseded one's answer is moot.
+		if (this.bestEntry(path, (candidate) => slot.refused.has(candidate)) !== entry) return;
+
+		const serving = slot.route.peek();
+		if (serving && serving.closed.peek() === undefined) {
+			slot.refused.add(entry);
+			slot.route.set(this.route(path, slot));
+			return;
+		}
+
+		this.requests.mutate((map) => {
+			if (map?.get(path) === slot) map.delete(path);
+		});
+		slot.answer?.close();
+		slot.answer = undefined;
+		slot.route.set(undefined);
+		this.releaseMaterialized(path);
+		for (const closed of slot.handles) closed.set(err);
+		slot.handles.clear();
 	}
 
 	/**
 	 * Recompute every open request covered by `prefix`, after a route was inserted or
 	 * removed there: a route covers many paths, so a single-path refresh is not enough.
-	 * Materialized broadcasts whose provider changed are released here too, so a
-	 * retracted route's session subscription closes even when nothing reads it again.
+	 * Every materialized broadcast belongs to an open request, so rerouting them also
+	 * releases a retracted route's session subscription even when nothing reads it again.
 	 */
 	refreshPrefix(prefix: Path.Valid): void {
-		const requests = this.requests.peek();
-		for (const [path, cached] of [...this.materialized]) {
-			if (!Path.hasPrefix(prefix, path)) continue;
-			const refused = requests?.get(path)?.refused;
-			if (cached.entry !== this.bestEntry(path, (entry) => refused?.has(entry) ?? false)) {
-				this.materialized.delete(path);
-				cached.front.close();
-			}
-		}
-		for (const [path, slot] of requests ?? []) {
+		for (const [path, slot] of this.requests.peek() ?? []) {
 			if (Path.hasPrefix(prefix, path)) slot.route.set(this.route(path, slot));
 		}
 	}
@@ -344,7 +479,8 @@ class OriginState {
 		const next = new Map<Path.Valid, Advertised>();
 		for (const [prefix, entries] of routes ?? []) {
 			const mine = preferredEntry(entries, received);
-			if (mine) next.set(prefix, { identity: mine.identity, route: mine.route.peek() });
+			if (mine)
+				next.set(prefix, { identity: mine.identity, route: mine.route.peek(), claim: claimOf(mine, prefix) });
 		}
 		// A local broadcast and an originated dynamic at one path compete on cost, as they do for requests.
 		for (const [path, route] of advertised ?? []) {
@@ -375,7 +511,10 @@ class OriginState {
 		let best: RouteEntry | undefined;
 		for (const [prefix, entries] of this.routes.peek() ?? []) {
 			if (!Path.hasPrefix(prefix, path)) continue;
-			const entry = preferredEntry(entries, skip);
+			const entry = preferredEntry(
+				entries,
+				(candidate) => !candidate.scope.matches(path) || (skip?.(candidate) ?? false),
+			);
 			if (!entry) continue;
 			if (bestPrefix === undefined || prefix.length > bestPrefix.length) {
 				bestPrefix = prefix;
@@ -404,8 +543,9 @@ class OriginState {
 	 * the best covering route, or the blind answer.
 	 *
 	 * Materialization is lazy and cached per path: the first request under a route opens
-	 * the providing session's subscription, repeats share it, and a provider change (the
-	 * route retracting, a better session taking over) swaps it out.
+	 * the providing session's subscription and repeats share it. A better route is made
+	 * before the old one breaks: the current front keeps serving until the new route
+	 * answers (then swaps) or refuses (then is skipped). A retracted route swaps at once.
 	 */
 	route(path: Path.Valid, slot: Pick<RequestSlot, "answer" | "refused">): broadcast.Consumer | undefined {
 		const entry = this.bestEntry(path, (candidate) => slot.refused.has(candidate));
@@ -416,24 +556,26 @@ class OriginState {
 			return local;
 		}
 
-		const cached = this.materialized.get(path);
-		if (cached && cached.entry === entry) {
-			if (cached.front.closed.peek() === undefined) return cached.front;
+		let cached = this.materialized.get(path);
+		if (cached && cached.front.closed.peek() !== undefined) {
 			this.materialized.delete(path);
-		} else if (cached) {
-			this.materialized.delete(path);
-			cached.front.close();
+			cached = undefined;
 		}
-		if (!entry?.server) return slot.answer;
+		if (cached && cached.entry === entry) return cached.front;
+		if (!entry?.server) {
+			this.releaseMaterialized(path);
+			return slot.answer;
+		}
 
 		const served = entry.server.served.get(path);
 		if (served && served.closed.peek() === undefined) {
+			cached?.front.close();
 			this.materialized.set(path, { entry, front: served });
 			return served;
 		}
 
 		entry.server.enqueue(path);
-		return undefined;
+		return cached?.front;
 	}
 }
 
@@ -492,25 +634,45 @@ export interface RequestOptions {
  */
 export class Producer implements Table {
 	#state = new OriginState();
+	#scope = Scope.all;
+	#requests?: Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined>;
 
 	// The reader backing the passthroughs, so holding a Producer never requires the
 	// consume().x() stutter for everyday reads. One instance, so `discovery` keeps its
 	// identity across reads.
-	#reader = makeConsumer(this.#state);
+	#reader = makeConsumer(this.#state, this.#scope);
 
 	constructor() {
 		const thisProducer = this;
 		registerWire(this, {
 			receive: (prefix, route) => this.#receive(prefix, route),
+			interests: () => this.#scope.heads(),
+			accepts: (prefix) =>
+				!this.#scope.allowed ||
+				this.#scope.allowed.overlaps(Path.Pattern.subtree(Path.join(this.#scope.root, prefix))),
 			attach: (discovery) => this.#attach(discovery),
 			expect: () => this.#expect(),
 			get requests() {
-				return thisProducer.#state.requests;
+				if (thisProducer.#scope === Scope.all) return thisProducer.#state.requests;
+				thisProducer.#requests ??= new Derived([thisProducer.#state.requests], (requests) =>
+					thisProducer.#scope.projectPaths(requests),
+				);
+				return thisProducer.#requests;
 			},
 			changed: () => this.#changed(),
-			answer: (path, front) => this.#answer(path, front),
+			answer: (path, front) => this.#answer(this.#scope.path(path), front),
 			routes: (path) => wireOf(this.#reader).routes(path),
 		});
+	}
+
+	/** Narrow this handle to patterns beneath root, presenting paths relative to that root. */
+	scope(root: Path.Valid, patterns: Path.Patterns): Producer {
+		const scope = this.#scope.narrow(root, patterns);
+		const producer = new Producer();
+		producer.#state = this.#state;
+		producer.#scope = scope;
+		producer.#reader = makeConsumer(this.#state, scope);
+		return producer;
 	}
 
 	/**
@@ -535,6 +697,7 @@ export class Producer implements Table {
 	 * a remote route at the same path on cost, winning ties.
 	 */
 	createBroadcast(path: Path.Valid): broadcast.Producer {
+		path = this.#scope.path(path);
 		const created = this.#state.created;
 		if (!created) throw new Error("origin is closed");
 
@@ -621,15 +784,17 @@ export class Producer implements Table {
 	}
 
 	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean): Dynamic {
-		const server = new ServeState();
+		prefix = this.#scope.prefix(prefix);
+		const server = new ServeState(this.#scope.root);
 		server.onChange = (path) => this.#state.refresh(path);
 		const entry: RouteEntry = {
 			identity: {},
+			scope: this.#scope,
 			route: new Signal(route),
 			originated,
 			server,
 		};
-		server.onReject = (path) => this.#state.refuse(path, entry);
+		server.onReject = (path, err) => this.#state.refuse(path, entry, err);
 
 		let closed = false;
 		this.#state.routes.mutate((routes) => {
@@ -722,7 +887,7 @@ export class Producer implements Table {
 	 *
 	 * @internal
 	 */
-	#changed(): Promise<unknown> {
+	#changed(): GetPromise<unknown> {
 		return Signal.race(this.#state.requests, this.#state.local, this.#state.routes, this.#state.advertisedLocal);
 	}
 
@@ -760,7 +925,7 @@ export class Producer implements Table {
 
 	/** A read handle for this origin, the side a connection's `publish` option borrows. */
 	consume(): Consumer {
-		return makeConsumer(this.#state);
+		return makeConsumer(this.#state, this.#scope);
 	}
 
 	/** Whether every attached session announces into the table; see {@link Consumer.discovery}. */
@@ -821,7 +986,7 @@ export class Producer implements Table {
 
 // Constructs a Consumer from within this module without exposing a public constructor
 // that would leak the unexported OriginState. Assigned in the class's static block.
-let makeConsumer: (state: OriginState) => Consumer;
+let makeConsumer: (state: OriginState, scope: Scope) => Consumer;
 
 // Same for Requesting: a public constructor would let a caller forge a handle that no origin
 // ever registered, whose lifecycle guarantees are then false. `@internal` alone would not
@@ -830,6 +995,7 @@ let makeRequesting: (
 	path: Path.Valid,
 	active: Getter<broadcast.Consumer | undefined>,
 	unroutable: Getter<boolean>,
+	closed: Once<Error | null>,
 	dispose: Dispose,
 ) => Requesting;
 
@@ -870,33 +1036,43 @@ export class Requesting {
 	 * set, and false while a connection is still coming up, so the ordinary page-load window
 	 * before the first handshake reads as pending rather than as a missing broadcast. Waiting
 	 * on this is futile by definition; wait for an announcement instead, via the origin's
-	 * `announced`.
+	 * `announced`. True once the request is refused.
 	 */
 	readonly unroutable: Getter<boolean>;
 
+	/**
+	 * Settles with the error a route's handler refused the path with, or `null` once you
+	 * {@link close} the request. A refusal is final: no other route is asked, and a fresh
+	 * request is needed to try again.
+	 */
+	readonly closed: GetPromise<Error | null>;
+
 	#dispose: Dispose;
-	#closed = false;
+	#disposed = false;
 
 	private constructor(
 		path: Path.Valid,
 		active: Getter<broadcast.Consumer | undefined>,
 		unroutable: Getter<boolean>,
+		closed: GetPromise<Error | null>,
 		dispose: Dispose,
 	) {
 		this.path = path;
 		this.active = active;
 		this.unroutable = unroutable;
+		this.closed = closed;
 		this.#dispose = dispose;
 	}
 
 	static {
-		makeRequesting = (path, active, unroutable, dispose) => new Requesting(path, active, unroutable, dispose);
+		makeRequesting = (path, active, unroutable, closed, dispose) =>
+			new Requesting(path, active, unroutable, closed, dispose);
 	}
 
 	/** Withdraw the request. The path stays routed for any other open request. Idempotent. */
 	close(): void {
-		if (this.#closed) return;
-		this.#closed = true;
+		if (this.#disposed) return;
+		this.#disposed = true;
 		this.#dispose();
 	}
 }
@@ -912,9 +1088,11 @@ export class Requesting {
  */
 export class Consumer {
 	#state: OriginState;
+	#scope: Scope;
 
-	private constructor(state: OriginState) {
+	private constructor(state: OriginState, scope: Scope) {
 		this.#state = state;
+		this.#scope = scope;
 		// True only when every attached session announces. One session that cannot means the
 		// table is an incomplete picture, so a consumer gated on it has to keep its blind
 		// fallback: the paths only that session carries never reach the table at all.
@@ -922,20 +1100,20 @@ export class Consumer {
 			total === 0 ? undefined : discovery === total,
 		);
 		registerWire(this, {
-			routes: (path) => this.#routes(path),
-			get broadcasts() {
-				return state.local;
-			},
-			get advertised() {
-				return state.originated;
-			},
-			local: (path) => this.#local(path),
-			demand: (path) => this.#demand(path),
+			routes: (path) => this.#routes(scope.path(path)),
+			broadcasts:
+				scope === Scope.all ? state.local : new Derived([state.local], (local) => scope.projectPaths(local)),
+			advertised:
+				scope === Scope.all
+					? state.originated
+					: new Derived([state.originated], (routes) => scope.projectRoutes(routes)),
+			local: (path) => this.#local(scope.path(path)),
+			demand: (path) => this.#demand(scope.path(path)),
 		});
 	}
 
 	static {
-		makeConsumer = (state) => new Consumer(state);
+		makeConsumer = (state, scope) => new Consumer(state, scope);
 	}
 
 	/** Settles once the origin closes; see {@link Producer.closed}. */
@@ -997,10 +1175,19 @@ export class Consumer {
 	 * feeds from more than one connection.
 	 */
 	request(path: Path.Valid, options: RequestOptions = {}): Requesting {
+		const relative = path;
+		path = this.#scope.path(path);
 		const requests = this.#state.requests.peek();
 		if (!requests) {
 			// Closed origin: a request that can never resolve, and says so.
-			return makeRequesting(path, new Signal<broadcast.Consumer | undefined>(undefined), getter(true), () => {});
+			const closed = new Once<Error | null>();
+			return makeRequesting(
+				relative,
+				new Signal<broadcast.Consumer | undefined>(undefined),
+				getter(true),
+				closed,
+				() => closed.set(null),
+			);
 		}
 
 		let slot = requests.get(path);
@@ -1012,8 +1199,8 @@ export class Consumer {
 			// notify nobody.
 			const refused = new Set<RouteEntry>();
 			const created: RequestSlot = {
-				count: 0,
 				blind: 0,
+				handles: new Set(),
 				refused,
 				route: new Signal(this.#state.route(path, { refused })),
 			};
@@ -1022,7 +1209,8 @@ export class Consumer {
 				map?.set(path, created);
 			});
 		}
-		slot.count += 1;
+		const closed = new Once<Error | null>();
+		slot.handles.add(closed);
 		let blind = !options.announced || this.#discovery.peek() === false;
 		if (blind) slot.blind += 1;
 		this.#state.requests.mutate(() => {});
@@ -1075,9 +1263,12 @@ export class Consumer {
 		// Only meaningful while nothing is routed, so it reads the route rather than `active`:
 		// the two cannot disagree, since a routed path always has an answerer-independent
 		// answer.
-		const unroutable = new Derived([route, this.#state.answerers], (front, answerers) => !front && answerers === 0);
+		const unroutable = new Derived(
+			[route, this.#state.answerers, closed],
+			(front, answerers, ended) => ended !== undefined || (!front && answerers === 0),
+		);
 
-		return makeRequesting(path, active, unroutable, () => {
+		return makeRequesting(relative, active, unroutable, closed, () => {
 			// Releases this request's handle; the route itself belongs to the table.
 			released = true;
 			unsubscribeDiscovery();
@@ -1086,18 +1277,21 @@ export class Consumer {
 			handle = undefined;
 			source = undefined;
 
-			taken.count -= 1;
+			taken.handles.delete(closed);
+			if (closed.peek() === undefined) closed.set(null);
 			if (blind) taken.blind -= 1;
 			this.#state.requests.mutate(() => {});
-			if (taken.count > 0) return;
+			if (taken.handles.size > 0) return;
 
 			// Defer the teardown a microtask: an effect whose rerun was triggered by the
 			// answer resolving closes its old request and takes a new one in the same tick,
 			// and tearing down in between would drop the answer it is about to read.
 			queueMicrotask(() => {
-				if (taken.count > 0) return;
+				if (taken.handles.size > 0) return;
+				// A refused slot already tore itself down, and the path may hold a newer one.
+				if (this.#state.requests.peek()?.get(path) !== taken) return;
 				this.#state.requests.mutate((map) => {
-					if (map?.get(path) === taken) map.delete(path);
+					map?.delete(path);
 				});
 				taken.answer?.close();
 				taken.answer = undefined;
@@ -1116,10 +1310,11 @@ export class Consumer {
 	 */
 	broadcasts(scope?: Path.Pattern, options?: announce.Options): Getter<ReadonlyMap<Path.Valid, Route>> {
 		const hidden = options?.hidden ?? false;
-		if (!scope) return hidden ? this.#state.available : this.#state.visible;
+		if (!scope && this.#scope === Scope.all) return hidden ? this.#state.available : this.#state.visible;
+		const patterns = this.#scope.patterns(scope);
 		return new Derived([this.#state.available], () => {
 			const routes = new Map<Path.Valid, Route>();
-			for (const [path, entry] of this.#listed(scope, hidden)) routes.set(path, entry.route);
+			for (const [path, entry] of this.#listed(patterns, hidden)) routes.set(path, entry.route);
 			return routes;
 		});
 	}
@@ -1134,29 +1329,42 @@ export class Consumer {
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
 		const producer = new announce.Producer();
-		void this.#runAnnounced(producer, scope, options?.hidden ?? false);
+		void this.#runAnnounced(producer, this.#scope.patterns(scope), options?.hidden ?? false);
 		return producer.consume();
 	}
 
 	/** One snapshot shared by map readers and announcement-stream diffing. */
-	#listed(scope: Path.Pattern, hidden: boolean): Map<Path.Valid, Presented> {
+	#listed(patterns: Path.Patterns, hidden: boolean): Map<Path.Valid, Presented> {
 		const next = new Map<Path.Valid, Presented>();
+		const covering = new CoveringRoot(this.#scope.root);
 		const { remote, local } = this.#state.snapshot();
-		const head = scopeHead(scope);
-		for (const [path, entry] of remote) {
-			if (!scopeOverlaps(scope, path)) continue;
-			if (!hidden && hiddenBelow(head, path)) continue;
-			next.set(path, { identity: entry.identity, route: entry.route, captures: scopeCaptures(scope, path) });
-		}
-		for (const [path, entry] of local) {
-			if (!scope.matches(path)) continue;
-			if (!hidden && hiddenBelow(head, path)) continue;
-			next.set(path, { identity: entry.identity, route: entry.route, captures: scopeCaptures(scope, path) });
+		const scopes = [...patterns]
+			.sort((a, b) => Path.compareSpecificity(b.specificity(), a.specificity()))
+			.map((pattern) => ({ pattern, head: scopeHead(pattern) }));
+		for (const [table, exact] of [
+			[remote, false],
+			[local, true],
+		] as const) {
+			for (const [path, entry] of table) {
+				const scope = scopes.find(
+					({ pattern, head }) =>
+						(exact ? pattern.matches(path) : advertOverlaps(entry, path, pattern)) &&
+						(hidden || !hiddenBelow(head, path)),
+				);
+				if (!scope) continue;
+				const relative = covering.relative(path);
+				if (relative === undefined) continue;
+				next.set(relative, {
+					identity: entry.identity,
+					route: entry.route,
+					captures: scopeCaptures(scope.pattern, path),
+				});
+			}
 		}
 		return next;
 	}
 
-	async #runAnnounced(producer: announce.Producer, scope: Path.Pattern, hidden: boolean): Promise<void> {
+	async #runAnnounced(producer: announce.Producer, patterns: Path.Patterns, hidden: boolean): Promise<void> {
 		// Keyed by the presented path (from the origin, not the scope), valued by identity
 		// plus route. Diffing identity rather than mere presence means a republish emits a
 		// retraction then a fresh announcement; a re-price of the same identity emits an
@@ -1170,7 +1378,7 @@ export class Consumer {
 				const routes = this.#state.routes.peek();
 				if (local === undefined && advertisedLocal === undefined && routes === undefined) break;
 
-				const next = this.#listed(scope, hidden);
+				const next = this.#listed(patterns, hidden);
 
 				for (const [path, snap] of active) {
 					const cur = next.get(path);
@@ -1293,7 +1501,7 @@ export class Dynamic {
 	#closed = false;
 
 	private constructor(prefix: Path.Valid, entry: RouteEntry, state: OriginState, retract: Dispose) {
-		this.prefix = prefix;
+		this.prefix = Path.stripPrefix(entry.scope.root, prefix) ?? Path.empty();
 		this.#entry = entry;
 		this.#state = state;
 		this.#retract = retract;
@@ -1308,7 +1516,7 @@ export class Dynamic {
 		if (this.#closed) throw new Error("dynamic is closed");
 		this.#entry.route.set(Route.normalize(route));
 		this.#state.rebuildOriginated();
-		this.#state.refreshPrefix(this.prefix);
+		this.#state.refreshPrefix(Path.join(this.#entry.scope.root, this.prefix));
 		this.#state.routes.mutate(() => {});
 	}
 

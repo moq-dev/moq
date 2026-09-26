@@ -13,7 +13,7 @@ operational ones that must stay private.
 | Endpoint | Returns |
 | --- | --- |
 | `GET /announced/<prefix>` | Broadcasts announced under the prefix. |
-| `GET /fetch/<broadcast>/<track>?group=N` | One group from the cache, the latest by default. Useful for catch-up and debugging. |
+| `GET /fetch/<broadcast>/<track>?group=N` | One group from the cache, the latest by default, or `404` if the track has no such group. Useful for catch-up and debugging. |
 | `GET /certificate.sha256` | The fingerprint of the first configured TLS certificate, for pinning a self-signed dev certificate. |
 | `GET /health` | `200 ok`, unauthenticated, for load balancers. |
 
@@ -25,6 +25,9 @@ curl http://localhost:4443/fetch/demo/bbb.hang/catalog.json
 The announcement listing names each announced route by the prefix it covers;
 by convention a publisher announces each broadcast's exact path, so the list
 reads as broadcast names.
+
+`moq ls` and `moq fetch` answer the same questions over MoQ; see
+[Inspect a relay](/bin/inspect).
 
 A relay configured with more than one certificate has no single fingerprint to
 publish, and this endpoint answers for the first. The others are reachable over
@@ -53,6 +56,10 @@ on `moq_relay_accept_failures_total{class="exhausted"}`, which means the
 process ran out of a resource `accept` needs. Content dropped for drifting past
 a subscriber's budget is counted separately as `moq_relay_stale_bytes_total`
 and friends. Host CPU and memory belong to a node exporter.
+
+Traffic and session counters accumulate for the node's lifetime, including
+broadcasts and sessions that have ended. The stats publishing prefix (normally
+`.stats`) is excluded to avoid counting the feed's own traffic.
 
 With `--runtime-io-uring`, each QUIC worker thread also reports its own
 `moq_relay_uring_*` counters under a `worker` label: datagrams and syscalls

@@ -1,4 +1,5 @@
 import { Mutex } from "async-mutex";
+import { error, ProtocolViolation } from "../error.ts";
 import { Reader, Stream, type Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import * as Namespace from "./namespace.ts";
@@ -58,7 +59,7 @@ export class NativeSession implements Session {
 const Route = {
 	NewRequest: 0, // Create virtual bidi stream, push initial message
 	Response: 1, // Push message to existing stream (keep open)
-	ErrorResponse: 2, // Push message to existing stream, then close
+	ErrorResponse: 2, // Push a final message to existing stream, then close
 	CloseStream: 3, // Close stream recv (no bytes pushed)
 	FollowUp: 4, // Push follow-up message to existing stream
 	MaxRequestId: 5, // Update flow control
@@ -246,6 +247,8 @@ export class ControlStreamAdapter implements Session {
 	 * Must be called after construction. Runs until the control stream closes.
 	 */
 	async run(): Promise<void> {
+		// Why the virtual streams end: undefined only for a GOAWAY, which is not a failure.
+		let cause: Error | undefined;
 		try {
 			// v16: also accept real bidi streams (for SubscribeNamespace)
 			if (this.version === Version.DRAFT_16) {
@@ -254,7 +257,10 @@ export class ControlStreamAdapter implements Session {
 
 			for (;;) {
 				const done = await this.#reader.done();
-				if (done) break;
+				if (done) {
+					cause = new ProtocolViolation("control stream closed");
+					break;
+				}
 
 				const typeId = await this.#reader.u53();
 				const size = await this.#reader.u16();
@@ -293,8 +299,11 @@ export class ControlStreamAdapter implements Session {
 						break;
 				}
 			}
+		} catch (err: unknown) {
+			cause = error(err);
+			throw err;
 		} finally {
-			this.close();
+			this.close(cause);
 		}
 	}
 
@@ -658,9 +667,9 @@ export class ControlStreamAdapter implements Session {
 				return { route: Route.CloseStream, requestId };
 			}
 			case 0x0b: {
-				// PublishDone
+				// PublishDone: the subscriber reads its status and stream count before the end.
 				const requestId = await readRequestId();
-				return { route: Route.CloseStream, requestId };
+				return { route: Route.ErrorResponse, requestId };
 			}
 			case 0x17: {
 				// FetchCancel
@@ -719,15 +728,19 @@ export class ControlStreamAdapter implements Session {
 		}
 	}
 
-	close() {
+	/**
+	 * Ends every virtual stream: cleanly for a deliberate close, or with `err` when the
+	 * control stream died under them, since every request riding it was cut off.
+	 */
+	close(err?: Error) {
 		if (this.#closed) return;
 		this.#closed = true;
 		console.debug("adapter: close() called");
 
-		// Close all virtual streams
 		for (const entry of this.#streams.values()) {
 			try {
-				entry.controller.close();
+				if (err) entry.controller.error(err);
+				else entry.controller.close();
 			} catch {
 				// Already closed
 			}

@@ -304,7 +304,7 @@ impl<S: crate::transport::poll::Session> Enforce<S> {
 			return Poll::Ready(());
 		};
 
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		if self.session.poll_closed(&mut cx).is_ready() {
 			return Poll::Ready(());
 		}

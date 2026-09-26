@@ -49,7 +49,10 @@ ingest here). A 2xx with a grant admits. A 401 or 403 refuses.
 Anything else at connect, a timeout, a 5xx, or an unparseable body, refuses and
 logs an error; nothing is admitted because the server was down. A grant that
 names nothing refuses, and one with `revalidate` but no `expires` is refused
-as invalid. A few seconds of clock skew are tolerated on `expires`.
+as invalid. A grant already less than five seconds past `expires` is accepted
+for the remainder of that clock-skew window; future expiries are unchanged.
+The client and relay snapshot each accepted grant's deadline on a monotonic
+clock, so later polls, outages, and wall-clock adjustments do not restart it.
 
 **Revalidate and outage.** On the cadence the relay POSTs `revalidate` with the
 same request. A grant applies: a changed `root` or one that no longer covers
@@ -154,7 +157,12 @@ after which it can never sign a broader token.
 | `subscribe` | Patterns the bearer may subscribe to under `root`. Same rules. |
 | `exp`, `iat` | Expiry and issue time. `exp` is enforced for the whole session, not just at connect. |
 
-A token carrying the retired `put` and `get` prefix lists fails verification.
+Tokens and key scopes from the older `moq-token` format still work: each `put`
+and `get` prefix `p` reads as the subtree `p/**`, and `""` as `**`. When every
+grant is a subtree, signing writes that older form so relays and auth servers
+that predate patterns accept it too. A grant only a pattern can express (an
+exact `foo`, or `*/chat`) is written as `publish`/`subscribe`, which an older
+verifier refuses.
 
 ### Path matching
 

@@ -3,6 +3,10 @@ use crate::{frame, group, origin, track};
 use std::{
 	collections::HashMap,
 	ops::Bound,
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -214,8 +218,9 @@ impl<S: crate::transport::poll::Session> Namespaces<S> {
 enum NamespaceEvent {
 	/// The session or stream ended, with the result to surface.
 	Closed(Result<(), Error>),
-	/// An origin-level route (un)announce, `None` once the announce stream ends.
-	Update(Option<crate::announce::Update>),
+	/// An origin-level route (un)announce and whether it is active, `None` once
+	/// the announce stream ends.
+	Update(Option<(crate::announce::Announce, bool)>),
 	/// The retry sleep fired: re-offer whatever the peer should be holding and isn't.
 	Retry,
 }
@@ -573,6 +578,7 @@ where
 						// object Timestamp below is in these units.
 						// We serve the newest group first, matching moq-lite.
 						true => ietf::Properties {
+							max_cache_duration: track.info().max_age,
 							timescale: Some(track.info().timescale),
 							priority: Some(super::priority::to_wire(track.info().priority)),
 							group_order: Some(GroupOrder::Descending),
@@ -587,34 +593,54 @@ where
 			// Run the track, cancelling on reader close (Unsubscribe or stream close).
 			// The fill (when one was requested) runs alongside on its own fetch stream;
 			// its failures reset that stream and never touch the subscription.
-			let res = {
-				let mut track_serve =
-					TrackServe::new(self.session.clone(), track, request_id, self.version, range, timescale);
+			let mut track_serve =
+				TrackServe::new(self.session.clone(), track, request_id, self.version, range, timescale);
+			let served = {
 				let serve = async {
 					match fill {
 						Some((fill, cache, timescale)) => {
 							let fill = self.run_fill(request_id, priority, fill, cache, timescale);
 							let track = kio::wait(|waiter| track_serve.poll(waiter));
-							let (res, ()) = futures::join!(track, fill);
-							res
+							let (res, filled) = futures::join!(track, fill);
+							(res, filled)
 						}
-						None => kio::wait(|waiter| track_serve.poll(waiter)).await,
+						None => (kio::wait(|waiter| track_serve.poll(waiter)).await, false),
 					}
 				};
 				let mut serve = std::pin::pin!(serve);
 				let mut closed_session = self.session.clone();
 				kio::wait(|waiter| {
-					if let Poll::Ready(res) = waiter.poll_future(serve.as_mut()) {
-						return Poll::Ready(res);
+					if let Poll::Ready(served) = waiter.poll_future(serve.as_mut()) {
+						return Poll::Ready(Some(served));
 					}
-					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					if stream.reader.poll_closed(&mut cx).is_ready() || closed_session.poll_closed(&mut cx).is_ready() {
-						return Poll::Ready(Ok(()));
+						return Poll::Ready(None);
 					}
 					Poll::Pending
 				})
 				.await
 			};
+
+			// Every data stream this subscription opened is closed by now, which PUBLISH_DONE
+			// requires, so the count it reports is final.
+			let completed = served.is_some();
+			let (res, filled) = served.unwrap_or((Ok(()), false));
+			let mut streams = track_serve.opened() + u64::from(filled);
+
+			// Draft-14 on carries no end location in PUBLISH_DONE: an END_OF_TRACK object is
+			// what tells the subscriber where the track ended. A cancelled subscription is
+			// owed nothing more.
+			if completed
+				&& res.is_ok()
+				&& let Some(end) = track_serve.end()
+			{
+				match track_serve.write_end_of_track(end, priority).await {
+					Ok(()) => streams += 1,
+					// A failure only costs the subscriber the early boundary.
+					Err(err) => tracing::debug!(%err, id = %request_id, "end of track failed"),
+				}
+			}
 
 			// Send PublishDone
 			let (status, reason) = match &res {
@@ -630,7 +656,7 @@ where
 						_ => None,
 					},
 					status_code: status.code(self.version),
-					stream_count: 0,
+					stream_count: streams,
 					reason_phrase: reason.into(),
 				})
 				.await;
@@ -716,6 +742,8 @@ where
 	/// A fill is a promise once requested. An empty range opens no stream, but a range we
 	/// cannot serve still opens one and resets it right after the FETCH_HEADER, the
 	/// draft's fill-failure signal. Nothing here touches the subscription either way.
+	///
+	/// Returns whether it opened a stream, which PUBLISH_DONE's Stream Count includes.
 	async fn run_fill(
 		&self,
 		request_id: RequestId,
@@ -723,9 +751,9 @@ where
 		fill: FillServe,
 		track: track::Consumer,
 		timescale: Option<Timescale>,
-	) {
+	) -> bool {
 		if matches!(fill, FillServe::Empty) {
-			return;
+			return false;
 		}
 
 		let mut session = self.session.clone();
@@ -733,7 +761,7 @@ where
 			Ok(stream) => stream,
 			Err(err) => {
 				tracing::debug!(err = %Error::from_transport(err), fill = %request_id, "fill stream failed to open");
-				return;
+				return false;
 			}
 		};
 		let mut stream = Writer::new(stream, self.version);
@@ -775,6 +803,7 @@ where
 				stream.abort(&err);
 			}
 		}
+		true
 	}
 
 	/// Write one group's frames in the negotiated draft's FETCH object layout.
@@ -1029,7 +1058,7 @@ where
 			let mut pending = false;
 			let mut deadline = crate::runtime::Deadline::after(&self.runtime, Duration::from_secs(10));
 			kio::wait(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
+				let mut cx = waiter.context();
 				// The request reader is what the subscriber FINs or resets. The writer
 				// on a draft-14-16 virtual stream reports closed immediately, which is
 				// not a cancellation.
@@ -1835,12 +1864,24 @@ where
 			let event = {
 				let Namespaces { target, .. } = &mut ns;
 				kio::wait(|waiter| {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					if let Poll::Ready(res) = target.poll_closed(&mut cx) {
 						return Poll::Ready(NamespaceEvent::Closed(res));
 					}
-					if let Poll::Ready(update) = announced.poll_next(waiter) {
-						return Poll::Ready(NamespaceEvent::Update(update));
+					// The origin's live marker means nothing to the peer here.
+					while let Poll::Ready(next) = announced.poll_next(waiter) {
+						match next {
+							Some(crate::announce::Event::Live) => continue,
+							Some(
+								crate::announce::Event::Announced(update) | crate::announce::Event::Updated(update),
+							) => {
+								return Poll::Ready(NamespaceEvent::Update(Some((update, true))));
+							}
+							Some(crate::announce::Event::Retracted(update)) => {
+								return Poll::Ready(NamespaceEvent::Update(Some((update, false))));
+							}
+							None => return Poll::Ready(NamespaceEvent::Update(None)),
+						}
 					}
 					if retry.poll(waiter).is_ready() {
 						return Poll::Ready(NamespaceEvent::Retry);
@@ -1881,14 +1922,14 @@ where
 					stream.writer.finish()?;
 					return stream.writer.closed().await;
 				}
-				NamespaceEvent::Update(Some(update)) => {
+				NamespaceEvent::Update(Some((update, active))) => {
 					let path = update.prefix;
 					let suffix = path
 						.strip_prefix(&prefix)
 						.expect("origin returned invalid prefix")
 						.to_owned();
 
-					if update.kind.is_active() {
+					if active {
 						// A repeat for a live suffix is a metadata update: keep the
 						// peer's refusal state and re-run the selection.
 						match ns.watched.get_mut(&suffix) {
@@ -1929,6 +1970,10 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	children: kio::Tasks<GroupServe<S>>,
 	/// The track finished: the in-flight group machines drain, then FIN.
 	draining: bool,
+	/// Group streams opened, shared with the group machines.
+	opened: Arc<AtomicU64>,
+	/// The track's exclusive end, once its groups ran out because it finished.
+	end: Option<u64>,
 }
 
 impl<S: crate::transport::poll::Session> TrackServe<S> {
@@ -1959,7 +2004,49 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			timescale,
 			children: kio::Tasks::new(),
 			draining: false,
+			opened: Default::default(),
+			end: None,
 		}
+	}
+
+	/// Group streams opened so far.
+	fn opened(&self) -> u64 {
+		self.opened.load(Ordering::Relaxed)
+	}
+
+	/// Where the track ends, when the subscription ran to that end rather than stopping at
+	/// its own range first.
+	fn end(&self) -> Option<u64> {
+		let end = self.end?;
+		let reached = self.range.end.is_none_or(|last| last.group.saturating_add(1) >= end);
+		reached.then_some(end)
+	}
+
+	/// Mark the track's end with an END_OF_TRACK object on its own stream, at object 0 of
+	/// the group that will never exist.
+	///
+	/// The last group's stream has usually finished before the track ends, so the marker
+	/// cannot ride on it. The stream counts toward PUBLISH_DONE once it is open.
+	async fn write_end_of_track(&mut self, end: u64, priority: u8) -> Result<(), Error> {
+		let mut stream = std::future::poll_fn(|cx| self.session.poll_open_uni(cx))
+			.await
+			.map_err(Error::from_transport)?;
+		stream.set_priority(priority);
+
+		let mut writer = Writer::new(stream, self.version);
+		writer.buffer(&ietf::GroupHeader {
+			track_alias: self.request_id.0,
+			group_id: end,
+			sub_group_id: 0,
+			publisher_priority: super::priority::to_wire(self.track.info().priority),
+			flags: ietf::GroupFlags::default(),
+		})?;
+		// Object ID delta 0, then an empty object whose status is END_OF_TRACK.
+		writer.buffer(&0u64)?;
+		writer.buffer(&0u64)?;
+		writer.encode(&END_OF_TRACK).await?;
+		// PUBLISH_DONE follows once this closes, like every other data stream.
+		writer.close().await
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -2006,18 +2093,24 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						},
 					};
 
-					self.children.push(GroupServe::new(
-						self.session.clone(),
-						msg,
-						self.track.subscription().priority,
-						group,
-						self.timescale,
-						self.version,
-						slice,
-					));
+					self.children.push(
+						GroupServe::new(
+							self.session.clone(),
+							msg,
+							self.track.subscription().priority,
+							group,
+							self.timescale,
+							self.version,
+							slice,
+						)
+						.counted(self.opened.clone()),
+					);
 				}
 				Poll::Ready(Ok(None)) => {
 					self.draining = true;
+					if let Poll::Ready(Ok(end)) = self.track.poll_finished(waiter) {
+						self.end = Some(end);
+					}
 					return self.children.poll(waiter).map(Ok);
 				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
@@ -2034,6 +2127,8 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 /// subgroup format.
 struct GroupServe<S: crate::transport::poll::Session> {
 	session: S,
+	/// The subscription's count of opened streams, bumped once this one opens.
+	opened: Arc<AtomicU64>,
 	msg: ietf::GroupHeader,
 	priority: u8,
 	group: group::Consumer,
@@ -2067,6 +2162,8 @@ enum GroupState<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> kio::Task for GroupServe<S> {
+	type Output = ();
+
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		// Errors just drop the writer, whose Drop resets the stream, exactly like
 		// the old future being discarded.
@@ -2090,6 +2187,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		let object_delta = group.index();
 		Self {
 			session,
+			opened: Default::default(),
 			msg,
 			priority,
 			group,
@@ -2100,8 +2198,14 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		}
 	}
 
+	/// Count this group's stream into `opened` once it opens.
+	fn counted(mut self, opened: Arc<AtomicU64>) -> Self {
+		self.opened = opened;
+		self
+	}
+
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				GroupState::Open => {
@@ -2116,6 +2220,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 							return Poll::Ready(Err(Error::from_transport(err)));
 						}
 					};
+					self.opened.fetch_add(1, Ordering::Relaxed);
 					let mut stream = stream;
 					stream.set_priority(self.priority);
 
@@ -2271,6 +2376,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		}
 	}
 }
+
+/// Object status: no object at or past this location exists.
+const END_OF_TRACK: u64 = 0x4;
 
 /// Buffer one object's header and prefix: the id delta, optional extension
 /// headers carrying the timestamp, the size, and (for an empty object) the status.

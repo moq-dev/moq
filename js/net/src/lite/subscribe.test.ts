@@ -152,10 +152,30 @@ test("SubscribeStart round-trips on draft-05", async () => {
 });
 
 test("SubscribeEnd round-trips on draft-05", async () => {
-	const got = await responseRoundtrip(Version.DRAFT_05, { end: new SubscribeEnd(7) });
+	// Type, length, group: no stream count before draft-07.
+	expect(await encode(Version.DRAFT_05, { end: new SubscribeEnd(7, 3) })).toEqual(new Uint8Array([1, 1, 7]));
+	const got = await responseRoundtrip(Version.DRAFT_05, { end: new SubscribeEnd(7, 3) });
 	expect("end" in got).toBe(true);
 	if (!("end" in got)) throw new Error("expected end");
-	expect(got.end.group).toBe(7);
+	expect([got.end.group, got.end.streams]).toEqual([7, 0]);
+});
+
+test("SubscribeEnd carries the stream count on draft-07", async () => {
+	expect(await encode(Version.DRAFT_07, { end: new SubscribeEnd(7, 3) })).toEqual(new Uint8Array([1, 2, 7, 3]));
+	const got = await responseRoundtrip(Version.DRAFT_07, { end: new SubscribeEnd(7, 3) });
+	if (!("end" in got)) throw new Error("expected end");
+	expect([got.end.group, got.end.streams]).toEqual([7, 3]);
+});
+
+test("SubscribeDrop is gone on draft-07", async () => {
+	const drop: SubscribeResponse = { drop: new SubscribeDrop({ start: 1, end: 3, error: 0 }) };
+	await expect(encode(Version.DRAFT_07, drop)).rejects.toThrow();
+
+	// A draft-06 DROP is an unknown response type on draft-07.
+	const wire06 = await encode(Version.DRAFT_06, drop);
+	await expect(decodeSubscribeResponse(new Reader(undefined, wire06), Version.DRAFT_07)).rejects.toThrow(
+		"unknown subscribe response type: 2",
+	);
 });
 
 test("SubscribeDrop is type 0x2 on draft-05 and 0x1 on draft-04", async () => {

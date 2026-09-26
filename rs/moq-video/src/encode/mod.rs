@@ -5,7 +5,9 @@
 //!
 //! Entry points, high to low level:
 //! - `publish_capture` captures and publishes a webcam (turnkey). Requires the
-//!   `capture` feature.
+//!   `capture` feature. `Control::new` is the same with a handle kept for
+//!   controlling it while it runs (asking for a keyframe), plus the `Driver`
+//!   that runs it.
 //! - [`Encoder`] encodes raw [`Frame`](crate::Frame)s you supply into
 //!   [`Encoded`] access units, and [`Producer`] publishes those (bring your own
 //!   frames). Build both for the same [`Codec`].
@@ -19,7 +21,7 @@
 //! discover a track nothing has encoded yet. That's what makes on-demand
 //! encoding possible at all.
 //!
-//! `Options` (with `capture`) / [`Kind`] / [`Config`] configure them. The decode/consume
+//! `CaptureOptions` / `Options` (with `capture`) / [`Kind`] / [`Config`] configure them. The decode/consume
 //! counterpart (mirror of `moq-audio`'s consumer) lives in the sibling
 //! [`decode`](crate::decode) module.
 //!
@@ -31,13 +33,16 @@ mod encoded;
 mod encoder;
 mod producer;
 mod sink;
+// Compiled without `capture` so its tests stay in the default merge gate.
+#[cfg_attr(not(feature = "capture"), allow(dead_code))]
+mod cuts;
 
 pub use backend::NAMES;
 pub use encoded::Encoded;
 pub use encoder::{Codec, Config, Encoder, Gop, Kind};
 pub use producer::Producer;
 #[cfg(feature = "capture")]
-pub use producer::{Options, publish_capture};
+pub use producer::{CaptureOptions, Control, Driver, Options, publish_capture};
 pub use sink::Sink;
 
 #[cfg(test)]

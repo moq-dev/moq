@@ -8,15 +8,14 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Milli, Timestamp } from "../time.ts";
-import { DEFAULT_MAX_AGE_MS } from "../track.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { sendOrder } from "./priority.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
 import { Publisher } from "./publisher.ts";
-import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";
-import { ALPN_05, ALPN_06, Version } from "./version.ts";
+import { decodeSubscribeResponse, Subscribe, type SubscribeEnd, SubscribeUpdate } from "./subscribe.ts";
+import { ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcast = origin.createBroadcast(path);
@@ -85,11 +84,11 @@ test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_06])(
 );
 
 // Delivers `sequences` in the given order, finishes the track, and returns the
-// SUBSCRIBE_END boundary the publisher put on the wire.
-async function subscribeEnd(sequences: number[]): Promise<number> {
-	const pair = createMockTransportPair(ALPN_05);
+// SUBSCRIBE_END the publisher put on the wire.
+async function subscribeEnd(sequences: number[], version: Version = Version.DRAFT_05): Promise<SubscribeEnd> {
+	const pair = createMockTransportPair(version === Version.DRAFT_07 ? ALPN_07_WIP : ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -118,8 +117,8 @@ async function subscribeEnd(sequences: number[]): Promise<number> {
 
 	try {
 		for (;;) {
-			const resp = await decodeSubscribeResponse(client.reader, Version.DRAFT_05);
-			if ("end" in resp) return resp.end.group;
+			const resp = await decodeSubscribeResponse(client.reader, version);
+			if ("end" in resp) return resp.end;
 		}
 	} finally {
 		publisher.close();
@@ -887,8 +886,8 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
-			maxAge: DEFAULT_MAX_AGE_MS,
-			groups: { end: { excluded: 6 } },
+			maxAge: TEST_MAX_AGE_MS,
+			groups: { start: undefined, end: { excluded: 6 } },
 		});
 		expect(ranges).not.toHaveBeenCalled();
 
@@ -972,19 +971,153 @@ test("lite draft-05: teardown unwinds with an undelivered update queued", async 
 // A Rust subscriber feeds this value straight into `track::Producer::finish_at`, which is
 // exclusive, so an inclusive bound here silently truncates the final group across languages.
 test("lite draft-05: subscribe end is the exclusive boundary", async () => {
-	expect(await subscribeEnd([0, 1, 2])).toBe(3);
+	expect((await subscribeEnd([0, 1, 2])).group).toBe(3);
 });
 
 // recvGroup is arrival-ordered, so the boundary has to clear the max sequence delivered,
 // not the last one seen. Otherwise the boundary lands on a group already on the wire.
 test("lite draft-05: subscribe end clears the max sequence when groups arrive out of order", async () => {
-	expect(await subscribeEnd([0, 2, 1])).toBe(3);
+	expect((await subscribeEnd([0, 2, 1])).group).toBe(3);
 });
 
 // 0 is the only encoding for "no groups at all"; an inclusive bound cannot express it
 // without colliding with a track whose sole group was sequence 0.
 test("lite draft-05: subscribe end is 0 when no groups were produced", async () => {
-	expect(await subscribeEnd([])).toBe(0);
+	expect((await subscribeEnd([])).group).toBe(0);
+});
+
+// The count is of group streams opened, not of groups below the end: a group the track
+// never produced has no stream and is not counted.
+test("lite draft-07: subscribe end counts the group streams opened", async () => {
+	const end = await subscribeEnd([0, 2], Version.DRAFT_07);
+	expect([end.group, end.streams]).toEqual([3, 2]);
+});
+
+test("lite draft-07: subscribe end counts zero streams when no groups were produced", async () => {
+	const end = await subscribeEnd([], Version.DRAFT_07);
+	expect([end.group, end.streams]).toEqual([0, 0]);
+});
+
+// finishAt names the end while groups below it are still being produced. The count
+// cannot include a stream that has not opened, so SUBSCRIBE_END waits for them.
+test("lite draft-07: subscribe end waits for groups below a declared finish", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video");
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+	void publisher.runSubscribe(
+		new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
+		server,
+	);
+
+	try {
+		const first = new GroupProducer(0);
+		first.writeString("hello");
+		first.close();
+		track.writeGroup(first);
+		track.finishAt(2);
+
+		const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_07);
+		expect("start" in start).toBe(true);
+		const pending = decodeSubscribeResponse(client.reader, Version.DRAFT_07);
+		const early = await Promise.race([pending, new Promise((resolve) => setTimeout(resolve, IDLE_MS))]);
+		expect(early).toBeUndefined();
+
+		const second = new GroupProducer(1);
+		second.writeString("hello");
+		second.close();
+		track.writeGroup(second);
+		track.close();
+
+		const resp = await pending;
+		if (!("end" in resp)) throw new Error("expected SUBSCRIBE_END");
+		expect([resp.end.group, resp.end.streams]).toEqual([2, 2]);
+	} finally {
+		publisher.close();
+		client.close();
+	}
+});
+
+// Serves one group with its stream open held until `open(ok)`, and returns the pending
+// SUBSCRIBE_END plus the call that lets the open succeed or fail.
+async function heldOpenEnd() {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video");
+
+	let open!: (ok: boolean) => void;
+	const opened = new Promise<boolean>((resolve) => {
+		open = resolve;
+	});
+	const createUni = pair.server.createUnidirectionalStream.bind(pair.server);
+	spyOn(pair.server, "createUnidirectionalStream").mockImplementation(async (options) => {
+		if (!(await opened)) throw new Error("no stream credit");
+		return createUni(options);
+	});
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+	void publisher.runSubscribe(
+		new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
+		server,
+	);
+
+	const group = new GroupProducer(0);
+	group.writeString("hello");
+	group.close();
+	track.writeGroup(group);
+	track.close();
+
+	const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_07);
+	expect("start" in start).toBe(true);
+	const end = decodeSubscribeResponse(client.reader, Version.DRAFT_07);
+
+	return {
+		end,
+		open,
+		close() {
+			publisher.close();
+			client.close();
+		},
+	};
+}
+
+// The count is final only once no served group is still waiting for its stream, so
+// SUBSCRIBE_END waits for the open.
+test("lite draft-07: subscribe end waits for every group stream to open", async () => {
+	const held = await heldOpenEnd();
+	try {
+		const early = await Promise.race([held.end, new Promise((resolve) => setTimeout(resolve, IDLE_MS))]);
+		expect(early).toBeUndefined();
+
+		held.open(true);
+		const resp = await held.end;
+		if (!("end" in resp)) throw new Error("expected SUBSCRIBE_END");
+		expect([resp.end.group, resp.end.streams]).toEqual([1, 1]);
+	} finally {
+		held.close();
+	}
+});
+
+// A group that never gets a stream owes the subscriber nothing, so it is not counted.
+test("lite draft-07: a group whose stream never opened is not counted", async () => {
+	const held = await heldOpenEnd();
+	try {
+		held.open(false);
+		const resp = await held.end;
+		if (!("end" in resp)) throw new Error("expected SUBSCRIBE_END");
+		expect([resp.end.group, resp.end.streams]).toEqual([1, 0]);
+	} finally {
+		held.close();
+	}
 });
 
 /** One group stream the publisher put on the wire. */
@@ -1325,22 +1458,27 @@ test("lite draft-05: a group waiting for a stream slot is dropped when the subsc
 
 // The publisher FINs the subscribe stream itself once a track ends, which must not be
 // mistaken for the subscriber leaving: SUBSCRIBE_END counts those queued groups as
-// delivered, so dropping them here would strand the tail of every finite track.
+// delivered, so dropping them here would strand the tail of every finite track. The FIN
+// tells the subscriber every group is accounted for, so it waits for the queued group.
 test("lite draft-05: a group waiting for a stream slot survives the track finishing", async () => {
 	const { client, track, freeSlot, outcome, close } = await saturatedGroup();
 
 	track.close();
 
-	// Read to the FIN the publisher sends after SUBSCRIBE_END. That FIN is the moment a
-	// cancel keyed on our own close would fire, so the slot must not free up before it.
+	// SUBSCRIBE_END goes out while the group is still waiting for its slot.
 	for (;;) {
 		const resp = await decodeSubscribeResponse(client.reader, Version.DRAFT_05);
 		if ("end" in resp) break;
 	}
-	await client.reader.closed;
+
+	// The FIN holds until the queued group is on the wire.
+	const fin = client.reader.closed.then(() => "fin" as const);
+	const idle = new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 20));
+	expect(await Promise.race([fin, idle])).toBe("pending");
 
 	freeSlot();
 	expect(await outcome).toBe("sent");
+	expect(await fin).toBe("fin");
 
 	close();
 });

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/moq-dev/moq/compare/moq-auth-v0.1.2...moq-auth-v0.1.3) - 2026-09-26
+
+### Other
+
+- *(auth)* wait on the recorded request instead of a fixed sleep ([#4194](https://github.com/moq-dev/moq/pull/4194))
+
+## [0.1.2](https://github.com/moq-dev/moq/compare/moq-auth-v0.1.1...moq-auth-v0.1.2) - 2026-09-25
+
+### Fixed
+
+- *(auth)* read and write legacy put/get token grants ([#4190](https://github.com/moq-dev/moq/pull/4190))
+
 ## [0.1.1](https://github.com/moq-dev/moq/compare/moq-auth-v0.1.0...moq-auth-v0.1.1) - 2026-09-25
 
 ### Added

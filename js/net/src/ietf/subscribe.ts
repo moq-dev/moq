@@ -276,10 +276,9 @@ export class SubscribeOk {
 		let properties: Properties.Properties = {};
 
 		if (version === Version.DRAFT_14) {
-			const expires = await r.u62();
-			if (expires !== BigInt(0)) {
-				throw new Error(`unsupported expires: ${expires}`);
-			}
+			// EXPIRES is when the publisher expects to end the subscription. That end
+			// arrives as PUBLISH_DONE regardless, so there is nothing to act on.
+			await r.u62();
 
 			await r.u8(); // Don't care about group order
 
@@ -290,13 +289,15 @@ export class SubscribeOk {
 				largest = { groupId, objectId };
 			}
 
-			await Parameters.decode(r, version); // ignore parameters
+			properties.maxCacheDuration = (await Parameters.decode(r, version)).maxCacheDuration;
 		} else {
 			// v15+: parameters followed by Track Properties (draft-17+). LARGEST_OBJECT is
 			// required on every draft once the track has content, so rejecting it would tear
 			// down a session over a parameter compliant publishers must send.
-			largest = (await Parameters.decode(r, version)).largest;
+			const params = await Parameters.decode(r, version);
+			largest = params.largest;
 			properties = await Properties.decode(r, version);
+			if (version === Version.DRAFT_15) properties.maxCacheDuration = params.maxCacheDuration;
 		}
 
 		return new SubscribeOk({ requestId, trackAlias, largest, properties });

@@ -502,7 +502,7 @@ pub struct moq_track_info {
 	/// Maximum age of a non-latest group before the publisher evicts it, in microseconds.
 	/// The publisher-side half of `moq_subscription.max_age_us`.
 	pub max_age_us: u64,
-	/// Whether `max_age_us` is set. When false, the publisher's default applies.
+	/// Whether `max_age_us` is set. When false, the publisher imposes no age limit.
 	pub max_age_present: bool,
 
 	/// Per-frame timescale in ticks per second.
@@ -692,6 +692,27 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 	Ok(moq_net::origin::Route::default()
 		.with_cost(moq_net::origin::Cost { warm: route.cost, cold })
 		.with_hops(route_hops))
+}
+
+/// Which broadcasts [moq_origin_announced] lists.
+///
+/// NULL or zeroed lists every visible path. Strings are borrowed for the
+/// duration of the call. New fields always append, so a zeroed struct keeps
+/// meaning the defaults.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_announce_config {
+	/// A literal path root, NOT NULL terminated. NULL when `prefix_len` is 0.
+	pub prefix: *const c_char,
+	pub prefix_len: usize,
+
+	/// A pattern relative to `prefix`, NOT NULL terminated, or NULL for every
+	/// path beneath it. Empty is a valid exact filter.
+	pub filter: *const c_char,
+	pub filter_len: usize,
+
+	/// Also list hidden paths: those with a segment starting with `.` below the prefix.
+	pub hidden: bool,
 }
 
 /// A route announcement or retraction from an origin.
@@ -889,6 +910,9 @@ static VERSION_NAMES: std::sync::LazyLock<Vec<String>> =
 /// may be larger than `count`. Pass a NULL `dst` with a zero `count` to size the array
 /// first. Each name borrows a static string valid for the life of the process, so a
 /// caller building a menu can hold them indefinitely.
+///
+/// Work-in-progress versions are omitted, since they are not advertised unless pinned;
+/// a dial still accepts them by name.
 ///
 /// Returns the total count on success, or a negative code on failure.
 ///
@@ -1687,9 +1711,8 @@ pub extern "C" fn moq_broadcast_request_free(request: u32) -> i32 {
 
 /// Learn about broadcasts matching a pattern scope under an origin.
 ///
-/// `prefix` is a literal path root. `filter` is a pattern relative to that
-/// prefix, or NULL for every path beneath it. Empty is a valid exact filter.
-/// Delivered [moq_announce_update] prefixes remain relative to the origin.
+/// `config` selects the paths; NULL lists every visible one. Delivered
+/// [moq_announce_update] prefixes remain relative to the origin.
 ///
 /// `on_announce` is invoked with a positive announced ID for each broadcast,
 /// then exactly once more with a terminal code: `0` (stopped cleanly) or a
@@ -1704,27 +1727,32 @@ pub extern "C" fn moq_broadcast_request_free(request: u32) -> i32 {
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
 /// # Safety
+/// - `config` may be NULL, or must point at a readable [moq_announce_config]
+///   whose strings are valid for their lengths.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_announce` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_announced(
 	origin: u32,
-	prefix: *const c_char,
-	prefix_len: usize,
-	filter: *const c_char,
-	filter_len: usize,
+	config: *const moq_announce_config,
 	on_announce: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
-		let prefix = unsafe { ffi::parse_str(prefix, prefix_len)? }.to_string();
-		let filter = if filter.is_null() {
-			None
-		} else {
-			Some(unsafe { ffi::parse_str(filter, filter_len)? }.to_string())
+		let (scope, hidden) = match unsafe { config.as_ref() } {
+			None => (moq_net::Pattern::all(), false),
+			Some(config) => {
+				let prefix = unsafe { ffi::parse_str(config.prefix, config.prefix_len)? };
+				let filter = if config.filter.is_null() {
+					moq_net::Pattern::all()
+				} else {
+					unsafe { ffi::parse_str(config.filter, config.filter_len)? }.parse()?
+				};
+				(filter.rooted(prefix)?, config.hidden)
+			}
 		};
 		let on_announce = unsafe { ffi::OnStatus::new(user_data, on_announce)? };
-		State::lock().origin.announced(origin, prefix, filter, on_announce)
+		State::lock().origin.announced(origin, scope, hidden, on_announce)
 	})
 }
 
@@ -2207,6 +2235,18 @@ pub extern "C" fn moq_publish_media_flush(media: u32, timestamp_us: u64) -> i32 
 		let media = ffi::parse_id(media)?;
 		let timestamp = hang::container::Timestamp::from_micros(timestamp_us)?;
 		State::lock().publish.media_flush(media, timestamp)
+	})
+}
+
+/// Mark a timeline break and restart handoff measurement without lowering advertised jitter.
+///
+/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock.
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_media_discontinuity(media: u32) -> i32 {
+	ffi::enter(move || {
+		let media = ffi::parse_id(media)?;
+		State::lock().publish.media_discontinuity(media)
 	})
 }
 

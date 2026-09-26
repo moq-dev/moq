@@ -7,7 +7,7 @@
 //! floor (GitHub-hosted CI), where it skips loudly.
 #![cfg(all(target_os = "linux", feature = "_uring"))]
 
-use std::net::{SocketAddr, UdpSocket};
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use moq_relay::{Config, Relay};
@@ -26,15 +26,6 @@ fn supported() -> bool {
 		}
 		Err(err) => panic!("io_uring worker setup failed: {err}"),
 	}
-}
-
-/// A UDP port nothing is bound to. Every worker binds the same port, so this
-/// cannot be `:0`.
-fn free_udp_port() -> u16 {
-	let probe = UdpSocket::bind("127.0.0.1:0").expect("bind probe");
-	let port = probe.local_addr().expect("local addr").port();
-	drop(probe);
-	port
 }
 
 /// A CA on disk plus a certificate it signed, for the mTLS test. Returns the
@@ -78,9 +69,9 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 
 /// A relay config serving QUIC from io_uring workers. Pinning is off because a
 /// CI container may restrict which cores it may run on.
-fn uring_config(cert: &std::path::Path, key: &std::path::Path, port: u16) -> Config {
+fn uring_config(cert: &std::path::Path, key: &std::path::Path) -> Config {
 	let mut config = Config::default();
-	config.listen.bind = Some(format!("127.0.0.1:{port}").parse().unwrap());
+	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.cert = vec![cert.to_path_buf()];
 	config.listen.tls.key = vec![key.to_path_buf()];
 	config.runtime.workers = Some(WORKERS);
@@ -118,11 +109,8 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-
-	let relay = Relay::load(uring_config(&cert, &key, port)).await.expect("load relay");
-	let expected: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-	assert_eq!(relay.addr(), Some(expected), "workers bound a different address");
+	let relay = Relay::load(uring_config(&cert, &key)).await.expect("load relay");
+	let port = relay.addr().expect("workers bound an address").port();
 
 	// The stock loop serves everything: the uring workers own QUIC, the shared
 	// runtime owns auth and supervision.
@@ -156,12 +144,12 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	}
 
 	for (index, (_connection, consumer, announced)) in subscribers.iter_mut().enumerate() {
-		let update = tokio::time::timeout(TIMEOUT, announced.next())
+		let (update, active) = tokio::time::timeout(TIMEOUT, next_update(announced))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} announcement timeout"))
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "test");
-		assert!(update.kind.is_active(), "expected announce, got retraction");
+		assert!(active, "expected announce, got retraction");
 		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} request timeout"))
@@ -209,10 +197,9 @@ async fn uring_workers_report_link_facts() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-
-	let relay = Relay::load(uring_config(&cert, &key, port)).await.expect("load relay");
+	let relay = Relay::load(uring_config(&cert, &key)).await.expect("load relay");
 	let local = relay.addr().expect("bound address");
+	let port = local.port();
 	let sessions = relay.sessions().clone();
 	let running = tokio::spawn(relay.run());
 
@@ -278,9 +265,7 @@ async fn uring_workers_publish_their_certificate_fingerprint() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let relay = Relay::load(uring_config(&cert, &key, free_udp_port()))
-		.await
-		.expect("load relay");
+	let relay = Relay::load(uring_config(&cert, &key)).await.expect("load relay");
 
 	// The relay's own web listener needs TLS; its router does not, and the
 	// handler reads the same certificate handle either way.
@@ -319,14 +304,13 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let (root, client_cert, client_key) = signed_client(dir.path());
-	let port = free_udp_port();
-
-	let mut config = uring_config(&cert, &key, port);
+	let mut config = uring_config(&cert, &key);
 	config.auth.public = Vec::new();
 	config.auth.url = Some(spawn_auth_server(mtls_only()).await);
 	config.listen.tls.root = vec![root];
 
 	let relay = Relay::load(config).await.expect("load relay");
+	let port = relay.addr().expect("workers bound an address").port();
 	let running = tokio::spawn(relay.run());
 
 	let client = || {
@@ -360,12 +344,12 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	let mut announced = consumer.announced();
 	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;
 
-	let update = tokio::time::timeout(TIMEOUT, announced.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	assert!(active, "expected announce, got retraction");
 	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
 		.await
 		.expect("request timeout")
@@ -414,11 +398,10 @@ async fn uring_workers_write_qlog_traces() {
 	let (cert, key) = certificate(dir.path());
 	let traces = dir.path().join("qlog");
 	std::fs::create_dir(&traces).expect("create qlog dir");
-	let port = free_udp_port();
-
-	let mut config = uring_config(&cert, &key, port);
+	let mut config = uring_config(&cert, &key);
 	config.quic.qlog = Some(traces.clone());
 	let relay = Relay::load(config).await.expect("load relay");
+	let port = relay.addr().expect("workers bound an address").port();
 	let running = tokio::spawn(relay.run());
 
 	// A real session, so a trace covers a handshake and application data
@@ -439,11 +422,11 @@ async fn uring_workers_write_qlog_traces() {
 	let consumer = subscriber_origin.consume();
 	let mut announced = consumer.announced();
 	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;
-	let update = tokio::time::timeout(TIMEOUT, announced.next())
+	let (_, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	assert!(active, "expected announce, got retraction");
 
 	assert!(!running.is_finished(), "the relay stopped while serving");
 	drop(track);
@@ -509,4 +492,17 @@ async fn spawn_auth_server(policy: moq_auth::serve::Policy) -> url::Url {
 	let server = moq_auth::serve::Server::new(policy);
 	tokio::spawn(async move { server.serve(listener).await });
 	url
+}
+
+/// The next route and whether it is active, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
+				Some((route, true))
+			}
+			moq_net::announce::Event::Retracted(route) => Some((route, false)),
+			moq_net::announce::Event::Live => continue,
+		};
+	}
 }

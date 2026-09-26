@@ -7,7 +7,7 @@
  *
  * @module
  */
-import type { Dispose, Getter } from "@moq/signals";
+import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type * as broadcast from "./broadcast.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
@@ -25,6 +25,10 @@ export interface Broadcast {
 
 /** The protocol-facing operations behind an origin producer. */
 export interface OriginProducer {
+	/** Minimal root-relative namespace prefixes that cover this origin scope. */
+	interests(): readonly Path.Valid[];
+	/** Whether an advertised prefix overlaps the handle's allowed paths. */
+	accepts(prefix: Path.Valid): boolean;
 	receive(
 		prefix: Path.Valid,
 		route?: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint },
@@ -32,7 +36,7 @@ export interface OriginProducer {
 	attach(discovery: boolean): Dispose;
 	expect(): Dispose;
 	readonly requests: Getter<ReadonlyMap<Path.Valid, origin.RequestSlot> | undefined>;
-	changed(): Promise<unknown>;
+	changed(): GetPromise<unknown>;
 	answer(path: Path.Valid, front: broadcast.Consumer): Dispose | undefined;
 	routes(path: Path.Valid): boolean;
 }
@@ -51,6 +55,8 @@ export interface OriginConsumer {
 export interface Advertised {
 	readonly identity: object;
 	readonly route: Route;
+	/** The absolute paths a scoped route may serve beneath its prefix; unset for the whole subtree. */
+	readonly claim?: Path.Patterns;
 }
 
 /** The protocol-facing operation behind an established session. */

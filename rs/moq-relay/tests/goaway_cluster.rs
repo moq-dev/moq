@@ -7,7 +7,6 @@
 //! of the cluster origin observes contiguous groups and no unannounce.
 
 use std::collections::BTreeSet;
-use std::net::TcpListener;
 use std::time::Duration;
 
 use moq_relay::{
@@ -54,23 +53,19 @@ where
 		.expect("test thread panicked");
 }
 
-/// Bind a stream-only moq server to a free loopback TCP port, retrying if the
-/// port is claimed in the window between the free-port probe and the real bind.
-/// Returns the chosen port and the initialized server. Avoids the spurious
-/// `init()` panic that a probe/drop/bind race can cause under parallel tests.
-fn bind_free_tcp_server() -> (u16, moq_tokio::Server) {
-	for _ in 0..20 {
-		let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-		let port = probe.local_addr().expect("local addr").port();
-		drop(probe);
-
-		let mut config = moq_tokio::listen::Config::default();
-		config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
-		if let Ok(server) = config.init(Default::default()) {
-			return (port, server);
-		}
-	}
-	panic!("could not bind a free TCP port after 20 attempts");
+/// A stream-only moq listener on an ephemeral loopback TCP port, already
+/// accepting, so a dial can follow immediately. Returns the port and listener.
+async fn listen_tcp() -> (u16, moq_tokio::Listener) {
+	let mut config = moq_tokio::listen::Config::default();
+	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	let server = config
+		.init(Default::default())
+		.expect("server init")
+		.listen()
+		.await
+		.expect("listen");
+	let port = server.tcp_local_addr().expect("tcp listener bound").port();
+	(port, server)
 }
 
 #[test]
@@ -98,8 +93,7 @@ async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let origin = moq_tokio::origin::spawn();
-	let (port, mut accepted, _handle) = spawn_upstream(origin);
-	wait_listening(port).await;
+	let (port, mut accepted, _handle) = spawn_upstream(origin).await;
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
@@ -132,19 +126,18 @@ fn cluster_reconnects_on_empty_uri_goaway() {
 /// A fake sibling upstream: a stream-only moq server publishing `origin`'s
 /// broadcasts to whoever connects. Returns its port, a receiver yielding each
 /// accepted [`moq_net::Session`] (so the test can drain it), and the task.
-fn spawn_upstream(
+async fn spawn_upstream(
 	origin: moq_net::origin::Producer,
 ) -> (
 	u16,
 	tokio::sync::mpsc::UnboundedReceiver<moq_net::Session>,
 	tokio::task::JoinHandle<()>,
 ) {
-	let (port, server) = bind_free_tcp_server();
+	let (port, mut server) = listen_tcp().await;
 
 	let (accepted_tx, accepted_rx) = tokio::sync::mpsc::unbounded_channel();
 
 	let handle = tokio::spawn(async move {
-		let mut server = server.listen().await.expect("listen");
 		while let Some(request) = server.accept().await {
 			// Serve the shared origin bidirectionally, like a relay peer would.
 			let scratch = moq_tokio::origin::spawn();
@@ -162,21 +155,6 @@ fn spawn_upstream(
 	(port, accepted_rx, handle)
 }
 
-/// Wait for the upstream's TCP listener to come up.
-async fn wait_listening(port: u16) {
-	let deadline = std::time::Instant::now() + Duration::from_secs(5);
-	loop {
-		if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-			break;
-		}
-		assert!(
-			std::time::Instant::now() < deadline,
-			"upstream never became ready on port {port}"
-		);
-		tokio::time::sleep(Duration::from_millis(25)).await;
-	}
-}
-
 /// An upstream GOAWAY with a redirect migrates the cluster dial to the sibling.
 /// The draining session keeps serving through the handover window, and the path
 /// never retracts on the cluster origin (route re-pricing and the sibling's
@@ -191,10 +169,8 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		broadcast.announce(Default::default()).expect("create broadcast");
 		let track = broadcast.create_track("video", None).expect("create track");
 
-		let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone());
-		let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone());
-		wait_listening(port_a).await;
-		wait_listening(port_b).await;
+		let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone()).await;
+		let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone()).await;
 
 		// ── the relay cluster under test, dialing sibling A ─────────────
 		let mut client_config = moq_tokio::connect::Config::default();
@@ -245,7 +221,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// unannounce the path (metadata updates are expected: the drain
 		// re-prices the old route and the sibling announces its own).
 		let mut announcements = cluster.origin.consume().announced();
-		let first = announcements.next().await.expect("initial announce");
+		let (first, _) = next_update(&mut announcements).await.expect("initial announce");
 		assert_eq!(first.prefix.as_str(), "cam");
 
 		// ── sibling A drains with a redirect to sibling B ────────────────
@@ -283,9 +259,9 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// updates (the drain re-pricing, the sibling's route) are expected and
 		// harmless; an inactive event means the path flapped.
 		loop {
-			match tokio::time::timeout(Duration::from_millis(500), announcements.next()).await {
+			match tokio::time::timeout(Duration::from_millis(500), next_update(&mut announcements)).await {
 				Err(_) => break,
-				Ok(Some(update)) if update.kind.is_active() => continue,
+				Ok(Some((_, true))) => continue,
 				Ok(event) => panic!("migration must not retract the path on the cluster origin: {event:?}"),
 			}
 		}
@@ -306,8 +282,7 @@ async fn spawn_relay_with_upstream(
 ) -> (u16, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let (port, server) = bind_free_tcp_server();
-	let mut server = server.listen().await.expect("listen");
+	let (port, mut server) = listen_tcp().await;
 
 	// Fully public auth: any no-JWT stream client gets the whole root.
 	let mut auth_config = auth::Config::default();
@@ -352,7 +327,6 @@ async fn spawn_relay_with_upstream(
 		}
 	});
 
-	wait_listening(port).await;
 	(port, handle)
 }
 
@@ -388,8 +362,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	broadcast.announce(Default::default()).expect("create broadcast");
 	let track = broadcast.create_track("video", None).expect("create track");
 
-	let (top_port, mut top_accepted, _top_handle) = spawn_upstream(top_origin.clone());
-	wait_listening(top_port).await;
+	let (top_port, mut top_accepted, _top_handle) = spawn_upstream(top_origin.clone()).await;
 	let top_url = format!("tcp://127.0.0.1:{top_port}/");
 
 	// ── MID-B: full relay clustered to TOP, up for the whole test ───────
@@ -420,8 +393,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		.await
 		.expect("TOP accept channel closed");
 
-	let (mid_a_port, mut mid_a_accepted, _mid_a_handle) = spawn_upstream(mid_a_origin.clone());
-	wait_listening(mid_a_port).await;
+	let (mid_a_port, mut mid_a_accepted, _mid_a_handle) = spawn_upstream(mid_a_origin.clone()).await;
 	let mid_a_url = format!("tcp://127.0.0.1:{mid_a_port}/");
 
 	// ── BOTTOM: full relay clustered to MID-A ───────────────────────────
@@ -452,9 +424,12 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// Watch announcements for the whole test: the failover must never
 	// unannounce the broadcast under the subscriber.
 	let mut announcements = sub_origin.consume().announced();
-	let first = within("broadcast announced through the MID-A leg", announcements.next())
-		.await
-		.expect("origin closed before the announce");
+	let (first, _) = within(
+		"broadcast announced through the MID-A leg",
+		next_update(&mut announcements),
+	)
+	.await
+	.expect("origin closed before the announce");
 	assert_eq!(first.prefix.as_str(), "diamond");
 
 	let bc = within("broadcast resolves on the subscriber origin", async {
@@ -603,9 +578,9 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// ── announcement stability: the path never retracted under the swap ──
 	// Metadata updates (route re-pricing, the new leg's hops) are expected.
 	loop {
-		match tokio::time::timeout(Duration::from_millis(500), announcements.next()).await {
+		match tokio::time::timeout(Duration::from_millis(500), next_update(&mut announcements)).await {
 			Err(_) => break,
-			Ok(Some(update)) if update.kind.is_active() => continue,
+			Ok(Some((_, true))) => continue,
 			Ok(event) => panic!("failover must not retract the path under the subscriber: {event:?}"),
 		}
 	}
@@ -660,8 +635,7 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	broadcast.announce(Default::default()).expect("create broadcast");
 	let track = broadcast.create_track("video", None).expect("create track");
 
-	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin.clone());
-	wait_listening(port).await;
+	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin.clone()).await;
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
@@ -775,11 +749,10 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let upstream_origin = moq_tokio::origin::spawn();
-	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin);
-	wait_listening(port).await;
+	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin).await;
 
 	// Accepts the connection, then never speaks MoQ: the dial hangs in the handshake.
-	let black_hole = TcpListener::bind("127.0.0.1:0").expect("bind black hole");
+	let black_hole = std::net::TcpListener::bind("127.0.0.1:0").expect("bind black hole");
 	let black_hole_port = black_hole.local_addr().expect("local addr").port();
 	let _black_hole = std::thread::spawn(move || {
 		// Hold every accepted socket open and idle for the life of the test.
@@ -835,4 +808,17 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	);
 
 	drop(connection);
+}
+
+/// The next route and whether it is active, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
+				Some((route, true))
+			}
+			moq_net::announce::Event::Retracted(route) => Some((route, false)),
+			moq_net::announce::Event::Live => continue,
+		};
+	}
 }

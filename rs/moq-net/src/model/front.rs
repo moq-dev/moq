@@ -105,7 +105,8 @@ pub(super) enum Action {
 	/// Drop the source copy of `track` but keep the delivered groups spliced,
 	/// so resume stays seamless while nobody reads.
 	Park { track: Arc<str> },
-	/// Drop the delivered groups of `track` too: the linger expired unread.
+	/// Drop the source copy of `track` and every delivered group: the linger expired
+	/// unread, or the source is local and keeps its own cache.
 	Release { track: Arc<str> },
 	/// The logical track completed.
 	Finish { track: Arc<str> },
@@ -587,6 +588,13 @@ impl Front {
 		};
 		track.used = false;
 		match track.state {
+			// A local source keeps its own cache, so a warm copy would only be a staler
+			// duplicate of it: drop the copy outright, and a returning reader re-splices
+			// the source and reads its cache against the real live edge.
+			TrackState::Spliced { .. } if self.identity == Identity::Local => {
+				track.state = TrackState::Idle;
+				actions.push(Action::Release { track: name });
+			}
 			// Drop the copy so the source goes idle at once; the delivered
 			// groups stay spliced for the linger.
 			TrackState::Spliced { .. } => {
@@ -1068,7 +1076,7 @@ mod tests {
 			result: Ok(200),
 		});
 		let other = track::Info {
-			max_age: Duration::from_secs(1),
+			max_age: Some(Duration::from_secs(1)),
 			..track::Info::default()
 		};
 		assert_actions(

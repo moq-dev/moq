@@ -2,7 +2,7 @@
 //! The relay records that publisher as `Hop::UNKNOWN`; reflected cluster paths
 //! must not replace it while gossiping around a redundant mesh.
 
-use std::{net::TcpListener, time::Duration};
+use std::time::Duration;
 
 use moq_relay::{Config, Relay};
 use url::Url;
@@ -10,24 +10,15 @@ use url::Url;
 const TIMEOUT: Duration = Duration::from_secs(10);
 const PATH: &str = "opalin/cell-clumsy-octopus/cameras/left.hang";
 
-fn free_tcp_port() -> u16 {
-	TcpListener::bind("127.0.0.1:0")
-		.expect("bind probe")
-		.local_addr()
-		.expect("local addr")
-		.port()
-}
-
 async fn spawn_relay(
 	id: u64,
 	connect: Vec<String>,
 	cluster_version: Option<moq_net::Version>,
 ) -> (u16, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-	let port = free_tcp_port();
 
 	let mut config = Config::default();
-	config.listen.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse bind"));
+	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	config.connect.bind = Some("127.0.0.1:0".parse().expect("parse client bind"));
 	config.connect.tls.insecure = Some(true);
 	config.connect.version.extend(cluster_version);
@@ -38,19 +29,12 @@ async fn spawn_relay(
 	config.cluster.id = Some(id);
 	config.cluster.connect = connect.into_iter().map(moq_relay::cluster::Peer::new).collect();
 
+	// `load` binds the TCP listener, so the port is ours before anyone dials it.
 	let relay = Relay::load(config).await.expect("relay load");
+	let port = relay.tcp_addr().expect("TCP listener is configured").port();
 	let handle = tokio::spawn(async move {
 		let _ = relay.run().await;
 	});
-
-	let deadline = std::time::Instant::now() + Duration::from_secs(5);
-	loop {
-		if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-			break;
-		}
-		assert!(std::time::Instant::now() < deadline, "relay {id} never became ready");
-		tokio::time::sleep(Duration::from_millis(25)).await;
-	}
 
 	(port, handle)
 }
@@ -190,8 +174,8 @@ async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
 
 	let mut updates = Vec::new();
 	let deadline = tokio::time::Instant::now() + window;
-	while let Ok(Some(update)) = tokio::time::timeout_at(deadline, announced.next()).await {
-		updates.push((update.prefix.as_str().to_string(), update.kind.is_active()));
+	while let Ok(Some((update, active))) = tokio::time::timeout_at(deadline, next_update(&mut announced)).await {
+		updates.push((update.prefix.as_str().to_string(), active));
 	}
 	updates
 }
@@ -379,4 +363,17 @@ async fn unknown_publisher_frames_over_an_ietf_cluster() {
 async fn unknown_publisher_does_not_flap_across_a_lite04_cluster_triangle() {
 	let version = "moq-lite-04".parse().expect("parse version");
 	assert_unknown_publisher_stays_announced(Some(version), true).await;
+}
+
+/// The next route and whether it is active, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
+				Some((route, true))
+			}
+			moq_net::announce::Event::Retracted(route) => Some((route, false)),
+			moq_net::announce::Event::Live => continue,
+		};
+	}
 }

@@ -301,18 +301,19 @@ mod test {
 		assert_eq!(encoded, output, "wrong encoded output");
 	}
 
-	/// Lock in the on-wire shape of the jitter field: a bare integer number
+	/// Lock in the on-wire shape of the jitter and delay fields: a bare integer number
 	/// of milliseconds. If `Option<Duration>` ever loses the `duration_millis`
 	/// serde adapter, this regresses to serde's default `{secs, nanos}` shape.
 	#[test]
-	fn jitter_serialized_as_millis() {
+	fn jitter_and_delay_serialized_as_millis() {
 		let mut encoded = r#"{
 			"video": {
 				"renditions": {
 					"video": {
 						"codec": "avc1.64001f",
 						"container": {"kind": "legacy"},
-						"jitter": 100
+						"jitter": 100,
+						"delay": 200
 					}
 				}
 			},
@@ -355,6 +356,7 @@ mod test {
 				optimize_for_latency: None,
 				container: Container::Legacy,
 				jitter: Some(std::time::Duration::from_millis(100)),
+				delay: Some(std::time::Duration::from_millis(200)),
 			},
 		);
 
@@ -371,6 +373,7 @@ mod test {
 				description: None,
 				container: Container::Legacy,
 				jitter: Some(std::time::Duration::from_millis(40)),
+				delay: None,
 			},
 		);
 
@@ -778,6 +781,68 @@ mod test {
 
 		let output = catalog.to_json().expect("failed to encode");
 		assert_eq!(output, encoded, "encode mismatch");
+	}
+
+	/// Data tracks carry the same optional `bitrate` and whole-millisecond `jitter` as media.
+	#[test]
+	fn data_track_bitrate_and_jitter() {
+		let encoded = r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"json":{"tracks":{"gps":{"mode":"stream","bitrate":8000,"jitter":100}}},"binary":{"tracks":{"frames":{"mode":"snapshot","bitrate":64000,"jitter":34}}}}"#;
+
+		let mut gps = JsonConfig::new(Mode::Stream);
+		gps.bitrate = Some(8_000);
+		gps.jitter = Some(std::time::Duration::from_millis(100));
+
+		let mut frames = BinaryConfig::new(Mode::Snapshot);
+		frames.bitrate = Some(64_000);
+		frames.jitter = Some(std::time::Duration::from_micros(33_334));
+
+		let mut catalog = Catalog::<()>::default();
+		catalog.json.insert("gps", gps).unwrap();
+		catalog.binary.insert("frames", frames).unwrap();
+
+		assert_eq!(
+			catalog.to_json().unwrap(),
+			encoded,
+			"jitter rounds up to whole milliseconds"
+		);
+
+		let decoded = Catalog::<()>::from_str(encoded).unwrap();
+		assert_eq!(
+			decoded.binary.tracks["frames"].jitter,
+			Some(std::time::Duration::from_millis(34))
+		);
+		assert_eq!(decoded.json.tracks["gps"].bitrate, Some(8_000));
+	}
+
+	/// An application lists a data track in its own section by flattening a data config beside its
+	/// own fields, so the reading rules and the application's fields share one entry.
+	#[test]
+	fn a_data_config_flattens_into_an_application_entry() {
+		#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+		struct Mavlink {
+			#[serde(flatten)]
+			binary: BinaryConfig,
+			sysid: u8,
+		}
+
+		#[derive(Serialize, Deserialize, PartialEq, Debug, Default, Clone)]
+		struct Ext {
+			#[serde(rename = "com.example.mavlink", default)]
+			mavlink: BTreeMap<String, Mavlink>,
+		}
+
+		let encoded = r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"com.example.mavlink":{"telemetry":{"mode":"stream","compression":"deflate","sysid":1}}}"#;
+
+		let catalog = Catalog::<Ext>::from_str(encoded).unwrap();
+		let entry = &catalog.ext.mavlink["telemetry"];
+		assert_eq!(entry.sysid, 1);
+		assert_eq!(entry.binary.mode, Mode::Stream);
+		assert_eq!(entry.binary.compression, Some(Compression::Deflate));
+		assert!(
+			entry.binary.extra.is_empty(),
+			"the application's own fields are not unknown data-track fields"
+		);
+		assert_eq!(catalog.to_json().unwrap(), encoded);
 	}
 
 	/// A track using a future mode or compression must survive a reparse-and-republish intact, so a

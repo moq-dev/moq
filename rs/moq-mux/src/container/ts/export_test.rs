@@ -1775,7 +1775,7 @@ async fn read_si_groups(consumer: &moq_net::broadcast::Consumer, name: &str) -> 
 		.subscribe(
 			moq_net::track::Subscription::default()
 				.with_start(moq_net::track::Position::group(0))
-				.with_max_age(moq_net::track::DEFAULT_MAX_AGE),
+				.with_max_age(Duration::from_secs(5)),
 		)
 		.await
 		.unwrap();

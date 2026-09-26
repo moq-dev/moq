@@ -11,8 +11,14 @@ cargo build --release
 This will:
 
 - Build the static library (`libmoq.a` on Unix-like systems, `moq.lib` on Windows)
-- Generate the C header file at `target/include/moq.h`
-- Generate the pkg-config file at `target/release/lib/pkgconfig/moq.pc`
+- Generate the C header file at `$OUT_DIR/include/moq.h`
+- Generate the pkg-config file at `$OUT_DIR/lib/pkgconfig/moq.pc`
+
+`OUT_DIR` is the build script's hashed output directory, which
+`cargo build --message-format=json` reports as `out_dir` on the
+`build-script-executed` message for libmoq.
+`moq.pc` assumes the install layout (`lib/libmoq.a` beside `lib/pkgconfig/`), so
+copy the staticlib into `$OUT_DIR/lib/` or a prefix before using it.
 
 There's also a [CMakeLists.txt](CMakeLists.txt) file that can be used to import/build the library.
 
@@ -54,11 +60,11 @@ int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len
 int32_t moq_origin_request_cancel(uint32_t task);
 int32_t moq_origin_announced_broadcast(uint32_t origin, const char *path, uintptr_t path_len, moq_status_callback on_broadcast, void *user_data);
 int32_t moq_origin_announced_broadcast_cancel(uint32_t task);
-int32_t moq_origin_announced(uint32_t origin, const char *prefix, uintptr_t prefix_len, const char *filter, uintptr_t filter_len, moq_status_callback on_announce, void *user_data);
+int32_t moq_origin_announced(uint32_t origin, const moq_announce_config *config, moq_status_callback on_announce, void *user_data);
 int32_t moq_origin_announced_info(uint32_t announced, moq_announce_update *dst);
 int32_t moq_origin_announced_free(uint32_t announced);
 int32_t moq_origin_announced_cancel(uint32_t announced);
-// filter is relative to the literal prefix, or NULL for **. Updates stay relative to the origin.
+// config (NULL for everything): filter is relative to the literal prefix, or NULL for **. hidden also lists `.`-named paths. Updates stay relative to the origin.
 
 // Publishing
 int32_t moq_publish_announce(uint32_t broadcast, const moq_route *route);

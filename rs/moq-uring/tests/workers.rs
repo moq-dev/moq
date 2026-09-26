@@ -96,6 +96,9 @@ fn a_steered_group_serves_a_shared_port() {
 	// One stop each: the wakers are per-thread, so a shared slot would let one
 	// worker's registration clobber the other's.
 	let stops: Vec<Arc<Stop>> = (0..WORKERS).map(|_| Arc::new(Stop::default())).collect();
+	// Each worker reports in once serving, so a setup failure fails here
+	// instead of as the dials hashed to it idling out.
+	let (ready, started) = std::sync::mpsc::channel();
 
 	let threads: Vec<_> = members
 		.into_iter()
@@ -105,6 +108,7 @@ fn a_steered_group_serves_a_shared_port() {
 			let stop = stop.clone();
 			let cert = certs.cert.clone();
 			let key = certs.key.clone();
+			let ready = ready.clone();
 			std::thread::spawn(move || {
 				let shard = member.shard();
 				let mut worker = Worker::new(Config::default()).expect("worker");
@@ -125,10 +129,15 @@ fn a_steered_group_serves_a_shared_port() {
 						accepted[usize::from(shard.index())].fetch_add(1, Ordering::AcqRel);
 					}
 				});
+				ready.send(()).expect("test alive");
 				worker.block_on(stop.wait()).expect("worker loop");
 			})
 		})
 		.collect();
+	drop(ready);
+	for _ in 0..WORKERS {
+		started.recv().expect("a worker thread failed to start");
+	}
 
 	// Dial the shared port repeatedly from one client worker. Every handshake
 	// completing is the steering assertion (see the module docs).

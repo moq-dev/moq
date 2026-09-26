@@ -10,7 +10,7 @@
 use std::sync::Mutex;
 use std::task::Poll;
 #[cfg(feature = "tokio")]
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -117,7 +117,7 @@ pub enum Due {
 #[derive(Debug)]
 struct Clock {
 	next: Option<tokio::time::Instant>,
-	expires: Option<SystemTime>,
+	expires: Option<tokio::time::Instant>,
 	cadence: Option<Duration>,
 	failures: u32,
 	revision: u64,
@@ -131,7 +131,7 @@ impl Clock {
 			next: grant
 				.revalidate
 				.and_then(|cadence| tokio::time::Instant::now().checked_add(cadence)),
-			expires: grant.expires,
+			expires: grant.deadline(),
 			cadence: grant.revalidate,
 			failures: 0,
 			revision: 0,
@@ -214,7 +214,7 @@ impl Producer {
 			};
 			let expire = async {
 				match expires {
-					Some(at) => tokio::time::sleep(crate::grant::until(at)).await,
+					Some(at) => tokio::time::sleep_until(at).await,
 					None => std::future::pending().await,
 				}
 			};
@@ -400,6 +400,7 @@ mod tests {
 	use std::future::Future;
 	use std::pin::pin;
 	use std::task::{Context, Waker};
+	use std::time::SystemTime;
 
 	fn grant(publish: &str) -> Grant {
 		Grant::new([publish.parse().unwrap()].into_iter().collect(), Default::default())

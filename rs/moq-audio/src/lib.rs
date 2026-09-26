@@ -14,10 +14,10 @@
 //!   they don't exist in a default build.
 //! - [`encode`] encodes PCM and publishes it through `moq_mux::container`,
 //!   registering the rendition in the `hang` catalog. Two entry points:
-//!   - `encode::Publication` and `encode::Driver` capture a controllable
-//!     microphone publication. The retained publication starts, stops, and
-//!     replaces the input while preserving one track identity, and reports the
-//!     active device, failures, and post-processing level.
+//!   - `encode::Control::new` returns a `Control` handle and the `Driver`
+//!     that captures the microphone. The handle starts, stops, and replaces
+//!     the input while preserving one track identity, and reports the active
+//!     device, failures, and post-processing level.
 //!   - `encode::publish_capture` is the turnkey shorthand. It encodes strictly
 //!     on demand: the track and catalog are advertised up front, but the device
 //!     opens only while a subscriber is listening and is released when the last

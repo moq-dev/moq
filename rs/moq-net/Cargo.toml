@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.3.2"
+version = "0.3.5"
 edition = "2024"
 rust-version.workspace = true
 
@@ -16,8 +16,8 @@ categories = ["multimedia", "network-programming", "web-programming"]
 ignored = ["getrandom"]
 
 [features]
-# Exposes the wire codecs to the `fuzz/` harness through the hidden `fuzz` module.
-# Off by default and hidden from the docs; nothing depends on it but that harness.
+# Exposes the wire codecs to the `fuzz/` harness and the announce bench through the
+# hidden `fuzz` module. Off by default and hidden from the docs.
 fuzz = []
 
 [dependencies]
@@ -69,6 +69,12 @@ required-features = ["fuzz"]
 name = "origin"
 harness = false
 
+# Reaches the private announce codec through the hidden `fuzz` module.
+[[bench]]
+name = "announce"
+harness = false
+required-features = ["fuzz"]
+
 [[bench]]
 name = "group"
 harness = false
@@ -83,4 +89,8 @@ harness = false
 
 [[bench]]
 name = "stats"
+harness = false
+
+[[bench]]
+name = "session"
 harness = false

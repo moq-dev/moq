@@ -311,7 +311,7 @@ async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<O
 	let mut deadline = moq_uring::Timer::after(handle, std::time::Duration::from_secs(5));
 	let mut future = std::pin::pin!(future);
 	kio::wait(|waiter| {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut cx) {
 			return std::task::Poll::Ready(Some(value));
 		}

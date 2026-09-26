@@ -92,6 +92,7 @@ export default defineConfig({
 						{ text: "moq-lite", link: "/concept/moq-lite" },
 						{ text: "hang", link: "/concept/hang" },
 						{ text: "Audio jitter", link: "/concept/audio-jitter" },
+						{ text: "Stats", link: "/concept/stats" },
 						{ text: "Standards", link: "/concept/standard" },
 						{
 							text: "Use cases",
@@ -131,7 +132,11 @@ export default defineConfig({
 								{ text: "Deployment", link: "/setup/prod" },
 							],
 						},
-						{ text: "moq-cli", link: "/bin/cli" },
+						{
+							text: "moq-cli",
+							link: "/bin/cli",
+							items: [{ text: "Inspect a relay", link: "/bin/inspect" }],
+						},
 						{
 							text: "Gateways",
 							items: [

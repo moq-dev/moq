@@ -299,7 +299,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 
 		// The transport's terminal error ends the supervisor.
 		if let Poll::Ready(err) = self.closed_watch.poll_closed(&mut cx) {
