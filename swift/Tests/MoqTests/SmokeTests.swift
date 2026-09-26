@@ -5,7 +5,8 @@ import XCTest
 /// The next announce event that is not `.live`, which lands wherever the backlog ends.
 private func nextRoute(_ announced: AnnounceConsumer) async throws -> AnnounceEvent {
     while true {
-        let event = try XCTUnwrap(try await announced.next(), "announce stream ended")
+        let next = try await announced.next()
+        let event = try XCTUnwrap(next, "announce stream ended")
         if event != .live {
             return event
         }
