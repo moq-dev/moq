@@ -11,17 +11,16 @@ accounting JS already has and Rust track tail adds.
 
 ## Plan
 
-- Both publishers already send the count, and both subscribers decode it
-  (`lite::SubscribeEnd::streams` in Rust, `SubscribeEnd.streams` in JS) and
-  ignore it.
-- JS track tail has landed, and its `Tail` already counts streams. Rust track
-  tail has landed (`rs/moq-net/src/tail.rs`), so lite-07's completion check
-  becomes "headers read >= Stream Count" after SUBSCRIBE_END, in place of
-  every sequence from start to end being covered. The Rust subscriber needs
-  the same count.
-- Tests in both languages: a late stream after SUBSCRIBE_END, a skipped group
-  that settles without the grace, a reset stream, and a count of zero. Add
-  the Rust-JS case to the track tail interop test.
+- Rust and JS subscribers now settle on the received header count for lite-07.
+  lite-05 and -06 keep their range and DROP accounting. The grace still covers
+  counted streams reset before their headers arrive.
+- Local Rust and JS regressions cover late streams, missing/reset streams,
+  skipped sequences, and zero streams. JS also verifies a reset after its header
+  and groups still being read across the subscription's FIN.
+- Remaining: add the count-specific Rust-JS case to track-tail interop. That
+  harness currently exposes a relay start-floor defect: when a newer group
+  arrives first, earlier in-flight groups can be lost. Finish the count proof
+  once that defect is resolved; keep this quest and its PR open until then.
 
 ## Related
 
