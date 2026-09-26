@@ -604,7 +604,7 @@ mod tests {
 			Poll::Ready(Ok(buf.len()))
 		}
 
-		fn set_priority(&mut self, _order: u8) {}
+		fn set_priority(&mut self, _order: i32) {}
 
 		fn finish(&mut self) -> Result<(), Self::Error> {
 			Ok(())
@@ -955,7 +955,7 @@ mod tests {
 			self.inner.poll_write(cx, buf)
 		}
 
-		fn set_priority(&mut self, order: u8) {
+		fn set_priority(&mut self, order: i32) {
 			self.inner.set_priority(order);
 		}
 

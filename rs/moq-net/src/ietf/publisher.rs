@@ -2031,7 +2031,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		let mut stream = std::future::poll_fn(|cx| self.session.poll_open_uni(cx))
 			.await
 			.map_err(Error::from_transport)?;
-		stream.set_priority(priority);
+		stream.set_priority(priority.into());
 
 		let mut writer = Writer::new(stream, self.version);
 		writer.buffer(&ietf::GroupHeader {
@@ -2222,7 +2222,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					};
 					self.opened.fetch_add(1, Ordering::Relaxed);
 					let mut stream = stream;
-					stream.set_priority(self.priority);
+					stream.set_priority(self.priority.into());
 
 					let mut writer = Writer::new(stream, self.version);
 					if let Err(err) = writer.buffer(&self.msg) {

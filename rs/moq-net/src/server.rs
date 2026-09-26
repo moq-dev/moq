@@ -877,7 +877,7 @@ mod tests {
 		) -> std::task::Poll<Result<usize, Self::Error>> {
 			std::task::Poll::Ready(Ok(buf.len()))
 		}
-		fn set_priority(&mut self, _order: u8) {}
+		fn set_priority(&mut self, _order: i32) {}
 		fn finish(&mut self) -> Result<(), Self::Error> {
 			Ok(())
 		}
