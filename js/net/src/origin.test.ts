@@ -1301,28 +1301,89 @@ test("a rejected request is not asked of the same route again", async () => {
 	origin.close();
 });
 
-test("a rejected request falls through to the next-best route", async () => {
+test("a refusal is terminal, never falling through to a broader route", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const narrow = origin.dynamic(Path.from("live"));
-	const served = new BroadcastProducer();
-	served.createTrack("video");
-	const disposeWide = serve(origin, Path.from(""), provider(served));
+	const wide = origin.dynamic(Path.from(""));
+	const wideRequests = wide.requested();
+	const wideAsked = wideRequests.next();
 
 	const request = consumer.request(Path.from("live/cam"));
 	const { value: req } = await narrow.requested().next();
+	const err = new Error("unserved");
+	req?.reject(err);
+	await settle();
+
+	// The narrow route spoke for the path, so the broader one is never asked.
+	expect(await request.closed).toBe(err);
+	expect(request.active.peek()).toBeUndefined();
+	expect(request.unroutable.peek()).toBe(true);
+	expect(await Promise.race([wideAsked.then(() => "asked"), settle().then(() => "idle")])).toBe("idle");
+
+	request.close();
+	void wideRequests.return?.();
+	narrow.close();
+	wide.close();
+	origin.close();
+});
+
+test("a better route's refusal leaves the serving route in place", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const served = new BroadcastProducer();
+	const disposeWide = serve(origin, Path.from(""), provider(served));
+
+	const request = consumer.request(Path.from("live/cam"));
+	await settle();
+	const before = request.active.peek();
+	expect(before).toBeDefined();
+
+	// The narrower route is asked while the broad one keeps serving, then says no.
+	const narrow = origin.dynamic(Path.from("live"));
+	const { value: req } = await narrow.requested().next();
+	expect(request.active.peek()).toBe(before);
 	req?.reject(new Error("unserved"));
 	await settle();
 
-	// The narrow route refused, so the broader one answers instead of the path black-holing.
-	const track = request.active.peek()?.track("video").subscribe();
-	expect(track).toBeDefined();
-	track?.close();
+	expect(request.active.peek()).toBe(before);
+	expect(before?.closed.peek()).toBeUndefined();
+	expect(request.closed.peek()).toBeUndefined();
 
 	request.close();
+	expect(request.closed.peek()).toBeNull();
 	narrow.close();
 	disposeWide();
 	served.close();
+	origin.close();
+});
+
+test("a refusal from a superseded route does not end the request", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const wide = origin.dynamic(Path.from(""));
+	const wideRequests = wide.requested();
+
+	const request = consumer.request(Path.from("live/cam"));
+	const { value: stale } = await wideRequests.next();
+
+	// A narrower route takes over the pending request before the broad one answers.
+	const narrow = origin.dynamic(Path.from("live"));
+	const { value: req } = await narrow.requested().next();
+	stale?.reject(new Error("unserved"));
+	await settle();
+	expect(request.closed.peek()).toBeUndefined();
+
+	const produced = new BroadcastProducer();
+	req?.accept(produced);
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+
+	request.close();
+	void wideRequests.return?.();
+	narrow.close();
+	wide.close();
+	produced.close();
 	origin.close();
 });
 
