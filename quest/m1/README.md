@@ -81,7 +81,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Benchmark regressions in CI](/quest/m1/bench-ci.md) - PRs get a non-blocking comparison of the Criterion benches they affect, and a nightly trend on main alerts on regressions
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - retained evidence, repeated paired runs, and uncertainty for performance claims
 - [#3126](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench reports per-interval latency percentiles so the ramp leaves the steady state
-- [Sans-IO session bench](/quest/m1/bench-session.md) - a moq-net bench drives publisher, relay, and subscribers over the in-memory transport, swept over publishers, subscribers, and frame size
 - [Relay session bench](/quest/m1/bench-relay.md) - the same scenario through moq-relay's own connection handling
 - [Bench coverage](/quest/m1/bench-coverage.md) - Criterion targets for moq-mux containers, the hang catalog, moq-auth verification, and moq-pattern matching
 - [Relay profiling](/quest/m1/performance-profiles.md) - reproducible CPU and allocation captures under the existing workloads
@@ -90,6 +89,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Watch worker](/quest/m1/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
 - [Closure counters](/quest/m1/closure-counters.md) - a departed node's return never regresses the closure counters a consumer already saw
 - [RTMP interleaving](/quest/m1/rtmp-interleaving.md) - isolate partial messages before optimizing assembly copies
+- [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - with the default pool, relay memory plateaus at the expiry window on moq-transport as on moq-lite
 - [Relay memory](/quest/m1/relay-memory.md) - remeasure what an announcement costs after prefix routes
 - [PoP skipping](/quest/m1/pop-skipping/README.md) - short cold paths for unpopular broadcasts without losing warm backhaul dedup
 - [Route cost in the JS origin](/quest/m1/route-cost.md) - the browser origin ranks routes by cost and hops like Rust instead of newest-first

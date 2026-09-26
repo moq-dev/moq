@@ -22,11 +22,11 @@ pub struct MockConnectOptions {
 	/// The MoQ version to negotiate (determines the ALPN protocol string).
 	pub version: Version,
 	/// Origin whose broadcasts the client publishes to the server.
-	pub client_publish: Option<origin::Producer>,
+	pub client_publish: Option<origin::Consumer>,
 	/// Origin the client inserts remote broadcasts into.
 	pub client_subscribe: Option<origin::Producer>,
 	/// Origin whose broadcasts the server publishes to the client.
-	pub server_publish: Option<origin::Producer>,
+	pub server_publish: Option<origin::Consumer>,
 	/// Origin the server inserts remote broadcasts into.
 	pub server_subscribe: Option<origin::Producer>,
 }
