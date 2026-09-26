@@ -3,7 +3,7 @@ import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
-import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
+import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
@@ -548,7 +548,7 @@ export class Subscriber {
 		} catch (err) {
 			// The setup outlived its deadline waiting for the first response: a control
 			// timeout, not content that arrived late.
-			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
+			const e = err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err);
 			request.reject(e);
 			this.#subscribes.delete(id);
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
@@ -571,11 +571,14 @@ export class Subscriber {
 			//
 			// On lite-05+ the publisher sends SUBSCRIBE_START/END/DROP on this stream until
 			// its FIN; older drafts just close it. Either way group streams can still be in
-			// flight, so the track ends only once the tail is accounted for.
+			// flight, so the track ends only once the tail is accounted for. A reset rejects
+			// instead, so the track ends with that error rather than a clean tail.
 			const responses = supportsTrackStream(this.version)
 				? this.#runResponses(stream, entry)
 				: stream.reader.closed;
 			const closed = responses.then(() => this.#settleTail(entry));
+			// A reset that lands after the race below settled is moot; the race observes one before.
+			closed.catch(() => {});
 			const subscriptionUpdates =
 				this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02
 					? undefined
@@ -603,7 +606,7 @@ export class Subscriber {
 			stream.close();
 			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
-			const e = error(err);
+			const e = await sessionCause(this.#quic, err);
 			producer.close(e);
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
 			stream.abort(e);
@@ -807,17 +810,11 @@ export class Subscriber {
 
 	// Reads SUBSCRIBE_START/END/DROP on the subscribe stream until FIN (lite-05+), recording
 	// the range the tail is accounted against. SUBSCRIBE_END declares the track's end right
-	// away, so a consumer learns it before the last groups arrive. Resolves on FIN or on the
-	// stream being reset out from under it; rejects only on a response that breaks the range.
+	// away, so a consumer learns it before the last groups arrive. Resolves on FIN and rejects
+	// when the stream is reset, so the track ends with the publisher's error rather than cleanly.
 	async #runResponses(stream: Stream, entry: SubscribeEntry): Promise<void> {
 		for (;;) {
-			let resp: Awaited<ReturnType<typeof decodeSubscribeResponseMaybe>>;
-			try {
-				resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
-			} catch {
-				// Stream closed or reset; nothing more to read.
-				return;
-			}
+			const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
 			if (!resp) return;
 
 			if ("start" in resp) {
@@ -1138,11 +1135,15 @@ export class Subscriber {
 		}
 	}
 
-	close() {
+	/**
+	 * Ends every subscribed track: cleanly for a deliberate close, or with `err` when the
+	 * session died, since those tracks were cut off rather than ended.
+	 */
+	close(err?: Error) {
 		this.#closed.abort();
 
 		for (const { track } of this.#subscribes.values()) {
-			track.close();
+			track.close(err);
 		}
 
 		this.#subscribes.clear();
