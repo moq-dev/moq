@@ -6225,6 +6225,27 @@ mod tests {
 		assert!(end.is_none(), "a group followed the final one");
 	}
 
+	/// A standing route outlives the source it produced: the front ends instead of
+	/// asking that route for the broadcast that just closed.
+	#[tokio::test]
+	async fn a_closed_source_is_not_requested_again_from_its_standing_route() {
+		let producer = origin(1).produce();
+		let server = producer
+			.dynamic("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		let pending = producer.consume().request_broadcast("room/alice");
+		let source = broadcast::Info::new().produce();
+		queued(&server).await.accept(&source);
+		let resolved = pending.await.unwrap();
+
+		source.close();
+		settle(|| resolved.is_closed()).await;
+		assert!(
+			server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"the closed source was requested again"
+		);
+	}
+
 	/// An origin front drops the source track as soon as its last reader leaves,
 	/// so the publisher's `unused()` resolves far below `TRACK_IDLE_LINGER`.
 	/// Cached groups stay on the front for the linger; a returning reader

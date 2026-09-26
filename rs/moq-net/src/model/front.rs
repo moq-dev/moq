@@ -202,7 +202,8 @@ pub(super) struct Front {
 	serving_closing: bool,
 	/// The route an upstream request is in flight through.
 	upstream: Option<u64>,
-	/// Routes that refused the path while another source was serving.
+	/// Routes excluded from selection: they refused the path while another
+	/// source was serving, or their source ended while still advertised.
 	refused: HashSet<u64>,
 	/// Why the last candidate fell through, reported if the front ends unresolved.
 	last_err: Option<Error>,
@@ -244,7 +245,7 @@ impl Front {
 		self.identity.pin()
 	}
 
-	/// The routes that refused the path; the driver skips them when selecting.
+	/// The routes excluded from selection; the driver skips them.
 	pub(super) fn refused_routes(&self) -> &HashSet<u64> {
 		&self.refused
 	}
@@ -429,12 +430,16 @@ impl Front {
 	}
 
 	fn source_closed(&mut self, source: u64, actions: &mut Vec<Action>) {
-		let Some((serving, _)) = self.serving else {
+		let Some((serving, route)) = self.serving else {
 			return;
 		};
 		if serving != source {
 			return;
 		}
+		// A standing route can outlive the source it produced. Asking it again
+		// would re-request the broadcast that just ended; another route to the
+		// same publisher may still resume it.
+		self.refused.insert(route);
 		self.serving = None;
 		self.serving_closing = false;
 		actions.push(Action::Detach { source });
@@ -813,6 +818,7 @@ mod tests {
 			front.step(Event::SourceClosed { source: 100 }),
 			&[Action::Detach { source: 100 }, Action::Reselect],
 		);
+		assert!(front.refused_routes().contains(&1));
 		assert_actions(
 			front.step(Event::Selected {
 				best: Some(remote(3, 10)),
