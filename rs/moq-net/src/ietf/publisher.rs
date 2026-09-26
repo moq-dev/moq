@@ -44,6 +44,115 @@ enum FillStep {
 	Done,
 }
 
+/// Where a fetch object sits relative to the one written before it on the same stream.
+#[derive(Clone, Copy)]
+enum FetchPrior {
+	/// The first object on the stream.
+	None,
+	/// The next object of the same group.
+	Same,
+	/// The first object after this earlier group.
+	Group(u64),
+}
+
+/// One group of a FETCH answer, read out of the cache so a later eviction cannot
+/// truncate what FETCH_OK already promised.
+struct FetchedGroup {
+	sequence: u64,
+	/// The Object ID of the first frame.
+	first: u64,
+	frames: Vec<frame::Frame>,
+	/// No frame past the last one read exists: the group ended there, or nothing was
+	/// written past the cap.
+	complete: bool,
+}
+
+impl FetchPrior {
+	/// The prior for the next object of a single-group stream, clearing `first`.
+	fn next(first: &mut bool) -> Self {
+		match std::mem::take(first) {
+			true => Self::None,
+			false => Self::Same,
+		}
+	}
+}
+
+impl FetchedGroup {
+	/// One past the last Object ID read.
+	fn end(&self) -> u64 {
+		self.first + self.frames.len() as u64
+	}
+}
+
+/// A FETCH range read out of a track.
+struct Walked {
+	groups: Vec<FetchedGroup>,
+	/// Why the walk stopped before the end of the range, when it did.
+	stopped: Option<Error>,
+}
+
+/// Read `start..end` out of `track` one group at a time, ascending.
+///
+/// Each group is a [`track::Consumer::fetch_group`], so a relay fetches a miss upstream.
+/// A group that does not exist below the newest one is a hole and is skipped; one at or
+/// past it is the end of the track, so the walk stops there. Any other failure answers
+/// the whole FETCH.
+async fn walk_fetch(track: &track::Consumer, start: Location, end: Location, priority: u8) -> Result<Walked, Error> {
+	let mut groups = Vec::new();
+	for sequence in start.group..=end.group {
+		if sequence == end.group && end.object == 0 {
+			break;
+		}
+
+		let skip = match sequence == start.group {
+			true => start.object,
+			false => 0,
+		};
+		let until = (sequence == end.group).then_some(end.object);
+		let fetch = group::Fetch {
+			priority,
+			frame_start: skip,
+		};
+
+		let mut group = match track.fetch_group(sequence, fetch).await {
+			Ok(group) => group,
+			Err(Error::NotFound) if track.latest().is_some_and(|latest| sequence < latest) => continue,
+			Err(err @ Error::NotFound) => {
+				return Ok(Walked {
+					groups,
+					stopped: Some(err),
+				});
+			}
+			Err(err) => return Err(err),
+		};
+
+		// `fetch_group` positions the consumer at `skip`, or refuses a group that no
+		// longer holds it.
+		let first = group.index();
+		let mut frames = Vec::new();
+		let complete = loop {
+			if let Some(until) = until
+				&& first + frames.len() as u64 >= until
+			{
+				break group.frame_count() as u64 <= until;
+			}
+			match group.read_frame().await? {
+				Some(frame) => frames.push(frame),
+				None => break true,
+			}
+		};
+
+		groups.push(FetchedGroup {
+			sequence,
+			first,
+			frames,
+			complete,
+		});
+	}
+
+	Ok(Walked { groups, stopped: None })
+}
+
 /// A broadcast whose route table is watched for changes in what we advertise: the
 /// namespace becoming (un)advertisable, or its path or cost moving.
 struct Watched {
@@ -863,20 +972,13 @@ where
 								stream,
 								sequence,
 								index,
-								std::mem::take(&mut first),
+								FetchPrior::next(&mut first),
 								frame.timestamp,
 								timescale,
 								version,
 							)
 							.await?;
-							stream.encode(&(frame.payload.len() as u64)).await?;
-							if frame.payload.is_empty() && matches!(version, Version::Draft14 | Version::Draft15) {
-								stream.encode(&0u64).await?;
-							}
-							if !frame.payload.is_empty() {
-								let mut payload = frame.payload;
-								stream.write_all(&mut payload).await?;
-							}
+							Self::write_fetch_payload(stream, frame.payload, version).await?;
 						}
 						index += 1;
 						group.keep_alive();
@@ -908,7 +1010,7 @@ where
 						stream,
 						sequence,
 						index,
-						std::mem::take(&mut first),
+						FetchPrior::next(&mut first),
 						frame.timestamp,
 						timescale,
 						version,
@@ -954,7 +1056,7 @@ where
 		stream: &mut Writer<S::SendStream, Version>,
 		sequence: u64,
 		object: u64,
-		first: bool,
+		prior: FetchPrior,
 		timestamp: Timestamp,
 		timescale: Option<Timescale>,
 		version: Version,
@@ -979,10 +1081,10 @@ where
 			return Ok(());
 		}
 
-		let header = match first {
+		let header = match prior {
 			// The first object must carry its absolute Group and Object IDs. Include the
 			// priority too: "same as the prior object" has no prior to refer to.
-			true => ietf::FetchObject::Object {
+			FetchPrior::None => ietf::FetchObject::Object {
 				subgroup: ietf::FetchSubgroup::Zero,
 				group: Some(sequence),
 				object: Some(object),
@@ -990,10 +1092,22 @@ where
 				properties,
 			},
 			// Same group and priority; the Object ID is the prior one plus one.
-			false => ietf::FetchObject::Object {
+			FetchPrior::Same => ietf::FetchObject::Object {
 				subgroup: ietf::FetchSubgroup::Zero,
 				group: None,
 				object: None,
+				priority: None,
+				properties,
+			},
+			// A later group, walked in ascending order. Draft-18 turned the field into a
+			// delta, where zero is the very next group.
+			FetchPrior::Group(prior) => ietf::FetchObject::Object {
+				subgroup: ietf::FetchSubgroup::Zero,
+				group: Some(match version {
+					Version::Draft15 | Version::Draft16 | Version::Draft17 => sequence,
+					_ => sequence - prior - 1,
+				}),
+				object: Some(object),
 				priority: None,
 				properties,
 			},
@@ -1001,6 +1115,24 @@ where
 
 		stream.encode(&header).await?;
 
+		Ok(())
+	}
+
+	/// Write a whole fetch object's length and payload, after its header.
+	async fn write_fetch_payload(
+		stream: &mut Writer<S::SendStream, Version>,
+		payload: bytes::Bytes,
+		version: Version,
+	) -> Result<(), Error> {
+		stream.encode(&(payload.len() as u64)).await?;
+		// Draft-14 and 15 still carry a Normal status after an empty object.
+		if payload.is_empty() && matches!(version, Version::Draft14 | Version::Draft15) {
+			stream.encode(&0u64).await?;
+		}
+		if !payload.is_empty() {
+			let mut payload = payload;
+			stream.write_all(&mut payload).await?;
+		}
 		Ok(())
 	}
 
@@ -1013,43 +1145,237 @@ where
 		}
 	}
 
-	/// Serve the current-group prefix for a relative joining FETCH with offset zero.
+	/// Answer a FETCH: a standalone range of the named track, or a joining FETCH's
+	/// groups up to its subscription's saved start.
+	///
+	/// Both walk the track one group at a time, ascending, and buffer the answer before
+	/// replying: FETCH_OK names where the response ends, which a range running past the
+	/// track only learns by reading it, and a refusal can still replace it until then.
 	async fn run_fetch_stream(mut self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
-		if Filter::is_draft20(self.version) {
+		let priority = super::priority::from_wire(msg.subscriber_priority);
+
+		let (track, start, end, timescale, joined) = match msg.fetch_type {
+			FetchType::Standalone {
+				namespace,
+				track,
+				start,
+				end,
+			} => {
+				// An End Object of 0 asks for the whole End Group.
+				let end = match end.object {
+					0 => end.group.checked_add(1).map(|group| Location { group, object: 0 }),
+					_ => Some(end),
+				};
+				let Some(end) = end.filter(|end| (start.group, start.object) < (end.group, end.object)) else {
+					return self
+						.reject_fetch(stream, msg.request_id, &Error::InvalidRange, "empty range")
+						.await;
+				};
+
+				// The peer must have seen the announcement to name this namespace, so this
+				// resolves like a SUBSCRIBE does.
+				let broadcast = match self.serving_origin().await.request_broadcast(&namespace).await {
+					Ok(broadcast) => broadcast,
+					Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
+				};
+				let track = match broadcast.track(&track) {
+					Ok(track) => track,
+					Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
+				};
+
+				// No SUBSCRIBE declared a timescale for this request, so its objects go
+				// out unstamped.
+				(track, start, end, None, false)
+			}
+			// Draft-20 replaced joining FETCH with subscription fills.
+			FetchType::RelativeJoining { .. } | FetchType::AbsoluteJoining { .. }
+				if Filter::is_draft20(self.version) =>
+			{
+				return self
+					.reject_fetch(
+						stream,
+						msg.request_id,
+						&Error::Unsupported,
+						"joining FETCH removed in draft-20",
+					)
+					.await;
+			}
+			FetchType::RelativeJoining {
+				subscriber_request_id, ..
+			}
+			| FetchType::AbsoluteJoining {
+				subscriber_request_id, ..
+			} => {
+				let (end, cache, timescale) = match self.joined(&mut stream, subscriber_request_id).await? {
+					Ok(joined) => joined,
+					Err((err, reason)) => return self.reject_fetch(stream, msg.request_id, &err, reason).await,
+				};
+				let start = match msg.fetch_type {
+					FetchType::RelativeJoining { group_offset, .. } => end.group.saturating_sub(group_offset),
+					FetchType::AbsoluteJoining { group_id, .. } if group_id <= end.group => group_id,
+					_ => {
+						return self
+							.reject_fetch(
+								stream,
+								msg.request_id,
+								&Error::InvalidRange,
+								"joining group past the subscription",
+							)
+							.await;
+					}
+				};
+				(
+					cache,
+					Location {
+						group: start,
+						object: 0,
+					},
+					end,
+					timescale,
+					true,
+				)
+			}
+		};
+
+		// The walk writes each group after the one before it, so the order the peer
+		// reads object IDs in is fixed. One group has no order to get wrong.
+		let last = match end.object {
+			0 => end.group - 1,
+			_ => end.group,
+		};
+		if msg.group_order == GroupOrder::Descending && start.group != last {
 			return self
 				.reject_fetch(
 					stream,
 					msg.request_id,
 					&Error::Unsupported,
-					"joining FETCH removed in draft-20",
+					"descending FETCH not supported",
 				)
 				.await;
 		}
 
-		let subscribe_id = match msg.fetch_type {
-			FetchType::Standalone { .. } => {
-				return self
-					.reject_fetch(stream, msg.request_id, &Error::Unsupported, "not supported")
-					.await;
-			}
-			FetchType::RelativeJoining {
-				subscriber_request_id,
-				group_offset,
-			} => {
-				if group_offset != 0 {
-					return self
-						.reject_fetch(stream, msg.request_id, &Error::Unsupported, "not supported")
-						.await;
+		// The subscriber cancelling is the only other way this ends early, and is owed
+		// nothing.
+		let walked = {
+			let mut walk = std::pin::pin!(walk_fetch(&track, start, end, priority));
+			kio::wait(|waiter| {
+				let mut cx = std::task::Context::from_waker(waiter.waker());
+				if stream.reader.poll_closed(&mut cx).is_ready() {
+					return Poll::Ready(None);
 				}
-				subscriber_request_id
+				waiter.poll_future(walk.as_mut()).map(Some)
+			})
+			.await
+		};
+		let walked = match walked {
+			Some(Ok(walked)) => walked,
+			Some(Err(err)) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
+			None => return Ok(()),
+		};
+
+		let (end_location, end_of_track) = if joined {
+			// The subscription starts at the saved Largest Object, so the prefix of that
+			// group has to be here in full or the two leave a gap.
+			let whole = walked
+				.groups
+				.last()
+				.is_some_and(|last| last.sequence == end.group && last.end() == end.object);
+			if !whole {
+				let (err, reason) = match walked.stopped {
+					Some(err) => (err, "joining group unavailable"),
+					None => (Error::Evicted, "joining prefix unavailable"),
+				};
+				return self.reject_fetch(stream, msg.request_id, &err, reason).await;
 			}
-			FetchType::AbsoluteJoining { .. } => {
-				return self
-					.reject_fetch(stream, msg.request_id, &Error::Unsupported, "not supported")
-					.await;
+			(end, false)
+		} else {
+			let Some(last) = walked.groups.last() else {
+				// Nothing in range exists: the refusal the walk ran into is the answer.
+				let err = walked.stopped.unwrap_or(Error::NotFound);
+				return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await;
+			};
+			let delivered = Location {
+				group: last.sequence,
+				object: last.end(),
+			};
+			let end_of_track = last.complete && track.final_sequence() == last.sequence.checked_add(1);
+			// A response that stopped short ends at its last object; one that covered the
+			// whole range ends where it was asked to.
+			match walked.stopped.is_some() || end_of_track {
+				true => (delivered, end_of_track),
+				false => (end, false),
 			}
 		};
 
+		// FETCH_OK on every draft, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK or
+		// REQUEST_ERROR in answer to a FETCH, and REQUEST_OK's own definition lists the other
+		// requests it answers without ever naming this one.
+		stream.writer.encode(&ietf::FetchOk::ID).await?;
+		stream
+			.writer
+			.encode(&ietf::FetchOk {
+				request_id: match self.version {
+					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(msg.request_id),
+					_ => None,
+				},
+				// Only draft-14 encodes it, and only as the publisher restating the order.
+				group_order: match msg.group_order {
+					GroupOrder::Descending => GroupOrder::Descending,
+					_ => GroupOrder::Ascending,
+				},
+				end_of_track,
+				end_location,
+			})
+			.await?;
+
+		let uni = self.session.open_uni().await.map_err(Error::from_transport)?;
+		let mut writer = Writer::new(uni, self.version);
+		writer.set_priority(priority);
+		writer.encode(&FetchHeader::TYPE).await?;
+		writer
+			.encode(&FetchHeader {
+				request_id: msg.request_id,
+			})
+			.await?;
+		let mut prior: Option<u64> = None;
+		for group in walked.groups {
+			for (object, frame) in (group.first..).zip(group.frames) {
+				let at = match prior {
+					None => FetchPrior::None,
+					Some(prior) if prior == group.sequence => FetchPrior::Same,
+					Some(prior) => FetchPrior::Group(prior),
+				};
+				Self::write_fetch_object(
+					&mut writer,
+					group.sequence,
+					object,
+					at,
+					frame.timestamp,
+					timescale,
+					self.version,
+				)
+				.await?;
+				Self::write_fetch_payload(&mut writer, frame.payload, self.version).await?;
+				prior = Some(group.sequence);
+			}
+		}
+		writer.close().await?;
+
+		// FETCH_OK is the last thing this stream has to say, and [`Writer`] resets on drop:
+		// without the finish the answer is discarded before the peer ever reads it, exactly
+		// as it would be for a refusal. The peer dropping the stream first is a normal end.
+		let _ = stream.writer.close().await;
+
+		Ok(())
+	}
+
+	/// Resolve the subscription a joining FETCH names to its saved start, or the refusal
+	/// to answer the FETCH with.
+	async fn joined(
+		&mut self,
+		stream: &mut Stream<S, Version>,
+		subscribe_id: RequestId,
+	) -> Result<Result<(Location, track::Consumer, Option<Timescale>), (Error, &'static str)>, Error> {
 		// Request streams can arrive out of order. Wait on registration, while bounding
 		// the lifetime of a request whose subscription never arrives or resolves.
 		let joined = {
@@ -1082,36 +1408,23 @@ where
 			})
 			.await
 		};
-		let joined = match joined {
-			Err(Error::Timeout) => {
-				return self
-					.reject_fetch(stream, msg.request_id, &Error::Timeout, "subscription not ready")
-					.await;
-			}
-			result => result?,
-		};
-		let (end, cache, timescale) = match joined {
-			None => {
-				return self
-					.reject_fetch(
-						stream,
-						msg.request_id,
-						&if matches!(
-							self.version,
-							Version::Draft14
-								| Version::Draft15 | Version::Draft16
-								| Version::Draft17 | Version::Draft18
-								| Version::Draft19
-						) {
-							Error::InvalidJoiningRequestId
-						} else {
-							Error::NotFound
-						},
-						"no such subscription",
-					)
-					.await;
-			}
-			Some(Joined::Unsupported) => {
+		let refusal = match joined {
+			Err(Error::Timeout) => (Error::Timeout, "subscription not ready"),
+			Err(err) => return Err(err),
+			Ok(Some(Joined::Group { end, cache, timescale })) => return Ok(Ok((end, cache, timescale))),
+			Ok(None) => (
+				match self.version {
+					Version::Draft14
+					| Version::Draft15
+					| Version::Draft16
+					| Version::Draft17
+					| Version::Draft18
+					| Version::Draft19 => Error::InvalidJoiningRequestId,
+					_ => Error::NotFound,
+				},
+				"no such subscription",
+			),
+			Ok(Some(Joined::Unsupported)) => {
 				if matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 					self.session.close(
 						crate::SessionError::ProtocolViolation.to_code(),
@@ -1119,116 +1432,11 @@ where
 					);
 					return Err(Error::ProtocolViolation);
 				}
-				return self
-					.reject_fetch(
-						stream,
-						msg.request_id,
-						&Error::Unsupported,
-						"joining filter not supported",
-					)
-					.await;
+				(Error::Unsupported, "joining filter not supported")
 			}
-			Some(Joined::Empty) => {
-				return self
-					.reject_fetch(
-						stream,
-						msg.request_id,
-						&Error::InvalidRange,
-						"no objects at subscription start",
-					)
-					.await;
-			}
-			Some(Joined::Group { end, cache, timescale }) => (end, cache, timescale),
+			Ok(Some(Joined::Empty)) => (Error::InvalidRange, "no objects at subscription start"),
 		};
-		let priority = super::priority::from_wire(msg.subscriber_priority);
-		let mut group = match cache
-			.fetch_group(
-				end.group,
-				group::Fetch {
-					priority,
-					..Default::default()
-				},
-			)
-			.await
-		{
-			Ok(group) => group,
-			Err(err) => {
-				return self
-					.reject_fetch(stream, msg.request_id, &err, "joining group unavailable")
-					.await;
-			}
-		};
-
-		// Retain the promised prefix before success: a cached group may already have
-		// evicted its front, and later cache eviction must not truncate this FETCH.
-		let mut prefix = Vec::new();
-		for _ in 0..end.object {
-			match group.read_frame().await {
-				Ok(Some(frame)) => prefix.push(frame),
-				_ => {
-					return self
-						.reject_fetch(stream, msg.request_id, &Error::Evicted, "joining prefix unavailable")
-						.await;
-				}
-			}
-		}
-
-		// FETCH_OK on every draft, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK or
-		// REQUEST_ERROR in answer to a FETCH, and REQUEST_OK's own definition lists the other
-		// requests it answers without ever naming this one.
-		stream.writer.encode(&ietf::FetchOk::ID).await?;
-		stream
-			.writer
-			.encode(&ietf::FetchOk {
-				request_id: match self.version {
-					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(msg.request_id),
-					_ => None,
-				},
-				// Only draft-14 encodes it, and only as the publisher restating the order.
-				group_order: msg.group_order.any_to_descending(),
-				end_of_track: false,
-				end_location: end,
-			})
-			.await?;
-
-		// The FETCH owns the retained prefix, capped at the subscription snapshot.
-		let uni = self.session.open_uni().await.map_err(Error::from_transport)?;
-		let mut writer = Writer::new(uni, self.version);
-		writer.set_priority(priority);
-		writer.encode(&FetchHeader::TYPE).await?;
-		writer
-			.encode(&FetchHeader {
-				request_id: msg.request_id,
-			})
-			.await?;
-		for (index, frame) in prefix.into_iter().enumerate() {
-			Self::write_fetch_object(
-				&mut writer,
-				end.group,
-				index as u64,
-				index == 0,
-				frame.timestamp,
-				timescale,
-				self.version,
-			)
-			.await?;
-			writer.encode(&(frame.payload.len() as u64)).await?;
-			if frame.payload.is_empty() && matches!(self.version, Version::Draft14 | Version::Draft15) {
-				writer.encode(&0u64).await?;
-			}
-			if !frame.payload.is_empty() {
-				let mut payload = frame.payload;
-				writer.write_all(&mut payload).await?;
-			}
-		}
-		writer.close().await?;
-
-		// FETCH_OK is the last thing this stream has to say, and [`Writer`] resets on drop:
-		// without the finish the answer is discarded before the peer ever reads it, exactly
-		// as it would be for a refusal. The peer dropping the stream first is a normal end.
-		let _ = stream.writer.close().await;
-
-		Ok(())
+		Ok(Err(refusal))
 	}
 
 	async fn reject_track_status(&self, mut stream: Stream<S, Version>, request_id: RequestId) -> Result<(), Error> {
@@ -3445,6 +3653,341 @@ mod serve_tests {
 		assert!(buf.is_empty());
 	}
 
+	/// Every draft that carries a standalone FETCH.
+	const FETCH_DRAFTS: [Version; 9] = [
+		Version::Draft14,
+		Version::Draft15,
+		Version::Draft16,
+		Version::Draft17,
+		Version::Draft18,
+		Version::Draft19,
+		Version::Draft20,
+		Version::Draft21,
+		Version::Draft22,
+	];
+
+	/// Groups `0..count`, each holding `g-0` and `g-1`, skipping `hole`.
+	fn publish_pairs(h: &mut Serve, count: u64, hole: Option<u64>) {
+		for sequence in (0..count).filter(|sequence| Some(*sequence) != hole) {
+			let mut group = h.track.create_group(group::Info { sequence }).unwrap();
+			for object in 0..2 {
+				group
+					.write_frame(timestamp(), format!("{sequence}-{object}").into_bytes())
+					.unwrap();
+			}
+			group.finish().unwrap();
+		}
+	}
+
+	/// Run a standalone FETCH of `room/video`, returning what the peer reads back.
+	async fn standalone_fetch(h: &Serve, start: Location, end: Location, group_order: GroupOrder) -> bytes::Bytes {
+		let version = h.publisher.version;
+		let mark = h.log.writes.lock().unwrap().len();
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+		h.publisher
+			.clone()
+			.run_fetch_stream(
+				stream,
+				ietf::Fetch {
+					request_id: FETCH_ID,
+					subscriber_priority: 128,
+					group_order,
+					fetch_type: FetchType::Standalone {
+						namespace: crate::Path::new("room"),
+						track: "video".into(),
+						start,
+						end,
+					},
+				},
+			)
+			.await
+			.unwrap();
+		bytes::Bytes::from(h.log.writes.lock().unwrap()[mark..].to_vec())
+	}
+
+	/// Decode a FETCH_OK and the fetch stream after it, as `(group, object, payload)`.
+	fn fetch_answer(mut buf: bytes::Bytes, version: Version) -> (ietf::FetchOk, Vec<(u64, u64, String)>) {
+		assert_eq!(
+			u64::decode(&mut buf, version).unwrap(),
+			ietf::FetchOk::ID,
+			"{version}: not a FETCH_OK"
+		);
+		let ok = ietf::FetchOk::decode(&mut buf, version).unwrap();
+		assert_eq!(u64::decode(&mut buf, version).unwrap(), FetchHeader::TYPE);
+		assert_eq!(FetchHeader::decode(&mut buf, version).unwrap().request_id, FETCH_ID);
+
+		let mut objects = Vec::new();
+		let mut prior: Option<(u64, u64)> = None;
+		while !buf.is_empty() {
+			let (group, object) = if version == Version::Draft14 {
+				let group = u64::decode(&mut buf, version).unwrap();
+				assert_eq!(u64::decode(&mut buf, version).unwrap(), 0, "subgroup");
+				let object = u64::decode(&mut buf, version).unwrap();
+				let _priority = u8::decode(&mut buf, version).unwrap();
+				let _properties = Vec::<u8>::decode(&mut buf, version).unwrap();
+				(group, object)
+			} else {
+				let ietf::FetchObject::Object { group, object, .. } =
+					ietf::FetchObject::decode(&mut buf, version).unwrap()
+				else {
+					panic!("{version}: unexpected End of Range");
+				};
+				match (prior, group) {
+					(None, group) => (group.unwrap(), object.unwrap()),
+					// No Group ID: the same group, and an absent Object ID Delta is one.
+					(Some((group, prior)), None) => (group, prior + object.unwrap_or(1)),
+					(Some((prior, _)), Some(group)) => {
+						let group = match version {
+							Version::Draft15 | Version::Draft16 | Version::Draft17 => group,
+							_ => prior + group + 1,
+						};
+						(group, object.unwrap())
+					}
+				}
+			};
+			let size = u64::decode(&mut buf, version).unwrap() as usize;
+			let payload = String::from_utf8(buf.split_to(size).to_vec()).unwrap();
+			objects.push((group, object, payload));
+			prior = Some((group, object));
+		}
+		(ok, objects)
+	}
+
+	/// The `(group, object, payload)` a range of two-frame groups holds.
+	fn pairs(groups: impl IntoIterator<Item = u64>) -> Vec<(u64, u64, String)> {
+		groups
+			.into_iter()
+			.flat_map(|group| (0..2).map(move |object| (group, object, format!("{group}-{object}"))))
+			.collect()
+	}
+
+	/// A range of whole groups is walked one group at a time and answered on one fetch
+	/// stream, in each draft's own Group ID encoding.
+	#[tokio::test]
+	async fn a_standalone_fetch_walks_whole_groups() {
+		for version in FETCH_DRAFTS {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 5, None);
+			settle().await;
+
+			// An End Object of 0 asks for the whole End Group.
+			let buf = standalone_fetch(
+				&h,
+				Location { group: 1, object: 0 },
+				Location { group: 3, object: 0 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			let (ok, objects) = fetch_answer(buf, version);
+			assert_eq!(ok.end_location, Location { group: 4, object: 0 }, "{version}");
+			assert!(!ok.end_of_track, "{version}");
+			assert_eq!(objects, pairs(1..=3), "{version}");
+			assert!(h.log.resets().is_empty(), "{version}");
+		}
+	}
+
+	/// A range that runs past the end of a finished track stops there, and FETCH_OK
+	/// says so: it ends one past the last object, with End of Track set.
+	#[tokio::test]
+	async fn a_standalone_fetch_past_the_end_reports_the_end_of_track() {
+		for version in FETCH_DRAFTS {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 5, None);
+			h.track.finish().unwrap();
+			settle().await;
+
+			let buf = standalone_fetch(
+				&h,
+				Location { group: 3, object: 1 },
+				Location { group: 9, object: 0 },
+				GroupOrder::Any,
+			)
+			.await;
+			let (ok, objects) = fetch_answer(buf, version);
+			assert_eq!(ok.end_location, Location { group: 4, object: 2 }, "{version}");
+			assert!(ok.end_of_track, "{version}");
+			assert_eq!(objects, pairs(3..=4)[1..].to_vec(), "{version}");
+		}
+	}
+
+	/// A missing group below the newest one is a hole the walk steps over.
+	#[tokio::test]
+	async fn a_standalone_fetch_skips_a_missing_group() {
+		for version in [Version::Draft16, Version::Draft18] {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 4, Some(2));
+			settle().await;
+
+			let buf = standalone_fetch(
+				&h,
+				Location { group: 1, object: 0 },
+				Location { group: 3, object: 1 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			let (ok, objects) = fetch_answer(buf, version);
+			assert_eq!(ok.end_location, Location { group: 3, object: 1 }, "{version}");
+			let mut expected = pairs([1]);
+			expected.push((3, 0, "3-0".into()));
+			assert_eq!(objects, expected, "{version}");
+		}
+	}
+
+	/// Read a REQUEST_ERROR (or draft-14 FETCH_ERROR) off a refused FETCH, as its code.
+	fn fetch_refusal(mut buf: bytes::Bytes, version: Version) -> u64 {
+		let id = u64::decode(&mut buf, version).unwrap();
+		let code = match version {
+			Version::Draft14 => {
+				assert_eq!(id, ietf::FetchError::ID);
+				ietf::FetchError::decode(&mut buf, version).unwrap().error_code
+			}
+			_ => {
+				assert_eq!(id, ietf::RequestError::ID);
+				ietf::RequestError::decode(&mut buf, version).unwrap().error_code
+			}
+		};
+		assert!(buf.is_empty(), "{version}: a refusal opens no fetch stream");
+		code
+	}
+
+	/// Nothing in range exists, so the walk's own refusal is the answer.
+	#[tokio::test]
+	async fn a_standalone_fetch_past_the_end_is_refused() {
+		for version in FETCH_DRAFTS {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 2, None);
+			settle().await;
+
+			let buf = standalone_fetch(
+				&h,
+				Location { group: 5, object: 0 },
+				Location { group: 6, object: 0 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			assert_eq!(fetch_refusal(buf, version), does_not_exist(version), "{version}");
+		}
+	}
+
+	/// The walk only runs forwards, so a descending range of several groups is refused.
+	#[tokio::test]
+	async fn a_descending_fetch_of_several_groups_is_refused() {
+		for version in [Version::Draft14, Version::Draft16, Version::Draft18] {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 3, None);
+			settle().await;
+
+			let buf = standalone_fetch(
+				&h,
+				Location { group: 0, object: 0 },
+				Location { group: 1, object: 0 },
+				GroupOrder::Descending,
+			)
+			.await;
+			assert_eq!(fetch_refusal(buf, version), 0x3, "{version}");
+		}
+	}
+
+	/// A joining FETCH with an offset walks the whole groups before the subscription's
+	/// group, then that group's prefix, and ends exactly where the subscription starts.
+	#[tokio::test]
+	async fn a_joining_fetch_with_an_offset_walks_back_whole_groups() {
+		for version in JOINING_DRAFTS {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 4, None);
+			let mut group = h.track.create_group(group::Info { sequence: 4 }).unwrap();
+			group.write_frame(timestamp(), b"4-0".as_slice()).unwrap();
+			settle().await;
+
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let mut serving = std::pin::pin!(
+				h.publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+			);
+			registered(&h, serving.as_mut()).await;
+
+			for (fetch_type, first) in [
+				(
+					FetchType::RelativeJoining {
+						subscriber_request_id: RequestId(REQUEST_ID),
+						group_offset: 2,
+					},
+					2,
+				),
+				(
+					FetchType::AbsoluteJoining {
+						subscriber_request_id: RequestId(REQUEST_ID),
+						group_id: 1,
+					},
+					1,
+				),
+			] {
+				let mark = h.log.writes.lock().unwrap().len();
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				h.publisher
+					.clone()
+					.run_fetch_stream(
+						stream,
+						ietf::Fetch {
+							request_id: FETCH_ID,
+							subscriber_priority: 128,
+							group_order: GroupOrder::Ascending,
+							fetch_type,
+						},
+					)
+					.await
+					.unwrap();
+				let buf = bytes::Bytes::from(h.log.writes.lock().unwrap()[mark..].to_vec());
+
+				let (ok, objects) = fetch_answer(buf, version);
+				assert_eq!(ok.end_location, Location { group: 4, object: 1 }, "{version}");
+				assert!(!ok.end_of_track, "{version}");
+				let mut expected = pairs(first..=3);
+				expected.push((4, 0, "4-0".into()));
+				assert_eq!(objects, expected, "{version}");
+			}
+		}
+	}
+
+	/// An absolute joining FETCH starting past the subscription's group names an empty range.
+	#[tokio::test]
+	async fn an_absolute_joining_fetch_past_the_subscription_is_refused() {
+		let version = Version::Draft16;
+		let mut h = serve(version);
+		publish_pairs(&mut h, 3, None);
+		settle().await;
+
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+		let mut serving = std::pin::pin!(
+			h.publisher
+				.clone()
+				.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+		);
+		registered(&h, serving.as_mut()).await;
+
+		let mark = h.log.writes.lock().unwrap().len();
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+		h.publisher
+			.clone()
+			.run_fetch_stream(
+				stream,
+				ietf::Fetch {
+					request_id: FETCH_ID,
+					subscriber_priority: 128,
+					group_order: GroupOrder::Ascending,
+					fetch_type: FetchType::AbsoluteJoining {
+						subscriber_request_id: RequestId(REQUEST_ID),
+						group_id: 5,
+					},
+				},
+			)
+			.await
+			.unwrap();
+		let buf = bytes::Bytes::from(h.log.writes.lock().unwrap()[mark..].to_vec());
+		assert_eq!(fetch_refusal(buf, version), invalid_range(version));
+	}
+
 	/// A fill against an empty track has an empty range: no fetch stream is owed.
 	#[tokio::test]
 	async fn an_empty_track_opens_no_fill_stream() {
@@ -4884,8 +5427,8 @@ mod tests {
 		(writes, h.log.resets())
 	}
 
-	/// Send a FETCH we don't implement, returning the same pair.
-	async fn fetch_unsupported(version: Version, fetch_type: FetchType<'_>) -> (Vec<u8>, Vec<u32>) {
+	/// Send a FETCH we refuse, returning the same pair.
+	async fn fetch_refused(version: Version, fetch_type: FetchType<'_>) -> (Vec<u8>, Vec<u32>) {
 		let h = harness(version);
 
 		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
@@ -4929,8 +5472,8 @@ mod tests {
 	/// Every FETCH we refuse goes out through its own error encoder, so it needs the same
 	/// finish: a reset there loses the rejection the same way.
 	#[tokio::test]
-	async fn unsupported_fetch_is_refused_without_resetting_the_stream() {
-		let unsupported = || {
+	async fn a_refused_fetch_does_not_reset_the_stream() {
+		let refused = || {
 			[
 				(
 					"standalone",
@@ -4942,25 +5485,20 @@ mod tests {
 					},
 				),
 				(
-					"relative joining with an offset",
-					FetchType::RelativeJoining {
-						subscriber_request_id: RequestId(3),
-						group_offset: 1,
-					},
-				),
-				(
-					"absolute joining",
-					FetchType::AbsoluteJoining {
-						subscriber_request_id: RequestId(3),
-						group_id: 7,
+					"empty range",
+					FetchType::Standalone {
+						namespace: crate::Path::new("nothing/here"),
+						track: "video".into(),
+						start: Location { group: 2, object: 0 },
+						end: Location { group: 1, object: 0 },
 					},
 				),
 			]
 		};
 
 		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
-			for (label, fetch_type) in unsupported() {
-				let (writes, resets) = fetch_unsupported(version, fetch_type).await;
+			for (label, fetch_type) in refused() {
+				let (writes, resets) = fetch_refused(version, fetch_type).await;
 
 				assert!(!writes.is_empty(), "{version} {label}: nothing was sent");
 				assert_eq!(

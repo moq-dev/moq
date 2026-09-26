@@ -690,6 +690,13 @@ impl Consumer {
 		self.state.read().latest()
 	}
 
+	/// The newest segment's declared exclusive end, where fetches are routed.
+	pub(crate) fn final_sequence(&self) -> Option<u64> {
+		// Copied out: the segment's track takes its own lock.
+		let track = self.state.read().segments.last().map(|segment| segment.track.clone())?;
+		track.final_sequence()
+	}
+
 	/// One past the newest position across the segments: where a route taking this
 	/// logical track over would resume.
 	pub(crate) fn resume_position(&self) -> Option<Position> {
@@ -796,11 +803,13 @@ impl kio::Pollable for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
-		if let Some(group) = (Consumer {
+		if let Some(mut group) = (Consumer {
 			state: self.state.clone(),
 		})
 		.cached_group(self.sequence, self.options.frame_start)
 		{
+			// Sitting where the caller asked, as a fetch from the segment's own track would.
+			group.start_at(self.options.frame_start);
 			return Poll::Ready(Ok(group));
 		}
 
@@ -2801,6 +2810,33 @@ mod test {
 			.expect("newest cached fetch should resolve")
 			.unwrap();
 		assert_eq!(read(&mut group), b"b4");
+	}
+
+	/// A cached copy is handed back sitting at the requested frame, the same as a fetch
+	/// the segment's own track answers.
+	#[tokio::test]
+	async fn a_cached_fetch_starts_at_the_requested_frame() {
+		let (track_a, consumer_a) = track_pair("a");
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		for payload in ["f0", "f1", "f2"] {
+			group
+				.write_frame(crate::Timestamp::ZERO, payload.as_bytes().to_vec())
+				.unwrap();
+		}
+		group.finish().unwrap();
+
+		let mut group = producer
+			.consume()
+			.fetch_group(0, group::Fetch::default().with_frame_start(1))
+			.now_or_never()
+			.expect("cached fetch should resolve")
+			.unwrap();
+		assert_eq!(group.index(), 1);
+		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.payload.as_ref(), b"f1");
 	}
 
 	#[tokio::test]

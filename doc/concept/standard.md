@@ -31,11 +31,18 @@ An IETF publisher declares the track's default priority in `SUBSCRIBE_OK` or
 flag inherit it. If the property is absent, the IETF wire default of 128 maps
 to model priority 127, where higher values are served first.
 
-On drafts 14–19, the Rust publisher serves relative joining `FETCH` requests
-with offset zero for `NextObject` subscriptions. The fetch delivers the saved
-current-group prefix, and the subscription delivers later objects. Standalone,
-absolute joining, and nonzero-offset fetches are refused. Draft-20 uses
-subscription fills instead. JavaScript publishing does not yet serve `FETCH`;
+The Rust publisher answers a standalone `FETCH` by walking its range one group
+at a time, in ascending order, from the cache. A relay fetches each missing
+group upstream with a `FETCH` of that one whole group, and an upstream refusal
+is the refusal the fetcher sees. A descending range of several groups is
+refused. A standalone `FETCH` carries no timestamps, since no `SUBSCRIBE_OK`
+declared a timescale for it.
+
+On drafts 14–19, the Rust publisher also serves relative and absolute joining
+`FETCH` requests for `NextObject` subscriptions: the whole groups before the
+subscription's group, then that group's saved prefix, while the subscription
+delivers later objects. Draft-20 uses subscription fills instead. JavaScript
+publishing does not yet serve `FETCH`;
 Rust and JavaScript subscribers request unfiltered delivery on older drafts
 because they do not issue joining fetches. Other publishers may replay a cached
 backlog for that filter; selecting the next group instead would leave static

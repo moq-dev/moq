@@ -2735,6 +2735,16 @@ impl Consumer {
 		}
 	}
 
+	/// The declared exclusive final sequence, or `None` while the track is open ended.
+	///
+	/// A spliced track answers for its newest segment, which is where fetches go.
+	pub(crate) fn final_sequence(&self) -> Option<u64> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => state.read().final_sequence,
+			ConsumerKind::Spliced(resume) => resume.final_sequence(),
+		}
+	}
+
 	/// The frame-precise point a replacement route should resume from: one past the
 	/// last frame this copy produced. `None` if it produced nothing.
 	///
@@ -2927,6 +2937,16 @@ impl group::Request {
 			.and_then(|mut state| state.insert_group_request(self.sequence, self.frame_start, info.into()));
 		self.remove();
 		res
+	}
+
+	/// Declare the track's exclusive final sequence, as the publisher answering this
+	/// fetch reported it. A no-op once the track declared one, or holds a later group.
+	pub(crate) fn finish_track_at(&self, final_sequence: u64) {
+		if let Ok(mut state) = TrackState::modify(&self.state)
+			&& state.final_sequence.is_none()
+		{
+			let _ = state.set_final(final_sequence);
+		}
 	}
 
 	/// Reject the fetch, resolving every joined [`Consumer::fetch_group`] with `err`.
