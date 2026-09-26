@@ -90,8 +90,6 @@ existing lite-06 ALPN.
 
 ## Quests
 
-- [Interop grants](/quest/m1/auth/interop.md) - the interop matrix asserts
-  each AUTH cell's grant and that a publish outside it fails loud
 - [Unauthorized reset](/quest/m1/auth/unauthorized.md) - a subscription that
   loses access resets with a dedicated UNAUTHORIZED stream code
 - [Path patterns](/quest/m1/auth/patterns.md) - one matcher for every path
