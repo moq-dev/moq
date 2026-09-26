@@ -94,16 +94,9 @@ struct BroadcastState {
 	// joined across per-session tracks. `None` for an ordinary broadcast.
 	spliced: Option<SplicedState>,
 
-	// Set once the broadcast ends: `Producer::close()`, an abort, or the last
-	// producer-side handle dropping. Every lookup after it answers `Unroutable`.
+	// Set once the broadcast ends: `Producer::close()` or the last producer-side
+	// handle dropping. Every lookup after it answers `Unroutable`.
 	closing: bool,
-
-	// Set only by the deprecated `Producer::finish()`, for `Consumer::is_finished`.
-	finished: bool,
-
-	// The error passed to `Producer::abort()`, reported by `Consumer::closed`.
-	// `None` for a finish or a dropped producer (reported as `Error::Dropped`).
-	abort: Option<Error>,
 }
 
 /// The spliced (route-fed) half of a broadcast: logical tracks that outlive any
@@ -447,31 +440,6 @@ impl Producer {
 		self.alive.close();
 	}
 
-	#[doc(hidden)]
-	#[deprecated(note = "use close(); a broadcast end carries no cause")]
-	pub fn finish(&self) {
-		self.alive.end(true);
-	}
-
-	#[doc(hidden)]
-	#[deprecated(note = "use close(); a broadcast end carries no cause")]
-	pub fn abort(self, err: Error) -> Result<(), Error> {
-		{
-			let mut state = self.state.lock();
-			if state.closing {
-				return Err(Error::Closed);
-			}
-			state.closing = true;
-			state.abort = Some(err.clone());
-			// Same as a finish: an unserved name is answerable now, with the reason the
-			// broadcast ended. Published tracks keep their cache (no cascade).
-			state.reject_unserved(err);
-		}
-		let _ = self.alive.token.close();
-		self.alive.retire();
-		Ok(())
-	}
-
 	/// Return true if this is the same broadcast instance.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
@@ -487,8 +455,7 @@ struct Alive {
 	token: kio::Producer<()>,
 	state: kio::Shared<BroadcastState>,
 	// The advertisement of the broadcast's exact path, owned here so it retracts
-	// with the broadcast: on close, abort, or the last producer-side handle
-	// dropping. `None` for a standalone broadcast.
+	// with the broadcast: on close or the last producer-side handle dropping. `None` for a standalone broadcast.
 	announcer: kio::Lock<Option<Announcer>>,
 }
 
@@ -510,33 +477,22 @@ impl Alive {
 
 	/// End the broadcast. See [`Producer::close`].
 	fn close(&self) {
-		self.end(false);
-	}
-
-	/// End the broadcast, recording the deprecated `finished` flag in the same locked
-	/// transition that claims the end, so a racing `abort` can't win after it's set.
-	fn end(&self, finished: bool) {
 		{
 			let mut state = self.state.lock();
 			if std::mem::replace(&mut state.closing, true) {
 				return;
 			}
-			state.finished = finished;
 			// A name that was reserved or queued but never served can't arrive now,
 			// and `Consumer::track` answers `Unroutable` for one asked about after this
 			// point. Say the same to whoever asked earlier.
 			state.reject_unserved(Error::Unroutable);
 		}
 		let _ = self.token.close();
-		self.retire();
-	}
 
-	/// End the broadcast's advertising for good: retract the standing advertisement
-	/// and drop the announcer, so a later `announce` fails with `Closed`.
-	fn retire(&self) {
+		// Drop the announcer for good, so a later `announce` fails with `Closed`. Dropped
+		// outside the announcer lock: the entry's removal re-syncs the origin's cursors
+		// under the origin's own lock.
 		let announcer = self.announcer.lock().take();
-		// Dropped outside the announcer lock: the entry's removal re-syncs the
-		// origin's cursors under the origin's own lock.
 		drop(announcer);
 	}
 }
@@ -692,16 +648,13 @@ impl Dynamic {
 	}
 
 	/// Block until the broadcast ends, by [`Producer::close`] or every producer dropping.
-	///
-	/// Returns [`Error::Dropped`], or the error passed to the deprecated `abort`.
-	pub async fn closed(&self) -> Error {
+	pub async fn closed(&self) {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
 	/// Poll-based variant of [`Self::closed`].
-	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		ready!(self.alive.token.poll_closed(waiter));
-		Poll::Ready(self.state.read().abort.clone().unwrap_or(Error::Dropped))
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.alive.token.poll_closed(waiter)
 	}
 
 	/// Return true if this is the same broadcast instance.
@@ -892,11 +845,8 @@ impl Consumer {
 	}
 
 	/// Block until the broadcast ends, by [`Producer::close`] or every producer dropping.
-	///
-	/// Returns [`Error::Dropped`], or the error passed to the deprecated `abort`.
-	pub async fn closed(&self) -> Error {
-		self.alive.closed().await;
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+	pub async fn closed(&self) {
+		self.alive.closed().await
 	}
 
 	/// Returns true once the broadcast has ended.
@@ -909,12 +859,6 @@ impl Consumer {
 	/// than a strike.
 	pub(crate) fn is_closing(&self) -> bool {
 		self.state.read().closing
-	}
-
-	#[doc(hidden)]
-	#[deprecated(note = "a broadcast end carries no cause")]
-	pub fn is_finished(&self) -> bool {
-		self.state.read().finished
 	}
 
 	/// Register a [`kio::Waiter`] that fires when the broadcast closes.
@@ -1281,7 +1225,7 @@ mod test {
 		let consumer = producer.consume();
 
 		producer.close();
-		assert!(matches!(consumer.closed().await, Error::Dropped));
+		consumer.closed().await;
 		assert!(matches!(consumer.track("video"), Err(Error::Unroutable)));
 		assert!(matches!(clone.consume().track("video"), Err(Error::Unroutable)));
 
@@ -1295,25 +1239,8 @@ mod test {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		drop(producer);
-		assert!(matches!(consumer.closed().await, Error::Dropped));
+		consumer.closed().await;
 		assert!(matches!(consumer.track("video"), Err(Error::Unroutable)));
-	}
-
-	/// The deprecated end APIs keep their old causes until they are removed.
-	#[tokio::test]
-	#[allow(deprecated)]
-	async fn deprecated_end_causes() {
-		let producer = Info::new().produce();
-		let consumer = producer.consume();
-		producer.abort(Error::Timeout).unwrap();
-		assert!(matches!(consumer.closed().await, Error::Timeout));
-		assert!(!consumer.is_finished());
-
-		let producer = Info::new().produce();
-		let consumer = producer.consume();
-		producer.finish();
-		assert!(matches!(consumer.closed().await, Error::Dropped));
-		assert!(consumer.is_finished());
 	}
 
 	#[tokio::test]
@@ -1500,25 +1427,6 @@ mod test {
 
 		producer.close();
 		assert!(matches!(pending.await, Err(Error::Unroutable)));
-	}
-
-	/// The deprecated abort says why the broadcast ended, and an unserved name resolves
-	/// with that reason.
-	#[tokio::test]
-	#[allow(deprecated)]
-	async fn abort_resolves_a_reserved_name_with_its_reason() {
-		let producer = Info::new().produce();
-		let consumer = producer.consume();
-
-		let request = producer.reserve_track("track1").unwrap();
-		let pending = subscribe_pending!(consumer, "track1");
-
-		producer.abort(Error::Cancel).unwrap();
-		assert!(matches!(pending.await, Err(Error::Cancel)));
-
-		let track = request.accept(None);
-		let mut subscriber = track.subscribe(None);
-		assert!(matches!(subscriber.recv_group().await, Err(Error::Cancel)));
 	}
 
 	/// A request still queued for a handler is the same parking case reached from the

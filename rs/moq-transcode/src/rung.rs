@@ -183,9 +183,9 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				// The output track closed; nothing more to serve.
 				return Ok(Ended::Closed);
 			},
-			err = rung.broadcast.closed() => {
+			() = rung.broadcast.closed() => {
 				// The source went away while idle; end the rung with it.
-				producer.clone().abort(err)?;
+				producer.clone().abort(moq_net::Error::Dropped)?;
 				return Ok(Ended::Closed);
 			}
 			() = retire.fired() => {

@@ -221,7 +221,7 @@ fn concurrent_tracks_drain_a_shared_pool() {
 		for handle in handles {
 			handle.join().unwrap();
 		}
-		broadcast.finish();
+		broadcast.close();
 		drop(broadcast);
 
 		assert_eq!(pool.used(), 0, "the pool kept a charge after every group was dropped");

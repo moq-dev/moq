@@ -315,12 +315,6 @@ def test_close_twice_is_a_noop():
         broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
 
 
-def test_finish_is_deprecated():
-    broadcast = moq.BroadcastProducer()
-    with pytest.deprecated_call():
-        broadcast.finish()
-
-
 async def test_announced_broadcast():
     origin = moq.OriginProducer()
     _broadcast = create_announced(origin, "test/broadcast")

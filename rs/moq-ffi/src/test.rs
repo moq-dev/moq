@@ -1805,7 +1805,7 @@ async fn finish_unpublishes() {
 		}
 	})
 	.await;
-	assert!(removed.is_ok(), "finish should unpublish the broadcast");
+	assert!(removed.is_ok(), "close should unpublish the broadcast");
 }
 
 #[tokio::test]
@@ -2138,7 +2138,7 @@ async fn video_decode_frame_ownership() {
 	native.cancel();
 	drop((portable, native));
 	video.finish().unwrap();
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 
 	assert_eq!((retained.width(), retained.height()), (320, 240));
 	assert_eq!(
