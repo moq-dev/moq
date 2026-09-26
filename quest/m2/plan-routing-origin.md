@@ -23,8 +23,9 @@ Open questions, to settle with the maintainer:
   horizon) stops two-relay loops, but not three-relay loops. It also hides
   backups: a relay never learns an alternative that passes back through the
   neighbor it came from. Babel's feasibility condition (RFC 8966: a
-  per-origin sequence number, accepting only routes cheaper than the best
-  seen for it) is loop-free with only the origin on the wire. Weigh it and
+  per-origin sequence number; a route is feasible when its sequence number is
+  newer, at any cost, or equal and cheaper than the best seen for it) is
+  loop-free with only the origin on the wire. Weigh it and
   any simpler scheme against what the relay cluster actually needs.
 - What replaces request exclusion, and whether it still matters once
   announcements are loop-free.
