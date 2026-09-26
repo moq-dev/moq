@@ -165,45 +165,15 @@ field.
 
 ### Where derived output lives
 
-Derived output is published under a service prefix that mirrors the source
-path, because a prefix claim needs the variable part of the path trailing:
-
-```text
-pid/foo.hang                     source
-transcode.pro/pid/foo.hang       the transcode contribution
-transcribe.pro/pid/foo.hang      the transcription contribution
-```
-
-Each service claims its prefix once for the whole fleet. That claim is longer
-than the archive's root claim, so transcode demand never reaches the archive
-and the archive never joins the worker pool. A worker's concrete announcement
-lands at the literal path its claim served, so takeover is still route
-selection at one tree node. The source's catalog references a contribution as
-a cross-broadcast rendition, which the player already lists under a covering
-claim and demands. A segment ending in `.pro` stays the one predicate every
-source rule matcher excludes, so platform output is never recursively
-transcoded or recorded.
-
-Rejected: publishing at `pid/foo.hang/transcode.pro`, beneath the source,
-routed by the suffix pattern `**/transcode.pro`. No wire carries a pattern
-(#3770), and the widest prefix covering that suffix is the root, which the
-archive also claims. Both would share one pool, and a refusal from the wrong
-member is final.
-
-What the mirror costs, and how each is paid:
-
-- **Grants.** A customer's `pid/` grant does not cover `transcode.pro/pid/`,
-  and customer tokens are minted by integrations the platform does not
-  control, so they cannot be asked to change. Recommended: the relay extends
-  a subscribe grant on `pid/` to the configured service prefixes; publish is
-  never extended, so a customer cannot forge platform output, which the
-  suffix layout allowed.
-- **Metering.** Egress under a service prefix is attributed to the project
-  segment that follows it.
-- **No overlay.** The mirror was once rejected for needing an origin-consumer
-  overlay that hid it behind the source path, a logical front across roots.
-  Catalog cross-broadcast references make that unnecessary: the player
-  subscribes to the mirrored path directly, one front per path.
+A prefix claim needs the variable part of a path trailing, so a fleet-wide
+service claims its own prefix and mirrors the source path beneath it
+(`.transcode/<pid>/foo.hang`) rather than publishing beneath the source. A
+suffix such as `**/transcode.pro` collapses to the root on the wire, where it
+would pool with the archive's claim and a refusal from the wrong member is
+final. The source's catalog reaches the contribution through a
+cross-broadcast reference. The platform layout, grants, and metering are
+the deployment's; moq.pro's is in its
+[wildcard questline](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/wildcard/README.md).
 
 The archive serves the source path itself: a recording IS the broadcast,
 served from storage through the root claim, and a live publisher's concrete

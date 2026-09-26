@@ -41,7 +41,7 @@ Decided:
   bare-name viewer behind one needs a publisher that opts out with the raw
   prefix route. Document this rather than promise it works.
 - Derived output mirrors the epoch it came from
-  (`transcode.pro/pid/foo.hang/@e`, per the
+  (`.transcode/pid/foo.hang/@e`, per the
   [wildcard](/quest/m1/wildcard/README.md) line's derived-output layout), so
   the service's prefix claim still covers it.
 
