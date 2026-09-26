@@ -66,8 +66,12 @@ pub(super) fn write_header(
 	channel_config: u8,
 	raw_len: usize,
 ) -> anyhow::Result<[u8; 7]> {
-	// ADTS `profile` is the 2-bit audioObjectType - 1.
-	let profile = object_type.saturating_sub(1) & 0x03;
+	// ADTS `profile` is the 2-bit audioObjectType - 1, so only Main, LC, SSR, and LTP fit.
+	anyhow::ensure!(
+		(1..=4).contains(&object_type),
+		"audioObjectType {object_type} not representable in ADTS"
+	);
+	let profile = object_type - 1;
 	let freq_index = freq_index_from_rate(sample_rate)?;
 	// ADTS has 3 bits for it; the higher configurations only fit an AudioSpecificConfig.
 	anyhow::ensure!(
@@ -101,12 +105,13 @@ fn freq_index_from_rate(sample_rate: u32) -> anyhow::Result<u8> {
 		.with_context(|| format!("sample rate {sample_rate} not representable in ADTS"))
 }
 
-/// Map a channel count to an AAC `channel_config` (ISO 14496-3 Table 1.19).
-pub(super) fn channel_config_from_count(channel_count: u32) -> u8 {
+/// Map a channel count to the ADTS `channel_config` (ISO 14496-3 Table 1.19) naming it, refusing a
+/// count that none does rather than guess a layout.
+pub(super) fn channel_config_from_count(channel_count: u32) -> anyhow::Result<u8> {
 	match channel_count {
-		1..=6 => channel_count as u8,
-		8 => 7,
-		_ => 2,
+		1..=6 => Ok(channel_count as u8),
+		8 => Ok(7),
+		_ => anyhow::bail!("{channel_count} channels have no ADTS channelConfiguration"),
 	}
 }
 
@@ -132,6 +137,25 @@ mod tests {
 		let mut header = write_header(2, 44_100, 2, 10).unwrap();
 		header[0] = 0x00;
 		assert!(Header::parse(&header).is_err());
+	}
+
+	#[test]
+	fn write_refuses_object_types_outside_the_profile_field() {
+		for object_type in [0, 5, 29] {
+			assert!(write_header(object_type, 48_000, 2, 10).is_err());
+		}
+		for object_type in 1..=4 {
+			let header = write_header(object_type, 48_000, 2, 10).unwrap();
+			assert_eq!(Header::parse(&header).unwrap().object_type, object_type);
+		}
+	}
+
+	#[test]
+	fn channel_counts_without_a_configuration_are_refused() {
+		assert_eq!(channel_config_from_count(8).unwrap(), 7);
+		for count in [0, 7, 9, 24] {
+			assert!(channel_config_from_count(count).is_err());
+		}
 	}
 
 	#[test]
