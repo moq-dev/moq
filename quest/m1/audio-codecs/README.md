@@ -45,7 +45,10 @@ its own decode and encode quest so verification stays per host.
 
 - [AudioToolbox decode](/quest/m1/audio-codecs/decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
 - [ADTS refusals](/quest/m1/audio-codecs/adts-refusals.md) - the ADTS writer refuses channel counts and object types it cannot label instead of mislabeling them
+- [TS Opus export refusals](/quest/m1/audio-codecs/ts-opus-export-refusals.md) - the TS exporter refuses Opus heads its channel code cannot describe instead of mislabeling them
+- [TS Opus channel codes](/quest/m1/audio-codecs/ts-opus-channel-codes.md) - TS Opus with a channel code of 0x81 or above imports with its real head or is refused, never guessed as stereo
 - [AudioToolbox encode](/quest/m1/audio-codecs/encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
+- [GStreamer surround Opus](/quest/m1/audio-codecs/gst-opus-surround.md) - the moq-gst sink publishes 3 to 8 channel Opus with the OpusHead its caps describe
 
 ## Related
 

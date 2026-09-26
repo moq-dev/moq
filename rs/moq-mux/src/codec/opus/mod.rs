@@ -37,9 +37,8 @@ pub enum Error {
 	#[error("invalid OpusHead channel mapping table")]
 	InvalidMappingTable,
 
-	/// No longer returned, since [`Config::encode`] emits every family; kept so
-	/// matching on it still compiles until the next breaking release.
-	#[error("cannot encode channel mapping family {0}")]
+	/// [`Mapping::new`] was given family 0, which has no mapping table.
+	#[error("channel mapping family {0} has no mapping table")]
 	UnsupportedMappingFamily(u8),
 }
 
@@ -87,19 +86,46 @@ impl Mapping {
 	/// The family 1 mapping a surround encoder uses for `channels` in Vorbis
 	/// order, for sources that name only a channel count.
 	pub(crate) fn vorbis(channels: u8) -> Result<Self> {
-		let (streams, coupled, order) = *channels
+		let (streams, coupled, table) = *channels
 			.checked_sub(1)
 			.and_then(|index| VORBIS.get(index as usize))
 			.ok_or(Error::UnsupportedChannelCount(channels as u32))?;
+		Self::new(1, streams, coupled, table)
+	}
 
-		let mut table = [0u8; 255];
-		table[..order.len()].copy_from_slice(order);
+	/// A mapping for `family` with `streams` Opus streams per packet, the first
+	/// `coupled` of them stereo, and one `table` entry per output channel naming
+	/// the decoded channel that feeds it (255 for silence).
+	///
+	/// Refuses family 0, a channel count the family does not allow, and a table
+	/// that names no streams, more coupled streams than streams, or a channel
+	/// past the decoded ones.
+	pub fn new(family: u8, streams: u8, coupled: u8, table: &[u8]) -> Result<Self> {
+		let max_channels = match family {
+			0 => return Err(Error::UnsupportedMappingFamily(0)),
+			1 => 8,
+			_ => 255,
+		};
+		if table.is_empty() || table.len() > max_channels {
+			return Err(Error::UnsupportedChannelCount(table.len() as u32));
+		}
+
+		let decoded = streams as u32 + coupled as u32;
+		if streams == 0 || coupled > streams || decoded > 255 {
+			return Err(Error::InvalidMappingTable);
+		}
+		if table.iter().any(|&entry| entry != 255 && entry as u32 >= decoded) {
+			return Err(Error::InvalidMappingTable);
+		}
+
+		let mut padded = [0u8; 255];
+		padded[..table.len()].copy_from_slice(table);
 		Ok(Self {
-			family: 1,
+			family,
 			streams,
 			coupled,
-			channels,
-			table,
+			channels: table.len() as u8,
+			table: padded,
 		})
 	}
 
@@ -109,26 +135,9 @@ impl Mapping {
 		}
 		let streams = buf.get_u8();
 		let coupled = buf.get_u8();
-		if streams == 0 || coupled > streams || streams as u32 + coupled as u32 > 255 {
-			return Err(Error::InvalidMappingTable);
-		}
-
 		let mut table = [0u8; 255];
-		for entry in &mut table[..channels as usize] {
-			*entry = buf.get_u8();
-			// 255 marks a silent channel.
-			if *entry != 255 && *entry >= streams + coupled {
-				return Err(Error::InvalidMappingTable);
-			}
-		}
-
-		Ok(Self {
-			family,
-			streams,
-			coupled,
-			channels,
-			table,
-		})
+		buf.copy_to_slice(&mut table[..channels as usize]);
+		Self::new(family, streams, coupled, &table[..channels as usize])
 	}
 
 	/// The channel mapping family: 1 is the Vorbis speaker order, 2 and 3 are
@@ -202,17 +211,9 @@ impl Config {
 		buf.advance(2); // Skip gain until if/when we support it.
 		let family = buf.get_u8();
 
-		let max_channels = match family {
-			0 => 2,
-			1 => 8,
-			_ => 255,
-		};
-		if channel_count == 0 || channel_count > max_channels {
-			return Err(Error::UnsupportedChannelCount(channel_count));
-		}
-
 		let mapping = match family {
-			0 => None,
+			0 if (1..=2).contains(&channel_count) => None,
+			0 => return Err(Error::UnsupportedChannelCount(channel_count)),
 			family => Some(Mapping::parse(buf, family, channel_count as u8)?),
 		};
 
@@ -392,6 +393,36 @@ mod tests {
 		let mut config = Config::new(48_000, 5);
 		config.mapping = Some(five_one);
 		assert!(matches!(config.encode(), Err(Error::UnsupportedChannelCount(5))));
+	}
+
+	#[test]
+	fn new_validates_the_table() {
+		let mapping = Mapping::new(255, 2, 0, &[0, 1, 255]).unwrap();
+		assert_eq!(mapping.family(), 255);
+		assert_eq!(mapping.table(), &[0, 1, 255]);
+		assert_eq!(mapping, Mapping::new(255, 2, 0, &[0, 1, 255]).unwrap());
+
+		assert!(matches!(
+			Mapping::new(0, 1, 1, &[0, 1]),
+			Err(Error::UnsupportedMappingFamily(0))
+		));
+		assert!(matches!(
+			Mapping::new(1, 1, 0, &[]),
+			Err(Error::UnsupportedChannelCount(0))
+		));
+		assert!(matches!(
+			Mapping::new(1, 9, 0, &[0; 9]),
+			Err(Error::UnsupportedChannelCount(9))
+		));
+		for (streams, coupled, table) in [(0, 0, &[0][..]), (1, 2, &[0]), (1, 1, &[2]), (200, 100, &[0])] {
+			assert!(
+				matches!(
+					Mapping::new(1, streams, coupled, table),
+					Err(Error::InvalidMappingTable)
+				),
+				"{streams} streams, {coupled} coupled, {table:?}"
+			);
+		}
 	}
 
 	#[test]
