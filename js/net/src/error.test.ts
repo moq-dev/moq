@@ -222,11 +222,11 @@ test("the code tables match the spec", () => {
 	// carries nothing, so no code sits there.
 	const assignedLite: StreamCode[] = [
 		StreamCode.ControlTimeout,
-		StreamCode.NoCapacity,
 		StreamCode.GroupTooLarge,
 		StreamCode.NotFound,
 		StreamCode.Old,
 		StreamCode.Evicted,
+		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
 	];
 	for (const code of Object.values(StreamCode)) {
@@ -239,7 +239,6 @@ test("the code tables match the spec", () => {
 	}
 	// The values the Rust `StreamError` sends for the same conditions.
 	expect(Number(StreamCode.ControlTimeout)).toBe(0x31);
-	expect(Number(StreamCode.NoCapacity)).toBe(0x30);
 	expect(Number(StreamCode.GroupTooLarge)).toBe(0x32);
 	expect(Number(StreamCode.NotFound)).toBe(0x33);
 	expect(Number(StreamCode.Old)).toBe(0x34);
@@ -361,7 +360,6 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 		StreamCode.TooFarBehind,
 		StreamCode.MalformedTrack,
 		StreamCode.ControlTimeout,
-		StreamCode.NoCapacity,
 		StreamCode.GroupTooLarge,
 		StreamCode.NotFound,
 		StreamCode.Old,

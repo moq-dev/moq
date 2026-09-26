@@ -22,8 +22,8 @@ pins a front to that route's first hop (moq#3312). Once a relay serves a path
 from a different pool member than the one it advertised, that label is wrong,
 and a later failover through another route with the same first hop splices
 different content. The mismatch already exists narrowly (a front stays pinned
-after its prefix's best route changes; a NO_CAPACITY re-resolution picks
-another advertiser), and spreading makes it the common case.
+after its prefix's best route changes), and spreading makes it the common
+case.
 
 - The subscribe and fetch replies name the origin that actually serves the
   request, and a relay stitches a failover only between replies naming the

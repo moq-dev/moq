@@ -150,11 +150,6 @@ pub enum StreamError {
 	#[error("unroutable")]
 	Unroutable,
 
-	/// The publisher could serve the request but has no capacity for it now. Permits one
-	/// re-resolution to another advertiser; a relay never forwards it.
-	#[error("no capacity")]
-	NoCapacity,
-
 	/// The group was superseded by a newer group and dropped.
 	#[error("old")]
 	Old,
@@ -202,7 +197,6 @@ impl StreamError {
 			Self::GoingAway => 0x4,
 			Self::TooFarBehind => 0x5,
 			Self::MalformedTrack => 0x12,
-			Self::NoCapacity => 0x30,
 			Self::ControlTimeout => 0x31,
 			Self::GroupTooLarge => 0x32,
 			Self::NotFound => 0x33,
@@ -234,7 +228,6 @@ impl StreamError {
 			0x4 => Self::GoingAway,
 			0x5 => Self::TooFarBehind,
 			0x12 => Self::MalformedTrack,
-			0x30 => Self::NoCapacity,
 			0x31 => Self::ControlTimeout,
 			0x32 => Self::GroupTooLarge,
 			0x33 => Self::NotFound,
@@ -341,13 +334,6 @@ pub enum Error {
 	/// router, so there is no route to it.
 	#[error("unroutable")]
 	Unroutable,
-
-	/// A dynamic handler could serve the request but has no capacity for it now.
-	///
-	/// The one refusal that is not final: the requester re-resolves once, excluding the
-	/// refusing advertiser, and reports [`Self::Unroutable`] if that fails too.
-	#[error("no capacity")]
-	NoCapacity,
 
 	/// A frame's payload length disagreed with its declared size.
 	#[error("wrong frame size")]
@@ -582,7 +568,6 @@ impl From<&Error> for StreamError {
 			Error::Lagged => Self::TooFarBehind,
 			Error::NotFound => Self::NotFound,
 			Error::Unroutable => Self::Unroutable,
-			Error::NoCapacity => Self::NoCapacity,
 			Error::WrongSize => Self::WrongSize,
 			Error::FrameTooLarge => Self::FrameTooLarge,
 			Error::GroupTooLarge => Self::GroupTooLarge,
@@ -687,7 +672,6 @@ mod tests {
 			StreamError::Old,
 			StreamError::Evicted,
 			StreamError::Unroutable,
-			StreamError::NoCapacity,
 			StreamError::WrongSize,
 			StreamError::FrameTooLarge,
 			StreamError::TimestampMismatch,
@@ -699,7 +683,6 @@ mod tests {
 
 		// moq-lite's own 48-63 range, pinned to the draft's table.
 		for (err, code) in [
-			(StreamError::NoCapacity, 0x30),
 			(StreamError::ControlTimeout, 0x31),
 			(StreamError::GroupTooLarge, 0x32),
 			(StreamError::NotFound, 0x33),
