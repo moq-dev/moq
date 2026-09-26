@@ -22,12 +22,13 @@ and per node like the existing counters.
 - Skip `.`-prefixed system broadcasts, as the existing aggregate does. Lag is
   per broadcast, so a per-broadcast view is worth adding if it stays cheap.
 - The [browser stats quest](/quest/m1/qos/stats/js.md) moves the dashboard
-  onto `@moq/stats` on the same line; read `lag` and `dropped` through its
-  schemas rather than new hand-written interfaces.
+  onto `@moq/stats` on the same line. If it has landed, read `lag` and
+  `dropped` through its schemas; otherwise extend the existing interfaces and
+  let whichever lands second reconcile.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [QoS](/quest/m1/qos/README.md) - the `lag` histogram and `dropped` counters
-  (#4298) land on this line, not on `main`
+- [Starvation](/quest/m1/qos/starvation.md) - the `lag` histogram and
+  `dropped` counters (#4298)

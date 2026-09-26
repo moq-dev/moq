@@ -6,7 +6,8 @@ A moq-ffi publisher, and every wrapper over it (Python, Swift, Kotlin, Go,
 Dart), can pass a capture time with a JSON or binary snapshot `update` or
 stream `append`, so its data tracks advertise `delay` and `jitter` like a Rust
 publisher's. Leaving it out keeps today's behaviour. `moq-json`'s `window`
-producer takes a capture time too. libmoq is out of scope.
+producer takes a capture time too. Settled scope: moq-ffi and its wrappers,
+not libmoq.
 
 ## Plan
 
@@ -15,11 +16,15 @@ producer takes a capture time too. libmoq is out of scope.
   `Timed<_, Instant>`, map it onto the broadcast clock, and refuse one ahead of
   now (`Error::InvalidCapture`). The moq-ffi producers in
   `rs/moq-ffi/src/{json,binary}.rs` pass bare values.
-- An `Instant` cannot cross the FFI. Pick a form every language can produce
-  without a shared epoch. Recommendation: an optional age (how long ago the
-  payload was captured), turned into `Instant::now() - age` inside moq-ffi. A
-  raw timestamp is the unmapped clock the Rust type exists to refuse. Make it
-  optional on the existing methods, never a `_with_capture` twin.
+- Settled: the capture time is a media timestamp on the broadcast's
+  timeline. moq-ffi exposes the broadcast clock's `now()` as a timestamp;
+  callers stamp payloads with values taken from it, and moq refuses one ahead
+  of now. That keeps a device or process clock out, as the Rust `Instant`
+  mapping does. The `moq-mux` producers take an `Instant` today, so either
+  map the timestamp back through the clock inside moq-ffi or give the clock a
+  typed timestamp moq-mux accepts; keep a raw `Timestamp` from compiling
+  there. Make it optional on the existing methods, never a `_with_capture`
+  twin.
 - `moq-json` window: `window::Producer::push` stamps `Timestamp::now()`
   (`rs/moq-json/src/window/producer.rs`). Accept `Timed` as the snapshot and
   stream producers do. Nothing in `moq-mux` publishes window mode, so there is
@@ -28,8 +33,8 @@ producer takes a capture time too. libmoq is out of scope.
   past capture time is accepted and a future one refused. Update
   `doc/lib/{py,swift,kt,go,dart}`.
 
-Public API: additive optional capture time on moq-ffi's data producers and
-every wrapper; `window::Producer::push` accepts `Timed`, source-compatible.
+Public API: additive broadcast clock `now()` and an optional capture time on
+moq-ffi's data producers and every wrapper; `window::Producer::push` accepts `Timed`, source-compatible.
 Wire: none.
 
 ## Required

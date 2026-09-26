@@ -14,14 +14,12 @@ origin stream opened before the first connection goes live.
   (`demo/web/src/index.ts`, `js/room/src/room.ts`, `js/watch/src/broadcast.ts`,
   `js/moq-boy`) skip it today.
 - Page load: an origin stream opened before any session connects has no
-  session to wait on, so it goes `live` at once and broadcasts arrive after
-  it, as in Rust. Recommendation: the reconnect loop
-  (`js/net/src/connection/reload.ts`), which already answers requests through
-  `expect()`, holds the marker until its first session lands `live` or its
-  first dial gives up. Then an empty list means the relay said so or is
-  unreachable, which a UI can tell apart. Confirm the semantics with the
-  maintainer first, and check whether Rust's reconnecting client has the same
-  gap.
+  session to wait on, so today it goes `live` at once and broadcasts arrive
+  after it. Settled: the reconnect loop (`js/net/src/connection/reload.ts`),
+  which already answers requests through `expect()`, holds the marker until
+  its first session lands `live` or its first dial gives up. An empty list
+  then means the relay said so or is unreachable, which a UI can tell apart.
+  Check whether Rust's reconnecting client has the same gap.
 - Apps: loading before `live`, an explicit empty state after it with nothing
   announced, and an error state when the connection gives up. Libraries
   expose the state as a signal; wording stays in the demo.

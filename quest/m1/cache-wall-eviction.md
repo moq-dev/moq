@@ -9,6 +9,9 @@ or a recorded reason to keep the exception.
 
 ## Plan
 
+Settled scope: a track's `max_age` retention aging groups out on a timer
+instead of only on a write. The pool's idle expiry is out of scope.
+
 - Today a track's `max_age` is media time and is applied only when the track
   writes: a group ages out when a later one starts (`is_stale` and the expiry
   scans in `rs/moq-net/src/model/track.rs`). A track that stops writing keeps
