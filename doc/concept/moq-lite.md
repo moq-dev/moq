@@ -43,7 +43,9 @@ certificate, or nothing), so a publisher learns before anyone subscribes
 whether its broadcasts can reach the peer. More tokens can be presented later
 without reconnecting; the session's scope is the union of every open token's
 grant, and withdrawing, revoking, or narrowing one withdraws only what it alone
-covered. A subscription or fetch that loses access resets with the
+covered. A grant is a union of [path patterns](#path-patterns), so `room/*/cam`
+or the exact broadcast `room/alice` arrives as issued rather than widened to a
+prefix. A subscription or fetch that loses access resets with the
 `UNAUTHORIZED` stream code, so the peer can tell it apart from the session
 closing.
 

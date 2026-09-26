@@ -447,7 +447,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 			match state.outbox.pop_front() {
 				Some(reply) => {
 					drop(state);
-					Self::write(&self.shared, &issue, stream, reply)?;
+					Self::write(&self.shared, stream, reply)?;
 				}
 				// The app is done with the grant, or refused the token: close our side.
 				None => {
@@ -459,12 +459,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 		}
 	}
 
-	fn write(
-		shared: &Shared<S>,
-		issue: &kio::Shared<crate::auth::Issue>,
-		stream: &mut Stream<S, Version>,
-		reply: crate::auth::Reply,
-	) -> Result<(), Error> {
+	fn write(shared: &Shared<S>, stream: &mut Stream<S, Version>, reply: crate::auth::Reply) -> Result<(), Error> {
 		let msg = match reply {
 			crate::auth::Reply::Grant(grant) => {
 				let now = crate::runtime::Timers::now(&shared.runtime);
@@ -479,18 +474,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 				reason,
 			}),
 		};
-		match stream.writer.buffer(&msg) {
-			// This wire carries prefixes only, so a pattern grant cannot be told, only
-			// withheld: reset the stream, which the presenter reads as unsupported
-			// rather than refused. Never widen it. A pattern grant is routine until the
-			// wire carries patterns, so it is not worth a warning.
-			Err(Error::Encode(crate::coding::EncodeError::Unsupported)) => {
-				tracing::debug!("auth grant not representable as prefixes; resetting the token's stream");
-				issue.lock().done = true;
-				Err(Error::Unsupported)
-			}
-			res => res,
-		}
+		stream.writer.buffer(&msg)
 	}
 }
 

@@ -1317,23 +1317,42 @@ AUTH_OK Message {
   Type (i) = 0x0
   Message Length (i)
   Publish Count (i)
-  Publish Prefix (s) ...
+  Publish Pattern (s) ...
   Subscribe Count (i)
-  Subscribe Prefix (s) ...
+  Subscribe Pattern (s) ...
   Expires (i)
 }
 ~~~
 
-**Publish Prefix**:
-A path prefix the opener may announce and serve, using the encoding and matching rules of the ANNOUNCE_REQUEST [prefix](#announce-request).
-An empty prefix grants every path, and a count of zero grants none.
+**Publish Pattern**:
+A [pattern](#path-pattern) matching broadcast paths the opener may announce and serve.
+A count of zero grants none.
 
-**Subscribe Prefix**:
-A path prefix the opener may subscribe to, with the same rules.
+**Subscribe Pattern**:
+A [pattern](#path-pattern) matching broadcast paths the opener may subscribe to.
 
 **Expires**:
 The number of milliseconds until the grant lapses, or 0 for never.
 The acceptor revokes a lapsed grant with AUTH_ERROR; the opener uses Expires to present a replacement token in time.
+
+### Path Pattern {#path-pattern}
+A pattern is a set of broadcast paths, written as `/`-separated segments.
+Each segment is one of:
+
+- a literal, matching that segment exactly;
+- `*`, matching any one segment;
+- a literal with one `*` inside it, such as `cam-*.hang`, matching any segment that starts with the bytes before the `*` and ends with the bytes after it, without overlapping them;
+- `**`, matching zero or more segments.
+
+A pattern matches a path when its segments match the path's segments in order, covering the whole path.
+The empty pattern matches only the empty path, `room/**` matches `room` and every path beneath it, and `**` matches every path.
+
+A pattern has at most 32 segments and at most one `**`.
+It has no leading, trailing, or repeated `/`, no segment with more than one `*`, and no `**` combined with other bytes in a segment.
+It is canonical: a `**` is never immediately preceded by a `*` segment, since `*/**` and `**/*` match the same paths and only `**/*` is valid.
+A pattern that breaks any of these rules is a PROTOCOL_VIOLATION.
+
+A grant covers a request when one of its patterns matches the path.
 
 ## AUTH_ERROR {#auth-error}
 AUTH_ERROR refuses a token, or revokes it after an AUTH_OK.
@@ -1417,7 +1436,7 @@ The `Message Length` describes the payload size on the wire.
 ## moq-lite-06
 
 - Assigned `moq-lite-06` as this draft's protocol identifier.
-- Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the paths it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
+- Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 - Require error-code translation when bridging protocols and draft versions.
 - Made a repeated non-zero Hop ID in one announcement's Hop ID list a PROTOCOL_VIOLATION, matching draft-lcurley-moq-cluster. Repeated 0 entries stay legal.
 - Moved the Qmux-over-WebSocket binding details to draft-lcurley-qmux-websocket; the binding itself is unchanged.

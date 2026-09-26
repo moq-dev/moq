@@ -158,7 +158,29 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 		server.close();
 	});
 
-	test("a grant the wire cannot carry is unsupported and leaves the rest alone", async () => {
+	test("a refused setup token grants nothing rather than everything", async () => {
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+		const requests = server.auth.requests();
+		void (async () => {
+			for (;;) {
+				const request = await requests.next();
+				if (!request) break;
+				request.reject(SessionCode.Unauthorized, "bad credential");
+			}
+		})();
+
+		const empty = await waitFor(client.auth.grant, (g) => g !== undefined);
+		expect(empty?.publish.size).toBe(0);
+		expect(empty?.subscribe.size).toBe(0);
+		client.close();
+		server.close();
+	});
+});
+
+// moq-transport carries namespace prefixes, so a grant that is not a union of subtrees
+// is refused there rather than widened.
+describe.each([Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
+	test("a grant namespace prefixes cannot carry is unsupported and leaves the rest alone", async () => {
 		const { client, server, transport } = await connect({ publish: new OriginProducer(), protocol });
 		const requests = server.auth.requests();
 		const issued: Issued[] = [];
@@ -188,7 +210,7 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 		}
 		expect(client.auth.grant.peek()?.publish.equals(patterns("a"))).toBe(true);
 
-		// An update the wire cannot carry revokes that token's grant, and only that one.
+		// An update namespace prefixes cannot carry revokes that token's grant, and only that one.
 		const t1 = await client.auth.add("t1");
 		await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a", "b")) === true);
 		issued[issued.length - 1]?.update({
@@ -207,24 +229,40 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 		client.close();
 		server.close();
 	});
+});
 
-	test("a refused setup token grants nothing rather than everything", async () => {
-		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
-		const requests = server.auth.requests();
-		void (async () => {
-			for (;;) {
-				const request = await requests.next();
-				if (!request) break;
-				request.reject(SessionCode.Unauthorized, "bad credential");
-			}
-		})();
+// moq-lite carries patterns, so every grant arrives exactly as issued.
+test("lite-06 carries literal and wildcard grants exactly", async () => {
+	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_06 });
+	const requests = server.auth.requests();
+	const unions: Record<string, [string[], string[]]> = {
+		"": [["a/**"], []],
+		exact: [["room/alice"], []],
+		wildcard: [["room/*/cam"], ["**/demo.hang"]],
+		mixed: [["room/**", "lobby", "cam-*.hang"], []],
+		root: [[""], ["**"]],
+	};
+	const parse = (texts: string[]) => new Path.Patterns(texts.map((text) => Path.Pattern.parse(text)));
+	const issued: Issued[] = [];
+	void (async () => {
+		for (;;) {
+			const request = await requests.next();
+			if (!request) break;
+			const [publish, subscribe] = unions[new TextDecoder().decode(request.token)] ?? [[], []];
+			issued.push(request.accept({ publish: parse(publish), subscribe: parse(subscribe) }));
+		}
+	})();
 
-		const empty = await waitFor(client.auth.grant, (g) => g !== undefined);
-		expect(empty?.publish.size).toBe(0);
-		expect(empty?.subscribe.size).toBe(0);
-		client.close();
-		server.close();
-	});
+	await waitFor(client.auth.grant, (g) => g !== undefined);
+	for (const token of ["exact", "wildcard", "mixed", "root"]) {
+		const [publish, subscribe] = unions[token];
+		const added = await client.auth.add(token);
+		const got = added.grant.peek();
+		expect(got?.publish.equals(parse(publish))).toBe(true);
+		expect(got?.subscribe.equals(parse(subscribe))).toBe(true);
+	}
+	client.close();
+	server.close();
 });
 
 test.each([Lite.ALPN_05, Ietf.ALPN.DRAFT_16])("%s has no grant", async (protocol) => {

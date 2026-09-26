@@ -80,8 +80,10 @@ browser) runs once more with a token that excludes its broadcast. It must fail
 loud, logging Unauthorized and naming the path, and every subscriber must time
 out.
 
-Tokens grant subtrees (`name/**`) because moq-lite-06's AUTH\_OK carries prefixes:
-the relay withholds a literal grant it cannot encode, and the client sees none.
+Tokens use patterns no prefix could carry, so every cell checks that AUTH\_OK
+delivers them as minted: a publisher is granted its exact broadcast, a subscriber
+`**/name` (a leading `**` matching zero segments), and the refused publisher
+`interop-allowed-*.hang`.
 
 ## Running locally
 
