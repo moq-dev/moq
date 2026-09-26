@@ -6,6 +6,7 @@
 
 #[macro_use]
 mod parameters;
+pub mod active_count;
 mod adapter;
 pub mod cluster;
 mod control;
@@ -18,7 +19,6 @@ pub mod hidden;
 mod location;
 pub mod message;
 mod namespace;
-pub mod namespace_count;
 pub mod peer;
 mod priority;
 mod properties;

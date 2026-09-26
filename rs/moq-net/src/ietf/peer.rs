@@ -20,9 +20,9 @@ pub(crate) struct Peer {
 	/// SUBSCRIBE_NAMESPACE, so we may send it.
 	pub hidden: bool,
 
-	/// MoQ Namespace Count: whether the peer counts the initial set on the REQUEST_OK
+	/// MoQ Active Count: whether the peer counts the active namespaces it replays on the REQUEST_OK
 	/// answering SUBSCRIBE_NAMESPACE, and reads ours.
-	pub namespace_count: bool,
+	pub active_count: bool,
 }
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
@@ -82,7 +82,7 @@ mod tests {
 			},
 			solicit: None,
 			hidden: false,
-			namespace_count: false,
+			active_count: false,
 		};
 
 		let slot = PeerSetup::default();
@@ -94,7 +94,7 @@ mod tests {
 			},
 			solicit: Some(true),
 			hidden: true,
-			namespace_count: true,
+			active_count: true,
 		});
 
 		assert_eq!(slot.get().await, first);

@@ -8,9 +8,9 @@ use crate::{
 };
 
 use super::{
-	Control, Message, Publisher, Subscriber, Version,
+	Control, Message, Publisher, Subscriber, Version, active_count,
 	adapter::ControlStreamAdapter,
-	cluster, hidden, namespace_count, peer, solicit,
+	cluster, hidden, peer, solicit,
 	subscriber::{is_protocol_violation, subscribe_prefixes},
 };
 
@@ -512,7 +512,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 		cluster: cluster::peer_from_setup(params, version)?,
 		solicit: solicit::from_setup(params, version)?,
 		hidden: hidden::from_setup(params, version),
-		namespace_count: namespace_count::from_setup(params, version),
+		active_count: active_count::from_setup(params, version),
 	})
 }
 
@@ -545,7 +545,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
 	solicit::into_setup(&mut parameters, version);
 	hidden::into_setup(&mut parameters, version);
-	namespace_count::into_setup(&mut parameters, version);
+	active_count::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer.encode(&setup::Setup { parameters }).await?;
@@ -905,7 +905,7 @@ mod tests {
 		writer
 			.encode(&ietf::RequestOk {
 				request_id: None,
-				namespace_count: None,
+				active: None,
 			})
 			.await
 			.unwrap();

@@ -488,7 +488,7 @@ pub(super) fn subscribe_prefixes(origin: &origin::Producer) -> Vec<(PathOwned, c
 
 /// How a SUBSCRIBE_NAMESPACE stream's initial set ends.
 enum Landing {
-	/// MoQ Namespace Count: after this many more NAMESPACE messages.
+	/// MoQ Active Count: after this many more NAMESPACE messages.
 	Count(u64),
 	/// Once the stream goes quiet, which is all the base protocol offers.
 	Quiet(crate::model::Quiet),
@@ -790,7 +790,7 @@ where
 				ietf::SubscribeNamespaceOk::decode_msg(&mut data, self.version)?;
 				None
 			}
-			ietf::RequestOk::ID => ietf::RequestOk::decode_msg(&mut data, self.version)?.namespace_count,
+			ietf::RequestOk::ID => ietf::RequestOk::decode_msg(&mut data, self.version)?.active,
 			ietf::SubscribeNamespaceError::ID if self.version == Version::Draft14 => {
 				let msg = ietf::SubscribeNamespaceError::decode_msg(&mut data, self.version)?;
 				let err = request::from_code(msg.error_code, request::Kind::SubscribeNamespace, self.version);
@@ -808,11 +808,11 @@ where
 
 		tracing::debug!(%prefix, ?count, "subscribe_namespace ok");
 
-		// MoQ Namespace Count says how many NAMESPACE messages replay the initial set.
+		// MoQ Active Count says how many active namespaces the NAMESPACE messages replay.
 		// Without it nothing on this wire marks the end, so the set has landed once the
 		// stream goes quiet. A count the negotiation did not promise, or a missing one it
 		// did, is the peer breaking the extension.
-		let landing = match (declared.namespace_count, count) {
+		let landing = match (declared.active_count, count) {
 			(true, Some(count)) => Landing::Count(count),
 			(false, None) => Landing::Quiet(crate::model::Quiet::new(&self.runtime)),
 			_ => return Err(Error::ProtocolViolation),
@@ -1298,7 +1298,7 @@ where
 					.writer
 					.encode(&ietf::RequestOk {
 						request_id: Some(request_id),
-						namespace_count: None,
+						active: None,
 					})
 					.await?;
 			}
@@ -1308,7 +1308,7 @@ where
 					.writer
 					.encode(&ietf::RequestOk {
 						request_id: None,
-						namespace_count: None,
+						active: None,
 					})
 					.await?;
 			}
@@ -3320,7 +3320,7 @@ mod tests {
 		writer
 			.encode(&ietf::RequestOk {
 				request_id: None,
-				namespace_count: None,
+				active: None,
 			})
 			.await
 			.unwrap();
@@ -3397,7 +3397,7 @@ mod tests {
 		);
 	}
 
-	/// MoQ Namespace Count is negotiated, so a REQUEST_OK that breaks the negotiation
+	/// MoQ Active Count is negotiated, so a REQUEST_OK that breaks the negotiation
 	/// either way is the peer's fault: a count we cannot rely on, or one missing where we
 	/// would otherwise wait on it forever.
 	#[tokio::test(start_paused = true)]
@@ -3412,7 +3412,7 @@ mod tests {
 			writer
 				.encode(&ietf::RequestOk {
 					request_id: None,
-					namespace_count: count,
+					active: count,
 				})
 				.await
 				.unwrap();
@@ -3423,7 +3423,7 @@ mod tests {
 			let (tasks, _task_set) = crate::util::TaskSet::new();
 			let peer_setup = peer::PeerSetup::default();
 			peer_setup.set(peer::Peer {
-				namespace_count: negotiated,
+				active_count: negotiated,
 				..Default::default()
 			});
 			let mut subscriber = Subscriber::new(
@@ -4565,7 +4565,7 @@ mod tests {
 			writer
 				.encode(&ietf::RequestOk {
 					request_id: None,
-					namespace_count: None,
+					active: None,
 				})
 				.await
 				.unwrap();

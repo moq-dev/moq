@@ -1,9 +1,9 @@
 ---
-title: "MoQ Namespace Count Extension"
-abbrev: "moq-namespace-count"
+title: "MoQ Active Count Extension"
+abbrev: "moq-active-count"
 category: info
 
-docname: draft-lcurley-moq-namespace-count-latest
+docname: draft-lcurley-moq-active-count-latest
 submissiontype: IETF  # also: "independent", "editorial", "IAB", or "IRTF"
 number:
 date:
@@ -23,8 +23,8 @@ informative:
 
 --- abstract
 
-This document defines an extension for MoQ Transport {{moqt}} that tells a subscriber where the initial set of namespaces answering its SUBSCRIBE_NAMESPACE ends.
-The publisher counts the NAMESPACE messages that replay what already exists, so the subscriber knows when it has caught up instead of guessing from a quiet stream.
+This document defines an extension for MoQ Transport {{moqt}} that tells a subscriber how many active namespaces a publisher replays in answer to its SUBSCRIBE_NAMESPACE.
+The subscriber knows when it has caught up once that many have arrived, instead of guessing from a quiet stream.
 
 --- note_Note_to_Readers
 
@@ -36,16 +36,17 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 # Conventions and Definitions
 {::boilerplate bcp14-tagged}
 
-The **initial set** of a SUBSCRIBE_NAMESPACE is the namespaces matching its prefix that the publisher advertises at the time it answers.
+A namespace is **active** on a SUBSCRIBE_NAMESPACE stream from the NAMESPACE that advertises it until the NAMESPACE_DONE that ends it.
+The **replay** is the NAMESPACE messages a publisher sends for the namespaces it already advertises under the subscription's prefix when it answers, one per namespace.
 
 
 # Introduction
-A publisher answers SUBSCRIBE_NAMESPACE with one NAMESPACE per matching namespace, then keeps the stream open to report changes.
+A publisher answers SUBSCRIBE_NAMESPACE with the replay, then keeps the stream open to report changes.
 Nothing on the wire separates the two, so a subscriber cannot tell "there are no broadcasts" from "they have not arrived yet".
-The best it can do is wait for the stream to go quiet, which is slow when the set is empty and wrong when the network stalls mid-replay.
+The best it can do is wait for the stream to go quiet, which is slow when there is nothing to replay and wrong when the network stalls mid-replay.
 
-This extension has the publisher count the initial set on its REQUEST_OK.
-The subscriber has caught up once that many NAMESPACE messages have arrived.
+This extension has the publisher count the replay on its REQUEST_OK, as moq-lite's ANNOUNCE_OK does.
+The subscriber has caught up once that many namespaces are active.
 
 
 # Setup Negotiation
@@ -53,7 +54,7 @@ The subscriber has caught up once that many NAMESPACE messages have arrived.
 An endpoint declares this extension with the following Setup Option ({{moqt}} Section 10.3):
 
 ~~~
-NAMESPACE_COUNT Setup Option {
+ACTIVE_COUNT Setup Option {
   Option Key (vi64) = 0x40B64
   Option Value (vi64) = 1
 }
@@ -61,7 +62,7 @@ NAMESPACE_COUNT Setup Option {
 
 A receiver MUST ignore the value.
 The extension is negotiated when both endpoints declare the option, and applies to every SUBSCRIBE_NAMESPACE on the session in both directions.
-An endpoint MUST NOT declare the option on a version of {{moqt}} without NAMESPACE, where the initial set does not ride the SUBSCRIBE_NAMESPACE stream.
+An endpoint MUST NOT declare the option on a version of {{moqt}} without NAMESPACE, where the replay does not ride the SUBSCRIBE_NAMESPACE stream.
 
 
 # Counting {#count}
@@ -69,17 +70,17 @@ An endpoint MUST NOT declare the option on a version of {{moqt}} without NAMESPA
 When the extension is negotiated, a publisher MUST include the following parameter in the REQUEST_OK answering a SUBSCRIBE_NAMESPACE:
 
 ~~~
-NAMESPACE_COUNT Parameter {
+ACTIVE_COUNT Parameter {
   Type (vi64) = 0x40B66
   Value (vi64) = Count
 }
 ~~~
 
-Count is the number of NAMESPACE messages carrying the initial set.
-The publisher MUST send exactly that many NAMESPACE messages on the stream immediately after REQUEST_OK, before any other message; later changes follow them as usual.
-A namespace the publisher would not advertise to this subscriber, such as one that loops back through it, is not counted.
+Count is the number of namespaces in the replay.
+The publisher MUST send the replay on the stream immediately after REQUEST_OK, exactly Count NAMESPACE messages for distinct namespaces and nothing else in between; later changes follow as usual.
+A namespace the publisher does not advertise to this subscriber, such as one that loops back through it, is neither replayed nor counted.
 
-A subscriber has received the initial set once it has read Count NAMESPACE messages, immediately on a Count of 0.
+A subscriber has caught up once it has read Count NAMESPACE messages, immediately on a Count of 0.
 It counts every one of them, including any it discards on receipt.
 
 A subscriber MUST close the session with a PROTOCOL_VIOLATION if REQUEST_OK omits the parameter when the extension is negotiated, or carries it when it is not.
@@ -102,7 +103,7 @@ This document requests one registration in the "MOQT Setup Options" registry ({{
 
 | Value   | Name            | Reference     |
 |:--------|:----------------|:--------------|
-| 0x40B64 | NAMESPACE_COUNT | This Document |
+| 0x40B64 | ACTIVE_COUNT | This Document |
 
 ## MOQT Message Parameters
 
@@ -110,7 +111,7 @@ This document requests one registration in the "MOQT Message Parameters" registr
 
 | Value   | Name            | Carried In | Reference     |
 |:--------|:----------------|:-----------|:--------------|
-| 0x40B66 | NAMESPACE_COUNT | REQUEST_OK | This Document |
+| 0x40B66 | ACTIVE_COUNT | REQUEST_OK | This Document |
 
 Both values are even, so each is a bare varint.
 

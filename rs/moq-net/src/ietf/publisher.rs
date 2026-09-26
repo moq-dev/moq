@@ -1767,7 +1767,7 @@ where
 
 		// The extension changes what an advertisement carries, so nothing can be
 		// sent until the peer's SETUP says whether it speaks it. The same SETUP says
-		// whether the OK counts the initial set (MoQ Namespace Count).
+		// whether the OK counts the active namespaces it replays (MoQ Active Count).
 		let peer = self.peer().await;
 		let declared = self.peer_setup.get().await;
 		// Register the split-horizon peer on the announce cursor too. The origin
@@ -1795,9 +1795,9 @@ where
 
 		let mut announced = origin.announced();
 
-		// MoQ Namespace Count: take what exists now, so the OK can say how many
+		// MoQ Active Count: take what is active now, so the OK can say how many
 		// NAMESPACE messages replay it. They go out first, ahead of any change.
-		let (initial, namespace_count) = match declared.namespace_count {
+		let (initial, active) = match declared.active_count {
 			true => {
 				let initial = Self::snapshot(&mut announced);
 				let count = initial
@@ -1826,7 +1826,7 @@ where
 					.writer
 					.encode(&ietf::RequestOk {
 						request_id: Some(msg.request_id),
-						namespace_count,
+						active,
 					})
 					.await?;
 			}
@@ -1836,7 +1836,7 @@ where
 					.writer
 					.encode(&ietf::RequestOk {
 						request_id: None,
-						namespace_count,
+						active,
 					})
 					.await?;
 			}
@@ -3893,7 +3893,7 @@ mod tests {
 		announced.assert_next_wait();
 	}
 
-	/// MoQ Namespace Count: the OK counts exactly the NAMESPACE messages that follow it,
+	/// MoQ Active Count: the OK counts exactly the NAMESPACE messages that follow it,
 	/// so a route this peer is never told about is not counted either. Counting one would
 	/// leave the peer waiting on a message that never comes.
 	#[tokio::test]
@@ -3909,7 +3909,7 @@ mod tests {
 				cost: None,
 			},
 			solicit: Some(true),
-			namespace_count: true,
+			active_count: true,
 			..Default::default()
 		});
 		let publisher = Publisher::new(
@@ -3956,7 +3956,7 @@ mod tests {
 		writer
 			.encode(&ietf::RequestOk {
 				request_id: None,
-				namespace_count: Some(1),
+				active: Some(1),
 			})
 			.await
 			.unwrap();
@@ -4137,7 +4137,7 @@ mod tests {
 				writer
 					.encode(&ietf::RequestOk {
 						request_id: Some(RequestId(1)),
-						namespace_count: None,
+						active: None,
 					})
 					.await
 					.unwrap();
@@ -4148,7 +4148,7 @@ mod tests {
 				writer
 					.encode(&ietf::RequestOk {
 						request_id: None,
-						namespace_count: None,
+						active: None,
 					})
 					.await
 					.unwrap();
@@ -4589,7 +4589,7 @@ mod tests {
 			},
 			solicit,
 			hidden: false,
-			namespace_count: false,
+			active_count: false,
 		});
 		slot
 	}

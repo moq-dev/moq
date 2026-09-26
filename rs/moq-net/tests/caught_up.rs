@@ -15,7 +15,7 @@ fn produce_origin(hop: Hop) -> origin::Producer {
 }
 
 /// Versions whose wire says where the initial set ends: ANNOUNCE_INIT, ANNOUNCE_OK's
-/// count, or REQUEST_OK's (MoQ Namespace Count, negotiated from draft-16).
+/// count, or REQUEST_OK's (MoQ Active Count, negotiated from draft-16).
 const COUNTED: &[&str] = &[
 	"moq-lite-01",
 	"moq-lite-02",

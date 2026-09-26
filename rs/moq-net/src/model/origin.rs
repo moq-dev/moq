@@ -3076,7 +3076,7 @@ impl Drop for Replaying {
 }
 
 /// When a [`Replaying`] source has landed, for wires that never say where the
-/// initial set ends (lite-03/04, moq-transport without MoQ Namespace Count): once
+/// initial set ends (lite-03/04, moq-transport without MoQ Active Count): once
 /// its stream goes quiet.
 ///
 /// A peer writes its whole set back to back, so the first announcement gets a

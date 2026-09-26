@@ -145,7 +145,7 @@ routes live at subscribe time have all been delivered, including those a peer
 session was still sending: moq-lite-05+ counts them in `ANNOUNCE_OK`,
 moq-lite-01/02 send them in `ANNOUNCE_INIT`, IETF draft-16+ sessions count them
 in `REQUEST_OK` when both sides speak
-[namespace-count](/draft/moq-namespace-count), and anything else waits for the
+[active-count](/draft/moq-active-count), and anything else waits for the
 stream to go quiet.
 
 Announcements are hints; requests are the authority. When a subscriber asks

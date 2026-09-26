@@ -336,7 +336,7 @@ impl Server {
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&params, v)?,
 					hidden: ietf::hidden::from_setup(&params, v),
-					namespace_count: ietf::namespace_count::from_setup(&params, v),
+					active_count: ietf::active_count::from_setup(&params, v),
 					..Default::default()
 				};
 				(path, request_id_max, peer_declared)
@@ -561,7 +561,7 @@ where
 					parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
 					ietf::solicit::into_setup(&mut parameters, v);
 					ietf::hidden::into_setup(&mut parameters, v);
-					ietf::namespace_count::into_setup(&mut parameters, v);
+					ietf::active_count::into_setup(&mut parameters, v);
 					parameters.encode_bytes(v)?
 				}
 				Version::Lite(v) => lite::Parameters::default().encode_bytes(v)?,
