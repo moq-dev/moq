@@ -664,8 +664,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// The broadcast's [`Timelines`](crate::timeline::Timelines): each enrolled track's index.
 	///
 	/// A track's timeline is created (and advertised in the catalog's root `archive` entry) when
-	/// it enrolls, so reading this costs nothing on a broadcast that never enrolls one. Use it to
-	/// declare boundaries ([`cut`](crate::timeline::Timelines::cut)).
+	/// it enrolls, so reading this costs nothing on a broadcast that never enrolls one.
 	pub fn timeline(&self) -> crate::timeline::Timelines {
 		self.timeline.clone()
 	}

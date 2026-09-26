@@ -528,16 +528,6 @@ impl Timelines {
 		Ok(Recorder { live })
 	}
 
-	/// Declare a boundary at `pts` on every enrolled track; see [`Segmenter::cut`].
-	pub fn cut(&self, pts: Timestamp) {
-		let registry = self.registry.lock().unwrap();
-		for (_, live) in registry.tracks.values() {
-			let mut live = live.lock().unwrap();
-			live.segmenter.cut(pts);
-			live.publish();
-		}
-	}
-
 	/// The catalog's root `archive` entry advertising every enrolled track's timeline.
 	pub fn section(&self) -> Archive {
 		let registry = self.registry.lock().unwrap();
