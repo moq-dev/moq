@@ -20,6 +20,6 @@ quest/
 # which format their own files; remark would follow them (and .agents, Codex's
 # link to the same directory) and rewrite the pinned checkouts.
 .claude/shared/
-.claude/quest/
+.quest/
 .claude/skills/
 .agents/

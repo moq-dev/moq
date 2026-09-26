@@ -21,7 +21,14 @@
 		//   - SVG assets, which Biome routes to its HTML parser and rejects.
 		//   - The audio jitter corpus, which is generated and byte-compared by its own test,
 		//     so a formatter rewriting it would fight the generator on every `just fix`.
-		"includes": ["**", "!rs/moq-mux/src/container/ts/test_data", "!**/*.svg", "!doc/concept/audio-jitter/*.json"]
+		// And the vendored kixelated/quest submodule, which formats its own files.
+		"includes": [
+			"**",
+			"!.quest",
+			"!rs/moq-mux/src/container/ts/test_data",
+			"!**/*.svg",
+			"!doc/concept/audio-jitter/*.json"
+		]
 	},
 	"linter": {
 		"rules": {

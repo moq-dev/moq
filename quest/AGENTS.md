@@ -1,1 +1,1 @@
-../.claude/quest/quest/AGENTS.md
+../.quest/quest/AGENTS.md
