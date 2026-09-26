@@ -20,7 +20,3 @@ catches a typed `MoqException`, on the host runtime.
   generator: a cancelled token drops the Rust future, and `IDisposable` on a
   handle cancels its pending calls. If upstream lacks the mapping, it lands in
   the fork here, never in the wrapper; the probe above is the acceptance test.
-
-## Related
-
-- [C++ generator](/quest/m1/cpp/generator.md) - the same port against the C++ generator

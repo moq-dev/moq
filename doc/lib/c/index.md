@@ -7,10 +7,12 @@ description: libmoq, the stable C ABI over the Rust core
 
 [![GitHub release](https://img.shields.io/github/v/release/moq-dev/moq?filter=libmoq-v*\&label=libmoq)](https://github.com/moq-dev/moq/releases?q=libmoq)
 
-`libmoq` exposes MoQ to C, C++, and any language with a C FFI through a
+`libmoq` exposes MoQ to C and any language with a C FFI through a
 stable ABI: a generated `moq.h`, a static `libmoq.a` that links the whole Rust
 runtime in, and a pkg-config file for its native link dependencies. The
-[OBS plugin](/bin/obs) is built on it.
+[OBS plugin](/bin/obs) is built on it. C++ projects should prefer the
+[C++ package](/lib/cpp/) (`moq-cpp`): the same core as RAII objects and futures instead of
+handles and callbacks.
 
 ## Install
 

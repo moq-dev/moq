@@ -8,11 +8,11 @@ set -euo pipefail
 #
 # Inputs a sample leaves undefined (`opus_init_bytes`, `pts`) come from a prelude
 # the caller compiles alongside. Imports are hoisted above the functions, where
-# Kotlin, Swift, and C require them.
+# Kotlin, Swift, C, and C++ require them.
 #
-# Usage: samples.sh python|kotlin|swift|c FILE...
+# Usage: samples.sh python|kotlin|swift|c|cpp FILE...
 
-lang="${1:?usage: samples.sh python|kotlin|swift|c FILE...}"
+lang="${1:?usage: samples.sh python|kotlin|swift|c|cpp FILE...}"
 shift
 
 awk -v lang="$lang" '
@@ -22,6 +22,7 @@ BEGIN {
 	else if (lang == "kotlin") { hoist = "^import "; opener = "suspend fun docSample%d() {"; closer = "}\n" }
 	else if (lang == "swift") { hoist = "^import "; opener = "func docSample%d() async throws {"; closer = "}\n" }
 	else if (lang == "c") { hoist = "^#include "; opener = "static int doc_sample_%d(void) {"; closer = "    return 0;\n}\n" }
+	else if (lang == "cpp") { hoist = "^#include "; opener = "[[maybe_unused]] static void doc_sample_%d() {"; closer = "}\n" }
 	else { print "samples.sh: unknown language " lang > "/dev/stderr"; exit 2 }
 	comment = (lang == "python") ? "#" : "//"
 }

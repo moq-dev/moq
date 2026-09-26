@@ -189,8 +189,20 @@ generate_bindings() {
         echo "  Skipping dart bindings: uniffi_bindgen_dart not on PATH"
     fi
 
+    # C++ uses a third-party bindgen too: a fork carrying LiveKit's async support
+    # ported to uniffi 0.32, which upstream has not released. Install it with:
+    # cargo install --locked uniffi-bindgen-cpp --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.1+v0.32.2
+    if command -v uniffi-bindgen-cpp >/dev/null 2>&1; then
+        echo "  Generating cpp bindings..."
+        uniffi-bindgen-cpp --library "$lib_path" \
+            --config "$WORKSPACE_DIR/cpp/moq/uniffi.toml" \
+            --out-dir "$OUTPUT_DIR/bindings/cpp"
+    else
+        echo "  Skipping cpp bindings: uniffi-bindgen-cpp not on PATH"
+    fi
+
     if [[ "$ARCHIVE" == true ]]; then
-        for lang in kotlin swift python go dart; do
+        for lang in kotlin swift python go dart cpp; do
             if [[ -d "$OUTPUT_DIR/bindings/$lang" ]]; then
                 local archive="moq-ffi-${VERSION}-${lang}.tar.gz"
                 tar -czf "$OUTPUT_DIR/$archive" -C "$OUTPUT_DIR/bindings" "$lang"

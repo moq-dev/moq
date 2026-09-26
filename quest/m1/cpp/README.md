@@ -31,11 +31,12 @@ Rust side carried across. Continuations run on a default bounded dispatcher
 unless the application installs its own (`uniffi::set_async_dispatcher`); OBS
 installs one that hops to its own threads.
 
-Errors never throw. The fork gains an `error_style = expected` flag so every
-generated method returns `moq::expected<T, moq::Error>` and futures deliver the
-same, which is what lets Unreal and other `-fno-exceptions` builds consume the
-package. `moq::expected` is `std::expected` on C++23 and a bundled
-`tl::expected` below it.
+Errors never throw. The fork's `error_style = "expected"` flag makes every
+fallible generated method return `uniffi::expected<T, moq::MoqError>` and every
+future deliver the same, which is what lets Unreal and other `-fno-exceptions`
+builds consume the package. `uniffi::expected` is `std::expected` on C++23 and a
+bundled `tl::expected` below it; the `moq::` layer renames both. Callback
+interfaces are refused under that flag until one is needed.
 
 One library, C++17 floor (OBS's baseline), feature-gated extras: `co_await`
 on a future under `__cpp_impl_coroutine`, `std::expected` under
@@ -49,8 +50,7 @@ reads the same release manifest so a release bumps both.
 
 ## Quests
 
-- [Generator](/quest/m1/cpp/generator.md) - the uniffi 0.32 C++ generator with futures and expected-style errors, pinned and generating `cpp/ffi` in CI
-- [Package](/quest/m1/cpp/package.md) - the `cpp/moq` wrapper, CMake package, release tarball, interop client, and docs
+- [Error messages](/quest/m1/cpp/error-message.md) - a C++ `moq::Error` prints the same message Rust gives
 - [OBS migration](/quest/m1/cpp/obs.md) - the OBS plugin moves from libmoq handles and trampolines to the generated C++
 
 ## Related

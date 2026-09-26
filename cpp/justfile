@@ -1,0 +1,79 @@
+#!/usr/bin/env just --justfile
+#
+# The moq C++ package over rs/moq-ffi. Invoked from the repo root as `just cpp <recipe>` via
+# the `mod cpp` import. The OBS plugin has its own module, `just obs`.
+
+set working-directory := '.'
+
+default:
+    just check
+
+# Takes an optional newline-separated list of changed files and skips when none
+# are in scope; `just cpp check` (no FILES) always runs. CXX picks the compiler
+# on Unix; Windows uses MSVC.
+
+# Build and install cpp/moq, then build the probe against the installed package at C++17 and
+# C++23 through CMake, and at C++17 through pkg-config, and run each. Also compiles the doc samples.
+check $FILES="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "$FILES" ]] && ! grep -qE '^(cpp/moq/|cpp/justfile$|rs/moq-ffi/|rs/libmoq/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)' <<< "$FILES"; then
+    	echo "cpp: no C++ package changes; skipping."
+    	exit 0
+    fi
+    if ! command -v uniffi-bindgen-cpp >/dev/null 2>&1; then
+    	echo "cpp check: uniffi-bindgen-cpp not on PATH, skipping" >&2
+    	echo "  install: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.1+v0.32.2" >&2
+    	exit 0
+    fi
+
+    # Single-config generators build Debug. Visual Studio ignores CMAKE_BUILD_TYPE and gets
+    # --config Release, since the Rust staticlib links the release CRT (/MD) either way.
+    build=moq/build
+    prefix="$PWD/$build/prefix"
+    cmake -S moq -B "$build/package" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR=lib
+    cmake --build "$build/package" --config Release
+    rm -rf "$prefix"
+    cmake --install "$build/package" --config Release --prefix "$prefix"
+
+    # Every generated moq::MoqFoo needs its moq::Foo alias in the wrapper.
+    missing=$(comm -23 \
+    	<(sed -nE 's/^(struct|enum class) Moq([A-Za-z0-9]+);$/\2/p' "$prefix/include/moq/ffi/moq.hpp" | sort -u) \
+    	<(sed -nE 's/^using ([A-Za-z0-9]+) = Moq\1;$/\1/p' moq/include/moq/moq.hpp | sort -u))
+    if [[ -n "$missing" ]]; then
+    	echo "cpp check: cpp/moq/include/moq/moq.hpp lacks an alias for:" $missing >&2
+    	exit 1
+    fi
+
+    run() {
+    	if [[ -x "$1/probe" ]]; then "$1/probe"; else "$1/Release/probe.exe"; fi
+    }
+    for std in 17 23; do
+    	cmake -S moq/test -B "$build/test-$std" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD="$std" -DCMAKE_PREFIX_PATH="$prefix"
+    	cmake --build "$build/test-$std" --config Release
+    	run "$build/test-$std"
+    done
+
+    # The samples in doc/lib/cpp compile against the installed headers.
+    bash ../doc/lib/samples.sh cpp ../doc/lib/cpp/index.md >"$build/doc-samples.cpp"
+    if [[ "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* ]]; then
+    	"${CXX:-c++}" -std=c++17 -fsyntax-only -Wall -Werror -include moq/test/doc-samples.hpp \
+    		-I"$prefix/include" "$build/doc-samples.cpp"
+    fi
+
+    if command -v pkg-config >/dev/null 2>&1; then
+    	export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+    	mkdir -p "$build/pkg-config"
+    	# shellcheck disable=SC2046 # pkg-config output is a flag list.
+    	"${CXX:-c++}" -std=c++17 -o "$build/pkg-config/probe" moq/test/probe.cpp \
+    		$(pkg-config --variable=sources moq-cpp) $(pkg-config --cflags --libs moq-cpp)
+    	run "$build/pkg-config"
+    fi
+
+# Build the release tarball for the host into cpp/moq/dist.
+package:
+    moq/build.sh --output moq/dist
+
+# Remove the package builds.
+clean:
+    rm -rf moq/build moq/dist

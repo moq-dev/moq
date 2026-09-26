@@ -1,0 +1,61 @@
+name: C++
+
+# Builds and tests the moq C++ package (cpp/moq) with clang, outside Nix. `just
+# check` already runs `just cpp check` with the dev shell's gcc; the dev shell
+# has no clang++, and adding one would change which compiler every other recipe
+# gets as `cc`. MSVC runs in nightly.yml, for the reason the Windows Rust check
+# does: those runners are throttled too hard to gate every pull request.
+#
+# Outside Nix the generator comes from `cargo install` at the tag flake.nix
+# pins; see the comment there for every other place that names it.
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    # `closed` is here only so merging/closing a PR cancels its in-flight run
+    # via the concurrency group below; the job itself is skipped on close.
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - "cpp/moq/**"
+      - "cpp/justfile"
+      - "rs/moq-ffi/**"
+      - "rs/libmoq/native-libs/**"
+      - "doc/lib/cpp/**"
+      - "doc/lib/samples.sh"
+      - "Cargo.lock"
+      - ".github/workflows/cpp.yml"
+
+concurrency:
+  group: cpp-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clang:
+    name: C++ (clang)
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      # Pinned: `--locked` fixes just's own dependencies, not which version of
+      # just cargo selects.
+      - name: Install just
+        run: cargo install --locked just@1.52.0
+
+      - name: Install uniffi-bindgen-cpp
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.1+v0.32.2
+
+      - name: Check
+        run: just cpp check
+        env:
+          CXX: clang++

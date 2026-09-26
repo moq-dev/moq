@@ -37,6 +37,7 @@ on:
       - moq-relay
       - Nightly
       - release-brew
+      - Release C++
       - Release Dart
       - Release Dart FFI
       - Release Go
