@@ -76,7 +76,7 @@ else()
   find_package(moq-cpp REQUIRED PATHS ${moq-cpp_SOURCE_DIR} NO_DEFAULT_PATH)
 endif()
 # The package carries the system libraries its Rust staticlib needs, on every platform.
-target_link_libraries(obs-moq PRIVATE moq-cpp::moq)
+target_link_libraries(obs-moq PRIVATE moq::cpp)
 
 # The obs-deps Qt6 build references the AGL framework transitively (via
 # WrapOpenGL), but recent macOS SDKs ship no linkable AGL binary -- it exists
