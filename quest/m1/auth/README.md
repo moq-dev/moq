@@ -45,11 +45,12 @@ Decisions settled while planning, recorded so review does not relitigate them:
 - **A public grant contains publish patterns, subscribe patterns, and an
   expiry**, in the presenter's own root; the presenter never sees the relay-side
   root, and every token in a union shares the connection's root. Unscoped
-  permission is `**`; an empty union grants nothing. Legacy AUTH wire codecs
-  explicitly convert representable prefix unions, where `[""]` means all,
-  and refuse patterns they cannot represent. [Pattern interest](/quest/m1/auth/patterns.md)
-  upgrades AUTH and ANNOUNCE_REQUEST wire fields together without changing
-  the public pattern-valued grant type.
+  permission is `**`; an empty union grants nothing. [Path patterns](/quest/m1/auth/patterns.md)
+  ships with AUTH, so AUTH_OK carries those patterns, wildcards and literals
+  alike, from the first release. There is no prefix-only AUTH_OK and no
+  covering-prefix workaround. Announce stays a prefix: ANNOUNCE_REQUEST and
+  SUBSCRIBE_NAMESPACE do not gain patterns in that change. The public grant
+  type stays pattern-valued.
 - **Fail loud by aborting the session.** A publisher whose origin announces a
   broadcast outside the union aborts the session with `Unauthorized`, naming
   the path. The check runs against the grants in hand once the tokens the
