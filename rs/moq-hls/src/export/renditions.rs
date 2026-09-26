@@ -2,8 +2,9 @@
 //!
 //! The `Producer` holds the current renditions, reconciled from the catalog by its `sync`;
 //! the HTTP serve path reads them synchronously (look one up, render the master playlist). It
-//! is also the fan-out point for the broadcast's single timeline: the timeline watcher's
-//! `Fanout` handle hands each record to every rendition, which keeps its own window over it.
+//! is also the fan-out point for the broadcast's segments: the reference rendition's timeline
+//! watcher hands each record to every rendition through the `Fanout` handle, and each rendition
+//! keeps its own window over them.
 //! A [`Consumer`] is a cursor for a recorder that mirrors the *whole* broadcast: [`next`](Consumer::next)
 //! yields one [`Event`] at a time as renditions are added or removed, replaying the current
 //! set as [`Added`](Event::Added) when first consumed, and returning `None` once the source
@@ -19,7 +20,7 @@ use moq_mux::timeline::Entry;
 
 use super::Upstream;
 use super::rendition::{Kind, Rendition};
-use super::segments::Discontinuities;
+use super::segments::{Discontinuities, Reference};
 
 /// The `(kind, name)` identity of a rendition. Video and audio are separate axes, so a video
 /// and an audio rendition may share a name without colliding.
@@ -47,10 +48,10 @@ pub enum Event {
 struct Feed {
 	/// Every rendition ever created and still alive, pruned as they drop.
 	targets: Vec<Weak<Rendition>>,
-	/// Recent records with their discontinuity sequence, replayed into a rendition created
-	/// mid-broadcast so its playlist window isn't empty until the next record. Evicted with the
-	/// same policy as the windows.
-	history: VecDeque<(u64, Entry, u64)>,
+	/// Recent reference records with their discontinuity sequence, replayed into a rendition
+	/// created mid-broadcast so its playlist window isn't empty until the next record. Evicted with
+	/// the same policy as the windows.
+	history: VecDeque<(u64, Entry, Reference, u64)>,
 	/// Stamps each record once, so every rendition agrees on where the timeline breaks.
 	discontinuities: Discontinuities,
 	/// The timeline ended cleanly; late-created renditions start ended (`EXT-X-ENDLIST`).
@@ -193,14 +194,15 @@ impl Fanout {
 		self.feed.lock().unwrap().window = None;
 	}
 
-	/// Fan one timeline record out to every living rendition, and into the replay history.
-	pub fn push(&self, index: u64, entry: Entry) {
+	/// Fan one reference timeline record out to every living rendition, and into the replay
+	/// history.
+	pub fn push(&self, index: u64, entry: Entry, reference: &Reference) {
 		let mut feed = self.feed.lock().unwrap();
 
 		// Same eviction policy as the per-rendition windows, so a replay reconstructs the
 		// same window a live rendition would have.
-		if let Some((_, back, _)) = feed.history.back()
-			&& (Duration::from(entry.pts) < Duration::from(back.pts) || entry.segment <= back.segment)
+		if let Some((_, back, _, _)) = feed.history.back()
+			&& (Duration::from(entry.pts) < Duration::from(back.pts) || entry.sequence <= back.sequence)
 		{
 			feed.history.clear();
 			feed.anchor = None;
@@ -213,7 +215,8 @@ impl Fanout {
 		}
 		let pts = Duration::from(entry.pts);
 		let discontinuity = feed.discontinuities.stamp(pts, pts + entry.duration);
-		feed.history.push_back((index, entry.clone(), discontinuity));
+		feed.history
+			.push_back((index, entry.clone(), reference.clone(), discontinuity));
 		let window = feed.window;
 		while let Some(window) = window
 			&& feed.history.len() >= 2
@@ -231,7 +234,7 @@ impl Fanout {
 			let Some(rendition) = target.upgrade() else {
 				return false;
 			};
-			rendition.push(index, &entry, discontinuity, window);
+			rendition.push(index, &entry, reference, discontinuity, window);
 			true
 		});
 	}
@@ -239,7 +242,7 @@ impl Fanout {
 	/// Remove records that left the source timeline window from every rendition window.
 	pub fn pop(&self, range: std::ops::Range<u64>) {
 		let mut feed = self.feed.lock().unwrap();
-		feed.history.retain(|(index, _, _)| !range.contains(index));
+		feed.history.retain(|(index, ..)| !range.contains(index));
 		feed.targets.retain(|target| {
 			let Some(rendition) = target.upgrade() else {
 				return false;
@@ -341,12 +344,14 @@ impl Producer {
 	}
 
 	/// Enroll a freshly-created rendition in the timeline feed, replaying the recent history
-	/// (and the ended/closed markers) so its window matches its siblings'.
+	/// (and the ended/closed markers) so its window matches its siblings', and start following its
+	/// own timeline.
 	fn register(&self, rendition: &Arc<Rendition>) {
 		let mut feed = self.fanout.feed.lock().unwrap();
 		rendition.label(feed.generation.clone());
-		for (index, entry, discontinuity) in &feed.history {
-			rendition.push(*index, entry, *discontinuity, feed.window);
+		rendition.watch(feed.window);
+		for (index, entry, reference, discontinuity) in &feed.history {
+			rendition.push(*index, entry, reference, *discontinuity, feed.window);
 		}
 		if feed.ended {
 			rendition.end();
@@ -365,9 +370,9 @@ impl Producer {
 	/// new advertised bitrate, since the publisher republishes the catalog every time its
 	/// measured bitrate or jitter moves.
 	///
-	/// Renditions are only servable when the catalog advertises the broadcast's timeline (its
-	/// root `archive` entry): without one there is nothing to render playlists from, so the
-	/// whole catalog is skipped with a warning.
+	/// Renditions are only servable when the catalog advertises its timelines (its root `archive`
+	/// entry): without one there is nothing to render playlists from, so the whole catalog is
+	/// skipped with a warning.
 	///
 	/// `upstream` carries the broadcast the snapshot was read from, so each rendition serves media
 	/// from that same broadcast rather than whatever is at the path by the time it is asked. A

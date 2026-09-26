@@ -17,16 +17,21 @@ moq --connect https://relay.example.com/anon --broadcast my-stream.hang export h
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang import hls https://example.com/live/master.m3u8
 ```
 
-Export never subscribes to media. It reads the broadcast's
-[timeline track](/concept/hang#catalog), a log of complete segments aligned
-across every rendition, to build playlists, then fetches exactly the groups a
-requested segment covers from the relay's cache and transmuxes them to CMAF on
-demand. So a segment is servable for as long as the relay's
+Export never subscribes to media. It reads each rendition's
+[timeline track](/concept/hang#catalog), a small index of that rendition's
+groups, to build playlists, then fetches exactly the frames a requested segment
+covers from the relay's cache and transmuxes them to CMAF on demand. So a
+segment is servable for as long as the relay's
 [cache](/bin/relay/config#cache) retains it, and idle renditions cost nothing.
-Because segments are aligned, the same number names the same span of content in
-every media playlist; a record with nothing for a rendition renders as
-`EXT-X-GAP` and a jump in content time as `EXT-X-DISCONTINUITY`. A broadcast
-whose catalog advertises no timeline is skipped. One server exposes every
+Segment boundaries come from one reference rendition (the first video
+rendition by name, or the first audio one without video) and are numbered by
+its records, so every edge and every reload agree. Every other video rendition
+snaps each boundary to its nearest keyframe within about a second, and a
+segment with none in range renders as `EXT-X-GAP`; audio takes every frame
+inside the segment's span. A jump in content time renders as
+`EXT-X-DISCONTINUITY`. Gaps are a fallback: a publisher wanting clean HLS
+export should align video GOPs across renditions. A broadcast
+whose catalog advertises no timelines is skipped. One server exposes every
 broadcast by path:
 
 ```text
@@ -40,12 +45,12 @@ broadcast by path:
 
 A [`moq-archive`](https://docs.rs/moq-archive) recording replayed through its
 `Reader` is served the same way, with no second stored copy. Playlists come
-from the replayed timeline alone, and a segment GETs exactly one stored object
-of its rendition, so switching renditions never downloads both. An
+from the replayed timelines alone, and a segment GETs only its rendition's
+stored objects, so switching renditions never downloads both. An
 inline-parameter-set codec with no catalog `description` is the exception:
 the first playlist render GETs one keyframe group to build the init segment,
 then caches it. Out-of-band configs need no media GET. When the catalog's
-`archive` entry names a `store` and no `replay` path, its ranges are durable on
+`archive` entry names a `store` and no `replay` path, its spans are durable on
 this broadcast, so the playlists list the whole retained timeline and only the
 recording's own retention trims them; DASH `timeShiftBufferDepth` is the listed
 span. The playlist ends with `EXT-X-ENDLIST` only once the reader's caller

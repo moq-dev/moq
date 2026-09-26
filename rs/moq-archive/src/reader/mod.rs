@@ -341,12 +341,16 @@ async fn serve_group<T: ObjectStore>(
 		request.reject(moq_net::Error::NotFound);
 		return;
 	}
-	// Validate the first object before accepting, so an unreadable group is a plain miss.
-	if let Err(err) = object(&shared, &track, &spans[0]).await {
-		tracing::warn!(track, sequence, %err, "archived group is unavailable");
-		request.reject(moq_net::Error::NotFound);
-		return;
-	}
+	// Validate the first object before accepting, so an unreadable group is a plain miss. Keep it,
+	// so a cache too small to hold it costs no second GET.
+	let mut first = match object(&shared, &track, &spans[0]).await {
+		Ok(object) => Some((spans[0].sequence, object)),
+		Err(err) => {
+			tracing::warn!(track, sequence, %err, "archived group is unavailable");
+			request.reject(moq_net::Error::NotFound);
+			return;
+		}
+	};
 	let Ok(mut producer) = request.accept(None) else {
 		return;
 	};
@@ -360,7 +364,11 @@ async fn serve_group<T: ObjectStore>(
 			if span.end <= Position::new(sequence, next) {
 				continue;
 			}
-			let object = match object(&shared, &track, span).await {
+			let loaded = match first.take_if(|(loaded, _)| *loaded == span.sequence) {
+				Some((_, object)) => Ok(object),
+				None => object(&shared, &track, span).await,
+			};
+			let object = match loaded {
 				Ok(object) if span.start <= Position::new(sequence, next) => object,
 				Ok(_) => {
 					let _ = producer.abort(moq_net::Error::NotFound);

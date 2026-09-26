@@ -478,8 +478,8 @@ impl Timelines {
 	/// Enroll the media track `name`, cut by the configured durations.
 	///
 	/// Creates its timeline track, named by [`hang::timeline::default_name`], on first enrollment.
-	/// Enrolling a name again continues its timeline. Errors when the timeline track name is taken
-	/// or the timelines finished.
+	/// Enrolling a name again continues its timeline's numbering for a new producer. Errors when
+	/// the timeline track name is taken or the timelines finished.
 	pub fn track(&self, name: &str) -> crate::Result<Recorder> {
 		self.enroll(name, self.config.clone())
 	}
@@ -494,8 +494,16 @@ impl Timelines {
 		if registry.finished {
 			return Err(moq_net::Error::Closed.into());
 		}
-		if let Some((_, live)) = registry.tracks.get(name) {
-			return Ok(Recorder { live: live.clone() });
+		if let Some((_, existing)) = registry.tracks.get(name) {
+			// A re-enrolled track is a new producer whose group sequences may restart, so it gets a
+			// fresh segmenter continuing the record numbering.
+			let mut live = existing.lock().unwrap();
+			live.segmenter.flush();
+			live.publish();
+			let sequence = live.segmenter.sequence();
+			live.segmenter = Segmenter::new(config).with_sequence(sequence);
+			drop(live);
+			return Ok(Recorder { live: existing.clone() });
 		}
 
 		let timeline = hang::timeline::default_name(name);
@@ -982,7 +990,8 @@ mod test {
 		first.frame(at(0), ms(0), true);
 		drop(first);
 		let mut second = timelines.track("video0").unwrap();
-		second.frame(at(1), ms(2_000), true);
+		// The new producer restarts its group sequences.
+		second.frame(at(0), ms(2_000), true);
 		drop(second);
 		timelines.finish();
 

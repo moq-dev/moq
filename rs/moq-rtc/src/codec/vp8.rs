@@ -67,7 +67,7 @@ mod tests {
 	async fn importer_creation_failure_preserves_abort_error() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let _collision = broadcast.create_track(hang::timeline::DEFAULT_NAME, None).unwrap();
+		let _collision = broadcast.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None).unwrap();
 		let consumer = broadcast.consume();
 		let mut bridge = super::Bridge::new(broadcast, catalog).unwrap();
 		let mut track = consumer.track("0.vp8").unwrap().subscribe(None).await.unwrap();

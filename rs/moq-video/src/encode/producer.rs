@@ -1181,7 +1181,7 @@ mod tests {
 				.await
 		}
 
-		/// A recording replays what the live edge published: the archive's segment records
+		/// A recording replays what the live edge published: the archive's records
 		/// carry the live timestamps across an idle restart, with the idle gap left in.
 		#[tokio::test]
 		async fn retained_archive_playback_keeps_the_live_timestamps() {
@@ -1193,7 +1193,7 @@ mod tests {
 						.snapshot()
 						.archive
 						.expect("the video track enrolls an archive");
-					let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section)
+					let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section, "video")
 						.await
 						.unwrap();
 
@@ -1207,12 +1207,12 @@ mod tests {
 						fixture.assert_acquired(published, captured);
 						live.push(published);
 						drop(track);
-						// Idle past the minimum segment, so each run is archived as its own segment.
+						// Idle past the minimum segment, so each run is archived as its own record.
 						tokio::time::sleep(moq_mux::timeline::DEFAULT_DURATION_MIN + Duration::from_millis(100)).await;
 					}
 
 					let (catalog, _consumer) = fixture.finish().await;
-					catalog.timeline().finish().unwrap();
+					catalog.timeline().finish();
 					let mut archived = Vec::new();
 					while let Some(event) = timeline.next().await.unwrap() {
 						match event {
@@ -1221,16 +1221,15 @@ mod tests {
 						}
 					}
 
-					assert_eq!(archived.len(), live.len(), "one segment per capture run: {archived:?}");
+					assert_eq!(archived.len(), live.len(), "one record per capture run: {archived:?}");
 					for (entry, live) in archived.iter().zip(&live) {
 						// The archive keeps millisecond precision.
 						assert_eq!(entry.pts.as_micros() / 1000, u128::from(*live / 1000), "{archived:?}");
-						assert!(entry.tracks.contains_key("video"), "{archived:?}");
 					}
 					let first = &archived[0];
 					assert!(
 						archived[1].pts.as_micros() >= first.pts.as_micros() + first.duration.as_micros(),
-						"the resumed segment overlaps the one before it: {archived:?}"
+						"the resumed record overlaps the one before it: {archived:?}"
 					);
 				})
 				.await

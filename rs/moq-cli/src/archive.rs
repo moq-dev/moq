@@ -24,7 +24,7 @@ pub struct ExportArgs {
 	/// Where to record: `file:///dir`, `s3://bucket/prefix`, `gs://bucket/prefix`, or `az://container/prefix`.
 	pub store: Url,
 
-	/// Keep only this much recent content (a DVR), deleting older segments. Unset keeps everything.
+	/// Keep only this much recent content (a DVR), deleting older records. Unset keeps everything.
 	#[usage(long)]
 	pub retention: Option<crate::duration::Duration>,
 
@@ -49,8 +49,8 @@ pub struct ImportArgs {
 
 /// Record the broadcast `name` into `args.store` until the broadcast ends.
 ///
-/// Reads the broadcast's own catalog: video and audio renditions pace the segments, while the
-/// catalog and every other track are recorded alongside without pacing.
+/// Reads the broadcast's own catalog: every track gets its own timeline, video and audio renditions
+/// cut by duration, while the catalog and every other track record each group as it finishes.
 pub async fn export(
 	origin: moq_net::origin::Consumer,
 	name: String,
@@ -77,7 +77,7 @@ pub async fn export(
 		.await
 		.with_context(|| format!("failed to start recording into {}", args.store))?;
 	let control = writer.control();
-	control.track(catalog_track).await?;
+	control.sparse(catalog_track).await?;
 	let catalog = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await?;
 
 	tracing::info!(%name, store = %args.store, "recording");
@@ -92,11 +92,16 @@ pub async fn export(
 
 /// Republish the recording at `args.store` as the broadcast `name`.
 ///
-/// The timeline replays as a live track and every other track's groups are served on request.
+/// Each track's timeline replays as a live track and every other track's groups are served on
+/// request.
 pub async fn import(origin: moq_net::origin::Producer, name: String, args: ImportArgs) -> anyhow::Result<()> {
 	let store = open(&args.store)?;
 	let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-	let config = moq_archive::reader::Config::new(hang::timeline::DEFAULT_NAME);
+	let timelines = store
+		.timelines()
+		.await
+		.with_context(|| format!("failed to list the recording at {}", args.store))?;
+	let config = moq_archive::reader::Config::new(timelines);
 	let mut reader = moq_archive::Reader::open(store, &broadcast, config)
 		.await
 		.with_context(|| format!("no readable recording at {}", args.store))?;
@@ -154,14 +159,10 @@ async fn enroll<S: ObjectStore>(
 ) -> anyhow::Result<()> {
 	let mut tracks = Tracks::default();
 	while let Some(snapshot) = catalog.next().await? {
-		// One rendition's subscription can outrun the rest of this snapshot. Without the
-		// hold, the writer closes a segment from that rendition alone and the others never
-		// enter the record.
-		let _hold = control.reserve();
 		for change in tracks.update(&snapshot)? {
 			match change {
-				Change::Pacing(name) => control.pacing_track(&name).await?,
-				Change::Track(name) => control.track(&name).await?,
+				Change::Media(name) => control.track(&name).await?,
+				Change::Sparse(name) => control.sparse(&name).await?,
 				Change::Remove(name) => control.remove(&name)?,
 			}
 		}
@@ -172,10 +173,10 @@ async fn enroll<S: ObjectStore>(
 /// A change to the recorded track set.
 #[derive(Debug, PartialEq, Eq)]
 enum Change {
-	/// Record a rendition that paces the segments.
-	Pacing(String),
-	/// Record a track without letting it pace the segments.
-	Track(String),
+	/// Record a rendition, its records cut by duration.
+	Media(String),
+	/// Record a data track, each group its own record.
+	Sparse(String),
 	/// Stop recording a track the catalog dropped.
 	Remove(String),
 }
@@ -219,7 +220,7 @@ impl Tracks {
 
 		let mut listed = HashSet::new();
 		let mut changes = Vec::new();
-		for (name, broadcast, pacing) in video.chain(audio).chain(text).chain(json).chain(binary) {
+		for (name, broadcast, media) in video.chain(audio).chain(text).chain(json).chain(binary) {
 			if let Some(broadcast) = broadcast {
 				anyhow::bail!(
 					"track `{name}` is served from broadcast `{broadcast}`; an archive records one broadcast"
@@ -232,9 +233,9 @@ impl Tracks {
 				self.enrolled.insert(name.clone()),
 				"track `{name}` returned to the catalog after it was dropped; the recording cannot resume it"
 			);
-			changes.push(match pacing {
-				true => Change::Pacing(name.clone()),
-				false => Change::Track(name.clone()),
+			changes.push(match media {
+				true => Change::Media(name.clone()),
+				false => Change::Sparse(name.clone()),
 			});
 		}
 
@@ -257,9 +258,9 @@ mod tests {
 		AudioConfig::new(AudioCodec::Opus, 48_000, 2)
 	}
 
-	/// Renditions pace, data tracks don't, and a later snapshot only adds what is new.
+	/// Renditions are media, data tracks are sparse, and a later snapshot only adds what is new.
 	#[test]
-	fn renditions_pace_and_the_rest_follow() {
+	fn renditions_are_media_and_the_rest_sparse() {
 		let mut tracks = Tracks::default();
 		let mut catalog = hang::Catalog::default();
 		catalog.audio.renditions.insert("audio".into(), audio());
@@ -270,15 +271,15 @@ mod tests {
 
 		assert_eq!(
 			tracks.update(&catalog).unwrap(),
-			[Change::Pacing("audio".into()), Change::Track("chat".into())]
+			[Change::Media("audio".into()), Change::Sparse("chat".into())]
 		);
 
 		catalog.audio.renditions.insert("audio2".into(), audio());
-		assert_eq!(tracks.update(&catalog).unwrap(), [Change::Pacing("audio2".into())]);
+		assert_eq!(tracks.update(&catalog).unwrap(), [Change::Media("audio2".into())]);
 		assert_eq!(tracks.update(&catalog).unwrap(), []);
 	}
 
-	/// A dropped rendition stops pacing, and coming back is refused rather than silently lost.
+	/// A dropped rendition stops recording, and coming back is refused rather than silently lost.
 	#[test]
 	fn a_dropped_track_is_removed_for_good() {
 		let mut tracks = Tracks::default();
@@ -385,7 +386,7 @@ mod tests {
 		serving.abort();
 	}
 
-	/// Renditions already live in the opening catalog all land in its first segment.
+	/// Renditions already live in the opening catalog are all recorded from their first group.
 	///
 	/// Groups are published before export starts, so the writer can drain the first rendition
 	/// while the next subscription is still in flight.
@@ -446,29 +447,25 @@ mod tests {
 			.unwrap()
 			.expect("the recording succeeds");
 
+		// Each rendition's own timeline opens at its first group.
 		let store = super::open(&url).unwrap();
-		let object = store
-			.get_segments(hang::timeline::DEFAULT_NAME, 0)
-			.await
-			.expect("segment 0");
-		let config = moq_json::window::ConsumerConfig::default().with_compression(true);
-		let mut decoder = moq_json::window::Decoder::<hang::timeline::Record>::new(config);
-		for stored in object.groups {
-			let mut group = decoder.group();
-			for frame in stored.frames {
-				group.decode(&frame.payload).unwrap();
+		for track in ["audio", "audio2"] {
+			let object = store
+				.get_segments(&hang::timeline::default_name(track), 0)
+				.await
+				.expect("record 0");
+			let config = moq_json::window::ConsumerConfig::default().with_compression(true);
+			let mut decoder = moq_json::window::Decoder::<hang::timeline::Record>::new(config);
+			for stored in object.groups {
+				let mut group = decoder.group();
+				for frame in stored.frames {
+					group.decode(&frame.payload).unwrap();
+				}
 			}
+			let Some(moq_json::window::Event::Push { value, .. }) = decoder.next_event() else {
+				panic!("{track} record 0 is pushed first");
+			};
+			assert_eq!(value.start, hang::timeline::Position::group(0), "{track}");
 		}
-		let mut opening = None;
-		while let Some(event) = decoder.next_event() {
-			if let moq_json::window::Event::Push { value, .. } = event
-				&& value.segment == 0
-			{
-				opening = Some(value);
-			}
-		}
-		let opening = opening.expect("segment 0 has a record");
-		assert!(opening.tracks.contains_key("audio"), "{opening:?}");
-		assert!(opening.tracks.contains_key("audio2"), "{opening:?}");
 	}
 }
