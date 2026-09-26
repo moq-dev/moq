@@ -24,4 +24,5 @@ hand-written crate's artifacts under the same names.
 
 ## Required
 
+- [libmoq becomes moq-c](/quest/m1/moq-c.md) - the rename that frees the `moq-c` name and `moq::c` target this package takes over
 - [C backend](/quest/m1/c/backend.md) - the generator output this packages
