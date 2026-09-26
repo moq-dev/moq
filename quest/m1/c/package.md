@@ -12,6 +12,11 @@ hand-written crate's artifacts under the same names.
 - Mirror `cpp/moq`: CMake runs `cargo build -p moq-ffi`, then the generator's C
   backend, and installs the result; a probe test compiles and links from the
   installed package through both `find_package(moq-c)` and pkg-config.
+- The installed CMake config honors `CMAKE_INSTALL_LIBDIR`, so a `lib64`
+  distro gets a working `find_package`; the hand-written crate's config
+  hardcodes `<prefix>/lib`.
+- `doc/index.md` says the C library ships static and shared; say what the
+  package actually ships.
 - A release workflow and nightly/CI jobs follow the C++ package's, pinned to the
   fork tag that carries the C backend.
 - Every Cross-Package Sync row that names libmoq for moq-ffi changes points at
