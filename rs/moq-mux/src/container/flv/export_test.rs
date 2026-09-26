@@ -509,6 +509,9 @@ type Keepalive = (
 
 /// Build a broadcast with two H.264 video renditions plus one AAC audio rendition,
 /// each with a single keyframe, so multitrack export has several tracks to mux.
+///
+/// The first description's rendition is the smaller and sorts first by name, so
+/// name order alone would pick the wrong one.
 fn build_multitrack_broadcast() -> (moq_net::broadcast::Consumer, Vec<Vec<u8>>, Keepalive) {
 	use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
 	use moq_net::Timestamp;
@@ -523,7 +526,7 @@ fn build_multitrack_broadcast() -> (moq_net::broadcast::Consumer, Vec<Vec<u8>>, 
 	let mut tracks = Vec::new();
 
 	let descriptions: Vec<Vec<u8>> = vec![avcc_level(0x1f), avcc_level(0x1e)];
-	for description in &descriptions {
+	for (description, (width, height)) in descriptions.iter().zip([(640, 360), (1920, 1080)]) {
 		let track = producer.create_track(producer.unique_name(".avc1"), None).unwrap();
 		let mut config = VideoConfig::new(H264 {
 			profile: 0x42,
@@ -533,6 +536,8 @@ fn build_multitrack_broadcast() -> (moq_net::broadcast::Consumer, Vec<Vec<u8>>, 
 		});
 		config.container = Container::Legacy;
 		config.description = Some(Bytes::from(description.clone()));
+		config.coded_width = Some(width);
+		config.coded_height = Some(height);
 		catalog
 			.modify()
 			.unwrap()
@@ -605,8 +610,7 @@ async fn drain_to_end(mut exporter: Export, keepalive: Keepalive) -> Vec<u8> {
 }
 
 /// With multitrack enabled, every rendition is muxed as an enhanced-RTMP
-/// multitrack track and survives an export -> import round trip. Without it, only
-/// the first video rendition is muxed.
+/// multitrack track and survives an export -> import round trip.
 #[tokio::test(start_paused = true)]
 async fn export_multitrack_roundtrips_all_renditions() {
 	let (consumer, descriptions, keepalive) = build_multitrack_broadcast();
@@ -665,11 +669,11 @@ async fn export_multitrack_roundtrips_all_renditions() {
 	assert_eq!(got, want, "each rendition should keep its own avcC");
 }
 
-/// Without multitrack, a multi-rendition broadcast exports only the first video
-/// rendition (the single-track fallback for a legacy player).
+/// Without multitrack, a multi-rendition broadcast exports only the best video
+/// rendition (the single-track fallback for a legacy player), not the first by name.
 #[tokio::test(start_paused = true)]
-async fn export_without_multitrack_keeps_first_rendition() {
-	let (consumer, _, keepalive) = build_multitrack_broadcast();
+async fn export_without_multitrack_keeps_best_rendition() {
+	let (consumer, descriptions, keepalive) = build_multitrack_broadcast();
 
 	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
 	let exported = drain_to_end(exporter, keepalive).await;
@@ -688,11 +692,60 @@ async fn export_without_multitrack_keeps_first_rendition() {
 	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
 	imp2.finish().unwrap();
 
+	let snap = cat2.snapshot();
+	let renditions: Vec<_> = snap.video.renditions.values().collect();
+	assert_eq!(renditions.len(), 1, "only one rendition without multitrack");
 	assert_eq!(
-		cat2.snapshot().video.renditions.len(),
-		1,
-		"only one rendition without multitrack"
+		renditions[0].description.as_deref(),
+		Some(descriptions[1].as_slice()),
+		"the larger rendition wins"
 	);
+}
+
+/// A selection narrows what the export may carry, and a single-track export
+/// picks the best rendition among what remains.
+#[tokio::test(start_paused = true)]
+async fn export_picks_the_best_selected_rendition() {
+	use crate::catalog::Stream;
+
+	let (consumer, descriptions, keepalive) = build_multitrack_broadcast();
+
+	// Select only the smaller rendition, so the larger one is off the table.
+	let snapshot = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap()
+		.next()
+		.await
+		.unwrap()
+		.unwrap();
+	let small = snapshot
+		.video
+		.renditions
+		.iter()
+		.find(|(_, config)| config.coded_height == Some(360))
+		.map(|(name, _)| name.clone())
+		.unwrap();
+
+	let select = crate::select::Broadcast::default()
+		.video(crate::select::Video::default().name(small))
+		.audio(crate::select::Audio::default());
+	let exporter = Export::new(crate::source::announced(&consumer))
+		.await
+		.unwrap()
+		.with_select(select);
+	let exported = drain_to_end(exporter, keepalive).await;
+
+	let mut bcast2 = moq_net::broadcast::Info::new().produce();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2, crate::catalog::Config::default()).unwrap();
+	let mut imp2 = Import::new(bcast2, cat2.reserve());
+	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
+	imp2.finish().unwrap();
+
+	let snap = cat2.snapshot();
+	let renditions: Vec<_> = snap.video.renditions.values().collect();
+	assert_eq!(renditions.len(), 1);
+	assert_eq!(renditions[0].description.as_deref(), Some(descriptions[0].as_slice()));
+	assert_eq!(snap.audio.renditions.len(), 1, "audio is selected too");
 }
 
 struct ParsedTag {
