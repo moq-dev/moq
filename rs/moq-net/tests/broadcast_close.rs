@@ -63,7 +63,7 @@ async fn close_ends_a_remote_consumer() {
 		let publisher = produce_origin(1);
 		let subscriber = produce_origin(2);
 		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
-		options.server_publish = Some(publisher.clone());
+		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(subscriber.clone());
 		let _pair = connect_mock(options).await;
 
