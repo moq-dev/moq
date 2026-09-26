@@ -263,7 +263,8 @@ export class Connection {
 	/**
 	 * Subscribe to broadcast announcements matching `scope`, spanning reconnects
 	 * and URL switches: a switch retracts everything from
-	 * the old relay's origin, then the new one's arrivals stream in.
+	 * the old relay's origin, then the new one's arrivals stream in. The `live` marker
+	 * comes once, from the first origin; see {@link Origin.Consumer.announced}.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
 		const producer = new Announce.Producer();
@@ -288,15 +289,16 @@ export class Connection {
 
 			// Track what this origin announced so a URL switch retracts it; the last
 			// event rides along for the retraction.
-			const active = new Map<Path.Valid, Announce.Update>();
+			const active = new Map<Path.Valid, Announce.Announce>();
 
 			effect.spawn(async () => {
 				try {
 					for (;;) {
 						const entry = await effect.race(upstream.next());
 						if (!entry) break;
-						if (Announce.isActive(entry.kind)) active.set(entry.prefix, entry);
-						else active.delete(entry.prefix);
+						if (entry.kind === "retracted") active.delete(entry.prefix);
+						else if (entry.kind !== "live") active.set(entry.prefix, entry);
+						// The stream delivers the marker once; a later session's is dropped.
 						producer.append(entry);
 					}
 				} finally {

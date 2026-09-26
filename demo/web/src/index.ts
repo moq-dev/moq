@@ -176,8 +176,8 @@ function createTile(name: string): WatchTile {
 // ---------------------------------------------------------------------------
 //
 // Subscribe to announcements under the prefix and keep a live set of active broadcasts.
-// `announced.next()` drains the update stream, so we track membership ourselves: active=true adds the
-// path, active=false removes it. `Connection.announced()` spans reconnects (it retracts everything on
+// `announced.next()` drains the event stream, so we track membership ourselves: an announcement adds the
+// path, a retraction removes it. `Connection.announced()` spans reconnects (it retracts everything on
 // disconnect and re-announces on reconnect), so the set self-heals without any extra wiring here.
 const discovery = new Signals.Effect();
 discovery.run((effect) => {
@@ -190,12 +190,13 @@ discovery.run((effect) => {
 		for (;;) {
 			const entry = await Promise.race([effect.cancel, announced.next()]);
 			if (!entry) break;
+			if (entry.kind === "live") continue;
 			const path = entry.prefix;
 			// Only catalog-backed broadcasts are watchable streams; this skips the relay's
 			// `.stats` broadcast (see the stats dashboard demo for that one).
 			if (!path.endsWith(".hang") && !path.endsWith(".msf")) continue;
-			if (Net.Announce.isActive(entry.kind)) live.add(path);
-			else live.delete(path);
+			if (entry.kind === "retracted") live.delete(path);
+			else live.add(path);
 			broadcasts.set([...live].sort());
 		}
 	});

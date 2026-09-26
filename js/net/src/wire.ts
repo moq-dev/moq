@@ -31,6 +31,8 @@ export interface OriginProducer {
 	): origin.Dynamic;
 	attach(discovery: boolean): Dispose;
 	expect(): Dispose;
+	/** Hold the live marker of announcement streams opened now, until the peer's initial set lands. */
+	replaying(): Dispose;
 	readonly requests: Getter<ReadonlyMap<Path.Valid, origin.RequestSlot> | undefined>;
 	changed(): GetPromise<unknown>;
 	answer(path: Path.Valid, front: broadcast.Consumer): Dispose | undefined;

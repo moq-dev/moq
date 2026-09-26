@@ -100,11 +100,14 @@ Three operations, on an origin:
   route is always a prefix on every wire.
 
 A route is a capability, not an inventory. `origin.announced(scope)` yields
-`Announce.Update` values: `prefix` is the covered prefix relative to the origin,
-`captures` is one pattern per scope wildcard when the prefix pins a complete
-match (otherwise `undefined`), `kind` is `"announced"`, `"updated"` (a
-reprice in place), or `"retracted"`, and `route` carries hops and cost (on a
-retraction, its last values). The consumer is an async iterable. A prefix is
+`Announce.Event` values. `kind` is `"announced"`, `"updated"` (a reprice in
+place), or `"retracted"`, each also carrying an `Announce.Announce`: `prefix`
+is the covered prefix relative to the origin, `captures` is one pattern per
+scope wildcard when the prefix pins a complete match (otherwise `undefined`),
+and `route` carries hops and cost (on a retraction, its last values). A single
+`{ kind: "live" }` follows the routes live at subscribe time, including every
+route a connected peer was still sending, so a caller listing what is live
+stops there. The consumer is an async iterable. A prefix is
 not a broadcast name; the scope filters locally while sessions request its
 literal head on the wire. Paths with a `.`-prefixed segment below that head
 are [hidden](/concept/moq-lite#hidden-broadcasts) unless `announced(scope, { hidden: true })` opts in;

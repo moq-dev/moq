@@ -188,3 +188,52 @@ test("a request replaced across one coalesced wakeup still gets answered", async
 	second.close();
 	origin.close();
 });
+
+/** Whether `next` is still waiting once everything queued has run. */
+async function pending(next: Promise<unknown>): Promise<boolean> {
+	const waiting = Symbol("waiting");
+	const result = await Promise.race([next, settle().then(() => waiting)]);
+	return result === waiting;
+}
+
+test("the origin's live marker waits for the session's initial set", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	forwardAnnounced(session.session, origin);
+
+	const announced = origin.announced();
+	session.announces.append({ prefix: Path.from("a"), captures: undefined, kind: "announced", route: Route.default });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("a"), kind: "announced" });
+
+	// The peer has not said its initial set is complete.
+	const next = announced.next();
+	expect(await pending(next)).toBe(true);
+
+	session.announces.append({ kind: "live" });
+	expect(await next).toEqual({ kind: "live" });
+
+	// A stream opened after the set landed does not wait on it.
+	const later = origin.announced();
+	expect(await later.next()).toMatchObject({ prefix: Path.from("a"), kind: "announced" });
+	expect(await later.next()).toEqual({ kind: "live" });
+
+	announced.close();
+	later.close();
+	origin.close();
+});
+
+test("a session dying before its initial set lands releases the marker", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	forwardAnnounced(session.session, origin);
+
+	const announced = origin.announced();
+	const next = announced.next();
+	expect(await pending(next)).toBe(true);
+
+	session.die();
+	expect(await next).toEqual({ kind: "live" });
+
+	announced.close();
+	origin.close();
+});

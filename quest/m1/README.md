@@ -31,7 +31,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Relay peer set](/quest/m1/relay-peer-set.md) - a wire consumer tells a client hop from a peer hop, and every mesh credential can mark a peer
 - [JS origin scope](/quest/m1/js-origin-scope.md) - a scoped `@moq/net` origin subscribes only to its allowed prefixes
 - [Session close](/quest/m1/session-close.md) - a graceful session end withdraws announces and waits one second for the ack
-- [JS caught up](/quest/m1/js-announce-caught-up.md) - @moq/net's announce consumer says when the initial set has landed, like Rust
 - [Bindings caught up](/quest/m1/announce-live-bindings.md) - moq-ffi, libmoq, and every wrapper yield the same flat announce event, `Live` included
 - [IETF announce count](/quest/m1/ietf-announce-count.md) - an opt-in moq-transport extension carries the replay count, so IETF announce consumers go live without a timer
 

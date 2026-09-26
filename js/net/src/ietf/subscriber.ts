@@ -303,6 +303,10 @@ export class Subscriber {
 		// reference nobody is left to release, pinning the path for the session.
 		let released = false;
 
+		// Nothing on this wire says where the initial set ends, so it has landed once the
+		// stream goes quiet.
+		let quiet: announce.Quiet | undefined;
+
 		// v14/v15: SubscribeNamespace on control stream (via adapter virtual stream)
 		// v16+: SubscribeNamespace on its own real bidi stream
 
@@ -351,6 +355,10 @@ export class Subscriber {
 					throw new Error(`SubscribeNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
 				}
 
+				quiet = new announce.Quiet(() => {
+					if (announced.closed.peek() === undefined) announced.append({ kind: "live" });
+				});
+
 				// Loop reading Namespace/NamespaceDone entries
 				const readLoop = (async () => {
 					for (;;) {
@@ -358,6 +366,7 @@ export class Subscriber {
 						if (done) break;
 
 						const msgType = await stream.reader.u53();
+						quiet?.heard();
 						if (msgType === SubscribeNamespaceEntry.id) {
 							const entry = await SubscribeNamespaceEntry.decode(
 								stream.reader,
@@ -453,6 +462,7 @@ export class Subscriber {
 			// each namespace keeps its count and the source never detaches, which would
 			// pin the path for the session even after the other source withdrew.
 			released = true;
+			quiet?.close();
 			for (const path of live) {
 				this.#detachAnnounce(path);
 			}
