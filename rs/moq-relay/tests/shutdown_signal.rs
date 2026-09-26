@@ -143,7 +143,10 @@ async fn an_embedder_owns_the_signals_inner() {
 	let mut interrupt =
 		tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).expect("register SIGINT");
 
-	let relay = Relay::load(relay_config()).await.expect("load relay").with_signals(false);
+	let relay = Relay::load(relay_config())
+		.await
+		.expect("load relay")
+		.with_signals(false);
 	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let trigger = relay.shutdown_trigger().clone();
 	let run = tokio::spawn(relay.run());
@@ -193,7 +196,10 @@ async fn an_embedder_owns_the_signals_inner() {
 async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let relay = Relay::load(relay_config()).await.expect("load relay").with_signals(false);
+	let relay = Relay::load(relay_config())
+		.await
+		.expect("load relay")
+		.with_signals(false);
 	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let trigger = relay.shutdown_trigger().clone();
 	let run = tokio::spawn(relay.run());
@@ -281,7 +287,10 @@ async fn a_drain_ends_once_every_session_leaves_inner() {
 async fn a_trigger_before_run_keeps_the_deadline_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let relay = Relay::load(relay_config()).await.expect("load relay").with_signals(false);
+	let relay = Relay::load(relay_config())
+		.await
+		.expect("load relay")
+		.with_signals(false);
 	let trigger = relay.shutdown_trigger().clone();
 
 	// Fired while `run` is still starting. The session deadline is this instant;

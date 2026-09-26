@@ -279,7 +279,10 @@ async fn uring_workers_drain_on_the_trigger() {
 	// drain with nothing counted ends at once.
 	let deadline = std::time::Instant::now() + TIMEOUT;
 	while sessions.list(&Default::default()).len() < 2 {
-		assert!(std::time::Instant::now() < deadline, "the relay never listed both sessions");
+		assert!(
+			std::time::Instant::now() < deadline,
+			"the relay never listed both sessions"
+		);
 		tokio::time::sleep(Duration::from_millis(25)).await;
 	}
 	trigger.start();
