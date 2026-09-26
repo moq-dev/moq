@@ -29,5 +29,4 @@ every covered broadcast. This comes from reading the code, not from a test.
 
 ## Related
 
-- [Announce counters](/quest/m0/announce-counters.md) - shows the saving on a live fleet
-- [Babel routing](/quest/m0/babel/README.md) - removes the other big source of updates, reroutes that change only the hop chain
+- [Cluster routing](/quest/m1/cluster-routing.md) - removes the other big source of updates, reroutes that change only the hop chain
