@@ -17,8 +17,9 @@ layout links a stale library or fails to find one.
   the shared workspace cache, and over `cargo metadata`, which still guesses
   the triple and profile subdirectories.
 - The `BUILD_RUST_LIB=OFF` prebuilt path is unchanged.
-- Verify by building `cpp/obs` against `MOQ_LOCAL` with `CARGO_TARGET_DIR`
-  set elsewhere. Update `rs/libmoq/README.md` and `doc/lib/c` if they describe
+- Regression test in CI: the existing `cpp/obs` build against `MOQ_LOCAL`
+  runs with `CARGO_TARGET_DIR` outside `target/`, so a hardcoded path fails
+  the build. Update `rs/libmoq/README.md` and `doc/lib/c` if they describe
   the path.
 
 ## Related
