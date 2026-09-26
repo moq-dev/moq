@@ -39,4 +39,3 @@ New work joins the milestone matching its priority, at its rank; a questline gro
 
 When done, commit and create a draft PR following `CONTRIBUTING.md`.
 After local checks pass, run `/merge` on it.
-Address one review round, then stop and report if the next review still has findings.
