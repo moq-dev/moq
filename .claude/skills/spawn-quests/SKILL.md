@@ -26,11 +26,8 @@ Each agent blocks on its own checks and reports back only when done or blocked.
 Limit the concurrency to at most N agents in parallel, where N is half the number of physical CPU cores.
 Other sessions share this machine: hold new agents while the load average exceeds the core count.
 
-Each agent opens its PR as a draft, lists every open decision in its report with a recommendation, and never marks it ready itself.
 Report each sub-agent's final status, staying silent on interim notifications, but do not monitor their PRs.
-
-As each agent reports, follow /decisions without waiting for the rest, offering its follow-ups to /plan-quests.
-Resume the owning agent with each answer, and mark its PR ready yourself once all of its decisions are resolved.
+Prompt the user if they want to /plan-quests for any suggested follow-ups.
 
 Run /plan-quests for any selected quests in the foreground.
 Perform any research and monitoring in the background.

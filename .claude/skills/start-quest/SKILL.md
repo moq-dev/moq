@@ -17,5 +17,6 @@ Implement the quest until it is complete, or some blocker is hit, then create a 
 Keep scratch files (PR body, logs, notes) in the worktree's gitignored `.scratch/`.
 Never write to or clean up a directory other agents share, such as a session scratchpad.
 
-When done, summarize any issues encountered and follow /decisions, offering follow-ups to /plan-quests.
-Keep the PR a draft until the user has confirmed every decision, then mark it ready for review.
+When done, summarize any issues encounted, and suggest potential follow-up.
+If you're happy with the outcome, switch the draft PR to ready for review.
+If you want another set of eyes on it, keep it a draft.
