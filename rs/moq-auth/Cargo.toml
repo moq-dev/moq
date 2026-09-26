@@ -12,9 +12,9 @@ rust-version.workspace = true
 [features]
 default = ["client"]
 # The HTTP client that drives a lease against an auth server.
-client = ["dep:reqwest", "dep:rustls", "dep:tokio", "dep:tracing", "dep:rand"]
+client = ["dep:reqwest", "dep:rustls", "tokio", "dep:tracing", "dep:rand"]
 # The reference auth server behind `moq auth serve`: the policy a relay held, on axum.
-serve = ["dep:axum", "dep:tokio", "dep:tracing", "tokio/net"]
+serve = ["dep:axum", "tokio", "dep:tracing", "tokio/net"]
 tokio = ["dep:tokio"]
 
 [dependencies]
