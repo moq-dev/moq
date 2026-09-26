@@ -1,4 +1,4 @@
-use crate::{broadcast, cache, stats, track};
+use crate::{broadcast, cache, group, stats, track};
 use kio::Task;
 use std::{
 	cmp::Reverse,
@@ -1815,6 +1815,9 @@ const TRACK_IDLE_LINGER: Duration = Duration::from_secs(30);
 struct WarmCopy {
 	track: track::Producer,
 	_dynamic: track::Dynamic,
+	/// The newest group, where the copy spliced after this one picks up (see
+	/// [`TrackIo::head`]).
+	edge: Option<WarmGroup>,
 }
 
 impl Drop for WarmCopy {
@@ -1823,23 +1826,140 @@ impl Drop for WarmCopy {
 	}
 }
 
-/// Cache `source`'s finished groups on a new local track the origin owns.
-fn warm_copy(source: &track::Consumer) -> Option<WarmCopy> {
+/// A warm copy's newest group, which the copy spliced after it continues.
+///
+/// Kept past that splice: an open one must stay open for the continuation (dropping
+/// an unfinished producer clears its frames), and either kind supplies the head the
+/// continuation lacks when the next park rebuilds the group. Nothing will ever finish
+/// an open one, so it aborts on drop.
+struct WarmGroup(group::Producer);
+
+impl Drop for WarmGroup {
+	fn drop(&mut self) {
+		if !self.0.is_finished() {
+			let _ = self.0.clone().abort(Error::Cancel);
+		}
+	}
+}
+
+/// Cache what `source` delivered on a new local track the origin owns: its complete
+/// groups, and its open live edge rebuilt from the frames already delivered.
+///
+/// `head` is the previous park's edge. A copy spliced after a warm cache continues its
+/// edge group from the next frame, so its copy of that group lacks the head, which
+/// `head` supplies.
+fn warm_copy(source: &track::Consumer, head: Option<&WarmGroup>) -> Option<WarmCopy> {
 	let info = source.cached_info()?;
 	let mut track = track::Producer::new(Arc::new(source.broadcast().clone()), source.name(), info);
-	for (group, visible) in source.cached_groups() {
-		// An open group is left for the re-splice to deliver whole. Dropping the source
-		// copy resets it mid-transfer, and its dead head would anchor the next takeover
-		// mid-group, asking upstream for a tail no returning reader can use.
-		if group.is_finished() {
-			let _ = track.adopt_group(group, visible);
+	let head = head.map(|head| &head.0);
+	let groups = source.cached_groups();
+	// Not `source.latest()`: datagrams share the sequence counter and can run past it.
+	let latest = groups
+		.iter()
+		.filter(|(_, visible)| *visible)
+		.map(|(group, _)| group.sequence)
+		.max();
+	let mut edge = None;
+
+	// A spliced copy hides the group it continued (its halves sit in two segments), so
+	// carry the previous edge over when the copy has no version of it at all. First,
+	// since it arrived before anything the copy holds.
+	if let Some(head) = head
+		&& !groups.iter().any(|(group, _)| group.sequence == head.sequence)
+	{
+		let is_latest = latest.is_none_or(|latest| head.sequence >= latest);
+		if head.is_finished() {
+			let _ = track.adopt_group(head.clone(), true);
+			if is_latest {
+				edge = Some(WarmGroup(head.clone()));
+			}
+		} else if is_latest {
+			edge = warm_rebuild(&track, head, None);
+		}
+	}
+
+	for (group, visible) in groups {
+		let finished = group.is_finished();
+		let whole = group.live_first_frame() == Some(0);
+		let is_latest = visible && Some(group.sequence) == latest;
+		let warm = if finished && whole {
+			let _ = track.adopt_group(group.clone(), visible);
+			Some(WarmGroup(group))
+		} else if (finished || is_latest) && (whole || head.is_some_and(|head| head.sequence == group.sequence)) {
+			// Dropping the source copy resets an open live edge mid-transfer, so rebuild
+			// it from the frames already delivered: the re-splice asks for the next
+			// frame, and a group that stays open for good (a JSON log in group 0)
+			// continues instead of being re-sent whole on every resume. A continuation
+			// is rebuilt whole from the previous edge's head the same way.
+			warm_rebuild(&track, &group, head)
+		} else {
+			// Mid-transfer backlog, or a continuation with no head to complete it.
+			None
+		};
+		if is_latest {
+			edge = warm;
 		}
 	}
 	let dynamic = track.dynamic();
 	Some(WarmCopy {
 		track,
 		_dynamic: dynamic,
+		edge,
 	})
+}
+
+/// Rebuild `live` on `track` from its delivered frames, prefixed by `head`'s when `live`
+/// only holds a continuation of it. Finished like `live`, or left open.
+fn warm_rebuild(track: &track::Producer, live: &group::Producer, head: Option<&group::Producer>) -> Option<WarmGroup> {
+	// A continuation holds nothing below its offset.
+	let mut start = live.live_first_frame()? as u64;
+	let mut tail = live.consume();
+	tail.start_at(start);
+	let mut frames = Vec::new();
+	if start > 0
+		&& let Some(head) = head.filter(|head| head.sequence == live.sequence)
+		&& let Some(head_start) = head.live_first_frame()
+	{
+		let mut head = head.consume();
+		head.start_at(head_start as u64);
+		while head.index() < start {
+			match head.poll_read_frame(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(frame))) => frames.push(frame),
+				_ => break,
+			}
+		}
+		match head.index() == start {
+			true => start = head_start as u64,
+			// The head doesn't reach the continuation: keep only the continuation.
+			false => frames.clear(),
+		}
+	}
+	while let Poll::Ready(Ok(Some(frame))) = tail.poll_read_frame(&kio::Waiter::noop()) {
+		frames.push(frame);
+	}
+	if frames.is_empty() {
+		return None;
+	}
+
+	// Wrapped first, so a failed write aborts it rather than dropping it unfinished.
+	let rebuilt = WarmGroup(
+		track
+			.create_group(group::Info {
+				sequence: live.sequence,
+			})
+			.ok()?,
+	);
+	let mut writer = rebuilt.0.clone();
+	if start > 0 {
+		writer.start_at(start).ok()?;
+	}
+	for frame in frames {
+		writer.write_frame(frame.timestamp, frame.payload).ok()?;
+	}
+	if live.is_finished() {
+		writer.finish().ok()?;
+	}
+	Some(rebuilt)
 }
 
 /// Everything [`run_front`] owns, queued by [`Consumer::request_broadcast`].
@@ -1879,6 +1999,9 @@ struct TrackIo {
 	/// Delivered groups kept after the copy was dropped, so resume stays spliced
 	/// through the linger without pinning the source as a reader.
 	warm: Option<WarmCopy>,
+	/// The last warm copy's newest group, outliving it so the copy spliced after it
+	/// can continue the group (see [`WarmGroup`]). Released at the next park.
+	head: Option<WarmGroup>,
 	/// Whether the track had a reader as of the last demand edge.
 	used: bool,
 }
@@ -2106,7 +2229,7 @@ async fn run_front(task: FrontTask) {
 							tracks.remove(&name);
 							continue;
 						}
-						io.warm = None;
+						io.head = io.warm.take().and_then(|mut warm| warm.edge.take());
 						// The new segment has produced nothing yet: this is the
 						// edge the copy is asked to advance.
 						io.edge = io.resume.resume_position();
@@ -2118,24 +2241,25 @@ async fn run_front(task: FrontTask) {
 						// Drop the source copy so its producer goes idle at once; keep
 						// the groups it delivered on a local track so resume stays
 						// spliced until the linger expires.
-						let warm = warm_copy(&copy);
+						let warm = warm_copy(&copy, io.head.as_ref());
 						drop(copy);
-						if io.resume.release().is_err() {
+						io.head = None;
+						let parked = match &warm {
+							Some(warm) => io.resume.park(&warm.track),
+							None => io.resume.release(),
+						};
+						if parked.is_err() {
 							tracks.remove(&name);
 							continue;
 						}
-						if let Some(warm) = warm {
-							if let Err(err) = io.resume.takeover(&warm.track) {
-								let _ = io.resume.abort(err);
-								tracks.remove(&name);
-								continue;
-							}
-							io.warm = Some(warm);
-						}
+						io.warm = warm;
 					}
 					Action::Release { track: name } => {
 						let Some(io) = tracks.get_mut(&name) else { continue };
+						// A local source releases straight from the spliced copy.
+						io.copy = None;
 						io.warm = None;
+						io.head = None;
 						if io.resume.release().is_err() {
 							tracks.remove(&name);
 						}
@@ -2252,6 +2376,7 @@ async fn run_front(task: FrontTask) {
 						copy: None,
 						edge: None,
 						warm: None,
+						head: None,
 						used: false,
 					},
 				);
@@ -4615,6 +4740,211 @@ mod tests {
 		assert!(matches!(subscription.recv_group().await, Ok(None)), "ends cleanly");
 	}
 
+	/// A front resolved through a served route, as a relay's upstream session serves
+	/// one: the upstream broadcast's track requests arrive on the returned handle.
+	async fn served_front() -> (Dynamic, broadcast::Producer, broadcast::Dynamic, broadcast::Consumer) {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer
+			.dynamic("room/alice", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		let pending = consumer.request_broadcast("room/alice");
+		let upstream = broadcast::Info::new().produce();
+		let dynamic = upstream.dynamic();
+		queued(&server).await.accept(&upstream);
+		let resolved = pending.await.expect("resolves");
+		(server, upstream, dynamic, resolved)
+	}
+
+	/// A reader returning to a parked track waits for the fresh copy to resolve its
+	/// start, and skips the warm cache when the copy resolves past it: the source
+	/// judged the groups in between stale, so the older cache is stale too. Without the
+	/// hold the reader was handed the whole warm cache first, seconds behind live.
+	#[tokio::test]
+	async fn returning_reader_skips_a_warm_cache_the_copy_resolved_past() {
+		let ms = |v: u64| crate::Timestamp::from_millis(v).unwrap();
+		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
+		let budget = track::Subscription::default().with_max_age(Duration::from_millis(100));
+
+		let track = resolved.track("audio").unwrap();
+		let b = budget.clone();
+		let subscribing = tokio::spawn(async move { track.subscribe(b).await });
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the front asked the source")
+			.expect("request");
+		let source = request.resolving_start().accept(None);
+		for seq in 0..4u64 {
+			let mut group = source.create_group(seq.into()).unwrap();
+			group.write_frame(ms(seq * 20), b"old".as_ref()).unwrap();
+			group.finish().unwrap();
+		}
+		let mut subscription = subscribing.await.unwrap().expect("subscribe");
+		subscription.recv_group().await.unwrap().expect("the live group");
+		drop(subscription);
+		tokio::time::timeout(Duration::from_secs(1), source.unused())
+			.await
+			.expect("parked")
+			.expect("source open");
+		drop(source);
+
+		let track = resolved.track("audio").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(budget).await });
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the front asked the source again")
+			.expect("request");
+		let mut source = request.resolving_start().accept(None);
+		let mut subscription = subscribing.await.unwrap().expect("resubscribe");
+
+		// The copy has not resolved its start: nothing is handed out yet.
+		assert!(
+			tokio::time::timeout(Duration::from_millis(50), subscription.recv_group())
+				.await
+				.is_err(),
+			"the warm cache was served before the copy resolved its start"
+		);
+
+		// The source resolves past the floor (lite-06 skipped 4..20 as stale).
+		source.start_at(20).unwrap();
+		let mut group = source.create_group(20u64.into()).unwrap();
+		group.write_frame(ms(2000), b"new".as_ref()).unwrap();
+		group.finish().unwrap();
+		let group = subscription.recv_group().await.unwrap().expect("the live group");
+		assert_eq!(group.sequence, 20, "a stale warm group was served");
+	}
+
+	/// A warm cache whose newest group finished still resumes when the source has
+	/// nothing newer: the re-splice asks for that group's tail, which a source that
+	/// resolves starts lazily (with its first served group) can answer at once. Asking
+	/// past it left a returning catalog reader waiting for the next catalog change.
+	#[tokio::test]
+	async fn returning_reader_replays_a_current_warm_cache() {
+		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
+
+		let track = resolved.track("catalog").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the front asked the source")
+			.expect("request");
+		let source = request.resolving_start().accept(None);
+		let mut group = source.create_group(0u64.into()).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut subscription = subscribing.await.unwrap().expect("subscribe");
+		subscription.recv_group().await.unwrap().expect("the catalog");
+		drop(subscription);
+		tokio::time::timeout(Duration::from_secs(1), source.unused())
+			.await
+			.expect("parked")
+			.expect("source open");
+		drop(source);
+
+		let track = resolved.track("catalog").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the front asked the source again")
+			.expect("request");
+		let mut source = request.resolving_start().accept(None);
+		let mut subscription = subscribing.await.unwrap().expect("resubscribe");
+
+		// The source still has group 0 as its newest: it serves the empty tail, and
+		// that is when its start resolves.
+		let reading = tokio::spawn(async move {
+			let mut group = subscription.recv_group().await.unwrap().expect("the catalog");
+			assert_eq!(group.sequence, 0);
+			group.read_frame().await.unwrap().expect("the snapshot").payload
+		});
+		tokio::task::yield_now().await;
+		assert_eq!(
+			source.subscription().and_then(|sub| sub.start),
+			Some(track::Position { group: 0, frame: 1 }),
+			"the re-splice asked past the cached catalog"
+		);
+		source.start_at(0).unwrap();
+		let mut tail = source.create_group(0u64.into()).unwrap();
+		tail.start_at(1).unwrap();
+		tail.finish().unwrap();
+		let payload = tokio::time::timeout(Duration::from_secs(1), reading)
+			.await
+			.expect("the returning reader never got the catalog")
+			.unwrap();
+		assert_eq!(&payload[..], b"snapshot");
+	}
+
+	/// A group that stays open for good (a JSON log in group 0) survives a park: the
+	/// returning reader gets the frames delivered before it from the warm cache, and the
+	/// re-splice asks the source only for the frames after them, across repeated parks.
+	/// A datagram sequenced past the group does not hide it as the live edge.
+	#[tokio::test]
+	async fn returning_reader_continues_an_open_warm_group() {
+		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
+
+		async fn read(group: &mut group::Consumer) -> Vec<u8> {
+			let frame = tokio::time::timeout(Duration::from_secs(1), group.read_frame())
+				.await
+				.expect("frame")
+				.unwrap()
+				.expect("group ended");
+			frame.payload.to_vec()
+		}
+
+		let mut expect: Vec<&[u8]> = Vec::new();
+		let mut floor: Option<track::Position> = None;
+		for (round, payload) in [b"a".as_ref(), b"b", b"c"].into_iter().enumerate() {
+			let track = resolved.track("log").unwrap();
+			let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+			let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+				.await
+				.expect("the front asked the source")
+				.expect("request");
+			let mut source = request.resolving_start().accept(None);
+			let mut subscription = subscribing.await.unwrap().expect("subscribe");
+
+			// The source resolves at the floor's group, continuing group 0.
+			source.start_at(0).unwrap();
+			let mut group = source.create_group(0u64.into()).unwrap();
+			if let Some(floor) = floor {
+				group.start_at(floor.frame).unwrap();
+			}
+			group.write_frame(crate::Timestamp::ZERO, payload).unwrap();
+			expect.push(payload);
+			source
+				.insert_datagram(10, crate::Timestamp::ZERO, b"datagram".as_ref())
+				.unwrap();
+
+			let mut reading = tokio::time::timeout(Duration::from_secs(1), subscription.recv_group())
+				.await
+				.expect("group 0")
+				.unwrap()
+				.expect("track ended");
+			assert_eq!(reading.sequence, 0);
+			for frame in &expect {
+				assert_eq!(read(&mut reading).await, *frame, "round {round}");
+			}
+			assert_eq!(
+				source.subscription().and_then(|sub| sub.start),
+				floor,
+				"round {round} asked for the wrong continuation"
+			);
+
+			drop(reading);
+			drop(subscription);
+			tokio::time::timeout(Duration::from_secs(1), source.unused())
+				.await
+				.expect("parked")
+				.expect("source open");
+			drop(group);
+			drop(source);
+			floor = Some(track::Position {
+				group: 0,
+				frame: expect.len() as u64,
+			});
+		}
+	}
+
 	/// The same holds for a reader returning to a parked track: its warm cache
 	/// does not stand in for the copy it is waiting on.
 	#[tokio::test]
@@ -5961,6 +6291,77 @@ mod tests {
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"live");
 	}
 
+	/// A returning reader judges the warm cache against the logical track's live
+	/// edge, not the parked segment's own frozen one: groups the fresh source
+	/// has left behind by more than the budget are skipped, exactly as they would
+	/// be on one unspliced track.
+	///
+	/// A local source is released rather than parked (it keeps its own cache), so
+	/// this goes through a served front, which is what actually holds the warm copy.
+	/// The copy resolves at the cached edge, not past it: resolving past it drops
+	/// the cache outright, which is a different case.
+	#[tokio::test]
+	async fn resumed_reader_skips_warm_groups_behind_the_new_edge() {
+		let ms = |v: u64| crate::Timestamp::from_millis(v).unwrap();
+		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
+		let budget = track::Subscription::default().with_max_age(Duration::from_millis(100));
+		let write = |source: &track::Producer, sequence: u64, millis: u64| {
+			let mut group = source.create_group(sequence.into()).unwrap();
+			group.write_frame(ms(millis), b"x".as_ref()).unwrap();
+			group.finish().unwrap();
+		};
+		let drain = |subscription: &mut track::Subscriber| {
+			let mut sequences = Vec::new();
+			while let Poll::Ready(group) = subscription.poll_recv_group(&kio::Waiter::noop()) {
+				sequences.push(group.unwrap().expect("track ended").sequence);
+			}
+			sequences
+		};
+
+		let track = resolved.track("video").unwrap();
+		let first = budget.clone();
+		let subscribing = tokio::spawn(async move { track.subscribe(first).await });
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the front asked the source")
+			.expect("request");
+		let source = request.resolving_start().accept(None);
+		for (sequence, millis) in [(0, 0), (1, 20), (2, 40), (3, 60)] {
+			write(&source, sequence, millis);
+		}
+		let mut subscription = subscribing.await.unwrap().expect("subscribe");
+		next_group(&mut subscription).await.unwrap().expect("a cached group");
+		drain(&mut subscription);
+		drop(subscription);
+
+		tokio::time::timeout(Duration::from_secs(1), source.unused())
+			.await
+			.expect("parked")
+			.expect("source open");
+		drop(source);
+
+		let track = resolved.track("video").unwrap();
+		let second = budget.clone();
+		let subscribing = tokio::spawn(async move { track.subscribe(second).await });
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the front asked the source again")
+			.expect("request");
+		let mut source = request.resolving_start().accept(None);
+		for (sequence, millis) in [(20, 400), (21, 420), (22, 440)] {
+			write(&source, sequence, millis);
+		}
+		// At the cached edge, not past it, so the warm copy stays and the budget
+		// decides. Past it, the copy has already judged the cache stale.
+		source.start_at(3).unwrap();
+		let mut subscription = subscribing.await.unwrap().expect("resubscribe");
+		settle(|| subscription.latest() == Some(22)).await;
+
+		// Groups 0..=2 reach at most 60ms against an edge at 440ms. Group 3 reaches
+		// where group 20 starts, 40ms behind that edge, inside the 100ms budget.
+		assert_eq!(drain(&mut subscription), [3, 20, 21, 22]);
+	}
+
 	/// A front serving from another front's spliced copy has no snapshot to keep:
 	/// it still drops upstream on the unused edge, so the publisher's `unused()`
 	/// resolves far below `TRACK_IDLE_LINGER` through the whole chain. The next
@@ -6015,10 +6416,11 @@ mod tests {
 			"every front keeps the delivered groups after releasing its source"
 		);
 
+		// A budget spanning the cache, so the returning reader replays it.
 		let mut subscription = edge_resolved
 			.track("video")
 			.unwrap()
-			.subscribe(None)
+			.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(3600)))
 			.await
 			.expect("resubscribe");
 		tokio::time::timeout(Duration::from_secs(5), track.used())

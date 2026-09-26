@@ -792,8 +792,8 @@ class BroadcastProducer:
         ``delta_ratio`` controls how aggressively deltas are emitted instead of full
         snapshots (0 disables deltas); ``None`` uses the binding's default. Set
         ``compression`` to DEFLATE-compress each group; the consumer must pass the same
-        flag. Advertise the track with :meth:`set_catalog_section` if consumers should
-        discover it.
+        flag. The track is advertised in the broadcast's catalog (``json.tracks.<name>``)
+        until it finishes; a name the catalog already carries is refused.
         """
         # Let the record supply delta_ratio's default rather than restating it here.
         config = (
@@ -807,7 +807,9 @@ class BroadcastProducer:
         """Publish a JSON stream track (lossless append-log).
 
         Every appended record is preserved and delivered in order. Set ``compression`` to
-        DEFLATE-compress the group; the consumer must pass the same flag.
+        DEFLATE-compress the group; the consumer must pass the same flag. The track is
+        advertised in the broadcast's catalog (``json.tracks.<name>``) until it finishes; a
+        name the catalog already carries is refused.
         """
         config = MoqJsonStreamConfig(compression=compression)
         return JsonStreamProducer(self._inner.publish_json_stream(name, config))
