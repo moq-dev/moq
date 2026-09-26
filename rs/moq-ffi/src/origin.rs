@@ -514,7 +514,7 @@ impl MoqAnnounceConsumer {
 impl MoqAnnouncedBroadcast {
 	/// Wait until the broadcast is announced. Returns `Closed` if cancelled or the origin is closed.
 	///
-	/// Its end arrives as an inactive [`MoqAnnounceUpdate`] on the origin's announcements.
+	/// Its end arrives as a [`MoqAnnounceEvent::Retracted`] on the origin's announcements.
 	pub async fn available(&self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		self.task.run(|mut state| async move { state.available().await }).await
 	}
