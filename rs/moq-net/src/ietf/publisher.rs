@@ -15,7 +15,7 @@ use web_transport_trait::poll::SendStream as _;
 
 use crate::{
 	AsPath, Error, Timescale, Timestamp,
-	coding::{Stream, Writer},
+	coding::{Encode as _, Stream, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
 	track::Subscription,
 	util::{MaybeBoxedExt, MaybeSendBox},
@@ -1960,6 +1960,9 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	opened: Arc<AtomicU64>,
 	/// The track's exclusive end, once its groups ran out because it finished.
 	end: Option<u64>,
+	/// Serve the track's datagrams too, as OBJECT_DATAGRAMs. Off when the transport has no
+	/// datagrams; there is no stream fallback.
+	datagrams: bool,
 }
 
 impl<S: crate::transport::poll::Session> TrackServe<S> {
@@ -1980,8 +1983,10 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			}
 		}
 		track.end_at(range.end.map_or(Bound::Unbounded, |end| Bound::Included(end.group)));
+		let datagrams = session.max_datagram_size() > 0;
 
 		Self {
+			datagrams,
 			session,
 			track,
 			request_id,
@@ -2093,6 +2098,8 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 					);
 				}
 				Poll::Ready(Ok(None)) => {
+					// Datagrams written before the track finished still go out.
+					self.poll_datagrams(waiter);
 					self.draining = true;
 					if let Poll::Ready(Ok(end)) = self.track.poll_finished(waiter) {
 						self.end = Some(end);
@@ -2103,9 +2110,58 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				Poll::Pending => break,
 			}
 		}
+		// Groups first, so a burst of datagrams cannot starve them.
+		self.poll_datagrams(waiter);
 		// Newly created group machines start now rather than on the next wake.
 		let _ = self.children.poll(waiter);
 		Poll::Pending
+	}
+
+	/// Send every buffered datagram as an OBJECT_DATAGRAM, best-effort, like moq-lite.
+	///
+	/// A datagram is Object 0 of a group that has no other, so the Object ends its group.
+	/// The track's end or failure surfaces through its groups, so this only stops.
+	fn poll_datagrams(&mut self, waiter: &kio::Waiter) {
+		if !self.datagrams {
+			return;
+		}
+		while let Poll::Ready(Ok(Some(datagram))) = self.track.poll_recv_datagram(waiter) {
+			let sequence = datagram.sequence;
+			let properties = match self.timescale {
+				Some(timescale) => {
+					let mut properties = Vec::new();
+					if ietf::encode_object_time(&mut properties, datagram.timestamp, timescale, self.version).is_err() {
+						continue;
+					}
+					Some(properties)
+				}
+				None => None,
+			};
+			let body = ietf::ObjectDatagram {
+				track_alias: self.request_id.0,
+				group_id: sequence,
+				object_id: None,
+				publisher_priority: Some(super::priority::to_wire(self.track.info().priority)),
+				end_of_group: true,
+				properties,
+				body: ietf::DatagramBody::Payload(datagram.payload),
+			};
+			let Ok(body) = body.encode_bytes(self.version) else {
+				continue;
+			};
+
+			let max = self.session.max_datagram_size();
+			if body.len() > max {
+				tracing::debug!(
+					sequence,
+					size = body.len(),
+					max,
+					"dropping datagram larger than the transport limit"
+				);
+				continue;
+			}
+			let _ = self.session.send_datagram(&body);
+		}
 	}
 }
 

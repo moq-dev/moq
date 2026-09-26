@@ -200,6 +200,7 @@ where
 					subscriber.clone(),
 					version
 				)));
+				let mut datagrams = std::pin::pin!(err_only(run_datagrams(adapter.clone(), subscriber.clone())));
 				// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
 				// see `Publisher::run_publish_namespaces`.
 				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
@@ -248,6 +249,9 @@ where
 						return Poll::Ready(Err(err));
 					}
 					if let Poll::Ready(err) = waiter.poll_future(dispatch.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
+					if let Poll::Ready(err) = waiter.poll_future(datagrams.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
 					if task_set.poll(waiter).is_ready() {
@@ -340,6 +344,7 @@ where
 					subscriber.clone(),
 					version
 				)));
+				let mut datagrams = std::pin::pin!(err_only(run_datagrams(session.clone(), subscriber.clone())));
 				let mut goaway_recv = std::pin::pin!(err_only(goaway_recv));
 				let mut setup = std::pin::pin!(setup);
 				// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
@@ -377,6 +382,9 @@ where
 						return Poll::Ready(Err::<(), Error>(err));
 					}
 					if let Poll::Ready(err) = waiter.poll_future(dispatch.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
+					if let Poll::Ready(err) = waiter.poll_future(datagrams.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
 					if let Poll::Ready(err) = waiter.poll_future(goaway_recv.as_mut()) {
@@ -706,6 +714,23 @@ where
 				reader.abort(reset);
 			}
 		});
+	}
+}
+
+/// Receive QUIC datagrams, each an OBJECT_DATAGRAM for one of our subscriptions.
+///
+/// A transport without datagrams never delivers one, so this parks. A transport failure
+/// or a malformed datagram ends the session.
+async fn run_datagrams<S>(mut session: S, subscriber: Subscriber<S>) -> Result<(), Error>
+where
+	S: crate::transport::poll::Boxable,
+{
+	if session.max_datagram_size() == 0 {
+		return Ok(());
+	}
+	loop {
+		let payload = session.recv_datagram().await.map_err(Error::from_transport)?;
+		subscriber.recv_datagram(payload)?;
 	}
 }
 

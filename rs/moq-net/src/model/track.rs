@@ -1337,9 +1337,8 @@ impl Producer {
 	/// track's groups but drawing from the same sequence namespace (so interleaving with
 	/// [`Self::append_group`] never reuses a number). There is no group fallback: each
 	/// session drops (with a debug log) any datagram whose encoded body exceeds the
-	/// transport's datagram size, and sessions that can't carry datagrams at all (IETF
-	/// moq-transport, moq-lite before 05, or stream-only transports like WebSocket) never
-	/// deliver them. Keep payloads well under the 1200-byte minimum path MTU. An origin
+	/// transport's datagram size, and sessions that can't carry datagrams at all (moq-lite
+	/// before 05, or stream-only transports like WebSocket) never deliver them. Keep payloads well under the 1200-byte minimum path MTU. An origin
 	/// publisher uses this; a relay preserving upstream numbering uses
 	/// [`Self::insert_datagram`].
 	pub fn append_datagram<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, payload: B) -> Result<u64> {
