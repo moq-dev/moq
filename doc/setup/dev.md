@@ -26,6 +26,17 @@ Recipes default to the local relay at `http://localhost:4443`. Pass
 publishers and `just pub serve` use MPEG-TS, with one audio frame per PES to
 avoid batching latency. Use `just pub cmaf` only when testing fMP4/CMAF.
 
+BBB publishes the original 720p video and a pre-encoded 360p rendition at
+about 600 kbps. The player can switch between them as bandwidth or viewport
+size changes, without encoding while publishing. The 720p track comes first
+for consumers that only support one rendition.
+
+To reproduce the hosted SD asset, run `just pub encode-bbb-sd`, then
+`just pub upload bbb-sd.mp4` with access to the video bucket. The encode keeps
+the source frame timestamps and keyframes, and holds the final SD frame long
+enough to match the source audio's loop period. `just pub check-bbb` verifies
+both assets across three loops. Remove the local SD file before re-encoding.
+
 ## Debugging
 
 ```bash
