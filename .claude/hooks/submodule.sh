@@ -12,8 +12,8 @@ cd "$CLAUDE_PROJECT_DIR" || exit 0
 # `git submodule status` prefixes an uninitialized entry with '-'. Any other
 # output means it is already populated, which is every session after the first.
 case "$(git submodule status .claude/shared 2>/dev/null)" in
--*) ;;
-*) exit 0 ;;
+    -*) ;;
+    *) exit 0 ;;
 esac
 
 echo "submodule hook: populating .claude/shared, the shared skills live there." >&2
