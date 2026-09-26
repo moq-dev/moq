@@ -805,20 +805,16 @@ export class Subscriber {
 		}
 	}
 
-	// Reads SUBSCRIBE_START/END/DROP on the subscribe stream until FIN (lite-05+), recording
-	// the range the tail is accounted against. SUBSCRIBE_END declares the track's end right
-	// away, so a consumer learns it before the last groups arrive. Resolves on FIN or on the
-	// stream being reset out from under it; rejects only on a response that breaks the range.
+	// Reads SUBSCRIBE_START/END/DROP until FIN. The publisher must declare the end
+	// before FIN; resets and malformed responses preserve their failure.
 	async #runResponses(stream: Stream, entry: SubscribeEntry): Promise<void> {
 		for (;;) {
-			let resp: Awaited<ReturnType<typeof decodeSubscribeResponseMaybe>>;
-			try {
-				resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
-			} catch {
-				// Stream closed or reset; nothing more to read.
+			const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
+			if (!resp) {
+				if (entry.end === undefined)
+					throw new ProtocolViolation("subscribe stream ended without SUBSCRIBE_END");
 				return;
 			}
-			if (!resp) return;
 
 			if ("start" in resp) {
 				entry.start = resp.start.group;

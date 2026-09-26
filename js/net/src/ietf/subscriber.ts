@@ -636,26 +636,24 @@ export class Subscriber {
 	 * An error status aborts the track with it. A clean one leaves streams in flight, since
 	 * QUIC does not order them, so wait until the Stream Count many have been read, or a
 	 * bounded grace for the ones that never arrive (the draft says to use a timeout). The count
-	 * is only a hint: a peer may send 0 regardless, so 0 waits out the grace. A request stream
-	 * that ends without one ends the track the same way.
+	 * is only a hint: a peer may send 0 regardless, so 0 waits out the grace. A request
+	 * stream that FINs without PUBLISH_DONE is a protocol violation.
 	 */
 	async #runPublishDone(stream: Stream, subscription: Subscription): Promise<void> {
 		const version = this.#session.version;
-		let count: bigint | undefined;
-		if (!(await stream.reader.done())) {
-			const typeId = await stream.reader.u53();
-			if (typeId !== PublishDone.id) {
-				throw new ProtocolViolation(`unexpected message on a subscription: 0x${typeId.toString(16)}`);
-			}
-			const done = await PublishDone.decode(stream.reader, version);
-			if (!publishDoneClean(done.statusCode, version)) {
-				throw new Error(`publish done: status=0x${done.statusCode.toString(16)} reason=${done.reasonPhrase}`);
-			}
-			count = done.streamCount;
+		if (await stream.reader.done()) throw new ProtocolViolation("subscribe stream ended without PUBLISH_DONE");
+		const typeId = await stream.reader.u53();
+		if (typeId !== PublishDone.id) {
+			throw new ProtocolViolation(`unexpected message on a subscription: 0x${typeId.toString(16)}`);
 		}
+		const done = await PublishDone.decode(stream.reader, version);
+		if (!publishDoneClean(done.statusCode, version)) {
+			throw new Error(`publish done: status=0x${done.statusCode.toString(16)} reason=${done.reasonPhrase}`);
+		}
+		const count = done.streamCount;
 
 		const { tail, track } = subscription;
-		const complete = () => count !== undefined && count > 0n && BigInt(tail.streams) >= count;
+		const complete = () => count > 0n && BigInt(tail.streams) >= count;
 		await tail.settle(complete, TAIL_GRACE_MS, track.closed);
 	}
 
