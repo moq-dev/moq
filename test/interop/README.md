@@ -80,7 +80,7 @@ browser) runs once more with a token that excludes its broadcast. It must fail
 loud, logging Unauthorized and naming the path, and every subscriber must time
 out.
 
-Tokens grant subtrees (`name/**`) because moq-lite-06's AUTH_OK carries prefixes:
+Tokens grant subtrees (`name/**`) because moq-lite-06's AUTH\_OK carries prefixes:
 the relay withholds a literal grant it cannot encode, and the client sees none.
 
 ## Running locally

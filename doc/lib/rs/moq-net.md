@@ -99,7 +99,8 @@ and the presenter sees `Unsupported`; after a grant, such an update revokes it.
 A client whose origin publishes a broadcast outside its grant closes the
 session with `Unauthorized`, naming the path in the close reason. A grant that
 shrinks withdraws the announcements and cancels the subscriptions it no longer
-covers, and leaves the session up.
+covers, and leaves the session up. On moq-lite each cancelled stream resets with
+`StreamError::Unauthorized`.
 
 ## Patterns
 

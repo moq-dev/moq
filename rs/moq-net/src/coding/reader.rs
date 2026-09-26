@@ -301,7 +301,7 @@ mod tests {
 
 	/// STOP_SENDING refuses a stream, so it must carry a stream code. Reusing the session
 	/// table here would have the peer decode it against the wrong registry: `Cancel` would
-	/// arrive as INTERNAL_ERROR, and `Unauthorized` as KEY_VALUE_FORMATTING_ERROR.
+	/// arrive as INTERNAL_ERROR, and `Unauthorized` as DELIVERY_TIMEOUT.
 	#[test]
 	fn abort_stops_with_a_stream_code() {
 		const VERSION: crate::lite::Version = crate::lite::Version::Lite05;
@@ -309,10 +309,7 @@ mod tests {
 		for (err, expected) in [
 			(Error::Cancel, StreamError::Cancel.to_code()),
 			(Error::Lagged, StreamError::TooFarBehind.to_code()),
-			(
-				Error::Unauthorized,
-				StreamError::Session(crate::SessionError::Unauthorized).to_code(),
-			),
+			(Error::Unauthorized, StreamError::Unauthorized.to_code()),
 		] {
 			let mut reader = Reader::new(StopLog::default(), VERSION);
 			reader.abort(&err);

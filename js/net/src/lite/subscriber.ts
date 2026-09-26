@@ -10,10 +10,9 @@ import {
 	error,
 	ProtocolViolation,
 	reason,
-	SessionCode,
-	SessionError,
 	StreamCode,
 	StreamError,
+	unauthorized,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
@@ -527,9 +526,9 @@ export class Subscriber {
 			request.reject(new Error(EMPTY_RANGE));
 			return;
 		}
-		const unauthorized = new SessionError(SessionCode.Unauthorized, { reason: broadcast });
+		const refused = unauthorized(broadcast);
 		if (this.#denied(broadcast)) {
-			request.reject(unauthorized);
+			request.reject(refused);
 			return;
 		}
 
@@ -586,8 +585,8 @@ export class Subscriber {
 		const disposeGrant = this.#grant?.subscribe(() => {
 			if (!this.#denied(broadcast)) return;
 			console.debug(`subscribe revoked: id=${id} broadcast=${broadcast} track=${request.name}`);
-			producer.close(unauthorized);
-			stream.abort(unauthorized);
+			producer.close(refused);
+			stream.abort(refused);
 		});
 		try {
 			// Watch for subscription changes and send SUBSCRIBE_UPDATE. Lite01/Lite02

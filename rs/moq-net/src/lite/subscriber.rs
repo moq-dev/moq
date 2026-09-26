@@ -3062,11 +3062,13 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 					request.reject(Error::Unauthorized);
 				}
 			}
-			TrackRunState::Serve(mut serve_loop) => {
+			TrackRunState::Serve(serve_loop) => {
 				let _ = serve_loop.serving.abort(Error::Unauthorized);
-				if let Sub::Active(active) = &mut serve_loop.sub {
+				// Reset rather than finish, so the publisher reads a revocation instead of
+				// a routine unsubscribe.
+				if let Sub::Active(active) = serve_loop.sub {
 					self.serve.subscriber.remove_subscribe(active.id);
-					let _ = active.stream.writer.finish();
+					active.stream.writer.abort(&Error::Unauthorized);
 				}
 			}
 			TrackRunState::Done => {}

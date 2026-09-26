@@ -1,13 +1,16 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { Getter } from "@moq/signals";
 import { type Grant, type Issued, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
-import { SessionCode, SessionError } from "./error.ts";
+import { SessionCode, SessionError, StreamCode, toStreamCode } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair, type MockTransport } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { Writer } from "./stream.ts";
+import { Timestamp } from "./time.ts";
+import { wireOf } from "./wire.ts";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -230,4 +233,68 @@ test.each([Lite.ALPN_05, Ietf.ALPN.DRAFT_16])("%s has no grant", async (protocol
 	await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
 	client.close();
 	server.close();
+});
+
+// moq-transport has no stream code for it, so only moq-lite resets with UNAUTHORIZED.
+test("a revoked grant resets its subscriptions with UNAUTHORIZED", async () => {
+	const clientOrigin = new OriginProducer();
+	const up = clientOrigin.createBroadcast(Path.from("up/y"));
+	up.announce();
+	const upTrack = up.createTrack("video");
+
+	const serverOrigin = new OriginProducer();
+	const down = serverOrigin.createBroadcast(Path.from("room/x"));
+	down.announce();
+	const downTrack = down.createTrack("video");
+
+	const { client, server } = await connect({
+		publish: clientOrigin,
+		serverPublish: serverOrigin,
+		protocol: Lite.ALPN_06,
+	});
+	const requests = server.auth.requests();
+	const issued: Issued[] = [];
+	void (async () => {
+		for (;;) {
+			const request = await requests.next();
+			if (!request) break;
+			issued.push(request.accept(grant(["up"], ["room"])));
+		}
+	})();
+	await waitFor(client.auth.grant, (g) => g !== undefined && g.subscribe.size > 0);
+
+	const frame = { payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) };
+	downTrack.appendGroup().writeFrame(frame);
+	upTrack.appendGroup().writeFrame(frame);
+
+	// The client subscribes to the server, and the server to the client.
+	const downSub = wireOf(client).consume(Path.from("room/x")).track("video").subscribe().ordered();
+	const upSub = wireOf(server).consume(Path.from("up/y")).track("video").subscribe().ordered();
+	expect(await downSub.nextGroup()).toBeDefined();
+	expect(await upSub.nextGroup()).toBeDefined();
+
+	const resets = spyOn(Writer.prototype, "reset");
+	try {
+		issued[0]?.revoke(SessionCode.Unauthorized, "expired");
+		const drained = async (track: typeof downSub) => {
+			for (;;) if (!(await track.nextGroup())) break;
+		};
+		await Promise.all([drained(downSub).catch(() => void 0), drained(upSub).catch(() => void 0)]);
+
+		const reasons = resets.mock.calls.map(([reason]) => reason);
+		// Both sides of the revocation: the subscription the client cancels, and the one it
+		// stops serving. Nothing reads as the session closing.
+		const messages = reasons.map((reason) => (reason as Error).message);
+		expect(messages).toContain("unauthorized: room/x");
+		expect(messages).toContain("unauthorized: up/y");
+		for (const reason of reasons) {
+			expect([StreamCode.Unauthorized, StreamCode.Cancel]).toContain(toStreamCode(reason));
+		}
+	} finally {
+		resets.mockRestore();
+		downSub.close();
+		upSub.close();
+		client.close();
+		server.close();
+	}
 });

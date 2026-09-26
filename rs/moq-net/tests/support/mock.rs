@@ -103,6 +103,8 @@ impl ClosedSignal {
 /// A mock send stream backed by a queue to the peer's reader.
 pub struct MockSendStream {
 	tx: Option<kio::Queue<StreamChunk>>,
+	/// Every code the owning side reset a stream with.
+	resets: Resets,
 	closed: Arc<ClosedSignal>,
 	park: kio::Park,
 }
@@ -131,6 +133,7 @@ impl poll::SendStream for MockSendStream {
 
 	fn reset(&mut self, code: u32) {
 		if let Some(tx) = self.tx.take() {
+			self.resets.lock().unwrap().push(code);
 			let _ = tx.try_push(StreamChunk::Reset(code));
 		}
 	}
@@ -254,13 +257,17 @@ impl Drop for MockRecvStream {
 
 // ── Stream pair constructor ─────────────────────────────────────────
 
-/// Create a linked (send, recv) stream pair.
-fn new_stream_pair() -> (MockSendStream, MockRecvStream) {
+/// The stream reset codes one side has sent.
+type Resets = Arc<Mutex<Vec<u32>>>;
+
+/// Create a linked (send, recv) stream pair, logging the sender's resets to `resets`.
+fn new_stream_pair(resets: &Resets) -> (MockSendStream, MockRecvStream) {
 	let queue = kio::Queue::new();
 	let closed = Arc::new(ClosedSignal::default());
 
 	let send = MockSendStream {
 		tx: Some(queue.clone()),
+		resets: resets.clone(),
 		closed: closed.clone(),
 		park: kio::Park::default(),
 	};
@@ -306,6 +313,9 @@ struct SessionSide {
 	protocol: Option<&'static str>,
 	/// Connection-level close state shared with the peer.
 	conn: Arc<ConnectionState>,
+	/// Stream resets sent by this side, and by the peer.
+	resets: Resets,
+	peer_resets: Resets,
 }
 
 /// An in-memory mock WebTransport session.
@@ -369,8 +379,8 @@ impl poll::Session for MockSession {
 		_cx: &mut Context<'_>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		// Create two stream pairs: one for each direction.
-		let (our_send, peer_recv) = new_stream_pair();
-		let (peer_send, our_recv) = new_stream_pair();
+		let (our_send, peer_recv) = new_stream_pair(&self.side.resets);
+		let (peer_send, our_recv) = new_stream_pair(&self.side.peer_resets);
 
 		// Deliver (peer_send, peer_recv) to the peer's accept_bi.
 		match self.side.peer_bidi.try_push((peer_send, peer_recv)) {
@@ -380,7 +390,7 @@ impl poll::Session for MockSession {
 	}
 
 	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-		let (our_send, peer_recv) = new_stream_pair();
+		let (our_send, peer_recv) = new_stream_pair(&self.side.resets);
 
 		// Deliver peer_recv to the peer's accept_uni.
 		match self.side.peer_uni.try_push(peer_recv) {
@@ -457,6 +467,13 @@ impl MockSession {
 		self.side.conn.close_state.lock().unwrap().clone()
 	}
 
+	/// Every code this side has reset a stream with, in order.
+	// Only some test binaries inspect the codes.
+	#[allow(dead_code)]
+	pub fn resets(&self) -> Vec<u32> {
+		self.side.resets.lock().unwrap().clone()
+	}
+
 	fn close_error(&self) -> MockError {
 		self.side
 			.conn
@@ -491,6 +508,8 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 	let s2c_uni = kio::Queue::new();
 	let c2s_datagrams = kio::Queue::new();
 	let s2c_datagrams = kio::Queue::new();
+	let client_resets = Resets::default();
+	let server_resets = Resets::default();
 
 	let client_side = Arc::new(SessionSide {
 		bidi: s2c_bidi.clone(),
@@ -501,6 +520,8 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		peer_datagrams: c2s_datagrams.clone(),
 		protocol,
 		conn: conn.clone(),
+		resets: client_resets.clone(),
+		peer_resets: server_resets.clone(),
 	});
 
 	let server_side = Arc::new(SessionSide {
@@ -512,6 +533,8 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		peer_datagrams: s2c_datagrams,
 		protocol,
 		conn,
+		resets: server_resets,
+		peer_resets: client_resets,
 	});
 
 	let new = |side| MockSession {

@@ -25,7 +25,7 @@ pub enum MoqProtocolKind {
 	Cancel,
 	/// Something went wrong that isn't worth a dedicated code. Session 1, stream 0.
 	Internal,
-	/// The peer's token does not grant the requested path or operation.
+	/// The peer's token does not grant the requested path or operation. Session 2, stream 0x3A.
 	Unauthorized,
 	/// The peer broke a protocol rule; the session is unusable.
 	ProtocolViolation,
@@ -143,6 +143,7 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 		moq_net::StreamError::WrongSize => MoqProtocolKind::WrongSize,
 		moq_net::StreamError::FrameTooLarge => MoqProtocolKind::FrameTooLarge,
 		moq_net::StreamError::TimestampMismatch => MoqProtocolKind::TimestampMismatch,
+		moq_net::StreamError::Unauthorized => MoqProtocolKind::Unauthorized,
 		moq_net::StreamError::App(_) => MoqProtocolKind::App,
 		moq_net::StreamError::Unknown(_) => MoqProtocolKind::Unknown,
 		_ => MoqProtocolKind::Unknown,
@@ -462,6 +463,19 @@ mod tests {
 				assert_eq!(protocol.scope, MoqErrorScope::Session);
 				assert_eq!(protocol.code, 0x1f);
 				assert_eq!(protocol.kind, MoqProtocolKind::Unknown);
+			}
+			other => panic!("expected Protocol, got {other}"),
+		}
+	}
+
+	#[test]
+	fn stream_unauthorized_keeps_its_kind() {
+		let err = MoqError::from(moq_net::Error::from(moq_net::StreamError::Unauthorized));
+		match err {
+			MoqError::Protocol { details: protocol } => {
+				assert_eq!(protocol.scope, MoqErrorScope::Stream);
+				assert_eq!(protocol.code, 0x3a);
+				assert_eq!(protocol.kind, MoqProtocolKind::Unauthorized);
 			}
 			other => panic!("expected Protocol, got {other}"),
 		}

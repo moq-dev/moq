@@ -92,6 +92,8 @@ export const StreamCode = Object.freeze(
 		Evicted: 0x35 as StreamCode,
 		/** A frame declared a payload larger than the receiver accepts. */
 		FrameTooLarge: 0x38 as StreamCode,
+		/** The grant does not cover this request, or no longer does. The session stays up. */
+		Unauthorized: 0x3a as StreamCode,
 		/** The publisher could serve this request but has no capacity for it now. */
 		NoCapacity: 0x30 as StreamCode,
 		/** A group grew past its cache budget and was aborted. */
@@ -330,6 +332,16 @@ function localStreamCode(err: unknown): StreamCode {
 export function controlTimeout(cause: unknown): Stream {
 	const message = cause instanceof Error && cause.message ? cause.message : "control request timed out";
 	return new Stream(StreamCode.ControlTimeout, { cause, message });
+}
+
+/**
+ * The {@link StreamCode.Unauthorized} error for a request the grant does not cover, naming
+ * the broadcast. Unlike {@link SessionCode.Unauthorized}, it ends only this stream.
+ *
+ * @internal
+ */
+export function unauthorized(broadcast: string): Stream {
+	return new Stream(StreamCode.Unauthorized, { message: `unauthorized: ${broadcast}` });
 }
 
 /**

@@ -182,6 +182,7 @@ test("stream reset codes are shared only where the draft agrees", () => {
 			StreamCode.Evicted,
 			StreamCode.FrameTooLarge,
 			StreamCode.GroupTooLarge,
+			StreamCode.Unauthorized,
 		]) {
 			expect(sharedStreamCode(code, version)).toBe(false);
 		}
