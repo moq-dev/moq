@@ -21,4 +21,4 @@ lower-quality rendition sorts first.
 ## Related
 
 - [WHEP ABR](/quest/m2/whep-abr.md) - switch the served rendition per peer instead of fixing one
-- [Transcode source](/quest/m1/transcode-source.md) - the same largest-rendition ranking for transcode input
+- [Transcode](/doc/bin/cli.md) - the source is the tallest rendition this host can decode

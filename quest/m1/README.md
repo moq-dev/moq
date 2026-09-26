@@ -63,7 +63,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [CMAF Opus](/quest/m1/cmaf-opus-dops.md) - fMP4 import and export keep the Opus pre-skip and gain
 - [NVDEC teardown](/quest/m1/nvdec-teardown.md) - dropping an NVDEC decoder no longer segfaults
 - [GPU pool reservation](/quest/m1/gpu-pool-reservation.md) - a full GPU frame pool is a `None` reservation the caller drops on, not an error to match
-- [Transcode source](/quest/m1/transcode-source.md) - select a rendition the chosen backend can actually decode
 - [Egress rendition pick](/quest/m1/egress-rendition-pick.md) - WHEP and single-track RTMP/FLV serve the best rendition, not the first by name
 - [Keyframe trigger](/quest/m1/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
 - [Video keyframe flag](/quest/m1/video-keyframe-flag.md) - encoded video marks its keyframes, so a requested cut never forces an extra one after a cadence keyframe
