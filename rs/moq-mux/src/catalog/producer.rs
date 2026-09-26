@@ -632,7 +632,8 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	/// Enroll `track` in the broadcast's timelines, advertising its timeline in the catalog's
-	/// root section. The first enrollment also enrolls the catalog itself.
+	/// root section with the next catalog change. The first enrollment also enrolls the catalog
+	/// itself.
 	///
 	/// The role-specific track constructors call this for you. fMP4 passthrough calls it directly
 	/// because it writes groups by hand instead of using a [`container::Producer`](crate::container::Producer).
@@ -645,14 +646,17 @@ impl<E: CatalogExt> Producer<E> {
 			}
 		}
 
-		// The commit publishes a catalog group, which the catalog's own timeline records.
+		// Staged without publishing: the entry the track belongs to commits it, so no consumer sees a
+		// catalog advertising a timeline before its rendition.
 		let section = self.timeline.section();
-		let mut catalog = self.modify()?;
-		match &mut catalog.archive {
-			Some(archive) => archive.timelines = section.timelines,
-			None => catalog.archive = Some(section),
+		let mut state = take(&self.current);
+		if let Some(err) = &state.closed {
+			return Err(err.clone());
 		}
-		catalog.commit()?;
+		match &mut state.catalog.archive {
+			Some(archive) => archive.timelines = section.timelines,
+			None => state.catalog.archive = Some(section),
+		}
 
 		Ok(recorder)
 	}
