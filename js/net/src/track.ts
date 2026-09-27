@@ -27,6 +27,10 @@ const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 /** Default {@link Info.maxAge} window (milliseconds) when the publisher does not set one. */
 export const DEFAULT_MAX_AGE_MS = Milli(5000);
 
+// The higher-first midpoint. IETF flips priority (lower first), so this goes out as 128, the
+// draft's usual publisher priority, while moq-lite carries 127 as written: one urgency on both.
+const DEFAULT_PRIORITY = 127;
+
 /** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
 const MAX_DATAGRAMS = 64;
 
@@ -67,7 +71,7 @@ export interface Info {
 	 * or non-finite value and a result past `Number.MAX_SAFE_INTEGER`.
 	 */
 	maxAge: Milli;
-	/** Tie-break priority between subscriptions of equal subscriber priority (`0..=255`). */
+	/** Tie-break priority between subscriptions of equal subscriber priority (`0..=255`, higher first). Defaults to `127`. */
 	priority: number;
 }
 
@@ -100,7 +104,7 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 	return {
 		timescale: Timescale(info.timescale ?? Timescale.MILLI),
 		maxAge: maxAgeMillis(info.maxAge ?? DEFAULT_MAX_AGE_MS),
-		priority: priorityByte(info.priority ?? 0),
+		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
 	};
 }
 
@@ -435,13 +439,13 @@ export class Producer {
 	}
 
 	/**
-	 * Publisher priority from the committed {@link Info}, or 0 before {@link accept}.
+	 * Publisher priority from the committed {@link Info}, or the default before {@link accept}.
 	 *
 	 * Higher is served first. Hang publishers set this from `Catalog.PRIORITY` so
 	 * audio outranks video on the wire and in the bandwidth allocator.
 	 */
 	get priority(): number {
-		return this.#state.info.peek()?.priority ?? 0;
+		return this.#state.info.peek()?.priority ?? DEFAULT_PRIORITY;
 	}
 
 	/**

@@ -2476,10 +2476,31 @@ mod group_priority_test {
 	/// every moq-transport peer.
 	#[tokio::test]
 	async fn group_header_carries_the_publisher_priority() {
+		let header = serve_group_header(track::Info::default().with_priority(hang_audio_priority())).await;
+		assert_eq!(
+			header.publisher_priority,
+			priority::to_wire(hang_audio_priority()),
+			"the wire is lower-first, so audio must encode below video"
+		);
+		assert!(
+			priority::to_wire(hang_audio_priority()) < priority::to_wire(hang_video_priority()),
+			"audio outranks video on the wire"
+		);
+	}
+
+	/// A track that never set a priority is the draft's usual publisher priority, 128,
+	/// not 255, the least urgent value a peer like moxygen would deprioritize.
+	#[tokio::test]
+	async fn group_header_defaults_to_the_midpoint() {
+		let header = serve_group_header(track::Info::default()).await;
+		assert_eq!(header.publisher_priority, 128);
+	}
+
+	/// Serve one group of a track with `info` and decode the subgroup header it opens with.
+	async fn serve_group_header(info: track::Info) -> ietf::GroupHeader {
 		let log = crate::lite::test_transport::Log::default();
 		let session = SinkSession::new(log.clone());
 
-		let info = track::Info::default().with_priority(hang_audio_priority());
 		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", info);
 		let subscriber = track.subscribe(None);
 
@@ -2500,16 +2521,7 @@ mod group_priority_test {
 
 		let written = log.writes.lock().unwrap().clone();
 		let mut buf = bytes::Bytes::from(written);
-		let header = ietf::GroupHeader::decode(&mut buf, Version::Draft14).expect("a group header");
-		assert_eq!(
-			header.publisher_priority,
-			priority::to_wire(hang_audio_priority()),
-			"the wire is lower-first, so audio must encode below video"
-		);
-		assert!(
-			priority::to_wire(hang_audio_priority()) < priority::to_wire(hang_video_priority()),
-			"audio outranks video on the wire"
-		);
+		ietf::GroupHeader::decode(&mut buf, Version::Draft14).expect("a group header")
 	}
 
 	/// `hang::catalog::PRIORITY` isn't reachable from `moq-net` (hang depends on it, not the

@@ -34,6 +34,10 @@ use std::{
 /// Default [`Info::max_age`] when the publisher doesn't set one.
 pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(5);
 
+// The higher-first midpoint. IETF flips priority (lower first), so this goes out as 128, the
+// draft's usual publisher priority, while moq-lite carries 127 as written: one urgency on both.
+const DEFAULT_PRIORITY: u8 = 127;
+
 /// Maximum number of datagrams retained in the per-track send buffer.
 ///
 /// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
@@ -105,6 +109,7 @@ pub struct Info {
 	pub max_age: Duration,
 	/// The publisher's priority for this track, used only to break ties between
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
+	/// Higher is more urgent. Defaults to 127, the midpoint.
 	pub priority: u8,
 }
 
@@ -113,7 +118,7 @@ impl Default for Info {
 		Self {
 			timescale: Timescale::default(),
 			max_age: DEFAULT_MAX_AGE,
-			priority: 0,
+			priority: DEFAULT_PRIORITY,
 		}
 	}
 }
@@ -2187,7 +2192,11 @@ impl Demand {
 	/// The publisher's tie-break priority, as set in [`Info::priority`].
 	pub(crate) fn priority(&self) -> u8 {
 		// Always Some once the track exists; a closed one reads its last value.
-		self.state.read().info.as_ref().map_or(0, |info| info.priority)
+		self.state
+			.read()
+			.info
+			.as_ref()
+			.map_or(DEFAULT_PRIORITY, |info| info.priority)
 	}
 
 	/// Whether anyone is subscribed right now, without waiting.

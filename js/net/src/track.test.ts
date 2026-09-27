@@ -27,9 +27,9 @@ function mockMonotonicTime(initial: number) {
 	};
 }
 
-test("priority reads the committed info and is 0 before accept", () => {
+test("priority reads the committed info and is the midpoint before accept", () => {
 	const producer = new TrackProducer("video");
-	expect(producer.priority).toBe(0);
+	expect(producer.priority).toBe(127);
 	producer.accept({ priority: 60 });
 	expect(producer.priority).toBe(60);
 });
