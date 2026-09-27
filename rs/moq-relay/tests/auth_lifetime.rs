@@ -348,9 +348,54 @@ async fn admits_and_reports_the_session() {
 	assert!(connect.remote.is_some_and(|addr| addr.ip().is_loopback()));
 	assert!(connect.local.is_some_and(|addr| addr.port() == port));
 	assert!(connect.tls.is_none());
+	assert!(connect.token.is_none(), "moq-lite carries no SETUP token");
 
 	drop(pub_session);
 	drop(sub_session);
+	relay.abort();
+}
+
+/// A moq-transport client's SETUP token reaches the auth server byte for byte.
+#[tokio::test]
+async fn forwards_the_setup_token() {
+	use web_transport_trait::{RecvStream as _, SendStream as _, Session as _};
+
+	let script = Script::new(grant(Duration::from_secs(3600)));
+	let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
+
+	// No client presents a SETUP token yet, so write a draft-16 CLIENT_SETUP by hand. One
+	// parameter, AUTHORIZATION TOKEN (3), holding USE_VALUE (3), Token Type 0, then a
+	// value that is not text, so any lossy step on the way shows.
+	let value = [0x00, 0xff, 0x80, b'x'];
+	let token = [&[0x03, 0x00][..], &value].concat();
+	let params = [&[0x01, 0x03, token.len() as u8][..], &token].concat();
+	let setup = [&[0x20][..], &(params.len() as u16).to_be_bytes(), &params].concat();
+
+	let session = qmux::tcp::Config::new(qmux::Version::QMux01)
+		.protocols(["moqt-16"])
+		.connect(("127.0.0.1", port))
+		.await
+		.expect("connect");
+	let (mut send, mut recv) = session.open_bi().await.expect("open the control stream");
+	send.write_all(&setup).await.expect("send CLIENT_SETUP");
+
+	// The relay answers SERVER_SETUP only once the auth server has admitted the session.
+	let mut reply = [0u8; 1];
+	tokio::time::timeout(TIMEOUT, recv.read(&mut reply))
+		.await
+		.expect("SERVER_SETUP timeout")
+		.expect("SERVER_SETUP");
+
+	let seen = script.seen.lock().unwrap().clone();
+	let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
+	assert_eq!(
+		connect.token,
+		Some(moq_auth::Token {
+			kind: moq_auth::Token::OUT_OF_BAND,
+			value: value.to_vec(),
+		})
+	);
+
 	relay.abort();
 }
 

@@ -2767,9 +2767,8 @@ impl Announced {
 	}
 
 	fn declined(&mut self, path: PathOwned) {
-		if let Some(Some(route)) = self.routes.insert(path, None) {
-			route.finish();
-		}
+		// Dropping a replaced route closes its sources.
+		self.routes.insert(path, None);
 	}
 
 	/// Record an advertisement before deciding what to do with it.
@@ -2780,8 +2779,7 @@ impl Announced {
 	/// at each rejection is what stops the next early return from silently freeing a path
 	/// the peer still holds.
 	/// Only valid on a prefix the peer does not already hold, which the caller establishes
-	/// with [`Self::contains`]. Overwriting an attached route here would drop its source
-	/// without finishing it, which is [`Self::declined`]'s job.
+	/// with [`Self::contains`]. Overwriting an attached route is [`Self::declined`]'s job.
 	fn reserve(&mut self, path: PathOwned) {
 		debug_assert!(!self.routes.contains_key(&path), "reserved a prefix already advertised");
 		self.routes.insert(path, None);
@@ -2792,9 +2790,8 @@ impl Announced {
 	}
 
 	fn retire(&mut self, path: &PathOwned) {
-		if let Some(Some(route)) = self.routes.remove(path) {
-			route.finish();
-		}
+		// Dropping the route closes its sources.
+		self.routes.remove(path);
 	}
 
 	/// Serve queued requests on every ready route: mint a source per requested
@@ -2846,8 +2843,7 @@ struct AnnouncedRoute {
 	route: crate::origin::Route,
 	/// Dropping it retracts the route and rejects its queued requests.
 	dynamic: crate::origin::Dynamic,
-	/// One minted source per requested path, finished on a clean retraction and
-	/// aborted (via drop) when the session dies.
+	/// One minted source per requested path, each closed when its guard drops.
 	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
 	/// Whether the GOAWAY drain already re-priced this route.
 	drained: bool,
@@ -2868,14 +2864,6 @@ impl AnnouncedRoute {
 			waker: std::task::Waker::from(wake.clone()),
 			wake,
 			park: kio::Park::default(),
-		}
-	}
-
-	/// The peer deliberately retracted the route: finish the minted sources so
-	/// their consumers observe a clean end, and retract the announcement.
-	fn finish(self) {
-		for (_, source) in self.sources {
-			source.finish();
 		}
 	}
 

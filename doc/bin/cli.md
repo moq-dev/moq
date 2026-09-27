@@ -159,8 +159,8 @@ watches them. On NVIDIA the whole pipeline stays on the GPU; `--frames cpu`
 forces decoded frames into CPU memory instead of the default `native`.
 Requires the `transcode` feature.
 
-The source is the tallest rendition this host can decode with `--decoder`, so a
-software-only host transcodes from an H.264 rendition rather than a taller H.265
+The source is the largest rendition this host can decode with `--decoder`, so a
+software-only host transcodes from an H.264 rendition rather than a larger H.265
 or AV1 one. When no rendition decodes, the command exits naming the decoder's
 refusal.
 

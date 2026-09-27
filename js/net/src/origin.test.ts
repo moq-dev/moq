@@ -271,8 +271,9 @@ test("closing the origin closes every routed broadcast", async () => {
 
 	expect(origin.closed.peek()).toBe(abort);
 	expect(consumer.closed.peek()).toBe(abort);
-	expect(a.closed.peek()).toBe(abort);
-	expect(b.closed.peek()).toBe(abort);
+	// A broadcast end carries no cause, so the routed broadcasts close cleanly.
+	expect(a.closed.peek()).toBeNull();
+	expect(b.closed.peek()).toBeNull();
 
 	expect(wireOf(consumer).routes(Path.from("a"))).toBe(false);
 	expect(() => publish(origin, Path.from("late"))).toThrow();

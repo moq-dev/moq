@@ -12,7 +12,3 @@ generated `close()` would collide with `AutoCloseable.close()`.
   binding keeps `close()`. Kotlin's `close()` still only releases the handle.
 - Test that `end()` ends the broadcast while a `dynamic()` handle is still
   held. Document it in `doc/lib/kt`.
-
-## Required
-
-- [Binding close](/quest/m1/broadcast-close/bindings.md) - moq-ffi gains the `close()` this renames
