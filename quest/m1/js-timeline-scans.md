@@ -30,4 +30,3 @@ every cached group.
 ## Related
 
 - [Browser benchmarks](/quest/m1/browser-benchmarks.md) - the browser media path; this bench covers the track model
-- [JS group guard](/quest/m1/js-group-guard.md) - the thunk there cuts guard calls, not the scan cost

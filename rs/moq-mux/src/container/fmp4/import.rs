@@ -561,11 +561,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config
 			}
 			mp4_atom::Codec::Opus(opus) => {
-				let mut config = AudioConfig::new(
-					AudioCodec::Opus,
-					opus.audio.sample_rate.integer() as _,
-					opus.audio.channel_count as _,
-				);
+				// dOps carries the OpusHead fields in ISOBMFF byte order; republish them as the
+				// OpusHead description so decoders apply its pre-skip and gain. mp4-atom already
+				// refuses a nonzero channel mapping family, so the table is never dropped here.
+				let dops = &opus.dops;
+				let mut head =
+					crate::codec::opus::Config::new(dops.input_sample_rate, dops.output_channel_count as u32)
+						.with_pre_skip(dops.pre_skip);
+				head.output_gain = dops.output_gain;
+
+				// The catalog describes the decoder's output: Opus always decodes at 48 kHz, whatever
+				// the sample entry or the informational input rate claims.
+				let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, head.channel_count);
+				config.description = Some(head.encode()?);
 				config.container = container;
 				config
 			}

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
+import { Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
 
 type Value = Record<string, unknown>;
@@ -358,38 +359,38 @@ test("a delta that would overflow the snapshot rolls a new one instead", async (
 
 test("a compressed delta is gated on its encoded size, not its plaintext", async () => {
 	// A sync-flushed DEFLATE frame can come out larger than its input, so the plaintext is not an
-	// upper bound on what lands in the group. A snapshot that fills the cache to within a few bytes
-	// plus a tiny patch that compresses to more than it measures would otherwise slip through the
-	// gate and evict frame 0.
-	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, compression: "deflate" });
+	// upper bound on what lands in the group. A patch that fits the budget by its plaintext but not
+	// by its encoded size would otherwise slip through the gate and overflow the group.
+	const value = { v: "x".repeat(1000) };
+	const patched = { ...value, q: "a" };
+	const plaintext = JSON.stringify({ q: "a" }).length;
 
-	// Highly repetitive, so the compressed snapshot lands just under the cap.
-	producer.update({ v: "x".repeat(Group.MAX_GROUP_CACHE_BYTES) });
-	producer.update({ v: "x".repeat(Group.MAX_GROUP_CACHE_BYTES), q: "a" });
+	// Measure the frames with the default budget, which admits the delta.
+	const probe = new Encoder<Value>({ compression: "deflate" });
+	const snapshot = probe.update(value);
+	snapshot?.commit();
+	const delta = probe.update(patched);
+	expect(delta?.keyframe).toBe(false);
+	expect(delta?.payload.length).toBeGreaterThan(plaintext);
+
+	// A budget with room for the plaintext patch but not the encoded one.
+	const maxGroupBytes = (snapshot?.payload.length ?? 0) + plaintext;
+	const track = new Track.Producer("test");
+	const producer = new Producer<Value>({ track, compression: "deflate", maxGroupBytes });
+	producer.update(value);
+	producer.update(patched);
 	producer.finish();
 
-	// Whatever the split, no group may exceed the cache, and the newest value must be readable.
-	const subscriber = track.subscribe({ maxAge: REPLAY_LATENCY }).ordered();
-	for (;;) {
-		const group = await subscriber.nextGroup();
-		if (!group) break;
-		let bytes = 0;
-		for (;;) {
-			const frame = await group.readFrame();
-			if (!frame) break;
-			bytes += frame.payload.byteLength;
-		}
-		expect(bytes).toBeLessThanOrEqual(Group.MAX_GROUP_CACHE_BYTES);
-	}
+	// The patch rolled into a fresh snapshot rather than joining the first group.
+	expect(await structure(track.subscribe({ maxAge: REPLAY_LATENCY }).ordered())).toEqual([1, 1]);
 
 	const consumer = new Consumer<Value>({
 		track: track.subscribe({ maxAge: REPLAY_LATENCY }),
 		compression: "deflate",
 	});
 	const values: Value[] = [];
-	for await (const value of consumer) values.push(value);
-	expect(values[values.length - 1]).toEqual({ v: "x".repeat(Group.MAX_GROUP_CACHE_BYTES), q: "a" });
+	for await (const out of consumer) values.push(out);
+	expect(values[values.length - 1]).toEqual(patched);
 });
 
 // A malformed or failed group must reach the caller; only an explicit retention gap is resumable.
@@ -401,4 +402,16 @@ test("snapshot consumer propagates a non-gap frame failure", async () => {
 	expect(await consumer.next()).toEqual({ ok: true });
 	group.close(new NetError.Stream(StreamCode.Internal));
 	await expect(consumer.next()).rejects.toMatchObject({ code: StreamCode.Internal });
+});
+
+test("a capture timestamp is written on snapshots and deltas alike", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Value>({ track, deltaRatio: 100 });
+	producer.update({ a: 1, b: "x".repeat(64) }, Time.Timestamp.fromMillis(1_000));
+	producer.update({ a: 2, b: "x".repeat(64) }, Time.Timestamp.fromMillis(2_000));
+	producer.finish();
+
+	const group = await track.subscribe().ordered().nextGroup();
+	expect((await group?.readFrame())?.timestamp.as(Time.Timescale.MILLI)).toBe(1_000);
+	expect((await group?.readFrame())?.timestamp.as(Time.Timescale.MILLI)).toBe(2_000);
 });

@@ -94,7 +94,9 @@ class Scope {
 		for (const [path, value] of values) {
 			if (this.allowed && ![...this.allowed].some((pattern) => advertOverlaps(value, path, pattern))) continue;
 			const relative = covering.relative(path);
-			if (relative !== undefined) out.set(relative, value);
+			if (relative === undefined) continue;
+			// The claim moves with the key, so it compares against root-relative requests.
+			out.set(relative, value.claim ? { ...value, claim: value.claim.rebase(this.root) } : value);
 		}
 		return out;
 	}

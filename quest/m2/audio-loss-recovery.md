@@ -25,4 +25,4 @@ audio settings. Existing wire compatibility must be demonstrated.
 
 ## Related
 
-- [Audio quality](/quest/m1/audio-quality-harness/README.md) - quality and latency measurements
+- [Audio quality](/quest/m0/audio-quality-harness/README.md) - quality and latency measurements

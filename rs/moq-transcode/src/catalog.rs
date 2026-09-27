@@ -158,32 +158,20 @@ impl Decoders {
 	}
 }
 
-/// Pick the rendition to transcode from: the highest-resolution rendition local
+/// Pick the rendition to transcode from: the best [ranked](Video::ranked) rendition local
 /// to the source broadcast that this host can decode.
 ///
 /// [`Error::NoSource`] means wait for a later snapshot. Any other error means
-/// nothing on offer can be decoded here, and is why the tallest one refused.
+/// nothing on offer can be decoded here, and is why the best one refused.
 pub(crate) async fn choose_source(video: &Video, decoders: &mut Decoders) -> Result<(String, VideoConfig), Error> {
-	let mut candidates: Vec<_> = video
-		.renditions
-		.iter()
+	// Best first. A rendition without dimensions ranks after every one with them:
+	// it can't be chosen yet, but it can still keep the transcoder waiting.
+	let candidates = video
+		.ranked()
 		// A rendition that itself lives in another broadcast can't be subscribed
 		// through this one; composing relative references is a follow-up.
 		.filter(|(_, config)| config.broadcast.is_none())
-		.filter_map(|(name, config)| Some((name, config, codec(config)?)))
-		.collect();
-	// Largest first, ties going to the last name as they always have. A rendition
-	// without dimensions sorts after every one with them: it can't be chosen yet,
-	// but it can still keep the transcoder waiting.
-	candidates.reverse();
-	candidates.sort_by_key(|(_, config, _)| {
-		std::cmp::Reverse((
-			dimensions(config).is_some(),
-			config.coded_height,
-			config.coded_width,
-			config.bitrate,
-		))
-	});
+		.filter_map(|(name, config)| Some((name, config, codec(config)?)));
 
 	let mut refused = None;
 	for (name, config, codec) in candidates {
@@ -749,14 +737,14 @@ mod tests {
 		let (name, _) = choose_source(&video, &mut decoders).await.unwrap();
 		assert_eq!(name, "avc");
 
-		// Hardware that decodes H.265 keeps the usual pick of the tallest it can.
+		// Hardware that decodes H.265 keeps the usual pick of the largest it can.
 		let (name, _) = choose_source(&video, &mut Decoders::assume(&[Codec::H264, Codec::H265]))
 			.await
 			.unwrap();
 		assert_eq!(name, "hevc");
 	}
 
-	/// Nothing on offer decodes here: a refusal carrying why the tallest
+	/// Nothing on offer decodes here: a refusal carrying why the largest
 	/// rendition's decoder refused, rather than waiting on a complete catalog.
 	#[tokio::test]
 	async fn refuses_when_no_rendition_decodes() {

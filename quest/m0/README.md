@@ -94,6 +94,7 @@ do not add another media abstraction or a renderer crate during stabilization.
 ## Quests
 
 - [Release](/quest/m0/release.md) - the release moq.pro adopts: binding docs, an upgrade page, and a staging soak gate it rather than the merge
+- [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - a playout latency regression fails a run instead of arriving as a bug report, and its recorder supplies the jitter target's replay traces
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
 - [A/V clock](/quest/m0/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [SD rendition for bbb](/quest/m0/bbb-sd.md) - `just pub bbb` publishes a pre-encoded 360p rung beside the 720p source, for localhost demos and moq.pro's fleet demo

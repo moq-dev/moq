@@ -9,8 +9,8 @@ cancellable futures, with no `user_data` plumbing, no handle integers, and no
 thread of their own to babysit. The OBS plugin is the in-tree consumer that
 proves the shape; external SDK users are the audience.
 
-Non-goals: libmoq stays as the plain-C ABI, keeps its own release, and keeps
-following the Cross-Package Sync table like every other wrapper; no
+Non-goals: the plain-C ABI, which moves to C generated from moq-ffi in
+[Generated C bindings](/quest/m1/c/README.md); no
 second hand-written C++ surface (ergonomics are fixed in moq-ffi where every
 binding benefits); no wire or public Rust API change.
 
@@ -47,10 +47,28 @@ remote we own, the latter two fetching the prebuilt tarball so consumers never
 need a Rust toolchain or the bindgen fork. vcpkg lands first; the Conan recipe
 reads the same release manifest so a release bumps both.
 
+Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
+
+- The fork's base is LiveKit's PR #1 (`uniffi-0.31-async`), not PR #5,
+  which runs a worker thread per in-flight future and has no `then()` or
+  async callback interfaces, both of which OBS needs.
+- Fork tags keep upstream's `v<generator>+v<uniffi>` scheme with a
+  `-kixelated.N` pre-release (`v0.11.0-kixelated.1+v0.32.2`), matching the
+  Dart fork, so they never collide with an upstream tag.
+- Cancelling abandons the future rather than delivering an error: a generic
+  `E` has no cancelled variant, and a `std::variant<E, Cancelled>` would
+  burden every call site.
+- Callback interfaces are refused under `error_style = "expected"` until a
+  consumer needs one; their bridge is built on `std::exception_ptr`.
+- MSVC is covered by the post-merge nightly, not a branch dispatch: branches
+  never dispatch the nightly.
+
 ## Quests
 
 - [Generator](/quest/m1/cpp/generator.md) - the uniffi 0.32 C++ generator with futures and expected-style errors, pinned and generating `cpp/ffi` in CI
 - [Package](/quest/m1/cpp/package.md) - the `cpp/moq` wrapper, CMake package, release tarball, interop client, and docs
+- [Cancel](/quest/m1/cpp/cancel.md) - a cancelled or consumed future reports `valid() == false`, like `std::future`, and a read of it aborts with a message naming the misuse
+- [C++ standard](/quest/m1/cpp/cxx-standard.md) - a consumer that sets C++23 only on its own target links the package
 - [OBS migration](/quest/m1/cpp/obs.md) - the OBS plugin moves from libmoq handles and trampolines to the generated C++
 
 ## Related

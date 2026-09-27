@@ -55,7 +55,7 @@ export interface OriginConsumer {
 export interface Advertised {
 	readonly identity: object;
 	readonly route: Route;
-	/** The absolute paths a scoped route may serve beneath its prefix; unset for the whole subtree. */
+	/** The paths a scoped route may serve beneath its prefix, relative like its key; unset for the whole subtree. */
 	readonly claim?: Path.Patterns;
 }
 
