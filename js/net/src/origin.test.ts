@@ -321,7 +321,7 @@ test("an empty origin is live at once, and the marker never repeats", async () =
 	expect(await announced.next()).toEqual({ kind: "live" });
 
 	// Later routes are live changes, even past a session that replays and lands.
-	const landed = wireOf(origin).replaying();
+	const landed = wireOf(origin).replaying(Path.empty());
 	landed();
 	const alice = publish(origin, Path.from("alice"));
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("alice"), kind: "announced" });
@@ -353,8 +353,8 @@ test("live follows the replayed routes", async () => {
 
 test("a replaying session withholds live until it lands", async () => {
 	const origin = new Producer();
-	const first = wireOf(origin).replaying();
-	const second = wireOf(origin).replaying();
+	const first = wireOf(origin).replaying(Path.empty());
+	const second = wireOf(origin).replaying(Path.empty());
 	const announced = origin.announced();
 
 	// Routes a session lands arrive before the marker.
@@ -368,12 +368,40 @@ test("a replaying session withholds live until it lands", async () => {
 	expect(await pending(next)).toBe(true);
 
 	// A session that starts replaying after the stream opened is not waited on.
-	const late = wireOf(origin).replaying();
+	const late = wireOf(origin).replaying(Path.empty());
 	second();
 	expect(await next).toEqual({ kind: "live" });
 
 	late();
 	announced.close();
+	origin.close();
+});
+
+test("a stream waits only on sessions replaying into its scope", async () => {
+	const origin = new Producer();
+	const room = wireOf(origin).replaying(Path.from("room"));
+	const other = wireOf(origin).replaying(Path.from("other"));
+
+	// Nothing replays under `lobby`, and `other` cannot announce into `room/**`.
+	const lobby = origin.announced(Path.Pattern.parse("lobby/**"));
+	expect(await lobby.next()).toEqual({ kind: "live" });
+	const announced = origin.announced(Path.Pattern.parse("room/**"));
+	const next = announced.next();
+	expect(await pending(next)).toBe(true);
+	room();
+	expect(await next).toEqual({ kind: "live" });
+
+	// A scoped handle rebases the prefix under its root before comparing.
+	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.all()]));
+	const inner = wireOf(scoped).replaying(Path.from("room"));
+	const outer = origin.announced(Path.Pattern.parse("room/**"));
+	expect(await outer.next()).toEqual({ kind: "live" });
+	const tenant = origin.announced(Path.Pattern.parse("tenant/room/**"));
+	expect(await pending(tenant.next())).toBe(true);
+
+	inner();
+	other();
+	for (const stream of [lobby, announced, outer, tenant]) stream.close();
 	origin.close();
 });
 

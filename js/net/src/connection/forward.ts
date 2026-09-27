@@ -53,8 +53,9 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		const inserted = new Map<Path.Valid, Dynamic>();
 
 		// Taken before the session is handed out, so no announcement stream on the origin misses
-		// it: each one opened now withholds its live marker until this interest's initial set lands.
-		const landed = originWire.replaying();
+		// it: each overlapping one opened now withholds its live marker until this interest's
+		// initial set lands.
+		const landed = originWire.replaying(prefix);
 
 		// End the stream the moment the session closes rather than waiting for the wire to
 		// error it, so the retractions below land promptly.
