@@ -201,14 +201,21 @@ impl<S: ObjectStore> Writer<S> {
 		let mut closed = false;
 		// Cleared once the channel yields nothing more: every sender dropped, or it closed and drained.
 		let mut accepting = true;
+		// The track the last event touched. Each event touches at most one, so the loop never scans
+		// the whole table.
+		let mut touched: Option<String> = None;
 
 		loop {
-			for track in tracks.values_mut() {
+			if let Some(name) = touched.take()
+				&& let Some(track) = tracks.get_mut(&name)
+			{
 				if let Some(commit) = track.commit()? {
 					commits.push(commit);
 				}
+				if track.finish() {
+					tracks.remove(&name);
+				}
 			}
-			tracks.retain(|_, track| !track.finish());
 
 			let idle = closed && tracks.is_empty() && commits.is_empty();
 			if idle && *enrolling.borrow_and_update() == 0 {
@@ -227,6 +234,7 @@ impl<S: ObjectStore> Writer<S> {
 					Some(Command::Enroll(mut track)) => {
 						let subscriber = track.subscriber.take().expect("an enrolling track carries its subscriber");
 						reads.push(guard(track.cancelled.clone(), recv(track.name.clone(), subscriber)).boxed());
+						touched = Some(track.name.clone());
 						tracks.insert(track.name.clone(), track);
 					}
 					Some(Command::Cut(pts)) => {
@@ -237,15 +245,17 @@ impl<S: ObjectStore> Writer<S> {
 					Some(Command::Remove(name)) => {
 						if let Some(track) = tracks.get_mut(&name) {
 							track.remove();
+							touched = Some(name);
 						}
 					}
 				},
 				Some(read) = reads.next(), if !reads.is_empty() => {
-					handle(read, &mut tracks, &mut reads)?;
+					touched = handle(read, &mut tracks, &mut reads)?;
 				}
 				Some((name, committer, result)) = commits.next(), if !commits.is_empty() => {
 					if let Some(track) = tracks.get_mut(&name) {
 						track.committer = Some(committer);
+						touched = Some(name);
 					}
 					let expired = result?;
 					if let Some(grace) = grace && !expired.is_empty() {
@@ -569,21 +579,23 @@ async fn guard(mut cancelled: watch::Receiver<()>, read: impl Future<Output = Re
 	}
 }
 
+/// Returns the track that may have records to commit or be finished.
+///
 /// Fails on malformed source input; a group the network aborted keeps the frames that arrived.
 fn handle<S: ObjectStore>(
 	read: Read,
 	tracks: &mut HashMap<String, Box<Track<S>>>,
 	reads: &mut FuturesUnordered<BoxFuture<'static, Read>>,
-) -> Result<()> {
+) -> Result<Option<String>> {
 	match read {
-		Read::Cancelled => Ok(()),
+		Read::Cancelled => Ok(None),
 		Read::Group {
 			name,
 			subscriber,
 			result,
 		} => {
 			let Some(track) = tracks.get_mut(&name) else {
-				return Ok(());
+				return Ok(None);
 			};
 			match result {
 				Ok(Some(group)) => {
@@ -598,23 +610,29 @@ fn handle<S: ObjectStore>(
 						reads.push(guard(track.cancelled.clone(), frame(name.clone(), Box::new(group))).boxed());
 					}
 					reads.push(guard(track.cancelled.clone(), recv(name, subscriber)).boxed());
+					// An accepted group holds no frames yet.
+					Ok(None)
 				}
-				Ok(None) => track.subscribed = false,
+				Ok(None) => {
+					track.subscribed = false;
+					Ok(Some(name))
+				}
 				Err(err) => {
 					tracing::warn!(track = %name, %err, "track ended");
 					track.subscribed = false;
+					Ok(Some(name))
 				}
 			}
-			Ok(())
 		}
 		Read::Frame { name, group, result } => {
 			let Some(track) = tracks.get_mut(&name) else {
-				return Ok(());
+				return Ok(None);
 			};
 			let sequence = group.sequence;
 			let Some(incoming) = track.accepted.get_mut(&sequence) else {
-				return Ok(());
+				return Ok(None);
 			};
+			let touched = name.clone();
 			match result {
 				Ok(Some(frame)) => {
 					let index = incoming.next;
@@ -641,7 +659,8 @@ fn handle<S: ObjectStore>(
 					incoming.finished = true;
 				}
 			}
-			track.report()
+			track.report()?;
+			Ok(Some(touched))
 		}
 	}
 }
