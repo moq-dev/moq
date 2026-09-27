@@ -376,6 +376,130 @@ async fn broadcast_moq_lite_05_fetch_webtransport() {
 	lite05_fetch_roundtrip("https").await;
 }
 
+/// A cache miss over moq-transport is a standalone FETCH of the one group, served from
+/// the publisher's cache, and a group the publisher lacks comes back as the publisher's
+/// own refusal.
+async fn transport_fetch_roundtrip(version: &str) {
+	let pub_origin = moq_tokio::origin::spawn();
+	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	broadcast
+		.announce(Default::default())
+		.expect("failed to announce broadcast");
+	let track = broadcast.create_track("video", None).expect("failed to create track");
+	for sequence in 0..3u64 {
+		let mut group = track.append_group().expect("failed to append group");
+		for frame in 0..2 {
+			group
+				.write_frame(
+					moq_net::Timestamp::ZERO,
+					bytes::Bytes::from(format!("{sequence}-{frame}")),
+				)
+				.expect("failed to write frame");
+		}
+		group.finish().expect("failed to finish group");
+	}
+
+	let mut server_config = moq_tokio::listen::Config::default();
+	server_config.bind = Some("[::]:0".parse().unwrap());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec![version.parse().unwrap()];
+	let server = server_config.init(Default::default()).expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
+	let addr = server.local_addr().expect("failed to get local addr");
+
+	let sub_origin = moq_tokio::origin::spawn();
+	let sub_consumer = sub_origin.consume();
+	let mut announcements = sub_consumer.announced();
+
+	let mut client_config = moq_tokio::connect::Config::default();
+	client_config.tls.insecure = Some(true);
+	client_config.version = vec![version.parse().unwrap()];
+	let client = client_config.init(Default::default()).expect("failed to init client");
+	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		let session = request.with_publisher(&pub_origin).ok().await?;
+		let _broadcast = broadcast;
+		let _track = track;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_subscriber(sub_origin);
+	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	tokio::time::timeout(TIMEOUT, announcements.next())
+		.await
+		.expect("announce timed out")
+		.expect("origin closed");
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
+
+	let mut group = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().fetch_group(1, None).await })
+		.await
+		.expect("fetch timed out")
+		.expect("fetch failed");
+	assert_eq!(group.sequence, 1);
+	for frame in 0..2 {
+		let payload = tokio::time::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("read timed out")
+			.expect("read failed")
+			.expect("group ended early");
+		assert_eq!(payload.payload, bytes::Bytes::from(format!("1-{frame}")));
+	}
+	let end = tokio::time::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("read timed out")
+		.expect("read failed");
+	assert!(end.is_none(), "the group ends after its frames");
+
+	let refused = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().fetch_group(7, None).await })
+		.await
+		.expect("fetch timed out");
+	assert!(
+		matches!(refused, Err(moq_net::Error::NotFound)),
+		"expected the publisher's refusal, got {:?}",
+		refused.err()
+	);
+
+	drop(connection);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn fetch_moq_transport_14() {
+	transport_fetch_roundtrip("moq-transport-14").await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn fetch_moq_transport_16() {
+	transport_fetch_roundtrip("moq-transport-16").await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn fetch_moq_transport_18() {
+	transport_fetch_roundtrip("moq-transport-18").await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn fetch_moq_transport_20() {
+	transport_fetch_roundtrip("moq-transport-20").await;
+}
+
 /// A fetch must be served while a live subscription is active on the same track.
 /// The relay subscribes starting at the latest group, so an older group isn't
 /// cached and the fetch has to issue a wire FETCH concurrently with the
