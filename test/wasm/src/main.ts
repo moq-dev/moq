@@ -374,9 +374,9 @@ const CASES: Case[] = [
 		},
 	},
 	{
-		// Freeing a handle only drops the JS reference: the pending read still
-		// settles, one way or the other, and the page keeps working.
-		name: "free() during a read settles it",
+		// Freeing a handle cancels its pending call, even one that could finish
+		// right away, and releases what the call held; the page keeps working.
+		name: "free() cancels a pending read",
 		run: async (wasm, relay) => {
 			const path = `wasm-test/${relay.name}-free`;
 			await withPublisher(relay, path, async () => {
@@ -385,23 +385,35 @@ const CASES: Case[] = [
 					const track = await broadcast.subscribe(TRACK);
 					const pendingTrack = broadcast.subscribe(TRACK);
 					broadcast.free();
-					(await pendingTrack.catch(() => undefined))?.free();
+					await expectCancelled("subscribe", pendingTrack, (track) => track.free());
 
 					const group = await track.recvGroup();
 					if (!group) throw new Error("track ended before its first group");
 					const pendingGroup = track.recvGroup();
 					track.free();
+					await expectCancelled("recvGroup", pendingGroup, (group) => group?.free());
 
 					const frame = group.readFrame();
 					group.free();
-					await frame.catch(() => undefined);
-					(await pendingGroup.catch(() => undefined))?.free();
+					await expectCancelled("readFrame", frame, () => {});
 				});
 			});
 			await expectUsable(wasm, relay);
 		},
 	},
 ];
+
+/** Fail unless `pending` rejects, releasing whatever it resolved with instead. */
+async function expectCancelled<T>(what: string, pending: Promise<T>, release: (value: T) => void): Promise<void> {
+	const resolved = await pending.then(
+		(value) => {
+			release(value);
+			return true;
+		},
+		() => false,
+	);
+	if (resolved) throw new Error(`${what} resolved after its handle was freed, want a rejection`);
+}
 
 /** Fail unless a fresh session still works, which a corrupted wasm heap would not. */
 async function expectUsable(wasm: Wasm, relay: RelayFixture): Promise<void> {

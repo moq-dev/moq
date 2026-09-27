@@ -15,8 +15,8 @@
 //! Methods that wait return a `Promise` over cloned state rather than being an
 //! `async fn(&self)`: wasm-bindgen keeps `&self` borrowed across such a method's
 //! await, and a JS `free()` during it throws from inside Rust, which unwinds past
-//! the shadow stack and corrupts the wasm heap. Freeing a handle only drops the
-//! JS reference; freeing the `Session` also closes it, rejecting what is pending.
+//! the shadow stack and corrupts the wasm heap. Freeing a handle rejects its
+//! pending calls with a cancel instead; freeing the `Session` also closes it.
 
 // Browser-only crate. Empty on native so `cargo check --workspace` stays green.
 #![cfg(target_arch = "wasm32")]
@@ -25,7 +25,9 @@ use std::cell::RefCell;
 use std::pin::pin;
 use std::rc::Rc;
 
-use futures::future::{Either, select};
+use futures::FutureExt;
+use futures::channel::oneshot;
+use futures::future::{Either, Shared, select};
 use js_sys::{Promise, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
@@ -35,6 +37,42 @@ pub mod transport;
 /// Map any displayable error into a JS exception.
 fn js_err(e: impl std::fmt::Display) -> JsValue {
 	JsError::new(&e.to_string()).into()
+}
+
+/// Rejects a handle's pending calls once JS frees the handle.
+///
+/// The handle owns the sender; each pending call races a clone of the receiver,
+/// which resolves when the sender drops with the handle.
+struct Freed {
+	_handle: oneshot::Sender<()>,
+	signal: Shared<oneshot::Receiver<()>>,
+}
+
+impl Freed {
+	fn new() -> Self {
+		let (handle, signal) = oneshot::channel();
+		Self {
+			_handle: handle,
+			signal: signal.shared(),
+		}
+	}
+
+	/// Run `task`, rejecting with a cancel if the handle is freed first.
+	///
+	/// The signal is polled first, so a freed handle rejects even when `task` could
+	/// finish on its first poll; dropping `task` releases whatever it had taken.
+	fn guard<F, T>(&self, task: F) -> impl Future<Output = Result<T, JsValue>> + use<F, T>
+	where
+		F: Future<Output = Result<T, JsValue>>,
+	{
+		let freed = self.signal.clone();
+		async move {
+			match select(freed, pin!(task)).await {
+				Either::Left(_) => Err(js_err(moq_net::Error::Cancel)),
+				Either::Right((result, _)) => result,
+			}
+		}
+	}
 }
 
 /// Install panic + tracing hooks for readable errors. Call once after the wasm
@@ -126,7 +164,13 @@ impl Session {
 			// The origin outlives the session, so its wait alone never ends on a close.
 			let closed = pin!(session.closed());
 			match select(request, closed).await {
-				Either::Left((inner, _)) => Ok(inner.map_or(JsValue::UNDEFINED, |inner| Broadcast { inner }.into())),
+				Either::Left((inner, _)) => Ok(inner.map_or(JsValue::UNDEFINED, |inner| {
+					Broadcast {
+						inner,
+						freed: Freed::new(),
+					}
+					.into()
+				})),
 				Either::Right((err, _)) => Err(js_err(err)),
 			}
 		})
@@ -144,6 +188,7 @@ impl Drop for Session {
 #[wasm_bindgen]
 pub struct Broadcast {
 	inner: moq_net::broadcast::Consumer,
+	freed: Freed,
 }
 
 #[wasm_bindgen]
@@ -152,14 +197,15 @@ impl Broadcast {
 	#[wasm_bindgen(unchecked_return_type = "Promise<Track>")]
 	pub fn subscribe(&self, name: String) -> Promise {
 		let broadcast = self.inner.clone();
-		future_to_promise(async move {
+		future_to_promise(self.freed.guard(async move {
 			let track = broadcast.track(&name).map_err(js_err)?;
 			let subscriber = track.subscribe(None).await.map_err(js_err)?;
 			Ok(Track {
 				inner: Rc::new(RefCell::new(Some(subscriber))),
+				freed: Freed::new(),
 			}
 			.into())
-		})
+		}))
 	}
 }
 
@@ -170,6 +216,7 @@ pub struct Track {
 	// the duration of the await instead of holding a borrow across it. One read in
 	// flight at a time; a concurrent call errors instead of aliasing.
 	inner: Rc<RefCell<Option<moq_net::track::Subscriber>>>,
+	freed: Freed,
 }
 
 #[wasm_bindgen]
@@ -178,7 +225,7 @@ impl Track {
 	#[wasm_bindgen(js_name = recvGroup, unchecked_return_type = "Promise<Group | undefined>")]
 	pub fn recv_group(&self) -> Promise {
 		let cell = self.inner.clone();
-		future_to_promise(async move {
+		future_to_promise(self.freed.guard(async move {
 			let mut sub = cell
 				.borrow_mut()
 				.take()
@@ -191,10 +238,11 @@ impl Track {
 				Group {
 					sequence: g.sequence,
 					inner: Rc::new(RefCell::new(Some(g))),
+					freed: Freed::new(),
 				}
 				.into()
 			}))
-		})
+		}))
 	}
 }
 
@@ -204,6 +252,7 @@ pub struct Group {
 	sequence: u64,
 	// Shared with the pending read; see `Track`.
 	inner: Rc<RefCell<Option<moq_net::group::Consumer>>>,
+	freed: Freed,
 }
 
 #[wasm_bindgen]
@@ -217,7 +266,7 @@ impl Group {
 	#[wasm_bindgen(js_name = readFrame, unchecked_return_type = "Promise<Uint8Array | undefined>")]
 	pub fn read_frame(&self) -> Promise {
 		let cell = self.inner.clone();
-		future_to_promise(async move {
+		future_to_promise(self.freed.guard(async move {
 			let mut group = cell
 				.borrow_mut()
 				.take()
@@ -229,6 +278,6 @@ impl Group {
 			Ok(frame.map_or(JsValue::UNDEFINED, |frame| {
 				Uint8Array::from(frame.payload.as_ref()).into()
 			}))
-		})
+		}))
 	}
 }

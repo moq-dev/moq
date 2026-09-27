@@ -24,9 +24,8 @@ for (let group = await track?.recvGroup(); group; group = await track?.recvGroup
 The classes (`Moq.Session`, `Moq.Broadcast`, `Moq.Track`, `Moq.Group`) drop the
 `Moq` prefix since they're already namespaced under the import.
 
-`free()` is safe while a call is pending. Freeing a `Session` closes it, and its
-pending calls reject with the close reason. Freeing any other handle only drops
-the JS reference: a pending call still settles.
+`free()` is safe while a call is pending, and rejects that handle's pending
+calls. Freeing a `Session` also closes it.
 
 ## Building
 

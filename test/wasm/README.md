@@ -80,9 +80,9 @@ uncovered here.
 - **free() rejects a pending consume** -- freeing a session closes it, so a
   `consume` still waiting on an unannounced path has to reject. A fresh session
   then has to connect, which a corrupted wasm heap would not.
-- **free() during a read settles it** -- freeing a `Broadcast`, `Track`, or
-  `Group` while its call is pending only drops the JS handle: the call still
-  settles and the page keeps working. An `async fn(&self)` binding fails both
+- **free() cancels a pending read** -- freeing a `Broadcast`, `Track`, or
+  `Group` while its call is pending rejects the call, even when data is already
+  buffered, and the page keeps working. An `async fn(&self)` binding fails both
   cases, since wasm-bindgen keeps `&self` borrowed across the await.
 
 ### Known failures
