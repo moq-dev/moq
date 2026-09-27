@@ -74,6 +74,9 @@ struct State {
 /// An open cuvid decoder plus the output geometry it was created for.
 struct Decoder {
 	api: &'static cuvid::Api,
+	/// Held so the context outlives the decoder and can be bound in `Drop`:
+	/// destroying the decoder after the last context ref is released segfaults.
+	ctx: Arc<CudaContext>,
 	handle: CUvideodecoder,
 	/// The coded size it was created for, to detect reconfigures.
 	coded: (u32, u32),
@@ -87,10 +90,13 @@ struct Decoder {
 
 impl Drop for Decoder {
 	fn drop(&mut self) {
-		// SAFETY: the handle is valid and no frame is mapped (every map is
-		// paired with an unmap before decode returns). The caller keeps the CUDA
-		// context bound.
-		unsafe { (self.api.destroy_decoder)(self.handle) };
+		// Drop may run on any thread; destroying needs the context current.
+		if self.ctx.bind_to_thread().is_ok() {
+			// SAFETY: the handle is valid, its context is alive and current, and
+			// no frame is mapped (every map is paired with an unmap before decode
+			// returns).
+			unsafe { (self.api.destroy_decoder)(self.handle) };
+		}
 	}
 }
 
@@ -227,8 +233,8 @@ impl Backend for Nvdec {
 
 impl Drop for Nvdec {
 	fn drop(&mut self) {
-		// Drop may run on a different thread than decode; the destroy calls
-		// (parser here, decoder via `state`) need the context current.
+		// Drop may run on a different thread than decode; destroying the parser
+		// needs the context current (the decoder binds its own).
 		let _ = self.state.ctx.bind_to_thread();
 		// SAFETY: the parser is valid and no parse call is in flight (&mut self).
 		unsafe { (self.state.api.destroy_video_parser)(self.parser) };
@@ -350,6 +356,7 @@ impl State {
 		);
 		self.decoder = Some(Decoder {
 			api: self.api,
+			ctx: self.ctx.clone(),
 			handle,
 			coded,
 			display_area,

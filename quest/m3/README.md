@@ -20,3 +20,7 @@ condition clears, move the quest to the milestone its work belongs in.
 - [#2893](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - video: validate PipeWire DMA-BUF capture on KDE hardware
 - [Embedded video](/quest/m3/video-embedded.md) - EGL import in the renderer, so moq-video presents on a Pi
 - [Vision worker](/quest/m3/processor-vision.md) - a documented customer-run vision worker proves the processor contract
+- [libmoq hidden opt-in](/quest/m3/libmoq-hidden.md) - `moq_origin_announced` takes a `hidden` flag so C callers can list `.`-named broadcasts
+- [libmoq shutdown](/quest/m3/libmoq-shutdown.md) - OBS exits cleanly with the plugin loaded: a C ABI `moq_shutdown` stops the libmoq thread before the module is unloaded
+- [libmoq CMake library](/quest/m3/libmoq-cmake-lib.md) - the in-tree CMake build links the `libmoq.a` cargo reports, not a hardcoded `target/<profile>` path
+- [libmoq fetch](/quest/m3/libmoq-fetch.md) - libmoq gains an additive cached-group fetch entry point
