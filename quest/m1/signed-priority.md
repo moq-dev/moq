@@ -20,7 +20,7 @@ Decided with the maintainer:
   that i8 -128 and -127 share byte 255, and IETF bytes 0 and 1 both decode to
   127. Pin both ends in tests.
 - hang's built-in priorities move above 0, so hang media outranks a track that
-  never set one. Something like catalog 40, text 30, audio 20, video 0; the
+  never set one. Something like catalog 40, text 30, audio 20, video 10; the
   spacing is the implementer's call. Rust and JS keep matching values.
 - A zeroed libmoq `moq_track_info` then means the default, which retires the
   need for a `priority_present` flag.
@@ -29,6 +29,12 @@ Changing published `u8` fields to `i8` is an API break in every language, so
 this lands on `dev`. Look for anything that does arithmetic on priority
 (the lite send queue, JS send-order packing, the bandwidth allocator, the
 relay's max-of-subscribers) and keep its ordering, not just its type.
+
+moq-archive's `Info::priority` follows. Its version-1 `.info` stores the
+`u8`, so existing recordings must keep their meaning: store the moq-lite byte
+(`p + 128`) or bump the format version, never reinterpret silently.
+`doc/concept/moq-lite.md` (the 0..255 knob) and `doc/concept/standard.md`
+(IETF 128 maps to 127) move to the new range and mapping.
 
 Report the wire impact in the PR: none in format, but the default byte on
 moq-lite moves again.
