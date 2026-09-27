@@ -4,9 +4,14 @@
 
 Public and mTLS rules (`[auth] public*`, `--auth-public*`, and
 `moq auth serve --public-*`/`--mtls-*`) are authorized like a JWT with root
-`/`, as in moq-relay 0.14.18. `public = "anon/**"` lets an anonymous client
-dialed at `/anon` publish `test.hang` (absolute `anon/test.hang`) and refuses
-a session dialed outside `anon/`. Relay tests cover it.
+`/`, as static public rules were in moq-relay 0.14.18. `public = "anon/**"`
+(0.14 spelled it `public = "anon"`) lets an anonymous client dialed at `/anon`
+publish `test.hang` (absolute `anon/test.hang`) and refuses a session dialed
+outside `anon/`. Relay tests cover it.
+
+This is a security fix for released 0.15: today an anonymous client can reach
+into any path. It lands first and on its own, ahead of
+[Auth parity](/quest/m0/auth-parity.md).
 
 Non-goals: the pattern grammar (owned by [Path patterns](/quest/m1/path-patterns.md))
 and JWT grant semantics, which already behave this way.
@@ -32,8 +37,9 @@ the dialed path.
 
 ### Cause
 
-0.14 built public access as `Claims::default().with_root("")` and ran it
-through `Claims::authorize(path)`. #3688 (relay) and #3686 (`moq auth serve`)
+0.14 built static public access as `Claims::default().with_root("")` and ran
+it through `Claims::authorize(path)`. Its public and auth APIs rooted their
+answers at the dialed path, as `--auth-url` still does. #3688 (relay) and #3686 (`moq auth serve`)
 replaced that with raw patterns in a `Grant` whose `root` is `None`, which
 roots them at the dialed path. `anon/**` dialed at `/anon` therefore enforces
 `anon/anon/**`. The `accepted` log was accurate: `root=event subscribe=event/**`
@@ -41,7 +47,10 @@ is root-relative and meant `event/event/**`.
 
 The same cause admits every path. Under `anon/**`, a session dialed at
 `/rooms/123` gets `rooms/123/anon/**`, so an anonymous client can publish
-inside a JWT-protected room. 0.14 answered 401. It also breaks HTTP:
+inside a JWT-protected room. A rule that starts with a wildcard is worse:
+`public_subscribe = "*"`, meant as the top-level broadcasts, lets a session
+dialed at `/rooms/123` subscribe to every broadcast in that room. 0.14
+answered 401. It also breaks HTTP:
 `/fetch/anon/bbb/video` scopes to `anon/bbb/anon/**` and times out with 504,
 and `/announced/anon` lists nothing. The demo's meet page dials
 `/anon/meet/<room>`, which fails under `prod.toml`'s suggested
@@ -55,12 +64,17 @@ and `/announced/anon` lists nothing. The demo's meet page dials
   `authorize(&request.path)`. This adds no public API. `grant.root = Some("")`
   would be wrong, because it would move the session root to `/`.
 - A dialed path the rules don't reach is refused, as 0.14 did
-  (`ExpectedToken`) and as a JWT is (`RootMismatch` / `NoAccess`).
+  (`ExpectedToken`) and as a JWT is (`RootMismatch` / `NoAccess`). It is a
+  refusal (401 or 403), never an outage: the relay's
+  `From<moq_auth::Error>` maps everything but `Refused` to a 502 that clients
+  retry forever, so map `NoAccess` explicitly.
 - A public or mTLS pattern with no wildcard (`anon`, `""`) refuses to start,
-  naming `anon/**` for the subtree. 0.14 read it as a prefix and 0.15 reads it
-  as exact, so a silent reading either way misleads someone. The refusal
-  applies to the relay config and `moq auth serve`, so patterns mean the same
-  thing everywhere.
+  naming `anon/**` for the subtree. This is a migration guard: 0.14 read
+  `anon` as a prefix and 0.15 reads it as exact, so either silent reading
+  misleads someone, and an operator fixes it before any client connects. It
+  also catches an empty `MOQ_AUTH_PUBLIC=` from an unset variable, which
+  today enables anonymous access. The cost is that no exact broadcast can be
+  made public; the guard can relax once 0.14 configs are gone.
 - The `accepted` log stays root-relative; the fix makes its output correct.
 - `/fetch` keeps dialing the whole broadcast path, as 0.14 did. The rebase
   makes it work under public rules.
@@ -78,6 +92,7 @@ relative or absolute. Use non-`**` patterns throughout.
 - Unit: restore 0.14's public-subscribe-only and public-publish-only tests.
 - Smoke: with `public = "anon/**"`, a client dialed at `/anon` publishes
   `test.hang`, a subscriber at `/` sees `anon/test.hang`, and a session at
+  `/rooms/123` is refused. With `public_subscribe = "*"`, a session at
   `/rooms/123` is refused.
 - Smoke: `/fetch` and `/announced` serve a broadcast under `anon/**` and
   refuse one outside it.
