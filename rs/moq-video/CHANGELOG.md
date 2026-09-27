@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/moq-dev/moq/compare/moq-video-v0.1.5...moq-video-v0.1.6) - 2026-09-26
+
+### Added
+
+- *(moq-mux)* catalog delay measures cross-rendition encoder lateness ([#4170](https://github.com/moq-dev/moq/pull/4170))
+
+### Other
+
+- rename CLAUDE.md to AGENTS.md ([#4235](https://github.com/moq-dev/moq/pull/4235))
+
 ## [0.1.5](https://github.com/moq-dev/moq/compare/moq-video-v0.1.4...moq-video-v0.1.5) - 2026-09-26
 
 ### Fixed

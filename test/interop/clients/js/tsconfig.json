@@ -6,7 +6,7 @@
 	"include": [
 		"driver.ts",
 		"harness.ts",
-		"harness.test.ts",
+		"harness.browser.ts",
 		"media.ts",
 		"src",
 		"vite.config.ts",

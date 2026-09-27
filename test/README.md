@@ -32,10 +32,10 @@ for the original run.
 
 The reservation root ignores `TMPDIR`: Nix shells have private temporary
 directories but share the host's ports. The user id avoids ownership conflicts in
-world-writable `/tmp`. `MOQ_TEST_PORTS` must name the same root for all of a user's runs sharing the
-network. A reservation root must belong to the
-current user and cannot be a symlink; new roots are private. Runs by different
-users still need disjoint ports.
+world-writable `/tmp`. An override via `MOQ_TEST_PORTS` must be the same for every
+run sharing the network. The root must belong to the current user and cannot be
+a symlink; new roots are private. Runs by different users still need disjoint
+ports.
 
 The reservation settles contention between harness runs, not with the rest of the
 machine, so each harness still refuses a port something unrelated is already

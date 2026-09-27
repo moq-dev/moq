@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.7](https://github.com/moq-dev/moq/compare/libmoq-v0.6.6...libmoq-v0.6.7) - 2026-09-26
+
+### Added
+
+- end a broadcast with close() in every language ([#4031](https://github.com/moq-dev/moq/pull/4031))
+- *(mux)* forward importer discontinuities through publishers ([#4239](https://github.com/moq-dev/moq/pull/4239))
+
+### Fixed
+
+- *(libmoq)* write moq.h and moq.pc into OUT_DIR only ([#4243](https://github.com/moq-dev/moq/pull/4243))
+
 ## [0.6.6](https://github.com/moq-dev/moq/compare/libmoq-v0.6.5...libmoq-v0.6.6) - 2026-09-26
 
 ### Other

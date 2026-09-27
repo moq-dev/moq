@@ -48,6 +48,10 @@ const trackShape = {
 	// The player's buffer must be at least this large to avoid underruns.
 	// Mirrors the `jitter` field in the hang catalog.
 	jitter: z.optional(z.number()),
+
+	// Non-standard: how far this rendition trails the broadcast's earliest, in milliseconds.
+	// Mirrors hang `delay`. A player holds `delay + jitter` and does not subtract across renditions.
+	delay: z.optional(z.number()),
 };
 
 /** Zod schema describing a single track entry in an MSF catalog. */

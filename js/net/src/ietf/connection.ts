@@ -141,7 +141,7 @@ export class Connection implements Established {
 		});
 		this.#solicit = solicit;
 		this.#cluster = cluster;
-		this.#subscriber = new Subscriber({ session: this.#session, cluster, hidden });
+		this.#subscriber = new Subscriber({ session: this.#session, quic, cluster, hidden });
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path) });
 
 		void this.#run();

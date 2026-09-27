@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.7](https://github.com/moq-dev/moq/compare/moq-cli-v0.12.6...moq-cli-v0.12.7) - 2026-09-26
+
+### Fixed
+
+- *(cli)* keep delayed playback at the live edge ([#4241](https://github.com/moq-dev/moq/pull/4241))
+
 ## [0.12.6](https://github.com/moq-dev/moq/compare/moq-cli-v0.12.5...moq-cli-v0.12.6) - 2026-09-26
 
 ### Other

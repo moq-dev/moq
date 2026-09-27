@@ -137,8 +137,8 @@ export const hooks: {
 		group: GroupConsumer,
 		expiry: { expired: () => boolean; changed: readonly Getter<unknown>[] },
 	) => void;
-	/** Stop an in-flight group operation if the handed-out group expires. */
-	guardGroup: <T>(group: GroupConsumer, operation: Promise<T>) => Promise<T>;
+	/** Start a group operation unless the handed-out group has expired, and stop it if the group expires mid-flight. */
+	guardGroup: <T>(group: GroupConsumer, operation: () => Promise<T>) => Promise<T>;
 	/** Read a frame the wire publisher completes (or skips) once written. */
 	readGroupFrame: (group: GroupConsumer, from?: number) => Promise<ReadGroupFrame | undefined>;
 	/** Make an evicted mirror terminal while its track timeline still contains it. */

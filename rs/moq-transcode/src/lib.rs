@@ -199,7 +199,7 @@ impl Transcoder {
 		tasks.shutdown().await;
 
 		derived.finish()?;
-		output.finish();
+		output.close();
 		Ok(())
 	}
 }
@@ -1452,7 +1452,7 @@ mod tests {
 		.expect("run kept waiting for a source it can never decode");
 
 		match result {
-			// Why the tallest rendition's decoder refused.
+			// Why the largest rendition's decoder refused.
 			Err(Error::Video(moq_video::Error::UnknownDecoder { name, codec, .. })) => {
 				assert_eq!(name, "missing");
 				assert_eq!(codec, moq_video::decode::Codec::H265);

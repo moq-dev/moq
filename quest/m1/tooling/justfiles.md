@@ -87,7 +87,7 @@ wanted), `_shell`, `_flake` as its one-liner, `clean`, the rs `package` and
 and `preset` bodies.
 
 Docs: `doc/setup/dev.md`, `CONTRIBUTING.md`, `test/README.md`, and the
-`CLAUDE.md` mentions of `just wasm` follow the survivors. Verify with `just
+`AGENTS.md` mentions of `just wasm` follow the survivors. Verify with `just
 check`, `just ci test`, and `just check --all`, and confirm every recipe name
 check.yml, cache.yml, nightly.yml, interop.yml, wasm.yml, obs.yml, swift.yml,
 and release-*.yml invoke still resolves.
