@@ -91,6 +91,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
 
+      - name: BBB rendition alignment
+        if: ${{ !cancelled() }}
+        run: nix develop --command just pub check-bbb
+
       - name: Audit
         if: ${{ !cancelled() }}
         run: nix develop --command just rs audit
