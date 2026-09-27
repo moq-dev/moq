@@ -18,7 +18,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use tokio::time::Instant;
 
-use crate::{Event, Grant, Key, KeyId, Permissions, Request};
+use crate::{Event, Grant, Key, KeyId, Permissions, Request, Token};
 
 /// Where the signing keys a `jwt` is verified against come from. Read per request,
 /// so a rotated file takes effect without a restart.
@@ -48,8 +48,12 @@ pub struct Limits {
 }
 
 /// The decisions the server answers with, evaluated in order and stopping at the
-/// first that applies: a `jwt` in the query, then a verified certificate, then the
-/// anonymous rules. A malformed or expired token is a refusal, never a fall through.
+/// first that applies: a JWT, then a verified certificate, then the anonymous rules.
+/// A malformed or expired token is a refusal, never a fall through.
+///
+/// The JWT is the `jwt` query parameter or a moq-transport SETUP token of type 0
+/// ([`Token::OUT_OF_BAND`]), verified alike. A session presenting both is refused,
+/// as is a SETUP token of any other type.
 ///
 /// `#[non_exhaustive]`, so start from [`Policy::default`] and set the fields.
 #[derive(Clone, Debug)]
@@ -110,12 +114,16 @@ pub enum Refusal {
 	TokenLimit,
 	#[error("too many live sessions from this address")]
 	RemoteLimit,
+	#[error("both a SETUP token and a `jwt` query were presented; present one")]
+	TwoTokens,
+	#[error("SETUP token type {0:#x} is not supported; only type 0 (a JWT) is")]
+	UnsupportedToken(u64),
 }
 
 impl Policy {
 	/// Decide `request` by the policy alone, ignoring session limits.
 	pub async fn decide(&self, request: &Request) -> Result<Grant, Refusal> {
-		let (permissions, expires) = if let Some(jwt) = token(request) {
+		let (permissions, expires) = if let Some(jwt) = jwt(request)? {
 			let key = self.key(jwt).await?;
 			let claims = key.verify(jwt).map_err(|err| Refusal::InvalidToken(err.to_string()))?;
 			let permissions = claims.authorize(&request.path).map_err(|err| match err {
@@ -161,9 +169,21 @@ impl Policy {
 	}
 }
 
+/// The JWT the request presents: its SETUP token, or else its `jwt` query parameter.
+fn jwt(request: &Request) -> Result<Option<&str>, Refusal> {
+	match (&request.token, query_jwt(request)) {
+		(Some(_), Some(_)) => Err(Refusal::TwoTokens),
+		(Some(token), None) if token.kind == Token::OUT_OF_BAND => std::str::from_utf8(&token.value)
+			.map(Some)
+			.map_err(|_| Refusal::InvalidToken("the SETUP token is not UTF-8".into())),
+		(Some(token), None) => Err(Refusal::UnsupportedToken(token.kind)),
+		(None, jwt) => Ok(jwt),
+	}
+}
+
 /// The `jwt` query parameter, when the request carries a non-empty one. The last one
 /// wins, as it did on the relay, so a client that appends a fresh token is believed.
-fn token(request: &Request) -> Option<&str> {
+fn query_jwt(request: &Request) -> Option<&str> {
 	let query = request.query.as_deref()?;
 	// Borrow rather than decode: a JWT is base64url and never needs unescaping.
 	query
@@ -204,7 +224,8 @@ impl Sessions {
 			slot.seen = Instant::now();
 			return Ok(());
 		}
-		let token = token(request).map(hash);
+		// Decided before counting, so the credential is already known to be one JWT.
+		let token = jwt(request).ok().flatten().map(hash);
 		let remote = remote(request);
 		if let (Some(cap), Some(token)) = (limits.token, token)
 			&& self.slots.values().filter(|slot| slot.token == Some(token)).count() >= cap
@@ -232,7 +253,7 @@ impl Sessions {
 	/// which survivor to revoke would be an accident of arrival order.
 	fn revalidate(&mut self, request: &Request) {
 		let slot = self.slots.entry(request.id.clone()).or_insert_with(|| Slot {
-			token: token(request).map(hash),
+			token: jwt(request).ok().flatten().map(hash),
 			remote: remote(request),
 			seen: Instant::now(),
 		});
@@ -532,6 +553,73 @@ mod tests {
 		assert!(policy.decide(&with_token(request("/demo"), &jwt)).await.is_ok());
 	}
 
+	fn with_setup_token(mut request: Request, kind: u64, value: &str) -> Request {
+		request.token = Some(Token {
+			kind,
+			value: value.as_bytes().to_vec(),
+		});
+		request
+	}
+
+	/// A type-0 SETUP token is the deployment's JWT, verified exactly like `?jwt=`.
+	#[tokio::test]
+	async fn a_type_zero_setup_token_is_a_jwt() {
+		let (dir, key) = key_dir();
+		let policy = Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			..Default::default()
+		};
+		let jwt = sign(&key, "demo", &["alice/**"], &[], None);
+		let grant = policy
+			.decide(&with_setup_token(request("/demo"), Token::OUT_OF_BAND, &jwt))
+			.await
+			.unwrap();
+		assert_eq!(grant.publish, patterns(&["alice/**"]));
+
+		// And refused like one: a stranger's key never falls through to public.
+		let stranger = Key::generate(Algorithm::HS256, Some(KeyId::decode("kid1").unwrap())).unwrap();
+		let forged = sign(&stranger, "demo", &["**"], &[], None);
+		let err = policy
+			.decide(&with_setup_token(request("/demo"), Token::OUT_OF_BAND, &forged))
+			.await
+			.unwrap_err();
+		assert!(matches!(err, Refusal::InvalidToken(_)), "{err}");
+	}
+
+	#[tokio::test]
+	async fn a_setup_token_of_another_type_is_refused() {
+		let (dir, key) = key_dir();
+		let policy = Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			public: rules(&["**"], &["**"]),
+			..Default::default()
+		};
+		let jwt = sign(&key, "demo", &["**"], &[], None);
+		let err = policy
+			.decide(&with_setup_token(request("/demo"), Token::CAT, &jwt))
+			.await
+			.unwrap_err();
+		assert_eq!(err, Refusal::UnsupportedToken(Token::CAT));
+		assert_eq!(
+			err.to_string(),
+			"SETUP token type 0x1 is not supported; only type 0 (a JWT) is"
+		);
+	}
+
+	/// Two credentials would leave the server guessing which one the client meant.
+	#[tokio::test]
+	async fn a_setup_token_and_a_query_jwt_are_refused() {
+		let (dir, key) = key_dir();
+		let policy = Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			..Default::default()
+		};
+		let jwt = sign(&key, "demo", &["**"], &[], None);
+		let request = with_setup_token(with_token(request("/demo"), &jwt), Token::OUT_OF_BAND, &jwt);
+		let err = policy.decide(&request).await.unwrap_err();
+		assert_eq!(err, Refusal::TwoTokens);
+	}
+
 	#[tokio::test]
 	async fn the_last_jwt_in_the_query_wins() {
 		let (dir, key) = key_dir();
@@ -545,7 +633,7 @@ mod tests {
 		// relay; a trailing empty value does not blank it out.
 		let mut request = request("/demo");
 		request.query = Some(format!("a=1&jwt=stale&jwt={fresh}&jwt="));
-		assert_eq!(token(&request), Some(fresh.as_str()));
+		assert_eq!(query_jwt(&request), Some(fresh.as_str()));
 		assert!(policy.decide(&request).await.is_ok());
 
 		request.query = Some(format!("jwt={fresh}&jwt=stale"));
@@ -553,7 +641,7 @@ mod tests {
 		assert!(matches!(err, Refusal::InvalidToken(_)), "{err}");
 
 		request.query = Some("jwt=&b=2".into());
-		assert_eq!(token(&request), None);
+		assert_eq!(query_jwt(&request), None);
 	}
 
 	#[tokio::test]
