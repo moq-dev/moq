@@ -62,10 +62,12 @@ held open with `{}` until the tier records. Any other name is refused.
 ## Frames
 
 Every frame is a JSON object mapping a key (broadcast path or auth root) to an
-entry. An entry appears while it is **live**, meaning some started counter
-still exceeds its ended counterpart so traffic could resume at any moment, and
-on any tick its counters changed. Once fully closed it appears one last time
-with its final counters and is then dropped. A track with no entries holds `{}`.
+entry. A traffic entry appears from its first nonzero counter until the relay
+drops its counters, even while idle: the last viewer can leave while the
+publisher still holds the path, and a returning viewer resumes the same
+counters. So a key missing from a frame had no counters, and one that returns
+starts from zero. A sessions entry appears while a session is connected and on
+the tick its last one disconnects. A track with no entries holds `{}`.
 
 The producer drains its counters every interval (one second by default) and
 writes only when a track's frame changed, so silence means nothing moved, not
