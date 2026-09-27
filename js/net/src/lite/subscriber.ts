@@ -797,7 +797,7 @@ export class Subscriber {
 			let pending: Promise<netGroup.Frame | undefined> | undefined;
 			for (;;) {
 				// Buffered frames are written without an await, as in a group stream.
-				let frame = pending ? undefined : stream.reader.tryDecode(decode);
+				let frame = pending === undefined ? stream.reader.tryDecode(decode) : undefined;
 				if (!frame) {
 					pending ??= stream.reader.decodeMaybe(decode);
 					const next = await race([pending, group.closed, unused]);
