@@ -307,14 +307,16 @@ enum GroupFetch {
 struct GroupFetchEntry {
 	state: Lock<State>,
 	fetch_id: RequestId,
+	slot: kio::Producer<GroupFetch>,
 }
 
 impl GroupFetchEntry {
 	fn new(state: &Lock<State>, fetch_id: RequestId, slot: kio::Producer<GroupFetch>) -> Self {
-		state.lock().group_fetches.insert(fetch_id, slot);
+		state.lock().group_fetches.insert(fetch_id, slot.clone());
 		Self {
 			state: state.clone(),
 			fetch_id,
+			slot,
 		}
 	}
 }
@@ -322,6 +324,9 @@ impl GroupFetchEntry {
 impl Drop for GroupFetchEntry {
 	fn drop(&mut self) {
 		self.state.lock().group_fetches.remove(&self.fetch_id);
+		// A fetch stream that overtook a refused or unserved FETCH_OK holds its own clone
+		// of the slot, so only closing it wakes that stream.
+		let _ = self.slot.close();
 	}
 }
 
@@ -3059,7 +3064,12 @@ where
 	) -> Result<(), Error> {
 		let mut next = 0u64;
 		let mut prior_group = None;
+		let mut ended = false;
 		while let Some(object) = decode_fetch_object(stream, self.version).await? {
+			if ended {
+				tracing::warn!(sequence, "a group fetch continued past its end marker");
+				return Err(Error::ProtocolViolation);
+			}
 			if !object.subgroup_ok {
 				tracing::warn!("subgroup ID is not supported, dropping group fetch");
 				return Err(Error::Unsupported);
@@ -3079,12 +3089,12 @@ where
 				return Err(Error::Unsupported);
 			}
 
-			// A marker is the end of the group, so anything after it has the wrong ID.
-			if self
+			match self
 				.recv_fetch_payload(stream, producer, object.properties, timescale)
 				.await?
 			{
-				next += 1;
+				true => next += 1,
+				false => ended = true,
 			}
 		}
 
@@ -6745,6 +6755,59 @@ mod stitch_tests {
 		assert_eq!(frames.len(), 2, "the prefix that arrived is published");
 		assert_eq!(frames[0].1, b"g7-0");
 		assert_eq!(frames[1].1, b"g7-1");
+	}
+
+	/// A draft-14/15 end-of-group marker ends a group fetch, so an object after it is a
+	/// violation rather than another frame.
+	#[tokio::test]
+	async fn a_group_fetch_refuses_an_object_past_its_end_marker() {
+		const DRAFT: Version = Version::Draft15;
+		let header = |object: u64| ietf::FetchObject::Object {
+			subgroup: ietf::FetchSubgroup::Zero,
+			group: Some(SEQUENCE),
+			object: Some(object),
+			priority: Some(0),
+			properties: None,
+		};
+		let mut buf = bytes::BytesMut::new();
+		header(0).encode(&mut buf, DRAFT).unwrap();
+		1u64.encode(&mut buf, DRAFT).unwrap();
+		buf.put_slice(b"a");
+		header(1).encode(&mut buf, DRAFT).unwrap();
+		0u64.encode(&mut buf, DRAFT).unwrap();
+		END_OF_GROUP.encode(&mut buf, DRAFT).unwrap();
+		header(1).encode(&mut buf, DRAFT).unwrap();
+		1u64.encode(&mut buf, DRAFT).unwrap();
+		buf.put_slice(b"b");
+
+		let mut session = ScriptedSession::per_stream_eof(vec![buf.to_vec()]);
+		let tasks = TaskSet::new();
+		let subscriber = Subscriber::new(
+			crate::time::Clock::tokio(),
+			session.clone(),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			DRAFT,
+			tasks.0.clone(),
+			Default::default(),
+		);
+		let (_, recv) = session.open_bi().await.unwrap();
+		let mut stream = Reader::new(recv, DRAFT);
+
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			track::Info::default(),
+		);
+		let mut group = track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+		let res = subscriber
+			.recv_group_fetch_objects(&mut stream, &mut group, SEQUENCE, None)
+			.await;
+		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
 	}
 }
 
