@@ -3,6 +3,7 @@ import { getter } from "@moq/signals";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { HopSchema, Route } from "./hop.ts";
+import { spreadHash } from "./internal.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -1359,4 +1360,46 @@ test("announced filters by arbitrary patterns and reports captures", async () =>
 	announced.close();
 	broadcast.close();
 	origin.close();
+});
+
+test("the spread hash matches rs/moq-net byte for byte", () => {
+	expect(spreadHash("pool/job-0", [10n])).toBe(0xefb5e20a66101c32n);
+	expect(spreadHash("pool/job-0", [11n])).toBe(0x0eb0a91370ff6653n);
+});
+
+test("an equal-cost pool spreads its paths the same way on every node", async () => {
+	const workers = [10n, 11n, 12n, 13n].map((id) => HopSchema.parse(id));
+	const paths = Array.from({ length: 64 }, (_, i) => Path.from(`pool/job-${i}`));
+
+	// The worker each path resolves to on an origin whose pool arrived in `order`.
+	async function winners(order: typeof workers): Promise<bigint[]> {
+		const origin = new Producer();
+		const served = new Map<Path.Valid, bigint>();
+		const handles = order.map((hop) => {
+			const handle = wireOf(origin).receive(Path.from("pool"), { hops: [hop], cost: 3n });
+			void (async () => {
+				for await (const request of handle.requested()) {
+					served.set(request.path, hop);
+					request.accept(new BroadcastProducer());
+				}
+			})();
+			return handle;
+		});
+		const requests = paths.map((path) => origin.request(path));
+		await settle();
+		for (const request of requests) request.close();
+		for (const handle of handles) handle.close();
+		origin.close();
+		return paths.map((path) => served.get(path) ?? -1n);
+	}
+
+	const forward = await winners(workers);
+	const reverse = await winners([...workers].reverse());
+	expect(reverse).toEqual(forward);
+
+	// Not an assertion about any two paths, which a correct hash may put on one worker:
+	// only that the set does not pile onto a few.
+	for (const worker of workers) {
+		expect(forward.filter((hop) => hop === worker).length).toBeGreaterThanOrEqual(paths.length / 16);
+	}
 });

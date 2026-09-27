@@ -15,7 +15,7 @@ import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { isAnonymous, Route, routesEqual } from "./hop.ts";
-import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "./internal.ts";
+import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps, spreadHash } from "./internal.ts";
 import * as Path from "./path.ts";
 import { type Advertised, registerWire, wireOf } from "./wire.ts";
 
@@ -76,8 +76,16 @@ function compareRoutes(a: Route, b: Route): number {
 	return 0;
 }
 
-/** The preferred of `entries` (newest first) not skipped: the best route, then fewest hops, then newest. */
-function preferredEntry(entries: readonly RouteEntry[], skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
+/**
+ * The preferred of `entries` (newest first) for resolving `path`, not skipped: the best route,
+ * then fewest hops, then the lowest {@link spreadHash}, then newest. `path` is the requested
+ * path for a request, or the prefix itself for an advertisement.
+ */
+function preferredEntry(
+	path: Path.Valid,
+	entries: readonly RouteEntry[],
+	skip?: (entry: RouteEntry) => boolean,
+): RouteEntry | undefined {
 	let best: RouteEntry | undefined;
 	for (const entry of entries) {
 		if (skip?.(entry)) continue;
@@ -87,7 +95,13 @@ function preferredEntry(entries: readonly RouteEntry[], skip?: (entry: RouteEntr
 		}
 		const a = entry.route.peek();
 		const b = best.route.peek();
-		const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
+		let order = compareRoutes(a, b) || a.hops.length - b.hops.length;
+		// Hashed only on a tie, so the common single-route prefix never pays for it.
+		if (order === 0) {
+			const ha = spreadHash(path, a.hops);
+			const hb = spreadHash(path, b.hops);
+			order = ha < hb ? -1 : ha > hb ? 1 : 0;
+		}
 		if (order < 0) best = entry;
 	}
 	return best;
@@ -241,7 +255,7 @@ class OriginState {
 		const local = new Map<Path.Valid, Advertised>();
 		const available = new Map<Path.Valid, Route>();
 		for (const [path, routes] of this.routes.peek() ?? []) {
-			const entry = preferredEntry(routes);
+			const entry = preferredEntry(path, routes);
 			if (!entry) continue;
 			const value = { identity: entry.identity, route: entry.route.peek() };
 			remote.set(path, value);
@@ -249,7 +263,7 @@ class OriginState {
 		}
 		for (const [path, front] of this.local.peek() ?? []) {
 			const routes = this.routes.peek()?.get(path);
-			if (!this.localWins(path, routes && preferredEntry(routes))) continue;
+			if (!this.localWins(path, routes && preferredEntry(path, routes))) continue;
 			const value = { identity: front, route: this.advertisedLocal.peek()?.get(path) ?? Route.default };
 			local.set(path, value);
 			available.set(path, value.route);
@@ -343,14 +357,14 @@ class OriginState {
 		}
 		const next = new Map<Path.Valid, Advertised>();
 		for (const [prefix, entries] of routes ?? []) {
-			const mine = preferredEntry(entries, received);
+			const mine = preferredEntry(prefix, entries, received);
 			if (mine) next.set(prefix, { identity: mine.identity, route: mine.route.peek() });
 		}
 		// A local broadcast and an originated dynamic at one path compete on cost, as they do for requests.
 		for (const [path, route] of advertised ?? []) {
 			const front = local?.get(path);
 			const entries = routes?.get(path);
-			if (front && this.localWins(path, entries && preferredEntry(entries, received))) {
+			if (front && this.localWins(path, entries && preferredEntry(path, entries, received))) {
 				next.set(path, { identity: front, route });
 			}
 		}
@@ -375,7 +389,7 @@ class OriginState {
 		let best: RouteEntry | undefined;
 		for (const [prefix, entries] of this.routes.peek() ?? []) {
 			if (!Path.hasPrefix(prefix, path)) continue;
-			const entry = preferredEntry(entries, skip);
+			const entry = preferredEntry(path, entries, skip);
 			if (!entry) continue;
 			if (bestPrefix === undefined || prefix.length > bestPrefix.length) {
 				bestPrefix = prefix;

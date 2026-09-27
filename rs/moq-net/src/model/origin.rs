@@ -4412,6 +4412,13 @@ mod tests {
 	/// Equal-cost advertisers of one prefix share its paths: a set of requested
 	/// paths spreads across the pool, and one path always resolves to the same
 	/// advertiser, whatever order the routes arrived in.
+	/// Pinned so `spreadHash` in `js/net` picks the same pool member for a path.
+	#[test]
+	fn spread_hash_matches_js() {
+		assert_eq!(fnv_key("pool/job-0", [origin(10)]), 0xefb5e20a66101c32);
+		assert_eq!(fnv_key("pool/job-0", [origin(11)]), 0x0eb0a91370ff6653);
+	}
+
 	#[tokio::test]
 	async fn equal_cost_pool_spreads_paths() {
 		const WORKERS: [u64; 4] = [10, 11, 12, 13];
