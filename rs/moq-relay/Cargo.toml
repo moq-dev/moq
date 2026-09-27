@@ -91,6 +91,7 @@ sd-notify = { workspace = true }
 [dev-dependencies]
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 moq-shaper = { path = "../moq-shaper" }
+qmux = { workspace = true, features = ["tcp"] }
 rand = { workspace = true }
 rcgen = "0.14"
 tempfile = { workspace = true }
