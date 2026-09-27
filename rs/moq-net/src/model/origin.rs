@@ -985,9 +985,11 @@ struct Mount {
 }
 
 impl Mount {
-	/// Where the handle-side absolute `path` resolves, when it is under this mount.
+	/// Where the handle-side absolute `path` resolves, when it is under this mount
+	/// and the result fits [`Path::MAX_PARTS`].
 	fn resolve(&self, path: &Path) -> Option<PathOwned> {
-		Some(self.target.join(path.strip_prefix(&self.at)?))
+		let resolved = self.target.join(path.strip_prefix(&self.at)?);
+		(resolved.parts().count() <= Path::MAX_PARTS).then_some(resolved)
 	}
 
 	/// Where the origin-side absolute `path` shows on the handle, when it is at or
@@ -1059,11 +1061,12 @@ impl OriginScope {
 		self.mounts.iter().find(|mount| path.has_prefix(&mount.at))
 	}
 
-	/// Where the absolute `path` resolves on the origin: itself, or its mount target.
-	fn resolve<'a>(&self, path: &'a Path<'a>) -> Path<'a> {
-		match self.mount(path).and_then(|mount| mount.resolve(path)) {
-			Some(target) => target,
-			None => path.borrow(),
+	/// Where the absolute `path` resolves on the origin: itself, or its mount
+	/// target. `None` when the mount would resolve it past [`Path::MAX_PARTS`].
+	fn resolve<'a>(&self, path: &'a Path<'a>) -> Option<Path<'a>> {
+		match self.mount(path) {
+			Some(mount) => mount.resolve(path),
+			None => Some(path.borrow()),
 		}
 	}
 
@@ -1545,7 +1548,8 @@ impl Producer {
 	///
 	/// Returns [`Error::Unauthorized`] unless this producer reaches all of
 	/// `target`, so a mount never widens a scope, and [`Error::Duplicate`] when
-	/// `at` overlaps a mount this producer already has.
+	/// `at` or `target` overlaps a mount this producer already has: mounts never
+	/// chain, so a target is always read as the origin holds it.
 	pub fn mount(&self, at: impl AsPath, target: impl AsPath) -> Result<Producer, Error> {
 		let at = self.root.join(at).to_owned();
 		let target = self.root.join(target).to_owned();
@@ -1556,12 +1560,11 @@ impl Producer {
 		{
 			return Err(Error::Unauthorized);
 		}
-		if self
-			.scope
-			.mounts
-			.iter()
-			.any(|mount| mount.at.has_prefix(&at) || at.has_prefix(&mount.at))
-		{
+		if self.scope.mounts.iter().any(|mount| {
+			[&at, &target]
+				.into_iter()
+				.any(|path| mount.at.has_prefix(path) || path.has_prefix(&mount.at))
+		}) {
 			return Err(Error::Duplicate);
 		}
 		let mounts = self
@@ -3649,7 +3652,10 @@ impl Consumer {
 		// A root at or beneath a mount reads only the mount: one cursor, re-rooted
 		// onto the target.
 		if let Some(mount) = self.scope.mount(&self.root) {
-			let root = mount.resolve(&self.root).expect("the root is under its mount");
+			// A root the mount resolves past the depth limit has nothing to announce.
+			let Some(root) = mount.resolve(&self.root) else {
+				return AnnounceConsumer::new(self.root.clone(), Vec::new(), state, self.stats.clone(), &self.shared);
+			};
 			let cursors = vec![cursor(
 				root,
 				mount.translate(&self.scope.allowed),
@@ -3713,7 +3719,7 @@ impl Consumer {
 		if !self.scope.permits(&full) {
 			return None;
 		}
-		let full = self.scope.resolve(&full);
+		let full = self.scope.resolve(&full)?;
 		let table = self.shared.lock();
 		table
 			.routes
@@ -3799,7 +3805,9 @@ impl Consumer {
 				if table.closed {
 					return Err(Error::Closed);
 				}
-				let watch = table.watch(&self.shared, &self.scope.resolve(&self.root.join(&path)));
+				let named = self.root.join(&path);
+				let resolved = self.scope.resolve(&named).ok_or(BoundsExceeded)?;
+				let watch = table.watch(&self.shared, &resolved);
 				let seen = watch.seen();
 				(watch, seen)
 			};
@@ -3875,7 +3883,9 @@ impl Consumer {
 
 		// Key requests by the absolute path on the origin, past any mount, so scoped,
 		// rooted, and mounted consumers and handlers agree on the same entry and front.
-		let absolute = self.scope.resolve(&named).to_owned();
+		let Some(absolute) = self.scope.resolve(&named).map(|path| path.to_owned()) else {
+			return kio::Pending::new(Requesting::failed(BoundsExceeded.into()));
+		};
 
 		let mut state = self.shared.lock();
 
@@ -4517,6 +4527,12 @@ mod tests {
 		let mut announced = project.announced();
 		announced.assert_next_active(".svc");
 		announced.assert_next_wait();
+
+		// Beneath the mount the target has no room: refused, never handed to a route.
+		let err = project.request_broadcast(".svc/x").await.err().unwrap();
+		assert!(matches!(err, Error::BoundsExceeded(_)), "{err:?}");
+		let inside = project.scope(".svc/x", &Patterns::from(Pattern::all())).unwrap();
+		inside.announced().assert_next_wait();
 	}
 
 	/// Nothing is published at or beneath a mount.
@@ -4550,6 +4566,9 @@ mod tests {
 		let mounted = producer.mount("p1/.svc", ".svc/p1").unwrap();
 		assert!(matches!(mounted.mount("p1/.svc/x", ".other"), Err(Error::Duplicate)));
 		assert!(matches!(mounted.mount("p1", ".other"), Err(Error::Duplicate)));
+		// A target through a mount would read the subtree the mount shadows.
+		assert!(matches!(mounted.mount("p2", "p1/.svc/x"), Err(Error::Duplicate)));
+		assert!(matches!(mounted.mount("p2", "p1"), Err(Error::Duplicate)));
 		mounted.mount("p1/.other", ".other/p1").unwrap();
 	}
 
