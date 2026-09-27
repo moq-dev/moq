@@ -59,7 +59,9 @@ pub struct Limits {
 ///
 /// The JWT is the `jwt` query parameter or a moq-transport SETUP token of type 0
 /// ([`Token::OUT_OF_BAND`]), verified alike. A session presenting both is refused,
-/// as is a SETUP token of any other type.
+/// as is a SETUP token of any other type, and one presenting a JWT alongside a
+/// certificate: neither can safely win, since a certificate would override a JWT
+/// meant to narrow it, and a JWT would narrow or refuse a peer by accident.
 ///
 /// `#[non_exhaustive]`, so start from [`Policy::default`] and set the fields.
 #[derive(Clone, Debug)]
@@ -125,12 +127,18 @@ pub enum Refusal {
 	TwoTokens,
 	#[error("SETUP token type {0:#x} is not supported; only type 0 (a JWT) is")]
 	UnsupportedToken(u64),
+	#[error("both a JWT and a client certificate were presented; present one")]
+	TokenAndCertificate,
 }
 
 impl Policy {
 	/// Decide `request` by the policy alone, ignoring session limits.
 	pub async fn decide(&self, request: &Request) -> Result<Grant, Refusal> {
-		let (permissions, expires) = if let Some(jwt) = jwt(request)? {
+		let jwt = jwt(request)?;
+		if jwt.is_some() && request.tls.is_some() {
+			return Err(Refusal::TokenAndCertificate);
+		}
+		let (permissions, expires) = if let Some(jwt) = jwt {
 			let key = self.key(jwt).await?;
 			let claims = key.verify(jwt).map_err(|err| Refusal::InvalidToken(err.to_string()))?;
 			let permissions = claims.authorize(&request.path).map_err(|err| match err {
@@ -688,6 +696,28 @@ mod tests {
 
 		// The certificate does not stand in for a public grant.
 		assert_eq!(policy.decide(&request("/")).await.unwrap_err(), Refusal::NoPublicGrant);
+	}
+
+	/// A certificate would override a JWT meant to narrow it, and a JWT would narrow or
+	/// refuse a peer by accident, so presenting both is refused, even with a bad JWT.
+	#[tokio::test]
+	async fn a_jwt_and_a_certificate_together_are_refused() {
+		let (dir, key) = key_dir();
+		let policy = Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			mtls: rules(&["**"], &["**"]),
+			..Default::default()
+		};
+		let jwt = sign(&key, "demo", &["**"], &[], None);
+		for request in [
+			with_peer(with_token(request("/demo"), &jwt), None),
+			with_peer(with_token(request("/demo"), "garbage"), None),
+			with_peer(with_setup_token(request("/demo"), Token::OUT_OF_BAND, &jwt), None),
+		] {
+			assert_eq!(policy.decide(&request).await.unwrap_err(), Refusal::TokenAndCertificate);
+		}
+		assert!(policy.decide(&with_peer(request("/demo"), None)).await.is_ok());
+		assert!(policy.decide(&with_token(request("/demo"), &jwt)).await.is_ok());
 	}
 
 	#[tokio::test]

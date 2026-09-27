@@ -370,6 +370,12 @@ impl Decider {
 							}
 						});
 					}
+					// Nothing here can verify a token, so one is refused rather than ignored:
+					// its holder expects it to count, and the public grant is not what it says.
+					Self::Public(_) if presents_token(&admission.request) => {
+						tracing::debug!(path = %admission.request.path, "a token was presented to public rules");
+						admission.refuse(Error::Refused);
+					}
 					Self::Public(rules) => match rules.authorize(&admission.request.path) {
 						Ok(access) => {
 							let grant = Grant::new(access.publish, access.subscribe);
@@ -387,6 +393,16 @@ impl Decider {
 			}
 		});
 	}
+}
+
+/// Whether `request` carries a token: a SETUP token of any type, or a non-empty
+/// `jwt` query parameter, the convention `moq auth serve` reads.
+fn presents_token(request: &Request) -> bool {
+	request.token.is_some()
+		|| request
+			.query
+			.as_deref()
+			.is_some_and(|query| query.split('&').any(|pair| pair.strip_prefix("jwt=").is_some_and(|jwt| !jwt.is_empty())))
 }
 
 /// Admits sessions by queueing every request for one admission decider.
@@ -609,6 +625,35 @@ mod tests {
 			assert!(matches!(err, Error::Refused), "{path}: {err}");
 			assert_eq!(http::StatusCode::from(&err), http::StatusCode::UNAUTHORIZED);
 		}
+	}
+
+	/// Public rules verify nothing, so a token is refused rather than ignored, in
+	/// whichever form it arrives.
+	#[tokio::test]
+	async fn public_rules_refuse_a_token() {
+		let auth = config(None, &["**"])
+			.init("relay-1", &moq_tokio::tls::Connect::default())
+			.unwrap();
+		let mut query = auth.request(moq_auth::Transport::WebSocket, "/");
+		query.query = Some("a=1&jwt=eyJ".into());
+		let mut setup = auth.request(moq_auth::Transport::Quic, "/");
+		setup.token = Some(moq_auth::Token {
+			kind: moq_auth::Token::CAT,
+			value: b"anything".to_vec(),
+		});
+		let mut http = auth.request(moq_auth::Transport::Http, "/");
+		http.query = Some("jwt=eyJ".into());
+		for request in [query, setup, http] {
+			let Err(err) = auth.admit(request).await else {
+				panic!("a token was admitted on the public grant");
+			};
+			assert!(matches!(err, Error::Refused), "{err}");
+		}
+
+		// An empty `jwt=` is no token.
+		let mut empty = auth.request(moq_auth::Transport::WebSocket, "/");
+		empty.query = Some("jwt=&b=2".into());
+		assert!(auth.admit(empty).await.is_ok());
 	}
 
 	/// A certificate is a fact the public rules ignore: it gets exactly what anyone does.
