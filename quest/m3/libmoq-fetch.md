@@ -6,6 +6,8 @@ A C embedder can fetch one cached group by sequence through the existing frame,
 handle, and terminal-status conventions. The new entry point is additive.
 
 ## Plan
+Parked in m3 behind [Generated C bindings](/quest/m1/c/README.md): the hand-written libmoq is being replaced by C generated from moq-ffi, which carries this for free. Do it only if the hand-written crate outlives that line.
+
 
 Mirror `MoqTrackConsumer::fetch_group` from `rs/moq-ffi/src/consumer.rs` in
 `rs/libmoq`, supporting raw and container-decoded delivery as the FFI does.

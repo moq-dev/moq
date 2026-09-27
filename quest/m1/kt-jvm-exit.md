@@ -37,4 +37,4 @@ Public API: none; the hook is internal to the binding. Wire: none.
 
 ## Related
 
-- [libmoq shutdown](/quest/m1/libmoq-shutdown.md) - the same hazard class for the C ABI and the OBS plugin
+- [libmoq shutdown](/quest/m3/libmoq-shutdown.md) - the same hazard class for the C ABI and the OBS plugin
