@@ -176,16 +176,16 @@ impl Segmenter {
 
 	/// Report the frame at `position`, presented at `pts`.
 	///
-	/// A report at or before the previous position is ignored: records never overlap.
-	pub fn frame(&mut self, position: Position, pts: Timestamp, keyframe: bool) {
+	/// Fails with [`TimelinePosition`](crate::Error::TimelinePosition) when `position` is at or
+	/// before the previous report: records never overlap, so that frame could never be indexed.
+	pub fn frame(&mut self, position: Position, pts: Timestamp, keyframe: bool) -> crate::Result<()> {
 		if self.closed {
-			return;
+			return Ok(());
 		}
 		if let Some(last) = self.last
 			&& position <= last
 		{
-			tracing::warn!(?position, ?last, "ignoring a timeline report that does not advance");
-			return;
+			return Err(crate::Error::TimelinePosition { position, last });
 		}
 
 		if let (Some(start), Some(last)) = (self.open.as_ref().map(|open| open.pts), self.last) {
@@ -217,6 +217,7 @@ impl Segmenter {
 		self.last = Some(position);
 		self.finished = false;
 		self.advance(pts);
+		Ok(())
 	}
 
 	/// Whether a group starting at `pts` ends the record that started at `start`.
@@ -563,8 +564,18 @@ impl Recorder {
 	}
 
 	/// Report the frame at `position`, presented at `pts`; see [`Segmenter::frame`].
+	///
+	/// A report the timeline cannot place ends the timeline track with an error rather than
+	/// publishing a timeline that silently omits frames. Media publishing is unaffected.
 	pub fn frame(&mut self, position: Position, pts: Timestamp, keyframe: bool) {
-		self.report(|segmenter| segmenter.frame(position, pts, keyframe));
+		let mut live = self.live.lock().unwrap();
+		if let Err(err) = live.segmenter.frame(position, pts, keyframe) {
+			tracing::warn!(%err, "timeline report rejected; dropping the timeline track");
+			live.segmenter.close();
+			// Dropped without a finish, so subscribers see the timeline fail rather than end.
+			live.output = None;
+		}
+		live.publish();
 	}
 
 	/// Report that group `group` can gain no more frames; see [`Segmenter::finish_group`].
@@ -758,7 +769,7 @@ mod test {
 	/// One frame per group, one group every `step` ms.
 	fn groups(segmenter: &mut Segmenter, groups: std::ops::Range<u64>, step: u64) {
 		for group in groups {
-			segmenter.frame(at(group), ms(group * step), true);
+			segmenter.frame(at(group), ms(group * step), true).unwrap();
 			segmenter.finish_group(group);
 		}
 	}
@@ -800,7 +811,9 @@ mod test {
 	fn a_long_group_splits_by_frame_at_the_maximum() {
 		let mut video = Segmenter::new(Config::default().with_duration_max(Duration::from_secs(3)));
 		for frame in 0..8 {
-			video.frame(Position::new(0, frame), ms(frame * 1_000), frame == 0);
+			video
+				.frame(Position::new(0, frame), ms(frame * 1_000), frame == 0)
+				.unwrap();
 		}
 		video.close();
 
@@ -823,12 +836,12 @@ mod test {
 	#[test]
 	fn a_sparse_track_records_each_group_when_it_finishes() {
 		let mut catalog = Segmenter::new(sparse());
-		catalog.frame(at(0), ms(0), true);
+		catalog.frame(at(0), ms(0), true).unwrap();
 		assert!(catalog.next().is_none(), "the group may still grow");
 		catalog.finish_group(0);
 		assert_eq!(drain(&mut catalog), vec![(0, 0, at(0), at(1))]);
 
-		catalog.frame(at(1), ms(60_000), true);
+		catalog.frame(at(1), ms(60_000), true).unwrap();
 		catalog.finish_group(1);
 		assert_eq!(drain(&mut catalog), vec![(60_000, 0, at(1), at(2))]);
 	}
@@ -838,7 +851,7 @@ mod test {
 		// A never-closing log: one frame a second, split every three seconds.
 		let mut log = Segmenter::new(sparse().with_duration_max(Duration::from_secs(3)));
 		for frame in 0..7 {
-			log.frame(Position::new(0, frame), ms(frame * 1_000), true);
+			log.frame(Position::new(0, frame), ms(frame * 1_000), true).unwrap();
 		}
 		assert_eq!(
 			drain(&mut log),
@@ -859,10 +872,10 @@ mod test {
 	#[test]
 	fn a_skipped_sequence_closes_the_record() {
 		let mut audio = Segmenter::new(Config::default().with_duration_min(Duration::from_secs(1)));
-		audio.frame(at(0), ms(0), true);
-		audio.frame(at(1), ms(300), true);
-		audio.frame(at(5), ms(600), true);
-		audio.frame(at(6), ms(1_700), true);
+		audio.frame(at(0), ms(0), true).unwrap();
+		audio.frame(at(1), ms(300), true).unwrap();
+		audio.frame(at(5), ms(600), true).unwrap();
+		audio.frame(at(6), ms(1_700), true).unwrap();
 		audio.close();
 
 		assert_eq!(
@@ -898,7 +911,7 @@ mod test {
 			if group % 3 == 0 {
 				video.cut(ms(group * 1_000));
 			}
-			video.frame(at(group), ms(group * 1_000), true);
+			video.frame(at(group), ms(group * 1_000), true).unwrap();
 		}
 
 		assert_eq!(drain(&mut video)[0], (0, 3_000, at(0), at(3)));
@@ -907,10 +920,10 @@ mod test {
 	#[test]
 	fn a_non_keyframe_start_is_flagged() {
 		let mut video = Segmenter::new(Config::default());
-		video.frame(at(0), ms(0), true);
+		video.frame(at(0), ms(0), true).unwrap();
 		// A mid-stream join: the group doesn't open on an IDR.
-		video.frame(at(1), ms(2_000), false);
-		video.frame(at(2), ms(4_000), true);
+		video.frame(at(1), ms(2_000), false).unwrap();
+		video.frame(at(2), ms(4_000), true).unwrap();
 
 		let records: Vec<Record> = std::iter::from_fn(|| video.next()).collect();
 		assert!(records[0].keyframe);
@@ -918,11 +931,16 @@ mod test {
 	}
 
 	#[test]
-	fn a_report_that_does_not_advance_is_ignored() {
+	fn a_report_that_does_not_advance_is_refused() {
 		let mut video = Segmenter::new(Config::default());
-		video.frame(at(3), ms(0), true);
-		video.frame(at(2), ms(2_000), true);
-		video.frame(at(4), ms(2_000), true);
+		video.frame(at(3), ms(0), true).unwrap();
+		for position in [at(2), at(3)] {
+			assert!(matches!(
+				video.frame(position, ms(2_000), true),
+				Err(crate::Error::TimelinePosition { last, .. }) if last == at(3)
+			));
+		}
+		video.frame(at(4), ms(2_000), true).unwrap();
 		assert_eq!(drain(&mut video), vec![(0, 2_000, at(3), at(4))]);
 	}
 
@@ -988,6 +1006,26 @@ mod test {
 
 		assert_eq!(read(&broadcast, &timelines.section(), "catalog.json").await.len(), 1);
 		drop(catalog);
+	}
+
+	#[tokio::test]
+	async fn a_rejected_report_fails_the_timeline() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let timelines = Timelines::new(&broadcast);
+		let mut video = timelines.track("video0", Config::default()).unwrap();
+		let mut consumer = Consumer::<()>::subscribe(&broadcast.consume(), &timelines.section(), "video0")
+			.await
+			.unwrap();
+
+		video.frame(at(1), ms(0), true);
+		video.frame(at(0), ms(2_000), true);
+		loop {
+			match consumer.next().await {
+				Ok(Some(_)) => continue,
+				Ok(None) => panic!("the timeline ended cleanly despite omitting a frame"),
+				Err(_) => break,
+			}
+		}
 	}
 
 	#[tokio::test]

@@ -194,6 +194,15 @@ pub enum Error {
 		actual: u64,
 	},
 
+	/// A timeline frame report did not advance past the previous one.
+	#[error("timeline report at {position:?} does not advance past {last:?}")]
+	TimelinePosition {
+		/// The rejected report's position.
+		position: hang::timeline::Position,
+		/// The previous report's position.
+		last: hang::timeline::Position,
+	},
+
 	/// The catalog's `archive` entry indexes no timeline for this track.
 	#[error("no timeline for track {0}")]
 	TimelineMissing(String),

@@ -506,16 +506,17 @@ where
 		self.estimator.cut(end);
 		self.claim();
 
+		let tail_end = marker_at.filter(|_| !self.reordered);
+		self.flush_buffer(tail_end)?;
+
 		// Tell the timeline where this group's content stops: the duration marker when we
-		// write one, else the caller's bound, else the furthest point we wrote.
+		// write one, else the caller's bound, else the furthest point we wrote. After the flush,
+		// so a group still wholly buffered has reported its first frame and opened a record.
 		if let Some(recorder) = self.recorder.as_mut()
 			&& let Some(end) = marker_at.or(end).max(self.end)
 		{
 			recorder.end(end);
 		}
-
-		let tail_end = marker_at.filter(|_| !self.reordered);
-		self.flush_buffer(tail_end)?;
 		if let Some(group) = self.group.as_mut() {
 			self.container.finish_group(group, tail_end)?;
 		}
@@ -1354,6 +1355,34 @@ mod tests {
 			kind: crate::container::fmp4::Kind::Video,
 		};
 		crate::container::fmp4::encode_fragment(info, group).unwrap();
+	}
+
+	/// A group shorter than the buffer reaches the timeline only when it closes, and its record
+	/// still runs to the group's end rather than stopping at its first frame.
+	#[tokio::test]
+	async fn a_wholly_buffered_group_records_its_end() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let timelines = crate::timeline::Timelines::new(&broadcast);
+		let recorder = timelines.track("video", crate::timeline::Config::default()).unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video))
+			.with_buffer(std::time::Duration::from_secs(10))
+			.with_recorder(recorder);
+
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(33_000, false)).unwrap();
+		producer.cut(Some(Timestamp::from_micros(66_000).unwrap())).unwrap();
+		drop(producer);
+		timelines.finish();
+
+		let mut timeline =
+			crate::timeline::Consumer::<()>::subscribe(&broadcast.consume(), &timelines.section(), "video")
+				.await
+				.unwrap();
+		let Some(crate::timeline::Event::Push { entry, .. }) = timeline.next().await.unwrap() else {
+			panic!("expected a record");
+		};
+		assert_eq!(entry.duration, std::time::Duration::from_millis(66));
 	}
 
 	#[tokio::test]

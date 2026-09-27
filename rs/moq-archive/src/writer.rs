@@ -457,7 +457,9 @@ impl<S: ObjectStore> Track<S> {
 				// Frame timestamps were validated while reading, so this conversion succeeds.
 				let pts = Timestamp::new(frame.timestamp, self.timescale).map_err(|_| Error::Id(frame.timestamp))?;
 				let position = Position::new(sequence, index);
-				self.segmenter.frame(position, pts, index == 0);
+				self.segmenter
+					.frame(position, pts, index == 0)
+					.map_err(|err| malformed(&self.name, sequence, err))?;
 				self.frames.push_back((position, frame));
 			}
 			if !incoming.finished {
