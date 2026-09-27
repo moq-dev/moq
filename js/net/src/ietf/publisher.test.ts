@@ -639,8 +639,9 @@ test("closing the session ends the unsolicited announce loop", async () => {
 	// The session ends. The origin is untouched: it is shared, and other sessions keep using it.
 	pair.server.close();
 
+	// Ending with the session's error is ending too: the close fails its open streams.
 	await Promise.race([
-		loop,
+		loop.catch(() => undefined),
 		new Promise((_resolve, reject) =>
 			setTimeout(() => reject(new Error("the announce loop outlived its session")), STREAM_WAIT),
 		),

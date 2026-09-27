@@ -39,7 +39,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   the union and cancels publications and subscriptions that lose authorization.
   Other authorized work continues on the same session. An empty union leaves
   the session connected with no access, so it can accept a fresh token.
-  [Origin narrowing](/quest/m1/origin-narrowing.md) owns the common resize
+  [Origin narrowing](/quest/m1/auth/narrowing.md) owns the common resize
   operation; relay token handling requires it rather than shipping a temporary
   close-on-shrink policy.
 - **A public grant contains publish patterns, subscribe patterns, and an
@@ -89,8 +89,14 @@ existing lite-06 ALPN.
 
 ## Quests
 
+- [Origin narrowing](/quest/m1/auth/narrowing.md) - a live grant narrows in
+  place: subscriptions outside it reset, publishes outside it abort, and relay
+  revalidation stops closing the session
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
+- [Request tokens](/quest/m1/auth/request-token.md) - an `AUTHORIZATION
+  TOKEN` on a moq-transport request authorizes that request when the session
+  grant does not, and REQUEST_UPDATE refreshes it
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi and libmoq
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
@@ -101,8 +107,6 @@ existing lite-06 ALPN.
 
 ## Related
 
-- [Origin narrowing](/quest/m1/origin-narrowing.md) - resizes a live session
-  when the union shrinks, for revalidation and token expiry alike
 - [Expiring media grants](/quest/m1/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token
 - [P2P](/quest/m1/p2p/README.md) - the first consumer of hop-bound peer grants

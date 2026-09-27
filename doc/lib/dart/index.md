@@ -65,7 +65,8 @@ await for (final request in server.requests()) {
 The three advertising operations: `moq.createBroadcast(path)` (or
 `origin.createBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.announce(route:)` / `broadcast.unannounce()` own that exact-path
-advertisement; `origin.dynamic_(prefix:, route:)` claims `prefix` and
+advertisement, and `broadcast.close()` ends the broadcast for good (a second
+call is a no-op; `finish()` is its deprecated alias); `origin.dynamic_(prefix:, route:)` claims `prefix` and
 every path beneath it (`''` for everything; Dart spells the origin method
 `dynamic_` because `dynamic` is reserved). Hold the returned handle while the
 claim should stay advertised, and reject the requests you will not serve. A
@@ -108,6 +109,8 @@ catalog and container types are there, so already-encoded frames flow through
 `package:camera`, platform channels, or another codec package.
 
 `MediaProducer.flush(timestampUs: ...)` records the handoff of a locally encoded frame on the broadcast media clock. Call it after `writeFrame` only for live encoder output; file, pipe, and network imports stay clock-free. `MediaProducer` aliases the generated FFI object, so its method is available directly.
+
+Call `media.discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds.
 
 ## Connection stats
 

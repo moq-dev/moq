@@ -59,10 +59,24 @@ impl Clock {
 	/// enough that the wall value stays within the JSON-safe integer range until the year 2255.
 	pub const TIMESCALE: moq_net::Timescale = moq_net::Timescale::MICRO;
 
-	/// Start a clock anchored at the current instant, with PTS zero at the current wall time.
+	/// How far before construction a fresh clock puts PTS zero.
+	///
+	/// A translated source anchors its first frame at the current instant, but the frames
+	/// muxed beside it can carry earlier timestamps: a B-frame presenting before the keyframe
+	/// decoded ahead of it, or audio leading video in the mux. Starting the clock this far back
+	/// leaves them room instead of landing before the broadcast began.
+	const LEAD: Duration = Duration::from_secs(10);
+
+	/// Start a clock at the current instant, with PTS zero ten seconds earlier on both the
+	/// monotonic and the wall clock, so earlier-stamped frames of a source anchored now still map.
 	pub fn new() -> Self {
-		Self::at(Instant::now(), SystemTime::now())
-			.expect("the current wall time is representable as a broadcast clock")
+		let (now, wall) = (Instant::now(), SystemTime::now());
+		// Shortly after boot the monotonic clock may not reach back that far; start at now then.
+		let (epoch, wall) = match (now.checked_sub(Self::LEAD), wall.checked_sub(Self::LEAD)) {
+			(Some(epoch), Some(wall)) => (epoch, wall),
+			_ => (now, wall),
+		};
+		Self::at(epoch, wall).expect("the current wall time is representable as a broadcast clock")
 	}
 
 	/// Start a clock at an explicit monotonic epoch and wall time.
@@ -122,7 +136,7 @@ impl Default for Clock {
 /// live edge, preserving the source's spacing from there on; a reset re-anchors forward,
 /// preserving the real idle gap measured on the broadcast's monotonic clock. Backwards steps
 /// within [`MAX_REORDER`](Self::MAX_REORDER) keep their offset, so permitted B-frame reordering
-/// inside a group survives verbatim.
+/// inside a group survives verbatim. Translated timestamps keep the source's timescale.
 ///
 /// The broadcast wall mapping is never touched: translating a reset is not a new epoch, and a
 /// discontinuity marker the adapter emits alongside is a delivery event the playhead reacts to,
@@ -131,13 +145,8 @@ impl Default for Clock {
 /// Each publisher adapter owns one per source and wires its own restart detection to
 /// [`reset`](Self::reset); the automatic path only separates reordering from resets by size.
 pub struct SourceMap {
-	clock: Clock,
-	/// Broadcast micros minus source micros; `None` until the first frame anchors it.
-	offset: Option<i128>,
-	last_source: Option<u128>,
-	last_broadcast: Option<u64>,
-	/// `clock.now()` when the last frame was translated: the idle gap's start.
-	last_arrival: Option<u64>,
+	anchor: Anchor,
+	lane: Lane,
 }
 
 impl SourceMap {
@@ -152,22 +161,19 @@ impl SourceMap {
 	/// A translator onto `clock`, unanchored until the first frame.
 	pub fn new(clock: Clock) -> Self {
 		Self {
-			clock,
-			offset: None,
-			last_source: None,
-			last_broadcast: None,
-			last_arrival: None,
+			anchor: Anchor::new(clock),
+			lane: Lane::default(),
 		}
 	}
 
 	/// The broadcast clock this source translates onto.
 	pub fn clock(&self) -> Clock {
-		self.clock
+		self.anchor.clock
 	}
 
 	/// Translate `pts` onto the broadcast clock, sampling the arrival time.
 	pub fn translate(&mut self, pts: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
-		self.translate_at(pts, self.clock.now().value())
+		self.anchor.translate(&mut self.lane, pts)
 	}
 
 	/// Translate `pts` onto the broadcast clock, arriving at monotonic `now` micros.
@@ -175,41 +181,7 @@ impl SourceMap {
 	/// The deterministic core behind [`translate`](Self::translate): synthetic sources pin the
 	/// arrival instants instead of sampling them.
 	pub fn translate_at(&mut self, pts: moq_net::Timestamp, now: u64) -> crate::Result<moq_net::Timestamp> {
-		let src = pts.as_micros();
-
-		let broadcast = match self.offset {
-			Some(offset) => {
-				let mapped = src as i128 + offset;
-				if mapped < 0 {
-					return Err(crate::Error::UnmappableTimestamp(format!(
-						"{pts:?} lands before the broadcast began"
-					)));
-				}
-				let mapped = u64::try_from(mapped).map_err(|_| {
-					crate::Error::UnmappableTimestamp(format!("{pts:?} lands outside the representable range"))
-				})?;
-				match self.last_broadcast {
-					Some(last) if mapped < last && last - mapped > Self::MAX_REORDER.as_micros() as u64 => {
-						// A source reset: re-anchor forward, counting the downtime as content.
-						self.reanchor(src, now)?
-					}
-					// Forward, steady, or reordered within a group: the offset stands.
-					_ => mapped,
-				}
-			}
-			// The first frame is live now; the source keeps its spacing from there. Rebasing by
-			// the frame's own PTS (rather than pretending it is timestamp zero) is what keeps a
-			// delayed first frame honest.
-			None => {
-				self.offset = Some(now as i128 - src as i128);
-				now
-			}
-		};
-
-		self.last_source = Some(src);
-		self.last_broadcast = Some(broadcast);
-		self.last_arrival = Some(now);
-		moq_net::Timestamp::from_micros(broadcast).map_err(crate::Error::from)
+		self.anchor.translate_at(&mut self.lane, pts, now)
 	}
 
 	/// Re-anchor after an explicitly detected source restart, preserving the idle gap.
@@ -218,33 +190,171 @@ impl SourceMap {
 	/// the next frame continues after everything published so far plus the downtime since the
 	/// previous frame, instead of rewinding the broadcast.
 	pub fn reset(&mut self, pts: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
-		self.reset_at(pts, self.clock.now().value())
+		self.lane.restart();
+		self.translate(pts)
 	}
 
 	/// [`reset`](Self::reset) with an explicit arrival instant, for synthetic sources.
 	pub fn reset_at(&mut self, pts: moq_net::Timestamp, now: u64) -> crate::Result<moq_net::Timestamp> {
-		let src = pts.as_micros();
-		let broadcast = self.reanchor(src, now)?;
-		self.last_source = Some(src);
-		self.last_broadcast = Some(broadcast);
-		self.last_arrival = Some(now);
-		moq_net::Timestamp::from_micros(broadcast).map_err(crate::Error::from)
+		self.lane.restart();
+		self.translate_at(pts, now)
+	}
+}
+
+/// One source's mapping onto the broadcast clock, shared by every track the source muxes.
+///
+/// Tracks of one source must share an offset or they drift apart by however far their first
+/// frames' PTS differ. They can't share a single [`SourceMap`] either: interleaved audio and
+/// video step back further than [`SourceMap::MAX_REORDER`], which would read as a reset. So
+/// each track keeps its own [`Lane`] that detects its own backwards steps, and a restart any
+/// lane detects moves the anchor once; the other lanes adopt that mapping when they restart too.
+pub(crate) struct Anchor {
+	clock: Clock,
+	/// Broadcast micros minus source micros for the current generation; `None` until the first
+	/// frame anchors it.
+	offset: Option<i128>,
+	/// Bumped at each re-anchor, so a lane knows whether its restart was already applied.
+	generation: u64,
+	/// The latest broadcast micros published so far, by any lane: the idle gap's origin.
+	last_broadcast: Option<u128>,
+	/// Where the latest frames end, by any lane, so a restart never lands on one of them.
+	last_end: Option<u128>,
+	/// `clock.now()` when the last frame was translated: the idle gap's start.
+	last_arrival: Option<u64>,
+}
+
+/// One track's position on its source's [`Anchor`].
+#[derive(Default)]
+pub(crate) struct Lane {
+	/// The offset this lane translates with, in micros; `None` until it adopts one.
+	offset: Option<i128>,
+	generation: u64,
+	last_source: Option<u128>,
+	/// The shortest forward step this lane's source took: its frame duration, near enough.
+	step: Option<u128>,
+	/// The adapter observed a restart on this lane out of band.
+	restart: bool,
+}
+
+impl Lane {
+	/// The next frame starts a new source timeline, however its PTS compares to the last.
+	pub(crate) fn restart(&mut self) {
+		self.restart = true;
+	}
+}
+
+impl Anchor {
+	pub(crate) fn new(clock: Clock) -> Self {
+		Self {
+			clock,
+			offset: None,
+			generation: 0,
+			last_broadcast: None,
+			last_end: None,
+			last_arrival: None,
+		}
 	}
 
-	/// Move the offset so `src` continues after the last broadcast plus the idle gap since the
-	/// previous arrival. Returns the rebased broadcast micros.
-	fn reanchor(&mut self, src: u128, now: u64) -> crate::Result<u64> {
+	/// Translate one of `lane`'s timestamps, sampling the arrival time.
+	pub(crate) fn translate(&mut self, lane: &mut Lane, pts: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
+		self.translate_at(lane, pts, self.clock.now().value())
+	}
+
+	/// Translate one of `lane`'s timestamps, arriving at monotonic `now` micros.
+	pub(crate) fn translate_at(
+		&mut self,
+		lane: &mut Lane,
+		pts: moq_net::Timestamp,
+		now: u64,
+	) -> crate::Result<moq_net::Timestamp> {
+		let src = pts.as_micros();
+
+		match self.offset {
+			// The first frame is live now; the source keeps its spacing from there. Rebasing by
+			// the frame's own PTS (rather than pretending it is timestamp zero) is what keeps a
+			// delayed first frame honest.
+			None => self.offset = Some(now as i128 - src as i128),
+			Some(_) => {
+				let stepped_back = lane
+					.last_source
+					.is_some_and(|last| last > src + SourceMap::MAX_REORDER.as_micros());
+				// A restart another lane already applied is adopted, not applied twice.
+				if (lane.restart || stepped_back) && lane.offset.is_some() && lane.generation == self.generation {
+					self.reanchor(src, now);
+				}
+				if lane.restart || stepped_back {
+					lane.offset = None;
+				}
+			}
+		}
+		lane.restart = false;
+
+		// A lane joining late, or following a restart, takes the source's current mapping.
+		let offset = *lane.offset.get_or_insert_with(|| {
+			lane.generation = self.generation;
+			self.offset.expect("anchored above")
+		});
+
+		let mapped = src as i128 + offset;
+		if mapped < 0 {
+			return Err(crate::Error::UnmappableTimestamp(format!(
+				"{pts:?} lands before the broadcast began"
+			)));
+		}
+		// The broadcast clock counts in micros, so the mapping must be nameable there too.
+		u64::try_from(mapped)
+			.ok()
+			.and_then(|mapped| moq_net::Timestamp::from_micros(mapped).ok())
+			.ok_or_else(|| {
+				crate::Error::UnmappableTimestamp(format!("{pts:?} lands outside the representable range"))
+			})?;
+
+		// Keep the source's timescale: the offset is constant, so the spacing stays exact.
+		let scale = pts.scale();
+		let shift = offset * scale.as_u64() as i128 / 1_000_000;
+		let value = u64::try_from(pts.value() as i128 + shift)
+			.map_err(|_| crate::Error::UnmappableTimestamp(format!("{pts:?} lands outside the representable range")))?;
+		let translated = moq_net::Timestamp::new(value, scale)
+			.map_err(|_| crate::Error::UnmappableTimestamp(format!("{pts:?} lands outside the representable range")))?;
+
+		if let Some(step) = lane
+			.last_source
+			.and_then(|last| src.checked_sub(last))
+			.filter(|step| *step > 0)
+		{
+			lane.step = Some(lane.step.map_or(step, |min| min.min(step)));
+		}
+		lane.last_source = Some(src);
+
+		let start = mapped as u128;
+		self.last_broadcast = Some(self.last_broadcast.map_or(start, |last| last.max(start)));
+		self.extend_micros(start + lane.step.unwrap_or(0));
+		self.last_arrival = Some(now);
+		Ok(translated)
+	}
+
+	/// Record that the broadcast has published up to `end`, e.g. a fragment's last sample end.
+	pub(crate) fn extend(&mut self, end: moq_net::Timestamp) {
+		self.extend_micros(end.as_micros());
+	}
+
+	fn extend_micros(&mut self, end: u128) {
+		self.last_end = Some(self.last_end.map_or(end, |last| last.max(end)));
+	}
+
+	/// Move the anchor so `src` continues after everything published plus the idle gap since the
+	/// previous arrival: the real downtime for a paced source, and at least the last frames' end
+	/// for one arriving in a burst.
+	fn reanchor(&mut self, src: u128, now: u64) {
 		let base = match (self.last_broadcast, self.last_arrival) {
-			(Some(last), Some(arrival)) => last as u128 + now.saturating_sub(arrival) as u128,
-			// Unanchored: the reset frame itself is live now.
+			(Some(last), Some(arrival)) => {
+				let idle = last + now.saturating_sub(arrival) as u128;
+				idle.max(self.last_end.unwrap_or(0))
+			}
 			_ => now as u128,
 		};
 		self.offset = Some(base as i128 - src as i128);
-		let broadcast =
-			u64::try_from(base).map_err(|_| crate::Error::UnmappableTimestamp(format!("{base} is out of range")))?;
-		// Refuse a mapping that contradicts the range instead of publishing it.
-		moq_net::Timestamp::from_micros(broadcast)?;
-		Ok(broadcast)
+		self.generation += 1;
 	}
 }
 
@@ -425,6 +535,81 @@ mod tests {
 			source.translate_at(huge, 0),
 			Err(crate::Error::UnmappableTimestamp(_))
 		));
+	}
+
+	#[test]
+	fn fresh_clock_leaves_room_before_now() {
+		let clock = Clock::new();
+		// PTS zero sits before construction, so a frame stamped a little before now still maps,
+		// and the mapping still names the current wall time.
+		assert!(clock.now().as_micros() >= Clock::LEAD.as_micros());
+		let now = clock.wall_clock(clock.now()).unwrap();
+		let drift = now
+			.duration_since(SystemTime::now())
+			.unwrap_or_else(|err| err.duration());
+		assert!(drift < Duration::from_secs(1), "wall + now is the current wall time");
+	}
+
+	#[test]
+	fn muxed_lanes_share_one_mapping() {
+		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
+		let mut anchor = Anchor::new(clock);
+		let (mut video, mut audio) = (Lane::default(), Lane::default());
+
+		// Video anchors live; audio, muxed 800ms earlier, joins on the same offset.
+		let v = anchor.translate_at(&mut video, us(10_800_000), 2_000_000).unwrap();
+		assert_eq!(v.as_micros(), 2_000_000);
+		let a = anchor.translate_at(&mut audio, us(10_000_000), 2_000_000).unwrap();
+		assert_eq!(a.as_micros(), 1_200_000);
+
+		// Interleaving steps back further than a reorder across lanes, which is not a reset.
+		let v = anchor.translate_at(&mut video, us(11_800_000), 3_000_000).unwrap();
+		assert_eq!(v.as_micros(), 3_000_000);
+		let a = anchor.translate_at(&mut audio, us(11_000_000), 3_000_000).unwrap();
+		assert_eq!(a.as_micros(), 2_200_000);
+	}
+
+	#[test]
+	fn muxed_restart_reanchors_once() {
+		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
+		let mut anchor = Anchor::new(clock);
+		let (mut video, mut audio) = (Lane::default(), Lane::default());
+
+		anchor.translate_at(&mut video, us(5_000_000), 1_000_000).unwrap();
+		anchor.translate_at(&mut audio, us(5_000_000), 1_000_000).unwrap();
+
+		// The source restarts at zero after 4s idle: video notices first and moves the anchor to
+		// the last published instant plus the gap.
+		let v = anchor.translate_at(&mut video, us(0), 5_000_000).unwrap();
+		assert_eq!(v.as_micros(), 5_000_000);
+		// Audio's own step back adopts that mapping rather than adding the gap again.
+		let a = anchor.translate_at(&mut audio, us(20_000), 5_020_000).unwrap();
+		assert_eq!(a.as_micros(), 5_020_000);
+
+		// An out-of-band restart flagged on every lane is applied once as well.
+		video.restart();
+		audio.restart();
+		let v = anchor.translate_at(&mut video, us(0), 6_000_000).unwrap();
+		assert_eq!(v.as_micros(), 6_000_000);
+		let a = anchor.translate_at(&mut audio, us(0), 6_000_000).unwrap();
+		assert_eq!(a.as_micros(), 6_000_000);
+	}
+
+	#[test]
+	fn translation_keeps_the_source_timescale() {
+		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
+		let mut source = clock.source();
+		let scale = moq_net::Timescale::new(90_000).unwrap();
+
+		let first = source
+			.translate_at(moq_net::Timestamp::new(3003, scale).unwrap(), 1_000_000)
+			.unwrap();
+		let second = source
+			.translate_at(moq_net::Timestamp::new(6006, scale).unwrap(), 1_033_000)
+			.unwrap();
+		// 90 kHz in, 90 kHz out, with the frame spacing exact in ticks.
+		assert_eq!(first.scale(), scale);
+		assert_eq!(second.value() - first.value(), 3003);
 	}
 
 	#[test]

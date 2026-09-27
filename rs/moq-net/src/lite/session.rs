@@ -281,6 +281,10 @@ where
 			Ok(()) => Error::Cancel,
 			Err(err) => err.clone(),
 		});
+		if let Err(err) = &res {
+			// Every track this session was receiving ends with its error.
+			self.subscriber.abort(err);
+		}
 		match &res {
 			Err(Error::Transport(_)) => {
 				tracing::info!("session terminated");

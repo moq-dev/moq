@@ -1,7 +1,7 @@
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
-import { hasFrameBounds, hasGroupOrder, resolvesStart, Version } from "./version.ts";
+import { hasFrameBounds, hasGroupOrder, hasStreamCount, resolvesStart, Version } from "./version.ts";
 
 /**
  * Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
@@ -456,24 +456,35 @@ export class SubscribeEnd {
 	/** The exclusive final group sequence: the first sequence that will never be produced. */
 	group: number;
 
-	constructor(group: number) {
+	/**
+	 * The number of group streams the publisher opened for this subscription.
+	 * Draft-07+ only; not on the wire before, where it decodes as 0.
+	 */
+	streams: number;
+
+	constructor(group: number, streams = 0) {
 		this.group = group;
+		this.streams = streams;
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, version: Version): Promise<void> {
 		return Message.encode(w, async (w) => {
 			await w.u53(this.group);
+			if (hasStreamCount(version)) await w.u53(this.streams);
 		});
 	}
 
-	static async decode(r: Reader): Promise<SubscribeEnd> {
-		return Message.decode(r, async (r) => new SubscribeEnd(await r.u53()));
+	static async decode(r: Reader, version: Version): Promise<SubscribeEnd> {
+		return Message.decode(
+			r,
+			async (r) => new SubscribeEnd(await r.u53(), hasStreamCount(version) ? await r.u53() : 0),
+		);
 	}
 }
 
 /// Indicates that one or more groups have been dropped.
 ///
-/// Draft03+ only.
+/// Draft-03 to Draft-06 only: Draft-07 counts group streams in SUBSCRIBE_END instead.
 export class SubscribeDrop {
 	start: number;
 	end: number;
@@ -510,8 +521,9 @@ export class SubscribeDrop {
  *
  * The discriminator is version-dependent:
  * - Draft-03/04: `0x0` SUBSCRIBE_OK, `0x1` SUBSCRIBE_DROP.
- * - Draft-05+: `0x0` SUBSCRIBE_START, `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP
+ * - Draft-05/06: `0x0` SUBSCRIBE_START, `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP
  *   (SUBSCRIBE_OK was removed; acceptance is implicit).
+ * - Draft-07+: `0x0` SUBSCRIBE_START, `0x1` SUBSCRIBE_END (SUBSCRIBE_DROP was removed).
  */
 export type SubscribeResponse =
 	| { ok: SubscribeOk }
@@ -548,12 +560,12 @@ export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse
 				await resp.start.encode(w);
 			} else if ("end" in resp) {
 				await w.u53(0x1);
-				await resp.end.encode(w);
-			} else if ("drop" in resp) {
+				await resp.end.encode(w, version);
+			} else if ("drop" in resp && !hasStreamCount(version)) {
 				await w.u53(0x2);
 				await resp.drop.encode(w);
 			} else {
-				throw new Error("SUBSCRIBE_OK not supported for this version");
+				throw new Error("subscribe response not supported for this version");
 			}
 			break;
 	}
@@ -582,8 +594,9 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 				case 0x0:
 					return { start: await SubscribeStart.decode(r) };
 				case 0x1:
-					return { end: await SubscribeEnd.decode(r) };
+					return { end: await SubscribeEnd.decode(r, version) };
 				case 0x2:
+					if (hasStreamCount(version)) throw new Error(`unknown subscribe response type: ${typ}`);
 					return { drop: await SubscribeDrop.decode(r) };
 				default:
 					throw new Error(`unknown subscribe response type: ${typ}`);

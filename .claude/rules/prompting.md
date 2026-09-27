@@ -1,6 +1,5 @@
 ---
 paths:
-  - "**/CLAUDE.md"
   - "**/AGENTS.md"
   - "CONTRIBUTING.md"
   - "PROMPTING.md"

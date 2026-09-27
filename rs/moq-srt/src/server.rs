@@ -182,6 +182,7 @@ pub struct Server {
 	/// Held to keep the listener (and its UDP socket) alive for the server's lifetime.
 	_listener: SrtListener,
 	incoming: SrtIncoming,
+	local_addr: SocketAddr,
 	/// The negotiated SRT receive latency, reused as the egress skip threshold on
 	/// each [`Subscribe`] (see [`crate::ts::Subscriber::new`]).
 	latency: Duration,
@@ -195,16 +196,32 @@ impl Server {
 	/// threshold for [`Subscribe`] requests.
 	pub async fn bind(addr: SocketAddr, latency: impl Into<Option<Duration>>) -> Result<Self> {
 		let latency = latency.into().unwrap_or(DEFAULT_LATENCY);
+
+		// srt-tokio refuses to listen on port 0 and never reports the port it bound,
+		// so bind the UDP socket first (with srt-tokio's own buffer sizing) and hand
+		// it over under its resolved address.
+		let mut options = SocketOptions::default();
+		options.connect.local = addr;
+		let socket = srt_tokio::bind_socket(&options).await?;
+		let local_addr = socket.local_addr()?;
+
 		let (listener, incoming) = SrtListener::builder()
+			.socket(socket)
 			.latency(latency)
 			.set(configure_buffers)
-			.bind(addr)
+			.bind(local_addr)
 			.await?;
 		Ok(Self {
 			_listener: listener,
 			incoming,
+			local_addr,
 			latency,
 		})
+	}
+
+	/// The address the listener is bound to, with any `:0` port resolved.
+	pub fn local_addr(&self) -> SocketAddr {
+		self.local_addr
 	}
 
 	/// Wait for the next connection that wants to publish or subscribe.
@@ -582,7 +599,6 @@ fn parse_stream_id(stream_id: Option<&StreamId>) -> Option<(String, ConnectionMo
 mod tests {
 	use super::*;
 	use bytes::Bytes;
-	use std::net::SocketAddr;
 	use std::time::Duration;
 
 	#[test]
@@ -623,13 +639,12 @@ mod tests {
 	/// (see [`configure_buffers`]).
 	#[tokio::test]
 	async fn accepted_socket_sends_a_burst_larger_than_srt_tokio_default() {
-		let probe = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-		let addr: SocketAddr = probe.local_addr().unwrap();
-		drop(probe);
-
 		// TSBPD holds every payload for the negotiated latency before releasing it, so
 		// ask for a short one: this asserts buffering, not delay.
-		let mut server = Server::bind(addr, Duration::from_millis(50)).await.unwrap();
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap(), Duration::from_millis(50))
+			.await
+			.unwrap();
+		let addr = server.local_addr();
 		let caller = tokio::spawn(async move {
 			SrtSocket::builder()
 				.call(addr, Some("#!::r=buffer-test,m=request"))
@@ -881,11 +896,8 @@ mod tests {
 			}
 		}
 
-		let probe = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-		let addr: SocketAddr = probe.local_addr().unwrap();
-		drop(probe);
-
-		let mut server = Server::bind(addr, LATENCY).await.unwrap();
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap(), LATENCY).await.unwrap();
+		let addr = server.local_addr();
 		let caller = tokio::spawn(async move {
 			SrtSocket::builder()
 				.call(addr, Some("#!::r=rewind,m=request"))

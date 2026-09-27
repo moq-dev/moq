@@ -28,10 +28,6 @@ application knows whether remote clocks are synchronized.
 Verify application access using the built-in publisher integration, including
 a live-only broadcast with no archive timeline.
 
-## Required
-
-- [CLI import clock](/quest/m1/cli-import-clock.md) - built-in publishers populate the mapping applications read
-
 ## Closes
 
 - [#2278](https://github.com/moq-dev/moq/issues/2278) - close this issue when the quest finishes

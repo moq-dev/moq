@@ -85,7 +85,7 @@ typedef GroupProducer = MoqGroupProducer;
 /// The read side of a single group: yields timestamped raw frames.
 typedef GroupConsumer = MoqGroupConsumer;
 
-/// The write side of a media track fed pre-framed payloads.
+/// The write side of a media track; discontinuity() marks a break between pre-framed payloads.
 typedef MediaProducer = MoqMediaProducer;
 
 /// The write side of a media track fed a raw byte stream, with frame boundaries inferred.

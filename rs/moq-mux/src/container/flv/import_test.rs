@@ -664,3 +664,145 @@ async fn import_rejects_non_flv() {
 	let buf = bytes::BytesMut::from(&b"NOTFLV\x00\x00\x00"[..]);
 	assert!(importer.decode(&buf).is_err());
 }
+
+/// One encoder session: sequence headers (after the file header when `header`), then `frames`
+/// video frames 40ms apart whose composition offsets reorder like B-frames, interleaved with AAC
+/// frames up to 300ms earlier in PTS, the way a muxer leads audio.
+fn session(header: bool, start_ms: u32, frames: u32) -> Vec<u8> {
+	let mut out = if header { flv_header(0x05) } else { Vec::new() };
+
+	let mut vseq = vec![
+		(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+		super::AVC_SEQUENCE_HEADER,
+		0,
+		0,
+		0,
+	];
+	vseq.extend_from_slice(&avcc());
+	write_tag(&mut out, super::TAG_VIDEO, start_ms, &vseq);
+	let mut aseq = vec![super::AAC_AUDIO_TAG_HEADER, super::AAC_SEQUENCE_HEADER];
+	aseq.extend_from_slice(&ASC);
+	write_tag(&mut out, super::TAG_AUDIO, start_ms, &aseq);
+
+	for i in 0..frames {
+		let dts = start_ms + i * 40;
+		let frame_type = if i % 25 == 0 {
+			super::FRAME_TYPE_KEY
+		} else {
+			super::FRAME_TYPE_INTER
+		};
+		// IPBPB...: P-frames present two slots late and the B-frames between them step back.
+		let cts: u8 = match i % 25 {
+			0 => 40,
+			j if j % 2 == 1 => 80,
+			_ => 0,
+		};
+		let mut video = vec![(frame_type << 4) | super::VIDEO_CODEC_AVC, super::AVC_NALU, 0, 0, cts];
+		video.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
+		write_tag(&mut out, super::TAG_VIDEO, dts, &video);
+
+		let mut audio = vec![super::AAC_AUDIO_TAG_HEADER, super::AAC_RAW];
+		audio.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+		write_tag(&mut out, super::TAG_AUDIO, dts + 20 - start_ms.min(300), &audio);
+	}
+	out
+}
+
+/// What an FLV import published, plus the broadcast clock's reading around the first chunk.
+struct Imported {
+	published: std::collections::BTreeMap<String, Vec<u128>>,
+	video: String,
+	before: u128,
+	after: u128,
+}
+
+/// Import `chunks` in order, idling `idle` between them, on a clock that began `ago` earlier.
+/// `live` translates onto that clock; otherwise tag timestamps publish verbatim.
+async fn import(chunks: &[Vec<u8>], live: bool, ago: Duration, idle: Duration) -> Imported {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let config = crate::catalog::Config::default().with_clock(crate::container::test_util::late_clock(ago));
+	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
+	let clock = catalog.clock();
+	let mut importer = Import::new(broadcast, catalog.reserve());
+	if live {
+		importer = importer.live();
+	}
+
+	let before = clock.now().as_micros();
+	let mut after = before;
+	for (i, chunk) in chunks.iter().enumerate() {
+		if i > 0 {
+			std::thread::sleep(idle);
+		}
+		importer.decode(chunk).unwrap();
+		if i == 0 {
+			after = clock.now().as_micros();
+		}
+	}
+	importer.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	Imported {
+		published: crate::container::test_util::published(&consumer, &snapshot).await,
+		video: snapshot.video.renditions.keys().next().unwrap().clone(),
+		before,
+		after,
+	}
+}
+
+/// A feed an hour into its own timeline, arriving 30s after the broadcast began, publishes on the
+/// broadcast clock: the first frame is live on arrival, and audio and video keep the one offset
+/// their tags gave them, B-frame reordering included.
+#[tokio::test]
+async fn live_import_anchors_a_late_first_frame() {
+	let input = [session(true, 3_600_000, 50)];
+	let ago = Duration::from_secs(30);
+	let verbatim = import(&input, false, ago, Duration::ZERO).await;
+	let live = import(&input, true, ago, Duration::ZERO).await;
+
+	crate::container::test_util::common_offset(&verbatim.published, &live.published);
+	let first = live.published[&live.video][0];
+	assert!(
+		(live.before..=live.after).contains(&first),
+		"the first frame is live on arrival: {first} not in {}..={}",
+		live.before,
+		live.after
+	);
+}
+
+/// An encoder restarting its timestamps at zero continues the broadcast forward: after the real
+/// idle gap, and with every track moving onto the one new mapping.
+#[tokio::test]
+async fn live_import_restarts_forward_after_idle() {
+	for idle in [Duration::ZERO, Duration::from_millis(300)] {
+		let input = [session(true, 5_000, 50), session(false, 0, 50)];
+		let live = import(&input, true, Duration::from_secs(30), idle).await;
+
+		let last_before = live
+			.published
+			.values()
+			.map(|t| t[..50].iter().max().unwrap())
+			.max()
+			.unwrap();
+		let video = &live.published[&live.video];
+		let gap = video[50] as i128 - *last_before as i128;
+		assert!(
+			gap >= idle.as_micros() as i128,
+			"the restart lands after the idle gap: {gap}us after {idle:?}"
+		);
+		assert!(
+			gap < (idle + Duration::from_secs(5)).as_micros() as i128,
+			"the restart is not pushed further: {gap}us"
+		);
+
+		// The second session keeps its own A/V relationship on the new mapping.
+		let verbatim = import(&[session(true, 0, 50)], false, Duration::ZERO, Duration::ZERO).await;
+		let second = live
+			.published
+			.iter()
+			.map(|(name, t)| (name.clone(), t[50..].to_vec()))
+			.collect();
+		crate::container::test_util::common_offset(&verbatim.published, &second);
+	}
+}

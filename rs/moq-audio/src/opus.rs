@@ -14,6 +14,34 @@ const RATES: [u32; 5] = [8_000, 12_000, 16_000, 24_000, 48_000];
 /// Frame durations libopus accepts, in microseconds.
 const FRAME_DURATIONS: [u128; 6] = [2_500, 5_000, 10_000, 20_000, 40_000, 60_000];
 
+/// The rate every Opus stream decodes at: the codec's clock, in which pre-skip
+/// and packet durations are reckoned. The OpusHead input rate is metadata.
+pub(crate) const DECODE_RATE: u32 = 48_000;
+
+/// The OpusHead a decoder opens with.
+///
+/// The catalog's description when present, refused when malformed or when it
+/// asks for a channel mapping this crate cannot decode. Without one, a
+/// mono/stereo stream with no pre-skip or gain, shaped by the catalog.
+pub(crate) fn head(catalog: &hang::catalog::AudioConfig) -> Result<moq_mux::codec::opus::Config, Error> {
+	let Some(description) = &catalog.description else {
+		return Ok(moq_mux::codec::opus::Config::new(
+			catalog.sample_rate,
+			catalog.channel_count,
+		));
+	};
+
+	let head = moq_mux::codec::opus::Config::parse(&mut description.as_ref())
+		.map_err(|err| Error::Unsupported(format!("opus description: {err}")))?;
+	if head.mapping_family != 0 {
+		return Err(Error::Unsupported(format!(
+			"opus channel mapping family {} is not supported",
+			head.mapping_family
+		)));
+	}
+	Ok(head)
+}
+
 /// Snap an arbitrary sample rate up to the nearest libopus-supported rate;
 /// falls back to 48 kHz for anything above the highest.
 pub(crate) fn pick_rate(input_rate: u32) -> u32 {

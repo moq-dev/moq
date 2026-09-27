@@ -7,9 +7,10 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::task::Waker;
+use std::sync::Arc;
+use std::task::{Context, Wake, Waker};
 
-use kio::{Waiter, WaiterList};
+use kio::{Park, Waiter, WaiterList};
 
 /// Inline slots in a `WaiterList`, which is private, so this mirrors it. A lower
 /// real value fails the test rather than passing it quietly.
@@ -88,4 +89,44 @@ fn a_small_list_cycles_without_allocating() {
 #[test]
 fn a_spilled_list_allocates_once_per_wake() {
 	assert_eq!(cycle_allocs(&waiters(INLINE_WAITERS + 1), 100), 100);
+}
+
+/// A task parked on several lists that only one of them wakes, as a relay's group
+/// stream parks on its frames, its priority, and its subscription. Its park re-polls
+/// with the same waiter, so a poll that re-registers everywhere allocates nothing.
+#[test]
+fn a_partial_wake_reuses_the_parked_waiter() {
+	// A waker of its own, since `Park` reuses a waiter only for a waker that
+	// `will_wake` matches, and `Waker::noop()` need not match itself.
+	struct Task;
+	#[expect(clippy::manual_noop_waker, reason = "the waker must match itself under will_wake")]
+	impl Wake for Task {
+		fn wake(self: Arc<Self>) {}
+	}
+
+	let waker = Waker::from(Arc::new(Task));
+	let cx = Context::from_waker(&waker);
+	let mut park = Park::default();
+	let mut woken = WaiterList::new();
+	let mut quiet = [WaiterList::new(), WaiterList::new()];
+
+	let mut poll = || {
+		let waiter = park.hold(&cx);
+		woken.register(waiter);
+		for list in &mut quiet {
+			list.register(waiter);
+		}
+		woken.wake();
+	};
+
+	poll();
+	let before = ALLOCS.with(Cell::get);
+	for _ in 0..100 {
+		poll();
+	}
+	assert_eq!(
+		ALLOCS.with(Cell::get) - before,
+		0,
+		"a partial wake re-allocated the waiter"
+	);
 }

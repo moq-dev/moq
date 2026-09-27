@@ -460,8 +460,12 @@ async fn serve_issue<S: crate::transport::poll::Session>(
 		.await;
 
 		match next {
-			// The presenter withdrew the token, by FIN or by a cancelling reset.
-			Next::Withdrawn(Ok(()) | Err(Error::Stream(crate::StreamError::Cancel))) => break,
+			// The presenter withdrew the token, by FIN or by a cancelling reset. That is
+			// why it ended, whether or not our own FIN reaches a presenter that left.
+			Next::Withdrawn(Ok(()) | Err(Error::Stream(crate::StreamError::Cancel))) => {
+				issue.lock().peer.get_or_insert(Error::Cancel);
+				break;
+			}
 			Next::Withdrawn(Err(err)) => return Err(err),
 			Next::Reply(Some(Reply::Grant(grant))) => {
 				let now = crate::runtime::Timers::now(runtime);

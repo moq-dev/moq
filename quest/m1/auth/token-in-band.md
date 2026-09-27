@@ -75,3 +75,5 @@ Additive.
   widen path the configured tokens reuse
 - [Bindings](/quest/m1/auth/bindings.md) - supplies the client surface the new
   token setters sit beside
+- [Setup token](/quest/m1/setup-token.md) - supplies `setup::Token` and the
+  setup-option encoder

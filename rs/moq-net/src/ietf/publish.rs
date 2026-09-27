@@ -124,10 +124,10 @@ use super::Version;
 pub(crate) enum PublishDoneStatus {
 	/// An implementation-specific failure ended the subscription.
 	InternalError,
+	/// The subscriber is no longer authorized for the track.
+	Unauthorized,
 	/// The track is no longer being published.
 	TrackEnded,
-	/// The publisher's grant no longer covers the track (MoQ Auth).
-	Unauthorized,
 }
 
 impl PublishDoneStatus {
@@ -167,6 +167,7 @@ impl PublishDone<'_> {
 	pub(crate) fn end(&self, version: Version) -> Result<(), crate::Error> {
 		match self.status_code {
 			code if code == PublishDoneStatus::TrackEnded.code(version) => Ok(()),
+			code if code == PublishDoneStatus::Unauthorized.code(version) => Err(crate::Error::Unauthorized),
 			// SUBSCRIPTION_ENDED: the subscription reached the end its filter asked for.
 			// Draft-20 removed it and left 0x3 unassigned.
 			0x3 if matches!(
@@ -447,7 +448,9 @@ impl Message for PublishOk {
 				})
 			}
 			_ => {
+				// EXPIRES is ignored, as in SUBSCRIBE_OK.
 				decode_params!(r, version,
+					0x08 => _expires: Option<u64>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => filter: Option<Filter>,
@@ -733,6 +736,10 @@ mod tests {
 		for version in [Version::Draft14, Version::Draft19, Version::Draft20, Version::Draft22] {
 			assert!(done(0x2).end(version).is_ok(), "{version:?}");
 			assert!(
+				matches!(done(0x1).end(version), Err(crate::Error::Unauthorized)),
+				"{version:?}"
+			);
+			assert!(
 				matches!(done(0x0).end(version), Err(crate::Error::Remote(0x0))),
 				"{version:?}"
 			);
@@ -922,6 +929,16 @@ mod tests {
 		assert_eq!(decoded.request_id, None);
 		assert!(decoded.forward);
 		assert_eq!(decoded.subscriber_priority, 128);
+	}
+
+	/// Draft-18 lets PUBLISH_OK carry EXPIRES; it is ignored rather than rejected.
+	#[test]
+	fn test_publish_ok_ignores_expires() {
+		let bytes = [0x04, 0x01, 0x08, 0x05];
+
+		let decoded: PublishOk = decode_message(&bytes, Version::Draft16).unwrap();
+		assert_eq!(decoded.request_id, Some(RequestId(4)));
+		assert!(decoded.forward);
 	}
 
 	#[test]
