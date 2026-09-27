@@ -165,7 +165,7 @@ export type InteropControl = {
 	start(): void;
 	/** Remove the player from the DOM. */
 	detach(): void;
-	/** Put the player back and resume sampling. */
+	/** Blank the canvas the old session left behind, put the player back, and resume sampling. */
 	reattach(): void;
 	/** Connect a second player and leave it behind for the leaked-session negative control. */
 	startLeak(): void;
