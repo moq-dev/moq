@@ -89,8 +89,8 @@ just fix          # Auto-fix lint/formatting, same scope
 
 These diff the branch against its base and only run the affected packages.
 
-Quests are vendored from kixelated/quest in the `.quest` submodule, including `quest/AGENTS.md` and the quest skills; change them upstream.
-Run the CLI as `just quest ...`.
+When work mentions a quest, run `quest guide` and follow it.
+The `quest` binary comes from the kixelated/quest flake input and serves the quest skills; change them upstream and bump the input.
 A quest deleted on `dev` is done, even while `main` still lists it.
 
 # Cross-Package Sync

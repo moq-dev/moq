@@ -49,7 +49,7 @@ For each finding:
 
 If you encounter issues, or findings that are out of scope, create follow-up quests.
 Focus on the core problem, offering a potential solution only if its obvious.
-For non-trivial tasks, file an issue or offer to run `/plan-quests`.
+For non-trivial tasks, file an issue or offer to run `/quest-plan`.
 
 # Forks
 
