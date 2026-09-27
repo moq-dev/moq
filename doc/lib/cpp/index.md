@@ -51,12 +51,13 @@ libmoq's `moq` package without colliding.
 
 ```cpp
 #include <moq/moq.hpp>
+#include <cstdio>
 
 // Subscribe. Every fallible call returns moq::expected; nothing throws.
 auto client = moq::Client::init();
 auto session = client->connect("https://relay.example.com").get();
 if (!session) {
-    report(session.error());   // a moq::Error value
+    std::fprintf(stderr, "connect: %s\n", session.error().to_string().c_str());
     return;
 }
 
@@ -141,9 +142,10 @@ process that exits normally can skip it.
 `moq::Error` holds a `std::variant` of cases (`moq::Error::kCancelled`,
 `kUnauthorized`, `kProtocol`, ...); test one with
 `std::holds_alternative<moq::Error::kUnauthorized>(error.get_variant())`. Auth
-rejections are their own cases, so you don't retry them. A Rust panic or a
-misused future (`get()` twice) aborts with a message on stderr instead of
-throwing.
+rejections are their own cases, so you don't retry them. `error.to_string()`
+gives the message Rust's `Display` does, for logs; branch on the case, not the
+text. A Rust panic or a misused future (`get()` twice) aborts with a message on
+stderr instead of throwing.
 
 Everything else maps one to one onto the
 [shared feature list](/lib/#what-every-binding-can-do): each generated

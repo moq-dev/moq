@@ -50,7 +50,6 @@ reads the same release manifest so a release bumps both.
 
 ## Quests
 
-- [Error messages](/quest/m1/cpp/error-message.md) - a C++ `moq::Error` prints the same message Rust gives
 - [Client settings parity](/quest/m1/cpp/client-config.md) - moq-ffi offers libmoq's client knobs, and the OBS advanced settings get back the ones the migration dropped
 - [Session report parity](/quest/m1/cpp/session-report.md) - a session reports its negotiated draft and reconnect failures, so the OBS dock shows them again
 

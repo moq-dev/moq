@@ -22,8 +22,6 @@
 #include <optional>
 #include <string>
 #include <thread>
-#include <type_traits>
-#include <variant>
 #include <vector>
 
 #ifdef _WIN32
@@ -55,24 +53,8 @@ constexpr uint32_t AUDIO_FRAME_DURATION_US = 2'500;
 constexpr uint64_t AUDIO_BATCH_US = 20'000;
 constexpr size_t AUDIO_BATCH_SAMPLES = AUDIO_RATE * AUDIO_BATCH_US / 1'000'000;
 
-template <typename V, typename = void>
-struct has_message: std::false_type {};
-template <typename V>
-struct has_message<V, std::void_t<decltype(std::declval<const V &>().v1)>>: std::true_type {};
-
-// moq::Error has no Display in the bindings yet, so name the variant and its message.
 [[noreturn]] void fail(const char *what, const moq::Error &error) {
-    std::string message = std::visit(
-        [](const auto &variant) -> std::string {
-            if constexpr (has_message<std::decay_t<decltype(variant)>>::value) {
-                return variant.v1;
-            } else {
-                return "";
-            }
-        },
-        error.get_variant()
-    );
-    std::fprintf(stderr, "error: %s: moq::Error variant %zu %s\n", what, error.get_variant().index(), message.c_str());
+    std::fprintf(stderr, "error: %s: %s\n", what, error.to_string().c_str());
     std::exit(1);
 }
 

@@ -8,8 +8,6 @@
 #include <memory>
 #include <vector>
 
-inline void report(const moq::Error &) {}
-
 inline moq::expected<std::shared_ptr<moq::Session>> session;
 inline moq::expected<std::shared_ptr<moq::MediaConsumer>> media;
 inline std::vector<uint8_t> opus_init;

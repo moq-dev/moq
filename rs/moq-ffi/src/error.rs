@@ -150,7 +150,10 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 }
 
 /// Error returned by all UniFFI-exported functions.
+///
+/// Exports `Display`, which the bindings that support it surface as the error's string form.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
+#[uniffi::export(Display)]
 #[non_exhaustive]
 pub enum MoqError {
 	/// A protocol failure carrying the peer's session or stream code.
