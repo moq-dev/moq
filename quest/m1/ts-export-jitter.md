@@ -20,9 +20,15 @@ Decided:
   is emitted. The early return exists to lock the track layout, not the
   per-track timing, and the importer often fills `jitter` only once it has
   seen reordering.
-- When `jitter` is absent, grow the reserve from the reordering actually
-  observed (how far a frame's PTS falls below the track's high-water mark).
-  It only grows, so a stream that never reorders keeps today's tiny reserve.
+- When `jitter` is absent, derive the reserve from the stream rather than
+  refuse it. First choice is the reorder depth the bitstream declares (H.264
+  VUI `max_num_reorder_frames`, HEVC `sps_max_num_reorder_pics`), known from
+  the first keyframe before any frame is emitted, so output stays
+  deterministic. AV1 and VP9 present in decode order and need no reserve.
+  Only when the stream declares nothing, grow the reserve from the
+  reordering actually observed (how far a frame's PTS falls below the
+  track's high-water mark); it only grows, so a stream that never reorders
+  keeps today's tiny reserve.
 - Refusing to export video without `jitter` was rejected as too extreme.
 - Treating unknown jitter as unbounded was tried in #4001 and rejected: the
   stall never clears when video leads, breaking
@@ -34,11 +40,13 @@ Guidance:
   further behind PTS. The existing monotonic clamp keeps DTS from stepping
   back; check the PCR, which backs off by the largest reserve, stays ahead of
   every DTS written.
-- A B-frame that lands before the reserve has grown to cover it can still
-  reorder output once. Say in a comment that the observed bound converges
-  after the first deep reorder, and that catalog `jitter` avoids even that.
-- Tests in `export_test.rs`: two exporters with a late B-frame and no
-  `jitter` produce byte-identical output once reordering has been seen, and a
+- Only the observed fallback is nondeterministic: a B-frame deeper than any
+  seen before can reorder output once per new maximum (Codex on #4307). Say
+  so in a comment and log each growth, so an undeclared stream is visible
+  rather than silently misordered.
+- Tests in `export_test.rs`: two exporters with a late B-frame, no `jitter`,
+  and a declared reorder depth produce byte-identical output from the first
+  frame; an undeclared stream converges after its deepest reorder; and a
   `jitter` arriving in a catalog after the PMT raises the reserve.
 
 ## Related

@@ -36,9 +36,10 @@ One outcome per candidate:
 
 - Decided in #4100: fork tags keep upstream's `v<generator>+v<uniffi>`
   scheme with a `-kixelated.N` pre-release, e.g.
-  `v0.11.0-kixelated.1+v0.32.2`, matching the Dart fork. The suffix sorts
-  after the base release and before any upstream patch release, and never
-  collides with an upstream tag. The Go fork (`v0.9.0+v0.32.0`) moves to it
+  `v0.11.0-kixelated.1+v0.32.2`, matching the Dart fork. It never collides
+  with an upstream tag. Under SemVer a pre-release sorts before its base, so
+  this only works because every pin names the exact tag; never let tooling
+  pick "the newest" fork tag (Codex on #4307). The Go fork (`v0.9.0+v0.32.0`) moves to it
   at its next bump.
 - Offer each fix with the regression test it landed with. When upstream
   merges one, move the pin in `flake.nix` (and the places its comment lists)
