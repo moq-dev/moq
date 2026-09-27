@@ -19,6 +19,7 @@ use super::{
 use crate::{
 	AsPath, Error, InvalidPattern, Path, PathOwned, Pattern, Patterns,
 	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
+	path::Segment,
 	runtime::{Instant, Timers},
 	time::Clock,
 	util::{Keepalive, TaskSet, Tasks, TasksWeak},
@@ -997,11 +998,28 @@ impl Mount {
 
 	/// The handle-side absolute `patterns` beneath this mount, as origin-side
 	/// patterns beneath its target.
+	///
+	/// A member too deep to root matches no valid path and drops, except that a
+	/// `**` one segment past the limit can only match nothing and is dropped instead,
+	/// so a deep target keeps its exact path.
 	fn translate(&self, patterns: &Patterns) -> Patterns {
+		let target = self.target.as_str();
 		patterns
 			.rebase(self.at.as_str())
-			.rooted(self.target.as_str())
-			.unwrap_or_default()
+			.iter()
+			.filter_map(|member| {
+				member
+					.rooted(target)
+					.or_else(|_| {
+						let segments = member
+							.segments()
+							.iter()
+							.filter(|segment| **segment != Segment::Globstar);
+						Pattern::new(segments.cloned())?.rooted(target)
+					})
+					.ok()
+			})
+			.collect()
 	}
 
 	/// A handle-side interest head as an origin-side one: a head beneath the mount
@@ -4479,6 +4497,26 @@ mod tests {
 		let update = inside.announced().try_next().expect("foo");
 		assert_eq!(update.prefix.as_str(), "foo");
 		assert_eq!(update.captures, Some(vec!["foo".parse::<Pattern>().unwrap()]));
+	}
+
+	/// A target at the maximum depth still presents its exact path: the `**` a
+	/// wildcard scope carries past it can only match nothing there.
+	#[tokio::test]
+	async fn mount_keeps_a_max_depth_target() {
+		let producer = origin(1).produce();
+		let deep = vec!["d"; Path::MAX_PARTS].join("/");
+		let _leaf = producer.publish(deep.as_str(), Route::default()).unwrap();
+		let project = producer
+			.mount("p1/.svc", deep.as_str())
+			.unwrap()
+			.scope("p1", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.consume()
+			.with_hidden(true);
+
+		let mut announced = project.announced();
+		announced.assert_next_active(".svc");
+		announced.assert_next_wait();
 	}
 
 	/// Nothing is published at or beneath a mount.
