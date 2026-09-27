@@ -1,11 +1,8 @@
-# Paths are relative to this .pc file so the raw `cargo build` target tree is
-# usable directly (e.g. PKG_CONFIG_PATH=target/<profile>/lib/pkgconfig). The
-# staticlib sits in the profile root two dirs up (target/<profile>/); the header
-# is shared across profiles in target/include/.
-# Packagers that relocate into a conventional lib/+include/ layout rewrite
-# libdir; see nix/overlay.nix.
-libdir=${pcfiledir}/../..
-includedir=${pcfiledir}/../../../include
+# Paths are relative to this .pc file, in the install layout the release
+# tarballs and nix/overlay.nix ship: lib/{libmoq.a,pkgconfig/moq.pc} and
+# include/moq.h under one prefix.
+libdir=${pcfiledir}/..
+includedir=${pcfiledir}/../../include
 
 Name: moq
 Description: Media over QUIC C Interface

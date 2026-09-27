@@ -301,18 +301,19 @@ mod test {
 		assert_eq!(encoded, output, "wrong encoded output");
 	}
 
-	/// Lock in the on-wire shape of the jitter field: a bare integer number
+	/// Lock in the on-wire shape of the jitter and delay fields: a bare integer number
 	/// of milliseconds. If `Option<Duration>` ever loses the `duration_millis`
 	/// serde adapter, this regresses to serde's default `{secs, nanos}` shape.
 	#[test]
-	fn jitter_serialized_as_millis() {
+	fn jitter_and_delay_serialized_as_millis() {
 		let mut encoded = r#"{
 			"video": {
 				"renditions": {
 					"video": {
 						"codec": "avc1.64001f",
 						"container": {"kind": "legacy"},
-						"jitter": 100
+						"jitter": 100,
+						"delay": 200
 					}
 				}
 			},
@@ -355,6 +356,7 @@ mod test {
 				optimize_for_latency: None,
 				container: Container::Legacy,
 				jitter: Some(std::time::Duration::from_millis(100)),
+				delay: Some(std::time::Duration::from_millis(200)),
 			},
 		);
 
@@ -371,6 +373,7 @@ mod test {
 				description: None,
 				container: Container::Legacy,
 				jitter: Some(std::time::Duration::from_millis(40)),
+				delay: None,
 			},
 		);
 
@@ -780,14 +783,16 @@ mod test {
 		assert_eq!(output, encoded, "encode mismatch");
 	}
 
-	/// Data tracks carry the same optional `bitrate` and whole-millisecond `jitter` as media.
+	/// Data tracks carry the same optional `bitrate` and whole-millisecond `jitter` and `delay` as
+	/// media.
 	#[test]
 	fn data_track_bitrate_and_jitter() {
-		let encoded = r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"json":{"tracks":{"gps":{"mode":"stream","bitrate":8000,"jitter":100}}},"binary":{"tracks":{"frames":{"mode":"snapshot","bitrate":64000,"jitter":34}}}}"#;
+		let encoded = r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"json":{"tracks":{"gps":{"mode":"stream","bitrate":8000,"jitter":100,"delay":250}}},"binary":{"tracks":{"frames":{"mode":"snapshot","bitrate":64000,"jitter":34}}}}"#;
 
 		let mut gps = JsonConfig::new(Mode::Stream);
 		gps.bitrate = Some(8_000);
 		gps.jitter = Some(std::time::Duration::from_millis(100));
+		gps.delay = Some(std::time::Duration::from_micros(249_001));
 
 		let mut frames = BinaryConfig::new(Mode::Snapshot);
 		frames.bitrate = Some(64_000);
@@ -809,6 +814,10 @@ mod test {
 			Some(std::time::Duration::from_millis(34))
 		);
 		assert_eq!(decoded.json.tracks["gps"].bitrate, Some(8_000));
+		assert_eq!(
+			decoded.json.tracks["gps"].delay,
+			Some(std::time::Duration::from_millis(250))
+		);
 	}
 
 	/// An application lists a data track in its own section by flattening a data config beside its

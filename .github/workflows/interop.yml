@@ -82,6 +82,10 @@ jobs:
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
         shell: bash -leo pipefail {0}
 
+      - name: Subscription termination interop
+        run: nix develop --command just test bare-fin
+        shell: bash -leo pipefail {0}
+
       - name: Interop (full matrix)
         run: nix develop --command just test interop --all
         shell: bash -leo pipefail {0}

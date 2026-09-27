@@ -1405,8 +1405,8 @@ impl SegmentSub {
 	}
 
 	/// Move an active cursor into terminal retention and mark the segment done.
-	fn complete(&mut self, count: Option<u64>) {
-		let previous = std::mem::replace(&mut self.sub, SubState::Done(count));
+	fn complete(&mut self, end: Result<u64>) {
+		let previous = std::mem::replace(&mut self.sub, SubState::Done(end));
 		if let SubState::Active(sub) = previous {
 			self.terminal = Some(*sub);
 		}
@@ -1449,23 +1449,22 @@ enum SubState {
 	/// Live cursor over the underlying track. Boxed: the subscriber dwarfs the other
 	/// variants, and every segment holds this enum.
 	Active(Box<track::Subscriber>),
-	/// The underlying track ended: `Some` with the group count when it finished
-	/// cleanly, `None` when it aborted or was dropped. An abort is deliberately
-	/// not surfaced: a dead route stalls the logical track until the next switch
-	/// replaces it.
-	Done(Option<u64>),
+	/// The underlying track ended: `Ok` with the group count when it finished
+	/// cleanly, `Err` with the cause when it aborted or was dropped. An abort only
+	/// surfaces once no switch can follow: until then a dead route stalls the
+	/// logical track for the next switch to replace.
+	Done(Result<u64>),
 }
 
 /// A live subscription spliced across every segment of a logical track.
 ///
 /// Reads switch between the underlying [`track::Subscriber`]s at the segment
 /// boundaries. A segment's session failing does not error the subscription; it
-/// stalls until [`Producer::switch`] provides a replacement, or ends cleanly once
-/// the producer [`finish`](Producer::finish)es and the final segment completes.
-/// The producer itself going away without a terminal state ends the track as its
-/// final segment's track ended, once the remaining segments drain: cleanly if it
-/// finished, [`Error::Dropped`] if it died. With nobody left to splice a
-/// replacement, a stall would never end.
+/// stalls until [`Producer::switch`] provides a replacement. Once the producer
+/// [`finish`](Producer::finish)es, or goes away without a terminal state, no
+/// replacement can follow, so the track ends as its final segment's track ended
+/// once the remaining segments drain: cleanly if it finished, with its error if it
+/// died. With nobody left to splice a replacement, a stall would never end.
 pub struct Subscriber {
 	state: kio::Consumer<ResumeState>,
 
@@ -1535,7 +1534,7 @@ impl Subscriber {
 					break;
 				}
 				if seg.pruned {
-					seg.sub = SubState::Done(None);
+					seg.sub = SubState::Done(Err(Error::Dropped));
 					seg.terminal = None;
 					seg.parked.clear();
 					cut -= 1;
@@ -1831,7 +1830,8 @@ impl Subscriber {
 			// The copy was asked for the cache's newest group and started past it: its
 			// source judged that group stale, so the older cache is no use to live reads.
 			if start.is_some_and(|start| edge.is_some_and(|edge| start > edge)) {
-				seg.complete(None);
+				// Discarded, not finished: there is no group count, same as a dropped segment.
+				seg.complete(Err(Error::Dropped));
 				return Poll::Ready(());
 			}
 		}
@@ -1852,7 +1852,7 @@ impl Subscriber {
 					seg.sub = SubState::Active(Box::new(sub));
 				}
 				// The underlying track was rejected or closed: stall, not error.
-				Err(_) => seg.sub = SubState::Done(None),
+				Err(err) => seg.sub = SubState::Done(Err(err)),
 			}
 		}
 		Poll::Ready(())
@@ -1881,18 +1881,17 @@ impl Subscriber {
 						return Poll::Ready(Some(group));
 					}
 					Ok(None) => {
-						let count = sub.poll_finished(waiter).map(|res| res.ok());
-						let count = match count {
-							Poll::Ready(count) => count,
-							Poll::Pending => None,
+						let end = match sub.poll_finished(waiter) {
+							Poll::Ready(end) => end,
+							Poll::Pending => Err(Error::Dropped),
 						};
-						seg.complete(count);
+						seg.complete(end);
 						return Poll::Ready(None);
 					}
 					// A dead segment stalls the logical track rather than erroring;
 					// the next switch resumes it.
-					Err(_) => {
-						seg.complete(None);
+					Err(err) => {
+						seg.complete(Err(err));
 						return Poll::Ready(None);
 					}
 				},
@@ -1971,15 +1970,15 @@ impl Subscriber {
 						}
 						// The track ran out at or below the floor: the segment drained.
 						Poll::Ready(Ok(None)) => {
-							let count = match sub.poll_finished(waiter) {
-								Poll::Ready(count) => count.ok(),
-								Poll::Pending => None,
+							let end = match sub.poll_finished(waiter) {
+								Poll::Ready(end) => end,
+								Poll::Pending => Err(Error::Dropped),
 							};
-							seg.complete(count);
+							seg.complete(end);
 						}
 						// A dead segment stalls the logical track rather than erroring;
 						// the next switch resumes it.
-						Poll::Ready(Err(_)) => seg.complete(None),
+						Poll::Ready(Err(err)) => seg.complete(Err(err)),
 						Poll::Pending => all_done = false,
 					},
 					SubState::Pending(_) => all_done = false,
@@ -2007,15 +2006,10 @@ impl Subscriber {
 			if let Some(err) = &self.abort {
 				return Poll::Ready(Err(err.clone()));
 			}
-			if all_done {
-				if self.finished {
-					return Poll::Ready(Ok(None));
-				}
-				// The producer is gone without finishing: no takeover can ever resume
-				// the drained segments, so the track ends as its final segment did.
-				if self.closed {
-					return Poll::Ready(self.orphan_end().map(|()| None));
-				}
+			// Finished or gone, no switch can follow: the track ends as its final
+			// segment did.
+			if all_done && (self.finished || self.closed) {
+				return Poll::Ready(self.final_end().map(|()| None));
 			}
 			return Poll::Pending;
 		}
@@ -2028,9 +2022,9 @@ impl Subscriber {
 	/// out exactly once no matter how many routes contributed to it.
 	///
 	/// Returns `Poll::Ready(Ok(None))` once every segment completed and the
-	/// producer finished, or was dropped with the final segment's track finished.
-	/// Returns `Poll::Ready(Err(_))` if the producer aborted, or was dropped and
-	/// the final segment's track died ([`Error::Dropped`]).
+	/// producer finished or was dropped, with the final segment's track finished.
+	/// Returns `Poll::Ready(Err(_))` if the producer aborted, or if it finished or
+	/// was dropped and the final segment's track died (with that track's error).
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll_sync(waiter);
 
@@ -2134,16 +2128,10 @@ impl Subscriber {
 		if let Some(err) = &self.abort {
 			return Poll::Ready(Err(err.clone()));
 		}
-		if all_done {
-			if self.finished {
-				return Poll::Ready(Ok(None));
-			}
-			// The producer is gone without finishing: no takeover can ever
-			// resume the drained segments, so the track ends as its final
-			// segment did rather than stalling forever.
-			if self.closed {
-				return Poll::Ready(self.orphan_end().map(|()| None));
-			}
+		// Finished or gone, no switch can follow: the track ends as its final
+		// segment did rather than stalling forever.
+		if all_done && (self.finished || self.closed) {
+			return Poll::Ready(self.final_end().map(|()| None));
 		}
 		Poll::Pending
 	}
@@ -2217,14 +2205,24 @@ impl Subscriber {
 		if let Some(err) = &self.abort {
 			return Poll::Ready(Err(err.clone()));
 		}
+		// The producer finished, so this channel ends now. A final segment that
+		// already died is that death: the datagram read above drops a Ready(Err)
+		// on the floor, and a clean Ok(None) here would hide it. A segment that
+		// has not activated yet has no end to report.
 		if self.finished {
-			return Poll::Ready(Ok(None));
+			if pending_activation {
+				return Poll::Ready(Ok(None));
+			}
+			return match ready!(self.poll_final(waiter)) {
+				Some(end) => Poll::Ready(end.map(|_| None)),
+				None => Poll::Ready(Ok(None)),
+			};
 		}
 		// The producer is gone: no takeover is coming, so the track ends when
 		// its newest segment does, and the way it did.
 		if self.closed && !pending_activation {
 			return match ready!(self.poll_final(waiter)) {
-				Some(_) => Poll::Ready(Ok(None)),
+				Some(end) => Poll::Ready(end.map(|_| None)),
 				None => Poll::Ready(Err(Error::Dropped)),
 			};
 		}
@@ -2249,40 +2247,42 @@ impl Subscriber {
 		if !self.finished && !self.closed {
 			return Poll::Pending;
 		}
-		let end = ready!(self.poll_final(waiter));
-		match self.finished {
-			true => Poll::Ready(Ok(end.unwrap_or(0))),
-			// The producer is gone without finishing: the track ends as its final
-			// segment did.
-			false => Poll::Ready(end.ok_or(Error::Dropped)),
+		// The track ends as its final segment did, or with nothing spliced, cleanly
+		// only if it finished.
+		match ready!(self.poll_final(waiter)) {
+			Some(end) => Poll::Ready(end),
+			None if self.finished => Poll::Ready(Ok(0)),
+			None => Poll::Ready(Err(Error::Dropped)),
 		}
 	}
 
 	/// Wait for the final segment's track to end: its group count when it
-	/// finished, `None` when it died or there is no segment. Earlier segments don't
+	/// finished, its error when it died, and `None` when there is no segment. Earlier segments don't
 	/// decide the end. Only the subscription is resolved here: consuming groups, or
 	/// completing the segment, would steal them from a `recv_group` caller on the
 	/// same subscriber.
-	fn poll_final(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+	fn poll_final(&mut self, waiter: &kio::Waiter) -> Poll<Option<Result<u64>>> {
 		let Some(seg) = self.segments.last_mut() else {
 			return Poll::Ready(None);
 		};
 		ready!(Self::poll_activate(seg, &self.last_prefs, self.min_sequence, waiter));
 		match &mut seg.sub {
-			SubState::Done(count) => Poll::Ready(*count),
+			SubState::Done(end) => Poll::Ready(Some(end.clone())),
 			// Observe only: the cursor may still hold groups, so the read path
 			// completes the segment once it drains.
-			SubState::Active(sub) => Poll::Ready(ready!(sub.poll_finished(waiter)).ok()),
+			SubState::Active(sub) => Poll::Ready(Some(ready!(sub.poll_finished(waiter)))),
 			SubState::Pending(_) => unreachable!("poll_activate resolved above"),
 		}
 	}
 
-	/// How a logical track whose producer went away without finishing ends, once
-	/// every segment drained: cleanly if its final segment's track finished, since
-	/// that is where the content ended, and [`Error::Dropped`] otherwise.
-	fn orphan_end(&self) -> Result<()> {
+	/// How a logical track ends once every segment drained and no switch can follow
+	/// (the producer finished or went away): as its final segment's track ended, since
+	/// that is where the content ended. A finished track with no segment ends cleanly;
+	/// an orphaned one with [`Error::Dropped`].
+	fn final_end(&self) -> Result<()> {
 		match self.segments.last().map(|seg| &seg.sub) {
-			Some(SubState::Done(Some(_))) => Ok(()),
+			Some(SubState::Done(end)) => end.clone().map(|_| ()),
+			None if self.finished => Ok(()),
 			_ => Err(Error::Dropped),
 		}
 	}
@@ -4895,12 +4895,61 @@ mod test {
 		assert_eq!(recv(&mut sub), 0);
 
 		// The segment dies, then the producer goes away without finish/abort:
-		// no takeover can ever come, so stalling would hang forever.
-		track_a.abort(Error::Cancel).unwrap();
+		// no takeover can ever come, so stalling would hang forever. The track
+		// ends with the segment's own error.
+		track_a.abort(Error::Timeout).unwrap();
 		drop(producer);
 
 		let result = sub.recv_group().now_or_never().expect("must not stall forever");
-		assert!(matches!(result, Err(Error::Dropped)));
+		assert!(matches!(result, Err(Error::Timeout)));
+	}
+
+	/// A finished logical track ends as its final segment did: a segment cut off
+	/// after the finish (its session died with a group still in flight) is an
+	/// error, not a clean end.
+	#[tokio::test]
+	async fn finished_producer_ends_with_a_dead_final_segment() {
+		let (mut track_a, consumer_a) = track_pair("a");
+
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		write_group(&mut track_a, 0, "a0");
+		assert_eq!(recv(&mut sub), 0);
+
+		producer.finish().unwrap();
+		track_a.abort(Error::Timeout).unwrap();
+
+		let result = sub.recv_group().now_or_never().expect("must not stall forever");
+		assert!(matches!(result, Err(Error::Timeout)));
+	}
+
+	/// A datagram-only reader of a finished logical track ends with the final
+	/// segment's error. The datagram poll drops a segment error that is not
+	/// `Ok(Some)`, so the finished path has to ask the segment itself.
+	#[tokio::test]
+	async fn finished_producer_ends_datagrams_with_a_dead_final_segment() {
+		let (track_a, consumer_a) = track_pair("a");
+
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		assert!(
+			kio::wait(|waiter| sub.poll_recv_datagram(waiter))
+				.now_or_never()
+				.is_none(),
+			"no datagram yet"
+		);
+
+		producer.finish().unwrap();
+		track_a.abort(Error::Timeout).unwrap();
+
+		let result = kio::wait(|waiter| sub.poll_recv_datagram(waiter))
+			.now_or_never()
+			.expect("must not stall forever");
+		assert!(matches!(result, Err(Error::Timeout)));
 	}
 
 	#[tokio::test]
@@ -4943,12 +4992,12 @@ mod test {
 			);
 			match clean {
 				true => track_a.finish().unwrap(),
-				false => track_a.abort(Error::Cancel).unwrap(),
+				false => track_a.abort(Error::Timeout).unwrap(),
 			}
 			let result = sub.finished().now_or_never().expect("must not stall forever");
 			match clean {
 				true => assert!(matches!(result, Ok(0))),
-				false => assert!(matches!(result, Err(Error::Dropped))),
+				false => assert!(matches!(result, Err(Error::Timeout))),
 			}
 		}
 	}

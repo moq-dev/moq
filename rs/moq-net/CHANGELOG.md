@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6](https://github.com/moq-dev/moq/compare/moq-net-v0.3.5...moq-net-v0.3.6) - 2026-09-26
+
+### Added
+
+- end a broadcast with close() in every language ([#4031](https://github.com/moq-dev/moq/pull/4031))
+
+### Fixed
+
+- *(net)* reject undeclared subscription ends ([#4231](https://github.com/moq-dev/moq/pull/4231))
+- *(net)* retain retired counters in host snapshots ([#4238](https://github.com/moq-dev/moq/pull/4238))
+- *(net)* end a track with its session's error when the session dies ([#4120](https://github.com/moq-dev/moq/pull/4120))
+
+### Other
+
+- rename CLAUDE.md to AGENTS.md ([#4235](https://github.com/moq-dev/moq/pull/4235))
+- *(moq-net)* model the dash aggregator's stats load in the session bench ([#4233](https://github.com/moq-dev/moq/pull/4233))
+- *(kio)* keep a parked waiter that quiet lists still hold ([#4240](https://github.com/moq-dev/moq/pull/4240))
+- *(moq-net)* bench lite-06, smoke-run benches nightly, refresh perf quests ([#4229](https://github.com/moq-dev/moq/pull/4229))
+
+## [0.3.5](https://github.com/moq-dev/moq/compare/moq-net-v0.3.4...moq-net-v0.3.5) - 2026-09-26
+
+### Added
+
+- *(net)* count lite-07 group streams in SUBSCRIBE_END ([#4118](https://github.com/moq-dev/moq/pull/4118))
+
+### Fixed
+
+- *(net)* accept EXPIRES in SUBSCRIBE_OK, PUBLISH_OK, and REQUEST_OK ([#4195](https://github.com/moq-dev/moq/pull/4195))
+
 ## [0.3.4](https://github.com/moq-dev/moq/compare/moq-net-v0.3.3...moq-net-v0.3.4) - 2026-09-25
 
 ### Fixed
@@ -102,7 +131,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [**breaking**] `create_track`, `reserve_track`, `unique_track`, `finish`, `create_group`, and `append_group` take `&self`. `track::Consumer::info()` is `query()`. `track::Demand` gains `is_used` / `poll_used` / `poll_unused`. `track::Producer::poll_unused` returns `Poll<Result<()>>`. `bandwidth::Producer::closed()` returns the cause.
 - [**breaking**] `stats::Presence` and `stats::Traffic` name both edges of each cumulative pair `*_started` / `*_ended` (`sessions_started` / `sessions_ended`, `announces_started` / `announces_ended`, `broadcasts_*`, `subscriptions_*`). Serialize still writes the previous `announced` / `*_closed` names beside the new ones; deserialize accepts either spelling, with the canonical name winning.
 - [**breaking**] `origin::Info` is `origin::Config` with public fields and no `with_*` builders. `Producer::info()` is `config()`.
-- [**breaking**] `origin::Config::default()` mints a random hop, `Config::id` is `hop`, and origin handles expose `hop()` instead of dereferencing to `Hop`. Random hops now use the full 62-bit wire range; current `@moq/net` clients decode them as `bigint`, while legacy `@moq/lite` clients limited to `Number.MAX_SAFE_INTEGER` can reject larger values and must upgrade.
+- [**breaking**] `origin::Config::default()` mints a random hop, `Config::id` is `hop`, and origin handles expose `hop()` instead of dereferencing to `Hop`. Random hops stay below 2^53, so legacy `@moq/lite` clients limited to `Number.MAX_SAFE_INTEGER` still decode them; current `@moq/net` clients decode the full 62-bit wire range as `bigint`.
 - [**breaking**] `origin::Producer::scope(root, patterns)` and `origin::Consumer::scope(root, patterns)` replace the separate `with_root` / `scope` calls and return `Result` with `Unauthorized` for an empty grant.
 - [**breaking**] `origin::Pending` is `origin::Requesting`, the consumer-side wait for a request to resolve.
 - `origin::Producer::publish(path, route)` creates and advertises a broadcast together.

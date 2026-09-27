@@ -28,8 +28,8 @@ avoid batching latency. Use `just pub cmaf` only when testing fMP4/CMAF.
 
 BBB publishes the original 720p video and a pre-encoded 360p rendition at
 about 600 kbps. The player can switch between them as bandwidth or viewport
-size changes, without encoding while publishing. The 720p track comes first
-for consumers that only support one rendition.
+size changes, without encoding while publishing. Consumers that only support
+one rendition get the 720p track.
 
 To reproduce the hosted SD asset, run `just pub encode-bbb-sd`, then
 `just pub upload bbb-sd.mp4` with access to the video bucket. The encode keeps

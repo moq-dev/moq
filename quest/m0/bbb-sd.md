@@ -20,10 +20,9 @@ CPU. moq.pro's always-on demo consumes the same asset.
   otherwise independent inputs drift by about 39 ms per loop.
 - `bbb` downloads both and feeds them as two `-stream_loop -1 -re` inputs to
   one ffmpeg with `-map 0 -map 1:v -c copy` into `import ts`, which turns each
-  video PID into its own rendition. Map the 720p stream first: WHEP and
-  non-multitrack RTMP still serve the first rendition by name until
-  [egress rendition pick](/quest/m1/egress-rendition-pick.md) lands.
-- Verified: both catalog renditions have a `bitrate`, HD comes first, and
+  video PID into its own rendition. WHEP and non-multitrack RTMP serve the
+  720p one, the largest, whatever the mapping order.
+- Verified: both catalog renditions have a `bitrate`, and
   `just pub check-bbb` compares all visible timestamps and keyframes across
   three loops. Nightly CI runs this check against the hosted assets.
 - Chromium with `just dev` switches down and back up on viewport changes and

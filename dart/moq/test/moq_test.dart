@@ -102,7 +102,8 @@ void main() {
     client.close();
     serverSession.cancel(code: 0);
     track.finish();
-    broadcast.finish();
+    broadcast.close();
+    broadcast.close(); // a second close is a no-op
     server.close();
   });
 

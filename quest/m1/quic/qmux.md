@@ -38,7 +38,9 @@ Add the missing wire evidence before release: golden draft-02 vectors,
 bidirectional interoperability against the published `qmux` 0.5.x crate, and
 the TypeScript qmux/WebSocket peer used by `js/net`. Preserve rejection of
 prohibited QUIC frames, params-first setup, record-size validation, close and
-reset semantics, keep-alive behavior, and bounded flow-control tests.
+reset semantics (the first recorded close wins, per
+[close codes](/quest/m1/close-codes.md)), keep-alive behavior, and bounded
+flow-control tests.
 
 The crate lives in the fork's workspace as `moq-noq-qmux`, so the stream
 state machine internals it drives stay crate-private there; `moq-dev/web-transport`'s

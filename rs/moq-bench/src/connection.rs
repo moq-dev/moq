@@ -799,7 +799,7 @@ mod tests {
 
 		task.await.unwrap().unwrap();
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
-		broadcast.finish();
+		broadcast.close();
 	}
 
 	/// The relay fails a group it gave up on (`Error::Lagged` once a subscriber
@@ -850,7 +850,7 @@ mod tests {
 		write_group(&mut track);
 		wait_for(&stats.groups_recv, 3).await;
 		track.finish().unwrap();
-		broadcast.finish();
+		broadcast.close();
 
 		task.await
 			.unwrap()

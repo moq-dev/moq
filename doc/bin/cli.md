@@ -106,6 +106,14 @@ actually is. While video owns the clock, a frame arriving earlier than predicted
 pulls playback forward, so a late start catches up to live instead of staying
 behind it. Once the speaker owns the clock, video follows the speaker instead.
 
+Video receives encoded frames independently of decoding, so a tune-in burst can
+update that clock even while the window is waiting for its first picture.
+Encoded video is retained within the delay budget with byte accounting; a skip
+resumes at a keyframe. Decoding starts at most 100 ms before presentation, and
+the window holds at most three decoded pictures. A stalled window loses its
+oldest picture instead of blocking reception. The configured delay therefore
+does not turn into seconds of raw video surfaces.
+
 Each role follows the catalog for as long as it lasts. Each decoder starts at
 the newest cached group, including when a rendition is reopened, so playback
 does not replay the retained backlog. A publisher that retires the rendition
@@ -151,8 +159,8 @@ watches them. On NVIDIA the whole pipeline stays on the GPU; `--frames cpu`
 forces decoded frames into CPU memory instead of the default `native`.
 Requires the `transcode` feature.
 
-The source is the tallest rendition this host can decode with `--decoder`, so a
-software-only host transcodes from an H.264 rendition rather than a taller H.265
+The source is the largest rendition this host can decode with `--decoder`, so a
+software-only host transcodes from an H.264 rendition rather than a larger H.265
 or AV1 one. When no rendition decodes, the command exits naming the decoder's
 refusal.
 

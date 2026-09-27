@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { GrantSchema, RequestSchema } from "./contract.ts";
+import { GrantSchema, RequestSchema, TokenSchema } from "./contract.ts";
 
 // The fixtures below are what the Rust `moq_auth::Request` and `Grant` serialize to,
 // so a server written against these schemas reads what a relay sends.
@@ -50,6 +50,35 @@ test("an end request carries its facts beside the rest", () => {
 	});
 	if (invalid.event !== "end") throw new Error("expected an end");
 	expect(invalid.reason).toBe("invalid");
+});
+
+test("a SETUP token parses as the Rust vector", () => {
+	// What `moq_auth::Request` serializes a CAT of bytes 00 fb ff to.
+	const request = RequestSchema.parse(
+		JSON.parse(
+			'{"id":"00ff","event":"connect","node":"relay-1","transport":"quic","path":"/demo/room","token":{"kind":1,"value":"APv_"}}',
+		),
+	);
+	expect(request.token).toEqual({ kind: 1, value: "APv_" });
+
+	expect(() =>
+		RequestSchema.parse({
+			id: "1",
+			event: "connect",
+			node: "n",
+			transport: "quic",
+			path: "/",
+			token: { kind: 0, value: "AP+/" },
+		}),
+	).toThrow();
+
+	// Not a length or final character any byte string encodes to, which Rust refuses too.
+	for (const value of ["A", "AB", "APv_A"]) {
+		expect(() => TokenSchema.parse({ kind: 0, value })).toThrow();
+	}
+	for (const value of ["", "AA", "AAA", "AAAA", "AQ", "AAE"]) {
+		expect(TokenSchema.parse({ kind: 0, value }).value).toBe(value);
+	}
 });
 
 test("a connect must not carry end facts, and an unknown transport is refused", () => {
