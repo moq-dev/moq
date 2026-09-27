@@ -38,6 +38,7 @@ pub enum Keys {
 /// a relay that dies without sending `end` holds its slots until they age out after
 /// two cadences, a restart empties the table until the fleet's next cadence refills
 /// it, and a session admitted while a live one's slot was missing stays over the cap.
+/// The cadence is [`Policy::revalidate`]; without one, nothing ages out.
 ///
 /// `#[non_exhaustive]`, so start from [`Limits::default`] and set the fields.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -76,11 +77,12 @@ pub struct Policy {
 	pub mtls: Permissions,
 	/// The tier stamped on every grant.
 	pub tier: Option<String>,
-	/// How often the relay re-checks each grant.
-	pub revalidate: Duration,
+	/// How often the relay re-checks each grant; `None` never re-checks. The contract
+	/// refuses a cadence without a bound, so set [`expires`](Self::expires) with it.
+	pub revalidate: Option<Duration>,
 	/// How long a grant with no bound of its own lasts: an anonymous session, a token
-	/// without `exp`, a certificate without one.
-	pub expires: Duration,
+	/// without `exp`, a certificate without one. `None` leaves those unbounded.
+	pub expires: Option<Duration>,
 	/// Live session caps.
 	pub limits: Limits,
 }
@@ -92,8 +94,8 @@ impl Default for Policy {
 			public: Permissions::default(),
 			mtls: Permissions::default(),
 			tier: None,
-			revalidate: Duration::from_secs(60),
-			expires: Duration::from_secs(24 * 60 * 60),
+			revalidate: None,
+			expires: None,
 			limits: Limits::default(),
 		}
 	}
@@ -163,9 +165,8 @@ impl Policy {
 		};
 
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
-		// The contract refuses a cadence without a bound, so every grant carries one.
-		grant.expires = Some(expires.unwrap_or_else(|| SystemTime::now() + self.expires));
-		grant.revalidate = Some(self.revalidate);
+		grant.expires = expires.or_else(|| self.expires.map(|bound| SystemTime::now() + bound));
+		grant.revalidate = self.revalidate;
 		grant.tier = self.tier.clone();
 		Ok(grant)
 	}
@@ -324,14 +325,18 @@ impl Server {
 			Event::Connect => {
 				let grant = self.policy.decide(request).await?;
 				let mut sessions = self.sessions.lock().unwrap();
-				sessions.sweep(self.policy.revalidate);
+				if let Some(cadence) = self.policy.revalidate {
+					sessions.sweep(cadence);
+				}
 				sessions.connect(request, self.policy.limits)?;
 				Ok(Some(grant))
 			}
 			Event::Revalidate => {
 				let grant = self.policy.decide(request).await?;
 				let mut sessions = self.sessions.lock().unwrap();
-				sessions.sweep(self.policy.revalidate);
+				if let Some(cadence) = self.policy.revalidate {
+					sessions.sweep(cadence);
+				}
 				sessions.revalidate(request);
 				Ok(Some(grant))
 			}
@@ -471,7 +476,7 @@ mod tests {
 		assert_eq!(grant.publish, patterns(&["alice/**"]));
 		assert_eq!(grant.subscribe, patterns(&["**"]));
 		assert_eq!(grant.expires, Some(exp));
-		assert_eq!(grant.revalidate, Some(Duration::from_secs(60)));
+		assert_eq!(grant.revalidate, None);
 		assert_eq!(grant.tier.as_deref(), Some("gold"));
 		assert_eq!(grant.root, None);
 	}
@@ -481,7 +486,7 @@ mod tests {
 		let (dir, key) = key_dir();
 		let policy = Policy {
 			keys: Some(Keys::Dir(dir.path().into())),
-			expires: Duration::from_secs(3600),
+			expires: Some(Duration::from_secs(3600)),
 			..Default::default()
 		};
 		let jwt = sign(&key, "demo", &["**"], &[], None);
@@ -690,9 +695,9 @@ mod tests {
 		assert_eq!(grant.publish, patterns(&["**"]));
 		assert_eq!(grant.expires, Some(not_after));
 
-		// A certificate without a bound gets the default one.
+		// A certificate without a bound gets none by default, like 0.14.
 		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
-		assert!(grant.expires.unwrap() <= SystemTime::now() + policy.expires);
+		assert_eq!(grant.expires, None);
 
 		// The certificate does not stand in for a public grant.
 		assert_eq!(policy.decide(&request("/")).await.unwrap_err(), Refusal::NoPublicGrant);
@@ -729,7 +734,9 @@ mod tests {
 		let grant = policy.decide(&request("/")).await.unwrap();
 		assert_eq!(grant.subscribe, patterns(&["anon/**"]));
 		assert!(grant.publish.is_empty());
-		assert!(grant.expires.is_some());
+		// Never re-checked or closed by default, like 0.14.
+		assert_eq!(grant.expires, None);
+		assert_eq!(grant.revalidate, None);
 	}
 
 	/// The rules are rooted at `/`, not at the dialed path: `anon/**` scopes a session
@@ -780,7 +787,8 @@ mod tests {
 				token: None,
 				remote: Some(2),
 			},
-			revalidate: Duration::from_secs(60),
+			revalidate: Some(Duration::from_secs(60)),
+			expires: Some(Duration::from_secs(24 * 60 * 60)),
 			..Default::default()
 		});
 

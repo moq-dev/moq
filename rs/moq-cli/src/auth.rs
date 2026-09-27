@@ -387,19 +387,19 @@ pub struct Serve {
 	#[usage(long)]
 	tier: Option<String>,
 
-	/// How often the relay re-checks each grant.
-	#[usage(long, default = "1m")]
-	revalidate: crate::duration::Duration,
+	/// How often the relay re-checks each grant. Off by default; needs `--expires`.
+	#[usage(long)]
+	revalidate: Option<crate::duration::Duration>,
 
-	/// How long a grant with no bound of its own lasts: anonymous sessions, tokens without `exp`, certificates without one.
-	#[usage(long, default = "1d")]
-	expires: crate::duration::Duration,
+	/// How long a grant with no bound of its own lasts: anonymous sessions, tokens without `exp`, certificates without one. Off by default.
+	#[usage(long)]
+	expires: Option<crate::duration::Duration>,
 
-	/// The most live sessions presenting one token.
+	/// The most live sessions presenting one token. Needs `--revalidate`.
 	#[usage(long)]
 	limit_token: Option<usize>,
 
-	/// The most live sessions from one remote address.
+	/// The most live sessions from one remote address. Needs `--revalidate`.
 	#[usage(long)]
 	limit_remote: Option<usize>,
 }
@@ -407,9 +407,18 @@ pub struct Serve {
 impl Serve {
 	/// The policy these flags describe, refusing a cadence the relay would spin on.
 	fn policy(&self) -> anyhow::Result<Policy> {
-		let revalidate = self.revalidate.into_std();
-		if revalidate.is_zero() {
+		let revalidate = self.revalidate.map(|cadence| cadence.into_std());
+		let expires = self.expires.map(|bound| bound.into_std());
+		if revalidate.is_some_and(|cadence| cadence.is_zero()) {
 			anyhow::bail!("--revalidate must be longer than 0s; every client would re-check in a tight loop");
+		}
+		if revalidate.is_some() && expires.is_none() {
+			anyhow::bail!("--revalidate needs --expires, so a grant re-checked through an outage still has a bound");
+		}
+		// Only a re-check tells the session table a slot is still live; without one,
+		// a relay that died without an `end` would hold its slots forever.
+		if (self.limit_token.is_some() || self.limit_remote.is_some()) && revalidate.is_none() {
+			anyhow::bail!("--limit-token and --limit-remote need --revalidate, which ages out the slots of dead relays");
 		}
 		// 0.14 read `anon` as the prefix `anon/`, and a pattern reads it as exactly the
 		// broadcast `anon`, so either silent reading would mislead someone upgrading.
@@ -443,7 +452,7 @@ impl Serve {
 		policy.mtls = rules(&self.mtls_publish, &self.mtls_subscribe);
 		policy.tier = self.tier.clone();
 		policy.revalidate = revalidate;
-		policy.expires = self.expires.into_std();
+		policy.expires = expires;
 		policy.limits.token = self.limit_token;
 		policy.limits.remote = self.limit_remote;
 		Ok(policy)
@@ -655,23 +664,34 @@ mod tests {
 		assert!(policy.public.publish.is_empty());
 		assert_eq!(policy.mtls.publish, ["**".parse().unwrap()].into_iter().collect());
 		assert_eq!(policy.tier.as_deref(), Some("internal"));
-		assert_eq!(policy.revalidate, std::time::Duration::from_secs(30));
-		assert_eq!(policy.expires, std::time::Duration::from_secs(7200));
+		assert_eq!(policy.revalidate, Some(std::time::Duration::from_secs(30)));
+		assert_eq!(policy.expires, Some(std::time::Duration::from_secs(7200)));
 		assert_eq!(policy.limits.token, Some(3));
 		assert_eq!(policy.limits.remote, Some(8));
 
-		// Nothing configured is a server that refuses everyone, on the defaults.
+		// Nothing configured is a server that refuses everyone, and like 0.14, never
+		// re-checks or closes a session on its own.
 		let bare = serve(&["moq", "auth", "serve"]).policy().unwrap();
 		assert!(bare.keys.is_none());
 		assert!(bare.public.is_empty() && bare.mtls.is_empty());
-		assert_eq!(bare.revalidate, std::time::Duration::from_secs(60));
-		assert_eq!(bare.expires, std::time::Duration::from_secs(86400));
+		assert_eq!(bare.revalidate, None);
+		assert_eq!(bare.expires, None);
 
-		// A zero cadence would have every client re-check in a tight loop.
-		let err = serve(&["moq", "auth", "serve", "--revalidate", "0s"])
-			.policy()
-			.unwrap_err();
-		assert!(err.to_string().contains("--revalidate"), "{err}");
+		for (args, needs) in [
+			// A zero cadence would have every client re-check in a tight loop.
+			(&["--revalidate", "0s", "--expires", "1h"][..], "longer than 0s"),
+			// The contract refuses a cadence without a bound.
+			(&["--revalidate", "1m"], "--revalidate needs --expires"),
+			// Only a re-check keeps a slot alive.
+			(&["--limit-token", "3"], "need --revalidate"),
+			(&["--limit-remote", "3", "--expires", "1h"], "need --revalidate"),
+		] {
+			let argv: Vec<&str> = ["moq", "auth", "serve"].iter().chain(args).copied().collect();
+			let err = serve(&argv).policy().unwrap_err().to_string();
+			assert!(err.contains(needs), "{args:?}: {err}");
+		}
+		let expiring = serve(&["moq", "auth", "serve", "--expires", "1h"]).policy().unwrap();
+		assert_eq!(expiring.revalidate, None);
 	}
 
 	/// 0.14 read `anon` as a prefix and a pattern reads it as one broadcast, so a
