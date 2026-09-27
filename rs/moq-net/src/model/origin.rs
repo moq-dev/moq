@@ -903,6 +903,9 @@ struct TableCursor {
 	/// The absolute prefixes a mount shadows: routes at or beneath them are not
 	/// this cursor's to present.
 	holes: Vec<PathOwned>,
+	/// For a cursor reading through a mount: the mount and the handle's own
+	/// patterns, so a wildcard captures what the handle names rather than the target.
+	named: Option<(Mount, Patterns)>,
 	/// The last delivered best route per presented (relative) prefix, for change
 	/// detection: `(entry id, hops, cost)`.
 	// entry id, metadata, and whether the entry could serve requests: the last
@@ -930,8 +933,11 @@ impl TableCursor {
 	/// What the cursor's most specific matching scope member captures from an
 	/// exact announced prefix. An overlap-only route does not pin every wildcard.
 	fn captures(&self, prefix: &Path) -> Option<Vec<Pattern>> {
-		let literal = Pattern::literal(prefix.as_str()).ok()?;
-		self.allowed
+		let (literal, allowed) = match &self.named {
+			Some((mount, allowed)) => (Pattern::literal(mount.name(prefix)?.as_str()).ok()?, allowed),
+			None => (Pattern::literal(prefix.as_str()).ok()?, &self.allowed),
+		};
+		allowed
 			.iter()
 			.filter_map(|allowed| {
 				allowed
@@ -981,6 +987,12 @@ impl Mount {
 	/// Where the handle-side absolute `path` resolves, when it is under this mount.
 	fn resolve(&self, path: &Path) -> Option<PathOwned> {
 		Some(self.target.join(path.strip_prefix(&self.at)?))
+	}
+
+	/// Where the origin-side absolute `path` shows on the handle, when it is at or
+	/// beneath the target. A route covering the target has no handle-side name.
+	fn name(&self, path: &Path) -> Option<PathOwned> {
+		Some(self.at.join(path.strip_prefix(&self.target)?))
 	}
 
 	/// The handle-side absolute `patterns` beneath this mount, as origin-side
@@ -3598,18 +3610,23 @@ impl Consumer {
 	/// Drop the returned [`AnnounceConsumer`] to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
 		let state = kio::Producer::<OriginConsumerState>::default();
-		let cursor =
-			|root: PathOwned, allowed: Patterns, hidden: Hidden, under: PathOwned, holes: Vec<PathOwned>| TableCursor {
-				root,
-				heads: interest_prefixes(&allowed),
-				allowed,
-				horizon: self.horizon,
-				hidden,
-				state: state.clone(),
-				under,
-				holes,
-				current: HashMap::new(),
-			};
+		let cursor = |root: PathOwned,
+		              allowed: Patterns,
+		              hidden: Hidden,
+		              mount: Option<&Mount>,
+		              under: PathOwned,
+		              holes: Vec<PathOwned>| TableCursor {
+			root,
+			heads: interest_prefixes(&allowed),
+			allowed,
+			horizon: self.horizon,
+			hidden,
+			state: state.clone(),
+			under,
+			holes,
+			named: mount.map(|mount| (mount.clone(), self.scope.allowed.clone())),
+			current: HashMap::new(),
+		};
 
 		// A root at or beneath a mount reads only the mount: one cursor, re-rooted
 		// onto the target.
@@ -3619,6 +3636,7 @@ impl Consumer {
 				root,
 				mount.translate(&self.scope.allowed),
 				self.hidden.translate(mount),
+				Some(mount),
 				PathOwned::default(),
 				Vec::new(),
 			)];
@@ -3645,6 +3663,7 @@ impl Consumer {
 				mount.target.clone(),
 				allowed,
 				self.hidden.translate(mount),
+				Some(mount),
 				under.to_owned(),
 				Vec::new(),
 			));
@@ -3655,6 +3674,7 @@ impl Consumer {
 				self.root.clone(),
 				self.scope.allowed.clone(),
 				self.hidden.clone(),
+				None,
 				PathOwned::default(),
 				holes,
 			),
@@ -4441,6 +4461,24 @@ mod tests {
 		other.clone().with_hidden(true).announced().assert_next_wait();
 		let err = other.request_broadcast(".svc/foo").await.err().unwrap();
 		assert!(matches!(err, Error::Unroutable));
+	}
+
+	/// A wildcard spanning the mount point captures the path as the handle names
+	/// it, so capture-keyed consumers key a mounted route like any other.
+	#[tokio::test]
+	async fn mount_captures_the_named_path() {
+		let producer = origin(1).produce();
+		let _foo = producer.publish(".svc/p1/foo", Route::default()).unwrap();
+		let project = mounted(&producer, "p1", &["**"]).with_hidden(true);
+
+		let update = project.announced().try_next().expect("foo");
+		assert_eq!(update.prefix.as_str(), ".svc/foo");
+		assert_eq!(update.captures, Some(vec![".svc/foo".parse::<Pattern>().unwrap()]));
+
+		let inside = project.scope(".svc", &Patterns::from(Pattern::all())).unwrap();
+		let update = inside.announced().try_next().expect("foo");
+		assert_eq!(update.prefix.as_str(), "foo");
+		assert_eq!(update.captures, Some(vec!["foo".parse::<Pattern>().unwrap()]));
 	}
 
 	/// Nothing is published at or beneath a mount.
