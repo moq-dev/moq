@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
+import { Baseline } from "../jitter";
 import type { AudioFrame, Format } from "./capture";
 import { Encoder, resolve } from "./encoder";
 
@@ -185,7 +186,7 @@ class Feed {
 }
 
 // An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes].
-async function setup() {
+async function setup(baseline = new Baseline()) {
 	const configured = new Promise<void>((resolve) => {
 		LaggingAudioEncoder.onConfigure = resolve;
 	});
@@ -218,7 +219,7 @@ async function setup() {
 	};
 
 	const encoder = new Encoder("audio", {
-		broadcast: { audio: () => rendition } as never,
+		broadcast: { audio: () => rendition, baseline } as never,
 		capture: capture as never,
 	});
 
@@ -226,6 +227,7 @@ async function setup() {
 	LaggingAudioEncoder.onConfigure = undefined;
 
 	return {
+		encoder,
 		track,
 		rendition,
 		feed,
@@ -296,4 +298,28 @@ test("a push completing several frames keeps the encoder running", async () => {
 		[58_700, 1],
 		[78_700, 1],
 	]);
+});
+
+// Another rendition on the same broadcast flushing with far less lateness leaves this one trailing
+// it, which the catalog advertises as `delay`.
+test("a rendition trailing the broadcast's earliest advertises delay", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const baseline = new Baseline();
+	using env = await setup(baseline);
+	const { encoder, feed } = env;
+
+	expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
+
+	// A sibling that flushes each frame the instant it is captured.
+	baseline.observe(0, performance.now() * 1000);
+
+	// Captured 100ms ago, so this rendition flushes at least that late.
+	const start = performance.now() * 1000 - 100_000;
+	for (let index = 0; index < 4; index++) {
+		await feed.push({ timestamp: Time.Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+	}
+	await feed.drain();
+
+	expect(env.written.length).toBe(2);
+	expect(encoder.out.catalog.peek()?.delay).toBeGreaterThanOrEqual(100);
 });

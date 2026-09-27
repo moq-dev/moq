@@ -873,6 +873,25 @@ fn synthesize_opus_trak_preserves_pre_skip() {
 	assert_eq!(opus.dops.pre_skip, 312);
 }
 
+/// dOps has nowhere to put a channel mapping table, so a family 1 head is refused rather
+/// than written as family 0 without it.
+#[test]
+fn synthesize_opus_trak_refuses_mapping_family() {
+	use hang::catalog::{AudioCodec, AudioConfig};
+
+	let mut head = crate::codec::opus::Config::new(48_000, 2).encode().unwrap().to_vec();
+	head[18] = 1; // channel mapping family
+	head.extend_from_slice(&[1, 1, 0, 1]); // one coupled stream feeding both channels
+	let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+	config.description = Some(head.into());
+
+	let err = super::synthesize_audio_trak(1, 48_000, &config).unwrap_err();
+	assert!(matches!(
+		err,
+		super::Error::Opus(crate::codec::opus::Error::UnsupportedMappingFamily(1))
+	));
+}
+
 /// A legacy FLAC rendition (no init segment) synthesizes a `fLaC` sample entry
 /// whose `dfLa` STREAMINFO is rebuilt from the catalog description.
 #[test]

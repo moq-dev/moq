@@ -2,7 +2,7 @@
 
 ## Goal
 
-A second round after [Tests hold up under load](/quest/m1/test-flakes.md):
+A second round after [#4286](https://github.com/moq-dev/moq/pull/4286):
 tests that pass alone but have failed under a loaded `just check` pass
 reliably, each fixed at its cause, never by raising a timeout or adding a
 retry.

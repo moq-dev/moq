@@ -20,8 +20,8 @@ the option fails loud instead of dropping the credential.
   adds a CAT. One CAT per connection: it is the connection credential, so a
   configured CAT takes the setup option and the JWT that would have gone
   there rides its AUTH stream instead, never the URL. `moq auth serve`
-  refuses a SETUP token beside a different `?jwt=` (decided in [Setup
-  token](/quest/m1/setup-token.md)), so a JWT on the URL would refuse the
+  refuses a SETUP token beside a different `?jwt=` (see [Token in
+  band](/quest/m1/auth/token-in-band.md)), so a JWT on the URL would refuse the
   CAT's connect; on a session without AUTH the JWT is simply absent, like
   any extra token.
 - A CAT with any offered version that lacks the setup option (every lite
@@ -31,8 +31,7 @@ the option fails loud instead of dropping the credential.
   config; `doc/bin/cli.md` and `doc/lib/rs/moq-net.md` gain it.
 - Tests: a Rust server's `Handshake::token()` sees kind `0x01` and the
   bytes on every draft from both a Rust and a JS client (a JS server is out
-  of scope: [Setup token](/quest/m1/setup-token.md) adds no JS accept-side
-  API, since nothing in `js/net` authorizes an IETF session); a JWT rides its
+  of scope: #4278 added no JS accept-side API, since nothing in `js/net` authorizes an IETF session); a JWT rides its
   AUTH stream and not the URL when a CAT holds the option; a lite offer with
   a CAT refuses at init; end to end against `moq auth serve` with a CAT from
   `moq auth sign --format cat`.
@@ -41,8 +40,6 @@ Public API: additive on `moq-tokio` and `js/net`. Wire: none.
 
 ## Required
 
-- [Setup token](/quest/m1/setup-token.md) - the server-side exposure
-  and the shared `setup::Token`
 - [Verify](/quest/m2/cat/verify.md) - the server that admits the token the
   end-to-end test presents
 - [Token in band](/quest/m1/auth/token-in-band.md) - the token

@@ -41,9 +41,9 @@ Boundaries decided while planning:
 
 ## Plan
 
-Order: the wire first so a token reaches the auth server, which is the
-standalone [Setup token](/quest/m1/setup-token.md) quest; verification;
-then our clients present one. Everything rides `moq_auth::Request` and
+Order: the SETUP option already reaches the auth server as
+`moq_auth::Request.token`; verification comes first, then our clients present
+one. Everything rides `moq_auth::Request` and
 `moq auth serve`, which shipped on dev. The JWT types sit at the crate root;
 the verify quest moves them under `moq_auth::jwt` so `cat` is a sibling
 module rather than a set of prefixed names.
@@ -55,11 +55,6 @@ module rather than a set of prefixed names.
   check the format
 - [Present](/quest/m2/cat/present.md) - a CAT is one kind of configured
   token, riding the SETUP option the in-band token quest already writes
-
-## Required
-
-- [Setup token](/quest/m1/setup-token.md) - the SETUP option reaches
-  `moq_auth::Request` as `token`
 
 ## Related
 
