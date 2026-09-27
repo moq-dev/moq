@@ -24,7 +24,7 @@ import {
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import * as DatagramStream from "./datagram_stream.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
-import type { Group as GroupMessage } from "./group.ts";
+import { frameDecoder, type Group as GroupMessage, readFrames } from "./group.ts";
 import { sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
@@ -55,11 +55,6 @@ import {
 // (Chrome ~100) and we open with waitUntilAvailable, so past the cap the open blocks
 // until the peer frees a slot. The timeout turns a stall into a clear error.
 const SUBSCRIBE_SETUP_TIMEOUT_MS = 10_000;
-
-/** Decode an unsigned zigzag varint back to a signed delta (mirrors Rust `VarInt::to_zigzag`). */
-function unzigzag(v: bigint): bigint {
-	return (v >> 1n) ^ -(v & 1n);
-}
 
 // The TRACK stream and implicit SUBSCRIBE acceptance are lite-05+.
 function supportsTrackStream(version: Version): boolean {
@@ -788,32 +783,29 @@ export class Subscriber {
 	// FIN. A stream-level failure aborts the group so its reader observes the gap.
 	async #runFetchResponse(stream: Stream, group: netGroup.Producer, timescale: Time.Timescale): Promise<void> {
 		try {
-			let prevTs = 0n;
+			const decode = frameDecoder(timescale);
 
 			// Serve until the stream FINs, the group closes, or every reader leaves. A group can
 			// stay open indefinitely (a catalog or JSON stream), so an abandoned fetch is stopped by
 			// demand, not by the stream ending. `unused` is watched across frames as one stable
 			// promise; the check is level-triggered, so a coalesced fetch that arrives before we
 			// cancel re-arms and resumes.
-			const idle = Symbol("idle");
-			let unused = group.unused().then(() => idle);
+			const idle: unique symbol = Symbol("idle");
+			let unused = group.unused().then((): typeof idle => idle);
 			for (;;) {
-				const done = await race([stream.reader.done(), group.closed, unused]);
-				if (done === idle) {
+				// Buffered frames are written without an await, as in a group stream.
+				const frame =
+					stream.reader.tryDecode(decode) ??
+					(await race([stream.reader.decodeMaybe(decode), group.closed, unused]));
+				if (frame === idle) {
 					if (!group.isClosed && group.used.peek()) {
-						unused = group.unused().then(() => idle);
+						unused = group.unused().then((): typeof idle => idle);
 						continue;
 					}
 					break;
 				}
-				if (done !== false) break;
-
-				prevTs += unzigzag(await stream.reader.u62());
-				const timestamp = new Time.Timestamp(Number(prevTs), timescale);
-				const size = await stream.reader.u53();
-				const payload = await stream.reader.read(size);
-				if (!payload) break;
-				group.writeFrame({ payload, timestamp });
+				if (!frame || frame instanceof Error) break;
+				group.writeFrame(frame);
 			}
 
 			group.close();
@@ -989,31 +981,7 @@ export class Subscriber {
 				scale = timescale.peek();
 			}
 
-			// A non-zero scale means every frame is prefixed with a zigzag-delta timestamp
-			// (the lite-05 FRAME format), which we decode into a Timestamp at that scale.
-			// Scale 0 (pre-lite-05) carries no timestamp, so we wall-clock-stamp.
-			let prevTs = 0n;
-
-			for (;;) {
-				// Only the group's own stream ends it: a track that closes first has already
-				// closed (or aborted) this group through its cache.
-				const done = await race([stream.done(), producer.closed]);
-				if (done !== false) break;
-
-				let timestamp: Time.Timestamp;
-				if (scale !== 0) {
-					prevTs += unzigzag(await stream.u62());
-					timestamp = new Time.Timestamp(Number(prevTs), Time.Timescale(scale));
-				} else {
-					timestamp = Time.Timestamp.now();
-				}
-
-				const size = await stream.u53();
-				const payload = await stream.read(size);
-				if (!payload) break;
-
-				producer.writeFrame({ payload, timestamp });
-			}
+			await readFrames(stream, producer, scale);
 
 			producer.close();
 			stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));

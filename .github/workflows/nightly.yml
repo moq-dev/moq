@@ -82,6 +82,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command bun js/net/bench/reader.ts
 
+      # Fails if a chunk carrying many small frames costs as much per frame as one
+      # carrying a single frame, which means decoding went back to a wakeup per frame.
+      - name: JS group frame benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command bun js/net/bench/frames.ts
+
       # Runs each moq-net Criterion routine once, so a bench that panics (an
       # unparsable version, a shape that deadlocks) fails here instead of on the
       # next manual run. Timing is not compared; nextest never runs a
