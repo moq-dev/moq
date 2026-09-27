@@ -1484,6 +1484,91 @@ async fn aac_program_config_roundtrip() {
 	assert_eq!(roundtripped, ingested, "the element is written once, not per frame");
 }
 
+/// GStreamer 1.28 `fdkaacenc` output, 48 kHz stereo, remuxed to FLV by ffmpeg 9.0.1. Its
+/// AudioSpecificConfig signals SBR (and PS for v2) explicitly: object type 5 or 29 over an LC core
+/// at 24 kHz, stereo for v1 and mono for v2. ADTS has two bits for the object type, so export
+/// labels the LC core at its own rate and layout and leaves SBR and PS to implicit signaling, the
+/// header ffmpeg's ADTS muxer writes too. ffprobe reads the result back as HE-AAC or HE-AACv2 at
+/// 48 kHz stereo, like the source.
+#[tokio::test(start_paused = true)]
+async fn aac_explicit_sbr_exports_its_lc_core() {
+	let fixtures: [(&[u8], u8); 2] = [
+		(include_bytes!("test_data/he_aac.flv"), 2),
+		(include_bytes!("test_data/he_aac_v2.flv"), 1),
+	];
+	for (data, channel_config) in fixtures {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = crate::container::flv::Import::new(broadcast, catalog.reserve());
+		import.decode(data).unwrap();
+		import.finish().unwrap();
+
+		let snapshot = catalog.snapshot();
+		let (name, _) = snapshot.audio.renditions.iter().next().expect("an AAC track");
+		let ingested = read_frames(&consumer, name, Kind::Audio).await;
+		assert!(!ingested.is_empty(), "no AAC frames");
+
+		let ts = drain(consumer).await;
+		assert_packet_aligned(&ts);
+
+		let (header, block) = first_adts_frame(&ts);
+		assert_eq!(header.object_type, 2, "the LC core, not a masked SBR or PS");
+		assert_eq!(header.sample_rate, 24_000, "the core rate, not the output rate");
+		assert_eq!(header.channel_config, channel_config);
+		assert_eq!(block, ingested[0], "the raw data block is untouched");
+	}
+}
+
+/// Without a description, the catalog is all ADTS has to label a track with. A channel count no
+/// channelConfiguration names is refused rather than written as stereo, and HE-AAC, whose core
+/// rate and layout only a description names, is refused rather than masked to AAC Main.
+#[tokio::test(start_paused = true)]
+async fn aac_export_refuses_what_adts_cannot_label() {
+	for (profile, channel_count, refusal) in [(2, 7, "7 channels"), (5, 2, "audioObjectType 5")] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+
+		let track = broadcast
+			.create_track(
+				broadcast.unique_name(".aac"),
+				hang::container::track_info(hang::catalog::PRIORITY.audio),
+			)
+			.unwrap();
+		let mut cfg = AudioConfig::new(AAC { profile }, 48_000, channel_count);
+		cfg.container = Container::Legacy;
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.insert(track.name().to_string(), cfg);
+
+		let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_millis(0).unwrap(),
+				duration: None,
+				payload: Bytes::from_static(&[0x01, 0x02]),
+				keyframe: true,
+			})
+			.unwrap();
+		producer.finish().unwrap();
+
+		let mut exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+		let err = loop {
+			match tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
+				Ok(Ok(Some(_))) => continue,
+				Ok(Ok(None)) => panic!("export completed; expected a refusal naming {refusal}"),
+				Ok(Err(e)) => break e,
+				Err(_) => panic!("export neither errored nor completed"),
+			}
+		};
+		assert!(err.to_string().contains(refusal), "expected {refusal}, got: {err}");
+	}
+}
+
 /// The ffmpeg E-AC-3 fixture must survive TS -> MoQ -> TS byte-for-byte in an
 /// audio-only program; the PMT re-announces ATSC 0x87 with the 'EAC3'
 /// registration descriptor.

@@ -66,6 +66,11 @@ discarding the old mux buffer. The first new clock packet signals the break and
 stdout pacing re-anchors. Every rendition joins the new program generation;
 no track is fenced across the marker.
 
+MPEG-TS export frames AAC as ADTS, which labels only the AAC Main, LC, SSR,
+and LTP profiles. HE-AAC and HE-AACv2 go out as their AAC-LC core, and decoders
+find the SBR and PS in band, as ffmpeg's ADTS output does. A track whose
+profile or channel layout ADTS cannot label is refused rather than mislabeled.
+
 A constant-rate MPEG-TS source records its multiplex rate in the catalog
 (`mpegts.muxRate`, measured off the PCR clock, null stuffing included), and
 `export ts` pads its output with null packets back to that rate so an IRD or

@@ -21,7 +21,3 @@ not written with a guessed `channel_config_code`.
 - Tests with real heads, checked against ffprobe where ffmpeg reads the result.
 
 Public API: none. Wire: none; TS output changes only for inputs it mislabeled.
-
-## Related
-
-- [ADTS refusals](/quest/m1/audio-codecs/adts-refusals.md) - the same refusal for the AAC writer
