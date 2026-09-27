@@ -62,6 +62,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Video surface](/quest/m1/video-surface.md) - on dev, moq-ffi's `native` becomes `surface`, refused on platforms with no surface
 - [HLS discontinuity sequence](/quest/m1/hls-discontinuity-sequence.md) - on dev, `Segment::discontinuity` is the absolute sequence, so every cursor agrees
 - [Strict Redirect::resolve](/quest/m1/redirect-resolve.md) - on dev, `Redirect::resolve` can no longer quietly turn a refused redirect into a redial
+- [RTMP TLS only](/quest/m1/rtmp-tls-only.md) - an RTMP listener configured for TLS can refuse plaintext instead of sniffing and serving it
 - [HLS linger](/quest/m1/hls-linger.md) - `moq_hls::Server` serves an ended broadcast for its playlist window plus grace, so the moq.pro edge drops its own pool
 - [Gateway live clock](/quest/m1/gateway-live-clock.md) - moq-srt, moq-rtmp, and HLS import publish on the broadcast clock, so encoder reconnects don't restart timestamps
 - [iroh versions](/quest/m1/iroh-lite-wip.md) - `iroh://` negotiates the configured versions, so `moq-lite-07-wip` can be opted into
