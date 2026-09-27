@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "moq-settings.h"
-#include "moq-describe.h"
 #include "logger.h"
 
 #include <algorithm>
@@ -208,7 +207,7 @@ bool Configure(obs_data_t *settings, moq::Client &client, std::string *error)
 	// Stops at the first setter moq-ffi rejects, naming the setting it came from.
 	auto apply = [&](const char *key, moq::expected<void> result) {
 		if (!result && error)
-			*error = std::string(key) + ": " + MoQDescribe(result.error());
+			*error = std::string(key) + ": " + result.error().to_string();
 		return result.has_value();
 	};
 

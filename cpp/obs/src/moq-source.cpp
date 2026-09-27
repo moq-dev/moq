@@ -31,7 +31,6 @@ extern "C" {
 }
 
 #include "moq-source.h"
-#include "moq-describe.h"
 #include "moq-url.h"
 #include "moq-worker.h"
 #include "logger.h"
@@ -438,7 +437,7 @@ static void moq_source_on_connect(struct moq_source *ctx, const std::shared_ptr<
 				  moq::expected<std::shared_ptr<moq::Session>> result)
 {
 	if (!result) {
-		LOG_ERROR("MoQ session error: %s", MoQDescribe(result.error()).c_str());
+		LOG_ERROR("MoQ session error: %s", result.error().to_string().c_str());
 		moq_source_fail_locked(ctx);
 		return;
 	}
@@ -453,7 +452,7 @@ static void moq_source_on_connect(struct moq_source *ctx, const std::shared_ptr<
 	auto announced = conn->session->consume()->announced_broadcast(conn->broadcast);
 	if (!announced) {
 		LOG_ERROR("Failed to request broadcast '%s': %s", conn->broadcast.c_str(),
-			  MoQDescribe(announced.error()).c_str());
+			  announced.error().to_string().c_str());
 		moq_source_fail_locked(ctx);
 		return;
 	}
@@ -470,7 +469,7 @@ static void moq_source_on_broadcast(struct moq_source *ctx, const std::shared_pt
 {
 	if (!result) {
 		LOG_ERROR("Failed to resolve broadcast '%s': %s", conn->broadcast.c_str(),
-			  MoQDescribe(result.error()).c_str());
+			  result.error().to_string().c_str());
 		moq_source_fail_locked(ctx);
 		return;
 	}
@@ -485,7 +484,7 @@ static void moq_source_on_catalogs(struct moq_source *ctx, const std::shared_ptr
 				   moq::expected<std::shared_ptr<moq::CatalogConsumer>> result)
 {
 	if (!result) {
-		LOG_ERROR("Failed to subscribe to catalog: %s", MoQDescribe(result.error()).c_str());
+		LOG_ERROR("Failed to subscribe to catalog: %s", result.error().to_string().c_str());
 		moq_source_fail_locked(ctx);
 		return;
 	}
@@ -509,7 +508,7 @@ static void moq_source_on_status(struct moq_source *ctx, const std::shared_ptr<C
 	if (!result) {
 		// Reconnecting gave up (or the relay refused us). Tear down every
 		// subscription, not just the session, and blank to show the error.
-		LOG_ERROR("MoQ session error: %s", MoQDescribe(result.error()).c_str());
+		LOG_ERROR("MoQ session error: %s", result.error().to_string().c_str());
 		moq_source_fail_locked(ctx);
 		return;
 	}
@@ -540,7 +539,7 @@ static void moq_source_on_catalog(struct moq_source *ctx, const std::shared_ptr<
 				  moq::expected<std::optional<moq::Catalog>> result)
 {
 	if (!result) {
-		LOG_ERROR("Catalog subscription error: %s", MoQDescribe(result.error()).c_str());
+		LOG_ERROR("Catalog subscription error: %s", result.error().to_string().c_str());
 		moq_source_blank_video(ctx);
 		return;
 	}
@@ -608,7 +607,7 @@ static void moq_source_on_resolved(struct moq_source *ctx, const std::shared_ptr
 				   moq::expected<std::shared_ptr<moq::BroadcastConsumer>> result)
 {
 	if (!result) {
-		LOG_ERROR("Failed to resolve %s track broadcast: %s", track->kind, MoQDescribe(result.error()).c_str());
+		LOG_ERROR("Failed to resolve %s track broadcast: %s", track->kind, result.error().to_string().c_str());
 		return;
 	}
 	track->call = (*result)
@@ -623,7 +622,7 @@ static void moq_source_on_subscribed(struct moq_source *ctx, const std::shared_p
 				     moq::expected<std::shared_ptr<moq::MediaConsumer>> result)
 {
 	if (!result) {
-		LOG_ERROR("Failed to subscribe to %s track: %s", track->kind, MoQDescribe(result.error()).c_str());
+		LOG_ERROR("Failed to subscribe to %s track: %s", track->kind, result.error().to_string().c_str());
 		return;
 	}
 	track->consumer = *result;
@@ -645,7 +644,7 @@ static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Co
 				moq::expected<std::optional<moq::MediaFrame>> result)
 {
 	if (!result) {
-		LOG_ERROR("%s track error: %s", track->kind, MoQDescribe(result.error()).c_str());
+		LOG_ERROR("%s track error: %s", track->kind, result.error().to_string().c_str());
 		return;
 	}
 	if (!*result) {

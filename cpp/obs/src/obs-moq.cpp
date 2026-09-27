@@ -22,7 +22,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <moq/moq.hpp>
 
 #include "logger.h"
-#include "moq-describe.h"
 #include "moq-output.h"
 #include "moq-service.h"
 #include "moq-source.h"
@@ -62,7 +61,7 @@ bool obs_module_load(void)
 
 	// Use RUST_LOG env var for more verbose output
 	if (auto logging = moq::log_level("info"); !logging)
-		LOG_WARNING("MoQ logging unavailable: %s", MoQDescribe(logging.error()).c_str());
+		LOG_WARNING("MoQ logging unavailable: %s", logging.error().to_string().c_str());
 
 	register_moq_output();
 	register_moq_service();

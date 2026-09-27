@@ -2,7 +2,7 @@
 #include <obs.hpp>
 
 #include "moq-output.h"
-#include "moq-describe.h"
+#include "moq-error.h"
 #include "moq-settings.h"
 #include "moq-url.h"
 #include "logger.h"
@@ -10,6 +10,7 @@
 
 #include <cstring>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -50,6 +51,23 @@ std::string DialSchemeLabel(const std::string &url)
 	if (scheme == "unix")
 		return "unix";
 	return scheme;
+}
+
+// The failure code the dock classifies a moq::Error by, beside its text.
+MoQError::Code FailureCode(const moq::Error &error)
+{
+	const auto &variant = error.get_variant();
+	if (std::holds_alternative<moq::Error::kUnauthorized>(variant))
+		return MoQError::Code::Unauthorized;
+	if (std::holds_alternative<moq::Error::kForbidden>(variant))
+		return MoQError::Code::Forbidden;
+	if (std::holds_alternative<moq::Error::kConnect>(variant))
+		return MoQError::Code::Connect;
+	if (const auto *protocol = std::get_if<moq::Error::kProtocol>(&variant)) {
+		if (protocol->details.kind == moq::ProtocolKind::kUnauthorized)
+			return MoQError::Code::Unauthorized;
+	}
+	return MoQError::Code::Other;
 }
 
 } // namespace
@@ -156,15 +174,15 @@ bool MoQOutput::Start()
 	auto next_origin = moq::OriginProducer::init(moq::OriginConfig{});
 	auto next_broadcast = next_origin->create_broadcast(path);
 	if (!next_broadcast) {
-		LOG_ERROR("Failed to create broadcast: %s", MoQDescribe(next_broadcast.error()).c_str());
+		LOG_ERROR("Failed to create broadcast: %s", next_broadcast.error().to_string().c_str());
 		return false;
 	}
 	if (auto announced = (*next_broadcast)->announce(moq::Route{}); !announced) {
-		LOG_ERROR("Failed to announce broadcast: %s", MoQDescribe(announced.error()).c_str());
+		LOG_ERROR("Failed to announce broadcast: %s", announced.error().to_string().c_str());
 		return false;
 	}
 	if (auto wired = next->client->set_publish(next_origin); !wired) {
-		LOG_ERROR("Failed to publish through the client: %s", MoQDescribe(wired.error()).c_str());
+		LOG_ERROR("Failed to publish through the client: %s", wired.error().to_string().c_str());
 		return false;
 	}
 
@@ -282,7 +300,7 @@ void MoQOutput::OnStatus(const std::shared_ptr<Attempt> &current, moq::expected<
 
 void MoQOutput::Fail(const std::shared_ptr<Attempt> &current, const moq::Error &error)
 {
-	const std::string reason = MoQDescribe(error);
+	const std::string reason = error.to_string();
 	const bool was_connected = current->connected;
 
 	// Retire the attempt, which also limits the failure signal to one per Start().
@@ -293,7 +311,7 @@ void MoQOutput::Fail(const std::shared_ptr<Attempt> &current, const moq::Error &
 		session.reset();
 		connected = false;
 		live = false;
-		last_failure_code = MoQFailureCode(error);
+		last_failure_code = FailureCode(error);
 		last_failure_reason = reason;
 	}
 	connect_time_ms = 0;
@@ -502,7 +520,7 @@ void MoQOutput::AudioData(struct encoder_packet *packet)
 	}
 
 	if (auto result = track->write_frame(PacketFrame(packet, *timestamp)); !result) {
-		LOG_ERROR("Failed to write audio frame: %s", MoQDescribe(result.error()).c_str());
+		LOG_ERROR("Failed to write audio frame: %s", result.error().to_string().c_str());
 		return;
 	}
 
@@ -511,12 +529,12 @@ void MoQOutput::AudioData(struct encoder_packet *packet)
 	// waiting for the next, the right trade for live. Video groups at its own keyframes.
 	// Cut before observing the flush so a failed observation never leaves the group open.
 	if (auto result = track->cut(); !result) {
-		LOG_ERROR("Failed to cut audio group: %s", MoQDescribe(result.error()).c_str());
+		LOG_ERROR("Failed to cut audio group: %s", result.error().to_string().c_str());
 		return;
 	}
 
 	if (auto result = track->flush(*timestamp); !result) {
-		LOG_ERROR("Failed to observe audio encoder flush: %s", MoQDescribe(result.error()).c_str());
+		LOG_ERROR("Failed to observe audio encoder flush: %s", result.error().to_string().c_str());
 		return;
 	}
 
@@ -544,12 +562,12 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 	}
 
 	if (auto result = track->write_frame(PacketFrame(packet, *timestamp)); !result) {
-		LOG_ERROR("Failed to write video frame: %s", MoQDescribe(result.error()).c_str());
+		LOG_ERROR("Failed to write video frame: %s", result.error().to_string().c_str());
 		return;
 	}
 
 	if (auto result = track->flush(*timestamp); !result) {
-		LOG_ERROR("Failed to observe video encoder flush: %s", MoQDescribe(result.error()).c_str());
+		LOG_ERROR("Failed to observe video encoder flush: %s", result.error().to_string().c_str());
 		return;
 	}
 
@@ -615,7 +633,7 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 
 	auto track = broadcast->publish_video(config);
 	if (!track) {
-		LOG_ERROR("Failed to initialize video track: %s", MoQDescribe(track.error()).c_str());
+		LOG_ERROR("Failed to initialize video track: %s", track.error().to_string().c_str());
 		video_tracks[encoder] = nullptr;
 		return;
 	}
@@ -676,7 +694,7 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 
 	auto track = broadcast->publish_audio(config);
 	if (!track) {
-		LOG_ERROR("Failed to initialize audio track: %s", MoQDescribe(track.error()).c_str());
+		LOG_ERROR("Failed to initialize audio track: %s", track.error().to_string().c_str());
 		audio_tracks[encoder] = nullptr;
 		return;
 	}
