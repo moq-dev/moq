@@ -18,7 +18,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 ## Quests
 
 - [BBR classic ECN](/quest/m1/bbr-classic-ecn.md) - Startup and bandwidth probing respond to CE marks before the bottleneck drops packets
-- [libmoq hidden opt-in](/quest/m1/libmoq-hidden.md) - `moq_origin_announced` takes a `hidden` flag so C callers can list `.`-named broadcasts
 - [lite-07 count settle](/quest/m1/lite-count-settle.md) - moq-lite-07 subscribers stop waiting for a subscription's tail once SUBSCRIBE_END's stream count is reached
 - [Dropped sources](/quest/m1/dropped-sources.md) - track consumers see the producer's real error on every end path, never `Dropped`
 - [JS group guard](/quest/m1/js-group-guard.md) - a `@moq/net` publisher abandons a group past its max age without an unhandled rejection
@@ -51,12 +50,12 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Tests under load](/quest/m1/test-flakes.md) - three tests that time out or run out of file descriptors under `just check` are fixed at the cause
 - [Decoded frame ownership](/quest/m1/decoded-frames.md) - retain moq-video Frames across bindings, with native views or CPU conversion as needed
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - generated C++ over moq-ffi with futures and expected-style errors, shipped as a tarball, vcpkg, and Conan, and adopted by the OBS plugin
+- [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [moq-c](/quest/m1/moq-c.md) - libmoq ships as `moq-c`, beside `moq-cpp`, with its C header and library unchanged
 - [OBS native codecs](/quest/m1/obs-moq-video/README.md) - remove FFmpeg decoding dependencies, deliver GPU frames, and use native audio/video encoders
 - [Opus concealment](/quest/m1/opus-conceal.md) - a lost Opus packet conceals the last packet's length, not 120 ms
 - [Audio codecs](/quest/m1/audio-codecs/README.md) - platform audio codecs, explicit unsupported cases, and channel layouts up to 7.1
 - [CMAF Opus](/quest/m1/cmaf-opus-dops.md) - fMP4 import and export keep the Opus pre-skip and gain
-- [NVDEC teardown](/quest/m1/nvdec-teardown.md) - dropping an NVDEC decoder no longer segfaults
 - [GPU pool reservation](/quest/m1/gpu-pool-reservation.md) - a full GPU frame pool is a `None` reservation the caller drops on, not an error to match
 - [Egress rendition pick](/quest/m1/egress-rendition-pick.md) - WHEP and single-track RTMP/FLV serve the best rendition, not the first by name
 - [Keyframe trigger](/quest/m1/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
@@ -139,11 +138,9 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Go mirror delivery](/quest/m1/go-mirror-delivery.md) - the Go binding's staticlibs stop growing git history by ~210 MiB per release
 - [Relay iroh opt-in](/quest/m1/relay-iroh-opt-in.md) - moq-relay drops iroh from its defaults and shipped builds, while moq-cli keeps it for P2P
 - [Dart on iOS](/quest/m1/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
-- [libmoq shutdown](/quest/m1/libmoq-shutdown.md) - OBS exits cleanly with the plugin loaded: a C ABI `moq_shutdown` stops the libmoq thread before the module is unloaded
 - [Kotlin JVM exit](/quest/m1/kt-jvm-exit.md) - a Kotlin/JVM program exits cleanly whatever the moq-ffi runtime thread is doing, like Python does since #3766
 - [Dart publish](/quest/m1/dart-publish.md) - the packages are built and dry-run clean but exist nowhere consumers can install from
 - [Dart codec parity](/quest/m1/dart-codecs.md) - Dart is the one binding that cannot originate media
-- [libmoq fetch](/quest/m1/libmoq-fetch.md) - libmoq gains an additive cached-group fetch entry point
 - [moq-mux on wasm32](/quest/m1/mux-wasm-target.md) - the crate's two wasm blockers are fixed and the target stays in the clippy lane
 - [#2850](/quest/m1/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - js/net: decode messages synchronously from buffered bytes and delete the publisher read-ahead queue
 - [Install moq](/quest/m1/moq-installer.md) - one command installs or upgrades the released CLI on macOS and Linux
