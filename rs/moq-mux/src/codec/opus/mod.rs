@@ -4,8 +4,10 @@
 //! publishes raw Opus frames (no Ogg framing) to a moq broadcast.
 
 mod import;
+pub mod mapping;
 
 pub use import::*;
+pub use mapping::Mapping;
 
 use bytes::{Buf, Bytes};
 
@@ -37,8 +39,8 @@ pub enum Error {
 	#[error("invalid OpusHead channel mapping table")]
 	InvalidMappingTable,
 
-	/// [`Config::encode`] only emits channel mapping family 0.
-	#[error("cannot encode channel mapping family {0}")]
+	/// [`Mapping::new`] was given family 0, which has no mapping table.
+	#[error("channel mapping family {0} has no mapping table")]
 	UnsupportedMappingFamily(u8),
 }
 
@@ -56,79 +58,6 @@ pub struct Config {
 	pub pre_skip: u16,
 	/// The channel mapping table, or `None` for family 0 (mono/stereo, one stream).
 	pub mapping: Option<Mapping>,
-}
-
-/// An OpusHead channel mapping table (RFC 7845 §5.1.1), present for every family but 0.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Mapping {
-	family: u8,
-	streams: u8,
-	coupled: u8,
-	channels: u8,
-	// Sized for the most channels any family allows, so `Config` stays `Copy`.
-	table: [u8; 255],
-}
-
-impl Mapping {
-	fn parse<T: Buf>(buf: &mut T, family: u8, channels: u8) -> Result<Self> {
-		if buf.remaining() < 2 + channels as usize {
-			return Err(Error::MappingTableTooShort);
-		}
-		let streams = buf.get_u8();
-		let coupled = buf.get_u8();
-		if streams == 0 || coupled > streams || streams as u32 + coupled as u32 > 255 {
-			return Err(Error::InvalidMappingTable);
-		}
-
-		let mut table = [0u8; 255];
-		for entry in &mut table[..channels as usize] {
-			*entry = buf.get_u8();
-			// 255 marks a silent channel.
-			if *entry != 255 && *entry >= streams + coupled {
-				return Err(Error::InvalidMappingTable);
-			}
-		}
-
-		Ok(Self {
-			family,
-			streams,
-			coupled,
-			channels,
-			table,
-		})
-	}
-
-	/// The channel mapping family: 1 is the Vorbis speaker order, 2 and 3 are
-	/// ambisonics, and 255 is channels with no declared position.
-	pub fn family(&self) -> u8 {
-		self.family
-	}
-
-	/// Number of Opus streams in each packet.
-	pub fn streams(&self) -> u8 {
-		self.streams
-	}
-
-	/// How many of those streams are coupled (stereo); they come first.
-	pub fn coupled(&self) -> u8 {
-		self.coupled
-	}
-
-	/// The decoded channel feeding each output channel, 255 for silence.
-	pub fn table(&self) -> &[u8] {
-		&self.table[..self.channels as usize]
-	}
-}
-
-impl std::fmt::Debug for Mapping {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("Mapping")
-			.field("family", &self.family)
-			.field("streams", &self.streams)
-			.field("coupled", &self.coupled)
-			.field("table", &self.table())
-			.finish()
-	}
 }
 
 impl Config {
@@ -169,17 +98,9 @@ impl Config {
 		buf.advance(2); // Skip gain until if/when we support it.
 		let family = buf.get_u8();
 
-		let max_channels = match family {
-			0 => 2,
-			1 => 8,
-			_ => 255,
-		};
-		if channel_count == 0 || channel_count > max_channels {
-			return Err(Error::UnsupportedChannelCount(channel_count));
-		}
-
 		let mapping = match family {
-			0 => None,
+			0 if (1..=2).contains(&channel_count) => None,
+			0 => return Err(Error::UnsupportedChannelCount(channel_count)),
 			family => Some(Mapping::parse(buf, family, channel_count as u8)?),
 		};
 
@@ -195,28 +116,35 @@ impl Config {
 		})
 	}
 
-	/// Encode the minimal OpusHead packet (19 bytes; channel mapping family
-	/// 0 and zero gain).
+	/// Encode an OpusHead packet (RFC 7845 §5.1) with zero gain, followed by
+	/// the channel mapping table when there is one.
 	///
-	/// Errors with [`Error::UnsupportedChannelCount`] unless `channel_count` is 1
-	/// or 2, since mapping family 0 is only defined for mono/stereo per RFC 7845 §5.1.
-	/// Multi-channel streams need family 1 with a channel mapping table, which
-	/// this helper does not emit, so any `mapping` is [`Error::UnsupportedMappingFamily`].
+	/// Errors with [`Error::UnsupportedChannelCount`] when `channel_count` is not
+	/// 1 or 2 without a `mapping` (family 0 is only defined for mono/stereo), or
+	/// is not the mapping's own channel count.
 	pub fn encode(&self) -> Result<Bytes> {
-		if let Some(mapping) = &self.mapping {
-			return Err(Error::UnsupportedMappingFamily(mapping.family));
-		}
-		if !(1..=2).contains(&self.channel_count) {
+		let valid = match &self.mapping {
+			None => (1..=2).contains(&self.channel_count),
+			Some(mapping) => self.channel_count == mapping.table().len() as u32,
+		};
+		if !valid {
 			return Err(Error::UnsupportedChannelCount(self.channel_count));
 		}
-		let mut head = Vec::with_capacity(19);
+
+		let mut head = Vec::with_capacity(21 + self.channel_count as usize);
 		head.extend_from_slice(b"OpusHead");
 		head.push(1); // version
 		head.push(self.channel_count as u8);
 		head.extend_from_slice(&self.pre_skip.to_le_bytes());
 		head.extend_from_slice(&self.sample_rate.to_le_bytes());
 		head.extend_from_slice(&0i16.to_le_bytes()); // output gain
-		head.push(0); // channel mapping family (0 = mono/stereo)
+		match &self.mapping {
+			None => head.push(0),
+			Some(mapping) => {
+				head.extend_from_slice(&[mapping.family(), mapping.streams(), mapping.coupled()]);
+				head.extend_from_slice(mapping.table());
+			}
+		}
 		Ok(Bytes::from(head))
 	}
 }
@@ -322,8 +250,36 @@ mod tests {
 		assert_eq!(mapping.coupled(), 2);
 		assert_eq!(mapping.table(), &[0, 4, 1, 2, 3, 5]);
 
-		// Encode only emits family 0.
-		assert!(matches!(parsed.encode(), Err(Error::UnsupportedMappingFamily(1))));
+		// The table survives a re-encode.
+		assert_eq!(parsed.encode().unwrap(), bytes);
+	}
+
+	#[test]
+	fn encodes_the_vorbis_mappings() {
+		for channels in 1..=8u8 {
+			let mut config = Config::new(48_000, channels as u32);
+			config.mapping = Some(Mapping::vorbis(channels).unwrap());
+			let head = config.encode().unwrap();
+			assert_eq!(head.len(), 21 + channels as usize, "{channels} channels");
+			assert_eq!(
+				Config::parse(&mut head.as_ref()).unwrap(),
+				config,
+				"{channels} channels"
+			);
+		}
+
+		// 5.1 is the table libopus and ffmpeg write.
+		let five_one = Mapping::vorbis(6).unwrap();
+		assert_eq!((five_one.streams(), five_one.coupled()), (4, 2));
+		assert_eq!(five_one.table(), &[0, 4, 1, 2, 3, 5]);
+
+		assert!(matches!(Mapping::vorbis(0), Err(Error::UnsupportedChannelCount(0))));
+		assert!(matches!(Mapping::vorbis(9), Err(Error::UnsupportedChannelCount(9))));
+
+		// The channel count must agree with the table.
+		let mut config = Config::new(48_000, 5);
+		config.mapping = Some(five_one);
+		assert!(matches!(config.encode(), Err(Error::UnsupportedChannelCount(5))));
 	}
 
 	#[test]

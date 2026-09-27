@@ -200,6 +200,29 @@ fn import_opus_catalog() {
 	assert_eq!(audio.channel_count, 2);
 }
 
+/// `opus_5_1.ts` is a 440 Hz center channel in 5.1, which ffmpeg's libopus
+/// encodes as family 1 and its muxer labels `channel_config_code` 6:
+/// `ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.5
+/// -ac 6 -c:a libopus -b:a 128k -f mpegts opus_5_1.ts`. The descriptor names only
+/// the channel count, so the importer must synthesize the Vorbis mapping table
+/// or the track has no OpusHead a decoder accepts.
+#[test]
+fn import_opus_surround_catalog() {
+	let data = include_bytes!("test_data/opus_5_1.ts");
+	let catalog = import_ts(data);
+
+	assert_eq!(catalog.audio.renditions.len(), 1, "expected one Opus track");
+	let audio = catalog.audio.renditions.values().next().unwrap();
+	assert_eq!(audio.channel_count, 6);
+
+	let head = crate::codec::opus::Config::parse(&mut audio.description.as_deref().expect("an OpusHead")).unwrap();
+	assert_eq!(head.channel_count, 6);
+	let mapping = head.mapping.expect("a family 1 mapping");
+	assert_eq!(mapping.family(), 1);
+	assert_eq!((mapping.streams(), mapping.coupled()), (4, 2));
+	assert_eq!(mapping.table(), &[0, 4, 1, 2, 3, 5]);
+}
+
 /// Opus frames from real ffmpeg output must decode: a non-empty run of Opus packets,
 /// each a plausible size (the control header was stripped, not left in the payload).
 #[tokio::test(start_paused = true)]

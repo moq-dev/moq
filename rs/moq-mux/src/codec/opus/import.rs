@@ -115,7 +115,7 @@ impl Import {
 pub fn config(init: &[u8]) -> crate::Result<hang::catalog::AudioConfig> {
 	let mut buf = init;
 	let mut config: hang::catalog::AudioConfig = Config::parse(&mut buf)?.into();
-	// Publish the head as given: re-encoding it would drop a channel mapping table.
+	// Publish the head as given: re-encoding it would drop the output gain.
 	config.description = Some(bytes::Bytes::copy_from_slice(init));
 	Ok(config)
 }

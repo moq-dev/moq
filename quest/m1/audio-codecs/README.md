@@ -45,10 +45,12 @@ its own decode and encode quest so verification stays per host.
 
 - [AudioToolbox decode](/quest/m1/audio-codecs/decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
 - [HE-AAC catalog output](/quest/m1/audio-codecs/he-aac-catalog-output.md) - HE-AAC catalog entries name the output rate and layout, not the LC core
+- [TS Opus export refusals](/quest/m1/audio-codecs/ts-opus-export-refusals.md) - the TS exporter refuses Opus heads its channel code cannot describe instead of mislabeling them
+- [TS Opus channel codes](/quest/m1/audio-codecs/ts-opus-channel-codes.md) - TS Opus with a channel code of 0x81 or above imports with its real head or is refused, never guessed as stereo
 - [AudioToolbox encode](/quest/m1/audio-codecs/encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
-- [TS surround Opus](/quest/m1/audio-codecs/ts-opus-surround.md) - a 3 to 8 channel Opus stream from MPEG-TS imports with a family 1 OpusHead that decodes
 - [AAC encode refusals](/quest/m1/audio-codecs/aac-encode-refusals.md) - `Config::encode` refuses channel counts it cannot name instead of writing stereo
 - [AAC parse truncated SBR](/quest/m1/audio-codecs/aac-parse-truncated-sbr.md) - `Config::parse` refuses SBR and PS configs cut off before their core
+- [GStreamer surround Opus](/quest/m1/audio-codecs/gst-opus-surround.md) - the moq-gst sink publishes 3 to 8 channel Opus with the OpusHead its caps describe
 
 ## Related
 
