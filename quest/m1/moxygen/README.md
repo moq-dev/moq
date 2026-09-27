@@ -30,6 +30,7 @@ Docs stay inline in the change that makes them stale. No new guide.
 
 ## Quests
 
+- [Sparse FETCH ranges](/quest/m1/moxygen/fetch-span.md) - a FETCH costs the groups it returns, not the span of its range
 - [Default track priority](/quest/m1/moxygen/priority.md) - an unset track priority is the midpoint on moq-lite and on IETF, not the least urgent value
 - [Datagram groups](/quest/m1/moxygen/datagram.md) - an IETF datagram that is one object in a group arrives as a moq-lite datagram group
 
