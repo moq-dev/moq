@@ -342,11 +342,12 @@ impl Control {
 	/// Request a keyframe, opening a new group at a frame no earlier than this call.
 	///
 	/// For a resume, a recording cut, or a known tune-in moment; [`Config::gop`](super::Config::gop)
-	/// is the cadence. Requests coalesce into the next keyframe, and forced keyframes land at least
-	/// 500ms apart, so a caller in a loop cannot pin the encoder at all-IDR; a request that arrives
-	/// too soon waits rather than being dropped. A request while nothing is watching is served by
-	/// the keyframe every fresh encoder opens with. A backend that cannot force one logs a warning
-	/// and keeps its GOP cadence; see [`Error::CutUnsupported`].
+	/// is the cadence. Requests coalesce into the next keyframe, whether forced or on that cadence,
+	/// and a forced one lands at least 500ms after any other, so a caller in a loop cannot pin the
+	/// encoder at all-IDR; a request that arrives too soon waits rather than being dropped. A
+	/// request while nothing is watching is served by the keyframe every fresh encoder opens with.
+	/// A backend that cannot force one logs a warning and keeps its GOP cadence; see
+	/// [`Error::CutUnsupported`].
 	pub fn cut(&self) {
 		if let Ok(mut cuts) = self.cuts.write() {
 			*cuts = cuts.wrapping_add(1);
@@ -749,6 +750,11 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 			};
 			let lag = started.elapsed();
 			producer.observe_lag(lag)?;
+			if let Some(forced) = forced.as_mut() {
+				for unit in encoded.iter().filter(|unit| unit.keyframe) {
+					forced.keyframe(unit.timestamp);
+				}
+			}
 			producer.publish(&encoded)?;
 		}
 
