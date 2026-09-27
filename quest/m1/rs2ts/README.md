@@ -42,8 +42,9 @@ Decided in planning (2026-09-27), with the spike data in
   change.
 - Parity: `just test interop --all`, plus moq-net's own tests translated with
   the code once they run on a mock clock instead of tokio.
-- Rust refactors that break moq-net's published API retarget to `dev` at PR
-  time; JS-only and tool-only children land on `main`.
+- The line lands on `dev`: the Rust refactors break moq-net's published API,
+  and the translator and generated code build on them. Only the additive
+  [JS VarInt](/quest/m1/rs2ts/js-varint.md) lands on `main`.
 - Hand-written js/net fixes keep landing until the generated path replaces
   them; it is months out.
 

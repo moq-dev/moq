@@ -24,8 +24,11 @@ Mapping decided in planning:
   refcount. JS is single-threaded, so `Mutex` and atomics become plain
   access.
 - Rust `VarInt` maps to the [JS VarInt](/quest/m1/rs2ts/js-varint.md) type.
-  Other integers map to `number` with checked arithmetic that throws on
-  overflow; never wrap silently.
+  Integers up to 32 bits and `usize` map to `number` with checked arithmetic
+  that throws on overflow; never wrap silently. A `u64` or `i64` never maps
+  to a lossy `number`: the model accepts `u64::MAX` (e.g.
+  `model/subscription.rs`), so each one either becomes `VarInt` or an
+  `Option` in the source, or maps to a full-width 64-bit TypeScript type.
 
 Guidance:
 
@@ -41,7 +44,8 @@ Guidance:
 - Charon stalled for 40+ minutes on the whole crate; extract only the modules
   being generated.
 
-Public API: none (internal tool). Wire: none.
+Public API: none (internal tool). Lands on `dev` with the codec it
+translates. Wire: none.
 
 ## Required
 
