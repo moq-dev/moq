@@ -54,5 +54,3 @@ Public API: none. Wire: none.
 
 - [Archive enrollment](/quest/m1/archive/enrollment-flake.md) - the same
   kind of flake on the archive line, where its test lives
-- [Interop flakes](/quest/m1/interop-flakes.md) - port reservations and the
-  pause click in the interop harness

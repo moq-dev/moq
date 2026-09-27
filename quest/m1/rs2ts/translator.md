@@ -1,0 +1,49 @@
+# [L] rs2ts
+
+## Goal
+
+`rs/rs2ts` translates moq-net's lite codec into readable TypeScript inside
+js/net. The output is committed, a CI lane regenerates it and fails on
+drift, and the generated codec passes `just test interop --all` in place of
+the hand-written one.
+
+## Plan
+
+A prototype exists in the planning spike: about 1,800 lines on `charon_lib`
+plus a 200-line runtime shim. It turned a sample crate into TypeScript that
+passed behavioral tests, including close-on-last-drop, and ran on moq-net's
+`coding` and lite message modules via `--start-from` (about 7,000 lines of
+output, 500 untranslated calls, mostly std, tracing, and atomics shims).
+
+Mapping decided in planning:
+
+- Structs become classes, enums discriminated unions, traits interfaces.
+  `Option<T>` is `T | undefined`, `&[u8]` a `Uint8Array` view with no copy.
+- `Drop` becomes an explicit `drop()` at each MIR drop point, exposed as
+  `[Symbol.dispose]`; `Arc`/`Rc` of a type with drop glue become an explicit
+  refcount. JS is single-threaded, so `Mutex` and atomics become plain
+  access.
+- Rust `VarInt` maps to the [JS VarInt](/quest/m1/rs2ts/js-varint.md) type.
+  Other integers map to `number` with checked arithmetic that throws on
+  overflow; never wrap silently.
+
+Guidance:
+
+- Pin Charon and its nightly in the nix shell for the regeneration lane only.
+- Borrow rust-js's MIT oxc printer for formatting and source maps.
+- Readability pass: inline single-use temporaries and keep source branch
+  order, so a reviewer can read a generated diff.
+- Add a lint on moq-net (clippy or dylint) for the accepted subset: no
+  `unsafe`, no `async` outside the `async` feature, no `u64` bit operations,
+  no trait impls on foreign or primitive types, no `&mut` out-params to
+  scalar or `Option` locals. Translator gaps become compile errors, not
+  runtime `todo()`s. Document the subset in `rs/rs2ts/README.md`.
+- Charon stalled for 40+ minutes on the whole crate; extract only the modules
+  being generated.
+
+Public API: none (internal tool). Wire: none.
+
+## Required
+
+- [VarInt codec](/quest/m1/rs2ts/varint-codec.md) - the codec shape the translator targets
+- [JS VarInt](/quest/m1/rs2ts/js-varint.md) - the TypeScript type `VarInt` maps to
