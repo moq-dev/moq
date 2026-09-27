@@ -20,8 +20,13 @@ whole program, as it already does per stream.
 
 Guidance:
 
-- The first stream to see a wrap sets the growth; the others must adopt it
-  rather than grow again when their own first post-wrap frame arrives. The
+- The shift must be known before any stream emits a frame of the new
+  generation (Codex on #4307): a first stream that grows only enough for
+  itself leaves a later-arriving stream below its edge, and growing again
+  then drifts the two. Decided: hold each stream's post-wrap frames until
+  every live stream of the program has shown its new PTS, then take the
+  maximum growth once. A stream that stays silent is bounded by the
+  existing liveness timeout (#3489), not waited on forever. The
   `Anchor`/`Lane` split behind `live()` in `moq_mux::clock` solves the same
   problem for restarts and may be reusable.
 - A stream whose own edge is still above the shifted timestamp after the

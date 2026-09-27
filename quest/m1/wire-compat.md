@@ -41,7 +41,11 @@ Guidance:
 - Derive the version matrix from what both sides accept (for example each
   CLI's `--connect-version` choices), not a hand-kept list, so a new draft
   joins the matrix and a dropped one leaves it without an edit. A version
-  only one side offers is skipped and logged, not failed.
+  only the checkout offers is skipped and logged. A version the last release
+  supports but the checkout no longer offers fails the run unless it is
+  acknowledged in the same skip list as planned breaks (decided with the
+  maintainer; silently dropping a published version is the regression this
+  exists to catch).
 - Prefer released binaries (GitHub release assets) over `cargo install` of
   the published crates if the build time threatens the nightly budget.
 - Subscribers must decode the catalog and frames, not only see a non-empty
