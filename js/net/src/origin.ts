@@ -1457,13 +1457,10 @@ export class Consumer {
 					}
 				}
 
-				await Signal.race(
-					this.#state.local,
-					this.#state.advertisedLocal,
-					this.#state.routes,
-					this.#state.replaying,
-					producer.closed,
-				);
+				// Replay holds only matter until the marker is out; past it, a reconnect's holds
+				// must not rescan the table for every stream already live.
+				const table = [this.#state.local, this.#state.advertisedLocal, this.#state.routes, producer.closed];
+				await (waiting ? Signal.race(...table, this.#state.replaying) : Signal.race(...table));
 				if (producer.closed.peek() !== undefined) return;
 			}
 		} catch {
