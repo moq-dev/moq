@@ -598,6 +598,42 @@ test("a subscription outside a covering route's claim does not hear it", async (
 });
 
 /**
+ * The claim is presented relative to the served origin's root, like the route's key: a
+ * publisher serving `tenant` offers `room` (claiming `tenant/room/chat`) to a
+ * subscription at `room/chat`.
+ */
+test("a covering route's claim is compared relative to the served root", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const origin = new OriginProducer();
+	const tenant = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.all()]));
+	const pub = new Publisher({
+		quic: pair.server,
+		session: new NativeSession(pair.server, VERSION, true),
+		publish: tenant.consume(),
+		requiresSolicitation: true,
+	});
+	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/room/chat"))]));
+	const dynamic = chat.dynamic(Path.from("tenant/room"));
+
+	const subscription = await Stream.open(pair.client, { version: VERSION });
+	const accepted = await Stream.accept(pair.server, VERSION);
+	if (!accepted) throw new Error("the subscription stream was never accepted");
+	void pub.runSubscribeNamespace(
+		new SubscribeNamespace({ requestId: 0n, namespace: Path.from("room/chat") }),
+		accepted,
+	);
+
+	expect(await subscription.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(subscription.reader, VERSION);
+	expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+	expect((await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix).toBe(Path.empty());
+
+	dynamic.close();
+	subscription.close();
+	origin.close();
+});
+
+/**
  * A peer that refuses an advertisement with a retry interval of 0 is asking not to be
  * offered it again. Coming back anyway turns a permanent refusal (unauthorized,
  * uninterested) into a request every few seconds for the life of the session.
