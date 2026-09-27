@@ -5,7 +5,11 @@
 // declaration emit shows this, which is why it runs over `dist/` after the build rather than as a
 // test that would have to run the compiler again.
 
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, extname, join, relative, resolve } from "node:path";
+import { parse } from "@babel/parser";
+
+type Statement = ReturnType<typeof parse>["program"]["body"][number];
+type Declaration = Extract<Statement, { type: "ExportNamedDeclaration" }>["declaration"];
 
 type FileExports = {
 	names: Set<string>;
@@ -42,9 +46,12 @@ export function problems(root: string, files: Map<string, string>): string[] {
 }
 
 // The declaration file a relative specifier resolves to, as a file or a directory index. A package
-// specifier resolves outside the package, so it is not checked.
+// specifier resolves outside the package, and an asset (`./icon.svg?raw`) is typed by the bundler,
+// so neither is checked.
 function dtsPath(files: Map<string, unknown>, from: string, specifier: string): string | undefined {
 	if (!specifier.startsWith(".")) return undefined;
+	const ext = extname(specifier);
+	if (ext && !/^\.(js|jsx|ts|tsx)$/.test(ext)) return undefined;
 	const base = resolve(dirname(from), specifier).replace(/\.(js|jsx|ts|tsx)$/, "");
 	const index = join(base, "index.d.ts");
 	return files.has(index) ? index : `${base}.d.ts`;
@@ -70,46 +77,52 @@ function fileExports(source: string): FileExports {
 	const stars: string[] = [];
 	const imports: Array<{ specifier: string; names: string[] }> = [];
 
-	const named = /^(import|export)(?:\s+type)?\s*\{([\s\S]*?)\}\s*(?:from\s+["']([^"']+)["'])?/gm;
-	const star = /^export\s+\*\s+from\s+["']([^"']+)["']/gm;
-	const asStar = /^export\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s+["']([^"']+)["']/gm;
-	const decl =
-		/^export\s+(?:declare\s+)?(?:abstract\s+)?(?:type|interface|class|function|const|enum|namespace)\s+([A-Za-z_$][\w$]*)/gm;
-
-	for (const match of source.matchAll(named)) {
-		const [, kind, list, specifier] = match;
-		if (specifier) imports.push({ specifier, names: ident(list ?? "", "imported") });
-		if (kind === "export") {
-			for (const name of ident(list ?? "", "exported")) names.add(name);
+	const ast = parse(source, { sourceType: "module", plugins: [["typescript", { dts: true }]] });
+	for (const statement of ast.program.body) {
+		switch (statement.type) {
+			case "ImportDeclaration":
+				if (statement.specifiers.length === 0) break;
+				imports.push({
+					specifier: statement.source.value,
+					names: statement.specifiers.flatMap((s) => {
+						if (s.type === "ImportDefaultSpecifier") return ["default"];
+						if (s.type === "ImportSpecifier") return [moduleName(s.imported)];
+						return [];
+					}),
+				});
+				break;
+			case "ExportNamedDeclaration": {
+				const imported: string[] = [];
+				for (const s of statement.specifiers) {
+					names.add(moduleName(s.exported));
+					if (s.type === "ExportSpecifier") imported.push(moduleName(s.local));
+				}
+				if (statement.source) imports.push({ specifier: statement.source.value, names: imported });
+				for (const name of declared(statement.declaration)) names.add(name);
+				break;
+			}
+			case "ExportAllDeclaration":
+				stars.push(statement.source.value);
+				break;
+			case "ExportDefaultDeclaration":
+				names.add("default");
+				break;
 		}
 	}
-
-	for (const match of source.matchAll(star)) {
-		if (match[1]) stars.push(match[1]);
-	}
-
-	for (const match of source.matchAll(asStar)) {
-		if (match[1]) names.add(match[1]);
-	}
-
-	for (const match of source.matchAll(decl)) {
-		if (match[1]) names.add(match[1]);
-	}
-
-	if (/^export\s+default\b/m.test(source)) names.add("default");
 
 	return { names, stars, imports };
 }
 
-function ident(list: string, side: "imported" | "exported"): string[] {
-	return list
-		.split(",")
-		.map((part) => part.trim())
-		.filter(Boolean)
-		.map((part) => {
-			const [left, right] = part.replace(/^type\s+/, "").split(/\s+as\s+/);
-			const name = side === "imported" ? left : (right ?? left);
-			return name?.trim() ?? "";
-		})
-		.filter(Boolean);
+function moduleName(node: { type: "Identifier"; name: string } | { type: "StringLiteral"; value: string }): string {
+	return node.type === "Identifier" ? node.name : node.value;
+}
+
+// The names an `export declare ...` statement introduces.
+function declared(declaration: Declaration | null | undefined): string[] {
+	if (!declaration) return [];
+	if (declaration.type === "VariableDeclaration") {
+		return declaration.declarations.flatMap((d) => (d.id.type === "Identifier" ? [d.id.name] : []));
+	}
+	if (!("id" in declaration) || !declaration.id) return [];
+	return declaration.id.type === "Identifier" ? [declaration.id.name] : [];
 }
