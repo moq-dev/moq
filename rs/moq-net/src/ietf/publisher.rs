@@ -1496,8 +1496,14 @@ where
 			}
 			(_, ietf::RequestOk::ID) => {
 				let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
-				// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count).
+				// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count). Closed
+				// here because the solicited path runs this inside a request task, whose
+				// errors end only that stream.
 				if msg.active.is_some() {
+					self.session.clone().close(
+						crate::SessionError::ProtocolViolation.to_code(),
+						"ACTIVE_COUNT on a PUBLISH_NAMESPACE answer",
+					);
 					return Err(Error::ProtocolViolation);
 				}
 				tracing::debug!(message = ?msg, "publish namespace ok");
@@ -1578,8 +1584,13 @@ where
 		match type_id {
 			ietf::RequestOk::ID => {
 				let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
-				// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count).
+				// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count); closed
+				// here for the same reason as in `advertise_namespace`.
 				if msg.active.is_some() {
+					self.session.clone().close(
+						crate::SessionError::ProtocolViolation.to_code(),
+						"ACTIVE_COUNT on a REQUEST_UPDATE answer",
+					);
 					return Err(Error::ProtocolViolation);
 				}
 				tracing::debug!(message = ?msg, "publish_namespace update ok");
@@ -4323,6 +4334,7 @@ mod tests {
 			.unwrap();
 		let ok = ok.writes.lock().unwrap().clone();
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![ok]);
+		let log = session.log.clone();
 
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer {
@@ -4343,6 +4355,9 @@ mod tests {
 			.await
 			.expect("the violation ends the loop");
 		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
+		// Closed at the source, since the solicited path's request task only logs errors.
+		let code = crate::SessionError::ProtocolViolation.to_code();
+		assert!(log.closes().iter().any(|(c, _)| *c == code), "{:?}", log.closes());
 	}
 
 	/// Drive both announce loops at once against a peer that declared `solicit`,
@@ -4781,6 +4796,9 @@ mod tests {
 			.await
 			.expect("the violation ends the loop");
 		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
+		// Closed at the source, since the solicited path's request task only logs errors.
+		let code = crate::SessionError::ProtocolViolation.to_code();
+		assert!(log.closes().iter().any(|(c, _)| *c == code), "{:?}", log.closes());
 	}
 
 	/// A route from a different original publisher is not an update: its content is not
