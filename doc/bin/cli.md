@@ -217,8 +217,8 @@ between 2s and 10s. The catalog and every text, JSON, and binary track are
 sparse data, so each of their groups is stored as soon as it finishes, and a
 group that never closes is stored in pieces as it grows. It refuses a rendition served
 from another broadcast, and one that returns after the catalog dropped it. The
-stage ends once the broadcast does, and it refuses a store URL that already
-holds a recording. `--retention 1h` keeps only the last hour (a DVR),
+stage ends once the broadcast does. A store URL that already holds a
+recording is continued: each track resumes after its newest stored span. `--retention 1h` keeps only the last hour (a DVR),
 deleting expired objects `--retention-grace` (default 30s) after the timeline
 stops advertising them. Every track keeps at least its newest span, so a catalog
 that never changes outlives the video it was published with.

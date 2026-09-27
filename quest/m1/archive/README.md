@@ -105,6 +105,7 @@ owned by that prerequisite, not duplicated in archive storage.
 ## Quests
 
 - [Per-track timelines](/quest/m1/archive/track-timeline/README.md) - every track segments and expires on its own timeline, and HLS is derived from group timestamps at the edge
+- [Flush idle archive groups](/quest/m1/archive/idle-flush.md) - the writer stores a quiet append-only group on a wall-clock bound, and a track can be flushed on demand
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq import archive` publishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay
 - [Paced replay](/quest/m1/archive/paced-replay.md) - a replay pushes its groups to live subscribers on one shared clock, so any live player plays it
 - [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts

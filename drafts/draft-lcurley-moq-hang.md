@@ -760,7 +760,7 @@ The final record of an ended track has no successor; its `duration` runs to the 
 
 ## Derived Formats {#timeline-derived}
 Segmented formats such as HLS and DASH need one segment numbering across renditions, which per-track timelines do not provide on their own.
-An edge deriving one takes the segment boundaries from a reference rendition's records, the first video rendition in the catalog or the first audio rendition when there is no video, and numbers the segments by that rendition's record `sequence`, so every edge and every reload agree.
+An edge deriving one takes the segment boundaries from a reference rendition's records, the first video rendition by name with a timeline, or the first such audio rendition when there is none, and numbers the segments by that rendition's record `sequence`, so every edge and every reload agree.
 Another video rendition snaps each boundary to its nearest record that starts a group on a keyframe; a segment with no such record nearby has no content on that rendition (a gap; HLS `EXT-X-GAP`).
 Other renditions take the frames whose timestamps fall inside each segment's span.
 A publisher wanting such an export SHOULD start video groups at the same timestamps across renditions.
