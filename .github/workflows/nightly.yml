@@ -83,7 +83,8 @@ jobs:
         run: nix develop --command bun js/net/bench/reader.ts
 
       # Fails if a chunk carrying many small frames costs as much per frame as one
-      # carrying a single frame, which means decoding went back to a wakeup per frame.
+      # carrying a single frame, on either the lite or moq-transport group stream,
+      # which means decoding went back to a wakeup per frame.
       - name: JS group frame benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command bun js/net/bench/frames.ts

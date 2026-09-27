@@ -321,6 +321,8 @@ export class Reader {
 			return result;
 		} catch (err: unknown) {
 			if (!(err instanceof Short)) throw err;
+			// Filling could never satisfy it, so retrying would spin.
+			if (err.need <= this.#buffer.byteLength) throw new Error("decode ran short of bytes it already had");
 			this.#short = { decode, err };
 			return err;
 		}
@@ -418,6 +420,28 @@ export class Cursor {
 	/** How many bytes have been read. */
 	get offset(): number {
 		return this.#offset;
+	}
+
+	/** How many buffered bytes are left to read. */
+	get remaining(): number {
+		return this.#buffer.byteLength - this.#offset;
+	}
+
+	/**
+	 * Decode the next `size` bytes on their own. Running past them, or leaving any unread, is
+	 * malformed rather than a reason to wait for more.
+	 */
+	exact<T>(size: number, decode: (c: Cursor) => T): T {
+		const inner = new Cursor(this.read(size), this.version);
+		let result: T;
+		try {
+			result = decode(inner);
+		} catch (err: unknown) {
+			if (err instanceof Short) throw new Error(`message is shorter than its fields: ${size} bytes`);
+			throw err;
+		}
+		if (inner.remaining > 0) throw new Error(`message has ${inner.remaining} unread bytes`);
+		return result;
 	}
 
 	#ensure(size: number) {
