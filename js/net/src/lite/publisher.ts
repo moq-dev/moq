@@ -928,7 +928,7 @@ export class Publisher {
 		}
 
 		const cached = tracks.get(track);
-		if (cached) return cached;
+		if (cached !== undefined) return cached;
 
 		const pending = (async () => {
 			const info = await wireOf(front).resolveTrackInfo(track);
