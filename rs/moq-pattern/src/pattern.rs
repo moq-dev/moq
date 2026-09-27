@@ -817,6 +817,9 @@ impl FromStr for Pattern {
 			return Self::new([]);
 		}
 		text.split('/')
+			// One past the limit is enough for `new` to refuse, without splitting a
+			// peer's megabytes of `a/a/...` into segments first.
+			.take(Self::MAX_SEGMENTS + 1)
 			.map(Segment::parse)
 			.collect::<Result<Vec<_>, _>>()
 			.and_then(Self::new)
