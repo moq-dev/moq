@@ -96,20 +96,21 @@ impl Config {
 	/// prefix `anon/`, and a pattern reads it as exactly the broadcast `anon`, so
 	/// either silent reading would mislead someone upgrading.
 	pub fn validate(&self) -> anyhow::Result<()> {
-		let patterns = self
-			.public
-			.iter()
-			.chain(&self.public_publish)
-			.chain(&self.public_subscribe);
-		if let Some(literal) = patterns.into_iter().find(|pattern| pattern.is_literal()) {
-			anyhow::bail!(
-				"--auth-public `{literal}` has no wildcard, so it names exactly one broadcast; write `{}` for the subtree",
-				if literal.as_str().is_empty() {
-					"**".to_string()
-				} else {
-					format!("{literal}/**")
+		let flags = [
+			("--auth-public", &self.public),
+			("--auth-public-publish", &self.public_publish),
+			("--auth-public-subscribe", &self.public_subscribe),
+		];
+		for (flag, patterns) in flags {
+			for pattern in patterns.iter().filter(|pattern| pattern.is_literal()) {
+				// A literal at the maximum depth is already its own subtree.
+				let subtree = Pattern::subtree(pattern.as_str())?;
+				if subtree != *pattern {
+					anyhow::bail!(
+						"{flag} `{pattern}` has no wildcard, so it names exactly one broadcast; write `{subtree}` for the subtree"
+					);
 				}
-			);
+			}
 		}
 		match (&self.url, self.public_grant()) {
 			(Some(_), Some(_)) => anyhow::bail!("--auth-url and --auth-public cannot both be set; the server decides"),
@@ -644,8 +645,13 @@ mod tests {
 			public_subscribe: patterns(&["anon/**", "live"]).into_iter().collect(),
 			..Default::default()
 		};
-		assert!(split.validate().is_err());
+		let err = split.validate().unwrap_err().to_string();
+		assert!(err.starts_with("--auth-public-subscribe `live`"), "{err}");
 		assert!(config(None, &["anon/*", "*/chat", "**"]).validate().is_ok());
+
+		// Nothing sits beneath a literal at the maximum depth, so it is its own subtree.
+		let deepest = vec!["a"; Pattern::MAX_SEGMENTS].join("/");
+		assert!(config(None, &[&deepest]).validate().is_ok());
 	}
 
 	#[test]

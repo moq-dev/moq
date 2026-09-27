@@ -420,14 +420,14 @@ impl Serve {
 			("--mtls-subscribe", &self.mtls_subscribe),
 		];
 		for (flag, patterns) in flags {
-			if let Some(literal) = patterns.iter().find(|pattern| pattern.is_literal()) {
-				let subtree = match literal.as_str() {
-					"" => "**".to_string(),
-					literal => format!("{literal}/**"),
-				};
-				anyhow::bail!(
-					"{flag} `{literal}` has no wildcard, so it names exactly one broadcast; write `{subtree}` for the subtree"
-				);
+			for pattern in patterns.iter().filter(|pattern| pattern.is_literal()) {
+				// A literal at the maximum depth is already its own subtree.
+				let subtree = Pattern::subtree(pattern.as_str())?;
+				if subtree != *pattern {
+					anyhow::bail!(
+						"{flag} `{pattern}` has no wildcard, so it names exactly one broadcast; write `{subtree}` for the subtree"
+					);
+				}
 			}
 		}
 		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
@@ -700,6 +700,14 @@ mod tests {
 			])
 			.policy()
 			.is_ok()
+		);
+
+		// Nothing sits beneath a literal at the maximum depth, so it is its own subtree.
+		let deepest = vec!["a"; Pattern::MAX_SEGMENTS].join("/");
+		assert!(
+			serve(&["moq", "auth", "serve", "--public-subscribe", &deepest])
+				.policy()
+				.is_ok()
 		);
 	}
 
