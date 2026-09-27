@@ -505,6 +505,10 @@
           '';
 
           env = {
+            # What sh/dispatch.sh checks before a scoped `just check` or `just
+            # fix`. IN_NIX_SHELL would also pass inside another project's shell.
+            MOQ_DEV_SHELL = "1";
+
             # Where `just obs compile` and `just obs test` look for libobs. Set
             # on every platform so the plugin type-checks against the pinned OBS
             # release everywhere, rather than whatever the host happens to have.
