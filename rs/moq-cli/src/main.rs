@@ -491,43 +491,47 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 	// The stage combinations were refused up front by `Invocation::validate`, before
 	// anything bound a port or dialed out.
 	let client = net.client(moq.client.clone())?;
-	let (bandwidth, origin) =
-		spawn_moq(&moq, &net, client.clone(), cluster, Directions::of(&stages), &mut tasks).await?;
+	let result = async {
+		let (bandwidth, origin) =
+			spawn_moq(&moq, &net, client.clone(), cluster, Directions::of(&stages), &mut tasks).await?;
 
-	// stdin and stdout are one resource each, so two stages can't share them.
-	let mut stdin = None;
-	let mut stdout = None;
+		// stdin and stdout are one resource each, so two stages can't share them.
+		let mut stdin = None;
+		let mut stdout = None;
 
-	for stage in stages {
-		let name = stage.broadcast(&moq);
-		match stage {
-			Command::Import(import) => {
-				if import.source.stdin_format().is_some() {
-					claim("stdin", &mut stdin, &name)?;
+		for stage in stages {
+			let name = stage.broadcast(&moq);
+			match stage {
+				Command::Import(import) => {
+					if import.source.stdin_format().is_some() {
+						claim("stdin", &mut stdin, &name)?;
+					}
+					if let Some(publish) = spawn_import(&origin, import, name, bandwidth.clone(), &mut tasks)? {
+						locals.push(publish);
+					}
 				}
-				if let Some(publish) = spawn_import(&origin, import, name, bandwidth.clone(), &mut tasks)? {
-					locals.push(publish);
+				Command::Export(export) => {
+					if export.sink.is_stdout() {
+						claim("stdout", &mut stdout, &name)?;
+					}
+					spawn_export(&origin, export, name, &mut tasks)?;
 				}
+				other => unreachable!("`{}` is not a stage", other.name()),
 			}
-			Command::Export(export) => {
-				if export.sink.is_stdout() {
-					claim("stdout", &mut stdout, &name)?;
-				}
-				spawn_export(&origin, export, name, &mut tasks)?;
-			}
-			other => unreachable!("`{}` is not a stage", other.name()),
+		}
+
+		if locals.is_empty() {
+			drive(tasks).await
+		} else {
+			let local = tokio::task::LocalSet::new();
+			supervise(&local, locals.into_iter().map(Publish::run), &mut tasks);
+			local.run_until(drive(tasks)).await
 		}
 	}
+	.await;
 
-	let result = if locals.is_empty() {
-		drive(tasks).await
-	} else {
-		let local = tokio::task::LocalSet::new();
-		supervise(&local, locals.into_iter().map(Publish::run), &mut tasks);
-		local.run_until(drive(tasks)).await
-	};
-
-	// The process exits next, so the relay only hears we left if the close goes out now.
+	// The process exits next, even on a setup error, so the relay only hears we left
+	// if the close goes out now.
 	client.close().await;
 	result
 }
