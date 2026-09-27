@@ -792,19 +792,26 @@ export class Subscriber {
 			// cancel re-arms and resumes.
 			const idle: unique symbol = Symbol("idle");
 			let unused = group.unused().then((): typeof idle => idle);
+			// A decode consumes its frame whenever it lands, so one outstanding across a re-arm is
+			// kept and awaited again rather than abandoned with its frame.
+			let pending: Promise<netGroup.Frame | undefined> | undefined;
 			for (;;) {
 				// Buffered frames are written without an await, as in a group stream.
-				const frame =
-					stream.reader.tryDecode(decode) ??
-					(await race([stream.reader.decodeMaybe(decode), group.closed, unused]));
-				if (frame === idle) {
-					if (!group.isClosed && group.used.peek()) {
-						unused = group.unused().then((): typeof idle => idle);
-						continue;
+				let frame = pending ? undefined : stream.reader.tryDecode(decode);
+				if (!frame) {
+					pending ??= stream.reader.decodeMaybe(decode);
+					const next = await race([pending, group.closed, unused]);
+					if (next === idle) {
+						if (!group.isClosed && group.used.peek()) {
+							unused = group.unused().then((): typeof idle => idle);
+							continue;
+						}
+						break;
 					}
-					break;
+					pending = undefined;
+					if (!next || next instanceof Error) break;
+					frame = next;
 				}
-				if (!frame || frame instanceof Error) break;
 				group.writeFrame(frame);
 			}
 
