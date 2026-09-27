@@ -37,7 +37,8 @@ Firefox 155 shipped five WebTransport features; decided 2026-09-26:
 - **`datagrams.createWritable()`** is already feature-detected in js/net and
   web-transport-wasm; nothing to do.
 - **`draining`** is not used. Drain stays at the MoQ layer: GOAWAY carries a
-  redirect URI and a timeout and works over qmux and WebSocket, while
+  redirect URI (and a timeout on moq-transport draft-17+; elsewhere the
+  deadline is sender-local) and works over qmux and WebSocket, while
   `WT_DRAIN_SESSION` is advisory and carries neither (see
   [drain](/quest/m1/drain/README.md)).
 - **`exportKeyingMaterial()`** has no consumer: the exporter is per hop, so it
