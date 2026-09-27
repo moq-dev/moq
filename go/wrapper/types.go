@@ -45,6 +45,23 @@ type (
 	OriginConfig = ffi.MoqOriginConfig
 	// Route is the hop chain a broadcast takes to reach an origin, and its costs: warm Cost plus undiscounted Cold (nil Cold means Cost).
 	Route = ffi.MoqRoute
+	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
+	// wildcard matched (nil Captures for a route that only overlaps the scope), and the
+	// Route serving it. It carries no broadcast; resolve a path with
+	// [OriginConsumer.RequestBroadcast].
+	Announce = ffi.MoqAnnounce
+	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventAnnounced,
+	// AnnounceEventUpdated, AnnounceEventRetracted, or AnnounceEventLive.
+	AnnounceEvent = ffi.MoqAnnounceEvent
+	// AnnounceEventAnnounced reports a route now covering a prefix that had none.
+	AnnounceEventAnnounced = ffi.MoqAnnounceEventAnnounced
+	// AnnounceEventUpdated reports the route covering a prefix changing hops or cost.
+	AnnounceEventUpdated = ffi.MoqAnnounceEventUpdated
+	// AnnounceEventRetracted reports that no route covers a prefix any more, carrying its last route.
+	AnnounceEventRetracted = ffi.MoqAnnounceEventRetracted
+	// AnnounceEventLive reports that every route live at subscribe time has been
+	// delivered; what follows is live changes. Yielded once.
+	AnnounceEventLive = ffi.MoqAnnounceEventLive
 	// Subscription holds subscriber-side delivery preferences: priority, ordering, max age, and group range.
 	Subscription = ffi.MoqSubscription
 	// TrackInfo holds publisher-side track properties: priority, ordering, max age, and timescale.

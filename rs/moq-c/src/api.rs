@@ -715,7 +715,24 @@ pub struct moq_announce_config {
 	pub hidden: bool,
 }
 
-/// A route announcement or retraction from an origin.
+/// Which announce event a [moq_announce_update] reports.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum moq_announce_kind {
+	/// A route now covers the prefix; the listener had none there.
+	MOQ_ANNOUNCE_KIND_ANNOUNCED = 0,
+	/// The route covering the prefix changed hops or cost.
+	MOQ_ANNOUNCE_KIND_UPDATED = 1,
+	/// No route covers the prefix any more.
+	MOQ_ANNOUNCE_KIND_RETRACTED = 2,
+	/// Every route live when the listener started has been delivered; what
+	/// follows is live changes. Delivered once, with no prefix or captures.
+	MOQ_ANNOUNCE_KIND_LIVE = 3,
+}
+
+/// An announce event from an origin: a route announced, updated, or retracted,
+/// or the listener catching up.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_announce_update {
@@ -730,9 +747,8 @@ pub struct moq_announce_update {
 	pub captures_len: usize,
 	pub has_captures: bool,
 
-	/// Whether the route is active or was retracted
-	/// This MUST toggle between true and false over the lifetime of the route
-	pub active: bool,
+	/// Which event this is. A LIVE event carries no prefix or captures.
+	pub kind: moq_announce_kind,
 }
 
 /// Statistics and protocol sampled from the same connection by [moq_session_snapshot].
@@ -1714,8 +1730,8 @@ pub extern "C" fn moq_broadcast_request_free(request: u32) -> i32 {
 /// `config` selects the paths; NULL lists every visible one. Delivered
 /// [moq_announce_update] prefixes remain relative to the origin.
 ///
-/// `on_announce` is invoked with a positive announced ID for each broadcast,
-/// then exactly once more with a terminal code: `0` (stopped cleanly) or a
+/// `on_announce` is invoked with a positive announced ID for each event (see
+/// [moq_announce_kind]), then exactly once more with a terminal code: `0` (stopped cleanly) or a
 /// negative error. After the terminal (`<= 0`) callback, `on_announce` is never
 /// called again and `user_data` is never touched again, so release `user_data`
 /// there. The terminal callback fires even after [moq_origin_announced_cancel].
@@ -1777,7 +1793,7 @@ pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq
 
 /// Free a single announcement delivered to a [moq_origin_announced] `on_announce` callback.
 ///
-/// Each announce / unannounce event hands the callback a distinct announcement handle (read
+/// Each event hands the callback a distinct announcement handle (read
 /// with [moq_origin_announced_info]); release it here once done to avoid leaking one per event
 /// over the life of the listener. This is per-announcement and distinct from
 /// [moq_origin_announced_cancel], which stops the listener itself. After freeing,

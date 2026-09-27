@@ -14,8 +14,12 @@ are renamed.
   nested TLS, QUIC, and backoff records. Validate in `new`. Resolve defaults
   in Rust, since Go gets none; Option fields keep additions additive. This
   also retires Kotlin `Moq.connect`'s twelve named parameters.
-- Objects that are only getters become records (`AnnounceUpdate` today).
+- Objects that are only getters become records.
   Handles with verbs (`Request`, `TrackRequest`, `GroupRequest`) stay objects.
+- An enum whose variants a wrapper must name spells each variant
+  `<Enum><Variant>` (`AnnounceEventAnnounced`, `AnnounceEventLive`) in Go,
+  Kotlin, Dart, and Python, whatever the generated name. Swift keeps its
+  generated `<Enum>.<variant>` cases, since it cannot alias a case.
 - `TrackProducer` drops `name`/`is_used`/`used`/`unused` for `demand()`.
 - The renames no additive change could make:
   - `subscribe` to `consume` on Python `Client`/`connect`, Kotlin

@@ -25,10 +25,11 @@ import dev.moq.*
 
 // Subscribe. The Flow is live, so run it in its own coroutine.
 Moq.connect("https://relay.example.com", tlsRoots = listOf("ca.pem")).use { moq ->
-    moq.announcements(AnnounceConfig(prefix = "live/", filter = "*/camera")).collect { announcement ->
-        // Updates stay origin-relative; captures reports what each wildcard matched.
-        println(announcement.captures())
-        val broadcast = moq.requestBroadcast(announcement.prefix())
+    moq.announcements(AnnounceConfig(prefix = "live/", filter = "*/camera")).collect { event ->
+        if (event !is AnnounceEventAnnounced) return@collect // Updated, Retracted, or Live
+        // Prefixes stay origin-relative; captures reports what each wildcard matched.
+        println(event.announce.captures)
+        val broadcast = moq.requestBroadcast(event.announce.prefix)
         println(broadcast.catalog())
     }
 }
@@ -64,8 +65,11 @@ handle, which ends the broadcast only once no `dynamic()` handle remains); `orig
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
 serve. A route is a capability, not an inventory. `announcements(config)` takes
-a literal prefix plus an optional relative pattern; `announcement.prefix()`
-stays origin-relative and `captures()` reports the wildcard matches. Paths with
+a literal prefix plus an optional relative pattern and yields `AnnounceEvent`s:
+`AnnounceEventAnnounced`, `AnnounceEventUpdated`, or `AnnounceEventRetracted`
+carrying an `Announce`, whose `prefix` stays origin-relative and whose
+`captures` reports the wildcard matches, or `AnnounceEventLive` once every route
+live at subscribe time has been delivered. Paths with
 a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless `hidden = true`.
 
 Sessions reconnect with backoff when the transport drops and re-announce local

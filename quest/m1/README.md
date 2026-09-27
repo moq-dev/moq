@@ -29,7 +29,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
 - [Session close](/quest/m1/session-close.md) - a graceful session end withdraws announces and waits one second for the ack
 - [Close codes](/quest/m1/close-codes.md) - a client sees the peer's application close code over WebSocket and raw QUIC, like WebTransport
-- [Bindings caught up](/quest/m1/announce-live-bindings.md) - moq-ffi, moq-c, and every wrapper yield the same flat announce event, `Live` included
 - [JS active count](/quest/m1/js-active-count.md) - @moq/net speaks MoQ Active Count, so its IETF announce consumers go live without a timer
 - [Page-load marker](/quest/m1/announce-page-load.md) - an announcement stream opened before the first connection waits for its replay before `live`
 - [Empty state](/quest/m1/announce-empty-state.md) - watch, room, and the demo show "no broadcasts" once `live` arrives with nothing announced

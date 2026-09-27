@@ -6,12 +6,16 @@ Idiomatic Dart and Flutter bindings for Media over QUIC.
 import 'package:moq/moq.dart';
 
 final connection = await Moq.connect('https://relay.example.com');
-await for (final announcement in connection.announcements(
+await for (final event in connection.announcements(
   options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
 )) {
-  // Prefix stays origin-relative; captures reports wildcard matches.
-  print(announcement.prefix());
-  print(announcement.captures());
+  if (event is AnnounceEventAnnounced) {
+    // Prefix stays origin-relative; captures reports wildcard matches.
+    print(event.announce.prefix);
+    print(event.announce.captures);
+  } else if (event is AnnounceEventLive) {
+    break; // every route live at subscribe time has been delivered
+  }
 }
 ```
 
