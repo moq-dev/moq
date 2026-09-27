@@ -110,7 +110,7 @@ Raw tracks support best-effort datagrams alongside groups: `TrackProducer.Append
 sends one `Frame` and returns its sequence number, while `TrackConsumer.RecvDatagram`
 and `TrackConsumer.Datagrams` receive them in arrival order. Payloads are capped at
 1200 bytes. Datagram delivery requires a datagram-capable transport and lite-05 or
-newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not
+newer moq-lite, or moq-transport; pre-lite-05, WebSocket, and TCP paths do not
 deliver them, and there is no stream fallback.
 
 ## Versioning

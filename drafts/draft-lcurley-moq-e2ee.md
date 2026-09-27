@@ -227,7 +227,8 @@ An Object ID above `2^32-1` MUST be refused as `identity` before encryption or d
 
 ## Datagrams
 A datagram uses `domain = 0x01`, its 64-bit sequence as `group`, and `frame = 0`.
-MoQ Transport has no datagram mapping in this profile; shared vectors cover grouped tracks on both transports and datagrams on moq-lite only.
+On MoQ Transport, a datagram is an Object at ID 0 in an OBJECT_DATAGRAM whose Group ID is the sequence.
+Shared vectors cover grouped tracks on both transports and datagrams on moq-lite only.
 
 ## Nonce
 The 96-bit AES-GCM nonce is:
