@@ -264,7 +264,6 @@ test("a blocked group header is reset when the group expires", async () => {
 test("a group that goes stale while its stream opens writes nothing", async () => {
 	const unhandled: unknown[] = [];
 	const onUnhandled = (reason: unknown) => unhandled.push(reason);
-	process.on("unhandledRejection", onUnhandled);
 
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	let requested!: () => void;
@@ -301,6 +300,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	try {
+		process.on("unhandledRejection", onUnhandled);
 		void pub.runSubscribe(
 			new Subscribe({
 				requestId: 0n,

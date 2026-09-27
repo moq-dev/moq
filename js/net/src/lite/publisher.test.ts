@@ -1532,7 +1532,6 @@ test("a version without the latency field serves a non-dropping budget", async (
 test("lite draft-05: a group that goes stale while its stream opens writes nothing", async () => {
 	const unhandled: unknown[] = [];
 	const onUnhandled = (reason: unknown) => unhandled.push(reason);
-	process.on("unhandledRejection", onUnhandled);
 
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
@@ -1571,6 +1570,7 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	try {
+		process.on("unhandledRejection", onUnhandled);
 		void publisher.runSubscribe(
 			new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0, maxAge: 100 }),
 			server,
