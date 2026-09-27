@@ -181,18 +181,7 @@ func (a *AnnounceConsumer) Next(ctx context.Context) (AnnounceEvent, error) {
 
 // All ranges over announce events until the stream ends or the loop breaks.
 func (a *AnnounceConsumer) All(ctx context.Context) iter.Seq2[AnnounceEvent, error] {
-	return func(yield func(AnnounceEvent, error) bool) {
-		for {
-			event, err := a.Next(ctx)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			if event == nil || !yield(event, nil) {
-				return
-			}
-		}
-	}
+	return streamSeq(ctx, a.Next)
 }
 
 // Cancel stops the announcement stream.
