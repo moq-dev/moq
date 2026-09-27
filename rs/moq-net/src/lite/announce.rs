@@ -34,12 +34,20 @@ pub fn restart_supported(version: Version) -> bool {
 /// 0); `EndedId` (ANNOUNCE_END) and `Restart` (ANNOUNCE_RESTART) reference
 /// that id instead of repeating the path. Older versions send a single
 /// `ANNOUNCE_BROADCAST` message that retracts by path (`Ended`).
+///
+/// The path and hop chain are as they appear on the wire: on lite-07 they may name a
+/// base announcement, resolved against the stream's history by
+/// [`AnnounceDecoder`](super::AnnounceDecoder).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnounceBroadcast<'a> {
 	/// ANNOUNCE_START (lite-06) / active (older): a broadcast is now available.
 	/// Carries the path suffix, the hop chain, and (lite-06+) the warm and cold
 	/// route costs, and assigns the next announce id.
-	Active { suffix: Path<'a>, hops: Hops, cost: Cost },
+	Active {
+		suffix: PathRef<'a>,
+		hops: HopsRef,
+		cost: Cost,
+	},
 	/// Pre-lite-06: a broadcast is no longer available, retracted by path.
 	Ended { suffix: Path<'a>, hops: Hops },
 	/// ANNOUNCE_END (lite-06+): a broadcast is no longer available, retracted by
@@ -48,12 +56,134 @@ pub enum AnnounceBroadcast<'a> {
 	/// ANNOUNCE_RESTART (lite-06+): atomically replace the announcement with this id
 	/// (e.g. a new hop chain after a relay failover, or a route whose cost moved).
 	/// The id stays live.
-	///
-	/// Only ever received: we advertise a replacement as an `EndedId` + `Active` pair.
-	Restart { id: u64, hops: Hops, cost: Cost },
+	Restart { id: u64, hops: HopsRef, cost: Cost },
 	/// An unknown lite-06+ announce type. The length-prefixed body was skipped so
 	/// the stream stays up; it does not assign an announce id.
 	Skipped,
+}
+
+/// A path suffix as it travels: the first `keep` segments of a base announcement's
+/// suffix, followed by `rest`.
+///
+/// `base` is the base's distance back from the stream's next unassigned announce id,
+/// so 1 is the latest ANNOUNCE_START, and 0 names no base (`keep` must be 0 too). Only
+/// lite-07 carries a base; every other version is `rest` alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathRef<'a> {
+	pub base: u64,
+	pub keep: u64,
+	pub rest: Path<'a>,
+}
+
+impl<'a> PathRef<'a> {
+	/// The whole suffix, with no base.
+	pub fn literal(rest: Path<'a>) -> Self {
+		Self { base: 0, keep: 0, rest }
+	}
+}
+
+impl Encode<Version> for PathRef<'_> {
+	fn encode<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		if version.has_announce_compression() {
+			self.base.encode(w, version)?;
+			self.keep.encode(w, version)?;
+		} else if self.base != 0 || self.keep != 0 {
+			return Err(EncodeError::Version);
+		}
+		self.rest.encode(w, version)
+	}
+}
+
+impl Decode<Version> for PathRef<'_> {
+	fn decode<B: Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
+		if !version.has_announce_compression() {
+			return Ok(Self::literal(Path::decode(buf, version)?));
+		}
+		let base = u64::decode(buf, version)?;
+		let keep = u64::decode(buf, version)?;
+		if base == 0 && keep != 0 {
+			return Err(DecodeError::InvalidValue);
+		}
+		let rest = Path::decode(buf, version)?;
+		Ok(Self { base, keep, rest })
+	}
+}
+
+/// A hop chain as it travels: `literal` leading hops, followed by the last `keep`
+/// entries of a base announcement's chain.
+///
+/// `base` counts back like [`PathRef::base`], independently of it. Only lite-07
+/// carries a base; every other version is `literal` alone.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HopsRef {
+	pub base: u64,
+	pub literal: Hops,
+	pub keep: u64,
+}
+
+impl HopsRef {
+	/// The whole chain, with no base.
+	pub fn literal(literal: Hops) -> Self {
+		Self {
+			base: 0,
+			literal,
+			keep: 0,
+		}
+	}
+}
+
+impl Encode<Version> for HopsRef {
+	fn encode<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		if !version.has_announce_compression() {
+			if self.base != 0 || self.keep != 0 {
+				return Err(EncodeError::Version);
+			}
+			return self.literal.encode(w, version);
+		}
+		self.base.encode(w, version)?;
+		self.literal.encode(w, version)?;
+		self.keep.encode(w, version)
+	}
+}
+
+impl Decode<Version> for HopsRef {
+	fn decode<B: Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
+		if !version.has_announce_compression() {
+			return Ok(Self::literal(Hops::decode(buf, version)?));
+		}
+		let base = u64::decode(buf, version)?;
+		let literal = Hops::decode(buf, version)?;
+		let keep = u64::decode(buf, version)?;
+		if base == 0 && keep != 0 {
+			return Err(DecodeError::InvalidValue);
+		}
+		Ok(Self { base, literal, keep })
+	}
+}
+
+impl AnnounceBroadcast<'_> {
+	/// Re-own a decoded message so it can outlive the decode buffer.
+	#[cfg(test)]
+	pub fn into_owned(self) -> AnnounceBroadcast<'static> {
+		match self {
+			Self::Active { suffix, hops, cost } => AnnounceBroadcast::Active {
+				suffix: PathRef {
+					base: suffix.base,
+					keep: suffix.keep,
+					rest: suffix.rest.into_owned(),
+				},
+				hops,
+				cost,
+			},
+			Self::Ended { suffix, hops } => AnnounceBroadcast::Ended {
+				suffix: suffix.into_owned(),
+				hops,
+			},
+			Self::EndedId { id } => AnnounceBroadcast::EndedId { id },
+			Self::Restart { id, hops, cost } => AnnounceBroadcast::Restart { id, hops, cost },
+			Self::Skipped => AnnounceBroadcast::Skipped,
+		}
+	}
 }
 
 impl Encode<Version> for Cost {
@@ -119,9 +249,13 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 		match self {
 			// The cost is a lite-06 addition, so it is simply not on the wire here.
 			Self::Active { suffix, hops, .. } => {
+				// Bases are a lite-07 addition; PathRef and HopsRef refuse one here.
+				if suffix.base != 0 || hops.base != 0 {
+					return Err(EncodeError::Version);
+				}
 				AnnounceStatus::Active.encode(&mut body, version)?;
-				suffix.encode(&mut body, version)?;
-				encode_hops(&mut body, version, hops)?;
+				suffix.rest.encode(&mut body, version)?;
+				encode_hops(&mut body, version, &hops.literal)?;
 			}
 			Self::Ended { suffix, hops } => {
 				AnnounceStatus::Ended.encode(&mut body, version)?;
@@ -151,8 +285,8 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 			let mut body = buf.take(size);
 			let msg = match typ {
 				ANNOUNCE_START => Self::Active {
-					suffix: Path::decode(&mut body, version)?,
-					hops: Hops::decode(&mut body, version)?,
+					suffix: PathRef::decode(&mut body, version)?,
+					hops: HopsRef::decode(&mut body, version)?,
 					cost: Cost::decode(&mut body, version)?,
 				},
 				ANNOUNCE_END => Self::EndedId {
@@ -160,7 +294,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 				},
 				ANNOUNCE_RESTART => Self::Restart {
 					id: u64::decode(&mut body, version)?,
-					hops: Hops::decode(&mut body, version)?,
+					hops: HopsRef::decode(&mut body, version)?,
 					cost: Cost::decode(&mut body, version)?,
 				},
 				// Unknown types are skipped by length so an earlier Lite06 build
@@ -214,8 +348,8 @@ impl AnnounceBroadcast<'_> {
 
 		Ok(match status {
 			AnnounceStatus::Active => Self::Active {
-				suffix,
-				hops,
+				suffix: PathRef::literal(suffix),
+				hops: HopsRef::literal(hops),
 				cost: Cost::UNKNOWN,
 			},
 			AnnounceStatus::Ended => Self::Ended { suffix, hops },
@@ -225,8 +359,8 @@ impl AnnounceBroadcast<'_> {
 			// path it's a fresh announce. Older versions never defined this status, so it's an
 			// invalid value there.
 			AnnounceStatus::Restart if restart_supported(version) => Self::Active {
-				suffix,
-				hops,
+				suffix: PathRef::literal(suffix),
+				hops: HopsRef::literal(hops),
 				cost: Cost::UNKNOWN,
 			},
 			AnnounceStatus::Restart => return Err(DecodeError::InvalidValue),
@@ -406,8 +540,8 @@ mod tests {
 		// Encode a normal Active, then flip its status byte (1 -> 2).
 		let mut buf = bytes::BytesMut::new();
 		AnnounceBroadcast::Active {
-			suffix: Path::new("foo/bar"),
-			hops: Hops::new(),
+			suffix: PathRef::literal(Path::new("foo/bar")),
+			hops: HopsRef::default(),
 			cost: Cost::default(),
 		}
 		.encode(&mut buf, version)
@@ -485,21 +619,7 @@ mod tests {
 		let mut slice = &buf[..];
 		let got = AnnounceBroadcast::decode(&mut slice, version).unwrap();
 		assert!(slice.is_empty(), "trailing bytes after decode");
-		// Decode borrows from `buf`; re-own so the value can outlive this frame.
-		match got {
-			AnnounceBroadcast::Active { suffix, hops, cost } => AnnounceBroadcast::Active {
-				suffix: suffix.to_owned(),
-				hops,
-				cost,
-			},
-			AnnounceBroadcast::Ended { suffix, hops } => AnnounceBroadcast::Ended {
-				suffix: suffix.to_owned(),
-				hops,
-			},
-			AnnounceBroadcast::EndedId { id } => AnnounceBroadcast::EndedId { id },
-			AnnounceBroadcast::Restart { id, hops, cost } => AnnounceBroadcast::Restart { id, hops, cost },
-			AnnounceBroadcast::Skipped => AnnounceBroadcast::Skipped,
-		}
+		got.into_owned()
 	}
 
 	#[test]
@@ -507,8 +627,8 @@ mod tests {
 		let mut hops = Hops::new();
 		hops.push(Hop::new(7).unwrap()).unwrap();
 		let msg = AnnounceBroadcast::Active {
-			suffix: Path::new("room/cam"),
-			hops: hops.clone(),
+			suffix: PathRef::literal(Path::new("room/cam")),
+			hops: HopsRef::literal(hops.clone()),
 			cost: Cost::UNKNOWN,
 		};
 		assert_eq!(broadcast_round_trip(&msg, Version::Lite05), msg);
@@ -530,8 +650,8 @@ mod tests {
 		let cost = Cost { warm: 12, cold: 30 };
 
 		let active = AnnounceBroadcast::Active {
-			suffix: Path::new("room/cam"),
-			hops: hops.clone(),
+			suffix: PathRef::literal(Path::new("room/cam")),
+			hops: HopsRef::literal(hops.clone()),
 			cost,
 		};
 		assert_eq!(broadcast_round_trip(&active, Version::Lite06), active);
@@ -539,8 +659,79 @@ mod tests {
 		let ended = AnnounceBroadcast::EndedId { id: 3 };
 		assert_eq!(broadcast_round_trip(&ended, Version::Lite06), ended);
 
-		let restart = AnnounceBroadcast::Restart { id: 3, hops, cost };
+		let restart = AnnounceBroadcast::Restart {
+			id: 3,
+			hops: HopsRef::literal(hops),
+			cost,
+		};
 		assert_eq!(broadcast_round_trip(&restart, Version::Lite06), restart);
+	}
+
+	// Lite07 carries both bases as they travel; the codec resolves nothing.
+	#[test]
+	fn announce_broadcast_round_trip_on_lite07() {
+		let mut hops = Hops::new();
+		hops.push(Hop::new(7).unwrap()).unwrap();
+		let cost = Cost { warm: 12, cold: 30 };
+
+		let active = AnnounceBroadcast::Active {
+			suffix: PathRef {
+				base: 2,
+				keep: 3,
+				rest: Path::new("cam"),
+			},
+			hops: HopsRef {
+				base: 1,
+				literal: hops.clone(),
+				keep: 2,
+			},
+			cost,
+		};
+		assert_eq!(broadcast_round_trip(&active, Version::Lite07), active);
+
+		let restart = AnnounceBroadcast::Restart {
+			id: 3,
+			hops: HopsRef {
+				base: 4,
+				literal: hops,
+				keep: 1,
+			},
+			cost,
+		};
+		assert_eq!(broadcast_round_trip(&restart, Version::Lite07), restart);
+	}
+
+	// A keep copies from a base, so one without a base is malformed.
+	#[test]
+	fn a_keep_without_a_base_is_rejected() {
+		for (path_keep, hop_keep) in [(1u8, 0u8), (0, 1)] {
+			// Path base, path keep, empty rest, hop base, no hops, hop keep, cost.
+			let body = [0, path_keep, 0, 0, 0, hop_keep, 0, 0];
+			let mut buf = vec![ANNOUNCE_START as u8, body.len() as u8];
+			buf.extend_from_slice(&body);
+			assert!(matches!(
+				AnnounceBroadcast::decode(&mut &buf[..], Version::Lite07),
+				Err(DecodeError::InvalidValue)
+			));
+		}
+	}
+
+	// Only lite-07 has room for a base.
+	#[test]
+	fn a_base_needs_lite07() {
+		let msg = AnnounceBroadcast::Active {
+			suffix: PathRef {
+				base: 1,
+				keep: 1,
+				rest: Path::new("cam"),
+			},
+			hops: HopsRef::default(),
+			cost: Cost::default(),
+		};
+		for version in [Version::Lite05, Version::Lite06] {
+			let mut buf = bytes::BytesMut::new();
+			assert!(matches!(msg.encode(&mut buf, version), Err(EncodeError::Version)));
+		}
 	}
 
 	// The id-referencing forms don't exist before lite-06, and the path form is gone on lite-06.
@@ -554,7 +745,7 @@ mod tests {
 		assert!(matches!(
 			AnnounceBroadcast::Restart {
 				id: 1,
-				hops: Hops::new(),
+				hops: HopsRef::default(),
 				cost: Cost::default()
 			}
 			.encode(&mut buf, Version::Lite05),
@@ -577,16 +768,16 @@ mod tests {
 	#[test]
 	fn route_cost_is_dropped_before_lite06() {
 		let msg = AnnounceBroadcast::Active {
-			suffix: Path::new("room/cam"),
-			hops: Hops::new(),
+			suffix: PathRef::literal(Path::new("room/cam")),
+			hops: HopsRef::default(),
 			cost: Cost { warm: 9, cold: 9 },
 		};
 		let got = broadcast_round_trip(&msg, Version::Lite05);
 		assert_eq!(
 			got,
 			AnnounceBroadcast::Active {
-				suffix: Path::new("room/cam"),
-				hops: Hops::new(),
+				suffix: PathRef::literal(Path::new("room/cam")),
+				hops: HopsRef::default(),
 				cost: Cost::UNKNOWN,
 			}
 		);

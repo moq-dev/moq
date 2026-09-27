@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.6...moq-ffi-v0.4.7) - 2026-09-26
+
+### Added
+
+- end a broadcast with close() in every language ([#4031](https://github.com/moq-dev/moq/pull/4031))
+- *(mux)* forward importer discontinuities through publishers ([#4239](https://github.com/moq-dev/moq/pull/4239))
+
+### Other
+
+- rename CLAUDE.md to AGENTS.md ([#4235](https://github.com/moq-dev/moq/pull/4235))
+
+## [0.4.6](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.5...moq-ffi-v0.4.6) - 2026-09-26
+
+### Other
+
+- updated the following local packages: moq-net, moq-video, moq-json, hang, moq-mux, moq-tokio, moq-audio
+
+## [0.4.5](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.4...moq-ffi-v0.4.5) - 2026-09-25
+
+### Added
+
+- *(ffi)* advertise JSON tracks in the catalog, add binary data tracks ([#4137](https://github.com/moq-dev/moq/pull/4137))
+
+### Fixed
+
+- *(ffi)* name the binary config conversion so moq-ffi compiles ([#4157](https://github.com/moq-dev/moq/pull/4157))
+
 ## [0.4.4](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.3...moq-ffi-v0.4.4) - 2026-09-25
 
 ### Added

@@ -403,9 +403,14 @@ impl Pattern {
 	/// The pattern matching `path` and every path beneath it: `path/**`.
 	///
 	/// Normalizes and validates `path` like [`literal`](Self::literal). The empty path
-	/// yields `**`.
+	/// yields `**`, and a path of [`MAX_SEGMENTS`](Self::MAX_SEGMENTS) yields the literal,
+	/// since nothing can sit beneath it.
 	pub fn subtree(path: &str) -> Result<Self, InvalidPattern> {
-		Self::new(literal_segments(path).chain([Segment::Globstar]))
+		let mut segments: Vec<Segment> = literal_segments(path).collect();
+		if segments.len() < Self::MAX_SEGMENTS {
+			segments.push(Segment::Globstar);
+		}
+		Self::new(segments)
 	}
 
 	/// The canonical text: segments joined by `/`, wildcards as `*` and `**`.
@@ -993,6 +998,10 @@ mod tests {
 		assert_eq!(Pattern::literal("").unwrap(), Pattern::default());
 		assert_eq!(Pattern::subtree("foo").unwrap(), pattern("foo/**"));
 		assert_eq!(Pattern::subtree("/").unwrap(), Pattern::all());
+		let max = ["a"; Pattern::MAX_SEGMENTS].join("/");
+		assert_eq!(Pattern::subtree(&max).unwrap(), pattern(&max));
+		let deep = ["a"; Pattern::MAX_SEGMENTS + 1].join("/");
+		assert_eq!(Pattern::subtree(&deep), Err(InvalidPattern::TooManySegments));
 		assert_eq!(Pattern::literal("a/*"), Err(InvalidPattern::InvalidSegment("*".into())));
 		assert_eq!(Pattern::literal("**"), Err(InvalidPattern::InvalidSegment("**".into())));
 	}

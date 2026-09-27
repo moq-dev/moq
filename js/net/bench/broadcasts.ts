@@ -8,18 +8,23 @@ const updates = 32;
 let checksum = 0;
 
 console.log("scope,routes,observers,update_us");
-for (const scope of ["unscoped", "distinct-scopes"] as const) {
+for (const scope of ["unscoped", "distinct-scopes", "producer-scopes", "rooted-producers"] as const) {
 	for (const routeCount of routeCounts) {
 		for (const observerCount of observerCounts) {
 			const origin = new Producer();
 			const handles = Array.from({ length: routeCount }, (_, index) =>
 				origin.dynamic(Path.from(`room/${index}`)),
 			);
-			const touched = Path.from("room/0");
+			const touched = Path.from(scope === "rooted-producers" ? "0" : "room/0");
 			let notifications = 0;
 			const disposes = Array.from({ length: observerCount }, (_, index) =>
-				origin
-					.broadcasts(scope === "unscoped" ? undefined : Path.Pattern.parse(`room/**/tag-${index}`))
+				(scope === "producer-scopes"
+					? origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse(`room/**/tag-${index}`)]))
+					: scope === "rooted-producers"
+						? origin.scope(Path.from("room"), new Path.Patterns([Path.Pattern.parse(`**/tag-${index}`)]))
+						: origin
+				)
+					.broadcasts(scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined)
 					.subscribe((routes) => {
 						if (routes.get(touched) === undefined) throw new Error("touched route disappeared");
 						notifications++;

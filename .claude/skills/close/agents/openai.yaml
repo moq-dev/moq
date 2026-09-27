@@ -1,4 +1,0 @@
-interface:
-  display_name: "Close PR"
-  short_description: "Close a GitHub PR"
-  default_prompt: "Use $close to close this PR."

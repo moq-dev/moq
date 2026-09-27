@@ -18,13 +18,27 @@ pub enum Version {
 	/// as `moq-lite-06` and preferred by the default version sets.
 	Lite06,
 	/// Lite-07. Adds the hidden opt-in to ANNOUNCE_REQUEST: without it, a route with
-	/// a `.`-prefixed segment below the requested prefix is left out. The wire format is
-	/// still work-in-progress, so it is advertised over ALPN as `moq-lite-07-wip` and
-	/// only when explicitly requested; the default version sets leave it out.
+	/// a `.`-prefixed segment below the requested prefix is left out. SUBSCRIBE_END
+	/// carries the number of group streams opened, replacing SUBSCRIBE_DROP.
+	/// ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail from a
+	/// live announcement on the same stream. The wire format is still work-in-progress,
+	/// so it is advertised over ALPN as `moq-lite-07-wip` and only when explicitly
+	/// requested; the default version sets leave it out.
 	Lite07,
 }
 
 impl Version {
+	/// Whether SUBSCRIBE_END carries the subscription's group stream count, sent once
+	/// every counted stream is open, in place of SUBSCRIBE_DROP. Added in lite-07.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_stream_count(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether the version has lite-05's dedicated TRACK stream and related stream
 	/// layout changes.
 	///
@@ -32,7 +46,7 @@ impl Version {
 	/// SUBSCRIBE_START/END, and per-frame timestamp prefixes.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_track_stream(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
+		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
 			_ => true,
@@ -44,7 +58,7 @@ impl Version {
 	/// there and must not be sent.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_probe_rtt(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
+		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 => false,
 			_ => true,
@@ -56,7 +70,7 @@ impl Version {
 	/// setup exchange (Lite01/02) and the no-setup drafts (Lite03/04) don't use it.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_setup_stream(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
+		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
 			_ => true,
@@ -69,7 +83,7 @@ impl Version {
 	/// send or accept datagram bodies.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_datagrams(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
+		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
 			_ => true,
@@ -80,7 +94,7 @@ impl Version {
 	/// from each announcement's hop chain. Added in lite-05.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_announce_ok(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
+		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
 			_ => true,
@@ -91,7 +105,7 @@ impl Version {
 	/// shutdown and migration. Added in lite-04.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_goaway(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
+		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 => false,
 			_ => true,
@@ -103,7 +117,7 @@ impl Version {
 	/// reference that id instead of repeating the path. Added in lite-06.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_announce_id(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
+		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
 			_ => true,
@@ -134,7 +148,7 @@ impl Version {
 	/// next group before it can resume.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_frame_bounds(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
+		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
 			_ => true,
@@ -163,7 +177,7 @@ impl Version {
 	/// of resolving it from the budget.
 	#[allow(clippy::match_like_matches_macro)]
 	pub(crate) fn resolves_start(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
+		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
 			_ => true,
@@ -174,7 +188,18 @@ impl Version {
 	/// requests decode as not opted in.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_hidden(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail
+	/// from a live announcement on the same stream. Added in lite-07.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_announce_compression(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
 			_ => true,
@@ -187,7 +212,7 @@ impl Version {
 	/// on hop count alone, exactly as before.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_route_cost(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
+		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
 			_ => true,

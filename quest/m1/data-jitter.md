@@ -5,8 +5,8 @@
 A JSON or binary track whose payloads carry a capture time on the publisher's
 own clock (a UDP datagram's arrival, a sensor read) advertises a detected
 `delay` and `jitter`: how late the publisher hands payloads to the transport
-relative to that time, the same measurement
-[jitter clock](/quest/m1/jitter-flush-clock.md) defines for encoders. A
+relative to that time, the same measurement `moq_mux::catalog::Estimator`
+makes for encoders. A
 telemetry source slower than the video it accompanies shows up as `delay`.
 Tracks written without a capture time advertise neither rather than a
 meaningless zero.
@@ -45,6 +45,3 @@ Public API: additive on `hang`, `moq-binary`, `moq-json`, `moq-mux`,
 `@moq/hang`, `@moq/binary`, and `@moq/json`. Wire: one optional field on data
 entries.
 
-## Required
-
-- [Jitter clock](/quest/m1/jitter-flush-clock.md) - defines the flush-lateness measurement and `delay`

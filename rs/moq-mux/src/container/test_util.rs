@@ -128,3 +128,65 @@ pub(crate) fn raw_frame(timestamp_us: u64, payload: &'static [u8], keyframe: boo
 		duration: None,
 	}
 }
+
+/// A broadcast clock that began `ago` before now, so a first frame arriving now reads as late.
+pub(crate) fn late_clock(ago: std::time::Duration) -> crate::Clock {
+	crate::Clock::at(std::time::Instant::now() - ago, std::time::SystemTime::now() - ago).unwrap()
+}
+
+/// Every frame timestamp, in micros, that each media rendition in `catalog` published, by track.
+///
+/// Reads through each rendition's own container, so an fMP4 timestamp comes from the fragment's
+/// `tfdt` rather than the wire header. The importer must have finished its tracks.
+pub(crate) async fn published<E>(
+	consumer: &moq_net::broadcast::Consumer,
+	catalog: &hang::catalog::Catalog<E>,
+) -> std::collections::BTreeMap<String, Vec<u128>> {
+	let mut containers = Vec::new();
+	for (name, config) in &catalog.video.renditions {
+		containers.push((name.clone(), crate::catalog::hang::Container::try_from(config).unwrap()));
+	}
+	for (name, config) in &catalog.audio.renditions {
+		containers.push((name.clone(), crate::catalog::hang::Container::try_from(config).unwrap()));
+	}
+
+	let mut out = std::collections::BTreeMap::new();
+	for (name, container) in containers {
+		let replay = moq_net::track::Subscription::default().with_max_age(std::time::Duration::from_secs(3600));
+		let track = consumer.track(&name).unwrap().subscribe(replay).await.unwrap();
+		let mut reader = crate::container::Consumer::new(track, container);
+		let mut timestamps = Vec::new();
+		while let Some(frame) = tokio::time::timeout(std::time::Duration::from_secs(5), reader.read())
+			.await
+			.expect("the importer finished its tracks")
+			.unwrap()
+		{
+			timestamps.push(frame.timestamp.as_micros());
+		}
+		out.insert(name, timestamps);
+	}
+	out
+}
+
+/// The one offset every published timestamp moved by between a verbatim and a live import of the
+/// same input, within a tick of rounding: one mapping for every track, so A/V sync and B-frame
+/// order survive exactly.
+pub(crate) fn common_offset(
+	verbatim: &std::collections::BTreeMap<String, Vec<u128>>,
+	live: &std::collections::BTreeMap<String, Vec<u128>>,
+) -> i128 {
+	assert_eq!(verbatim.keys().count(), live.keys().count(), "the same tracks publish");
+	let mut offset = None;
+	for (v, l) in verbatim.values().zip(live.values()) {
+		assert_eq!(v.len(), l.len(), "the same frames publish");
+		for (v, l) in v.iter().zip(l) {
+			let delta = *l as i128 - *v as i128;
+			let first = *offset.get_or_insert(delta);
+			assert!(
+				(delta - first).abs() <= 1_000,
+				"every frame moves by one offset: {delta} vs {first}"
+			);
+		}
+	}
+	offset.expect("frames were published")
+}
