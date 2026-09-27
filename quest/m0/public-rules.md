@@ -81,8 +81,10 @@ and `/announced/anon` lists nothing. The demo's meet page dials
 
 ### Tests
 
-Every existing integration test uses `**`, which reads the same whether
-relative or absolute. Use non-`**` patterns throughout.
+Every existing integration test grants bare `**`, which reads the same
+whether relative or absolute, so it hides the bug. Use rooted patterns such as
+`anon/**` and `anon/*` throughout, which read differently at every dialed path
+but the root.
 
 - Unit: relay `Decider::Public` and `serve::Policy` public and mTLS rules with
   `anon/**`, dialed at `/`, `/anon`, `/anon/room`, and `/other`. Fix

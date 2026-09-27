@@ -48,7 +48,8 @@ Each fix lands with a regression test that fails without it.
   `root` defaults to `""`: an issuer's typo such as
   `{"rooot":"room/123","publish":["**"]}` would grant the whole relay, and so
   would a future narrowing claim read by an older verifier. So:
-  - `iss`, `sub`, and `jti` are accepted and ignored.
+  - `iss`, `sub`, and `jti` are accepted and ignored. `iat` is read and not
+    enforced, as today.
   - `nbf` is enforced, like `exp`. JS (`jose`) enforces it today; Rust
     ignores it.
   - `aud` is refused. 0.14 refused it (jsonwebtoken's default
