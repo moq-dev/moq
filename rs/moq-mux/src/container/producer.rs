@@ -648,6 +648,8 @@ where
 		group.finish()?;
 		if let Some(recorder) = self.recorder.as_mut() {
 			recorder.finish_group(group.sequence);
+			// The marker is contiguous, so without this the next record boundary would absorb the pause.
+			recorder.flush();
 		}
 		Ok(())
 	}
@@ -1383,6 +1385,38 @@ mod tests {
 			panic!("expected a record");
 		};
 		assert_eq!(entry.duration, std::time::Duration::from_millis(66));
+	}
+
+	/// The record before a discontinuity ends at the marker, not where content resumes.
+	#[tokio::test]
+	async fn a_discontinuity_ends_the_record_at_the_marker() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let timelines = crate::timeline::Timelines::new(&broadcast);
+		let recorder = timelines.track("video", crate::timeline::Config::default()).unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
+		let mut producer =
+			Producer::new(track, Container::Legacy(crate::container::Kind::Video)).with_recorder(recorder);
+
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(33_000, false)).unwrap();
+		producer.cut(Some(Timestamp::from_micros(66_000).unwrap())).unwrap();
+		producer.discontinuity().unwrap();
+		// Resumed 40 minutes later.
+		producer.write(frame(2_400_000_000, true)).unwrap();
+		drop(producer);
+		timelines.finish();
+
+		let mut timeline =
+			crate::timeline::Consumer::<()>::subscribe(&broadcast.consume(), &timelines.section(), "video")
+				.await
+				.unwrap();
+		let mut spans = Vec::new();
+		while let Some(event) = timeline.next().await.unwrap() {
+			if let crate::timeline::Event::Push { entry, .. } = event {
+				spans.push((entry.pts.as_micros() / 1_000, entry.duration.as_millis()));
+			}
+		}
+		assert_eq!(spans, vec![(0, 66), (2_400_000, 0)]);
 	}
 
 	#[tokio::test]

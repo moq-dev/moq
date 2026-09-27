@@ -659,7 +659,7 @@ If absent, it defaults to 1000 (milliseconds).
 A zero `timescale` is invalid and MUST be refused.
 
 The `durationMax` field, if present, is the declared upper bound on a record's `duration`, in `timescale` units.
-A publisher MUST NOT emit a record whose `duration` exceeds it; splitting a group between frames ({{timeline-cutting}}) makes the bound achievable for any content.
+A publisher MUST NOT emit a record whose `duration` exceeds it; splitting a group between frames ({{timeline-cutting}}) makes the bound achievable for any content, and a record whose frames are farther apart than the bound ends at the bound, leaving the rest of the gap uncovered.
 The value MUST NOT change for the life of the broadcast.
 
 Wall-clock mapping is the catalog root `clock` ({{clock}}), not this section: a consumer derives the wall-clock time of any record as `clock.wall + pts` after converting `pts` into the clock's timescale.
@@ -750,7 +750,7 @@ The RECOMMENDED policy is one rule for every track:
 
 - A record ends at the first group boundary at least a minimum duration past its own start, so short groups (audio) pack into one record and long ones (video) get one each.
 - A group still open a maximum duration past the record's start is split between frames, so a group that never closes (an append-log such as a `moq-json` stream) is indexed as it grows; `durationMax` advertises this maximum.
-- A skipped group sequence ends the record.
+- A skipped group sequence ends the record at its newest known content, not where the next group starts, so a pause is not counted as content.
 
 A minimum of 2 seconds and a maximum of 10 seconds are RECOMMENDED.
 Sparse data that publishes on its own schedule, such as a catalog, SHOULD use a minimum of zero: each group is then its own record, ended as soon as the group finishes, so its newest group is indexed without waiting for another that may never come.

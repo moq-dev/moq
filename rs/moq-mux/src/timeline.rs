@@ -19,8 +19,10 @@
 //!   group finishes.
 //! - A group still open [`Config::duration_max`] (10s by default) past the record's start is split
 //!   at the next reported frame, so an append-only group that never closes is still indexed as it
-//!   grows.
-//! - A skipped group sequence always closes the record, so a record's groups are contiguous.
+//!   grows. Frames farther apart than the maximum leave nothing to split at, so the record's
+//!   duration stops at the maximum and the rest of the gap is uncovered.
+//! - A skipped group sequence always closes the record at its newest reported content time, so a
+//!   record's groups are contiguous and a pause is not absorbed into its duration.
 //! - [`Segmenter::cut`] adds an application boundary, such as a video keyframe cutting audio so a
 //!   derived segment needs fewer objects. The first cut takes over from minimum-duration pacing.
 //!
@@ -192,16 +194,21 @@ impl Segmenter {
 			let elapsed = pts.as_micros().saturating_sub(start.as_micros());
 			let end = if position.group != last.group {
 				let contiguous = position.group == last.group + 1 && position.frame == 0;
-				// A skipped sequence or a group joined mid-way always closes, so a record's groups are
-				// contiguous and the reader never has to guess what lies between.
-				let boundary = !contiguous
-					|| elapsed >= self.config.duration_max.as_micros()
-					|| self.boundary(start, pts, elapsed);
-				boundary.then_some(Position::group(last.group + 1))
+				if !contiguous {
+					// A skipped sequence or a group joined mid-way always closes, so a record's groups are
+					// contiguous and the reader never has to guess what lies between. The skipped time is
+					// not content, so the record ends at its newest report rather than at this frame.
+					let frontier = self.frontier.expect("an open record has a frontier");
+					Some((Position::group(last.group + 1), frontier))
+				} else if elapsed >= self.config.duration_max.as_micros() || self.boundary(start, pts, elapsed) {
+					Some((Position::group(last.group + 1), pts))
+				} else {
+					None
+				}
 			} else {
-				(elapsed >= self.config.duration_max.as_micros()).then_some(position)
+				(elapsed >= self.config.duration_max.as_micros()).then_some((position, pts))
 			};
-			if let Some(end) = end {
+			if let Some((end, pts)) = end {
 				self.emit(end, pts);
 			}
 		}
@@ -318,7 +325,9 @@ impl Segmenter {
 			return;
 		};
 		let start = wire(open.pts);
-		let duration = wire(pts).saturating_sub(start);
+		// Frames farther apart than the maximum leave nothing to split at, so the record stops at the
+		// advertised bound and the rest of the gap is uncovered.
+		let duration = wire(pts).saturating_sub(start).min(units(self.config.duration_max));
 		let mut record = Record::new(self.sequence, start, duration, open.start, end);
 		record.keyframe = open.keyframe;
 		self.sequence += 1;
@@ -591,6 +600,11 @@ impl Recorder {
 	/// Declare a boundary at `pts` on this track; see [`Segmenter::cut`].
 	pub fn cut(&mut self, pts: Timestamp) {
 		self.report(|segmenter| segmenter.cut(pts));
+	}
+
+	/// Close the open record now; see [`Segmenter::flush`].
+	pub(crate) fn flush(&mut self) {
+		self.report(|segmenter| segmenter.flush());
 	}
 }
 
@@ -881,9 +895,44 @@ mod test {
 		assert_eq!(
 			drain(&mut audio),
 			vec![
-				(0, 600, at(0), at(2)),
+				(0, 300, at(0), at(2)),
 				(600, 1_100, at(5), at(6)),
 				(1_700, 0, at(6), Position::new(6, 1))
+			]
+		);
+	}
+
+	#[test]
+	fn a_skipped_run_ends_at_the_previous_frontier() {
+		// A data track paused for 40 minutes, skipping a sequence as its discontinuity marker.
+		let mut data = Segmenter::new(Config::default());
+		groups(&mut data, 0..2, 1_000);
+		data.end(ms(2_000));
+		data.frame(at(3), ms(2_400_000), true).unwrap();
+		data.close();
+
+		assert_eq!(
+			drain(&mut data),
+			vec![(0, 2_000, at(0), at(2)), (2_400_000, 0, at(3), Position::new(3, 1))],
+			"the pause is not absorbed into the record before it"
+		);
+	}
+
+	#[test]
+	fn a_record_never_exceeds_the_maximum() {
+		// A quiet log: nothing between its frames to split at.
+		let mut log = Segmenter::new(sparse().with_duration_max(Duration::from_secs(10)));
+		log.frame(Position::new(0, 0), ms(0), true).unwrap();
+		log.frame(Position::new(0, 1), ms(20_000), true).unwrap();
+		log.frame(at(1), ms(45_000), true).unwrap();
+		log.close();
+
+		assert_eq!(
+			drain(&mut log),
+			vec![
+				(0, 10_000, Position::new(0, 0), Position::new(0, 1)),
+				(20_000, 10_000, Position::new(0, 1), at(1)),
+				(45_000, 0, at(1), Position::new(1, 1)),
 			]
 		);
 	}
