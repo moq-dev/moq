@@ -173,7 +173,7 @@ impl MoqBroadcastProducer {
 	}
 
 	/// Run `f` against the open broadcast and catalog. Errors with
-	/// [`MoqError::Closed`] if `finish()` has already run. Used by
+	/// [`MoqError::Closed`] if `close()` has already run. Used by
 	/// sibling modules (e.g. `audio`) that need joint access.
 	pub(crate) fn with_state<R>(
 		&self,
@@ -473,15 +473,19 @@ impl MoqBroadcastProducer {
 		}))
 	}
 
-	/// Finish this publisher, finalizing the catalog stream and cleanly closing the
-	/// broadcast so subscribers see a normal end rather than `Error::Dropped`.
-	pub fn finish(&self) -> Result<(), MoqError> {
+	/// End the broadcast for good: retract it, serve no new tracks, and finalize the catalog.
+	///
+	/// Tracks already subscribed carry on to their own end. Every later call on this
+	/// producer fails with `Closed`; closing again is a no-op.
+	pub fn close(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
+		// Hold the lock through shutdown so a concurrent close() returns only once it is done.
 		let mut guard = self.state.lock().unwrap();
-		let mut state = guard.take().ok_or(MoqError::Closed)?;
-		// Finish the broadcast first so the clean end reaches subscribers even if
-		// finalizing the catalog fails.
-		state.broadcast.finish();
+		let Some(mut state) = guard.take() else {
+			return Ok(());
+		};
+		// Close the broadcast first so it ends even if finalizing the catalog fails.
+		state.broadcast.close();
 		state.catalog.finish()?;
 		Ok(())
 	}
@@ -971,6 +975,17 @@ impl MoqMediaProducer {
 		let mut guard = self.inner.lock().unwrap();
 		let media = guard.as_mut().ok_or(MoqError::Closed)?;
 		media.import.flush(timestamp, std::time::Instant::now())?;
+		Ok(())
+	}
+
+	/// Mark a timeline break and restart handoff measurement without lowering advertised jitter.
+	///
+	/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock.
+	pub fn discontinuity(&self) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let media = guard.as_mut().ok_or(MoqError::Closed)?;
+		media.import.discontinuity()?;
 		Ok(())
 	}
 

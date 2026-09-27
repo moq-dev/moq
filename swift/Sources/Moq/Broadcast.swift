@@ -344,8 +344,10 @@ public final class BroadcastProducer: Sendable {
         try ffi.removeCatalogSection(name: name)
     }
 
-    /// Finish the broadcast, finalizing the catalog stream.
-    public func finish() throws {
-        try ffi.finish()
+    /// End the broadcast for good: retract it and serve no new tracks.
+    ///
+    /// Tracks already subscribed carry on to their own end. Closing again is a no-op.
+    public func close() throws {
+        try ffi.close()
     }
 }

@@ -67,5 +67,5 @@ source changed rather than scanning every mount or session.
 
 ## Related
 
-- [Origin narrowing](/quest/m1/origin-narrowing.md) - the same origin/auth area; land them in sequence
+- [Origin narrowing](/quest/m1/auth/narrowing.md) - the same origin/auth area; land them in sequence
 - `Cluster::admit` (#3943) - should carry mounts too

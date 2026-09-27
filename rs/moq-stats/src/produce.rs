@@ -852,12 +852,11 @@ impl GroupPublisher {
 		self.sessions.adopt_parked(&self.broadcast, &mut self.requested);
 	}
 
-	/// Deliberately end the broadcast: finish every pair, then the broadcast
-	/// itself, so teardown emits no dropped-without-finish warnings.
+	/// Deliberately end the broadcast: finish every pair, then close the broadcast.
 	fn finish(mut self) {
 		self.traffic.finish();
 		self.sessions.finish();
-		self.broadcast.finish();
+		self.broadcast.close();
 	}
 }
 

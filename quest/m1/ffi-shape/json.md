@@ -12,7 +12,7 @@ sets is what the other children copy.
 JSON is the smallest group, so it carries the setup cost: a Python submodule,
 a Go subpackage, a Kotlin package, a Dart library, and a Swift namespace, each
 wired into its package build, tests, and docs. Settle the pattern here and
-write it down where the next child will find it (`rs/moq-ffi/CLAUDE.md` if it
+write it down where the next child will find it (`rs/moq-ffi/AGENTS.md` if it
 is a convention, after reading `PROMPTING.md`).
 
 Mirror `moq-json`'s names (`snapshot`, `stream`) and constructors, which
@@ -25,9 +25,9 @@ keep doing so, and the rest may follow.
 Watch for Go import cycles: a subpackage takes the root's broadcast handle, so
 the root must not import it back.
 
-libmoq's JSON symbols move to `moq_json_*`.
+moq-c's JSON symbols move to `moq_json_*`.
 
-Public API: breaking in every binding and libmoq. Wire: none.
+Public API: breaking in every binding and moq-c. Wire: none.
 
 ## Required
 

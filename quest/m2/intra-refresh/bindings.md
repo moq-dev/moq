@@ -3,17 +3,17 @@
 ## Goal
 
 Every binding names the group structure the way the core does: the ffi record,
-the libmoq C struct, and the Python, Swift, Kotlin, Dart, and Go wrappers take
+the moq-c C struct, and the Python, Swift, Kotlin, Dart, and Go wrappers take
 a keyframe interval or a refresh cycle and nothing else, and `cut()` keeps its
 meaning in both modes. This replaces the published `gop` integer in moq-ffi
-and changes the libmoq C struct layout, so it targets `dev`.
+and changes the moq-c C struct layout, so it targets `dev`.
 
 ## Plan
 
 - `rs/moq-ffi/src/video.rs`: `MoqVideoEncoderOutput.gop: Option<u32>` becomes
   a `MoqVideoGop` enum record mirroring `Gop`, defaulting to keyframes at two
   seconds. `MoqVideoProducer::cut()` already has the right name.
-- `rs/libmoq/src/video.rs`: `moq_video_encoder_output` gains a
+- `rs/moq-c/src/video.rs`: `moq_video_encoder_output` gains a
   `moq_video_gop` discriminant beside `gop`, zero meaning keyframes, and
   `moq.h` is regenerated (build.rs does not do it on source-only changes).
   `cpp/obs/src` follows the header.

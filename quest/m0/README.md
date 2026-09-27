@@ -62,7 +62,7 @@ Their package boundaries are explicit:
 - `moq-nvenc` narrows its safe facade around owned resources and completion,
   while loading and incompatibility become fallible public errors.
 - Published `moq-mux` gains only the additive shared `rate` namespace. Published
-  `moq-ffi`, `libmoq`, and language-binding signatures, layouts, and sentinel
+  `moq-ffi`, `moq-c`, and language-binding signatures, layouts, and sentinel
   behavior remain unchanged while their internals adapt.
 
 The agreed media direction is small, honest APIs: typed PCM layouts, rational

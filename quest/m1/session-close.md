@@ -22,7 +22,3 @@ end and returns a promise, which is a published break, so that change targets
 
 `doc/concept/moq-lite.md` says a graceful close withdraws announces and an
 abort does not. No new page.
-
-## Related
-
-- [Broadcast close](/quest/m1/broadcast-close/README.md) - `close()` on a broadcast, which is not this session end

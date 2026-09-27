@@ -25,7 +25,7 @@ default:
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
 # sanity check). `interop --all` runs the full matrix: rust + python + go +
-# browser publish; everyone subscribes (incl. native node/bun JS, the C libmoq
+# browser publish; everyone subscribes (incl. native node/bun JS, the moq-c C
 # client, and the GStreamer moqsrc plugin). --timeout 30 gives headless Chromium
 # cold-start headroom. Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
@@ -100,3 +100,7 @@ wasm *args:
 # Optional publisher retention across Rust/JS sessions through a Rust relay.
 max-age:
     cargo nextest run --locked -p moq-tokio --test max_age --run-ignored all
+
+# Cross-language subscription termination over in-memory transports.
+bare-fin:
+    just rs test -p moq-net --lib bare_fin_interop --run-ignored all

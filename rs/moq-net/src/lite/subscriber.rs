@@ -1435,6 +1435,88 @@ mod tests {
 
 	const VERSION: Version = Version::Lite05;
 
+	/// Drive the subscriber with a peer's response bytes followed by FIN.
+	async fn check_subscription_fin(version: Version, responses: Vec<u8>, clean: bool) {
+		let session = crate::lite::test_transport::ScriptedSession::eof(responses);
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
+			session,
+			origin,
+			recv_bandwidth: None,
+			version,
+			peer_setup: Default::default(),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+		});
+		let serve = TrackServe {
+			subscriber,
+			path: Path::new("room").to_owned(),
+			name: "video".to_string(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let request = broadcast.reserve_track("video").unwrap();
+		let serving = ServeLoop::new(&serve, request, Default::default(), Some(Timescale::default()));
+		let mut reader = broadcast
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let mut running = TrackServeRun {
+			serve,
+			state: TrackRunState::Serve(serving),
+		};
+		assert!(
+			kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready(),
+			"{version:?}: FIN must settle immediately"
+		);
+		if clean {
+			assert!(reader.recv_group().await.unwrap().is_none());
+		} else {
+			assert!(matches!(reader.recv_group().await, Err(Error::ProtocolViolation)));
+		}
+	}
+
+	fn fin_responses(version: Version, started: bool, clean: bool) -> Vec<u8> {
+		let mut responses = Vec::new();
+		if started {
+			lite::SubscribeResponse::Start(lite::SubscribeStart { group: 0 })
+				.encode(&mut responses, version)
+				.unwrap();
+		}
+		if clean {
+			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, streams: 0 })
+				.encode(&mut responses, version)
+				.unwrap();
+		}
+		responses
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn bare_fin_requires_subscribe_end() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for (started, clean) in [(false, false), (true, false), (false, true)] {
+				check_subscription_fin(version, fin_responses(version, started, clean), clean).await;
+			}
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	#[ignore = "requires Bun; run by just test bare-fin in interop CI"]
+	async fn bare_fin_interop() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for (started, clean) in [(false, false), (true, false), (false, true)] {
+				let responses = fin_responses(version, started, clean);
+				let responses =
+					crate::test_interop::fin(crate::Version::from(version).alpn(), started, clean, responses);
+				check_subscription_fin(version, responses, clean).await;
+			}
+		}
+	}
+
 	/// Removing a subscription both stops delivery and releases the session's handle
 	/// on the producer, so the track (its cached groups, its stats subscription) ends
 	/// rather than outliving the subscription it belonged to.
@@ -2785,9 +2867,8 @@ impl Announced {
 	}
 
 	fn declined(&mut self, path: PathOwned) {
-		if let Some(Some(route)) = self.routes.insert(path, None) {
-			route.finish();
-		}
+		// Dropping a replaced route closes its sources.
+		self.routes.insert(path, None);
 	}
 
 	/// Record an advertisement before deciding what to do with it.
@@ -2798,8 +2879,7 @@ impl Announced {
 	/// at each rejection is what stops the next early return from silently freeing a path
 	/// the peer still holds.
 	/// Only valid on a prefix the peer does not already hold, which the caller establishes
-	/// with [`Self::contains`]. Overwriting an attached route here would drop its source
-	/// without finishing it, which is [`Self::declined`]'s job.
+	/// with [`Self::contains`]. Overwriting an attached route is [`Self::declined`]'s job.
 	fn reserve(&mut self, path: PathOwned) {
 		debug_assert!(!self.routes.contains_key(&path), "reserved a prefix already advertised");
 		self.routes.insert(path, None);
@@ -2810,9 +2890,8 @@ impl Announced {
 	}
 
 	fn retire(&mut self, path: &PathOwned) {
-		if let Some(Some(route)) = self.routes.remove(path) {
-			route.finish();
-		}
+		// Dropping the route closes its sources.
+		self.routes.remove(path);
 	}
 
 	/// Serve queued requests on every ready route: mint a source per requested
@@ -2864,8 +2943,7 @@ struct AnnouncedRoute {
 	route: crate::origin::Route,
 	/// Dropping it retracts the route and rejects its queued requests.
 	dynamic: crate::origin::Dynamic,
-	/// One minted source per requested path, finished on a clean retraction and
-	/// aborted (via drop) when the session dies.
+	/// One minted source per requested path, each closed when its guard drops.
 	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
 	/// Whether the GOAWAY drain already re-priced this route.
 	drained: bool,
@@ -2886,14 +2964,6 @@ impl AnnouncedRoute {
 			waker: std::task::Waker::from(wake.clone()),
 			wake,
 			park: kio::Park::default(),
-		}
-	}
-
-	/// The peer deliberately retracted the route: finish the minted sources so
-	/// their consumers observe a clean end, and retract the announcement.
-	fn finish(self) {
-		for (_, source) in self.sources {
-			source.finish();
 		}
 	}
 
@@ -3734,6 +3804,9 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 								continue;
 							}
 							Ok(None) => {
+								if serve.subscriber.version.has_track_stream() && active.end.is_none() {
+									return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));
+								}
 								tracing::info!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "subscribe complete");
 								// Upstream FIN'd the subscription: the publisher only FINs
 								// once the track's final sequence is known and every group

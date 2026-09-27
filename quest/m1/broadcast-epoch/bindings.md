@@ -2,7 +2,7 @@
 
 ## Goal
 
-`moq-ffi`, `libmoq`, and the py, swift, kt, go, and dart wrappers publish under
+`moq-ffi`, `moq-c`, and the py, swift, kt, go, and dart wrappers publish under
 the default epoch and follow bare names like Rust. The epoch of a published or
 consumed broadcast is readable, and a caller can pass an explicit one. The
 reconnect counter `session.epoch()` is renamed so "epoch" has one meaning.

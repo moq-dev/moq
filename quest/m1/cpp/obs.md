@@ -2,11 +2,11 @@
 
 ## Goal
 
-`cpp/obs` links `cpp/moq` instead of libmoq. The output and source hold
+`cpp/obs` links `cpp/moq` instead of moq-c. The output and source hold
 `moq::` objects instead of `int` handles, async work is a future with a
 continuation on OBS's own executor, and the generation counters, condvars,
 `SessionRef`/`callback_state` heap trampolines, and "never take signal_mutex
-inside a libmoq call" lock-order rules that exist only to survive libmoq's
+inside a moq-c call" lock-order rules that exist only to survive moq-c's
 single callback thread are deleted. Behavior visible to OBS users is
 unchanged: same settings, same dock, same reconnect and teardown timing.
 
@@ -26,13 +26,13 @@ unchanged: same settings, same dock, same reconnect and teardown timing.
   object, not a `free` call. FFmpeg decode stays as is; the native decode
   replacement is the OBS native codecs questline and now starts from this
   code.
-- Tests: `cpp/obs/test/*-test.cpp` currently stub libmoq's C symbols to race
+- Tests: `cpp/obs/test/*-test.cpp` currently stub moq-c's C symbols to race
   the OBS and runtime threads. Rewrite them against `moq::` interfaces with a
   fake executor; keep the scenarios (stop during connect, late terminal,
   superseded attempt).
 - Build and release: `cpp/obs/CMakeLists.txt` consumes the package
   (in-tree `cpp/` for `MOQ_LOCAL`, the release tarball otherwise); `obs.yml`
-  rides `release-cpp.yml` instead of `libmoq.yml`. `doc/bin/obs.md` says the
+  rides `release-cpp.yml` instead of `moq-c.yml`. `doc/bin/obs.md` says the
   plugin is C++ over the generated bindings.
 - Shutdown: define `obs_module_unload` and call `moq_ffi_shutdown` there,
   after OBS has destroyed the outputs and sources, so the runtime thread is

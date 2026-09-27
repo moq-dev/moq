@@ -9,7 +9,7 @@ cancellable futures, with no `user_data` plumbing, no handle integers, and no
 thread of their own to babysit. The OBS plugin is the in-tree consumer that
 proves the shape; external SDK users are the audience.
 
-Non-goals: libmoq stays as the plain-C ABI, keeps its own release, and keeps
+Non-goals: moq-c stays as the plain-C ABI, keeps its own release, and keeps
 following the Cross-Package Sync table like every other wrapper; no
 second hand-written C++ surface (ergonomics are fixed in moq-ffi where every
 binding benefits); no wire or public Rust API change.
@@ -42,7 +42,7 @@ on a future under `__cpp_impl_coroutine`, `std::expected` under
 `__cpp_lib_expected`. Never a second library per standard.
 
 Distribution is all of: a release tarball with a CMake package config and
-pkg-config file (mirroring `libmoq.yml`), a vcpkg registry we own, and a Conan
+pkg-config file (mirroring `moq-c.yml`), a vcpkg registry we own, and a Conan
 remote we own, the latter two fetching the prebuilt tarball so consumers never
 need a Rust toolchain or the bindgen fork. vcpkg lands first; the Conan recipe
 reads the same release manifest so a release bumps both.
@@ -51,7 +51,7 @@ reads the same release manifest so a release bumps both.
 
 - [Generator](/quest/m1/cpp/generator.md) - the uniffi 0.32 C++ generator with futures and expected-style errors, pinned and generating `cpp/ffi` in CI
 - [Package](/quest/m1/cpp/package.md) - the `cpp/moq` wrapper, CMake package, release tarball, interop client, and docs
-- [OBS migration](/quest/m1/cpp/obs.md) - the OBS plugin moves from libmoq handles and trampolines to the generated C++
+- [OBS migration](/quest/m1/cpp/obs.md) - the OBS plugin moves from moq-c handles and trampolines to the generated C++
 
 ## Related
 

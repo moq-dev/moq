@@ -74,7 +74,7 @@ impl Options {
 /// `moq_audio::decode::Consumer`.
 pub struct Consumer {
 	/// A [`Sink`] rather than a bare `Decoder`: the read loop below is held
-	/// across `.await` by every caller (libmoq's spawned task, moq-transcode),
+	/// across `.await` by every caller (moq-c's spawned task, moq-transcode),
 	/// so the codec would otherwise migrate between executor workers and
 	/// unbalance the per-thread COM apartment the Windows backend opens.
 	decoder: Sink,

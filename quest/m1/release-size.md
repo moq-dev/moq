@@ -2,9 +2,9 @@
 
 ## Goal
 
-The shipped moq-ffi and libmoq artifacts already build with thin LTO and one
+The shipped moq-ffi and moq-c artifacts already build with thin LTO and one
 codegen unit, but through `CARGO_PROFILE_RELEASE_*` exports in three places
-(`rs/moq-ffi/build.sh`, `rs/libmoq/build.sh`, `nix/overlay.nix`), so the
+(`rs/moq-ffi/build.sh`, `rs/moq-c/build.sh`, `nix/overlay.nix`), so the
 Python wheel (maturin), `moq`, `moq-relay`, and every `cargo build --release`
 by a self-builder get none of it, and a plain release build measures nothing a
 user receives. After this quest `[profile.release]` in the workspace
@@ -37,11 +37,11 @@ both still produce symbolized captures. Thin LTO is the known-good starting
 point. Try `lto = "fat"` and `strip = "symbols"` on top and keep each only if
 the table earns it: thin LTO bought 5% on the dylib, so fat is not assumed to
 buy much, and `strip` must not break the crash reports C ABI users read
-(libmoq ships a symbols file if it does). Link time on the release matrix
+(moq-c ships a symbols file if it does). Link time on the release matrix
 goes in the same table as the sizes.
 
 Then the nightly job: a `size` recipe under `sh/` that builds both moq-ffi
-configurations and `libmoq` with the release profile, prints stripped sizes
+configurations and `moq-c` with the release profile, prints stripped sizes
 and `cargo bloat --crates -n 30` per build, and posts the result to the job
 summary. `cargo bloat` reads the symbol table, so if `strip` lands the recipe
 builds with `CARGO_PROFILE_RELEASE_STRIP=none` for the bloat pass and strips

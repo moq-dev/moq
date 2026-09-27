@@ -28,4 +28,4 @@ a compressed track is announced, routed, and cached like any other.
 ## Quests
 
 - [Track wrapper](/quest/m2/flate/track.md) - `moq-flate` and `@moq/flate` wrap a track so each group is one compression window without caller bookkeeping
-- [Bindings](/quest/m2/flate/bindings.md) - moq-ffi and libmoq publish and subscribe compressed tracks, mirrored through every wrapper
+- [Bindings](/quest/m2/flate/bindings.md) - moq-ffi and moq-c publish and subscribe compressed tracks, mirrored through every wrapper

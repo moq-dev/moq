@@ -29,7 +29,7 @@ default:
 # No `cargo check` pass: clippy is a superset of it, and the two use different
 # rustc wrappers, so running both means compiling the workspace twice.
 #
-# A bare `just rs check` is default-members, which skips libmoq, moq-ffi,
+# A bare `just rs check` is default-members, which skips moq-c, moq-ffi,
 # moq-gst, and moq-wasm (they need cbindgen, a uniffi build, GStreamer, and a
 # wasm32 target respectively, so they stay out of a casual local check). Every
 # recipe that means "all of it" therefore passes `--workspace` explicitly, since
@@ -206,12 +206,12 @@ _select $FILES:
     seeds=$(sed -n 's|^rs/\([^/]*\)/.*|\1|p' <<< "$FILES" | sort -u)
 
     # Every workspace member, not just the default ones. `--no-deps` already
-    # limits this to the workspace. The non-default members (libmoq, moq-ffi,
+    # limits this to the workspace. The non-default members (moq-c, moq-ffi,
     # moq-gst, moq-wasm) have to participate as both seeds and dependents: they
     # used to drop out here because `check` matched a bare `cargo check`, but
     # `check` is the only gate now, and the `cargo clippy --workspace` in the
     # deleted `just rs ci` is what used to cover them. Without them, a PR
-    # touching only rs/libmoq selects nothing and compiles nothing.
+    # touching only rs/moq-c selects nothing and compiles nothing.
     edges=$(jq -r '
     	.packages[]
     	| .name as $name
@@ -624,8 +624,8 @@ uring-check *args:
 #
 # Same trade as `windows`: nightly.yml runs this once a day rather than gating a
 # merge on a Mac runner. The moq-video half also has a release-time backstop,
-# since libmoq's `libmoq-v*` tag build compiles it on Apple Silicon. The
-# moq-audio half has none: libmoq and moq-ffi take it codecs-only, so no release
+# since moq-c's `moq-c-v*` tag build compiles it on Apple Silicon. The
+# moq-audio half has none: moq-c and moq-ffi take it codecs-only, so no release
 # build compiles its capture backend and this recipe is the only thing that does.
 #
 # Scoped to those two crates instead of the workspace, because they hold all
@@ -722,23 +722,23 @@ audit:
 relay-minimal:
     cargo nextest run --locked -p moq-relay --no-default-features --lib -E 'test(workers_require_a_quic_backend)'
 
-# libmoq's C fixtures (`rs/libmoq/c-tests/*.c`) link `libmoq.a` the way an
+# moq-c's C fixtures (`rs/moq-c/c-tests/*.c`) link `libmoq.a` the way an
 # embedder does: an external `cc` against the generated `moq.h`, plus the native
-# libraries from `rs/libmoq/native-libs` that cargo can't inject into a link it
+# libraries from `rs/moq-c/native-libs` that cargo can't inject into a link it
 # doesn't drive. Each fixture pins part of the C ABI at compile time and
 # exercises it at runtime, so it has to run, not just compile.
 #
 # Outside nextest on purpose. The staticlib link alone takes ~2 minutes, past the
 # hang budget in `.config/nextest.toml` once the rest of the workspace builds
-# beside it, and `rs/CLAUDE.md` says to make a slow test fast, not to raise the
-# ceiling. obs.yml runs this on every PR that touches rs/libmoq, right after it
+# beside it, and `rs/AGENTS.md` says to make a slow test fast, not to raise the
+# ceiling. obs.yml runs this on every PR that touches rs/moq-c, right after it
 # has built the same debug libmoq.a for the plugin, and nightly.yml covers the
 # paths that filter misses.
 #
 # Unix only: linking a Rust staticlib from MSVC spells the flags and the
 # archive (`moq.lib`) differently, and this recipe doesn't model that.
 
-# Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
+# Compile and run moq-c's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
 c-tests:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -748,33 +748,33 @@ c-tests:
         exit 1
     fi
 
-    cargo build --locked -p libmoq
+    cargo build --locked -p moq-c
 
-    # Ask cargo where it put the staticlib rather than assuming target/debug:
-    # CARGO_TARGET_DIR and a configured build target (`target/<triple>/debug`)
-    # both move it, and guessing wrong would link a stale copy or nothing.
-    # Replays the build above from cache, so it costs a process, not a compile.
-    lib=$(cargo build --locked -p libmoq --message-format=json |
-        jq -r 'select(.reason == "compiler-artifact") | .filenames[] | select(endswith("/libmoq.a"))' |
-        tail -1)
+    # Ask cargo where it put the staticlib and the header rather than assuming
+    # target/debug: CARGO_TARGET_DIR and a configured build target
+    # (`target/<triple>/debug`) both move them, and guessing wrong would link a
+    # stale copy or nothing. Replays the build above from cache, so it costs a
+    # process, not a compile.
+    log=$(cargo build --locked -p moq-c --message-format=json)
+    lib=$(jq -r 'select(.reason == "compiler-artifact") | .filenames[] | select(endswith("/libmoq.a"))' <<<"$log" | tail -1)
     if [ -z "$lib" ]; then
-        echo "cargo reported no libmoq.a for libmoq" >&2
+        echo "cargo reported no libmoq.a for moq-c" >&2
         exit 1
     fi
-    # The header sits beside the profile directory: rs/libmoq/build.rs writes it
-    # to `<target>/include`, one level above `<target>/<profile>/libmoq.a`.
     profile=$(dirname "$lib")
-    include="$(dirname "$profile")/include"
-    if [ ! -f "$include/moq.h" ]; then
-        echo "$include/moq.h missing after 'cargo build --locked -p libmoq'" >&2
+    # rs/moq-c/build.rs writes the header into its OUT_DIR.
+    out_dir=$(jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("/moq-c#")) | .out_dir' <<<"$log" | tail -1)
+    include="$out_dir/include"
+    if [ -z "$out_dir" ] || [ ! -f "$include/moq.h" ]; then
+        echo "$include/moq.h missing after 'cargo build --locked -p moq-c'" >&2
         exit 1
     fi
 
-    # Same list build.rs (moq.pc), CMakeLists.txt, and test/interop/interop.sh read:
+    # Same list build.rs (moq-c.pc), CMakeLists.txt, and test/interop/interop.sh read:
     # `framework:Foo` is a linker framework flag, anything else a plain library.
     case "$(uname -s)" in
-        Darwin) native_libs=rs/libmoq/native-libs/apple.txt ;;
-        *) native_libs=rs/libmoq/native-libs/linux.txt ;;
+        Darwin) native_libs=rs/moq-c/native-libs/apple.txt ;;
+        *) native_libs=rs/moq-c/native-libs/linux.txt ;;
     esac
     libs=()
     while read -r entry; do
@@ -792,7 +792,7 @@ c-tests:
     # doc-samples.h declares, and every name the prose cites. A `moq_decode_*`
     # wildcard ends in `_` and is skipped.
     bash doc/lib/samples.sh c doc/lib/c/index.md >"$out/doc-samples.c"
-    "$cc" -fsyntax-only -Werror=implicit-function-declaration -include rs/libmoq/c-tests/doc-samples.h -I"$include" "$out/doc-samples.c"
+    "$cc" -fsyntax-only -Werror=implicit-function-declaration -include rs/moq-c/c-tests/doc-samples.h -I"$include" "$out/doc-samples.c"
     for name in $(grep -oE '\b(moq|MOQ)_[A-Za-z0-9_]*' doc/lib/c/index.md | grep -v '_$' | sort -u); do
         if ! grep -qw "$name" "$include/moq.h"; then
             echo "doc/lib/c/index.md cites $name, which moq.h does not declare" >&2
@@ -800,7 +800,7 @@ c-tests:
         fi
     done
 
-    for source in rs/libmoq/c-tests/*.c; do
+    for source in rs/moq-c/c-tests/*.c; do
         bin="$out/$(basename "$source" .c)"
         "$cc" "$source" -I"$include" -L"$profile" -lmoq "${libs[@]}" -o "$bin"
         echo "running $source"
