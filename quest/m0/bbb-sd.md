@@ -18,9 +18,8 @@ CPU. moq.pro's always-on demo consumes the same asset.
   its other consumers.
 - `bbb` downloads both and feeds them as two `-stream_loop -1 -re` inputs to
   one ffmpeg with `-map 0 -map 1:v -c copy` into `import ts`, which turns each
-  video PID into its own rendition. Map the 720p stream first: WHEP and
-  non-multitrack RTMP still serve the first rendition by name until
-  [egress rendition pick](/quest/m1/egress-rendition-pick.md) lands.
+  video PID into its own rendition. WHEP and non-multitrack RTMP serve the
+  720p one, the largest, whatever the mapping order.
 - Verify: the catalog lists both renditions with a `bitrate`; the player
   switches down under throttling and back up; the two renditions stay
   timestamp-aligned after several loops (two looped inputs drift if their
