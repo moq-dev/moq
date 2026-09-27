@@ -4213,6 +4213,7 @@ dependencies = [
  "kio 0.6.1",
  "moq-auth",
  "moq-pattern",
+ "moq-token",
  "p256",
  "p384",
  "rand 0.10.3",
@@ -4758,6 +4759,24 @@ dependencies = [
  "tokio",
  "tracing",
  "web-async",
+]
+
+[[package]]
+name = "moq-token"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "014ed664b93a4a1bde2547fc92604f3147d2087ed7577e069a33bb88662bb57b"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "jsonwebtoken",
+ "p256",
+ "p384",
+ "rsa",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

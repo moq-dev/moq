@@ -105,7 +105,9 @@ impl Permissions {
 /// Legacy `moq-token` claims are read too: each `put`/`get` prefix `p` is the subtree
 /// `p/**`. Claims that only grant subtrees are written that way, so every published
 /// verifier accepts them; anything else is written as `publish`/`subscribe`, which an
-/// older verifier refuses rather than misreads. Any other field fails verification.
+/// older verifier refuses rather than misreads. The registered `iss`, `sub`, and `jti`
+/// claims are read and ignored; any other field fails verification, since it might
+/// narrow the grant, and a misspelled `root` would otherwise widen it.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 #[serde(try_from = "crate::wire::Claims", into = "crate::wire::Claims")]
 #[non_exhaustive]
@@ -127,6 +129,10 @@ pub struct Claims {
 
 	/// The issued time of the token as a unix timestamp (`iat`).
 	pub issued: Option<std::time::SystemTime>,
+
+	/// The time before which the token is refused, as a unix timestamp (`nbf`).
+	/// Enforced by [`Key::verify`](crate::Key::verify).
+	pub not_before: Option<std::time::SystemTime>,
 }
 
 impl Claims {
@@ -246,6 +252,7 @@ mod tests {
 			subscribe: patterns(&["test-sub/**"]),
 			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 			issued: Some(SystemTime::now()),
+			not_before: None,
 		}
 	}
 

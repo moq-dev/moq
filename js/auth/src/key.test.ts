@@ -758,3 +758,37 @@ test("key scope treats absolute and rooted grants alike", async () => {
 	// Roles are independent: a publish-only scope grants no subscribe.
 	await expect(Key.sign(scoped, { root: "project", subscribe: ["live/**"] })).rejects.toThrow("exceed the key scope");
 });
+
+/** Sign an arbitrary payload with `testKey`, bypassing the claims schema, as another issuer might. */
+async function signRaw(payload: Record<string, unknown>): Promise<string> {
+	const secret = new TextEncoder().encode("test-secret-that-is-long-enough-for-hmac-sha256");
+	return new SignJWT(payload).setProtectedHeader({ alg: "HS256", typ: "JWT" }).sign(secret);
+}
+
+// An issuer's bookkeeping is read and dropped; anything else is refused by name, since it
+// might narrow the grant, and a misspelled `root` would widen it to everything.
+test("verify - only registered claims", async () => {
+	const key = Key.parse(encodeJwk(testKey));
+	const now = Math.floor(Date.now() / 1000);
+
+	const token = await signRaw({ root: "room", publish: ["**"], iss: "api", sub: "alice", jti: "1", iat: now });
+	const claims = await Key.verify(key, token);
+	expect(claims.root).toBe("room");
+	expect(claims).not.toHaveProperty("iss");
+
+	for (const [claim, payload] of [
+		["rooot", { rooot: "room/123", publish: ["**"] }],
+		["user_id", { root: "room", publish: ["**"], user_id: 7 }],
+		["cluster", { root: "room", put: [""], cluster: true }],
+		["aud", { root: "room", publish: ["**"], aud: "relay" }],
+	] as const) {
+		await expect(Key.verify(key, await signRaw(payload))).rejects.toThrow(claim);
+	}
+});
+
+test("verify - enforces not before", async () => {
+	const key = Key.parse(encodeJwk(testKey));
+	const now = Math.floor(Date.now() / 1000);
+	expect((await Key.verify(key, await signRaw({ publish: ["**"], nbf: now - 60 }))).nbf).toBe(now - 60);
+	await expect(Key.verify(key, await signRaw({ publish: ["**"], nbf: now + 3600 }))).rejects.toThrow();
+});

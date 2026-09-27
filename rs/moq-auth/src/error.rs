@@ -90,6 +90,9 @@ pub enum Error {
 	#[error("token has expired")]
 	TokenExpired,
 
+	#[error("token is not valid yet")]
+	TokenNotYetValid,
+
 	#[error(transparent)]
 	Pattern(#[from] moq_pattern::InvalidPattern),
 
