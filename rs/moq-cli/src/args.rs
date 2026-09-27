@@ -378,6 +378,7 @@ impl MoqSide {
 		found.extend(self.quic.deprecated());
 		found.extend(self.server.deprecated());
 		found.extend(self.cluster.deprecated());
+		found.extend(self.auth.deprecated());
 		if self.origin.is_some() {
 			found.flag("--origin", Some("MOQ_ORIGIN"), "--hop / MOQ_HOP");
 		}
