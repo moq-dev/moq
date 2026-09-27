@@ -440,7 +440,7 @@
             moq-relay
             moq-bench
             moq-boy
-            libmoq
+            moq-c
             moq-gst
             ;
 
@@ -537,12 +537,12 @@
         checks = {
           package-source-assets = pkgs.runCommand "package-source-assets" { } ''
             for asset in \
-              rs/libmoq/moq.pc.in \
-              rs/libmoq/native-libs/apple.txt \
-              rs/libmoq/native-libs/linux.txt \
-              rs/libmoq/native-libs/windows.txt
+              rs/moq-c/moq-c.pc.in \
+              rs/moq-c/native-libs/apple.txt \
+              rs/moq-c/native-libs/linux.txt \
+              rs/moq-c/native-libs/windows.txt
             do
-              test -f "${overlayPkgs.libmoq.src}/$asset"
+              test -f "${overlayPkgs.moq-c.src}/$asset"
             done
             test -f "${overlayPkgs.moq-boy.src}/rs/moq-video/src/frame/nv12_resize.ptx"
             touch "$out"

@@ -33,7 +33,7 @@ The reference implementation. Every crate is on
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
 | [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtc](https://docs.rs/moq-rtc) | The [gateways](/bin/), as libraries you can embed with your own auth. |
-| [moq-ffi](https://docs.rs/moq-ffi), [libmoq](/lib/c/) | The UniFFI core behind the language bindings, and the C ABI. |
+| [moq-ffi](https://docs.rs/moq-ffi), [moq-c](/lib/c/) | The UniFFI core behind the language bindings, and the C ABI. |
 | [moq-relay](/bin/relay/), [moq-cli](/bin/cli) | The binaries, also usable as crates. |
 | [web-transport](https://github.com/moq-dev/web-transport) | The QUIC/WebTransport/qmux transports, in a sibling repository. |
 

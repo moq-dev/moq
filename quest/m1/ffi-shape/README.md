@@ -32,10 +32,10 @@ Settled shape:
   namespaces.
 - `demand()` is the one way to watch subscribers; producers drop their
   `name`/`is_used`/`used`/`unused` duplicates.
-- libmoq renames its C symbols to the same groups (`moq_json_*`,
+- moq-c renames its C symbols to the same groups (`moq_json_*`,
   `moq_media_*`), with `cpp/obs` adapting.
 
-Each child reshapes one group end to end: moq-ffi, all five wrappers, libmoq,
+Each child reshapes one group end to end: moq-ffi, all five wrappers, moq-c,
 and the `doc/lib` samples, per the cross-package table. This README owns the
 work no child does:
 

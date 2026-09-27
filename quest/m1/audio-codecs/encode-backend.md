@@ -16,7 +16,7 @@ and selection contract settled in main. Opus and PCM retain their behavior. This
 quest adds AAC through platform encoders; no software AAC dependency is selected.
 
 - `encode::Codec` gains `Aac`, meaning `mp4a.40.2`, and `as_str` / `FromStr`
-  accept `"aac"`, which is what libmoq's codec string carries. moq-ffi's
+  accept `"aac"`, which is what moq-c's codec string carries. moq-ffi's
   immutable codec object gains an `aac()` constructor and conversion; do not
   reintroduce a closed binding enum. The generated bindings, hand-written
   wrappers, and docs follow the Cross-Package Sync table.

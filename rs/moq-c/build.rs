@@ -60,10 +60,10 @@ fn main() {
 		.expect("Unable to generate bindings")
 		.write_to_file(&header);
 
-	let pc_in = PathBuf::from(&crate_dir).join(format!("{}.pc.in", LIB_NAME));
+	let pc_in = PathBuf::from(&crate_dir).join("moq-c.pc.in");
 	let pkgconfig_dir = out_dir.join("lib").join("pkgconfig");
 	fs::create_dir_all(&pkgconfig_dir).expect("Failed to create pkgconfig directory");
-	let pc_out = pkgconfig_dir.join(format!("{}.pc", LIB_NAME));
+	let pc_out = pkgconfig_dir.join("moq-c.pc");
 	if let Ok(template) = fs::read_to_string(&pc_in) {
 		let target = env::var("TARGET").unwrap();
 		let libs_private = native_libs(&crate_dir, &target);

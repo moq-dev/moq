@@ -3,7 +3,7 @@
 ## Goal
 
 Every binding can read a session's grant and present more tokens: moq-ffi and
-libmoq expose it, and the hand-written Python, Swift, Kotlin, Go, and Dart
+moq-c expose it, and the hand-written Python, Swift, Kotlin, Go, and Dart
 wrappers and their docs carry it. An OBS user whose token is about to expire
 mid-stream can be handed a new one without the plugin reconnecting.
 
@@ -19,9 +19,9 @@ mid-stream can be handed a new one without the plugin reconnecting.
   moq-ffi already maps on refusal. `MoqClient` sessions reached through the
   reconnecting connection use the accessor
   [Relay tokens](/quest/m1/auth/relay-refresh.md) adds.
-- libmoq: `moq_session_auth_grant`, `moq_session_auth_add`, and
+- moq-c: `moq_session_auth_grant`, `moq_session_auth_add`, and
   `moq_auth_token_close` with the terminal-status callback contract the other
-  async calls use, in `rs/libmoq/src/api.rs` and the session table;
+  async calls use, in `rs/moq-c/src/api.rs` and the session table;
   regenerate `moq.h`, and update `cpp/obs/src` only if the plugin surfaces a
   token field, otherwise leave it.
 - Interop: the Python, Go, and C interop clients print their grant and join

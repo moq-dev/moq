@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 # release-plz owns the version and only ever bumps Cargo.toml, so read it from
 # there. A copy here goes stale the next release and stamps a wrong version into
-# the installed find_package(moq) config, where it silently breaks version
+# the installed find_package(moq-c) config, where it silently breaks version
 # constraints rather than failing the build.
 file(READ "${CMAKE_CURRENT_LIST_DIR}/Cargo.toml" _cargo_toml)
 string(REGEX MATCH "\nversion[ \t]*=[ \t]*\"([^\"]+)\"" _match "${_cargo_toml}")
@@ -11,10 +11,10 @@ unset(_cargo_toml)
 unset(_match)
 
 if(NOT _version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
-    message(FATAL_ERROR "Unsupported version '${_version}' in rs/libmoq/Cargo.toml (project() takes a numeric x.y.z)")
+    message(FATAL_ERROR "Unsupported version '${_version}' in rs/moq-c/Cargo.toml (project() takes a numeric x.y.z)")
 endif()
 
-project(moq VERSION ${_version} LANGUAGES C)
+project(moq-c VERSION ${_version} LANGUAGES C)
 
 option(BUILD_RUST_LIB "Build the Rust library using cargo" ON)
 
@@ -62,6 +62,8 @@ file(MAKE_DIRECTORY ${RUST_INCLUDE_DIR})
 
 # Create interface library target that wraps the Rust static library
 add_library(moq INTERFACE)
+# The name find_package(moq-c) exports, so a consumer links one target either way.
+add_library(moq::c ALIAS moq)
 target_include_directories(moq INTERFACE ${RUST_INCLUDE_DIR})
 
 # Link the static library - must use target_link_libraries so it appears
@@ -70,7 +72,7 @@ target_link_libraries(moq INTERFACE "${RUST_LIB}")
 
 # System libraries Rust std/deps pull in. When the staticlib is linked into a
 # C/C++ target by an external linker, cargo can't inject these itself. build.rs
-# reads the same files for moq.pc, so the two never drift.
+# reads the same files for moq-c.pc, so the two never drift.
 #
 # Reads native-libs/<platform>.txt into MOQ_NATIVE_LIBS: `framework:Foo` becomes
 # a linker framework flag, anything else a plain library name.
@@ -106,7 +108,7 @@ endfunction()
 moq_read_native_libs(MOQ_NATIVE_LIBS)
 target_link_libraries(moq INTERFACE ${MOQ_NATIVE_LIBS})
 
-# Same list, quoted for substitution into cmake/moq-config.cmake.in below.
+# Same list, quoted for substitution into cmake/moq-c-config.cmake.in below.
 # nix/overlay.nix substitutes that template itself and formats this identically.
 set(MOQ_NATIVE_LIBS_QUOTED "")
 foreach(_lib IN LISTS MOQ_NATIVE_LIBS)
@@ -135,27 +137,27 @@ if(PROJECT_IS_TOP_LEVEL)
     # Generate and install CMake package config files
     include(CMakePackageConfigHelpers)
 
-    # The remaining placeholders in cmake/moq-config.cmake.in. rs/libmoq/build.sh
+    # The remaining placeholders in cmake/moq-c-config.cmake.in. rs/moq-c/build.sh
     # and nix/overlay.nix fill the same two in for the release artifacts.
     get_filename_component(LIB_FILE "${RUST_LIB}" NAME)
     set(VERSION "${PROJECT_VERSION}")
 
     configure_package_config_file(
-        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/moq-config.cmake.in
-        ${CMAKE_CURRENT_BINARY_DIR}/moq-config.cmake
-        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/moq
+        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/moq-c-config.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/moq-c-config.cmake
+        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/moq-c
         PATH_VARS CMAKE_INSTALL_LIBDIR CMAKE_INSTALL_INCLUDEDIR
     )
 
     write_basic_package_version_file(
-        ${CMAKE_CURRENT_BINARY_DIR}/moq-config-version.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/moq-c-config-version.cmake
         VERSION ${PROJECT_VERSION}
         COMPATIBILITY SameMajorVersion
     )
 
     install(FILES
-        ${CMAKE_CURRENT_BINARY_DIR}/moq-config.cmake
-        ${CMAKE_CURRENT_BINARY_DIR}/moq-config-version.cmake
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/moq
+        ${CMAKE_CURRENT_BINARY_DIR}/moq-c-config.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/moq-c-config-version.cmake
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/moq-c
     )
 endif()

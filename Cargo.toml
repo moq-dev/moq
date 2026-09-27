@@ -9,6 +9,7 @@ members = [
     "rs/moq-bench",
     "rs/moq-binary",
     "rs/moq-boy",
+    "rs/moq-c",
     "rs/moq-cli",
     "rs/moq-e2ee",
     "rs/moq-ffi",
@@ -44,7 +45,7 @@ members = [
 default-members = [
     "rs/kio",
     "rs/hang",
-    # "rs/libmoq",    # requires C toolchain
+    # "rs/moq-c",     # requires C toolchain
     "rs/moq-archive",
     "rs/moq-auth",
     "rs/moq-boy",
@@ -186,7 +187,7 @@ moq-vaapi = "0.1.0"
 # cross-compiled Python, Swift, Kotlin, and Go builds have no use for: adding
 # `features = ["capture"]` to a consumer that ships in those bindings pulls the
 # whole device graph into every one of them. Codec features are independent of
-# that argument, so moq-ffi and libmoq opt NVIDIA, OpenH264, and VAAPI back in.
+# that argument, so moq-ffi and moq-c opt NVIDIA, OpenH264, and VAAPI back in.
 moq-video = { version = "0.1.5", path = "rs/moq-video", default-features = false }
 nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
 # Upstream noq-proto, only for iroh's controller factory types.

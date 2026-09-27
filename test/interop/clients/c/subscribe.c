@@ -1,7 +1,7 @@
 // Subscribe-only cross-language interop client for the interop test, linked
-// against the workspace libmoq (the C bindings, built by `cargo build -p libmoq`).
+// against the workspace moq-c (the C bindings, built by `cargo build -p moq-c`).
 //
-// libmoq is a handle + callback API: connect, consume a broadcast, get a
+// moq-c is a handle + callback API: connect, consume a broadcast, get a
 // catalog snapshot via callback, start the video track, and a frame callback
 // fires as frames arrive. Once a non-empty frame lands we close and drain every
 // registration, then return 0; a timeout exits 1. Publishing isn't wired up: the
@@ -33,13 +33,13 @@ typedef struct {
 
     // One flag per registration handed &ctx, set by that registration's terminal
     // (<= 0) callback. main returns only once all four are set: that terminal is
-    // libmoq's documented last touch of user_data, so it is what makes main's
+    // moq-c's documented last touch of user_data, so it is what makes main's
     // frame safe to destroy.
     int done_status, done_broadcast, done_catalog, done_frame;
 } ctx_t;
 
-// Callbacks run on libmoq's runtime thread; main waits on the condvar. ctx lives
-// on main's stack and libmoq keeps the pointer until each registration's
+// Callbacks run on moq-c's runtime thread; main waits on the condvar. ctx lives
+// on main's stack and moq-c keeps the pointer until each registration's
 // terminal (<= 0) callback fires, so main must not return until every one of
 // them has. Closing the session ends its status registration alone;
 // moq_origin_announced_broadcast, moq_consume_catalog and moq_consume_video each
@@ -118,7 +118,7 @@ static void on_catalog(void *ud, int32_t catalog) {
     moq_consume_catalog_free((uint32_t)catalog);
 }
 
-// Report a failure and exit 1, for the paths where libmoq still holds &ctx.
+// Report a failure and exit 1, for the paths where moq-c still holds &ctx.
 //
 // _exit rather than a return: it leaves main's frame (and so ctx) intact for the
 // callbacks still pointing at it, which is what the failure paths want. Draining
@@ -250,7 +250,7 @@ int main(int argc, char **argv) {
 
     // The data path succeeded, which is all this interop client verifies. Returning
     // (rather than _exit) is the other half of what it verifies: an embedder that
-    // closes and drains gets a clean process exit, with libmoq's runtime thread
+    // closes and drains gets a clean process exit, with moq-c's runtime thread
     // still live behind its LazyLock.
     drain(&c);
     moq_consume_close((uint32_t)bc);

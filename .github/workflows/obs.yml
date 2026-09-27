@@ -6,13 +6,13 @@ name: OBS
 #
 # Linux is the platform that needs no bundle at all -- nixpkgs has obs-studio,
 # Qt6 and ffmpeg, so the dev shell is the whole dependency set. The plugin is
-# platform-independent C++ over libmoq's C ABI, so a Linux compile catches the
+# platform-independent C++ over moq-c's C ABI, so a Linux compile catches the
 # breakage a macOS developer would otherwise ship uncompiled.
 #
-# Narrow trigger, like swift.yml: the plugin's own sources, the libmoq header
+# Narrow trigger, like swift.yml: the plugin's own sources, the moq-c header
 # they call through, and the flake that supplies the toolchain.
 #
-# libmoq's own C fixtures (`just rs c-tests`) run here too. They link libmoq.a
+# moq-c's own C fixtures (`just rs c-tests`) run here too. They link libmoq.a
 # from outside cargo the same way, which is too slow for nextest's hang budget
 # and needs the debug staticlib this job has just built, so this is the one
 # PR gate that already has everything they need. They also compile the C doc
@@ -20,13 +20,13 @@ name: OBS
 #
 # The manifests and Cargo.lock are in there for the one way a crate the plugin
 # never names can break it: linking libmoq.a from outside cargo needs the native
-# libraries in `rs/libmoq/native-libs/*.txt`, which are maintained by hand. A
+# libraries in `rs/moq-c/native-libs/*.txt`, which are maintained by hand. A
 # dependency that starts pulling in a new one leaves that list stale, and every
 # Rust gate stays green, because cargo passes the flag itself and only this job
 # links without it.
 #
 # Manifests and build scripts rather than Cargo.lock alone, because neither a
-# feature toggle nor a build script has to touch the lockfile. libmoq takes
+# feature toggle nor a build script has to touch the lockfile. moq-c takes
 # moq-native with default features, so flipping one of those defaults on
 # (`jemalloc` gates `dep:tikv-jemallocator`) changes what libmoq.a needs at link
 # time while Cargo.lock stays byte-identical, since moq-relay already put that
@@ -49,7 +49,7 @@ on:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "cpp/obs/**"
-      - "rs/libmoq/**"
+      - "rs/moq-c/**"
       - "doc/lib/c/**"
       - "doc/lib/samples.sh"
       - "rs/**/Cargo.toml"
@@ -94,7 +94,7 @@ jobs:
 
       # cache.yml warms the default-branch store on `main`. Pull requests restore
       # it; the action refuses to publish from a pull request. It holds
-      # dev-profile artifacts, which is why `just obs ci` builds libmoq in debug
+      # dev-profile artifacts, which is why `just obs ci` builds moq-c in debug
       # rather than the preset's release.
       - name: Rust cache
         uses: ./.github/actions/rust-cache
@@ -106,5 +106,5 @@ jobs:
 
       # The plugin build above already produced the debug libmoq.a, so the
       # cargo step inside is a no-op and this is just a cc and a run.
-      - name: libmoq C fixtures
+      - name: moq-c C fixtures
         run: nix develop --command just rs c-tests

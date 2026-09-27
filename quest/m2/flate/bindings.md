@@ -2,7 +2,7 @@
 
 ## Goal
 
-moq-ffi and libmoq publish and subscribe a compressed track of opaque frames,
+moq-ffi and moq-c publish and subscribe a compressed track of opaque frames,
 and every wrapper (Python, Swift, Kotlin, Go, Dart, C) reaches it. A track
 written from C decodes in the browser with `@moq/flate` and vice versa.
 
@@ -29,7 +29,7 @@ track API; only the payload is compressed. Explicit groups rather than a flat `a
 at the boundary and the caller chooses where that is; a helper that rolls
 groups on a size or count budget can follow if a consumer asks.
 
-libmoq mirrors `moq_publish_json_*` and `moq_consume_json_*`:
+moq-c mirrors `moq_publish_json_*` and `moq_consume_json_*`:
 `moq_publish_flate`, `moq_publish_flate_group`, `moq_publish_flate_frame`,
 `moq_publish_flate_group_finish`, `moq_publish_flate_finish`,
 `moq_consume_flate`, `moq_consume_flate_group`, `moq_consume_flate_frame`,
@@ -43,12 +43,12 @@ Wrappers per the Cross-Package Sync table: the uniffi bindings regenerate;
 re-exports and `Flows.kt` extensions, and `dart/moq` each gain a hand-written
 sibling. Document in `doc/lib/{c,py,swift,kt,go,dart}` beside the JSON entry.
 
-Tests: a moq-ffi round trip next to `json_snapshot_roundtrip`, a libmoq C
+Tests: a moq-ffi round trip next to `json_snapshot_roundtrip`, a moq-c C
 round trip in `src/test.rs`, and one cross-language check that a C-published
 group decodes with the shared vector from the track quest. Run
 `just test interop --all`.
 
-Public API impact: additive on moq-ffi, libmoq, and every wrapper; `main`.
+Public API impact: additive on moq-ffi, moq-c, and every wrapper; `main`.
 Wire impact: none.
 
 ## Required

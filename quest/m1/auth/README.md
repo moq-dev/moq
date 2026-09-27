@@ -107,7 +107,7 @@ existing lite-06 ALPN.
 - [moq-transport](/quest/m1/auth/moq-transport.md) - the same exchange as a
   setup-option extension on draft-17+, specified in a new draft
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
-  binding through moq-ffi and libmoq
+  binding through moq-ffi and moq-c
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
   the URL: a session starts on what the URL carried and its AUTH streams add
   the rest, with the URL kept for peers below lite-06

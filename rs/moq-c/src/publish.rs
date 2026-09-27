@@ -99,7 +99,7 @@ pub struct Publish {
 
 impl Publish {
 	/// Store an origin-created broadcast producer, attaching the catalog track
-	/// every libmoq broadcast carries.
+	/// every moq-c broadcast carries.
 	pub fn create(&mut self, mut broadcast: moq_net::broadcast::Producer) -> Result<Id, Error> {
 		let config = moq_mux::catalog::Config::default()
 			.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::catalog::hang::Extra>::default());
