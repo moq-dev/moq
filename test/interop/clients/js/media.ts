@@ -621,12 +621,16 @@ try {
 		});
 		console.error("  detach released every session, audio graph, and worker");
 
+		// The reattached canvas still holds the last frame painted before the detach, and the relay
+		// may replay its cached group from before it too. Only a frame the fixture emits after this
+		// point proves the new session is playing.
+		const detached = (await readFixtureState(publisher)).frameId;
 		await command(player, "reattach");
 		await waitForState(player, playerErrors, {
 			deadline: Date.now() + timeoutMs,
 			assertion: "reattach resumes playback",
-			description: `the presented frame to move past the ${busy.frameId} showing before the detach`,
-			predicate: (state) => (state.frameId ?? 0) > (busy.frameId ?? 0),
+			description: `the presented frame to move past the ${detached} the fixture had emitted by the detach`,
+			predicate: (state) => (state.frameId ?? 0) > detached,
 		});
 		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after reattach");
 	}
