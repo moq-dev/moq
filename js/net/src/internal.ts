@@ -59,9 +59,12 @@ export function presented(
 ): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
 	let rootLen = -1;
+	const requested = Path.Pattern.subtree(prefix);
 	for (const [covered, snap] of table) {
 		if (!carries(covered)) continue;
 		if (Path.hasPrefix(covered, prefix)) {
+			// A scoped route covers only what it claims, so it cannot serve a prefix outside that.
+			if (snap.claim && !snap.claim.overlaps(requested)) continue;
 			if (covered.length < rootLen) continue;
 			rootLen = covered.length;
 			out.set(Path.empty(), snap);
