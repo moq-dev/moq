@@ -23,9 +23,11 @@ both passing.
 The starting point is not a blank page. The reporter on #3477 already built a
 working browser harness on their fork (`fperex/moq`, branch `debug/rt-audio`):
 a CDP driver, a beacon sink, a trace analyzer, a ring replay, a five-scenario
-`bench.sh`, and a `compare.mjs` that prints before-and-after tables, with 130
-raw ndjson traces attached to release `rt-audio-traces-2026-09-06`. Upstream
-that rather than reinventing it.
+`bench.sh`, and a `compare.mjs` that prints before-and-after tables. Upstream
+that rather than reinventing it. The raw traces it shipped with are gone, so
+this harness records fresh ones, and the [jitter target's watch
+quest](/quest/m0/audio-jitter-target/watch.md) replays them (decided with the
+maintainer during the merged-PR audit).
 
 Jitter comes from the seeded userspace UDP shaper the transport drills run
 under (`rs/moq-shaper`, documented in `test/drill/README.md`), not from a fake

@@ -21,14 +21,16 @@ Decided:
   per-track timing, and the importer often fills `jitter` only once it has
   seen reordering.
 - When `jitter` is absent, derive the reserve from the stream rather than
-  refuse it. First choice is the reorder depth the bitstream declares (H.264
-  VUI `max_num_reorder_frames`, HEVC `sps_max_num_reorder_pics`), known from
-  the first keyframe before any frame is emitted, so output stays
-  deterministic. AV1 and VP9 present in decode order and need no reserve.
-  Only when the stream declares nothing, grow the reserve from the
-  reordering actually observed (how far a frame's PTS falls below the
-  track's high-water mark); it only grows, so a stream that never reorders
-  keeps today's tiny reserve.
+  refuse it. The bitstream's reorder depth (H.264 VUI
+  `max_num_reorder_frames`, HEVC `sps_max_num_reorder_pics`) counts
+  pictures, not time, so it becomes a deterministic 90 kHz bound only with
+  fixed timing: the VUI `fixed_frame_rate_flag` with its tick, or the
+  catalog framerate. With both, the reserve is depth times frame duration,
+  known from the first keyframe before any frame is emitted. AV1 and VP9
+  present in decode order and need no reserve. Otherwise (variable frame
+  rate, or nothing declared), grow the reserve from the reordering actually
+  observed (how far a frame's PTS falls below the track's high-water mark);
+  it only grows, so a stream that never reorders keeps today's tiny reserve.
 - Refusing to export video without `jitter` was rejected as too extreme.
 - Treating unknown jitter as unbounded was tried in #4001 and rejected: the
   stall never clears when video leads, breaking
@@ -41,12 +43,13 @@ Guidance:
   back; check the PCR, which backs off by the largest reserve, stays ahead of
   every DTS written.
 - Only the observed fallback is nondeterministic: a B-frame deeper than any
-  seen before can reorder output once per new maximum (Codex on #4307). Say
+  seen before can reorder output once per new maximum (Codex on #4307).
+  Refusing such streams was ruled out by the maintainer. Say
   so in a comment and log each growth, so an undeclared stream is visible
   rather than silently misordered.
 - Tests in `export_test.rs`: two exporters with a late B-frame, no `jitter`,
-  and a declared reorder depth produce byte-identical output from the first
-  frame; an undeclared stream converges after its deepest reorder; and a
+  and a declared reorder depth at a fixed frame rate produce byte-identical
+  output from the first frame; an undeclared stream converges after its deepest reorder; and a
   `jitter` arriving in a catalog after the PMT raises the reserve.
 
 ## Related

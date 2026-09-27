@@ -64,8 +64,9 @@ budget, or a schedule.
   each of those moves the expected floor. A profile-only key silently grades
   one row against another's threshold. Tightening a budget is then a visible
   diff and loosening one needs a reason in review.
-- Trim the released ndjson traces from `rt-audio-traces-2026-09-06` into a
-  fixture and replay them too, so a real recorded arrival pattern is graded
-  next to the synthetic profiles.
+- Record real arrival traces (the #3477 release traces are gone), trim them
+  into a fixture, and replay them too, so a real recorded arrival pattern is
+  graded next to the synthetic profiles. The jitter target's watch quest
+  replays the same fixture.
 - Add the lane to `nightly.yml`, and extend its header comment with why this
   one is not a PR gate.

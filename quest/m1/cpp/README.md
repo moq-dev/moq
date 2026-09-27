@@ -67,7 +67,7 @@ Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
 
 - [Generator](/quest/m1/cpp/generator.md) - the uniffi 0.32 C++ generator with futures and expected-style errors, pinned and generating `cpp/ffi` in CI
 - [Package](/quest/m1/cpp/package.md) - the `cpp/moq` wrapper, CMake package, release tarball, interop client, and docs
-- [Cancel](/quest/m1/cpp/cancel.md) - `Future::cancel()` is &&-qualified, so `get()` after `cancel()` no longer compiles
+- [Cancel](/quest/m1/cpp/cancel.md) - a cancelled or consumed future reports `valid() == false`, like `std::future`, and a read of it aborts with a message naming the misuse
 - [C++ standard](/quest/m1/cpp/cxx-standard.md) - a consumer that sets C++23 only on its own target links the package
 - [OBS migration](/quest/m1/cpp/obs.md) - the OBS plugin moves from libmoq handles and trampolines to the generated C++
 

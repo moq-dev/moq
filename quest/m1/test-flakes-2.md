@@ -35,8 +35,10 @@ retry.
 - WARN counting: capture per test (a scoped subscriber or a filter on the
   test's own span) instead of a process-global count.
 - The race test shares one port only so both transports sit behind one URL.
-  Drive the race with each side on its own `:0` port as #4084 did, or have
-  the listener reserve both itself; no retry. #4084's follow-ups
+  Separate `:0` ports fix the bind collision but not the race itself: with
+  `websocket.delay = 0` either arm can legitimately win under load. Make the
+  order deterministic the way #4084 did, holding the WebSocket arm until QUIC
+  has connected, rather than asserting on a real race; no retry. #4084's follow-ups
   (`tests/reconnect.rs` `spawn_server`, `tests/worker.rs` `free_udp_port`)
   are the same probe-and-rebind pattern; fix them here if cheap.
 - Media late join: first decide whether 16 frames is a real regression (the
