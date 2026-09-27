@@ -418,7 +418,9 @@ impl Serve {
 		// Only a re-check tells the session table a slot is still live; without one,
 		// a relay that died without an `end` would hold its slots forever.
 		if (self.limit_token.is_some() || self.limit_remote.is_some()) && revalidate.is_none() {
-			anyhow::bail!("--limit-token and --limit-remote need --revalidate, which ages out the slots of dead relays");
+			anyhow::bail!(
+				"--limit-token and --limit-remote need --revalidate, which ages out the slots of dead relays"
+			);
 		}
 		// 0.14 read `anon` as the prefix `anon/`, and a pattern reads it as exactly the
 		// broadcast `anon`, so either silent reading would mislead someone upgrading.

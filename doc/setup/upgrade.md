@@ -78,11 +78,33 @@ Other changes to a deployment:
   the pattern-only `moq-auth` 0.1.0/0.1.1 or `@moq/auth` 0.1.x/0.2.0 refuse
   that form, so upgrade them before their issuers. Grants only a pattern can
   express need an upgraded verifier.
+- **Removed auth settings refuse to start.** 0.14's `[auth]` `key`, `key_dir`,
+  `auth_api`, `domains`, `mtls_tier`, and `[auth.tls]`, and their flags and
+  `MOQ_AUTH_*` variables, stop the relay with the replacement named rather
+  than being ignored.
+- **Token claims.** `iss`, `sub`, and `jti` are ignored and `nbf` is enforced.
+  Any other claim refuses the token with its name, `aud` and `cluster`
+  included, where 0.14 ignored all but `aud`: an issuer adding app claims such
+  as `user_id` must drop them.
+- **Every credential is evaluated or refused.** A relay on `--auth-public`
+  refuses a session presenting a token, as 0.14 did, including peers sending
+  `cluster.token`, and refuses to start with a client CA. `moq auth serve`
+  refuses a session presenting both a JWT and a certificate, so a peer
+  presents one or the other.
+- **`moq auth serve` never re-checks or expires by default**, as 0.14 never
+  did. `--revalidate` needs `--expires`, and `--limit-*` needs `--revalidate`.
 - **mTLS admits nothing on its own.** A verified client certificate is reported
   to the auth server, which grants it. `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` restores the old full access for every certificate
   the relay's client CA verifies, so keep that CA to cluster peers.
 - **`moq --listen` needs auth.** A CLI listener refuses to start without
   `--auth-url` or `--auth-public` instead of accepting everyone.
+- **Other 0.14 auth differences kept.** A 0.14 peer that dials with a
+  cluster JWT no longer sees `.internal/origins` gossip; peers identify by
+  certificate or LAN path. An auth server's `root` alias may have any depth.
+  A path in `--cluster-connect` is not refused, although it shifts the mesh
+  frame. `moq auth serve --key` takes a file, not an https or JWKS URL.
+  `moq auth sign --root` is the token root and JS `verify --root` the dialed
+  path. `/.cluster*` roots are reserved. `--auth-public a,b` splits on commas.
 - **noq is the only QUIC stack** (#3811). The `quinn` and `quiche` cargo
   features and the backend setting are gone.
 - **Stats counters** are `*_started` / `*_ended` (`sessions_started`,

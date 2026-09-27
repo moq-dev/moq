@@ -316,10 +316,12 @@ in
         MOQ_CLUSTER_ROOT = cfg.cluster.rootUrl;
       }
       # Public rules refuse a token, so a peer only presents one an auth server will read.
-      // lib.optionalAttrs (cfg.cluster.mode != "none" && (cfg.auth.enable || cfg.cluster.tokenFile != null)) {
-        MOQ_CLUSTER_TOKEN =
-          if cfg.cluster.tokenFile != null then cfg.cluster.tokenFile else "${cfg.stateDir}/cluster.jwt";
-      }
+      //
+        lib.optionalAttrs (cfg.cluster.mode != "none" && (cfg.auth.enable || cfg.cluster.tokenFile != null))
+          {
+            MOQ_CLUSTER_TOKEN =
+              if cfg.cluster.tokenFile != null then cfg.cluster.tokenFile else "${cfg.stateDir}/cluster.jwt";
+          }
       // lib.optionalAttrs (cfg.cluster.nodeUrl != null) {
         MOQ_CLUSTER_NODE = cfg.cluster.nodeUrl;
       };

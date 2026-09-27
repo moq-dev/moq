@@ -67,6 +67,7 @@ pub struct Limits {
 /// `#[non_exhaustive]`, so start from [`Policy::default`] and set the fields.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
+#[derive(Default)]
 pub struct Policy {
 	/// The keys a `jwt` is verified against; `None` refuses every token.
 	pub keys: Option<Keys>,
@@ -85,20 +86,6 @@ pub struct Policy {
 	pub expires: Option<Duration>,
 	/// Live session caps.
 	pub limits: Limits,
-}
-
-impl Default for Policy {
-	fn default() -> Self {
-		Self {
-			keys: None,
-			public: Permissions::default(),
-			mtls: Permissions::default(),
-			tier: None,
-			revalidate: None,
-			expires: None,
-			limits: Limits::default(),
-		}
-	}
 }
 
 /// Why a session was refused; the body of the 403.

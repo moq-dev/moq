@@ -158,7 +158,12 @@ after which it can never sign a broader token.
 | `root` | Base path. Optional. |
 | `publish` | Patterns the bearer may publish under `root`. `**` means everything; omitted means no publishing. |
 | `subscribe` | Patterns the bearer may subscribe to under `root`. Same rules. |
-| `exp`, `iat` | Expiry and issue time. `exp` is enforced for the whole session, not just at connect. |
+| `exp`, `iat`, `nbf` | Expiry, issue time, and not-before. `exp` is enforced for the whole session, not just at connect, and a token is refused before its `nbf`. |
+| `iss`, `sub`, `jti` | Read and ignored. |
+
+Any other claim refuses the token with its name, `aud` included: an unknown
+claim may narrow the grant, and a misspelled `root` would otherwise widen it to
+everything. Put application data somewhere other than the token.
 
 Tokens and key scopes from the older `moq-token` format still work: each `put`
 and `get` prefix `p` reads as the subtree `p/**`, and `""` as `**`. When every
@@ -210,7 +215,9 @@ public_subscribe = ["anon/**", "demo/**"]
 public_publish = ["anon/**"]
 ```
 
-A static grant with no expiry and no re-check. The patterns are rooted at `/`,
+A static grant with no expiry and no re-check. Nothing here verifies a token,
+so a session presenting one (a `jwt` query or any SETUP token) is refused
+rather than admitted on the public grant. The patterns are rooted at `/`,
 like a token with an empty root (see [Path matching](#path-matching)): `anon/**`
 admits a session dialed at `/`, `/anon`, or `/anon/room`, scoped to `anon/`,
 and refuses one dialed anywhere else. A pattern with no wildcard, such as
@@ -225,8 +232,9 @@ server instead (`moq auth serve --public-*`).
 bad chain still fails there. What the certificate admits is the server's
 decision: the relay reports its facts in the request's `tls` and enforces the
 grant it gets back. `moq auth serve` grants a certificate only what
-`--mtls-publish` and `--mtls-subscribe` name, empty by default. A relay on
-`--auth-public` grants a certificate what it grants everyone.
+`--mtls-publish` and `--mtls-subscribe` name, empty by default. Public rules
+ignore certificates, so a relay on `--auth-public` refuses to start with
+`listen.tls.root` or `web.https.root`.
 
 Cluster peers are admitted the same way, so a mesh runs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server
@@ -254,34 +262,43 @@ moq auth serve --listen 127.0.0.1:4440 \
   --key-dir /etc/moq/keys \
   --public-subscribe 'anon/**' --public-publish 'anon/**' \
   --mtls-publish '**' --mtls-subscribe '**' \
-  --tier edge --revalidate 1m --limit-remote 64
+  --tier edge --expires 1d --revalidate 1m --limit-remote 64
 ```
 
-Policy runs in this order and stops at the first that applies:
+What a session presents decides what is checked. Every credential is either
+evaluated or refused: nothing is ignored, and no two are combined.
 
-1. A JWT, from the `jwt` query or a SETUP `token` of `kind` 0, is verified
-   against `--key FILE` or `--key-dir DIR`
-   (by `kid`, read per request so rotation needs no restart). Its claims
-   are authorized at the dialed path (`Claims::authorize`): the path may
-   equal the root, extend it (which narrows the grant), or be a parent of
-   it (the grant stays anchored at the root). Residuals become the grant.
-   An unrelated path, or one the token grants nothing at, is refused. A
-   malformed, expired, or unknown-key token is refused; it never falls
-   through to the anonymous rules. So is a SETUP token of any other `kind`,
-   and a session presenting both a SETUP token and a `jwt` query.
-2. A verified client certificate gets `--mtls-publish` and
-   `--mtls-subscribe`, rooted at `/` and authorized at the dialed path like a
-   token with an empty root, and nothing when they are empty. Cluster peers are
-   admitted this way; a mesh needs `'**'` for both.
-3. Anything else gets `--public-publish` and `--public-subscribe`, rooted
-   the same way, and is refused when they are empty or reach nothing at the
-   dialed path.
+| Presented | `--auth-public` | `--auth-url` to `moq auth serve` |
+| --- | --- | --- |
+| nothing | the public rules | `--public-*`, or refused |
+| a JWT | refused | verified, or refused |
+| a certificate | never requested: a client CA refuses to start | `--mtls-*`, or refused |
+| a JWT and a certificate | never requested | refused |
 
-Every grant carries `--tier`, a `revalidate` cadence (`--revalidate`, default
-one minute), and an `expires`: the token's `exp`, the certificate's notAfter,
-or `--expires` (default one day) when neither has one.
+A JWT, from the `jwt` query or a SETUP `token` of `kind` 0, is verified
+against `--key FILE` or `--key-dir DIR` (by `kid`, read per request so
+rotation needs no restart) and authorized at the dialed path, as in
+[Path matching](#path-matching). A malformed, expired, or unknown-key token is
+refused; it never falls through to the anonymous rules. So is a SETUP token of
+any other `kind`, and a session presenting both a SETUP token and a `jwt` query.
+A JWT presented with a certificate is refused, because neither can safely win:
+the certificate would override a JWT meant to narrow it, and the JWT would
+narrow or refuse a peer by accident. So a peer presents `cluster.token` or a
+certificate, not both.
 
-`--limit-token N` and `--limit-remote N` cap live sessions per token and
+`--mtls-*` and `--public-*` are rooted at `/`, like a token with an empty root,
+and a session they reach nothing at is refused. Cluster peers are admitted by
+certificate; a mesh needs `--mtls-publish '**' --mtls-subscribe '**'`.
+
+Every grant carries `--tier`. As in 0.14, nothing is re-checked or closed by
+default: a session lives until its token's `exp` or its certificate's notAfter.
+`--expires D` bounds a grant with no bound of its own (an anonymous session, a
+token without `exp`, a certificate without notAfter). `--revalidate D` has the
+relay re-check each grant on that cadence and needs `--expires`, so an outage
+still has a bound. Without `--revalidate`, rotating or deleting a key does not
+close live sessions.
+
+`--limit-token N` and `--limit-remote N` need `--revalidate`, and cap live sessions per token and
 per remote address (port dropped, IPv4-mapped IPv6 folded), counted from
 `connect` and `end` by session id. The cap is a nuisance limit, not a security
 boundary: it gates admission and never revokes. A relay that dies without an

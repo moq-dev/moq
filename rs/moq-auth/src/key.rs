@@ -983,7 +983,10 @@ mod tests {
 	#[test]
 	fn test_key_verify_only_registered_claims() {
 		let key = create_test_key();
-		let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+		let now = SystemTime::now()
+			.duration_since(SystemTime::UNIX_EPOCH)
+			.unwrap()
+			.as_secs();
 
 		let token = sign_raw(
 			&key,
@@ -993,15 +996,24 @@ mod tests {
 
 		for (claim, payload) in [
 			("rooot", serde_json::json!({"rooot": "room/123", "publish": ["**"]})),
-			("user_id", serde_json::json!({"root": "room", "publish": ["**"], "user_id": 7})),
-			("cluster", serde_json::json!({"root": "room", "put": [""], "cluster": true})),
+			(
+				"user_id",
+				serde_json::json!({"root": "room", "publish": ["**"], "user_id": 7}),
+			),
+			(
+				"cluster",
+				serde_json::json!({"root": "room", "put": [""], "cluster": true}),
+			),
 		] {
 			let err = key.verify(&sign_raw(&key, payload)).unwrap_err().to_string();
 			assert!(err.contains(&format!("`{claim}`")), "{claim}: {err}");
 		}
 
 		// No audience is configured, so there is nothing to check one against.
-		let token = sign_raw(&key, serde_json::json!({"root": "room", "publish": ["**"], "aud": "relay"}));
+		let token = sign_raw(
+			&key,
+			serde_json::json!({"root": "room", "publish": ["**"], "aud": "relay"}),
+		);
 		assert!(key.verify(&token).is_err());
 	}
 
@@ -1009,8 +1021,14 @@ mod tests {
 	fn test_key_verify_enforces_not_before() {
 		let key = create_test_key();
 		let at = |offset: i64| {
-			let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
-			sign_raw(&key, serde_json::json!({"root": "room", "publish": ["**"], "nbf": now + offset}))
+			let now = SystemTime::now()
+				.duration_since(SystemTime::UNIX_EPOCH)
+				.unwrap()
+				.as_secs() as i64;
+			sign_raw(
+				&key,
+				serde_json::json!({"root": "room", "publish": ["**"], "nbf": now + offset}),
+			)
 		};
 		assert!(key.verify(&at(-60)).is_ok());
 		assert!(matches!(key.verify(&at(3600)), Err(crate::Error::TokenNotYetValid)));

@@ -109,15 +109,35 @@ pub(crate) struct Legacy {
 	key_dir: Option<String>,
 	#[usage(name = "auth-api", long = "auth-api", env = "MOQ_AUTH_API", hide = true)]
 	api: Option<String>,
-	#[usage(name = "auth-public-api", long = "auth-public-api", env = "MOQ_AUTH_PUBLIC_API", hide = true)]
+	#[usage(
+		name = "auth-public-api",
+		long = "auth-public-api",
+		env = "MOQ_AUTH_PUBLIC_API",
+		hide = true
+	)]
 	public_api: Option<String>,
 	#[usage(name = "auth-domain", long = "auth-domain", env = "MOQ_AUTH_DOMAIN", hide = true)]
 	domain: Vec<String>,
-	#[usage(name = "auth-mtls-tier", long = "auth-mtls-tier", env = "MOQ_AUTH_MTLS_TIER", hide = true)]
+	#[usage(
+		name = "auth-mtls-tier",
+		long = "auth-mtls-tier",
+		env = "MOQ_AUTH_MTLS_TIER",
+		hide = true
+	)]
 	mtls_tier: Option<String>,
-	#[usage(name = "auth-tls-root", long = "auth-tls-root", env = "MOQ_AUTH_TLS_ROOT", hide = true)]
+	#[usage(
+		name = "auth-tls-root",
+		long = "auth-tls-root",
+		env = "MOQ_AUTH_TLS_ROOT",
+		hide = true
+	)]
 	tls_root: Vec<String>,
-	#[usage(name = "auth-tls-cert", long = "auth-tls-cert", env = "MOQ_AUTH_TLS_CERT", hide = true)]
+	#[usage(
+		name = "auth-tls-cert",
+		long = "auth-tls-cert",
+		env = "MOQ_AUTH_TLS_CERT",
+		hide = true
+	)]
 	tls_cert: Option<String>,
 	#[usage(name = "auth-tls-key", long = "auth-tls-key", env = "MOQ_AUTH_TLS_KEY", hide = true)]
 	tls_key: Option<String>,
@@ -528,10 +548,11 @@ impl Decider {
 /// `jwt` query parameter, the convention `moq auth serve` reads.
 fn presents_token(request: &Request) -> bool {
 	request.token.is_some()
-		|| request
-			.query
-			.as_deref()
-			.is_some_and(|query| query.split('&').any(|pair| pair.strip_prefix("jwt=").is_some_and(|jwt| !jwt.is_empty())))
+		|| request.query.as_deref().is_some_and(|query| {
+			query
+				.split('&')
+				.any(|pair| pair.strip_prefix("jwt=").is_some_and(|jwt| !jwt.is_empty()))
+		})
 }
 
 /// Admits sessions by queueing every request for one admission decider.

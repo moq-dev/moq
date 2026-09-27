@@ -93,7 +93,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 ## Quests
 
-- [Auth parity](/quest/m0/auth-parity.md) - 0.14 configs and tokens keep working or are refused with the fix named, and every credential a session presents is evaluated or refused
 - [Release](/quest/m0/release.md) - the release moq.pro adopts: binding docs, an upgrade page, and a staging soak gate it rather than the merge
 - [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - a playout latency regression fails a run instead of arriving as a bug report, and its recorder supplies the jitter target's replay traces
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
