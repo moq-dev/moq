@@ -1792,7 +1792,8 @@ impl Production {
 		}
 		// A max, not a store: B-frames present out of order within a group.
 		self.newest.fetch_max(at, Ordering::Relaxed);
-		self.bytes.fetch_add(bytes, Ordering::Relaxed);
+		// Release: a sampler that acquires these bytes also sees the edges above.
+		self.bytes.fetch_add(bytes, Ordering::Release);
 	}
 
 	fn load(cell: &AtomicU64) -> Option<Duration> {
@@ -1822,6 +1823,8 @@ struct FrontierState {
 	behind: Option<Instant>,
 	/// The tracks feeding the subscription: one, or one per segment of a splice.
 	sources: Vec<Source>,
+	/// Bytes an unwatched source produced since the last sample, still owed to it.
+	unsampled: u64,
 }
 
 /// A track feeding a [`Frontier`], with the produced bytes already sampled.
@@ -1839,6 +1842,7 @@ impl Frontier {
 				advanced: crate::model::clock::now(),
 				behind: None,
 				sources: Vec::new(),
+				unsampled: 0,
 			}),
 		});
 		counters
@@ -1878,9 +1882,21 @@ impl Frontier {
 	pub(crate) fn unwatch(&self, track: &Arc<cache::Track>) {
 		let Some(inner) = &self.0 else { return };
 		let mut state = inner.state.lock().expect("stats frontier poisoned");
-		state
-			.sources
-			.retain(|s| s.track.upgrade().is_some_and(|live| !Arc::ptr_eq(&live, track)));
+		let mut unsampled = 0;
+		state.sources.retain(|s| {
+			let Some(live) = s.track.upgrade() else { return false };
+			if !Arc::ptr_eq(&live, track) {
+				return true;
+			}
+			// What it produced before the cap reached this reader: keep it for the next sample.
+			unsampled += live
+				.production()
+				.bytes
+				.load(Ordering::Relaxed)
+				.saturating_sub(s.sampled);
+			false
+		});
+		state.unsampled += unsampled;
 	}
 
 	/// Start tracking one group stream written toward the peer.
@@ -1897,7 +1913,7 @@ impl FrontierInner {
 	/// nothing was produced (a paused source moves nothing).
 	fn sample(&self, now: Instant) -> Option<(Duration, u64)> {
 		let mut state = self.state.lock().expect("stats frontier poisoned");
-		let mut weight = 0;
+		let mut weight = std::mem::take(&mut state.unsampled);
 		let mut newest = None;
 		let mut first: Option<Duration> = None;
 		state.sources.retain_mut(|source| {
@@ -1906,7 +1922,8 @@ impl FrontierInner {
 				return false;
 			};
 			let production = track.production();
-			let bytes = production.bytes.load(Ordering::Relaxed);
+			// Acquire pairs with `Production::record`: the edges read below cover these bytes.
+			let bytes = production.bytes.load(Ordering::Acquire);
 			weight += bytes.saturating_sub(source.sampled);
 			source.sampled = bytes;
 			newest = newest.max(Production::load(&production.newest));

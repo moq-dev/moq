@@ -2560,15 +2560,17 @@ mod test {
 		write_group_at(&mut track_a, 0, "a0", Duration::ZERO);
 		assert_eq!(weight(), 2);
 
-		producer.switch(&consumer_b, Position::group(1)).unwrap();
-		let _ = kio::wait(|waiter| sub.poll_recv_group(waiter)).now_or_never();
+		// Produced before the switch but not sampled yet: still this reader's media.
+		write_group_at(&mut track_a, 1, "a1", Duration::from_millis(500));
+		producer.switch(&consumer_b, Position::group(2)).unwrap();
+		while kio::wait(|waiter| sub.poll_recv_group(waiter)).now_or_never().is_some() {}
 		pending(&mut sub);
-		write_group_at(&mut track_b, 1, "b1", Duration::from_secs(1));
-		assert_eq!(weight(), 4);
+		write_group_at(&mut track_b, 2, "b2", Duration::from_secs(1));
+		assert_eq!(weight(), 6);
 
 		// The capped route keeps publishing past the boundary: not this reader's media.
-		write_group_at(&mut track_a, 2, "a2", Duration::from_secs(2));
-		assert_eq!(weight(), 4);
+		write_group_at(&mut track_a, 3, "a3", Duration::from_secs(2));
+		assert_eq!(weight(), 6);
 	}
 
 	#[tokio::test]
