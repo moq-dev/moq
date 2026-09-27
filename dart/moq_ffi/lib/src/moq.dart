@@ -1773,7 +1773,7 @@ class MoqTrackInfo {
   final int? maxAgeUs;
   final int? timescale;
   MoqTrackInfo({
-    this.priority = 0,
+    this.priority = 127,
     this.maxAgeUs = null,
     this.timescale = null,
   });

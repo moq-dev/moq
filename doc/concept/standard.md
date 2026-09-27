@@ -29,7 +29,9 @@ differences.
 An IETF publisher declares the track's default priority in `SUBSCRIBE_OK` or
 `PUBLISH` when that draft carries track properties. Groups without a priority
 flag inherit it. If the property is absent, the IETF wire default of 128 maps
-to model priority 127, where higher values are served first.
+to model priority 127, where higher values are served first. A track that
+never sets a priority is 127 as well, so it goes out as 128 on IETF and 127
+on moq-lite.
 
 The Rust publisher answers a standalone `FETCH` by walking its range one group
 at a time, in ascending order, from the cache. A relay fetches each missing
