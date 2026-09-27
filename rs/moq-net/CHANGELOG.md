@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7](https://github.com/moq-dev/moq/compare/moq-net-v0.3.6...moq-net-v0.3.7) - 2026-09-27
+
+### Added
+
+- *(mux)* detect delay and jitter on JSON and binary tracks ([#4270](https://github.com/moq-dev/moq/pull/4270))
+- *(net)* the SETUP AUTHORIZATION TOKEN option reaches the verifier ([#4278](https://github.com/moq-dev/moq/pull/4278))
+
+### Fixed
+
+- *(net)* settle lite-07 tails on stream counts ([#4224](https://github.com/moq-dev/moq/pull/4224))
+- *(net)* announce a covering route to a narrower prefix instead of panicking ([#4302](https://github.com/moq-dev/moq/pull/4302))
+
+### Other
+
+- fix stale agent rules, the moq-net hop range, and the ffi unannounce doc ([#4305](https://github.com/moq-dev/moq/pull/4305))
+
 ## [0.3.6](https://github.com/moq-dev/moq/compare/moq-net-v0.3.5...moq-net-v0.3.6) - 2026-09-26
 
 ### Added

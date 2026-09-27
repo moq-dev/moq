@@ -1437,6 +1437,50 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 	server.close();
 });
 
+// A fetch that coalesces after the last reader left, but before the FETCH is cancelled, re-arms
+// the demand watch. The frame read in flight across that re-arm must still reach the group. The
+// window is a few microtasks wide, so the late reader arrives after every delay across it.
+test("integration: lite fetch re-armed by a late reader keeps every frame", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const broadcast = publish(origin, Path.from("test"));
+	const video = broadcast.createTrack("video");
+	const remote = wireOf(client).consume(Path.from("test"));
+
+	for (let delay = 0; delay <= 12; delay++) {
+		const group = video.appendGroup(); // open
+		group.writeString("hello");
+
+		const f1 = await remote.track("video").fetchGroup(group.sequence);
+		expect(await f1.readString()).toBe("hello");
+
+		f1.close();
+		for (let i = 0; i < delay; i++) await Promise.resolve();
+		const f2 = await remote.track("video").fetchGroup(group.sequence);
+		expect(await f2.readString()).toBe("hello");
+
+		group.writeString("more");
+		const more = await Promise.race([
+			f2.readString(),
+			new Promise<string>((resolve) => setTimeout(() => resolve("dropped"), 500)),
+		]);
+		expect(`${delay}: ${more}`).toBe(`${delay}: more`);
+
+		f2.close();
+		group.close();
+	}
+
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
 // A finite group must still deliver every frame and end cleanly (the demand watch must not disturb
 // normal completion), exercising the per-frame loop many times.
 test("integration: lite fetch delivers every frame of a finite multi-frame group", async () => {

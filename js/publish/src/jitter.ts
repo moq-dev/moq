@@ -1,18 +1,24 @@
+import * as Catalog from "@moq/hang/catalog";
+
 const WINDOW = 10_000_000; // 10 seconds in microseconds.
 
 type Sample = { at: number; lateness: number };
 
-// One rendition's recent minimum encode lateness. The queue is ordered by lateness so its head is
-// the minimum in the last window, and each sample enters/leaves once.
-export class JitterClock {
+// The minimum flush lateness over the last window, so a media clock drifting against the wall clock
+// does not ratchet forever. The queue is ordered by lateness so its head is the minimum, and each
+// sample enters/leaves once.
+//
+// Every js/publish timestamp is `performance.now()`, so lateness compares across renditions and one
+// window can be shared by a whole broadcast.
+export class Baseline {
 	#samples: Sample[] = [];
 	#head = 0;
 
-	observe(timestamp: number, now: number): number {
+	// Insert a lateness observed at `now` and return the window's minimum.
+	observe(lateness: number, now: number): number {
 		const cutoff = now - WINDOW;
 		while (this.#head < this.#samples.length && this.#samples[this.#head].at < cutoff) this.#head++;
 
-		const lateness = now - timestamp;
 		while (this.#samples.length > this.#head) {
 			const last = this.#samples.at(-1);
 			if (!last || last.lateness < lateness) break;
@@ -26,23 +32,40 @@ export class JitterClock {
 			this.#head = 0;
 		}
 		this.#samples.push({ at: now, lateness });
-		return Math.max(0, lateness - this.#samples[this.#head].lateness);
+		return this.#samples[this.#head].lateness;
 	}
 }
 
-// One rendition's advertised maximum spread above its own recent minimum lateness.
-export class RenditionJitter {
-	#clock = new JitterClock();
-	#maximum = 0;
+// One rendition's catalog `jitter` and `delay`, each a lifetime maximum in whole milliseconds.
+// Mirrors `moq_mux::catalog::Estimator`.
+export class Estimator {
+	#baseline = new Baseline();
+	#jitter = 0;
+	#delay = 0;
 
-	get current(): number | undefined {
-		return this.#maximum || undefined;
+	// The catalog fields measured so far, each absent until nonzero.
+	get estimate(): { jitter?: Catalog.U53; delay?: Catalog.U53 } {
+		return {
+			jitter: this.#jitter ? Catalog.u53(this.#jitter) : undefined,
+			delay: this.#delay ? Catalog.u53(this.#delay) : undefined,
+		};
 	}
 
-	observe(timestamp: number): number | undefined {
-		const rounded = Math.ceil(this.#clock.observe(timestamp, performance.now() * 1000) / 1000);
-		if (rounded <= this.#maximum) return undefined;
-		this.#maximum = rounded;
-		return rounded;
+	// Measure a frame handed to the transport now, against the `broadcast` baseline every rendition
+	// in the catalog shares. Jitter is the spread above this rendition's own recent minimum lateness,
+	// so a constant encoder delay is not jitter; delay is how far that minimum trails the broadcast's.
+	// Returns whether either estimate rose.
+	flush(timestamp: number, broadcast: Baseline, now = performance.now() * 1000): boolean {
+		const lateness = now - timestamp;
+		const earliest = broadcast.observe(lateness, now);
+		const minimum = this.#baseline.observe(lateness, now);
+
+		const jitter = Math.ceil((lateness - minimum) / 1000);
+		const delay = Math.ceil((minimum - earliest) / 1000);
+		if (jitter <= this.#jitter && delay <= this.#delay) return false;
+
+		this.#jitter = Math.max(this.#jitter, jitter);
+		this.#delay = Math.max(this.#delay, delay);
+		return true;
 	}
 }

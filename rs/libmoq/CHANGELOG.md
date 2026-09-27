@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.8](https://github.com/moq-dev/moq/compare/libmoq-v0.6.7...libmoq-v0.6.8) - 2026-09-27
+
+### Other
+
+- video resumes on a keyframe after discontinuity() ([#4285](https://github.com/moq-dev/moq/pull/4285))
+
 ## [0.6.7](https://github.com/moq-dev/moq/compare/libmoq-v0.6.6...libmoq-v0.6.7) - 2026-09-26
 
 ### Added

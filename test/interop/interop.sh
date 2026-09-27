@@ -256,7 +256,7 @@ prepare_go() {
     }
     echo "building go client (workspace moq-go via uniffi-bindgen-go)..."
     local staged ffi_pkg wrapper_pkg src="$HARNESS_RUN/go-client"
-    if ! staged=$(bash "$WORKSPACE/go/scripts/stage.sh" 2>"$HARNESS_RUN/go-stage.log"); then
+    if ! staged=$(bash "$WORKSPACE/go/scripts/stage.sh" --output "$HARNESS_RUN/go-stage" 2>"$HARNESS_RUN/go-stage.log"); then
         mark_broken go "go/scripts/stage.sh failed"
         sed 's/^/        /' "$HARNESS_RUN/go-stage.log" >&2 || true
         return

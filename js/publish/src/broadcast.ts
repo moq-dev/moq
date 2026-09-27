@@ -3,6 +3,7 @@ import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import { CatalogProducer } from "./catalog";
+import { Baseline } from "./jitter";
 import { type Kind, Rendition } from "./rendition";
 
 // Signals the broadcast reads. Whoever owns the backing Signal (the element, or another component
@@ -69,6 +70,12 @@ export class Broadcast {
 	// catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
 	// Reacquire it via an effect, since a rename swaps in a fresh producer.
 	readonly net = new Signal<Moq.Broadcast.Producer | undefined>(undefined);
+
+	/**
+	 * @internal The recent minimum flush lateness across every rendition, which each encoder
+	 * measures its catalog `delay` against. Per broadcast, so a swapped one starts fresh.
+	 */
+	readonly baseline = new Baseline();
 
 	// The registered renditions keyed by full track name. A plain object so deep-equality detects a
 	// key add/remove; the Rendition values compare by identity, which is stable.

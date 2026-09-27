@@ -30,6 +30,7 @@ import {
 	type PlayerState,
 	POLL_INTERVAL_MS,
 	pageUrl,
+	pause,
 	readFixtureState,
 	readPlayerState,
 	SELECTORS,
@@ -526,9 +527,7 @@ try {
 	// ── pause and resume ─────────────────────────────────────────────────────
 	if (wants("pause")) {
 		console.error("=== pause and resume ===");
-		// The chrome auto-hides while playing; pointer activity reveals the real control.
-		await player.dispatchEvent(SELECTORS.ui, "pointermove");
-		await player.locator(SELECTORS.ui).locator(SELECTORS.pauseControl).click();
+		await pause(player);
 		await waitForState(player, playerErrors, {
 			deadline: Date.now() + SETTLE_MS,
 			assertion: "pause takes effect",

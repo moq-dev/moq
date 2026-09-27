@@ -10,7 +10,7 @@ A relay admits a session in exactly one of two ways:
 | Flag | What admits |
 | --- | --- |
 | `--auth-url` | An auth server, asked once per session event with everything the relay knows. `moq auth serve` is the reference server; a Worker or a service of your own answers the same contract. |
-| `--auth-public` | A static grant for anonymous sessions: patterns under the dialed path, no server. |
+| `--auth-public` | A static grant for anonymous sessions: patterns rooted at `/`, like a token with an empty root. No server. |
 
 Setting both, or neither, fails at startup; an application that embeds the
 relay may leave both unset and decide [in process](#in-process) instead.
@@ -182,6 +182,19 @@ at the dialed path: the path may equal the root, extend it (which narrows the
 grant), or be a parent of it (the grant still applies at the root). An unrelated
 path is rejected. The relay forwards the raw path and enforces the grant it gets.
 
+The session's root is always the path it dialed, and what it sees is named
+relative to that. For a grant of `demo/**` from the root:
+
+| Dialed | Session root | Granted |
+| --- | --- | --- |
+| `/demo/bar` | `demo/bar` | `**` |
+| `/demo` | `demo` | `**` |
+| `/` | \`\` | `demo/**` |
+| `/other` | refused | |
+
+Anonymous and mTLS rules, on the relay and in `moq auth serve`, are authorized
+the same way, as a token with an empty root.
+
 | root | publish | subscribe | Publish | Subscribe |
 | --- | --- | --- | --- | --- |
 | `demo` | `my-stream/**` | `**` | `demo/my-stream/**` | `demo/**` |
@@ -201,7 +214,12 @@ public_subscribe = ["anon/**", "demo/**"]
 public_publish = ["anon/**"]
 ```
 
-A static grant with no expiry and no re-check. `public = "**"` opens everything
+A static grant with no expiry and no re-check. The patterns are rooted at `/`,
+like a token with an empty root (see [Path matching](#path-matching)): `anon/**`
+admits a session dialed at `/`, `/anon`, or `/anon/room`, scoped to `anon/`,
+and refuses one dialed anywhere else. A pattern with no wildcard, such as
+`anon`, refuses to start: 0.14 read it as a prefix and a pattern reads it as one
+broadcast, so write `anon/**` for the subtree. `public = "**"` opens everything
 and is for development only. With `--auth-url` the anonymous rules live on the
 server instead (`moq auth serve --public-*`).
 
@@ -256,10 +274,12 @@ Policy runs in this order and stops at the first that applies:
    through to the anonymous rules. So is a SETUP token of any other `kind`,
    and a session presenting both a SETUP token and a `jwt` query.
 2. A verified client certificate gets `--mtls-publish` and
-   `--mtls-subscribe`, and nothing when they are empty. Cluster peers are
+   `--mtls-subscribe`, rooted at `/` and authorized at the dialed path like a
+   token with an empty root, and nothing when they are empty. Cluster peers are
    admitted this way; a mesh needs `'**'` for both.
-3. Anything else gets `--public-publish` and `--public-subscribe`, and is
-   refused when they are empty.
+3. Anything else gets `--public-publish` and `--public-subscribe`, rooted
+   the same way, and is refused when they are empty or reach nothing at the
+   dialed path.
 
 Every grant carries `--tier`, a `revalidate` cadence (`--revalidate`, default
 one minute), and an `expires`: the token's `exp`, the certificate's notAfter,
@@ -280,10 +300,12 @@ its own.
 
 ### Migrating from the relay flags
 
-The relay flags below were deleted; the policy moves to the server and the
-relay gets `--auth-url`.
+Most of the 0.14 relay flags below were deleted; their policy moves to the
+server and the relay gets `--auth-url`. A relay without a server keeps
+`--auth-public`, as patterns: `--auth-public 'PREFIX/**'`. With a server, the
+anonymous rules move too.
 
-| Removed relay flag | `moq auth serve` |
+| 0.14 relay flag | `moq auth serve` |
 | --- | --- |
 | `--auth-key FILE` | `--key FILE` |
 | `--auth-key-dir DIR` | `--key-dir DIR` |

@@ -56,12 +56,12 @@ struct Outcome {
 	elapsed: Duration,
 }
 
-/// Publish a one-group track, end it while its group stream is held back, then deliver or
-/// lose that stream, and return what the subscriber read.
-async fn round(version: &str, late: Late) -> Outcome {
+/// Publish a group below the declared end (or none for an empty track), hold its stream
+/// back until the subscription ends, then deliver or lose it.
+async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
+	let mut track = broadcast.create_track("video", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let subscriber = produce_origin(2);
@@ -112,19 +112,23 @@ async fn round(version: &str, late: Late) -> Outcome {
 		.unwrap();
 
 	pair.server_transport.hold_unis();
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
-	group.finish().unwrap();
-	track.finish().unwrap();
+	if final_sequence > 0 {
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
+		group.finish().unwrap();
+	}
+	track.finish_at(final_sequence).unwrap();
 	drop(track);
 
-	// Paused time only advances once every task is idle, so this runs the publisher to its
-	// end of the subscription and the subscriber through reading it.
-	tokio::time::sleep(GRACE / 10).await;
-	assert!(
-		!reader.is_finished(),
-		"{version}: the track ended before its group arrived"
-	);
+	if final_sequence > 0 {
+		// Paused time advances only when every task is idle, after the publisher and
+		// subscriber have processed the subscription's end.
+		tokio::time::sleep(GRACE / 10).await;
+		assert!(
+			!reader.is_finished(),
+			"{version}: the track ended before its group arrived"
+		);
+	}
 
 	let released = tokio::time::Instant::now();
 	match late {
@@ -150,7 +154,7 @@ async fn round(version: &str, late: Late) -> Outcome {
 async fn a_group_after_the_end_is_delivered() {
 	tokio::time::pause();
 	for version in VERSIONS {
-		let outcome = round(version, Late::Delivered).await;
+		let outcome = round(version, Late::Delivered, 1).await;
 		assert!(
 			outcome.err.is_none() && outcome.frames == [PAYLOAD],
 			"{version}: got {} frame(s), err={:?}",
@@ -176,7 +180,7 @@ async fn a_group_after_the_end_is_delivered() {
 async fn a_lost_group_ends_the_track_after_the_grace() {
 	tokio::time::pause();
 	for version in VERSIONS {
-		let outcome = round(version, Late::Lost).await;
+		let outcome = round(version, Late::Lost, 1).await;
 		assert!(
 			outcome.err.is_none() && outcome.frames.is_empty(),
 			"{version}: got {} frame(s), err={:?}",
@@ -189,4 +193,24 @@ async fn a_lost_group_ends_the_track_after_the_grace() {
 			outcome.elapsed
 		);
 	}
+}
+
+/// Skipped sequences have no stream and must not hold lite-07's counted tail open.
+#[tokio::test]
+async fn lite07_skipped_groups_end_without_the_grace() {
+	tokio::time::pause();
+	let outcome = round("moq-lite-07-wip", Late::Delivered, 3).await;
+	assert!(outcome.err.is_none());
+	assert_eq!(outcome.frames, [PAYLOAD]);
+	assert!(outcome.elapsed < GRACE / 10, "ended after {:?}", outcome.elapsed);
+}
+
+/// A zero stream count leaves no tail to wait for.
+#[tokio::test]
+async fn lite07_zero_streams_end_without_the_grace() {
+	tokio::time::pause();
+	let outcome = round("moq-lite-07-wip", Late::Delivered, 0).await;
+	assert!(outcome.err.is_none());
+	assert!(outcome.frames.is_empty());
+	assert!(outcome.elapsed < GRACE / 10, "ended after {:?}", outcome.elapsed);
 }

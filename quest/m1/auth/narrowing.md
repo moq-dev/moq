@@ -29,6 +29,17 @@ A narrowing always succeeds. A changed root still closes the session.
   handle and cursor (`OriginScope` in `rs/moq-net/src/model/origin.rs`), so
   narrowing needs shared state. If handles need a tree to share it, keep the
   ceiling on the grant node itself (an `Arc` shared by clones and children).
+- Close the revocation races Codex found on
+  [#4179](https://github.com/moq-dev/moq/pull/4179), which the same watcher
+  mechanism owns: an in-flight lite FETCH keeps serving after its path is
+  revoked (Rust and JS check only at accept, and Rust's dropped fetches reset
+  `CANCELLED`, not `UNAUTHORIZED`); a Rust lite subscription still in
+  `Establish` when the grant shrinks is dropped with `CANCELLED` instead of
+  aborted `UNAUTHORIZED`; and the JS lite publisher and subscriber arm their
+  grant watchers only after an await (`demand()`, `#openSubscribe`), and
+  `Getter.subscribe` does not replay, so a shrink during setup is missed for
+  good. Every request holds one watcher from its first check to its end, and
+  rechecks when the watcher is armed.
 - Publish side: routes and broadcasts the session published outside the
   narrowed grant abort, so consumers see `Unauthorized` just as the subscribe
   side does. Draining is not an option: a group may stay open as long as its

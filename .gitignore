@@ -15,7 +15,7 @@
 /.claude/tmp/
 /.claude/worktrees/
 
-# Per-worktree agent scratch (PR bodies, logs, notes); see the start-quest skill.
+# Per-worktree agent scratch (PR bodies, logs, notes); see the quest-start skill.
 /.scratch/
 
 # IDE

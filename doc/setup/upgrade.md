@@ -65,7 +65,11 @@ Other changes to a deployment:
 - **Grants are patterns, not prefixes.** `anon` is now exactly the broadcast
   `anon`; write `anon/**` for the subtree. This applies to `--auth-public`,
   TOML `public`, and the `[auth.public]` table, which is now
-  `public_subscribe` / `public_publish`.
+  `public_subscribe` / `public_publish`. A public or mTLS pattern with no
+  wildcard refuses to start, naming the subtree to write, rather than pick
+  one reading silently. The patterns are rooted at `/`, as in 0.14, so
+  `anon/**` admits a client dialed at `/anon` and refuses one dialed outside
+  `anon/`. Earlier 0.15 releases rooted them at the dialed path instead.
 - **Token grants are patterns.** JWT `publish` and `subscribe` claims are
   patterns, so a token granting `alice` covers only `alice`; sign `alice/**`
   instead. Existing `put`/`get` tokens and key scopes keep working as subtrees,
