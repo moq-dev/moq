@@ -12,7 +12,7 @@ configured rate.
 
 ## Plan
 
-Uses the reservation surface from libmoq (`moq_session_bandwidth`,
+Uses the reservation surface from moq-c (`moq_session_bandwidth`,
 `moq_bandwidth_reserve`, `moq_reservation_grant`). Apply grants through
 the shape `moq_mux::rate::Control` uses (drops at once, raises ramp,
 hysteresis) rather than pushing every change into `obs_encoder_update`; whether

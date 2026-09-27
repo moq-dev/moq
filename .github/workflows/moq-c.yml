@@ -1,9 +1,9 @@
-name: libmoq
+name: moq-c
 
 on:
   push:
     tags:
-      - "libmoq-v*"
+      - "moq-c-v*"
   # Dry-run: build everything, publish nothing. Nightly calls every release
   # workflow this way so a broken build surfaces before the tag is cut.
   workflow_call:
@@ -55,12 +55,12 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: .github/scripts/release.sh parse-version libmoq
+        run: .github/scripts/release.sh parse-version moq-c
 
       - name: Build and package
         shell: bash
         run: |
-          ./rs/libmoq/build.sh \
+          ./rs/moq-c/build.sh \
             --target ${{ matrix.target }} \
             --version ${{ steps.parse.outputs.version }} \
             --output dist
@@ -68,7 +68,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: libmoq-${{ matrix.target }}
+          name: moq-c-${{ matrix.target }}
           path: dist/*
 
   release:
@@ -87,11 +87,11 @@ jobs:
 
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version libmoq
+        run: .github/scripts/release.sh parse-version moq-c
 
       - name: Find previous tag
         id: prev_tag
-        run: .github/scripts/release.sh prev-tag libmoq
+        run: .github/scripts/release.sh prev-tag moq-c
 
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -103,14 +103,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-          RELEASE_TITLE: "libmoq v${{ steps.parse.outputs.version }}"
+          RELEASE_TITLE: "moq-c v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
         run: .github/scripts/release.sh create artifacts
 
-  # The OBS plugin (cpp/obs) statically links libmoq, so it ships with every
-  # libmoq release: rebuild it against the release we just published (no
+  # The OBS plugin (cpp/obs) statically links moq-c, so it ships with every
+  # moq-c release: rebuild it against the release we just published (no
   # second cargo build, guaranteed-matching ABI) and cut a parallel
-  # obs-moq-v<version> release. Runs after `release` so the libmoq archives
+  # obs-moq-v<version> release. Runs after `release` so the moq-c archives
   # the plugin's CMake fetches are already live.
   obs-build:
     name: OBS plugin (${{ matrix.target }})
@@ -140,17 +140,17 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: .github/scripts/release.sh parse-version libmoq
+        run: .github/scripts/release.sh parse-version moq-c
 
       # Native Xcode / Visual Studio; libobs/Qt6/ffmpeg come from the obs-deps
-      # bundle and libmoq from the release we just published (--libmoq-release).
+      # bundle and moq-c from the release we just published (--moq-c-release).
       - name: Build and package
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ steps.parse.outputs.version }}
         run: |
-          ./cpp/obs/build.sh --target "$TARGET" --libmoq-release "$VERSION" --output dist
+          ./cpp/obs/build.sh --target "$TARGET" --moq-c-release "$VERSION" --output dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -173,10 +173,10 @@ jobs:
 
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version libmoq
+        run: .github/scripts/release.sh parse-version moq-c
 
-      # Only the obs-moq archives: the libmoq-* artifacts from the build job
-      # belong to the libmoq release, not this one.
+      # Only the obs-moq archives: the moq-c-* artifacts from the build job
+      # belong to the moq-c release, not this one.
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -185,7 +185,7 @@ jobs:
           merge-multiple: true
 
       # release.sh prev-tag keys off the current tag, but the trigger here is a
-      # libmoq-v* tag, so it can't find the previous obs-moq tag. Take the
+      # moq-c-v* tag, so it can't find the previous obs-moq tag. Take the
       # newest existing obs-moq tag (excluding this version, for safe re-runs)
       # so the release notes span only since the last obs-moq release.
       - name: Find previous obs-moq tag

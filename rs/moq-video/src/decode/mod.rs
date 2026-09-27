@@ -30,7 +30,7 @@ pub use sink::Sink;
 
 #[cfg(test)]
 mod tests {
-	/// Callers (libmoq, moq-transcode) hold these across `.await`s in spawned
+	/// Callers (moq-c, moq-transcode) hold these across `.await`s in spawned
 	/// tasks and share frames via `Arc` (the transcode fanout), so both must
 	/// stay `Send` and `Frame` also `Sync` even when a platform's frame wraps
 	/// a GPU handle. Compile-time check; fails per-platform if a variant

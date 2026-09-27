@@ -1,6 +1,6 @@
-# Run with `cmake -DCARGO_BUILD_FLAG=... -DHEADER=... -P cargo-build.cmake` from rs/libmoq.
+# Run with `cmake -DCARGO_BUILD_FLAG=... -DHEADER=... -P cargo-build.cmake` from rs/moq-c.
 #
-# Builds libmoq, then copies moq.h to HEADER. build.rs writes the header into
+# Builds moq-c, then copies moq.h to HEADER. build.rs writes the header into
 # its OUT_DIR, whose hashed path only cargo's JSON messages name.
 execute_process(
     COMMAND cargo build --locked ${CARGO_BUILD_FLAG} --message-format=json-render-diagnostics
@@ -8,9 +8,9 @@ execute_process(
     COMMAND_ERROR_IS_FATAL ANY
 )
 
-string(REGEX MATCH "{\"reason\":\"build-script-executed\",\"package_id\":\"[^\"]*/libmoq#[^\n]*" _message "${_messages}")
+string(REGEX MATCH "{\"reason\":\"build-script-executed\",\"package_id\":\"[^\"]*/moq-c#[^\n]*" _message "${_messages}")
 if(NOT _message)
-    message(FATAL_ERROR "cargo reported no build script output for libmoq")
+    message(FATAL_ERROR "cargo reported no build script output for moq-c")
 endif()
 string(JSON _out_dir GET "${_message}" out_dir)
 

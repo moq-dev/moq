@@ -590,8 +590,8 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 
 /// A borrowed UTF-8 string slice, NOT NULL terminated.
 ///
-/// Used in both directions. As an output (e.g. a JSON document libmoq hands back) the
-/// pointer borrows libmoq's own storage and is only valid until the owning resource is
+/// Used in both directions. As an output (e.g. a JSON document moq-c hands back) the
+/// pointer borrows moq-c's own storage and is only valid until the owning resource is
 /// freed; see the function that fills it for the exact lifetime. As an input (e.g. a
 /// [moq_client_config] list) the pointer borrows the caller's storage and is only read
 /// during the call.
@@ -857,12 +857,12 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -
 
 /// Human-readable reason for the most recent failed call on the calling thread.
 ///
-/// libmoq functions return only a negative code; this exposes the matching message
+/// moq-c functions return only a negative code; this exposes the matching message
 /// (including detail the code can't carry, e.g. which URL failed to parse or why a
 /// decode failed). The string is only meaningful after a call returned a negative
 /// code; check the code first.
 ///
-/// Returns a NUL-terminated, UTF-8 pointer valid until the next libmoq call **on the
+/// Returns a NUL-terminated, UTF-8 pointer valid until the next moq-c call **on the
 /// same thread**, or NULL if no error has been recorded on this thread. Copy it if you
 /// need it to outlive the next call. Errors delivered through status callbacks carry
 /// their code directly; read this from inside the callback to get their reason.
@@ -879,7 +879,7 @@ pub extern "C" fn moq_error() -> *const c_char {
 /// (transport, not-found, a bad handle, ...). Do not parse [moq_error] for this.
 ///
 /// The values are only meaningful after a call returned a negative code; check the
-/// code first. Same lifetime as [moq_error]: overwritten by the next libmoq call on
+/// code first. Same lifetime as [moq_error]: overwritten by the next moq-c call on
 /// this thread. Errors delivered through status callbacks are recorded before the
 /// callback runs, so read this from inside the callback.
 ///

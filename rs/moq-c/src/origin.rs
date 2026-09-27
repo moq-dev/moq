@@ -89,7 +89,7 @@ struct DynamicEntry {
 impl Origin {
 	pub fn create(&mut self) -> Result<Id, Error> {
 		// Every FFI entry point runs inside `RUNTIME.enter()`, so the driver
-		// lands on the dedicated libmoq runtime.
+		// lands on the dedicated moq-c runtime.
 		self.active.insert(moq_tokio::origin::spawn())
 	}
 

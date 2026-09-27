@@ -25,9 +25,9 @@ keep doing so, and the rest may follow.
 Watch for Go import cycles: a subpackage takes the root's broadcast handle, so
 the root must not import it back.
 
-libmoq's JSON symbols move to `moq_json_*`.
+moq-c's JSON symbols move to `moq_json_*`.
 
-Public API: breaking in every binding and libmoq. Wire: none.
+Public API: breaking in every binding and moq-c. Wire: none.
 
 ## Required
 

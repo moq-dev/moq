@@ -1,10 +1,10 @@
 # Paths are relative to this .pc file, in the install layout the release
-# tarballs and nix/overlay.nix ship: lib/{libmoq.a,pkgconfig/moq.pc} and
+# tarballs and nix/overlay.nix ship: lib/{libmoq.a,pkgconfig/moq-c.pc} and
 # include/moq.h under one prefix.
 libdir=${pcfiledir}/..
 includedir=${pcfiledir}/../../include
 
-Name: moq
+Name: moq-c
 Description: Media over QUIC C Interface
 Version: @VERSION@
 Libs: -L${libdir} -lmoq
