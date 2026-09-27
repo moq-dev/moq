@@ -48,6 +48,7 @@ type (
 	// Subscription holds subscriber-side delivery preferences: priority, ordering, max age, and group range.
 	Subscription = ffi.MoqSubscription
 	// TrackInfo holds publisher-side track properties: priority, ordering, max age, and timescale.
+	// A zero Priority is the least urgent, not the default; set 127 for the midpoint a nil TrackInfo uses.
 	TrackInfo = ffi.MoqTrackInfo
 	// Video describes one catalog rendition, including whether the publisher recommends temporarily avoiding it.
 	Video = ffi.MoqVideo

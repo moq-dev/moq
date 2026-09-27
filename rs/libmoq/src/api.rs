@@ -491,8 +491,8 @@ pub struct moq_datagram {
 /// Publisher-side raw track properties.
 ///
 /// A null [moq_publish_track] `info` pointer uses the moq-net defaults.
-/// A zero-initialized struct also uses those defaults, except `priority` where
-/// zero is the default itself.
+/// A zero-initialized struct also uses those defaults, except `priority`, which
+/// has no presence flag: zero is the least urgent, and 127 is the moq-net default.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_track_info {
