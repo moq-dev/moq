@@ -151,7 +151,17 @@ impl Server {
 	/// which is what drops the thread-affinity bounds: a pinned `!Send`
 	/// transport can gate on the advertised path too. Anything but a moq-lite
 	/// ALPN is refused with [`Error::Version`].
-	pub async fn accept_request_lite<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
+	pub async fn accept_request_lite<S>(&self, now: Instant, session: S) -> Result<Handshake<S>, Error>
+	where
+		S: crate::transport::poll::Session,
+	{
+		let mut refused = session.clone();
+		self.handshake_lite(now, session)
+			.await
+			.inspect_err(|err| close(&mut refused, err))
+	}
+
+	async fn handshake_lite<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
 	where
 		S: crate::transport::poll::Session,
 	{
@@ -215,6 +225,8 @@ impl Server {
 			path,
 			role,
 			origin,
+			// moq-lite carries no SETUP token.
+			token: None,
 			assigned_hop: crate::Hop::random(),
 			inner: Some(RequestInner {
 				server: self.clone(),
@@ -250,7 +262,22 @@ impl Server {
 	///
 	/// The path is surfaced for moq-lite-05 and newer, and every moq-transport
 	/// draft we speak; it's empty on versions with no in-band request path (lite 01-04).
-	pub async fn accept_request<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
+	///
+	/// A SETUP that fails to parse or negotiate closes the session with the matching code,
+	/// so the peer learns why instead of seeing a bare disconnect.
+	pub async fn accept_request<S>(&self, now: Instant, session: S) -> Result<Handshake<S>, Error>
+	where
+		S: crate::transport::poll::Boxable,
+		S::SendStream: MaybeSync,
+		S::RecvStream: MaybeSync,
+	{
+		let mut refused = session.clone();
+		self.handshake(now, session)
+			.await
+			.inspect_err(|err| close(&mut refused, err))
+	}
+
+	async fn handshake<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
 	where
 		S: crate::transport::poll::Boxable,
 		S::SendStream: MaybeSync,
@@ -295,7 +322,7 @@ impl Server {
 			// Every lite ALPN goes through the same entry point, which is also
 			// what a `!Send` transport calls directly.
 			Some(ALPN_LITE_07_WIP | ALPN_LITE_06 | ALPN_LITE_05 | ALPN_LITE_04 | ALPN_LITE_03) => {
-				return self.accept_request_lite(now, session).await;
+				return self.handshake_lite(now, session).await;
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -319,7 +346,7 @@ impl Server {
 		// Pull the request path and max request ID out now (IETF only) so `ok()`
 		// doesn't re-decode the consumed parameters. moq-transport carries the path
 		// in its SETUP just like lite-05.
-		let (path, request_id_max, peer_declared) = match version {
+		let (path, token, request_id_max, peer_declared) = match version {
 			Version::Ietf(v) => {
 				let params = ietf::Parameters::decode(&mut client.parameters, v)?;
 				let path = match params.get_bytes(ietf::ParameterBytes::Path) {
@@ -330,6 +357,7 @@ impl Server {
 					),
 					None => None,
 				};
+				let token = ietf::token::from_setup(&params, v)?;
 				let request_id_max = params
 					.get_varint(ietf::ParameterVarInt::MaxRequestId)
 					.map(ietf::RequestId);
@@ -338,15 +366,16 @@ impl Server {
 					hidden: ietf::hidden::from_setup(&params, v),
 					..Default::default()
 				};
-				(path, request_id_max, peer_declared)
+				(path, token, request_id_max, peer_declared)
 			}
-			Version::Lite(_) => (None, None, ietf::peer::Peer::default()),
+			Version::Lite(_) => (None, None, None, ietf::peer::Peer::default()),
 		};
 
 		Ok(Handshake {
 			path,
 			role: None,
 			origin: None,
+			token,
 			assigned_hop: crate::Hop::random(),
 			inner: Some(RequestInner {
 				server: self.clone(),
@@ -382,6 +411,7 @@ impl Server {
 			// A moq-transport peer only has an identity if it negotiated the MoQ
 			// Cluster extension and declared a non-zero Hop ID.
 			origin: peer_setup.declared.cluster.hop.filter(|h| *h != crate::Hop::UNKNOWN),
+			token: peer_setup.token.clone(),
 			assigned_hop: crate::Hop::random(),
 			inner: Some(RequestInner {
 				server: self.clone(),
@@ -407,6 +437,7 @@ pub struct Handshake<S: crate::transport::poll::Session> {
 	path: Option<String>,
 	role: Option<Role>,
 	origin: Option<crate::Hop>,
+	token: Option<setup::Token>,
 	/// The identity this session's routes are stamped with when the peer declares none
 	/// on the wire. Fresh per request unless the caller overrides it
 	/// ([`Handshake::with_peer_hop`]).
@@ -516,9 +547,8 @@ where
 		.maybe_boxed()
 	}
 
-	fn close(self: Box<Self>, err: Error) {
-		let mut session = self.session;
-		session.close(SessionError::from(&err).to_code(), &err.to_string());
+	fn close(mut self: Box<Self>, err: Error) {
+		close(&mut self.session, &err);
 	}
 }
 
@@ -619,9 +649,8 @@ where
 		.maybe_boxed()
 	}
 
-	fn close(self: Box<Self>, err: Error) {
-		let mut session = self.session;
-		session.close(SessionError::from(&err).to_code(), &err.to_string());
+	fn close(mut self: Box<Self>, err: Error) {
+		close(&mut self.session, &err);
 	}
 }
 
@@ -661,6 +690,14 @@ where
 	/// authenticated identity: authorize on the token or client certificate.
 	pub fn peer_hop(&self) -> Option<crate::Hop> {
 		self.origin
+	}
+
+	/// The credential the client presented in its SETUP's `AUTHORIZATION TOKEN` option.
+	///
+	/// Only moq-transport carries one, so moq-lite sessions return `None`. The transport
+	/// has not verified it: authorize on it the way you would a URL token.
+	pub fn token(&self) -> Option<&setup::Token> {
+		self.token.as_ref()
 	}
 
 	/// Publish to the connected client. Overrides any value from the [`Server`]
@@ -742,8 +779,13 @@ impl<S: crate::transport::poll::Session> RequestInner<S> {
 			PausedHandshake::LiteSetup { session, .. } => session,
 			PausedHandshake::Boxed(paused) => return paused.close(err),
 		};
-		session.close(SessionError::from(&err).to_code(), &err.to_string());
+		close(&mut session, &err);
 	}
+}
+
+/// Close `session` with `err`'s wire code.
+fn close<S: crate::transport::poll::Session>(session: &mut S, err: &Error) {
+	session.close(SessionError::from(err).to_code(), &err.to_string());
 }
 
 impl<S: crate::transport::poll::Session> Drop for Handshake<S> {
@@ -789,12 +831,15 @@ mod tests {
 		}
 	}
 
-	/// A session that replays a queue of unidirectional streams (each a `Vec<u8>`) in
-	/// order from `accept_uni`; everything else is inert.
+	/// A session that replays a queue of streams (each a `Vec<u8>`) in order from
+	/// `accept_uni` and `accept_bi`, and records the code it was closed with; everything
+	/// else is inert.
 	#[derive(Clone)]
 	struct FakeSession {
 		protocol: Option<&'static str>,
 		uni: Arc<Mutex<VecDeque<Vec<u8>>>>,
+		bi: Arc<Mutex<VecDeque<Vec<u8>>>>,
+		closed: Arc<Mutex<Option<u32>>>,
 	}
 
 	impl FakeSession {
@@ -802,7 +847,18 @@ mod tests {
 			Self {
 				protocol: Some(protocol),
 				uni: Arc::new(Mutex::new(uni.into_iter().collect())),
+				bi: Default::default(),
+				closed: Default::default(),
 			}
+		}
+
+		fn with_bi(self, bi: Vec<u8>) -> Self {
+			self.bi.lock().unwrap().push_back(bi);
+			self
+		}
+
+		fn closed(&self) -> Option<u32> {
+			*self.closed.lock().unwrap()
 		}
 	}
 
@@ -824,7 +880,10 @@ mod tests {
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
 		) -> std::task::Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
-			std::task::Poll::Pending
+			match self.bi.lock().unwrap().pop_front() {
+				Some(data) => std::task::Poll::Ready(Ok((FakeSend, FakeRecv { data: data.into() }))),
+				None => std::task::Poll::Pending,
+			}
 		}
 		fn poll_open_bi(
 			&mut self,
@@ -857,7 +916,9 @@ mod tests {
 		fn protocol(&self) -> Option<&str> {
 			self.protocol
 		}
-		fn close(&mut self, _code: u32, _reason: &str) {}
+		fn close(&mut self, code: u32, _reason: &str) {
+			self.closed.lock().unwrap().get_or_insert(code);
+		}
 		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Error> {
 			std::task::Poll::Pending
 		}
@@ -936,6 +997,10 @@ mod tests {
 		if let Some(path) = path {
 			params.set_bytes(ietf::ParameterBytes::Path, path.as_bytes().to_vec());
 		}
+		ietf_setup_with(version, params)
+	}
+
+	fn ietf_setup_with(version: ietf::Version, params: ietf::Parameters) -> Vec<u8> {
 		let parameters = params.encode_bytes(version).unwrap();
 
 		let mut buf = Vec::new();
@@ -943,6 +1008,91 @@ mod tests {
 			.encode(&mut buf, crate::Version::Ietf(version))
 			.unwrap();
 		buf
+	}
+
+	/// Encode a draft 14-16 CLIENT_SETUP, sent on the control bidi stream.
+	fn legacy_setup(version: ietf::Version, params: ietf::Parameters) -> Vec<u8> {
+		let mut buf = Vec::new();
+		setup::Client {
+			versions: crate::coding::Versions::from([crate::Version::Ietf(version).into()]),
+			parameters: params.encode_bytes(version).unwrap(),
+		}
+		.encode(&mut buf, crate::Version::Ietf(version))
+		.unwrap();
+		buf
+	}
+
+	fn setup_token() -> setup::Token {
+		setup::Token {
+			kind: setup::Token::OUT_OF_BAND,
+			value: vec![0x00, 0xff, b'j', b'w', b't'],
+		}
+	}
+
+	fn token_params(version: ietf::Version) -> ietf::Parameters {
+		let mut params = ietf::Parameters::default();
+		ietf::token::into_setup(&mut params, &setup_token(), version).unwrap();
+		params
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn accept_request_exposes_the_setup_token() {
+		let modern = FakeSession::new(
+			ALPN_19,
+			[ietf_setup_with(
+				ietf::Version::Draft19,
+				token_params(ietf::Version::Draft19),
+			)],
+		);
+		let legacy = FakeSession::new(ALPN_16, []).with_bi(legacy_setup(
+			ietf::Version::Draft16,
+			token_params(ietf::Version::Draft16),
+		));
+		for (name, session) in [("draft-19", modern), ("draft-16", legacy)] {
+			let request = Server::new()
+				.accept_request(tokio::time::Instant::now().into_std(), session)
+				.await
+				.unwrap();
+			assert_eq!(request.token(), Some(&setup_token()), "{name}");
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn accept_request_without_a_token_reports_none() {
+		let ietf = FakeSession::new(ALPN_19, [ietf_setup(ietf::Version::Draft19, None)]);
+		let lite = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
+		for (name, session) in [("draft-19", ietf), ("lite-05", lite)] {
+			let request = Server::new()
+				.accept_request(tokio::time::Instant::now().into_std(), session)
+				.await
+				.unwrap();
+			assert_eq!(request.token(), None, "{name}");
+		}
+	}
+
+	/// A SETUP the server refuses closes the session with the code naming why, on both
+	/// the draft-17+ uni stream and the draft 14-16 bidi stream.
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_setup_token_closes_with_its_code() {
+		let delete = [0x0, 0x7]; // DELETE alias 7
+		let truncated = [0x3]; // USE_VALUE with no Token Type
+		for (raw, code) in [
+			(&delete[..], SessionError::ProtocolViolation),
+			(&truncated[..], SessionError::KeyValueFormatting),
+		] {
+			let mut params = ietf::Parameters::default();
+			params.set_bytes(ietf::ParameterBytes::AuthorizationToken, raw.to_vec());
+
+			let modern = FakeSession::new(ALPN_19, [ietf_setup_with(ietf::Version::Draft19, params.clone())]);
+			let legacy = FakeSession::new(ALPN_16, []).with_bi(legacy_setup(ietf::Version::Draft16, params));
+			for (name, session) in [("draft-19", modern), ("draft-16", legacy)] {
+				let result = Server::new()
+					.accept_request(tokio::time::Instant::now().into_std(), session.clone())
+					.await;
+				assert!(result.is_err(), "{name}");
+				assert_eq!(session.closed(), Some(code.to_code()), "{name} {code}");
+			}
+		}
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1075,6 +1225,7 @@ mod tests {
 			path: None,
 			role: None,
 			origin: None,
+			token: None,
 			assigned_hop: Hop::random(),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),
@@ -1088,6 +1239,7 @@ mod tests {
 							Version::Ietf(version),
 						),
 						path: None,
+						token: None,
 						declared: ietf::peer::Peer::default(),
 					},
 				})),

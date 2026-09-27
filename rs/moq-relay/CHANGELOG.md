@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.7](https://github.com/moq-dev/moq/compare/moq-relay-v0.15.6...moq-relay-v0.15.7) - 2026-09-26
+
+### Added
+
+- end a broadcast with close() in every language ([#4031](https://github.com/moq-dev/moq/pull/4031))
+
+### Fixed
+
+- *(auth)* keep accepted grants on fixed expiry deadlines ([#4237](https://github.com/moq-dev/moq/pull/4237))
+
+### Other
+
+- origin narrowing joins auth, drop relay peer set, plan hop-list routing ([#4158](https://github.com/moq-dev/moq/pull/4158))
+- rename CLAUDE.md to AGENTS.md ([#4235](https://github.com/moq-dev/moq/pull/4235))
+- *(relay)* run the outage lease test on the real clock ([#4244](https://github.com/moq-dev/moq/pull/4244))
+
 ## [0.15.6](https://github.com/moq-dev/moq/compare/moq-relay-v0.15.5...moq-relay-v0.15.6) - 2026-09-26
 
 ### Other

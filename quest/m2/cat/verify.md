@@ -82,8 +82,3 @@ rather than a set of prefixed names; `@moq/auth` stays flat.
 
 Public API: `moq_auth::cat` new, `moq auth serve` and `moq auth sign|verify`
 gain flags. Wire: none.
-
-## Required
-
-- [Setup token](/quest/m1/setup-token.md) - the token reaches the
-  server's request

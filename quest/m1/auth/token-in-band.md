@@ -43,7 +43,7 @@ AUTH can carry the full grant once the pattern-interest prerequisite lands.
   stream; every other configured token gets its own AUTH stream on an
   AUTH-capable session, so no token is ever granted twice. On moq-transport
   the first token also rides the AUTHORIZATION TOKEN setup option
-  (`ParameterBytes::AuthorizationToken`, `USE_VALUE`, token type 0), which
+  (`ietf::token::into_setup`, `USE_VALUE`, token type 0), which
   scopes at accept the way the URL does.
 - The relay admits on the URL, then widens. An anonymous connection today is
   admitted with the public grant when one is configured and refused
@@ -77,5 +77,3 @@ Additive.
   token setters sit beside
 - [moq-transport](/quest/m1/auth/moq-transport.md) - supplies the IETF AUTH
   exchange the setup-option token pairs with
-- [Setup token](/quest/m1/setup-token.md) - supplies `setup::Token` and the
-  setup-option encoder

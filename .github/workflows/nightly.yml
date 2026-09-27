@@ -77,6 +77,11 @@ jobs:
           nix develop --command bun install --frozen-lockfile
           nix develop --command bun js/net/bench/broadcasts.ts
 
+      # Fails if reading a fragmented frame costs more per byte as the frame grows.
+      - name: JS stream reader benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command bun js/net/bench/reader.ts
+
       # Runs each moq-net Criterion routine once, so a bench that panics (an
       # unparsable version, a shape that deadlocks) fails here instead of on the
       # next manual run. Timing is not compared; nextest never runs a

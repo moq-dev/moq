@@ -34,8 +34,6 @@ Public API: additive on `moq-tokio` and `js/net`. Wire: none.
 
 ## Required
 
-- [Setup token](/quest/m1/setup-token.md) - the server-side exposure
-  and the shared `setup::Token`
 - [Verify](/quest/m2/cat/verify.md) - the server that admits the token the
   end-to-end test presents
 - [Token in band](/quest/m1/auth/token-in-band.md) - the token
