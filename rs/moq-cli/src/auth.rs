@@ -367,19 +367,19 @@ pub struct Serve {
 	#[usage(long, conflicts = "--key", value_hint = usage::ValueHint::DirPath)]
 	key_dir: Option<PathBuf>,
 
-	/// Patterns an anonymous session may publish (repeatable); `foo/**` for a subtree.
+	/// Patterns an anonymous session may publish, rooted at `/` (repeatable); `foo/**` for a subtree.
 	#[usage(long)]
 	public_publish: Vec<Pattern>,
 
-	/// Patterns an anonymous session may subscribe to (repeatable).
+	/// Patterns an anonymous session may subscribe to, rooted at `/` (repeatable).
 	#[usage(long)]
 	public_subscribe: Vec<Pattern>,
 
-	/// Patterns a session with a verified certificate may publish (repeatable). Empty refuses certificates.
+	/// Patterns a session with a verified certificate may publish, rooted at `/` (repeatable). Empty refuses certificates.
 	#[usage(long)]
 	mtls_publish: Vec<Pattern>,
 
-	/// Patterns a session with a verified certificate may subscribe to (repeatable).
+	/// Patterns a session with a verified certificate may subscribe to, rooted at `/` (repeatable).
 	#[usage(long)]
 	mtls_subscribe: Vec<Pattern>,
 
@@ -410,6 +410,25 @@ impl Serve {
 		let revalidate = self.revalidate.into_std();
 		if revalidate.is_zero() {
 			anyhow::bail!("--revalidate must be longer than 0s; every client would re-check in a tight loop");
+		}
+		// 0.14 read `anon` as the prefix `anon/`, and a pattern reads it as exactly the
+		// broadcast `anon`, so either silent reading would mislead someone upgrading.
+		let flags = [
+			("--public-publish", &self.public_publish),
+			("--public-subscribe", &self.public_subscribe),
+			("--mtls-publish", &self.mtls_publish),
+			("--mtls-subscribe", &self.mtls_subscribe),
+		];
+		for (flag, patterns) in flags {
+			if let Some(literal) = patterns.iter().find(|pattern| pattern.is_literal()) {
+				let subtree = match literal.as_str() {
+					"" => "**".to_string(),
+					literal => format!("{literal}/**"),
+				};
+				anyhow::bail!(
+					"{flag} `{literal}` has no wildcard, so it names exactly one broadcast; write `{subtree}` for the subtree"
+				);
+			}
 		}
 		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
 			Permissions::new(publish.iter().cloned().collect(), subscribe.iter().cloned().collect())
@@ -653,6 +672,35 @@ mod tests {
 			.policy()
 			.unwrap_err();
 		assert!(err.to_string().contains("--revalidate"), "{err}");
+	}
+
+	/// 0.14 read `anon` as a prefix and a pattern reads it as one broadcast, so a
+	/// wildcard-free rule refuses to start rather than pick silently.
+	#[test]
+	fn serve_refuses_a_rule_without_a_wildcard() {
+		for (flag, rule, hint) in [
+			("--public-publish", "anon", "anon/**"),
+			("--public-subscribe", "event/cam1.hang", "event/cam1.hang/**"),
+			("--mtls-publish", "", "**"),
+			("--mtls-subscribe", "origin", "origin/**"),
+		] {
+			let err = serve(&["moq", "auth", "serve", flag, rule]).policy().unwrap_err();
+			let err = err.to_string();
+			assert!(err.contains(flag) && err.contains(&format!("`{hint}`")), "{err}");
+		}
+		assert!(
+			serve(&[
+				"moq",
+				"auth",
+				"serve",
+				"--public-subscribe",
+				"*/chat",
+				"--mtls-publish",
+				"origin/*"
+			])
+			.policy()
+			.is_ok()
+		);
 	}
 
 	#[cfg(unix)]

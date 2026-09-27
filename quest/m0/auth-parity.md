@@ -134,10 +134,6 @@ Each of these was considered and kept as 0.15 behavior:
   `doc/setup/upgrade.md`. List the declined differences in the upgrade notes,
   since none of them is documented today.
 
-## Required
-
-- [Public rules parity](/quest/m0/public-rules.md) - same auth code; one owner at a time
-
 ## Related
 
 - [Release](/quest/m0/release.md) - ships this parity

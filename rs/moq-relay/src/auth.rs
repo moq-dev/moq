@@ -35,9 +35,9 @@ pub struct Config {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub url: Option<Url>,
 
-	/// Patterns an anonymous session may both publish and subscribe to, such as
-	/// `anon/**`. Repeatable or comma-separated. Sets a static grant with no expiry
-	/// and no server.
+	/// Patterns an anonymous session may both publish and subscribe to, rooted at
+	/// `/`, such as `anon/**`. Repeatable or comma-separated. Sets a static grant
+	/// with no expiry and no server.
 	#[usage(
 		long = "auth-public",
 		env = "MOQ_AUTH_PUBLIC",
@@ -48,7 +48,7 @@ pub struct Config {
 	#[serde_as(as = "OneOrMany<_>")]
 	pub public: Vec<Pattern>,
 
-	/// Patterns an anonymous session may subscribe to. Repeatable.
+	/// Patterns an anonymous session may subscribe to, rooted at `/`. Repeatable.
 	#[usage(
 		long = "auth-public-subscribe",
 		env = "MOQ_AUTH_PUBLIC_SUBSCRIBE",
@@ -59,7 +59,7 @@ pub struct Config {
 	#[serde_as(as = "OneOrMany<_>")]
 	pub public_subscribe: Vec<Pattern>,
 
-	/// Patterns an anonymous session may publish. Repeatable.
+	/// Patterns an anonymous session may publish, rooted at `/`. Repeatable.
 	#[usage(
 		long = "auth-public-publish",
 		env = "MOQ_AUTH_PUBLIC_PUBLISH",
@@ -73,6 +73,9 @@ pub struct Config {
 
 impl Config {
 	/// The static grant the public patterns name, or `None` when none is set.
+	///
+	/// Its patterns are rooted at `/`, not at a dialed path: each session is granted
+	/// what they reach from where it dialed, as a token with an empty root would be.
 	pub fn public_grant(&self) -> Option<Grant> {
 		let publish: Patterns = self.public.iter().chain(&self.public_publish).cloned().collect();
 		let subscribe: Patterns = self.public.iter().chain(&self.public_subscribe).cloned().collect();
@@ -88,7 +91,26 @@ impl Config {
 
 	/// Refuse a configuration that admits nobody, or that names both a server and
 	/// a static grant, so the question of who decides has one answer.
+	///
+	/// A public pattern without a wildcard is refused too. 0.14 read `anon` as the
+	/// prefix `anon/`, and a pattern reads it as exactly the broadcast `anon`, so
+	/// either silent reading would mislead someone upgrading.
 	pub fn validate(&self) -> anyhow::Result<()> {
+		let patterns = self
+			.public
+			.iter()
+			.chain(&self.public_publish)
+			.chain(&self.public_subscribe);
+		if let Some(literal) = patterns.into_iter().find(|pattern| pattern.is_literal()) {
+			anyhow::bail!(
+				"--auth-public `{literal}` has no wildcard, so it names exactly one broadcast; write `{}` for the subtree",
+				if literal.as_str().is_empty() {
+					"**".to_string()
+				} else {
+					format!("{literal}/**")
+				}
+			);
+		}
 		match (&self.url, self.public_grant()) {
 			(Some(_), Some(_)) => anyhow::bail!("--auth-url and --auth-public cannot both be set; the server decides"),
 			(None, None) => anyhow::bail!(
@@ -109,7 +131,11 @@ impl Config {
 				let tls = tls.build()?;
 				Decider::Server(moq_auth::Client::new(url.clone(), Some(tls))?)
 			}
-			(None, Some(grant)) => Decider::Public(grant),
+			(None, Some(grant)) => Decider::Public(
+				moq_auth::Claims::default()
+					.with_publish(grant.publish)
+					.with_subscribe(grant.subscribe),
+			),
 			(None, None) => unreachable!("validated above"),
 		};
 		let (auth, admissions) = Auth::embedded(node);
@@ -324,7 +350,8 @@ impl Lease {
 
 enum Decider {
 	Server(moq_auth::Client),
-	Public(Grant),
+	/// The public rules, as a token with an empty root.
+	Public(moq_auth::Claims),
 	Refuse,
 }
 
@@ -342,7 +369,18 @@ impl Decider {
 							}
 						});
 					}
-					Self::Public(grant) => admission.grant(lease::Consumer::fixed(grant.clone())),
+					Self::Public(rules) => match rules.authorize(&admission.request.path) {
+						Ok(access) => {
+							let grant = Grant::new(access.publish, access.subscribe);
+							admission.grant(lease::Consumer::fixed(grant));
+						}
+						// A path the rules don't reach is a refusal, never an outage a
+						// client would retry.
+						Err(err) => {
+							tracing::debug!(path = %admission.request.path, %err, "public rules refused");
+							admission.refuse(Error::Refused);
+						}
+					},
 					Self::Refuse => admission.refuse(Error::Refused),
 				}
 			}
@@ -537,16 +575,77 @@ mod tests {
 		assert!(grant.publish.is_empty());
 	}
 
+	/// The public rules are rooted at `/`, like a token with an empty root. Bare `**`
+	/// reads the same either way, which is how rooting them at the dialed path went
+	/// unnoticed: `anon/**` at `/rooms/123` granted `rooms/123/anon/**`.
+	#[tokio::test]
+	async fn public_rules_are_rooted_at_slash() {
+		let auth = Config {
+			public_publish: patterns(&["anon/**"]).into_iter().collect(),
+			public_subscribe: patterns(&["anon/**", "*/chat"]).into_iter().collect(),
+			..Default::default()
+		}
+		.init("relay-1", &moq_tokio::tls::Connect::default())
+		.unwrap();
+
+		for (path, root, publish, subscribe) in [
+			("/", "", &["anon/**"][..], &["anon/**", "*/chat"][..]),
+			("/anon", "anon", &["**"], &["**", "chat"]),
+			("/anon/room", "anon/room", &["**"], &["**"]),
+			("/rooms", "rooms", &[], &["chat"]),
+		] {
+			let lease = auth.admit(auth.request(moq_auth::Transport::Quic, path)).await.unwrap();
+			assert_eq!(lease.token().root, Path::new(root).to_owned(), "{path}");
+			assert_eq!(lease.token().publish, patterns(publish), "{path}");
+			assert_eq!(lease.token().subscribe, patterns(subscribe), "{path}");
+		}
+
+		// A path the rules don't reach is refused, never an outage the client retries.
+		for path in ["/rooms/123", "/other/room", "/anonymous/room"] {
+			let Err(err) = auth.admit(auth.request(moq_auth::Transport::Quic, path)).await else {
+				panic!("{path} was admitted");
+			};
+			assert!(matches!(err, Error::Refused), "{path}: {err}");
+			assert_eq!(http::StatusCode::from(&err), http::StatusCode::UNAUTHORIZED);
+		}
+	}
+
+	/// A certificate is a fact the public rules ignore: it gets exactly what anyone does.
 	#[tokio::test]
 	async fn a_public_config_admits_anonymous_and_certificate_alike() {
 		let auth = config(None, &["anon/**"])
 			.init("relay-1", &moq_tokio::tls::Connect::default())
 			.unwrap();
-		let request = auth.request(moq_auth::Transport::Quic, "/anon/room");
-		let lease = auth.admit(request).await.unwrap();
-		assert_eq!(lease.token().root, Path::new("anon/room").to_owned());
-		assert_eq!(lease.token().subscribe, patterns(&["anon/**"]));
-		assert_eq!(lease.token().tier, Tier::default());
+		let anonymous = auth.request(moq_auth::Transport::Quic, "/anon/room");
+		let mut certificate = anonymous.clone();
+		certificate.tls = Some(moq_auth::Peer {
+			name: "edge0".into(),
+			fingerprint: "ab".repeat(32),
+			expires: None,
+			issuer: "CN=cluster".into(),
+		});
+		for request in [anonymous, certificate] {
+			let lease = auth.admit(request).await.unwrap();
+			assert_eq!(lease.token().root, Path::new("anon/room").to_owned());
+			assert_eq!(lease.token().subscribe, patterns(&["**"]));
+			assert_eq!(lease.token().tier, Tier::default());
+		}
+	}
+
+	/// 0.14 read `anon` as a prefix and a pattern reads it as one broadcast, so a
+	/// wildcard-free public pattern refuses to start rather than pick silently.
+	#[test]
+	fn a_public_pattern_without_a_wildcard_refuses_to_start() {
+		for (public, hint) in [("anon", "anon/**"), ("anon/room", "anon/room/**"), ("", "**")] {
+			let err = config(None, &[public]).validate().unwrap_err().to_string();
+			assert!(err.contains(&format!("`{hint}`")), "{public}: {err}");
+		}
+		let split = Config {
+			public_subscribe: patterns(&["anon/**", "live"]).into_iter().collect(),
+			..Default::default()
+		};
+		assert!(split.validate().is_err());
+		assert!(config(None, &["anon/*", "*/chat", "**"]).validate().is_ok());
 	}
 
 	#[test]
