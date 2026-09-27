@@ -34,6 +34,12 @@ Guidance:
   puts module loading on the fallback path. Measure the connect time it adds,
   and drop this trim if the fallback gets noticeably slower.
 - Report the before and after first-load sizes in the PR.
+- Add a CI check that imports the built `@moq/watch` dist outside a browser
+  (the `bun -e 'await import("./dist/index.js")'` that verified
+  [#4217](https://github.com/moq-dev/moq/pull/4217)). Unit tests run on
+  `src`, so a bundled browser-only dependency that breaks Node, Bun, or SSR
+  imports only shows up in the dist, and these trims move exactly those
+  imports around. Cover `@moq/publish` the same way if it is cheap.
 
 ## Related
 

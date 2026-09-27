@@ -78,7 +78,8 @@ rather than a set of prefixed names; `@moq/auth` stays flat.
   vectors round-tripped both ways; expiry and not-before; the grant
   produced from every c4m-01 example; serve admitting a CAT over a real
   moq-transport session on every supported draft and refusing an unknown
-  token kind, a bad MAC, and a token plus `jwt`; the CLI round trip.
+  token kind, a bad MAC, and a token plus a different `jwt` (the same value
+  in both is one credential, admitted once); the CLI round trip.
 
 Public API: `moq_auth::cat` new, `moq auth serve` and `moq auth sign|verify`
 gain flags. Wire: none.

@@ -44,8 +44,8 @@ each of those dimensions moves the expected floor.
 
 ## Quests
 
-- [Browser](/quest/m1/audio-quality-harness/browser.md) - upstream the fork's harness, grade it against a budget, run it nightly
-- [Native](/quest/m1/audio-quality-harness/native.md) - the same profiles and budgets through `moq play` on a dummy device
+- [Browser](/quest/m0/audio-quality-harness/browser.md) - upstream the fork's harness, grade it against a budget, run it nightly
+- [Native](/quest/m0/audio-quality-harness/native.md) - the same profiles and budgets through `moq play` on a dummy device
 
 ## Related
 

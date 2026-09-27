@@ -12,7 +12,7 @@ Attempt GPU delivery immediately, starting on macOS. Windows and Linux can ship 
 
 Initial video decoding covers H.264, HEVC, and AV1 where moq-video has an available backend. Unsupported codecs produce an actionable error; do not retain an FFmpeg fallback. VP8/VP9 return through their own follow-up quest. Audio playback covers Opus, AAC-LC, and PCM.
 
-Publishing remains opt-in, with one **Use MoQ encoders** choice for video and audio. Keep the existing OBS encoder mode. Internal OBS encoder adapters call moq-video/moq-audio, preserving OBS's A/V handling and the existing encoded MoQ output. The combined choice is enabled only when both adapters are present. Start with H.264, supported HEVC, and Opus; defer AV1/AAC encoding and PCM publishing UI. Keep bitrate separate from **Low latency** (default), **Balanced**, and **Quality** presets. Presets describe supported buffering/compression controls, not an end-to-end delay promise.
+Publishing remains opt-in, with one **Use MoQ encoders** choice for video and audio. Keep the existing OBS encoder mode. Internal OBS encoder adapters call moq-video/moq-audio, preserving OBS's A/V handling and the existing encoded MoQ output. The combined choice is enabled only when both adapters are present. Start with H.264, supported HEVC, and Opus; defer AV1/AAC encoding and PCM publishing UI. Keep bitrate separate from **Low latency**, **Balanced** (default), and **Quality** presets. Presets describe supported buffering/compression controls, not an end-to-end delay promise.
 
 The quests separate portable decoding, platform GPU delivery, audio, and publishing so each can land and be validated independently. The existing CPU decode path is a fallback primitive, not a GPU implementation: it explicitly converts every surface to I420. Native frame ownership must cross the FFI boundary without that conversion.
 
@@ -24,6 +24,7 @@ The quests separate portable decoding, platform GPU delivery, audio, and publish
 - [Linux decoded frames](/quest/m1/obs-moq-video/decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Linux bundle](/quest/m1/obs-moq-video/linux-bundle.md) - attach a portable Linux x86_64 tarball to every obs-moq release once FFmpeg is gone
 - [Encoder presets](/quest/m1/obs-moq-video/presets.md) - define and measure shared low-latency, balanced, and quality policies
+- [Preset parity](/quest/m1/obs-moq-video/preset-parity.md) - audio stores and reports its preset like video, defaults to Balanced, and the preset claims hold
 - [Audio publishing](/quest/m1/obs-moq-video/audio-publish.md) - back an internal OBS Opus encoder with moq-audio
 - [Video publishing](/quest/m1/obs-moq-video/adapter.md) - back an internal OBS video encoder with moq-video and expose the combined opt-in mode
 - [Rate control](/quest/m1/obs-moq-video/rate-control.md) - the plugin reserves its bitrate and retunes the OBS encoder to the grant

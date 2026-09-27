@@ -22,3 +22,11 @@ end and returns a promise, which is a published break, so that change targets
 
 `doc/concept/moq-lite.md` says a graceful close withdraws announces and an
 abort does not. No new page.
+
+The interop runner is the consumer that found this
+([#4209](https://github.com/moq-dev/moq/pull/4209)): after a successful
+publish it calls `abort`, so the relay never sees `PUBLISH_NAMESPACE_DONE` and
+the next run is told the namespace is already published. Switch it to the
+graceful `close()` once that exists. If the calling code lives outside this
+repository (moq-interop-runner), that change is a PR there and needs the
+maintainer's approval before posting.

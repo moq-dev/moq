@@ -14,6 +14,12 @@ Decided in planning:
 
 - Load the file source with a dynamic `import()` when a file source is
   selected.
+- Open the picker before anything is awaited: `File.prompt()` must run
+  synchronously in the click handler, and the decoder (mediabunny) loads
+  lazily once a `File` arrives. Awaiting the `import()` first spends the
+  click's transient user activation, so the browser blocks the picker
+  (Codex on [#4257](https://github.com/moq-dev/moq/pull/4257)). So the
+  picker stays in the eager bundle and only the decode path is lazy.
 - Keep `ALL_FORMATS`, so any container mediabunny reads still works. Leave
   mediabunny bundled into publish's dist rather than making it external.
 

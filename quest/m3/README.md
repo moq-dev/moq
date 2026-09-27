@@ -24,3 +24,4 @@ condition clears, move the quest to the milestone its work belongs in.
 - [libmoq shutdown](/quest/m3/libmoq-shutdown.md) - OBS exits cleanly with the plugin loaded: a C ABI `moq_shutdown` stops the libmoq thread before the module is unloaded
 - [libmoq CMake library](/quest/m3/libmoq-cmake-lib.md) - the in-tree CMake build links the `libmoq.a` cargo reports, not a hardcoded `target/<profile>` path
 - [libmoq fetch](/quest/m3/libmoq-fetch.md) - libmoq gains an additive cached-group fetch entry point
+- [Upstream forks](/quest/m3/upstream-forks.md) - offer the uniffi generator fixes our cpp, dart, and Python forks carry upstream, lowest priority

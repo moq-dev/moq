@@ -17,6 +17,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 
 ## Quests
 
+- [Drill sensitivity](/quest/m1/drill-sensitivity.md) - the nightly drill-sensitivity job passes: the subscriber-leaks-broadcasts mutation applies to the current lite subscriber again
 - [BBR classic ECN](/quest/m1/bbr-classic-ecn.md) - Startup and bandwidth probing respond to CE marks before the bottleneck drops packets
 - [lite-07 count settle](/quest/m1/lite-count-settle.md) - moq-lite-07 subscribers stop waiting for a subscription's tail once SUBSCRIBE_END's stream count is reached
 - [Dropped sources](/quest/m1/dropped-sources.md) - track consumers see the producer's real error on every end path, never `Dropped`
@@ -36,6 +37,35 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Bindings caught up](/quest/m1/announce-live-bindings.md) - moq-ffi, libmoq, and every wrapper yield the same flat announce event, `Live` included
 - [Optional max age](/quest/m1/ietf-max-age.md) - max age is optional, set only by the publisher, and crosses moq-transport as MAX_CACHE_DURATION
 - [IETF announce count](/quest/m1/ietf-announce-count.md) - an opt-in moq-transport extension carries the replay count, so IETF announce consumers go live without a timer
+- [kio waiter overflow](/quest/m1/kio-waiter-lost.md) - a retained `Waiter` past 8 lists stops adding a duplicate entry to lists it already recorded
+- [moqsink keyframe latch](/quest/m1/moqsink-keyframe-latch.md) - a header-only buffer after a break no longer permanently invalidates a moqsink video pad
+- [Capture re-anchor](/quest/m1/capture-reanchor.md) - a repeating or restarting device clock never rewinds native capture during a fast backlog drain
+- [Splice edge cases](/quest/m1/splice-edges.md) - an unstamped successor, a pruned segment's boundary group, and a warm head during a takeover are each handled correctly
+- [Track tail hardening](/quest/m1/track-tail-hardening.md) - Rust and JS wait out a track's tail by the same rules, with the known hang, count, truncation, grace, and memory holes closed
+- [Session death parity](/quest/m1/session-death.md) - a local close ends tracks cleanly in both languages, and JS group readers see the session's error on session death
+- [JS scoped routes](/quest/m1/js-scoped-routes.md) - a scoped JS origin reader announces the preferred route among those in its scope, like Rust, with the fan-out benchmarked
+- [JS subtree at max depth](/quest/m1/js-pattern-depth.md) - `Pattern.subtree` returns the literal path at 32 segments like Rust, pinned by a shared pattern.json vector
+- [moq play decode schedule](/quest/m1/play-decode-schedule.md) - `moq play` video keeps valid pictures across rewinds, reordering deeper than 100 ms, and decoder batches larger than three
+- [moqsrc stop](/quest/m1/moqsrc-stop.md) - moqsrc's stop blocks until its session ends, without deadlocking on a blocked pad push
+- [More tests under load](/quest/m1/test-flakes-2.md) - the second round of load-only failures, fixed at the cause
+- [UnknownSession log flood](/quest/m1/unknown-session-logs.md) - streams reset before their WebTransport header stop being reported as UnknownSession at WARN
+- [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
+- [Wire compatibility](/quest/m1/wire-compat.md) - a nightly run tests this checkout against the last published release for tokens, session wire, and catalog/container
+- [Accept-side flags](/quest/m1/cli-given-flags.md) - dial-only and local verbs refuse every `--listen-*` flag instead of ignoring it
+- [JS catalog path](/quest/m1/js-catalog-path.md) - `@moq/net` broadcast consumers expose their path and `Catalog.watch` rejects escaping references, like Rust
+- [Full codec string](/quest/m1/publish-codec-string.md) - browser-published video carries the encoder's full RFC 6381 codec string, so native players decode it
+- [TS export jitter](/quest/m1/ts-export-jitter.md) - the video reorder bound follows later catalogs and observed reordering, so a late B-frame never reorders TS output
+- [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - unflagged loop wraps move audio and video by one shift, so A/V sync holds across wraps
+- [PipeWire duplicate cameras](/quest/m1/pipewire-dup-cameras.md) - a webcam lists once with PipeWire enabled
+- [Catalog wall clock](/quest/m1/catalog-wall-clock.md) - `Clock::wall_clock` keeps the catalog's full precision instead of truncating to milliseconds
+- [Capture control](/quest/m1/capture-control.md) - on dev, `encode::Capture` replaces `CaptureOptions`, an unsupported `cut()` errors, and dropping the last `Control` cancels in-flight opens
+- [Video surface](/quest/m1/video-surface.md) - on dev, moq-ffi's `native` becomes `surface`, refused on platforms with no surface
+- [HLS discontinuity sequence](/quest/m1/hls-discontinuity-sequence.md) - on dev, `Segment::discontinuity` is the absolute sequence, so every cursor agrees
+- [Strict Redirect::resolve](/quest/m1/redirect-resolve.md) - on dev, `Redirect::resolve` can no longer quietly turn a refused redirect into a redial
+- [HLS linger](/quest/m1/hls-linger.md) - `moq_hls::Server` serves an ended broadcast for its playlist window plus grace, so the moq.pro edge drops its own pool
+- [Gateway live clock](/quest/m1/gateway-live-clock.md) - moq-srt, moq-rtmp, and HLS import publish on the broadcast clock, so encoder reconnects don't restart timestamps
+- [iroh versions](/quest/m1/iroh-lite-wip.md) - `iroh://` negotiates the configured versions, so `moq-lite-07-wip` can be opted into
+- [Go and Dart doc samples](/quest/m1/doc-samples-go-dart.md) - Go and Dart doc samples compile against their wrappers
 
 - [Publish delay](/quest/m1/publish-delay.md) - js/publish encoders advertise `delay` behind the earliest rendition, like moq-mux
 - [Data jitter](/quest/m1/data-jitter.md) - JSON and binary tracks with a capture time advertise a detected `delay` and `jitter`
@@ -78,7 +108,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Perf](/quest/m1/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
 - [#2924](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every listener on both runtimes shares one reloadable served identity, so rotation is atomic and generate works with workers
 - [#2964](/quest/m1/2964-quic-workers-dropping-one-split-server-resizes-the.md) - integrate the dev worker owner with hardened socket-group formation
-- [Audio quality harness](/quest/m1/audio-quality-harness/README.md) - a playout latency regression fails a run instead of arriving as a bug report
 - [Benchmark regressions in CI](/quest/m1/bench-ci.md) - PRs get a non-blocking comparison of the Criterion benches they affect, and a nightly trend on main alerts on regressions
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - retained evidence, repeated paired runs, and uncertainty for performance claims
 - [#3126](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench reports per-interval latency percentiles so the ramp leaves the steady state

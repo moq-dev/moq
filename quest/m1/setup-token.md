@@ -41,9 +41,14 @@ band](/quest/m1/auth/token-in-band.md) owns presenting one.
   the deployment negotiated out of band, verified exactly like `?jwt=`, and
   refuses any other kind naming the code until
   [Verify](/quest/m2/cat/verify.md) teaches it `0x01`. A request carrying
-  both a SETUP token and a `jwt` query is refused naming both.
+  both a SETUP token and a `jwt` query is admitted once when the two are the
+  same value and refused naming both when they differ: [Token in
+  band](/quest/m1/auth/token-in-band.md) sends one credential both ways while
+  any offered version lacks AUTH, so refusing the pair would refuse its own
+  connect path, while two different credentials have no defined precedence.
 - `js/net/src/ietf/parameters.ts` mirrors the decode and encode rules. No JS
-  accept-side API: nothing in `js/net` authorizes an IETF session.
+  accept-side API: nothing in `js/net` authorizes an IETF session, so no
+  consumer would read it; add one when a JS server needs to verify.
 - Docs: `doc/concept` on the IETF binding gains the option;
   `doc/lib/rs/moq-auth.md` gains the request field; `doc/bin/relay/auth.md`
   says the relay forwards the option and `moq auth serve` verifies a type-0
@@ -54,7 +59,8 @@ band](/quest/m1/auth/token-in-band.md) owns presenting one.
   exposes the bytes on one legacy and one draft-17+ session and a lite
   session reports none; the relay forwards the bytes to a wiremock auth
   server byte for byte; `moq auth serve` admits a type-0 JWT, refuses an
-  unknown kind, and refuses a token plus `?jwt=`.
+  unknown kind, admits a token plus the same `?jwt=`, and refuses a token
+  plus a different one.
 
 Public API: additive on `moq-net`, `moq-tokio`, `moq-auth`, and `js/net`.
 Wire: none new; the option already exists in every supported draft.

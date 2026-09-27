@@ -49,6 +49,7 @@ by the stop deadline and encoder reconnect.
 - [Client goaway](/quest/m1/drain/client-goaway.md) - the JavaScript client
   migrates on GOAWAY with a handover and the guarded redirect the Rust client
   already has, and the Rust drain path gets its regression test
+- [JS GOAWAY requests](/quest/m1/drain/js-goaway-requests.md) - after GOAWAY the JS client opens no new request on the old session, like Rust
 
 ## Related
 

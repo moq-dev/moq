@@ -80,7 +80,8 @@ Current decisions, open questions, or implementation guidance.
   child owns: the end-to-end test, the docs page.
 - New work joins the milestone matching its priority, at its rank.
 - Every issue under `Closes` carries the `quest` GitHub label
-  (`gh issue edit <n> --add-label quest`), applied when the quest lands.
+  (`gh issue edit <n> --add-label quest`), applied when the PR creating the
+  quest opens and removed if that PR closes unmerged.
   `Related` is context and gets none.
 - A release or pin bump that unblocks work is its own quest holding the
   condition as a plain-text `Required` bullet; every dependent requires it.
