@@ -53,6 +53,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Compressed tracks](/quest/m2/flate/README.md) - any track compresses per group from every language, not only the JSON modes
 - [Binary delta stats](/quest/m2/stats-delta.md) - an on-demand varint delta flavor of every stats track, if relay encode CPU still matters after the JSON fixes
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
+- [Plan: routing without a hop list](/quest/m2/plan-routing-origin.md) - whether announcements can drop the hop list and stay loop-free once stitching keys on the subscribe reply
 - [Redundant ingest](/quest/m2/redundant-ingest.md) - decide whether two publishers sharing one epoch may splice, and who declares the incumbent dead before the keep-alive does
 - [Multipath spike](/quest/m2/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends
 - [Receive timestamps](/quest/m2/quic-receive-ts.md) - per-packet arrival times in ACKs, the feedback GCC and deadlines need
@@ -84,6 +85,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Common Access Tokens](/quest/m2/cat/README.md) - a moq-transport client presents a CAT in SETUP and `moq auth serve` admits it with the scope its `moqt` claim names
 - [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - run exact source snapshots on accessible Linux and device hosts with retrievable debug evidence
 - [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks
+- [Firefox 155 WebTransport](/quest/m2/firefox-155-webtransport.md) - Firefox negotiates the version by subprotocol, and the other new WebTransport features stay unused on purpose
 - [Windows capture parity](/quest/m2/capture-windows.md) - system audio and screen cursor capture with a settled app-capture policy
 - [Linux capture parity](/quest/m2/capture-linux.md) - Wayland window/system-audio capture with explicit display-selection and app-capture limits
 - [Plan capture ergonomics](/quest/m2/capture-ergonomics.md) - scope independent crop and audio mixing quests

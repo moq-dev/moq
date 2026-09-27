@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.7](https://github.com/moq-dev/moq/compare/hang-v0.21.6...hang-v0.21.7) - 2026-09-26
+
+### Added
+
+- *(moq-mux)* catalog delay measures cross-rendition encoder lateness ([#4170](https://github.com/moq-dev/moq/pull/4170))
+
 ## [0.21.6](https://github.com/moq-dev/moq/compare/hang-v0.21.5...hang-v0.21.6) - 2026-09-26
 
 ### Other

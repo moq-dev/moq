@@ -15,6 +15,7 @@
 #![cfg_attr(not(feature = "play"), allow(dead_code))]
 
 mod args;
+mod buffer;
 mod layout;
 mod playback;
 mod source;
@@ -26,6 +27,8 @@ mod fake;
 mod media;
 #[cfg(feature = "play")]
 mod output;
+#[cfg(feature = "play")]
+mod video;
 #[cfg(feature = "play")]
 mod window;
 

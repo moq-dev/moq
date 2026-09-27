@@ -152,19 +152,32 @@ struct State {
 	broadcasts: HashMap<PathOwned, BroadcastState>,
 }
 
-impl Drop for State {
-	fn drop(&mut self) {
-		// The session dispatcher owns this state and can be dropped at any await.
-		// Active receive tasks abort their own groups. Cancel any head waiting for
-		// its tail here, along with the track. Ordinary unsubscribe removes its entry.
-		for (_, track) in self.subscribes.drain() {
+impl State {
+	/// End every active subscription with the error that ended the session.
+	///
+	/// Active receive tasks abort their own groups. Abort any head waiting for its
+	/// tail here, along with the track. Ordinary unsubscribe removes its entry.
+	fn abort(&mut self, err: &Error) {
+		for (_, mut track) in self.subscribes.drain() {
+			if let Some(request) = track.pending.take() {
+				request.reject(err.clone());
+			}
 			if let Fill::Ready { producer, .. } = &*track.fill.read() {
-				let _ = producer.clone().abort(Error::Cancel);
+				let _ = producer.clone().abort(err.clone());
 			}
 			if let Some(producer) = track.producer {
-				let _ = producer.abort(Error::Cancel);
+				let _ = producer.abort(err.clone());
 			}
 		}
+	}
+}
+
+impl Drop for State {
+	fn drop(&mut self) {
+		// The session dispatcher owns this state and can be dropped at any await. A
+		// session that ended with an error already aborted these with it; what
+		// remains was cancelled with the dispatcher.
+		self.abort(&Error::Cancel);
 	}
 }
 
@@ -298,6 +311,9 @@ struct Accepted {
 
 struct TrackState {
 	producer: Option<track::Producer>,
+	/// The origin request, until SUBSCRIBE_OK accepts it. Abort rejects this: the
+	/// producer does not exist yet, and dropping the setup task would be `Dropped`.
+	pending: Option<track::Request>,
 	name: String,
 	alias: Option<u64>,
 
@@ -344,6 +360,7 @@ impl TrackState {
 	fn pending(name: String, broadcast: PathOwned, fill: kio::Producer<Fill>, joining: Option<JoiningFetch>) -> Self {
 		Self {
 			producer: None,
+			pending: None,
 			name,
 			alias: None,
 			broadcast,
@@ -371,24 +388,6 @@ impl Drop for Counted {
 	}
 }
 
-/// How the last source for a path detaches, which decides whether the origin closes
-/// the broadcast now or holds it open for a replacement.
-///
-/// Only the detach that drops the refcount to zero decides, matching the model's rule
-/// for several sources at one path (the front's source selection): an earlier owner that vanished
-/// does not outvote the last one still on the path. That keeps two advertisements on
-/// one session behaving like the same two on separate sessions, where the model sees
-/// two independent sources and the last one out decides.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Detach {
-	/// The peer retracted the path, or we are rolling back an announce we just made.
-	/// Nothing is coming back, so close it now.
-	Graceful,
-	/// The stream carrying the path went away without retracting it. Abort the
-	/// source so viewers observe the loss as an error rather than a clean end.
-	Abrupt,
-}
-
 struct BroadcastState {
 	// The route announced into our origin for this namespace, post-charge.
 	route: crate::origin::Route,
@@ -400,9 +399,8 @@ struct BroadcastState {
 	// active number of PUBLISH_NAMESPACE messages.
 	count: usize,
 
-	// One minted source per requested path under the namespace: finish() on a
-	// deliberate unannounce, dropping (a dying session) aborts them so viewers
-	// observe the loss as an error.
+	// One minted source per requested path under the namespace, each closed
+	// when its guard drops.
 	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
 }
 
@@ -511,6 +509,11 @@ where
 			version,
 			going_away,
 		}
+	}
+
+	/// End every active subscription with the error that ended the session.
+	pub fn abort(&self, err: &Error) {
+		self.state.lock().abort(err);
 	}
 
 	/// Leave `alias` in the state a cancelled subscription leaves behind: bound to a
@@ -641,6 +644,11 @@ where
 		held.broadcast == new.broadcast && held.name == new.name
 	}
 
+	/// Take the origin request back out of a subscription that is still setting up.
+	fn take_pending(&self, request_id: RequestId) -> Option<track::Request> {
+		self.state.lock().subscribes.get_mut(&request_id)?.pending.take()
+	}
+
 	fn remove_subscribe(&self, request_id: RequestId) -> Option<TrackState> {
 		let mut state = self.state.lock();
 		let track = state.subscribes.remove(&request_id)?;
@@ -765,14 +773,11 @@ where
 		// ends: a clean close, a decode error, or the peer resetting it. Without this
 		// each namespace keeps its refcount and the source never detaches.
 		//
-		// Abruptly, including on a clean FIN: closing the stream retracts nothing, since
-		// the protocol has NAMESPACE_DONE for that. Whatever is still live here outlived
-		// its channel without being withdrawn, so hold the front open for a reconnect.
 		// This is what moq-lite already does, where the equivalent map is a local whose
 		// guards drop.
 		let res = self.run_namespace_entries(&mut stream, &prefix, &peer, &mut live).await;
 		for path in live {
-			let _ = self.stop_announce(path, Detach::Abrupt);
+			let _ = self.stop_announce(path);
 		}
 		res
 	}
@@ -816,7 +821,7 @@ where
 						// leave subscriptions on a path the peer no longer offers.
 						tracing::debug!(%path, "dropping reflected namespace");
 						if live.remove(&path) {
-							let _ = self.stop_announce(path, Detach::Graceful);
+							let _ = self.stop_announce(path);
 						}
 						continue;
 					};
@@ -846,7 +851,7 @@ where
 					let path = prefix.join(&msg.suffix);
 					tracing::debug!(%path, "namespace_done");
 					if live.remove(&path) {
-						let _ = self.stop_announce(path, Detach::Graceful);
+						let _ = self.stop_announce(path);
 					}
 				}
 				_ => {
@@ -981,7 +986,7 @@ where
 			Ok(_) => {
 				if let Err(err) = self.write_ok(&mut stream, request_id).await {
 					// Local rollback, not a peer unannounce: don't count announce bytes.
-					let _ = self.stop_announce(path, Detach::Graceful);
+					let _ = self.stop_announce(path);
 					return Err(err);
 				}
 			}
@@ -1005,15 +1010,7 @@ where
 			.await;
 
 		if attached {
-			// Ending cleanly IS the retraction here, unlike a NAMESPACE stream: this stream
-			// carries exactly one advertisement, and withdrawing it is what ends the stream.
-			// Any other ending left the advertisement standing, so the peer never withdrew
-			// it and the loss reads as abrupt (an error, not a clean end).
-			let detach = match res.is_ok() {
-				true => Detach::Graceful,
-				false => Detach::Abrupt,
-			};
-			self.stop_announce(path, detach)?;
+			self.stop_announce(path)?;
 		}
 
 		res
@@ -1125,7 +1122,7 @@ where
 			let Some(advert) = self.route(held.as_ref(), &peer) else {
 				if std::mem::take(attached) {
 					tracing::debug!(%path, "publish_namespace now loops back; detaching");
-					let _ = self.stop_announce(path.clone(), Detach::Graceful);
+					let _ = self.stop_announce(path.clone());
 				}
 				self.write_ok(stream, msg.request_id).await?;
 				continue;
@@ -1394,24 +1391,18 @@ where
 		}
 	}
 
-	fn stop_announce(&mut self, path: PathOwned, detach: Detach) -> Result<(), Error> {
+	/// Release one advertisement of `path`, closing its sources when it was the last.
+	fn stop_announce(&mut self, path: PathOwned) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
 				entry.get_mut().count -= 1;
 				if entry.get().count == 0 {
-					tracing::debug!(route = %self.origin.absolute(&path), ?detach, "unannounced");
-					// Dropping the entry retracts the route (its announcement drops).
-					let removed = entry.remove();
-					for (_, source) in removed.sources {
-						match detach {
-							Detach::Graceful => source.finish(),
-							// Dropping the guard aborts the source, so the loss reads
-							// as an error rather than a clean end.
-							Detach::Abrupt => {}
-						}
-					}
+					tracing::debug!(route = %self.origin.absolute(&path), "unannounced");
+					// Dropping the entry retracts the route (its announcement drops) and
+					// closes its sources (their guards drop).
+					entry.remove();
 				}
 			}
 			Entry::Vacant(_) => return Err(Error::NotFound),
@@ -1487,8 +1478,8 @@ where
 			let dynamic = source.dynamic();
 			request.accept(&source);
 
-			// Retain the source so a retraction can finish it. If the route was
-			// retracted since the accept, finish it here as that retraction would
+			// Retain the source so a retraction can close it. If the route was
+			// retracted since the accept, close it here as that retraction would
 			// have, and still serve what it took on: tracks subscribed since carry on.
 			let guard = crate::model::broadcast::SourceGuard::new(source);
 			let retracted = {
@@ -1501,9 +1492,7 @@ where
 					None => Some(guard),
 				}
 			};
-			if let Some(guard) = retracted {
-				guard.finish();
-			}
+			drop(retracted);
 
 			let this = self.clone();
 			broadcasts.push(async move {
@@ -1642,6 +1631,19 @@ where
 
 		tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %request.name(), "subscribe started");
 
+		// Park the origin request where a session abort can reject it. The producer
+		// does not exist until SUBSCRIBE_OK, and dropping this task would otherwise
+		// end the track as `Dropped`.
+		let track_name = request.name().to_owned();
+		{
+			let mut state = self.state.lock();
+			let Some(held) = state.subscribes.get_mut(&request_id) else {
+				request.reject(Error::Cancel);
+				return;
+			};
+			held.pending = Some(request);
+		}
+
 		// A publisher can be serving before its SUBSCRIBE_OK reaches us, since the data
 		// streams are independent of the request stream. Waiting for the response alone would
 		// miss the local side going away in that window and leave the publisher serving a
@@ -1651,9 +1653,10 @@ where
 		enum Setup {
 			Response(Result<Option<Accepted>, Error>),
 			Unused,
+			/// `abort` already rejected the parked request.
+			Gone,
 		}
 
-		let track_name = request.name().to_owned();
 		let setup = {
 			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream));
 			loop {
@@ -1665,7 +1668,15 @@ where
 					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
 						return Poll::Ready(Setup::Response(res));
 					}
-					if request.poll_unused(waiter).is_ready() {
+					let mut state = self.state.lock();
+					let Some(pending) = state
+						.subscribes
+						.get_mut(&request_id)
+						.and_then(|held| held.pending.as_mut())
+					else {
+						return Poll::Ready(Setup::Gone);
+					};
+					if pending.poll_unused(waiter).is_ready() {
 						return Poll::Ready(Setup::Unused);
 					}
 					Poll::Pending
@@ -1673,23 +1684,36 @@ where
 				.await;
 
 				match setup {
-					Setup::Response(res) => break Some((res, request)),
+					Setup::Response(res) => break Some(res),
+					Setup::Gone => break None,
 					Setup::Unused => {
-						if request.reject_unused(Error::Cancel) {
+						let mut state = self.state.lock();
+						let Some(pending) = state
+							.subscribes
+							.get_mut(&request_id)
+							.and_then(|held| held.pending.take())
+						else {
 							break None;
+						};
+						if pending.reject_unused(Error::Cancel) {
+							break None;
+						}
+						if let Some(held) = state.subscribes.get_mut(&request_id) {
+							held.pending = Some(pending);
 						}
 					}
 				}
 			}
 		};
 
-		let Some((response, request)) = setup else {
+		let Some(response) = setup else {
 			tracing::info!(
 				broadcast = %self.origin.absolute(&broadcast_path),
 				track = %track_name,
 				"subscribe abandoned before it was accepted"
 			);
-			// The publisher may already be serving before it answers.
+			// The publisher may already be serving before it answers. A session abort
+			// already rejected the parked request; dropping what remains is not a second one.
 			self.remove_subscribe(request_id);
 			self.cancel_subscribe(stream, request_id).await;
 			return;
@@ -1700,14 +1724,18 @@ where
 		let accepted = match response {
 			Ok(Some(accepted)) => accepted,
 			Ok(None) => {
+				if let Some(pending) = self.take_pending(request_id) {
+					pending.reject(Error::UnexpectedMessage);
+				}
 				self.remove_subscribe(request_id);
-				request.reject(Error::UnexpectedMessage);
 				return;
 			}
 			Err(err) => {
 				tracing::debug!(%err, "subscribe response error");
+				if let Some(pending) = self.take_pending(request_id) {
+					pending.reject(err);
+				}
 				self.remove_subscribe(request_id);
-				request.reject(err);
 				return;
 			}
 		};
@@ -1723,6 +1751,11 @@ where
 			.with_priority(super::priority::from_wire(priority.unwrap_or(128)));
 		// Declared before the track is released to readers, so a warm cache waiting on
 		// this copy judges itself against where the live feed actually starts.
+		let Some(request) = self.take_pending(request_id) else {
+			// Aborted while the answer was in hand. The parked request is already rejected.
+			self.remove_subscribe(request_id);
+			return;
+		};
 		let request = match live {
 			true => request.resolving_start(),
 			false => request,
@@ -2974,6 +3007,53 @@ mod tests {
 
 	use super::*;
 
+	async fn check_publish_fin(responses: Vec<u8>, clean: bool) {
+		use crate::lite::test_transport::ScriptedSession;
+		use crate::transport::poll::Session as _;
+		let mut session = ScriptedSession::eof(responses);
+		let (_, recv) = session.open_bi().await.unwrap();
+		let mut reader = Reader::new(recv, Version::Draft19);
+		let result = Subscriber::<ScriptedSession>::read_publish_done(&mut reader, Version::Draft19).await;
+		if clean {
+			assert_eq!(result.unwrap(), 0);
+		} else {
+			assert!(matches!(result, Err(Error::ProtocolViolation)));
+		}
+	}
+
+	fn fin_responses(clean: bool) -> Vec<u8> {
+		use crate::coding::Encode;
+		let mut responses = Vec::new();
+		if clean {
+			ietf::PublishDone::ID.encode(&mut responses, Version::Draft19).unwrap();
+			ietf::PublishDone {
+				request_id: None,
+				status_code: ietf::PublishDoneStatus::TrackEnded.code(Version::Draft19),
+				stream_count: 0,
+				reason_phrase: "done".into(),
+			}
+			.encode(&mut responses, Version::Draft19)
+			.unwrap();
+		}
+		responses
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn bare_fin_requires_publish_done() {
+		for clean in [false, true] {
+			check_publish_fin(fin_responses(clean), clean).await;
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	#[ignore = "requires Bun; run by just test bare-fin in interop CI"]
+	async fn bare_fin_interop() {
+		for clean in [false, true] {
+			let responses = crate::test_interop::fin("moqt-19", false, clean, fin_responses(clean));
+			check_publish_fin(responses, clean).await;
+		}
+	}
+
 	/// The tokio-backed test runtime. Its transport parameter is phantom, so one
 	/// type serves every fake session in this module.
 
@@ -2989,6 +3069,45 @@ mod tests {
 		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
 
 		assert_eq!(pending.await.unwrap(), RequestId(11));
+	}
+
+	/// SUBSCRIBE_OK has not accepted the track, so the map holds no producer.
+	/// Abort still has to reject the parked origin request with the session error.
+	#[tokio::test]
+	async fn session_death_rejects_a_subscribe_still_setting_up() {
+		let broadcast = crate::broadcast::Info::new().produce();
+		let mut dynamic = broadcast.dynamic();
+		let consumer = broadcast.consume();
+		let mut waiting = std::pin::pin!(consumer.track("video").unwrap().subscribe(None));
+		assert!(poll!(&mut waiting).is_pending());
+
+		let mut requested = std::pin::pin!(dynamic.requested_track());
+		let std::task::Poll::Ready(Ok(request)) = poll!(&mut requested) else {
+			panic!("the subscribe did not request a track");
+		};
+
+		let mut state = State::default();
+		state.subscribes.insert(
+			RequestId(1),
+			TrackState {
+				pending: Some(request),
+				..TrackState::pending(
+					"video".to_string(),
+					crate::Path::new("bcast").to_owned(),
+					kio::Producer::new(Fill::Done),
+					None,
+				)
+			},
+		);
+		state.abort(&Error::Session(crate::SessionError::App(7)));
+
+		assert!(
+			matches!(
+				poll!(&mut waiting),
+				std::task::Poll::Ready(Err(Error::Session(crate::SessionError::App(7))))
+			),
+			"setup was not rejected with the session error"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -3595,7 +3714,7 @@ mod tests {
 
 		// Let the SUBSCRIBE go out, then retract the broadcast before any response.
 		settle().await;
-		producer.finish();
+		producer.close();
 		settle().await;
 
 		assert!(
@@ -4387,7 +4506,7 @@ mod tests {
 		subscriber.start_announce(path.clone(), advert).unwrap();
 		settle().await;
 
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path).unwrap();
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
 			"an explicit NAMESPACE_DONE must retract the route",
@@ -4508,7 +4627,7 @@ mod tests {
 
 	/// Several advertisements share one refcounted source, so the detach that empties it
 	/// is the one that counts: the broadcast survives the first stop and closes on the
-	/// last, whatever kind each detach is.
+	/// last.
 	///
 	/// That is the model's own rule for several sources at one path (the front's source
 	/// selection),
@@ -4529,7 +4648,7 @@ mod tests {
 		settle().await;
 
 		// One advertisement's stream dies: the other still holds the source.
-		subscriber.stop_announce(path.clone(), Detach::Abrupt).unwrap();
+		subscriber.stop_announce(path.clone()).unwrap();
 		settle().await;
 		assert!(
 			routed_now(&consumer, "room/host").is_some(),
@@ -4537,7 +4656,7 @@ mod tests {
 		);
 
 		// The last owner retracts: the broadcast closes with it.
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path).unwrap();
 		settle().await;
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
@@ -4604,7 +4723,7 @@ mod tests {
 
 		// One advertisement, so one unannounce detaches it. If the update had bumped the
 		// refcount, this would leave the route stranded.
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -4657,7 +4776,7 @@ mod tests {
 		);
 
 		// One advertisement, so one unannounce detaches it.
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -4686,9 +4805,9 @@ mod tests {
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to retract.
-		subscriber.stop_announce(path.clone(), Detach::Graceful).unwrap();
+		subscriber.stop_announce(path.clone()).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -4715,9 +4834,9 @@ mod tests {
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to retract.
-		subscriber.stop_announce(path.clone(), Detach::Graceful).unwrap();
+		subscriber.stop_announce(path.clone()).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -4754,7 +4873,7 @@ mod tests {
 		);
 
 		// That supersedes the advertisement it repeats, so the old route is retired.
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path).unwrap();
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
 			"the superseded route must not stay attached"
@@ -5214,7 +5333,7 @@ mod tests {
 
 		// What the stream's exit path does with whatever it still holds.
 		for path in live {
-			subscriber.stop_announce(path, Detach::Graceful).unwrap();
+			subscriber.stop_announce(path).unwrap();
 		}
 
 		assert!(routed_now(&consumer, "room/a").is_none(), "room/a leaked a refcount");

@@ -54,6 +54,10 @@ process ran out of a resource `accept` needs. Content dropped for drifting past
 a subscriber's budget is counted separately as `moq_relay_stale_bytes_total`
 and friends. Host CPU and memory belong to a node exporter.
 
+Traffic and session counters accumulate for the node's lifetime, including
+broadcasts and sessions that have ended. The stats publishing prefix (normally
+`.stats`) is excluded to avoid counting the feed's own traffic.
+
 With `--runtime-io-uring`, each QUIC worker thread also reports its own
 `moq_relay_uring_*` counters under a `worker` label: datagrams and syscalls
 (the ratios are the GRO/GSO batching and the syscall amortization the runtime

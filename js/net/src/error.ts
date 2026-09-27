@@ -425,6 +425,31 @@ export function fromClose(info: WebTransportCloseInfo): Session | null {
 }
 
 /**
+ * The session's close as the error it ends everything with, carrying the peer's code. A clean
+ * close code is still an error here: whatever the close cut off did not end.
+ *
+ * @internal
+ */
+export function closeError(quic: WebTransport): Promise<Error> {
+	return quic.closed.then(
+		(info) => fromClose(info) ?? new Session(SessionCode.Cancel, { reason: info.reason }),
+		(err: unknown) => error(err),
+	);
+}
+
+/**
+ * Report a failure the session's close caused as the session's own error, which carries the
+ * peer's close code; any other failure passes through.
+ *
+ * @internal
+ */
+export async function sessionCause(quic: WebTransport | undefined, err: unknown): Promise<Error> {
+	const source = typeof err === "object" && err !== null ? (err as { source?: unknown }).source : undefined;
+	if (quic && source === "session") return closeError(quic);
+	return error(err);
+}
+
+/**
  * Coerce an unknown thrown value into an `Error`.
  *
  * @internal

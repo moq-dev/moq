@@ -39,6 +39,24 @@ struct State {
 }
 
 impl Recorder {
+	/// Present the newest due frame, just as the window does on a redraw.
+	pub fn present(&self, media: &super::media::Media<Self>) -> Option<hang::moq_net::Timestamp> {
+		let mut video = media.video.lock().unwrap();
+		let presentation = media.presentation.lock().unwrap();
+		let now = Instant::now().into_std();
+		let mut shown = None;
+		while video
+			.front()
+			.is_some_and(|frame| presentation.due(frame.timestamp).is_none_or(|at| at <= now))
+		{
+			shown = video.pop_front().map(|frame| frame.timestamp);
+		}
+		if shown.is_some() {
+			media.drained.notify_one();
+		}
+		shown
+	}
+
 	/// Everything the speaker played, in write order.
 	pub fn played(&self) -> Vec<Played> {
 		self.state.lock().unwrap().played.clone()

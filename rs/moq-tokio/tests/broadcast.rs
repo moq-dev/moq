@@ -789,7 +789,7 @@ async fn announce_lifecycle_test(version: &str) {
 
 	// Unannounce: retracted by announce id on the wire. Dropping the announcement
 	// retracts the route; the broadcast's own end is independent.
-	second.finish();
+	second.close();
 	let update = next_announce(&mut announcements).await;
 	assert_eq!(update.prefix.as_str(), "room/second");
 	assert!(!update.kind.is_active(), "expected retraction");
@@ -804,7 +804,7 @@ async fn announce_lifecycle_test(version: &str) {
 	// Replace the route at "first": retract the original (retiring its announce
 	// id on the wire), then announce the same path again (assigning a fresh id).
 	// Await the retraction first so the events cannot coalesce away.
-	first.finish();
+	first.close();
 	let update = next_announce(&mut announcements).await;
 	assert_eq!(update.prefix.as_str(), "room/first");
 	assert!(!update.kind.is_active(), "expected the replaced retraction");

@@ -239,7 +239,7 @@ where
 					Ok(())
 				}));
 
-				kio::wait(|waiter| {
+				let res = kio::wait(|waiter| {
 					use std::task::Poll;
 					if let Poll::Ready(err) = waiter.poll_future(adapter_run.as_mut()) {
 						return Poll::Ready(Err::<(), Error>(err));
@@ -261,7 +261,12 @@ where
 					}
 					Poll::Pending
 				})
-				.await
+				.await;
+				if let Err(err) = &res {
+					// Every track this session was receiving ends with its error.
+					subscriber.abort(err);
+				}
+				res
 			}
 			_ => {
 				// Send SETUP and keep the stream alive: it is also our GOAWAY channel.
@@ -366,7 +371,7 @@ where
 					Ok(())
 				}));
 
-				kio::wait(|waiter| {
+				let res = kio::wait(|waiter| {
 					use std::task::Poll;
 					if let Poll::Ready(err) = waiter.poll_future(unis.as_mut()) {
 						return Poll::Ready(Err::<(), Error>(err));
@@ -391,7 +396,12 @@ where
 					}
 					Poll::Pending
 				})
-				.await
+				.await;
+				if let Err(err) = &res {
+					// Every track this session was receiving ends with its error.
+					subscriber.abort(err);
+				}
+				res
 			}
 		};
 
@@ -424,6 +434,9 @@ pub struct PeerSetup<S: crate::transport::poll::Session> {
 
 	/// The request path the peer advertised, for URL-less transports.
 	pub path: Option<String>,
+
+	/// The credential the peer presented in its `AUTHORIZATION TOKEN` option.
+	pub token: Option<crate::setup::Token>,
 
 	/// The Setup Options it declared (see [`cluster`] and [`solicit`]).
 	pub declared: peer::Peer,
@@ -475,11 +488,13 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 			),
 			None => None,
 		};
+		let token = super::token::from_setup(&params, version)?;
 		let declared = peer_from_params(&params, version)?;
 
 		return Ok(PeerSetup {
 			stream: reader,
 			path,
+			token,
 			declared,
 		});
 	}

@@ -1,3 +1,7 @@
+//! The SETUP exchange, and the credential a peer may present in it.
+//!
+//! Only [`Token`] is public; the SETUP messages themselves are wire internals.
+
 use bytes::Bytes;
 
 use crate::{
@@ -12,9 +16,27 @@ const SERVER_SETUP: u8 = 0x21;
 /// Draft-17 unified SETUP message type (varint 0x2F00)
 pub(crate) const SETUP_V17: u64 = 0x2F00;
 
+/// A credential a moq-transport peer presented in its SETUP's `AUTHORIZATION TOKEN` option.
+///
+/// The transport never reads the bytes; verifying them is the application's job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Token {
+	/// The wire Token Type, naming how [`value`](Self::value) is encoded.
+	pub kind: u64,
+	/// The token itself.
+	pub value: Vec<u8>,
+}
+
+impl Token {
+	/// Token Type 0: a format the endpoints agreed on out of band, such as a JWT.
+	pub const OUT_OF_BAND: u64 = 0x0;
+	/// Token Type 1: a Common Access Token (draft-ietf-moq-c4m).
+	pub const CAT: u64 = 0x1;
+}
+
 /// Draft-17+ unified SETUP message, with the same encoding for both client and server.
 #[derive(Debug, Clone)]
-pub struct Setup {
+pub(crate) struct Setup {
 	pub parameters: Bytes,
 }
 
@@ -88,7 +110,7 @@ impl SetupVersion {
 
 /// A version-agnostic setup message sent by the client.
 #[derive(Debug, Clone)]
-pub struct Client {
+pub(crate) struct Client {
 	/// The list of supported versions in preferred order.
 	pub versions: coding::Versions,
 
@@ -171,7 +193,7 @@ impl Encode<Version> for Client {
 
 /// Sent by the server in response to a client setup.
 #[derive(Debug, Clone)]
-pub struct Server {
+pub(crate) struct Server {
 	/// The list of supported versions in preferred order.
 	pub version: coding::Version,
 

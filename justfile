@@ -248,7 +248,7 @@ install:
 # Resolve BASE: arg > $GITHUB_BASE_REF > upstream > origin/main. A branch's
 # upstream is the branch it merges into, which is the base a `dev`-targeted
 # branch needs. `git push -u` repoints upstream at the branch's own remote copy,
-# which would diff HEAD against itself, so ignore that case (see CLAUDE.md).
+# which would diff HEAD against itself, so ignore that case (see AGENTS.md).
 # GITHUB_BASE_REF outranks the upstream because a PR checkout has no upstream
 # configured, and the branch being merged into is exactly the base GitHub is
 # asking about.

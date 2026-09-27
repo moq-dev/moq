@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/moq-dev/moq/compare/moq-auth-v0.1.3...moq-auth-v0.1.4) - 2026-09-26
+
+### Fixed
+
+- *(auth)* keep accepted grants on fixed expiry deadlines ([#4237](https://github.com/moq-dev/moq/pull/4237))
+
 ## [0.1.3](https://github.com/moq-dev/moq/compare/moq-auth-v0.1.2...moq-auth-v0.1.3) - 2026-09-26
 
 ### Other

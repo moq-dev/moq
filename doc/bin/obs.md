@@ -35,7 +35,8 @@ OBS Studio install.
 
 OBS reports each locally encoded packet's handoff to libmoq against the shared
 broadcast media clock. Each track's catalog `jitter` is the largest measured
-delay above that track's own recent minimum, rounded up to milliseconds.
+delay above that track's own recent minimum, and its `delay` is how far that
+minimum trails the earliest track, both rounded up to milliseconds.
 
 ## Source quality and moq-transcode
 

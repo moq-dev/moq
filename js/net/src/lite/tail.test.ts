@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -72,6 +73,7 @@ async function subscribed(version: Version, maxAge = GRACE) {
 		reader,
 		respond: (resp: SubscribeResponse) => encodeSubscribeResponse(sub.writer, resp, version),
 		fin: () => sub.writer.close(),
+		reset: (error: Error) => sub.writer.reset(error),
 	};
 }
 
@@ -248,4 +250,23 @@ test("lite-07 zero count ends without grace even when the announced range is non
 	expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
 	expect(await reader.closed).toBeNull();
 	expect(reader.final()).toBe(3);
+});
+
+for (const started of [false, true]) {
+	test(`a bare FIN ${started ? "after SUBSCRIBE_START" : "without responses"} aborts the track`, async () => {
+		const { reader, respond, fin } = await subscribed(Version.DRAFT_05);
+		if (started) await respond({ start: new SubscribeStart(0) });
+		await fin();
+		expect(await reader.closed).toBeInstanceOf(ProtocolViolation);
+		await expect(reader.recvGroup()).rejects.toThrow(ProtocolViolation);
+	});
+}
+
+test("a subscribe stream reset preserves the publisher's failure", async () => {
+	const { reader, reset } = await subscribed(Version.DRAFT_05);
+	reset(new StreamError(StreamCode.NotFound));
+	const closed = await reader.closed;
+	expect(closed).toBeInstanceOf(StreamError);
+	expect((closed as StreamError).code).toBe(StreamCode.NotFound);
+	await expect(reader.recvGroup()).rejects.toThrow(StreamError);
 });
