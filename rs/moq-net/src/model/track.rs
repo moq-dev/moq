@@ -4077,6 +4077,17 @@ impl Subscriber {
 		}
 	}
 
+	/// Stop reporting the tracks feeding this cursor to `frontier`.
+	pub(crate) fn unwatch(&mut self, frontier: &stats::Frontier) {
+		match &mut self.inner {
+			SubscriberKind::Plain(plain) => {
+				let cache = plain.state.read().cache.clone();
+				frontier.unwatch(&cache);
+			}
+			SubscriberKind::Spliced(spliced) => spliced.unwatch(frontier),
+		}
+	}
+
 	/// Return the latest sequence number in the track.
 	pub fn latest(&self) -> Option<u64> {
 		match &self.inner {

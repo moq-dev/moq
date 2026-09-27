@@ -1873,6 +1873,16 @@ impl Frontier {
 		});
 	}
 
+	/// Remove a track that no longer feeds this subscription, such as a splice
+	/// segment capped by a switch, so what it produces past the cap stops counting.
+	pub(crate) fn unwatch(&self, track: &Arc<cache::Track>) {
+		let Some(inner) = &self.0 else { return };
+		let mut state = inner.state.lock().expect("stats frontier poisoned");
+		state
+			.sources
+			.retain(|s| s.track.upgrade().is_some_and(|live| !Arc::ptr_eq(&live, track)));
+	}
+
 	/// Start tracking one group stream written toward the peer.
 	pub(crate) fn delivery(&self) -> Delivery {
 		Delivery {

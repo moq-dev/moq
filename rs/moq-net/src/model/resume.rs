@@ -1520,6 +1520,17 @@ impl Subscriber {
 			}
 		}
 	}
+
+	/// Stop reporting any segment's track to `frontier`, current or future.
+	pub(crate) fn unwatch(&mut self, frontier: &crate::stats::Frontier) {
+		self.frontier = Default::default();
+		for seg in &mut self.segments {
+			seg.frontier = Default::default();
+			if let SubState::Active(sub) = &mut seg.sub {
+				sub.unwatch(frontier);
+			}
+		}
+	}
 }
 
 impl Subscriber {
@@ -1656,6 +1667,13 @@ impl Subscriber {
 						warm.next = next;
 					}
 					if existing.end != segment.end {
+						// A capped segment's track may live on past the boundary; what it
+						// produces there never reaches this reader, so it stops weighing lag.
+						if existing.end.is_none()
+							&& let SubState::Active(sub) = &mut existing.sub
+						{
+							sub.unwatch(&existing.frontier);
+						}
 						// The boundary bounds the drift anchor as well as the demand; the
 						// anchor follows in `refresh_anchor`.
 						existing.end = segment.end;
@@ -1870,7 +1888,10 @@ impl Subscriber {
 					sub.raise_start_to(seg.first_group().max(min_sequence));
 					sub.set_anchor(seg.anchor.clone());
 					let _ = sub.update(slice(prefs, seg.ask, seg.end));
-					sub.watch(&seg.frontier);
+					// Only the open-ended segment weighs lag; see `apply`.
+					if seg.end.is_none() {
+						sub.watch(&seg.frontier);
+					}
 					seg.sub = SubState::Active(Box::new(sub));
 				}
 				// The underlying track was rejected or closed: stall, not error.
@@ -2505,8 +2526,9 @@ mod test {
 		recv_pending(&mut sub);
 	}
 
-	/// A spliced subscription's lag weighs what every segment's track produces, so a
-	/// route-fed broadcast (every relay hop) is sampled across failovers.
+	/// A spliced subscription's lag weighs what the open-ended segment's track
+	/// produces, so a route-fed broadcast (every relay hop) is sampled across
+	/// failovers, and a capped route that lives on stops counting.
 	#[tokio::test]
 	async fn lag_weighs_every_segment() {
 		use crate::stats;
@@ -2542,6 +2564,10 @@ mod test {
 		let _ = kio::wait(|waiter| sub.poll_recv_group(waiter)).now_or_never();
 		pending(&mut sub);
 		write_group_at(&mut track_b, 1, "b1", Duration::from_secs(1));
+		assert_eq!(weight(), 4);
+
+		// The capped route keeps publishing past the boundary: not this reader's media.
+		write_group_at(&mut track_a, 2, "a2", Duration::from_secs(2));
 		assert_eq!(weight(), 4);
 	}
 
