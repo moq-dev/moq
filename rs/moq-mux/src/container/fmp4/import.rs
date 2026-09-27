@@ -939,18 +939,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				track.estimator.cut(Some(timestamp));
 			}
 			let fragment_len = fragment_bytes.len();
-			// Audio is always independently decodable; video says whether this fragment really
-			// begins on an IDR, which is what an HLS export reads to bootstrap an init segment.
-			if let Some(recorder) = track.recorder.as_mut() {
-				recorder.frame(position, timestamp, contains_keyframe);
-			}
-
 			let mut frame = g.create_frame(moq_net::frame::Info {
 				size: fragment_bytes.len() as u64,
 				timestamp,
 			})?;
 			frame.write(fragment_bytes)?;
 			frame.finish()?;
+
+			// Only once published, so a rejected fragment is never indexed. Audio is always
+			// independently decodable; video says whether this fragment really begins on an IDR,
+			// which is what an HLS export reads to bootstrap an init segment.
+			if let Some(recorder) = track.recorder.as_mut() {
+				recorder.frame(position, timestamp, contains_keyframe);
+			}
 
 			track.group = Some(g);
 
