@@ -93,6 +93,8 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 ## Quests
 
+- [Public rules parity](/quest/m0/public-rules.md) - public and mTLS rules authorize like a JWT rooted at `/`, as in 0.14, so `anon/**` works at `/anon` and refuses every path outside it
+- [Auth parity](/quest/m0/auth-parity.md) - the silent 0.15 auth changes revert to 0.14 behavior or refuse at startup with the replacement named, and 0.14 tokens still verify
 - [Release](/quest/m0/release.md) - the release moq.pro adopts: binding docs, an upgrade page, and a staging soak gate it rather than the merge
 - [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - a playout latency regression fails a run instead of arriving as a bug report, and its recorder supplies the jitter target's replay traces
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
