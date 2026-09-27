@@ -167,7 +167,8 @@ impl Message for Fetch<'_> {
 				);
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
-				let group_order = group_order.unwrap_or(GroupOrder::Descending);
+				// No preference: the publisher picks the order.
+				let group_order = group_order.unwrap_or(GroupOrder::Any);
 
 				Ok(Self {
 					request_id,

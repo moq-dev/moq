@@ -30,7 +30,7 @@ Docs stay inline in the change that makes them stale. No new guide.
 
 ## Quests
 
-- [Group FETCH](/quest/m1/moxygen/fetch.md) - an IETF FETCH of whole groups is served from cache or fetched upstream, one group at a time
+- [Sparse FETCH ranges](/quest/m1/moxygen/fetch-span.md) - a FETCH costs the groups it returns, not the span of its range
 - [Datagram groups](/quest/m1/moxygen/datagram.md) - an IETF datagram that is one object in a group arrives as a moq-lite datagram group
 
 ## Related
