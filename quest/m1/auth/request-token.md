@@ -41,28 +41,35 @@ on the unknown key, and the legacy drafts silently ignore it.
   alone ends with `EXPIRED_AUTH_TOKEN` or `UNAUTHORIZED`. A session grant
   that shrinks cancels the requests it covered, as for any request, through
   [Origin narrowing](/quest/m1/auth/narrowing.md).
-- Relay: each such request attaches its own lease through the
-  `Client::attach` path [Relay tokens](/quest/m1/auth/relay-refresh.md)
-  builds, once per request, with no sharing across requests carrying the
-  same bytes; the lease is dropped with the request. The request is resolved
-  against the origin with the path checked against that lease's grant, not
-  through the session's scoped origin handle.
+- Relay: each such request gets its own lease from a per-request call on
+  `moq_auth::Client`, not the `Client::attach` that [Relay
+  tokens](/quest/m1/auth/relay-refresh.md) builds. `attach` connects with the
+  connection's id, and the auth server treats that as one more grant on the
+  session that never POSTs `end`, so a request token would widen the whole
+  connection for its life. The per-request call carries the token in
+  `moq_auth::Request.token` with its kind (a CAT reaches the CAT verifier,
+  not the JWT one) and the request's path, is never counted as a session
+  grant, and ends when the request ends. Two requests carrying the same bytes
+  get two leases. The request is resolved against the origin with the path
+  checked against that lease's grant, not through the session's scoped
+  origin handle. Name the call while implementing.
 - `js/net` mirrors the decode and the default refusal.
 - Docs: `doc/bin/relay/auth.md` states the order (session grant, then the
   request's token, then `UNAUTHORIZED`), that a request token covers only its
   request, and how a peer refreshes with REQUEST_UPDATE.
 - Tests: a SUBSCRIBE outside the session grant succeeds with a covering token
   and is refused `UNAUTHORIZED` without one; its token grants nothing to a
-  second SUBSCRIBE; a request inside the session grant never calls the
+  second SUBSCRIBE, and through the relay the auth server never counts it as
+  a session grant and sees its lease end with the request; a request inside the session grant never calls the
   verifier; a REQUEST_UPDATE token keeps a subscription alive past the old
   token's expiry; an expired request token ends only that request; with no
   consumer a token-bearing request is refused `Unsupported`; one legacy and
   one strict draft, Rust and JS.
 
 Public API: additive on `moq_net::auth::Request` (the request it belongs
-to). Wire: none new; the parameter already exists in every supported draft.
+to) and on `moq_auth::Client` (the per-request lease). Wire: none new; the parameter already exists in every supported draft.
 
 ## Required
 
-- [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the per-token
-  lease and `Client::attach` path each request uses
+- [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the lease
+  revalidation the per-request lease reuses

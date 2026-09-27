@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.19](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.18...moq-tokio-v0.19.19) - 2026-09-27
+
+### Added
+
+- *(net)* the SETUP AUTHORIZATION TOKEN option reaches the verifier ([#4278](https://github.com/moq-dev/moq/pull/4278))
+
+### Fixed
+
+- *(cli)* close the relay connection on SIGINT and SIGTERM ([#4287](https://github.com/moq-dev/moq/pull/4287))
+
+### Other
+
+- fix three load-only test failures at the cause ([#4286](https://github.com/moq-dev/moq/pull/4286))
+
 ## [0.19.18](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.17...moq-tokio-v0.19.18) - 2026-09-26
 
 ### Added

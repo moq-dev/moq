@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.8](https://github.com/moq-dev/moq/compare/moq-relay-v0.15.7...moq-relay-v0.15.8) - 2026-09-27
+
+### Added
+
+- *(net)* the SETUP AUTHORIZATION TOKEN option reaches the verifier ([#4278](https://github.com/moq-dev/moq/pull/4278))
+
+### Fixed
+
+- *(auth)* root public and mTLS rules at / ([#4318](https://github.com/moq-dev/moq/pull/4318))
+
 ## [0.15.7](https://github.com/moq-dev/moq/compare/moq-relay-v0.15.6...moq-relay-v0.15.7) - 2026-09-26
 
 ### Added

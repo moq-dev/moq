@@ -34,6 +34,19 @@ Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts
 still in progress: it negotiates as `moq-lite-07-wip`, and only when both
 sides explicitly enable it.
 
+## Subscription completion
+
+On moq-lite 07, `SUBSCRIBE_END` counts the group streams opened for the
+subscription. Rust and TypeScript stop waiting for missing streams once that
+many headers have arrived; skipped group sequences add no wait. Groups already
+being received continue until their own stream ends or resets.
+
+A stream reset before its header arrived cannot be counted, so the subscriber
+still allows a grace period for late streams. The grace uses the subscription's
+nonzero effective maximum age, or one second when no maximum age is set.
+moq-lite 05 and 06 instead account for group sequences using received headers
+and `SUBSCRIBE_DROP`.
+
 ## Discovery
 
 A session can ask for announcements matching a path prefix. The peer replies

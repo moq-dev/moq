@@ -37,7 +37,7 @@ pub(crate) mod tracks;
 pub(crate) use claim::Claim;
 pub use consumer::Consumer;
 pub use data::IntoRendition;
-pub(crate) use data::{Listing, json_len};
+pub(crate) use data::Listing;
 pub use entry::Entry;
 pub use estimate::{Estimate, Estimator};
 pub use format::*;

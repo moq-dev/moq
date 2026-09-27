@@ -20,7 +20,7 @@ import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk } from "./subscribe.ts";
-import { SubscribeNamespace } from "./subscribe_namespace.ts";
+import { SubscribeNamespace, SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
@@ -613,6 +613,107 @@ test("a solicited legacy advertisement refused once is retried", async () => {
 });
 
 /**
+ * A SUBSCRIBE_NAMESPACE below an advertised route still hears that route: it serves the
+ * requested prefix, so it lands as the empty suffix, then paths beneath the prefix follow
+ * as their own suffixes. Matches the Lite publisher and Rust.
+ */
+test("a subscription below an advertised route hears it as the empty suffix", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
+	publish(origin, Path.from("dash"));
+
+	const subscription = await Stream.open(pair.client, { version: VERSION });
+	const accepted = await Stream.accept(pair.server, VERSION);
+	if (!accepted) throw new Error("the subscription stream was never accepted");
+	void pub.runSubscribeNamespace(
+		new SubscribeNamespace({ requestId: 0n, namespace: Path.from("dash/nobody") }),
+		accepted,
+	);
+
+	const entry = async () => {
+		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+		return (await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix;
+	};
+
+	expect(await subscription.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(subscription.reader, VERSION);
+	expect(await entry()).toBe(Path.empty());
+
+	publish(origin, Path.from("dash/nobody/cam"));
+	expect(await entry()).toBe(Path.from("cam"));
+
+	subscription.close();
+	origin.close();
+});
+
+/**
+ * A scoped route covers only what it claims: `room` claiming `room/chat` cannot serve
+ * `room/video`, so a subscription there must not hear it as the empty suffix.
+ */
+test("a subscription outside a covering route's claim does not hear it", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
+	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room/chat"))]));
+	const dynamic = chat.dynamic(Path.from("room"));
+
+	const subscription = await Stream.open(pair.client, { version: VERSION });
+	const accepted = await Stream.accept(pair.server, VERSION);
+	if (!accepted) throw new Error("the subscription stream was never accepted");
+	void pub.runSubscribeNamespace(
+		new SubscribeNamespace({ requestId: 0n, namespace: Path.from("room/video") }),
+		accepted,
+	);
+
+	expect(await subscription.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(subscription.reader, VERSION);
+
+	// The first entry is the broadcast beneath the prefix, not the out-of-claim cover.
+	publish(origin, Path.from("room/video/cam"));
+	expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+	expect((await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix).toBe(Path.from("cam"));
+
+	dynamic.close();
+	subscription.close();
+	origin.close();
+});
+
+/**
+ * The claim is presented relative to the served origin's root, like the route's key: a
+ * publisher serving `tenant` offers `room` (claiming `tenant/room/chat`) to a
+ * subscription at `room/chat`.
+ */
+test("a covering route's claim is compared relative to the served root", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const origin = new OriginProducer();
+	const tenant = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.all()]));
+	const pub = new Publisher({
+		quic: pair.server,
+		session: new NativeSession(pair.server, VERSION, true),
+		publish: tenant.consume(),
+		requiresSolicitation: true,
+	});
+	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/room/chat"))]));
+	const dynamic = chat.dynamic(Path.from("tenant/room"));
+
+	const subscription = await Stream.open(pair.client, { version: VERSION });
+	const accepted = await Stream.accept(pair.server, VERSION);
+	if (!accepted) throw new Error("the subscription stream was never accepted");
+	void pub.runSubscribeNamespace(
+		new SubscribeNamespace({ requestId: 0n, namespace: Path.from("room/chat") }),
+		accepted,
+	);
+
+	expect(await subscription.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(subscription.reader, VERSION);
+	expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+	expect((await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix).toBe(Path.empty());
+
+	dynamic.close();
+	subscription.close();
+	origin.close();
+});
+
+/**
  * A peer that refuses an advertisement with a retry interval of 0 is asking not to be
  * offered it again. Coming back anyway turns a permanent refusal (unauthorized,
  * uninterested) into a request every few seconds for the life of the session.
@@ -993,7 +1094,7 @@ async function readGroup(stream: ReadableStream<Uint8Array>): Promise<ServedGrou
 async function readEndOfTrack(stream: ReadableStream<Uint8Array>): Promise<number> {
 	const reader = new Reader(stream, undefined, V20);
 	const header = await GroupMessage.decode(reader, V20);
-	const frame = await Frame.decode(reader, header.flags, undefined, V20);
+	const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
 	expect(frame.endOfTrack).toBe(true);
 	expect(await reader.done()).toBe(true);
 	return header.groupId;

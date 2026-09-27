@@ -1,4 +1,0 @@
-interface:
-  display_name: "start-quest"
-  short_description: "Find and start an unblocked repository quest"
-  default_prompt: "Use $start-quest to find unblocked repository quests and start my choice."

@@ -31,6 +31,12 @@ make MoQ's common case.
 
 - Existence is split from reachability. An announcement carries the path, its
   origin relay, and the origin's cost, and nothing about the path to it.
+- An existence event carries the origin's seqno, scoped to its incarnation. A
+  relay applies an event only when it is newer than the last it applied for
+  that path and origin, and keeps an ended path's seqno, so a start delayed on
+  a stale tree or a failed-over registry cannot revive it. Babel keeps
+  feasibility past withdrawal for the same reason
+  ([RFC 8966 section 3.7.3](https://www.rfc-editor.org/rfc/rfc8966#section-3.7.3)).
 - The topology is configured: `--cluster-connect` or the connect API gives the
   relay graph and link costs. Relays flood per-link liveness among themselves
   with a per-link seqno. The seqno is scoped to the relay's incarnation, so a
@@ -44,6 +50,13 @@ make MoQ's common case.
   links. That is a shortest path to a virtual node linked to every origin, so
   it is loop-free whenever relays agree on the topology. Specificity still
   ranks first, per [Wildcard](/quest/m0/wildcard/README.md).
+- The first relay's choice rides the SUBSCRIBE, and transit relays forward
+  toward that origin by topology alone, never re-selecting. Re-selection
+  against another existence view loops: a relay that lost a specific claim
+  falls back to a broader one through a relay still routing to the specific
+  one ([RFC 8966 section 3.5.4](https://www.rfc-editor.org/rfc/rfc8966#section-3.5.4)).
+  If the origin no longer serves the path, it refuses, and the first relay
+  selects again.
 - SUBSCRIBE and FETCH carry a visited-relay list end to end. It catches loops
   while liveness views disagree and names the path for stats. Narrowing it to
   cluster hops is later work. The serving origin's identity rides the reply,
@@ -81,6 +94,8 @@ make MoQ's common case.
 - Sharding registries by HRW over a prefix key once one registry cannot hold
   everything, and what that key is.
 - A mixed-version bridge, if a fleet cannot switch at once.
+- How long a relay keeps an ended path's seqno. A new origin incarnation
+  clears it; within one, it must outlive every delayed copy of the start.
 - How an edge routes a SUBSCRIBE for a path none of its clients asked to
   announce. It holds no route for it, and asking a registry first adds a round
   trip before the first byte.

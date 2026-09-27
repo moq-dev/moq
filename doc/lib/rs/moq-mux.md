@@ -85,6 +85,17 @@ The producer sets the entry's `mode` and encodes the track with its
 `compression`. Read it back from `Catalog<Ext>` and subscribe with
 `catalog::Entry::new(name, &entry.binary)`.
 
+A payload that knows when it was captured (a datagram's arrival, a sensor read)
+carries that `Instant`. The producer maps it onto the broadcast clock and writes
+it as the frame timestamp, and the entry advertises `jitter` and `delay` the way
+a media rendition does, so telemetry lagging its video shows up as `delay`. An
+instant ahead of now is refused. A device's own clock is an unrelated epoch;
+keep it in the payload.
+
+```rust
+telemetry.append(moq_net::Timed::from(packet).at(received_at))?;
+```
+
 The fMP4, MPEG-TS, and FLV importers publish the source's own timestamps unless
 built with `live()`, which translates them onto the catalog's broadcast clock:
 the first frame is live on arrival, every track of the input shares that one

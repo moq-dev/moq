@@ -2,8 +2,10 @@
 //!
 //! [`Policy`] decides a [`Request`] the way `--auth-key`, `--auth-key-dir`, and
 //! `--auth-public` did on the relay, plus an explicit grant for mTLS peers and live
-//! session caps. [`Server`] serves it on a TCP or unix listener as `POST /`. `moq auth
-//! serve` is the CLI; the relay's tests run against it in process.
+//! session caps. Its anonymous and mTLS rules are rooted at `/`, like a token with an
+//! empty root, and authorized at the dialed path the same way. [`Server`] serves it
+//! on a TCP or unix listener as `POST /`. `moq auth serve` is the CLI; the relay's
+//! tests run against it in process.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -51,6 +53,10 @@ pub struct Limits {
 /// first that applies: a JWT, then a verified certificate, then the anonymous rules.
 /// A malformed or expired token is a refusal, never a fall through.
 ///
+/// The anonymous and mTLS rules name what they grant from `/`, like a token with an
+/// empty root: `anon/**` admits a session dialed at `/`, `/anon`, or `/anon/room`,
+/// each scoped to `anon/`, and refuses one dialed at `/other`.
+///
 /// The JWT is the `jwt` query parameter or a moq-transport SETUP token of type 0
 /// ([`Token::OUT_OF_BAND`]), verified alike. A session presenting both is refused,
 /// as is a SETUP token of any other type.
@@ -61,9 +67,10 @@ pub struct Limits {
 pub struct Policy {
 	/// The keys a `jwt` is verified against; `None` refuses every token.
 	pub keys: Option<Keys>,
-	/// What an anonymous session is granted; empty refuses it.
+	/// What an anonymous session is granted, rooted at `/`; empty refuses it.
 	pub public: Permissions,
-	/// What a session presenting a verified certificate is granted; empty refuses it.
+	/// What a session presenting a verified certificate is granted, rooted at `/`;
+	/// empty refuses it.
 	pub mtls: Permissions,
 	/// The tier stamped on every grant.
 	pub tier: Option<String>,
@@ -104,7 +111,7 @@ pub enum Refusal {
 	InvalidToken(String),
 	#[error("the token root `{root}` does not overlap the dialed path `{path}`")]
 	RootMismatch { root: String, path: String },
-	#[error("the token grants no access at `{path}`")]
+	#[error("nothing is granted at `{path}`")]
 	NoAccess { path: String },
 	#[error("a certificate was presented but nothing is granted to certificates")]
 	NoMtlsGrant,
@@ -139,12 +146,12 @@ impl Policy {
 			if self.mtls.is_empty() {
 				return Err(Refusal::NoMtlsGrant);
 			}
-			(self.mtls.clone(), peer.expires)
+			(authorize(&self.mtls, &request.path)?, peer.expires)
 		} else {
 			if self.public.is_empty() {
 				return Err(Refusal::NoPublicGrant);
 			}
-			(self.public.clone(), None)
+			(authorize(&self.public, &request.path)?, None)
 		};
 
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
@@ -167,6 +174,20 @@ impl Policy {
 		};
 		Key::from_file_async(&path).await.map_err(|_| Refusal::UnknownKey)
 	}
+}
+
+/// Authorize rules rooted at `/` at the dialed `path`, exactly as a token with an
+/// empty root would be.
+fn authorize(rules: &Permissions, path: &str) -> Result<Permissions, Refusal> {
+	let claims = crate::Claims {
+		publish: rules.publish.clone(),
+		subscribe: rules.subscribe.clone(),
+		..Default::default()
+	};
+	// An empty root overlaps every path, so the only refusal is reaching nothing.
+	claims.authorize(path).map_err(|_| Refusal::NoAccess {
+		path: crate::path::normalize(path),
+	})
 }
 
 /// The JWT the request presents: its SETUP token, or else its `jwt` query parameter.
@@ -679,6 +700,45 @@ mod tests {
 		assert_eq!(grant.subscribe, patterns(&["anon/**"]));
 		assert!(grant.publish.is_empty());
 		assert!(grant.expires.is_some());
+	}
+
+	/// The rules are rooted at `/`, not at the dialed path: `anon/**` scopes a session
+	/// dialed anywhere to `anon/`, and refuses one dialed outside it. Bare `**` reads
+	/// the same either way, which is how rooting them at the dialed path went unnoticed.
+	#[tokio::test]
+	async fn public_and_mtls_rules_are_rooted_at_slash() {
+		let policy = Policy {
+			public: rules(&["anon/**"], &["anon/**", "*/chat"]),
+			mtls: rules(&["origin/*"], &["origin/*"]),
+			..Default::default()
+		};
+
+		for (path, publish, subscribe) in [
+			("/", &["anon/**"][..], &["anon/**", "*/chat"][..]),
+			("/anon", &["**"], &["**", "chat"]),
+			("/anon/room", &["**"], &["**"]),
+			("/rooms", &[], &["chat"]),
+		] {
+			let grant = policy.decide(&request(path)).await.unwrap();
+			assert_eq!(grant.publish, patterns(publish), "{path}");
+			assert_eq!(grant.subscribe, patterns(subscribe), "{path}");
+			assert_eq!(grant.root, None, "{path}");
+		}
+
+		// Before, `/rooms/123` got `rooms/123/anon/**`: into any room, anonymously.
+		for path in ["/rooms/123", "/other/room", "/anonymous/room"] {
+			assert_eq!(
+				policy.decide(&request(path)).await.unwrap_err(),
+				Refusal::NoAccess {
+					path: path.trim_start_matches('/').into()
+				},
+			);
+		}
+
+		let grant = policy.decide(&with_peer(request("/origin/edge0"), None)).await.unwrap();
+		assert_eq!(grant.publish, patterns(&[""]));
+		let err = policy.decide(&with_peer(request("/anon"), None)).await.unwrap_err();
+		assert!(matches!(err, Refusal::NoAccess { .. }), "{err}");
 	}
 
 	#[tokio::test]

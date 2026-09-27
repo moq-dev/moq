@@ -78,7 +78,10 @@ rather than a set of prefixed names; `@moq/auth` stays flat.
   vectors round-tripped both ways; expiry and not-before; the grant
   produced from every c4m-01 example; serve admitting a CAT over a real
   moq-transport session on every supported draft and refusing an unknown
-  token kind, a bad MAC, and a token plus `jwt`; the CLI round trip.
+  token kind, a bad MAC, and a CAT beside any `jwt` (a CAT is type `0x01`
+  and a `jwt` is a JWT, so equal bytes are still two credentials; only a
+  type-0 SETUP token equal to `jwt` is admitted once, per [Token in
+  band](/quest/m1/auth/token-in-band.md)); the CLI round trip.
 
 Public API: `moq_auth::cat` new, `moq auth serve` and `moq auth sign|verify`
 gain flags. Wire: none.

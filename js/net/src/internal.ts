@@ -12,6 +12,7 @@ import type { Route } from "./hop.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Groups, Producer, Request, Subscriber } from "./track.ts";
+import type { Advertised } from "./wire.ts";
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
 export function groupBounds(groups: Groups = {}): { start: number; end?: number } {
@@ -44,6 +45,35 @@ export function scopeHead(scope: Path.Pattern): Path.Valid {
 export function hiddenBelow(prefix: Path.Valid, path: Path.Valid): boolean {
 	const below = Path.stripPrefix(prefix, path);
 	return below !== null && Path.parts(below).some((part) => part.startsWith("."));
+}
+
+/**
+ * Where each carried route lands under the requested prefix: its suffix beneath the
+ * prefix, or the empty suffix for a route above it, where the most specific such route
+ * wins the way a request through the prefix would resolve.
+ */
+export function presented(
+	prefix: Path.Valid,
+	table: ReadonlyMap<Path.Valid, Advertised>,
+	carries: (covered: Path.Valid) => boolean,
+): Map<Path.Valid, Advertised> {
+	const out = new Map<Path.Valid, Advertised>();
+	let rootLen = -1;
+	const requested = Path.Pattern.subtree(prefix);
+	for (const [covered, snap] of table) {
+		if (!carries(covered)) continue;
+		if (Path.hasPrefix(covered, prefix)) {
+			// A scoped route covers only what it claims, so it cannot serve a prefix outside that.
+			if (snap.claim && !snap.claim.overlaps(requested)) continue;
+			if (covered.length < rootLen) continue;
+			rootLen = covered.length;
+			out.set(Path.empty(), snap);
+			continue;
+		}
+		const suffix = Path.stripPrefix(prefix, covered);
+		if (suffix !== null) out.set(suffix, snap);
+	}
+	return out;
 }
 
 /** Whether the announced prefix's subtree overlaps `scope`. */

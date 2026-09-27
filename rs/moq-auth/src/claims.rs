@@ -66,7 +66,7 @@ impl Scope {
 ///
 /// Produced by [`Claims::authorize`]. `**` grants the path itself and everything
 /// beneath it; the empty pattern grants exactly the path. The reference server's
-/// policy uses the same pair for anonymous and mTLS grants.
+/// policy holds its anonymous and mTLS rules as this pair too, authorized at `/`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Permissions {
 	/// Patterns the holder may subscribe to, relative to the authorized path.

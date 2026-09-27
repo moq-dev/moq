@@ -95,6 +95,14 @@ pub struct JsonConfig {
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
 
+	/// How far this track's payloads reach the transport behind the broadcast's earliest
+	/// rendition, with the same meaning and encoding as
+	/// [`VideoConfig::delay`](crate::catalog::VideoConfig::delay). Only measured for payloads that
+	/// carry a capture time.
+	#[serde_as(as = "MillisCeil")]
+	#[serde(default)]
+	pub delay: Option<std::time::Duration>,
+
 	/// Fields this build doesn't recognize, kept so the entry round-trips.
 	///
 	/// A future [`Mode`] or [`Compression`] almost certainly comes with fields describing it, and
@@ -115,6 +123,7 @@ impl JsonConfig {
 			schema: None,
 			bitrate: None,
 			jitter: None,
+			delay: None,
 			extra: Default::default(),
 		}
 	}

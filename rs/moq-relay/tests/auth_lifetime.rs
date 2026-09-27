@@ -888,7 +888,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	)))
 	.await;
 	let (addr, relay) = spawn_quic_relay(build_auth(narrow), Some(root.clone())).await;
-	let url: url::Url = format!("moql://127.0.0.1:{}/room", addr.port()).parse().unwrap();
+	let url: url::Url = format!("moql://127.0.0.1:{}/mine", addr.port()).parse().unwrap();
 	let origin = moq_tokio::origin::spawn();
 	let session = tokio::time::timeout(
 		TIMEOUT,
@@ -909,6 +909,9 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	);
 	// A subscribe-only client has nothing granted, so it is refused at the handshake.
 	assert_refused_with(mtls_client(), &url).await;
+	// The rules are rooted at `/`, so a certificate dialed outside `mine` gets nothing.
+	let room: url::Url = format!("moql://127.0.0.1:{}/room", addr.port()).parse().unwrap();
+	assert_refused_with(mtls_client(), &room).await;
 	drop(session);
 	relay.abort();
 }

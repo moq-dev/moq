@@ -63,6 +63,12 @@ export const SELECTORS = {
 	fixture: "#fixture",
 } as const;
 
+/** Activate the player's pause button without depending on pointer hit testing. */
+export async function pause(page: Page): Promise<void> {
+	// Enter focuses and activates the real button even when the chrome auto-hides.
+	await page.locator(SELECTORS.ui).locator(SELECTORS.pauseControl).press("Enter");
+}
+
 /** How often a wait re-reads the page. */
 export const POLL_INTERVAL_MS = 100;
 

@@ -110,6 +110,11 @@ if (role === "publish") {
 		},
 		reattach: () => {
 			stop();
+			// The torn-down player leaves its last frame on the canvas, which can be newer than the frame
+			// the driver read before detaching. Blank it so every frame read after this was presented by
+			// the new session, not left over from the old one.
+			const canvas = el.querySelector("canvas");
+			canvas?.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
 			player.appendChild(el);
 			stop = attach(el);
 		},

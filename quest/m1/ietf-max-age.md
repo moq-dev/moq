@@ -30,8 +30,12 @@ survives an IETF hop the way it already survives moq-lite 05+.
   group always kept, so the mapping is approximate. Accept that rather than
   modeling a second clock.
 - moq-lite-07 (still WIP, off by default) makes TRACK_INFO's Max Age
-  optional: the value plus one, with 0 meaning none. Lite05/06 map `None` to
-  the largest varint in both directions. Update
+  optional: the value plus one, with 0 meaning none. Lite05/06 have no
+  absent value, so `None` is a sentinel both languages can represent: send
+  2^53-1 (`Number.MAX_SAFE_INTEGER`) and read any value at or above it as
+  `None`. Decided over the largest varint (2^62-1) because JS reads Max Age
+  as a u53, so that sentinel would not survive a JS hop
+  ([#4188](https://github.com/moq-dev/moq/pull/4188)). Update
   `drafts/draft-lcurley-moq-lite.md` in the same PR.
 - EXPIRES stays 0 on send and ignored on receive. It is subscription lifetime,
   not retention.

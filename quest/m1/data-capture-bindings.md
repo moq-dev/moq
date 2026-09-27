@@ -39,10 +39,6 @@ no optional arguments), and a `_with_x` twin is ruled out. The broadcast clock
 `now()` is additive; `window::Producer::push` accepts `Timed`, source-compatible.
 Wire: none.
 
-## Required
-
-- [Data jitter](/quest/m1/data-jitter.md) - `Timed` and the mux capture path (#4270)
-
 ## Related
 
 - [FFI shape](/quest/m1/ffi-shape/README.md) - moves the data producers into a json namespace

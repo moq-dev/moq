@@ -11,10 +11,10 @@ removes inside a cluster.
 
 ## Plan
 
-- The relay already knows each route's arriving session and its tier: cluster
-  peers attach through `origin.peer()` (`rs/moq-relay/src/cluster.rs`). Build
-  an `origin::Consumer` that admits only routes from customer-tier sessions,
-  without copying the table.
+- The view exists: `origin::Consumer::local()` (`rs/moq-net/src/model/origin.rs`)
+  hides every route a `Producer::peer` handle announced, which is how cluster
+  peers attach (`rs/moq-relay/src/cluster.rs`), and
+  `local_view_hides_peer_routes` covers it. The work is serving that view.
 - The internal listener (`rs/moq-relay/src/internal.rs`) is plain HTTP
   today (`/metrics`, `/health`, `/nodes`, `/sessions`). Serve a moq session on
   it over the WebSocket transport the relay already accepts. It is

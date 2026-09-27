@@ -49,11 +49,42 @@
         "type": "github"
       }
     },
+    "quest": {
+      "inputs": {
+        "crane": [
+          "crane"
+        ],
+        "flake-utils": [
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "rust-overlay": [
+          "rust-overlay"
+        ]
+      },
+      "locked": {
+        "lastModified": 1790533850,
+        "narHash": "sha256-6cBgVpfIBVQ9tTXyV7Xj8AAYH+Qtp6aOmFx/dwEUNLw=",
+        "owner": "kixelated",
+        "repo": "quest",
+        "rev": "a4c3debebeacc142dc31b170f3255d1ccf6e4c9b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "kixelated",
+        "repo": "quest",
+        "rev": "a4c3debebeacc142dc31b170f3255d1ccf6e4c9b",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "crane": "crane",
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
+        "quest": "quest",
         "rust-overlay": "rust-overlay"
       }
     },
