@@ -31,7 +31,9 @@ skipping inside the Nix shell.
   `LD_LIBRARY_PATH`, and run that selection. Fail when a library is missing
   instead of skipping. `just rs vulkan-cuda` puts the whole host directory on
   the path, which lets host libraries shadow the Nix ones; fold it into this
-  recipe, since its `vulkan_cuda_` tests are the same kind.
+  recipe, since its `vulkan_cuda_` tests are the same kind. Those also need
+  the Vulkan loader to find the host NVIDIA ICD: point it at the ICD manifest
+  and expose the driver libraries it names, or keep them in their own recipe.
 - Nightly: a job in `.github/workflows/nightly.yml` runs `just rs nvidia` on
   the self-hosted runner. A self-hosted runner on a public repository must
   never run untrusted code: only `schedule` and `workflow_dispatch`, with the

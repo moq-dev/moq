@@ -46,3 +46,4 @@ Wire: none.
 ## Related
 
 - [FFI shape](/quest/m1/ffi-shape/README.md) - moves the data producers into a json namespace
+- [Generated C bindings](/quest/m1/c/README.md) - replaces libmoq, so C inherits this from moq-ffi
