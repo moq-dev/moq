@@ -2389,23 +2389,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 							tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "skipping group with a missing head");
 							continue;
 						}
-						if self.emit_range && !self.start_sent {
-							self.start_sent = true;
-							// Only the group: the subscriber derives the start frame from
-							// its own request (see `lite::SubscribeStart`).
-							stream
-								.writer
-								.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
-									group: sequence,
-									origin: self.ctx.served.origin(),
-								}))?;
-							// SUBSCRIBE_OK is an implicit drop of everything below the
-							// resolved start (the subscriber records it as a permanent
-							// miss), so a lower group arriving late must not be served
-							// after all. A widening SUBSCRIBE_UPDATE re-lowers the floor,
-							// renegotiating the resolved start along with the demand.
-							self.track.start_at(sequence);
-						}
+						self.start(stream, sequence)?;
 
 						let frame_start = group.index();
 						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
@@ -2422,7 +2406,10 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 						self.children
 							.push(GroupServe::new(self.ctx.clone(), sequence, frame_start, handle, group));
 					}
-					Recv::Datagram(datagram) => self.ctx.serve_datagram(datagram),
+					Recv::Datagram(datagram) => {
+						self.start(stream, datagram.sequence)?;
+						self.ctx.serve_datagram(datagram);
+					}
 					Recv::Boundary(group) => {
 						// The track declared its exclusive final sequence. Forward it now,
 						// even if trailing groups (below `group`) are still in flight, then
@@ -2454,6 +2441,30 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 			return Poll::Pending;
 		}
+	}
+
+	/// Send SUBSCRIBE_START ahead of the first group served, by stream or datagram: it
+	/// resolves the start and names the origin, which a lite-07 subscriber needs before
+	/// it delivers either.
+	fn start(&mut self, stream: &mut Stream<S, Version>, sequence: u64) -> Result<(), Error> {
+		if !self.emit_range || self.start_sent {
+			return Ok(());
+		}
+		self.start_sent = true;
+		// Only the group: the subscriber derives the start frame from its own request
+		// (see `lite::SubscribeStart`).
+		stream
+			.writer
+			.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
+				group: sequence,
+				origin: self.ctx.served.origin(),
+			}))?;
+		// SUBSCRIBE_OK is an implicit drop of everything below the resolved start (the
+		// subscriber records it as a permanent miss), so a lower group arriving late
+		// must not be served after all. A widening SUBSCRIBE_UPDATE re-lowers the floor,
+		// renegotiating the resolved start along with the demand.
+		self.track.start_at(sequence);
+		Ok(())
 	}
 }
 

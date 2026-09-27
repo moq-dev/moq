@@ -35,6 +35,10 @@ struct Fixture {
 /// A publisher and a subscriber joined over the mock transport, sharing one
 /// datagram-carrying track.
 async fn connect_datagram_track() -> Fixture {
+	connect_datagram_track_on("moq-lite-05").await
+}
+
+async fn connect_datagram_track_on(version: &str) -> Fixture {
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
@@ -42,7 +46,7 @@ async fn connect_datagram_track() -> Fixture {
 	let producer = broadcast.create_track("datagrams", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
-	let mut options = MockConnectOptions::new("moq-lite-05".parse::<Version>().unwrap());
+	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(consumer_origin.clone());
 	let pair = connect_mock(options).await;
@@ -108,6 +112,34 @@ async fn datagrams_reach_the_subscriber_in_order() {
 	})
 	.await
 	.expect("timed out");
+}
+
+/// Lite-07 holds a subscription's content until SUBSCRIBE_OK names its origin, so a
+/// track that only ever sends datagrams must still send SUBSCRIBE_OK for any to arrive.
+/// Datagrams racing ahead of it are dropped, so this keeps sending until one lands.
+#[tokio::test]
+async fn datagram_only_track_names_its_origin_on_lite07() {
+	tokio::time::timeout(TEST_TIMEOUT, async {
+		let mut fixture = connect_datagram_track_on("moq-lite-07-wip").await;
+
+		for sequence in 0.. {
+			fixture
+				.producer
+				.insert_datagram(
+					sequence,
+					Timestamp::from_millis(sequence).unwrap(),
+					bytes::Bytes::from_static(PAYLOAD),
+				)
+				.unwrap();
+			let arrived = tokio::time::timeout(Duration::from_millis(10), fixture.subscriber.recv_datagram()).await;
+			if let Ok(datagram) = arrived {
+				assert_eq!(&datagram.unwrap().unwrap().payload[..], PAYLOAD);
+				break;
+			}
+		}
+	})
+	.await
+	.expect("no datagram arrived: SUBSCRIBE_OK never named the origin");
 }
 
 /// MoQ Transport has no datagram mapping: groups still flow, inserted datagrams do not.

@@ -462,10 +462,18 @@ for (const [protocol, carriesOptIn] of [
 	});
 }
 
-test("integration: lite draft-05 datagram delivery", async () => {
+// Draft-07 holds a subscription's content until SUBSCRIBE_START names its origin, so a
+// datagram-only track must still send one for any datagram to arrive.
+for (const protocol of [Lite.ALPN_05, Lite.ALPN_07_WIP]) {
+	test(`integration: ${protocol} datagram delivery`, async () => {
+		await datagramDelivery(protocol);
+	});
+}
+
+async function datagramDelivery(protocol: string) {
 	const enc = new TextEncoder();
 	const dec = new TextDecoder();
-	const pair = createMockTransportPair(Lite.ALPN_05);
+	const pair = createMockTransportPair(protocol);
 	const origin = new OriginProducer();
 
 	const [client, server] = await Promise.all([
@@ -502,7 +510,7 @@ test("integration: lite draft-05 datagram delivery", async () => {
 	remote.close();
 	client.close();
 	server.close();
-});
+}
 
 test("integration: lite draft-05 datagrams not sent on a non-datagram transport", async () => {
 	const enc = new TextEncoder();

@@ -1106,6 +1106,10 @@ export class Subscriber {
 		const entry = this.#subscribes.get(dg.subscribe);
 		if (!entry) return; // Unknown or already-closed subscription.
 
+		// A datagram cannot wait for SUBSCRIBE_START to name its origin like a group stream
+		// does, so on draft-07 it is dropped until then.
+		if (!entry.started.peek()) return;
+
 		// Datagrams are lite-05+, which always negotiates a timescale; if it hasn't resolved
 		// yet (the datagram raced ahead of TRACK_INFO), drop rather than guess.
 		const scale = entry.timescale.peek();

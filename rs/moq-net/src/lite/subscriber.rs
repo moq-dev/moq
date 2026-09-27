@@ -438,6 +438,12 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(());
 		};
 
+		// A datagram cannot wait for its subscription's SUBSCRIBE_OK like a group stream
+		// does, so until the origin it names is admitted, the datagram is dropped.
+		if self.version.has_origin() && !entry.producer.provenance().is_admitted() {
+			return Ok(());
+		}
+
 		// Datagrams are lite-05+, which always negotiates a timescale; default defensively.
 		let scale = entry.timescale.unwrap_or_default();
 		let timestamp =
@@ -1437,6 +1443,65 @@ mod tests {
 			matches!(received.recv_datagram().now_or_never(), Some(Err(Error::Dropped))),
 			"the track outlived its subscription"
 		);
+	}
+
+	/// On lite-07 a datagram carries no origin of its own, so until its subscription's
+	/// origin is admitted it is dropped rather than risk splicing another origin's content.
+	#[test]
+	fn datagram_waits_for_the_admitted_origin() {
+		let version = Version::Lite07;
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
+			session: SinkSession::default(),
+			origin,
+			recv_bandwidth: None,
+			version,
+			peer_setup: Default::default(),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+		});
+
+		let broadcast = crate::broadcast::Info::new().produce();
+		let producer = broadcast.create_track("datagrams", None).unwrap();
+		let provenance = producer.provenance();
+		let mut received = producer.subscribe(None);
+		subscriber.subscribes.lock().insert(
+			7,
+			TrackEntry {
+				producer,
+				timescale: Some(Timescale::default()),
+				tail: Default::default(),
+				started: kio::Shared::new(false),
+			},
+		);
+
+		let payload = |sequence| {
+			lite::Datagram {
+				subscribe: 7,
+				sequence,
+				timestamp: sequence,
+				payload: bytes::Bytes::from_static(b"x"),
+			}
+			.encode_bytes(version)
+			.unwrap()
+		};
+
+		// Named but not admitted: the front serves another origin.
+		let named = crate::Hop::new(42).unwrap();
+		provenance.name(named).unwrap();
+		provenance.admit(crate::Hop::new(43).unwrap());
+		subscriber.route_datagram(payload(1)).unwrap();
+		assert!(
+			received.recv_datagram().now_or_never().is_none(),
+			"delivered before admission"
+		);
+
+		provenance.admit(named);
+		subscriber.route_datagram(payload(2)).unwrap();
+		let datagram = received.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(datagram.sequence, 2);
 	}
 
 	/// `establish` puts exactly one SUBSCRIBE on the wire, and the id is registered

@@ -209,6 +209,11 @@ impl Provenance {
 		}
 	}
 
+	/// Whether the named origin is admitted now, for content that cannot wait for it.
+	pub(crate) fn is_admitted(&self) -> bool {
+		self.0.read().admitted()
+	}
+
 	/// Wait until the named origin is admitted, or fail once the copy is refused.
 	/// Admission wins: a refusal only stops what was still waiting.
 	pub(crate) fn poll_admitted(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
