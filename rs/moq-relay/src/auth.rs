@@ -145,7 +145,10 @@ pub(crate) struct Legacy {
 		name = "auth-tls-disable-verify",
 		long = "auth-tls-disable-verify",
 		env = "MOQ_AUTH_TLS_DISABLE_VERIFY",
-		hide = true
+		hide = true,
+		default_missing = "true",
+		num_args = 0..=1,
+		require_equals = true
 	)]
 	tls_disable_verify: Option<String>,
 }

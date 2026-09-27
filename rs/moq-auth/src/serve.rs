@@ -298,12 +298,28 @@ pub struct Server {
 }
 
 impl Server {
-	/// A server answering with `policy`.
-	pub fn new(policy: Policy) -> Self {
-		Self {
+	/// A server answering with `policy`, refusing one that asks for a re-check without
+	/// a bound, or caps sessions without the re-check that ages out a dead relay's.
+	pub fn new(policy: Policy) -> crate::Result<Self> {
+		if policy.revalidate.is_some() && policy.expires.is_none() {
+			return Err(crate::Error::UnboundedRevalidate);
+		}
+		let limited = policy.limits.token.is_some() || policy.limits.remote.is_some();
+		if limited && policy.revalidate.is_none() {
+			return Err(crate::Error::LimitsWithoutRevalidate);
+		}
+		Ok(Self {
 			policy: Arc::new(policy),
 			sessions: Default::default(),
-		}
+		})
+	}
+
+	/// The cadence the session table ages out by, or `None` when no limit needs a table.
+	fn cadence(&self) -> Option<Duration> {
+		let limits = self.policy.limits;
+		(limits.token.is_some() || limits.remote.is_some())
+			.then_some(self.policy.revalidate)
+			.flatten()
 	}
 
 	/// Answer one event: the grant, or why the session is refused.
@@ -311,20 +327,20 @@ impl Server {
 		match request.event {
 			Event::Connect => {
 				let grant = self.policy.decide(request).await?;
-				let mut sessions = self.sessions.lock().unwrap();
-				if let Some(cadence) = self.policy.revalidate {
+				if let Some(cadence) = self.cadence() {
+					let mut sessions = self.sessions.lock().unwrap();
 					sessions.sweep(cadence);
+					sessions.connect(request, self.policy.limits)?;
 				}
-				sessions.connect(request, self.policy.limits)?;
 				Ok(Some(grant))
 			}
 			Event::Revalidate => {
 				let grant = self.policy.decide(request).await?;
-				let mut sessions = self.sessions.lock().unwrap();
-				if let Some(cadence) = self.policy.revalidate {
+				if let Some(cadence) = self.cadence() {
+					let mut sessions = self.sessions.lock().unwrap();
 					sessions.sweep(cadence);
+					sessions.revalidate(request);
 				}
-				sessions.revalidate(request);
 				Ok(Some(grant))
 			}
 			Event::End { .. } => {
@@ -418,7 +434,7 @@ mod tests {
 
 	/// The server behind a client, with a signal for each `end` it has handled.
 	async fn serve(policy: Policy) -> (Client, Arc<tokio::sync::Notify>) {
-		let server = Server::new(policy);
+		let server = Server::new(policy).unwrap();
 		let ended = Arc::new(tokio::sync::Notify::new());
 		let router = Router::new()
 			.route(
@@ -777,7 +793,8 @@ mod tests {
 			revalidate: Some(Duration::from_secs(60)),
 			expires: Some(Duration::from_secs(24 * 60 * 60)),
 			..Default::default()
-		});
+		})
+		.unwrap();
 
 		let first = request("/");
 		let second = request("/");
@@ -817,6 +834,49 @@ mod tests {
 		assert_eq!(server.answer(&request("/")).await.unwrap_err(), Refusal::RemoteLimit);
 	}
 
+	/// The re-check a session table ages out by, which every limit needs.
+	fn limited() -> Policy {
+		Policy {
+			revalidate: Some(Duration::from_secs(60)),
+			expires: Some(Duration::from_secs(3600)),
+			..Default::default()
+		}
+	}
+
+	/// Without a re-check, a relay that died would hold its slots forever, and a
+	/// re-check without a bound would outlive an outage.
+	#[test]
+	fn a_server_refuses_limits_without_a_cadence() {
+		let capped = Policy {
+			limits: Limits {
+				token: Some(1),
+				remote: None,
+			},
+			..Default::default()
+		};
+		assert!(matches!(Server::new(capped), Err(Error::LimitsWithoutRevalidate)));
+		let unbounded = Policy {
+			revalidate: Some(Duration::from_secs(60)),
+			..Default::default()
+		};
+		assert!(matches!(Server::new(unbounded), Err(Error::UnboundedRevalidate)));
+	}
+
+	/// With no limit to count against, nothing is kept per session, so a relay that
+	/// dies without sending `end` leaks nothing here.
+	#[tokio::test]
+	async fn no_limits_keep_no_sessions() {
+		let server = Server::new(Policy {
+			public: rules(&["**"], &["**"]),
+			..Default::default()
+		})
+		.unwrap();
+		for _ in 0..3 {
+			server.answer(&request("/")).await.unwrap();
+		}
+		assert!(server.sessions.lock().unwrap().slots.is_empty());
+	}
+
 	#[tokio::test]
 	async fn limits_count_sessions_per_token_and_fold_mapped_addresses() {
 		let (dir, key) = key_dir();
@@ -826,8 +886,9 @@ mod tests {
 				token: Some(1),
 				remote: Some(1),
 			},
-			..Default::default()
-		});
+			..limited()
+		})
+		.unwrap();
 		let jwt = sign(&key, "demo", &["**"], &[], None);
 
 		server.answer(&with_token(request("/demo"), &jwt)).await.unwrap();
@@ -855,7 +916,7 @@ mod tests {
 				token: None,
 				remote: Some(1),
 			},
-			..Default::default()
+			..limited()
 		})
 		.await;
 
@@ -880,7 +941,8 @@ mod tests {
 		let server = Server::new(Policy {
 			public: rules(&["**"], &["**"]),
 			..Default::default()
-		});
+		})
+		.unwrap();
 		tokio::spawn(async move { server.serve_unix(listener).await });
 
 		let url = url::Url::from_file_path(&path).unwrap();

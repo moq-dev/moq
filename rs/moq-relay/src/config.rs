@@ -476,6 +476,12 @@ root = ["ca.pem"]
 			unsafe { std::env::remove_var(var) };
 			assert!(err.contains(spelling), "{var}: {err}");
 		}
+
+		// 0.14 took the bare flag, so it has to parse to be refused by name.
+		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "**", "--auth-tls-disable-verify"])
+			.expect_err("must refuse")
+			.to_string();
+		assert!(err.contains("--auth-tls-* / MOQ_AUTH_TLS_*"), "{err}");
 	}
 
 	/// A released flag and a released table are refused together, in one message.

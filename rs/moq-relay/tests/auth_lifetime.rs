@@ -856,7 +856,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	let serve = |policy: moq_auth::serve::Policy| async move {
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
-		let server = moq_auth::serve::Server::new(policy);
+		let server = moq_auth::serve::Server::new(policy).unwrap();
 		tokio::spawn(async move { server.serve(listener).await });
 		url
 	};

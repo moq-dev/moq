@@ -227,7 +227,7 @@ async fn auth_server_public_rules_are_rooted_at_slash() {
 	policy.public = moq_auth::Permissions::new(Default::default(), ["event/**".parse().unwrap()].into_iter().collect());
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let server_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
-	let server = moq_auth::serve::Server::new(policy);
+	let server = moq_auth::serve::Server::new(policy).unwrap();
 	tokio::spawn(async move { server.serve(listener).await });
 
 	let mut config = auth::Config::default();

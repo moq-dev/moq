@@ -479,7 +479,7 @@ impl Serve {
 
 	async fn run(self) -> anyhow::Result<()> {
 		let listen = self.listener()?;
-		let server = moq_auth::serve::Server::new(self.policy()?);
+		let server = moq_auth::serve::Server::new(self.policy()?)?;
 		match listen {
 			Listen::Tcp(addr) => {
 				let listener = tokio::net::TcpListener::bind(addr)
