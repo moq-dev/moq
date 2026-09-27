@@ -30,7 +30,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Session close](/quest/m1/session-close.md) - a graceful session end withdraws announces and waits one second for the ack
 - [Close codes](/quest/m1/close-codes.md) - a client sees the peer's application close code over WebSocket and raw QUIC, like WebTransport
 - [JS caught up](/quest/m1/js-announce-caught-up.md) - @moq/net's announce consumer says when the initial set has landed, like Rust
-- [IETF announce count](/quest/m1/ietf-announce-count.md) - an opt-in moq-transport extension carries the replay count, so IETF announce consumers go live without a timer
+- [JS active count](/quest/m1/js-active-count.md) - @moq/net speaks MoQ Active Count, so its IETF announce consumers go live without a timer
 
 - [Publish delay](/quest/m1/publish-delay.md) - js/publish encoders advertise `delay` behind the earliest rendition, like moq-mux
 - [Data jitter](/quest/m1/data-jitter.md) - JSON and binary tracks with a capture time advertise a detected `delay` and `jitter`
@@ -51,7 +51,8 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [CMAF Opus](/quest/m1/cmaf-opus-dops.md) - fMP4 import and export keep the Opus pre-skip and gain
 - [Egress rendition pick](/quest/m1/egress-rendition-pick.md) - WHEP and single-track RTMP/FLV serve the best rendition, not the first by name
 - [NVDEC teardown](/quest/m1/nvdec-teardown.md) - dropping an NVDEC decoder no longer segfaults
-- [Video keyframe flag](/quest/m1/video-keyframe-flag.md) - encoded video marks its keyframes, so a requested cut never forces an extra one after a cadence keyframe
+- [Capture cut test](/quest/m1/capture-cut-e2e.md) - the capture loop's keyframe throttle is tested end to end against an encoder with its own GOP
+- [NVENC keyframe flag](/quest/m1/nvenc-keyframe-flag.md) - NVENC flags keyframes from its reported picture type instead of scanning the bitstream
 - [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms, and client stats broadcasts from publishers and viewers
 - [Drain](/quest/m1/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - a session that came up over WebSocket moves to QUIC once the QUIC dial lands, handing over at a group boundary
