@@ -141,10 +141,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Parse version
+      # The build job already checked the tag against this file.
+      - name: Read C++ version
         id: parse
         shell: bash
-        run: .github/scripts/release.sh parse-version cpp
+        run: echo "version=$(tr -d '[:space:]' < cpp/moq/VERSION)" >>"$GITHUB_OUTPUT"
 
       # Native Xcode / Visual Studio; libobs/Qt6/ffmpeg come from the obs-deps
       # bundle and the C++ package from the release just published (--moq-release).

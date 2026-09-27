@@ -407,6 +407,11 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 	}
 	snapshot.dial = DialSchemeLabel(dial_url);
 
+	// A Stop(), restart, or disconnect while stats() ran retired this session, so
+	// its numbers no longer describe the output.
+	std::lock_guard<std::mutex> lock(mutex);
+	if (session != current || !live)
+		return false;
 	*out = std::move(snapshot);
 	return true;
 }
