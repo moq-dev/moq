@@ -226,8 +226,7 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 	where
 		T: 'a,
 	{
-		let value = self.clock.stamp(value.into())?;
-		let captured = value.at;
+		let (value, captured) = self.clock.stamp(value.into())?;
 		match self.inner.update(value)? {
 			Some(size) => self.listing.record(size, captured),
 			None => Ok(()),
@@ -311,8 +310,7 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 	where
 		T: 'a,
 	{
-		let value = self.clock.stamp(value.into())?;
-		let captured = value.at;
+		let (value, captured) = self.clock.stamp(value.into())?;
 		let size = match self.inner.append(value) {
 			Ok(size) => size,
 			Err(err) => {

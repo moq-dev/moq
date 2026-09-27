@@ -112,10 +112,21 @@ impl Clock {
 			.expect("an instant elapsed duration fits in a timestamp"))
 	}
 
-	/// Map a payload's capture instant onto this clock, keeping the payload.
-	pub(crate) fn stamp<P>(&self, timed: moq_net::Timed<P, Instant>) -> crate::Result<moq_net::Timed<P>> {
-		let at = timed.at.map(|at| self.capture(at)).transpose()?;
-		Ok(moq_net::Timed { value: timed.value, at })
+	/// Map a payload's capture instant onto this clock, stamping an untimed payload now, so timed
+	/// and untimed writes share one timeline. Also returns the capture time, if there was one.
+	pub(crate) fn stamp<P>(
+		&self,
+		timed: moq_net::Timed<P, Instant>,
+	) -> crate::Result<(moq_net::Timed<P>, Option<moq_net::Timestamp>)> {
+		let captured = timed.at.map(|at| self.capture(at)).transpose()?;
+		let at = captured.unwrap_or_else(|| self.now());
+		Ok((
+			moq_net::Timed {
+				value: timed.value,
+				at: Some(at),
+			},
+			captured,
+		))
 	}
 
 	/// Units per second for [`wall`](Self::wall): [`TIMESCALE`](Self::TIMESCALE).

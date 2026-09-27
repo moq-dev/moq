@@ -180,8 +180,7 @@ impl<E: CatalogExt> Snapshot<E> {
 	/// A payload timed with its capture instant is written at that time and measures the entry's
 	/// `jitter` and `delay`; one ahead of now is refused before anything is written.
 	pub fn update(&mut self, payload: impl Into<Timed<Bytes, Instant>>) -> crate::Result<()> {
-		let payload = self.clock.stamp(payload.into())?;
-		let captured = payload.at;
+		let (payload, captured) = self.clock.stamp(payload.into())?;
 		let size = self.inner.update(payload)?;
 		self.listing.record(size, captured)
 	}
@@ -256,8 +255,7 @@ impl<E: CatalogExt> Stream<E> {
 	/// error publishing the measured bitrate is returned after the payload was written, so the track
 	/// stays open and a retry would duplicate it.
 	pub fn append(&mut self, payload: impl Into<Timed<Bytes, Instant>>) -> crate::Result<()> {
-		let payload = self.clock.stamp(payload.into())?;
-		let captured = payload.at;
+		let (payload, captured) = self.clock.stamp(payload.into())?;
 		let size = match self.inner.append(payload) {
 			Ok(size) => size,
 			Err(err) => {
@@ -484,6 +482,38 @@ mod test {
 
 		let jitter = entry(&catalog, "telemetry").jitter.expect("a late capture is jitter");
 		assert!(jitter >= std::time::Duration::from_secs(1), "{jitter:?}");
+	}
+
+	/// An untimed payload is stamped on the broadcast clock too, so mixing it with captured payloads
+	/// keeps the track on one timeline.
+	#[test]
+	fn an_untimed_payload_shares_the_broadcast_clock() {
+		let (mut broadcast, catalog) = catalog();
+		let mut telemetry = catalog
+			.binary_stream(track(&mut broadcast, "telemetry"), Config::default())
+			.unwrap();
+		let mut subscriber = telemetry.consume();
+
+		let before = catalog.clock().now();
+		telemetry.append(&b"untimed"[..]).unwrap();
+		telemetry
+			.append(Timed::from(&b"timed"[..]).at(std::time::Instant::now()))
+			.unwrap();
+		let after = catalog.clock().now();
+
+		let waiter = kio::Waiter::noop();
+		let mut stamps = Vec::new();
+		while let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) {
+			while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
+				stamps.push(frame.timestamp.as_millis());
+			}
+		}
+		assert_eq!(stamps.len(), 2);
+		assert!(
+			// The track stores milliseconds.
+			before.as_millis() <= stamps[0] && stamps[0] <= stamps[1] && stamps[1] <= after.as_millis(),
+			"{before:?} {stamps:?} {after:?}"
+		);
 	}
 
 	#[test]
