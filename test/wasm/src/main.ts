@@ -354,7 +354,62 @@ const CASES: Case[] = [
 			});
 		},
 	},
+	{
+		// Freeing a session closes it, so a call still waiting on it has to reject
+		// rather than hang or take the page's wasm down with it.
+		name: "free() rejects a pending consume",
+		run: async (wasm, relay) => {
+			const session = await connect(wasm, relay);
+			const pending = session.consume(`wasm-test/${relay.name}-never-announced`);
+			session.free();
+			const resolved = await pending.then(
+				(broadcast) => {
+					broadcast?.free();
+					return true;
+				},
+				() => false,
+			);
+			if (resolved) throw new Error("consume resolved after the session was freed, want a rejection");
+			await expectUsable(wasm, relay);
+		},
+	},
+	{
+		// Freeing a handle only drops the JS reference: the pending read still
+		// settles, one way or the other, and the page keeps working.
+		name: "free() during a read settles it",
+		run: async (wasm, relay) => {
+			const path = `wasm-test/${relay.name}-free`;
+			await withPublisher(relay, path, async () => {
+				await withSession(wasm, relay, async (session) => {
+					const broadcast = await consume(session, path);
+					const track = await broadcast.subscribe(TRACK);
+					const pendingTrack = broadcast.subscribe(TRACK);
+					broadcast.free();
+					(await pendingTrack.catch(() => undefined))?.free();
+
+					const group = await track.recvGroup();
+					if (!group) throw new Error("track ended before its first group");
+					const pendingGroup = track.recvGroup();
+					track.free();
+
+					const frame = group.readFrame();
+					group.free();
+					await frame.catch(() => undefined);
+					(await pendingGroup.catch(() => undefined))?.free();
+				});
+			});
+			await expectUsable(wasm, relay);
+		},
+	},
 ];
+
+/** Fail unless a fresh session still works, which a corrupted wasm heap would not. */
+async function expectUsable(wasm: Wasm, relay: RelayFixture): Promise<void> {
+	await withSession(wasm, relay, async (session) => {
+		const version = session.version();
+		if (version !== relay.version) throw new Error(`version is "${version}", want "${relay.version}"`);
+	});
+}
 
 /** Run every case against every relay, sequentially, and report each outcome. */
 async function run(config: Config): Promise<CaseResult[]> {

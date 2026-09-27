@@ -77,6 +77,13 @@ uncovered here.
   surface, as a rejected `subscribe` (lite-06, which looks a track's info up
   first) or as a track that yields no group (IETF, lite-02). A hang fails on the
   case timeout.
+- **free() rejects a pending consume** -- freeing a session closes it, so a
+  `consume` still waiting on an unannounced path has to reject. A fresh session
+  then has to connect, which a corrupted wasm heap would not.
+- **free() during a read settles it** -- freeing a `Broadcast`, `Track`, or
+  `Group` while its call is pending only drops the JS handle: the call still
+  settles and the page keeps working. An `async fn(&self)` binding fails both
+  cases, since wasm-bindgen keeps `&self` borrowed across the await.
 
 ### Known failures
 

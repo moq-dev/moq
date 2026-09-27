@@ -4944,6 +4944,7 @@ name = "moq-wasm"
 version = "0.0.0"
 dependencies = [
  "console_error_panic_hook",
+ "futures",
  "getrandom 0.4.3",
  "js-sys",
  "moq-net",
