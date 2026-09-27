@@ -40,8 +40,10 @@ export type Peer = z.infer<typeof PeerSchema>;
 export const TokenSchema = z.object({
 	/** The moq-transport Token Type: 0 is negotiated out of band (a JWT to `moq auth serve`), 1 is a Common Access Token. */
 	kind: z.int().check(z.nonnegative()),
-	/** The token bytes, base64url without padding. */
-	value: z.string().check(z.regex(/^[A-Za-z0-9_-]*$/)),
+	/** The token bytes, base64url without padding. The final character must leave no stray bits, as Rust decodes it. */
+	value: z
+		.string()
+		.check(z.regex(/^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-][AQgw]|[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048])?$/)),
 });
 export type Token = z.infer<typeof TokenSchema>;
 

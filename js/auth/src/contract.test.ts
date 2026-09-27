@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { GrantSchema, RequestSchema } from "./contract.ts";
+import { GrantSchema, RequestSchema, TokenSchema } from "./contract.ts";
 
 // The fixtures below are what the Rust `moq_auth::Request` and `Grant` serialize to,
 // so a server written against these schemas reads what a relay sends.
@@ -71,6 +71,14 @@ test("a SETUP token parses as the Rust vector", () => {
 			token: { kind: 0, value: "AP+/" },
 		}),
 	).toThrow();
+
+	// Not a length or final character any byte string encodes to, which Rust refuses too.
+	for (const value of ["A", "AB", "APv_A"]) {
+		expect(() => TokenSchema.parse({ kind: 0, value })).toThrow();
+	}
+	for (const value of ["", "AA", "AAA", "AAAA", "AQ", "AAE"]) {
+		expect(TokenSchema.parse({ kind: 0, value }).value).toBe(value);
+	}
 });
 
 test("a connect must not carry end facts, and an unknown transport is refused", () => {

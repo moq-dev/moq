@@ -299,6 +299,16 @@ mod tests {
 			r#"{"id":"00ff","event":"connect","node":"relay-1","transport":"quic","path":"/demo/room","token":{"kind":1,"value":"APv_"}}"#
 		);
 		assert_eq!(serde_json::from_str::<Request>(&json).unwrap(), request);
+
+		// `js/auth` refuses the same malformed values.
+		for value in ["A", "AB", "APv_A", "AP+/"] {
+			let json = format!(r#"{{"kind":0,"value":"{value}"}}"#);
+			assert!(serde_json::from_str::<Token>(&json).is_err(), "{value}");
+		}
+		for value in ["", "AA", "AAA", "AAAA", "AQ", "AAE"] {
+			let json = format!(r#"{{"kind":0,"value":"{value}"}}"#);
+			assert!(serde_json::from_str::<Token>(&json).is_ok(), "{value}");
+		}
 	}
 
 	#[test]
