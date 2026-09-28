@@ -2,14 +2,15 @@
 
 ## Goal
 
-A relay resolves a subscribe or FETCH for an unannounced path against the best
-matching wildcard.
+A relay resolves a subscribe or FETCH for an unannounced path against the
+longest covering prefix claim.
 
 ## Plan
 
-Specificity before cost is an explicit routing policy: a catch-all must not
-silently take over a path still claimed by a concrete service, even when that
-service refuses the request. Keep the draft and regressions aligned with it.
+Longest prefix before cost is an explicit routing policy: a catch-all must not
+silently take over a path still claimed by a longer prefix or a concrete
+announcement, even when that claim refuses the request. Keep the draft and
+regressions aligned with it.
 
 [moq#3225](https://github.com/moq-dev/moq/pull/3225) built the table this quest
 needs. `Consumer::request_broadcast` resolves a local broadcast first, then
@@ -22,23 +23,21 @@ repeat requests share one upstream subscription. A route never passes through
 `origin::Dynamic`'s shared FIFO, so requester identity and the hop chain are
 both available to selection.
 
-So this quest extends a working table rather than standing one up: teach the
-route entries to hold a pattern instead of only a literal prefix, and teach
-selection the tiering and pooling below. Keep the exclusion filter where it is,
-applied before selection, so an out-of-band request can never be served back
-through the peer that made it.
+So this quest extends a working table rather than standing one up: route
+entries stay literal prefixes, and selection learns the pooling below. Keep the
+exclusion filter where it is, applied before selection, so an out-of-band
+request can never be served back through the peer that made it.
 
-Among the survivors, only the tier selected by the matcher's shared structural
-specificity is consulted, with equal-specificity patterns forming one pool. A
-refusal from that tier never falls through to a less
-specific one, so `**/transcode.pro` shadows the archive's `**` for
-every transcode path, matched or refused. Selection within the tier is lowest
-accumulated cost first, then a hash of the REQUESTED path against each
-advertiser's origin id. Keying on the request rather than the pattern is the
-whole point: hashing the pattern would hand one advertiser every path matching
-it. A concrete announcement is maximally specific and shadows every wildcard
-regardless of cost. A terminal refusal from that concrete claim never falls
-through to a wildcard; it shadows until the claim is withdrawn.
+Among the survivors, only the longest covering prefix is consulted, and its
+advertisers form one pool. A refusal from that tier never falls through to a
+shorter prefix, so a transcode service's prefix shadows the archive's root
+claim for every path beneath it, matched or refused. Selection within the tier
+is lowest accumulated cost first, then a hash of the REQUESTED path against
+each advertiser's origin id. Keying on the request rather than the prefix is
+the whole point: hashing the prefix would hand one advertiser every path
+beneath it. A concrete announcement is the longest prefix and shadows every
+claim regardless of cost. A terminal refusal from that concrete claim never
+falls through to a broader one; it shadows until the claim is withdrawn.
 
 Both lookup kinds route through this table: subscribe via `recv_subscribe`'s
 existing fallback, and FETCH the same way, since the archive's whole use case
@@ -50,9 +49,9 @@ A served path is not announced downstream, so a wildcard never manufactures
 announcements. But a resolved upstream SUBSCRIPTION must be installed as a
 ROUTE on the path's origin node, seeded with the wildcard's accumulated cost,
 not parked in the request-level `served` cache alone. Preserve the route's
-wildcard provenance and specificity: installing an exact-path node must not
+claim provenance and prefix: installing an exact-path node must not
 promote it into a concrete announcement. A concrete announcement arriving
-later lands on the same node and wins by specificity, and the front's
+later lands on the same node and wins as the longest prefix, and the front's
 ordinary route change moves consumers at a group boundary. A
 cache-only answer would strand every bound consumer on the wildcard
 subscription with nothing able to migrate or stop it. When the concrete claim
@@ -97,9 +96,9 @@ Tests, at the process level with real sessions rather than an in-process stand-i
   advertiser, or unroutable, but never hung and never looping.
 - A permanent refusal does not re-resolve, so a request for a path nobody serves
   costs exactly one round trip.
-- A path matched by both a suffix pattern and the catch-all resolves against
-  the suffix pattern's pool only, and a terminal refusal from it never reaches
-  the catch-all advertiser.
+- A path covered by both a service prefix and the root claim resolves against
+  the service prefix's pool only, and a terminal refusal from it never reaches
+  the root advertiser.
 - A refused subscribe resets rather than hanging, and leaves no state behind.
 - A wildcard retracted mid-serve does not disturb the subscription already
   running.

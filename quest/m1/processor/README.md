@@ -4,7 +4,9 @@
 
 A customer runs a worker in its own environment, connects outbound to a MoQ
 deployment, reads only eligible source media, and publishes an on-demand
-contribution at `<source>/<processor>.pro`. The platform supplies
+contribution under a prefix it claims, mirroring the source path (the
+[wildcard](/quest/m0/wildcard/README.md) line's derived-output layout). The
+platform supplies
 registration, scoped credentials, routing, demand, status, and usage
 visibility; it does not upload or execute customer code.
 
@@ -20,8 +22,8 @@ and custom transforms use the same worker lifecycle.
   contribution references, source relations, and correlation in the Hang
   catalog
 - [Advertise-only authorization](/quest/m1/processor/advertise-auth.md) - a
-  worker may advertise its contribution suffix without receiving permission to
-  publish arbitrary matching paths
+  worker may advertise its contribution prefix without receiving permission to
+  publish arbitrary paths beneath it
 - [Expiring media grants](/quest/m1/processor/grant-lease.md) - enforce
   short-lived exact grants on already-open consumer and producer handles
 

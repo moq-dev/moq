@@ -48,8 +48,8 @@ make MoQ's common case.
   origin id, and forwards along its shortest path. Distance compares cost,
   then hop count, so every hop strictly shortens it even across `?cost=0`
   links. That is a shortest path to a virtual node linked to every origin, so
-  it is loop-free whenever relays agree on the topology. Specificity still
-  ranks first, per [Wildcard](/quest/m0/wildcard/README.md).
+  it is loop-free whenever relays agree on the topology. The longest covering
+  prefix still ranks first, per [Wildcard](/quest/m0/wildcard/README.md).
 - The first relay's choice rides the SUBSCRIBE, and transit relays forward
   toward that origin by topology alone, never re-selecting. Re-selection
   against another existence view loops: a relay that lost a specific claim
@@ -113,4 +113,4 @@ make MoQ's common case.
 
 - [Skip unchanged announce updates](/quest/m0/announce-update-dedupe.md) - cuts duplicate updates on today's routing
 - [Local origin](/quest/m0/local-origin.md) - workers stop reading hop chains before they go
-- [Wildcard](/quest/m0/wildcard/README.md) - the specificity, pool spread, and reply identity this selection builds on
+- [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity this selection builds on
