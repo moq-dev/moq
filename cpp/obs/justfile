@@ -4,7 +4,7 @@
 # `just obs compile` type-checks the sources on any platform with nothing to
 # download. The recipes below build a loadable plugin, which is a bigger ask:
 #
-# Linux:   `nix develop` provides obs-studio/qt6/ffmpeg/cmake, then `just obs build`.
+# Linux:   `nix develop .#obs` provides obs-studio/qt6/ffmpeg/cmake, then `just obs build`.
 # macOS:   native, NOT nix. Needs full Xcode; run outside `nix develop` (its
 #          toolchain breaks the Xcode build). `just obs setup` downloads
 #          libobs/Qt6/ffmpeg via buildspec.json (obs-deps).
@@ -35,7 +35,7 @@ build preset="":
 compile:
     ../../sh/obs/compile.sh
 
-# Compile and link the plugin the way CI does, against the dev shell's own
+# Compile and link the plugin the way CI does, against the `.#obs` shell's own
 # libobs/Qt6/ffmpeg, then run the unit tests. Linux-only in practice: it's the
 # one platform where nixpkgs has obs-studio. The Debug build type reuses the
 # dev-profile Rust artifacts CI restores, where a release libmoq would rebuild

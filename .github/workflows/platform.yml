@@ -8,8 +8,9 @@ name: Platform
 # breaks any of them (a moq-net type they consume, say) merges green and
 # compiles for the first time in a tag-triggered release build.
 #
-# Unfiltered, unlike android.yml: every job still finishes before check.yml, so
-# a path list tracking the dependency graphs of all that code isn't worth it.
+# Filtered to the Rust workspace and the OBS plugin, rather than to each job's
+# exact dependency graph like android.yml: these are the slowest and most
+# expensive runners in CI, and a quest or docs PR has nothing for them to build.
 #
 # Pushes to `main` and `dev` catch the break two individually green PRs make
 # once both land, which is what the nightly run of these jobs used to cover.
@@ -29,10 +30,30 @@ permissions:
 on:
   push:
     branches: [main, dev]
+    paths:
+      - "rs/**"
+      - "cpp/**"
+      - ".cargo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "justfile"
+      - "sh/**"
+      - ".github/workflows/platform.yml"
   pull_request:
     # `closed` is here only so merging/closing a PR cancels its in-flight run
     # via the concurrency group below; the jobs themselves are skipped on close.
     types: [opened, synchronize, reopened, closed]
+    paths:
+      - "rs/**"
+      - "cpp/**"
+      - ".cargo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "justfile"
+      - "sh/**"
+      - ".github/workflows/platform.yml"
 
 concurrency:
   # Keyed by event, so a merged pull request's `closed` run can't cancel the push
