@@ -444,6 +444,14 @@ test("Reader decode rejects a stream that ends inside a message", async () => {
 	await expect(reader.decode(sized)).rejects.toThrow("unexpected end of stream");
 });
 
+test("Reader refuses an oversized value even when it is already buffered", async () => {
+	const size = 64 * 1024 * 1024 + 1;
+	const buffer = new Uint8Array(4 + size);
+	buffer.set([0x84, 0x00, 0x00, 0x01]); // the 4-byte varint for size
+	await expect(new Reader(undefined, buffer).string()).rejects.toThrow("exceeds max size");
+	await expect(new Reader(undefined, buffer.subarray(4)).read(size)).rejects.toThrow("exceeds max size");
+});
+
 /** A stream reset as a transport delivers one: the peer's code, and nothing else useful. */
 class Reset extends Error {
 	readonly source = "stream" as const;
