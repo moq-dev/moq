@@ -61,7 +61,7 @@ int32_t moq_origin_request_cancel(uint32_t task);
 int32_t moq_origin_announced_broadcast(uint32_t origin, const char *path, uintptr_t path_len, moq_status_callback on_broadcast, void *user_data);
 int32_t moq_origin_announced_broadcast_cancel(uint32_t task);
 int32_t moq_origin_announced(uint32_t origin, const moq_announce_config *config, moq_status_callback on_announce, void *user_data);
-int32_t moq_origin_announced_info(uint32_t announced, moq_announce_update *dst);
+int32_t moq_origin_announced_info(uint32_t announced, moq_announce_event *dst);
 int32_t moq_origin_announced_free(uint32_t announced);
 int32_t moq_origin_announced_cancel(uint32_t announced);
 // config (NULL for everything): filter is relative to the literal prefix, or NULL for **. hidden also lists `.`-named paths. Updates stay relative to the origin.

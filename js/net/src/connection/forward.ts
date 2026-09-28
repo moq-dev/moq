@@ -73,7 +73,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 					}
 					if (!originWire.accepts(event.prefix)) continue;
 
-					if (event.kind !== "retracted") {
+					if (event.kind !== "end") {
 						const existing = inserted.get(event.prefix);
 						if (existing) {
 							existing.update(event.route);

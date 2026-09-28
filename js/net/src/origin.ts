@@ -1427,7 +1427,7 @@ export class Consumer {
 						producer.append({
 							prefix: path,
 							captures: snap.captures,
-							kind: "retracted",
+							kind: "end",
 							route: snap.route,
 						});
 				}
@@ -1437,11 +1437,11 @@ export class Consumer {
 						producer.append({
 							prefix: path,
 							captures: snap.captures,
-							kind: "announced",
+							kind: "start",
 							route: snap.route,
 						});
 					} else if (!routesEqual(prev.route, snap.route)) {
-						producer.append({ prefix: path, captures: snap.captures, kind: "updated", route: snap.route });
+						producer.append({ prefix: path, captures: snap.captures, kind: "update", route: snap.route });
 					}
 				}
 				active = next;

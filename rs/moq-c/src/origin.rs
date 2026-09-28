@@ -2,7 +2,7 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, moq_announce_kind, moq_announce_update, moq_string};
+use crate::{Error, Id, NonZeroSlab, State, moq_announce_event, moq_announce_kind, moq_string};
 
 /// A spawned task entry: `close` signals shutdown, `callback` delivers status.
 ///
@@ -57,9 +57,9 @@ impl AnnouncedRecord {
 	fn new(event: moq_net::announce::Event) -> Self {
 		use moq_net::announce::Event;
 		let (update, kind) = match event {
-			Event::Announced(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_ANNOUNCED),
-			Event::Updated(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_UPDATED),
-			Event::Retracted(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_RETRACTED),
+			Event::Start(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_START),
+			Event::Update(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_UPDATE),
+			Event::End(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_END),
 			Event::Live => {
 				return Self {
 					prefix: String::new(),
@@ -168,9 +168,9 @@ impl Origin {
 		}
 	}
 
-	pub fn announced_info(&self, announced: Id, dst: &mut moq_announce_update) -> Result<(), Error> {
+	pub fn announced_info(&self, announced: Id, dst: &mut moq_announce_event) -> Result<(), Error> {
 		let announced = self.announced.get(announced).ok_or(Error::AnnouncementNotFound)?;
-		*dst = moq_announce_update {
+		*dst = moq_announce_event {
 			prefix: announced.prefix.as_ptr().cast::<c_char>(),
 			prefix_len: announced.prefix.len(),
 			captures: announced.capture_views.as_ptr(),

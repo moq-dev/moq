@@ -205,7 +205,7 @@ async fn next_announced(announced: &MoqAnnounceConsumer) -> MoqAnnounce {
 	loop {
 		match next_event(announced).await {
 			MoqAnnounceEvent::Live => continue,
-			MoqAnnounceEvent::Announced { announce } => return announce,
+			MoqAnnounceEvent::Start { announce } => return announce,
 			other => panic!("expected an announcement, got {other:?}"),
 		}
 	}
@@ -332,7 +332,7 @@ async fn announced_route_keeps_cold_cost_on_reannounce() {
 	// own `{warm: 0, cold: 0}`.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let route = loop {
-		if let MoqAnnounceEvent::Announced { announce } | MoqAnnounceEvent::Updated { announce } =
+		if let MoqAnnounceEvent::Start { announce } | MoqAnnounceEvent::Update { announce } =
 			next_event(&announced).await
 			&& announce.prefix == "cold-route"
 		{
@@ -1502,7 +1502,7 @@ async fn create_broadcast_is_invisible_until_announced() {
 		.expect("announce reaches the cursor")
 		.expect("the cursor is still open");
 	assert!(
-		matches!(&update, MoqAnnounceEvent::Announced { announce } if announce.prefix == "live"),
+		matches!(&update, MoqAnnounceEvent::Start { announce } if announce.prefix == "live"),
 		"{update:?}"
 	);
 	broadcast.close().unwrap();
@@ -1671,7 +1671,7 @@ async fn announced_yields_live_once_caught_up() {
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let first = next_event(&announced).await;
 	assert!(
-		matches!(&first, MoqAnnounceEvent::Announced { announce } if announce.prefix == "cam"),
+		matches!(&first, MoqAnnounceEvent::Start { announce } if announce.prefix == "cam"),
 		"{first:?}"
 	);
 	assert_eq!(next_event(&announced).await, MoqAnnounceEvent::Live);
@@ -1776,8 +1776,8 @@ async fn announce_and_unannounce_toggles_discovery() {
 	async fn wait_live(announced: &MoqAnnounceConsumer, active: bool) {
 		loop {
 			match next_event(announced).await {
-				MoqAnnounceEvent::Announced { announce } if active && announce.prefix == "live" => return,
-				MoqAnnounceEvent::Retracted { announce } if !active && announce.prefix == "live" => return,
+				MoqAnnounceEvent::Start { announce } if active && announce.prefix == "live" => return,
+				MoqAnnounceEvent::End { announce } if !active && announce.prefix == "live" => return,
 				_ => {}
 			}
 		}
@@ -3274,7 +3274,7 @@ fn without_runtime() {
 		let announcement = loop {
 			match pollster::block_on(announced.next()).unwrap().unwrap() {
 				MoqAnnounceEvent::Live => continue,
-				MoqAnnounceEvent::Announced { announce } => break announce,
+				MoqAnnounceEvent::Start { announce } => break announce,
 				other => panic!("expected an announcement, got {other:?}"),
 			}
 		};

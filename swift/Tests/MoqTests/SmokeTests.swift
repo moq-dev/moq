@@ -96,13 +96,13 @@ final class SmokeTests: XCTestCase {
 
         try broadcast.announce()
         let announced = try consumer.announced(prefix: "")
-        guard case .announced(let first) = try await nextRoute(announced) else {
+        guard case .start(let first) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(first.prefix, "live")
 
         try broadcast.unannounce()
-        guard case .retracted(let retracted) = try await nextRoute(announced) else {
+        guard case .end(let retracted) = try await nextRoute(announced) else {
             return XCTFail("expected a retraction")
         }
         XCTAssertEqual(retracted.prefix, "live")
@@ -112,7 +112,7 @@ final class SmokeTests: XCTestCase {
         } catch {}
 
         try broadcast.announce()
-        guard case .announced = try await nextRoute(announced) else {
+        guard case .start = try await nextRoute(announced) else {
             return XCTFail("expected a reannouncement")
         }
         _ = try await consumer.requestBroadcast(path: "live")
@@ -124,7 +124,7 @@ final class SmokeTests: XCTestCase {
         let chat = try origin.createBroadcast(path: "room/alice/chat")
         try chat.announce()
 
-        guard case .announced(let update) = try await nextRoute(announced) else {
+        guard case .start(let update) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(update.prefix, "room/alice/chat")
@@ -146,7 +146,7 @@ final class SmokeTests: XCTestCase {
 
         var listed: [String] = []
         for try await event in try consumer.announced() {
-            if case .announced(let announce) = event {
+            if case .start(let announce) = event {
                 listed.append(announce.prefix)
             } else if event == .live {
                 break

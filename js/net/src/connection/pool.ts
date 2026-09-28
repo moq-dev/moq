@@ -296,7 +296,7 @@ export class Connection {
 					for (;;) {
 						const entry = await effect.race(upstream.next());
 						if (!entry) break;
-						if (entry.kind === "retracted") active.delete(entry.prefix);
+						if (entry.kind === "end") active.delete(entry.prefix);
 						else if (entry.kind !== "live") active.set(entry.prefix, entry);
 						// The stream delivers the marker once; a later session's is dropped.
 						producer.append(entry);
@@ -304,7 +304,7 @@ export class Connection {
 				} finally {
 					if (!closed) {
 						for (const entry of active.values()) {
-							producer.append({ ...entry, kind: "retracted" });
+							producer.append({ ...entry, kind: "end" });
 						}
 					}
 				}

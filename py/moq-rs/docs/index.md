@@ -17,7 +17,7 @@ import moq
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
         async for event in client.announced():
-            if isinstance(event, moq.AnnounceEventAnnounced):
+            if isinstance(event, moq.AnnounceEventStart):
                 broadcast = await client.request_broadcast(event.announce.prefix)
                 print(await broadcast.catalog())
 
@@ -103,9 +103,9 @@ asyncio.run(main())
    AnnouncedBroadcast
    Announce
    AnnounceEvent
-   AnnounceEventAnnounced
-   AnnounceEventUpdated
-   AnnounceEventRetracted
+   AnnounceEventStart
+   AnnounceEventUpdate
+   AnnounceEventEnd
    AnnounceEventLive
 ```
 

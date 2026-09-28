@@ -195,7 +195,7 @@ discovery.run((effect) => {
 			// Only catalog-backed broadcasts are watchable streams; this skips the relay's
 			// `.stats` broadcast (see the stats dashboard demo for that one).
 			if (!path.endsWith(".hang") && !path.endsWith(".msf")) continue;
-			if (entry.kind === "retracted") live.delete(path);
+			if (entry.kind === "end") live.delete(path);
 			else live.add(path);
 			broadcasts.set([...live].sort());
 		}

@@ -369,10 +369,8 @@ async fn unknown_publisher_does_not_flap_across_a_lite04_cluster_triangle() {
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 	loop {
 		return match announced.next().await? {
-			moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
-				Some((route, true))
-			}
-			moq_net::announce::Event::Retracted(route) => Some((route, false)),
+			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::End(route) => Some((route, false)),
 			moq_net::announce::Event::Live => continue,
 		};
 	}

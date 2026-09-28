@@ -1316,7 +1316,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := nextRoute(t, ctx, announced)
-	if retracted, ok := event.(moq.AnnounceEventRetracted); !ok || retracted.Announce.Prefix != "live" {
+	if retracted, ok := event.(moq.AnnounceEventEnd); !ok || retracted.Announce.Prefix != "live" {
 		t.Fatalf("unannounce: event=%+v", event)
 	}
 	if _, err := consumer.RequestBroadcast(ctx, "live"); err == nil {
@@ -1448,7 +1448,7 @@ func TestAnnouncedYieldsLiveOnceCaughtUp(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if a, ok := event.(moq.AnnounceEventAnnounced); ok {
+		if a, ok := event.(moq.AnnounceEventStart); ok {
 			listed = append(listed, a.Announce.Prefix)
 		}
 		if _, ok := event.(moq.AnnounceEventLive); ok {
@@ -1483,7 +1483,7 @@ func nextAnnounced(t *testing.T, ctx context.Context, announced *moq.AnnounceCon
 	t.Helper()
 
 	event := nextRoute(t, ctx, announced)
-	announcedEvent, ok := event.(moq.AnnounceEventAnnounced)
+	announcedEvent, ok := event.(moq.AnnounceEventStart)
 	if !ok {
 		t.Fatalf("expected an announcement, got %+v", event)
 	}

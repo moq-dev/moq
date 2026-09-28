@@ -50,15 +50,15 @@ type (
 	// Route serving it. It carries no broadcast; resolve a path with
 	// [OriginConsumer.RequestBroadcast].
 	Announce = ffi.MoqAnnounce
-	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventAnnounced,
-	// AnnounceEventUpdated, AnnounceEventRetracted, or AnnounceEventLive.
+	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
+	// AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive.
 	AnnounceEvent = ffi.MoqAnnounceEvent
-	// AnnounceEventAnnounced reports a route now covering a prefix that had none.
-	AnnounceEventAnnounced = ffi.MoqAnnounceEventAnnounced
-	// AnnounceEventUpdated reports the route covering a prefix changing hops or cost.
-	AnnounceEventUpdated = ffi.MoqAnnounceEventUpdated
-	// AnnounceEventRetracted reports that no route covers a prefix any more, carrying its last route.
-	AnnounceEventRetracted = ffi.MoqAnnounceEventRetracted
+	// AnnounceEventStart reports a route now covering a prefix that had none.
+	AnnounceEventStart = ffi.MoqAnnounceEventStart
+	// AnnounceEventUpdate reports the route covering a prefix changing hops or cost.
+	AnnounceEventUpdate = ffi.MoqAnnounceEventUpdate
+	// AnnounceEventEnd reports that no route covers a prefix any more, carrying its last route.
+	AnnounceEventEnd = ffi.MoqAnnounceEventEnd
 	// AnnounceEventLive reports that every route live at subscribe time has been
 	// delivered; what follows is live changes. Yielded once.
 	AnnounceEventLive = ffi.MoqAnnounceEventLive

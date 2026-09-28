@@ -1881,10 +1881,10 @@ where
 		let mut initial = std::collections::BTreeMap::new();
 		while let Some(event) = announced.try_next() {
 			match event {
-				crate::announce::Event::Announced(update) | crate::announce::Event::Updated(update) => {
+				crate::announce::Event::Start(update) | crate::announce::Event::Update(update) => {
 					initial.insert(update.prefix.clone(), update);
 				}
-				crate::announce::Event::Retracted(update) => {
+				crate::announce::Event::End(update) => {
 					initial.remove(&update.prefix);
 				}
 				crate::announce::Event::Live => {}
@@ -1941,12 +1941,10 @@ where
 					while let Poll::Ready(next) = announced.poll_next(waiter) {
 						match next {
 							Some(crate::announce::Event::Live) => continue,
-							Some(
-								crate::announce::Event::Announced(update) | crate::announce::Event::Updated(update),
-							) => {
+							Some(crate::announce::Event::Start(update) | crate::announce::Event::Update(update)) => {
 								return Poll::Ready(NamespaceEvent::Update(Some((update, true))));
 							}
-							Some(crate::announce::Event::Retracted(update)) => {
+							Some(crate::announce::Event::End(update)) => {
 								return Poll::Ready(NamespaceEvent::Update(Some((update, false))));
 							}
 							None => return Poll::Ready(NamespaceEvent::Update(None)),

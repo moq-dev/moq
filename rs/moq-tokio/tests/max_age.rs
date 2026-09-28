@@ -101,7 +101,7 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 				.next()
 				.await
 				.ok_or_else(|| anyhow::anyhow!("announcements closed"))?,
-			moq_net::announce::Event::Announced(_)
+			moq_net::announce::Event::Start(_)
 		) {}
 		let front = consumer.request_broadcast("age").await?;
 		for (i, age) in AGES.into_iter().enumerate() {

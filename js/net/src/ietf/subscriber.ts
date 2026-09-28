@@ -204,7 +204,7 @@ export class Subscriber {
 			announced.append({
 				prefix: active,
 				captures: scopeCaptures(scope, active),
-				kind: "announced",
+				kind: "start",
 				route: info.route,
 			});
 		}
@@ -234,7 +234,7 @@ export class Subscriber {
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			if (!sees(filter, path)) continue;
 			const scope = filter.scope;
-			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "announced", route });
+			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "start", route });
 		}
 	}
 
@@ -251,7 +251,7 @@ export class Subscriber {
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			if (!sees(filter, path)) continue;
 			const scope = filter.scope;
-			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "updated", route });
+			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "update", route });
 		}
 	}
 
@@ -280,7 +280,7 @@ export class Subscriber {
 				consumer.append({
 					prefix: path,
 					captures: scopeCaptures(scope, path),
-					kind: "retracted",
+					kind: "end",
 					route: existing.route,
 				});
 			} catch {

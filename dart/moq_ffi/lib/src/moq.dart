@@ -3917,19 +3917,19 @@ class FfiConverterMoqAnnounceEvent {
     final subview = Uint8List.view(buf.buffer, buf.offsetInBytes + 4);
     switch (index) {
       case 1:
-        final lifted = AnnouncedMoqAnnounceEvent.read(subview);
+        final lifted = StartMoqAnnounceEvent.read(subview);
         return LiftRetVal<MoqAnnounceEvent>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 2:
-        final lifted = UpdatedMoqAnnounceEvent.read(subview);
+        final lifted = UpdateMoqAnnounceEvent.read(subview);
         return LiftRetVal<MoqAnnounceEvent>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 3:
-        final lifted = RetractedMoqAnnounceEvent.read(subview);
+        final lifted = EndMoqAnnounceEvent.read(subview);
         return LiftRetVal<MoqAnnounceEvent>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
@@ -3961,18 +3961,18 @@ class FfiConverterMoqAnnounceEvent {
   }
 }
 
-class AnnouncedMoqAnnounceEvent extends MoqAnnounceEvent {
+class StartMoqAnnounceEvent extends MoqAnnounceEvent {
   final MoqAnnounce announce;
-  AnnouncedMoqAnnounceEvent(MoqAnnounce this.announce);
-  AnnouncedMoqAnnounceEvent._(MoqAnnounce this.announce);
-  static LiftRetVal<AnnouncedMoqAnnounceEvent> read(Uint8List buf) {
+  StartMoqAnnounceEvent(MoqAnnounce this.announce);
+  StartMoqAnnounceEvent._(MoqAnnounce this.announce);
+  static LiftRetVal<StartMoqAnnounceEvent> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
     final announce_lifted = FfiConverterMoqAnnounce.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final announce = announce_lifted.value;
     new_offset += announce_lifted.bytesRead;
-    return LiftRetVal(AnnouncedMoqAnnounceEvent._(announce), new_offset);
+    return LiftRetVal(StartMoqAnnounceEvent._(announce), new_offset);
   }
 
   @override
@@ -3999,18 +3999,18 @@ class AnnouncedMoqAnnounceEvent extends MoqAnnounceEvent {
   }
 }
 
-class UpdatedMoqAnnounceEvent extends MoqAnnounceEvent {
+class UpdateMoqAnnounceEvent extends MoqAnnounceEvent {
   final MoqAnnounce announce;
-  UpdatedMoqAnnounceEvent(MoqAnnounce this.announce);
-  UpdatedMoqAnnounceEvent._(MoqAnnounce this.announce);
-  static LiftRetVal<UpdatedMoqAnnounceEvent> read(Uint8List buf) {
+  UpdateMoqAnnounceEvent(MoqAnnounce this.announce);
+  UpdateMoqAnnounceEvent._(MoqAnnounce this.announce);
+  static LiftRetVal<UpdateMoqAnnounceEvent> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
     final announce_lifted = FfiConverterMoqAnnounce.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final announce = announce_lifted.value;
     new_offset += announce_lifted.bytesRead;
-    return LiftRetVal(UpdatedMoqAnnounceEvent._(announce), new_offset);
+    return LiftRetVal(UpdateMoqAnnounceEvent._(announce), new_offset);
   }
 
   @override
@@ -4037,18 +4037,18 @@ class UpdatedMoqAnnounceEvent extends MoqAnnounceEvent {
   }
 }
 
-class RetractedMoqAnnounceEvent extends MoqAnnounceEvent {
+class EndMoqAnnounceEvent extends MoqAnnounceEvent {
   final MoqAnnounce announce;
-  RetractedMoqAnnounceEvent(MoqAnnounce this.announce);
-  RetractedMoqAnnounceEvent._(MoqAnnounce this.announce);
-  static LiftRetVal<RetractedMoqAnnounceEvent> read(Uint8List buf) {
+  EndMoqAnnounceEvent(MoqAnnounce this.announce);
+  EndMoqAnnounceEvent._(MoqAnnounce this.announce);
+  static LiftRetVal<EndMoqAnnounceEvent> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
     final announce_lifted = FfiConverterMoqAnnounce.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final announce = announce_lifted.value;
     new_offset += announce_lifted.bytesRead;
-    return LiftRetVal(RetractedMoqAnnounceEvent._(announce), new_offset);
+    return LiftRetVal(EndMoqAnnounceEvent._(announce), new_offset);
   }
 
   @override
@@ -12844,7 +12844,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqannouncedbroadcast_available() !=
-      64570) {
+      17719) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqannouncedbroadcast_cancel() != 63175) {

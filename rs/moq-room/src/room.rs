@@ -79,8 +79,8 @@ impl Room {
 			}
 
 			let (update, active) = match ready!(self.announced.poll_next(waiter)) {
-				Some(announce::Event::Announced(update) | announce::Event::Updated(update)) => (update, true),
-				Some(announce::Event::Retracted(update)) => (update, false),
+				Some(announce::Event::Start(update) | announce::Event::Update(update)) => (update, true),
+				Some(announce::Event::End(update)) => (update, false),
 				Some(announce::Event::Live) => continue,
 				None => return Poll::Ready(None),
 			};

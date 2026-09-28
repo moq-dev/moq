@@ -42,9 +42,9 @@ fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
 	let mut seen = Vec::new();
 	while let Some(event) = announced.try_next() {
 		let (kind, announce) = match event {
-			Event::Announced(announce) => ("Announced", announce),
-			Event::Updated(announce) => ("Updated", announce),
-			Event::Retracted(announce) => ("Retracted", announce),
+			Event::Start(announce) => ("Start", announce),
+			Event::Update(announce) => ("Update", announce),
+			Event::End(announce) => ("End", announce),
 			Event::Live => continue,
 		};
 		seen.push(format!("{kind} {}", announce.prefix));
@@ -207,11 +207,11 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 const EXPECTED: &[&str] = &[
 	"created: [] unroutable",
-	"announced: [\"Announced bcast\"] ok",
+	"announced: [\"Start bcast\"] ok",
 	"in flight: before",
-	"unannounced: [\"Retracted bcast\"] unroutable closed=true",
+	"unannounced: [\"End bcast\"] unroutable closed=true",
 	"draining: after then end",
-	"reannounced: [\"Announced bcast\"] ok fresh=true",
+	"reannounced: [\"Start bcast\"] ok fresh=true",
 	"serving again: again",
 ];
 

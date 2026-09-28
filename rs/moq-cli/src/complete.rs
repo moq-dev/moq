@@ -480,12 +480,12 @@ fn broadcasts(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 			// The root broadcast is the connection path itself, which an unset
 			// `--broadcast` already names; there is no word to insert for it.
 			match event {
-				moq_net::announce::Event::Announced(announce) | moq_net::announce::Event::Updated(announce) => {
+				moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Update(announce) => {
 					if !announce.prefix.is_empty() {
 						live.insert(announce.prefix.to_string());
 					}
 				}
-				moq_net::announce::Event::Retracted(announce) => {
+				moq_net::announce::Event::End(announce) => {
 					live.remove(announce.prefix.as_str());
 				}
 				moq_net::announce::Event::Live => break,

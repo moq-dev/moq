@@ -136,7 +136,7 @@ discovery.run((effect) => {
 			const node = Net.Path.stripPrefix(prefix, path);
 			if (!node) continue;
 
-			if (entry.kind !== "retracted") {
+			if (entry.kind !== "end") {
 				if (subs.has(node)) continue;
 				const ne = new Signals.Effect();
 				subs.set(node, ne);

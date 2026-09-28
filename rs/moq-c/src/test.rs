@@ -124,7 +124,7 @@ impl Callback {
 
 impl Callback {
 	/// Wait for the next announce event that is not `LIVE`, freeing any `LIVE` ahead of it.
-	fn recv_route(&self) -> (u32, moq_announce_update) {
+	fn recv_route(&self) -> (u32, moq_announce_event) {
 		loop {
 			let announced = id(self.recv());
 			let info = announce_info(announced);
@@ -149,8 +149,8 @@ impl Callback {
 }
 
 /// Read an announce event delivered to an `on_announce` callback.
-fn announce_info(announced: u32) -> moq_announce_update {
-	let mut info = moq_announce_update {
+fn announce_info(announced: u32) -> moq_announce_event {
+	let mut info = moq_announce_event {
 		prefix: std::ptr::null(),
 		prefix_len: 0,
 		captures: std::ptr::null(),
@@ -1876,7 +1876,7 @@ fn announced_free_lifecycle() {
 
 	// The first callback is the announcement for our broadcast.
 	let (announced, mut info) = ann_cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_ANNOUNCED);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
 	let got = unsafe { std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len) };
 	assert_eq!(got, path, "announced prefix should match");
 
@@ -2042,7 +2042,7 @@ fn announced_delivers_live_once_caught_up() {
 	let task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 	let announced = id(cb.recv());
 	let info = announce_info(announced);
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_ANNOUNCED);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
 	let got = unsafe { std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len) };
 	assert_eq!(got, path);
 	let live = id(cb.recv());
@@ -2067,7 +2067,7 @@ fn local_announce() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let (announced_id, info) = cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_ANNOUNCED);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
 
 	let announced_prefix =
 		unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len)).unwrap() };
@@ -2164,7 +2164,7 @@ fn announced_deactivation() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let (announced_id, info) = cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_ANNOUNCED);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
 	assert_eq!(moq_origin_announced_free(announced_id), 0);
 
 	// Going non-live unannounces the broadcast without tearing it down: local
@@ -2172,13 +2172,13 @@ fn announced_deactivation() {
 	assert_eq!(moq_publish_unannounce(broadcast), 0);
 
 	let (deactivated_id, info) = cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_RETRACTED);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_END);
 	assert_eq!(moq_origin_announced_free(deactivated_id), 0);
 	assert!(request_once(origin, path) < 0, "an unannounced broadcast is unroutable");
 
 	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
 	let (reannounced_id, info) = cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_ANNOUNCED);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
 	assert_eq!(moq_origin_announced_free(reannounced_id), 0);
 	let _ = request_broadcast(origin, path);
 
@@ -2202,7 +2202,7 @@ fn create_broadcast_is_unroutable_until_announced() {
 	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
 	let _ = request_broadcast(origin, path);
 	let (announced_id, info) = cb.recv_route();
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_ANNOUNCED);
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
 	assert_eq!(moq_origin_announced_free(announced_id), 0);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);

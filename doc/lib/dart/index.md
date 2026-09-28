@@ -30,7 +30,7 @@ final moq = await Moq.connect('https://relay.example.com');
 moq.announcements(
   options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
 ).listen((event) {
-  if (event is AnnounceEventAnnounced) {
+  if (event is AnnounceEventStart) {
     print(event.announce.prefix);
     print(event.announce.captures);
   } else if (event is AnnounceEventLive) {
@@ -76,7 +76,7 @@ every path beneath it (`''` for everything; Dart spells the origin method
 claim should stay advertised, and reject the requests you will not serve. A
 route is a capability, not an inventory. `announcements(options:)` takes a
 literal prefix plus an optional relative pattern and yields `AnnounceEvent`s:
-`AnnounceEventAnnounced`, `AnnounceEventUpdated`, or `AnnounceEventRetracted`
+`AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`
 carrying an `Announce`, whose `prefix` stays origin-relative and whose
 `captures` reports the wildcard matches, or `AnnounceEventLive` once every route
 live at subscribe time has been delivered. Paths with

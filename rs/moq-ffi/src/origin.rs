@@ -198,11 +198,11 @@ impl From<moq_net::announce::Announce> for MoqAnnounce {
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MoqAnnounceEvent {
 	/// A route now covers the prefix; the stream had none there.
-	Announced { announce: MoqAnnounce },
+	Start { announce: MoqAnnounce },
 	/// The route covering the prefix changed hops or cost.
-	Updated { announce: MoqAnnounce },
+	Update { announce: MoqAnnounce },
 	/// No route covers the prefix any more. Carries its last advertised route.
-	Retracted { announce: MoqAnnounce },
+	End { announce: MoqAnnounce },
 	/// Every route live at subscribe time has been delivered; what follows is
 	/// live changes. Yielded once.
 	Live,
@@ -212,13 +212,13 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 	fn from(event: moq_net::announce::Event) -> Self {
 		use moq_net::announce::Event;
 		match event {
-			Event::Announced(announce) => Self::Announced {
+			Event::Start(announce) => Self::Start {
 				announce: announce.into(),
 			},
-			Event::Updated(announce) => Self::Updated {
+			Event::Update(announce) => Self::Update {
 				announce: announce.into(),
 			},
-			Event::Retracted(announce) => Self::Retracted {
+			Event::End(announce) => Self::End {
 				announce: announce.into(),
 			},
 			Event::Live => Self::Live,
@@ -514,7 +514,7 @@ impl MoqAnnounceConsumer {
 impl MoqAnnouncedBroadcast {
 	/// Wait until the broadcast is announced. Returns `Closed` if cancelled or the origin is closed.
 	///
-	/// Its end arrives as a [`MoqAnnounceEvent::Retracted`] on the origin's announcements.
+	/// Its end arrives as a [`MoqAnnounceEvent::End`] on the origin's announcements.
 	pub async fn available(&self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		self.task.run(|mut state| async move { state.available().await }).await
 	}

@@ -12,7 +12,7 @@ import pytest
 async def routes(announced: moq.AnnounceConsumer):
     """Yield each newly announced route, skipping the other events such as LIVE."""
     async for event in announced:
-        if isinstance(event, moq.AnnounceEventAnnounced):
+        if isinstance(event, moq.AnnounceEventStart):
             yield event.announce
 
 
@@ -335,7 +335,7 @@ async def test_broadcast_route_over_wire():
 
 
 async def test_route_update_observes_restart():
-    """A route metadata update arrives as an AnnounceEventUpdated.
+    """A route metadata update arrives as an AnnounceEventUpdate.
 
     The publisher re-prices its announced route; the subscriber observes the new
     hop chain in place (no retraction), and cancelling retracts it.
@@ -353,7 +353,7 @@ async def test_route_update_observes_restart():
             ) as client:
                 announced = client.announced()
                 first = await next_route(announced)
-                assert isinstance(first, moq.AnnounceEventAnnounced)
+                assert isinstance(first, moq.AnnounceEventStart)
                 assert first.announce.prefix == "routed"
                 assert 42 in first.announce.route.hops
                 assert 77 not in first.announce.route.hops
@@ -361,14 +361,14 @@ async def test_route_update_observes_restart():
                 # The publisher advertises a longer chain: an in-place update.
                 announce.update(moq.Route(hops=[42, 77]))
                 updated = await next_route(announced)
-                assert isinstance(updated, moq.AnnounceEventUpdated)
+                assert isinstance(updated, moq.AnnounceEventUpdate)
                 assert updated.announce.prefix == "routed"
                 assert 77 in updated.announce.route.hops
 
                 # Cancelling retracts the route.
                 announce.cancel()
                 ended = await next_route(announced)
-                assert isinstance(ended, moq.AnnounceEventRetracted)
+                assert isinstance(ended, moq.AnnounceEventEnd)
                 assert ended.announce.prefix == "routed"
         finally:
             serve_task.cancel()
