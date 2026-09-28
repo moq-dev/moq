@@ -1259,6 +1259,8 @@ mod tests {
 			front.step(Event::Deadline { now: t0 + LINGER }),
 			&[Action::Forget { track: name("video") }],
 		);
+		front.step(Event::Forgotten { track: name("video") });
+		assert!(!front.tracks.contains_key(&name("video")));
 	}
 
 	/// A local source keeps its own cache, so an unread track is forgotten at once.

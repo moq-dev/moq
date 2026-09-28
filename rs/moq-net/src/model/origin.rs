@@ -2456,10 +2456,16 @@ async fn run_front(task: FrontTask) {
 					}
 					Action::Forget { track: name } => {
 						// A reader that looked the track up since the machine decided keeps
-						// it; its demand edge feeds `Used` next.
-						if let Some(io) = tracks.get(&name)
+						// it. Feed its `Used` edge here: the demand poll only sees the
+						// current level, so a reader gone before the next poll would
+						// otherwise leave the track unread with no linger armed.
+						if let Some(io) = tracks.get_mut(&name)
 							&& !broadcast.forget_spliced(&name, &io.resume)
 						{
+							if !io.used {
+								io.used = true;
+								events.push_back(Event::Used { track: name });
+							}
 							continue;
 						}
 						tracks.remove(&name);
