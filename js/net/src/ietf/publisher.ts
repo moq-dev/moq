@@ -11,7 +11,7 @@ import { Milli, Timescale } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
-import { type Advertised, wireOf } from "../wire.ts";
+import { type Advertised, type Advertisements, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
 import { requestReason, toRequestCode } from "./error.ts";
@@ -161,7 +161,7 @@ export class Publisher {
 	// session leaves its broadcasts alone. The namespaces are advertised with an unsolicited
 	// PUBLISH_NAMESPACE (see {@link runPublishNamespaces}), or on request if the peer asked
 	// for that (see {@link runSubscribeNamespace}).
-	#advertised: Getter<ReadonlyMap<Path.Valid, Advertised> | undefined>;
+	#advertised: Getter<Advertisements | undefined>;
 	#publish?: OriginConsumer;
 
 	// What every advertisement carries on a session that negotiated the MoQ Cluster
@@ -779,7 +779,7 @@ export class Publisher {
 				// waits for its reply only notifies listeners already registered.
 				// TODO Make a better helper within Signals.
 				let dispose!: Dispose;
-				const changed = new Promise<ReadonlyMap<Path.Valid, Advertised> | undefined>((resolve) => {
+				const changed = new Promise<Advertisements | undefined>((resolve) => {
 					dispose = this.#advertised.changed(resolve);
 				});
 
@@ -904,7 +904,7 @@ export class Publisher {
 				// through it and leave the namespace unadvertised until something unrelated
 				// changed.
 				// TODO Make a better helper within Signals.
-				const changed = new Promise<ReadonlyMap<Path.Valid, Advertised> | undefined>((resolve) => {
+				const changed = new Promise<Advertisements | undefined>((resolve) => {
 					dispose = this.#advertised.changed(resolve);
 				});
 
@@ -915,10 +915,10 @@ export class Publisher {
 				}
 
 				const updated = new Map<Path.Valid, Advertised>();
-				for (const [covered, snap] of advertised) {
+				for (const [covered, candidates] of advertised) {
 					// Unasked, a hidden namespace stays off the wire (MoQ Hidden).
-					if (hiddenBelow(Path.empty(), covered)) continue;
-					updated.set(covered, snap);
+					if (hiddenBelow(Path.empty(), covered) || candidates.length === 0) continue;
+					updated.set(covered, candidates[0]);
 				}
 
 				// A namespace that is gone, or that a republish replaced, takes its refusal with

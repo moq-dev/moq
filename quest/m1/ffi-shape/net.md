@@ -36,9 +36,7 @@ are renamed.
   this line removes, but dropping it costs every quick-start a hop (raised in
   #3959).
 
-libmoq's affected symbols follow.
-
-Public API: breaking in every binding and libmoq. Wire: none.
+Public API: breaking in every binding. Wire: none.
 
 ## Required
 

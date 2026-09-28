@@ -53,8 +53,9 @@ pub(super) enum Event {
 	Resolved { route: u64, result: Result<u64, Refusal> },
 	/// A source closed: it will never serve again.
 	SourceClosed { source: u64 },
-	/// The spliced broadcast handed out a new logical track to serve.
-	TrackAssigned { track: Arc<str> },
+	/// The spliced broadcast handed out a new logical track to serve. It has no
+	/// reader until [`Event::Used`] says so.
+	TrackAssigned { track: Arc<str>, now: Instant },
 	/// A source answered a track query: its copy's metadata, or a refusal.
 	/// `closing` is whether the source has begun closing, in which case a
 	/// refusal is not held against it: it is on its way out.
@@ -80,6 +81,9 @@ pub(super) enum Event {
 	Unused { track: Arc<str>, now: Instant },
 	/// The armed deadline passed.
 	Deadline { now: Instant },
+	/// The driver let go of a track the machine asked it to [`Action::Forget`].
+	/// Not fed when a reader arrived first: [`Event::Used`] follows instead.
+	Forgotten { track: Arc<str> },
 	/// The origin is tearing down.
 	Closed,
 }
@@ -105,9 +109,10 @@ pub(super) enum Action {
 	/// Drop the source copy of `track` but keep the delivered groups spliced,
 	/// so resume stays seamless while nobody reads.
 	Park { track: Arc<str> },
-	/// Drop the source copy of `track` and every delivered group: the linger expired
-	/// unread, or the source is local and keeps its own cache.
-	Release { track: Arc<str> },
+	/// Remove `track` from the broadcast and drop everything behind it, unless a reader
+	/// arrived meanwhile: it went unread for the linger, or the source is local and
+	/// keeps its own cache. Feed back [`Event::Forgotten`] once it is gone.
+	Forget { track: Arc<str> },
 	/// The logical track completed.
 	Finish { track: Arc<str> },
 	/// The logical track failed for good.
@@ -174,8 +179,8 @@ enum TrackState {
 	Querying { source: u64 },
 	/// A source's copy is spliced in and being served.
 	Spliced { source: u64 },
-	/// Nobody reads it: the copy was dropped, the delivered groups stay
-	/// spliced until the linger expires.
+	/// Nobody reads it: the copy was dropped, and whatever the track delivered
+	/// stays spliced until the linger expires and the track is forgotten.
 	Parked { since: Instant },
 }
 
@@ -189,6 +194,9 @@ struct Track {
 	refusal: Option<Error>,
 	/// Whether anyone reads the track: a copy is only spliced in for a reader.
 	used: bool,
+	/// The track finished or aborted: nothing is spliced again, and it stays only
+	/// until it goes unread for the linger.
+	ended: bool,
 }
 
 /// One front's state; see the module docs.
@@ -213,7 +221,7 @@ pub(super) struct Front {
 	/// Immutable track metadata, fixed by the first copy of each track. Every
 	/// source of the broadcast must serve the same content.
 	info: BTreeMap<Arc<str>, track::Info>,
-	/// How long an unread track keeps its delivered groups spliced.
+	/// How long an unread track stays before it is forgotten.
 	linger: Duration,
 	/// The deadline last armed, so a step only re-arms on change.
 	armed: Option<Instant>,
@@ -222,7 +230,7 @@ pub(super) struct Front {
 
 impl Front {
 	/// A front with no source and no tracks; `linger` is how long an unread
-	/// track keeps its delivered groups spliced.
+	/// track stays before it is forgotten.
 	pub(super) fn new(linger: Duration) -> Self {
 		Self {
 			identity: Identity::Undetermined,
@@ -278,15 +286,17 @@ impl Front {
 			Event::SourceClosed { source } => self.source_closed(source, &mut actions),
 			// A fresh logical track, even under a name served before: an earlier
 			// verdict belonged to that request, and a later one asks afresh. The
-			// broadcast's track metadata is what persists.
-			Event::TrackAssigned { track } => {
+			// broadcast's track metadata is what persists. Unread until a reader
+			// shows up, so a lookup whose reader left early is forgotten too.
+			Event::TrackAssigned { track, now } => {
 				self.tracks.insert(
 					track,
 					Track {
-						state: TrackState::Idle,
+						state: TrackState::Parked { since: now },
 						refused: HashSet::new(),
 						refusal: None,
 						used: false,
+						ended: false,
 					},
 				);
 			}
@@ -306,6 +316,9 @@ impl Front {
 			Event::Used { track } => self.used(track, &mut actions),
 			Event::Unused { track, now } => self.unused(track, now, &mut actions),
 			Event::Deadline { now } => self.deadline(now, &mut actions),
+			Event::Forgotten { track } => {
+				self.tracks.remove(&track);
+			}
 			Event::Closed => self.end(Error::Dropped, &mut actions),
 		}
 		if !self.ended {
@@ -406,7 +419,7 @@ impl Front {
 		}
 		// A read track is never parked, so idle is the only state to re-query.
 		for (name, track) in &mut self.tracks {
-			if track.used && track.state == TrackState::Idle {
+			if track.used && !track.ended && track.state == TrackState::Idle {
 				track.state = TrackState::Querying { source };
 				actions.push(Action::Query {
 					track: name.clone(),
@@ -519,11 +532,11 @@ impl Front {
 			return;
 		}
 		match result {
-			// Over for good: the track leaves the machine, so a name served again
-			// later starts afresh and a long-lived front does not keep a stub per
-			// name it ever served.
+			// Over for good: readers drain what it delivered, and it is forgotten
+			// once unread for the linger, like any other track.
 			Ok(()) => {
-				self.tracks.remove(&name);
+				track.state = TrackState::Idle;
+				track.ended = true;
 				actions.push(Action::Finish { track: name });
 			}
 			// Died mid-serve after delivering: normal failover, re-splice from
@@ -560,12 +573,12 @@ impl Front {
 			return;
 		};
 		let track = self.tracks.get_mut(&name).expect("dispatching a known track");
-		if !track.used || track.state != TrackState::Idle {
+		if !track.used || track.ended || track.state != TrackState::Idle {
 			return;
 		}
 		if track.refused.contains(&source) {
 			let err = track.refusal.clone().unwrap_or(Error::NotFound);
-			self.tracks.remove(&name);
+			track.ended = true;
 			actions.push(Action::Abort { track: name, err });
 			return;
 		}
@@ -594,11 +607,11 @@ impl Front {
 		track.used = false;
 		match track.state {
 			// A local source keeps its own cache, so a warm copy would only be a staler
-			// duplicate of it: drop the copy outright, and a returning reader re-splices
-			// the source and reads its cache against the real live edge.
+			// duplicate of it: forget the track outright, and a returning reader
+			// re-splices the source and reads its cache against the real live edge.
 			TrackState::Spliced { .. } if self.identity == Identity::Local => {
 				track.state = TrackState::Idle;
-				actions.push(Action::Release { track: name });
+				actions.push(Action::Forget { track: name });
 			}
 			// Drop the copy so the source goes idle at once; the delivered
 			// groups stay spliced for the linger.
@@ -606,21 +619,22 @@ impl Front {
 				track.state = TrackState::Parked { since: now };
 				actions.push(Action::Park { track: name });
 			}
-			TrackState::Querying { .. } => track.state = TrackState::Idle,
-			_ => {}
+			TrackState::Parked { .. } => {}
+			TrackState::Idle | TrackState::Querying { .. } => track.state = TrackState::Parked { since: now },
 		}
 	}
 
 	fn deadline(&mut self, now: Instant, actions: &mut Vec<Action>) {
 		// The driver's deadline fired and cleared itself: re-arm whatever is still
-		// parked, even if nothing was due yet, or it would never be released.
+		// parked, even if nothing was due yet, or it would never be forgotten.
+		// Idle until the driver confirms: a reader that arrived first keeps it.
 		self.armed = None;
 		for (name, track) in &mut self.tracks {
 			if let TrackState::Parked { since } = track.state
 				&& since + self.linger <= now
 			{
 				track.state = TrackState::Idle;
-				actions.push(Action::Release { track: name.clone() });
+				actions.push(Action::Forget { track: name.clone() });
 			}
 		}
 	}
@@ -705,13 +719,23 @@ mod tests {
 			}),
 			&[Action::Resolve],
 		);
-		assert_actions(front.step(Event::TrackAssigned { track: name("video") }), &[]);
+		let t0 = Instant::now();
+		assert_actions(
+			front.step(Event::TrackAssigned {
+				track: name("video"),
+				now: t0,
+			}),
+			&[Action::Arm { at: Some(t0 + LINGER) }],
+		);
 		assert_actions(
 			front.step(Event::Used { track: name("video") }),
-			&[Action::Query {
-				track: name("video"),
-				source,
-			}],
+			&[
+				Action::Query {
+					track: name("video"),
+					source,
+				},
+				Action::Arm { at: None },
+			],
 		);
 		assert_actions(
 			front.step(Event::TrackInfo {
@@ -970,7 +994,10 @@ mod tests {
 	#[test]
 	fn a_source_refusing_a_track_aborts_it_and_nothing_else() {
 		let mut front = serving(remote(1, 10), 100);
-		front.step(Event::TrackAssigned { track: name("audio") });
+		front.step(Event::TrackAssigned {
+			track: name("audio"),
+			now: Instant::now(),
+		});
 		front.step(Event::Used { track: name("audio") });
 		assert_actions(
 			front.step(Event::TrackInfo {
@@ -990,7 +1017,10 @@ mod tests {
 	#[test]
 	fn a_closing_source_refusal_is_not_a_verdict() {
 		let mut front = serving(remote(1, 10), 100);
-		front.step(Event::TrackAssigned { track: name("audio") });
+		front.step(Event::TrackAssigned {
+			track: name("audio"),
+			now: Instant::now(),
+		});
 		front.step(Event::Used { track: name("audio") });
 		assert_actions(
 			front.step(Event::TrackInfo {
@@ -1100,7 +1130,7 @@ mod tests {
 	}
 
 	#[test]
-	fn unread_track_parks_then_releases_after_the_linger() {
+	fn unread_track_parks_then_is_forgotten_after_the_linger() {
 		let mut front = serving(remote(1, 10), 100);
 		let t0 = Instant::now();
 		assert_actions(
@@ -1123,15 +1153,126 @@ mod tests {
 		// nothing re-arms.
 		assert_actions(
 			front.step(Event::Deadline { now: t0 + LINGER }),
-			&[Action::Release { track: name("video") }],
+			&[Action::Forget { track: name("video") }],
 		);
-		// A returning reader re-splices from the serving source.
+		assert_actions(front.step(Event::Forgotten { track: name("video") }), &[]);
+		assert!(!front.tracks.contains_key(&name("video")));
+	}
+
+	/// A reader that looked the track up before the driver could forget it keeps
+	/// it: the driver feeds `Used` instead of `Forgotten`, and the track re-splices.
+	#[test]
+	fn a_reader_racing_the_forget_keeps_the_track() {
+		let mut front = serving(remote(1, 10), 100);
+		let t0 = Instant::now();
+		front.step(Event::Unused {
+			track: name("video"),
+			now: t0,
+		});
+		assert_actions(
+			front.step(Event::Deadline { now: t0 + LINGER }),
+			&[Action::Forget { track: name("video") }],
+		);
 		assert_actions(
 			front.step(Event::Used { track: name("video") }),
 			&[Action::Query {
 				track: name("video"),
 				source: 100,
 			}],
+		);
+	}
+
+	/// A finished track stays for readers still draining it and for the linger
+	/// after the last one, is never spliced again, and is then forgotten.
+	#[test]
+	fn a_finished_track_lingers_then_is_forgotten() {
+		let mut front = serving(remote(1, 10), 100);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Ok(()),
+				delivered: true,
+			}),
+			&[Action::Finish { track: name("video") }],
+		);
+		let t0 = Instant::now();
+		assert_actions(
+			front.step(Event::Unused {
+				track: name("video"),
+				now: t0,
+			}),
+			&[Action::Arm { at: Some(t0 + LINGER) }],
+		);
+		// A returning reader reads what it holds: no query, and the linger waits.
+		assert_actions(
+			front.step(Event::Used { track: name("video") }),
+			&[Action::Arm { at: None }],
+		);
+		// A replacement source does not re-splice it either.
+		front.step(Event::Selected {
+			best: Some(remote(2, 10)),
+			serving_closing: false,
+		});
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			}),
+			&[Action::Detach { source: 100 }],
+		);
+		let t1 = t0 + LINGER;
+		front.step(Event::Unused {
+			track: name("video"),
+			now: t1,
+		});
+		assert_actions(
+			front.step(Event::Deadline { now: t1 + LINGER }),
+			&[Action::Forget { track: name("video") }],
+		);
+		front.step(Event::Forgotten { track: name("video") });
+		assert!(!front.tracks.contains_key(&name("video")));
+	}
+
+	/// An aborted track lingers the same way rather than staying for the life of
+	/// the front.
+	#[test]
+	fn an_aborted_track_lingers_then_is_forgotten() {
+		let mut front = serving(remote(1, 10), 100);
+		front.step(Event::TrackEnded {
+			track: name("video"),
+			source: 100,
+			closing: false,
+			result: Err(Error::Dropped),
+			delivered: false,
+		});
+		let t0 = Instant::now();
+		assert_actions(
+			front.step(Event::Unused {
+				track: name("video"),
+				now: t0,
+			}),
+			&[Action::Arm { at: Some(t0 + LINGER) }],
+		);
+		assert_actions(
+			front.step(Event::Deadline { now: t0 + LINGER }),
+			&[Action::Forget { track: name("video") }],
+		);
+		front.step(Event::Forgotten { track: name("video") });
+		assert!(!front.tracks.contains_key(&name("video")));
+	}
+
+	/// A local source keeps its own cache, so an unread track is forgotten at once.
+	#[test]
+	fn an_unread_local_track_is_forgotten_at_once() {
+		let mut front = serving(local(1), 100);
+		assert_actions(
+			front.step(Event::Unused {
+				track: name("video"),
+				now: Instant::now(),
+			}),
+			&[Action::Forget { track: name("video") }],
 		);
 	}
 
@@ -1155,11 +1296,21 @@ mod tests {
 		);
 	}
 
+	/// A track whose reader left before the front saw it is never spliced, and is
+	/// forgotten after the linger rather than kept as a stub.
 	#[test]
 	fn unread_track_is_never_spliced() {
 		let mut front = serving(remote(1, 10), 100);
-		assert_actions(front.step(Event::TrackAssigned { track: name("audio") }), &[]);
-		assert_eq!(front.tracks[&name("audio")].state, TrackState::Idle);
+		let t0 = Instant::now();
+		front.step(Event::TrackAssigned {
+			track: name("audio"),
+			now: t0,
+		});
+		assert_eq!(front.tracks[&name("audio")].state, TrackState::Parked { since: t0 });
+		assert_actions(
+			front.step(Event::Deadline { now: t0 + LINGER }),
+			&[Action::Forget { track: name("audio") }],
+		);
 	}
 
 	#[test]
@@ -1237,7 +1388,10 @@ mod tests {
 				}),
 			},
 			Event::SourceClosed { source: 100 },
-			Event::TrackAssigned { track: name("v") },
+			Event::TrackAssigned {
+				track: name("v"),
+				now: t0,
+			},
 			Event::Used { track: name("v") },
 			Event::Unused {
 				track: name("v"),
@@ -1263,6 +1417,7 @@ mod tests {
 				delivered: false,
 			},
 			Event::Deadline { now: t0 + LINGER },
+			Event::Forgotten { track: name("v") },
 		];
 
 		fn walk(front: &Front, alphabet: &[Event], depth: usize, sequences: &mut usize) {

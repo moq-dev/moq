@@ -1687,3 +1687,113 @@ test("finished rejects when the track aborts or closes without an end", async ()
 	clean.close();
 	expect(await reader.finished()).toBe(1);
 });
+
+test("an abort keeps finished groups for a slow reader, then reports it", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: Milli(10_000) });
+	const arrival = producer.subscribe({ maxAge: Milli(10_000) });
+	const ordered = producer.subscribe({ maxAge: Milli(10_000) }).ordered();
+	for (let i = 0; i < 2; i++) {
+		const group = producer.appendGroup();
+		group.writeString(`g${i}`);
+		group.close();
+	}
+	producer.appendGroup().writeString("open");
+	const boom = new Error("boom");
+	producer.close(boom);
+
+	for (const next of [() => arrival.recvGroup(), () => ordered.nextGroup()]) {
+		for (let i = 0; i < 2; i++) {
+			const group = await next();
+			expect(group?.sequence).toBe(i);
+			expect(await group?.readString()).toBe(`g${i}`);
+		}
+		// The open group nobody will finish is not handed out.
+		await expect(next()).rejects.toBe(boom);
+	}
+});
+
+test("an abort after the declared end settles ends clean", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: Milli(10_000) });
+	const arrival = producer.subscribe({ maxAge: Milli(10_000) });
+	const ordered = producer.subscribe({ maxAge: Milli(10_000) }).ordered();
+	for (let i = 0; i < 2; i++) {
+		const group = producer.appendGroup();
+		group.writeString(`g${i}`);
+		group.close();
+	}
+	producer.finishAt(2);
+	producer.close(new Error("boom"));
+
+	for (const next of [() => arrival.recvGroup(), () => ordered.nextGroup()]) {
+		expect((await next())?.sequence).toBe(0);
+		expect((await next())?.sequence).toBe(1);
+		expect(await next()).toBeUndefined();
+	}
+});
+
+test("an abort after the declared end reached by a datagram ends clean", () => {
+	const producer = new TrackProducer("test").accept();
+	producer.appendDatagram(Timestamp.fromMillis(0), enc.encode("d"));
+	producer.finishAt(1);
+	producer.close(new Error("boom"));
+	expect(producer.closed.peek()).toBeNull();
+});
+
+test("an ended track's buffered groups age out for a stale subscriber", () => {
+	// Nothing writes after the close, so only the prune wakeup can reclaim them. Stub the
+	// timers so the test fires exactly the wakeups still armed, at a mocked time.
+	const clock = mockMonotonicTime(10_000);
+	const realSet = globalThis.setTimeout;
+	const realClear = globalThis.clearTimeout;
+	const armed = new Map<object, () => void>();
+	// @ts-expect-error a stub, not a full setTimeout
+	globalThis.setTimeout = (fn: () => void) => {
+		const handle = { unref: () => {} };
+		armed.set(handle, fn);
+		return handle;
+	};
+	// @ts-expect-error a stub, not a full clearTimeout
+	globalThis.clearTimeout = (handle: object) => armed.delete(handle);
+
+	try {
+		for (const abort of [undefined, new Error("boom")]) {
+			clock.set(10_000);
+			armed.clear();
+			const producer = new TrackProducer("test").accept({ maxAge: Milli(30) });
+			const stale = producer.subscribe({ maxAge: Milli(30) });
+			const group = producer.appendGroup();
+			group.writeString("x");
+			group.close();
+			producer.close(abort);
+
+			clock.set(10_100);
+			for (const [handle, fire] of [...armed]) {
+				armed.delete(handle);
+				fire();
+			}
+			// Nothing buffered is left: the subscriber sees only how the track ended.
+			if (abort) expect(() => stale.tryRecvGroup()).toThrow(abort);
+			else expect(stale.tryRecvGroup()).toBeUndefined();
+		}
+	} finally {
+		globalThis.setTimeout = realSet;
+		globalThis.clearTimeout = realClear;
+		clock.restore();
+	}
+});
+
+test("an abort leaves a group already taken readable, then reports the abort", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: Milli(10_000) });
+	const arrival = producer.subscribe({ maxAge: Milli(10_000) });
+	const ordered = producer.subscribe({ maxAge: Milli(10_000) }).ordered();
+	producer.appendGroup().writeString("held");
+	const held = [await arrival.recvGroup(), await ordered.nextGroup()];
+	const boom = new Error("boom");
+	producer.close(boom);
+
+	for (const group of held) {
+		expect(group?.sequence).toBe(0);
+		expect(await group?.readString()).toBe("held");
+		await expect(group?.readFrame()).rejects.toBe(boom);
+	}
+});

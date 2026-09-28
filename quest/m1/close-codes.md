@@ -11,6 +11,10 @@ WebTransport. Never `Transport("connection closed")` or its own `Internal`.
 
 Both bugs are upstream; fix them at the source, release, and bump the pins.
 
+Targets `dev`: #4262 (open) does this, and the qmux release pulls in
+`web-transport-trait` 0.5 (`SendStream::set_priority` takes `i32`), a Rust
+API break. It reports `@moq/qmux` already keeps the first close.
+
 - qmux 0.5.1 (`moq-dev/web-transport`) lets later writes overwrite the
   recorded close in `session.rs`: the WS Close frame read after
   APPLICATION_CLOSE (reader loop, backend `send_replace`), a local `close()`

@@ -15,6 +15,11 @@ Rust and JS end a session's tracks and groups the same way:
 https://github.com/moq-dev/moq/pull/4120 made a dying session end its tracks
 with the session's error in both languages, and left two gaps.
 
+Since then #4351 and #4378 changed Rust abort semantics: an abort keeps the
+finished groups and drops only the open ones, so readers get what finished
+and then the abort, or a clean end once the declared end settled. #4385 (open)
+mirrors that in JS. Build the clean end below on those semantics.
+
 Decided by the maintainer:
 
 - **A local close is a close, not an error.** JS already ends tracks cleanly

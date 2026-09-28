@@ -10,8 +10,7 @@ deleted: the browser runs moq-net as generated TypeScript instead.
 Decided in planning: keep the experiment until generated lite ships, then
 delete it rather than polish it. Remove its entries from the size report,
 the justfiles, the wasm clippy lane (keep `moq-net` and `moq-mux` there if
-anything still targets wasm32), and the docs, and update the P2P questline's
-note about `moq-wasm`.
+anything still targets wasm32), and the docs.
 
 Public API: removes the unpublished `@moq/wasm` package. Wire: none.
 

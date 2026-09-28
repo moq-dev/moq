@@ -678,6 +678,78 @@ test("a subscription outside a covering route's claim does not hear it", async (
 });
 
 /**
+ * A cheaper route claiming `room/chat` does not hide a costlier `room/video` route at the
+ * same prefix from a subscription at `room/video`.
+ */
+test("a subscription hears the best covering route its claim allows", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
+	const scoped = (path: string) =>
+		origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from(path))]));
+	const chat = scoped("room/chat").dynamic(Path.from("room"), { cost: 1n });
+	const video = scoped("room/video").dynamic(Path.from("room"), { cost: 5n });
+
+	const subscription = await Stream.open(pair.client, { version: VERSION });
+	const accepted = await Stream.accept(pair.server, VERSION);
+	if (!accepted) throw new Error("the subscription stream was never accepted");
+	void pub.runSubscribeNamespace(
+		new SubscribeNamespace({ requestId: 0n, namespace: Path.from("room/video") }),
+		accepted,
+	);
+
+	expect(await subscription.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(subscription.reader, VERSION);
+
+	// The first entry is the video route as the empty suffix, not a later broadcast beneath it.
+	publish(origin, Path.from("room/video/cam"));
+	expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+	expect((await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix).toBe(Path.empty());
+
+	video.close();
+	chat.close();
+	subscription.close();
+	origin.close();
+});
+
+/**
+ * A served root collapses every covering route to the empty suffix. A narrow one claiming
+ * only `tenant/chat` must not hide a broader one from a subscription at `video`.
+ */
+test("a subscription hears a broader covering route when the narrowest cannot serve it", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const origin = new OriginProducer();
+	const tenant = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.all()]));
+	const pub = new Publisher({
+		quic: pair.server,
+		session: new NativeSession(pair.server, VERSION, true),
+		publish: tenant.consume(),
+		requiresSolicitation: true,
+	});
+	const chat = origin
+		.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/chat"))]))
+		.dynamic(Path.from("tenant"));
+	const broad = origin.dynamic(Path.empty(), { cost: 5n });
+
+	const subscription = await Stream.open(pair.client, { version: VERSION });
+	const accepted = await Stream.accept(pair.server, VERSION);
+	if (!accepted) throw new Error("the subscription stream was never accepted");
+	void pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 0n, namespace: Path.from("video") }), accepted);
+
+	expect(await subscription.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(subscription.reader, VERSION);
+
+	// The first entry is the broad route as the empty suffix, not a later broadcast beneath it.
+	publish(origin, Path.from("tenant/video/cam"));
+	expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+	expect((await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix).toBe(Path.empty());
+
+	broad.close();
+	chat.close();
+	subscription.close();
+	origin.close();
+});
+
+/**
  * The claim is presented relative to the served origin's root, like the route's key: a
  * publisher serving `tenant` offers `room` (claiming `tenant/room/chat`) to a
  * subscription at `room/chat`.

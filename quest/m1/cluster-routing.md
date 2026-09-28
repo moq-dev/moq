@@ -104,13 +104,21 @@ make MoQ's common case.
   registry's replay lands, on every new prefix rather than in a rare race.
 - What remains of announce compression's hop-tail half (`Hop Base` and
   `Hop Keep` in the lite draft) once only cluster boundaries carry hops.
+- What replaces `--hop` first-hop failover. Today two publishers sharing a Hop
+  ID are one source that relays fail over between at a group boundary
+  (`doc/bin/cli.md` "Redundant publishers",
+  `doc/concept/use-case/contribution.md`). Inside a cluster no announcement
+  carries a hop list, so two encoders on different ingest relays become two
+  origins. Keep the documented behavior or change the docs in the same PR.
 
 ## Required
 
+- moq.pro workers stop electing on hop chains, reading the relay's local origin instead ([moq.pro voice-local-origin](https://github.com/moq-dev/moq.pro/blob/main/quest/m0/voice-local-origin.md))
+- [Wildcard](/quest/m0/wildcard/README.md) - the specificity, pool spread, and reply identity this selection builds on
 - moq.pro's routing simulator reports ([quest](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/routing-simulator.md))
 
 ## Related
 
 - [Skip unchanged announce updates](/quest/m0/announce-update-dedupe.md) - cuts duplicate updates on today's routing
-- [Local origin](/quest/m0/local-origin.md) - workers stop reading hop chains before they go
-- [Wildcard](/quest/m0/wildcard/README.md) - the specificity, pool spread, and reply identity this selection builds on
+- [Redundant ingest](/quest/m2/redundant-ingest.md) - builds on the `--hop` failover this must keep or replace
+- [Routing cost domains](/quest/m2/routing-cost-domains.md) - cost across the cluster boundaries this keeps path vector

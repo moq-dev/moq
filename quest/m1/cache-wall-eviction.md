@@ -18,6 +18,12 @@ instead of only on a write. The pool's idle expiry is out of scope.
   groups past `max_age` until the pool's idle expiry (`Pool::gc`, driven by
   the origin driver without a write) or byte pressure reclaims them.
   `max_age_does_not_drive_wall_eviction` pins that behaviour.
+- JS already does the opposite: `#prune` in `js/net/src/track.ts` evicts a
+  group once it has been idle on the wall clock (`performance.now`) past
+  `maxAge`, on its own timer, and `js/net/bench/track.ts` benches the publish
+  cost against the retained window. So `max_age` means different things per
+  language today. The decision settles both: either Rust gains a wall term or
+  JS moves to media time, and the loser's tests and docs change with it.
 - Prototype the alternative behind a bench-only switch: each track keeps a
   deadline for its oldest group on `max(wall elapsed, pts)`, armed on the
   timers the origin driver already runs, and evicts on expiry.

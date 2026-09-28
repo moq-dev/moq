@@ -10,7 +10,9 @@ origin stream opened before the first connection goes live.
 
 ## Plan
 
-- #4261 (on `dev`) adds the `live` event; the consumers it touches
+- #4261 (on `dev`) adds the `live` event, and #4266 the same marker in the
+  bindings. Open #4384 renames the announce events to Start/Update/End/Live;
+  follow its names if it lands first. The consumers it touches
   (`demo/web/src/index.ts`, `js/room/src/room.ts`, `js/watch/src/broadcast.ts`,
   `js/moq-boy`) skip it today.
 - Page load: an origin stream opened before any session connects has no
@@ -32,11 +34,3 @@ origin stream opened before the first connection goes live.
 
 Public API: when `@moq/net` emits `live` changes; any state signal on
 `@moq/room` or `@moq/watch` is additive. Lands on `dev` with #4261. Wire: none.
-
-## Required
-
-- [JS caught up](/quest/m1/js-announce-caught-up.md) - the `live` marker (#4261)
-
-## Related
-
-- [Bindings caught up](/quest/m1/announce-live-bindings.md) - the same marker in the bindings
