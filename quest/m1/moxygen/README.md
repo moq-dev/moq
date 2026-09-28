@@ -26,11 +26,26 @@ Out of scope, so they are not reopened as bugs:
 - A peer that answers SUBSCRIBE_NAMESPACE with unimplemented. The session
   already continues.
 
+Decided in the review of
+[#4276](https://github.com/moq-dev/moq/pull/4276), also not reopened:
+
+- A FETCH starting mid-group is answered from that object. Each fetch
+  object carries its own IDs, so it is what was asked, not a partial group
+  ([r4113671550](https://github.com/moq-dev/moq/pull/4276#discussion_r4113671550)).
+- FETCH_OK names the requested end when the range runs past a finished
+  group's last object. Missing objects there are a hole, like a missing
+  group ([r4114050992](https://github.com/moq-dev/moq/pull/4276#discussion_r4114050992)).
+- An End of Track on a group FETCH_OK that contradicts the cache is
+  ignored. It only fills a boundary the live subscription has not declared,
+  and that subscription stays authoritative
+  ([r4114051032](https://github.com/moq-dev/moq/pull/4276#discussion_r4114051032)).
+
 Docs stay inline in the change that makes them stale. No new guide.
 
 ## Quests
 
 - [Sparse FETCH ranges](/quest/m1/moxygen/fetch-span.md) - a FETCH costs the groups it returns, not the span of its range
+- [Group fetch fill](/quest/m1/moxygen/fetch-fill.md) - a cache fill from an IETF upstream is complete or refused, validated against FETCH_OK, and asks from the frame the reader wants
 
 ## Related
 
