@@ -1,10 +1,9 @@
 //! Receive encoded video independently of the paced decoder and window.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use hang::moq_net;
 use moq_mux::container::Frame;
 use tokio::time::Instant;
 
@@ -13,9 +12,35 @@ use super::output::Output;
 use super::timeline::Presentation;
 use super::window::Event;
 
-/// A few surfaces, independent of the requested playout delay.
+/// A few surfaces, independent of the requested playout delay. A codec batch
+/// that overflows it waits beside the queue rather than pushing out pictures
+/// the window has yet to show.
 pub(super) const MAX_FRAMES: usize = 3;
+/// How long before the earliest owed picture is due to feed the codec.
 const DECODE_AHEAD: Duration = Duration::from_millis(100);
+
+/// What the decode loop does next.
+enum Step {
+	/// Sleep until the instant, or until the buffer or the window changes.
+	Wait(Option<std::time::Instant>),
+	Decode,
+	/// The track ended: drain what the codec still holds.
+	Flush,
+}
+
+/// When the window's queue has room for another picture, or `None` if it does
+/// now.
+///
+/// The window presents the newest due picture, so a full queue's oldest one
+/// is skipped anyway once the next falls due. Making room then keeps a
+/// stalled window from stalling decode without dropping a picture a live one
+/// would show.
+fn vacancy(queue: &VecDeque<moq_video::Frame>, presentation: &Presentation) -> Option<std::time::Instant> {
+	if queue.len() < MAX_FRAMES {
+		return None;
+	}
+	queue.get(1).and_then(|frame| presentation.due(frame.timestamp))
+}
 
 type Track = moq_mux::container::Consumer<moq_mux::catalog::hang::Container>;
 
@@ -89,77 +114,112 @@ impl<O: Output> Video<O> {
 			Ok::<_, anyhow::Error>(())
 		};
 		let decode = async {
+			// The generation the decoder's output belongs to, while it holds any.
 			let mut generation = None;
+			// Presentation times fed to the decoder that it has not returned yet.
+			let mut held = BTreeSet::new();
+			// Decoded pictures waiting for room in the window's queue.
+			let mut pending = VecDeque::new();
 			loop {
-				let next = {
+				let (current, oldest, ended) = {
 					let buffer = buffer.lock().unwrap();
-					buffer.frames.front().map(|frame| frame.timestamp)
+					(buffer.generation, buffer.oldest(), buffer.ended)
 				};
-				let Some(timestamp) = next else {
-					if buffer.lock().unwrap().ended {
+				if generation.is_some_and(|generation| generation != current) {
+					// Whatever the codec still holds sits below the new floor, so it is
+					// filtered on the way out and owes the window nothing.
+					generation = None;
+					held.clear();
+					pending.clear();
+				}
+				let step = {
+					let mut queue = self.frames.lock().unwrap();
+					let presentation = self.presentation.lock().unwrap();
+					let now = Instant::now().into_std();
+					let mut placed = false;
+					while !pending.is_empty() && vacancy(&queue, &presentation).is_none_or(|at| at <= now) {
+						if queue.len() >= MAX_FRAMES {
+							queue.pop_front();
+						}
+						let frame: moq_video::Frame = pending.pop_front().expect("checked by the loop");
+						let index = queue.partition_point(|queued| queued.timestamp <= frame.timestamp);
+						queue.insert(index, frame);
+						placed = true;
+					}
+					if placed {
+						self.output.send(Event::Wake);
+					}
+					if !pending.is_empty() {
+						Step::Wait(vacancy(&queue, &presentation))
+					} else if let Some(oldest) = oldest {
+						// Every access unit up to the earliest picture still owed must be
+						// decoded before that picture is due, however deep the stream
+						// reorders or the codec holds pictures back.
+						let owed = held.first().map_or(oldest, |held| oldest.min(*held));
+						let at = presentation
+							.due(owed)
+							.and_then(|at| at.checked_sub(DECODE_AHEAD))
+							.max(vacancy(&queue, &presentation));
+						match at.filter(|at| *at > now) {
+							Some(at) => Step::Wait(Some(at)),
+							None => Step::Decode,
+						}
+					} else if !ended {
+						Step::Wait(None)
+					} else if generation.is_some() {
+						Step::Flush
+					} else {
 						break;
 					}
-					self.changed.notified().await;
-					continue;
 				};
-				let at = {
-					let frames = self.frames.lock().unwrap();
-					let presentation = self.presentation.lock().unwrap();
-					let mut at = presentation.due(timestamp).and_then(|at| at.checked_sub(DECODE_AHEAD));
-					// A full window may lag, but a future picture still deserves its
-					// slot. Once due, evict it rather than blocking the live reader.
-					if frames.len() >= MAX_FRAMES {
-						at = at.max(frames.front().and_then(|frame| presentation.due(frame.timestamp)));
+				let frames = match step {
+					Step::Wait(Some(at)) => {
+						tokio::select! {
+							_ = tokio::time::sleep_until(at.into()) => {},
+							_ = self.changed.notified() => {},
+						}
+						continue;
 					}
-					at
-				};
-				if let Some(at) = at.filter(|at| *at > Instant::now().into_std()) {
-					tokio::select! {
-						_ = tokio::time::sleep_until(at.into()) => {},
-						_ = self.changed.notified() => {},
+					Step::Wait(None) => {
+						self.changed.notified().await;
+						continue;
 					}
-					continue;
-				}
-				let (frame, current) = {
-					let mut buffer = buffer.lock().unwrap();
-					(
-						buffer.pop().expect("no await since inspecting the front"),
-						buffer.generation,
-					)
+					Step::Decode => {
+						let frame = buffer
+							.lock()
+							.unwrap()
+							.pop()
+							.expect("no await since inspecting the buffer");
+						generation = Some(current);
+						held.insert(frame.timestamp);
+						// Never race a codec call: cancelling Sink::decode poisons it. The
+						// joined receiver continues observing arrivals during this await.
+						decoder.decode(frame).await?
+					}
+					Step::Flush => {
+						generation = None;
+						held.clear();
+						decoder.flush().await?
+					}
 				};
-				// Never race a codec call: cancelling Sink::decode poisons it. The
-				// joined receiver continues observing arrivals during this await.
-				let frames = decoder.decode(frame).await?;
-				generation = Some(current);
-				if buffer.lock().unwrap().generation == current {
-					self.decoded(frames, buffer.lock().unwrap().floor);
+				// A codec returns display order, so a picture held before the newest
+				// one it returned was dropped rather than delayed.
+				if let Some(last) = frames.iter().map(|frame| frame.timestamp).max() {
+					held.retain(|held| *held > last);
 				}
-			}
-			let tail = decoder.flush().await?;
-			if generation == Some(buffer.lock().unwrap().generation) {
-				self.decoded(tail, buffer.lock().unwrap().floor);
+				// A codec may return pictures it held across the keyframe that
+				// resumed a skipped timeline. Those pictures no longer have a slot.
+				let floor = buffer.lock().unwrap().floor;
+				pending.extend(
+					frames
+						.into_iter()
+						.filter(|frame| floor.is_none_or(|floor| frame.timestamp.as_micros() >= floor.as_micros())),
+				);
 			}
 			Ok::<_, anyhow::Error>(())
 		};
 		tokio::try_join!(receive, decode)?;
 		Ok(())
-	}
-
-	fn decoded(&self, frames: Vec<moq_video::Frame>, floor: Option<moq_net::Timestamp>) {
-		let mut queue = self.frames.lock().unwrap();
-		for frame in frames {
-			// A codec may return pictures it held across the keyframe that
-			// resumed a skipped timeline. Those pictures no longer have a slot.
-			if floor.is_some_and(|floor| frame.timestamp.as_micros() < floor.as_micros()) {
-				continue;
-			}
-			let index = queue.partition_point(|queued| queued.timestamp <= frame.timestamp);
-			queue.insert(index, frame);
-			while queue.len() > MAX_FRAMES {
-				queue.pop_front();
-			}
-		}
-		self.output.send(Event::Wake);
 	}
 }
 
@@ -167,28 +227,47 @@ impl<O: Output> Video<O> {
 mod tests {
 	use super::super::{args::Args, fake::Recorder, media::Media};
 	use super::*;
+	use hang::moq_net;
 
-	#[derive(Default)]
+	/// A codec whose reorder buffer holds `depth` pictures and bumps the
+	/// earliest one out, the way a real decoder returns display order.
 	struct Buffered {
-		pending: Option<moq_video::Frame>,
+		depth: usize,
+		held: Vec<moq_video::Frame>,
 		decoded: Arc<Mutex<Vec<(moq_net::Timestamp, Instant)>>>,
 		flushed: Arc<Mutex<usize>>,
+	}
+
+	impl Default for Buffered {
+		fn default() -> Self {
+			Self::new(1)
+		}
+	}
+
+	impl Buffered {
+		fn new(depth: usize) -> Self {
+			Self {
+				depth,
+				held: Vec::new(),
+				decoded: Default::default(),
+				flushed: Default::default(),
+			}
+		}
 	}
 
 	impl Decoder for Buffered {
 		async fn decode(&mut self, frame: Frame) -> anyhow::Result<Vec<moq_video::Frame>> {
 			self.decoded.lock().unwrap().push((frame.timestamp, Instant::now()));
 			let surface = moq_video::Surface::rgba(&[128; 16 * 16 * 4], moq_video::Size::new(16, 16))?;
-			Ok(self
-				.pending
-				.replace(moq_video::Frame::new(surface, frame.timestamp))
-				.into_iter()
-				.collect())
+			self.held.push(moq_video::Frame::new(surface, frame.timestamp));
+			self.held.sort_by_key(|frame| frame.timestamp);
+			let bumped = self.held.len().saturating_sub(self.depth);
+			Ok(self.held.drain(..bumped).collect())
 		}
 
 		async fn flush(&mut self) -> anyhow::Result<Vec<moq_video::Frame>> {
 			*self.flushed.lock().unwrap() += 1;
-			Ok(self.pending.take().into_iter().collect())
+			Ok(std::mem::take(&mut self.held))
 		}
 	}
 
@@ -340,11 +419,7 @@ mod tests {
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
 		task.await.unwrap().unwrap();
-		assert_eq!(
-			shown,
-			[33, 66, 99],
-			"the bounded queue evicts the oldest, then presents reordered output"
-		);
+		assert_eq!(shown, [0, 33, 66, 99], "reordered output was not presented in order");
 	}
 	#[tokio::test]
 	async fn a_discontinuity_discards_old_pictures_and_restarts_the_delay() {
@@ -401,5 +476,62 @@ mod tests {
 			.collect::<Vec<_>>();
 		assert_eq!(queued, [500], "old decoder output crossed the discontinuity");
 		assert_eq!(media.output.present(&media).unwrap().as_millis(), 500);
+	}
+
+	/// Play one burst of 33 ms pictures, given by slot in decode order, through a
+	/// codec holding `depth` pictures, and check the window shows every one on
+	/// time.
+	async fn schedule(order: &[u64], depth: usize) {
+		tokio::time::pause();
+		let delay = Duration::from_secs(2);
+		let media = media(delay);
+		let track = track(order.iter().map(|&slot| frame(slot * 33, slot == 0)), delay).await;
+		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(depth)));
+		tokio::task::yield_now().await;
+		let last = moq_net::Timestamp::from_millis(order.iter().max().unwrap() * 33).unwrap();
+		let end = media.presentation.lock().unwrap().due(last).unwrap();
+		let mut shown = Vec::new();
+		while Instant::now().into_std() <= end + Duration::from_millis(10) {
+			if let Some(timestamp) = media.output.present(&media) {
+				shown.push((timestamp, Instant::now().into_std()));
+			}
+			tokio::time::advance(Duration::from_millis(1)).await;
+			tokio::task::yield_now().await;
+		}
+		task.await.unwrap().unwrap();
+		let mut expected = order.iter().map(|slot| (slot * 33) as u128).collect::<Vec<_>>();
+		expected.sort();
+		assert_eq!(
+			shown
+				.iter()
+				.map(|(timestamp, _)| timestamp.as_millis())
+				.collect::<Vec<_>>(),
+			expected,
+			"a picture was dropped"
+		);
+		let presentation = media.presentation.lock().unwrap();
+		for (timestamp, at) in shown {
+			let due = presentation.due(timestamp).unwrap();
+			assert!(
+				at.saturating_duration_since(due) <= Duration::from_millis(1),
+				"{timestamp:?} was shown {:?} late",
+				at - due
+			);
+		}
+	}
+
+	/// A hierarchical GOP: the reference coded second is presented 264 ms after
+	/// the first picture, so the B-pictures coded after it need it decoded far
+	/// more than 100 ms before its own deadline.
+	#[tokio::test]
+	async fn reordering_deeper_than_the_decode_lead_stays_on_time() {
+		schedule(&[0, 8, 4, 2, 1, 3, 6, 5, 7], 3).await;
+	}
+
+	/// A codec holding more pictures than the window's queue returns a tail
+	/// larger than the queue when it is flushed.
+	#[tokio::test]
+	async fn a_flush_larger_than_the_queue_keeps_its_tail() {
+		schedule(&(0..10).collect::<Vec<_>>(), 5).await;
 	}
 }

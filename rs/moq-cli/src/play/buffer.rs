@@ -29,6 +29,12 @@ impl Buffer {
 		self.waiting_keyframe = true;
 	}
 
+	/// The earliest presentation time still buffered, wherever it sits in
+	/// decode order.
+	pub fn oldest(&self) -> Option<moq_net::Timestamp> {
+		self.oldest.front().copied()
+	}
+
 	pub fn pop(&mut self) -> Option<Frame> {
 		let frame = self.frames.pop_front()?;
 		self.bytes -= frame.payload.len();
