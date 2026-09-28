@@ -110,7 +110,9 @@ test("withholds the catalog until every expected rendition resolves", async () =
 	audio.config.set(undefined);
 	await settle();
 	const second = await subscriber.nextGroup();
-	expect(((await second?.readJson()) as Catalog.Root).audio).toBeUndefined();
+	const next = (await second?.readJson()) as Catalog.Root | undefined;
+	expect(next).toBeDefined();
+	expect(next?.audio).toBeUndefined();
 
 	effect.close();
 	broadcast.close();
