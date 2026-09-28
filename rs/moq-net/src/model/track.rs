@@ -418,7 +418,9 @@ impl TrackState {
 		if let Some(end) = end_sequence
 			&& end <= next_sequence
 		{
-			if let Some(err) = &self.abort {
+			if let Some(err) = &self.abort
+				&& !self.settled
+			{
 				return Poll::Ready(Err(err.clone()));
 			}
 			return Poll::Pending;
@@ -439,8 +441,13 @@ impl TrackState {
 			return Poll::Ready(Ok(Some(group.clone())));
 		}
 
-		// No in-range group is cached. Decide whether more could ever arrive.
-		if let Some(err) = &self.abort {
+		// No in-range group is cached. Decide whether more could ever arrive. An abort
+		// after the end settled is a clean end (see `is_complete`): the cached groups
+		// above were everything the end promised, so the cursor ends as `poll_recv_group`
+		// does, not with the abort.
+		if let Some(err) = &self.abort
+			&& !self.settled
+		{
 			return Poll::Ready(Err(err.clone()));
 		}
 		// `final_sequence` is one past the last possible sequence. If our
@@ -4127,8 +4134,9 @@ impl Ordered {
 	/// the cap rises or is removed.
 	///
 	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
-	/// `Poll::Ready(Ok(None))` when the track is finished,
-	/// `Poll::Ready(Err(e))` when the track has been aborted, or
+	/// `Poll::Ready(Ok(None))` when the track is finished (including an abort after its
+	/// declared end settled, see [`Producer::abort`]),
+	/// `Poll::Ready(Err(e))` when the track has been aborted short of its end, or
 	/// `Poll::Pending` when no group is available yet.
 	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.inner.poll_next_group(waiter)
@@ -6962,6 +6970,29 @@ mod test {
 		producer.abort(Error::Timeout).unwrap();
 		let res = consumer.recv_group().now_or_never().expect("should not block");
 		assert!(matches!(res, Ok(None)));
+	}
+
+	/// The settled end stands on the ordered cursor too: a reader that starts after the
+	/// abort gets every group below the end, then the clean end, not the abort.
+	#[tokio::test]
+	async fn abort_after_the_end_settles_ends_clean_for_an_ordered_reader() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None).ordered();
+
+		for sequence in 0..2 {
+			let group = producer.create_group(group::Info { sequence }).unwrap();
+			group.finish().unwrap();
+		}
+		producer.finish_at(2).unwrap();
+		producer.abort(Error::Timeout).unwrap();
+
+		assert_eq!(drain_ordered(&mut consumer), [0, 1]);
+		let end = consumer
+			.next_group()
+			.now_or_never()
+			.expect("should not block")
+			.map(|group| group.map(|group| group.sequence));
+		assert!(matches!(end, Ok(None)), "expected the clean end, got {end:?}");
 	}
 
 	#[tokio::test]
