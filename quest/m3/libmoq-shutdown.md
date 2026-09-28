@@ -10,8 +10,8 @@ libmoq statically, so the thread's code is unmapped under it. Any host that
 unloads the library has the same exposure.
 
 ## Plan
-Parked in m3 behind [Generated C bindings](/quest/m1/c/README.md): the hand-written libmoq is being replaced by C generated from moq-ffi, which carries this for free. Do it only if the hand-written crate outlives that line.
 
+Parked in m3 behind [Generated C bindings](/quest/m1/c/README.md): the hand-written libmoq is being replaced by C generated from moq-ffi, which carries this for free. Do it only if the hand-written crate outlives that line.
 
 Starts on `main`; libmoq's runtime (`rs/libmoq/src/ffi.rs`) is the same on
 both branches and the change is additive.
@@ -48,6 +48,10 @@ both branches and the change is additive.
   under the thread.
 
 Public API: additive on the libmoq C ABI (`moq_shutdown`). Wire: none.
+
+## Required
+
+- The maintainer keeps the hand-written libmoq instead of retiring it in the Generated C bindings line
 
 ## Related
 

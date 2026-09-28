@@ -31,6 +31,26 @@ any controller event changes with the packet identity and ACK sampling fixes.
 Keep state private where possible; document any public Controller change and
 its consumers. No wire change is intended. Wire regressions into fork CI.
 
+moq-dev/noq#5 added `Controller::on_app_limited` for this and shipped in
+moq-noq 1.3.1; check what it leaves open before writing more code.
+
+The same defect is the likely cause of
+[#4219](https://github.com/moq-dev/moq/issues/4219): after a long
+keep-alive-only idle, a BBRv3 (`delay`) sender paced its next burst at one
+packet per RTT instead of near the bandwidth it had learned. The reporter ran
+1.3.0 and nobody has reproduced it on either version. Add a virtual-time
+transport test: learn the bandwidth, idle on keep-alives for about five
+minutes, send 250 KB, and assert the pacing rate stays at or above about 0.9x
+the earlier max bandwidth. It should fail on 1.3.0. If it still stalls on the
+fix, find the remaining cause (a stale `bw_shortterm` or a ProbeRTT effect
+after idle). Dropping the estimate after a long idle is a policy change for
+the m2 study, not this quest. The `iroh` feature uses upstream noq, which
+lacks the fix; offering it there belongs to the upstream quest.
+
+## Closes
+
+- [#4219](https://github.com/moq-dev/moq/issues/4219) - the first send after an idle period is paced at a trickle
+
 ## Related
 
 - [Finish each BBR ACK sample](/quest/m1/quic/bbr-ack-sampling.md) - a separate ordering defect in the same callback lifecycle

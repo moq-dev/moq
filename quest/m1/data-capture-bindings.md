@@ -5,7 +5,8 @@
 A moq-ffi publisher, and every wrapper over it (Python, Swift, Kotlin, Go,
 Dart), can pass a capture time with a JSON or binary snapshot `update` or
 stream `append`, so its data tracks advertise `delay` and `jitter` like a Rust
-publisher's. Leaving it out keeps today's behaviour. `moq-json`'s `window`
+publisher's. Leaving it out keeps today's behaviour. The Go and Python
+wrappers gain the binary snapshot and stream producers they lack. `moq-json`'s `window`
 producer takes a capture time too. Settled scope: moq-ffi and its wrappers,
 not libmoq.
 
@@ -30,13 +31,19 @@ not libmoq.
   stream producers do. Nothing in `moq-mux` publishes window mode, so there is
   no estimator to feed.
 - Wrappers follow per the cross-package sync table, each with a test that a
-  past capture time is accepted and a future one refused. Update
+  past capture time is accepted and a future one refused.
+- Go (`go/wrapper/moq`) and Python (`py/moq-rs`) wrap only the JSON
+  producers; [#4137](https://github.com/moq-dev/moq/pull/4137) added
+  `publish_binary_snapshot` / `publish_binary_stream` to moq-ffi without
+  them. Add hand-written binary wrappers there, capture time included, so
+  the capture tests cover binary too. The maintainer asked for this. Update
   `doc/lib/{py,swift,kt,go,dart}`.
 
 Public API: breaking, so it lands on `dev`. A new parameter on the generated
 `update` and `append` breaks every published binding caller (Go, for one, has
 no optional arguments), and a `_with_x` twin is ruled out. The broadcast clock
-`now()` is additive; `window::Producer::push` accepts `Timed`, source-compatible.
+`now()` and the Go and Python binary producers are additive;
+`window::Producer::push` accepts `Timed`, source-compatible.
 Wire: none.
 
 ## Related
