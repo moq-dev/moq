@@ -35,9 +35,11 @@ on:
     types: [opened, synchronize, reopened, closed]
 
 concurrency:
-  # Keyed by event as well as ref, so a merged pull request's `closed` run can't
-  # cancel the push run it triggers.
-  group: platform-${{ github.event_name }}-${{ github.ref }}
+  # Keyed by event, so a merged pull request's `closed` run can't cancel the push
+  # run it triggers. Pull requests key by number rather than ref, since a merged
+  # PR's `closed` run can report the base branch as its ref instead of the PR's
+  # merge ref, and then wouldn't cancel the PR's in-flight run.
+  group: platform-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
