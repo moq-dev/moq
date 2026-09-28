@@ -19,7 +19,7 @@ Total storage and bytes delivered to a video-only subscriber are different
 measurements. Any future split must state which payloads move and how missing
 metadata is handled; do not promise byte-faithful export after a deadline miss.
 
-## Quests
+## Required
 
 - [SEI evidence](/quest/m2/sei/evidence.md) - measure savings and identify a consumer before deciding whether to split
 - [SEI section](/quest/m2/sei/sei.md) - define a format only after a positive verdict and settled association policy

@@ -13,7 +13,7 @@ feature. A study may end with a measured no-go. Work gated on hardware, a
 partner, or a provider waits in [m3](/quest/m3/README.md); work waiting on an
 upstream release waits in [m4](/quest/m4/README.md).
 
-## Quests
+## Required
 
 - [AV1 metadata separation](/quest/m2/av1-metadata.md) - retain metadata OBUs inline while evaluating separate delivery
 - [SEI separation](/quest/m2/sei/README.md) - retain inline SEI until measured savings or a metadata-only consumer justify a split
@@ -31,14 +31,12 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Audio loss recovery](/quest/m2/audio-loss-recovery.md) - prove a useful Opus recovery policy before exposing another option
 - [Opus implementation](/quest/m2/audio-opus-backend.md) - compare current codec quality, CPU, and optional build costs
 - [Latency ledger](/quest/m2/latency-ledger.md) - a session reports where its end-to-end audio delay went, stage by stage
-- [JS discontinuity](/quest/m2/js-discontinuity.md) - JS names its timeline break `discontinuity()` like Rust, so `cut` means the same group close in both
+- [JS discontinuity](/quest/m2/js-discontinuity.md) - on dev, JS `discontinuity()` without an end writes no cadence-estimated end, like Rust
 - [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
 - [Media Foundation encode](/quest/m2/audio-encode-mediafoundation.md) - Windows encodes AAC-LC
 - [MediaCodec decode](/quest/m2/audio-decode-mediacodec.md) - Android decodes HE-AAC, multichannel AAC, and what else the device offers
 - [MediaCodec encode](/quest/m2/audio-encode-mediacodec.md) - Android encodes AAC-LC
-- [AAC encode refusal](/quest/m2/aac-encode-refusal.md) - AAC config encode refuses channel counts it cannot name, on dev
-- [OBS channel layouts](/quest/m2/obs-wave-layout.md) - the OBS source maps channel counts to the WAVE default layouts, like moq-audio
 - [Video codec coverage](/quest/m2/video-codec-coverage.md) - prioritize remaining native AV1 and portable decoder gaps
 - [#2147](/quest/m2/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - moq-video: 10-bit HEVC and AV1 support in the NVIDIA codec path
 - [NVENC buffer pool](/quest/m2/nvenc-pool.md) - NVENC reuses input and output buffers instead of allocating per frame, if a benchmark shows it wins
@@ -46,13 +44,13 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Direct3D11 render import](/quest/m2/render-d3d11.md) - Windows presents without downloading every frame to system memory
 - [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - video with periodic intra refresh publishes, imports, and tunes in cleanly with one group per sweep and a catalog `warmup`
 - [Capture multi-plane PipeWire cameras](/quest/m2/pipewire-camera-planes.md) - I420 and NV12 cameras that deliver one memory block per plane
-- [#2819](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: carry PipeWire DMA-BUFs safely into the Vulkan renderer
+- [#2819](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: validate PipeWire DMA-BUFs into the Vulkan renderer on hardware, and export V4L2 buffers as DMA-BUFs
 - [Unreal prototype](/quest/m2/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
 - [Unity prototype](/quest/m2/unity.md) - the C# package under IL2CPP, playing subscribed audio
 - [C# through moq-ffi](/quest/m2/cs/README.md) - generated C# over moq-ffi as a NuGet package with native runtimes
 - [vcpkg registry](/quest/m2/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
 - [Conan remote](/quest/m2/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
-- [Compressed tracks](/quest/m2/flate/README.md) - any track compresses per group from every language, not only the JSON modes
+- [Compressed tracks](/quest/m2/flate/README.md) - the hand-written binding wrappers expose flate tracks
 - [Binary delta stats](/quest/m2/stats-delta.md) - an on-demand varint delta flavor of every stats track, if relay encode CPU still matters after the JSON fixes
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
 - [Redundant ingest](/quest/m2/redundant-ingest.md) - decide whether two publishers sharing one epoch may splice, and who declares the incumbent dead before the keep-alive does
@@ -62,7 +60,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [QUIC FEC](/quest/m2/quic-fec.md) - a measured verdict on transport-level FEC vs retransmission
 - [Google BBR comparison](/quest/m2/quic-bbr-google.md) - measure growth detection and precautionary probing after the correctness fixes
 - [WHEP ABR](/quest/m2/whep-abr.md) - a WHEP viewer switches renditions from its own congestion feedback
-- [Natural media drains](/quest/m2/quic-bbr-app-limited.md) - whether bounded drain credit avoids ProbeRTT deadline interference
+- [Natural media drains](/quest/m2/quic-bbr-natural-drain.md) - whether bounded drain credit avoids ProbeRTT deadline interference
 - [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [L4S on the backbone](/quest/m2/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate
@@ -75,14 +73,11 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Send buffer pools](/quest/m2/quic-buffer-pool.md) - whether pooled send buffers beat Bytes in the stream send path
 - [AF_XDP UDP path](/quest/m2/af-xdp.md) - the kernel-bypass verdict on today's virtio hosts that gates DPDK
 - [GOP overhead](/quest/m2/gop-overhead.md) - price the I-frames a short GOP pays for, deciding whether a long GOP plus a keyframe request is worth designing
-- [#703](/quest/m2/703-experimental-webgpu-renderer.md) - Experimental WebGPU renderer
-- [#823](/quest/m2/823-svc-support.md) - SVC support?
-- [#1838](/quest/m2/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - TR 101 290 monitoring: requirements (broadcast/contribution health metrics)
+- [#1838](/quest/m2/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - plan TR 101 290 stream-health monitoring into implementation quests
 - [Teleoperation](/quest/m2/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
 - [SIP media stack](/quest/m2/sip-stack.md) - terminate one inbound SIP audio call leg and expose it as Opus frames
 - [Carrier voice](/quest/m2/carrier-voice/README.md) - determine whether MoQ should be the call fabric for programmable carrier voice
 - [LiveKit WebRTC bridge](/quest/m2/livekit-webrtc-bridge.md) - a go/no-go verdict, backed by a spike, on per-track LiveKit-to-MoQ bridging
-- [Expired token error](/quest/m2/auth-expired-error.md) - an expired token reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [Common Access Tokens](/quest/m2/cat/README.md) - a moq-transport client presents a CAT in SETUP and `moq auth serve` admits it with the scope its `moqt` claim names
 - [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - run exact source snapshots on accessible Linux and device hosts with retrievable debug evidence
 - [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks
@@ -90,7 +85,6 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Windows capture parity](/quest/m2/capture-windows.md) - system audio and screen cursor capture with a settled app-capture policy
 - [Linux capture parity](/quest/m2/capture-linux.md) - Wayland window/system-audio capture with explicit display-selection and app-capture limits
 - [Plan capture ergonomics](/quest/m2/capture-ergonomics.md) - scope independent crop and audio mixing quests
-- [Capture clock source](/quest/m2/capture-clock-source.md) - capture publishers stamp on the catalog's clock, with no separate clock to pass, on dev
 - [Audio capture time](/quest/m2/audio-capture-time.md) - native audio stamps a buffer's capture instant, not when the driver reads it
 - [X11 capture transport](/quest/m2/x11-capture-shm.md) - move X11 capture to shared memory and RandR events instead of a per-frame socket copy
 - [Capture frame buffers](/quest/m2/capture-frame-buffers.md) - stop rebuilding a full-frame buffer every tick in the X11 and Windows backends

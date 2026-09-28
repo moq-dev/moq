@@ -34,11 +34,7 @@ not an end-to-end network measurement. Persist a reproducible harness in CI
 separate implementation quest for any adopted change rather than silently
 expanding this study into a controller rewrite.
 
-## Required
-
-- [Release BBR fixes](/quest/m1/quic/bbr-release.md) - measure a baseline without the seven known defects
-
 ## Related
 
-- [BBR3 app-limited](/quest/m2/quic-bbr-app-limited.md) - reuse media profiles and measurements
+- [Natural media drains](/quest/m2/quic-bbr-natural-drain.md) - reuse media profiles and measurements
 - [Upstream the fork](/quest/m1/quic/upstream.md) - share useful findings with upstream

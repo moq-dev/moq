@@ -30,9 +30,10 @@ Implement in the fork.
   ACK-frequency extension noq already implements) on the next packet and arm
   a shortened probe at `max(deadline - rtt - now, min_pto)`. Never probe past
   the congestion window; the probe is a scheduling choice, not extra credit.
-- moq-net: `Subscription::serve_group` sets the deadline from the
-  subscription's latency target and the group's expiry, whichever is sooner;
-  a subscription with neither sets none. The reset error code maps to the
+- moq-net: the per-group `GroupServe` machine in the lite and IETF
+  publishers (`lite/publisher.rs`, `ietf/publisher.rs`) sets the deadline
+  when it opens the stream, from the subscription's latency target and the
+  group's expiry, whichever is sooner; a subscription with neither sets none. The reset error code maps to the
   existing group-expired code on the MoQ wire, so a viewer sees the same
   signal it sees for a relay-side expiry today.
 

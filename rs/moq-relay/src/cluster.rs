@@ -2280,6 +2280,25 @@ mod tests {
 		assert!(cluster.publisher(&token).is_none());
 	}
 
+	/// A grant whose mounts chain, or whose mount point is a wildcard, admits
+	/// nothing. Mounts apply in key order, so the chain is written with the
+	/// mount point on the target sorting last.
+	#[tokio::test]
+	async fn session_handles_refuse_invalid_grant_mounts() {
+		let cluster = new_cluster(Config::default()).expect("cluster");
+		let everything = || moq_net::Patterns::from(moq_net::Pattern::all());
+		let invalid: [&[(&str, &str)]; 2] = [&[(".a", "pid/.z"), (".z", "secret")], &[("*", ".svc/pid")]];
+		for mounts in invalid {
+			let mut grant = moq_auth::Grant::new(everything(), everything());
+			for (at, target) in mounts {
+				grant.mounts.insert((*at).into(), (*target).into());
+			}
+			let token = auth::Token::new("/pid", &grant);
+			assert!(cluster.subscriber(&token).is_none(), "{mounts:?}");
+			assert!(cluster.publisher(&token).is_none(), "{mounts:?}");
+		}
+	}
+
 	/// The publish task holds only a `Weak` to its producer, so it stops when the
 	/// last `moq_stats::Producer` clone drops. Attaching one must therefore hand
 	/// its lifetime to the cluster: an embedder clones handles off a `Relay` and

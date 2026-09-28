@@ -273,6 +273,17 @@ impl Config {
 		}
 	}
 
+	/// Refuse a client CA under public rules, which grant a certificate what they
+	/// grant anyone. `client_ca` is whether any listener verifies client certificates.
+	pub fn validate_client_ca(&self, client_ca: bool) -> anyhow::Result<()> {
+		if client_ca && self.url.is_none() && self.public_grant().is_some() {
+			anyhow::bail!(
+				"a client CA (--listen-tls-root, --web-https-root) verifies client certificates, which --auth-public ignores; remove it, or grant certificates with --auth-url to `moq auth serve --mtls-*`"
+			);
+		}
+		Ok(())
+	}
+
 	/// Build the [`Auth`] this configuration describes. `tls` is the client
 	/// identity an `https://` server is dialed with; `node` names this relay in
 	/// every request. Must be called within a Tokio runtime, which drives the

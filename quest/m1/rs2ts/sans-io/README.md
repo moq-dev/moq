@@ -13,11 +13,11 @@ reimplements the async helpers natively with Promises, so the translator
 reads the crate without the `async` feature. Split by layer so each lands on
 `dev` independently.
 
-This README's own work is the `async` feature and the CI lane that builds
-moq-net without it.
+The line has no work of its own beyond its children.
 
-## Quests
+## Required
 
 - [Sans-IO lite session](/quest/m1/rs2ts/sans-io/lite.md) - the lite session is driven by bytes, stream events, and `tick(now)`
 - [Sans-IO model](/quest/m1/rs2ts/sans-io/model.md) - origin, broadcast, track, and group handles run without a runtime, with time supplied by the caller
+- [The async feature](/quest/m1/rs2ts/sans-io/async-feature.md) - the async helpers sit behind an `async` feature and a CI lane builds and tests moq-net without it
 - [Sans-IO IETF session](/quest/m1/rs2ts/sans-io/ietf.md) - the moq-transport session is driven the same way as lite

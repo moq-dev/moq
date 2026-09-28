@@ -46,7 +46,10 @@ dialed path, which is how a slug aliases to a canonical id), `mounts`
 (optional object; each key, a path relative to the root, reads from the
 absolute path it maps to: `{".svc": ".svc/pid"}` resolves `.svc/foo` at
 `.svc/pid/foo` and presents its announcements under `.svc`, the patterns still
-authorize `.svc/foo`, and nothing may be published beneath a key), `expires`
+authorize `.svc/foo`, and nothing may be published beneath a key; a key
+that holds a wildcard or overlaps another key or any value, its own included,
+refuses the grant),
+`expires`
 (optional unix seconds; the session closes then), `revalidate` (optional
 seconds until the relay asks again), `tier` (optional label handed to
 [stats](/bin/relay/config#stats)), and `peer` (optional; `true` marks another
@@ -237,8 +240,8 @@ bad chain still fails there. What the certificate admits is the server's
 decision: the relay reports its facts in the request's `tls` and enforces the
 grant it gets back. `moq auth serve` grants a certificate only what
 `--mtls-publish` and `--mtls-subscribe` name, empty by default. Public rules
-ignore certificates, so a relay on `--auth-public` refuses to start with
-`listen.tls.root` or `web.https.root`.
+ignore certificates, so a relay or `moq --listen` on `--auth-public` refuses
+to start with `listen.tls.root` or `web.https.root`.
 
 Cluster peers are admitted the same way, so a mesh runs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server
@@ -284,7 +287,8 @@ against `--key FILE` or `--key-dir DIR` (by `kid`, read per request so
 rotation needs no restart) and authorized at the dialed path, as in
 [Path matching](#path-matching). A malformed, expired, or unknown-key token is
 refused; it never falls through to the anonymous rules. So is a SETUP token of
-any other `kind`, and a session presenting both a SETUP token and a `jwt` query.
+any other `kind`. A SETUP token and a `jwt` query with the same value are one
+JWT, verified once; different values are refused.
 A JWT presented with a certificate is refused, because neither can safely win:
 the certificate would override a JWT meant to narrow it, and the JWT would
 narrow or refuse a peer by accident. So a peer presents `cluster.token` or a

@@ -8,7 +8,7 @@ import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
-import { type Reader, Stream } from "../stream.ts";
+import { type OpenOptions, type Reader, Stream } from "../stream.ts";
 import { TAIL_GRACE_MS, Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
@@ -672,17 +672,33 @@ export class Subscriber {
 
 	// Opens a TRACK stream, reads the single TRACK_INFO, and FINs. Lite-05+ only.
 	async #trackInfo(broadcast: Path.Valid, track: string): Promise<TrackInfo> {
-		const stream = await Stream.open(this.#quic);
-		try {
+		return this.#exchange(undefined, async (stream) => {
 			await stream.writer.u53(StreamId.Track);
 			await new TrackMessage(broadcast, track).encode(stream.writer, this.version);
 			const info = await TrackInfo.decode(stream.reader, this.version);
 			// The publisher FINs after TRACK_INFO; FIN our side too.
 			stream.close();
 			return info;
+		});
+	}
+
+	// Opens a stream and runs a request/response exchange on it, resetting the stream if `run`
+	// fails. Subscriber.close() also resets it while `run` is pending, so a peer that never
+	// answers cannot hold it open, and a stream that opens after the close is reset at once.
+	async #exchange<T>(options: OpenOptions | undefined, run: (stream: Stream) => Promise<T>): Promise<T> {
+		const closed = this.#closed.signal;
+		closed.throwIfAborted();
+		const stream = await Stream.open(this.#quic, options);
+		const abort = () => stream.abort(error(closed.reason));
+		closed.addEventListener("abort", abort);
+		try {
+			closed.throwIfAborted();
+			return await run(stream);
 		} catch (err) {
 			stream.abort(error(err));
 			throw err;
+		} finally {
+			closed.removeEventListener("abort", abort);
 		}
 	}
 
@@ -754,29 +770,46 @@ export class Subscriber {
 				throw new Error("fetch group requires moq-lite-05 or newer");
 			}
 
-			const info = await this.#trackInfo(broadcast, track);
-			const priority = options.priority ?? 0;
-			const stream = await Stream.open(this.#quic, { sendOrder: sendOrder({ priority }) });
-
+			// Lite has no FETCH_OK, so a publisher that never answers would hold the setup forever.
+			// Subscriber.close() closing the group releases every caller at any stage, and resets
+			// the streams the setup opened.
+			const setup = this.#fetchSetup(broadcast, track, sequence, options);
+			let accepted: { stream: Stream; info: TrackInfo };
 			try {
-				await stream.writer.u53(StreamId.Fetch);
-				await new FetchMessage({ broadcast, track, priority, group: sequence }).encode(
-					stream.writer,
-					this.version,
-				);
-				// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
-				// done() buffers that byte so the response pump can decode it normally.
-				await stream.reader.done();
+				accepted = await untilClosed(group, setup);
 			} catch (err: unknown) {
-				stream.abort(error(err));
+				// A setup that finishes just after the close hands back a stream nobody will read.
+				void setup.then(
+					({ stream }) => stream.abort(error(err)),
+					() => void 0,
+				);
 				throw err;
 			}
 
-			void this.#runFetchResponse(stream, group, Time.Timescale(info.timescale));
+			void this.#runFetchResponse(accepted.stream, group, Time.Timescale(accepted.info.timescale));
 		} catch (err: unknown) {
 			group.close(error(err));
 			throw err;
 		}
+	}
+
+	// Resolve the track's timescale, then open the FETCH stream and wait for it to be accepted.
+	async #fetchSetup(
+		broadcast: Path.Valid,
+		track: string,
+		sequence: number,
+		options: track.FetchGroupOptions,
+	): Promise<{ stream: Stream; info: TrackInfo }> {
+		const info = await this.#trackInfo(broadcast, track);
+		const priority = options.priority ?? 0;
+		return this.#exchange({ sendOrder: sendOrder({ priority }) }, async (stream) => {
+			await stream.writer.u53(StreamId.Fetch);
+			await new FetchMessage({ broadcast, track, priority, group: sequence }).encode(stream.writer, this.version);
+			// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
+			// done() buffers that byte so the response pump can decode it normally.
+			await stream.reader.done();
+			return { stream, info };
+		});
 	}
 
 	// Read the FETCH response (bare zigzag-delta-timestamped frames) into the group, then
@@ -1135,14 +1168,31 @@ export class Subscriber {
 	 * session died, since those tracks were cut off rather than ended.
 	 */
 	close(err?: Error) {
-		this.#closed.abort();
+		// A fetch or setup exchange cut off by the session is incomplete even on a deliberate
+		// close, so it always ends with an error.
+		const cut = err ?? new StreamError(StreamCode.SessionClosed, { message: "session closed" });
+		this.#closed.abort(cut);
 
 		for (const { track } of this.#subscribes.values()) {
 			track.close(err);
 		}
 
 		this.#subscribes.clear();
+
+		// This also releases callers still awaiting acceptance.
+		for (const { group } of this.#fetches.values()) {
+			group.close(cut);
+		}
 	}
+}
+
+// Settles with `step`, or rejects with the group's error once it closes first. A publisher
+// may never answer a FETCH, so Subscriber.close() closing the group is what releases it.
+async function untilClosed<T>(group: netGroup.Producer, step: Promise<T>): Promise<T> {
+	const value = await race([step, group.closed]);
+	const closed = group.closed.peek();
+	if (closed !== undefined) throw closed ?? new Error("fetch closed before it was accepted");
+	return value as T;
 }
 
 /**

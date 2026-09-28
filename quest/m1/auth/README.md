@@ -87,7 +87,7 @@ Everything here is additive: `Session::auth()` is new, the relay derives the
 grant from the origin handles it already scopes, and AUTH is added to the
 existing lite-06 ALPN.
 
-## Quests
+## Required
 
 - [Lite stream](/quest/m1/auth/lite.md) - both sides of a lite-06 session
   exchange grants over AUTH streams, exposed as `Session::auth()`, and an
@@ -108,6 +108,8 @@ existing lite-06 ALPN.
   grant does not, and REQUEST_UPDATE refreshes it
 - [moq-transport](/quest/m1/auth/moq-transport.md) - the same exchange as a
   setup-option extension on draft-17+, specified in a new draft
+- [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
+  reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi and libmoq
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave

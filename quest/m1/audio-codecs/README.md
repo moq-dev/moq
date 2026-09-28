@@ -41,7 +41,7 @@ its own decode and encode quest so verification stays per host. The
 HE-AAC refusal and the PCE parse are defects in what ships today and are
 ready now.
 
-## Quests
+## Required
 
 - [Named codecs](/quest/m1/audio-codecs/named-codecs.md) - `decode::Kind::Named` keeps the published codec names and picks backends internally; must land before the line merges
 - [HE-AAC refusal](/quest/m1/audio-codecs/he-aac-refusal.md) - implicit-SBR HE-AAC over TS is refused instead of half-decoded as the LC core
@@ -56,7 +56,7 @@ ready now.
 ## Related
 
 - [OBS native codecs](/quest/m1/obs-moq-video/README.md) - the OBS source and encoder adapters consume this through moq-ffi; #3498 narrowed OBS to what moq-audio decodes today
-- [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - Windows and Android verification needs a host; the Windows and macOS CI gates run nightly, not per PR
+- [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - Windows and Android verification needs a host; the Windows and macOS CI gates only compile
 - [Dart codec parity](/quest/m1/dart-codecs.md) - Dart gains these once it builds with the `audio` feature
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
 - [Media Foundation encode](/quest/m2/audio-encode-mediafoundation.md) - Windows encodes AAC-LC

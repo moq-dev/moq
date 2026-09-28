@@ -25,10 +25,16 @@ Guidance:
   itself leaves a later-arriving stream below its edge, and growing again
   then drifts the two. Decided: hold each stream's post-wrap frames until
   every live stream of the program has shown its new PTS, then take the
-  maximum growth once. A stream that stays silent is bounded by the
-  existing liveness timeout (#3489), not waited on forever. The
-  `Anchor`/`Lane` split behind `live()` in `moq_mux::clock` solves the same
-  problem for restarts and may be reusable.
+  maximum growth once.
+- The hold needs its own bound: #3489 adds per-PID counters, not a timeout,
+  and the catalog `stalled` bit (`Stream::tick`, #3630) covers video only and
+  runs on the catalog's timer. Decided: bound the hold on the program clock
+  (PCR advance since the first stream's new generation, not wall time), and
+  commit the shift over the streams seen so far when it expires. A stream
+  that returns later applies the committed shift, clamped to its edge as
+  below. The `Anchor`/`Lane` split behind `live()` in `moq_mux::clock` solves
+  a similar problem for restarts, but the remove-live quest deletes it, so
+  copy what helps rather than depending on it.
 - A stream whose own edge is still above the shifted timestamp after the
   shared growth (its tail ran longer) is the case that forces growing by the
   maximum. Landing on its edge is accepted today; keep that trade-off.
@@ -42,3 +48,4 @@ Guidance:
 ## Related
 
 - [#3489](/quest/m1/3489-ts-import-stream-liveness.md) - per-PID liveness in the same importer; touches `Stream` but not the shift
+- [Remove live()](/quest/m1/remove-live.md) - deletes the restart anchor; a wrap shift stays input-derived

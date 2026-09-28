@@ -31,7 +31,13 @@ The counters and channels land here. The moq.pro (downstream) dashboard work,
 including the health badge, connection-health drill-down, and stream
 preflight, consumes them downstream.
 
-## Quests
+Decided (2026-09-28): the whole line, including the client stats line, targets
+`dev`. The moq-stats schema change
+([#4145](https://github.com/moq-dev/moq/pull/4145)) breaks the published
+`moq-stats` crate, and a line cannot close with part of it on `main` and part
+on `dev`.
+
+## Required
 
 - [Starvation](/quest/m1/qos/starvation.md) - per broadcast, how far behind
   the acknowledged frontier of its subscriptions is, in media time, plus the

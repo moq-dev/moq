@@ -1,4 +1,4 @@
-# Wildcard advertisements
+# [L] Wildcard advertisements
 
 ## Goal
 
@@ -40,7 +40,10 @@ prefix claims resolved against pattern interest. The three workloads above
 still hold: the transcoder claims its service prefix
 ([Where derived output lives](#where-derived-output-lives)), and the archive
 claims the root and refuses what it does not have.
-Resolve and Demand are additive and land on main.
+Resolve and Demand are additive and land on main. Both are done on the line
+branch (#4050 re-resolves on a refusal; 9d059b1b9 lists and demands covered
+renditions in the browser player), so main no longer lists them; the line
+branch moves to `quest/m0/wildcard/README` to match this path.
 
 ### What already exists, and what does not
 
@@ -65,7 +68,7 @@ the requester's excluded hop, ordered by `route_order`
 (`rs/moq-net/src/model/origin.rs:633`), served on demand by the session that
 announced it and cached per prefix in `ServeState.served` (`:764`). That is the split-horizon-safe
 lookup the old `origin::Dynamic` could not provide, and it is what
-[Resolve](/quest/m0/wildcard/resolve.md) now extends rather than replaces.
+resolve extends rather than replaces.
 
 Request resolution is prefix-only (`best_server` in
 `rs/moq-net/src/model/origin.rs`) and stays that way. The pattern matcher
@@ -121,15 +124,13 @@ field.
   The seed still has a floor, because standby and running claims of the same
   prefix do meet: a standby concrete claim (`with_cost(1000)` is the
   existing per-broadcast convention) shares a tier with a running publisher's
-  concrete announcement and with warm-advertise's exact-path warm routes. The
+  concrete announcement. The
   floor MUST exceed the deployment's enforced maximum charged-link count
   times its enforced maximum link cost (32 links at cost at most 5 gives
   a bound of 160, with producing origins seeded at 0), or a nearby standby outranks a distant running copy and the
   mesh starts a second encode of a stream it is already serving. That floor
   replaces the ad-hoc standby bias the moq.pro (downstream) transcode worker
-  carries today, and it is the same stride discipline
-  [pop-skipping](/quest/m1/pop-skipping/README.md) states for provider
-  economics.
+  carries today.
 - **A wildcard is a capability, not an inventory.** It advertises what the
   sender could serve, never that a given path exists. Refusal is how a specific
   path is denied. This is why an over-claiming advertisement is not a defect:
@@ -147,7 +148,7 @@ field.
   composer waiting for an announcement that only demand would produce. The
   browser player currently enforces the opposite (`js/watch`'s
   `#isPathAnnounced` hides a catalog rendition with no exact-path
-  announcement); [Demand](/quest/m0/wildcard/demand.md) makes a covering wildcard count as
+  announcement); demand makes a covering wildcard count as
   availability there.
 - **Refusal is a typed stream reset, with no negative cache.** An advertiser
   resets a subscribe it will not serve, and the reset carries which KIND of
@@ -201,8 +202,8 @@ The leading `.` is deliberate. Existing customers on moq-lite-06 or older must
 never see `.pro/` broadcasts, which could confuse their business logic. Those
 versions cannot opt into hidden routes, so the relay never announces them
 there. Hidden routes are a moq-lite-07 feature, so the player's covering check
-opts into them ([Demand](/quest/m0/wildcard/demand.md)) and sees a claim only
-when lite-07 is negotiated. A customer who wants transcodes upgrades, or
+(Demand, done on the line branch) opts into them and sees a claim only when
+lite-07 is negotiated. A customer who wants transcodes upgrades, or
 subscribes to the explicit `.pro/<service>/...` path, which works on any
 version. Grants and metering are the deployment's; moq.pro's are in its
 [wildcard questline](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/wildcard/README.md).
@@ -213,21 +214,13 @@ announcement shadows it. A claim names no generation, so a client that must
 distinguish recording generations reads the catalog's archive entry
 ([archive](/quest/m1/archive/README.md)) rather than announce state.
 
-## Quests
-
-- [Resolve](/quest/m0/wildcard/resolve.md) - a relay resolves a subscribe or
-  FETCH for an unannounced path against the best matching wildcard
-- [Demand](/quest/m0/wildcard/demand.md) - the browser player subscribes to a
-  catalog-referenced broadcast a wildcard covers, breaking the lazy-rendition
-  deadlock
-
 ## Related
 
 - [path-patterns](/quest/m1/path-patterns.md) - owns the pattern dialect
   and the shared matcher tokens and filters reuse
 - [archive](/quest/m1/archive/README.md) - an archive claims the root, and its
   catalog names the generations a claim cannot
-- [pop-skipping](/quest/m1/pop-skipping/README.md) - it owns the route cost and
-  the rank hash this reuses
+- [Cluster routing](/quest/m1/cluster-routing.md) - origin selection by cost
+  with an HRW tie-break, built on this line's longest-prefix rule
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - derived output
   mirrors the source path, `@<epoch>` segment included

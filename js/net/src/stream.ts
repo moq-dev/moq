@@ -446,6 +446,9 @@ export class Cursor {
 
 	#ensure(size: number) {
 		const need = this.#offset + size;
+		// Checked here too, and on the whole decode like the fill, since bytes that are already
+		// buffered never reach the fill.
+		if (need > MAX_READ_SIZE) throw new Error(`read size ${need} exceeds max size ${MAX_READ_SIZE}`);
 		if (need > this.#buffer.byteLength) throw new Short(need);
 	}
 

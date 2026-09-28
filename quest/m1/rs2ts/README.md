@@ -52,7 +52,7 @@ This README's own work is the no-downgrade report once generated lite ships:
 bundle size, per-frame CPU, and first-frame latency against the hand-written
 js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-benchmarks.md).
 
-## Quests
+## Required
 
 - [VarInt codec](/quest/m1/rs2ts/varint-codec.md) - moq-net encodes through a `VarInt` newtype and a concrete slice-based codec, not generic traits on primitives
 - [JS VarInt](/quest/m1/rs2ts/js-varint.md) - js/net has a 62-bit `VarInt` type with checked `number` conversion and no BigInt on the hot path
@@ -69,7 +69,10 @@ js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-ben
 - [#2822](https://github.com/moq-dev/moq/issues/2822) - close this issue when the quest finishes
 - [#2835](https://github.com/moq-dev/moq/issues/2835) - close this issue when the quest finishes
 
+## Required
+
+- [Browser benchmarks](/quest/m1/browser-benchmarks.md) - the harness the no-downgrade report uses
+
 ## Related
 
 - [#2850](/quest/m1/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - the same synchronous decode shape, in hand-written js/net today
-- [Browser benchmarks](/quest/m1/browser-benchmarks.md) - the harness the no-downgrade report uses

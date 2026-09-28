@@ -578,24 +578,21 @@ fix-changed $FILES:
     	just rs wasm-fix
     fi
 
-# Runs the `#[cfg(target_os = "windows")]` code past the compiler: moq-video's
-# Media Foundation capture/encode/decode and its D3D11 frames, which the Linux
-# gate skips entirely. Cross-compiling can't stand in, because openh264-sys2
-# builds vendored C++ that needs an MSVC toolchain and openh264 is a
-# non-optional dependency.
-#
-# Windows runners are throttled too hard for a per-PR gate, so nightly.yml runs
-# this once a day instead. A break there lands on main rather than being caught
-# in review, which is the same trade the other nightly gates make.
+# Runs the `#[cfg(windows)]` code past the compiler, which the Linux gate skips
+# entirely: moq-video's Media Foundation capture/encode/decode and its D3D11
+# frames, moq-nvenc's Windows loader, and the Winsock paths in moq-tokio. A
+# native host rather than a cross-compile, because openh264-sys2's vendored C++
+# needs an MSVC toolchain. platform.yml runs this on every pull request and
+# every push to main and dev.
 #
 # Default features rather than `--all-features`: jemalloc doesn't build on
-# MSVC, while moq-video's Linux-only `nvidia` default
-# are already no-ops off Linux. moq-gst is excluded because it links
-# GStreamer via pkg-config, which the Windows runner doesn't have.
+# MSVC, and the Linux-only features (vaapi, pipewire, io-uring) have nothing to
+# compile here. moq-gst is excluded because it links GStreamer via pkg-config,
+# which the runner doesn't have.
 #
 # `moq-cli/play` and `moq-cli/capture` are named explicitly because they are
-# off by default, and they are the only thing that compiles the cli's own
-# device and render code.
+# off by default, and they are what turns on the device and render code in
+# moq-video, moq-audio, and the cli itself.
 
 # Compile the whole workspace on a Windows host. Must run ON Windows.
 windows *args:
@@ -618,25 +615,18 @@ uring *args:
 uring-check *args:
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
 
-# Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
-# VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,
-# plus moq-audio's ScreenCaptureKit system audio and TCC permission pre-check.
+# Runs the Apple-gated code past the compiler: moq-video's VideoToolbox
+# encode/decode and its ScreenCaptureKit / AVFoundation capture, moq-audio's
+# ScreenCaptureKit system audio and TCC permission pre-check, and moq-sock's
+# BSD socket-buffer sysctl. platform.yml runs this alongside `windows`.
 #
-# Same trade as `windows`: nightly.yml runs this once a day rather than gating a
-# merge on a Mac runner. The moq-video half also has a release-time backstop,
-# since libmoq's `libmoq-v*` tag build compiles it on Apple Silicon. The
-# moq-audio half has none: libmoq and moq-ffi take it codecs-only, so no release
-# build compiles its capture backend and this recipe is the only thing that does.
-#
-# Scoped to those two crates instead of the workspace, because they hold all
-# the Apple-gated code the Linux gate misses. moq-ffi (and through it the
-# Swift/Kotlin/Go wrappers) already compiles on macOS in swift.yml.
-# `--all-features` also compiles the off-by-default cpal hosts and PipeWire
-# capture, which are Linux-only and no-ops here, so it costs nothing extra.
+# The same workspace and features as `windows`, for the same reasons: moq-gst
+# needs GStreamer, and the cli's `play` and `capture` features are what turn on
+# the device and render code.
 
-# Compile the Apple-only code paths. Must run ON macOS.
+# Compile the whole workspace on a macOS host. Must run ON macOS.
 macos *args:
-    cargo check --locked -p moq-video -p moq-audio --all-targets --all-features {{ args }}
+    cargo check --locked --workspace --exclude moq-gst {{ no_fuzz }} --all-targets --features "moq-cli/play moq-cli/capture" {{ args }}
 
 # The Linux device code: moq-video's V4L2 and X11 capture and moq-audio's cpal
 # capture, all behind the off-by-default `capture` feature. `check-changed` runs
@@ -770,7 +760,7 @@ c-tests:
         exit 1
     fi
 
-    # Same list build.rs (moq.pc), CMakeLists.txt, and test/interop/interop.sh read:
+    # Same list nix/overlay.nix (moq.pc), CMakeLists.txt, and test/interop/interop.sh read:
     # `framework:Foo` is a linker framework flag, anything else a plain library.
     case "$(uname -s)" in
         Darwin) native_libs=rs/libmoq/native-libs/apple.txt ;;

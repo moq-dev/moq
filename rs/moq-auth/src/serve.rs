@@ -59,8 +59,9 @@ pub struct Limits {
 /// each scoped to `anon/`, and refuses one dialed at `/other`.
 ///
 /// The JWT is the `jwt` query parameter or a moq-transport SETUP token of type 0
-/// ([`Token::OUT_OF_BAND`]), verified alike. A session presenting both is refused,
-/// as is a SETUP token of any other type, and one presenting a JWT alongside a
+/// ([`Token::OUT_OF_BAND`]), verified alike. A session presenting both is verified
+/// once when they are the same JWT and refused when they differ, as is a SETUP token
+/// of any other type, and one presenting a JWT alongside a
 /// certificate: neither can safely win, since a certificate would override a JWT
 /// meant to narrow it, and a JWT would narrow or refuse a peer by accident.
 ///
@@ -112,7 +113,7 @@ pub enum Refusal {
 	TokenLimit,
 	#[error("too many live sessions from this address")]
 	RemoteLimit,
-	#[error("both a SETUP token and a `jwt` query were presented; present one")]
+	#[error("a SETUP token and a different `jwt` query were presented; present one")]
 	TwoTokens,
 	#[error("SETUP token type {0:#x} is not supported; only type 0 (a JWT) is")]
 	UnsupportedToken(u64),
@@ -187,8 +188,12 @@ fn authorize(rules: &Permissions, path: &str) -> Result<Permissions, Refusal> {
 }
 
 /// The JWT the request presents: its SETUP token, or else its `jwt` query parameter.
+/// Both at once count as one only when they are the same JWT.
 fn jwt(request: &Request) -> Result<Option<&str>, Refusal> {
 	match (&request.token, query_jwt(request)) {
+		// A client that offers a version without in-band auth copies its SETUP token
+		// into the URL too, so the same JWT arrives twice.
+		(Some(token), Some(jwt)) if token.kind == Token::OUT_OF_BAND && token.value == jwt.as_bytes() => Ok(Some(jwt)),
 		(Some(_), Some(_)) => Err(Refusal::TwoTokens),
 		(Some(token), None) if token.kind == Token::OUT_OF_BAND => std::str::from_utf8(&token.value)
 			.map(Some)
@@ -643,9 +648,9 @@ mod tests {
 		);
 	}
 
-	/// Two credentials would leave the server guessing which one the client meant.
+	/// The same JWT in the SETUP token and the query is one credential, evaluated once.
 	#[tokio::test]
-	async fn a_setup_token_and_a_query_jwt_are_refused() {
+	async fn a_setup_token_equal_to_the_query_jwt_is_admitted() {
 		let (dir, key) = key_dir();
 		let policy = Policy {
 			keys: Some(Keys::Dir(dir.path().into())),
@@ -653,8 +658,26 @@ mod tests {
 		};
 		let jwt = sign(&key, "demo", &["**"], &[], None);
 		let request = with_setup_token(with_token(request("/demo"), &jwt), Token::OUT_OF_BAND, &jwt);
-		let err = policy.decide(&request).await.unwrap_err();
-		assert_eq!(err, Refusal::TwoTokens);
+		let grant = policy.decide(&request).await.unwrap();
+		assert_eq!(grant.publish, patterns(&["**"]));
+	}
+
+	/// Two different credentials would leave the server guessing which one the client meant.
+	#[tokio::test]
+	async fn a_setup_token_and_a_different_query_jwt_are_refused() {
+		let (dir, key) = key_dir();
+		let policy = Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			..Default::default()
+		};
+		let setup = sign(&key, "demo", &["**"], &[], None);
+		let query = sign(&key, "demo", &[], &["**"], None);
+		let different = with_setup_token(with_token(request("/demo"), &query), Token::OUT_OF_BAND, &setup);
+		assert_eq!(policy.decide(&different).await.unwrap_err(), Refusal::TwoTokens);
+
+		// The same bytes under another token type are still a second credential.
+		let other_type = with_setup_token(with_token(request("/demo"), &setup), Token::CAT, &setup);
+		assert_eq!(policy.decide(&other_type).await.unwrap_err(), Refusal::TwoTokens);
 	}
 
 	#[tokio::test]
