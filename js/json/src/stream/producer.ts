@@ -29,8 +29,10 @@ export class Producer<T> {
 	 * this mode promises, so the failure is surfaced rather than papered over with a second group.
 	 * The track is aborted rather than closed cleanly, so a consumer sees the failure instead of a
 	 * log that merely looks complete.
+	 *
+	 * `at` is when the value was captured, written as its frame timestamp. Defaults to now.
 	 */
-	append(value: T): void {
+	append(value: T, at: Time.Timestamp = Time.Timestamp.now()): void {
 		// Encode first, so a value that can't be serialized doesn't publish an empty group that
 		// subscribers would advance into and wait on. Opening the group afterwards is safe because
 		// the record stays uncommitted until the write lands.
@@ -58,7 +60,7 @@ export class Producer<T> {
 		}
 
 		try {
-			this.#group.writeFrame({ payload: record.payload, timestamp: Time.Timestamp.now() });
+			this.#group.writeFrame({ payload: record.payload, timestamp: at });
 		} catch (err) {
 			// The group is live, so the record is a hole in the log and a second group would hand
 			// consumers that gap dressed up as a complete log.

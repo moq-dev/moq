@@ -11,6 +11,10 @@ WebTransport. Never `Transport("connection closed")` or its own `Internal`.
 
 Both bugs are upstream; fix them at the source, release, and bump the pins.
 
+Targets `dev`: #4262 (open) does this, and the qmux release pulls in
+`web-transport-trait` 0.5 (`SendStream::set_priority` takes `i32`), a Rust
+API break. It reports `@moq/qmux` already keeps the first close.
+
 - qmux 0.5.1 (`moq-dev/web-transport`) lets later writes overwrite the
   recorded close in `session.rs`: the WS Close frame read after
   APPLICATION_CLOSE (reader loop, backend `send_replace`), a local `close()`
@@ -18,9 +22,8 @@ Both bugs are upstream; fix them at the source, release, and bump the pins.
   `accept_bi` also return a bare `Closed`. Make the first close win, make
   `close()` a no-op once closed, and have `accept_*` return the recorded
   reason. Add a qmux test where APPLICATION_CLOSE and EOF arrive together.
-- `web-transport-moq` 1.3.1 (`moq-dev/noq`) maps `ApplicationClosed` only
-  through the HTTP/3 code space in `error.rs`, so a raw `moqt://` code yields
-  no `session_error()`. Map raw QUIC codes directly.
+- `web-transport-moq` 1.3.2 (`moq-dev/noq#11`) maps a raw `moqt://` peer's
+  `ApplicationClosed` code directly. Done; only the regression below remains.
 - moq-net's `close(Internal)` after a transport error is correct: closing a
   closed connection does nothing. Do not work around it here.
 - One moq-tokio regression runs the issue's three cases (abort after accept,

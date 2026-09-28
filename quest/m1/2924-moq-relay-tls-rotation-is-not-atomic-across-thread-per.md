@@ -21,8 +21,8 @@ own `tls::reload_certs` watcher, and snapshots its own mTLS roots.
 endpoint. `uring::Workers::bind` reads one pair once and never reloads.
 
 The primitive already exists: `ServeCerts` implements
-`rustls::server::ResolvesServerCert` (`rs/moq-tokio/src/tls.rs:2857`) and
-`reload_certs` (`:2931`) swaps its contents from the file watcher. What is
+`rustls::server::ResolvesServerCert` in `rs/moq-tokio/src/tls.rs`, and
+`reload_certs` there swaps its contents from the file watcher. What is
 missing is sharing it.
 
 - Build the `ServeCerts` and its watcher once, on the shared runtime, in

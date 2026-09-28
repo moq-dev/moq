@@ -28,6 +28,11 @@ them (a planned-drain health state, the SIGTERM sequencing and stop timeouts,
 per-PoP serial deploys, a two-node PoP floor, and the gateway drain contract)
 is moq.pro's (downstream) fleet drain work, which consumes these quests.
 
+Drain stays at the MoQ layer. WebTransport's `WT_DRAIN_SESSION` capsule and
+the browser `draining` promise are advisory and carry no redirect URI or
+timeout, and qmux and WebSocket have no equivalent, so neither the relay nor
+the clients send or act on them (decided 2026-09-26).
+
 The relay's drain hook has landed: `Relay::with_signals(false)` hands SIGTERM
 to the embedder, and its `shutdown_trigger` GOAWAYs every session, arrivals
 included, against one deadline. `Relay::run` returns as soon as every session
@@ -48,10 +53,11 @@ group. It passes today only with a 1s latency budget: following the route
 means resubscribing on B, and a group boundary inside the swap loses that
 group. The line completes once the viewer needs no budget.
 
-## Quests
+## Required
 
 - [JS group-boundary handover](/quest/m1/drain/js-group-handover.md) - a JS track subscription carries across a route swap at a group boundary, so `test/drain` passes at zero latency budget
+- [JS GOAWAY requests](/quest/m1/drain/js-goaway-requests.md) - after GOAWAY the JS client opens no new request on the old session, like Rust
 
 ## Related
 
-- [pop-skipping](/quest/m1/pop-skipping/README.md) - its same-PoP link price and full eligible pairing become important when a deployment adds a second relay per PoP
+- [Cluster routing](/quest/m1/cluster-routing.md) - the configured topology and link costs a second relay per PoP joins

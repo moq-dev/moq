@@ -245,6 +245,10 @@ pub enum Error {
 	/// A rendition tried to lower delay already advertised to subscribers.
 	#[error("catalog delay cannot decrease for a published rendition")]
 	DelayDecreased,
+
+	/// A capture instant is ahead of the broadcast clock's now, or before its epoch.
+	#[error("capture time is outside the broadcast clock")]
+	InvalidCapture,
 }
 
 impl Error {

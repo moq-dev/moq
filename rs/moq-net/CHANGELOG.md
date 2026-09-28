@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7](https://github.com/moq-dev/moq/compare/moq-net-v0.3.6...moq-net-v0.3.7) - 2026-09-27
+
+### Added
+
+- *(mux)* detect delay and jitter on JSON and binary tracks ([#4270](https://github.com/moq-dev/moq/pull/4270))
+- *(net)* the SETUP AUTHORIZATION TOKEN option reaches the verifier ([#4278](https://github.com/moq-dev/moq/pull/4278))
+
+### Fixed
+
+- *(net)* settle lite-07 tails on stream counts ([#4224](https://github.com/moq-dev/moq/pull/4224))
+- *(net)* announce a covering route to a narrower prefix instead of panicking ([#4302](https://github.com/moq-dev/moq/pull/4302))
+
+### Other
+
+- fix stale agent rules, the moq-net hop range, and the ffi unannounce doc ([#4305](https://github.com/moq-dev/moq/pull/4305))
+
 ## [0.3.6](https://github.com/moq-dev/moq/compare/moq-net-v0.3.5...moq-net-v0.3.6) - 2026-09-26
 
 ### Added
@@ -131,7 +147,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [**breaking**] `create_track`, `reserve_track`, `unique_track`, `finish`, `create_group`, and `append_group` take `&self`. `track::Consumer::info()` is `query()`. `track::Demand` gains `is_used` / `poll_used` / `poll_unused`. `track::Producer::poll_unused` returns `Poll<Result<()>>`. `bandwidth::Producer::closed()` returns the cause.
 - [**breaking**] `stats::Presence` and `stats::Traffic` name both edges of each cumulative pair `*_started` / `*_ended` (`sessions_started` / `sessions_ended`, `announces_started` / `announces_ended`, `broadcasts_*`, `subscriptions_*`). Serialize still writes the previous `announced` / `*_closed` names beside the new ones; deserialize accepts either spelling, with the canonical name winning.
 - [**breaking**] `origin::Info` is `origin::Config` with public fields and no `with_*` builders. `Producer::info()` is `config()`.
-- [**breaking**] `origin::Config::default()` mints a random hop, `Config::id` is `hop`, and origin handles expose `hop()` instead of dereferencing to `Hop`. Random hops now use the full 62-bit wire range; current `@moq/net` clients decode them as `bigint`, while legacy `@moq/lite` clients limited to `Number.MAX_SAFE_INTEGER` can reject larger values and must upgrade.
+- [**breaking**] `origin::Config::default()` mints a random hop, `Config::id` is `hop`, and origin handles expose `hop()` instead of dereferencing to `Hop`. Random hops stay below 2^53, so legacy `@moq/lite` clients limited to `Number.MAX_SAFE_INTEGER` still decode them; current `@moq/net` clients decode the full 62-bit wire range as `bigint`.
 - [**breaking**] `origin::Producer::scope(root, patterns)` and `origin::Consumer::scope(root, patterns)` replace the separate `with_root` / `scope` calls and return `Result` with `Unauthorized` for an empty grant.
 - [**breaking**] `origin::Pending` is `origin::Requesting`, the consumer-side wait for a request to resolve.
 - `origin::Producer::publish(path, route)` creates and advertises a broadcast together.

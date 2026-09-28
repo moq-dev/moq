@@ -577,7 +577,7 @@ async fn spawn_auth_server(policy: moq_auth::serve::Policy) -> url::Url {
 	let url = format!("http://{}/", listener.local_addr().expect("auth addr"))
 		.parse()
 		.expect("auth url");
-	let server = moq_auth::serve::Server::new(policy);
+	let server = moq_auth::serve::Server::new(policy).unwrap();
 	tokio::spawn(async move { server.serve(listener).await });
 	url
 }

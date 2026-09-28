@@ -28,5 +28,9 @@ let mut producer = moq_binary::snapshot::Producer::new(track, config);
 producer.update(payload)?;
 ```
 
+A payload is stamped when written, unless it carries its capture time:
+`moq_net::Timed::from(bytes).at(captured)`. Writes return the encoded frame
+size.
+
 The TypeScript twin is [`@moq/binary`](/lib/js/binary). API:
 [docs.rs/moq-binary](https://docs.rs/moq-binary).

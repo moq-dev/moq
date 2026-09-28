@@ -18,6 +18,11 @@ the encode seam as the platform candidate on macOS and iOS.
 - Regression: a stereo and a 5.1 encode round-trip through the AudioToolbox
   decoder and through symphonia (stereo only), with timestamps continuous
   across the priming.
+- Decided in [#4183](https://github.com/moq-dev/moq/pull/4183): the uniffi
+  `MoqAudioEncoderOutput::frame_duration_us` default moves from 20000 to 0
+  (the codec's own frame) with this quest, so `aac()` works without an
+  explicit 0. Changing a published binding default is a break, so that
+  change targets `dev`.
 
 ## Required
 

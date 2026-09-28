@@ -22,8 +22,8 @@ extern "C" {
 #include <libswscale/swscale.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/samplefmt.h>
-#include "moq.h"
 }
+#include "moq.h"
 
 #include "moq-source.h"
 #include "moq-url.h"

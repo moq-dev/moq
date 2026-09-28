@@ -16,6 +16,7 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Dig into the root cause and fix it at the source. Never work around a fixable bug with a retry, sleep, or timeout.
 - Fail loud and early. Error on unsupported or malformed input rather than warn and continue: supported or refused.
 - Reproduce bugs before fixing them. Land each fix with a regression test that fails without it, when one is easy.
+- Unit tests mock time instead of depending on wall-clock timing or sleeps.
 - Keep the PR focused. No unrelated refactors, formatting churn, or drive-by changes; split when in doubt.
 - Refactor aggressively for long-term maintainability, but re-evaluate the direction as you learn.
 - Propose a course change, even suggest abandoning a PR, rather than finish a half-solution.
@@ -88,6 +89,10 @@ just fix          # Auto-fix lint/formatting, same scope
 ```
 
 These diff the branch against its base and only run the affected packages.
+
+When work mentions a quest, run `quest guide` and follow it.
+The `quest` binary comes from the kixelated/quest flake input and serves the quest skills; change them upstream and bump the input.
+A quest deleted on `dev` is done, even while `main` still lists it.
 
 # Cross-Package Sync
 

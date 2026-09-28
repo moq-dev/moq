@@ -17,7 +17,7 @@ IL2CPP constraints Unity adds (static `MonoPInvokeCallback` trampolines, no
 dynamic loading) are measured in the next prototype rather than designed around
 up front.
 
-## Quests
+## Required
 
 - [Generator](/quest/m2/cs/generator.md) - uniffi-bindgen-cs on uniffi 0.32, pinned and generating `cs/ffi` in CI
 - [Package](/quest/m2/cs/package.md) - the `cs/moq` wrapper, NuGet package with native runtimes, interop client, and docs

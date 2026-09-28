@@ -12,6 +12,7 @@ import type { Route } from "./hop.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Groups, Producer, Request, Subscriber } from "./track.ts";
+import type { Advertised, Advertisements } from "./wire.ts";
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
 export function groupBounds(groups: Groups = {}): { start: number; end?: number } {
@@ -44,6 +45,36 @@ export function scopeHead(scope: Path.Pattern): Path.Valid {
 export function hiddenBelow(prefix: Path.Valid, path: Path.Valid): boolean {
 	const below = Path.stripPrefix(prefix, path);
 	return below !== null && Path.parts(below).some((part) => part.startsWith("."));
+}
+
+/**
+ * Where each carried route lands under the requested prefix: its suffix beneath the
+ * prefix, or the empty suffix for a route above it, where the most specific such route
+ * wins the way a request through the prefix would resolve.
+ */
+export function presented(
+	prefix: Path.Valid,
+	table: Advertisements,
+	carries: (covered: Path.Valid) => boolean,
+): Map<Path.Valid, Advertised> {
+	const out = new Map<Path.Valid, Advertised>();
+	let rootLen = -1;
+	const requested = Path.Pattern.subtree(prefix);
+	for (const [covered, candidates] of table) {
+		if (!carries(covered)) continue;
+		if (Path.hasPrefix(covered, prefix)) {
+			if (covered.length < rootLen) continue;
+			// A scoped route covers only what it claims, so the best one that can serve the prefix wins.
+			const snap = candidates.find((candidate) => !candidate.claim || candidate.claim.overlaps(requested));
+			if (!snap) continue;
+			rootLen = covered.length;
+			out.set(Path.empty(), snap);
+			continue;
+		}
+		const suffix = Path.stripPrefix(prefix, covered);
+		if (suffix !== null && candidates.length > 0) out.set(suffix, candidates[0]);
+	}
+	return out;
 }
 
 /** Whether the announced prefix's subtree overlaps `scope`. */
@@ -137,8 +168,8 @@ export const hooks: {
 		group: GroupConsumer,
 		expiry: { expired: () => boolean; changed: readonly Getter<unknown>[] },
 	) => void;
-	/** Stop an in-flight group operation if the handed-out group expires. */
-	guardGroup: <T>(group: GroupConsumer, operation: Promise<T>) => Promise<T>;
+	/** Start a group operation unless the handed-out group has expired, and stop it if the group expires mid-flight. */
+	guardGroup: <T>(group: GroupConsumer, operation: () => Promise<T>) => Promise<T>;
 	/** Read a frame the wire publisher completes (or skips) once written. */
 	readGroupFrame: (group: GroupConsumer, from?: number) => Promise<ReadGroupFrame | undefined>;
 	/** Make an evicted mirror terminal while its track timeline still contains it. */

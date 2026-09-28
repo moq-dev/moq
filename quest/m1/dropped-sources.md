@@ -17,12 +17,17 @@ end carries no cause since #4031, so only track errors are in scope.
   over a mock session, and map JS `PUBLISH_DONE` Unauthorized to #4179's shared
   error. Preserve causes at the source rather than remapping `Dropped` at
   consumers.
+- The same goes for revocation. Leftovers from #4179's review: a bridged
+  revocation reaches Rust IETF subscribers as `PUBLISH_DONE` InternalError, a
+  JS relay reports a route revocation as INTERNAL_ERROR, and the bindings
+  neither document nor test `is_auth` for a stream-scoped Unauthorized. Each
+  should surface Unauthorized.
 
 Public API: none expected; error values consumers observe change. Wire: none.
 
 ## Required
 
-- [Unauthorized](/quest/m1/auth/unauthorized.md) - #4179 supplies shared Unauthorized errors and revoked-stream handling
+- [Auth](/quest/m1/auth/README.md) - its Unauthorized quest (#4179, done on the line) supplies shared Unauthorized errors and revoked-stream handling
 
 ## Related
 

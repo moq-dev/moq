@@ -33,12 +33,15 @@ the group's turn, and opening newer groups must not reset its accumulated
 fair-share credit.
 
 Map conventions only at adapters. MoQ's model remains higher value first, the
-IETF wire remains lower value first, and browser `sendOrder` remains local to
-its WebTransport send group. Native QUIC and qmux use the full three levels;
-a browser that cannot prioritize send groups gets the lower two levels without
-pretending to provide strict subscription priority.
+IETF wire remains lower value first. Native QUIC and qmux use the full three
+levels. Browsers (js/net and web-transport-wasm) never create send groups:
+browser groups are flat and byte-fair, which would trade strict priority
+between subscriptions (audio over video) for fairness nobody on a browser
+session needs, so they keep the default group and pack priority and group
+order into `sendOrder` (decided 2026-09-26 with
+[Firefox 155](/quest/m2/firefox-155-webtransport.md)).
 
-Give every MoQ subscription one send group. A SUBSCRIBE_UPDATE changes the
+Give every MoQ subscription one native send group. A SUBSCRIBE_UPDATE changes the
 group priority atomically. Group streams use their position within the
 subscription, never another subscription's sequence. Remove the session-wide
 `lite::PriorityQueue` once every enabled backend has an honest implementation

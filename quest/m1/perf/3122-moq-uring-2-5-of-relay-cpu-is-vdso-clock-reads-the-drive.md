@@ -21,7 +21,10 @@ the tokio worker path:
 
 That is `clock_gettime`. Roughly 2.5% of relay CPU spent reading the clock.
 The profile is the since-deleted quiche driver's; re-measure on noq before
-and after.
+and after. The closed, unmerged prototype
+[#3136](https://github.com/moq-dev/moq/pull/3136) froze the clock per turn
+behind an RAII guard on that driver; its shape and tests are a starting
+point.
 
 Where the reads are:
 

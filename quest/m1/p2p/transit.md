@@ -32,10 +32,6 @@ the id appended and never on A; a chain already containing the id is dropped;
 a retraction on A retracts on B; two watchers of one tab share one upstream
 subscription.
 
-## Required
-
-- [Route cost in the JS origin](/quest/m1/route-cost.md) - cost and hops must be carried on the entry before they can be forwarded
-
 ## Related
 
 - [Watch opts in](/quest/m1/p2p/watch.md) - the first topology that needs a forwarding tab

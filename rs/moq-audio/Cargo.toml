@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 rust-version.workspace = true
 
@@ -19,9 +19,10 @@ categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 # and Windows would pay nothing, but a default is one setting for every host.
 # The features exist so a consumer can pick what it wants, not to hide code from
 # the default compile: `just check` lints default features only, so the device
-# code is compiled by nightly's `just rs features` and `just rs macos`. Workspace
-# consumers opt in at the root manifest (`default-features = false`) per crate,
-# which keeps cpal out of the language bindings.
+# code is compiled by nightly's `just rs features` and platform.yml's
+# `just rs macos`. Workspace consumers opt in at the root manifest
+# (`default-features = false`) per crate, which keeps cpal out of the language
+# bindings.
 default = ["aac"]
 # AAC-LC decode via symphonia. Pure Rust, so it costs no toolchain: the trade
 # this crate already refused for Opus. Only a subscriber to an ingest-sourced

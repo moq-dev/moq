@@ -170,8 +170,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      # No Rust cache: its entry would evict the store every pull request
+      # restores from the 10 GB budget. See cache.yml.
 
       # Generate the UniFFI Kotlin so the sibling :moq-ffi project compiles.
       - name: Generate bindings
@@ -189,7 +189,7 @@ jobs:
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         with:
           # The action's default adds the legacy `tools` package, which Google
           # dropped from the SDK repository. Gradle fetches the rest itself.

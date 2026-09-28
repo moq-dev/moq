@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8](https://github.com/moq-dev/moq/compare/moq-rtmp-v0.3.7...moq-rtmp-v0.3.8) - 2026-09-27
+
+### Fixed
+
+- *(egress)* single-rendition egress serves the best rendition ([#4293](https://github.com/moq-dev/moq/pull/4293))
+
 ## [0.3.7](https://github.com/moq-dev/moq/compare/moq-rtmp-v0.3.6...moq-rtmp-v0.3.7) - 2026-09-26
 
 ### Added

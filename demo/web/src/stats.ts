@@ -13,8 +13,8 @@
  *   sessions.json    sessions by auth root
  *
  * Each frame is `{ "<broadcast path>": Snapshot }`. Counters are cumulative;
- * "active" = started - ended. The relay only includes currently-live entries, so
- * the latest frame is a snapshot of now. We sample the aggregate on an interval
+ * "active" = started - ended. The relay includes every entry it still holds
+ * counters for, idle ones too, so the latest frame is a snapshot of now. We sample the aggregate on an interval
  * to derive per-second throughput rates for the charts. A relay built after the
  * started/ended rename still writes the legacy names beside the new ones; this
  * dashboard prefers the canonical spelling and falls back so it also reads an

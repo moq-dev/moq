@@ -15,104 +15,128 @@ Give one agent ownership of each shared code area at a time (origin/auth, the
 JS Reader, audio playback, media containers and archive, bindings, worker
 transport, benchmark tooling); worktrees isolate commits, not semantics.
 
-## Quests
+## Required
 
-- [BBR classic ECN](/quest/m1/bbr-classic-ecn.md) - Startup and bandwidth probing respond to CE marks before the bottleneck drops packets
-- [libmoq hidden opt-in](/quest/m1/libmoq-hidden.md) - `moq_origin_announced` takes a `hidden` flag so C callers can list `.`-named broadcasts
-- [lite-07 count settle](/quest/m1/lite-count-settle.md) - moq-lite-07 subscribers stop waiting for a subscription's tail once SUBSCRIBE_END's stream count is reached
-- [Dropped sources](/quest/m1/dropped-sources.md) - track consumers see the producer's real error on every end path, never `Dropped`
-- [JS group guard](/quest/m1/js-group-guard.md) - a `@moq/net` publisher abandons a group past its max age without an unhandled rejection
+- [Cluster routing](/quest/m1/cluster-routing.md) - an announcement says where a broadcast originates, not how to reach it, and a relay hears only the prefixes its clients asked for
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
-- [Interop flakes](/quest/m1/interop-flakes.md) - the interop harness passes with other runs sharing the machine
-- [Signal.race cleanup](/quest/m1/signal-race.md) - `Signal.race` releases its signal listeners when its result loses a race
-- [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi, libmoq, and every wrapper configure and observe audio playout delay
-- [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, audio, and video namespaces built from the handle below
+- [Go cancel test](/quest/m1/go-origin-gc.md) - the Go request-cancel test keeps its origin alive, so the collector can't close it mid-test
+- [Worker socket count](/quest/m1/worker-socket-count.md) - the moq-tokio worker test counts only its own listener's sockets
+- [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
+- [moq-binary folds into moq-flate](/quest/m1/flate-binary.md) - on dev, moq-flate and @moq/flate own the opaque snapshot and stream tracks and moq-binary is deleted
+- [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
-- [Kotlin end](/quest/m1/kotlin-end.md) - Kotlin exposes `close()` as `end()`, since `AutoCloseable.close()` takes the name
-- [Remove finish](/quest/m1/broadcast-remove.md) - on dev, the deprecated broadcast end APIs are gone and `closed()` carries no cause
-- [CLI inspection](/quest/m1/cli-inspect/README.md) - `moq ls` lists what is live and `moq fetch` reads a group over MoQ, and a guide shows how to inspect a relay
+- [Error messages](/quest/m1/error-display.md) - Python, Go, and Dart print `MoqError` with Rust's message, as Kotlin and Swift do
 - [Session close](/quest/m1/session-close.md) - a graceful session end withdraws announces and waits one second for the ack
+- [Drain before close](/quest/m1/drain-before-close.md) - a closing client delivers its queued stream finishes, so `moq import` ends the catalog cleanly over a real relay
 - [Close codes](/quest/m1/close-codes.md) - a client sees the peer's application close code over WebSocket and raw QUIC, like WebTransport
-- [JS caught up](/quest/m1/js-announce-caught-up.md) - @moq/net's announce consumer says when the initial set has landed, like Rust
-- [Bindings caught up](/quest/m1/announce-live-bindings.md) - moq-ffi, libmoq, and every wrapper yield the same flat announce event, `Live` included
-- [Optional max age](/quest/m1/ietf-max-age.md) - max age is optional, set only by the publisher, and crosses moq-transport as MAX_CACHE_DURATION
-- [IETF announce count](/quest/m1/ietf-announce-count.md) - an opt-in moq-transport extension carries the replay count, so IETF announce consumers go live without a timer
-
-- [Publish delay](/quest/m1/publish-delay.md) - js/publish encoders advertise `delay` behind the earliest rendition, like moq-mux
-- [Data jitter](/quest/m1/data-jitter.md) - JSON and binary tracks with a capture time advertise a detected `delay` and `jitter`
+- [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
+- [Live in apps](/quest/m1/announce-live-apps.md) - the demo and `@moq/room` show "no broadcasts" from the `live` marker, which waits for the first session on page load
+- [kio waiter overflow](/quest/m1/kio-waiter-lost.md) - a retained `Waiter` past 8 lists stops adding a duplicate entry to lists it already recorded
+- [Capture re-anchor](/quest/m1/capture-reanchor.md) - a repeating or restarting device clock never rewinds native capture during a fast backlog drain
+- [Splice edge cases](/quest/m1/splice-edges.md) - an unstamped successor, a pruned segment's boundary group, and a warm head during a takeover are each handled correctly
+- [Track tail hardening](/quest/m1/track-tail-hardening.md) - Rust and JS wait out a track's tail by the same rules, with the known hang, count, truncation, grace, and memory holes closed
+- [Session death parity](/quest/m1/session-death.md) - a local close ends tracks cleanly in both languages, and JS group readers see the session's error on session death
+- [moqsrc stop](/quest/m1/moqsrc-stop.md) - moqsrc's stop blocks until its session ends, without deadlocking on a blocked pad push
+- [More tests under load](/quest/m1/test-flakes-2.md) - the second round of load-only failures, fixed at the cause
+- [Interop contention](/quest/m1/interop-contention.md) - two `just test interop --all` matrices pass side by side, and `just test harness` runs from a clean checkout
+- [UnknownSession log flood](/quest/m1/unknown-session-logs.md) - streams reset before their WebTransport header stop being reported as UnknownSession at WARN
+- [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
+- [Wire compatibility](/quest/m1/wire-compat.md) - a nightly run tests this checkout against the last published release for tokens, session wire, and catalog/container
+- [Accept-side flags](/quest/m1/cli-given-flags.md) - dial-only and local verbs refuse every `--listen-*` flag instead of ignoring it
+- [JS catalog path](/quest/m1/js-catalog-path.md) - `@moq/net` broadcast consumers expose their path and `Catalog.watch` rejects escaping references, like Rust
+- [#2075](/quest/m1/2075-mirror-catalog-reservation-gating-in-moq-hang-js-hang.md) - @moq/publish gates the first catalog snapshot until every reserved track is described
+- [Full codec string](/quest/m1/publish-codec-string.md) - browser-published video carries the encoder's full RFC 6381 codec string, so native players decode it
+- [TS export jitter](/quest/m1/ts-export-jitter.md) - the video reorder bound follows later catalogs and the declared reorder depth, so a late B-frame never reorders TS output; an undeclared stream can reorder once per new maximum depth
+- [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - unflagged loop wraps move audio and video by one shift, so A/V sync holds across wraps
+- [PipeWire duplicate cameras](/quest/m1/pipewire-dup-cameras.md) - a webcam lists once with PipeWire enabled
+- [Catalog wall clock](/quest/m1/catalog-wall-clock.md) - `Clock::wall_clock` keeps the catalog's full precision instead of truncating to milliseconds
+- [IPv6 TLS names](/quest/m1/ipv6-tls-name.md) - dialing an IPv6 literal completes TLS on WebSocket as on noq, including a bare `::1` host override
+- [Capture control](/quest/m1/capture-control.md) - on dev, `encode::Capture` replaces `CaptureOptions` without a `clock` field (it reads the catalog's), an unsupported `cut()` errors, and dropping the last `Control` cancels in-flight opens
+- [Video surface](/quest/m1/video-surface.md) - on dev, moq-ffi's `native` becomes `surface`, refused on platforms with no surface
+- [HLS discontinuity sequence](/quest/m1/hls-discontinuity-sequence.md) - on dev, `Segment::discontinuity` is the absolute sequence, so every cursor agrees
+- [RTMP TLS only](/quest/m1/rtmp-tls-only.md) - an RTMP listener configured for TLS can refuse plaintext instead of sniffing and serving it
+- [HLS linger](/quest/m1/hls-linger.md) - `moq_hls::Server` serves an ended broadcast for its playlist window plus grace, so the moq.pro edge drops its own pool
+- [Remove live()](/quest/m1/remove-live.md) - on dev, importers publish stream timestamps verbatim, the catalog clock maps them to wall time, and an encoder restart becomes a new epoch
+- [iroh versions](/quest/m1/iroh-lite-wip.md) - `iroh://` negotiates the configured versions, so `moq-lite-07-wip` can be opted into
+- [Go and Dart doc samples](/quest/m1/doc-samples-go-dart.md) - Go and Dart doc samples compile against their wrappers
+- [Data capture in bindings](/quest/m1/data-capture-bindings.md) - moq-ffi and every wrapper pass a data frame's capture time, and the JSON window producer takes one
 - [Moxygen compatibility](/quest/m1/moxygen/README.md) - one subgroup per group, whole-group FETCH, and one datagram per group, never a full moxygen pass
+- [JS IETF datagrams](/quest/m1/js-ietf-datagram.md) - `@moq/net` sends and receives datagram groups over moq-transport, like Rust
+- [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic producer per track name in both languages, with the sequence namespace surviving a replacement
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - generic on-demand group serving and IETF FETCH for browser publishers
-- [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS, on the catalog and store the release ships
-- [Wildcard](/quest/m1/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
+- [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; the catalog entry and format may break in place, since no archives exist
 - [Tooling](/quest/m1/tooling/README.md) - justfiles become a one-line menu over `sh/`, one impact map scopes CI, and every workflow step runs a recipe
 - [Path patterns](/quest/m1/path-patterns.md) - one matcher for every predicate over broadcast paths: tokens, origins, interest
-- [Setup token](/quest/m1/setup-token.md) - a moq-transport SETUP `AUTHORIZATION TOKEN` reaches the accepted handshake and the relay's auth request, so a verifier can run on it
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
-- [Tests under load](/quest/m1/test-flakes.md) - three tests that time out or run out of file descriptors under `just check` are fixed at the cause
-- [Decoded frame ownership](/quest/m1/decoded-frames.md) - retain moq-video Frames across bindings, with native views or CPU conversion as needed
+- [Dropped sources](/quest/m1/dropped-sources.md) - track consumers see the producer's real error on every end path, never `Dropped`
+- [Shaper virtual time](/quest/m1/shaper-virtual-time.md) - `moq-shaper` tests judge seeded decisions on paused time, not on wall-clock delivery under load
+- [Rust compressed gate test](/quest/m1/json-compressed-gate-rs.md) - `rs/moq-json` proves a snapshot delta is gated on its encoded size
+- [Shrink the JS overflow test](/quest/m1/json-rolls-snapshot-test.md) - the `js/json` roll-on-overflow test uses a small `maxGroupBytes` budget instead of megabytes of JSON
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - generated C++ over moq-ffi with futures and expected-style errors, shipped as a tarball, vcpkg, and Conan, and adopted by the OBS plugin
-- [moq-c](/quest/m1/moq-c.md) - libmoq ships as `moq-c`, beside `moq-cpp`, with its C header and library unchanged
-- [OBS native codecs](/quest/m1/obs-moq-video/README.md) - remove FFmpeg decoding dependencies, deliver GPU frames, and use native audio/video encoders
+- [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
+- [OBS native codecs](/quest/m1/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
 - [Opus concealment](/quest/m1/opus-conceal.md) - a lost Opus packet conceals the last packet's length, not 120 ms
 - [Audio codecs](/quest/m1/audio-codecs/README.md) - platform audio codecs, explicit unsupported cases, and channel layouts up to 7.1
-- [CMAF Opus](/quest/m1/cmaf-opus-dops.md) - fMP4 import and export keep the Opus pre-skip and gain
-- [NVDEC teardown](/quest/m1/nvdec-teardown.md) - dropping an NVDEC decoder no longer segfaults
-- [GPU pool reservation](/quest/m1/gpu-pool-reservation.md) - a full GPU frame pool is a `None` reservation the caller drops on, not an error to match
-- [Egress rendition pick](/quest/m1/egress-rendition-pick.md) - WHEP and single-track RTMP/FLV serve the best rendition, not the first by name
-- [Keyframe trigger](/quest/m1/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
-- [Video keyframe flag](/quest/m1/video-keyframe-flag.md) - encoded video marks its keyframes, so a requested cut never forces an extra one after a cadence keyframe
-- [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms, and client stats broadcasts from publishers and viewers
+- [Opus catalog rate](/quest/m1/opus-catalog-rate.md) - MKV Opus import publishes the 48 kHz codec rate in the catalog, not the OpusHead input rate
+- [mp4-atom dOps mapping](/quest/m1/mp4-atom-dops-mapping.md) - a released mp4-atom reads and writes any `dOps` channel mapping family and table
+- [CMAF surround Opus](/quest/m1/cmaf-opus-surround.md) - fMP4 import and export carry an Opus channel mapping table
+- [js/hang dOps pre-skip](/quest/m1/js-dops-pre-skip.md) - CMAF encoding in js/hang stops hard-coding a 312-sample pre-skip
+- [GPU CI](/quest/m1/gpu-ci.md) - NVIDIA tests run nightly on a self-hosted GPU runner, and `just rs nvidia` runs them locally instead of skipping
+- [JS rendition ranking](/quest/m1/js-ranked.md) - `@moq/hang` ranks video renditions like Rust, and `@moq/watch`'s fallback uses it
+- [Audio rendition pick](/quest/m1/audio-ranked.md) - single-track FLV/RTMP and WHEP serve the best audio rendition, not the first by name
+- [FLV rebind before header](/quest/m1/flv-rebind.md) - single-track FLV switches to a better rendition announced before the header
+- [FLV catalog stream](/quest/m1/flv-catalog-stream.md) - on dev, `flv::Export` takes a catalog stream like fmp4, replacing `with_select`
+- [Own the QUIC stack](/quest/m1/quic/README.md) - the moq-noq fork carries ACK progress, reliable reset, hierarchical scheduling, deadlines, peer limits, and qmux
+- [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms, and client stats broadcasts from publishers and viewers, on dev
 - [Drain](/quest/m1/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
 - [Drain handshakes](/quest/m1/drain-handshakes.md) - a drain GOAWAYs and waits for sessions still in their handshake instead of exiting under them
 - [io_uring runner](/quest/m1/uring-runner.md) - the io_uring relay tests run nightly on a 6.12+ self-hosted runner instead of skipping
+- [Strict Redirect::resolve](/quest/m1/redirect-resolve.md) - on dev, `Redirect::resolve` can no longer quietly turn a refused redirect into a redial
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - a session that came up over WebSocket moves to QUIC once the QUIC dial lands, handing over at a group boundary
-- [Own the QUIC stack](/quest/m1/quic/README.md) - the moq-noq fork carries
-  ACK progress, reliable reset, hierarchical scheduling, deadlines, probing,
-  keep-alive, peer limits, careful resume, ECN, and qmux
-- [BBR idle burst](/quest/m1/bbr-idle-burst.md) - a BBRv3 burst after a long idle paces near the learned bandwidth, proven by a fork regression
 - [P2P](/quest/m1/p2p/README.md) - opted-in clients serve each other over data channels and iroh while the relay stays the rendezvous and the fallback, under application policy
 - [One port](/quest/m1/one-port/README.md) - a relay speaks QUIC, STUN, WebRTC media, and SRT on one UDP port and HTTP, RTMP, and RTMPS on one TCP port
+- [Signed priority](/quest/m1/signed-priority.md) - on dev, every API priority is an `i8` with 0 as the unset midpoint, and hang's built-ins sit above it
 - [Scope track priority](/quest/m1/track-priority-scope.md) - priority orders one owner's streams, and a shared cluster session is fair across tenants
 - [Stream sessions](/quest/m1/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [IETF on the ring](/quest/m1/uring-ietf.md) - the io_uring workers serve moq-transport sessions too, so a uring relay drops no client protocol
-- [JS timeline scans](/quest/m1/js-timeline-scans.md) - a `@moq/net` publisher's per-group cost stays flat as the retained window grows
 - [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md) - packet bookkeeping scales with completed entries instead of scanning the flight on every ACK
 - [Perf](/quest/m1/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
 - [#2924](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every listener on both runtimes shares one reloadable served identity, so rotation is atomic and generate works with workers
 - [#2964](/quest/m1/2964-quic-workers-dropping-one-split-server-resizes-the.md) - integrate the dev worker owner with hardened socket-group formation
-- [Audio quality harness](/quest/m1/audio-quality-harness/README.md) - a playout latency regression fails a run instead of arriving as a bug report
 - [Benchmark regressions in CI](/quest/m1/bench-ci.md) - PRs get a non-blocking comparison of the Criterion benches they affect, and a nightly trend on main alerts on regressions
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - retained evidence, repeated paired runs, and uncertainty for performance claims
 - [#3126](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench reports per-interval latency percentiles so the ramp leaves the steady state
 - [Relay session bench](/quest/m1/bench-relay.md) - the same scenario through moq-relay's own connection handling
 - [Bench coverage](/quest/m1/bench-coverage.md) - Criterion targets for moq-mux containers, the hang catalog, moq-auth verification, and moq-pattern matching
+- [Stats producer bench](/quest/m1/stats-producer-bench.md) - the stats drain and encode cost per tick, swept over held paths and tiers and run nightly
 - [Relay profiling](/quest/m1/performance-profiles.md) - reproducible CPU and allocation captures under the existing workloads
 - [Browser benchmarks](/quest/m1/browser-benchmarks.md) - measure JS transport, container, decode, and render costs in an identified browser
+- [Generated @moq/net](/quest/m1/rs2ts/README.md) - the browser runs moq-net as TypeScript generated from the Rust source, retiring js/net's hand-written protocol and model code
 - [Plan: watch worker](/quest/m1/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
 - [Watch worker](/quest/m1/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
 - [Closure counters](/quest/m1/closure-counters.md) - a departed node's return never regresses the closure counters a consumer already saw
 - [RTMP interleaving](/quest/m1/rtmp-interleaving.md) - isolate partial messages before optimizing assembly copies
 - [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - with the default pool, relay memory plateaus at the expiry window on every version
+- [Plan: cache age-out](/quest/m1/cache-wall-eviction.md) - a swept benchmark decides whether the track cache ages groups out on wall time without a write
+- [Frame slot charge](/quest/m1/frame-slot-charge.md) - a group's frame slots past the first four count against the cache pool, including capacity a released group keeps
 - [Relay memory](/quest/m1/relay-memory.md) - remeasure what an announcement costs after prefix routes
-- [PoP skipping](/quest/m1/pop-skipping/README.md) - short cold paths for unpopular broadcasts without losing warm backhaul dedup
-- [Route cost in the JS origin](/quest/m1/route-cost.md) - the browser origin ranks routes by cost and hops like Rust instead of newest-first
 - [Front parking](/quest/m1/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence
 - [JS abandonment](/quest/m1/js-subscribe-abandonment.md) - a viewer returning during IETF subscribe setup keeps its track across microtasks
 - [IETF stream types](/quest/m1/ietf-uni-stream-types.md) - padding streams are discarded stream-only and an unknown uni type closes the session, per draft-21
-- [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic producer per track name in both languages, with the sequence namespace surviving a replacement
 - [Epoch primitive](/quest/m1/epoch.md) - one `Epoch` type in moq-net and @moq/net, carried as a trailing `@<uuidv7>` path segment, shared by e2ee and broadcast epochs
 - [E2EE](/quest/m1/e2ee/README.md) - TypeScript and Rust peers interoperate over encrypted broadcasts no relay can decrypt
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - each publish of a name gets a fresh `@<uuidv7>` epoch, viewers follow the newest live one at once, and bare names still resolve on every version
-- [Processor](/quest/m1/processor/README.md) - a customer-run worker publishes an on-demand contribution with scoped access
+- [Processor](/quest/m1/processor/README.md) - a customer-run worker publishes an on-demand contribution under its own service prefix with scoped access
 - [#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - watch: the video decoder resets on a declared discontinuity
 - [#933](/quest/m1/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - the catalog rotation follows the live camera's orientation
-- [#2075](/quest/m1/2075-mirror-catalog-reservation-gating-in-moq-hang-js-hang.md) - @moq/publish gates the first catalog snapshot until every reserved track is described
 - [#2848](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the Opus producer follows its bandwidth grant through the settled `moq_mux::rate::Control`
 - [Ladder](/quest/m1/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
 - [LOC duration marker](/quest/m1/loc-duration-marker.md) - LOC producers write the marker once released consumers skip it
-- [#2278](/quest/m1/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md) - hang: expose the fixed catalog-root broadcast clock without synchronizing library playback to wall time
+- [#2278](/quest/m1/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md) - hang: document reading the catalog-root clock and converting PTS to wall time, without synchronizing library playback to wall time
 - [Time stretch](/quest/m1/watch-audio-time-stretch.md) - js/watch: the audio ring converges by time-stretching instead of skipping or going silent
+- [Native audio quality](/quest/m1/audio-quality-native.md) - the browser lane's profiles, budgets, and metric schema run against `moq play` on a dummy device
+- [fMP4 emsg](/quest/m1/emsg.md) - event messages survive fMP4 import, and the timed-metadata contract ID3, SCTE-35, and FLV script tags share is settled with them
 - [#2279](/quest/m1/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues arrive immediately on an independent metadata track, optionally associated with a rendition
 - [Caption import](/quest/m1/captions-import.md) - fMP4 and MKV subtitle tracks import as text renditions instead of erroring or being dropped
 - [MSF caption roles](/quest/m1/captions-msf.md) - an MSF caption, subtitle, or sign-language track survives conversion to a hang catalog
@@ -129,7 +153,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [SRT import stats](/quest/m1/srt-import-stats.md) - the SRT gateway reports the same per-stream counters instead of nothing
 - [Text availability](/quest/m1/text-schema.md) - a text track publishes its own coverage index instead of copying the media timeline
 - [ID3 catalog section](/quest/m1/id3.md) - timed ID3 as a first-class container-neutral catalog section
-- [fMP4 emsg](/quest/m1/emsg.md) - event messages survive fMP4 import, and the timed-metadata contract ID3, SCTE-35, and FLV script tags share is settled with them
 - [FLV script tags](/quest/m1/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
 - [Release profile](/quest/m1/release-profile.md) - every release build gets fat LTO, one codegen unit, and stripping from the workspace profile instead of three script exports
 - [Size report](/quest/m1/size-report.md) - a nightly job reports every shipped artifact's size, native and JS, and alerts when one grows
@@ -137,16 +160,12 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [JS bundle trims](/quest/m1/js-bundle-trims.md) - minified worklets, no bowser, split pako, and lazy qmux and captions
 - [Slim Docker images](/quest/m1/docker-slim.md) - images carry only the package's nix closure, not ~170 MiB of nixos/nix
 - [Bindings size profile](/quest/m1/ffi-size-profile.md) - a benchmark decides whether the moq-ffi builds ship at opt-level "s", which halves the dylib
-- [wasm-opt](/quest/m1/wasm-opt.md) - `just wasm` size-optimizes the moq-wasm module with binaryen
 - [Go mirror delivery](/quest/m1/go-mirror-delivery.md) - the Go binding's staticlibs stop growing git history by ~210 MiB per release
 - [Relay iroh opt-in](/quest/m1/relay-iroh-opt-in.md) - moq-relay drops iroh from its defaults and shipped builds, while moq-cli keeps it for P2P
 - [Dart on iOS](/quest/m1/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
-- [libmoq shutdown](/quest/m1/libmoq-shutdown.md) - OBS exits cleanly with the plugin loaded: a C ABI `moq_shutdown` stops the libmoq thread before the module is unloaded
 - [Kotlin JVM exit](/quest/m1/kt-jvm-exit.md) - a Kotlin/JVM program exits cleanly whatever the moq-ffi runtime thread is doing, like Python does since #3766
 - [Dart publish](/quest/m1/dart-publish.md) - the packages are built and dry-run clean but exist nowhere consumers can install from
 - [Dart codec parity](/quest/m1/dart-codecs.md) - Dart is the one binding that cannot originate media
-- [libmoq fetch](/quest/m1/libmoq-fetch.md) - libmoq gains an additive cached-group fetch entry point
-- [moq-mux on wasm32](/quest/m1/mux-wasm-target.md) - the crate's two wasm blockers are fixed and the target stays in the clippy lane
 - [#2850](/quest/m1/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - js/net: decode messages synchronously from buffered bytes and delete the publisher read-ahead queue
 - [Install moq](/quest/m1/moq-installer.md) - one command installs or upgrades the released CLI on macOS and Linux
 - [Install URL](/quest/m1/moq-install-url.md) - moq.dev serves the canonical installer at /install.sh

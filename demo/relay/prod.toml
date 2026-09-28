@@ -37,6 +37,3 @@ key = "key.pem"
 # For multiple keys with rotation, give it `--key-dir /path/to/keys/` instead:
 # keys are named {kid}.jwk and resolved by the kid in the JWT header.
 url = "http://127.0.0.1:4440/"
-
-# Or use a URL for remote key management:
-# key_dir = "https://api.example.com/keys"

@@ -518,6 +518,11 @@ impl Producer {
 		self.state.read().abort.is_some()
 	}
 
+	/// Whether `other` produces the same logical track.
+	pub(crate) fn is_clone(&self, other: &Self) -> bool {
+		self.state.same_channel(&other.state)
+	}
+
 	/// Create a read handle for the logical track.
 	pub fn consume(&self) -> Consumer {
 		Consumer {

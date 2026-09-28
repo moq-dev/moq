@@ -311,6 +311,7 @@ impl Config {
 		deprecated.extend(self.listen.deprecated());
 		deprecated.extend(self.connect.deprecated());
 		deprecated.extend(self.cluster.deprecated());
+		deprecated.extend(self.auth.deprecated());
 		if let Some(server) = &self.server {
 			deprecated.toml("[server]", "[listen]", None);
 			deprecated.extend(server.deprecated());
@@ -422,6 +423,66 @@ max_streams = 64
 		assert!(err.contains("[server.quic] -> [quic]"), "{err}");
 		assert!(err.contains("[client.quic] -> [quic]"), "{err}");
 		assert!(err.contains("both directions"), "{err}");
+	}
+
+	/// A 0.14 `[auth]` config with `key` and `public` would otherwise boot with
+	/// every JWT ignored; each removed key refuses with its replacement named.
+	#[test]
+	fn released_auth_keys_refuse_to_boot() {
+		let toml = r#"
+[auth]
+key = "root.jwk"
+key_dir = "keys/"
+auth_api = "https://api.example.com/auth"
+domains = ["example.com"]
+mtls_tier = "internal"
+public = "anon/**"
+
+[auth.tls]
+root = ["ca.pem"]
+"#;
+		let mut config: Config = toml::from_str(toml).expect("released config must still parse");
+		let err = config.resolve().expect_err("must refuse").to_string();
+		for old in [
+			"[auth] key -> --auth-url to `moq auth serve --key`",
+			"[auth] key_dir -> --auth-url to `moq auth serve --key-dir`",
+			"[auth] auth_api -> ",
+			"[auth] domains -> ",
+			"[auth] mtls_tier -> --auth-url to `moq auth serve --tier`",
+			"[auth.tls] -> --connect-tls-*",
+		] {
+			assert!(err.contains(old), "{old}: {err}");
+		}
+	}
+
+	/// The environment is the half a removed flag silently misses: a relay deployed
+	/// through it never typed the flag.
+	#[test]
+	fn released_auth_env_refuses_to_boot() {
+		let vars = [
+			("MOQ_AUTH_KEY", "--auth-key / MOQ_AUTH_KEY"),
+			("MOQ_AUTH_KEY_DIR", "--auth-key-dir / MOQ_AUTH_KEY_DIR"),
+			("MOQ_AUTH_API", "--auth-api / MOQ_AUTH_API"),
+			("MOQ_AUTH_PUBLIC_API", "--auth-public-api / MOQ_AUTH_PUBLIC_API"),
+			("MOQ_AUTH_DOMAIN", "--auth-domain / MOQ_AUTH_DOMAIN"),
+			("MOQ_AUTH_MTLS_TIER", "--auth-mtls-tier / MOQ_AUTH_MTLS_TIER"),
+			("MOQ_AUTH_TLS_ROOT", "--auth-tls-* / MOQ_AUTH_TLS_*"),
+		];
+		let _env = EnvGuard::clear(&vars.map(|(var, _)| var));
+		for (var, spelling) in vars {
+			unsafe { std::env::set_var(var, "x") };
+			let err = Config::parse_and_merge(["moq-relay", "--auth-public", "**"])
+				.expect_err("must refuse")
+				.to_string();
+			unsafe { std::env::remove_var(var) };
+			assert!(err.contains(spelling), "{var}: {err}");
+		}
+
+		// 0.14 took the bare flag, so it has to parse to be refused by name.
+		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "**", "--auth-tls-disable-verify"])
+			.expect_err("must refuse")
+			.to_string();
+		assert!(err.contains("--auth-tls-* / MOQ_AUTH_TLS_*"), "{err}");
 	}
 
 	/// A released flag and a released table are refused together, in one message.

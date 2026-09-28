@@ -11,13 +11,11 @@ nothing changes.
 
 ## Plan
 
-Lands in `js/net`, reusing the [drain](/quest/m1/drain/README.md) line's
-GOAWAY handover (`Reload`'s migration in
-`js/net/src/connection/reload.ts`), once its group-boundary handover keeps a
-watched track's groups across the route swap: dial the replacement while the old session
-keeps serving, let both feed the origin (a request holds the outranked route
-until the new one answers), leave the old session to close on its own or at the
-handover cap. See the
+Lands in `js/net`, after the [drain](/quest/m1/drain/README.md) line ships
+the GOAWAY handover it reuses (client goaway is done on the line, JS
+group-boundary handover is its remaining child): dial the replacement while the old session
+keeps serving, swap the origin wiring once it is established, leave the old
+session to close on its own or at the handover cap. See the
 [questline](/quest/m1/transport-upgrade/README.md) for the shared decisions.
 
 - `connectInner` (`js/net/src/connection/connect.ts`) currently resolves
@@ -34,16 +32,20 @@ handover cap. See the
   may not name a redirect URI, and an empty one is legal) and closes at the
   configured cap. A WebTransport attempt that fails after WebSocket won is logged at
   debug and the session stays on WebSocket.
+- A self-sent GOAWAY must gate new requests on the old session too, not only
+  a received one: [JS GOAWAY requests](/quest/m1/drain/js-goaway-requests.md)
+  covers the received case, so check it also covers this path.
 - On a successful upgrade delete the URL from `websocketWon`.
 - Tests in the browser harness against the in-tree relay: with the
   WebTransport dial delayed past the head start, a watched track keeps every
   group across the upgrade, the WebSocket session closes within the cap, and
   the next connect to the same URL gives WebTransport the head start again;
   with no delay, WebTransport wins and no WebSocket session is ever opened.
-- Public API: none beyond what the drain line adds; `transportOf` already
+- Public API: none beyond what client-goaway adds; `transportOf` already
   reports the live transport. Update `doc/lib/js` where the fallback race is
   described.
 
 ## Required
 
-- [JS group-boundary handover](/quest/m1/drain/js-group-handover.md) - a watched track keeps every group across a route swap, which the upgrade is one of
+- [Drain](/quest/m1/drain/README.md) - the GOAWAY handover this upgrade reuses
+- [JS GOAWAY requests](/quest/m1/drain/js-goaway-requests.md) - no new request opens on a session that is going away

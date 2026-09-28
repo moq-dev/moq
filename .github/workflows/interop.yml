@@ -45,7 +45,7 @@ jobs:
 
     steps:
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
         with:
           tool-cache: false
 
@@ -73,6 +73,9 @@ jobs:
         uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-on-failure: true
+          # A pull request's entry is scoped to its own branch, where no later
+          # run reads it, while it spends the budget the shared store needs.
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
       # runtime libs (`--with-deps` needs the host package manager) so the
@@ -80,6 +83,10 @@ jobs:
       # `playwright install` then no-ops.
       - name: Playwright Chromium
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
+        shell: bash -leo pipefail {0}
+
+      - name: Harness regressions
+        run: nix develop --command just test harness
         shell: bash -leo pipefail {0}
 
       - name: Subscription termination interop
