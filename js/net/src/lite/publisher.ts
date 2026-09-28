@@ -9,7 +9,7 @@ import type * as Path from "../path.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale } from "../time.ts";
 import type * as track from "../track.ts";
-import { type Advertised, wireOf } from "../wire.ts";
+import { type Advertised, type Advertisements, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import * as DatagramStream from "./datagram_stream.ts";
@@ -340,7 +340,7 @@ export class Publisher {
 	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
 
 	// Originated advertisements this session forwards.
-	#advertised: Getter<ReadonlyMap<Path.Valid, Advertised> | undefined>;
+	#advertised: Getter<Advertisements | undefined>;
 
 	#publish?: OriginConsumer;
 
@@ -450,7 +450,7 @@ export class Publisher {
 		// unrelated moved.
 		// TODO Make a better helper within Signals.
 		let dispose!: Dispose;
-		let changed = new Promise<ReadonlyMap<Path.Valid, Advertised> | undefined>((resolve) => {
+		let changed = new Promise<Advertisements | undefined>((resolve) => {
 			dispose = this.#advertised.changed(resolve);
 		});
 
@@ -498,7 +498,7 @@ export class Publisher {
 				if (!advertised) break;
 
 				// Re-arm before reading, so an advertise that lands while we write is not lost.
-				changed = new Promise<ReadonlyMap<Path.Valid, Advertised> | undefined>((resolve) => {
+				changed = new Promise<Advertisements | undefined>((resolve) => {
 					dispose = this.#advertised.changed(resolve);
 				});
 

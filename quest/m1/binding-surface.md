@@ -2,7 +2,7 @@
 
 ## Goal
 
-moq-ffi, libmoq, and every wrapper (Python, Go, Swift, Kotlin, Dart) expose
+moq-ffi and every wrapper (Python, Go, Swift, Kotlin, Dart) expose
 `decode::Options::delay` and `decode::Consumer::delay()` so applications can
 configure and observe audio playout delay.
 
@@ -11,9 +11,9 @@ configure and observe audio playout delay.
 - One PR, each wrapper touched once, in its own idiom: durations as the
   language's duration type where the wrapper already uses one, handles over
   flat methods where a surface has more than one call.
-- Add the libmoq implementation and tests in `rs/libmoq`, then regenerate
-  `moq.h`. Keep the additions compatible with the published C ABI.
-- Update `doc/lib/{py,swift,kt,go,dart,c}` in the same PR.
+- moq-ffi only, not libmoq: the [generated C](/quest/m1/c/README.md) and
+  C++ bindings inherit it from moq-ffi.
+- Update `doc/lib/{py,swift,kt,go,dart}` in the same PR.
 - Test configuration and observed delay in every wrapper that has tests.
 
 ## Required

@@ -36,5 +36,4 @@ there belongs to the upstream quest.
 
 ## Related
 
-- [Release BBR fixes](/quest/m1/quic/bbr-release.md) - ships any remaining fix
 - [Upstream the fork](/quest/m1/quic/upstream.md) - offer the starvation fix upstream

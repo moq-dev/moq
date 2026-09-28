@@ -22,7 +22,9 @@ Guidance:
 - The catalog is built from the resolved config today, before any frame is
   encoded. Either hold the rendition out of the catalog until the first
   output reports its `decoderConfig`, or update it then; keep the stall and
-  jitter reporting working either way.
+  jitter reporting working either way. Holding it out must go through the
+  reservation gate the #2075 quest adds to `#runCatalog`, or it recreates the
+  partial first snapshot that quest prevents.
 - Check what each browser returns for a bare hint. If one echoes the hint
   back, derive the string from the bitstream (SPS for H.264/H.265, the
   sequence header for AV1, the uncompressed header for VP9), or fail loud
@@ -31,3 +33,7 @@ Guidance:
   catalog follows it.
 - Tests with the fake `VideoEncoder`: a bare-hint probe whose output reports
   a full string publishes the full string.
+
+## Required
+
+- [#2075](/quest/m1/2075-mirror-catalog-reservation-gating-in-moq-hang-js-hang.md) - the catalog reservation gate this rendition hold must go through

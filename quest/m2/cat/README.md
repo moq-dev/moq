@@ -44,9 +44,8 @@ Boundaries decided while planning:
 Order: the SETUP option already reaches the auth server as
 `moq_auth::Request.token`; verification comes first, then our clients present
 one. Everything rides `moq_auth::Request` and
-`moq auth serve`, which shipped on dev. The JWT types sit at the crate root;
-the verify quest moves them under `moq_auth::jwt` so `cat` is a sibling
-module rather than a set of prefixed names.
+`moq auth serve`. The JWT types stay at the crate root, so the published
+`moq-auth` names do not break; `cat` is an additive module beside them.
 
 ## Required
 

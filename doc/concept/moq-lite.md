@@ -149,7 +149,9 @@ prefixes it is told about.
 
 A subscriber watching under a root sees advertisements named relative to that
 root. The pattern scope filters which prefixes are visible without changing a
-route's prefix. Announce events carry the covered path, captures, and what
+route's prefix. When several routes advertise one prefix, each reader sees the
+best route its scope can use, so a cheaper route scoped elsewhere never hides
+it. Announce events carry the covered path, captures, and what
 happened to it: Rust
 `announce::Update { prefix, captures: Option<Vec<Pattern>>, route, kind }` and
 TypeScript `Announce.Update { prefix, captures, route, kind }`, where the kind is

@@ -8,7 +8,13 @@ beats `SendMsg` end to end before it is on by default.
 
 ## Plan
 
-Follow-up to #2875.
+Follow-up to #2875. The closed, unmerged prototype
+[#3224](https://github.com/moq-dev/moq/pull/3224) (on the quiche-era dev
+tree) did this together with #3204's fixed buffers, opt-in behind
+`udp::Config::send_zc_threshold`. On loopback it was 6 to 9% slower, but
+`IORING_SEND_ZC_REPORT_USAGE` showed the kernel copying there, so loopback
+measures only the forced-copy overhead: the sweep needs a remote peer
+through a physical NIC.
 
 The UDP path already assembles up to 64 KiB GSO trains in stable pool buffers, then submits `SendMsg` and recycles the buffer at the first CQE. Large trains are the promising case for `SENDMSG_ZC`; individual QUIC datagrams are likely below the copy-avoidance crossover.
 

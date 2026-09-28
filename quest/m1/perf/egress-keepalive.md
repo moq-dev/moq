@@ -23,7 +23,7 @@ before optimizing the remaining publisher overhead.
 
 Extend the existing group and track Criterion targets and add a bounded
 session regression to normal CI. Keep
-`slow_batch_reader_survives_expiry_with_keep_alive`, and cover expiry scans
+`slow_prefetch_reader_survives_expiry` (`rs/moq-net/src/model/track.rs`), and cover expiry scans
 while a batch drains, cancellation, and eventual expiry after reads stop.
 Report delivered bytes, refresh cost, CPU, and throughput for paired runs;
 fewer refresh calls alone are not evidence of a win.

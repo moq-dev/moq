@@ -1996,7 +1996,8 @@ impl Drop for DriverState {
 /// Within the window a returning viewer, or the next of a run of back-to-back
 /// fetches, reads the groups the front already cached: no second round trip for
 /// `TRACK_INFO`. Groups past that cached edge cost a fresh source splice. After
-/// the window, the cached segment is released.
+/// the window the track is forgotten, finished and aborted ones included, so a
+/// long-lived broadcast only holds the tracks read recently.
 ///
 /// Sized above the fetch cadence of a segmented consumer: HLS polls every
 /// `TARGETDURATION` seconds, commonly 6 or 10, so a shorter window would drop the
@@ -2201,6 +2202,18 @@ struct TrackIo {
 	head: Option<WarmGroup>,
 	/// Whether the track had a reader as of the last demand edge.
 	used: bool,
+}
+
+impl TrackIo {
+	/// Let go of every source handle once the logical track ended: its segments keep
+	/// what readers drain, and only its demand is still watched, until it is forgotten.
+	fn end(&mut self) {
+		self.staged = None;
+		self.query = None;
+		self.copy = None;
+		self.warm = None;
+		self.head = None;
+	}
 }
 
 /// Drives one front: feeds the world's events to a [`Front`] and performs the
@@ -2451,24 +2464,33 @@ async fn run_front(task: FrontTask) {
 						}
 						io.warm = warm;
 					}
-					Action::Release { track: name } => {
-						let Some(io) = tracks.get_mut(&name) else { continue };
-						// A local source releases straight from the spliced copy.
-						io.copy = None;
-						io.warm = None;
-						io.head = None;
-						if io.resume.release().is_err() {
-							tracks.remove(&name);
+					Action::Forget { track: name } => {
+						// A reader that looked the track up since the machine decided keeps
+						// it. Feed its `Used` edge here: the demand poll only sees the
+						// current level, so a reader gone before the next poll would
+						// otherwise leave the track unread with no linger armed.
+						if let Some(io) = tracks.get_mut(&name)
+							&& !broadcast.forget_spliced(&name, &io.resume)
+						{
+							if !io.used {
+								io.used = true;
+								events.push_back(Event::Used { track: name });
+							}
+							continue;
 						}
+						tracks.remove(&name);
+						events.push_back(Event::Forgotten { track: name });
 					}
 					Action::Finish { track: name } => {
-						if let Some(mut io) = tracks.remove(&name) {
+						if let Some(io) = tracks.get_mut(&name) {
+							io.end();
 							let _ = io.resume.finish();
 						}
 					}
 					Action::Abort { track: name, err } => {
-						if let Some(mut io) = tracks.remove(&name) {
+						if let Some(io) = tracks.get_mut(&name) {
 							tracing::debug!(name = %name, %err, "aborting track");
+							io.end();
 							let _ = io.resume.abort(err);
 						}
 					}
@@ -2577,7 +2599,10 @@ async fn run_front(task: FrontTask) {
 						used: false,
 					},
 				);
-				Event::TrackAssigned { track: name }
+				Event::TrackAssigned {
+					track: name,
+					now: timers.now(),
+				}
 			}
 			Step::Resolved(route, result) => {
 				upstream = None;
@@ -5407,6 +5432,67 @@ mod tests {
 		assert_eq!(&payload[..], b"snapshot");
 	}
 
+	/// A finished track stays readable from the front while it is read and for the
+	/// linger after, then leaves the broadcast so it stops pinning its cache: the next
+	/// reader asks the source afresh.
+	#[tokio::test(start_paused = true)]
+	async fn finished_track_is_forgotten_after_the_linger() {
+		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
+
+		let track = resolved.track("catalog").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the front asked the source")
+			.expect("request");
+		let source = request.resolving_start().accept(None);
+		let mut group = source.create_group(0u64.into()).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
+		group.finish().unwrap();
+		source.finish().unwrap();
+		let mut subscription = subscribing.await.unwrap().expect("subscribe");
+		assert_eq!(
+			next_group(&mut subscription)
+				.await
+				.unwrap()
+				.expect("the catalog")
+				.sequence,
+			0
+		);
+		assert!(next_group(&mut subscription).await.unwrap().is_none());
+		drop(subscription);
+		drop(source);
+
+		// Within the linger, a returning reader gets the finished track from the front.
+		let mut subscription = resolved.track("catalog").unwrap().subscribe(None).await.unwrap();
+		assert_eq!(
+			next_group(&mut subscription)
+				.await
+				.unwrap()
+				.expect("the catalog")
+				.sequence,
+			0
+		);
+		assert!(next_group(&mut subscription).await.unwrap().is_none());
+		drop(subscription);
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+				.await
+				.is_err(),
+			"a finished track within the linger asked the source again"
+		);
+
+		// Paused time runs the front's earlier deadline before this sleep returns.
+		tokio::time::sleep(TRACK_IDLE_LINGER).await;
+
+		let track = resolved.track("catalog").unwrap();
+		let _subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the finished track outlived the linger")
+			.expect("request");
+	}
+
 	/// A group that stays open for good (a JSON log in group 0) survives a park: the
 	/// returning reader gets the frames delivered before it from the warm cache, and the
 	/// re-splice asks the source only for the frames after them, across repeated parks.
@@ -5668,6 +5754,25 @@ mod tests {
 		let _pending = producer.consume().request_broadcast("room/chat");
 		let request = queued(&dynamic).await;
 		assert_eq!(request.path().as_str(), "room/chat");
+	}
+
+	#[tokio::test]
+	async fn scoped_cursor_selects_among_the_routes_it_can_see() {
+		let producer = origin(1).produce();
+		let scoped = |pattern: &str| {
+			producer
+				.scope("", &Patterns::from(pattern.parse::<Pattern>().unwrap()))
+				.unwrap()
+		};
+		let _chat = scoped("*/chat").dynamic("", Route::default().with_cost(1)).unwrap();
+		let _video = scoped("*/video").dynamic("", Route::default().with_cost(5)).unwrap();
+
+		let mut video = producer
+			.consume()
+			.scope("", &scopes(&["room/video"]))
+			.unwrap()
+			.announced();
+		assert_eq!(video.assert_next_active("").cost, Cost::new(5));
 	}
 
 	#[tokio::test]

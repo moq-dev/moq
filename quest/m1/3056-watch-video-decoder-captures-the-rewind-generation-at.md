@@ -31,6 +31,19 @@ The container signals a playhead generation, not a codec reset: native decode
 stops flushing on it. This quest is whether watch still calls `decoder.reset()`
 to drop in-flight WebCodecs chunks when that generation bumps.
 
+Reproduce before fixing; this is likely a false positive. Since
+[#3711](https://github.com/moq-dev/moq/pull/3711) timelines only move
+forward: a discontinuity continues from the live edge and the Rust consumer
+refuses a rewind (`TimestampRewind`), so every chunk queued before the bump is
+stamped below the new group, not against a distant new timeline. A
+`decoder.reset()` would also contradict the documented "not a decoder flush"
+contract of the discontinuity counter (`container::Consumer::discontinuity`,
+and `continuous` in `js/hang/src/container/consumer.ts`), and the same
+finding was ruled a false positive for native play in
+[#4374](https://github.com/moq-dev/moq/pull/4374). If a stale frame cannot be
+made to surface in a browser harness, close #3056 with that evidence and
+delete this quest instead of adding the reset.
+
 ## Closes
 
 - [#3056](https://github.com/moq-dev/moq/issues/3056) - close this issue when the quest finishes

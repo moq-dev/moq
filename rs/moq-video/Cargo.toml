@@ -21,7 +21,8 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 # on. `capture` and `v4l2` no longer cost anything on Linux (moq-v4l checks its
 # bindings in) and stay opt-in only until every distribution ships them. The features exist so a consumer can pick what it wants, not to hide code
 # from the default compile (`just check` lints default features only, so the
-# opt-in ones are compiled by nightly's `just rs features` and `just rs macos`).
+# opt-in ones are compiled by nightly's `just rs features` and platform.yml's
+# `just rs macos`).
 # OpenH264 remains the default software fallback, but is optional so a hardware-
 # only consumer does not compile its vendored C++. Workspace consumers opt out
 # at the root manifest (`default-features = false`) and pick per crate, so the

@@ -2,30 +2,21 @@
 
 ## Goal
 
-Any track can be DEFLATE-compressed per group from every language, not only
-the JSON modes. A native or C caller publishes and consumes a compressed track
-of opaque frames the same way a Rust or browser caller does, and the bytes on
-the wire are identical across all of them.
+Opaque tracks, compressed per group or not, are published and consumed the
+same way from every language, not only Rust and JS, and the bytes on the wire
+are identical across all of them.
 
 ## Plan
 
-`moq-flate` and `@moq/flate` today are a bare codec: `Encoder`/`Decoder` with
-`frame(bytes) -> bytes` and a shared window the caller scopes to a group by
-hand. Only `moq-json` composes them, so the bindings reach compression through
-`compression: bool` on the JSON configs and nothing else. A telemetry, caption,
-or sensor track of raw frames has no compressed form outside Rust and JS, and
-even there the caller re-derives the group discipline from the crate docs.
-
-The line adds a track wrapper to the crate first, then binds that wrapper. The
-codec objects stay as they are; the wrapper owns the per-group window so a
-caller cannot desynchronize it. The wire format does not change: a wrapper
-group is the raw sync-flushed stream the codec already emits, so a wrapped
-producer interoperates with a hand-composed consumer and with `moq-json`.
+`moq-flate` and `@moq/flate` absorb `moq-binary`'s snapshot and stream modes
+in [moq-binary folds into moq-flate](/quest/m1/flate-binary.md), so the crate
+already owns the per-group window a caller could otherwise desynchronize. The
+track wrapper this line once planned was dropped for that reason. What
+remains is reaching those tracks from the hand-written binding wrappers.
 
 No wire, catalog, or relay impact. Compression stays invisible to `moq-net`;
 a compressed track is announced, routed, and cached like any other.
 
 ## Required
 
-- [Track wrapper](/quest/m2/flate/track.md) - `moq-flate` and `@moq/flate` wrap a track so each group is one compression window without caller bookkeeping
-- [Bindings](/quest/m2/flate/bindings.md) - moq-ffi and libmoq publish and subscribe compressed tracks, mirrored through every wrapper
+- [Bindings](/quest/m2/flate/bindings.md) - the hand-written wrappers expose flate tracks
