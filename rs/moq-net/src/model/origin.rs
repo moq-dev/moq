@@ -739,7 +739,7 @@ struct RouteEntry {
 	advertised: bool,
 	/// Whether a peer the chain passes through has since withdrawn this prefix.
 	/// The route was derived from that peer's advertisement, so it serves nobody
-	/// until the peer announces again. See [`Producer::withdrawn`].
+	/// until the peer announces again. See [`Dynamic::withdrawn`].
 	stale: bool,
 	/// [`prefix_claim`] of [`Self::prefix`], built once at announce time.
 	///
@@ -1529,22 +1529,6 @@ impl Producer {
 		})
 	}
 
-	/// Hide every route at `prefix` whose hop chain passes through `peer`.
-	///
-	/// For a session whose peer explicitly withdrew `prefix`. Those routes were
-	/// derived from the advertisement the peer just withdrew; left visible, each
-	/// would be selected and re-advertised in turn until it retracts too, so the
-	/// cluster walks every stale path before it converges. They stay hidden until
-	/// the peer announces the prefix again, and the withdrawal is forgotten once
-	/// no route there passes through the peer.
-	pub(crate) fn withdrawn(&self, prefix: impl AsPath, peer: Hop) {
-		let prefix = self.root.join(prefix.as_path()).to_owned();
-		let mut shared = self.shared.lock();
-		shared.withdrawn.entry(prefix.clone()).or_default().insert(peer);
-		shared.restale(&prefix);
-		shared.prune_withdrawn(&prefix);
-	}
-
 	/// Returns a producer rooted at `root` and restricted to matching `patterns`.
 	///
 	/// `root` is relative to this producer's root, and `patterns` are relative to
@@ -1865,7 +1849,7 @@ impl AnnounceProducer {
 
 	/// Retract the route now: remove its table entries and reject anything still
 	/// waiting on its queue. Idempotent, and what dropping the advertisement does.
-	fn retract(&self) {
+	fn retract(&self, withdrawn: bool) {
 		let mut shared = self.shared.lock();
 		for (prefix, id) in &self.entries {
 			let Some(entry) = shared.routes.remove(prefix, *id) else {
@@ -1882,6 +1866,21 @@ impl AnnounceProducer {
 					}
 				}
 			}
+			// A peer remains reachable while any of its sessions advertises this
+			// prefix. Remove this session's route before testing the remaining
+			// claims, under the same lock, so overlapping withdrawals cannot
+			// invalidate a newer advertisement or miss the last withdrawal.
+			if withdrawn
+				&& let Some(&peer) = entry.hops.iter().last()
+				&& peer != Hop::UNKNOWN
+				&& !shared
+					.routes
+					.at(prefix)
+					.any(|other| other.live() && other.hops.iter().last() == Some(&peer))
+			{
+				shared.withdrawn.entry(prefix.clone()).or_default().insert(peer);
+				shared.restale(prefix);
+			}
 			shared.sync_route(&entry.prefix, &entry.claim);
 			shared.prune_withdrawn(&entry.prefix);
 		}
@@ -1890,7 +1889,7 @@ impl AnnounceProducer {
 
 impl Drop for AnnounceProducer {
 	fn drop(&mut self) {
-		self.retract();
+		self.retract(false);
 	}
 }
 
@@ -3066,7 +3065,7 @@ struct OriginState {
 	fronts: WeakCache<FrontKey, RemoteFront>,
 
 	// Peers that withdrew a prefix while routes there still passed through them,
-	// which are stale. See [`Producer::withdrawn`].
+	// which are stale. See [`Dynamic::withdrawn`].
 	withdrawn: HashMap<PathOwned, HashSet<Hop>>,
 
 	// Set when the origin's driver dropped: new requests fail with `Closed`
@@ -3337,6 +3336,12 @@ pub struct Dynamic {
 }
 
 impl Dynamic {
+	/// Retire an explicit peer withdrawal, hiding derived paths only once its
+	/// last live advertisement at the prefix is gone. A lost session just drops.
+	pub(crate) fn withdrawn(self) {
+		self.announcement.retract(true);
+	}
+
 	/// Re-price the route in place: replace its hops and cost.
 	///
 	/// Consumers observe another active update for the same prefix; sessions
@@ -6146,8 +6151,7 @@ mod tests {
 		announced.assert_next_wait();
 
 		// Relay 2 withdraws: the relayed copy goes with it rather than taking over.
-		peer.withdrawn("room", origin(2));
-		drop(first);
+		first.withdrawn();
 		announced.assert_next_ended("room");
 		announced.assert_next_wait();
 
@@ -6157,45 +6161,60 @@ mod tests {
 		assert!(producer.shared.lock().withdrawn.is_empty());
 
 		// Nothing passes through relay 2 once both routes are gone.
-		peer.withdrawn("room", origin(2));
-		drop(second);
+		second.withdrawn();
 		drop(relayed);
 		announced.assert_next_ended("room");
 		assert!(producer.shared.lock().withdrawn.is_empty());
 	}
 
-	/// A restart from the peer that withdrew, on another of its sessions, is that
-	/// peer announcing again.
+	/// Overlapping sessions are independent claims, regardless of announcement order.
 	#[tokio::test]
-	async fn withdrawn_peer_restart_revives_its_routes() {
-		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
-		let mut announced = producer.consume().announced();
-
-		let direct = || Route::default().with_hops(hops(&[9, 2])).with_via(origin(2));
-		let first = peer.dynamic("room", direct()).unwrap();
-		let second = peer.dynamic("room", direct()).unwrap();
-		announced.assert_next_active("room");
-		announced.assert_next_wait();
-
-		peer.withdrawn("room", origin(2));
-		drop(first);
-		announced.assert_next_ended("room");
-
-		second.update(direct().with_cost(3)).unwrap();
-		announced.assert_next_active("room");
-		assert!(producer.shared.lock().withdrawn.is_empty());
+	async fn old_session_withdrawal_keeps_newer_route() {
+		for restart in [false, true] {
+			let producer = origin(1).produce();
+			let peer = producer.clone().peer();
+			let mut announced = producer.consume().announced();
+			let route = Route::default().with_hops(hops(&[9, 2]));
+			let first = peer.dynamic("room", route.clone()).unwrap();
+			let second = peer.dynamic("room", route.clone()).unwrap();
+			announced.assert_next_active("room");
+			announced.assert_next_wait();
+			let remaining = if restart {
+				// The older table entry has the newest advertisement after a restart.
+				first.update(route).unwrap();
+				second.withdrawn();
+				first
+			} else {
+				first.withdrawn();
+				second
+			};
+			announced.assert_next_wait();
+			assert!(producer.shared.lock().withdrawn.is_empty());
+			remaining.withdrawn();
+			announced.assert_next_ended("room");
+			assert!(producer.shared.lock().withdrawn.is_empty());
+		}
 	}
 
 	#[tokio::test]
 	async fn withdrawn_route_no_longer_covers_requests() {
 		let producer = origin(1).produce();
 		let peer = producer.clone().peer();
-		let _route = peer.dynamic("room", Route::default().with_hops(hops(&[9, 2]))).unwrap();
+		let direct = peer.dynamic("room", Route::default().with_hops(hops(&[9, 2]))).unwrap();
+		let _relayed = peer
+			.dynamic("room", Route::default().with_hops(hops(&[9, 2, 3])))
+			.unwrap();
 		let path = Path::new("room/video");
-		let id = producer.shared.read().routes.covering(&path).next().unwrap().id;
+		let id = producer
+			.shared
+			.read()
+			.routes
+			.covering(&path)
+			.find(|entry| entry.hops.iter().last() == Some(&origin(3)))
+			.unwrap()
+			.id;
 		assert!(producer.shared.read().routes.covers(&path, id));
-		peer.withdrawn("room", origin(2));
+		direct.withdrawn();
 		assert!(!producer.shared.read().routes.covers(&path, id));
 	}
 
