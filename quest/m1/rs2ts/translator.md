@@ -19,6 +19,12 @@ Mapping decided in planning:
 
 - Structs become classes, enums discriminated unions, traits interfaces.
   `Option<T>` is `T | undefined`, `&[u8]` a `Uint8Array` view with no copy.
+  That collapses a nested `Option`, whose states the source relies on:
+  `model/track.rs::first_start` returns `Option<Option<Timestamp>>` to tell
+  "no successor" from an unstamped one, and `reach` behaves differently for
+  each. Recommendation: the subset lint rejects nested `Option`, and the source
+  names those states with an enum; a tagged TypeScript form for the inner
+  `Option` is the alternative. Either way nested states never merge silently.
 - `Drop` becomes an explicit `drop()` at each MIR drop point, exposed as
   `[Symbol.dispose]`; `Arc`/`Rc` of a type with drop glue become an explicit
   refcount. JS is single-threaded, so `Mutex` and atomics become plain
@@ -37,7 +43,7 @@ Guidance:
 - Readability pass: inline single-use temporaries and keep source branch
   order, so a reviewer can read a generated diff.
 - Add a lint on moq-net (clippy or dylint) for the accepted subset: no
-  `unsafe`, no `async` outside the `async` feature, no `u64` bit operations,
+  `unsafe`, no `async` outside the `async` feature, no nested `Option`, no `u64` bit operations,
   no trait impls on foreign or primitive types, no `&mut` out-params to
   scalar or `Option` locals. Translator gaps become compile errors, not
   runtime `todo()`s. Document the subset in `rs/rs2ts/README.md`.

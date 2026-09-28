@@ -8,8 +8,8 @@ Today `BUILD_RUST_LIB` assumes `target/<debug|release>/libmoq.a`, so any other
 layout links a stale library or fails to find one.
 
 ## Plan
-Parked in m3 behind [Generated C bindings](/quest/m1/c/README.md): the hand-written libmoq is being replaced by C generated from moq-ffi, which carries this for free. Do it only if the hand-written crate outlives that line.
 
+Parked in m3 behind [Generated C bindings](/quest/m1/c/README.md): the hand-written libmoq is being replaced by C generated from moq-ffi, which carries this for free. Do it only if the hand-written crate outlives that line.
 
 - `cmake/cargo-build.cmake` already parses cargo's JSON messages to find
   `moq.h` in its hashed `OUT_DIR`. Read the libmoq `compiler-artifact`
@@ -23,6 +23,10 @@ Parked in m3 behind [Generated C bindings](/quest/m1/c/README.md): the hand-writ
   runs with `CARGO_TARGET_DIR` outside `target/`, so a hardcoded path fails
   the build. Update `rs/libmoq/README.md` and `doc/lib/c` if they describe
   the path.
+
+## Required
+
+- The maintainer keeps the hand-written libmoq instead of retiring it in the Generated C bindings line
 
 ## Related
 
