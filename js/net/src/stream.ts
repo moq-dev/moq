@@ -446,13 +446,14 @@ export class Cursor {
 
 	#ensure(size: number) {
 		const need = this.#offset + size;
+		// Checked here too, and on the whole decode like the fill, since bytes that are already
+		// buffered never reach the fill.
+		if (need > MAX_READ_SIZE) throw new Error(`read size ${need} exceeds max size ${MAX_READ_SIZE}`);
 		if (need > this.#buffer.byteLength) throw new Short(need);
 	}
 
 	/** Read `size` bytes, as a view onto the buffer rather than a copy. */
 	read(size: number): Uint8Array {
-		// Checked here too, since a value that is already buffered never reaches the fill.
-		if (size > MAX_READ_SIZE) throw new Error(`read size ${size} exceeds max size ${MAX_READ_SIZE}`);
 		this.#ensure(size);
 		const start = this.#offset;
 		this.#offset += size;
