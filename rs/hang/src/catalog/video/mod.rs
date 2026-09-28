@@ -106,6 +106,20 @@ impl Video {
 		self.renditions.remove(name)
 	}
 
+	/// Iterate the renditions best first: largest picture, then highest bitrate.
+	///
+	/// A consumer that carries one rendition takes the first it supports, so the
+	/// picture doesn't depend on how the tracks are named. Unknown dimensions or
+	/// bitrate rank below known ones, and exact ties keep name order.
+	pub fn ranked(&self) -> impl Iterator<Item = (&String, &VideoConfig)> {
+		let mut ranked: Vec<_> = self.renditions.iter().collect();
+		ranked.sort_by_key(|(_, config)| {
+			let area = u64::from(config.coded_width.unwrap_or(0)) * u64::from(config.coded_height.unwrap_or(0));
+			std::cmp::Reverse((area, config.bitrate))
+		});
+		ranked.into_iter()
+	}
+
 	/// Normalize and replace the properties shared by every video rendition.
 	pub fn set_properties(&mut self, properties: VideoProperties) -> crate::Result<()> {
 		let properties = properties.normalized()?;
@@ -281,6 +295,35 @@ mod test {
 	use crate::catalog::{Container, H264};
 
 	use super::*;
+
+	#[test]
+	fn ranked_orders_by_picture_then_bitrate() {
+		fn rendition(size: Option<(u32, u32)>, bitrate: Option<u64>) -> VideoConfig {
+			let mut config = VideoConfig::new(VideoCodec::VP8);
+			config.coded_width = size.map(|(w, _)| w);
+			config.coded_height = size.map(|(_, h)| h);
+			config.bitrate = bitrate;
+			config
+		}
+
+		let mut video = Video::default();
+		// Names sort worst first, so name order alone would pick the wrong one.
+		video.insert("a", rendition(None, Some(9_000_000))).unwrap();
+		video.insert("b", rendition(Some((640, 360)), Some(1_000_000))).unwrap();
+		video.insert("c", rendition(Some((1280, 720)), None)).unwrap();
+		video
+			.insert("d", rendition(Some((1280, 720)), Some(3_000_000)))
+			.unwrap();
+		video
+			.insert("e", rendition(Some((1280, 720)), Some(3_000_000)))
+			.unwrap();
+		video
+			.insert("f", rendition(Some((1920, 1080)), Some(6_000_000)))
+			.unwrap();
+
+		let names: Vec<_> = video.ranked().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, ["f", "d", "e", "c", "b", "a"]);
+	}
 
 	#[test]
 	fn label_round_trips() {

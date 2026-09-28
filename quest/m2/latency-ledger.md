@@ -29,9 +29,9 @@ trade to get it running. This quest promotes them.
 
 ## Required
 
-- [Audio quality harness](/quest/m1/audio-quality-harness/README.md) - defines the stage schema and lands the probes this promotes
+- [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - defines the stage schema and lands the probes this promotes
 
 ## Related
 
-- [Audio quality harness](/quest/m1/audio-quality-harness/README.md) - defines the stages and is the first consumer
+- [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - defines the stages and is the first consumer
 - [QoS](/quest/m1/qos/README.md) - relay-side health, the same idea from the other end

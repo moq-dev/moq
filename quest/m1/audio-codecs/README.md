@@ -43,6 +43,7 @@ ready now.
 
 ## Quests
 
+- [Named codecs](/quest/m1/audio-codecs/named-codecs.md) - `decode::Kind::Named` keeps the published codec names and picks backends internally; must land before the line merges
 - [HE-AAC refusal](/quest/m1/audio-codecs/he-aac-refusal.md) - implicit-SBR HE-AAC over TS is refused instead of half-decoded as the LC core
 - [AAC PCE](/quest/m1/audio-codecs/aac-pce.md) - a channel_config of 0 parses the program config element instead of guessing stereo
 - [Layout](/quest/m1/audio-codecs/layout.md) - the settled `Layout` carries up to 7.1 through decode, resample, playback, and the FFI

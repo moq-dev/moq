@@ -715,20 +715,24 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 
 	let sample_entry = match &config.codec {
 		AudioCodec::Opus => {
-			let pre_skip = match &config.description {
+			let head = match &config.description {
 				Some(description) => {
-					let mut description = description.as_ref();
-					crate::codec::opus::Config::parse(&mut description)?.pre_skip
+					let head = crate::codec::opus::Config::parse(&mut description.as_ref())?;
+					// dOps shares OpusHead's family 0 layout; a mapping table would need writing too.
+					if head.mapping_family != 0 {
+						return Err(crate::codec::opus::Error::UnsupportedMappingFamily(head.mapping_family).into());
+					}
+					head
 				}
-				None => 0,
+				None => crate::codec::opus::Config::new(config.sample_rate, config.channel_count),
 			};
 			mp4_atom::Codec::from(mp4_atom::Opus {
 				audio,
 				dops: mp4_atom::Dops {
 					output_channel_count: config.channel_count as u8,
-					pre_skip,
-					input_sample_rate: config.sample_rate,
-					output_gain: 0,
+					pre_skip: head.pre_skip,
+					input_sample_rate: head.sample_rate,
+					output_gain: head.output_gain,
 				},
 				btrt: None,
 			})

@@ -119,7 +119,7 @@ See [HTTP endpoints](/bin/relay/http).
 # Exactly one of these:
 url = "http://127.0.0.1:4440/"       # An auth server asked once per session event (`moq auth serve`,
                                      # or your own). https:// presents connect.tls; unix:// is a socket.
-# public = "anon/**"                 # Or a static anonymous grant, publish and subscribe alike.
+# public = "anon/**"                 # Or a static anonymous grant rooted at /, publish and subscribe alike.
 # public_subscribe = ["anon/**", "demo/**"]   # Or split them; patterns, `foo/**` for a subtree.
 # public_publish = ["anon/**"]
 ```

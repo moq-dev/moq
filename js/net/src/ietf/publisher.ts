@@ -3,7 +3,7 @@ import type * as broadcast from "../broadcast.ts";
 import { controlTimeout, error, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { type Route, routesEqual } from "../hop.ts";
-import { hiddenBelow, hooks } from "../internal.ts";
+import { hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
@@ -513,7 +513,7 @@ export class Publisher {
 			});
 
 			try {
-				await hooks.guardGroup(group, header.encode(stream, this.#session.version));
+				await hooks.guardGroup(group, () => header.encode(stream, this.#session.version));
 				// The first written object goes on the wire as its absolute id, so a trimmed
 				// head shows the true numbering rather than a silently renumbered group.
 				let first = true;
@@ -542,8 +542,7 @@ export class Publisher {
 						const obj = new Frame({ payload: read.frame.payload, timestamp: read.frame.timestamp });
 						const delta = first ? read.sequence : 0;
 						first = false;
-						await hooks.guardGroup(
-							group,
+						await hooks.guardGroup(group, () =>
 							obj.encode(stream, header.flags, timescale, this.#session.version, delta),
 						);
 					} finally {
@@ -790,12 +789,7 @@ export class Publisher {
 					break;
 				}
 
-				const updated = new Map<Path.Valid, Advertised>();
-				for (const [covered, snap] of advertised) {
-					const suffix = Path.stripPrefix(prefix, covered);
-					if (suffix === null || !carries(covered)) continue;
-					updated.set(suffix, snap);
-				}
+				const updated = presented(prefix, advertised, carries);
 
 				// A namespace that is gone, or that a republish replaced, takes its refusal with
 				// it: the peer refused a broadcast, not a path forever, so a different one at

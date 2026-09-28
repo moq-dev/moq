@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/moq-dev/moq/compare/moq-transcode-v0.1.6...moq-transcode-v0.1.7) - 2026-09-27
+
+### Fixed
+
+- *(egress)* single-rendition egress serves the best rendition ([#4293](https://github.com/moq-dev/moq/pull/4293))
+
+## [0.1.6](https://github.com/moq-dev/moq/compare/moq-transcode-v0.1.5...moq-transcode-v0.1.6) - 2026-09-26
+
+### Added
+
+- end a broadcast with close() in every language ([#4031](https://github.com/moq-dev/moq/pull/4031))
+
 ## [0.1.5](https://github.com/moq-dev/moq/compare/moq-transcode-v0.1.4...moq-transcode-v0.1.5) - 2026-09-26
 
 ### Other
