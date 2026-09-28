@@ -10,7 +10,7 @@ a ratio of two totals.
 
 ## Plan
 
-Branch from dev. The loop in `Worker::block_on`
+Branch from main. The loop in `Worker::block_on`
 (rs/moq-uring/src/worker.rs:164-187) runs one task pass, then `pump`
 (`submit()` at worker.rs:250, then reap and dispatch), then `maybe_park`,
 whose enter (`submit_and_wait(1)` or a timed `enter(to_submit, 1,

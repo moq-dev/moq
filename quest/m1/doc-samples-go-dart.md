@@ -20,11 +20,16 @@ knows neither language.
   imports are compile errors. Handle what the samples actually use; prefer
   adjusting a sample so it reads naturally and still compiles over growing
   the extractor.
-- Wire each into its language's `check` recipe (`go/justfile`,
-  `dart/justfile`) the way `py/justfile` and `rs/justfile` call it, and add
-  `doc/lib/samples.sh` and the doc page to the paths that trigger those
-  checks in CI.
+- Wire each into its language's check script, `sh/go/check.sh` and
+  `sh/dart/check.sh` on the tooling line, the way `sh/kt/check.sh` and
+  `sh/py/samples.sh` call `samples.sh`. Add `doc/lib/go/`, `doc/lib/dart/`,
+  and `doc/lib/samples.sh` to the `go` and `dart` patterns of the impact
+  map in `sh/dispatch.sh`, as the `py`, `kt`, and `swift` ones already have.
 - Prove it by renaming one wrapper method locally and watching each check
   fail on the doc sample.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [Tooling](/quest/m1/tooling/README.md) - the `sh/<module>/` check scripts and the impact map this extends

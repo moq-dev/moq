@@ -27,7 +27,9 @@ prefix. Keyframe requests stay out.
   a stalled share
   above a threshold steps the target down like a bandwidth drop, recovery
   follows the existing attack curve, and the estimate stays the ceiling.
-  Audio follows the same signal with its narrower ladder.
+  Audio does not follow its grant today (`Options::bandwidth` in
+  `rs/moq-audio/src/encode/producer.rs` reserves only), so it follows this
+  signal only once the grant quest lands; until then the loop drives video.
 - `moq import --feedback <prefix>` and `moq transcode --feedback <prefix>`
   wire it; each rung of the ladder reads its own broadcast's track.
 - Test with the CLI publishing to a relay and two `moq play --stats` viewers
@@ -46,5 +48,5 @@ prefix. Keyframe requests stay out.
 
 - [Ladder](/quest/m1/ladder/README.md) - the transcode ladder that adapts to
   its uplink today
-- [Keyframe trigger](/quest/m1/keyframe-trigger.md) - the keyframe request
-  this loop does not send
+- [Audio follows the grant](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) -
+  the audio rate follow this signal would feed

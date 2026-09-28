@@ -24,8 +24,3 @@ capture quests in this questline start only once this is settled.
   `moq-video`, so replace them with the required platform-owned implementation
   quests if the answer is option 1. Update [mobile completion](/quest/m2/mobile-completion.md)
   to require those replacements before abandoning the Rust capture quests.
-
-## Related
-
-- [Decoded frame ownership](/quest/m1/decoded-frames.md) - established shared frame lifetime; reuse it for any later native mobile views
-- [Decoded frame ownership](/quest/m1/decoded-frames.md) - independently supplies portable pixels from Rust decoding

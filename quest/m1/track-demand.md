@@ -20,7 +20,3 @@ line, so moq-net breaks once. Its PR retargets to `dev`.
 
 Public API: breaking in moq-net and the layer crates, and in `@moq/net`. Wire:
 none.
-
-## Required
-
-- [Release](/quest/m0/release.md) - the break follows the release

@@ -108,6 +108,8 @@ existing lite-06 ALPN.
   grant does not, and REQUEST_UPDATE refreshes it
 - [moq-transport](/quest/m1/auth/moq-transport.md) - the same exchange as a
   setup-option extension on draft-17+, specified in a new draft
+- [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
+  reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi and libmoq
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave

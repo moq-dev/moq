@@ -3,7 +3,7 @@
 ## Goal
 
 Reduce relay CPU per session, raise the per-worker throughput ceiling, and
-hold tail latency on the dev thread-per-core stack by eliminating measured
+hold tail latency on the thread-per-core stack by eliminating measured
 hot-path costs: redundant copies, locks, atomics, clock reads, allocations,
 and syscalls. Not io_uring specific: anything on the relay's hot path qualifies,
 including the shared moq-net model layer and kio.
@@ -13,6 +13,10 @@ plus the targeted micro-benches it names). A measured no-win is a valid
 outcome that abandons the quest.
 
 ## Plan
+
+Quests branch from main unless they say otherwise;
+[Run to quiescence](/quest/m1/perf/uring-quiescence.md) needs dev, where
+`kio`'s `Tasks::poll` changed (#4156).
 
 Planning quests can settle their contracts independently. Facts from the 2026-09
 hot-path survey, so quests don't re-litigate them:

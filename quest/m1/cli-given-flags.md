@@ -2,8 +2,7 @@
 
 ## Goal
 
-`moq fetch`, `moq ls` (on the [CLI inspect](/quest/m1/cli-inspect/README.md)
-line), and the local verbs behind `Invocation::reject` refuse any listener
+`moq fetch`, `moq ls` (#4032, on `dev`), and the local verbs behind `Invocation::reject` refuse any listener
 flag they would never use, as they already do for `--listen` and the cluster
 flags. Today `MoqSide::given()` in `rs/moq-cli/src/args.rs` lists only some
 of them, so `--listen-version`, `--listen-tls-*`, `--listen-preferred-*`, and

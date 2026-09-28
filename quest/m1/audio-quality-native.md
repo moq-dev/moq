@@ -40,7 +40,11 @@ budget. Only then compare end-to-end totals, with the backend-dependent stages
 isolated: this lane deliberately accepts real device callback noise, so a
 difference in totals alone proves nothing about the estimator.
 
+Standalone in m1 rather than a child of the m0 [Audio quality
+harness](/quest/m0/audio-quality-harness/README.md) line (decided in the
+2026-09-28 quest audit): nothing in m0 waits on it. The native jitter target
+it grades is done on the jitter target line.
+
 ## Required
 
 - [Browser](/quest/m0/audio-quality-harness/browser.md) - defines the metric schema, the budget file, and the extracted shaper
-- [Native jitter target](/quest/m0/audio-jitter-target/native.md) - the estimator this lane grades and compares against the browser; without it there is no target series and the budgets would be set against a playout path that holds nothing

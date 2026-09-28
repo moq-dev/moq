@@ -27,7 +27,3 @@ UDP sink is out of scope; delivery stays with an external tool.
   it in the existing TS test recipe against a CBR fixture.
 - `doc/bin/cli.md`: say that export pads to `mpegts.muxRate` on a constant-rate
   schedule and what latency that adds.
-
-## Closes
-
-- [#3925](https://github.com/moq-dev/moq/issues/3925) - close this issue when the quest finishes

@@ -49,6 +49,10 @@ One outcome per candidate:
 
 Public API: none. Wire: none.
 
+## Required
+
+- The maintainer approves offering the fixes upstream, per post, issue, or PR
+
 ## Related
 
 - [Upstream the fork](/quest/m1/quic/upstream.md) - the same practice for the noq fork

@@ -33,11 +33,6 @@ a verdict on whether a long GOP plus a keyframe request is worth designing.
 A verdict of "2 seconds is fine" is a valid, expected outcome and completes
 this quest.
 
-## Related
-
-- [Keyframe trigger](/quest/m1/keyframe-trigger.md) - the publisher-side half a
-  keyframe request would drive, useful on its own
-
 ## Closes
 
 - [#2284](https://github.com/moq-dev/moq/issues/2284) - close this issue when the quest finishes

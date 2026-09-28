@@ -15,8 +15,9 @@ on stream errors. WebTransport sessions keep the mapping they need.
   `web-transport-iroh` and `web-transport-quinn` (moq-dev/web-transport) do
   the same. A raw peer's code 5 reads as `None` or another value, and ours
   reaches it as a large HTTP/3 code.
-- [Close codes](/quest/m1/close-codes.md) fixed the same mix-up for
-  `ApplicationClosed` (noq#11, #4262). Let each stream know whether its
+- [Close codes](/quest/m1/close-codes.md) fixes the same mix-up for
+  `ApplicationClosed` (noq#11 is released; #4262 is still open on `dev`, so
+  this follows it there unless trait 0.5 reaches main first). Let each stream know whether its
   session is raw and skip the mapping there, in all three adapters, with a
   round-trip test per adapter against a plain QUIC peer.
 - Release the fixed crates and bump the pins here in the same quest; published

@@ -26,16 +26,19 @@ skipping inside the Nix shell.
   tests (Android, D3D11, PipeWire). Inside that selection a missing GPU fails
   the test instead of returning early. Keep the no-driver tests
   (`missing_driver_errors_instead_of_panicking`) outside it.
-- `just rs nvidia`: symlink only those three libraries (by soname) from
-  `/usr/lib/x86_64-linux-gnu` into a private directory, put that on
-  `LD_LIBRARY_PATH`, and run that selection. Fail when a library is missing
-  instead of skipping. `just rs vulkan-cuda` puts the whole host directory on
-  the path, which lets host libraries shadow the Nix ones; fold it into this
-  recipe, since its `vulkan_cuda_` tests are the same kind. Those also need
+- `just rs nvidia`, a one-line recipe over `sh/rs/nvidia.sh` in the tooling
+  line's `sh/<module>/` layout: symlink only those three libraries (by
+  soname) from `/usr/lib/x86_64-linux-gnu` into a private directory, put that
+  on `LD_LIBRARY_PATH`, and run that selection. Fail when a library is missing
+  instead of skipping. `just rs vulkan-cuda` (`sh/rs/vulkan-cuda.sh`) puts the
+  whole host driver directory on the path, which lets host libraries shadow
+  the Nix ones; fold it into this script and recipe, since its `vulkan_cuda_`
+  tests are the same kind. Those also need
   the Vulkan loader to find the host NVIDIA ICD: point it at the ICD manifest
   and expose the driver libraries it names, or keep them in their own recipe.
-- Nightly: a job in `.github/workflows/nightly.yml` runs `just rs nvidia` on
-  the self-hosted runner. A self-hosted runner on a public repository must
+- Nightly: a job in `.github/workflows/nightly.yml` runs `nix develop
+  --command just rs nvidia` on the self-hosted runner, a recipe and not a
+  script path, like every other workflow step. A self-hosted runner on a public repository must
   never run untrusted code: only `schedule` and `workflow_dispatch`, with the
   job gated to `refs/heads/main`, never `pull_request`; a dedicated label only
   this job selects; read-only `permissions`. Read GitHub's self-hosted runner
@@ -49,6 +52,7 @@ Public API: none. Wire: none.
 
 ## Required
 
+- [Tooling](/quest/m1/tooling/README.md) - the `sh/` script layout and recipe-only workflows this follows
 - A self-hosted runner is registered for moq-dev/moq on the maintainer's host, with the NVIDIA driver
 
 ## Related
