@@ -76,6 +76,8 @@ service setup, Windows support, or new release targets.
 
 ## Related
 
+- [Tooling](/quest/m1/tooling/README.md) - its shared binary release
+  workflow builds the artifacts this installer downloads
 - [`moq relay`](/quest/m1/moq-relay-subcommand.md) - relay functionality joins
   the same executable independently of its installation method
 - [Install URL](/quest/m1/moq-install-url.md) - exposes this installer through
