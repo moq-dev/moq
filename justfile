@@ -544,6 +544,7 @@ _check $BASE $TEST:
         just rs media-features
         just --justfile bench/justfile check
         quest check
+        just test drill-sensitivity --apply-only
         # Not covered by the line above: moq-wasm only exists on the wasm32 target.
         just rs wasm
         just py check
@@ -569,6 +570,12 @@ _check $BASE $TEST:
         # either a quest or the flake-pinned validator changes.
         if echo "$files" | grep -qE '^(quest/|flake\.lock$)'; then
             quest check
+        fi
+        # The drill mutations patch Rust source, so a Rust change can move the
+        # code they target. Only nightly runs the drills against them; this
+        # catches a stale patch in the PR that moved its code.
+        if echo "$files" | grep -qE '^(rs/|test/drill/)'; then
+            just test drill-sensitivity --apply-only
         fi
         just py check "$files"
         just kt check "$files"
