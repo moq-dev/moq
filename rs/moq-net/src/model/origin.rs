@@ -1719,17 +1719,7 @@ impl Announcing {
 
 		let mut entries = Vec::with_capacity(self.prefixes.len());
 		for (prefix, claim) in &self.prefixes {
-			// The peer that withdrew the prefix, the chain's last hop, announces it
-			// again: routes through it are live once more.
-			if let Some(sender) = route.hops.iter().last()
-				&& shared
-					.withdrawn
-					.get_mut(prefix)
-					.is_some_and(|peers| peers.remove(sender))
-			{
-				shared.restale(prefix);
-				shared.prune_withdrawn(prefix);
-			}
+			shared.reannounced(prefix, &route.hops);
 			let id = shared.next_route;
 			shared.next_route += 1;
 			let stale = shared.withdrawn_through(prefix, &route.hops);
@@ -1836,6 +1826,7 @@ impl AnnounceProducer {
 			return Err(Error::Closed);
 		}
 		for (prefix, id) in &self.entries {
+			shared.reannounced(prefix, &route.hops);
 			let stale = shared.withdrawn_through(prefix, &route.hops);
 			// Each entry keeps its advertised prefix; only the metadata moves.
 			let Some(entry) = shared.routes.entry_mut(prefix, *id) else {
@@ -2334,7 +2325,7 @@ async fn run_front(task: FrontTask) {
 							table
 								.routes
 								.covering(&path.as_path())
-								.find(|entry| entry.id == route)
+								.find(|entry| entry.id == route && entry.live())
 								.map(|entry| {
 									(
 										Candidate {
@@ -2935,9 +2926,9 @@ impl RouteTable {
 		above.into_iter().chain(at).flat_map(|node| node.entries.iter())
 	}
 
-	/// Whether the route `id` still covers `path`.
+	/// Whether the live route `id` still covers `path`.
 	fn covers(&self, path: &Path, id: u64) -> bool {
-		self.covering(path).any(|entry| entry.id == id)
+		self.covering(path).any(|entry| entry.id == id && entry.live())
 	}
 
 	/// The routes announced exactly at `prefix`.
@@ -3094,6 +3085,16 @@ impl OriginState {
 			.is_some_and(|peers| hops.iter().any(|hop| peers.contains(hop)))
 	}
 
+	/// A new or restarted advertisement from the withdrawing peer revives its paths.
+	fn reannounced(&mut self, prefix: &PathOwned, hops: &Hops) {
+		if let Some(sender) = hops.iter().last()
+			&& self.withdrawn.get_mut(prefix).is_some_and(|peers| peers.remove(sender))
+		{
+			self.restale(prefix);
+			self.prune_withdrawn(prefix);
+		}
+	}
+
 	/// Recompute which entries at `prefix` are stale after its withdrawals changed.
 	fn restale(&mut self, prefix: &Path) {
 		let peers = self.withdrawn.get(prefix);
@@ -3118,8 +3119,21 @@ impl OriginState {
 		let Some(peers) = self.withdrawn.get_mut(prefix) else {
 			return;
 		};
-		let routes = &self.routes;
-		peers.retain(|peer| routes.at(prefix).any(|entry| entry.hops.contains(peer)));
+		if peers.len() <= 1 {
+			// The common case is already linear and needs no temporary allocation.
+			peers.retain(|peer| self.routes.at(prefix).any(|entry| entry.hops.contains(peer)));
+		} else {
+			let mut unreferenced = peers.clone();
+			for entry in self.routes.at(prefix) {
+				if unreferenced.is_empty() {
+					break;
+				}
+				for hop in entry.hops.iter() {
+					unreferenced.remove(hop);
+				}
+			}
+			peers.retain(|peer| !unreferenced.contains(peer));
+		}
 		if peers.is_empty() {
 			self.withdrawn.remove(prefix);
 		}
@@ -6146,6 +6160,36 @@ mod tests {
 		drop(relayed);
 		announced.assert_next_ended("room");
 		assert!(producer.shared.lock().withdrawn.is_empty());
+	}
+
+	#[tokio::test]
+	async fn withdrawn_peer_restart_revives_attached_route() {
+		let producer = origin(1).produce();
+		let peer = producer.clone().peer();
+		let mut announced = producer.consume().announced();
+		let route = Route::default().with_hops(hops(&[9, 2])).with_via(origin(2));
+		let first = peer.dynamic("room", route.clone()).unwrap();
+		let second = peer.dynamic("room", route.clone()).unwrap();
+		announced.assert_next_active("room");
+
+		peer.withdrawn("room", origin(2));
+		drop(first);
+		announced.assert_next_ended("room");
+		second.update(route).unwrap();
+		announced.assert_next_active("room");
+		assert!(producer.shared.lock().withdrawn.is_empty());
+	}
+
+	#[tokio::test]
+	async fn withdrawn_route_no_longer_covers_requests() {
+		let producer = origin(1).produce();
+		let peer = producer.clone().peer();
+		let _route = peer.dynamic("room", Route::default().with_hops(hops(&[9, 2]))).unwrap();
+		let path = Path::new("room/video");
+		let id = producer.shared.read().routes.covering(&path).next().unwrap().id;
+		assert!(producer.shared.read().routes.covers(&path, id));
+		peer.withdrawn("room", origin(2));
+		assert!(!producer.shared.read().routes.covers(&path, id));
 	}
 
 	/// A change of source alone is delivered: the same chain and cost arriving
