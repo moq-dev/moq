@@ -125,7 +125,7 @@ jobs:
       # cost of surfacing a day late rather than in review.
       - name: OBS
         if: ${{ !cancelled() }}
-        run: nix develop --command just obs ci
+        run: nix develop .#obs --command just obs ci
 
       - name: libmoq C fixtures
         if: ${{ !cancelled() }}
