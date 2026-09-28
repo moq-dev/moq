@@ -114,13 +114,11 @@ make MoQ's common case.
 ## Required
 
 - [Local origin](/quest/m0/local-origin.md) - workers stop reading hop chains before they go
-- [Wildcard](/quest/m0/wildcard/README.md) - the specificity, pool spread, and reply identity this selection builds on
+- [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity this selection builds on
 - moq.pro's routing simulator reports ([quest](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/routing-simulator.md))
 
 ## Related
 
 - [Skip unchanged announce updates](/quest/m0/announce-update-dedupe.md) - cuts duplicate updates on today's routing
-- [Local origin](/quest/m0/local-origin.md) - workers stop reading hop chains before they go
-- [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity this selection builds on
 - [Redundant ingest](/quest/m2/redundant-ingest.md) - builds on the `--hop` failover this must keep or replace
 - [Routing cost domains](/quest/m2/routing-cost-domains.md) - cost across the cluster boundaries this keeps path vector

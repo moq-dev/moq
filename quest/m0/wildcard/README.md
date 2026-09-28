@@ -52,8 +52,8 @@ production cost: zero for a live publish, something large for a standby that
 would have to start working (a cold transcoder)"
 (`drafts/draft-lcurley-moq-lite.md`). `moq_auth::Claims.publish` and
 `origin::Producer` gain versioned patterns through
-[Path patterns](/quest/m1/path-patterns.md), so advertisements reuse the
-same matcher. `Cost { warm, cold }`
+[Path patterns](/quest/m1/path-patterns.md), so tokens and filters reuse the
+same matcher; advertisements stay prefixes. `Cost { warm, cold }`
 (`rs/moq-net/src/model/origin.rs:426`) is the route cost since
 [#2925](https://github.com/moq-dev/moq/pull/2925).
 
@@ -140,9 +140,12 @@ field.
   refused. A prefix wider than the grant is accepted, but it only routes
   requests for paths the grant covers. Fleet-wide services use the cluster
   identity; a customer service serves only what its own v1 grant contains.
-- **Wildcards are visible to subscribers.** A subscriber sees every pattern
-  matching under its scope, rebased by the matcher's exact set-valued operation,
-  and duplicates combine into one. That is the point: it tells a client it may subscribe to
+  Until [Advertise-only authorization](/quest/m1/processor/advertise-auth.md)
+  lands, the publish scope stands in for advertising; a credential with its own
+  advertise scope is checked against that instead.
+- **Claims are visible to subscribers.** A subscriber sees every advertised
+  prefix under its scope, filtered locally like any other announcement. That
+  is the point: it tells a client it may subscribe to
   matching paths, and its withdrawal tells the client the capability is gone.
   This is what makes a lazily-produced rendition discoverable without the
   composer waiting for an announcement that only demand would produce. The
