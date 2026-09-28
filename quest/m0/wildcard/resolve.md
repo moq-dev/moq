@@ -40,19 +40,6 @@ it. A concrete announcement is maximally specific and shadows every wildcard
 regardless of cost. A terminal refusal from that concrete claim never falls
 through to a wildcard; it shadows until the claim is withdrawn.
 
-Specificity must survive relay hops. Nothing on the wire spells a
-pattern, so past the first relay `**/transcode.pro` and `**` are both the
-root prefix, and `Announcing::announce` (`rs/moq-net/src/model/origin.rs`)
-attaches only the receiving cluster session's scope. A relay two hops from
-the suffix worker therefore cannot tell its pool from the archive's
-catch-all, and may send a transcode request to the archive (Codex on
-[#4213](https://github.com/moq-dev/moq/pull/4213)). Carry each route's
-specificity across cluster hops, or narrow the promise to what one relay can
-see; decide with the maintainer before building. Recommendation: carry a
-specificity rank beside the route cost rather than the pattern itself, which
-keeps patterns off the wire per #3770. Either way it is a wire change to the
-lite draft.
-
 Both lookup kinds route through this table: subscribe via `recv_subscribe`'s
 existing fallback, and FETCH the same way, since the archive's whole use case
 is serving stored groups to FETCH for paths nothing announces. A FETCH selects
@@ -113,8 +100,6 @@ Tests, at the process level with real sessions rather than an in-process stand-i
 - A path matched by both a suffix pattern and the catch-all resolves against
   the suffix pattern's pool only, and a terminal refusal from it never reaches
   the catch-all advertiser.
-- The same holds when the suffix worker and the catch-all archive connect to
-  different relays and the request arrives at a third.
 - A refused subscribe resets rather than hanging, and leaves no state behind.
 - A wildcard retracted mid-serve does not disturb the subscription already
   running.
