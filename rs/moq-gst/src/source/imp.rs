@@ -81,6 +81,12 @@ impl TrackKind {
 	}
 }
 
+tokio::task_local! {
+	/// The element whose session task or pump is running, so [`SessionController::stop`] can tell
+	/// it was reached from that element's own streaming context.
+	static STREAMING: glib::WeakRef<super::MoqSrc>;
+}
+
 /// The session task drives everything: it connects, follows the catalog, and
 /// runs one [`Pump`] per active rendition. The element just starts and
 /// stops it. No control-plane channel is needed because pumps push to their pads
@@ -89,33 +95,114 @@ impl TrackKind {
 struct SessionController {
 	shutdown: watch::Sender<bool>,
 	join: tokio::task::JoinHandle<()>,
+	/// The one-shot connection, held so [`stop`](Self::stop) can end it and wait for it to close.
+	connection: moq_tokio::Connection,
 }
 
 impl SessionController {
-	fn start(settings: ResolvedSettings, element: glib::WeakRef<super::MoqSrc>) -> Self {
-		let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-		let join = RUNTIME.spawn(async move {
-			if let Err(err) = run_session(settings, element.clone(), &mut shutdown_rx).await
+	fn start(settings: ResolvedSettings, element: glib::WeakRef<super::MoqSrc>) -> Result<Self> {
+		let (connection, origin) = connect(&settings)?;
+		let task_connection = connection.clone();
+		let task_element = element.clone();
+		Ok(Self::spawn(connection, element, move |mut shutdown| async move {
+			run_session(
+				&task_connection,
+				origin,
+				settings.broadcast,
+				task_element,
+				&mut shutdown,
+			)
+			.await
+		}))
+	}
+
+	/// Run `session` as this element's session task, reporting its error on the bus.
+	fn spawn<F, Fut>(connection: moq_tokio::Connection, element: glib::WeakRef<super::MoqSrc>, session: F) -> Self
+	where
+		F: FnOnce(watch::Receiver<bool>) -> Fut,
+		Fut: Future<Output = Result<()>> + Send + 'static,
+	{
+		let (shutdown_tx, shutdown_rx) = watch::channel(false);
+		let task = session(shutdown_rx.clone());
+		let task_connection = connection.clone();
+		let join = RUNTIME.spawn(STREAMING.scope(element.clone(), async move {
+			let result = task.await;
+			// A broadcast that ends on its own releases the transport now rather than at stop.
+			task_connection.abort(moq_net::Error::Cancel);
+			// Stopping cuts the session short, which is not a failure.
+			if let Err(err) = result
+				&& !*shutdown_rx.borrow()
 				&& let Some(obj) = element.upgrade()
 			{
 				gst::element_error!(obj, gst::CoreError::Failed, ("session error"), ["{err:?}"]);
 			}
-		});
+		}));
 
 		Self {
 			shutdown: shutdown_tx,
 			join,
+			connection,
 		}
 	}
 
-	fn stop(self) {
+	/// Stop the session, returning once its pumps have removed their pads and the connection closed.
+	///
+	/// A dial still running once the element reached NULL can outlive `main` (`gst-launch` exits right
+	/// after), and aws-lc aborts the process when a thread asks it for randomness after its exit
+	/// destructors ran.
+	fn stop(self, element: &super::MoqSrc) {
 		let _ = self.shutdown.send(true);
-		RUNTIME.spawn(async move {
-			if let Err(err) = self.join.await {
+
+		// A pump blocked in a push returns once its pad flushes, the same unlock a GStreamer source
+		// gives its streaming thread on stop. A push held up inside a downstream element is released
+		// by that element leaving PAUSED, which a pipeline does before it reaches its source.
+		for pad in element.src_pads() {
+			let _ = pad.set_active(false);
+		}
+
+		// Reached from this element's own session task or pump (a bus sync or pad handler), waiting
+		// for the session would wait on the caller's own stack. GStreamer refuses the same for its
+		// sources; the connection still closes before this returns.
+		let own = STREAMING
+			.try_with(|streaming| streaming.upgrade().as_ref() == Some(element))
+			.unwrap_or(false);
+		if own {
+			gst::warning!(
+				CAT,
+				obj = element,
+				"stopped from its own streaming thread, not waiting for the session to end"
+			);
+		}
+
+		let Self { join, connection, .. } = self;
+		crate::block_on(async move {
+			// The connection outlives the session so a stop never reads as a dropped connection.
+			if !own && let Err(err) = join.await {
 				gst::warning!(CAT, "session task ended with error: {err:?}");
 			}
+			connection.abort(moq_net::Error::Cancel);
+			let _ = connection.closed().await;
 		});
 	}
+}
+
+/// Start the one-shot dial, returning it with the origin its announcements land in.
+fn connect(settings: &ResolvedSettings) -> Result<(moq_tokio::Connection, moq_net::origin::Consumer)> {
+	let mut config = moq_tokio::connect::Config::default();
+	config.tls.insecure = Some(settings.tls_disable_verify);
+
+	// The origin and the connection loop are both spawned tasks.
+	let _rt = RUNTIME.enter();
+	let origin = moq_tokio::origin::spawn();
+	let consumer = origin.consume();
+	// One-shot: the catalog subscription dies with the session anyway, so a background redial could
+	// not resurrect this run. A drop surfaces as the catalog closing and the session winding down.
+	let connection = config
+		.init(Default::default())?
+		.with_subscriber(origin)
+		.with_reconnect(false)
+		.connect(settings.url.clone());
+	Ok((connection, consumer))
 }
 
 #[derive(Default)]
@@ -266,14 +353,15 @@ impl ElementImpl for MoqSrc {
 impl MoqSrc {
 	fn start_session(&self) -> Result<()> {
 		let settings = ResolvedSettings::try_from(self.settings.lock().unwrap().clone())?;
-		let session = SessionController::start(settings, self.obj().downgrade());
+		let session = SessionController::start(settings, self.obj().downgrade())?;
 		*self.session.lock().unwrap() = Some(session);
 		Ok(())
 	}
 
 	fn stop_session(&self) {
-		if let Some(session) = self.session.lock().unwrap().take() {
-			session.stop();
+		let session = self.session.lock().unwrap().take();
+		if let Some(session) = session {
+			session.stop(&self.obj());
 		}
 	}
 }
@@ -347,31 +435,23 @@ impl ActiveTrack {
 }
 
 async fn run_session(
-	settings: ResolvedSettings,
+	connection: &moq_tokio::Connection,
+	origin: moq_net::origin::Consumer,
+	broadcast: String,
 	element: glib::WeakRef<super::MoqSrc>,
 	shutdown: &mut watch::Receiver<bool>,
 ) -> Result<()> {
-	let mut config = moq_tokio::connect::Config::default();
-	config.tls.insecure = Some(settings.tls_disable_verify);
-
-	let origin = moq_tokio::origin::spawn();
-	let origin_consumer = origin.consume();
-	let client = config.init(Default::default())?.with_subscriber(origin);
-
-	// One-shot: the catalog subscription below dies with the session anyway, so a
-	// background redial could not resurrect this run. A drop surfaces as the
-	// catalog closing and the loop below winding down.
-	let _connection = client
-		.with_reconnect(false)
-		.connect(settings.url.clone())
-		.established()
-		.await?;
+	// Stop closes the connection only after the session ends, so the dial races shutdown here.
+	tokio::select! {
+		established = moq_net::kio::wait(|waiter| connection.poll_established(waiter)) => established?,
+		_ = shutdown.changed() => return Ok(()),
+	}
 
 	// Wait for a route to cover the broadcast. Synchronous lookup would race the gossip
 	// of announcements that happens after the session is established.
-	tracing::info!(broadcast = %settings.broadcast, "waiting for broadcast to be announced");
+	tracing::info!(%broadcast, "waiting for broadcast to be announced");
 	let broadcast = tokio::select! {
-		routed = origin_consumer.routed_broadcast(&settings.broadcast) => {
+		routed = origin.routed_broadcast(&broadcast) => {
 			routed.context("broadcast unavailable")?
 		}
 		_ = shutdown.changed() => return Ok(()),
@@ -388,10 +468,12 @@ async fn follow_catalog(
 	element: glib::WeakRef<super::MoqSrc>,
 	shutdown: &mut watch::Receiver<bool>,
 ) -> Result<()> {
-	let catalog_track = broadcast
-		.track(hang::catalog::Catalog::DEFAULT_NAME)?
-		.subscribe(hang::catalog::Catalog::default_subscription())
-		.await?;
+	let catalog_track = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?;
+	// A publisher that never answers would otherwise hold stop until the connection closes.
+	let catalog_track = tokio::select! {
+		track = catalog_track.subscribe(hang::catalog::Catalog::default_subscription()) => track?,
+		_ = shutdown.changed() => return Ok(()),
+	};
 	let mut catalog_consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
 
 	// Follow the catalog for the whole session and reconcile our pumps against every update,
@@ -556,17 +638,20 @@ fn reconcile(
 		let (cancel_tx, cancel_rx) = watch::channel(false);
 		let state = Arc::new(PumpState::new());
 		let task = pumps.spawn_on(
-			Pump {
-				element: element.clone(),
-				kind: d.kind,
-				name: name.clone(),
-				caps: d.shape.caps.clone(),
-				track,
-				container,
-				state: state.clone(),
-				cancel: cancel_rx,
-			}
-			.run(),
+			STREAMING.scope(
+				element.clone(),
+				Pump {
+					element: element.clone(),
+					kind: d.kind,
+					name: name.clone(),
+					caps: d.shape.caps.clone(),
+					track,
+					container,
+					state: state.clone(),
+					cancel: cancel_rx,
+				}
+				.run(),
+			),
 			RUNTIME.handle(),
 		);
 
@@ -995,10 +1080,11 @@ mod session_tests {
 
 	use gst::glib;
 	use gst::prelude::*;
+	use gst::subclass::prelude::*;
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoConfig};
 	use tokio::sync::watch;
 
-	use super::{NEXT_VIDEO_PAD_ID, follow_catalog};
+	use super::{NEXT_VIDEO_PAD_ID, ResolvedSettings, SessionController, follow_catalog};
 
 	/// The pad-id counters are process-global, so a test reading one has to be the only test
 	/// allocating while it runs. `cargo test` shares a process across tests (nextest doesn't),
@@ -1583,5 +1669,164 @@ mod session_tests {
 
 		let _ = shutdown.send(true);
 		super::RUNTIME.block_on(session).unwrap().unwrap();
+	}
+
+	/// Settings whose dial goes nowhere, so a stop catches it in flight.
+	fn unreachable() -> ResolvedSettings {
+		ResolvedSettings {
+			url: "https://127.0.0.1:1".parse().unwrap(),
+			broadcast: "test".into(),
+			tls_disable_verify: false,
+		}
+	}
+
+	fn is_closed(connection: &moq_tokio::Connection) -> bool {
+		connection.poll_closed(&moq_net::kio::Waiter::noop()).is_ready()
+	}
+
+	fn started(element: &super::super::MoqSrc) -> (SessionController, moq_tokio::Connection) {
+		let session = SessionController::start(unreachable(), element.downgrade()).unwrap();
+		let connection = session.connection.clone();
+		(session, connection)
+	}
+
+	/// A session following `broadcast` in place of a relay's, beside a dial for stop to end.
+	fn serve(
+		element: &super::super::MoqSrc,
+		broadcast: moq_net::broadcast::Consumer,
+	) -> (SessionController, moq_tokio::Connection) {
+		let (connection, _) = super::connect(&unreachable()).unwrap();
+		let weak = element.downgrade();
+		let session = SessionController::spawn(
+			connection.clone(),
+			element.downgrade(),
+			move |mut shutdown| async move { follow_catalog(broadcast, weak, &mut shutdown).await },
+		);
+		(session, connection)
+	}
+
+	/// A broadcast with one video rendition, and the producer that feeds it.
+	fn video_broadcast() -> (
+		moq_net::broadcast::Producer,
+		moq_mux::catalog::Producer,
+		moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
+	) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let video = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		{
+			let mut guard = catalog.modify().unwrap();
+			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+		}
+		let producer = moq_mux::container::Producer::new(
+			video,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		);
+		(broadcast, catalog, producer)
+	}
+
+	fn keyframe() -> moq_mux::container::Frame {
+		moq_mux::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(0).unwrap(),
+			payload: bytes::Bytes::from_static(&[0; 64]),
+			keyframe: true,
+			duration: None,
+		}
+	}
+
+	// A dial still running once the element reached NULL can outlive `main`, and aws-lc aborts the
+	// process when a thread asks it for randomness after its exit destructors ran.
+	#[test]
+	fn stop_returns_after_the_connection_closes() {
+		let element = element();
+		let (session, connection) = started(&element);
+		session.stop(&element);
+		assert!(is_closed(&connection));
+	}
+
+	// A notify or bus sync handler can stop the element from a runtime worker. With the tasks parked,
+	// their wakeups land in that worker's own LIFO slot, which no other worker can steal, so blocking
+	// the worker outright would never let them run.
+	#[test]
+	fn stop_from_a_runtime_worker_does_not_deadlock() {
+		let element = element();
+		let (session, connection) = started(&element);
+		let metrics = super::RUNTIME.metrics();
+		// An odd count means that worker is parked.
+		while metrics.global_queue_depth() > 0
+			|| (0..metrics.num_workers()).any(|worker| metrics.worker_park_unpark_count(worker).is_multiple_of(2))
+		{
+			std::thread::yield_now();
+		}
+		let stopping = element.clone();
+		super::RUNTIME
+			.block_on(super::RUNTIME.spawn(async move { session.stop(&stopping) }))
+			.unwrap();
+		assert!(is_closed(&connection));
+	}
+
+	// An application driving its own executor can reach NULL from inside it, and executors refuse to nest.
+	#[test]
+	fn stop_inside_another_executor() {
+		let element = element();
+		let (session, connection) = started(&element);
+		futures::executor::block_on(async { session.stop(&element) });
+		assert!(is_closed(&connection));
+	}
+
+	/// Stop waits for every pump to remove its pad, so a pump held in a push has to be let go
+	/// first, or stop never returns.
+	#[test]
+	fn stop_releases_a_blocked_push() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let (broadcast, _catalog, mut producer) = video_broadcast();
+		let (session, connection) = serve(&element, broadcast.consume());
+
+		let pad = await_pad(&element, "video_");
+		let (blocked, reached) = std::sync::mpsc::channel();
+		pad.add_probe(gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER, move |_, _| {
+			let _ = blocked.send(());
+			gst::PadProbeReturn::Ok
+		});
+		producer.write(keyframe()).unwrap();
+		reached
+			.recv_timeout(Duration::from_secs(10))
+			.expect("the frame never reached the pad");
+
+		session.stop(&element);
+		assert!(pad.parent().is_none(), "the pad outlived stop");
+		assert!(is_closed(&connection));
+	}
+
+	/// A bus sync or pad handler can stop the element from inside a pump's push. Waiting for the
+	/// session there would wait on that pump, so stop settles for the connection closing.
+	#[test]
+	fn stop_from_its_own_pump_does_not_deadlock() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let (broadcast, _catalog, mut producer) = video_broadcast();
+		let (session, connection) = serve(&element, broadcast.consume());
+		*element.imp().session.lock().unwrap() = Some(session);
+
+		let pad = await_pad(&element, "video_");
+		let (stopped, returned) = std::sync::mpsc::channel();
+		pad.add_probe(gst::PadProbeType::BUFFER, move |pad, _| {
+			let element = pad
+				.parent_element()
+				.unwrap()
+				.downcast::<super::super::MoqSrc>()
+				.unwrap();
+			element.imp().stop_session();
+			let _ = stopped.send(());
+			gst::PadProbeReturn::Drop
+		});
+		producer.write(keyframe()).unwrap();
+		returned
+			.recv_timeout(Duration::from_secs(10))
+			.expect("stop from the pump never returned");
+		assert!(is_closed(&connection));
 	}
 }
