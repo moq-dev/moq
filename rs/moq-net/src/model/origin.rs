@@ -1719,17 +1719,7 @@ impl Announcing {
 
 		let mut entries = Vec::with_capacity(self.prefixes.len());
 		for (prefix, claim) in &self.prefixes {
-			// The peer that withdrew the prefix, the chain's last hop, announces it
-			// again: routes through it are live once more.
-			if let Some(sender) = route.hops.iter().last()
-				&& shared
-					.withdrawn
-					.get_mut(prefix)
-					.is_some_and(|peers| peers.remove(sender))
-			{
-				shared.restale(prefix);
-				shared.prune_withdrawn(prefix);
-			}
+			shared.reannounced(prefix, &route.hops);
 			let id = shared.next_route;
 			shared.next_route += 1;
 			let stale = shared.withdrawn_through(prefix, &route.hops);
@@ -1836,6 +1826,7 @@ impl AnnounceProducer {
 			return Err(Error::Closed);
 		}
 		for (prefix, id) in &self.entries {
+			shared.reannounced(prefix, &route.hops);
 			let stale = shared.withdrawn_through(prefix, &route.hops);
 			// Each entry keeps its advertised prefix; only the metadata moves.
 			let Some(entry) = shared.routes.entry_mut(prefix, *id) else {
@@ -2321,7 +2312,9 @@ async fn run_front(task: FrontTask) {
 							table
 								.routes
 								.covering(&path.as_path())
-								.find(|entry| entry.id == route)
+								// Gone stale since it was selected: the peer it came through
+								// withdrew the path.
+								.find(|entry| entry.id == route && !entry.stale)
 								.map(|entry| {
 									(
 										Candidate {
@@ -2910,9 +2903,10 @@ impl RouteTable {
 		above.into_iter().chain(at).flat_map(|node| node.entries.iter())
 	}
 
-	/// Whether the route `id` still covers `path`.
+	/// Whether the route `id` still covers `path`. A stale route does not: its
+	/// peer withdrew the path it was derived from.
 	fn covers(&self, path: &Path, id: u64) -> bool {
-		self.covering(path).any(|entry| entry.id == id)
+		self.covering(path).any(|entry| entry.id == id && !entry.stale)
 	}
 
 	/// The routes announced exactly at `prefix`.
@@ -3085,6 +3079,18 @@ impl OriginState {
 		}
 	}
 
+	/// A route at `prefix` was announced or restarted with `hops`. When its sender,
+	/// the chain's last hop, had withdrawn the prefix, routes through it are live
+	/// once more.
+	fn reannounced(&mut self, prefix: &PathOwned, hops: &Hops) {
+		if let Some(sender) = hops.iter().last()
+			&& self.withdrawn.get_mut(prefix).is_some_and(|peers| peers.remove(sender))
+		{
+			self.restale(prefix);
+			self.prune_withdrawn(prefix);
+		}
+	}
+
 	/// Forget the withdrawals at `prefix` that no longer hide a route.
 	fn prune_withdrawn(&mut self, prefix: &PathOwned) {
 		if self.withdrawn.is_empty() {
@@ -3093,8 +3099,13 @@ impl OriginState {
 		let Some(peers) = self.withdrawn.get_mut(prefix) else {
 			return;
 		};
-		let routes = &self.routes;
-		peers.retain(|peer| routes.at(prefix).any(|entry| entry.hops.contains(peer)));
+		// One pass over the routes, not one per withdrawn peer.
+		let referenced: HashSet<Hop> = self
+			.routes
+			.at(prefix)
+			.flat_map(|entry| entry.hops.iter().copied())
+			.collect();
+		peers.retain(|peer| referenced.contains(peer));
 		if peers.is_empty() {
 			self.withdrawn.remove(prefix);
 		}
@@ -6040,6 +6051,29 @@ mod tests {
 		drop(second);
 		drop(relayed);
 		announced.assert_next_ended("room");
+		assert!(producer.shared.lock().withdrawn.is_empty());
+	}
+
+	/// A restart from the peer that withdrew, on another of its sessions, is that
+	/// peer announcing again.
+	#[tokio::test]
+	async fn withdrawn_peer_restart_revives_its_routes() {
+		let producer = origin(1).produce();
+		let peer = producer.clone().peer();
+		let mut announced = producer.consume().announced();
+
+		let direct = || Route::default().with_hops(hops(&[9, 2])).with_via(origin(2));
+		let first = peer.dynamic("room", direct()).unwrap();
+		let second = peer.dynamic("room", direct()).unwrap();
+		announced.assert_next_active("room");
+		announced.assert_next_wait();
+
+		peer.withdrawn("room", origin(2));
+		drop(first);
+		announced.assert_next_ended("room");
+
+		second.update(direct().with_cost(3)).unwrap();
+		announced.assert_next_active("room");
 		assert!(producer.shared.lock().withdrawn.is_empty());
 	}
 
