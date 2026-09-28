@@ -28,7 +28,7 @@ Out of scope, so they are not reopened as bugs:
 
 Docs stay inline in the change that makes them stale. No new guide.
 
-## Quests
+## Required
 
 - [Default track priority](/quest/m1/moxygen/priority.md) - an unset track priority is the midpoint on moq-lite and on IETF, not the least urgent value
 - [Group FETCH](/quest/m1/moxygen/fetch.md) - an IETF FETCH of whole groups is served from cache or fetched upstream, one group at a time
