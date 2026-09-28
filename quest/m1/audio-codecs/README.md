@@ -41,7 +41,7 @@ its own decode and encode quest so verification stays per host. The
 HE-AAC refusal and the PCE parse are defects in what ships today and are
 ready now.
 
-## Quests
+## Required
 
 - [Named codecs](/quest/m1/audio-codecs/named-codecs.md) - `decode::Kind::Named` keeps the published codec names and picks backends internally; must land before the line merges
 - [HE-AAC refusal](/quest/m1/audio-codecs/he-aac-refusal.md) - implicit-SBR HE-AAC over TS is refused instead of half-decoded as the LC core

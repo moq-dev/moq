@@ -599,10 +599,15 @@ mod test {
 
 		*producer.modify().unwrap() = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
 
-		// The publisher learns the cause at its next edit, the consumer from the aborted track.
+		// The publisher learns the cause at its next edit. The consumer drains the snapshot
+		// that finished, then learns it from the aborted track.
 		assert!(matches!(
 			producer.modify(),
 			Err(crate::Error::Net(moq_net::Error::FrameTooLarge))
+		));
+		assert!(matches!(
+			subscriber.poll_next_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(Some(_)))
 		));
 		assert!(matches!(
 			subscriber.poll_next_group(&kio::Waiter::noop()),

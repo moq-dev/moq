@@ -45,11 +45,9 @@ AUTH can carry the full grant once the pattern-interest prerequisite lands.
   the first token also rides the AUTHORIZATION TOKEN setup option
   (`ietf::token::into_setup`, `USE_VALUE`, token type 0), which
   scopes at accept the way the URL does. While the URL also carries it, the
-  auth server sees the same credential twice. Decided by the maintainer (on
-  #4211): `moq auth serve` admits a SETUP token equal to the `?jwt=` value
-  and refuses only two different credentials. #4278 shipped refusing both
-  (`serve::Refusal::TwoTokens`, pinned by a test), so this quest changes that
-  and its test. Never send different values in the two places.
+  auth server sees the same credential twice: `moq auth serve` admits a SETUP
+  token equal to the `?jwt=` value and refuses two different ones
+  (`serve::Refusal::TwoTokens`). Never send different values in the two places.
 - The relay admits on the URL, then widens. An anonymous connection today is
   admitted with the public grant when one is configured and refused
   otherwise; with this quest a connection with no URL credential and no

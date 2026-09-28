@@ -101,7 +101,7 @@ surface; [JavaScript FETCH](/quest/m1/js-fetch.md) supplies the missing browser
 IETF support before browser archive implementation. Transport codecs are
 owned by that prerequisite, not duplicated in archive storage.
 
-## Quests
+## Required
 
 - [Recording writer](/quest/m1/archive/writer.md) - feed the segmenter from a `broadcast::Consumer`, store each segment, then commit its record
 - [Recording reader](/quest/m1/archive/reader.md) - serve archived FETCH through a supplied `broadcast::Producer`

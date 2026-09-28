@@ -140,7 +140,7 @@ gossip paths so an old unannounce cannot stale a replacement. The remaining
 boundary is structured policy that does not live in the URL: the two directional
 costs of one bidirectional session, which one `?cost=` cannot split.
 
-## Quests
+## Required
 
 - [Warm advertise](/quest/m1/pop-skipping/warm-advertise.md) - a carrying relay
   advertises the exact broadcast path as a warm route, and retracts it when

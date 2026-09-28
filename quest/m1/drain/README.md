@@ -46,7 +46,7 @@ scale-down prerequisite, not merely a deploy improvement. RTMP/SRT/WHIP/WHEP
 cannot receive MoQ GOAWAY, so their contract remains DNS withdrawal followed
 by the stop deadline and encoder reconnect.
 
-## Quests
+## Required
 
 - [Relay drain api](/quest/m1/drain/relay-drain-api.md) - a drain hook that
   GOAWAYs every session, including new arrivals, triggered by the embedding
