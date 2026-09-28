@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/moq-dev/moq/compare/moq-video-v0.1.6...moq-video-v0.1.7) - 2026-09-27
+
+### Fixed
+
+- *(video)* keep the CUDA context alive until the NVDEC decoder is destroyed ([#4290](https://github.com/moq-dev/moq/pull/4290))
+
 ## [0.1.6](https://github.com/moq-dev/moq/compare/moq-video-v0.1.5...moq-video-v0.1.6) - 2026-09-26
 
 ### Added

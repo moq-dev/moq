@@ -24,6 +24,15 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # The quest CLI, which also serves the quest guide and skills the stubs in
+    # .claude/skills call. Bump the rev to upgrade them.
+    quest = {
+      url = "github:kixelated/quest/a4c3debebeacc142dc31b170f3255d1ccf6e4c9b";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
+      inputs.crane.follows = "crane";
+      inputs.rust-overlay.follows = "rust-overlay";
+    };
   };
 
   outputs =
@@ -33,6 +42,7 @@
       flake-utils,
       crane,
       rust-overlay,
+      quest,
       ...
     }:
     let
@@ -525,7 +535,8 @@
             ++ goDeps
             ++ cppDeps
             ++ dartDeps
-            ++ devTools;
+            ++ devTools
+            ++ [ quest.packages.${system}.default ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

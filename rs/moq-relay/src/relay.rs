@@ -123,6 +123,16 @@ impl Relay {
 			.clone()
 			.or_else(|| config.cluster.node.clone())
 			.unwrap_or_default();
+		// Public rules grant a certificate what they grant anyone, so a client CA
+		// would only have browsers offer certificates for nothing.
+		if config.auth.url.is_none()
+			&& config.auth.public_grant().is_some()
+			&& !(config.listen.tls.root.is_empty() && config.web.https.root.is_empty())
+		{
+			anyhow::bail!(
+				"--listen-tls-root and --web-https-root verify client certificates, which --auth-public ignores; remove them, or grant certificates with --auth-url to `moq auth serve --mtls-*`"
+			);
+		}
 		// No `[auth]` source means the embedder decides: it takes the admissions
 		// before `run`, which refuses to start if nobody did.
 		let (auth, admissions) = match config.auth.is_empty() {

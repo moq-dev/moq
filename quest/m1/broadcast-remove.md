@@ -18,5 +18,4 @@ This is a published API break, so it targets `dev`.
 
 ## Required
 
-- [Kotlin end](/quest/m1/kotlin-end.md) - Kotlin keeps a forced end once `finish` is gone
 - `main` merged into `dev` once #4031 lands, so the deprecations exist there

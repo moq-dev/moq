@@ -49,7 +49,7 @@ For each finding:
 
 If you encounter issues, or findings that are out of scope, create follow-up quests.
 Focus on the core problem, offering a potential solution only if its obvious.
-For non-trivial tasks, file an issue or offer to run `/plan-quests`.
+For non-trivial tasks, file an issue or offer to run `/quest-plan`.
 
 # Forks
 
@@ -62,5 +62,10 @@ For an advisory against noq or Quinn, compare the pinned release's `PARENT` with
 
 Releases are cut separately; bump only when asked. Each package's version lives in one place:
 
+- **Rust**: release-plz owns crate versions and Rust dependency requirements.
+- **JavaScript**: `js/*/package.json` packages with a `scripts.release` entry (skip private ones like `@moq/clock`, `@moq/wasm`), plus the matching workspace version in `bun.lock`.
+- **Python**: `py/moq-rs/pyproject.toml` only; `py/moq-ffi` follows the `moq-ffi-v*` tag and Rust crate.
+- **Swift**: `swift/VERSION`. **Kotlin**: `moq.version` in `kt/gradle.properties`. **Dart**: `version` in `dart/moq/pubspec.yaml`. Their FFI counterparts track the Rust crate.
+- **Go**: `go/wrapper/VERSION` holds a human-owned `MAJOR.MINOR` line; CI derives the patch, so only edit it for a breaking API. Leave the placeholder FFI version in `go.mod` alone.
 - **C++**: `cpp/moq/VERSION`, human-owned; a `cpp-v<version>` tag releases it.
 - **OBS**: `cpp/obs/VERSION`, human-owned; each C++ release also cuts `obs-moq-v<version>`, and refuses one whose version already names an earlier release.

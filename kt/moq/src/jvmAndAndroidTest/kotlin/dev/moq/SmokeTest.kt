@@ -143,6 +143,19 @@ class SmokeTest {
     }
 
     @Test
+    fun `end ends a broadcast while a dynamic handle is still held`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            broadcast.dynamic().use {
+                val consumer = broadcast.consume()
+                broadcast.end()
+                broadcast.end()
+                assertFailsWith<MoqException> { consumer.subscribeTrack("events", null) }
+                assertFailsWith<MoqException> { broadcast.publishTrack("events", null) }
+            }
+        }
+    }
+
+    @Test
     fun `broadcast updates shared video properties`() {
         BroadcastProducer().use { broadcast ->
             broadcast.setVideoProperties(VideoProperties(rotation = 315.0))

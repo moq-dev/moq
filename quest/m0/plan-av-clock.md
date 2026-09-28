@@ -39,6 +39,15 @@ Recommendations for the implementation:
 - The text renderer is the third track: it reads `sync.now()`
   (`js/watch/src/text/renderer.ts:261`) to drive the cue clock and prune cues
   at `:263-265`.
+- Close the player gaps [#4170](https://github.com/moq-dev/moq/pull/4170)
+  left, since the handles own them. `Sync.received` only ever lowers its
+  reference, so after the earliest subscribed track leaves, playback stays
+  anchored to it; a track's handle going away must release its part of the
+  reference, the same expiry the jitter target's arrival minimum has. Text
+  renditions register no floor with `Sync`, so their catalog `delay` is
+  ignored; the text handle registers one like audio and video. The MSF
+  catalog schema (`js/msf/src/catalog.ts`) accepts a negative `delay` and
+  folds it into absent; refuse it on decode instead.
 
 ## Required
 
