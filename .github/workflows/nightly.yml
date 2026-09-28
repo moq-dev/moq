@@ -77,6 +77,12 @@ jobs:
           nix develop --command bun install --frozen-lockfile
           nix develop --command bun js/net/bench/broadcasts.ts
 
+      # A route above several interest heads lands once per head, so its re-price
+      # should expose any slope over heads times received routes.
+      - name: JS origin announce forwarding benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command bun js/net/bench/forward.ts
+
       # Fails if reading a fragmented frame costs more per byte as the frame grows.
       - name: JS stream reader benchmark
         if: ${{ !cancelled() }}
