@@ -167,7 +167,8 @@ relative to `root`. Nested scopes intersect with their parent. In Rust,
 `origin.mount(at, target)` reads the subtree at `at` from `target` instead: a
 request for `at/rest` joins the one front at `target/rest`, announcements under
 `target` present under `at`, the handle's patterns still authorize `at/rest`,
-and nothing is published beneath `at`. A session receiving
+and nothing is published beneath `at`. Mounts never chain: a mount point that
+overlaps another mount's point or any target, its own included, is refused. A session receiving
 into that scoped origin asks for the literal heads of its allowed patterns,
 coalescing duplicate or nested heads. An unscoped origin still asks for the empty
 prefix, covering every namespace. These subscriptions include hidden routes;
