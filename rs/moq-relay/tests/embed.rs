@@ -66,18 +66,29 @@ async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
 /// processes churn sockets.
 #[cfg(target_os = "linux")]
 fn bound(port: u16) -> std::collections::HashSet<u64> {
+	use std::os::fd::FromRawFd;
+	use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
 	let mut bound = std::collections::HashSet::new();
 	for entry in std::fs::read_dir("/proc/self/fd").expect("read /proc/self/fd") {
-		let path = entry.expect("read /proc/self/fd").path();
-		let Some(inode) = socket_inode(&path) else { continue };
-		let Some(fd) = path.file_name().and_then(|name| name.to_str()?.parse().ok()) else {
+		let entry = entry.expect("read /proc/self/fd");
+		let Some(fd) = entry.file_name().to_str().and_then(|name| name.parse().ok()) else {
 			continue;
 		};
-		// SAFETY: only queried, never closed. Another thread may close the
-		// descriptor meanwhile, so the inode is checked again below, and a number
-		// reused for another socket is not counted.
-		let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-		let socket = socket2::SockRef::from(&fd);
+		// Duplicated rather than borrowed: another thread may close the original
+		// meanwhile, which fails the duplicate instead of pulling the descriptor
+		// out from under a borrow, and the copy pins the socket it names.
+		let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+		if dup < 0 {
+			continue;
+		}
+		// SAFETY: `dup` is a fresh descriptor that nothing else owns.
+		let file = std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(dup) });
+		let Ok(meta) = file.metadata() else { continue };
+		if !meta.file_type().is_socket() {
+			continue;
+		}
+		let socket = socket2::SockRef::from(&file);
 		let owned = match socket.r#type() {
 			Ok(socket2::Type::DGRAM) => true,
 			Ok(socket2::Type::STREAM) => socket.is_listener().unwrap_or(false),
@@ -89,8 +100,8 @@ fn bound(port: u16) -> std::collections::HashSet<u64> {
 			.and_then(|addr| addr.as_socket())
 			.map(|addr| addr.port())
 			== Some(port);
-		if owned && on_port && socket_inode(&path) == Some(inode) {
-			bound.insert(inode);
+		if owned && on_port {
+			bound.insert(meta.ino());
 		}
 	}
 	bound
