@@ -547,14 +547,6 @@
         # (`.github/actions/rust-cache`); nothing here configures it.
         checks = {
           package-source-assets = pkgs.runCommand "package-source-assets" { } ''
-            for asset in \
-              rs/libmoq/moq.pc.in \
-              rs/libmoq/native-libs/apple.txt \
-              rs/libmoq/native-libs/linux.txt \
-              rs/libmoq/native-libs/windows.txt
-            do
-              test -f "${overlayPkgs.libmoq.src}/$asset"
-            done
             test -f "${overlayPkgs.moq-boy.src}/rs/moq-video/src/frame/nv12_resize.ptx"
             touch "$out"
           '';

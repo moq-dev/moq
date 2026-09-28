@@ -46,7 +46,10 @@ dialed path, which is how a slug aliases to a canonical id), `mounts`
 (optional object; each key, a path relative to the root, reads from the
 absolute path it maps to: `{".svc": ".svc/pid"}` resolves `.svc/foo` at
 `.svc/pid/foo` and presents its announcements under `.svc`, the patterns still
-authorize `.svc/foo`, and nothing may be published beneath a key), `expires`
+authorize `.svc/foo`, and nothing may be published beneath a key; a key
+that holds a wildcard or overlaps another key or any value, its own included,
+refuses the grant),
+`expires`
 (optional unix seconds; the session closes then), `revalidate` (optional
 seconds until the relay asks again), `tier` (optional label handed to
 [stats](/bin/relay/config#stats)), and `peer` (optional; `true` marks another
@@ -237,8 +240,8 @@ bad chain still fails there. What the certificate admits is the server's
 decision: the relay reports its facts in the request's `tls` and enforces the
 grant it gets back. `moq auth serve` grants a certificate only what
 `--mtls-publish` and `--mtls-subscribe` name, empty by default. Public rules
-ignore certificates, so a relay on `--auth-public` refuses to start with
-`listen.tls.root` or `web.https.root`.
+ignore certificates, so a relay or `moq --listen` on `--auth-public` refuses
+to start with `listen.tls.root` or `web.https.root`.
 
 Cluster peers are admitted the same way, so a mesh runs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server

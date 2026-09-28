@@ -38,8 +38,8 @@ runs:
         # even though it is kept in sync with the flake.
         #
         # Every segment the generated layout carries has to be carried here too:
-        # the runner pair, so the two architectures the warm job builds cannot
-        # read each other, and `target`, so changing `github-cache-mode` cannot
+        # the runner pair, so a job on an x86 runner cannot restore the ARM64
+        # store, and `target`, so changing `github-cache-mode` cannot
         # restore the other payload. The trailing run id rolls the key on every
         # run, which is what lets a repeated `workflow_dispatch` seed a cold
         # cache against GitHub's immutable entries.

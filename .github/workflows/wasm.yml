@@ -62,9 +62,9 @@ jobs:
   wasm:
     name: WASM
     if: github.event.action != 'closed'
-    # x64, not the arm runner the other jobs use: this is the configuration
-    # interop.yml already launches Playwright's Chromium on.
-    runs-on: ubuntu-latest
+    # ARM64 like check.yml, the only architecture cache.yml warms a Rust store
+    # for; the harness builds the relay natively, which that store covers.
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
 
     steps:
