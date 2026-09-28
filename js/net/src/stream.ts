@@ -188,6 +188,8 @@ export class Reader {
 	#stream?: ReadableStream<Uint8Array>; // if undefined, the buffer is consumed then EOF
 	#reader?: ReadableStreamDefaultReader<Uint8Array>;
 	#closed?: Promise<void>;
+	// The decode that last ran short and how far, so a retry can wait for those bytes.
+	#short?: { decode: (c: Cursor) => unknown; err: Short };
 	version?: IetfVersion;
 
 	// Either stream or buffer MUST be provided.
@@ -276,11 +278,59 @@ export class Reader {
 		return result;
 	}
 
+	/**
+	 * Run a synchronous decode over the buffered bytes and consume what it read.
+	 *
+	 * Returns undefined and consumes nothing when the decode ran past the buffered bytes, so a
+	 * caller can drain every complete message already here without waiting on the stream.
+	 */
+	tryDecode<T extends NonNullable<unknown>>(decode: (c: Cursor) => T): T | undefined {
+		const result = this.#try(decode);
+		return result instanceof Short ? undefined : result;
+	}
+
+	/** Run a synchronous decode, filling from the stream until it has the bytes it needs. */
+	async decode<T>(decode: (c: Cursor) => T): Promise<T> {
+		for (;;) {
+			const result = this.#try(decode);
+			if (!(result instanceof Short)) return result;
+			await this.#fillTo(result.need);
+		}
+	}
+
+	/** Like {@link decode}, but returns undefined if the stream ends cleanly first. */
+	async decodeMaybe<T>(decode: (c: Cursor) => T): Promise<T | undefined> {
+		if (await this.done()) return undefined;
+		return this.decode(decode);
+	}
+
+	#try<T>(decode: (c: Cursor) => T): T | Short {
+		// A retry of the decode that last ran short, before the bytes it needs have arrived,
+		// would only throw again. Every decode reads at least a byte, so none can succeed on
+		// an empty buffer either.
+		const available = this.#buffer.byteLength + this.#chunked;
+		if (available === 0) return EMPTY;
+		if (decode === this.#short?.decode && available < this.#short.err.need) return this.#short.err;
+
+		this.#join();
+		const cursor = new Cursor(this.#buffer, this.version);
+		try {
+			const result = decode(cursor);
+			this.#slice(cursor.offset);
+			this.#short = undefined;
+			return result;
+		} catch (err: unknown) {
+			if (!(err instanceof Short)) throw err;
+			// Filling could never satisfy it, so retrying would spin.
+			if (err.need <= this.#buffer.byteLength) throw new Error("decode ran short of bytes it already had");
+			this.#short = { decode, err };
+			return err;
+		}
+	}
+
 	async read(size: number): Promise<Uint8Array> {
 		if (size === 0) return new Uint8Array();
-
-		await this.#fillTo(size);
-		return this.#slice(size);
+		return this.decode((c) => c.read(size));
 	}
 
 	async readAll(): Promise<Uint8Array> {
@@ -292,105 +342,29 @@ export class Reader {
 	}
 
 	async string(): Promise<string> {
-		const length = await this.u53();
-		const buffer = await this.read(length);
-		return decodeUtf8(buffer);
+		return this.decode(STRING);
 	}
 
 	async bool(): Promise<boolean> {
-		const v = await this.u8();
-		if (v === 0) return false;
-		if (v === 1) return true;
-		throw new Error("invalid bool value");
+		return this.decode(BOOL);
 	}
 
 	async u8(): Promise<number> {
-		await this.#fillTo(1);
-		return this.#slice(1)[0];
+		return this.decode(U8);
 	}
 
 	async u16(): Promise<number> {
-		await this.#fillTo(2);
-		const view = new DataView(this.#buffer.buffer, this.#buffer.byteOffset, 2);
-		const result = view.getUint16(0);
-		this.#slice(2);
-		return result;
+		return this.decode(U16);
 	}
 
 	// Returns a Number using 53-bits, the max Javascript can use for integer math.
 	async u53(): Promise<number> {
-		const v = await this.u62();
-		if (v > Varint.MAX_U53) {
-			throw new Error(`value larger than 53-bits: ${v.toString()}`);
-		}
-
-		return Number(v);
+		return this.decode(U53);
 	}
 
 	// NOTE: Returns a bigint instead of a number since it may be larger than 53-bits
 	async u62(): Promise<bigint> {
-		if (isLeadingOnes(this.version)) {
-			return this.#readLeadingOnes();
-		}
-		return this.#readQuicVarint();
-	}
-
-	async #readQuicVarint(): Promise<bigint> {
-		await this.#fillTo(1);
-		const size = (this.#buffer[0] & 0xc0) >> 6;
-
-		if (size === 0) {
-			const first = this.#slice(1)[0];
-			return BigInt(first) & 0x3fn;
-		}
-		if (size === 1) {
-			await this.#fillTo(2);
-			const slice = this.#slice(2);
-			const view = new DataView(slice.buffer, slice.byteOffset, slice.byteLength);
-
-			return BigInt(view.getUint16(0)) & 0x3fffn;
-		}
-		if (size === 2) {
-			await this.#fillTo(4);
-			const slice = this.#slice(4);
-			const view = new DataView(slice.buffer, slice.byteOffset, slice.byteLength);
-
-			return BigInt(view.getUint32(0)) & 0x3fffffffn;
-		}
-		await this.#fillTo(8);
-		const slice = this.#slice(8);
-		const view = new DataView(slice.buffer, slice.byteOffset, slice.byteLength);
-
-		return view.getBigUint64(0) & 0x3fffffffffffffffn;
-	}
-
-	async #readLeadingOnes(): Promise<bigint> {
-		await this.#fillTo(1);
-		const b = this.#buffer[0];
-
-		// Count leading 1-bits
-		let ones = 0;
-		for (let bit = 7; bit >= 0; bit--) {
-			if (b & (1 << bit)) ones++;
-			else break;
-		}
-
-		// 1111110x is a 7-byte form. Draft-17 rejects it; draft-18+ allows it per #1595.
-		if (ones === 6 && this.version === Version.DRAFT_17) {
-			throw new Error("invalid leading-ones varint: 1111110x prefix is reserved on draft-17");
-		}
-
-		let totalSize: number;
-		if (ones <= 5) totalSize = ones + 1;
-		else if (ones === 6) totalSize = 7;
-		else if (ones === 7) totalSize = 8;
-		else totalSize = 9; // ones === 8
-
-		await this.#fillTo(totalSize);
-		const slice = this.#slice(totalSize);
-
-		const [value] = Varint.decodeLeadingOnes(slice);
-		return value;
+		return this.decode(U62);
 	}
 
 	// Returns false if there is more data to read, blocking if it hasn't been received yet.
@@ -412,6 +386,174 @@ export class Reader {
 		return this.#closed;
 	}
 }
+
+// Thrown by a Cursor read that runs past the buffered bytes, carrying how many bytes from the
+// start of the buffer the decode needs. Not an Error: it ends every chunk, so it must not
+// capture a stack.
+class Short {
+	readonly need: number;
+
+	constructor(need: number) {
+		this.need = need;
+	}
+}
+
+const EMPTY = new Short(1);
+
+/**
+ * A synchronous view over a {@link Reader}'s buffered bytes, handed to {@link Reader.decode}.
+ *
+ * A read past the buffered bytes throws an internal signal that the Reader catches: it consumes
+ * nothing, fills, and runs the decode again from the start. A decode must therefore not mutate
+ * anything before its last read, must not swallow what it throws, and must read at least a byte.
+ */
+export class Cursor {
+	readonly version?: IetfVersion;
+	#buffer: Uint8Array;
+	#offset = 0;
+
+	constructor(buffer: Uint8Array, version?: IetfVersion) {
+		this.#buffer = buffer;
+		this.version = version;
+	}
+
+	/** How many bytes have been read. */
+	get offset(): number {
+		return this.#offset;
+	}
+
+	/** How many buffered bytes are left to read. */
+	get remaining(): number {
+		return this.#buffer.byteLength - this.#offset;
+	}
+
+	/**
+	 * Decode the next `size` bytes on their own. Running past them, or leaving any unread, is
+	 * malformed rather than a reason to wait for more.
+	 */
+	exact<T>(size: number, decode: (c: Cursor) => T): T {
+		const inner = new Cursor(this.read(size), this.version);
+		let result: T;
+		try {
+			result = decode(inner);
+		} catch (err: unknown) {
+			if (err instanceof Short) throw new Error(`message is shorter than its fields: ${size} bytes`);
+			throw err;
+		}
+		if (inner.remaining > 0) throw new Error(`message has ${inner.remaining} unread bytes`);
+		return result;
+	}
+
+	#ensure(size: number) {
+		const need = this.#offset + size;
+		if (need > this.#buffer.byteLength) throw new Short(need);
+	}
+
+	/** Read `size` bytes, as a view onto the buffer rather than a copy. */
+	read(size: number): Uint8Array {
+		this.#ensure(size);
+		const start = this.#offset;
+		this.#offset += size;
+		return this.#buffer.subarray(start, this.#offset);
+	}
+
+	string(): string {
+		return decodeUtf8(this.read(this.u53()));
+	}
+
+	bool(): boolean {
+		const v = this.u8();
+		if (v === 0) return false;
+		if (v === 1) return true;
+		throw new Error("invalid bool value");
+	}
+
+	u8(): number {
+		this.#ensure(1);
+		return this.#buffer[this.#offset++];
+	}
+
+	u16(): number {
+		this.#ensure(2);
+		const b = this.#buffer;
+		const o = this.#offset;
+		this.#offset += 2;
+		return (b[o] << 8) | b[o + 1];
+	}
+
+	// Returns a Number using 53-bits, the max Javascript can use for integer math.
+	u53(): number {
+		// Most varints fit in 4 bytes, which decode without a bigint.
+		if (!isLeadingOnes(this.version)) {
+			this.#ensure(1);
+			const b = this.#buffer;
+			const o = this.#offset;
+			const size = 1 << (b[o] >> 6);
+			if (size < 8) {
+				this.#ensure(size);
+				this.#offset += size;
+				if (size === 1) return b[o] & 0x3f;
+				if (size === 2) return ((b[o] & 0x3f) << 8) | b[o + 1];
+				return (b[o] & 0x3f) * 2 ** 24 + ((b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]);
+			}
+		}
+
+		const v = this.u62();
+		if (v > Varint.MAX_U53) {
+			throw new Error(`value larger than 53-bits: ${v.toString()}`);
+		}
+		return Number(v);
+	}
+
+	// NOTE: Returns a bigint instead of a number since it may be larger than 53-bits
+	u62(): bigint {
+		return isLeadingOnes(this.version) ? this.#leadingOnes() : this.#quicVarint();
+	}
+
+	#quicVarint(): bigint {
+		this.#ensure(1);
+		const size = 1 << (this.#buffer[this.#offset] >> 6);
+		if (size < 8) return BigInt(this.u53());
+
+		const slice = this.read(8);
+		const view = new DataView(slice.buffer, slice.byteOffset, slice.byteLength);
+		return view.getBigUint64(0) & 0x3fffffffffffffffn;
+	}
+
+	#leadingOnes(): bigint {
+		this.#ensure(1);
+		const b = this.#buffer[this.#offset];
+
+		// Count leading 1-bits
+		let ones = 0;
+		for (let bit = 7; bit >= 0; bit--) {
+			if (b & (1 << bit)) ones++;
+			else break;
+		}
+
+		// 1111110x is a 7-byte form. Draft-17 rejects it; draft-18+ allows it per #1595.
+		if (ones === 6 && this.version === Version.DRAFT_17) {
+			throw new Error("invalid leading-ones varint: 1111110x prefix is reserved on draft-17");
+		}
+
+		let totalSize: number;
+		if (ones <= 5) totalSize = ones + 1;
+		else if (ones === 6) totalSize = 7;
+		else if (ones === 7) totalSize = 8;
+		else totalSize = 9; // ones === 8
+
+		const [value] = Varint.decodeLeadingOnes(this.read(totalSize));
+		return value;
+	}
+}
+
+// Shared decodes for the Reader's async primitives, so a read allocates no closure.
+const STRING = (c: Cursor) => c.string();
+const BOOL = (c: Cursor) => c.bool();
+const U8 = (c: Cursor) => c.u8();
+const U16 = (c: Cursor) => c.u16();
+const U53 = (c: Cursor) => c.u53();
+const U62 = (c: Cursor) => c.u62();
 
 // Writer wraps a stream and writes chunks of data
 export class Writer {

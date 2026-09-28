@@ -29,8 +29,8 @@
 		"@moq/loc": "workspace:^",
 		"@moq/net": "workspace:^",
 		"@moq/signals": "workspace:^",
-		"@svta/cml-iso-bmff": "^1.0.5",
-		"@svta/cml-utils": "1.6.0",
+		"@svta/cml-iso-bmff": "^1.0.6",
+		"@svta/cml-utils": "1.6.1",
 		"@zod/mini": "^4.6.5",
 		"zod": "^4.6.5"
 	},

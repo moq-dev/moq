@@ -191,7 +191,7 @@ generate_bindings() {
 
     # C++ uses a third-party bindgen too: a fork carrying LiveKit's async support
     # ported to uniffi 0.32, which upstream has not released. Install it with:
-    # cargo install --locked uniffi-bindgen-cpp --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.1+v0.32.2
+    # cargo install --locked uniffi-bindgen-cpp --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.2+v0.32.2
     if command -v uniffi-bindgen-cpp >/dev/null 2>&1; then
         echo "  Generating cpp bindings..."
         uniffi-bindgen-cpp --library "$lib_path" \

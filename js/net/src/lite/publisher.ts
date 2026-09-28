@@ -3,9 +3,9 @@ import type * as broadcast from "../broadcast.ts";
 import { error, NotFound, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { type Hop, type Route, routesEqual } from "../hop.ts";
-import { hiddenBelow, hooks } from "../internal.ts";
+import { hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
-import * as Path from "../path.ts";
+import type * as Path from "../path.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale } from "../time.ts";
 import type * as track from "../track.ts";
@@ -36,31 +36,6 @@ import {
 	resolvesStart,
 	Version,
 } from "./version.ts";
-
-// Where each originated route lands under the requested prefix: its suffix beneath
-// the prefix, or the empty suffix for a route above it, where the most specific
-// such route wins the way a request through the prefix would resolve.
-function presented(
-	prefix: Path.Valid,
-	table: ReadonlyMap<Path.Valid, Advertised>,
-	hidden: boolean,
-): Map<Path.Valid, Advertised> {
-	const out = new Map<Path.Valid, Advertised>();
-	let rootLen = -1;
-	for (const [covered, snap] of table) {
-		if (Path.hasPrefix(covered, prefix)) {
-			if (covered.length < rootLen) continue;
-			rootLen = covered.length;
-			out.set(Path.empty(), snap);
-			continue;
-		}
-		// A hidden route stays off the wire unless the request opted in.
-		if (!hidden && hiddenBelow(prefix, covered)) continue;
-		const suffix = Path.stripPrefix(prefix, covered);
-		if (suffix !== null) out.set(suffix, snap);
-	}
-	return out;
-}
 
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
@@ -479,11 +454,14 @@ export class Publisher {
 			dispose = this.#advertised.changed(resolve);
 		});
 
+		// A hidden route stays off the wire unless the request opted in.
+		const carries = (covered: Path.Valid) => msg.hidden || !hiddenBelow(msg.prefix, covered);
+
 		try {
 			const initial = this.#advertised.peek();
 			if (!initial) return; // closed
 
-			for (const [name, snap] of presented(msg.prefix, initial, msg.hidden)) {
+			for (const [name, snap] of presented(msg.prefix, initial, carries)) {
 				active.set(name, snap);
 			}
 
@@ -528,7 +506,7 @@ export class Publisher {
 				if (!latest) break;
 
 				const updated = new Map<Path.Valid, Advertised>();
-				for (const [name, snap] of presented(msg.prefix, latest, msg.hidden)) {
+				for (const [name, snap] of presented(msg.prefix, latest, carries)) {
 					updated.set(name, snap);
 				}
 
@@ -950,7 +928,7 @@ export class Publisher {
 		}
 
 		const cached = tracks.get(track);
-		if (cached) return cached;
+		if (cached !== undefined) return cached;
 
 		const pending = (async () => {
 			const info = await wireOf(front).resolveTrackInfo(track);
@@ -1084,13 +1062,10 @@ export class Publisher {
 			// follows it too rather than keeping a stale rank until it finishes.
 			priority.add(stream, group.sequence);
 
-			await hooks.guardGroup(
-				group,
-				(async () => {
-					await stream.u53(0); // stream type
-					await msg.encode(stream, this.version);
-				})(),
-			);
+			await hooks.guardGroup(group, async () => {
+				await stream.u53(0); // stream type
+				await msg.encode(stream, this.version);
+			});
 
 			// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
 			// advertised timescale; older drafts omit it.
@@ -1122,12 +1097,12 @@ export class Publisher {
 					if (timestamps) {
 						// Convert each frame to the track's advertised timescale.
 						const ts = BigInt(Math.round(read.frame.timestamp.as(timescale)));
-						await hooks.guardGroup(group, stream.u62(zigzag(ts - prevTs)));
+						await hooks.guardGroup(group, () => stream.u62(zigzag(ts - prevTs)));
 						prevTs = ts;
 					}
 
-					await hooks.guardGroup(group, stream.u53(read.frame.payload.byteLength));
-					await hooks.guardGroup(group, stream.write(read.frame.payload));
+					await hooks.guardGroup(group, () => stream.u53(read.frame.payload.byteLength));
+					await hooks.guardGroup(group, () => stream.write(read.frame.payload));
 				} finally {
 					read.complete();
 				}

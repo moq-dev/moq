@@ -24,6 +24,15 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # The quest CLI, which also serves the quest guide and skills the stubs in
+    # .claude/skills call. Bump the rev to upgrade them.
+    quest = {
+      url = "github:kixelated/quest/a4c3debebeacc142dc31b170f3255d1ccf6e4c9b";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
+      inputs.crane.follows = "crane";
+      inputs.rust-overlay.follows = "rust-overlay";
+    };
   };
 
   outputs =
@@ -33,6 +42,7 @@
       flake-utils,
       crane,
       rust-overlay,
+      quest,
       ...
     }:
     let
@@ -350,16 +360,16 @@
         # collide with upstream's. Move back upstream once one tags both.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-cpp";
-          version = "0.11.0-kixelated.1+v0.32.2";
+          version = "0.11.0-kixelated.2+v0.32.2";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-cpp";
             rev = "v${version}";
-            hash = "sha256-i5qVHviZS36TpmaWINNgLKx12cWPm0TUT9+k+YaNAvw=";
+            hash = "sha256-NtlhJNjpIZ/h6v8Umi7iyd91/OYlj/8Gkw0cIlAKgp0=";
           };
 
-          cargoHash = "sha256-+Vt69WTtR/evH+qPcI0J7I1OKWtVOo1xzoGD4Hwg3zE=";
+          cargoHash = "sha256-WbcpuxTvH8v8TnUHX5VNFRZwLB+PfEfub0vlNVBMKEg=";
 
           # The workspace's other member is the fixture crate, which pulls the
           # uniffi examples in from git; build only the generator.
@@ -525,7 +535,8 @@
             ++ goDeps
             ++ cppDeps
             ++ dartDeps
-            ++ devTools;
+            ++ devTools
+            ++ [ quest.packages.${system}.default ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

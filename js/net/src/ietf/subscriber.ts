@@ -7,7 +7,7 @@ import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
-import type { Reader, Stream } from "../stream.ts";
+import type { Cursor, Reader, Stream } from "../stream.ts";
 import { TAIL_GRACE_MS, Tail } from "../tail.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
@@ -1045,18 +1045,18 @@ export class Subscriber {
 			// header priority inherits it (draft-21 section 10.4).
 			if (!group.flags.hasPriority) group.publisherPriority = toWire((await track.info()).priority);
 
+			const decode = (c: Cursor) => Frame.decode(c, group.flags, this.#timescales.get(group.trackAlias));
 			for (;;) {
-				// Only the group's own stream ends it: a track that closes first has already
-				// closed (or aborted) this group through its cache.
-				const done = await (producer ? race([stream.done(), producer.closed]) : stream.done());
-				if (done !== false) break;
-
-				const frame = await Frame.decode(
-					stream,
-					group.flags,
-					this.#timescales.get(group.trackAlias),
-					this.#session.version,
-				);
+				// Every object already buffered is written without an await, so the reader wakes
+				// once per batch rather than once per object. Only the group's own stream ends it:
+				// a track that closes first has already closed (or aborted) this group through its
+				// cache.
+				const frame =
+					stream.tryDecode(decode) ??
+					(await (producer
+						? race([stream.decodeMaybe(decode), producer.closed])
+						: stream.decodeMaybe(decode)));
+				if (!frame || frame instanceof Error) break;
 
 				if (frame.endOfTrack) {
 					// No object at or past this location exists: after the group's last object

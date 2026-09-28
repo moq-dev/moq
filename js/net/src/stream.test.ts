@@ -11,7 +11,7 @@ import {
 	StreamError,
 } from "./error.ts";
 import { Version } from "./ietf/version.ts";
-import { Reader, Stream, Writer } from "./stream.ts";
+import { type Cursor, Reader, Stream, Writer } from "./stream.ts";
 import { TimeoutError } from "./util/timeout.ts";
 
 // Helper to create a writable stream that captures written data
@@ -238,22 +238,18 @@ test("Reader u53 rejects integers that cannot be represented exactly", async () 
 	const wireValues = [firstUnsafe, firstUnsafe + 1n];
 	expect(Number(wireValues[0])).toBe(Number(wireValues[1]));
 
-	const { stream, written } = createTestWritableStream();
-	const writer = new Writer(stream);
-
 	for (const value of wireValues) {
+		const { stream, written } = createTestWritableStream();
+		const writer = new Writer(stream);
 		await writer.u62(value);
-	}
+		writer.close();
+		await writer.closed;
 
-	writer.close();
-	await writer.closed;
-
-	const reader = new Reader(undefined, concatChunks(written));
-	for (const value of wireValues) {
+		// A failed decode consumes nothing; the stream is unusable after it anyway.
+		const reader = new Reader(undefined, concatChunks(written));
 		await expect(reader.u53()).rejects.toThrow(`value larger than 53-bits: ${value}`);
+		expect(await reader.done()).toBe(false);
 	}
-
-	expect(await reader.done()).toBe(true);
 });
 
 test("Reader u62 varint decoding", async () => {
@@ -412,6 +408,40 @@ test("Reader u53 decodes two-byte stream type prefixes", async () => {
 	const reader = new Reader(undefined, concatChunks(written));
 	expect(await reader.u53()).toBe(0x40);
 	expect(await reader.done()).toBe(true);
+});
+
+/** A length-prefixed payload. */
+const sized = (c: Cursor) => c.read(c.u53());
+
+test("Reader tryDecode drains every buffered message, then consumes nothing from a partial one", async () => {
+	let controller!: ReadableStreamDefaultController<Uint8Array>;
+	const reader = new Reader(new ReadableStream<Uint8Array>({ start: (c) => (controller = c) }));
+	controller.enqueue(new Uint8Array([1, 0xa, 2, 0xb, 0xc, 3, 0xd]));
+	expect(await reader.done()).toBe(false);
+
+	expect(reader.tryDecode(sized)).toEqual(new Uint8Array([0xa]));
+	expect(reader.tryDecode(sized)).toEqual(new Uint8Array([0xb, 0xc]));
+	expect(reader.tryDecode(sized)).toBeUndefined();
+	expect(reader.tryDecode(sized)).toBeUndefined();
+
+	const pending = reader.decode(sized);
+	controller.enqueue(new Uint8Array([0xe]));
+	controller.enqueue(new Uint8Array([0xf]));
+	expect(await pending).toEqual(new Uint8Array([0xd, 0xe, 0xf]));
+	controller.close();
+	expect(await reader.decodeMaybe(sized)).toBeUndefined();
+});
+
+test("Reader tryDecode holds only the decode that ran short to the bytes it needs", () => {
+	const reader = new Reader(undefined, new Uint8Array([2, 0xa]));
+	expect(reader.tryDecode(sized)).toBeUndefined();
+	expect(reader.tryDecode((c) => c.u8())).toBe(2);
+});
+
+test("Reader decode rejects a stream that ends inside a message", async () => {
+	const reader = new Reader(undefined, new Uint8Array([3, 0xa]));
+	expect(reader.tryDecode(sized)).toBeUndefined();
+	await expect(reader.decode(sized)).rejects.toThrow("unexpected end of stream");
 });
 
 /** A stream reset as a transport delivers one: the peer's code, and nothing else useful. */

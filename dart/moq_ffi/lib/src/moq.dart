@@ -11667,6 +11667,14 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqsession_status(
   Pointer<Void> ptr,
 );
 
+@Native<RustBuffer Function(RustBuffer, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external RustBuffer uniffi_moq_ffi_fn_method_moqerror_uniffi_trait_display(
+  RustBuffer ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Void Function(RustBuffer, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -12896,7 +12904,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_unannounce() !=
-      63513) {
+      49647) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqcontainerproducer_cut() != 17534) {

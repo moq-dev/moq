@@ -1,4 +1,4 @@
-import { Reader, Writer } from "../stream.ts";
+import { type Cursor, type Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -100,32 +100,27 @@ async function encodeObjectExtensions(
 	return result;
 }
 
-async function decodeObjectTime(
-	r: Reader,
-	timescale: Timescale,
-	version: IetfVersion | undefined,
-): Promise<Timestamp | undefined> {
+function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | undefined {
 	let timestamp: bigint | undefined;
 	let overrideScale: bigint | undefined;
 	let prevType = 0n;
 	let first = true;
 
-	while (!(await r.done())) {
-		const step = await r.u62();
-		const id = !hasDeltaObjectPropertyTypes(version) || first ? step : prevType + step;
+	while (c.remaining > 0) {
+		const step = c.u62();
+		const id = !hasDeltaObjectPropertyTypes(c.version) || first ? step : prevType + step;
 		first = false;
 		prevType = id;
 
 		if (id % 2n === 0n) {
-			const value = await r.u62();
+			const value = c.u62();
 			if (id === PROP_TIMESTAMP || id === PROP_TIMESTAMP_DRAFT03) {
 				timestamp = value;
 			} else if (id === PROP_TIMESCALE) {
 				overrideScale = value;
 			}
 		} else {
-			const size = await r.u53();
-			await r.read(size);
+			c.read(c.u53());
 		}
 	}
 
@@ -312,41 +307,37 @@ export class Frame {
 		}
 	}
 
-	/** Decode a frame using the group flags and negotiated IETF version. */
-	static async decode(
-		r: Reader,
-		flags: GroupFlags,
-		timescale: Timescale | undefined,
-		version = r.version,
-	): Promise<Frame> {
+	/** Decode a frame using the group flags, at the cursor's negotiated IETF version. */
+	static decode(c: Cursor, flags: GroupFlags, timescale: Timescale | undefined): Frame {
 		// The first object's delta is its absolute Object ID; every later one is the prior ID
 		// plus the delta plus one. moq-lite groups start at object 0 and never skip one, so
 		// a sequential group is a zero delta throughout, and any other value means the group
 		// either starts partway through or has a gap that would renumber the frames after it.
-		const delta = await r.u53();
+		const delta = c.u53();
 		if (delta !== 0) {
 			throw new Error(`object IDs must start at 0 and increment by 1, got a delta of ${delta}`);
 		}
 
 		let timestamp: Timestamp | undefined;
 		if (flags.hasExtensions) {
-			const extensionsLength = await r.u53();
-			const extensions = await r.read(extensionsLength);
+			const extensionsLength = c.u53();
 			// A track that declared no timescale opted out of timestamps, so its objects
 			// are stamped on arrival even if one carries a Timestamp we cannot interpret.
 			if (timescale !== undefined) {
-				timestamp = await decodeObjectTime(new Reader(undefined, extensions, version), timescale, version);
+				timestamp = c.exact(extensionsLength, (e) => decodeObjectTime(e, timescale));
+			} else {
+				c.read(extensionsLength);
 			}
 		}
 
-		const payloadLength = await r.u53();
+		const payloadLength = c.u53();
 
 		if (payloadLength > 0) {
-			const payload = await r.read(payloadLength);
+			const payload = c.read(payloadLength);
 			return new Frame({ payload, timestamp });
 		}
 
-		const status = await r.u53();
+		const status = c.u53();
 
 		// Defined on every implemented draft, whether or not the header marks the group's end.
 		if (status === END_OF_TRACK) return new Frame({ endOfTrack: true });

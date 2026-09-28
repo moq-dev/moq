@@ -44,7 +44,7 @@ jobs:
 
     steps:
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
         with:
           tool-cache: false
 
@@ -82,6 +82,19 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command bun js/net/bench/reader.ts
 
+      # Fails if a chunk carrying many small frames costs as much per frame as one
+      # carrying a single frame, on either the lite or moq-transport group stream,
+      # which means decoding went back to a wakeup per frame.
+      - name: JS group frame benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command bun js/net/bench/frames.ts
+
+      # Fails if publishing a group costs more as the track retains more groups,
+      # which means the latency guard or the cache went back to scanning them all.
+      - name: JS track retention benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command bun js/net/bench/track.ts
+
       # Runs each moq-net Criterion routine once, so a bench that panics (an
       # unparsable version, a shape that deadlocks) fails here instead of on the
       # next manual run. Timing is not compared; nextest never runs a
@@ -90,6 +103,10 @@ jobs:
       - name: moq-net benchmark smoke
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
+
+      - name: BBB rendition alignment
+        if: ${{ !cancelled() }}
+        run: nix develop --command just pub check-bbb
 
       - name: Audit
         if: ${{ !cancelled() }}
@@ -138,7 +155,7 @@ jobs:
         recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring"]
     steps:
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
         with:
           tool-cache: false
       - name: Checkout
@@ -247,7 +264,7 @@ jobs:
         target: [lite, announce, ietf, varint, path, pattern]
     steps:
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
         with:
           tool-cache: false
       - name: Checkout
@@ -345,7 +362,7 @@ jobs:
       # The tag flake.nix pins; see the comment there.
       - name: Install uniffi-bindgen-cpp
         shell: bash
-        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.1+v0.32.2
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.2+v0.32.2
 
       - name: Check
         shell: bash

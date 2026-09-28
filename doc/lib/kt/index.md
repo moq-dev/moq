@@ -58,8 +58,9 @@ Call `media.discontinuity()` when the source seeks, pauses, or changes its time 
 The three advertising operations: `moq.createBroadcast(path)` (or
 `origin.createBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.announce(route)` / `broadcast.unannounce()` own that exact-path
-advertisement, and `broadcast.close()` (or `use { }`) releases the producer,
-ending the broadcast once no `dynamic()` handle remains; `origin.dynamic(prefix, route)` claims `prefix` and every
+advertisement; `broadcast.end()` ends the broadcast for good, while
+`broadcast.close()` (or `use { }`) only releases the handle, ending the
+broadcast once no `dynamic()` handle remains; `origin.dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
 serve. A route is a capability, not an inventory. `announcements(config)` takes

@@ -28,7 +28,7 @@ using namespace std::chrono_literals;
 namespace {
 
 [[noreturn]] void fail(const char *what, const moq::Error &error) {
-    std::fprintf(stderr, "%s failed: moq::Error variant %zu\n", what, error.get_variant().index());
+    std::fprintf(stderr, "%s failed: %s\n", what, error.to_string().c_str());
     std::abort();
 }
 
@@ -104,6 +104,8 @@ int main() {
     auto fingerprints = unbound->cert_fingerprints();
     CHECK(!fingerprints);
     CHECK(std::holds_alternative<moq::Error::kBind>(fingerprints.error().get_variant()));
+    // It prints the message Rust's Display gives.
+    CHECK(fingerprints.error().to_string() == "bind: not listening; call listen() first");
 
     // Publisher: a server whose origin serves one broadcast with one track.
     auto origin = moq::OriginProducer::init({});

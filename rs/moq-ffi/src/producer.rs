@@ -253,8 +253,8 @@ impl MoqBroadcastProducer {
 	/// Retract this broadcast's exact-path advertisement, if any.
 	///
 	/// Local consumers and peers alike stop discovering and requesting it;
-	/// tracks already in flight carry on. Announcing again brings it back. Errors
-	/// with `Closed` on a standalone broadcast (no origin to announce on).
+	/// tracks already in flight carry on. Announcing again brings it back. A no-op
+	/// on a standalone broadcast.
 	pub fn unannounce(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
