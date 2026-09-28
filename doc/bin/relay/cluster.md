@@ -45,8 +45,9 @@ the sum of what it crossed.
 
 Prefix advertisements are forwarded and costed the same way as an exact-path
 route: each hop appends its identity, adds the link price, and passes the
-claim on. An advertisement must be contained by one of the publisher's granted
-prefixes (`grant/**`); an over-wide prefix is refused rather than clamped.
+claim on. An advertised prefix must overlap the publisher's grant, or it is
+refused. A prefix wider than the grant is accepted, but it only routes requests
+for paths the grant covers.
 
 Routing prefers the longest covering prefix, then a fully identified hop list
 over one that holds a 0 (an anonymous hop) at any depth, then the lowest cost,
