@@ -162,9 +162,8 @@ impl Publish {
 		Ok((&mut broadcast.producer, &mut broadcast.catalog))
 	}
 
-	/// Cleanly finish the broadcast and finalize the catalog stream, so subscribers
-	/// see a normal end rather than [`moq_net::Error::Dropped`].
-	pub fn finish(&mut self, broadcast: Id) -> Result<(), Error> {
+	/// End the broadcast for good and release it, finalizing the catalog stream.
+	pub fn close(&mut self, broadcast: Id) -> Result<(), Error> {
 		let Broadcast {
 			producer,
 			mut catalog,
@@ -183,9 +182,8 @@ impl Publish {
 			}
 			guard.commit()?;
 		}
-		// Finish the broadcast first so the clean end reaches subscribers even if
-		// finalizing the catalog fails.
-		producer.finish();
+		// Close the broadcast first so it ends even if finalizing the catalog fails.
+		producer.close();
 		catalog.finish()?;
 		Ok(())
 	}
@@ -242,6 +240,13 @@ impl Publish {
 	pub fn media_flush(&mut self, media: Id, timestamp: hang::container::Timestamp) -> Result<(), Error> {
 		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
 		track.flush(timestamp, std::time::Instant::now())?;
+		Ok(())
+	}
+
+	/// Mark a timeline break on this media importer.
+	pub fn media_discontinuity(&mut self, media: Id) -> Result<(), Error> {
+		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
+		track.discontinuity()?;
 		Ok(())
 	}
 

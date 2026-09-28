@@ -77,11 +77,14 @@ fn literal_and_subtree() {
 	}
 	for case in vectors["subtree"].as_array().unwrap() {
 		let path = case["path"].as_str().unwrap();
-		assert_eq!(
-			Pattern::subtree(path).unwrap(),
-			pattern(case["pattern"].as_str().unwrap()),
-			"subtree {path:?}"
-		);
+		match Pattern::subtree(path) {
+			Ok(got) => assert_eq!(got, pattern(case["pattern"].as_str().unwrap()), "subtree {path:?}"),
+			Err(err) => assert_eq!(
+				error_code(&err),
+				case["error"].as_str().unwrap_or("ok"),
+				"subtree {path:?}"
+			),
+		}
 	}
 }
 

@@ -29,6 +29,11 @@ them (a planned-drain health state, the SIGTERM sequencing and stop timeouts,
 per-PoP serial deploys, a two-node PoP floor, and the gateway drain contract)
 is moq.pro's (downstream) fleet drain work, which consumes these quests.
 
+Drain stays at the MoQ layer. WebTransport's `WT_DRAIN_SESSION` capsule and
+the browser `draining` promise are advisory and carry no redirect URI or
+timeout, and qmux and WebSocket have no equivalent, so neither the relay nor
+the clients send or act on them (decided 2026-09-26).
+
 **relay-drain-api.** A drain hook that GOAWAYs every established session and
 immediately GOAWAYs any new arrival, so an embedding process can enter drain
 on SIGTERM after the DNS window and still bound the total stop time. Expose
@@ -41,7 +46,7 @@ scale-down prerequisite, not merely a deploy improvement. RTMP/SRT/WHIP/WHEP
 cannot receive MoQ GOAWAY, so their contract remains DNS withdrawal followed
 by the stop deadline and encoder reconnect.
 
-## Quests
+## Required
 
 - [Relay drain api](/quest/m1/drain/relay-drain-api.md) - a drain hook that
   GOAWAYs every session, including new arrivals, triggered by the embedding
@@ -49,7 +54,8 @@ by the stop deadline and encoder reconnect.
 - [Client goaway](/quest/m1/drain/client-goaway.md) - the JavaScript client
   migrates on GOAWAY with a handover and the guarded redirect the Rust client
   already has, and the Rust drain path gets its regression test
+- [JS GOAWAY requests](/quest/m1/drain/js-goaway-requests.md) - after GOAWAY the JS client opens no new request on the old session, like Rust
 
 ## Related
 
-- [pop-skipping](/quest/m1/pop-skipping/README.md) - its same-PoP link price and full eligible pairing become important when a deployment adds a second relay per PoP
+- [Cluster routing](/quest/m1/cluster-routing.md) - the configured topology and link costs a second relay per PoP joins

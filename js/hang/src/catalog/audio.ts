@@ -59,6 +59,17 @@ export const AudioConfigSchema = z.object({
 			z.transform((value) => (value === 0 ? undefined : value)),
 		),
 	),
+
+	// How far this rendition's frames reach the transport behind the broadcast's earliest
+	// rendition, in whole milliseconds rounded up. A player holds `delay + jitter` for it and never
+	// subtracts one rendition's `delay` from another's. Absent on the earliest rendition. It only
+	// ever grows over the life of a stream.
+	delay: z.optional(
+		z.pipe(
+			u53Schema,
+			z.transform((value) => (value === 0 ? undefined : value)),
+		),
+	),
 });
 
 /** Schema for the catalog audio section: a map of track name to rendition config. */

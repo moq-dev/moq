@@ -418,11 +418,13 @@ export class Consumer {
 		return true;
 	}
 
-	#guard<T>(operation: Promise<T>): Promise<T> {
-		if (this.#expire(true)) return Promise.reject(this.#terminal);
+	// Takes a thunk rather than a started promise, so a group already past its budget
+	// never begins the write: an abandoned write would reject later with no handler.
+	#guard<T>(operation: () => Promise<T>): Promise<T> {
+		this.#expire(true);
 		if (this.#terminal) return Promise.reject(this.#terminal);
 		const expiry = this.#expiry;
-		if (!expiry) return operation;
+		if (!expiry) return operation();
 
 		return new Promise<T>((resolve, reject) => {
 			let settled = false;
@@ -442,7 +444,7 @@ export class Consumer {
 			};
 
 			for (const changed of expiry.changed) disposes.push(changed.subscribe(check));
-			operation.then(
+			operation().then(
 				(value) => finish(() => resolve(value)),
 				(error: unknown) => finish(() => reject(error)),
 			);

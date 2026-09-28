@@ -76,11 +76,11 @@ test-changed $LIST:
 tokio-features:
     sh/rs/tokio-features.sh
 
-# Runs the `#[cfg(target_os = "windows")]` code past the compiler, which the
-# Linux gate skips; nightly.yml runs it on a Windows runner. Default features,
-# since jemalloc doesn't build on MSVC, and moq-gst is excluded because the
-# runner has no GStreamer. `moq-cli/play` and `moq-cli/capture` are the only
-# thing that compiles the cli's device and render code.
+# Runs the `#[cfg(windows)]` code past the compiler, which the Linux gate
+# skips; platform.yml runs it on a Windows runner for every pull request.
+# Default features, since jemalloc doesn't build on MSVC, and moq-gst is
+# excluded because the runner has no GStreamer. `moq-cli/play` and
+# `moq-cli/capture` turn on the device and render code.
 
 # Compile the whole workspace on a Windows host. Must run ON Windows.
 windows *args:
@@ -98,16 +98,22 @@ uring *args:
 uring-check *args:
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
 
-# moq-video's VideoToolbox/ScreenCaptureKit/AVFoundation code and moq-audio's
-# ScreenCaptureKit capture, which nightly.yml compiles on a Mac runner.
+# The Apple-gated code in moq-video, moq-audio, and moq-sock, which
+# platform.yml compiles on a Mac runner alongside `windows`.
 
-# Compile the Apple-only code paths. Must run ON macOS.
+# Compile the whole workspace on a macOS host. Must run ON macOS.
 macos *args:
-    cargo check --locked -p moq-video -p moq-audio --all-targets --all-features {{ args }}
+    cargo check --locked --workspace --exclude moq-gst {{ no_fuzz }} --all-targets --features "moq-cli/play moq-cli/capture" {{ args }}
 
 # Compile and lint the capture feature, which the default check skips.
 capture *args:
     cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture {{ args }} -- -D warnings
+
+# The capture tests drive synthetic devices, so they need no hardware.
+
+# Test the capture feature, which the default test pass skips.
+capture-test *args:
+    just rs test -p moq-video -p moq-audio --features moq-video/capture,moq-audio/capture {{ args }}
 
 # moq-video's MediaCodec code is `#[cfg(target_os = "android")]`. Needs an NDK,
 # which the dev shell lacks, so android.yml runs it outside Nix. `check` rather
@@ -184,6 +190,13 @@ test *args:
 # Exercise Vulkan -> CUDA -> NVENC on Linux/NVIDIA hardware.
 vulkan-cuda:
     sh/rs/vulkan-cuda.sh
+
+# The media tasks run against a recorder rather than a device (see
+# `rs/moq-cli/src/play/fake.rs`), so this needs no speaker or display.
+
+# Test moq-cli's `play` feature, which default features leave out.
+play *args:
+    just rs test -p moq-cli --features play {{ args }}
 
 # Compile and run the `/// ```` examples, which nextest skips.
 doctest *args:

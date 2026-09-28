@@ -36,6 +36,10 @@ while extending this harness rather than creating another benchmark runner.
   samples. Validate an unchanged-revision A/A run and a deliberately degraded
   fixture; keep normal machine timing informational rather than a flaky CI gate.
 
+## Required
+
+- [Tooling](/quest/m1/tooling/README.md) - the recipe and script layout `just bench` runs under
+
 ## Related
 
 - [Windowed latency](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - owns histogram/window semantics

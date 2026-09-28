@@ -1,0 +1,4 @@
+# Kotlin objects are AutoCloseable, and `close()` there only releases the handle.
+# A generated `close()` would collide with it, so Kotlin names the method `end()`.
+[bindings.kotlin.rename]
+"MoqBroadcastProducer.close" = "end"

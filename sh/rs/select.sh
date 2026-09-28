@@ -49,7 +49,7 @@ select_packages() {
     # A crate is rebuilt when anything it depends on changed, so walk the edges
     # backwards until the selection stops growing. Test the value, not the key:
     # awk creates a key on every `want[dep[i]]` read. The id lookup below drops
-    # names that are not workspace crates, such as a seed from `rs/CLAUDE.md`.
+    # names that are not workspace crates, such as a seed from `rs/AGENTS.md`.
     selected=$(awk -v seeds="$seeds" '
 		BEGIN { split(seeds, s, "\n"); for (i in s) want[s[i]] = 1 }
 		{ pkg[NR] = $1; dep[NR] = $2 }
@@ -123,8 +123,13 @@ case "$action" in
         # wasm32 pass checks it. moq-mux and moq-ffi ride along in that pass, and
         # nothing depends on moq-ffi, so each has to reach it on its own.
         if wants '(moq-wasm|moq-mux|moq-ffi)'; then just rs wasm; fi
-        # Device code behind the off-by-default `capture` feature.
-        if wants '(moq-video|moq-audio)'; then just rs capture; fi
+        # Device code behind the off-by-default `capture` feature. check-test
+        # lints it through the test build, as for the default features.
+        if wants '(moq-video|moq-audio)'; then
+            if [[ "$action" == check-test ]]; then CARGO_BUILD_WARNINGS=deny just rs capture-test; else just rs capture; fi
+        fi
+        # moq-cli's media tasks are behind `play`; only check-test runs tests.
+        if [[ "$action" == check-test ]] && wants moq-cli; then just rs play; fi
         # The relay's io_uring listener, off the default feature set.
         if wants moq-relay; then just rs uring-check; fi
         # Each media feature shape compiles on its own, about two minutes.
@@ -139,6 +144,9 @@ case "$action" in
         # nextest exits 4 on that; the whole workspace finding none really is wrong.
         [[ "$packages" == ALL ]] || flags+=(--no-tests=pass)
         just rs test "${flags[@]}"
+        # Tests behind the off-by-default `capture` and `play` features.
+        if wants '(moq-video|moq-audio)'; then just rs capture-test; fi
+        if wants moq-cli; then just rs play; fi
         ;;
     *)
         echo "$usage" >&2

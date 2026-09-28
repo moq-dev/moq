@@ -36,7 +36,7 @@ bespoke media fork for each service.
   compliance outside the experiment. The SIP adapter is the boundary to that
   world.
 
-## Quests
+## Required
 
 - [Call fabric protocol](/quest/m2/carrier-voice/protocol.md) - versioned
   namespaces, roles, state transitions, authorization, and both topologies

@@ -27,9 +27,20 @@ pub(super) struct FrameChannel {
 struct State {
 	frame: Option<Frame>,
 	#[cfg(any(target_os = "linux", target_os = "windows", test))]
-	native_anchor: Option<(Timestamp, Timestamp)>,
+	native: Option<Native>,
 	closed: bool,
 	error: Option<Error>,
+}
+
+/// How a device's own timeline maps onto this stream's.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+#[derive(Clone, Copy)]
+struct Native {
+	/// A device timestamp and the local time it was anchored to.
+	source: Timestamp,
+	local: Timestamp,
+	/// The previous device timestamp, which the next must exceed to keep the anchor.
+	last: Timestamp,
 }
 
 impl FrameChannel {
@@ -38,7 +49,7 @@ impl FrameChannel {
 			state: Mutex::new(State {
 				frame: None,
 				#[cfg(any(target_os = "linux", target_os = "windows", test))]
-				native_anchor: None,
+				native: None,
 				closed: false,
 				error: None,
 			}),
@@ -53,7 +64,7 @@ impl FrameChannel {
 		self.push_at(frame, Instant::now());
 	}
 
-	fn push_at(&self, surface: Surface, captured: Instant) {
+	pub(super) fn push_at(&self, surface: Surface, captured: Instant) {
 		let micros = captured.saturating_duration_since(self.epoch).as_micros();
 		let micros = u64::try_from(micros).unwrap_or(u64::MAX);
 		let frame = Frame::new(surface, Timestamp::from_micros(micros).expect("capture timestamp fits"));
@@ -61,9 +72,13 @@ impl FrameChannel {
 	}
 
 	/// Map a device-local timestamp into this stream's private timeline. The
-	/// source epoch never escapes: its first sample is anchored to acquisition.
+	/// source epoch never escapes: its first sample is anchored to arrival.
 	/// Only the blocking-device pump feeds native timestamps, so it is gated like
 	/// `pump` plus `cfg(test)` for the mapping test below.
+	///
+	/// A device timeline that steps back or stalls (a driver restarting its clock
+	/// at zero, or one reporting a constant) re-anchors that sample to arrival, so
+	/// the stream never rewinds or repeats a timestamp it already delivered.
 	#[cfg(any(target_os = "linux", target_os = "windows", test))]
 	pub(super) fn push_native(&self, surface: Surface, source: Timestamp) {
 		let local = self.now();
@@ -71,11 +86,19 @@ impl FrameChannel {
 		if state.closed {
 			return;
 		}
-		let (source_anchor, local_anchor) = *state.native_anchor.get_or_insert((source, local));
+		let anchor = match state.native {
+			Some(native) if source > native.last => native,
+			_ => Native {
+				source,
+				local,
+				last: source,
+			},
+		};
 		let timestamp = source
-			.checked_sub(source_anchor)
-			.and_then(|elapsed| local_anchor.checked_add(elapsed))
+			.checked_sub(anchor.source)
+			.and_then(|elapsed| anchor.local.checked_add(elapsed))
 			.unwrap_or(local);
+		state.native = Some(Native { last: source, ..anchor });
 		state.frame = Some(Frame::new(surface, timestamp));
 		drop(state);
 		self.notify.notify_one();
@@ -255,5 +278,43 @@ mod tests {
 		let second = chan.recv().await.unwrap().unwrap().timestamp;
 		assert_eq!(second.as_micros() - first.as_micros(), 33_367);
 		assert!(first.as_micros() < 9_000_000);
+	}
+
+	/// A device clock that restarts at zero mid-stream must not rewind the stream's
+	/// timeline: the sample re-anchors to arrival and the device's spacing resumes from there.
+	#[tokio::test]
+	async fn native_timestamps_reanchor_when_the_device_clock_restarts() {
+		let chan = FrameChannel::new();
+		let us = |micros| Timestamp::from_micros(micros).unwrap();
+
+		chan.push_native(frame(1), us(0));
+		chan.recv().await.unwrap().unwrap();
+		// Real time passes with the device clock, so the mapping stays at or behind arrival.
+		tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+		chan.push_native(frame(2), us(20_000));
+		let before = chan.recv().await.unwrap().unwrap().timestamp;
+
+		chan.push_native(frame(3), us(0));
+		let restarted = chan.recv().await.unwrap().unwrap().timestamp;
+		assert!(restarted >= before, "{restarted:?} rewound behind {before:?}");
+
+		chan.push_native(frame(4), us(33_000));
+		let next = chan.recv().await.unwrap().unwrap().timestamp;
+		assert_eq!(next.as_micros() - restarted.as_micros(), 33_000);
+	}
+
+	/// A driver that reports one constant timestamp must not stamp every frame
+	/// identically: each sample falls back to its arrival.
+	#[tokio::test]
+	async fn a_stalled_device_clock_falls_back_to_arrival() {
+		let chan = FrameChannel::new();
+		let constant = Timestamp::from_micros(0).unwrap();
+
+		chan.push_native(frame(1), constant);
+		let first = chan.recv().await.unwrap().unwrap().timestamp;
+		tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+		chan.push_native(frame(2), constant);
+		let second = chan.recv().await.unwrap().unwrap().timestamp;
+		assert!(second > first, "a stalled device clock repeated {first:?}");
 	}
 }

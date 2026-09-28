@@ -24,6 +24,9 @@ for (let group = await track?.recvGroup(); group; group = await track?.recvGroup
 The classes (`Moq.Session`, `Moq.Broadcast`, `Moq.Track`, `Moq.Group`) drop the
 `Moq` prefix since they're already namespaced under the import.
 
+`free()` is safe while a call is pending, and rejects that handle's pending
+calls. Freeing a `Session` also closes it.
+
 ## Building
 
 `dist/` is generated, not committed. Build it from the repo root:

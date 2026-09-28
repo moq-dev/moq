@@ -74,11 +74,11 @@ against it is likely cheaper than patching the branch's:
   came up on the 100 ms chip, so something is restoring or overriding it. Pin
   that down: a stored preference silently winning over the default is its own
   bug, and it also means auto gets far less real exposure than it looks like.
-- Replay the recorded traces from #3477 rather than synthetic ones of the same
-  shape. They are on the reporter's fork (`fperex/moq`, branch
-  `debug/rt-audio`) with the raw ndjson attached to release
-  `rt-audio-traces-2026-09-06`. Trim a copy into the repository and replay it
-  through both rings in `replay.test.ts`.
+- Replay recorded traces rather than synthetic ones of the same shape. The
+  #3477 traces are gone, so record fresh ones with the [browser
+  harness](/quest/m0/audio-quality-harness/browser.md) (decided with the
+  maintainer instead of asking the reporter). Trim a copy into the repository
+  and replay it through both rings in `replay.test.ts`.
 - Manual run against the public relay on Chrome and Safari, the two rows the
   issue measured. Measure the publisher's audio encoder input-to-output lag in
   the same run using the reporter's instrumented harness; #3518 fixed the known
@@ -94,6 +94,10 @@ quest lands on `main`, so it adds the spread inputs beside `probe` and stops
 reading `probe`; removing it is part of the `SyncInput` reshape in
 [Plan: A/V clock](/quest/m0/plan-av-clock.md). Land the estimator so
 that quest can adopt it without a second estimator change.
+
+## Required
+
+- [Browser harness](/quest/m0/audio-quality-harness/browser.md) - records the arrival traces this quest replays
 
 ## Related
 

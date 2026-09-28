@@ -83,8 +83,12 @@ declare -A scope=(
     [rs]='^(rs/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
     [bench]='^bench/'
     [drafts]='^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)'
-    # Quest documents form one graph, so any change validates the whole tree.
-    [quest]='^(quest/|rs/quest/)'
+    # Quest documents form one graph, so any change validates the whole tree,
+    # as does a bump of the flake-pinned validator.
+    [quest]='^(quest/|flake\.lock$)'
+    # The drill mutations patch Rust source, so a Rust change can move the code
+    # they target. Only nightly runs the drills; this catches a stale patch.
+    [drill]='^(rs/|test/drill/)'
     # maturin bundles rs/moq-ffi into the moq-ffi wheel, and the other
     # bindings generate from it. Each check also compiles its doc samples.
     [py]='^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/lib/samples\.sh$)'
@@ -117,7 +121,8 @@ declare -A tools=(
     [rs]='cargo jq'
     [bench]='cargo'
     [drafts]='bun kramdown-rfc xml2rfc'
-    [quest]='cargo'
+    [quest]='quest'
+    [drill]=''
     [py]='uv'
     [kt]='cargo gradle java'
     [swift]=''
@@ -135,7 +140,7 @@ declare -A tools=(
 )
 
 case "$action" in
-    check | ci-check) modules=(js workers drafts rs bench quest py kt swift go dart obs_compile obs flake markdown shell toml nix justfile gh) ;;
+    check | ci-check) modules=(js workers drafts rs bench quest drill py kt swift go dart obs_compile obs flake markdown shell toml nix justfile gh) ;;
     fix) modules=(js rs py dart obs markdown shell toml nix justfile) ;;
     ci-test) modules=(js rs py) ;;
 esac
@@ -187,7 +192,8 @@ for module in "${selected[@]}"; do
         # `ci-check` uses clippy, which is quicker when the tests run elsewhere.
         check:rs) if [[ "$action" == check ]]; then just rs check-test-changed "$rs_list"; else just rs check-changed "$rs_list"; fi ;;
         check:bench) cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring ;;
-        check:quest) cargo run --quiet --locked --package quest -- check ;;
+        check:quest) quest check ;;
+        check:drill) just test drill-sensitivity --apply-only ;;
         check:obs_compile) just obs compile ;;
         check:flake) nix flake check ;;
         check:markdown)

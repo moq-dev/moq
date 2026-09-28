@@ -1,0 +1,24 @@
+# [S] Expired token error
+
+## Goal
+
+A session whose token expired reports `moq_net::Error::Expired`, not
+`Unauthorized`, over moq-lite and moq-transport, mirrored in `@moq/net` and
+the bindings. A client can then refresh its token instead of treating the
+refusal as final.
+
+## Plan
+
+- Add the variant to the `#[non_exhaustive]` error, so the change is additive
+  on `main`. Map it from lite's `AUTH_ERROR { Expired }` and moq-transport's
+  `EXPIRED_AUTH_TOKEN`, and back again when refusing.
+- Carry it through moq-ffi's error mapping and each wrapper.
+
+Moved from m2 into the auth line: relay tokens refuse an expired
+token with `AUTH_ERROR { Expired }`, so without this moq-net cannot tell it
+apart from `Unauthorized`.
+
+## Required
+
+- [Lite stream](/quest/m1/auth/lite.md) - the lite AUTH streams that carry `Expired`
+- [moq-transport](/quest/m1/auth/moq-transport.md) - the extension that carries `EXPIRED_AUTH_TOKEN`

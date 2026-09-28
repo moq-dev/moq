@@ -1,7 +1,10 @@
 import { describe, expect, it } from "bun:test";
+import type * as Catalog from "@moq/hang/catalog";
 import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
+import { playbackJitter } from "./audio/config";
 import { type Delay, Sync } from "./sync";
+import { renditionJitter } from "./video/playhead";
 
 // Effects in @moq/signals flush on a microtask, so let pending updates drain before asserting.
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -77,6 +80,23 @@ describe("delay and buffer", () => {
 		unregister();
 		await flush();
 		expect(sync.out.delay.peek()).toBe(100 as Time.Milli);
+		sync.close();
+	});
+
+	it("holds the largest delay plus jitter among subscribed renditions", async () => {
+		const audio = { codec: "opus", container: { kind: "legacy" }, sampleRate: 48000, numberOfChannels: 2 };
+		const video = { codec: "avc1.640028", container: { kind: "legacy" }, jitter: 34, delay: 200 };
+		const sync = new Sync({ delay: 100 as Time.Milli });
+		sync.register(new Signal(playbackJitter(audio as Catalog.AudioConfig)));
+		const unsubscribe = sync.register(new Signal(renditionJitter(video as Catalog.VideoConfig)));
+		await flush();
+		// 100 ms of network jitter over the video's 200 ms delay and 34 ms spread.
+		expect(sync.out.delay.peek()).toBe(334 as Time.Milli);
+
+		// Dropping the slow rendition lowers latency to the audio's own 20 ms frame and 3 ms quantum.
+		unsubscribe();
+		await flush();
+		expect(sync.out.delay.peek()).toBe(123 as Time.Milli);
 		sync.close();
 	});
 

@@ -41,25 +41,24 @@ because the newest group wins regardless of which message it holds. Putting
 them all in one long-lived group has the opposite failure: nothing can be
 skipped and head-of-line blocking is back.
 
-So the lossy class is a latest-value snapshot, the shape `moq_json::snapshot`
-implements, with the frame as an opaque value. Two details decide whether it
-actually delivers latest-value:
+So the lossy class is a latest-value snapshot of opaque bytes:
+`moq_binary::snapshot` (moving to `moq_flate::snapshot` in
+[moq-binary folds into moq-flate](/quest/m1/flate-binary.md)), with the raw
+frame as the value. Every update is a self-contained group, so a newer value
+never waits behind an older one. One detail decides whether it actually
+delivers latest-value:
 
 - **Key on `(sysid, compid, msgid)`, not msgid alone.** A vehicle is several
   components, and an autopilot, a gimbal and a camera all emit `HEARTBEAT`
   under msgid 0; keying on msgid alone lets them overwrite each other. Decide
   explicitly what to do about instances distinguished only inside a payload,
   which the msgid-only rule cannot see.
-- **Set the encoder's delta ratio to 0.** By default `moq_json::snapshot`
-  batches up to `MAX_DELTA_FRAMES` merge patches into one ordered group
-  (`rs/moq-json/src/snapshot/encoder.rs`), so under congestion an earlier 50 Hz
-  attitude delta head-of-line blocks a later heartbeat inside that group. A
-  ratio of 0 makes every change a self-contained snapshot, which is the
-  latest-value contract; anything else has to justify the added delay.
 
-`moq-flate` is the existing answer if the encoding overhead matters.
+Not `moq_json::snapshot`: a MAVLink frame is not JSON, and its default batches
+up to `MAX_DELTA_FRAMES` merge patches into one ordered group, so an earlier
+50 Hz attitude delta would head-of-line block a later heartbeat.
 
-The reliable class is the append-log shape (`moq_json::stream`): commands,
+The reliable class is the append-log shape (the binary `stream` mode): commands,
 ACKs, mission, parameter and file transfer are stop-and-wait exchanges carried
 in one ordered group. Note the scope in
 [robot](/quest/m2/teleop/robot.md): that is gap-free for a live reader, not

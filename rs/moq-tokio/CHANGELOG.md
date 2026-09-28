@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.19](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.18...moq-tokio-v0.19.19) - 2026-09-27
+
+### Added
+
+- *(net)* the SETUP AUTHORIZATION TOKEN option reaches the verifier ([#4278](https://github.com/moq-dev/moq/pull/4278))
+
+### Fixed
+
+- *(cli)* close the relay connection on SIGINT and SIGTERM ([#4287](https://github.com/moq-dev/moq/pull/4287))
+
+### Other
+
+- fix three load-only test failures at the cause ([#4286](https://github.com/moq-dev/moq/pull/4286))
+
+## [0.19.18](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.17...moq-tokio-v0.19.18) - 2026-09-26
+
+### Added
+
+- end a broadcast with close() in every language ([#4031](https://github.com/moq-dev/moq/pull/4031))
+
+### Fixed
+
+- *(net)* end a track with its session's error when the session dies ([#4120](https://github.com/moq-dev/moq/pull/4120))
+
+## [0.19.17](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.16...moq-tokio-v0.19.17) - 2026-09-26
+
+### Other
+
+- updated the following local packages: moq-net
+
+## [0.19.16](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.15...moq-tokio-v0.19.16) - 2026-09-25
+
+### Fixed
+
+- *(net)* skip a stale warm cache on an IETF rejoin ([#4150](https://github.com/moq-dev/moq/pull/4150))
+
 ## [0.19.15](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.14...moq-tokio-v0.19.15) - 2026-09-25
 
 ### Fixed

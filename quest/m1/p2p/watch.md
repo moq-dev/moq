@@ -12,7 +12,7 @@ goes away, with no visible interruption.
 `hang-watch` and `hang-publish` gain a `p2p` attribute that constructs
 `Peers` on the shared connection's origin with the demo's ICE servers and a
 `max` from the page; `demo/web` exposes the toggle. The route pick is the
-origin's, from [cost ranking](/quest/m1/route-cost.md) under the rule from
+origin's, from its cost ranking (`compareRoutes` in `js/net/src/origin.ts`) under the rule from
 [cost across scopes](/quest/m1/p2p/cost-scopes.md): a peer already carrying
 the broadcast wins, and its retraction falls back to the relay.
 
@@ -26,5 +26,4 @@ watcher tab re-serving to another watcher through
 - [Signaling and policy](/quest/m1/p2p/signal.md)
 - [moq-cli joins](/quest/m1/p2p/cli.md) - the native hop the second topology shows
 - [Transit in the JS origin](/quest/m1/p2p/transit.md)
-- [Route cost in the JS origin](/quest/m1/route-cost.md)
 - [Cost across scopes](/quest/m1/p2p/cost-scopes.md)

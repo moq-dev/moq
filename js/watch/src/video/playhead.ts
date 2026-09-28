@@ -9,15 +9,19 @@ const SLACK = Time.Milli(100);
 /**
  * How far behind live a rendition's playhead can sit while still being at its own live edge.
  *
- * Frames arrive one group at a time, so this is the rendition's group cadence: the sync buffer
- * has to cover it or playback starves between groups. The catalog value wins. Otherwise assume
- * the publisher flushes each frame as it's encoded, so a frame interval is the longest we wait.
- * Undefined when the catalog declares neither.
+ * Its catalog `delay` behind the broadcast's earliest rendition, plus its own spread: frames arrive
+ * one group at a time, so the sync buffer has to cover the group cadence or playback starves
+ * between groups. The catalog `jitter` wins. Otherwise assume the publisher flushes each frame as
+ * it's encoded, so a frame interval is the longest we wait. Undefined when the catalog declares
+ * none of them.
  */
 export function renditionJitter(config: Catalog.VideoConfig): Time.Milli | undefined {
-	if (config.jitter !== undefined) return Time.Milli(config.jitter);
-	if (config.framerate) return Time.Milli(Math.ceil(1000 / config.framerate));
-	return undefined;
+	let spread: Time.Milli | undefined;
+	if (config.jitter !== undefined) spread = Time.Milli(config.jitter);
+	else if (config.framerate) spread = Time.Milli(Math.ceil(1000 / config.framerate));
+
+	if (config.delay === undefined) return spread;
+	return Time.Milli.add(Time.Milli(config.delay), spread ?? Time.Milli.zero);
 }
 
 /** The playheads involved in promoting a new rendition. */

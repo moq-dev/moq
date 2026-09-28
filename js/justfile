@@ -40,13 +40,13 @@ fix:
 # Run all unit tests.
 test:
     bun install --frozen-lockfile
-    bun test common/deps.test.ts
+    bun test common/declarations.test.ts common/deps.test.ts
     bun run --filter='*' --elide-lines=0 test
 
-# Benchmark re-pricing the origin broadcast map as routes and observers grow.
-bench:
+# Run one net benchmark: broadcasts, forward, reader, frames, or track.
+bench name:
     bun install --frozen-lockfile
-    bun net/bench/broadcasts.ts
+    bun net/bench/{{ name }}.ts
 
 # Build all packages.
 build:

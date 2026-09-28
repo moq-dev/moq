@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Coverage-guided fuzzing of the moq-net wire codecs: sh/rs/fuzz.sh TARGET [ARGS...]
 #
-# TARGET is lite, ietf, varint, or path; ARGS pass to `cargo fuzz run`, so
-# `just rs fuzz lite -- -max_total_time=300` bounds a run. See
-# rs/moq-net/fuzz/README.md.
+# TARGET is lite, announce, ietf, varint, path, or pattern; ARGS pass to
+# `cargo fuzz run`, so `just rs fuzz lite -- -max_total_time=300` bounds a run.
+# See rs/moq-net/fuzz/README.md.
 #
 # Seeds are regenerated first so the corpus follows the dispatch rather than a
 # stale run, and libFuzzer writes what it discovers to the FIRST corpus

@@ -11,14 +11,16 @@ tokens. Every claim we do not evaluate refuses the token naming the claim.
 
 ## Plan
 
-The JWT types (`Claims`, `Key`, `Jwk`, `KeyId`, `Algorithm`, the key set,
-`authorize`) sit at the `moq_auth` root today. Move them under
-`moq_auth::jwt` first, keeping their names, so `cat` is a sibling module
-rather than a set of prefixed names; `@moq/auth` stays flat.
+The JWT types (`Claims`, `Key`, `Jwk`, `KeyId`, `Algorithm`, `Scope`, the
+key set) sit at the root of the published `moq-auth` 0.1.x, and they stay
+there: `cat` is an additive module beside them, so this lands on `main`.
+Moving them under `moq_auth::jwt` would break every published caller; if it
+is still wanted, it is its own `dev` change, not part of this quest. Decided
+in the 2026-09-28 quest audit. `@moq/auth` stays flat.
 
 - Crates: `coset` for COSE and CWT claims, `ciborium` for CBOR; HMAC through
   the `aws-lc-rs` the crate already links, ES256 through `p256`. Keys reuse
-  `moq_auth::jwt::Key` files: a JWK with `alg` maps to the COSE algorithm
+  `moq_auth::Key` files: a JWK with `alg` maps to the COSE algorithm
   (`HS256` to HMAC 256/256, `ES256` to -7, `EdDSA` to -8, `RS256` to -257);
   a JWK whose algorithm has no COSE mapping is refused at load naming it.
 - `cat::Claims { issuer, audience, subject, expires, not_before, issued,
@@ -46,7 +48,7 @@ rather than a set of prefixed names; `@moq/auth` stays flat.
   than widening a fetch-only token into a live subscription. `ClientSetup`
   and `ServerSetup` add nothing. The namespace fields become one `moq_pattern::Pattern` segment
   each, the mapping `rs/moq-pattern` documents under "CAT / C4M", relative
-  to the dialed path exactly as `jwt::Claims::root` is: `Exact(f)` is the
+  to the dialed path exactly as the JWT `Claims::root` is: `Exact(f)` is the
   literal segment, `Prefix(f)` is `f*`, `Suffix(f)` is `*f`, a named
   namespace without `exact_depth` appends `/**`, and an absent namespace is
   bare `**` with nothing appended. A field value containing `/` or `*`
@@ -78,12 +80,10 @@ rather than a set of prefixed names; `@moq/auth` stays flat.
   vectors round-tripped both ways; expiry and not-before; the grant
   produced from every c4m-01 example; serve admitting a CAT over a real
   moq-transport session on every supported draft and refusing an unknown
-  token kind, a bad MAC, and a token plus `jwt`; the CLI round trip.
+  token kind, a bad MAC, and a CAT beside any `jwt` (a CAT is type `0x01`
+  and a `jwt` is a JWT, so equal bytes are still two credentials; only a
+  type-0 SETUP token equal to `jwt` is admitted once, per [Token in
+  band](/quest/m1/auth/token-in-band.md)); the CLI round trip.
 
 Public API: `moq_auth::cat` new, `moq auth serve` and `moq auth sign|verify`
 gain flags. Wire: none.
-
-## Required
-
-- [Setup token](/quest/m2/cat/setup-token.md) - the token reaches the
-  server's request

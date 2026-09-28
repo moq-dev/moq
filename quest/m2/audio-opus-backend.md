@@ -24,4 +24,4 @@ before a separately scoped backend implementation.
 
 ## Related
 
-- [Audio quality](/quest/m1/audio-quality-harness/README.md) - shared measurement infrastructure
+- [Audio quality](/quest/m0/audio-quality-harness/README.md) - shared measurement infrastructure
