@@ -55,10 +55,9 @@ same exact containment check. `Cost { warm, cold }`
 [#2925](https://github.com/moq-dev/moq/pull/2925).
 
 [moq#3225](https://github.com/moq-dev/moq/pull/3225) moved a long way toward
-this. An announcement carries a `Pattern` covering a set of paths. Rust
-`announce::Update.pattern` and TypeScript `Announce.Update.pattern` use the
-matcher directly, so callers explicitly select prefix-shaped claims when
-they need a concrete broadcast path.
+this, and #3770 settled the wire: an announcement carries a path prefix on
+every protocol, and a consumer filters announced paths against its pattern
+interest locally.
 
 The routing table exists too. `Consumer::request_broadcast` resolves a local
 broadcast first, then `best_server`: the longest covering prefix, filtered by
