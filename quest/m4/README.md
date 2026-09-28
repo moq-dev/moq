@@ -11,7 +11,7 @@ Each quest states its gate as a plain-text `Required` bullet. Re-check the
 gates periodically; when one clears, remove the bullet and promote the quest to
 the milestone its priority belongs in.
 
-## Quests
+## Required
 
 - [VAAPI encode and decode](/quest/m4/video-vaapi.md) - H.265 encode and decode, and pre-generated bindings that remove the libclang build dependency, gated on a moq-dev/vaapi release
 - [Pool VAAPI resize surfaces](/quest/m4/vaapi-resize-pool.md) - a resize reuses one output surface per size once moq-vaapi ships that pool

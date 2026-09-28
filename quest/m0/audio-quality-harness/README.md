@@ -44,7 +44,7 @@ sample rate, which is more than a merge gate should carry, and `nightly.yml`
 already exists for exactly this trade. Budgets are keyed by the full row, since
 each of those dimensions moves the expected floor.
 
-## Quests
+## Required
 
 - [Browser](/quest/m0/audio-quality-harness/browser.md) - upstream the fork's harness, grade it against a budget, run it nightly
 - [Native](/quest/m0/audio-quality-harness/native.md) - the same profiles and budgets through `moq play` on a dummy device

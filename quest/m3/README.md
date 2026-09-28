@@ -12,7 +12,7 @@ A quest lands here when its gate is the outside world, not its priority. Each
 states the condition in prose or as a plain-text `Required` bullet. When the
 condition clears, move the quest to the milestone its work belongs in.
 
-## Quests
+## Required
 
 - [DPDK](/quest/m3/dpdk.md) - a kernel-bypass UDP path for the relay, once a provider offers SR-IOV or bare metal
 - [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were written but never run on real machines
