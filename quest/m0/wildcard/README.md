@@ -50,7 +50,7 @@ would have to start working (a cold transcoder)"
 (`drafts/draft-lcurley-moq-lite.md`). `moq_auth::Claims.publish` and
 `origin::Producer` gain versioned patterns through
 [Path patterns](/quest/m1/path-patterns.md), so advertisements reuse the
-same exact containment check. `Cost { warm, cold }`
+same matcher. `Cost { warm, cold }`
 (`rs/moq-net/src/model/origin.rs:426`) is the route cost since
 [#2925](https://github.com/moq-dev/moq/pull/2925).
 
@@ -130,19 +130,15 @@ field.
   carries today, and it is the same stride discipline
   [pop-skipping](/quest/m1/pop-skipping/README.md) states for provider
   economics.
-- **One cost varint, not the pair.** `Cost` is `{ warm, cold }` because a relay
-  that is carrying a broadcast discounts the warm half. A wildcard carries
-  nothing and can never be warm, so the two halves are provably equal and the
-  message carries one value. `From<u64>` already means exactly this.
 - **A wildcard is a capability, not an inventory.** It advertises what the
   sender could serve, never that a given path exists. Refusal is how a specific
   path is denied. This is why an over-claiming advertisement is not a defect:
   the catch-all `**` is legal, and answering "not that one" is the mechanism.
-- **Containment against the publish scope is what authorization checks.** An
-  advertised prefix MUST be contained by the sender's granted patterns (the
-  matcher's containment check), and any attempted widening is refused rather
-  than clamped. Fleet-wide services use the cluster identity; a customer service may
-  advertise only the exact set its own v1 grant contains.
+- **Overlap with the publish scope is what authorization checks.** An
+  advertised prefix MUST overlap the sender's granted patterns or it is
+  refused. A prefix wider than the grant is accepted, but it only routes
+  requests for paths the grant covers. Fleet-wide services use the cluster
+  identity; a customer service serves only what its own v1 grant contains.
 - **Wildcards are visible to subscribers.** A subscriber sees every pattern
   matching under its scope, rebased by the matcher's exact set-valued operation,
   and duplicates combine into one. That is the point: it tells a client it may subscribe to
