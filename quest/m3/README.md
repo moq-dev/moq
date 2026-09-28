@@ -12,7 +12,7 @@ A quest lands here when its gate is the outside world, not its priority. Each
 states the condition in prose or as a plain-text `Required` bullet. When the
 condition clears, move the quest to the milestone its work belongs in.
 
-## Quests
+## Required
 
 - [DPDK](/quest/m3/dpdk.md) - a kernel-bypass UDP path for the relay, once a provider offers SR-IOV or bare metal
 - [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were written but never run on real machines
@@ -20,3 +20,5 @@ condition clears, move the quest to the milestone its work belongs in.
 - [#2893](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - video: validate PipeWire DMA-BUF capture on KDE hardware
 - [Embedded video](/quest/m3/video-embedded.md) - EGL import in the renderer, so moq-video presents on a Pi
 - [Vision worker](/quest/m3/processor-vision.md) - a documented customer-run vision worker proves the processor contract
+- [Suffix announce](/quest/m3/suffix-announce.md) - moq-lite-only suffix announce and interest, benchmarked over the announce table, once a deployment needs a claim a service prefix cannot express
+- [Upstream forks](/quest/m3/upstream-forks.md) - offer the uniffi generator fixes our cpp, dart, and Python forks carry upstream, lowest priority

@@ -89,6 +89,8 @@ pub struct Internal {
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	listener: Option<net::TcpListener>,
+	addr: Option<net::SocketAddr>,
 }
 
 #[derive(Clone)]
@@ -122,7 +124,29 @@ impl Internal {
 			health,
 			listeners,
 			uring: Vec::new(),
+			listener: None,
+			addr: None,
 		}
+	}
+
+	/// Bind the configured listener now, so [`addr`](Self::addr) reports an ephemeral port before serving.
+	pub fn bind(mut self) -> anyhow::Result<Self> {
+		if let Some(listen) = self.config.listen
+			&& self.listener.is_none()
+		{
+			let listener = moq_tokio::bind::tcp(listen).context("failed to bind internal listener")?;
+			let addr = listener
+				.local_addr()
+				.context("failed to resolve internal bind address")?;
+			self.addr = Some(addr);
+			self.listener = Some(listener);
+		}
+		Ok(self)
+	}
+
+	/// The bound address after [`bind`](Self::bind) or [`crate::Relay::load`], if configured.
+	pub fn addr(&self) -> Option<net::SocketAddr> {
+		self.addr
 	}
 
 	/// Report other listeners' accept health at `/metrics`.
@@ -220,18 +244,7 @@ impl Internal {
 	/// resolves), so it drops cleanly into a `select!` as a disabled no-op -
 	/// mirroring how the relay treats other optional services.
 	pub async fn serve(self, app: Router) -> anyhow::Result<()> {
-		let listener = self.bind()?;
-		self.serve_bound(app, listener).await
-	}
-
-	pub(crate) fn bind(&self) -> anyhow::Result<Option<net::TcpListener>> {
-		self.config
-			.listen
-			.map(|listen| moq_tokio::bind::tcp(listen).context("failed to bind internal listener"))
-			.transpose()
-	}
-
-	pub(crate) async fn serve_bound(self, app: Router, listener: Option<net::TcpListener>) -> anyhow::Result<()> {
+		let Internal { listener, health, .. } = self.bind()?;
 		let Some(listener) = listener else {
 			std::future::pending::<()>().await;
 			return Ok(());
@@ -241,7 +254,7 @@ impl Internal {
 		// that single top-level layer, matching `Web::serve` / `Cluster::run`.
 		// No accept-time work: the ops router never hands a connection to qmux, so
 		// capturing a descriptor per health check would spend one for nothing.
-		crate::listener::server(listener, self.health, DefaultAcceptor::new())?
+		crate::listener::server(listener, health, DefaultAcceptor::new())?
 			.serve(app.into_make_service())
 			.await?;
 		Ok(())
@@ -803,32 +816,23 @@ mod tests {
 	/// and forking both the socket options and the disabled-listener contract.
 	#[tokio::test]
 	async fn serve_hosts_merged_routes_alongside_the_defaults() {
-		// A throwaway bind picks a free port, released before `serve` claims it
-		// for real (`bind::tcp` sets SO_REUSEADDR, and nothing ever connected).
-		let listen = std::net::TcpListener::bind("127.0.0.1:0")
-			.expect("probe bind")
-			.local_addr()
-			.expect("probe addr");
-
-		let internal = Internal::new(Config { listen: Some(listen) }, moq_net::stats::Registry::disabled());
+		let listen = Some("127.0.0.1:0".parse().unwrap());
+		let internal = Internal::new(Config { listen }, moq_net::stats::Registry::disabled())
+			.bind()
+			.expect("bind internal listener");
+		let addr = internal.addr().expect("internal listener is configured");
 		let app = internal
 			.routes()
 			.merge(Router::new().route("/embedder", get(async || "embedded\n")));
 		let server = tokio::spawn(internal.serve(app));
 
-		// `serve` binds inside the task, so poll rather than assume it is up the
-		// instant the spawn returns.
 		let client = reqwest::Client::new();
-		let url = format!("http://{listen}");
-		let mut embedder = None;
-		for _ in 0..200 {
-			if let Ok(res) = client.get(format!("{url}/embedder")).send().await {
-				embedder = Some(res);
-				break;
-			}
-			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-		}
-		let embedder = embedder.expect("internal listener never accepted a connection");
+		let url = format!("http://{addr}");
+		let embedder = client
+			.get(format!("{url}/embedder"))
+			.send()
+			.await
+			.expect("embedder request");
 
 		assert_eq!(embedder.status(), reqwest::StatusCode::OK);
 		assert_eq!(embedder.text().await.expect("embedder body"), "embedded\n");

@@ -24,6 +24,15 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # The quest CLI, which also serves the quest guide and skills the stubs in
+    # .claude/skills call. Bump the rev to upgrade them.
+    quest = {
+      url = "github:kixelated/quest/46d7fe89247919583632e4963aee1c9a68dfe059";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
+      inputs.crane.follows = "crane";
+      inputs.rust-overlay.follows = "rust-overlay";
+    };
   };
 
   outputs =
@@ -33,6 +42,7 @@
       flake-utils,
       crane,
       rust-overlay,
+      quest,
       ...
     }:
     let
@@ -480,7 +490,8 @@
             ++ ktDeps
             ++ goDeps
             ++ dartDeps
-            ++ devTools;
+            ++ devTools
+            ++ [ quest.packages.${system}.default ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).
@@ -536,14 +547,6 @@
         # (`.github/actions/rust-cache`); nothing here configures it.
         checks = {
           package-source-assets = pkgs.runCommand "package-source-assets" { } ''
-            for asset in \
-              rs/libmoq/moq.pc.in \
-              rs/libmoq/native-libs/apple.txt \
-              rs/libmoq/native-libs/linux.txt \
-              rs/libmoq/native-libs/windows.txt
-            do
-              test -f "${overlayPkgs.libmoq.src}/$asset"
-            done
             test -f "${overlayPkgs.moq-boy.src}/rs/moq-video/src/frame/nv12_resize.ptx"
             touch "$out"
           '';

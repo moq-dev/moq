@@ -25,6 +25,10 @@ export interface Broadcast {
 
 /** The protocol-facing operations behind an origin producer. */
 export interface OriginProducer {
+	/** Minimal root-relative namespace prefixes that cover this origin scope. */
+	interests(): readonly Path.Valid[];
+	/** Whether an advertised prefix overlaps the handle's allowed paths. */
+	accepts(prefix: Path.Valid): boolean;
 	receive(
 		prefix: Path.Valid,
 		route?: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint },
@@ -41,7 +45,7 @@ export interface OriginProducer {
 export interface OriginConsumer {
 	routes(path: Path.Valid): boolean;
 	readonly broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
-	readonly advertised: Getter<ReadonlyMap<Path.Valid, Advertised> | undefined>;
+	readonly advertised: Getter<Advertisements | undefined>;
 	/** The announced local broadcast at `path`, when it is the route peers are offered there. */
 	local(path: Path.Valid): broadcast.Consumer | undefined;
 	demand(path: Path.Valid): Promise<broadcast.Consumer | undefined>;
@@ -51,7 +55,15 @@ export interface OriginConsumer {
 export interface Advertised {
 	readonly identity: object;
 	readonly route: Route;
+	/** The paths a scoped route may serve beneath its prefix, relative like its key; unset for the whole subtree. */
+	readonly claim?: Path.Patterns;
 }
+
+/**
+ * Every originated advertisement per prefix, most preferred first. A reader takes the first
+ * one its scope admits, so a cheaper route it cannot use never hides one it can.
+ */
+export type Advertisements = ReadonlyMap<Path.Valid, readonly Advertised[]>;
 
 /** The protocol-facing operation behind an established session. */
 export interface Established {

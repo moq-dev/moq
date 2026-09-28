@@ -519,6 +519,7 @@ impl Producer {
 		// Ingress payload: one whole frame written.
 		self.stats.frames(1);
 		self.stats.bytes(size);
+		self.cache.production().record(timestamp, size);
 		Ok(())
 	}
 
@@ -571,6 +572,7 @@ impl Producer {
 			state.cache += size;
 			now = state.charge.add(size);
 			state.stamp(frame.timestamp);
+			self.cache.production().record(frame.timestamp, size);
 			state.frames.push_back(frame);
 		}
 		state.next_index = next_index;
@@ -632,8 +634,9 @@ impl Producer {
 		self.cache.settle(now);
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
-		// frame::Producer writes them.
+		// frame::Producer writes them. Production counts the declared size up front.
 		self.stats.frames(1);
+		self.cache.production().record(timestamp, frame.size);
 		let meter = self.stats.clone();
 
 		let info = frame::Info {
@@ -688,8 +691,9 @@ impl Producer {
 		self.cache.settle(now);
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
-		// producer writes them.
+		// producer writes them. Production counts the declared size up front.
 		self.stats.frames(1);
+		self.cache.production().record(timestamp, frame.size);
 		let meter = self.stats.clone();
 
 		let info = frame::Info {
@@ -1804,8 +1808,10 @@ impl Fetch {
 /// The handler fulfills it by calling [`Self::accept`], which inserts the group
 /// into the track cache (resolving every [`track::Consumer::fetch_group`] that joined the
 /// attempt) and returns a [`Producer`] to fill. A relay typically opens a wire
-/// FETCH, reads FETCH_OK, then accepts. The request carries its own producer handle,
-/// so it works the same whether or not the track has been accepted yet.
+/// FETCH and waits for the publisher to answer before accepting, so a group the
+/// publisher lacks is rejected rather than accepted and then aborted. The request
+/// carries its own producer handle, so it works the same whether or not the track
+/// has been accepted yet.
 pub struct Request {
 	pub(crate) state: kio::Producer<track::TrackState>,
 	pub(crate) fetch: kio::Shared<track::FetchState>,

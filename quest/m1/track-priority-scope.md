@@ -72,8 +72,3 @@ change.
 
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - the fair
   tier the per-broadcast send groups ride on
-
-## Related
-
-- [Starvation](/quest/m1/qos/starvation.md) - the relay-side signal that
-  shows a starved subscription

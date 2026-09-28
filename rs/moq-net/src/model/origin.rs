@@ -19,6 +19,7 @@ use super::{
 use crate::{
 	AsPath, Error, InvalidPattern, Path, PathOwned, Pattern, Patterns,
 	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
+	path::Segment,
 	runtime::{Instant, Timers},
 	time::Clock,
 	util::{Keepalive, TaskSet, Tasks, TasksWeak},
@@ -894,8 +895,18 @@ struct TableCursor {
 	horizon: Horizon,
 	/// Which routes beneath a hidden segment are reported.
 	hidden: Hidden,
-	/// The delivery buffer, drained by the cursor's `poll_next`.
+	/// The delivery buffer, drained by the cursor's `poll_next`. A mounted
+	/// consumer's cursors share one.
 	state: kio::Producer<OriginConsumerState>,
+	/// Where this cursor's presented prefixes land in the delivery buffer: empty,
+	/// or the mount the cursor reads for, relative to the consumer's root.
+	under: PathOwned,
+	/// The absolute prefixes a mount shadows: routes at or beneath them are not
+	/// this cursor's to present.
+	holes: Vec<PathOwned>,
+	/// For a cursor reading through a mount: the mount and the handle's own
+	/// patterns, so a wildcard captures what the handle names rather than the target.
+	named: Option<(Mount, Patterns)>,
 	/// The last delivered best route per presented (relative) prefix, for change
 	/// detection: `(entry id, hops, cost)`.
 	// entry id, metadata, and whether the entry could serve requests: the last
@@ -923,8 +934,11 @@ impl TableCursor {
 	/// What the cursor's most specific matching scope member captures from an
 	/// exact announced prefix. An overlap-only route does not pin every wildcard.
 	fn captures(&self, prefix: &Path) -> Option<Vec<Pattern>> {
-		let literal = Pattern::literal(prefix.as_str()).ok()?;
-		self.allowed
+		let (literal, allowed) = match &self.named {
+			Some((mount, allowed)) => (Pattern::literal(mount.name(prefix)?.as_str()).ok()?, allowed),
+			None => (Pattern::literal(prefix.as_str()).ok()?, &self.allowed),
+		};
+		allowed
 			.iter()
 			.filter_map(|allowed| {
 				allowed
@@ -936,23 +950,98 @@ impl TableCursor {
 	}
 
 	/// Whether this cursor may observe `entry` at all: advertised, not behind
-	/// the excluded peer (split horizon), and within the cursor's patterns.
+	/// the excluded peer (split horizon), within the cursor's patterns, and
+	/// nameable through its mount.
 	fn visible(&self, entry: &RouteEntry) -> bool {
-		entry.advertised && self.horizon.admits(entry) && entry.overlaps(&self.allowed) && self.discovers(&entry.prefix)
+		entry.advertised
+			&& self.horizon.admits(entry)
+			&& entry.overlaps(&self.allowed)
+			&& self.discovers(&entry.prefix)
+			&& !self.holes.iter().any(|hole| entry.prefix.has_prefix(hole))
+			&& self.named.as_ref().is_none_or(|(mount, _)| mount.names(&entry.prefix))
 	}
 
 	/// Whether the hidden rule lets this cursor discover a route at `prefix`.
 	fn discovers(&self, prefix: &Path) -> bool {
-		(self.hidden.include || !hides(&self.heads, prefix))
-			&& self.hidden.beyond.as_ref().is_none_or(|outer| hides(outer, prefix))
+		self.hidden.discovers(&self.heads, prefix)
 	}
 }
 
-/// A handle's view of an origin: the absolute patterns it may reach.
+/// A handle's view of an origin: the absolute patterns it may reach, and the
+/// subtrees it reads from elsewhere on the origin.
 #[derive(Clone)]
 struct OriginScope {
-	// The paths this handle may reach, absolute.
+	// The paths this handle may reach, absolute, named as the handle sees them:
+	// a path under a mount is authorized here, before it is resolved.
 	allowed: Patterns,
+	// The subtrees that resolve elsewhere; see [`Producer::mount`]. Disjoint.
+	mounts: Arc<[Mount]>,
+}
+
+/// A subtree a handle reads from elsewhere on the origin: `at/rest` resolves at
+/// `target/rest`. Both absolute.
+#[derive(Clone, Debug)]
+struct Mount {
+	at: PathOwned,
+	target: PathOwned,
+}
+
+impl Mount {
+	/// Where the handle-side absolute `path` resolves, when it is under this mount
+	/// and the result fits [`Path::MAX_PARTS`].
+	fn resolve(&self, path: &Path) -> Option<PathOwned> {
+		let resolved = self.target.join(path.strip_prefix(&self.at)?);
+		(resolved.parts().count() <= Path::MAX_PARTS).then_some(resolved)
+	}
+
+	/// Where the origin-side absolute `path` shows on the handle, when it is at or
+	/// beneath the target. A route covering the target has no handle-side name.
+	fn name(&self, path: &Path) -> Option<PathOwned> {
+		Some(self.at.join(path.strip_prefix(&self.target)?))
+	}
+
+	/// Whether the origin-side absolute `path` has a handle-side name within
+	/// [`Path::MAX_PARTS`], so a reader could ask for it. A route covering the
+	/// target always does.
+	fn names(&self, path: &Path) -> bool {
+		path.strip_prefix(&self.target)
+			.is_none_or(|rest| self.at.parts().count() + rest.parts().count() <= Path::MAX_PARTS)
+	}
+
+	/// The handle-side absolute `patterns` beneath this mount, as origin-side
+	/// patterns beneath its target.
+	///
+	/// A member too deep to root matches no valid path and drops, except that a
+	/// `**` one segment past the limit can only match nothing and is dropped instead,
+	/// so a deep target keeps its exact path.
+	fn translate(&self, patterns: &Patterns) -> Patterns {
+		let target = self.target.as_str();
+		patterns
+			.rebase(self.at.as_str())
+			.iter()
+			.filter_map(|member| {
+				member
+					.rooted(target)
+					.or_else(|_| {
+						let segments = member
+							.segments()
+							.iter()
+							.filter(|segment| **segment != Segment::Globstar);
+						Pattern::new(segments.cloned())?.rooted(target)
+					})
+					.ok()
+			})
+			.collect()
+	}
+
+	/// A handle-side interest head as an origin-side one: a head beneath the mount
+	/// moves under the target, and one above it hangs at the target itself.
+	fn translate_head(&self, head: &Path) -> Option<PathOwned> {
+		match head.strip_prefix(&self.at) {
+			Some(rest) => Some(self.target.join(rest)),
+			None => self.at.has_prefix(head).then(|| self.target.clone()),
+		}
+	}
 }
 
 impl OriginScope {
@@ -960,6 +1049,7 @@ impl OriginScope {
 	fn empty() -> Self {
 		Self {
 			allowed: Patterns::new(),
+			mounts: Arc::from([]),
 		}
 	}
 
@@ -969,8 +1059,31 @@ impl OriginScope {
 		if allowed.is_empty() {
 			None
 		} else {
-			Some(Self { allowed })
+			Some(Self {
+				allowed,
+				mounts: self.mounts.clone(),
+			})
 		}
+	}
+
+	/// The mount the absolute `path` is under, if any.
+	fn mount(&self, path: &Path) -> Option<&Mount> {
+		self.mounts.iter().find(|mount| path.has_prefix(&mount.at))
+	}
+
+	/// Where the absolute `path` resolves on the origin: itself, or its mount
+	/// target. `None` when the mount would resolve it past [`Path::MAX_PARTS`].
+	fn resolve<'a>(&self, path: &'a Path<'a>) -> Option<Path<'a>> {
+		match self.mount(path) {
+			Some(mount) => mount.resolve(path),
+			None => Some(path.borrow()),
+		}
+	}
+
+	/// Whether this view may publish at the absolute `prefix`: a mount is read-only,
+	/// so nothing is published at or beneath one.
+	fn publishes(&self, prefix: &Path) -> bool {
+		self.mount(prefix).is_none()
 	}
 
 	/// Whether this view reaches the absolute `path`.
@@ -988,6 +1101,7 @@ impl Default for OriginScope {
 	fn default() -> Self {
 		Self {
 			allowed: Patterns::from(Pattern::all()),
+			mounts: Arc::from([]),
 		}
 	}
 }
@@ -1019,6 +1133,26 @@ pub(crate) struct Hidden {
 	/// Report only what a feed scoped to these heads hides, for a stream that tops
 	/// up a feed already carrying everything visible from them.
 	beyond: Option<Vec<PathOwned>>,
+}
+
+impl Hidden {
+	/// Whether a cursor hanging at `heads` reports a route at `prefix`.
+	fn discovers(&self, heads: &[PathOwned], prefix: &Path) -> bool {
+		(self.include || !hides(heads, prefix)) && self.beyond.as_ref().is_none_or(|outer| hides(outer, prefix))
+	}
+
+	/// This rule for a cursor reading through `mount`, whose heads sit on the
+	/// target: a feed it tops up hid everything under the mount, or hid what it
+	/// hides under the target.
+	fn translate(&self, mount: &Mount) -> Self {
+		let beyond = self.beyond.as_ref().and_then(|outer| {
+			(!hides(outer, &mount.at)).then(|| outer.iter().filter_map(|head| mount.translate_head(head)).collect())
+		});
+		Self {
+			include: self.include,
+			beyond,
+		}
+	}
 }
 
 /// Whether a segment of `prefix` below the head it sits under starts with `.`.
@@ -1237,14 +1371,12 @@ impl Producer {
 	/// polled. Register a [`broadcast::Producer::dynamic`] handler before
 	/// announcing, so the first consumer finds the tracks it serves.
 	///
-	/// End the broadcast with [`broadcast::Producer::finish`]; dropping it
-	/// without finishing also works, but logs a warning. Either way the path
-	/// closes once it was the last source; an unfinished drop additionally aborts
-	/// the spliced tracks with an error, so consumers observe a failure rather
-	/// than a clean end.
+	/// End the broadcast with [`broadcast::Producer::close`] or by dropping it;
+	/// either way the path closes once it was the last source.
 	///
 	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this
-	/// producer may publish under (after [`scope`](Self::scope)),
+	/// producer may publish under (after [`scope`](Self::scope)) or beneath a
+	/// [`mount`](Self::mount),
 	/// [`Error::BoundsExceeded`] if the full rooted path exceeds
 	/// [`Path::MAX_PARTS`], [`Error::InvalidPath`] if it holds a segment no
 	/// pattern can spell (`*` or `**`), or [`Error::Closed`] once the origin's
@@ -1253,7 +1385,7 @@ impl Producer {
 		let path = path.as_path();
 
 		let full = self.root.join(&path).to_owned();
-		if !self.scope.permits(&full) {
+		if !self.scope.permits(&full) || !self.scope.publishes(&full) {
 			return Err(Error::Unauthorized);
 		}
 		// A decoded prefix and suffix are each within the wire limit, but their
@@ -1271,7 +1403,7 @@ impl Producer {
 
 		// The broadcast is a route table entry at its exact path from the start,
 		// hidden from cursors and requests until it announces. The entry lives
-		// as long as the broadcast: its announcer drops on finish, abort, or the
+		// as long as the broadcast: its announcer drops on close, abort, or the
 		// last handle.
 		let announcing = Announcing {
 			hop: self.hop,
@@ -1413,6 +1545,71 @@ impl Producer {
 		})
 	}
 
+	/// Returns a producer that reads the subtree at `at` from `target` instead.
+	///
+	/// Both are relative to this producer's root. A consumer derived from the
+	/// result resolves `at/rest` at `target/rest`, through the one front serving
+	/// that path, and presents the routes under `target` (or covering it) under
+	/// `at`. Permissions stay named from the handle's side: a later
+	/// [`scope`](Self::scope) authorizes `at/rest` as written. The mount is
+	/// read-only: nothing is published at or beneath `at`, so what a reader finds
+	/// there is only ever `target`'s. Whatever the origin holds at `at` itself is
+	/// hidden from the mounted handle.
+	///
+	/// Returns [`Error::Unauthorized`] unless this producer reaches all of
+	/// `target`, so a mount never widens a scope, and [`Error::Duplicate`] when
+	/// `at` or `target` overlaps a mount point this producer already has, or `at`
+	/// overlaps an existing target or its own: mounts never chain, in whatever order they are added,
+	/// so a target is always read as the origin holds it. Mounts may share a target.
+	/// [`Error::BoundsExceeded`] if either rooted path exceeds [`Path::MAX_PARTS`],
+	/// and [`Error::InvalidPath`] if `at` holds a segment no pattern can spell.
+	pub fn mount(&self, at: impl AsPath, target: impl AsPath) -> Result<Producer, Error> {
+		let at = self.root.join(at).to_owned();
+		let target = self.root.join(target).to_owned();
+		if [&at, &target]
+			.into_iter()
+			.any(|path| path.parts().count() > Path::MAX_PARTS)
+		{
+			return Err(BoundsExceeded.into());
+		}
+		// A mount point no pattern can spell could never be announced or authorized.
+		Pattern::literal(at.as_str())?;
+		if !self
+			.scope
+			.allowed
+			.covers(&Patterns::from(Pattern::subtree(target.as_str())?))
+		{
+			return Err(Error::Unauthorized);
+		}
+		// Symmetric, so the order mounts are added never changes which sets are accepted:
+		// no mount point overlaps any mount's point or target, its own included.
+		// Targets may overlap.
+		let overlaps = |a: &Path, b: &Path| a.has_prefix(b) || b.has_prefix(a);
+		if overlaps(&at, &target)
+			|| self
+				.scope
+				.mounts
+				.iter()
+				.any(|mount| overlaps(&at, &mount.at) || overlaps(&target, &mount.at) || overlaps(&at, &mount.target))
+		{
+			return Err(Error::Duplicate);
+		}
+		let mounts = self
+			.scope
+			.mounts
+			.iter()
+			.cloned()
+			.chain([Mount { at, target }])
+			.collect();
+		Ok(Producer {
+			scope: OriginScope {
+				allowed: self.scope.allowed.clone(),
+				mounts,
+			},
+			..self.clone()
+		})
+	}
+
 	/// Cheap read handle over this origin's route table.
 	///
 	/// Use [`Consumer::announced`] to register interest and start receiving
@@ -1467,7 +1664,7 @@ impl Announcing {
 			return Err(BoundsExceeded.into());
 		}
 		let claim = prefix_claim(&requested)?;
-		if !producer.scope.allowed.overlaps(&claim) {
+		if !producer.scope.allowed.overlaps(&claim) || !producer.scope.publishes(&requested) {
 			return Err(Error::Unauthorized);
 		}
 		Ok(Self {
@@ -2286,7 +2483,7 @@ async fn run_front(task: FrontTask) {
 						// subscriptions already in flight): dropping their producers
 						// leaves each reader on the copy it was spliced from, ending
 						// when and as that copy ends.
-						broadcast.finish();
+						broadcast.close();
 						broadcast.release_spliced(err.clone());
 						for (_, mut io) in tracks.drain() {
 							// A reader still waiting on its source's answer is in flight
@@ -2886,13 +3083,13 @@ impl OriginState {
 					// old identity explicitly so capture-keyed consumers can remove it.
 					Some((_, prev, _, prev_captures)) if prev_captures != captures => {
 						if let Ok(mut state) = cursor.state.write() {
-							state.apply_unannounce(presented.clone(), prev, prev_captures);
-							state.apply_announce(presented.clone(), meta, captures);
+							state.apply_unannounce(cursor.under.join(presented), prev, prev_captures);
+							state.apply_announce(cursor.under.join(presented), meta, captures);
 						}
 					}
 					_ => {
 						if let Ok(mut state) = cursor.state.write() {
-							state.apply_announce(presented.clone(), meta, captures);
+							state.apply_announce(cursor.under.join(presented), meta, captures);
 						}
 					}
 				}
@@ -2901,7 +3098,7 @@ impl OriginState {
 				if let Some((_, last, _, captures)) = cursor.current.remove(presented)
 					&& let Ok(mut state) = cursor.state.write()
 				{
-					state.apply_unannounce(presented.clone(), last, captures);
+					state.apply_unannounce(cursor.under.join(presented), last, captures);
 				}
 			}
 		}
@@ -3460,14 +3657,80 @@ impl Consumer {
 	/// patterns are hidden unless [`with_hidden`](Self::with_hidden) opted in.
 	/// Drop the returned [`AnnounceConsumer`] to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
-		AnnounceConsumer::new(
-			self.root.clone(),
-			self.scope.allowed.clone(),
-			self.stats.clone(),
-			self.horizon,
-			self.hidden.clone(),
-			&self.shared,
-		)
+		let state = kio::Producer::<OriginConsumerState>::default();
+		let cursor = |root: PathOwned,
+		              allowed: Patterns,
+		              hidden: Hidden,
+		              mount: Option<&Mount>,
+		              under: PathOwned,
+		              holes: Vec<PathOwned>| TableCursor {
+			root,
+			heads: interest_prefixes(&allowed),
+			allowed,
+			horizon: self.horizon,
+			hidden,
+			state: state.clone(),
+			under,
+			holes,
+			named: mount.map(|mount| (mount.clone(), self.scope.allowed.clone())),
+			current: HashMap::new(),
+		};
+
+		// A root at or beneath a mount reads only the mount: one cursor, re-rooted
+		// onto the target.
+		if let Some(mount) = self.scope.mount(&self.root) {
+			// A root the mount resolves past the depth limit has nothing to announce.
+			let Some(root) = mount.resolve(&self.root) else {
+				return AnnounceConsumer::new(self.root.clone(), Vec::new(), state, self.stats.clone(), &self.shared);
+			};
+			let cursors = vec![cursor(
+				root,
+				mount.translate(&self.scope.allowed),
+				self.hidden.translate(mount),
+				Some(mount),
+				PathOwned::default(),
+				Vec::new(),
+			)];
+			return AnnounceConsumer::new(self.root.clone(), cursors, state, self.stats.clone(), &self.shared);
+		}
+
+		// Otherwise the consumer's own cursor, minus the mounted subtrees, plus one
+		// cursor per mount beneath the root it may discover, presenting under it.
+		let heads = interest_prefixes(&self.scope.allowed);
+		let mut holes = Vec::new();
+		let mut cursors = Vec::new();
+		for mount in self.scope.mounts.iter() {
+			let Some(under) = mount.at.strip_prefix(&self.root) else {
+				continue;
+			};
+			holes.push(mount.at.clone());
+			let allowed = mount.translate(&self.scope.allowed);
+			// Hidden at the mount point means hidden throughout: the dot segment is above
+			// everything the mount holds. A top-up feed's rule moves onto the target.
+			if allowed.is_empty() || !(self.hidden.include || !hides(&heads, &mount.at)) {
+				continue;
+			}
+			cursors.push(cursor(
+				mount.target.clone(),
+				allowed,
+				self.hidden.translate(mount),
+				Some(mount),
+				under.to_owned(),
+				Vec::new(),
+			));
+		}
+		cursors.insert(
+			0,
+			cursor(
+				self.root.clone(),
+				self.scope.allowed.clone(),
+				self.hidden.clone(),
+				None,
+				PathOwned::default(),
+				holes,
+			),
+		);
+		AnnounceConsumer::new(self.root.clone(), cursors, state, self.stats.clone(), &self.shared)
 	}
 
 	/// Returns a cheap duplicate of this read handle.
@@ -3483,6 +3746,7 @@ impl Consumer {
 		if !self.scope.permits(&full) {
 			return None;
 		}
+		let full = self.scope.resolve(&full)?;
 		let table = self.shared.lock();
 		table
 			.routes
@@ -3568,7 +3832,9 @@ impl Consumer {
 				if table.closed {
 					return Err(Error::Closed);
 				}
-				let watch = table.watch(&self.shared, &self.root.join(&path));
+				let named = self.root.join(&path);
+				let resolved = self.scope.resolve(&named).ok_or(BoundsExceeded)?;
+				let watch = table.watch(&self.shared, &resolved);
 				let seen = watch.seen();
 				(watch, seen)
 			};
@@ -3627,20 +3893,26 @@ impl Consumer {
 	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<Requesting> {
 		let path = path.as_path();
 
-		// Key requests by absolute path so scoped/rooted consumers and handlers
-		// (which may have a different root) agree on the same entry, and so the egress
-		// counters resolve against the same broadcast the ingress side wrote.
-		let absolute = self.root.join(&path).to_owned();
-		let scope = self.stats.egress(&absolute);
+		// The path as this handle names it, absolute: what its scope authorizes and
+		// what its egress is counted under, so a read through a mount bills where
+		// the reader asked.
+		let named = self.root.join(&path).to_owned();
+		let scope = self.stats.egress(&named);
 		// The resolved handle is named by what *this* cursor asked for, not by the absolute
 		// path: a rooted cursor cannot name anything above its own root, so that is what a
 		// catalog it reads may reference.
 		let requested = path.to_owned();
 
 		// Routes only cover paths within this consumer's scope.
-		if !self.scope.permits(&absolute) {
+		if !self.scope.permits(&named) {
 			return kio::Pending::new(Requesting::failed(Error::Unauthorized));
 		}
+
+		// Key requests by the absolute path on the origin, past any mount, so scoped,
+		// rooted, and mounted consumers and handlers agree on the same entry and front.
+		let Some(absolute) = self.scope.resolve(&named).map(|path| path.to_owned()) else {
+			return kio::Pending::new(Requesting::failed(BoundsExceeded.into()));
+		};
 
 		let mut state = self.shared.lock();
 
@@ -3739,7 +4011,9 @@ impl Consumer {
 /// Created by [`Consumer::announced`].
 /// Drop to unregister.
 pub struct AnnounceConsumer {
-	id: ConsumerId,
+	// One registration per table cursor feeding `state`: more than one when the
+	// consumer reads through a mount.
+	ids: Vec<ConsumerId>,
 	shared: kio::Shared<OriginState>,
 	root: PathOwned,
 
@@ -3764,15 +4038,12 @@ pub struct AnnounceConsumer {
 impl AnnounceConsumer {
 	fn new(
 		root: PathOwned,
-		allowed: Patterns,
+		cursors: Vec<TableCursor>,
+		state: kio::Producer<OriginConsumerState>,
 		stats: stats::Session,
-		horizon: Horizon,
-		hidden: Hidden,
 		shared: &kio::Shared<OriginState>,
 	) -> Self {
-		let state = kio::Producer::<OriginConsumerState>::default();
-		let id = ConsumerId::new();
-
+		let mut ids = Vec::with_capacity(cursors.len());
 		{
 			let mut table = shared.lock();
 			if table.closed {
@@ -3781,23 +4052,16 @@ impl AnnounceConsumer {
 					state.ended = true;
 				}
 			} else {
-				table.register_cursor(
-					id,
-					TableCursor {
-						root: root.clone(),
-						heads: interest_prefixes(&allowed),
-						allowed,
-						horizon,
-						hidden,
-						state: state.clone(),
-						current: HashMap::new(),
-					},
-				);
+				for cursor in cursors {
+					let id = ConsumerId::new();
+					table.register_cursor(id, cursor);
+					ids.push(id);
+				}
 			}
 		}
 
 		Self {
-			id,
+			ids,
 			shared: shared.clone(),
 			root,
 			state,
@@ -3902,9 +4166,11 @@ impl futures::Stream for AnnounceConsumer {
 impl Drop for AnnounceConsumer {
 	fn drop(&mut self) {
 		let mut shared = self.shared.lock();
-		if let Some(cursor) = shared.cursors.remove(&self.id) {
-			for head in &cursor.heads {
-				shared.routes.remove_cursor(head, self.id);
+		for id in &self.ids {
+			if let Some(cursor) = shared.cursors.remove(id) {
+				for head in &cursor.heads {
+					shared.routes.remove_cursor(head, *id);
+				}
 			}
 		}
 	}
@@ -4141,6 +4407,273 @@ mod tests {
 		assert_eq!(resolved.info().path.as_str(), ".stats/node");
 	}
 
+	/// A project-rooted handle reading `.svc` from the fleet-wide `.svc/<pid>`.
+	fn mounted(producer: &Producer, pid: &str, patterns: &[&str]) -> Consumer {
+		let patterns: Patterns = patterns.iter().map(|pattern| pattern.parse().unwrap()).collect();
+		producer
+			.mount(format!("{pid}/.svc"), format!(".svc/{pid}"))
+			.unwrap()
+			.scope(pid, &patterns)
+			.unwrap()
+			.consume()
+	}
+
+	/// A request through a mount is a request for the target path: it joins the
+	/// one front there, so the fleet-wide claim is asked once for both readers.
+	#[tokio::test]
+	async fn mount_resolves_on_the_target_front() {
+		let producer = origin(1).produce();
+		let server = producer.dynamic(".svc", Route::default()).unwrap();
+		let project = mounted(&producer, "p1", &["**"]);
+
+		let through = project.request_broadcast(".svc/foo");
+		let direct = producer.consume().request_broadcast(".svc/p1/foo");
+
+		let request = queued(&server).await;
+		assert_eq!(request.path().as_str(), ".svc/p1/foo");
+		assert!(server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
+		let source = broadcast::Info::new().produce();
+		request.accept(&source);
+
+		let through = through.await.expect("resolves");
+		let direct = direct.await.expect("resolves");
+		assert!(through.is_clone(&direct));
+		// Named by what the reader asked for.
+		assert_eq!(through.info().path.as_str(), ".svc/foo");
+	}
+
+	/// Routes under the target, and the claim covering it, present under the
+	/// mount; what the origin holds at the mounted path itself does not.
+	#[tokio::test]
+	async fn mount_presents_target_routes_under_the_mount() {
+		let producer = origin(1).produce();
+		let _claim = producer.announce(".svc", Route::default()).unwrap();
+		let foo = producer.publish(".svc/p1/foo", Route::default()).unwrap();
+		let _other = producer.publish(".svc/p2/bar", Route::default()).unwrap();
+		let _cam = producer.publish("p1/cam", Route::default()).unwrap();
+		let _shadowed = producer.publish("p1/.svc/forged", Route::default()).unwrap();
+		let project = mounted(&producer, "p1", &["**"]);
+
+		// A dot segment hides the mount like any other.
+		let mut announced = project.announced();
+		announced.assert_next_active("cam");
+		announced.assert_next_wait();
+
+		let mut announced = project.clone().with_hidden(true).announced();
+		announced.assert_next_active(".svc");
+		announced.assert_next_active(".svc/foo");
+		announced.assert_next_active("cam");
+		announced.assert_next_wait();
+
+		// Rooted inside the mount, the claim covers the root itself.
+		let mut inside = project
+			.scope(".svc", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.announced();
+		inside.assert_next_active("");
+		inside.assert_next_active("foo");
+		inside.assert_next_wait();
+
+		drop(foo);
+		announced.assert_next_ended(".svc/foo");
+		inside.assert_next_ended("foo");
+		announced.assert_next_wait();
+
+		// The shadowed path never resolves: the mount answers for it.
+		let err = project.request_broadcast(".svc/forged").await.err().unwrap();
+		assert!(matches!(err, Error::NotFound | Error::Unroutable), "{err:?}");
+	}
+
+	/// The handle's own patterns authorize a path through the mount, named as the
+	/// handle names it.
+	#[tokio::test]
+	async fn mount_authorizes_the_named_path() {
+		let producer = origin(1).produce();
+		let _foo = producer.publish(".svc/p1/foo", Route::default()).unwrap();
+		let _bar = producer.publish(".svc/p1/bar", Route::default()).unwrap();
+
+		let granted = mounted(&producer, "p1", &["foo", ".svc/foo"]);
+		granted.request_broadcast(".svc/foo").await.expect("granted");
+		let refused = granted
+			.request_broadcast(".svc/bar")
+			.now_or_never()
+			.expect("refused at once");
+		assert!(matches!(refused, Err(Error::Unauthorized)));
+		let mut announced = granted.clone().with_hidden(true).announced();
+		announced.assert_next_active(".svc/foo");
+		announced.assert_next_wait();
+
+		let narrower = mounted(&producer, "p1", &["foo"]);
+		let refused = narrower
+			.request_broadcast(".svc/foo")
+			.now_or_never()
+			.expect("refused at once");
+		assert!(matches!(refused, Err(Error::Unauthorized)));
+		narrower.clone().with_hidden(true).announced().assert_next_wait();
+
+		// Another project's mount reaches its own target, never this one's.
+		let other = mounted(&producer, "p2", &["**"]);
+		other.clone().with_hidden(true).announced().assert_next_wait();
+		let err = other.request_broadcast(".svc/foo").await.err().unwrap();
+		assert!(matches!(err, Error::Unroutable));
+	}
+
+	/// A wildcard spanning the mount point captures the path as the handle names
+	/// it, so capture-keyed consumers key a mounted route like any other.
+	#[tokio::test]
+	async fn mount_captures_the_named_path() {
+		let producer = origin(1).produce();
+		let _foo = producer.publish(".svc/p1/foo", Route::default()).unwrap();
+		let project = mounted(&producer, "p1", &["**"]).with_hidden(true);
+
+		let update = project.announced().try_next().expect("foo");
+		assert_eq!(update.prefix.as_str(), ".svc/foo");
+		assert_eq!(update.captures, Some(vec![".svc/foo".parse::<Pattern>().unwrap()]));
+
+		let inside = project.scope(".svc", &Patterns::from(Pattern::all())).unwrap();
+		let update = inside.announced().try_next().expect("foo");
+		assert_eq!(update.prefix.as_str(), "foo");
+		assert_eq!(update.captures, Some(vec!["foo".parse::<Pattern>().unwrap()]));
+	}
+
+	/// A target at the maximum depth still presents its exact path: the `**` a
+	/// wildcard scope carries past it can only match nothing there.
+	#[tokio::test]
+	async fn mount_keeps_a_max_depth_target() {
+		let producer = origin(1).produce();
+		let deep = vec!["d"; Path::MAX_PARTS].join("/");
+		let _leaf = producer.publish(deep.as_str(), Route::default()).unwrap();
+		let project = producer
+			.mount("p1/.svc", deep.as_str())
+			.unwrap()
+			.scope("p1", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.consume()
+			.with_hidden(true);
+
+		let mut announced = project.announced();
+		announced.assert_next_active(".svc");
+		announced.assert_next_wait();
+
+		// Beneath the mount the target has no room: refused, never handed to a route.
+		let err = project.request_broadcast(".svc/x").await.err().unwrap();
+		assert!(matches!(err, Error::BoundsExceeded(_)), "{err:?}");
+		let inside = project.scope(".svc/x", &Patterns::from(Pattern::all())).unwrap();
+		inside.announced().assert_next_wait();
+	}
+
+	/// A mount point deeper than its target never presents a route whose name
+	/// through the mount is past the depth limit, and a mount point past it is refused.
+	#[tokio::test]
+	async fn mount_bounds_the_named_path() {
+		let producer = origin(1).produce();
+		let _near = producer.publish("t/x", Route::default()).unwrap();
+		let deep = format!("t/{}", vec!["d"; Path::MAX_PARTS - 1].join("/"));
+		let _deep = producer.publish(deep.as_str(), Route::default()).unwrap();
+		let project = producer
+			.mount("p1/a/b", "t")
+			.unwrap()
+			.scope("p1", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.consume();
+
+		let mut announced = project.announced();
+		announced.assert_next_active("a/b/x");
+		announced.assert_next_wait();
+
+		let over = vec!["d"; Path::MAX_PARTS + 1].join("/");
+		assert!(matches!(
+			producer.mount(over.as_str(), "t"),
+			Err(Error::BoundsExceeded(_))
+		));
+	}
+
+	/// Nothing is published at or beneath a mount.
+	#[tokio::test]
+	async fn mount_is_read_only() {
+		let producer = origin(1).produce();
+		let project = producer
+			.mount("p1/.svc", ".svc/p1")
+			.unwrap()
+			.scope("p1", &Patterns::from(Pattern::all()))
+			.unwrap();
+		assert!(matches!(project.create_broadcast(".svc/foo"), Err(Error::Unauthorized)));
+		assert!(matches!(
+			project.dynamic(".svc", Route::default()),
+			Err(Error::Unauthorized)
+		));
+		assert!(matches!(
+			project.dynamic(".svc/foo", Route::default()),
+			Err(Error::Unauthorized)
+		));
+		project.publish("cam", Route::default()).unwrap();
+	}
+
+	/// A mount reaches only what the handle already reaches, and mounts never nest.
+	#[test]
+	fn mount_never_widens_a_scope() {
+		let (producer, _driver) = Producer::new(Config::new(origin(1)));
+		let project = producer.scope("", &scopes(&["p1"])).unwrap();
+		assert!(matches!(project.mount("p1/.svc", ".svc/p1"), Err(Error::Unauthorized)));
+
+		let mounted = producer.mount("p1/.svc", ".svc/p1").unwrap();
+		assert!(matches!(mounted.mount("p1/.svc/x", ".other"), Err(Error::Duplicate)));
+		assert!(matches!(mounted.mount("p1", ".other"), Err(Error::Duplicate)));
+		// A target through a mount would read the subtree the mount shadows.
+		assert!(matches!(mounted.mount("p2", "p1/.svc/x"), Err(Error::Duplicate)));
+		assert!(matches!(mounted.mount("p2", "p1"), Err(Error::Duplicate)));
+		// A mount point on a target would chain through it, in either order.
+		assert!(matches!(mounted.mount(".svc/p1/x", ".other"), Err(Error::Duplicate)));
+		assert!(matches!(mounted.mount(".svc", ".other"), Err(Error::Duplicate)));
+		mounted.mount("p1/.other", ".other/p1").unwrap();
+		// Mount points may share a target.
+		mounted.mount("p2/.svc", ".svc/p1").unwrap();
+		// A mount point overlapping its own target is refused like any other overlap.
+		for (at, target) in [("a", "a/b"), ("a/b", "a"), ("a", "a")] {
+			assert!(
+				matches!(producer.mount(at, target), Err(Error::Duplicate)),
+				"{at} -> {target}"
+			);
+		}
+	}
+
+	/// A mount point no pattern can spell could never be announced or authorized.
+	#[test]
+	fn mount_refuses_a_wildcard_mount_point() {
+		let (producer, _driver) = Producer::new(Config::new(origin(1)));
+		for at in ["*", "p1/*", "p1/**", "p1/a*"] {
+			assert!(
+				matches!(producer.mount(at, ".svc/p1"), Err(Error::InvalidPath(_))),
+				"{at}"
+			);
+		}
+	}
+
+	/// Egress through a mount counts under the path the reader named, so it
+	/// attributes to the reader's root rather than the fleet-wide target.
+	#[tokio::test]
+	async fn mount_egress_counts_under_the_named_path() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let producer = origin(1).produce();
+		let _foo = producer.publish(".svc/p1/foo", Route::default()).unwrap();
+		let project = mounted(&producer, "p1", &["**"])
+			.with_stats(registry.tier(stats::Tier::default()).session("p1"))
+			.with_hidden(true);
+
+		let mut announced = project.announced();
+		announced.assert_next_active(".svc/foo");
+		project.request_broadcast(".svc/foo").await.expect("resolves");
+
+		let mut report = stats::Report::default();
+		registry.report(&mut report);
+		let paths: Vec<_> = report
+			.traffic
+			.iter()
+			.map(|entry| entry.path.as_str().to_string())
+			.collect();
+		assert_eq!(paths, ["p1/.svc/foo"]);
+	}
+
 	/// A route that turns up later is filtered the same way as the replay.
 	#[tokio::test]
 	async fn hidden_route_announced_later_stays_hidden() {
@@ -4192,7 +4725,7 @@ mod tests {
 		broadcast.announce(Route::default()).unwrap();
 		announced.assert_next_active("room/alice");
 		peer.assert_next_active("room/alice");
-		broadcast.finish();
+		broadcast.close();
 		announced.assert_next_ended("room/alice");
 		peer.assert_next_ended("room/alice");
 		assert!(matches!(broadcast.announce(Route::default()), Err(Error::Closed)));
@@ -5135,6 +5668,25 @@ mod tests {
 		let _pending = producer.consume().request_broadcast("room/chat");
 		let request = queued(&dynamic).await;
 		assert_eq!(request.path().as_str(), "room/chat");
+	}
+
+	#[tokio::test]
+	async fn scoped_cursor_selects_among_the_routes_it_can_see() {
+		let producer = origin(1).produce();
+		let scoped = |pattern: &str| {
+			producer
+				.scope("", &Patterns::from(pattern.parse::<Pattern>().unwrap()))
+				.unwrap()
+		};
+		let _chat = scoped("*/chat").dynamic("", Route::default().with_cost(1)).unwrap();
+		let _video = scoped("*/video").dynamic("", Route::default().with_cost(5)).unwrap();
+
+		let mut video = producer
+			.consume()
+			.scope("", &scopes(&["room/video"]))
+			.unwrap()
+			.announced();
+		assert_eq!(video.assert_next_active("").cost, Cost::new(5));
 	}
 
 	#[tokio::test]
@@ -6123,9 +6675,9 @@ mod tests {
 		assert!(again.is_clone(&resolved));
 
 		// Losing one source keeps the front alive; losing both closes it.
-		first.finish();
+		first.close();
 		settle(|| consumer.get_broadcast("room/alice").is_some()).await;
-		second.finish();
+		second.close();
 		settle(|| consumer.get_broadcast("room/alice").is_none()).await;
 
 		// The path is free again for a fresh broadcast.
@@ -6161,7 +6713,7 @@ mod tests {
 		group.finish().unwrap();
 		track.finish().unwrap();
 		drop(track);
-		broadcast.finish();
+		broadcast.close();
 
 		let mut group = next_group(&mut subscription)
 			.await
@@ -6206,7 +6758,7 @@ mod tests {
 
 		// ANNOUNCE_END overtakes the track's end: the route is retracted, and the front
 		// has acted on it, before the track's last group and end arrive.
-		source.finish();
+		source.close();
 		drop(server);
 		settle(|| resolved.is_closed()).await;
 		let mut group = track.append_group().unwrap();
@@ -6226,6 +6778,27 @@ mod tests {
 			.await
 			.expect("a cleanly finished track ended as an error");
 		assert!(end.is_none(), "a group followed the final one");
+	}
+
+	/// A standing route outlives the source it produced: the front ends instead of
+	/// asking that route for the broadcast that just closed.
+	#[tokio::test]
+	async fn a_closed_source_is_not_requested_again_from_its_standing_route() {
+		let producer = origin(1).produce();
+		let server = producer
+			.dynamic("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		let pending = producer.consume().request_broadcast("room/alice");
+		let source = broadcast::Info::new().produce();
+		queued(&server).await.accept(&source);
+		let resolved = pending.await.unwrap();
+
+		source.close();
+		settle(|| resolved.is_closed()).await;
+		assert!(
+			server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"the closed source was requested again"
+		);
 	}
 
 	/// An origin front drops the source track as soon as its last reader leaves,
@@ -6508,7 +7081,7 @@ mod tests {
 
 		// The incumbent leaving exhausts the table: the refusal is never retried.
 		drop(track);
-		first.finish();
+		first.close();
 		assert!(matches!(subscription.recv_group().await, Err(Error::Unsupported)));
 	}
 
@@ -6707,7 +7280,7 @@ mod tests {
 		// Publishing through the nested view lands where the root says.
 		let broadcast = nested.create_broadcast("room/chat/live").unwrap();
 		assert!(producer.consume().get_broadcast("room/chat/live").is_some());
-		broadcast.finish();
+		broadcast.close();
 	}
 
 	#[test]

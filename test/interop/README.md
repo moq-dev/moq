@@ -76,6 +76,9 @@ just test interop --all
 # Pick your own axes:
 just test interop --publishers rust,python --subscribers rust,c,js-native-bun
 
+# Subscription termination: Rust/JS response bytes over in-memory transports.
+just test bare-fin
+
 # Negative control: no publisher, every subscriber must time out.
 just test interop-negative
 
@@ -183,3 +186,12 @@ clients/
 `.github/workflows/interop.yml` runs the full matrix nightly (and on demand, and on
 PRs that touch `test/interop/`). A red cell means a real interop break in the
 current tree.
+
+## Subscription termination
+
+`just test bare-fin` exchanges encoded subscription responses between Rust and
+JS, then feeds them into each implementation's subscriber over an in-memory
+transport. It checks bare FIN before and after SUBSCRIBE\_START on lite-05/06/07,
+and FIN without PUBLISH\_DONE on IETF draft-19. Clean-end controls use the same
+path. This tests response interoperability, not network delivery or relay behavior.
+The interop workflow runs it alongside the real-transport matrix.

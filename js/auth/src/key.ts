@@ -3,6 +3,7 @@ import * as z from "@zod/mini";
 import * as jose from "jose";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
 import { type Claims, ClaimsSchema, ScopeSchema, scopeAllows } from "./claims.ts";
+import { encodeGrants } from "./wire.ts";
 
 /**
  * A validated key identifier (kid). Only alphanumeric, hyphens, and underscores.
@@ -185,16 +186,19 @@ function parse(jwk: string): Key {
 async function sign(key: Key, claims: Claims): Promise<string> {
 	ensureOperationSupported(key, "sign");
 
-	// Validate claims before signing
+	// Scope-check and sign what the schema parsed, never the raw input: an untyped
+	// caller could pass legacy `put`/`get` fields the scope check would not see.
+	let parsed: Claims;
 	try {
-		ClaimsSchema.parse(claims);
+		parsed = ClaimsSchema.parse(claims);
 	} catch (error) {
 		throw new Error(`Invalid claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
-	ensureClaimsWithinScope(key, claims);
+	ensureClaimsWithinScope(key, parsed);
 
 	const joseKey = await importJoseKey(key);
-	const jwt = await new jose.SignJWT(claims)
+	// Written the legacy way when that says the same thing, so older verifiers accept it.
+	const jwt = await new jose.SignJWT(encodeGrants(parsed))
 		.setProtectedHeader({
 			alg: key.alg,
 			typ: "JWT",

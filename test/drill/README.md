@@ -112,7 +112,9 @@ protocol's reaction to loss and delay, not the kernel's rendering of them.
 ## Sensitivity
 
 The Nightly workflow runs all mutations, so patches that stop applying and drills
-that stop detecting their recovery failures fail CI.
+that stop detecting their recovery failures fail CI. `just check` also runs
+`--apply-only` whenever Rust or this directory changes, so a patch that no longer
+applies fails the PR that moved its code rather than the next nightly.
 
 `sensitivity.sh` removes one recovery behavior at a time and requires the drill
 covering it to fail. Each mutation is a patch under `mutations/`, applied to a

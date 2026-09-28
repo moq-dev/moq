@@ -62,10 +62,12 @@ held open with `{}` until the tier records. Any other name is refused.
 ## Frames
 
 Every frame is a JSON object mapping a key (broadcast path or auth root) to an
-entry. An entry appears while it is **live**, meaning some started counter
-still exceeds its ended counterpart so traffic could resume at any moment, and
-on any tick its counters changed. Once fully closed it appears one last time
-with its final counters and is then dropped. A track with no entries holds `{}`.
+entry. A traffic entry appears from its first nonzero counter until the relay
+drops its counters, even while idle: the last viewer can leave while the
+publisher still holds the path, and a returning viewer resumes the same
+counters. So a key missing from a frame had no counters, and one that returns
+starts from zero. A sessions entry appears while a session is connected and on
+the tick its last one disconnects. A track with no entries holds `{}`.
 
 The producer drains its counters every interval (one second by default) and
 writes only when a track's frame changed, so silence means nothing moved, not
@@ -84,6 +86,8 @@ return later as a new broadcast.
     "fetches": 0,
     "bytes": 1048576, "frames": 900, "groups": 30, "datagrams": 0,
     "stale": { "bytes": 0, "frames": 0, "groups": 0, "datagrams": 0 },
+    "lag": { "50ms": 1040000, "1s": 8576 },
+    "dropped": { "duration": 966.5, "bytes": 8576, "groups": 1 },
     "announced": 1, "announced_closed": 0,
     "broadcasts": 3, "broadcasts_closed": 1,
     "subscriptions": 6, "subscriptions_closed": 2
@@ -101,10 +105,43 @@ return later as a new broadcast.
 | `bytes` / `frames` / `groups` | Payload delivered. |
 | `datagrams` | Groups delivered as an unreliable datagram. A subset of `groups`. |
 | `stale` | Payload skipped because it aged past a subscriber's latency budget, with the same four fields. Disjoint from the top-level payload counters. |
+| `lag` | `publisher.json` only: how far behind the viewers' acknowledged media is, as bytes per bucket of media time. See [Lag](#lag). Omitted while empty. |
+| `dropped` | `publisher.json` only: media written to a viewer on a group stream that was reset or abandoned before the viewer acknowledged it, as `duration` (fractional milliseconds), `bytes`, and `groups`. Omitted while empty. |
 
-The last six fields are legacy spellings of the `*_started` and `*_ended`
+The last six fields in the example are legacy spellings of the `*_started` and `*_ended`
 counters, still written so an older consumer reads a newer relay. A reader
 should prefer the canonical name and fall back to the legacy one.
+
+### Lag
+
+Each track subscription has an acknowledged **frontier**: the newest frame
+timestamp the viewer is known to have received. It starts at the track's newest
+frame when the subscription opens, so a backlog the viewer deliberately starts
+behind never counts, and advances when the viewer acknowledges the end (FIN) of
+a group stream. Every stats interval the relay samples each subscription's lag,
+the newest frame the track has produced minus the frontier, or the wall-clock
+time the frontier has stood still while newer media exists if that is larger.
+It adds the bytes the track produced during the interval to the bucket that lag
+falls in, and the broadcast's subscriptions sum into one entry.
+
+| Bucket | Lag |
+| --- | --- |
+| `50ms` | under 50 ms |
+| `100ms` | 50 ms to 100 ms |
+| `250ms` | 100 ms to 250 ms |
+| `500ms` | 250 ms to 500 ms |
+| `1s` | 500 ms to 1 s |
+| `2s` | 1 s to 2 s |
+| `5s` | 2 s to 5 s |
+| `inf` | 5 s and above |
+
+Each bucket is a cumulative byte counter, so the difference of two frames is
+the byte-weighted lag distribution over that interval, from which a dashboard
+reads percentiles or a mean. A paused broadcast produces nothing and adds
+nothing. The frontier moves once per group, so a healthy viewer of a stream
+with two-second groups still spreads across the buckets below `2s`; the dropped
+counters likewise count a whole group's written span, including frames the
+viewer did receive.
 
 ### Presence
 
@@ -119,7 +156,8 @@ ends on the old one and starts on the new.
 
 ### Counters
 
-Every counter is a cumulative, monotonic unsigned integer. A rate is the
+Every counter is cumulative and monotonic: an unsigned integer, apart from
+`dropped.duration` in fractional milliseconds. A rate is the
 difference between two frames divided by the time between them, and a live
 count is started minus ended. A frame never shows ended above started.
 

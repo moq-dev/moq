@@ -364,6 +364,46 @@ impl Stream {
 	}
 }
 
+/// A test-driven capture device: fixtures push frames at explicit acquisition
+/// instants or device timestamps, standing in for a camera behind a [`Stream`].
+#[cfg(test)]
+pub(crate) struct Synthetic {
+	chan: Arc<FrameChannel>,
+}
+
+#[cfg(test)]
+impl Synthetic {
+	/// Open a synthetic device with the given geometry, returning it and the stream reading it.
+	pub(crate) fn open(size: crate::Size, framerate: Rate) -> (Self, Stream) {
+		let chan = FrameChannel::new();
+		let stream = Stream::new(
+			chan.clone(),
+			size.width,
+			size.height,
+			Some(framerate),
+			"synthetic".to_string(),
+			None,
+			Box::new(()),
+		);
+		(Self { chan }, stream)
+	}
+
+	/// Deliver a frame acquired at `captured`.
+	pub(crate) fn push_at(&self, surface: crate::frame::Surface, captured: std::time::Instant) {
+		self.chan.push_at(surface, captured);
+	}
+
+	/// Deliver a frame stamped on the device's own timeline, like V4L2 and Media Foundation.
+	pub(crate) fn push_native(&self, surface: crate::frame::Surface, source: moq_net::Timestamp) {
+		self.chan.push_native(surface, source);
+	}
+
+	/// End the stream, as a device that stops delivering does.
+	pub(crate) fn close(&self) {
+		self.chan.close();
+	}
+}
+
 /// Open the capture source described by `config`.
 pub async fn open(config: &Config) -> Result<Stream, Error> {
 	match &config.source {

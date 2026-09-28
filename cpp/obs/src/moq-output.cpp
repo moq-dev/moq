@@ -10,9 +10,7 @@
 #include <cstring>
 #include <string>
 
-extern "C" {
 #include "moq.h"
-}
 
 namespace {
 
@@ -301,10 +299,10 @@ void MoQOutput::Reset()
 	}
 	audio_tracks.clear();
 
-	// Finish the broadcast so the origin unpublishes it immediately; Start()
+	// Close the broadcast so the origin retracts it immediately; Start()
 	// creates a fresh one on restart.
 	if (broadcast > 0) {
-		moq_publish_finish(broadcast);
+		moq_publish_close(broadcast);
 		broadcast = 0;
 	}
 }

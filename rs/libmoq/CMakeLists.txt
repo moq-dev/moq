@@ -36,13 +36,14 @@ if(BUILD_RUST_LIB)
         set(CARGO_BUILD_FLAG "--release")
     endif()
 
-    set(RUST_TARGET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../target")
-    set(RUST_DIR "${RUST_TARGET_DIR}/${CARGO_BUILD_TYPE}")
+    set(RUST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../target/${CARGO_BUILD_TYPE}")
     set(RUST_LIB "${RUST_DIR}/${LIB_PREFIX}moq${LIB_SUFFIX}")
-    set(RUST_HEADER "${RUST_TARGET_DIR}/include/moq.h")
+    set(RUST_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/include")
+    set(RUST_HEADER "${RUST_INCLUDE_DIR}/moq.h")
 
     add_custom_target(rust_build ALL
-        COMMAND cargo build --locked ${CARGO_BUILD_FLAG}
+        COMMAND ${CMAKE_COMMAND} -DCARGO_BUILD_FLAG=${CARGO_BUILD_FLAG} -DHEADER=${RUST_HEADER}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/cargo-build.cmake
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         BYPRODUCTS ${RUST_LIB} ${RUST_HEADER}
         COMMENT "Building Rust library"
@@ -50,26 +51,26 @@ if(BUILD_RUST_LIB)
     )
 else()
     set(RUST_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH "Directory containing pre-built library and header")
-    set(RUST_TARGET_DIR "${RUST_DIR}")
     set(RUST_LIB "${RUST_DIR}/${LIB_PREFIX}moq${LIB_SUFFIX}")
-    set(RUST_HEADER "${RUST_DIR}/include/moq.h")
+    set(RUST_INCLUDE_DIR "${RUST_DIR}/include")
+    set(RUST_HEADER "${RUST_INCLUDE_DIR}/moq.h")
 endif()
 
 # Ensure the directories exist (cargo build creates them)
 file(MAKE_DIRECTORY ${RUST_DIR})
-file(MAKE_DIRECTORY ${RUST_TARGET_DIR}/include)
+file(MAKE_DIRECTORY ${RUST_INCLUDE_DIR})
 
 # Create interface library target that wraps the Rust static library
 add_library(moq INTERFACE)
-target_include_directories(moq INTERFACE ${RUST_TARGET_DIR}/include)
+target_include_directories(moq INTERFACE ${RUST_INCLUDE_DIR})
 
 # Link the static library - must use target_link_libraries so it appears
 # after object files in the link command (linker order matters for static libs)
 target_link_libraries(moq INTERFACE "${RUST_LIB}")
 
 # System libraries Rust std/deps pull in. When the staticlib is linked into a
-# C/C++ target by an external linker, cargo can't inject these itself. build.rs
-# reads the same files for moq.pc, so the two never drift.
+# C/C++ target by an external linker, cargo can't inject these itself.
+# nix/overlay.nix reads the same files for moq.pc, so the two never drift.
 #
 # Reads native-libs/<platform>.txt into MOQ_NATIVE_LIBS: `framework:Foo` becomes
 # a linker framework flag, anything else a plain library name.

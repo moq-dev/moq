@@ -90,7 +90,10 @@ and refuses to start anywhere it cannot deliver. `[quic]` applies either way,
 except that `mtu_discovery` (its datagram path sends a fixed payload) and the
 three flow-control windows (these workers run fixed ones) are refused under
 `io_uring` rather than quietly ignored. Each worker reports its own counters at
-[`/metrics`](/bin/relay/http#get-metrics).
+[`/metrics`](/bin/relay/http#get-metrics). The kernel charges each worker's
+ring (~56 KiB, plus a page per socket) to `RLIMIT_MEMLOCK`, a budget shared by
+every io\_uring the user runs; raise it (`LimitMEMLOCK=` under systemd) if
+workers fail to start with a message naming that limit.
 
 ## \[web]
 
@@ -116,7 +119,7 @@ See [HTTP endpoints](/bin/relay/http).
 # Exactly one of these:
 url = "http://127.0.0.1:4440/"       # An auth server asked once per session event (`moq auth serve`,
                                      # or your own). https:// presents connect.tls; unix:// is a socket.
-# public = "anon/**"                 # Or a static anonymous grant, publish and subscribe alike.
+# public = "anon/**"                 # Or a static anonymous grant rooted at /, publish and subscribe alike.
 # public_subscribe = ["anon/**", "demo/**"]   # Or split them; patterns, `foo/**` for a subtree.
 # public_publish = ["anon/**"]
 ```
@@ -207,6 +210,15 @@ and auth root, split by a **tier** label chosen by the auth server's grant or
 `--cluster-tier`, which is what makes billing per customer or per region
 possible. [Stats](/concept/stats) describes the paths, tracks, and encodings;
 read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
+
+`publisher.json` also reports how far behind each broadcast's viewers are. Every
+`interval` the relay samples each subscription's lag, the newest frame produced
+minus the newest frame the viewer acknowledged, into a byte-weighted `lag`
+histogram with buckets at 50 ms, 100 ms, 250 ms, 500 ms, 1 s, 2 s, 5 s, and above.
+`dropped` counts the duration, bytes, and groups of media written to a
+viewer on a group stream that ended before the viewer acknowledged it. Both
+resolve one group at a time, so they overstate lag and drops for long groups;
+see [Lag](/concept/stats#lag).
 
 ## \[iroh]
 

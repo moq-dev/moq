@@ -75,12 +75,17 @@ mkdir -p "$PACKAGE_DIR/include" "$PACKAGE_DIR/lib"
 
 if [[ "$TARGET" == *"-windows-"* ]]; then
     echo "Building libmoq for $TARGET via cargo (Windows path)..."
-    cargo build --locked --release --package libmoq --target "$TARGET" --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+    BUILD_LOG="$(mktemp)"
+    trap 'rm -f "$BUILD_LOG"' EXIT
+    cargo build --locked --release --package libmoq --target "$TARGET" --manifest-path "$WORKSPACE_DIR/Cargo.toml" \
+        --message-format=json-render-diagnostics >"$BUILD_LOG"
 
     TARGET_DIR="$WORKSPACE_DIR/target/$TARGET/release"
     LIB_FILE="moq.lib"
     cp "$TARGET_DIR/$LIB_FILE" "$PACKAGE_DIR/lib/"
-    cp "$WORKSPACE_DIR/target/$TARGET/include/moq.h" "$PACKAGE_DIR/include/"
+    # build.rs writes the header into its OUT_DIR, which only cargo's JSON names.
+    GEN_DIR=$(jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("libmoq")) | .out_dir' "$BUILD_LOG" | tail -1)
+    cp "$GEN_DIR/include/moq.h" "$PACKAGE_DIR/include/"
 
     # Generate CMake config files from templates (no pkg-config on Windows).
     mkdir -p "$PACKAGE_DIR/lib/cmake/moq"

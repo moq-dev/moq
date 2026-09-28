@@ -964,6 +964,34 @@ test("a group that claims its first object must start at zero", async () => {
 	track.close();
 });
 
+test("every object in a chunk reaches the reader before it wakes", async () => {
+	const { subscriber, track } = await subscribeTrack();
+
+	const header = new GroupMessage({
+		trackAlias: ALIAS,
+		groupId: 3,
+		subGroupId: 0,
+		publisherPriority: 0,
+		flags: groupFlags(true),
+	});
+	const objects = encodeObjects(Array.from({ length: 10 }, () => 0));
+	const readable = new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(objects);
+			controller.close();
+		},
+	});
+	const handled = subscriber.handleGroup(header, new Reader(readable, undefined, VERSION));
+
+	const group = await track.ordered().nextGroup();
+	if (!group) throw new Error("no group");
+	expect(await group.readString()).toBe("object 0");
+	expect(group.frameCount).toBe(10);
+
+	await handled;
+	track.close();
+});
+
 // Hold the actual legacy cancellation write so returning demand lands in the teardown gap.
 test("returning demand survives a blocked unsubscribe", async () => {
 	const version = Version.DRAFT_16;

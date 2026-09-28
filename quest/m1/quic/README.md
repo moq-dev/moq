@@ -8,10 +8,10 @@ MoQ's schedule and offers it upstream when it is general. One core serves the
 tokio backend, the thread-per-core `moq-uring` backend, iroh, and qmux. The
 features are per-stream acknowledgment progress, reliable stream resets,
 hierarchical stream scheduling with per-broadcast fairness, the shared stream
-state machine used by qmux, capacity probing for media, per-stream
-deadlines, deadline-based and wider limits for relay peers. The experiments that may join them (GCC, FEC, receive
-timestamps, kernel pacing, buffer pools, probing, L4S, careful resume) live
-in [m2](/quest/m2/README.md).
+state machine used by qmux, per-stream deadlines, and wider limits for relay
+peers. The experiments that may join them (GCC, FEC, receive timestamps,
+kernel pacing, buffer pools, media probing, L4S, careful resume, deadline
+keep-alive) live in [m2](/quest/m2/README.md) and do not gate this line.
 
 ## Plan
 
@@ -20,15 +20,15 @@ One stack carries every change on MoQ's own QUIC paths; a build with the `iroh`
 feature also compiles upstream noq, and iroh connections are outside what these
 quests reach.
 
-The seven BBR correctness fixes follow the fork bootstrap. They are separate
-PRs, but one owner should work in the shared controller code at a time.
-Their controller-level regressions extend the shared test `Sim` in
-`bbr3/mod.rs` with only what each needs, rather than adding another
-simulation loop; a fix at the transport boundary still needs a transport
-test through the real callbacks. The existing loops stay, since the fork
-merges upstream weekly and a port would conflict.
-The [BBR release](/quest/m1/quic/bbr-release.md) delivers them without waiting
-for the remaining transport features. The
+The seven BBR correctness fixes shipped in moq-noq 1.3.1 (#4206). The
+remaining BBR quests here and [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md)
+all edit `bbr3/mod.rs`, so one owner should work there at a time.
+Controller-level regressions extend the shared test `Sim` in `bbr3/mod.rs`
+with only what each needs, rather than adding another simulation loop; a fix
+at the transport boundary still needs a transport test through the real
+callbacks. The existing loops stay, since the fork merges upstream weekly and
+a port would conflict. Each BBR fix ships in a fork patch release without
+waiting for the remaining transport features. The
 [Google comparison](/quest/m2/quic-bbr-google.md) is a separate study.
 
 Rules the line keeps:
@@ -49,16 +49,9 @@ session with fairness enabled, the send group is the broadcast. The default
 MoQ order is newest group first; an ordered subscription keeps oldest first.
 This is a transport API change, not a MoQ wire change.
 
-## Quests
+## Required
 
-- [Preserve QUIC packet identity in BBR](/quest/m1/quic/bbr-packet-identity.md) - ACKs and losses identify the right packet across QUIC spaces
-- [Finish each BBR ACK sample before using it](/quest/m1/quic/bbr-ack-sampling.md) - current delivery samples reach the model once with consistent metadata
-- [Mark application starvation before the next BBR send](/quest/m1/quic/bbr-app-limited.md) - resumed bursts retain correct sample labels
-- [Finish BBR bandwidth-probe feedback once](/quest/m1/quic/bbr-probe-feedback.md) - cruise rounds neither age probe history repeatedly nor retain probe-loss classification
-- [Recalibrate BBR startup pacing from measured RTT](/quest/m1/quic/bbr-startup-pacing.md) - measured RTT replaces the nominal startup rate for media senders
-- [Protect bandwidth samples during BBR ProbeRTT](/quest/m1/quic/bbr-probe-rtt.md) - intentionally reduced sending cannot masquerade as reduced capacity
-- [Preserve BBR state across a spurious loss episode](/quest/m1/quic/bbr-loss-undo.md) - consecutive losses preserve the original recovery snapshot
-- [Release BBR fixes](/quest/m1/quic/bbr-release.md) - publish and pin the corrected controller independently of later features
+- [BBR idle burst](/quest/m1/quic/bbr-app-limited.md) - a fork regression proves a burst after a long idle is paced at the learned bandwidth, closing #4219
 - [Align BBR loss handling with draft-06](/quest/m1/quic/bbr-loss-parity.md) - losses use their own sample and undo re-enters ProbeUp through Refill
 - [Mark BBR starvation wherever the source runs dry](/quest/m1/quic/bbr-app-limited-edges.md) - partial polls count, local send caps do not, receiver credit is pinned
 - [Deliver the application close before io_uring teardown](/quest/m1/quic/uring-close.md) -
@@ -90,8 +83,6 @@ This is a transport API change, not a MoQ wire change.
 
 - [Scope track priority](/quest/m1/track-priority-scope.md) - the
   per-broadcast fairness policy on cluster sessions
-- [Starvation](/quest/m1/qos/starvation.md) - the first consumer of ACK
-  progress: how far behind viewers are, from the relay's point of view
 - [Receive timestamps](/quest/m2/quic-receive-ts.md) - per-packet arrival
   times for GCC and deadlines
 - [GCC egress experiment](/quest/m2/quic-gcc.md) - a measured verdict on
@@ -99,7 +90,7 @@ This is a transport API change, not a MoQ wire change.
 - [FEC experiment](/quest/m2/quic-fec.md) - a measured verdict on transport
   redundancy
 - [Kernel pacing](/quest/m2/quic-kernel-pacing.md), [Send batching](/quest/m2/quic-send-batching.md),
-  [Send buffer pools](/quest/m2/quic-buffer-pool.md), [BBR3 app-limited](/quest/m2/quic-bbr-app-limited.md) -
+  [Send buffer pools](/quest/m2/quic-buffer-pool.md), [Natural media drains](/quest/m2/quic-bbr-natural-drain.md) -
   the syscall, allocation, and controller spikes
 - [Multipath spike](/quest/m2/multipath-spike.md) - a noq capability that
   MoQ does not use yet

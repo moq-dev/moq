@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.8](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.7...moq-mux-v0.10.8) - 2026-09-27
+
+### Added
+
+- *(mux)* detect delay and jitter on JSON and binary tracks ([#4270](https://github.com/moq-dev/moq/pull/4270))
+
+### Fixed
+
+- *(fmp4)* carry Opus pre-skip and gain through dOps ([#4294](https://github.com/moq-dev/moq/pull/4294))
+- *(egress)* single-rendition egress serves the best rendition ([#4293](https://github.com/moq-dev/moq/pull/4293))
+
+## [0.10.7](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.6...moq-mux-v0.10.7) - 2026-09-26
+
+### Added
+
+- *(mux)* forward importer discontinuities through publishers ([#4239](https://github.com/moq-dev/moq/pull/4239))
+- *(moq-mux)* catalog delay measures cross-rendition encoder lateness ([#4170](https://github.com/moq-dev/moq/pull/4170))
+
+### Other
+
+- rename CLAUDE.md to AGENTS.md ([#4235](https://github.com/moq-dev/moq/pull/4235))
+
+## [0.10.6](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.5...moq-mux-v0.10.6) - 2026-09-26
+
+### Other
+
+- updated the following local packages: moq-net, moq-json, hang, moq-binary, moq-loc
+
+## [0.10.5](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.4...moq-mux-v0.10.5) - 2026-09-25
+
+### Added
+
+- *(ffi)* advertise JSON tracks in the catalog, add binary data tracks ([#4137](https://github.com/moq-dev/moq/pull/4137))
+
+### Fixed
+
+- *(audio)* honor and validate Opus stream descriptions ([#4130](https://github.com/moq-dev/moq/pull/4130))
+
+### Other
+
+- *(capture)* drive native capture through clock edge cases in CI ([#4125](https://github.com/moq-dev/moq/pull/4125))
+
 ## [0.10.4](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.3...moq-mux-v0.10.4) - 2026-09-25
 
 ### Added

@@ -5,9 +5,7 @@
 #include <string>
 #include <vector>
 
-extern "C" {
 #include "moq.h"
-}
 
 // Advanced MoQ connection settings.
 //

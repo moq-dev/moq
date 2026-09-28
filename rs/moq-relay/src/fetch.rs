@@ -3,8 +3,9 @@
 /// The newest needs a live subscription to learn its sequence, since a fetch can
 /// only retrieve a sequence already known. Once known it is fetched rather than
 /// read off the subscription, so an evicted group is retrieved from upstream
-/// instead of waited on forever. Returns [`moq_net::Error::NotFound`] when the
-/// group can never be served, including a track that ends before any group.
+/// instead of waited on forever. Fails before returning when the group can never
+/// be served: [`moq_net::Error::NotFound`] locally, including a track that ends
+/// before any group, or [`moq_net::StreamError::NotFound`] from upstream.
 pub async fn fetch_group(
 	track: &moq_net::track::Consumer,
 	sequence: Option<u64>,

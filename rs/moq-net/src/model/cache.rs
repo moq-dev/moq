@@ -10,7 +10,7 @@
 //! global eviction task.
 //!
 //! Cross-track ordering comes from one statistic: the mean last-access time of the
-//! evictable population (every cached group except each track's protected latest).
+//! evictable population (every cached group except each live track's protected latest).
 //! A group accessed more recently than that mean is never evicted, so freshly read
 //! or fetched content in one track can't die while another track holds staler
 //! content, and a track
@@ -18,9 +18,10 @@
 //! old entries and inserting new ones both advance the mean, so the eviction
 //! frontier moves with cache turnover on its own.
 //!
-//! The pool also owns the wall-clock LRU window ([`Pool::expiry`]): a non-latest
-//! group that nobody has read or written for that long is reclaimed, no matter what
-//! retention its track advertises. Track retention
+//! The pool also owns the wall-clock LRU window ([`Pool::expiry`]): a group that
+//! nobody has read or written for that long is reclaimed, no matter what retention
+//! its track advertises. Only a live track's latest group is exempt: once a track
+//! ends, a stale consumer can't pin any of it. Track retention
 //! ([`max_age`](crate::track::Info::max_age)) is measured in media timestamps, so a
 //! congestion stall can't age content out; the pool's expiry is the orthogonal
 //! wall-clock bound that keeps unwatched content from pinning RAM.
@@ -101,8 +102,8 @@ impl Config {
 
 	/// Set the wall-clock LRU window. `None` disables idle reclamation.
 	///
-	/// A non-latest cached group that nobody reads or writes for this long is
-	/// reclaimed, surfacing to any remaining reader as
+	/// A cached group (other than a live track's latest) that nobody reads or writes
+	/// for this long is reclaimed, surfacing to any remaining reader as
 	/// [`Error::Old`](crate::Error::Old). This is independent of track retention:
 	/// [`max_age`](crate::track::Info::max_age) uses media timestamps, while this
 	/// window keeps idle content from pinning memory. Reclaiming without a write behind
@@ -269,7 +270,7 @@ impl Pool {
 	/// Call after polling and at the returned deadline, including when idle.
 	/// Calls before that deadline only advance the pool's sampled clock. A due
 	/// pass visits every cached group, dating accesses since the last pass and
-	/// reclaiming idle groups except each track's latest. Delayed calls extend
+	/// reclaiming idle groups except each live track's latest. Delayed calls extend
 	/// retention. Shared pools use the latest supplied instant.
 	///
 	/// `None` means both cache policies are disabled. After enabling a capacity
@@ -490,6 +491,10 @@ pub(crate) struct Track {
 	// This account's slot in the pool's sweep registry, absent when the pool has no
 	// expiry window (nothing is registered) or for the detached default account.
 	sweep: OnceLock<usize>,
+
+	// What the track's groups have produced, for the egress lag sampler. Kept on the
+	// account because it is already the one per-track handle every group holds.
+	production: crate::stats::Production,
 }
 
 impl Track {
@@ -502,6 +507,7 @@ impl Track {
 			expiry_cursor: AtomicUsize::new(0),
 			state,
 			sweep: OnceLock::new(),
+			production: Default::default(),
 		});
 		if let Some(key) = track.pool.register(&track) {
 			let _ = track.sweep.set(key);
@@ -512,6 +518,11 @@ impl Track {
 	/// The pool this track caches into.
 	pub(crate) fn pool(&self) -> &Pool {
 		&self.pool
+	}
+
+	/// What this track's groups have produced.
+	pub(crate) fn production(&self) -> &crate::stats::Production {
+		&self.production
 	}
 
 	/// Charge a new group's fixed overhead, returning its [`Charge`].
@@ -564,7 +575,14 @@ impl Track {
 		}
 		// Counts as a producer while it lives, which is why `track::Producer` gates
 		// its teardown on its own clone count rather than the state's.
-		let Some(state) = self.state.upgrade() else { return };
+		let Some(state) = self.state.upgrade() else {
+			// An ended track's channel is closed, but a stale consumer can still hold its
+			// groups: the sweep expires them in place, or they would never go.
+			if full && scan_expiry {
+				self.state.read(|state| state.expire_closed(state.expiry_scan_drain()));
+			}
+			return;
+		};
 		let expiry = if scan_expiry {
 			let state = state.read();
 			let scan = if full {

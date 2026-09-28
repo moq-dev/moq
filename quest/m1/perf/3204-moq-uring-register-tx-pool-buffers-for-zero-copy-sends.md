@@ -9,6 +9,15 @@ measurable gain over plain `SendMsgZc` or the change is dropped.
 ## Plan
 
 Follow-up to #2875 and dependent on the `SENDMSG_ZC` experiment in #3201.
+The closed, unmerged prototype [#3224](https://github.com/moq-dev/moq/pull/3224)
+built this; reuse its lease and quarantine handling.
+
+Fixed buffers on `SENDMSG_ZC` need Linux 6.15 (vectored registered-buffer
+support), above moq-uring's 6.12 floor, so the fixed path must fall back:
+#3224 retried with ordinary `SENDMSG` on `EINVAL` or `EOPNOTSUPP` and
+disabled later attempts on that ring. #3224 also filled the SQE `buf_index`
+with a raw-SQE adapter because the `io-uring` crate did not expose it for
+this opcode; check the current crate first.
 
 The TX pool already owns stable `Box<[u8]>` allocations and grows lazily. If zero-copy send wins, registering those allocations lets send SQEs reference fixed buffers and can reduce repeated page accounting on the large-train path.
 

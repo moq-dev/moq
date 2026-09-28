@@ -80,6 +80,10 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	video: BTreeMap<u8, VideoStream>,
 	/// Demuxed audio tracks keyed by RTMP track id.
 	audio: BTreeMap<u8, AudioStream>,
+
+	/// The source's mapping onto the broadcast clock, set by [`live`](Self::live). `None`
+	/// publishes the tag timestamps verbatim.
+	anchor: Option<crate::clock::Anchor>,
 }
 
 /// The demuxed video track plus its current catalog config, so a repeated
@@ -89,12 +93,14 @@ struct VideoStream {
 	config: VideoConfig,
 	stalled: hang::catalog::stalled::Detector,
 	last_source: Option<Instant>,
+	lane: crate::clock::Lane,
 }
 
 /// The demuxed audio track plus its current catalog config.
 struct AudioStream {
 	track: crate::container::Producer<crate::catalog::hang::Container, AudioConfig>,
 	config: AudioConfig,
+	lane: crate::clock::Lane,
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
@@ -110,7 +116,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			header_seen: false,
 			video: BTreeMap::new(),
 			audio: BTreeMap::new(),
+			anchor: None,
 		}
+	}
+
+	/// Publish on the broadcast clock rather than the source's own tag timestamps.
+	///
+	/// For a live feed with its own zero: the first frame is live on arrival, every track shares
+	/// that one mapping, and an encoder that restarts its timestamps continues forward after the
+	/// real idle gap. Without this, tag timestamps are published verbatim, which suits a source
+	/// already on the clock the catalog advertises
+	/// ([`Config::with_clock`](crate::catalog::Config::with_clock)).
+	pub fn live(mut self) -> Self {
+		self.anchor = Some(crate::clock::Anchor::new(self.catalog.clock()));
+		self
 	}
 
 	/// Select the container this importer wraps decoded media renditions in.
@@ -470,9 +489,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
-		let timestamp = Timestamp::from_millis(pts_ms as u64)?;
 		let written = {
 			let stream = self.video.get_mut(&track_id).expect("checked above");
+			let timestamp = Timestamp::from_millis(pts_ms as u64)?;
+			let timestamp = match self.anchor.as_mut() {
+				Some(anchor) => anchor.translate(&mut stream.lane, timestamp)?,
+				None => timestamp,
+			};
 			match stream.track.write(Frame {
 				timestamp,
 				duration: None,
@@ -502,8 +525,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
+		let timestamp = Timestamp::from_millis(timestamp)?;
+		let timestamp = match self.anchor.as_mut() {
+			Some(anchor) => anchor.translate(&mut stream.lane, timestamp)?,
+			None => timestamp,
+		};
 		stream.track.write(Frame {
-			timestamp: Timestamp::from_millis(timestamp)?,
+			timestamp,
 			duration: None,
 			payload: Bytes::copy_from_slice(data),
 			keyframe: true,
@@ -537,6 +565,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config,
 				stalled: hang::catalog::stalled::Detector::new(),
 				last_source: None,
+				lane: Default::default(),
 			},
 		);
 		Ok(())
@@ -558,7 +587,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			Some(reserved) => reserved.audio(net_track, wire, config.clone())?,
 			None => self.catalog.audio(net_track, wire, config.clone())?,
 		};
-		self.audio.insert(track_id, AudioStream { track: media, config });
+		self.audio.insert(
+			track_id,
+			AudioStream {
+				track: media,
+				config,
+				lane: Default::default(),
+			},
+		);
 		Ok(())
 	}
 
@@ -628,9 +664,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		for stream in self.video.values_mut() {
 			stream.track.seek(sequence)?;
+			stream.lane.restart();
 		}
 		for stream in self.audio.values_mut() {
 			stream.track.seek(sequence)?;
+			stream.lane.restart();
 		}
 		Ok(())
 	}

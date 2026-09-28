@@ -22,10 +22,7 @@ a bare-metal tier is worth operating.
 
 ## Required
 
+- [AF_XDP UDP path](/quest/m2/af-xdp.md) - the no-hardware verdict this waits
+  on; a kernel path within reach of line rate abandons this quest
 - A moq.pro relay provider offers SR-IOV or bare-metal hosts the fleet can
   run on
-
-## Related
-
-- [AF_XDP UDP path](/quest/m2/af-xdp.md) - the no-hardware verdict this waits
-  on

@@ -111,6 +111,31 @@ mod test {
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(v))) if v == "two"));
 	}
 
+	/// A stamped payload is written at its capture time, and the returned size is the encoded frame
+	/// on the wire rather than the payload handed in.
+	#[test]
+	fn a_stamped_update_writes_its_capture_time() {
+		let (mut producer, track) = producer(true);
+		let mut groups = producer.consume();
+		let captured = moq_net::Timestamp::from_millis(1_234).unwrap();
+		let payload = Bytes::from(vec![7u8; 4096]);
+		let size = producer
+			.update(moq_net::Timed::from(payload.clone()).at(captured))
+			.unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected a group");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("expected a frame");
+		};
+		assert_eq!(frame.timestamp.as_micros(), captured.as_micros());
+		assert_eq!(size, frame.payload.len());
+		assert!(size < payload.len(), "the size is the compressed frame");
+		assert_eq!(drain(consume(track, true)), vec![payload]);
+	}
+
 	#[test]
 	fn one_group_per_update() {
 		let (mut producer, track) = producer(false);

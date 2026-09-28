@@ -3,7 +3,7 @@
 ## Goal
 
 Reduce relay CPU per session, raise the per-worker throughput ceiling, and
-hold tail latency on the dev thread-per-core stack by eliminating measured
+hold tail latency on the thread-per-core stack by eliminating measured
 hot-path costs: redundant copies, locks, atomics, clock reads, allocations,
 and syscalls. Not io_uring specific: anything on the relay's hot path qualifies,
 including the shared moq-net model layer and kio.
@@ -13,6 +13,10 @@ plus the targeted micro-benches it names). A measured no-win is a valid
 outcome that abandons the quest.
 
 ## Plan
+
+Quests branch from main unless they say otherwise;
+[Run to quiescence](/quest/m1/perf/uring-quiescence.md) needs dev, where
+`kio`'s `Tasks::poll` changed (#4156).
 
 Planning quests can settle their contracts independently. Facts from the 2026-09
 hot-path survey, so quests don't re-litigate them:
@@ -39,10 +43,12 @@ The relay's `/metrics` endpoint already carries the ring-level counters
 (enters, park/wake, batch effectiveness) several quests want as evidence, one
 row per io_uring worker.
 
-## Quests
+## Required
 
 - [Open contract](/quest/m1/perf/uring-open-contract.md) - plan concurrent WebTransport opening and cancellation
 
+- [Announce replay](/quest/m1/perf/announce-replay.md) - the initial announce set replays in linear time, so joins don't slow with the route count
+- [Group cost](/quest/m1/perf/group-cost.md) - count and cut the allocations and time spent relaying one small group to one viewer
 - [One enter per turn](/quest/m1/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter
 - [Run to quiescence](/quest/m1/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass budget that keeps the fairness rule
 - [Lock wait](/quest/m1/perf/lock-wait.md) - each worker reports time blocked on cross-worker locks, deciding whether the shared model needs work

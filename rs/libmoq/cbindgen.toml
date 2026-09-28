@@ -1,10 +1,11 @@
 # cbindgen configuration for libmoq.
 #
 # NOT loaded: build.rs drives cbindgen through `Builder::new()`, which never
-# discovers this file, and passes its own config. The generated moq.h therefore
-# has none of the settings below (no include guard, no `#pragma once`, no
-# renaming). Loading it now would rename every struct field and type in the
-# published C API, so the options a build actually uses live in build.rs.
+# discovers this file, and passes its own config. Of the settings below, only
+# `pragma_once` and `cpp_compat` reach the generated moq.h, because build.rs sets
+# them itself; the rest (the MOQ_H include guard, the renaming) do not. Loading
+# it now would rename every struct field and type in the published C API, so
+# the options a build actually uses live in build.rs.
 
 language = "C"
 include_guard = "MOQ_H"

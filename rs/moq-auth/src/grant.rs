@@ -1,6 +1,7 @@
 use moq_pattern::Patterns;
 use serde::{Deserialize, Serialize};
 use serde_with::{DurationSeconds, TimestampSeconds, serde_as};
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 /// A grant that expired this recently still stands: the auth server's clock may run behind.
@@ -9,7 +10,7 @@ pub(crate) const CLOCK_SKEW: Duration = Duration::from_secs(5);
 /// How long until `at`. A deadline up to [`CLOCK_SKEW`] in the past still has the
 /// remaining window; anything older is zero. Future deadlines are unchanged, so a
 /// grant that expires in ten seconds still expires in ten seconds.
-pub(crate) fn until(at: SystemTime) -> Duration {
+fn until(at: SystemTime) -> Duration {
 	match at.duration_since(SystemTime::now()) {
 		Ok(remaining) => remaining,
 		Err(late) => CLOCK_SKEW.saturating_sub(late.duration()),
@@ -40,6 +41,12 @@ pub struct Grant {
 	/// server aliases a slug to a canonical id. Absent means the dialed path.
 	pub root: Option<String>,
 
+	/// Subtrees the session reads from elsewhere: each path, relative to the root,
+	/// resolves at the absolute path it maps to. Read-only: nothing is published
+	/// beneath one. The patterns still name the path relative to the root.
+	#[serde(skip_serializing_if = "BTreeMap::is_empty")]
+	pub mounts: BTreeMap<String, String>,
+
 	/// When the session closes, as unix seconds.
 	#[serde_as(as = "Option<TimestampSeconds<i64>>")]
 	pub expires: Option<SystemTime>,
@@ -65,6 +72,12 @@ impl Grant {
 			subscribe,
 			..Default::default()
 		}
+	}
+
+	/// Snapshot the expiry on Tokio's clock, allowing five seconds of past clock skew.
+	#[cfg(feature = "tokio")]
+	pub fn deadline(&self) -> Option<tokio::time::Instant> {
+		self.expires.map(|at| tokio::time::Instant::now() + until(at))
 	}
 
 	/// Refuse a grant that admits nothing, asks to be revalidated without a bound or
@@ -102,6 +115,7 @@ mod tests {
 			publish: patterns(&["alice/**"]),
 			subscribe: patterns(&["**"]),
 			root: Some("pid/room".into()),
+			mounts: BTreeMap::new(),
 			expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
@@ -123,6 +137,7 @@ mod tests {
 			publish: patterns(&["alice/**"]),
 			subscribe: patterns(&["**"]),
 			root: Some("pid/room".into()),
+			mounts: BTreeMap::new(),
 			expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
@@ -132,6 +147,15 @@ mod tests {
 			serde_json::to_string(&grant).unwrap(),
 			r#"{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","peer":true}"#
 		);
+	}
+
+	#[test]
+	fn mounts_round_trip_as_an_object() {
+		let mut grant = Grant::new(Patterns::new(), patterns(&["**"]));
+		grant.mounts.insert(".svc".into(), ".svc/pid".into());
+		let json = serde_json::to_string(&grant).unwrap();
+		assert_eq!(json, r#"{"subscribe":["**"],"mounts":{".svc":".svc/pid"}}"#);
+		assert_eq!(serde_json::from_str::<Grant>(&json).unwrap(), grant);
 	}
 
 	#[test]

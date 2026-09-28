@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { ProtocolViolation } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
@@ -69,6 +70,7 @@ async function subscribed() {
 	return {
 		subscriber,
 		reader,
+		fin: () => peer.writer.close(),
 		done: async (statusCode: number, streamCount: bigint) => {
 			await peer.writer.u53(PublishDone.id);
 			await new PublishDone({ statusCode, streamCount, reasonPhrase: "done" }).encode(peer.writer, VERSION);
@@ -174,4 +176,11 @@ test("END_OF_TRACK at object 0 ends the track before its group, which never exis
 	expect((await reader.recvGroup())?.sequence).toBe(0);
 	expect(await reader.recvGroup()).toBeUndefined();
 	expect(reader.final()).toBe(2);
+});
+
+test("a bare FIN without PUBLISH_DONE aborts the track", async () => {
+	const { reader, fin } = await subscribed();
+	await fin();
+	expect(await reader.closed).toBeInstanceOf(ProtocolViolation);
+	await expect(reader.recvGroup()).rejects.toThrow(ProtocolViolation);
 });

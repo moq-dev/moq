@@ -129,7 +129,7 @@ compile:
 # Compile and link the plugin the way CI does, against the dev shell's own
 # libobs/Qt6/ffmpeg, then run the unit tests. Linux-only in practice: it's the
 # one platform where nixpkgs has obs-studio, so nothing has to be downloaded.
-# Manual elsewhere, like `just rs macos`.
+# Manual elsewhere.
 #
 # The tests run here without ThreadSanitizer because this is the only recipe CI
 # invokes (.github/workflows/obs.yml). `just obs test` is manual, so on its own
@@ -200,11 +200,9 @@ _includes:
 
     (cd ../.. && cargo check --locked --quiet -p libmoq)
 
-    # Ask cargo where its build script ran rather than reconstructing the path.
-    # CARGO_TARGET_DIR, a `--target` triple and a custom profile each move the
-    # generated header, and guessing wrong doesn't fail: it type-checks against
-    # whatever stale copy the default directory still holds. Replays the check
-    # above from cache, so it costs a process rather than a compile.
+    # rs/libmoq/build.rs writes the header into its OUT_DIR, so ask cargo where
+    # that is. Replays the check above from cache, so it costs a process rather
+    # than a compile.
     out_dir=$(cd ../.. && cargo check --locked -p libmoq --message-format=json |
         jq -r 'select(.reason == "build-script-executed") | select(.package_id | tostring | test("libmoq")) | .out_dir' |
         tail -1)
@@ -212,9 +210,7 @@ _includes:
         echo "cargo reported no build script output for libmoq" >&2
         exit 1
     fi
-    # <target>/<profile>/build/libmoq-<hash>/out, and the header sits beside the
-    # profile directory. rs/libmoq/build.rs derives it from OUT_DIR the same way.
-    moq_include="$(dirname "$(dirname "$(dirname "$(dirname "$out_dir")")")")/include"
+    moq_include="$out_dir/include"
     if [ ! -f "$moq_include/moq.h" ]; then
         echo "$moq_include/moq.h missing after 'cargo check --locked -p libmoq'" >&2
         exit 1
@@ -227,9 +223,9 @@ _includes:
 # Unit-test the plugin sources against stubbed libobs/libmoq/ffmpeg, under
 # ThreadSanitizer.
 #
-# Manual, like `just rs macos` and `just rs windows`, because ThreadSanitizer
-# needs its own build. `just obs ci` runs the same tests without it, so a
-# regression these assertions catch still turns PR CI red; the sanitizer is what
+# Manual because ThreadSanitizer needs its own build. `just obs ci` runs the
+# same tests without it, so a regression these assertions catch still turns PR
+# CI red; the sanitizer is what
 # adds the races on top. Run this whenever you touch src/, especially the session
 # callback plumbing, whose orderings the build can't check.
 test:

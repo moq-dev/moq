@@ -22,9 +22,7 @@
 #include <obs.h>
 #include <obs-module.h>
 
-extern "C" {
 #include "moq.h"
-}
 
 #include "moq-settings.h"
 
@@ -233,7 +231,7 @@ int32_t moq_publish_announce(uint32_t, const moq_route *)
 	return 0;
 }
 
-int32_t moq_publish_finish(uint32_t)
+int32_t moq_publish_close(uint32_t)
 {
 	return 0;
 }
