@@ -1,7 +1,7 @@
 use crate::runtime::Timers as _;
 use crate::{SessionError, announce, frame, group, origin, track};
 use std::{
-	collections::HashMap,
+	collections::{BTreeSet, HashMap},
 	ops::Bound,
 	sync::{
 		Arc,
@@ -2216,6 +2216,8 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	start_sent: bool,
 	// The first servable group, held until the source resolves where its feed starts.
 	first: Option<group::Consumer>,
+	// Groups skipped for a missing head before the start resolved, which it must not name.
+	skipped: BTreeSet<u64>,
 	end_sent: bool,
 	// Lite07+ sends SUBSCRIBE_END with the stream count instead of as soon as the
 	// boundary is known, once every group below it has opened its stream.
@@ -2253,6 +2255,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			emit_range,
 			start_sent: false,
 			first: None,
+			skipped: BTreeSet::new(),
 			end_sent: false,
 			count_streams,
 			datagrams,
@@ -2337,6 +2340,9 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 							// partial group. Skip it rather than open a stream that can
 							// only be reset; the next servable group resolves the start.
 							tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, "skipping group with a missing head");
+							if self.emit_range && !self.start_sent {
+								self.skipped.insert(group.sequence);
+							}
 							continue;
 						}
 						match self.emit_range && !self.start_sent {
@@ -2393,7 +2399,13 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		source: Option<u64>,
 		stream: &mut Stream<S, Version>,
 	) -> Result<(), Error> {
-		let start = source.map_or(group.sequence, |source| source.min(group.sequence));
+		let mut start = source.map_or(group.sequence, |source| source.min(group.sequence));
+		// A skipped group is never served, so it cannot be where the feed starts. This stops
+		// at the held group at the latest, since it was not skipped.
+		while self.skipped.contains(&start) {
+			start += 1;
+		}
+		self.skipped.clear();
 		self.start_sent = true;
 		// Only the group: the subscriber derives the start frame from its own request
 		// (see `lite::SubscribeStart`).
@@ -3215,6 +3227,13 @@ mod serve_group_test {
 		fn opened(&self) -> u64 {
 			self.opens.opened.load(Ordering::Relaxed)
 		}
+
+		/// Whether the first thing written was SUBSCRIBE_START at `group`.
+		fn started_at(&self, group: u64) -> bool {
+			let start = lite::SubscribeResponse::Start(lite::SubscribeStart { group });
+			let start = start.encode_bytes(Version::Lite07).unwrap();
+			self.session.log.writes.lock().unwrap().starts_with(&start)
+		}
 	}
 
 	/// A SUBSCRIBE_UPDATE landing while the first group waits on the source's start keeps
@@ -3265,6 +3284,30 @@ mod serve_group_test {
 		write_group(&mut track, 5, 5);
 		relay.settle();
 		assert_eq!(relay.opened(), 2, "dropped the floor's group");
+		assert!(relay.started_at(5));
+	}
+
+	/// A group skipped for a missing head before the start resolves is never served, so
+	/// SUBSCRIBE_START must not name it, even where the source's feed starts.
+	#[tokio::test]
+	async fn held_first_group_starts_past_a_skipped_head() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut relay = RelayRun::new(&mut track, 5).await;
+
+		// Group 5's first frame is gone.
+		let mut headless = track.create_group(group::Info { sequence: 5 }).unwrap();
+		headless.start_at(1).unwrap();
+		headless
+			.write_frame(Timestamp::from_millis(5).unwrap(), b"x".as_slice())
+			.unwrap();
+		headless.finish().unwrap();
+		write_group(&mut track, 6, 6);
+		relay.settle();
+
+		track.start_at(5).unwrap();
+		relay.settle();
+		assert_eq!(relay.opened(), 1, "the held group is served");
+		assert!(relay.started_at(6), "named the skipped group");
 	}
 
 	/// A track that ends without a group still ends the subscription, with no stream owed.
