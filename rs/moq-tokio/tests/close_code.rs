@@ -58,7 +58,8 @@ async fn serve(case: Case) -> Server {
 						let Ok(session) = request.ok().await else { return };
 						session.abort(moq_net::Error::App(CODE));
 						if let Case::Abort = case {
-							tokio::time::sleep(Duration::from_secs(5)).await;
+							// Hold the handle until the test's runtime shuts down.
+							std::future::pending::<()>().await;
 						}
 						drop(session);
 					}
