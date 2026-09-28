@@ -24,6 +24,9 @@ export type { Datagram } from "./datagram.ts";
 // and fires right away.
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
+// The cache scans at most this many times per retention window.
+const PRUNE_SLICES = 8;
+
 /** Default {@link Info.maxAge} window (milliseconds) when the publisher does not set one. */
 export const DEFAULT_MAX_AGE_MS = Milli(5000);
 
@@ -431,14 +434,14 @@ export class Producer {
 	#cache: CachedGroup[] = [];
 	// The same entries by sequence, so a write finds a duplicate without a scan.
 	#cached = new Map<number, CachedGroup>();
-	// When the stalest entry the last prune kept ages out. Activity only moves forward, so
-	// until then a prune would evict nothing, and skips the scan.
-	#pruneAt = 0;
+	// When the cache was last scanned. See #prune.
+	#pruned = Number.NEGATIVE_INFINITY;
 
 	// Wakeup for the next entry due to age out. Writes settle retention inline, but a
 	// publisher that stalls stops writing, so without this an abandoned group (and any
 	// reader parked in it) would wait for a write that never comes.
 	#pruneTimer?: ReturnType<typeof setTimeout>;
+	#pruneTimerAt = 0;
 
 	// One independent downstream state per live subscriber.
 	#sinks = new Set<TrackState>();
@@ -496,8 +499,6 @@ export class Producer {
 		if (this.#state.closed.peek() !== undefined) return this;
 		const resolved = infoDefaults(info);
 		this.#state.info.set(resolved);
-		// The window may have shrunk, so the next prune scans.
-		this.#pruneAt = 0;
 		// Propagate to any sink handed out before accept (the on-demand path).
 		for (const sink of this.#sinks) sink.info.set(resolved);
 		this.#updateSubscription();
@@ -643,74 +644,73 @@ export class Producer {
 	// Evict cached groups idle for longer than the cache window. Idle means nothing
 	// written, so an abandoned open group ages out instead of pinning its buffer (and
 	// any reader parked in it) forever.
+	//
+	// Scans at most once per slice of the window, so a track publishing faster than that
+	// evicts a run of groups per scan instead of scanning everything to evict one per
+	// write. A group can outlive the window by up to one slice.
 	#prune(): void {
-		if (performance.now() < this.#pruneAt) return;
-
 		const maxAgeMs = this.#state.info.peek()?.maxAge ?? DEFAULT_MAX_AGE_MS;
-		const cutoff = performance.now() - maxAgeMs;
+		const now = performance.now();
+		const slice = maxAgeMs / PRUNE_SLICES;
+		if (now < this.#pruned + slice) {
+			// Something may have come due since the last scan, so make sure another follows.
+			this.#wake(this.#pruned + slice);
+			return;
+		}
+		this.#pruned = now;
+
+		const cutoff = now - maxAgeMs;
 		const live = this.#liveEdge();
 
-		let oldest = Number.POSITIVE_INFINITY;
+		let oldest: number | undefined;
 		const retained: CachedGroup[] = [];
 		for (const entry of this.#cache) {
 			if (entry.group === live) {
 				retained.push(entry);
 			} else if (entry.group.activity >= cutoff) {
 				retained.push(entry);
-				oldest = Math.min(oldest, entry.group.activity);
+				if (oldest === undefined || entry.group.activity < oldest) oldest = entry.group.activity;
 			} else {
 				this.#cached.delete(entry.group.sequence);
 				this.#evict(entry);
 			}
 		}
 		this.#cache = retained;
-		this.#pruneAt = oldest + maxAgeMs;
-		this.#schedulePrune();
-	}
 
-	// Pull the next prune forward to when `group` ages out, if that is sooner.
-	#pruneBy(group: GroupProducer): void {
-		const at = group.activity + (this.#state.info.peek()?.maxAge ?? DEFAULT_MAX_AGE_MS);
-		if (at >= this.#pruneAt) return;
-		this.#pruneAt = at;
-		this.#schedulePrune();
-	}
-
-	// Arm the wakeup for the next entry due to age out, replacing any pending one.
-	// Writes settle retention inline, so this only has to cover the case no write
-	// follows. Cheap to over-arm: an entry written since is retained and re-armed.
-	#schedulePrune(): void {
+		// Replace the wakeup with one for the next entry due to age out. Writes settle
+		// retention inline, so this only has to cover the case no write follows. Cheap to
+		// over-arm: an entry written since is retained and re-armed.
 		clearTimeout(this.#pruneTimer);
 		this.#pruneTimer = undefined;
+		if (oldest !== undefined) this.#wake(Math.max(oldest + maxAgeMs, now + slice));
+	}
+
+	// Arm the prune wakeup for `at`, unless one is already armed sooner.
+	#wake(at: number): void {
 		if (this.#state.closed.peek() !== undefined) return;
-		if (this.#pruneAt === Number.POSITIVE_INFINITY) return;
+		if (this.#pruneTimer !== undefined && this.#pruneTimerAt <= at) return;
+		clearTimeout(this.#pruneTimer);
 
 		// setTimeout truncates its delay to a signed 32-bit int, so a longer window
 		// would fire immediately and spin. Wake at the cap instead and re-arm: #prune
 		// retains anything still fresh, so the extra wakeups are the only cost.
-		const delay = Math.min(MAX_TIMEOUT_MS, Math.max(0, this.#pruneAt - performance.now()));
+		const delay = Math.min(MAX_TIMEOUT_MS, Math.max(0, at - performance.now()));
 		const timer = setTimeout(() => {
 			this.#pruneTimer = undefined;
-			// Scan even if the cap woke this early, so the scan re-arms the wakeup.
-			this.#pruneAt = 0;
 			this.#prune();
 		}, delay);
 		// A cache prune is never a reason to hold a Node/Bun process open.
 		(timer as unknown as { unref?: () => void }).unref?.();
 		this.#pruneTimer = timer;
+		this.#pruneTimerAt = at;
 	}
 
 	// Retain a source group and fan it out to every live sink.
 	#publish(group: GroupProducer): void {
-		// The previous newest group was exempt from the last prune while open, and a written
-		// group may already be idle, so both count toward the next prune.
-		const previous = this.#cache.at(-1)?.group;
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>() };
 		this.#cache.push(entry);
 		this.#cached.set(group.sequence, entry);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
-		if (previous) this.#pruneBy(previous);
-		this.#pruneBy(group);
 		// Give held mirrors the new live edge before pruning their timeline entry,
 		// so their latency guard can preserve a terminal expiry verdict.
 		this.#prune();

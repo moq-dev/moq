@@ -10,13 +10,17 @@ const heldCounts = [0, 16];
 const groups = 100;
 const reps = 7;
 // Publishing a group must not cost more as the retained window grows, or a guard or cache pass
-// has gone back to scanning every retained group. A scan costs 4x to 40x across the sweep; the
-// margin is loose because the machine is noisy.
+// has gone back to scanning every retained group. The sweep spans 60x, so a scan lands well past
+// this; the margin is loose because the machine is noisy.
 const maxSlope = 5;
-// Long enough that nothing ages out, and nothing held is ever stale.
-const window = Milli(3_600_000);
 const payload = new Uint8Array(80);
 let checksum = 0;
+
+// A clock that advances a millisecond per group, so a window of N ms retains N groups and every
+// publish ages the oldest one out. Timing reads the real clock.
+const now = performance.now.bind(performance);
+let clock = 0;
+performance.now = () => clock;
 
 // Let every woken reader re-evaluate its guard before the next group.
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -35,11 +39,14 @@ function receive(subscribers: Subscriber[]): GroupConsumer[] {
 }
 
 async function measure(retained: number, subscriberCount: number, held: number): Promise<number> {
+	// Held groups would age out too, so those rows keep everything instead.
+	const window = Milli(held > 0 ? 3_600_000 : retained);
 	const producer = new Producer("bench").accept({ maxAge: window });
 	const subscribers = Array.from({ length: subscriberCount }, () => producer.subscribe({ maxAge: window }));
 	let sequence = 0;
 	// Inserted by sequence, the way the wire hands a subscribed track its groups.
 	const publish = (close: boolean) => {
+		clock++;
 		const group = new GroupProducer(sequence);
 		producer.writeGroup(group);
 		group.writeFrame({ payload, timestamp: Timestamp.fromMillis(sequence++) });
@@ -61,13 +68,13 @@ async function measure(retained: number, subscriberCount: number, held: number):
 	}
 	await flush();
 
-	const start = performance.now();
+	const start = now();
 	for (let index = 0; index < groups; index++) {
 		publish(true);
 		receive(subscribers);
 		await flush();
 	}
-	const elapsed = performance.now() - start;
+	const elapsed = now() - start;
 
 	for (const group of open) group.close();
 	await Promise.all(reads);

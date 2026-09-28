@@ -986,7 +986,7 @@ test("retention reclaims a group the publisher abandoned open", async () => {
 	}
 });
 
-test("an idle live edge ages out as soon as a newer group arrives", async () => {
+test("an idle live edge ages out once a newer group arrives", async () => {
 	const clock = mockMonotonicTime(10_000);
 	try {
 		const producer = new TrackProducer("test").accept({ maxAge: Milli(100) });
@@ -1002,8 +1002,9 @@ test("an idle live edge ages out as soon as a newer group arrives", async () => 
 		clock.set(10_200);
 		producer.subscribe({ maxAge: Milli(100) });
 
-		// A successor ends the exemption, and the group is long past the window, so that
+		// A successor ends the exemption, and the group is long past the window, so the
 		// write evicts it rather than a later wakeup.
+		clock.set(10_300);
 		producer.appendGroup();
 		const read = group.readFrame().then(
 			() => "clean end",
