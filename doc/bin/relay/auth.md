@@ -46,7 +46,9 @@ dialed path, which is how a slug aliases to a canonical id), `mounts`
 (optional object; each key, a path relative to the root, reads from the
 absolute path it maps to: `{".svc": ".svc/pid"}` resolves `.svc/foo` at
 `.svc/pid/foo` and presents its announcements under `.svc`, the patterns still
-authorize `.svc/foo`, and nothing may be published beneath a key), `expires`
+authorize `.svc/foo`, and nothing may be published beneath a key; a key
+that holds a wildcard or overlaps another key or any value refuses the grant),
+`expires`
 (optional unix seconds; the session closes then), `revalidate` (optional
 seconds until the relay asks again), `tier` (optional label handed to
 [stats](/bin/relay/config#stats)), and `peer` (optional; `true` marks another
