@@ -505,24 +505,29 @@ mod tests {
 	async fn a_grant_closes_at_its_expiry() {
 		tokio::time::pause();
 		// Whole seconds, as the grant crosses the wire, so the client sees this exact instant.
+		// An hour out, so a slow runner cannot expire it before `connect` answers.
 		let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-		let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() + 3);
+		let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() + 3600);
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
 		grant.expires = Some(expires);
 		let client = clock_server(Log::default(), grant, false).await;
 
-		let remaining = expires.duration_since(SystemTime::now()).unwrap();
+		// The client reads both clocks somewhere inside `connect`, so bracket it: the
+		// bounds hold however long it takes.
+		let (wall, tick) = (SystemTime::now(), tokio::time::Instant::now());
 		let consumer = client.connect(request()).await.unwrap();
-		let at = tokio::time::Instant::now() + remaining;
+		let earliest = tick + expires.duration_since(SystemTime::now()).unwrap();
+		let latest = tokio::time::Instant::now() + expires.duration_since(wall).unwrap();
 
+		// A millisecond either side for Tokio's timer resolution.
+		let tolerance = Duration::from_millis(1);
 		assert!(
-			tokio::time::timeout_at(at - Duration::from_secs(1), consumer.closed())
+			tokio::time::timeout_at(earliest - tolerance, consumer.closed())
 				.await
 				.is_err(),
 			"live until its expiry"
 		);
-		// A millisecond for Tokio's timer resolution.
-		let reason = tokio::time::timeout_at(at + Duration::from_millis(1), consumer.closed())
+		let reason = tokio::time::timeout_at(latest + tolerance, consumer.closed())
 			.await
 			.expect("closed at its expiry, not later");
 		assert_eq!(reason, Reason::Expired);
