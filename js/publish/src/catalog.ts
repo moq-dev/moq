@@ -19,8 +19,9 @@ import type { Effect } from "@moq/signals";
 export class CatalogProducer {
 	#value: Catalog.Root = { clock: pageClock() };
 	#outputs = new Set<Json.Snapshot.Producer<Catalog.Root>>();
+	#reservations = 0;
 
-	/** Edit the catalog in place; the result is published to all current subscribers. */
+	/** Edit the catalog in place; the result is published to all current subscribers once no reservation withholds it. */
 	mutate(fn: (catalog: Catalog.Root) => void): void {
 		const value = structuredClone(this.#value);
 		fn(value);
@@ -37,11 +38,37 @@ export class CatalogProducer {
 			}
 		}
 		this.#value = value;
-		for (const output of this.#outputs) output.update(value);
+		this.#publish();
 	}
 
 	/**
-	 * Serve a track: seed it with the current catalog, then forward updates.
+	 * @internal Withhold the catalog until the returned handle closes.
+	 *
+	 * While any reservation is open, {@link mutate} edits without publishing and a new subscriber
+	 * waits, so nobody locks onto a catalog still missing a rendition. Closing the last one publishes
+	 * the current catalog. Close is idempotent.
+	 */
+	reserve(): { close(): void } {
+		this.#reservations++;
+		let closed = false;
+		return {
+			close: () => {
+				if (closed) return;
+				closed = true;
+				this.#reservations--;
+				this.#publish();
+			},
+		};
+	}
+
+	#publish(): void {
+		if (this.#reservations > 0) return;
+		for (const output of this.#outputs) output.update(this.#value);
+	}
+
+	/**
+	 * Serve a track: seed it with the current catalog, then forward updates. While a reservation is
+	 * open the seed waits for it to close.
 	 *
 	 * Pass `opts.compression` to DEFLATE-compress this subscriber's frames, so the same catalog can be
 	 * served both plaintext and compressed (e.g. `catalog.json` and `catalog.json.z`).
@@ -52,7 +79,7 @@ export class CatalogProducer {
 			compression: opts?.compression ? "deflate" : "none",
 			deltaRatio: 0,
 		});
-		output.update(this.#value);
+		if (this.#reservations === 0) output.update(this.#value);
 
 		this.#outputs.add(output);
 		effect.cleanup(() => {

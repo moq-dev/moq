@@ -185,6 +185,13 @@ export class Encoder {
 		// Publish the resolved catalog config; undefined (while disabled) drops it from the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
 
+		// A captured source resolves into a config, so hold the catalog for it meanwhile.
+		effect.run((effect) => {
+			const capture = effect.get(this.in.capture);
+			const source = capture ? effect.get(capture.in.source) : undefined;
+			effect.set(rendition.expected, effect.get(this.in.enabled) && source !== undefined, false);
+		});
+
 		// Encode only while enabled and a subscriber is attached (the demand gate).
 		effect.run((effect) => {
 			const enabled = effect.get(this.in.enabled);

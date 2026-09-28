@@ -255,6 +255,13 @@ export class Encoder {
 		// Publish the resolved config; undefined (no capture) drops it from the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
 
+		// A captured source resolves into a config, so hold the catalog for it meanwhile.
+		effect.run((effect) => {
+			const capture = effect.get(this.in.capture);
+			const source = capture ? effect.get(capture.in.source) : undefined;
+			effect.set(rendition.expected, effect.get(this.in.enabled) && source !== undefined, false);
+		});
+
 		// The pipeline outlives any one subscription: it is built as soon as capture runs and
 		// #encode reads the live producer per frame rather than subscribing to it. Rebuilding on a
 		// swap would close the AudioEncoder, which discards every chunk the codec still holds, and

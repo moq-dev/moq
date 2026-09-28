@@ -74,6 +74,69 @@ test("a rendition with an undefined config is omitted from the catalog", async (
 	broadcast.close();
 });
 
+test("withholds the catalog until every expected rendition resolves", async () => {
+	const broadcast = new Broadcast({ enabled: true });
+
+	const video = broadcast.video("video");
+	const audio = broadcast.audio("audio");
+	video.expected.set(true);
+	audio.expected.set(true);
+	await settle();
+
+	const effect = new Effect();
+	const track = new Track.Producer("catalog.json");
+	broadcast.catalog.serve(track, effect);
+	const subscriber = track.subscribe().ordered();
+
+	// Audio resolves first: nothing is published while video is still outstanding, not even a seed.
+	audio.config.set(audioConfig);
+	await settle();
+	broadcast.catalog.mutate((c) => {
+		c.scte35 = { splices: [] };
+	});
+
+	video.config.set(videoConfig);
+	await settle();
+
+	// The first snapshot is the complete one.
+	const first = await subscriber.nextGroup();
+	expect(first?.sequence).toBe(0);
+	const catalog = (await first?.readJson()) as Catalog.Root;
+	expect(Object.keys(catalog.video?.renditions ?? {})).toEqual(["video"]);
+	expect(Object.keys(catalog.audio?.renditions ?? {})).toEqual(["audio"]);
+	expect(catalog.scte35).toEqual({ splices: [] });
+
+	// Only the first config is awaited: a later drop (e.g. a device swap) publishes incrementally.
+	audio.config.set(undefined);
+	await settle();
+	const second = await subscriber.nextGroup();
+	expect(((await second?.readJson()) as Catalog.Root).audio).toBeUndefined();
+
+	effect.close();
+	broadcast.close();
+});
+
+test("an expected rendition that stops expecting releases the catalog", async () => {
+	const broadcast = new Broadcast({ enabled: true });
+
+	const video = broadcast.video("video");
+	const audio = broadcast.audio("audio");
+	video.expected.set(true);
+	audio.expected.set(true);
+	audio.config.set(audioConfig);
+	await settle();
+
+	// e.g. the camera is disabled before its codec probe finished.
+	video.expected.set(false);
+	await settle();
+
+	const catalog = await readCatalog(broadcast);
+	expect(catalog?.video).toBeUndefined();
+	expect(Object.keys(catalog?.audio?.renditions ?? {})).toEqual(["audio"]);
+
+	broadcast.close();
+});
+
 test("a duplicate track name throws across both kinds", () => {
 	const broadcast = new Broadcast({ enabled: true });
 

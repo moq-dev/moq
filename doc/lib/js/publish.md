@@ -139,5 +139,10 @@ authorizes screen capture. Audio capture that starts before the page's first
 click or keypress waits for one: browsers suspend Web Audio until then, and the
 audio rendition stays out of the catalog until samples flow.
 
+The catalog is withheld until every encoder with a source resolves its first
+config, so a subscriber's first catalog lists every rendition. With a
+microphone that includes the wait for a gesture. Another producer opts in by
+setting `rendition.expected` while its config resolves.
+
 Every input and output is a signal from [`@moq/signals`](/lib/js/signals).
 Load from a CDN (`https://esm.sh/@moq/publish/element`) for a no-build embed.

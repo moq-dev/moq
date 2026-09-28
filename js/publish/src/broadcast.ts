@@ -85,6 +85,12 @@ export class Broadcast {
 	// A static network track is exposed here only while at least one subscriber uses it.
 	readonly #tracks = new Map<string, Signal<Moq.Track.Producer | undefined>>();
 
+	// The renditions whose config has arrived at least once.
+	readonly #resolved = new WeakSet<Rendition<unknown>>();
+
+	// Held on the catalog while an expected rendition has yet to resolve.
+	#reservation?: { close(): void };
+
 	#signals = new Effect();
 
 	constructor(props?: Inputs<BroadcastInput>) {
@@ -165,9 +171,17 @@ export class Broadcast {
 		const audio: Record<string, Catalog.AudioConfig> = {};
 		const text: Record<string, Catalog.TextConfig> = {};
 
+		// Whether an expected rendition has yet to resolve its first config, which withholds the whole
+		// catalog. Only the first: a config that later drops out (a camera swap) publishes as usual.
+		let pending = false;
+
 		for (const rendition of Object.values(renditions)) {
 			const config = enabled ? effect.get(rendition.config) : undefined;
-			if (config === undefined) continue;
+			if (config === undefined) {
+				if (enabled && !this.#resolved.has(rendition) && effect.get(rendition.expected)) pending = true;
+				continue;
+			}
+			this.#resolved.add(rendition);
 
 			if (rendition.kind === "video") {
 				video[rendition.name] = config as Catalog.VideoConfig;
@@ -180,6 +194,9 @@ export class Broadcast {
 
 		const display = effect.get(this.in.display);
 		const flip = effect.get(this.in.flip);
+
+		// Reserve before the edit and release after it, so neither side publishes a partial catalog.
+		if (pending) this.#reservation ??= this.catalog.reserve();
 
 		this.catalog.mutate((catalog) => {
 			if (Object.keys(video).length > 0) {
@@ -206,6 +223,11 @@ export class Broadcast {
 				delete catalog.text;
 			}
 		});
+
+		if (!pending) {
+			this.#reservation?.close();
+			this.#reservation = undefined;
+		}
 	}
 
 	#run(effect: Effect) {
