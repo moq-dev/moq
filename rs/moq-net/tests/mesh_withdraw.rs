@@ -19,10 +19,10 @@ fn produce_origin(hop: u64) -> origin::Producer {
 }
 
 /// Peer two relays the way `moq-relay`'s cluster does: one session, both directions.
-async fn peer(a: &origin::Producer, b: &origin::Producer) -> MockPair {
+async fn peer(version: Version, a: &origin::Producer, b: &origin::Producer) -> MockPair {
 	let a = a.clone().peer();
 	let b = b.clone().peer();
-	let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
+	let mut options = MockConnectOptions::new(version);
 	options.client_publish = Some(a.consume().with_hidden(true));
 	options.client_subscribe = Some(a);
 	options.server_publish = Some(b.consume().with_hidden(true));
@@ -48,11 +48,12 @@ struct Mesh {
 }
 
 impl Mesh {
-	async fn new(n: u64, edges: &[(usize, usize)]) -> Self {
+	async fn new(version: &str, n: u64, edges: &[(usize, usize)]) -> Self {
+		let version: Version = version.parse().unwrap();
 		let nodes: Vec<_> = (1..=n).map(produce_origin).collect();
 		let mut pairs = Vec::new();
 		for &(a, b) in edges {
-			pairs.push(peer(&nodes[a], &nodes[b]).await);
+			pairs.push(peer(version, &nodes[a], &nodes[b]).await);
 		}
 		let announced = nodes.last().unwrap().consume().announced();
 		Self {
@@ -95,10 +96,20 @@ fn ring_with_chords(n: usize) -> Vec<(usize, usize)> {
 }
 
 /// Every relay neighbors the publisher's, so each hears the withdrawal first-hand
-/// and drops every path derived from it at once.
+/// and drops every path derived from it at once. Lite04 names the peer only in
+/// the chain, later versions in the announce handshake too.
 #[tokio::test(start_paused = true)]
-async fn full_mesh_withdraw_retracts_once() {
-	let mut mesh = Mesh::new(8, &full_mesh(8)).await;
+async fn full_mesh_withdraw_retracts_once_lite04() {
+	full_mesh_withdraw_retracts_once("moq-lite-04").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_mesh_withdraw_retracts_once_lite06() {
+	full_mesh_withdraw_retracts_once("moq-lite-06").await;
+}
+
+async fn full_mesh_withdraw_retracts_once(version: &str) {
+	let mut mesh = Mesh::new(version, 8, &full_mesh(8)).await;
 	let broadcasts = mesh.publish(100, 0).await;
 	drop(broadcasts);
 	let updates = drain(&mut mesh.announced).await;
@@ -116,7 +127,7 @@ async fn full_mesh_withdraw_retracts_once() {
 /// no withdrawal outlives the peer announcing the path again.
 #[tokio::test(start_paused = true)]
 async fn partial_mesh_withdraw_then_republish() {
-	let mut mesh = Mesh::new(12, &ring_with_chords(12)).await;
+	let mut mesh = Mesh::new("moq-lite-06", 12, &ring_with_chords(12)).await;
 	let broadcasts = mesh.publish(100, 0).await;
 	drop(broadcasts);
 	let updates = drain(&mut mesh.announced).await;

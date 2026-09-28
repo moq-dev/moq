@@ -1719,9 +1719,14 @@ impl Announcing {
 
 		let mut entries = Vec::with_capacity(self.prefixes.len());
 		for (prefix, claim) in &self.prefixes {
-			// The peer that withdrew the prefix announces it again: routes through it
-			// are live once more.
-			if shared.withdrawn.get_mut(prefix).is_some_and(|peers| peers.remove(&via)) {
+			// The peer that withdrew the prefix, the chain's last hop, announces it
+			// again: routes through it are live once more.
+			if let Some(sender) = route.hops.iter().last()
+				&& shared
+					.withdrawn
+					.get_mut(prefix)
+					.is_some_and(|peers| peers.remove(sender))
+			{
 				shared.restale(prefix);
 				shared.prune_withdrawn(prefix);
 			}

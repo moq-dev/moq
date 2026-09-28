@@ -2797,9 +2797,11 @@ impl Announced {
 		let Some(Some(entry)) = self.routes.remove(path) else {
 			return;
 		};
-		let peer = entry.route.via;
-		// Only a declared identity names the peer in other chains.
-		if peer != crate::Hop::UNKNOWN && entry.route.hops.contains(&peer) {
+		// The chain's last hop is the peer on every version that names one: lite05+
+		// appends the declared responder on receipt, and a lite04 sender stamps itself.
+		if let Some(&peer) = entry.route.hops.iter().last()
+			&& peer != crate::Hop::UNKNOWN
+		{
 			origin.withdrawn(path, peer);
 		}
 	}
