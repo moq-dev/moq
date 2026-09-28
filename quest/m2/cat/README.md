@@ -48,7 +48,7 @@ one. Everything rides `moq_auth::Request` and
 the verify quest moves them under `moq_auth::jwt` so `cat` is a sibling
 module rather than a set of prefixed names.
 
-## Quests
+## Required
 
 - [Verify](/quest/m2/cat/verify.md) - `moq_auth::cat` turns a CAT into a
   grant and `moq auth serve` admits one; `moq auth sign|verify` mint and

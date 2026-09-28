@@ -39,7 +39,7 @@ The relay's `/metrics` endpoint already carries the ring-level counters
 (enters, park/wake, batch effectiveness) several quests want as evidence, one
 row per io_uring worker.
 
-## Quests
+## Required
 
 - [Open contract](/quest/m1/perf/uring-open-contract.md) - plan concurrent WebTransport opening and cancellation
 
