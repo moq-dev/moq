@@ -1687,3 +1687,63 @@ test("finished rejects when the track aborts or closes without an end", async ()
 	clean.close();
 	expect(await reader.finished()).toBe(1);
 });
+
+test("an abort keeps finished groups for a slow reader, then reports it", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: Milli(10_000) });
+	const arrival = producer.subscribe({ maxAge: Milli(10_000) });
+	const ordered = producer.subscribe({ maxAge: Milli(10_000) }).ordered();
+	for (let i = 0; i < 2; i++) {
+		const group = producer.appendGroup();
+		group.writeString(`g${i}`);
+		group.close();
+	}
+	producer.appendGroup().writeString("open");
+	const boom = new Error("boom");
+	producer.close(boom);
+
+	for (const next of [() => arrival.recvGroup(), () => ordered.nextGroup()]) {
+		for (let i = 0; i < 2; i++) {
+			const group = await next();
+			expect(group?.sequence).toBe(i);
+			expect(await group?.readString()).toBe(`g${i}`);
+		}
+		// The open group nobody will finish is not handed out.
+		await expect(next()).rejects.toBe(boom);
+	}
+});
+
+test("an abort after the declared end settles ends clean", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: Milli(10_000) });
+	const arrival = producer.subscribe({ maxAge: Milli(10_000) });
+	const ordered = producer.subscribe({ maxAge: Milli(10_000) }).ordered();
+	for (let i = 0; i < 2; i++) {
+		const group = producer.appendGroup();
+		group.writeString(`g${i}`);
+		group.close();
+	}
+	producer.finishAt(2);
+	producer.close(new Error("boom"));
+
+	for (const next of [() => arrival.recvGroup(), () => ordered.nextGroup()]) {
+		expect((await next())?.sequence).toBe(0);
+		expect((await next())?.sequence).toBe(1);
+		expect(await next()).toBeUndefined();
+	}
+});
+
+test("an ended track's buffered groups age out for a stale subscriber", async () => {
+	// Real time: nothing writes after the close, so only the wakeup can reclaim them.
+	for (const abort of [undefined, new Error("boom")]) {
+		const producer = new TrackProducer("test").accept({ maxAge: Milli(30) });
+		const stale = producer.subscribe({ maxAge: Milli(30) });
+		const group = producer.appendGroup();
+		group.writeString("x");
+		group.close();
+		producer.close(abort);
+
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		// Nothing buffered is left: the subscriber sees only how the track ended.
+		if (abort) expect(() => stale.tryRecvGroup()).toThrow(abort);
+		else expect(stale.tryRecvGroup()).toBeUndefined();
+	}
+});
