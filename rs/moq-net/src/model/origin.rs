@@ -5671,6 +5671,25 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn scoped_cursor_selects_among_the_routes_it_can_see() {
+		let producer = origin(1).produce();
+		let scoped = |pattern: &str| {
+			producer
+				.scope("", &Patterns::from(pattern.parse::<Pattern>().unwrap()))
+				.unwrap()
+		};
+		let _chat = scoped("*/chat").dynamic("", Route::default().with_cost(1)).unwrap();
+		let _video = scoped("*/video").dynamic("", Route::default().with_cost(5)).unwrap();
+
+		let mut video = producer
+			.consume()
+			.scope("", &scopes(&["room/video"]))
+			.unwrap()
+			.announced();
+		assert_eq!(video.assert_next_active("").cost, Cost::new(5));
+	}
+
+	#[tokio::test]
 	async fn dynamic_accepts_a_max_depth_prefix() {
 		let producer = origin(1).produce();
 		let path = (0..Path::MAX_PARTS)

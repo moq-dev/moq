@@ -57,10 +57,10 @@ jobs:
         with:
           determinate: false
 
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          cache-on-failure: true
+      # Restore only, like `tests` below. Saving its own store cost 3.6 GB of the
+      # repository's 10 GB budget and evicted the one every pull request restores.
+      - name: Rust cache
+        uses: ./.github/actions/rust-cache
 
       # Runs even if the audit fails: a fresh advisory shouldn't hide a
       # compile break in the feature permutations.
@@ -76,6 +76,12 @@ jobs:
         run: |
           nix develop --command bun install --frozen-lockfile
           nix develop --command bun js/net/bench/broadcasts.ts
+
+      # A route above several interest heads lands once per head, so its re-price
+      # should expose any slope over heads times received routes.
+      - name: JS origin announce forwarding benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command bun js/net/bench/forward.ts
 
       # Fails if reading a fragmented frame costs more per byte as the frame grows.
       - name: JS stream reader benchmark

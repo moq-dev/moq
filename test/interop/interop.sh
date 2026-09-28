@@ -306,7 +306,7 @@ prepare_c() {
         return
     }
     # cargo can't inject libmoq.a's native deps into an external link, so read
-    # them from the same list build.rs and CMake use.
+    # them from the same list moq.pc and CMake use.
     local native_libs
     case "$(uname -s)" in
         Darwin) native_libs="$WORKSPACE/rs/libmoq/native-libs/apple.txt" ;;

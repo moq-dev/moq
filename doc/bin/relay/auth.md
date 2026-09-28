@@ -240,8 +240,8 @@ bad chain still fails there. What the certificate admits is the server's
 decision: the relay reports its facts in the request's `tls` and enforces the
 grant it gets back. `moq auth serve` grants a certificate only what
 `--mtls-publish` and `--mtls-subscribe` name, empty by default. Public rules
-ignore certificates, so a relay on `--auth-public` refuses to start with
-`listen.tls.root` or `web.https.root`.
+ignore certificates, so a relay or `moq --listen` on `--auth-public` refuses
+to start with `listen.tls.root` or `web.https.root`.
 
 Cluster peers are admitted the same way, so a mesh runs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server

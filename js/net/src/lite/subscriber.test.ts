@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
-import { error, reason } from "../error.ts";
+import { error, reason, StreamCode, StreamError } from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
@@ -9,6 +9,7 @@ import * as Time from "../time.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
 import { Probe } from "./probe.ts";
 import { Subscriber } from "./subscriber.ts";
+import { TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";
 
 test("closing the subscriber suppresses probe stream warnings", async () => {
@@ -690,4 +691,115 @@ test("a draft-05 duplicate start is still a restart", async () => {
 
 	announced.close();
 	subscriber.close();
+});
+
+interface FakeStream {
+	inbound: ReadableStreamDefaultController<Uint8Array>;
+	// Resolves once the subscriber waits on a read the test has not answered.
+	reading: Promise<void>;
+	aborted: Promise<unknown>;
+	// Hands the stream to the subscriber, for an open the session was told to park.
+	release: () => void;
+}
+
+// A session whose streams the test answers by hand and that never fails them on its own, so
+// only Subscriber.close() can end a wait. Opens numbered in `park` wait for `release()`.
+function fakeSession(park: number[] = []) {
+	const streams: FakeStream[] = [];
+	const quic = {
+		createBidirectionalStream: () => {
+			let inbound!: ReadableStreamDefaultController<Uint8Array>;
+			let onRead!: () => void;
+			let onAbort!: (reason: unknown) => void;
+			let release!: () => void;
+			const reading = new Promise<void>((resolve) => (onRead = resolve));
+			const aborted = new Promise<unknown>((resolve) => (onAbort = resolve));
+			// No high water mark, so pull() means the subscriber is blocked on a read.
+			const readable = new ReadableStream<Uint8Array>(
+				{
+					start: (controller) => {
+						inbound = controller;
+					},
+					pull: () => onRead(),
+				},
+				{ highWaterMark: 0 },
+			);
+			const writable = new WritableStream<Uint8Array>({ abort: (reason) => void onAbort(reason) });
+			const opened = new Promise((resolve) => (release = () => resolve({ readable, writable })));
+			if (!park.includes(streams.length)) release();
+			streams.push({ inbound, reading, aborted, release });
+			return opened;
+		},
+	} as unknown as WebTransport;
+	return { quic, streams };
+}
+
+async function answerTrackInfo(stream: FakeStream): Promise<void> {
+	const chunks: Uint8Array[] = [];
+	const writer = new Writer(
+		new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+	);
+	await new TrackInfo({}).encode(writer, Version.DRAFT_05);
+	for (const chunk of chunks) stream.inbound.enqueue(chunk);
+	stream.inbound.close();
+}
+
+function expectCut(err: unknown, cause: Error | undefined) {
+	if (cause) {
+		expect(err).toBe(cause);
+	} else {
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(StreamCode.SessionClosed);
+	}
+}
+
+// Lite has no FETCH_OK, so a publisher that never answers holds each setup stage until the
+// subscriber closes. The stream that stage opened is reset, even one opening after the close.
+test.each([
+	["the TRACK_INFO", "track", undefined],
+	["the FETCH", "fetch", undefined],
+	["the FETCH, on a session error", "fetch", new Error("session died")],
+	["a stream slot for the FETCH", "open", undefined],
+] as const)("closing the subscriber rejects a fetch waiting on %s", async (_, stage, cause) => {
+	const { quic, streams } = fakeSession(stage === "open" ? [1] : []);
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+
+	let settled = false;
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).then(
+		() => {
+			settled = true;
+			return undefined;
+		},
+		(err: unknown) => {
+			settled = true;
+			return err;
+		},
+	);
+
+	await drainUntil(() => streams.length === 1);
+	if (stage === "track") {
+		await streams[0].reading;
+	} else {
+		await answerTrackInfo(streams[0]);
+		await drainUntil(() => streams.length === 2);
+		if (stage === "fetch") await streams[1].reading;
+	}
+	expect(settled).toBe(false);
+
+	subscriber.close(cause);
+	expectCut(await fetch, cause);
+
+	const stuck = streams[stage === "track" ? 0 : 1];
+	stuck.release();
+	await stuck.aborted;
+});
+
+test("a fetch started after the subscriber closes rejects without opening a stream", async () => {
+	const { quic, streams } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	subscriber.close();
+
+	const err = await subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => err);
+	expectCut(err, undefined);
+	expect(streams.length).toBe(0);
 });
