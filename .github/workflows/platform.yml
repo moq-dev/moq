@@ -1,0 +1,105 @@
+name: Platform
+
+# Compiles the `#[cfg(target_os = ...)]` code that no Linux job compiles at all:
+# moq-video's Media Foundation and VideoToolbox backends, their capture paths,
+# and moq-audio's ScreenCaptureKit capture. Without this, a change that breaks
+# them (a moq-net type they consume, say) merges green and compiles for the
+# first time in a tag-triggered release build.
+#
+# Unfiltered, unlike android.yml: the cheap half (macOS) takes about as long as
+# installing `just`, and the Windows half is still shorter than check.yml, so a
+# path list that has to track two crates' dependency graphs isn't worth it.
+#
+# Pushes to `main` and `dev` catch the break two individually green PRs make
+# once both land, which is what the nightly run of these jobs used to cover.
+# `dev` never ran the nightly at all.
+#
+# Outside Nix, like android.yml: neither runner has it, so each installs the
+# runner-native toolchain. rust-toolchain.toml still pins the compiler, and the
+# recipes are the same ones a developer runs on that OS.
+#
+# No Rust cache. The repository's 10 GB budget is spent on the Linux `target/`
+# that cache.yml warms for every pull request, and a Windows or macOS store
+# would evict it to save these jobs a few minutes.
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    # `closed` is here only so merging/closing a PR cancels its in-flight run
+    # via the concurrency group below; the jobs themselves are skipped on close.
+    types: [opened, synchronize, reopened, closed]
+
+concurrency:
+  # Keyed by event as well as ref, so a merged pull request's `closed` run can't
+  # cancel the push run it triggers.
+  group: platform-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JUST_VERSION: 1.52.0
+
+jobs:
+  # `just rs windows` is the only thing that compiles moq-video's Media
+  # Foundation capture/encode/decode, its D3D11 frames, and every
+  # `#[cfg(target_os = "windows")]` test module.
+  windows:
+    name: Windows
+    if: github.event.action != 'closed'
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      # aws-lc-rs assembles its x86_64 crypto with NASM on Windows.
+      - name: Install NASM
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # Pinned: `--locked` fixes just's own dependencies, not which version of
+      # just cargo selects.
+      - name: Install just
+        shell: bash
+        run: cargo install --locked "just@$JUST_VERSION"
+
+      - name: Check
+        shell: bash
+        run: just rs windows
+
+  # `just rs macos` is the only thing that compiles moq-video's VideoToolbox
+  # encode/decode and its ScreenCaptureKit / AVFoundation capture, plus
+  # moq-audio's ScreenCaptureKit system audio and its TCC permission pre-check.
+  # swift.yml already compiles moq-ffi here, so this stays scoped to the two
+  # crates holding the Apple-gated code.
+  macos:
+    name: macOS
+    if: github.event.action != 'closed'
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install just
+        run: cargo install --locked "just@$JUST_VERSION"
+
+      - name: Check
+        run: just rs macos
