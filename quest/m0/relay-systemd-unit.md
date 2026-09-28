@@ -11,8 +11,7 @@ rejects unknown flags, so every packaged install crash-loops.
 
 `ExecStart=/usr/bin/moq-relay /etc/moq-relay/relay.toml`. Add the reporter's
 unit test in the relay crate that parses the unit's `ExecStart` with the
-relay's own `Cli`, so the unit and the parser can't drift again. This lands
-before the release, since the release ships the packages.
+relay's own `Cli`, so the unit and the parser can't drift again.
 
 ## Closes
 
