@@ -285,6 +285,31 @@ export class Consumer {
 	}
 }
 
+// The index of the first timeline group at or after `sequence`.
+function timelineIndex(timeline: GroupConsumer[], sequence: number): number {
+	let lo = 0;
+	let hi = timeline.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (timeline[mid].sequence < sequence) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo;
+}
+
+// Add a group to a sorted timeline, replacing any group with the same sequence. Groups
+// usually arrive in order, so the append is checked first.
+function timelineInsert(timeline: GroupConsumer[], group: GroupConsumer): void {
+	const last = timeline.at(-1);
+	if (!last || last.sequence < group.sequence) {
+		timeline.push(group);
+		return;
+	}
+	const index = timelineIndex(timeline, group.sequence);
+	if (timeline[index]?.sequence === group.sequence) timeline[index] = group;
+	else timeline.splice(index, 0, group);
+}
+
 // The shared state behind a Producer / Subscriber pair. Package-internal
 // wiring, unexported so it never appears in the published type declarations.
 class TrackState {
@@ -292,9 +317,10 @@ class TrackState {
 	producer?: Producer;
 	groups = new Signal<GroupConsumer[]>([]);
 	// Every group still in the producer's replay cache, including groups this
-	// subscriber already consumed, paired with its source queue time. Drift anchors
-	// have the same lifetime as content.
-	timeline = new Map<number, { group: GroupConsumer; time: number }>();
+	// subscriber already consumed, sorted by sequence. Drift anchors have the same
+	// lifetime as content. Sorted so the latency guard, evaluated per group and per
+	// arrival, searches it instead of scanning the whole retained window.
+	timeline: GroupConsumer[] = [];
 	// First timestamps mutate group state rather than track state, so held groups
 	// watch this revision as well as arrivals when enforcing latency after handoff.
 	timelineChanged = new Signal(0);
@@ -346,7 +372,7 @@ async function resolveInfo(state: TrackState): Promise<Info> {
 
 // A source group retained in the producer cache, with the mirror handed to each sink
 // so eviction can drop them together.
-type CachedGroup = { group: GroupProducer; time: number; mirrors: Map<TrackState, GroupConsumer> };
+type CachedGroup = { group: GroupProducer; mirrors: Map<TrackState, GroupConsumer> };
 
 function bindProducer(name: string, producer: Producer, sequences: TrackSequences): void {
 	let shared = sequences.get(name);
@@ -403,6 +429,11 @@ export class Producer {
 	// it handed to every sink so eviction can drop them too: otherwise a slow consumer
 	// that never reads would pin old groups (and their frame bytes) forever.
 	#cache: CachedGroup[] = [];
+	// The same entries by sequence, so a write finds a duplicate without a scan.
+	#cached = new Map<number, CachedGroup>();
+	// When the stalest entry the last prune kept ages out. Activity only moves forward, so
+	// until then a prune would evict nothing, and skips the scan.
+	#pruneAt = 0;
 
 	// Wakeup for the next entry due to age out. Writes settle retention inline, but a
 	// publisher that stalls stops writing, so without this an abandoned group (and any
@@ -465,6 +496,8 @@ export class Producer {
 		if (this.#state.closed.peek() !== undefined) return this;
 		const resolved = infoDefaults(info);
 		this.#state.info.set(resolved);
+		// The window may have shrunk, so the next prune scans.
+		this.#pruneAt = 0;
 		// Propagate to any sink handed out before accept (the on-demand path).
 		for (const sink of this.#sinks) sink.info.set(resolved);
 		this.#updateSubscription();
@@ -569,7 +602,7 @@ export class Producer {
 	#mirror(entry: CachedGroup, sink: TrackState): void {
 		const dst = entry.group.mirror();
 		entry.mirrors.set(sink, dst);
-		sink.timeline.set(dst.sequence, { group: dst, time: entry.time });
+		timelineInsert(sink.timeline, dst);
 		void dst.readable().then(() => sink.timelineChanged.update((revision) => revision + 1));
 		sink.latest = Math.max(sink.latest ?? 0, dst.sequence);
 		sink.groups.mutate((groups) => {
@@ -591,7 +624,8 @@ export class Producer {
 				const i = groups.indexOf(mirror);
 				if (i >= 0) groups.splice(i, 1);
 			});
-			if (sink.timeline.get(mirror.sequence)?.group === mirror) sink.timeline.delete(mirror.sequence);
+			const index = timelineIndex(sink.timeline, mirror.sequence);
+			if (sink.timeline[index] === mirror) sink.timeline.splice(index, 1);
 			mirror.close();
 		}
 		entry.mirrors.clear();
@@ -610,19 +644,35 @@ export class Producer {
 	// written, so an abandoned open group ages out instead of pinning its buffer (and
 	// any reader parked in it) forever.
 	#prune(): void {
+		if (performance.now() < this.#pruneAt) return;
+
 		const maxAgeMs = this.#state.info.peek()?.maxAge ?? DEFAULT_MAX_AGE_MS;
 		const cutoff = performance.now() - maxAgeMs;
 		const live = this.#liveEdge();
 
+		let oldest = Number.POSITIVE_INFINITY;
 		const retained: CachedGroup[] = [];
 		for (const entry of this.#cache) {
-			if (entry.group === live || entry.group.activity >= cutoff) {
+			if (entry.group === live) {
 				retained.push(entry);
-				continue;
+			} else if (entry.group.activity >= cutoff) {
+				retained.push(entry);
+				oldest = Math.min(oldest, entry.group.activity);
+			} else {
+				this.#cached.delete(entry.group.sequence);
+				this.#evict(entry);
 			}
-			this.#evict(entry);
 		}
 		this.#cache = retained;
+		this.#pruneAt = oldest + maxAgeMs;
+		this.#schedulePrune();
+	}
+
+	// Pull the next prune forward to when `group` ages out, if that is sooner.
+	#pruneBy(group: GroupProducer): void {
+		const at = group.activity + (this.#state.info.peek()?.maxAge ?? DEFAULT_MAX_AGE_MS);
+		if (at >= this.#pruneAt) return;
+		this.#pruneAt = at;
 		this.#schedulePrune();
 	}
 
@@ -633,24 +683,16 @@ export class Producer {
 		clearTimeout(this.#pruneTimer);
 		this.#pruneTimer = undefined;
 		if (this.#state.closed.peek() !== undefined) return;
+		if (this.#pruneAt === Number.POSITIVE_INFINITY) return;
 
-		// One pass, no intermediate arrays: this runs on every publish, and a spread
-		// over the cache would also cap how many groups a track can hold.
-		const live = this.#liveEdge();
-		let oldest: number | undefined;
-		for (const entry of this.#cache) {
-			if (entry.group === live) continue;
-			if (oldest === undefined || entry.group.activity < oldest) oldest = entry.group.activity;
-		}
-		if (oldest === undefined) return;
-
-		const maxAgeMs = this.#state.info.peek()?.maxAge ?? DEFAULT_MAX_AGE_MS;
 		// setTimeout truncates its delay to a signed 32-bit int, so a longer window
 		// would fire immediately and spin. Wake at the cap instead and re-arm: #prune
 		// retains anything still fresh, so the extra wakeups are the only cost.
-		const delay = Math.min(MAX_TIMEOUT_MS, Math.max(0, oldest + maxAgeMs - performance.now()));
+		const delay = Math.min(MAX_TIMEOUT_MS, Math.max(0, this.#pruneAt - performance.now()));
 		const timer = setTimeout(() => {
 			this.#pruneTimer = undefined;
+			// Scan even if the cap woke this early, so the scan re-arms the wakeup.
+			this.#pruneAt = 0;
 			this.#prune();
 		}, delay);
 		// A cache prune is never a reason to hold a Node/Bun process open.
@@ -660,9 +702,15 @@ export class Producer {
 
 	// Retain a source group and fan it out to every live sink.
 	#publish(group: GroupProducer): void {
-		const entry: CachedGroup = { group, time: performance.now(), mirrors: new Map<TrackState, GroupConsumer>() };
+		// The previous newest group was exempt from the last prune while open, and a written
+		// group may already be idle, so both count toward the next prune.
+		const previous = this.#cache.at(-1)?.group;
+		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>() };
 		this.#cache.push(entry);
+		this.#cached.set(group.sequence, entry);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
+		if (previous) this.#pruneBy(previous);
+		this.#pruneBy(group);
 		// Give held mirrors the new live edge before pruning their timeline entry,
 		// so their latency guard can preserve a terminal expiry verdict.
 		this.#prune();
@@ -699,14 +747,14 @@ export class Producer {
 	writeGroup(group: GroupProducer) {
 		this.#writable(group.sequence);
 
-		const existing = this.#cache.findIndex((entry) => entry.group.sequence === group.sequence);
-		if (existing >= 0) {
-			const entry = this.#cache[existing];
-			if (!(entry.group.closed.peek() instanceof Error)) {
+		const existing = this.#cached.get(group.sequence);
+		if (existing) {
+			if (!(existing.group.closed.peek() instanceof Error)) {
 				throw new Error(`duplicate group: sequence=${group.sequence}`);
 			}
-			this.#evict(entry);
-			this.#cache.splice(existing, 1);
+			this.#evict(existing);
+			this.#cache.splice(this.#cache.indexOf(existing), 1);
+			this.#cached.delete(group.sequence);
 		}
 
 		// Only advance the shared counter upward (for appendGroup auto-increment).
@@ -876,16 +924,17 @@ export class Subscriber {
 		end?: number;
 	} {
 		const { end } = this.#cursor.peek();
+		const timeline = this.#state.timeline;
 		let presentation: { sequence: number; timestamp: Timestamp } | undefined;
-		for (const { group } of this.#state.timeline.values()) {
-			if (end !== undefined && group.sequence >= end) continue;
+		// The edge wants the newest content that exists, so it takes the newest
+		// stamped group's latest frame: walk back from the cap to the first one.
+		for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
+			const group = timeline[i];
 			if (group.closed.peek() instanceof Error) continue;
-			// The edge wants the newest content that exists, so it takes the newest
-			// stamped group's latest frame.
 			const timestamp = hooks.groupTimestamp(group);
-			if (timestamp !== undefined && (!presentation || group.sequence > presentation.sequence)) {
-				presentation = { sequence: group.sequence, timestamp: hooks.groupLatest(group) ?? timestamp };
-			}
+			if (timestamp === undefined) continue;
+			presentation = { sequence: group.sequence, timestamp: hooks.groupLatest(group) ?? timestamp };
+			break;
 		}
 
 		const requested = this.#state.update.peek()?.maxAge ?? 0;
@@ -910,15 +959,14 @@ export class Subscriber {
 	// unstamped successor will begin, and shrinking the bound is the unsafe direction.
 	// An unstamped successor leaves the reach unbounded until it presents a frame.
 	#reach(sequence: number, end?: number): number | undefined {
-		let successor: GroupConsumer | undefined;
-		for (const { group } of this.#state.timeline.values()) {
-			if (group.sequence <= sequence) continue;
-			if (end !== undefined && group.sequence >= end) continue;
-			if (group.closed.peek() instanceof Error) continue;
-			if (!successor || group.sequence < successor.sequence) successor = group;
+		const timeline = this.#state.timeline;
+		for (let i = timelineIndex(timeline, sequence + 1); i < timeline.length; i++) {
+			const successor = timeline[i];
+			if (end !== undefined && successor.sequence >= end) break;
+			if (successor.closed.peek() instanceof Error) continue;
+			return hooks.groupTimestamp(successor)?.asMillis();
 		}
-		if (!successor) return undefined;
-		return hooks.groupTimestamp(successor)?.asMillis();
+		return undefined;
 	}
 
 	// Whether the drift budget says to give up on `group`.
@@ -945,8 +993,7 @@ export class Subscriber {
 			end?: number;
 		},
 	): boolean {
-		const candidate = this.#state.timeline.get(group.sequence);
-		if (candidate?.group !== group) return false;
+		if (this.#state.timeline[timelineIndex(this.#state.timeline, group.sequence)] !== group) return false;
 
 		const reach = this.#reach(group.sequence, drift.end);
 		return (
@@ -1145,7 +1192,7 @@ export class Subscriber {
 		});
 		this.#frameGroup?.close(abort);
 		this.#frameGroup = undefined;
-		this.#state.timeline.clear();
+		this.#state.timeline.length = 0;
 	}
 
 	/**

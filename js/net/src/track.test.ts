@@ -453,6 +453,29 @@ test("an unstamped immediate successor leaves reach unbounded", async () => {
 	expect((await track.recvGroup())?.sequence).toBe(2);
 });
 
+// Groups can arrive out of sequence order; the immediate successor bounds reach even when it
+// arrived last.
+test("a late-arriving successor bounds a group's reach", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: Milli(5000) });
+	const track = producer.subscribe({ maxAge: Milli(500) });
+
+	for (const [sequence, ms] of [
+		[0, 0],
+		[2, 3000],
+		[1, 200],
+	]) {
+		const group = new GroupProducer(sequence);
+		group.writeFrame({ payload: enc.encode(`${ms}`), timestamp: Timestamp.fromMillis(ms) });
+		group.close();
+		producer.writeGroup(group);
+	}
+
+	// Group 0 reaches at most 200ms, where group 1 starts, so it is past the budget.
+	// Group 1 reaches 3000ms, the edge itself.
+	expect((await track.recvGroup())?.sequence).toBe(1);
+	expect((await track.recvGroup())?.sequence).toBe(2);
+});
+
 // The ordered frame helpers ride the same cursor, so they see the same budget: a
 // backlog inside it is drained in full, and what is past it is skipped.
 test("ordered frame reads follow the budget", async () => {
@@ -958,6 +981,35 @@ test("retention reclaims a group the publisher abandoned open", async () => {
 
 		// A gap, not a clean finish: the publisher never ended this group.
 		await expect(group.readFrame()).rejects.toBeInstanceOf(TooFarBehind);
+	} finally {
+		clock.restore();
+	}
+});
+
+test("an idle live edge ages out as soon as a newer group arrives", async () => {
+	const clock = mockMonotonicTime(10_000);
+	try {
+		const producer = new TrackProducer("test").accept({ maxAge: Milli(100) });
+		const track = producer.subscribe({ maxAge: Milli(100) });
+		const edge = producer.appendGroup();
+		edge.writeString("first");
+
+		const group = await track.recvGroup();
+		if (!group) throw new Error("missing group");
+		expect(await group.readString()).toBe("first");
+
+		// A prune while it is still the live edge keeps it, and finds nothing else to age out.
+		clock.set(10_200);
+		producer.subscribe({ maxAge: Milli(100) });
+
+		// A successor ends the exemption, and the group is long past the window, so that
+		// write evicts it rather than a later wakeup.
+		producer.appendGroup();
+		const read = group.readFrame().then(
+			() => "clean end",
+			(err: unknown) => err,
+		);
+		expect(await Promise.race([read, settle().then(() => "still parked")])).toBeInstanceOf(TooFarBehind);
 	} finally {
 		clock.restore();
 	}

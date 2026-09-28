@@ -89,6 +89,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command bun js/net/bench/frames.ts
 
+      # Fails if publishing a group costs more as the track retains more groups,
+      # which means the latency guard or the cache went back to scanning them all.
+      - name: JS track retention benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command bun js/net/bench/track.ts
+
       # Runs each moq-net Criterion routine once, so a bench that panics (an
       # unparsable version, a shape that deadlocks) fails here instead of on the
       # next manual run. Timing is not compared; nextest never runs a
