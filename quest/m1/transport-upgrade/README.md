@@ -34,8 +34,8 @@ forbidden to a moq-transport client). The origin's multi-route front prefers
 the newest of two equal routes and `resume` splices each track at a group
 boundary, capping the old segment so the old session's subscription ends at the
 boundary on its own. The JavaScript handover is the
-[client goaway](/quest/m1/drain/client-goaway.md) quest's, so the JS half
-requires it.
+[drain](/quest/m1/drain/README.md) line's (client goaway, done there), so the
+JS half requires it.
 
 Shared decisions:
 

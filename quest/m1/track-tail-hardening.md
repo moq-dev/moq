@@ -53,9 +53,8 @@ decide in the PR, applying the choice to both languages:
   and the end waits out the whole grace (JS was reported to wait and Rust
   not, but Rust's `covers(owed)` reads the same way despite the comment in
   `route_datagram`; confirm with a test first). Recommendation: no, datagrams
-  are best effort. On lite-07 the SUBSCRIBE_END stream count
-  ([lite-count-settle](/quest/m1/lite-count-settle.md)) settles without
-  looking at sequences, which makes this moot there; older versions keep the
+  are best effort. On lite-07 the SUBSCRIBE_END stream count (#4224)
+  settles without looking at sequences, which makes this moot there; older versions keep the
   grace as the documented stopgap.
 - **Does a group at or past the declared end abort the track, or only that
   group?** Rust aborts the track with `ProtocolViolation`; JS aborts the group
@@ -75,5 +74,4 @@ drafts already require.
 ## Related
 
 - [Track tail interop](/quest/m1/track-tail-interop.md) - the Rust-JS check that both sides now agree
-- [lite-07 count settle](/quest/m1/lite-count-settle.md) - replaces sequence coverage with the stream count on lite-07
 - [Session death](/quest/m1/session-death.md) - how a tail ends when the session dies under it

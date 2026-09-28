@@ -17,9 +17,10 @@ and there is no merge queue, so nothing re-runs them on the combined tree.
   queue tests the combination once, at merge time.
 - Make the workflows ready: every workflow providing a required check
   (today `Check` and `Test` in `.github/workflows/check.yml`) also runs on
-  `merge_group`. `just ci` scopes by diffing against `GITHUB_BASE_REF`,
-  which a merge group does not set, so pass the group's base
-  (`github.event.merge_group.base_sha`) explicitly. Check the concurrency
+  `merge_group`. `just ci check|test` runs `sh/dispatch.sh`, which scopes
+  by diffing against its `BASE` argument, else `origin/$GITHUB_BASE_REF`. A
+  merge group sets no `GITHUB_BASE_REF`, so pass the group's base
+  (`github.event.merge_group.base_sha`) as `BASE`. Check the concurrency
   group and the `closed`-only skip still behave for queue refs.
 - Document it in `CONTRIBUTING.md`: PRs merge through the queue, a
   dequeued PR means the combination failed, and how agents enqueue (the
@@ -29,3 +30,7 @@ and there is no merge queue, so nothing re-runs them on the combined tree.
   settings to use rather than changing it.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [Tooling](/quest/m1/tooling/README.md) - `just ci` and `sh/dispatch.sh`, the entry point the queue runs

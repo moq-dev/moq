@@ -14,6 +14,11 @@ refusal as final.
   `EXPIRED_AUTH_TOKEN`, and back again when refusing.
 - Carry it through moq-ffi's error mapping and each wrapper.
 
+Moved from m2 into the auth line: relay tokens refuse an expired
+token with `AUTH_ERROR { Expired }`, so without this moq-net cannot tell it
+apart from `Unauthorized`.
+
 ## Required
 
-- [In-band auth](/quest/m1/auth/README.md) - the AUTH streams that carry these codes
+- [Lite stream](/quest/m1/auth/lite.md) - the lite AUTH streams that carry `Expired`
+- [moq-transport](/quest/m1/auth/moq-transport.md) - the extension that carries `EXPIRED_AUTH_TOKEN`

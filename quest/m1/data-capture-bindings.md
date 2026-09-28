@@ -46,7 +46,10 @@ no optional arguments), and a `_with_x` twin is ruled out. The broadcast clock
 `window::Producer::push` accepts `Timed`, source-compatible.
 Wire: none.
 
+## Required
+
+- [JSON and flate namespaces](/quest/m1/ffi-shape/json.md) - moves the data producers this changes, so the two breaks land in order rather than colliding
+
 ## Related
 
-- [FFI shape](/quest/m1/ffi-shape/README.md) - moves the data producers into a json namespace
 - [Generated C bindings](/quest/m1/c/README.md) - replaces libmoq, so C inherits this from moq-ffi

@@ -13,16 +13,18 @@ production path is the one without cross-origin isolation.
 
 ## Plan
 
-Upstream the reporter's harness from `fperex/moq` branch `debug/rt-audio`
-rather than rebuilding it, keeping the attribution. It already has the CDP
-driver, the beacon sink, the analyzer, the ring replay, `bench.sh`'s five
-scenarios, and `compare.mjs`. What it does not have is a home in `test/`, a
-budget, or a schedule.
+Upstream the reporter's lane from `fperex/moq` branch
+`debug-findings-solution` rather than rebuilding it, keeping the attribution.
+It already has a built `test/audio-quality/` lane: `just test audio-quality`
+over `moq-shaper`, a Playwright-driven Chromium matrix, a `budgets.json`
+graded by `grade.ts` under `--enforce`, a nightly job that keeps a failure's
+run directory, and `chromium`, `safari`, and `replay` runtimes. It also
+carries player, estimator, and shaper changes (checked 2026-09-28: 222 commits
+ahead of and 148 behind `main`), so land the lane on its own and hold its
+schema to the contract below rather than taking the branch wholesale.
 
-- Land the driver and analyzer under `test/`, alongside the existing `interop`
-  and `drill` lanes, wired into the `justfile` the way they are. Playwright is
-  already in the tree for the harness quests, so prefer it over a bespoke CDP
-  driver if the switch is cheap; if it is not, say so and keep CDP.
+- Land the lane under `test/`, alongside the existing `interop` and `drill`
+  lanes, wired into the `justfile` the way they are.
 - Keep the instrumentation ad-hoc for now. The probes stay a debug surface, not
   public API; promoting them is [Latency
   ledger](/quest/m2/latency-ledger.md), which nothing here waits on.

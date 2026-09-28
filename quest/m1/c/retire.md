@@ -8,9 +8,11 @@ it are deleted. `doc/setup/upgrade.md` tells C users how to move.
 
 ## Plan
 
-- Fold in any retirement step #4288 already planned for the renamed crate.
-- Decide the parked m3 libmoq quests: delete each whose outcome the generated
-  API already provides, and say so in the PR.
+- #4288 renamed libmoq to `moq-c` on dev and left a code-free `rs/libmoq` stub
+  whose last release points at `moq-c`; dev's
+  `quest/m1/libmoq-retire.md` deletes that stub. This quest retires the
+  hand-written `rs/moq-c` itself, so fold in or delete that quest, whichever
+  is still open.
 
 ## Required
 

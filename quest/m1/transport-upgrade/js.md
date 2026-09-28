@@ -11,8 +11,9 @@ nothing changes.
 
 ## Plan
 
-Lands in `js/net`, after the [client goaway](/quest/m1/drain/client-goaway.md)
-quest ships the handover it reuses: dial the replacement while the old session
+Lands in `js/net`, after the [drain](/quest/m1/drain/README.md) line ships
+the GOAWAY handover it reuses (client goaway is done on the line, JS
+group-boundary handover is its remaining child): dial the replacement while the old session
 keeps serving, swap the origin wiring once it is established, leave the old
 session to close on its own or at the handover cap. See the
 [questline](/quest/m1/transport-upgrade/README.md) for the shared decisions.
@@ -31,6 +32,9 @@ session to close on its own or at the handover cap. See the
   may not name a redirect URI, and an empty one is legal) and closes at the
   configured cap. A WebTransport attempt that fails after WebSocket won is logged at
   debug and the session stays on WebSocket.
+- A self-sent GOAWAY must gate new requests on the old session too, not only
+  a received one: [JS GOAWAY requests](/quest/m1/drain/js-goaway-requests.md)
+  covers the received case, so check it also covers this path.
 - On a successful upgrade delete the URL from `websocketWon`.
 - Tests in the browser harness against the in-tree relay: with the
   WebTransport dial delayed past the head start, a watched track keeps every
@@ -43,4 +47,5 @@ session to close on its own or at the handover cap. See the
 
 ## Required
 
-- [Client goaway](/quest/m1/drain/client-goaway.md) - the handover this upgrade reuses
+- [Drain](/quest/m1/drain/README.md) - the GOAWAY handover this upgrade reuses
+- [JS GOAWAY requests](/quest/m1/drain/js-goaway-requests.md) - no new request opens on a session that is going away
