@@ -1,15 +1,15 @@
 name: Platform
 
-# Compiles the `#[cfg(target_os = ...)]` code that no Linux job compiles at all:
-# moq-video's Media Foundation and VideoToolbox backends, their capture paths,
-# and moq-audio's ScreenCaptureKit capture. It also builds the OBS plugin
-# against the obs-deps bundle, which obs.yml can't do on Linux. Without this, a
-# change that breaks any of them (a moq-net type they consume, say) merges green
-# and compiles for the first time in a tag-triggered release build.
+# Compiles the workspace on Windows and macOS, the `#[cfg(...)]` code no Linux
+# job compiles at all: moq-video's Media Foundation and VideoToolbox backends,
+# their capture paths, moq-audio's ScreenCaptureKit capture, and the smaller
+# platform branches elsewhere. It also builds the OBS plugin against the
+# obs-deps bundle, which obs.yml can't do on Linux. Without this, a change that
+# breaks any of them (a moq-net type they consume, say) merges green and
+# compiles for the first time in a tag-triggered release build.
 #
-# Unfiltered, unlike android.yml: the cheap half (macOS) takes about as long as
-# installing `just`, and the Windows half is still shorter than check.yml, so a
-# path list that has to track two crates' dependency graphs isn't worth it.
+# Unfiltered, unlike android.yml: every job still finishes before check.yml, so
+# a path list tracking the dependency graphs of all that code isn't worth it.
 #
 # Pushes to `main` and `dev` catch the break two individually green PRs make
 # once both land, which is what the nightly run of these jobs used to cover.
@@ -44,9 +44,6 @@ env:
   JUST_VERSION: 1.52.0
 
 jobs:
-  # `just rs windows` is the only thing that compiles moq-video's Media
-  # Foundation capture/encode/decode, its D3D11 frames, and every
-  # `#[cfg(target_os = "windows")]` test module.
   windows:
     name: Windows
     if: github.event.action != 'closed'
@@ -79,11 +76,6 @@ jobs:
         shell: bash
         run: just rs windows
 
-  # `just rs macos` is the only thing that compiles moq-video's VideoToolbox
-  # encode/decode and its ScreenCaptureKit / AVFoundation capture, plus
-  # moq-audio's ScreenCaptureKit system audio and its TCC permission pre-check.
-  # swift.yml already compiles moq-ffi here, so this stays scoped to the two
-  # crates holding the Apple-gated code.
   macos:
     name: macOS
     if: github.event.action != 'closed'
