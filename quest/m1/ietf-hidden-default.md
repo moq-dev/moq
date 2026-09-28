@@ -32,15 +32,19 @@ Guidance:
   PUBLISH_NAMESPACE path, and draft-14/15 (PUBLISH_NAMESPACE requests) as well
   as 16+ (inline NAMESPACE entries).
 - Rewrite the draft's "applies whether or not the peer declared the option"
-  rule and keep `just drafts check` green.
+  rule and keep `just drafts check` green. `doc/concept/moq-lite.md` also
+  says a peer without the extension never discovers hidden routes; update it
+  in the same change.
 - Tests: an undeclared peer sees hidden namespaces, a declared peer without
   the parameter does not, on at least one pre-16 and one 16+ draft. Also fill
   the gaps where nothing is tested today: draft-14/15 with hidden, JS IETF
   without solicitation, and local filtering when a peer sends hidden paths the
   reader did not ask for.
-- Rust measures "below the prefix" from the publish origin's scope heads, JS
-  from the request's prefix, so they may disagree when the publish scope is a
-  pattern like `.stats/**`. Settle one rule while here.
+- Hiddenness is measured from the requested prefix, as the draft already
+  defines it and JS already does. Rust measures from the publish origin's
+  scope heads instead, so a publish scope like `.stats/**` exposes
+  `.stats/node` to a request for the empty prefix; bring Rust in line and test
+  that case in both languages.
 
 Public API: none. Wire: behavior change for IETF peers that did not declare
 MoQ Hidden.
