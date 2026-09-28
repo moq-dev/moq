@@ -30,7 +30,7 @@ the option fails loud instead of dropping the credential.
 - `moq` CLI publish and subscribe get the flag through the shared connect
   config; `doc/bin/cli.md` and `doc/lib/rs/moq-net.md` gain it.
 - Tests: a Rust server's `Handshake::token()` sees kind `0x01` and the
-  bytes on every draft from both a Rust and a JS client (a JS server is out
+  bytes on every draft that carries the setup option, from both a Rust and a JS client (a JS server is out
   of scope: #4278 added no JS accept-side API, since nothing in `js/net` authorizes an IETF session); a JWT rides its
   AUTH stream and not the URL when a CAT holds the option; a lite offer with
   a CAT refuses at init; end to end against `moq auth serve` with a CAT from

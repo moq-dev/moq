@@ -32,6 +32,7 @@ CARGO=cargo
 
 KEEP=0
 BASELINE=1
+APPLY_ONLY=0
 SELECTED=()
 dir=
 log=
@@ -68,6 +69,7 @@ Options:
   --list           list the mutations and the drill each one must break
   --keep           keep the mutated snapshots (prints each path)
   --no-baseline    skip the unmutated run of each drill
+  --apply-only     only check that each mutation still applies; builds nothing
   -h, --help       this
 
 With no mutation named, every mutation runs.
@@ -86,6 +88,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-baseline)
             BASELINE=0
+            shift
+            ;;
+        --apply-only)
+            APPLY_ONLY=1
             shift
             ;;
         -h | --help)
@@ -157,6 +163,14 @@ for patch in "$MUTATIONS"/*.patch; do
     checked=$((checked + 1))
     echo "=== $name -> $drill"
 
+    if [[ $APPLY_ONLY -eq 1 ]]; then
+        if ! patch -p1 -d "$WORKSPACE" --dry-run --batch --forward --silent <"$patch"; then
+            echo "  FAIL: '$name' does not apply to this tree" >&2
+            failed=$((failed + 1))
+        fi
+        continue
+    fi
+
     if [[ $BASELINE -eq 1 ]]; then
         log=$(mktemp "${TMPDIR:-/tmp}/drill-baseline.XXXXXX")
         status=$(run_drill "$WORKSPACE" "$drill" "$log")
@@ -219,6 +233,15 @@ done
 if [[ $checked -eq 0 ]]; then
     echo "error: no mutations selected" >&2
     exit 2
+fi
+
+if [[ $APPLY_ONLY -eq 1 ]]; then
+    if [[ $failed -gt 0 ]]; then
+        echo "$failed of $checked mutations do not apply; retarget them at the current code" >&2
+        exit 1
+    fi
+    echo "$checked of $checked mutations apply"
+    exit 0
 fi
 
 if [[ $failed -gt 0 ]]; then

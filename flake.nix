@@ -74,8 +74,12 @@
         # string pool 4-byte aligned, which macOS 27's dyld refuses to load, so
         # release-profile proc macros and cdylibs are a coin flip there. The
         # crates still declare their own lower floors (Cargo.toml rust-version).
-        rust-toolchain = pkgs.rust-bin.stable."1.98.1".default.override {
+        rust-toolchain = pkgs.rust-bin.stable."1.98.1".minimal.override {
+          # `minimal` rather than `default`, which adds 740 MB of offline HTML
+          # docs to a closure every CI job downloads.
           extensions = [
+            "rustfmt"
+            "clippy"
             "rust-src"
             "rust-analyzer"
           ];
@@ -392,7 +396,8 @@
         # Type-checking needs headers rather than libraries, and those are
         # cross-platform -- obs-headers above, plus qt6.qtbase, which does build
         # on Darwin. So `just obs compile` and the lints run everywhere while
-        # `just obs build` stays native.
+        # `just obs build` stays native. On Linux it links nixpkgs' obs-studio,
+        # which only the `.#obs` shell below carries.
         obsDeps =
           with pkgs;
           [
@@ -409,7 +414,6 @@
             gersemi
           ]
           ++ lib.optionals (!stdenv.hostPlatform.isDarwin) [
-            obs-studio
             ninja
           ];
 
@@ -475,6 +479,15 @@
         # are disallowed in the flake `packages` schema.
         legacyPackages = {
           inherit (pkgs) gst_all_1;
+
+          # `nix develop .#obs`: the default shell plus obs-studio, which linking
+          # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out
+          # of the default shell because it pulls in ~3 GB (CEF, mostly) that
+          # every other CI job would download. Under legacyPackages rather than
+          # devShells so `nix flake check` doesn't build it on every Rust PR.
+          obs = self.devShells.${system}.default.overrideAttrs (old: {
+            nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.obs-studio ];
+          });
         };
 
         devShells.default = pkgs.mkShell {
@@ -547,14 +560,6 @@
         # (`.github/actions/rust-cache`); nothing here configures it.
         checks = {
           package-source-assets = pkgs.runCommand "package-source-assets" { } ''
-            for asset in \
-              rs/libmoq/moq.pc.in \
-              rs/libmoq/native-libs/apple.txt \
-              rs/libmoq/native-libs/linux.txt \
-              rs/libmoq/native-libs/windows.txt
-            do
-              test -f "${overlayPkgs.libmoq.src}/$asset"
-            done
             test -f "${overlayPkgs.moq-boy.src}/rs/moq-video/src/frame/nv12_resize.ptx"
             touch "$out"
           '';

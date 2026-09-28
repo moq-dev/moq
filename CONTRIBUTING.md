@@ -1,6 +1,7 @@
 # Commits
 
-PRs are squash-merged, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
+PRs into `main` are squash-merged, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
+PRs into any other branch (`dev`, a questline) use a merge commit, so their history survives until they land.
 
 - Use conventional-commit subjects (`feat(watch): ...`, `fix: ...`, `chore: ...`, `docs: ...`)
 - AI commit attribution goes in a `Co-Authored-By:` trailer, not the commit body.
@@ -45,6 +46,10 @@ For each finding:
 - If you don't agree with it, reply to the finding and move on.
 - If it's a relatively easy improvement, fix it and push. Update the summary if needed.
 
+Wait for Codex to review the final head before merging.
+Merge only on its thumbs up, or once every Codex finding on the PR is fixed or replied to.
+Codex skips fork PRs; ask the maintainer to request one.
+
 # Follow-ups
 
 If you encounter issues, or findings that are out of scope, create follow-up quests.
@@ -64,7 +69,7 @@ Releases are cut separately; bump only when asked. Each package's version lives 
 
 - **Rust**: release-plz owns crate versions and Rust dependency requirements.
 - **JavaScript**: `js/*/package.json` packages with a `scripts.release` entry (skip private ones like `@moq/clock`, `@moq/wasm`), plus the matching workspace version in `bun.lock`.
-- **Python**: `py/moq-rs/pyproject.toml` only; `py/moq-ffi` follows the `moq-ffi-v*` tag and Rust crate.
+- **Python**: `py/moq-rs/pyproject.toml`, plus the matching `moq-rs` entry in the root `uv.lock`; `py/moq-ffi` follows the `moq-ffi-v*` tag and Rust crate.
 - **Swift**: `swift/VERSION`. **Kotlin**: `moq.version` in `kt/gradle.properties`. **Dart**: `version` in `dart/moq/pubspec.yaml`. Their FFI counterparts track the Rust crate.
 - **Go**: `go/wrapper/VERSION` holds a human-owned `MAJOR.MINOR` line; CI derives the patch, so only edit it for a breaking API. Leave the placeholder FFI version in `go.mod` alone.
-- **OBS**: the plugin takes the `libmoq` crate's version (`cpp/obs/CMakeLists.txt`), so release-plz owns it.
+- **OBS**: release builds take their version from the `libmoq-v*` tag that release-plz cuts for the `libmoq` crate (`cpp/obs/build.sh --libmoq-release`), not from any manifest, so there is nothing to bump.

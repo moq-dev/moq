@@ -53,10 +53,9 @@ decide in the PR, applying the choice to both languages:
   and the end waits out the whole grace (JS was reported to wait and Rust
   not, but Rust's `covers(owed)` reads the same way despite the comment in
   `route_datagram`; confirm with a test first). Recommendation: no, datagrams
-  are best effort. On lite-07 the SUBSCRIBE_END stream count
-  ([lite-count-settle](/quest/m1/lite-count-settle.md)) settles without
-  looking at sequences, which makes this moot there; older versions keep the
-  grace as the documented stopgap.
+  are best effort. [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) decided
+  the same: datagram groups are not owed, so an uncovered hole waits out the
+  grace on every version.
 - **Does a group at or past the declared end abort the track, or only that
   group?** Rust aborts the track with `ProtocolViolation`; JS aborts the group
   and ends clean. Recommendation: abort the track in both. The peer
@@ -65,7 +64,8 @@ decide in the PR, applying the choice to both languages:
   permanent gap for the life of the subscription, and so does JS's. A gap
   older than the grace can no longer be waited for, so folding it in as
   accounted loses nothing. Recommendation: that, which bounds the ranges by
-  the gaps inside the grace window; lite-07 needs only the stream count.
+  the gaps inside the grace window. Once publishers send SUBSCRIBE_DROP for
+  every gap, only datagram holes remain.
 
 Regression tests go in `rs/moq-net/tests/track_tail.rs` (its `hold_unis`
 mock makes the reorder deterministic) and the JS tail tests. Wire output only
@@ -75,5 +75,5 @@ drafts already require.
 ## Related
 
 - [Track tail interop](/quest/m1/track-tail-interop.md) - the Rust-JS check that both sides now agree
-- [lite-07 count settle](/quest/m1/lite-count-settle.md) - replaces sequence coverage with the stream count on lite-07
+- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every group is a stream or a drop, replacing lite-07's stream count
 - [Session death](/quest/m1/session-death.md) - how a tail ends when the session dies under it

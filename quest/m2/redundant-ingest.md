@@ -4,21 +4,27 @@
 
 Decide whether and how two live publishers of identical content share one
 broadcast, so viewers survive losing one faster than the QUIC keep-alive.
-Epochs let the publishers claim one identity (the same `@<uuidv7>`), but
-today's #3312 rule splices only across routes with the same first hop, so
-two ingest hosts are two identities. The study may end in a no-go.
+The study may end in a no-go.
 
 ## Plan
 
-Open questions: whether an explicitly shared epoch may splice across first
-hops at a group boundary, and what makes that safe (group sequences aligned
-across encoders, a matching catalog). Also who declares the incumbent dead
-early: a failover service that retracts it, or active-active delivery to the
-relay. Weigh them against the moq-transport rule that multiple publishers of
-a namespace must each be asked (#3697) and the cluster draft. Output: a
+Start from what is documented today (`doc/bin/cli.md` "Redundant
+publishers"): two encoders sharing a Hop ID (`--hop 42`) are one first hop,
+so relays hold both routes and fail over at a group boundary under the #3312
+same-first-hop rule, provided the tracks are identical with aligned groups.
+
+Open questions: how that maps onto epochs (the pair claiming one
+`@<uuidv7>`), what enforces the alignment the docs only ask for (group
+sequences, a matching catalog), and who declares the incumbent dead early: a
+failover service that retracts it, or active-active delivery to the relay.
+[Cluster routing](/quest/m1/cluster-routing.md) drops hop lists inside a
+cluster and must decide what replaces this failover; follow its answer.
+Weigh them against the moq-transport rule that multiple publishers of a
+namespace must each be asked (#3697) and the cluster draft. Output: a
 decision, with a quest for the chosen mechanism.
 
 ## Related
 
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - identical tracks from one encoded stream under one first hop, the case this generalizes
+- [Cluster routing](/quest/m1/cluster-routing.md) - decides what replaces first-hop failover inside a cluster
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - explicit epochs are what a redundant pair would share

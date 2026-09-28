@@ -6,13 +6,13 @@
  * @module
  */
 import type { Dispose, Getter } from "@moq/signals";
-import type { Producer as BroadcastProducer } from "./broadcast.ts";
+import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Frame, Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Groups, Producer, Request, Subscriber } from "./track.ts";
-import type { Advertised } from "./wire.ts";
+import type { Advertised, Advertisements } from "./wire.ts";
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
 export function groupBounds(groups: Groups = {}): { start: number; end?: number } {
@@ -54,24 +54,25 @@ export function hiddenBelow(prefix: Path.Valid, path: Path.Valid): boolean {
  */
 export function presented(
 	prefix: Path.Valid,
-	table: ReadonlyMap<Path.Valid, Advertised>,
+	table: Advertisements,
 	carries: (covered: Path.Valid) => boolean,
 ): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
 	let rootLen = -1;
 	const requested = Path.Pattern.subtree(prefix);
-	for (const [covered, snap] of table) {
+	for (const [covered, candidates] of table) {
 		if (!carries(covered)) continue;
 		if (Path.hasPrefix(covered, prefix)) {
-			// A scoped route covers only what it claims, so it cannot serve a prefix outside that.
-			if (snap.claim && !snap.claim.overlaps(requested)) continue;
 			if (covered.length < rootLen) continue;
+			// A scoped route covers only what it claims, so the best one that can serve the prefix wins.
+			const snap = candidates.find((candidate) => !candidate.claim || candidate.claim.overlaps(requested));
+			if (!snap) continue;
 			rootLen = covered.length;
 			out.set(Path.empty(), snap);
 			continue;
 		}
 		const suffix = Path.stripPrefix(prefix, covered);
-		if (suffix !== null) out.set(suffix, snap);
+		if (suffix !== null && candidates.length > 0) out.set(suffix, candidates[0]);
 	}
 	return out;
 }
@@ -178,6 +179,8 @@ export const hooks: {
 		producer: BroadcastProducer,
 		announcer: { announce(route: Route): void; unannounce(): void },
 	) => void;
+	/** Name a broadcast handle by the path an origin created or resolved it at. */
+	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
 } = {
 	makeRequest: () => {
 		throw new Error("track.ts not loaded");
@@ -216,6 +219,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	attachAnnouncer: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	stampPath: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 };

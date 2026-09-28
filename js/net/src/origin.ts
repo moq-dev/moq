@@ -17,7 +17,7 @@ import { StreamCode, StreamError } from "./error.ts";
 import { isAnonymous, Route, routesEqual } from "./hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "./internal.ts";
 import * as Path from "./path.ts";
-import { type Advertised, registerWire, wireOf } from "./wire.ts";
+import { type Advertised, type Advertisements, registerWire, wireOf } from "./wire.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
 export { isAnonymous } from "./hop.ts";
@@ -84,19 +84,39 @@ class Scope {
 		return out;
 	}
 
-	/** The advertised prefixes that may serve this scope, relative to its root. */
-	projectRoutes(
-		values: ReadonlyMap<Path.Valid, Advertised> | undefined,
-	): ReadonlyMap<Path.Valid, Advertised> | undefined {
+	/**
+	 * The advertisements that may serve this scope, relative to its root. Every prefix at or
+	 * above the root presents as the empty path, most specific first, since that is the order
+	 * a request beneath the root resolves in.
+	 */
+	projectRoutes(values: Advertisements | undefined): Advertisements | undefined {
 		if (!values || this === Scope.all) return values;
-		const out = new Map<Path.Valid, Advertised>();
-		const covering = new CoveringRoot(this.root);
-		for (const [path, value] of values) {
-			if (this.allowed && ![...this.allowed].some((pattern) => advertOverlaps(value, path, pattern))) continue;
-			const relative = covering.relative(path);
-			if (relative === undefined) continue;
-			// The claim moves with the key, so it compares against root-relative requests.
-			out.set(relative, value.claim ? { ...value, claim: value.claim.rebase(this.root) } : value);
+		const out = new Map<Path.Valid, readonly Advertised[]>();
+		const covering: [Path.Valid, Advertised[]][] = [];
+		const allowed = this.allowed && [...this.allowed];
+		for (const [path, candidates] of values) {
+			const relative = Path.stripPrefix(this.root, path);
+			const above = relative === null || relative === Path.empty();
+			if (above && !Path.hasPrefix(path, this.root)) continue;
+			const visible = candidates
+				.filter((value) => !allowed || allowed.some((pattern) => advertOverlaps(value, path, pattern)))
+				// The claim moves with the key, so it compares against root-relative requests.
+				.map((value) => (value.claim ? { ...value, claim: value.claim.rebase(this.root) } : value));
+			if (visible.length === 0) continue;
+			if (!above) {
+				out.set(relative, visible);
+				continue;
+			}
+			// Hold the empty path's place in the order until every covering prefix is known.
+			if (covering.length === 0) out.set(Path.empty(), []);
+			covering.push([path, visible]);
+		}
+		if (covering.length > 0) {
+			covering.sort(([a], [b]) => b.length - a.length);
+			out.set(
+				Path.empty(),
+				covering.flatMap(([, visible]) => visible),
+			);
 		}
 		return out;
 	}
@@ -105,11 +125,6 @@ class Scope {
 /** Whether the route advertised at `prefix` may serve any path `pattern` admits. */
 function advertOverlaps(advert: Advertised, prefix: Path.Valid, pattern: Path.Pattern): boolean {
 	return advert.claim ? advert.claim.overlaps(pattern) : scopeOverlaps(pattern, prefix);
-}
-
-/** The paths `entry` may serve beneath `prefix`, when its producer is scoped. */
-function claimOf(entry: RouteEntry, prefix: Path.Valid): Path.Patterns | undefined {
-	return entry.scope.allowed?.intersect(new Path.Patterns([Path.Pattern.subtree(prefix)]));
 }
 
 /**
@@ -180,9 +195,25 @@ export interface RequestSlot {
 export interface RouteEntry {
 	readonly identity: object;
 	readonly scope: Scope;
+	/** The paths the entry may serve beneath its prefix, when its producer is scoped. */
+	readonly claim?: Path.Patterns;
 	readonly route: Signal<Route>;
 	readonly originated: boolean;
 	readonly server?: ServeState;
+}
+
+/** One advertisement at a prefix. `exact` marks an announced local broadcast, which is only its own path. */
+interface Candidate extends Advertised {
+	readonly exact: boolean;
+}
+
+/** Orders advertisements at one prefix: the better route, then a local broadcast on a tie, then fewer hops. */
+function compareCandidates(a: Candidate, b: Candidate): number {
+	return (
+		compareRoutes(a.route, b.route) ||
+		Number(b.exact) - Number(a.exact) ||
+		a.route.hops.length - b.route.hops.length
+	);
 }
 
 /** Orders two routes by preference: identified before anonymous, then lower warm cost, then lower cold cost. */
@@ -343,12 +374,11 @@ class OriginState {
 	routes = new VersionedSignal<Map<Path.Valid, RouteEntry[]> | undefined>(new Map());
 
 	#snapshotVersion = "";
-	#snapshot = {
-		remote: new Map<Path.Valid, Advertised>(),
-		local: new Map<Path.Valid, Advertised>(),
-		routes: new Map<Path.Valid, Route>(),
-		visible: new Map<Path.Valid, Route>(),
-	};
+	#snapshot: {
+		candidates: ReadonlyMap<Path.Valid, readonly Candidate[]>;
+		routes: ReadonlyMap<Path.Valid, Route>;
+		visible: ReadonlyMap<Path.Valid, Route>;
+	} = { candidates: new Map(), routes: new Map(), visible: new Map() };
 
 	/** The full route table is built once per mutation, regardless of observer count. */
 	available = new Derived([this.local, this.advertisedLocal, this.routes], () => this.snapshot().routes);
@@ -356,43 +386,57 @@ class OriginState {
 	visible = new Derived([this.local, this.advertisedLocal, this.routes], () => this.snapshot().visible);
 
 	snapshot(): {
-		remote: ReadonlyMap<Path.Valid, Advertised>;
-		local: ReadonlyMap<Path.Valid, Advertised>;
+		candidates: ReadonlyMap<Path.Valid, readonly Candidate[]>;
 		routes: ReadonlyMap<Path.Valid, Route>;
 		visible: ReadonlyMap<Path.Valid, Route>;
 	} {
 		const version = `${this.local.version}/${this.advertisedLocal.version}/${this.routes.version}`;
 		if (version === this.#snapshotVersion) return this.#snapshot;
-		const remote = new Map<Path.Valid, Advertised>();
-		const local = new Map<Path.Valid, Advertised>();
+		const candidates = this.candidates();
 		const available = new Map<Path.Valid, Route>();
-		for (const [path, routes] of this.routes.peek() ?? []) {
-			const entry = preferredEntry(routes);
-			if (!entry) continue;
-			const value = { identity: entry.identity, route: entry.route.peek(), claim: claimOf(entry, path) };
-			remote.set(path, value);
-			available.set(path, value.route);
-		}
-		for (const [path, front] of this.local.peek() ?? []) {
-			const routes = this.routes.peek()?.get(path);
-			if (!this.localWins(path, routes && preferredEntry(routes))) continue;
-			const value = { identity: front, route: this.advertisedLocal.peek()?.get(path) ?? Route.default };
-			local.set(path, value);
-			available.set(path, value.route);
-		}
 		const visible = new Map<Path.Valid, Route>();
-		for (const [path, route] of available) {
-			if (!hiddenBelow(Path.empty(), path)) visible.set(path, route);
+		for (const [path, [best]] of candidates) {
+			available.set(path, best.route);
+			if (!hiddenBelow(Path.empty(), path)) visible.set(path, best.route);
 		}
-		this.#snapshot = { remote, local, routes: available, visible };
+		this.#snapshot = { candidates, routes: available, visible };
 		this.#snapshotVersion = version;
 		return this.#snapshot;
+	}
+
+	/**
+	 * Every advertisement per prefix, most preferred first, without the `skip`ped entries.
+	 * Readers select after filtering by their scope, so a cheaper route they cannot see
+	 * never hides one they can.
+	 */
+	candidates(skip?: (entry: RouteEntry) => boolean): Map<Path.Valid, Candidate[]> {
+		const out = new Map<Path.Valid, Candidate[]>();
+		for (const [path, entries] of this.routes.peek() ?? []) {
+			const list: Candidate[] = [];
+			for (const entry of entries) {
+				if (skip?.(entry)) continue;
+				list.push({ identity: entry.identity, route: entry.route.peek(), claim: entry.claim, exact: false });
+			}
+			if (list.length > 0) out.set(path, list);
+		}
+		const advertised = this.advertisedLocal.peek();
+		for (const [path, front] of this.local.peek() ?? []) {
+			const local = { identity: front, route: advertised?.get(path) ?? Route.default, exact: true };
+			const list = out.get(path);
+			if (list) list.push(local);
+			else out.set(path, [local]);
+		}
+		for (const list of out.values()) {
+			// Stable, so equal routes keep the table's newest-first order.
+			if (list.length > 1) list.sort(compareCandidates);
+		}
+		return out;
 	}
 
 	// Originated advertisements sessions should forward: exact-path announces plus
 	// originated dynamics. Identity is the local front or the route entry, so a
 	// republish diffs as retract-then-announce and a re-price as another active.
-	originated = new Signal<Map<Path.Valid, Advertised> | undefined>(new Map());
+	originated = new Signal<Advertisements | undefined>(new Map());
 
 	// Broadcasts materialized from a served route, keyed by exact path. Shared by every
 	// request for the path so repeats reuse one accept; dropped (and closed) when the
@@ -471,28 +515,12 @@ class OriginState {
 
 	/** Rebuild the publisher-facing originated table after an advertisement write. */
 	rebuildOriginated(): void {
-		const local = this.local.peek();
-		const advertised = this.advertisedLocal.peek();
-		const routes = this.routes.peek();
-		if (!local && !advertised && !routes) {
+		if (!this.local.peek() && !this.advertisedLocal.peek() && !this.routes.peek()) {
 			this.originated.set(undefined);
 			return;
 		}
-		const next = new Map<Path.Valid, Advertised>();
-		for (const [prefix, entries] of routes ?? []) {
-			const mine = preferredEntry(entries, received);
-			if (mine)
-				next.set(prefix, { identity: mine.identity, route: mine.route.peek(), claim: claimOf(mine, prefix) });
-		}
 		// A local broadcast and an originated dynamic at one path compete on cost, as they do for requests.
-		for (const [path, route] of advertised ?? []) {
-			const front = local?.get(path);
-			const entries = routes?.get(path);
-			if (front && this.localWins(path, entries && preferredEntry(entries, received))) {
-				next.set(path, { identity: front, route });
-			}
-		}
-		this.originated.set(next);
+		this.originated.set(this.candidates(received));
 	}
 
 	/**
@@ -704,6 +732,7 @@ export class Producer implements Table {
 		if (!created) throw new Error("origin is closed");
 
 		const producer = new broadcast.Producer();
+		hooks.stampPath(producer, path);
 		const front = producer.consume();
 
 		hooks.attachAnnouncer(producer, {
@@ -792,6 +821,7 @@ export class Producer implements Table {
 		const entry: RouteEntry = {
 			identity: {},
 			scope: this.#scope,
+			claim: this.#scope.allowed?.intersect(new Path.Patterns([Path.Pattern.subtree(prefix)])),
 			route: new Signal(route),
 			originated,
 			server,
@@ -1248,6 +1278,7 @@ export class Consumer {
 				const previous = handle;
 				source = front;
 				handle = front?.clone();
+				if (handle) hooks.stampPath(handle, relative);
 				previous?.close();
 			}
 			return handle;
@@ -1339,29 +1370,32 @@ export class Consumer {
 	#listed(patterns: Path.Patterns, hidden: boolean): Map<Path.Valid, Presented> {
 		const next = new Map<Path.Valid, Presented>();
 		const covering = new CoveringRoot(this.#scope.root);
-		const { remote, local } = this.#state.snapshot();
 		const scopes = [...patterns]
 			.sort((a, b) => Path.compareSpecificity(b.specificity(), a.specificity()))
 			.map((pattern) => ({ pattern, head: scopeHead(pattern) }));
-		for (const [table, exact] of [
-			[remote, false],
-			[local, true],
-		] as const) {
-			for (const [path, entry] of table) {
-				const scope = scopes.find(
+		for (const [path, candidates] of this.#state.snapshot().candidates) {
+			// The first candidate this reader can see wins, since the preferred one overall may not be.
+			let entry: Candidate | undefined;
+			let scope: (typeof scopes)[number] | undefined;
+			for (const candidate of candidates) {
+				scope = scopes.find(
 					({ pattern, head }) =>
-						(exact ? pattern.matches(path) : advertOverlaps(entry, path, pattern)) &&
+						(candidate.exact ? pattern.matches(path) : advertOverlaps(candidate, path, pattern)) &&
 						(hidden || !hiddenBelow(head, path)),
 				);
-				if (!scope) continue;
-				const relative = covering.relative(path);
-				if (relative === undefined) continue;
-				next.set(relative, {
-					identity: entry.identity,
-					route: entry.route,
-					captures: scopeCaptures(scope.pattern, path),
-				});
+				if (scope) {
+					entry = candidate;
+					break;
+				}
 			}
+			if (!entry || !scope) continue;
+			const relative = covering.relative(path);
+			if (relative === undefined) continue;
+			next.set(relative, {
+				identity: entry.identity,
+				route: entry.route,
+				captures: scopeCaptures(scope.pattern, path),
+			});
 		}
 		return next;
 	}

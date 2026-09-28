@@ -6,25 +6,25 @@
 # means a route outlives the session that announced it, so a crashed publisher's
 # name stays announced with nothing behind it.
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
-index 729a23e4b..dac9990c6 100644
+index 8a0259fec..0b6035640 100644
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -2566,7 +2566,8 @@ struct AnnouncedRoute {
+@@ -2842,7 +2842,8 @@ struct AnnouncedRoute {
  	/// without recomputing the chain.
  	route: crate::origin::Route,
  	/// Dropping it retracts the route and rejects its queued requests.
 -	dynamic: crate::origin::Dynamic,
 +	// MUTATION: never dropped, so a route outlives the session that announced it.
 +	dynamic: std::mem::ManuallyDrop<crate::origin::Dynamic>,
- 	/// One minted source per requested path, finished on a clean retraction and
- 	/// aborted (via drop) when the session dies.
+ 	/// One minted source per requested path, each closed when its guard drops.
  	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
-@@ -2578,7 +2579,7 @@ impl AnnouncedRoute {
- 	fn new(route: crate::origin::Route, dynamic: crate::origin::Dynamic) -> Self {
+ 	/// Whether the GOAWAY drain already re-priced this route.
+@@ -2858,7 +2859,7 @@ impl AnnouncedRoute {
+ 	fn new(route: crate::origin::Route, dynamic: crate::origin::Dynamic, wake: Arc<RouteWake>) -> Self {
  		Self {
  			route,
 -			dynamic,
 +			dynamic: std::mem::ManuallyDrop::new(dynamic),
  			sources: HashMap::new(),
  			drained: false,
- 		}
+ 			waker: std::task::Waker::from(wake.clone()),

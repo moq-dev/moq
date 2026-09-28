@@ -33,6 +33,11 @@ grant; `Options::bandwidth` documents that
   their own loop; the capture driver's `_reservation` goes away. Public entry
   points for a manual ceiling stay `Producer::set_bitrate`
   and `Encoder::set_bitrate`.
+- The audio-codecs line branch moves the Opus encoder behind a backend seam:
+  the rate setter and its floor live in
+  `rs/moq-audio/src/encode/backend/libopus.rs` there, and
+  `Encoder::set_bitrate` dispatches through the backend. Target whichever
+  shape is on the base when this starts.
 - Floor: `set_opus_bitrate` refuses anything outside
   `opus::bitrate_floor(codec_rate, frame_size).max(500)` to
   `300_000 * channels` (`encoder.rs`, `rs/moq-audio/src/opus.rs`). `Policy::min` defaults to a tenth of

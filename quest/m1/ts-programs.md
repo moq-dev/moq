@@ -12,11 +12,15 @@ programs, and `--program` chooses what to import.
 
 Decided:
 
-- Default: error before publishing when a PAT (initial or later) lists more
-  than one non-zero program, naming each program and pointing at `--program`.
+- Default: error before publishing when the initial PAT lists more than one
+  non-zero program, naming each program and pointing at `--program`. A later
+  PAT that adds a program ends the import with the same error; media already
+  published stays.
 - `--program <n>` imports program `n` only.
-- `--program all` publishes one broadcast per program, named
-  `<broadcast>/<program_number>`, each with its own clock and catalog.
+- `--program all` publishes one broadcast per program, each with its own clock
+  and catalog. The catalog suffix stays last so discovery and format detection
+  still see it: `--broadcast event.hang` publishes `event/1.hang` and
+  `event/2.hang`.
 - `export ts` stays one program per broadcast.
 
 Tests: a synthetic two-program input with far-apart clocks fails naming both

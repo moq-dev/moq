@@ -44,7 +44,7 @@ Decisions the quests share:
 - [Encode config](/quest/m2/intra-refresh/encode-config.md) - refresh mode extends the settled GOP contract; the producer cuts groups per sweep and publishes `warmup`
 - [NVENC refresh](/quest/m2/intra-refresh/nvenc-refresh.md) - the NVENC backend encodes refresh mode for H.264 and HEVC
 - [V4L2 refresh](/quest/m2/intra-refresh/v4l2-refresh.md) - the V4L2 backend encodes refresh mode
-- [Bindings](/quest/m2/intra-refresh/bindings.md) - ffi, libmoq, and every wrapper expose the `Gop` enum
+- [Bindings](/quest/m2/intra-refresh/bindings.md) - moq-ffi and every wrapper expose refresh mode, additive on the ffi-shape `Gop` enum
 - [Export sync flags](/quest/m2/intra-refresh/export-sync-flags.md) - fmp4, MKV, and HLS stop advertising a refresh group start as a sync sample
 
 ## Related

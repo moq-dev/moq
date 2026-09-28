@@ -32,7 +32,3 @@ once and exits 1 with `json: dropped`, even while `moq_tokio` is mid-reconnect
 - Tests: a relay-backed CLI test that restarts the publisher within the linger
   and sees output resume, one that lets it expire and checks exit 1, and a
   clean FIN that exits 0.
-
-## Closes
-
-- [#3926](https://github.com/moq-dev/moq/issues/3926) - close this issue when the quest finishes

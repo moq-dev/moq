@@ -46,7 +46,8 @@ Decisions settled while planning:
   authorization, or route-selection input.
 - **A published break goes through dev**, because `moq-stats` is a published crate and the generic
   producer is a breaking change, and the moq-json rework there is what the
-  producers build on.
+  producers build on. The parent QoS line targets `dev` with it (#4145), so
+  every quest here does too.
 
 ## Required
 
@@ -58,7 +59,3 @@ Decisions settled while planning:
   crate, and the browser publisher and player report through it
 - [Encoder feedback](/quest/m1/qos/stats/encoder-feedback.md) - a Rust
   encoder subscribes to its viewers' stats and adapts its bitrate
-
-## Closes
-
-- [#3608](https://github.com/moq-dev/moq/issues/3608) - close this issue when the questline finishes

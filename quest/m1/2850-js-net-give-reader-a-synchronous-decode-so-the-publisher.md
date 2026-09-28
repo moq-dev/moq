@@ -26,11 +26,11 @@ buffered bytes run out. `tryDecode` returns undefined and consumes nothing in
 that case, and `decode`/`decodeMaybe` are the one async driver that fills and
 retries. The primitives (`u62`, `u53`, `read`, `string`, ...) are that driver
 applied to the `Cursor` reads, and the group and FETCH frame loops drain every
-buffered frame with `tryDecode` (`js/net/bench/frames.ts`). The 23
+buffered frame with `tryDecode` (`js/net/bench/frames.ts`). The 22
 `static async decode` message decoders under `js/net/src/lite/`, plus four
 `decodeMaybe` variants, still await a primitive per field.
 
-- Convert all 23 decoders to a single synchronous body over a `Cursor`, with
+- Convert all 26 decoders to a single synchronous body over a `Cursor`, with
   the async form as `reader.decode(...)` rather than a second copy. `Message`
   in `lite/message.ts` becomes a sync size-prefixed wrapper.
 - The publisher drains controls synchronously in its loop and

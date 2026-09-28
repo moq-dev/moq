@@ -27,23 +27,22 @@ Decided:
   (NULL on success) with `moq_error_message()`, results come through
   out-params, records are owned structs with `moq_<type>_free`, and names are
   the uniffi names in snake case.
-- The generated package takes over the `moq-c` name and `moq::c` target that
-  #4288 gives the hand-written crate, so C users migrate once. Its first release
-  is 0.8.0, a minor bump over the hand-written 0.7.x.
+- The line targets `dev`: #4288 already renamed the hand-written crate to
+  `moq-c` (`rs/moq-c`) there, and the generated package takes over that name
+  and `moq::c` target, so C users migrate once. Its first release is 0.8.0, a
+  minor bump over the hand-written 0.7.x.
 - Docs change inline: the consumer quest rewrites `doc/lib/c`, and retirement
   adds an upgrade note. No separate guide.
 
 The line owns the end-to-end check: every `doc/lib/c` sample and the C interop
 client build and run against the released 0.8.0 archive, not only in-tree.
 
-The hand-written crate's open feature quests are parked in m3 until this line
-retires it: [fetch](/quest/m3/libmoq-fetch.md),
-[hidden](/quest/m3/libmoq-hidden.md),
-[CMake library](/quest/m3/libmoq-cmake-lib.md), and
-[shutdown](/quest/m3/libmoq-shutdown.md).
+The hand-written crate gets no more feature work: its shutdown, CMake library,
+and fetch quests were abandoned for this line, and hidden is done on dev.
 
 ## Required
 
+- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the generator fork, package recipe, and OBS move this line builds on
 - [C backend](/quest/m1/c/backend.md) - the fork emits an ergonomic C header and implementation from moq-ffi, with its own tests
 - [moq-c package](/quest/m1/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
 - [C consumers](/quest/m1/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
@@ -51,6 +50,4 @@ retires it: [fetch](/quest/m3/libmoq-fetch.md),
 
 ## Related
 
-- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the generator fork and package recipe this line extends
-- [libmoq becomes moq-c](/quest/m1/moq-c.md) - the rename whose name this line inherits
 - [FFI shape](/quest/m1/ffi-shape/README.md) - reshapes moq-ffi, which the generated C then follows for free

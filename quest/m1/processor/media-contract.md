@@ -8,9 +8,14 @@ can resolve without eagerly subscribing to processor output.
 
 ## Plan
 
-This quest also defines the generic catalog-level contribution reference
-itself: a catalog entry that names another contribution and its relative
-broadcast without opening it, which the processor contract specializes.
+Build on hang's existing per-rendition relative `broadcast` reference
+(`broadcast` on the video rendition in `rs/hang/src/catalog/video/mod.rs`,
+with its audio, text, JSON, and binary counterparts): it already names another
+broadcast relative to the catalog's, and Rust rejects one that escapes. The
+processor output lives under the processor's prefix, mirroring the source
+path, so the source catalog reaches it through that relative reference. Add
+only what it lacks: a catalog-level contribution entry that names a whole
+contribution without opening it, which the processor contract specializes.
 
 The processor publishes a normal Hang contribution rather than an arbitrary
 fragment for an edge to merge. Output renditions carry their own schema and an

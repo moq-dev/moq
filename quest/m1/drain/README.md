@@ -58,4 +58,4 @@ by the stop deadline and encoder reconnect.
 
 ## Related
 
-- [pop-skipping](/quest/m1/pop-skipping/README.md) - its same-PoP link price and full eligible pairing become important when a deployment adds a second relay per PoP
+- [Cluster routing](/quest/m1/cluster-routing.md) - the configured topology and link costs a second relay per PoP joins

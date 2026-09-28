@@ -3,10 +3,13 @@
 ## Goal
 
 Settle how independently operated MoQ networks exchange reachability without
-adding incomparable costs. Produce a reviewed design and scoped implementation
-quests, not a protocol implementation. Cloudflare, moq.pro, and self-hosted
-relays can retain their own business policy; no RTT/loss-driven repricing or
-automatic performance failover is authorized by this work.
+adding incomparable costs, at the cluster boundaries where
+[Cluster routing](/quest/m1/cluster-routing.md) keeps path vector with cluster
+ids as hops. Cost inside one cluster is cluster-routing's. Produce a
+reviewed design and scoped implementation quests, not a protocol
+implementation. Cloudflare, moq.pro, and self-hosted relays can retain their
+own business policy; no RTT/loss-driven repricing or automatic performance
+failover is authorized by this work.
 
 ## Plan
 
@@ -46,16 +49,14 @@ Explain how warm-route marginal savings interact with border policy without
 pretending those savings erase upstream delay. State tradeoffs, migration and
 mixed-version behavior, and the limits of any convergence claim.
 
-Reconcile the existing directional charged/declared cost plan rather than
-creating a second peer-policy mechanism. Completion is a documented decision,
+Reconcile with cluster-routing's configured link costs rather than creating
+a second peer-policy mechanism. Completion is a documented decision,
 worked counterexamples or model checks, and independently completable follow-up
 quests. Open wire/API choices belong to this design exercise.
 
 ## Related
 
-- [Peer reconfigure](/quest/m1/pop-skipping/peer-reconfigure.md) - existing
-  charged versus declared directional policy
-- [PoP skipping](/quest/m1/pop-skipping/README.md) - coordinated fleet economics
-  and warm-route behavior
+- [Cluster routing](/quest/m1/cluster-routing.md) - in-cluster topology and
+  cost; this designs only what crosses its boundaries
 - [#3769](https://github.com/moq-dev/moq/pull/3769) - measurement-based pricing
   prompted the separation of measurement, operator policy, and protocol

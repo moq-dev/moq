@@ -26,4 +26,4 @@ accept `OBJECT_DATAGRAM` as the drafts define; no project draft changes.
 
 ## Required
 
-- [Datagram groups](/quest/m1/moxygen/datagram.md) - the Rust side this mirrors and interops with
+- [moxygen interop](/quest/m1/moxygen/README.md) - its datagram groups quest (done on the line) is the Rust side this mirrors and interops with

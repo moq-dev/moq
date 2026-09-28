@@ -16,9 +16,9 @@ constant rather than the configured `Versions` (`versions.alpns()`, which
 config and then ignored on iroh. Thread the configured versions through
 instead.
 
-The relay's WebSocket listener and `moq-ffi`'s transport also read
-`moq_net::ALPNS` directly. Check whether they have the same hole; fix them
-here if it is the same small change, otherwise report it.
+`moq-ffi`'s transport (`rs/moq-ffi/src/transport.rs`) also offers
+`moq_net::ALPNS` directly; fix it here too. The relay's WebSocket listener
+already honors the configured versions. Scope is those two files.
 
 Decided by the maintainer: the finalized lite-07 ALPN stays `moq-lite-07`,
 as `drafts/draft-lcurley-moq-lite.md` already says. Peers from the yanked
