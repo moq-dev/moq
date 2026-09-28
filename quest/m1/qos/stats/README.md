@@ -48,7 +48,7 @@ Decisions settled while planning:
   producer is a breaking change, and the moq-json rework there is what the
   producers build on.
 
-## Quests
+## Required
 
 - [Schema and library](/quest/m1/qos/stats/schema.md) - moq-stats takes an
   extension, serves per-broadcast tracks, and hang defines the media stats

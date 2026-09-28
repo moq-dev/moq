@@ -49,7 +49,7 @@ session with fairness enabled, the send group is the broadcast. The default
 MoQ order is newest group first; an ordered subscription keeps oldest first.
 This is a transport API change, not a MoQ wire change.
 
-## Quests
+## Required
 
 - [Preserve QUIC packet identity in BBR](/quest/m1/quic/bbr-packet-identity.md) - ACKs and losses identify the right packet across QUIC spaces
 - [Finish each BBR ACK sample before using it](/quest/m1/quic/bbr-ack-sampling.md) - current delivery samples reach the model once with consistent metadata
