@@ -426,8 +426,9 @@ export class Producer {
 	// read mirrored sinks, never this state directly.
 	#state = new TrackState();
 	#sequence: TrackSequence = { next: 0 };
-	// One past the highest group this producer received. The shared counter above can run
-	// ahead of it: sibling producers of the same track and datagrams advance it too.
+	// One past the highest group or datagram this producer received, like the Rust
+	// `max_sequence`. The shared counter above can run ahead of it: sibling producers of
+	// the same track advance it too.
 	#received = 0;
 
 	// Recently written source groups, retained for replay to late subscribers and
@@ -790,6 +791,7 @@ export class Producer {
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.
 	// Late subscribers do NOT replay old datagrams (best-effort, unlike the group cache).
 	#publishDatagram(datagram: Datagram): void {
+		this.#received = Math.max(this.#received, datagram.sequence + 1);
 		for (const sink of this.#sinks) {
 			sink.datagrams.mutate((list) => {
 				if (list.length === MAX_DATAGRAMS) list.shift();

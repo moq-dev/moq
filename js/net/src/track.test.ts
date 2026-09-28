@@ -1731,6 +1731,14 @@ test("an abort after the declared end settles ends clean", async () => {
 	}
 });
 
+test("an abort after the declared end reached by a datagram ends clean", () => {
+	const producer = new TrackProducer("test").accept();
+	producer.appendDatagram(Timestamp.fromMillis(0), enc.encode("d"));
+	producer.finishAt(1);
+	producer.close(new Error("boom"));
+	expect(producer.closed.peek()).toBeNull();
+});
+
 test("an ended track's buffered groups age out for a stale subscriber", () => {
 	// Nothing writes after the close, so only the prune wakeup can reclaim them. Stub the
 	// timers so the test fires exactly the wakeups still armed, at a mocked time.
