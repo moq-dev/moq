@@ -56,10 +56,9 @@ async fn round(abort: bool) -> (Vec<u64>, Option<Error>) {
 async fn an_abort_after_the_end_settled_keeps_the_groups_for_a_late_reader() {
 	let (got, err) = round(true).await;
 	assert!(
-		err.is_some() || got == (0..GROUPS).collect::<Vec<_>>(),
-		"the track ended Ok(None) having delivered {got:?} of {GROUPS} groups that had all \
-		 finished before the abort (a complete track must hand a late reader every group it \
-		 promised, or end with an error)"
+		err.is_none() && got == (0..GROUPS).collect::<Vec<_>>(),
+		"got {got:?} of {GROUPS} groups, err={err:?} (every group had finished before the \
+		 abort, so a late reader gets all of them and then the clean end)"
 	);
 }
 

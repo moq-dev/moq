@@ -1512,6 +1512,11 @@ impl Producer {
 	/// of the leftover cache. Child groups are independent: a consumer that already pulled
 	/// a [`group::Consumer`] keeps its own handle and can finish reading it.
 	///
+	/// Unless the declared end had settled: the final sequence from
+	/// [`finish_at`](Self::finish_at) was reached and every group below it finished. The
+	/// track then already holds everything it promised, so it ends cleanly and keeps the
+	/// cached groups for consumers still draining, as [`finish`](Self::finish) does.
+	///
 	/// [`finish`](Self::finish) is deliberately not terminal: it declares the final
 	/// sequence, and lower-numbered groups may still be written afterwards.
 	pub fn abort(self, err: Error) -> Result<()> {
