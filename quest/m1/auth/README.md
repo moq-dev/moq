@@ -89,6 +89,9 @@ existing lite-06 ALPN.
 
 ## Quests
 
+- [Malformed grant](/quest/m1/auth/malformed-grant.md) - a malformed or
+  non-canonical grant pattern, or an out-of-range `Expires`, closes the
+  session with PROTOCOL_VIOLATION in Rust and JS
 - [Origin narrowing](/quest/m1/auth/narrowing.md) - a live grant narrows in
   place: subscriptions outside it reset, publishes outside it abort, and relay
   revalidation stops closing the session
