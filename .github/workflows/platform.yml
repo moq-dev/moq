@@ -2,9 +2,10 @@ name: Platform
 
 # Compiles the `#[cfg(target_os = ...)]` code that no Linux job compiles at all:
 # moq-video's Media Foundation and VideoToolbox backends, their capture paths,
-# and moq-audio's ScreenCaptureKit capture. Without this, a change that breaks
-# them (a moq-net type they consume, say) merges green and compiles for the
-# first time in a tag-triggered release build.
+# and moq-audio's ScreenCaptureKit capture. It also builds the OBS plugin
+# against the obs-deps bundle, which obs.yml can't do on Linux. Without this, a
+# change that breaks any of them (a moq-net type they consume, say) merges green
+# and compiles for the first time in a tag-triggered release build.
 #
 # Unfiltered, unlike android.yml: the cheap half (macOS) takes about as long as
 # installing `just`, and the Windows half is still shorter than check.yml, so a
@@ -103,3 +104,39 @@ jobs:
 
       - name: Check
         run: just rs macos
+
+  # The release build of the OBS plugin, minus the published libmoq: build.sh
+  # without `--libmoq-release` links the in-tree rs/libmoq instead, so a PR is
+  # checked against its own C ABI. The obs-deps bundle (libobs, Qt6, ffmpeg)
+  # comes from buildspec.json at configure time, same as a tag build.
+  obs:
+    name: OBS (${{ matrix.name }})
+    if: github.event.action != 'closed'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            target: aarch64-apple-darwin
+            os: macos-latest
+          - name: Windows
+            target: x86_64-pc-windows-msvc
+            # The plugin preset uses the Visual Studio 17 2022 generator.
+            os: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: ./cpp/obs/build.sh --target "$TARGET" --output "$RUNNER_TEMP/obs"
