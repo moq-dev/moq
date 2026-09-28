@@ -6,7 +6,7 @@ import { compareSpecificity, IntersectionError, InvalidPattern, Pattern, Pattern
 interface Vectors {
 	parse: { text: string; canonical?: string; segments?: Segment[] | null; error?: InvalidPattern.Code }[];
 	literal: ({ path: string; pattern: string } | { path: string; error: InvalidPattern.Code })[];
-	subtree: { path: string; pattern: string }[];
+	subtree: ({ path: string; pattern: string } | { path: string; error: InvalidPattern.Code })[];
 	head: { pattern: string; head: string; literal: boolean; globstar: boolean }[];
 	matches: { pattern: string; path: string; expect: boolean }[];
 	contains: { outer: string; inner: string; expect: boolean }[];
@@ -68,7 +68,14 @@ describe("vectors", () => {
 				).toBe(c.error);
 			else expect(Pattern.literal(c.path).text, c.path).toBe(c.pattern);
 		}
-		for (const c of vectors.subtree) expect(Pattern.subtree(c.path).text, c.path).toBe(c.pattern);
+		for (const c of vectors.subtree) {
+			if ("error" in c)
+				expect(
+					errorCode(() => Pattern.subtree(c.path)),
+					c.path,
+				).toBe(c.error);
+			else expect(Pattern.subtree(c.path).text, c.path).toBe(c.pattern);
+		}
 	});
 
 	test("head", () => {
