@@ -39,7 +39,10 @@ moq <MoQ side> fetch <track> [options]
 The **MoQ side** goes first and attaches the process to the network:
 `--connect <url>` dials a relay (the path is the auth path, `?jwt=`
 carries a token), and `--broadcast <name>` names the broadcast. A process can
-instead host sessions with `--listen`, or both at once. `moq import --help` lists the sources and `moq import rtmp --help` a specific one.
+instead host sessions with `--listen`, or both at once. A listener admits
+clients by `--auth-url` or `--auth-public`, as the relay does (see
+[Authentication](/bin/relay/auth)); public rules ignore certificates, so
+`--auth-public` refuses to start with `--listen-tls-root`. `moq import --help` lists the sources and `moq import rtmp --help` a specific one.
 
 ```bash
 # Publish a file (remux to MPEG-TS without re-encoding)
