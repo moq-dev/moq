@@ -15,14 +15,15 @@ match Rust moq-net: the player never re-asks a handler that already said no.
   `js/watch/src/broadcast.ts` only watches `request.active`, so after a
   `dynamic()` handler refuses, the request closes with an error that nobody
   reads and `active` stays `undefined` forever.
-- Observe `Requesting.closed` (and decide whether `unroutable` matters too)
-  and carry the error into the broadcast's state. Whether that is a new
-  `"error"` status, a separate error signal, or both is open; mirror how the
-  element already surfaces other terminal states, such as the unsupported
-  indicator. Keep the error's message so the UI can say why.
-- What clears the error is part of the design: a change of `name`, origin,
-  or `enabled` naturally makes a fresh request, and that should be the only
-  way back. No retry loop.
+- Observe `Requesting.closed` and carry the error into the broadcast's
+  state. Whether that is a new `"error"` status, a separate error signal, or
+  both is open; mirror how the element already surfaces other terminal
+  states, such as the unsupported indicator. Keep the error's message so the
+  UI can say why. `unroutable` is also true for a path nothing serves yet, so
+  it cannot tell a refusal from offline.
+- What clears the error is part of the design: a fresh request (a new
+  `name` or origin, or re-enabling) should be the only way back. No retry
+  loop.
 - Cover both the announced and unannounced paths in `#runBroadcast`.
 - Show it in the UI, and update `demo/web` if it consumes the status. Add a
   test in `js/watch` where a `dynamic()` handler refuses and the broadcast

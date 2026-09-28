@@ -15,9 +15,10 @@ config instead of quietly refusing every session.
   the CLI must each remember to call; the CLI missing the original check is
   the bug it fixes. Fold it into `validate(&self, client_ca: bool)` so every
   caller has to answer, and have `init` take the same answer so a caller that
-  skips `validate` still cannot start. The exact shape (a bool, or something
-  `init` already receives such as the listener TLS config) is open; prefer
-  whatever makes the wrong call unrepresentable.
+  skips `validate` still cannot start. `init` today only receives the
+  outbound auth TLS, so the listener's client-CA answer is a new input; its
+  shape (a bool, or the listener TLS config) is open. Prefer whatever makes
+  the wrong call unrepresentable.
 - `spawn_server` in `rs/moq-cli/src/main.rs` maps any `auth.validate()` error
   to `Auth::refuse`. Return the error instead, so a bad config stops startup.
 - Update every caller, the tests #4364 added in both `moq-cli` and

@@ -34,8 +34,9 @@ widened timeouts, and no dependence on how fast the OS delivers loopback.
   `end`. Don't keep two tests proving the same thing.
 - Measure against tokio's clock, not `SystemTime`: the grant still carries a
   wall-clock `expires`, so pin how it maps onto the paused clock.
-- Other paused-clock tests that touch real sockets share the hazard. #4291's
-  audit named `a_grant_within_clock_skew_stays_live` (moq-auth) and
+- Other paused-clock tests touch real sockets and would share the hazard
+  once a timeout lands on their path. #4291's audit named
+  `a_grant_within_clock_skew_stays_live` (moq-auth) and
   `fixed_addresses_keep_tls_name_and_request_host` (moq-tokio websocket);
   moq-auth's `clock_server` helper exists only to keep axum on the paused
   clock. Move those onto the same seam if it is cheap.
