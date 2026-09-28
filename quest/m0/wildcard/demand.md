@@ -17,12 +17,15 @@ any that covers the path, so a route at `room/` already makes
 the covering test stays `Path.hasPrefix` (`:223`) and needs no pattern
 matching.
 
-The check opts into hidden routes (`announced({ hidden: true })`). A service
-prefix like `.transcode/` is hidden from default discovery, so without the opt-in
-a subscriber with a broad scope never sees the claim covering a rendition.
-Hiding only narrows listings, and this check lists nothing to the user, so
-opting in is safe. It still relies on the relay and the token's scope exposing
-those routes to the browser.
+The check opts into hidden routes (`announced({ hidden: true })`). Derived
+output lives under a hidden service prefix (`.pro/transcode/`), so without the
+opt-in a subscriber with a broad scope never sees the claim covering a
+rendition. Hiding only narrows listings, and this check lists nothing to the
+user, so opting in is safe. Hidden routes are a moq-lite-07 feature: on
+moq-lite-06 or older the relay never announces them, by design, so the
+rendition stays filtered there, while subscribing to the explicit
+`.pro/<service>/...` path works on any version. The token's scope must still
+reach those routes.
 
 So the remaining work is narrow: prove that a rendition covered only by a
 service's prefix claim is listed and demanded, and fix whatever stops it.
