@@ -18,9 +18,15 @@ missing, late, broader, or mismatched refresh closes them. Reconnecting with an
 expired grant is denied as it is today.
 
 Keep deadline enforcement in the relay authorization owner rather than a
-cooperative worker timer. Cover an idle open handle, active source reads,
-active publication, refresh before expiry, refresh after demand ends, relay
-clock skew within the token policy, disconnect races, HTTP and HLS rejection of
+cooperative worker timer. Build on what exists: `Grant::deadline`
+(`rs/moq-auth/src/grant.rs`, #4237) already pins an accepted grant to a fixed
+deadline, and dev's `moq_auth::lease` (#3943) re-checks a session on cadence
+and reports why it ended. Extend those to the handles a grant opened rather
+than adding a second timer. No clock-skew grace: open #4368 makes expiry
+exact and drops `CLOCK_SKEW`, so a deadline in the past is expired.
+
+Cover an idle open handle, active source reads, active publication, refresh
+before expiry, refresh after demand ends, disconnect races, HTTP and HLS rejection of
 the worker audience, and unrelated traffic continuing through an existing
 pooled HLS consumer after a worker grant expires.
 

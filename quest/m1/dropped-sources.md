@@ -27,7 +27,7 @@ Public API: none expected; error values consumers observe change. Wire: none.
 
 ## Required
 
-- [Unauthorized](/quest/m1/auth/unauthorized.md) - #4179 supplies shared Unauthorized errors and revoked-stream handling
+- [Auth](/quest/m1/auth/README.md) - its Unauthorized quest (#4179, done on the line) supplies shared Unauthorized errors and revoked-stream handling
 
 ## Related
 

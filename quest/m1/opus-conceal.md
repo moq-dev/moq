@@ -11,6 +11,10 @@ last real one, instead of 120 ms. The API is unchanged and lands on main.
   libopus's `frame_size` on every call, and libopus conceals exactly that many
   samples. Record the last packet's sample count (`opus_packet_get_nb_samples`)
   and pass it for an empty packet; it is always a multiple of 2.5 ms.
+- The audio-codecs line branch moves this code to
+  `rs/moq-audio/src/decode/backend/libopus.rs` (same `max_frame_size`);
+  land the fix wherever the code lives when this starts, and port it on the
+  line's next merge from main otherwise.
 - Refuse loss before any packet has decoded, rather than surfacing libopus's
   `BUFFER_TOO_SMALL`.
 - Document on `decode` how much an empty packet conceals.

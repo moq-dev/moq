@@ -2,7 +2,7 @@
 
 ## Goal
 
-A PipeWire camera that delivers I420 or NV12 in separate memory blocks produces frames. Single-block cameras keep working. Other pixel formats stay unsupported. Importing multi-plane NV12 into Vulkan stays with the PipeWire DMA-BUF quest.
+A PipeWire camera that delivers I420 or NV12 in separate memory blocks produces frames. Single-block cameras keep working. Other pixel formats stay unsupported. The renderer already imports multi-plane NV12 DMA-BUFs (#3331); this is the shared-memory capture offer.
 
 ## Plan
 
@@ -13,4 +13,4 @@ Unit-test the offer, a multi-block NV12 buffer, and a multi-block I420 buffer, w
 ## Related
 
 - [Validate PipeWire cameras on a portal and a Pi](/quest/m3/pipewire-camera-hardware.md) - the pass that shows whether a real Pi or portal camera delivers separate planes
-- [PipeWire DMA-BUFs into Vulkan](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - multi-plane NV12 import in the renderer
+- [PipeWire DMA-BUFs into Vulkan](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - the hardware validation of the DMA-BUF path

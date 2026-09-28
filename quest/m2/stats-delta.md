@@ -112,4 +112,4 @@ impact: new on-demand tracks; existing tracks unchanged.
 
 - [Stats format page](/doc/concept/stats.md) - where the new flavor is documented
 - [Client stats](/quest/m1/qos/stats/README.md) - the extension and gauges the format must carry or refuse
-- [Compressed tracks](/quest/m2/flate/README.md) - the group-window discipline this flavor repeats
+- [Compressed tracks](/quest/m2/flate/README.md) - group-scoped DEFLATE tracks, whose group-window discipline this flavor repeats

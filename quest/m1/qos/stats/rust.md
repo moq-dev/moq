@@ -36,7 +36,3 @@ publisher of a `.hang` broadcast can learn whether its viewers played it.
 
 - [Schema and library](/quest/m1/qos/stats/schema.md) - the producer and the
   media types
-
-## Closes
-
-- [#2734](https://github.com/moq-dev/moq/issues/2734) - close this issue when the quest finishes

@@ -1,4 +1,4 @@
-# Wildcard advertisements
+# [L] Wildcard advertisements
 
 ## Goal
 
@@ -38,7 +38,10 @@ widest prefix that covers it (`**` is the root) and the request is the
 authority, so the advertise half of this questline is re-scoped to prefix
 claims resolved against pattern interest. The three workloads above still
 hold: the transcoder claims the root and refuses what it will not serve.
-Resolve and Demand are additive and land on main.
+Resolve and Demand are additive and land on main. Both are done on the line
+branch (#4050 re-resolves on a refusal; 9d059b1b9 lists and demands covered
+renditions in the browser player), so main no longer lists them; the line
+branch moves to `quest/m0/wildcard/README` to match this path.
 
 ### What already exists, and what does not
 
@@ -64,7 +67,7 @@ the requester's excluded hop, ordered by `route_order`
 (`rs/moq-net/src/model/origin.rs:633`), served on demand by the session that
 announced it and cached per prefix in `ServeState.served` (`:764`). That is the split-horizon-safe
 lookup the old `origin::Dynamic` could not provide, and it is what
-[Resolve](/quest/m0/wildcard/resolve.md) now extends rather than replaces.
+resolve extends rather than replaces.
 
 Request resolution, by contrast, is still prefix-only (`best_server` in
 `rs/moq-net/src/model/origin.rs`). The pattern matcher itself exists:
@@ -123,15 +126,13 @@ field.
   The seed still has a floor, because standby and running claims of equal
   specificity do meet: a standby concrete claim (`with_cost(1000)` is the
   existing per-broadcast convention) shares a tier with a running publisher's
-  concrete announcement and with warm-advertise's exact-path warm routes. The
+  concrete announcement. The
   floor MUST exceed the deployment's enforced maximum charged-link count
   times its enforced maximum link cost (32 links at cost at most 5 gives
   a bound of 160, with producing origins seeded at 0), or a nearby standby outranks a distant running copy and the
   mesh starts a second encode of a stream it is already serving. That floor
   replaces the ad-hoc standby bias the moq.pro (downstream) transcode worker
-  carries today, and it is the same stride discipline
-  [pop-skipping](/quest/m1/pop-skipping/README.md) states for provider
-  economics.
+  carries today.
 - **One cost varint, not the pair.** `Cost` is `{ warm, cold }` because a relay
   that is carrying a broadcast discounts the warm half. A wildcard carries
   nothing and can never be warm, so the two halves are provably equal and the
@@ -154,7 +155,7 @@ field.
   composer waiting for an announcement that only demand would produce. The
   browser player currently enforces the opposite (`js/watch`'s
   `#isPathAnnounced` hides a catalog rendition with no exact-path
-  announcement); [Demand](/quest/m0/wildcard/demand.md) makes a covering wildcard count as
+  announcement); demand makes a covering wildcard count as
   availability there.
 - **Refusal is a typed stream reset, with no negative cache.** An advertiser
   resets a subscribe it will not serve, and the reset carries which KIND of
@@ -256,21 +257,13 @@ no generation, so a client that must distinguish recording generations reads
 the catalog's archive entry ([archive](/quest/m1/archive/README.md)) rather
 than announce state.
 
-## Required
-
-- [Resolve](/quest/m0/wildcard/resolve.md) - a relay resolves a subscribe or
-  FETCH for an unannounced path against the best matching wildcard
-- [Demand](/quest/m0/wildcard/demand.md) - the browser player subscribes to a
-  catalog-referenced broadcast a wildcard covers, breaking the lazy-rendition
-  deadlock
-
 ## Related
 
 - [path-patterns](/quest/m1/path-patterns.md) - owns the pattern dialect
   and the shared matcher advertisements reuse
 - [archive](/quest/m1/archive/README.md) - an archive advertises the catch-all
   pattern, and its catalog names the generations a wildcard cannot
-- [pop-skipping](/quest/m1/pop-skipping/README.md) - it owns the route cost and
-  the rank hash this reuses
+- [Cluster routing](/quest/m1/cluster-routing.md) - origin selection by cost
+  with an HRW tie-break, built on this line's specificity
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - derived output moves under the
   source's `@<epoch>` segment, which the suffix patterns still match

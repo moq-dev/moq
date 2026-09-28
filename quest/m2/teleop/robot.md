@@ -34,41 +34,46 @@ QUIC stream (`open_uni`, `rs/moq-net/src/lite/publisher.rs`), so frames inside
 it are ordered and delivered exactly once.
 
 That guarantee is scoped, and the crate must say so rather than promise
-losslessness. A group caches at most `MAX_GROUP_CACHE` bytes and evicts frames
-off the front (`rs/moq-net/src/model/group.rs`); a reader that falls behind the
-retained window, or joins late, gets `Error::Lagged` and cannot recover the
-start of the log. So the contract is ordered, gap-free delivery for a live
-reader that keeps up, and recovery after a reconnect belongs to the application
+losslessness. A group holds at most `MAX_CACHE_BYTES` and `MAX_GROUP_FRAMES`
+(`rs/moq-net/src/model/group.rs`), and a write past either aborts it with
+`Error::GroupTooLarge`; `moq_json::stream` never rolls its one group, so that
+bound ends the track, and a link drop or reconnect loses what was in flight.
+So the contract is ordered, gap-free delivery for a live reader within one
+bounded log, and recovery after a reconnect belongs to the application
 protocol. That is an acceptable division for MAVLink, whose mission, parameter
 and file-transfer services already carry their own stop-and-wait
 retransmission, but it must be stated, not assumed.
 
 The framing is where the guarantee lives, not the subscription flags:
 
-- `Subscription::ordered` is a scheduling tie-break whose own doc says groups
-  may arrive out of order or not at all. It aggregates across subscribers by
-  `&&`, and the IETF transport does not carry it. A class built on it would not
-  be reliable, which is why the reliable class is a single group instead.
+- `track::Subscriber::ordered()` returns an `Ordered` handle that reads the
+  groups it receives in sequence order. It is a local cursor, not a delivery
+  guarantee: groups that aged out or were skipped never arrive. A class built
+  on it would not be reliable, which is why the reliable class is a single
+  group instead.
 - What makes the lossy class lossy on the wire is the publisher's
-  `Info::latency_max`: `commit_group` calls `evict_expired`, which calls
-  `slot.group.abort(Error::Old)` (`rs/moq-net/src/model/track.rs`), and an abort
-  resets the QUIC stream, so stale bytes stop being retransmitted.
+  `Info::max_age`: `evict_expired` aborts an aged-out group with `Error::Old`
+  (`rs/moq-net/src/model/track.rs`), and an abort resets the QUIC stream, so
+  stale bytes stop being retransmitted.
 - A subscriber cannot weaken either class. `clamp_combined`
   (`rs/moq-net/src/model/track.rs`) clamps the aggregate window down to
-  `Info::latency_max`, and `Subscription::default()` is already
+  `Info::max_age`, and `Subscription::max_age` already defaults to
   `Duration::ZERO`, so a raw observer subscribing through `moq-net` neither
   widens the window nor has to be prevented from trying.
 
 ### Contents
 
-- The catalog section, through `moq-mux`'s `CatalogExt` and
-  `RenditionConfig<E>`: a namespaced root section whose entries embed a
-  `JsonConfig` or `BinaryConfig` beside the robot's own fields, published
-  through the `moq-mux` data producers.
+- The catalog entries. The hang catalog already advertises data tracks in its
+  `json` and `binary` sections (`rs/hang/src/catalog/{json,binary}.rs`),
+  written by the `moq-mux` data producers, and each entry carries `extra`
+  fields. Decide whether the robot's fields ride there or in a namespaced
+  root section through `moq-mux`'s `CatalogExt` and `RenditionConfig<E>`.
   No hang schema change.
 - Announce-prefix fan-in, generalised from `rs/moq-boy/src/input.rs`.
-- The two delivery classes, as `moq-json`'s snapshot and stream modes with
-  the group structure and `Info::latency_max` each one needs.
+- The two delivery classes, as the snapshot and stream modes with the group
+  structure and `Info::max_age` each one needs: `moq-json`'s for JSON, and the
+  opaque-bytes ones for binary frames (`moq-binary`, folding into `moq-flate`
+  per [moq-binary folds into moq-flate](/quest/m1/flate-binary.md)).
 - Per-stage timestamp instrumentation, generalised from moq-boy's `status`
   track. Check it against the publisher-reported stats broadcast
   ([client stats](/quest/m1/qos/stats/schema.md), moq#2734) before adding a

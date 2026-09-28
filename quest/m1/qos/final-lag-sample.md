@@ -26,6 +26,13 @@ interval disappears with it.
 
 Public API: none. Wire: none, only the histogram's values change.
 
+Overlaps the lag-splice quest on the line branch
+([#4381](https://github.com/moq-dev/moq/pull/4381)), which also changes how
+`FrontierInner::sample` holds `unsampled` weight and when a spliced segment's
+source stops being sampled. Land them in sequence on the same sampler, not in
+parallel, and make the final drop-time sample keep any weight lag-splice
+defers.
+
 ## Required
 
 - [Starvation](/quest/m1/qos/starvation.md) - the sampler this extends (#4298)
