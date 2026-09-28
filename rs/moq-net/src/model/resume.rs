@@ -2256,13 +2256,19 @@ impl Subscriber {
 		}
 	}
 
-	/// Poll for the first group the first segment's source serves at or above this
-	/// cursor's floor, once resolved; see [`track::Subscriber::poll_start`]. Like
-	/// [`Self::poll_final`], this only resolves the subscription and consumes no groups.
+	/// Poll for the first group the first segment reaching this cursor's floor serves at
+	/// or above it, once its source resolved; see [`track::Subscriber::poll_start`]. A
+	/// segment ending at or below the floor serves nothing here, so its source is not
+	/// waited on. Like [`Self::poll_final`], this only resolves the subscription and
+	/// consumes no groups.
 	pub(crate) fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		self.poll_sync(waiter);
 		let floor = self.min_sequence;
-		let Some(seg) = self.segments.first_mut() else {
+		let Some(seg) = self
+			.segments
+			.iter_mut()
+			.find(|seg| seg.last_group().is_none_or(|last| last > floor))
+		else {
 			return Poll::Ready(None);
 		};
 		ready!(Self::poll_activate(seg, &self.last_prefs, floor, waiter));
@@ -2497,6 +2503,32 @@ mod test {
 		assert_eq!(recv(&mut sub), 2);
 		assert_eq!(recv(&mut sub), 3);
 		recv_pending(&mut sub);
+	}
+
+	/// A segment that ends at or below the cursor's floor serves it nothing, so its
+	/// source's unresolved start must not hold up the start of the segment that does.
+	#[tokio::test]
+	async fn poll_start_skips_a_segment_below_the_floor() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+		track_a.request_start(Some(0)).unwrap();
+		track_b.request_start(Some(5)).unwrap();
+
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		producer.switch(&consumer_b, Position::group(5)).unwrap();
+
+		let mut sub = producer.consume().subscribe(replay());
+		sub.start_at(10);
+		assert!(
+			kio::wait(|waiter| sub.poll_start(waiter)).now_or_never().is_none(),
+			"B's source has not resolved yet"
+		);
+
+		// A's source never resolves: it serves nothing at or above the floor.
+		track_b.start_at(12).unwrap();
+		let start = kio::wait(|waiter| sub.poll_start(waiter)).now_or_never();
+		assert_eq!(start, Some(Some(12)), "waited on a segment below the floor");
 	}
 
 	#[tokio::test]
