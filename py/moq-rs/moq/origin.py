@@ -31,18 +31,18 @@ each broadcast's exact path, so subscribers can enumerate broadcasts from routes
 """
 
 AnnounceEvent = MoqAnnounceEvent
-"""What :class:`AnnounceConsumer` yields: :data:`AnnounceEventAnnounced`,
-:data:`AnnounceEventUpdated`, or :data:`AnnounceEventRetracted` carrying an
+"""What :class:`AnnounceConsumer` yields: :data:`AnnounceEventStart`,
+:data:`AnnounceEventUpdate`, or :data:`AnnounceEventEnd` carrying an
 :data:`Announce` as ``announce``, or :data:`AnnounceEventLive`.
 """
 
-AnnounceEventAnnounced = MoqAnnounceEvent.ANNOUNCED
+AnnounceEventStart = MoqAnnounceEvent.START
 """A route now covers the prefix; the stream had none there."""
 
-AnnounceEventUpdated = MoqAnnounceEvent.UPDATED
+AnnounceEventUpdate = MoqAnnounceEvent.UPDATE
 """The route covering the prefix changed hops or cost."""
 
-AnnounceEventRetracted = MoqAnnounceEvent.RETRACTED
+AnnounceEventEnd = MoqAnnounceEvent.END
 """No route covers the prefix any more; carries its last route."""
 
 AnnounceEventLive = MoqAnnounceEvent.LIVE

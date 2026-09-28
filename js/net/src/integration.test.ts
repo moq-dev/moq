@@ -104,14 +104,14 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	const entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected entry");
 	expect(entry.prefix).toBe("test" as Path.Valid);
-	expect(entry.kind).toBe("announced");
+	expect(entry.kind).toBe("start");
 
 	// Scoped discovery only echoes the suffix on the wire, but presents the whole path.
 	const prefixed = client.announced(Path.Pattern.subtree(Path.from("root")));
 	const prefixedEntry = await nextRoute(prefixed);
 	if (!prefixedEntry) throw new Error("expected prefixed entry");
 	expect(prefixedEntry.prefix).toBe("root/child" as Path.Valid);
-	expect(prefixedEntry.kind).toBe("announced");
+	expect(prefixedEntry.kind).toBe("start");
 
 	// Client consumes the broadcast and subscribes to a track
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -388,28 +388,28 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 	let entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected announce");
 	expect(entry.prefix).toBe("first" as Path.Valid);
-	expect(entry.kind).toBe("announced");
+	expect(entry.kind).toBe("start");
 
 	// A live announce.
 	const second = publish(origin, Path.from("second"));
 	entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected announce");
 	expect(entry.prefix).toBe("second" as Path.Valid);
-	expect(entry.kind).toBe("announced");
+	expect(entry.kind).toBe("start");
 
 	// Unannounce: retracted by announce id on the wire.
 	second.close();
 	entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected unannounce");
 	expect(entry.prefix).toBe("second" as Path.Valid);
-	expect(entry.kind).toBe("retracted");
+	expect(entry.kind).toBe("end");
 
 	// Re-announce the same path: a fresh announce assigning a fresh id.
 	const secondAgain = publish(origin, Path.from("second"));
 	entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected re-announce");
 	expect(entry.prefix).toBe("second" as Path.Valid);
-	expect(entry.kind).toBe("announced");
+	expect(entry.kind).toBe("start");
 
 	// Cleanup
 	first.close();
@@ -1913,7 +1913,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 	// The announcement lands in the client's origin.
 	const reader = clientOrigin.consume();
 	const announced = reader.announced();
-	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("test"), kind: "announced" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("test"), kind: "start" });
 
 	// Consuming through the origin reaches the wire.
 	const remote = await routed(reader, Path.from("test"));
@@ -1923,7 +1923,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 
 	// Unpublishing retracts the entry over the wire and out of the origin.
 	broadcast.close();
-	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("test"), kind: "retracted" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("test"), kind: "end" });
 	await until(() => !wireOf(reader).routes(Path.from("test")));
 
 	await serving;
@@ -2274,7 +2274,7 @@ test("create then announce is discoverable on the wire", async () => {
 	broadcast.announce();
 	const entry = await pending;
 	expect(entry?.prefix).toBe("later" as Path.Valid);
-	expect(entry?.kind).toBe("announced");
+	expect(entry?.kind).toBe("start");
 
 	announced.close();
 	broadcast.close();
@@ -2304,7 +2304,7 @@ test("a handle serves a request under live/** over the wire", async () => {
 	const announced = client.announced();
 	const entry = await nextRoute(announced);
 	expect(entry?.prefix).toBe("live" as Path.Valid);
-	expect(entry?.kind).toBe("announced");
+	expect(entry?.kind).toBe("start");
 
 	const remote = wireOf(client).consume(Path.from("live/cam"));
 	const track = remote.track("chat").subscribe().ordered();
@@ -2438,7 +2438,7 @@ async function caughtUp(protocol: string, version: number | undefined, paths: st
 		const event = await withTimeout(announced.next(), 2000, `${protocol || version}: never caught up`);
 		if (!event) throw new Error("announcements ended");
 		if (event.kind === "live") break;
-		if (event.kind !== "announced") throw new Error(`only announcements before the marker: got ${event.kind}`);
+		if (event.kind !== "start") throw new Error(`only announcements before the marker: got ${event.kind}`);
 		seen.push(event.prefix);
 	}
 

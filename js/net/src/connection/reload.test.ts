@@ -570,7 +570,7 @@ test("closing an announce consumer during upstream teardown does not append retr
 		upstream.append({
 			prefix: Path.from("alice/camera.hang"),
 			captures: undefined,
-			kind: "announced",
+			kind: "start",
 			route: Route.default,
 		});
 		await consumer.next();

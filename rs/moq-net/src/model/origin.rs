@@ -716,21 +716,21 @@ impl OriginConsumerState {
 			PendingUpdate::Announce(meta) => {
 				// The consumer has seen this prefix before, so it is a metadata update.
 				let kind = match self.delivered.insert(prefix.clone()) {
-					true => AnnounceEvent::Announced,
-					false => AnnounceEvent::Updated,
+					true => AnnounceEvent::Start,
+					false => AnnounceEvent::Update,
 				};
 				(meta, kind)
 			}
 			PendingUpdate::Unannounce(meta) => {
 				self.delivered.remove(&prefix);
-				(meta, AnnounceEvent::Retracted)
+				(meta, AnnounceEvent::End)
 			}
 			PendingUpdate::UnannounceAnnounce { old, new } => {
 				// Deliver the retraction now; leave the trailing announce pending so
 				// the next take returns it for the same prefix.
 				self.delivered.remove(&prefix);
 				self.pending.insert(prefix.clone(), PendingUpdate::Announce(new));
-				(old, AnnounceEvent::Retracted)
+				(old, AnnounceEvent::End)
 			}
 		};
 		self.settled(&prefix);
@@ -1075,11 +1075,11 @@ fn hides(heads: &[PathOwned], prefix: &Path) -> bool {
 #[derive(Clone, Debug)]
 pub enum AnnounceEvent {
 	/// A route now covers the prefix; the cursor had none there.
-	Announced(Announce),
+	Start(Announce),
 	/// The route covering the prefix changed hops or cost; it is delivered in place.
-	Updated(Announce),
+	Update(Announce),
 	/// No route covers the prefix any more. Carries its last advertised route.
-	Retracted(Announce),
+	End(Announce),
 	/// Every route live at subscribe time has been delivered; what follows is
 	/// live changes. Yielded once, and only after each remote source feeding the
 	/// origin at subscribe time has landed its initial set.
@@ -3662,7 +3662,7 @@ impl Consumer {
 		// discovery, not lookup, so a hidden path resolves like any other.
 		let mut announced = consumer.untagged().with_hidden(true).announced();
 		loop {
-			if let AnnounceEvent::Announced(announce) | AnnounceEvent::Updated(announce) = announced.next().await?
+			if let AnnounceEvent::Start(announce) | AnnounceEvent::Update(announce) = announced.next().await?
 				&& path.has_prefix(&announce.prefix)
 			{
 				return Some(announce.route);
@@ -3947,13 +3947,13 @@ impl AnnounceConsumer {
 	/// Drive the egress announce guards for one update.
 	fn hand_out(&mut self, event: AnnounceEvent) -> AnnounceEvent {
 		match &event {
-			AnnounceEvent::Announced(announce) | AnnounceEvent::Updated(announce) => {
+			AnnounceEvent::Start(announce) | AnnounceEvent::Update(announce) => {
 				let scope = self.stats.egress(self.root.join(&announce.prefix));
 				self.guards
 					.entry(announce.prefix.clone())
 					.or_insert_with(|| scope.announce());
 			}
-			AnnounceEvent::Retracted(announce) => {
+			AnnounceEvent::End(announce) => {
 				self.guards.remove(&announce.prefix);
 			}
 			AnnounceEvent::Live => {}
@@ -4080,7 +4080,7 @@ impl AnnounceConsumer {
 	/// The route of an active event at `expected`.
 	fn active(event: AnnounceEvent, expected: &Path) -> Route {
 		match event {
-			AnnounceEvent::Announced(announce) | AnnounceEvent::Updated(announce) => {
+			AnnounceEvent::Start(announce) | AnnounceEvent::Update(announce) => {
 				assert_eq!(announce.prefix, *expected, "wrong prefix");
 				announce.route
 			}
@@ -4103,7 +4103,7 @@ impl AnnounceConsumer {
 	/// The next update must be a retraction at `expected`.
 	pub fn assert_next_ended(&mut self, expected: impl AsPath) {
 		match self.next_route_now().expect("next blocked").expect("no next") {
-			AnnounceEvent::Retracted(announce) => assert_eq!(announce.prefix, expected.as_path(), "wrong prefix"),
+			AnnounceEvent::End(announce) => assert_eq!(announce.prefix, expected.as_path(), "wrong prefix"),
 			other => panic!("should be a retraction: got {other:?}"),
 		}
 	}
@@ -4359,7 +4359,7 @@ mod tests {
 		loop {
 			match announced.next().now_or_never().expect("blocked").expect("closed") {
 				AnnounceEvent::Live => break,
-				AnnounceEvent::Announced(announce) => seen.push(announce.prefix.to_string()),
+				AnnounceEvent::Start(announce) => seen.push(announce.prefix.to_string()),
 				other => panic!("only announcements before the marker: got {other:?}"),
 			}
 		}
@@ -4772,19 +4772,19 @@ mod tests {
 			.unwrap();
 		let mut announced = consumer.announced();
 
-		let Some(Some(AnnounceEvent::Announced(first))) = announced.next_route_now() else {
+		let Some(Some(AnnounceEvent::Start(first))) = announced.next_route_now() else {
 			panic!("expected the announcement");
 		};
 		assert_eq!(first.prefix.as_str(), "");
 		assert_eq!(first.captures, Some(Vec::new()));
 
 		drop(exact);
-		let Some(Some(AnnounceEvent::Retracted(retracted))) = announced.next_route_now() else {
+		let Some(Some(AnnounceEvent::End(retracted))) = announced.next_route_now() else {
 			panic!("expected the retraction");
 		};
 		assert_eq!(retracted.prefix.as_str(), "");
 		assert_eq!(retracted.captures, Some(Vec::new()));
-		let Some(Some(AnnounceEvent::Announced(replacement))) = announced.next_route_now() else {
+		let Some(Some(AnnounceEvent::Start(replacement))) = announced.next_route_now() else {
 			panic!("expected the replacement");
 		};
 		assert_eq!(replacement.prefix.as_str(), "");
@@ -5329,7 +5329,7 @@ mod tests {
 		let second = producer.dynamic("live", Route::default().with_cost(1)).unwrap();
 
 		let mut announced = producer.consume().announced();
-		let Some(Some(AnnounceEvent::Announced(update))) = announced.next_route_now() else {
+		let Some(Some(AnnounceEvent::Start(update))) = announced.next_route_now() else {
 			panic!("expected the announcement");
 		};
 		assert_eq!(update.prefix.as_str(), "live");
@@ -5337,7 +5337,7 @@ mod tests {
 		announced.assert_next_wait();
 
 		drop(second);
-		let Some(Some(AnnounceEvent::Updated(update))) = announced.next_route_now() else {
+		let Some(Some(AnnounceEvent::Update(update))) = announced.next_route_now() else {
 			panic!("expected the reprice");
 		};
 		assert_eq!(update.prefix.as_str(), "live");
@@ -5437,14 +5437,14 @@ mod tests {
 		let server = producer.dynamic("live", Route::default()).unwrap();
 		let mut announced = producer.consume().announced();
 		let mut next = || StreamExt::next(&mut announced).now_or_never();
-		let Some(Some(AnnounceEvent::Announced(update))) = next() else {
+		let Some(Some(AnnounceEvent::Start(update))) = next() else {
 			panic!("expected the replayed route");
 		};
 		assert_eq!(update.prefix.as_str(), "live");
 		assert!(matches!(next(), Some(Some(AnnounceEvent::Live))));
 		assert!(next().is_none());
 		drop(server);
-		assert!(matches!(next(), Some(Some(AnnounceEvent::Retracted(_)))));
+		assert!(matches!(next(), Some(Some(AnnounceEvent::End(_)))));
 	}
 
 	#[tokio::test]
@@ -5649,7 +5649,7 @@ mod tests {
 		// The newest identical route wins, so the local twin takes over.
 		let local = producer.dynamic("room", route).unwrap();
 		match announced.next().now_or_never().expect("next blocked").expect("no next") {
-			AnnounceEvent::Updated(announce) => assert_eq!(announce.route.source(), Source::Local),
+			AnnounceEvent::Update(announce) => assert_eq!(announce.route.source(), Source::Local),
 			other => panic!("should be an update: got {other:?}"),
 		}
 
@@ -7009,7 +7009,7 @@ mod tests {
 
 		let alice = producer.create_broadcast("room/alice/chat").unwrap();
 		alice.announce(Route::default()).unwrap();
-		let Some(AnnounceEvent::Announced(update)) = announced.try_next_route() else {
+		let Some(AnnounceEvent::Start(update)) = announced.try_next_route() else {
 			panic!("expected alice's chat");
 		};
 		assert_eq!(update.prefix.as_str(), "room/alice/chat");
@@ -7020,7 +7020,7 @@ mod tests {
 		announced.assert_next_wait();
 
 		let broad = producer.announce("room", Route::default()).unwrap();
-		let Some(AnnounceEvent::Announced(update)) = announced.try_next_route() else {
+		let Some(AnnounceEvent::Start(update)) = announced.try_next_route() else {
 			panic!("expected the overlapping broad route");
 		};
 		assert_eq!(update.prefix.as_str(), "room");
@@ -7039,7 +7039,7 @@ mod tests {
 		local.announce(Route::default()).unwrap();
 
 		let mut announced = producer.consume().announced();
-		let Some(AnnounceEvent::Announced(update)) = announced.try_next_route() else {
+		let Some(AnnounceEvent::Start(update)) = announced.try_next_route() else {
 			panic!("expected one winning route");
 		};
 		assert_eq!(update.prefix.as_str(), "room/alice");

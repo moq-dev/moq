@@ -205,7 +205,7 @@ export class Broadcast {
 				if (entry.kind === "live") continue;
 				this.#announced.mutate((active) => {
 					if (!active) return;
-					if (entry.kind === "retracted") active.delete(entry.prefix);
+					if (entry.kind === "end") active.delete(entry.prefix);
 					else active.add(entry.prefix);
 				});
 			}

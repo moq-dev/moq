@@ -1664,8 +1664,8 @@ impl Cluster {
 			tokio::select! {
 				ann = announced.next() => {
 					let (update, active) = match ann {
-						Some(moq_net::announce::Event::Announced(update) | moq_net::announce::Event::Updated(update)) => (update, true),
-						Some(moq_net::announce::Event::Retracted(update)) => (update, false),
+						Some(moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update)) => (update, true),
+						Some(moq_net::announce::Event::End(update)) => (update, false),
 						Some(moq_net::announce::Event::Live) => continue,
 						None => return,
 					};
@@ -2308,10 +2308,8 @@ mod tests {
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		loop {
 			return match announced.next().await? {
-				moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
-					Some((route, true))
-				}
-				moq_net::announce::Event::Retracted(route) => Some((route, false)),
+				moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+				moq_net::announce::Event::End(route) => Some((route, false)),
 				moq_net::announce::Event::Live => continue,
 			};
 		}
@@ -2321,7 +2319,7 @@ mod tests {
 	fn try_next_announced(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Announce> {
 		loop {
 			return match announced.try_next()? {
-				moq_net::announce::Event::Announced(route) => Some(route),
+				moq_net::announce::Event::Start(route) => Some(route),
 				moq_net::announce::Event::Live => continue,
 				other => panic!("expected an announcement: got {other:?}"),
 			};
@@ -3121,7 +3119,7 @@ mod tests {
 		// The self-registration route must be visible on the origin.
 		// The watcher subscribed to an empty origin, so its marker comes first.
 		assert!(matches!(watcher.try_next(), Some(moq_net::announce::Event::Live)));
-		let Some(moq_net::announce::Event::Announced(update)) = watcher.try_next() else {
+		let Some(moq_net::announce::Event::Start(update)) = watcher.try_next() else {
 			panic!("self-registration must be published");
 		};
 		assert_eq!(update.prefix.as_str(), ".internal/origins/rendezvous.example.com:4443");

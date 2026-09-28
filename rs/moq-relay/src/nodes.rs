@@ -171,8 +171,7 @@ impl Nodes {
 			// A retraction can land mid-drain (a re-announce is a metadata update,
 			// not a retract-and-announce). Skip it rather than end the scan, which
 			// would drop every node still queued behind it.
-			let (moq_net::announce::Event::Announced(update) | moq_net::announce::Event::Updated(update)) = event
-			else {
+			let (moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update)) = event else {
 				continue;
 			};
 
@@ -385,7 +384,7 @@ mod tests {
 
 		// Take relay-a's replayed announce, then retire it so the cursor queues a
 		// bare unannounce ahead of relay-b's still-pending announce.
-		let Some(moq_net::announce::Event::Announced(first_update)) = announced.try_next() else {
+		let Some(moq_net::announce::Event::Start(first_update)) = announced.try_next() else {
 			panic!("replayed announce");
 		};
 		assert_eq!(

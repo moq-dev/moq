@@ -1000,7 +1000,7 @@ async fn broadcast_route_migration() {
 	// active metadata updates (the standby's chain taking over).
 	while let Some(event) = announcements.try_next() {
 		assert!(
-			!matches!(event, moq_net::announce::Event::Retracted(_)),
+			!matches!(event, moq_net::announce::Event::End(_)),
 			"failover must not retract the route"
 		);
 	}
@@ -3695,10 +3695,8 @@ async fn abort_carries_its_code_to_the_peer() {
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 	loop {
 		return match announced.next().await? {
-			moq_net::announce::Event::Announced(route) | moq_net::announce::Event::Updated(route) => {
-				Some((route, true))
-			}
-			moq_net::announce::Event::Retracted(route) => Some((route, false)),
+			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::End(route) => Some((route, false)),
 			moq_net::announce::Event::Live => continue,
 		};
 	}

@@ -274,7 +274,7 @@ export class Subscriber {
 						advertised.set(path, { publisher: undefined, live, route, captures });
 						if (!live) continue;
 						console.debug(`announced: broadcast=${path} active=true`);
-						announced.append({ prefix: path, captures, kind: "announced", route });
+						announced.append({ prefix: path, captures, kind: "start", route });
 					}
 					announced.append({ kind: "live" });
 					break;
@@ -385,7 +385,7 @@ export class Subscriber {
 					announced.append({
 						prefix: path,
 						captures: previous.captures,
-						kind: "retracted",
+						kind: "end",
 						route: previous.route,
 					});
 				};
@@ -459,7 +459,7 @@ export class Subscriber {
 						if (!routesEqual(previous.route, route)) {
 							advertised.set(path, { publisher, live: true, route, captures });
 							console.debug(`announced: broadcast=${path} rerouted`);
-							announced.append({ prefix: path, captures, kind: "updated", route });
+							announced.append({ prefix: path, captures, kind: "update", route });
 						} else {
 							console.debug(`announced: broadcast=${path} rerouted`);
 						}
@@ -477,7 +477,7 @@ export class Subscriber {
 				advertised.set(path, { publisher, live: true, route, captures });
 
 				console.debug(`announced: broadcast=${path} active=true`);
-				announced.append({ prefix: path, captures, kind: "announced", route });
+				announced.append({ prefix: path, captures, kind: "start", route });
 			}
 
 			announced.close();

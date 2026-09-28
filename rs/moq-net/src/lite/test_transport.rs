@@ -133,7 +133,8 @@ impl poll::SendStream for SinkSend {
 		Poll::Ready(Ok(buf.len()))
 	}
 
-	fn set_priority(&mut self, order: u8) {
+	fn set_priority(&mut self, order: i32) {
+		let order = u8::try_from(order).expect("moq-net sends u8 send orders");
 		self.log.priorities.lock().unwrap().push(order);
 	}
 

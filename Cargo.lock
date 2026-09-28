@@ -4526,9 +4526,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq"
-version = "1.3.1"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39e37523750e5f1313c3fd1798c4ffdb00218571054f601c3193ceb4e100e5ca"
+checksum = "6bad260343e6ad6e35cdd7f858312af6f316409500333196b3ca67ca3d884196"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -4548,9 +4548,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq-proto"
-version = "1.3.1"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7448c4a6a6713b276b346931f3def60e0a89415cd8172d12f6465fed6501a261"
+checksum = "fa4a518eca6adda2eca66d974fd181093ccaeba9c999b26d87496a4979d54819"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
@@ -4579,9 +4579,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq-udp"
-version = "1.3.1"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98e7d85788b7ec2437ac3dd83a231c4e403b96a5e53e39a8701ba5d1d4fad4a4"
+checksum = "b8dc8cf6fa35ba82ba89a4db24661068a75b7432abfb1ff3d74993dedfc2c9f0"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -6841,9 +6841,9 @@ dependencies = [
 
 [[package]]
 name = "qmux"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af3a86f3c22d13c8b2159b795eced3fa4eee0316527be16b56626f3d063b02a1"
+checksum = "08859fcf8124885aa2a286f880a9781253b40ce90bda9d3d5374bca43191116c"
 dependencies = [
  "bytes",
  "futures",
@@ -9829,9 +9829,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-iroh"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14c292c05ff2f4df8e582244a6a5f2ba89f4c13b1170ec5f59a727f9a4624baf"
+checksum = "9e70872b1e0cb791a06373859105570e78759dd3286b1f42bccd31f5b812539c"
 dependencies = [
  "bytes",
  "http",
@@ -9848,9 +9848,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-moq"
-version = "1.3.1"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d3bdb2400eb49f82b778165df8da318f94be5a667a840a94fe6fc32f3798746"
+checksum = "f6e6a49b49f2139a8b62dd11c79cf88a9e0dfa14e262e0677eb6ee80eff1a216"
 dependencies = [
  "bytes",
  "futures",
@@ -9883,18 +9883,18 @@ dependencies = [
 
 [[package]]
 name = "web-transport-trait"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a916df726e858e8e6cc21e852129f59e6277d3a01bb2254c0506dcf829fdd5d"
+checksum = "5f1e801f997864ab0074afb1c7d3262df46d5d9ad9b78274c47694544db2dba7"
 dependencies = [
  "bytes",
 ]
 
 [[package]]
 name = "web-transport-wasm"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d587cda0c9a7dd4591c6368d74834d62cb967f863122f712e22eb3b8b8ececfb"
+checksum = "3a9069c0103154db8be4ab08432c72b6605a75175871be692f67c3de2f3ba154"
 dependencies = [
  "bytes",
  "js-sys",

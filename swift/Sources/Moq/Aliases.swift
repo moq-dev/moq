@@ -83,7 +83,7 @@ public typealias Route = MoqFFI.MoqRoute
 /// wildcard matched (`captures`, `nil` for a partial overlap), and the `route`
 /// serving it. Resolve a path with `OriginConsumer.requestBroadcast`.
 public typealias Announce = MoqFFI.MoqAnnounce
-/// What an `AnnounceConsumer` yields: `.announced`, `.updated`, or `.retracted`
+/// What an `AnnounceConsumer` yields: `.start`, `.update`, or `.end`
 /// carrying an `Announce`, or `.live` once every route live at subscribe time
 /// has been delivered.
 public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent

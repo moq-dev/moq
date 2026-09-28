@@ -17,7 +17,7 @@ are renamed.
 - Objects that are only getters become records.
   Handles with verbs (`Request`, `TrackRequest`, `GroupRequest`) stay objects.
 - An enum whose variants a wrapper must name spells each variant
-  `<Enum><Variant>` (`AnnounceEventAnnounced`, `AnnounceEventLive`) in Go,
+  `<Enum><Variant>` (`AnnounceEventStart`, `AnnounceEventLive`) in Go,
   Kotlin, Dart, and Python, whatever the generated name. Swift keeps its
   generated `<Enum>.<variant>` cases, since it cannot alias a case.
 - `TrackProducer` drops `name`/`is_used`/`used`/`unused` for `demand()`.

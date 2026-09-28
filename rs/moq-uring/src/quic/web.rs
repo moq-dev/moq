@@ -859,7 +859,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 		}
 	}
 
-	fn set_priority(&mut self, order: u8) {
+	fn set_priority(&mut self, order: i32) {
 		web_transport_trait::poll::SendStream::set_priority(&mut self.inner, order);
 	}
 

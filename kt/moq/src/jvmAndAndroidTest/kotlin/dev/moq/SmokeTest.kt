@@ -362,16 +362,16 @@ class SmokeTest {
 
                 broadcast.announce(Route())
                 val announced = consumer.announced(AnnounceConfig())
-                val first = assertIs<AnnounceEventAnnounced>(announced.nextRoute())
+                val first = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals("live", first.announce.prefix)
 
                 broadcast.unannounce()
-                val retracted = assertIs<AnnounceEventRetracted>(announced.nextRoute())
+                val retracted = assertIs<AnnounceEventEnd>(announced.nextRoute())
                 assertEquals("live", retracted.announce.prefix)
                 assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
 
                 broadcast.announce(Route())
-                assertIs<AnnounceEventAnnounced>(announced.nextRoute())
+                assertIs<AnnounceEventStart>(announced.nextRoute())
                 consumer.requestBroadcast("live")
             }
         }
@@ -383,7 +383,7 @@ class SmokeTest {
             val announced = origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
             origin.createBroadcast("room/alice/chat").use { broadcast ->
                 broadcast.announce(Route())
-                val update = assertIs<AnnounceEventAnnounced>(announced.nextRoute())
+                val update = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals("room/alice/chat", update.announce.prefix)
                 assertEquals(listOf("alice"), update.announce.captures)
             }
@@ -404,7 +404,7 @@ class SmokeTest {
 
                 val listed = consumer.announcements()
                     .takeWhile { it !is AnnounceEventLive }
-                    .map { (it as AnnounceEventAnnounced).announce.prefix }
+                    .map { (it as AnnounceEventStart).announce.prefix }
                     .toList()
                 assertEquals(listOf("cam"), listed)
             }

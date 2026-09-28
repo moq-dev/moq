@@ -17,7 +17,7 @@ def create_announced(origin: moq.OriginProducer, path: str) -> moq.BroadcastProd
 async def routes(announced: moq.AnnounceConsumer):
     """Yield each newly announced route, skipping the other events such as LIVE."""
     async for event in announced:
-        if isinstance(event, moq.AnnounceEventAnnounced):
+        if isinstance(event, moq.AnnounceEventStart):
             yield event.announce
 
 
@@ -1155,19 +1155,19 @@ async def test_broadcast_is_reachable_only_while_announced():
     broadcast.announce()
     announced = consumer.announced()
     first = await next_route(announced)
-    assert isinstance(first, moq.AnnounceEventAnnounced)
+    assert isinstance(first, moq.AnnounceEventStart)
     assert first.announce.prefix == "live"
 
     broadcast.unannounce()
     retracted = await next_route(announced)
-    assert isinstance(retracted, moq.AnnounceEventRetracted)
+    assert isinstance(retracted, moq.AnnounceEventEnd)
     assert retracted.announce.prefix == "live"
     with pytest.raises(Exception):
         await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
 
     broadcast.announce()
     back = await next_route(announced)
-    assert isinstance(back, moq.AnnounceEventAnnounced)
+    assert isinstance(back, moq.AnnounceEventStart)
     await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
     announced.cancel()
     track.finish()
@@ -1191,7 +1191,7 @@ async def test_announced_yields_live_once_caught_up():
         async for event in announced:
             if isinstance(event, moq.AnnounceEventLive):
                 break
-            assert isinstance(event, moq.AnnounceEventAnnounced)
+            assert isinstance(event, moq.AnnounceEventStart)
             listed.append(event.announce.prefix)
     assert listed == ["cam"]
     broadcast.close()
@@ -1204,14 +1204,14 @@ async def test_announced_pattern_captures():
 
     dynamic = origin.dynamic("room")
     overlap = await next_route(announced)
-    assert isinstance(overlap, moq.AnnounceEventAnnounced)
+    assert isinstance(overlap, moq.AnnounceEventStart)
     assert overlap.announce.prefix == "room"
     assert overlap.announce.captures is None
 
     audio = create_announced(origin, "room/alice/audio")
     chat = create_announced(origin, "room/alice/chat")
     match = await next_route(announced)
-    assert isinstance(match, moq.AnnounceEventAnnounced)
+    assert isinstance(match, moq.AnnounceEventStart)
     assert match.announce.prefix == "room/alice/chat"
     assert match.announce.captures == ["alice"]
 

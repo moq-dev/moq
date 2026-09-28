@@ -33,7 +33,7 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 			const received: string[] = [];
 			for (let index = 0; index < 3; index++) {
 				const update = await withTimeout(announced.next(), 1000, "scoped announcement did not arrive");
-				if (update?.kind !== "announced") throw new Error(`expected an announcement, got ${update?.kind}`);
+				if (update?.kind !== "start") throw new Error(`expected an announcement, got ${update?.kind}`);
 				received.push(update.prefix);
 			}
 			expect(received.sort()).toEqual(["client/other/live", "client/room/.hidden", "client/room/live"]);

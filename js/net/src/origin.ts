@@ -1354,7 +1354,7 @@ export class Consumer {
 
 	/**
 	 * The announced routes matching `scope`, as a live stream: every currently advertised
-	 * route arrives first as `announced`, then the `live` marker, then changes as they
+	 * route arrives first as `start`, then the `live` marker, then changes as they
 	 * happen. The marker also waits for every session still replaying its peer's initial
 	 * set when the stream opened, so a caller listing what is live stops there.
 	 * Any pattern is accepted. A local broadcast appears once it announces, exactly as a
@@ -1427,7 +1427,7 @@ export class Consumer {
 						producer.append({
 							prefix: path,
 							captures: snap.captures,
-							kind: "retracted",
+							kind: "end",
 							route: snap.route,
 						});
 				}
@@ -1437,11 +1437,11 @@ export class Consumer {
 						producer.append({
 							prefix: path,
 							captures: snap.captures,
-							kind: "announced",
+							kind: "start",
 							route: snap.route,
 						});
 					} else if (!routesEqual(prev.route, snap.route)) {
-						producer.append({ prefix: path, captures: snap.captures, kind: "updated", route: snap.route });
+						producer.append({ prefix: path, captures: snap.captures, kind: "update", route: snap.route });
 					}
 				}
 				active = next;

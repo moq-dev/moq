@@ -438,7 +438,7 @@ export class Reload {
 	 * Subscribe to broadcast announcements matching `scope`, spanning reconnects.
 	 *
 	 * The same {@link Announce.Consumer} stream as {@link Established.announced}, but everything active
-	 * is retracted (a `retracted` update) whenever the connection drops and re-announced on
+	 * is retracted (an `end` event) whenever the connection drops and re-announced on
 	 * reconnect, so a consumer draining `next()` never clings to a dead route across a reconnect.
 	 * The `live` marker comes once, from the first session.
 	 *
@@ -473,7 +473,7 @@ export class Reload {
 					for (;;) {
 						const entry = await effect.race(upstream.next());
 						if (!entry) break;
-						if (entry.kind === "retracted") active.delete(entry.prefix);
+						if (entry.kind === "end") active.delete(entry.prefix);
 						else if (entry.kind !== "live") active.set(entry.prefix, entry);
 						// The stream delivers the marker once; a later session's is dropped.
 						producer.append(entry);
@@ -485,7 +485,7 @@ export class Reload {
 					// watcher tears down instead of clinging to the dead route.
 					if (consumer.closed.peek() === undefined) {
 						for (const entry of active.values()) {
-							producer.append({ ...entry, kind: "retracted" });
+							producer.append({ ...entry, kind: "end" });
 						}
 					}
 				}

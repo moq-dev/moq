@@ -715,27 +715,27 @@ pub struct moq_announce_config {
 	pub hidden: bool,
 }
 
-/// Which announce event a [moq_announce_update] reports.
+/// Which announce event a [moq_announce_event] reports.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_announce_kind {
 	/// A route now covers the prefix; the listener had none there.
-	MOQ_ANNOUNCE_KIND_ANNOUNCED = 0,
+	MOQ_ANNOUNCE_KIND_START = 0,
 	/// The route covering the prefix changed hops or cost.
-	MOQ_ANNOUNCE_KIND_UPDATED = 1,
+	MOQ_ANNOUNCE_KIND_UPDATE = 1,
 	/// No route covers the prefix any more.
-	MOQ_ANNOUNCE_KIND_RETRACTED = 2,
+	MOQ_ANNOUNCE_KIND_END = 2,
 	/// Every route live when the listener started has been delivered; what
 	/// follows is live changes. Delivered once, with no prefix or captures.
 	MOQ_ANNOUNCE_KIND_LIVE = 3,
 }
 
-/// An announce event from an origin: a route announced, updated, or retracted,
+/// An announce event from an origin: a route starting, updating, or ending,
 /// or the listener catching up.
 #[repr(C)]
 #[allow(non_camel_case_types)]
-pub struct moq_announce_update {
+pub struct moq_announce_event {
 	/// The covered prefix, relative to the origin, NOT NULL terminated
 	pub prefix: *const c_char,
 	pub prefix_len: usize,
@@ -1728,7 +1728,7 @@ pub extern "C" fn moq_broadcast_request_free(request: u32) -> i32 {
 /// Learn about broadcasts matching a pattern scope under an origin.
 ///
 /// `config` selects the paths; NULL lists every visible one. Delivered
-/// [moq_announce_update] prefixes remain relative to the origin.
+/// [moq_announce_event] prefixes remain relative to the origin.
 ///
 /// `on_announce` is invoked with a positive announced ID for each event (see
 /// [moq_announce_kind]), then exactly once more with a terminal code: `0` (stopped cleanly) or a
@@ -1781,9 +1781,9 @@ pub unsafe extern "C" fn moq_origin_announced(
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `dst` is a valid pointer to a [moq_announce_update] struct.
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_announce_event] struct.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq_announce_update) -> i32 {
+pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq_announce_event) -> i32 {
 	ffi::enter(move || {
 		let announced = ffi::parse_id(announced)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;

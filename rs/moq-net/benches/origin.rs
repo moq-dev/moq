@@ -266,7 +266,7 @@ fn bench_subscribe(c: &mut Criterion) {
 			b.iter(|| {
 				let mut cursor = fleet.consumer.announced();
 				let mut replayed = 0;
-				while let Some(announce::Event::Announced(_)) = cursor.next().now_or_never().flatten() {
+				while let Some(announce::Event::Start(_)) = cursor.next().now_or_never().flatten() {
 					replayed += 1;
 				}
 				assert_eq!(replayed, publishers);

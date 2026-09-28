@@ -133,8 +133,8 @@ overlaps that scope; exact creates and requests must match it, so a broad
 route can advertise the wire-compatible prefix while excluded requests are
 refused locally. A disjoint route is `Unauthorized`.
 
-`origin.consume().announced()` yields `announce::Event`s: `Announced`,
-`Updated` (a reprice in place), or `Retracted`, each holding an
+`origin.consume().announced()` yields `announce::Event`s: `Start`,
+`Update` (a reprice in place), or `End`, each holding an
 `announce::Announce` with `prefix`, the covered prefix relative to the
 consumer's root; `captures`, what the most specific matching scope member's
 wildcards stood for when the prefix pins them; and `route`, its hops and cost

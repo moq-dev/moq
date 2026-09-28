@@ -137,10 +137,10 @@ prefixes it is told about.
 A subscriber watching under a root sees advertisements named relative to that
 root. The pattern scope filters which prefixes are visible without changing a
 route's prefix. Announce events carry the covered path, captures, and what
-happened to it: Rust `announce::Event::{Announced, Updated, Retracted}`, each
+happened to it: Rust `announce::Event::{Start, Update, End}`, each
 holding an `announce::Announce { prefix, captures: Option<Vec<Pattern>>, route }`,
-and TypeScript `Announce.Event`, whose `kind` is `"announced"`, `"updated"`, or
-`"retracted"` alongside the same `Announce.Announce` fields. An update is a
+and TypeScript `Announce.Event`, whose `kind` is `"start"`, `"update"`, or
+`"end"` alongside the same `Announce.Announce` fields. An update is a
 reprice in place. Captures are present when the announced prefix pins every
 wildcard in the most-specific matching scope member. The Rust consumer is a
 `Stream` and the TypeScript one an async iterable. Both, and every binding over

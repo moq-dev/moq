@@ -204,7 +204,7 @@ export class Subscriber {
 			announced.append({
 				prefix: active,
 				captures: scopeCaptures(scope, active),
-				kind: "announced",
+				kind: "start",
 				route: info.route,
 			});
 		}
@@ -234,13 +234,13 @@ export class Subscriber {
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			if (!sees(filter, path)) continue;
 			const scope = filter.scope;
-			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "announced", route });
+			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "start", route });
 		}
 	}
 
 	/**
 	 * Replace the stored route for a path that is already announced. A no-op when the
-	 * hops and cost did not change; otherwise consumers hear `updated` so a forwarder
+	 * hops and cost did not change; otherwise consumers hear `update` so a forwarder
 	 * can reprice without retracting.
 	 */
 	#updateAnnounce(path: Path.Valid, route: Route) {
@@ -251,7 +251,7 @@ export class Subscriber {
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			if (!sees(filter, path)) continue;
 			const scope = filter.scope;
-			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "updated", route });
+			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "update", route });
 		}
 	}
 
@@ -280,7 +280,7 @@ export class Subscriber {
 				consumer.append({
 					prefix: path,
 					captures: scopeCaptures(scope, path),
-					kind: "retracted",
+					kind: "end",
 					route: existing.route,
 				});
 			} catch {

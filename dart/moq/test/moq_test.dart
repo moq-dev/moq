@@ -39,14 +39,13 @@ void main() {
     expect(client.bandwidth(), isA<MoqBandwidth>());
 
     final announcement = client.announcements().firstWhere(
-      (event) => event is AnnounceEventAnnounced,
+      (event) => event is AnnounceEventStart,
     );
     final broadcast = relay.createBroadcast(path: 'live');
     final track = broadcast.publishTrack(name: 'events', info: null);
     broadcast.announce(route: MoqRoute());
     final announced =
-        (await announcement.timeout(timeout) as AnnounceEventAnnounced)
-            .announce;
+        (await announcement.timeout(timeout) as AnnounceEventStart).announce;
     expect(announced.prefix, 'live');
 
     final requested = await client
@@ -106,14 +105,13 @@ void main() {
     final serverSession = await accepted;
 
     final announcement = client.announcements().firstWhere(
-      (event) => event is AnnounceEventAnnounced,
+      (event) => event is AnnounceEventStart,
     );
     final broadcast = server.createBroadcast('live');
     final track = broadcast.publishTrack(name: 'events', info: null);
     broadcast.announce(route: MoqRoute());
     final announced =
-        (await announcement.timeout(timeout) as AnnounceEventAnnounced)
-            .announce;
+        (await announcement.timeout(timeout) as AnnounceEventStart).announce;
     expect(announced.prefix, 'live');
 
     client.close();
@@ -184,20 +182,20 @@ void main() {
     broadcast.announce(route: MoqRoute());
     final announced = consumer.announced(config: MoqAnnounceConfig());
     final first = await nextRoute(announced);
-    expect(first, isA<AnnounceEventAnnounced>());
-    expect((first as AnnounceEventAnnounced).announce.prefix, 'live');
+    expect(first, isA<AnnounceEventStart>());
+    expect((first as AnnounceEventStart).announce.prefix, 'live');
 
     broadcast.unannounce();
     final retracted = await nextRoute(announced);
-    expect(retracted, isA<AnnounceEventRetracted>());
-    expect((retracted as AnnounceEventRetracted).announce.prefix, 'live');
+    expect(retracted, isA<AnnounceEventEnd>());
+    expect((retracted as AnnounceEventEnd).announce.prefix, 'live');
     await expectLater(
       consumer.requestBroadcast(path: 'live').timeout(timeout),
       throwsA(anything),
     );
 
     broadcast.announce(route: MoqRoute());
-    expect(await nextRoute(announced), isA<AnnounceEventAnnounced>());
+    expect(await nextRoute(announced), isA<AnnounceEventStart>());
     await consumer.requestBroadcast(path: 'live').timeout(timeout);
     announced.cancel();
     announced.dispose();
@@ -211,7 +209,7 @@ void main() {
     final broadcast = origin.createBroadcast(path: 'room/alice/chat');
     broadcast.announce(route: MoqRoute());
 
-    final update = await nextRoute(announced) as AnnounceEventAnnounced;
+    final update = await nextRoute(announced) as AnnounceEventStart;
     expect(update.announce.prefix, 'room/alice/chat');
     expect(update.announce.captures, ['alice']);
   });
@@ -231,7 +229,7 @@ void main() {
 
     final announced = consumer.announced(config: MoqAnnounceConfig());
     final first = await announced.next().timeout(timeout);
-    expect((first as AnnounceEventAnnounced).announce.prefix, 'cam');
+    expect((first as AnnounceEventStart).announce.prefix, 'cam');
     expect(await announced.next().timeout(timeout), isA<AnnounceEventLive>());
     announced.cancel();
     announced.dispose();

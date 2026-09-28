@@ -32,15 +32,15 @@ export interface Announce {
 /**
  * What an announcement stream yields.
  *
- * `announced`: a route now covers the prefix. `updated`: the route covering it changed
- * hops or cost, in place. `retracted`: no route covers it any more. `live`: every route
+ * `start`: a route now covers the prefix. `update`: the route covering it changed
+ * hops or cost, in place. `end`: no route covers it any more. `live`: every route
  * live at subscribe time has been delivered, including those a connected peer was still
  * sending, so what follows is live changes; yielded at most once, and a caller listing
  * what is live stops there.
  *
  * @public
  */
-export type Event = ({ kind: "announced" | "updated" | "retracted" } & Announce) | { kind: "live" };
+export type Event = ({ kind: "start" | "update" | "end" } & Announce) | { kind: "live" };
 
 /**
  * Options for an announcement stream.

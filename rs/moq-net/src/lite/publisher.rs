@@ -710,8 +710,8 @@ impl AnnounceRun {
 				// We use `try_next()` to synchronously get the initial updates.
 				while let Some(event) = announced.try_next() {
 					let (update, active) = match event {
-						announce::Event::Announced(update) | announce::Event::Updated(update) => (update, true),
-						announce::Event::Retracted(update) => (update, false),
+						announce::Event::Start(update) | announce::Event::Update(update) => (update, true),
+						announce::Event::End(update) => (update, false),
 						// The marker only says the origin caught up; the peer learns the
 						// initial set's end from the version's own framing.
 						announce::Event::Live => continue,
@@ -745,8 +745,8 @@ impl AnnounceRun {
 				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
 				while let Some(event) = announced.try_next() {
 					let (update, active) = match event {
-						announce::Event::Announced(update) | announce::Event::Updated(update) => (update, true),
-						announce::Event::Retracted(update) => (update, false),
+						announce::Event::Start(update) | announce::Event::Update(update) => (update, true),
+						announce::Event::End(update) => (update, false),
 						// The marker only says the origin caught up; the peer learns the
 						// initial set's end from the version's own framing.
 						announce::Event::Live => continue,
@@ -819,8 +819,8 @@ impl AnnounceRun {
 			};
 
 			let (update, active) = match next {
-				Some(announce::Event::Announced(update) | announce::Event::Updated(update)) => (update, true),
-				Some(announce::Event::Retracted(update)) => (update, false),
+				Some(announce::Event::Start(update) | announce::Event::Update(update)) => (update, true),
+				Some(announce::Event::End(update)) => (update, false),
 				Some(announce::Event::Live) => continue,
 				None => {
 					// The buffer is empty (flushed at the loop top), so FIN now and

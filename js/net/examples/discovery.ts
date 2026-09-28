@@ -14,7 +14,7 @@ async function main() {
 			console.log("Caught up: everything live has been listed");
 			continue;
 		}
-		if (announcement.kind === "retracted") continue;
+		if (announcement.kind === "end") continue;
 		console.log("New stream available:", announcement.prefix);
 
 		// Subscribe to new streams

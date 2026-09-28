@@ -74,10 +74,10 @@ async fn list(moq: &MoqSide, args: &Args, net: &crate::Net, out: &mut (impl Asyn
 		};
 
 		let (announce, active) = match event {
-			Event::Announced(announce) => (announce, true),
-			Event::Retracted(announce) => (announce, false),
+			Event::Start(announce) => (announce, true),
+			Event::End(announce) => (announce, false),
 			// A new route for a path already live changes nothing listed.
-			Event::Updated(_) => continue,
+			Event::Update(_) => continue,
 			Event::Live if args.follow => continue,
 			Event::Live => break,
 		};

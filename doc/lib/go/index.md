@@ -37,9 +37,9 @@ for event, err := range announced.All(ctx) {
         if moq.IsShutdown(err) { break }
         log.Fatal(err)
     }
-    ann, ok := event.(moq.AnnounceEventAnnounced)
+    ann, ok := event.(moq.AnnounceEventStart)
     if !ok {
-        continue // AnnounceEventUpdated, AnnounceEventRetracted, or AnnounceEventLive
+        continue // AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive
     }
     // Prefix stays origin-relative; Captures reports what each wildcard matched.
     fmt.Printf("captures: %v\n", ann.Announce.Captures)
@@ -86,7 +86,7 @@ path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
 serve. A route is a capability, not an inventory. `Announced(options)` combines
 a literal prefix with an optional relative pattern and yields an `AnnounceEvent`:
-`AnnounceEventAnnounced`, `AnnounceEventUpdated`, or `AnnounceEventRetracted`
+`AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`
 carrying an `Announce`, whose `Prefix` stays relative to the origin and whose
 `Captures` reports the wildcard matches, or `AnnounceEventLive` once every route
 live at subscribe time has been delivered. Break on `AnnounceEventLive` to list

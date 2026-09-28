@@ -144,7 +144,7 @@ impl poll::SendStream for MockSendStream {
 		)
 	}
 
-	fn set_priority(&mut self, _order: u8) {}
+	fn set_priority(&mut self, _order: i32) {}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		if self.tx.is_some() {

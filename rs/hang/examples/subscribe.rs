@@ -46,7 +46,7 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 	let mut announced = consumer.announced();
 	let path = loop {
 		match announced.next().await.context("origin closed")? {
-			moq_net::announce::Event::Announced(announce) => break announce.prefix,
+			moq_net::announce::Event::Start(announce) => break announce.prefix,
 			// Nothing else can come before the first announcement.
 			event => anyhow::ensure!(matches!(event, moq_net::announce::Event::Live), "unexpected {event:?}"),
 		}
