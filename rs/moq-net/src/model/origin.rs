@@ -3085,16 +3085,6 @@ impl OriginState {
 			.is_some_and(|peers| hops.iter().any(|hop| peers.contains(hop)))
 	}
 
-	/// A new or restarted advertisement from the withdrawing peer revives its paths.
-	fn reannounced(&mut self, prefix: &PathOwned, hops: &Hops) {
-		if let Some(sender) = hops.iter().last()
-			&& self.withdrawn.get_mut(prefix).is_some_and(|peers| peers.remove(sender))
-		{
-			self.restale(prefix);
-			self.prune_withdrawn(prefix);
-		}
-	}
-
 	/// Recompute which entries at `prefix` are stale after its withdrawals changed.
 	fn restale(&mut self, prefix: &Path) {
 		let peers = self.withdrawn.get(prefix);
@@ -3108,6 +3098,18 @@ impl OriginState {
 		}
 		if let Some(claim) = changed {
 			self.sync_route(prefix, &claim);
+		}
+	}
+
+	/// A route at `prefix` was announced or restarted with `hops`. When its sender,
+	/// the chain's last hop, had withdrawn the prefix, routes through it are live
+	/// once more.
+	fn reannounced(&mut self, prefix: &PathOwned, hops: &Hops) {
+		if let Some(sender) = hops.iter().last()
+			&& self.withdrawn.get_mut(prefix).is_some_and(|peers| peers.remove(sender))
+		{
+			self.restale(prefix);
+			self.prune_withdrawn(prefix);
 		}
 	}
 
@@ -6162,20 +6164,25 @@ mod tests {
 		assert!(producer.shared.lock().withdrawn.is_empty());
 	}
 
+	/// A restart from the peer that withdrew, on another of its sessions, is that
+	/// peer announcing again.
 	#[tokio::test]
-	async fn withdrawn_peer_restart_revives_attached_route() {
+	async fn withdrawn_peer_restart_revives_its_routes() {
 		let producer = origin(1).produce();
 		let peer = producer.clone().peer();
 		let mut announced = producer.consume().announced();
-		let route = Route::default().with_hops(hops(&[9, 2])).with_via(origin(2));
-		let first = peer.dynamic("room", route.clone()).unwrap();
-		let second = peer.dynamic("room", route.clone()).unwrap();
+
+		let direct = || Route::default().with_hops(hops(&[9, 2])).with_via(origin(2));
+		let first = peer.dynamic("room", direct()).unwrap();
+		let second = peer.dynamic("room", direct()).unwrap();
 		announced.assert_next_active("room");
+		announced.assert_next_wait();
 
 		peer.withdrawn("room", origin(2));
 		drop(first);
 		announced.assert_next_ended("room");
-		second.update(route).unwrap();
+
+		second.update(direct().with_cost(3)).unwrap();
 		announced.assert_next_active("room");
 		assert!(producer.shared.lock().withdrawn.is_empty());
 	}
