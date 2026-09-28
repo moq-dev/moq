@@ -79,6 +79,7 @@ Wire changes should be backwards compatible for any *published* drafts/versions.
 
 Before starting, `git fetch origin` and set the upstream to the base branch.
 If a published API break requires `dev`, retarget the PR to `dev`, set the upstream to `origin/dev`, then rebase onto it.
+Write scratch files (PR bodies, logs, notes) to the worktree's gitignored `.scratch/`, never a directory other agents share.
 
 Use the Nix dev shell so tooling matches CI.
 direnv loads it automatically, but if not: `nix develop --command ...`.

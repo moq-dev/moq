@@ -36,3 +36,6 @@ bindings = "uniffi"
 manifest-path = "../../rs/moq-ffi/Cargo.toml"
 python-source = "."
 module-name = "moq_ffi._uniffi"
+# `maturin develop` writes the bindings into the source tree, where a later wheel build
+# would pick them up again and fail on the duplicate. The build regenerates them anyway.
+exclude = ["moq_ffi/_uniffi/**", "**/__pycache__/**"]
