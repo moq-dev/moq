@@ -47,6 +47,7 @@ For each finding:
 
 Wait for Codex to review the final head before merging.
 Merge only on its thumbs up, or once every Codex finding on the PR is fixed or replied to.
+Codex skips fork PRs; ask the maintainer to request one.
 
 # Follow-ups
 
