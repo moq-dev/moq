@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
-import { error, reason } from "../error.ts";
+import { error, reason, StreamCode, StreamError } from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
@@ -9,6 +9,7 @@ import * as Time from "../time.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
 import { Probe } from "./probe.ts";
 import { Subscriber } from "./subscriber.ts";
+import { TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";
 
 test("closing the subscriber suppresses probe stream warnings", async () => {
@@ -690,4 +691,63 @@ test("a draft-05 duplicate start is still a restart", async () => {
 
 	announced.close();
 	subscriber.close();
+});
+
+// A publisher that answers TRACK_INFO but never answers the FETCH, on a session that stays
+// up: nothing but Subscriber.close() can end the wait.
+test.each([
+	["a deliberate close", undefined],
+	["a session error", new Error("session died")],
+])("closing the subscriber rejects a fetch the publisher never answered, on %s", async (_, cause) => {
+	const streams: { inbound: ReadableStreamDefaultController<Uint8Array>; aborted: Promise<unknown> }[] = [];
+	const quic = {
+		createBidirectionalStream: async () => {
+			let inbound!: ReadableStreamDefaultController<Uint8Array>;
+			let onAbort!: (reason: unknown) => void;
+			const aborted = new Promise<unknown>((resolve) => (onAbort = resolve));
+			const readable = new ReadableStream<Uint8Array>({ start: (controller) => (inbound = controller) });
+			const writable = new WritableStream<Uint8Array>({ abort: (reason) => void onAbort(reason) });
+			streams.push({ inbound, aborted });
+			return { readable, writable };
+		},
+	} as unknown as WebTransport;
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+
+	let settled = false;
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).then(
+		() => {
+			settled = true;
+			return undefined;
+		},
+		(err: unknown) => {
+			settled = true;
+			return err;
+		},
+	);
+
+	// Answer the TRACK stream so the FETCH goes out.
+	await drainUntil(() => streams.length === 1);
+	const chunks: Uint8Array[] = [];
+	const writer = new Writer(
+		new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+	);
+	await new TrackInfo({}).encode(writer, Version.DRAFT_05);
+	for (const chunk of chunks) streams[0].inbound.enqueue(chunk);
+	streams[0].inbound.close();
+
+	await drainUntil(() => streams.length === 2);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	expect(settled).toBe(false);
+
+	subscriber.close(cause);
+
+	const err = await fetch;
+	if (cause) {
+		expect(err).toBe(cause);
+	} else {
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(StreamCode.SessionClosed);
+	}
+	// The unanswered FETCH stream is reset rather than left open.
+	await streams[1].aborted;
 });

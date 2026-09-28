@@ -754,7 +754,7 @@ export class Subscriber {
 				throw new Error("fetch group requires moq-lite-05 or newer");
 			}
 
-			const info = await this.#trackInfo(broadcast, track);
+			const info = await untilClosed(group, this.#trackInfo(broadcast, track));
 			const priority = options.priority ?? 0;
 			const stream = await Stream.open(this.#quic, { sendOrder: sendOrder({ priority }) });
 
@@ -766,7 +766,7 @@ export class Subscriber {
 				);
 				// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
 				// done() buffers that byte so the response pump can decode it normally.
-				await stream.reader.done();
+				await untilClosed(group, stream.reader.done());
 			} catch (err: unknown) {
 				stream.abort(error(err));
 				throw err;
@@ -1142,7 +1142,23 @@ export class Subscriber {
 		}
 
 		this.#subscribes.clear();
+
+		// A fetch cut off by the session is incomplete even on a deliberate close, so it
+		// always ends with an error. This also releases callers still awaiting acceptance.
+		const cut = err ?? new StreamError(StreamCode.SessionClosed, { message: "session closed" });
+		for (const { group } of this.#fetches.values()) {
+			group.close(cut);
+		}
 	}
+}
+
+// Settles with `step`, or rejects with the group's error once it closes first. A publisher
+// may never answer a FETCH, so Subscriber.close() closing the group is what releases it.
+async function untilClosed<T>(group: netGroup.Producer, step: Promise<T>): Promise<T> {
+	const value = await race([step, group.closed]);
+	const closed = group.closed.peek();
+	if (closed !== undefined) throw closed ?? new Error("fetch closed before it was accepted");
+	return value as T;
 }
 
 /**
