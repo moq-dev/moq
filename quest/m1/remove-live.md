@@ -6,8 +6,9 @@ The fMP4, MPEG-TS, and FLV importers in `rs/moq-mux` have no `live()`: every
 importer publishes the stream's own timestamps verbatim (after PTS unwrap),
 and the catalog's root `clock` is what maps them to wall time. `moq import`
 (`rs/moq-cli/src/publish.rs`) stops calling it. An encoder that restarts its
-timestamps starts a new broadcast epoch instead of being re-anchored forward
-onto the old one. The SRT, RTMP, and HLS gateways, which reuse these
+timestamps ends the broadcast with an error instead of being re-anchored
+forward onto the old one; turning the republish into a new epoch is the
+broadcast epoch line's outcome, not this quest's. The SRT, RTMP, and HLS gateways, which reuse these
 importers, get the same behavior.
 
 ## Plan

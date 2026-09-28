@@ -19,9 +19,13 @@ Today `AnnounceRequest` (`rs/moq-net/src/lite/announce.rs`) carries only a
 `prefix`, and the origin's route table is a trie keyed by path segment
 (`rs/moq-net/benches/origin.rs`). A suffix cannot walk that trie, so a naive
 match costs the whole announce table on every announcement and every new
-cursor. Benchmark first: extend `rs/moq-net/benches/origin.rs` with suffix
-cursors swept over publishers and subscribers. The slope decides between a
-reversed-segment index and abandoning the quest.
+cursor. Requests hit the same wall: `request_broadcast` resolves through
+`best_route`, which walks the prefix trie for the longest covering claim, so
+a suffix advertisement must also be inserted where SUBSCRIBE and FETCH
+resolution find it, with the same specificity rules as prefix claims.
+Benchmark first: extend `rs/moq-net/benches/origin.rs` with suffix cursors
+and suffix route lookups, each swept over publishers and subscribers. The
+slopes decide between a reversed-segment index and abandoning the quest.
 
 The wire field is version-gated like `hidden`. Update `js/net` and
 `drafts/draft-lcurley-moq-lite.md` in the same PR. Token patterns
