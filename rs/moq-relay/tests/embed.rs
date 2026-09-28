@@ -60,36 +60,57 @@ async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
 /// The socket inodes this process holds bound to `port`: every UDP socket, but
 /// only a TCP listener, since accepted connections are not the owner's to close.
 ///
-/// Read from procfs rather than proven by rebinding the port: a freed port is
-/// fair game for any concurrent process's ephemeral bind, so a rebind races
-/// the rest of the test suite.
+/// Asked of this process's own descriptors, for two reasons. Rebinding the port
+/// races any concurrent process's ephemeral bind, which may take a freed port.
+/// And `/proc/net/udp` is served in chunks that skip entries while other
+/// processes churn sockets.
 #[cfg(target_os = "linux")]
 fn bound(port: u16) -> std::collections::HashSet<u64> {
-	let udp = [procfs::net::udp(), procfs::net::udp6()]
-		.into_iter()
-		.flat_map(|entries| entries.expect("read /proc/net/udp"))
-		.filter(|entry| entry.local_address.port() == port)
-		.map(|entry| entry.inode);
-	let tcp = [procfs::net::tcp(), procfs::net::tcp6()]
-		.into_iter()
-		.flat_map(|entries| entries.expect("read /proc/net/tcp"))
-		.filter(|entry| entry.local_address.port() == port && entry.state == procfs::net::TcpState::Listen)
-		.map(|entry| entry.inode);
-	let bound: std::collections::HashSet<u64> = udp.chain(tcp).collect();
-	open_sockets().intersection(&bound).copied().collect()
+	let mut bound = std::collections::HashSet::new();
+	for entry in std::fs::read_dir("/proc/self/fd").expect("read /proc/self/fd") {
+		let path = entry.expect("read /proc/self/fd").path();
+		let Some(inode) = socket_inode(&path) else { continue };
+		let Some(fd) = path.file_name().and_then(|name| name.to_str()?.parse().ok()) else {
+			continue;
+		};
+		// SAFETY: only queried, never closed. Another thread may close the
+		// descriptor meanwhile, so the inode is checked again below, and a number
+		// reused for another socket is not counted.
+		let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+		let socket = socket2::SockRef::from(&fd);
+		let owned = match socket.r#type() {
+			Ok(socket2::Type::DGRAM) => true,
+			Ok(socket2::Type::STREAM) => socket.is_listener().unwrap_or(false),
+			_ => false,
+		};
+		let on_port = socket
+			.local_addr()
+			.ok()
+			.and_then(|addr| addr.as_socket())
+			.map(|addr| addr.port())
+			== Some(port);
+		if owned && on_port && socket_inode(&path) == Some(inode) {
+			bound.insert(inode);
+		}
+	}
+	bound
+}
+
+/// The inode of the socket at a `/proc/self/fd` entry, or `None` for anything else.
+#[cfg(target_os = "linux")]
+fn socket_inode(path: &std::path::Path) -> Option<u64> {
+	use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+	let meta = std::fs::metadata(path).ok()?;
+	meta.file_type().is_socket().then(|| meta.ino())
 }
 
 /// The inodes of every socket this process has open.
 #[cfg(target_os = "linux")]
 fn open_sockets() -> std::collections::HashSet<u64> {
-	procfs::process::Process::myself()
-		.expect("read /proc/self")
-		.fd()
+	std::fs::read_dir("/proc/self/fd")
 		.expect("read /proc/self/fd")
-		.filter_map(|fd| match fd.ok()?.target {
-			procfs::process::FDTarget::Socket(inode) => Some(inode),
-			_ => None,
-		})
+		.filter_map(|entry| socket_inode(&entry.ok()?.path()))
 		.collect()
 }
 
