@@ -222,12 +222,32 @@ impl PublishDecoder {
 	}
 }
 
+/// The catalog a stdin decoder publishes into. TS carries the `mpegts` extension.
+enum PublishCatalog {
+	Media(moq_mux::catalog::Producer),
+	Ts(moq_mux::catalog::Producer<ts::Ext>),
+}
+
+impl PublishCatalog {
+	/// End the catalog tracks cleanly, keeping the renditions they last listed.
+	fn finish(&mut self) -> anyhow::Result<()> {
+		match self {
+			Self::Media(catalog) => catalog.finish()?,
+			Self::Ts(catalog) => catalog.finish()?,
+		}
+		Ok(())
+	}
+}
+
 // Exactly one Source exists per process, so the size gap between the small
 // Stream variant and the larger Capture config is irrelevant.
 #[allow(clippy::large_enum_variant)]
 enum Source {
 	/// Decode a container read from stdin.
-	Stream(PublishDecoder),
+	Stream {
+		decoder: PublishDecoder,
+		catalog: PublishCatalog,
+	},
 	/// Capture from local devices. The per-medium producers are built on their
 	/// own capture threads (native camera/screen capture, microphone via cpal), publishing
 	/// onto the shared broadcast + catalog; [`Publish::run`] drives them
@@ -272,34 +292,43 @@ impl Publish {
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 			let ts = ts::Import::new(broadcast.clone(), catalog.reserve()).live();
 			return Ok(Self {
-				source: Source::Stream(PublishDecoder::Ts(Box::new(ts))),
+				source: Source::Stream {
+					decoder: PublishDecoder::Ts(Box::new(ts)),
+					catalog: PublishCatalog::Ts(catalog),
+				},
 				broadcast,
 			});
 		}
 
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
-		let source = match format {
+		let decoder = match format {
 			PublishFormat::Avc3 => {
 				let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
 				let import = moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?;
 				let split = Box::new(moq_mux::codec::h264::Split::new());
-				Source::Stream(PublishDecoder::Avc3 {
+				PublishDecoder::Avc3 {
 					split,
 					import: Box::new(import),
-				})
+				}
 			}
 			PublishFormat::Fmp4 => {
 				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.reserve()).live();
-				Source::Stream(PublishDecoder::Fmp4(Box::new(fmp4)))
+				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Ts => unreachable!("TS is handled above with the mpegts catalog extension"),
 			PublishFormat::Flv => {
 				let flv = flv::Import::new(broadcast.clone(), catalog.reserve()).live();
-				Source::Stream(PublishDecoder::Flv(Box::new(flv)))
+				PublishDecoder::Flv(Box::new(flv))
 			}
 		};
 
-		Ok(Self { source, broadcast })
+		Ok(Self {
+			source: Source::Stream {
+				decoder,
+				catalog: PublishCatalog::Media(catalog),
+			},
+			broadcast,
+		})
 	}
 
 	/// Build a publisher capturing local devices (camera/screen and microphone).
@@ -345,47 +374,7 @@ impl Publish {
 	/// Drive the source until stdin EOF (or the capture devices stop).
 	pub async fn run(self) -> anyhow::Result<()> {
 		match self.source {
-			Source::Stream(mut decoder) => {
-				let mut stdin = tokio::io::stdin();
-				let mut buffer = bytes::BytesMut::new();
-
-				// Damage reported so far, so only the change is logged. A live feed is
-				// diagnosed by the rate at which these climb, and stdin may never end, so
-				// they have to surface as they accumulate rather than at exit.
-				let mut reported = decoder.stats();
-
-				// Run the read/decode loop so an error surfaces here rather than
-				// dropping the decoder (and its tracks) with a bare Error::Dropped.
-				let result: anyhow::Result<()> = async {
-					loop {
-						buffer.clear();
-						let n = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer).await?;
-						if n == 0 {
-							return Ok(()); // EOF
-						}
-						decoder.decode_chunk(&buffer)?;
-
-						let latest = decoder.stats();
-						if latest != reported {
-							log_stats(latest.as_ref(), reported.as_ref());
-							reported = latest;
-						}
-					}
-				}
-				.await;
-
-				// Flush on a clean EOF; on any error (read, decode, or the flush
-				// itself) abort with the real cause so subscribers see it instead of
-				// a bare Error::Dropped.
-				let outcome = result.and_then(|()| decoder.finish());
-				// The drain at end of input can publish a frame nothing vouched for, so the
-				// final snapshot is only complete after `finish`.
-				log_stats(decoder.stats().as_ref(), reported.as_ref());
-				if let Err(err) = &outcome {
-					decoder.abort(moq_net::Error::Transport(err.to_string()));
-				}
-				outcome
-			}
+			Source::Stream { decoder, catalog } => decode(decoder, catalog, tokio::io::stdin()).await,
 			#[cfg(feature = "capture")]
 			Source::Capture { catalog, video, audio } => {
 				// Each enabled medium publishes its own track onto the shared
@@ -431,6 +420,59 @@ impl Publish {
 				tokio::try_join!(video_fut, audio_fut)?;
 				Ok(())
 			}
+		}
+	}
+}
+
+/// Decode `input` into the broadcast until EOF.
+///
+/// At EOF the media tracks finish, then the catalog does, while it still lists them: the
+/// renditions retire from the catalog as the decoder drops, which a subscriber would read
+/// as removed tracks, and a catalog dropped unfinished reads as a publisher that vanished.
+async fn decode(
+	mut decoder: PublishDecoder,
+	mut catalog: PublishCatalog,
+	mut input: impl tokio::io::AsyncRead + Unpin,
+) -> anyhow::Result<()> {
+	let mut buffer = bytes::BytesMut::new();
+
+	// Damage reported so far, so only the change is logged. A live feed is
+	// diagnosed by the rate at which these climb, and stdin may never end, so
+	// they have to surface as they accumulate rather than at exit.
+	let mut reported = decoder.stats();
+
+	// Run the read/decode loop so an error surfaces here rather than
+	// dropping the decoder (and its tracks) with a bare Error::Dropped.
+	let result: anyhow::Result<()> = async {
+		loop {
+			buffer.clear();
+			let n = tokio::io::AsyncReadExt::read_buf(&mut input, &mut buffer).await?;
+			if n == 0 {
+				return Ok(()); // EOF
+			}
+			decoder.decode_chunk(&buffer)?;
+
+			let latest = decoder.stats();
+			if latest != reported {
+				log_stats(latest.as_ref(), reported.as_ref());
+				reported = latest;
+			}
+		}
+	}
+	.await;
+
+	// Flush on a clean EOF; on any error (read, decode, or the flush
+	// itself) abort with the real cause so subscribers see it instead of
+	// a bare Error::Dropped.
+	let outcome = result.and_then(|()| decoder.finish());
+	// The drain at end of input can publish a frame nothing vouched for, so the
+	// final snapshot is only complete after `finish`.
+	log_stats(decoder.stats().as_ref(), reported.as_ref());
+	match outcome {
+		Ok(()) => catalog.finish(),
+		Err(err) => {
+			decoder.abort(moq_net::Error::Transport(err.to_string()));
+			Err(err)
 		}
 	}
 }
@@ -690,7 +732,7 @@ mod tests {
 		settle().await;
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts, Default::default()).unwrap();
 		#[allow(irrefutable_let_patterns)]
-		let Source::Stream(decoder) = &mut publish.source else {
+		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
 		decoder.decode_chunk(&input).unwrap();
@@ -771,7 +813,7 @@ mod tests {
 		let config = moq_mux::catalog::Config::default().with_clock(clock);
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts, config).unwrap();
 		#[allow(irrefutable_let_patterns)]
-		let Source::Stream(decoder) = &mut publish.source else {
+		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
 		let before = clock.now();
@@ -806,6 +848,37 @@ mod tests {
 			before.as_micros() - skew <= first.as_micros() && first.as_micros() <= after.as_micros() + skew,
 			"the first frame is live on arrival: {first:?} not in {before:?}..={after:?}"
 		);
+	}
+
+	/// At stdin EOF the catalog ends cleanly and still lists the renditions, so a
+	/// subscriber reads a finished broadcast rather than its tracks being removed.
+	#[tokio::test(start_paused = true)]
+	async fn eof_finishes_the_catalog_with_its_renditions() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let publish = Publish::new(broadcast, &PublishFormat::Ts, Default::default()).unwrap();
+		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
+
+		#[allow(irrefutable_let_patterns)]
+		let Source::Stream { decoder, catalog } = publish.source else {
+			panic!("expected a stream source");
+		};
+		decode(decoder, catalog, BBB).await.unwrap();
+		drop(publish.broadcast);
+
+		let mut last = None;
+		loop {
+			let next = tokio::time::timeout(Duration::from_secs(1), catalogs.next())
+				.await
+				.expect("the catalog track ends");
+			match next.expect("the catalog ends cleanly") {
+				Some(catalog) => last = Some(catalog),
+				None => break,
+			}
+		}
+		let last = last.expect("a catalog");
+		assert_eq!(last.video.renditions.len(), 1, "the video rendition is still listed");
+		assert_eq!(last.audio.renditions.len(), 1, "the audio rendition is still listed");
 	}
 
 	/// Read the first frame of a verbatim track back as raw bytes.

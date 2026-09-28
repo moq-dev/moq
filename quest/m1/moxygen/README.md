@@ -28,7 +28,7 @@ Out of scope, so they are not reopened as bugs:
 
 Docs stay inline in the change that makes them stale. No new guide.
 
-## Quests
+## Required
 
 - [Sparse FETCH ranges](/quest/m1/moxygen/fetch-span.md) - a FETCH costs the groups it returns, not the span of its range
 

@@ -22,11 +22,10 @@ replaces both: the rule is timestamp arithmetic on the group start.
 - Withhold rule, keyed on the same non-continuous signal in both consumers:
   `js/hang/src/container/consumer.ts` `next()` reports `continuous: false`
   after a subscribe, a declared discontinuity, or any skip (`#gap`). The Rust
-  `rs/moq-mux/src/container` `Consumer` has no such signal: `read()` returns a
-  bare frame and `discontinuity()` covers only empty groups and rewinds, so
-  this quest adds a per-delivery continuity flag there, set on a sequence gap
-  and on a latency skip, and `rs/moq-video/src/decode/consumer.rs` propagates
-  it. For the first
+  `moq_mux::container::Consumer` gains the equivalent in the open-GOP quest
+  (today `poll_read` returns a bare frame and only the `discontinuity()`
+  counter moves); this quest reuses it, and
+  `rs/moq-video/src/decode/consumer.rs` propagates it. For the first
   group after that signal, every frame is decoded (the decoder needs them to
   build reference state) and frames stamped below `group.start + warmup` are
   not presented; frames stamped at or above that boundary are, so the recovery
@@ -41,13 +40,15 @@ replaces both: the rule is timestamp arithmetic on the group start.
   in `js/hang`. Other codecs never set `warmup`, so no check is needed there.
 - Join earlier: the subscription's maximum age becomes the latency target plus
   `warmup`, so the group start lands `warmup` before the target and the first
-  presented frame is on time. JS sets `Subscription.latencyMax` in `js/net`;
-  Rust sets `latency_max` on the decode consumer's subscription
-  (`rs/moq-video/src/decode/consumer.rs`), not `Subscription::group_start`,
-  which is aggregated across subscribers and rewinds the track for everyone.
-- Latency skipping must not shed the warmup span it deliberately joined:
-  `#checkLatency` in the JS container consumer and `with_latency` in Rust
-  compare the buffered span against the target, and frames still inside a
+  presented frame is on time. JS sets the subscription's `maxAge` in `js/net`;
+  Rust adds it to the decode consumer's `Options::max_age`, which reaches the
+  subscription through `Subscription::with_max_age`
+  (`rs/moq-video/src/decode/consumer.rs`), not `Subscription::start`, which
+  is aggregated across subscribers and rewinds the track for everyone.
+- Max-age skipping must not shed the warmup span it deliberately joined:
+  `#checkMaxAge` in the JS container consumer and the max-age budget in Rust
+  (`Consumer::poll_read`, set by `set_max_age`) compare the buffered span
+  against the target, and frames still inside a
   withheld warmup count as decode-only, not buffered.
 - Tests in both languages: a synthetic three-group track with `warmup` where a
   cold join presents nothing before start plus `warmup` and everything after;
@@ -59,7 +60,4 @@ replaces both: the rule is timestamp arithmetic on the group start.
 ## Required
 
 - [Catalog warmup](/quest/m1/catalog-warmup.md) - the field this reads
-
-## Related
-
-- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims frames stamped before the keyframe; this trims frames after the start, on the same signal
+- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - adds the Rust non-continuous signal this keys on, and trims frames stamped before the keyframe where this trims frames after the start

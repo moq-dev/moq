@@ -20,7 +20,7 @@ import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk } from "./subscribe.ts";
-import { SubscribeNamespace } from "./subscribe_namespace.ts";
+import { SubscribeNamespace, SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
@@ -252,6 +252,86 @@ test("a blocked group header is reset when the group expires", async () => {
 		expect(resetBeforeRelease).toBe(true);
 	} finally {
 		release();
+		client.close();
+		broadcast.close();
+		origin.close();
+	}
+});
+
+// A group can go stale while its stream is still opening. Serving it must abandon the group
+// without starting a write: an abandoned write rejects once the stream resets, and nothing
+// would handle it (Node exits on the first unhandled rejection).
+test("a group that goes stale while its stream opens writes nothing", async () => {
+	const unhandled: unknown[] = [];
+	const onUnhandled = (reason: unknown) => unhandled.push(reason);
+
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	let requested!: () => void;
+	const opening = new Promise<void>((resolve) => {
+		requested = resolve;
+	});
+	let open!: () => void;
+	const opened = new Promise<void>((resolve) => {
+		open = resolve;
+	});
+	let reset!: (reason: unknown) => void;
+	const streamReset = new Promise<unknown>((resolve) => {
+		reset = resolve;
+	});
+	let writes = 0;
+	const stale = new WritableStream<Uint8Array>({
+		write() {
+			writes++;
+			throw new Error("write into an abandoned stream");
+		},
+		abort: (reason) => reset(reason),
+	});
+	spyOn(pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => {
+		requested();
+		await opened;
+		return stale;
+	});
+
+	const { pub, origin } = publisher(pair.server);
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video");
+	const client = await Stream.open(pair.client, { version: VERSION });
+	const server = await Stream.accept(pair.server, VERSION);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	try {
+		process.on("unhandledRejection", onUnhandled);
+		void pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+			}),
+			server,
+		);
+
+		const write = (sequence: number, ms: number) => {
+			const group = new GroupProducer(sequence);
+			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(ms) });
+			group.close();
+			track.writeGroup(group);
+		};
+		write(0, 0);
+		await opening;
+
+		// A group beyond the edge, so group 0's reach (where group 1 begins) is provably past
+		// the budget: a successor alone never convicts it.
+		write(1, 10_000);
+		write(2, 20_000);
+		open();
+
+		expect(String(await streamReset)).toContain("max age budget");
+		expect(writes).toBe(0);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(unhandled).toEqual([]);
+	} finally {
+		process.off("unhandledRejection", onUnhandled);
 		client.close();
 		broadcast.close();
 		origin.close();
@@ -528,6 +608,179 @@ test("a solicited legacy advertisement refused once is retried", async () => {
 	expect(await readPublishNamespace(stream)).toBe(Path.from("lonely"));
 	await acceptPublishNamespace(stream);
 
+	subscription.close();
+	origin.close();
+});
+
+/**
+ * A SUBSCRIBE_NAMESPACE below an advertised route still hears that route: it serves the
+ * requested prefix, so it lands as the empty suffix, then paths beneath the prefix follow
+ * as their own suffixes. Matches the Lite publisher and Rust.
+ */
+test("a subscription below an advertised route hears it as the empty suffix", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
+	publish(origin, Path.from("dash"));
+
+	const subscription = await Stream.open(pair.client, { version: VERSION });
+	const accepted = await Stream.accept(pair.server, VERSION);
+	if (!accepted) throw new Error("the subscription stream was never accepted");
+	void pub.runSubscribeNamespace(
+		new SubscribeNamespace({ requestId: 0n, namespace: Path.from("dash/nobody") }),
+		accepted,
+	);
+
+	const entry = async () => {
+		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+		return (await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix;
+	};
+
+	expect(await subscription.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(subscription.reader, VERSION);
+	expect(await entry()).toBe(Path.empty());
+
+	publish(origin, Path.from("dash/nobody/cam"));
+	expect(await entry()).toBe(Path.from("cam"));
+
+	subscription.close();
+	origin.close();
+});
+
+/**
+ * A scoped route covers only what it claims: `room` claiming `room/chat` cannot serve
+ * `room/video`, so a subscription there must not hear it as the empty suffix.
+ */
+test("a subscription outside a covering route's claim does not hear it", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
+	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room/chat"))]));
+	const dynamic = chat.dynamic(Path.from("room"));
+
+	const subscription = await Stream.open(pair.client, { version: VERSION });
+	const accepted = await Stream.accept(pair.server, VERSION);
+	if (!accepted) throw new Error("the subscription stream was never accepted");
+	void pub.runSubscribeNamespace(
+		new SubscribeNamespace({ requestId: 0n, namespace: Path.from("room/video") }),
+		accepted,
+	);
+
+	expect(await subscription.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(subscription.reader, VERSION);
+
+	// The first entry is the broadcast beneath the prefix, not the out-of-claim cover.
+	publish(origin, Path.from("room/video/cam"));
+	expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+	expect((await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix).toBe(Path.from("cam"));
+
+	dynamic.close();
+	subscription.close();
+	origin.close();
+});
+
+/**
+ * A cheaper route claiming `room/chat` does not hide a costlier `room/video` route at the
+ * same prefix from a subscription at `room/video`.
+ */
+test("a subscription hears the best covering route its claim allows", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
+	const scoped = (path: string) =>
+		origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from(path))]));
+	const chat = scoped("room/chat").dynamic(Path.from("room"), { cost: 1n });
+	const video = scoped("room/video").dynamic(Path.from("room"), { cost: 5n });
+
+	const subscription = await Stream.open(pair.client, { version: VERSION });
+	const accepted = await Stream.accept(pair.server, VERSION);
+	if (!accepted) throw new Error("the subscription stream was never accepted");
+	void pub.runSubscribeNamespace(
+		new SubscribeNamespace({ requestId: 0n, namespace: Path.from("room/video") }),
+		accepted,
+	);
+
+	expect(await subscription.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(subscription.reader, VERSION);
+
+	// The first entry is the video route as the empty suffix, not a later broadcast beneath it.
+	publish(origin, Path.from("room/video/cam"));
+	expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+	expect((await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix).toBe(Path.empty());
+
+	video.close();
+	chat.close();
+	subscription.close();
+	origin.close();
+});
+
+/**
+ * A served root collapses every covering route to the empty suffix. A narrow one claiming
+ * only `tenant/chat` must not hide a broader one from a subscription at `video`.
+ */
+test("a subscription hears a broader covering route when the narrowest cannot serve it", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const origin = new OriginProducer();
+	const tenant = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.all()]));
+	const pub = new Publisher({
+		quic: pair.server,
+		session: new NativeSession(pair.server, VERSION, true),
+		publish: tenant.consume(),
+		requiresSolicitation: true,
+	});
+	const chat = origin
+		.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/chat"))]))
+		.dynamic(Path.from("tenant"));
+	const broad = origin.dynamic(Path.empty(), { cost: 5n });
+
+	const subscription = await Stream.open(pair.client, { version: VERSION });
+	const accepted = await Stream.accept(pair.server, VERSION);
+	if (!accepted) throw new Error("the subscription stream was never accepted");
+	void pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 0n, namespace: Path.from("video") }), accepted);
+
+	expect(await subscription.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(subscription.reader, VERSION);
+
+	// The first entry is the broad route as the empty suffix, not a later broadcast beneath it.
+	publish(origin, Path.from("tenant/video/cam"));
+	expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+	expect((await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix).toBe(Path.empty());
+
+	broad.close();
+	chat.close();
+	subscription.close();
+	origin.close();
+});
+
+/**
+ * The claim is presented relative to the served origin's root, like the route's key: a
+ * publisher serving `tenant` offers `room` (claiming `tenant/room/chat`) to a
+ * subscription at `room/chat`.
+ */
+test("a covering route's claim is compared relative to the served root", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const origin = new OriginProducer();
+	const tenant = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.all()]));
+	const pub = new Publisher({
+		quic: pair.server,
+		session: new NativeSession(pair.server, VERSION, true),
+		publish: tenant.consume(),
+		requiresSolicitation: true,
+	});
+	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/room/chat"))]));
+	const dynamic = chat.dynamic(Path.from("tenant/room"));
+
+	const subscription = await Stream.open(pair.client, { version: VERSION });
+	const accepted = await Stream.accept(pair.server, VERSION);
+	if (!accepted) throw new Error("the subscription stream was never accepted");
+	void pub.runSubscribeNamespace(
+		new SubscribeNamespace({ requestId: 0n, namespace: Path.from("room/chat") }),
+		accepted,
+	);
+
+	expect(await subscription.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(subscription.reader, VERSION);
+	expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+	expect((await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix).toBe(Path.empty());
+
+	dynamic.close();
 	subscription.close();
 	origin.close();
 });
@@ -913,7 +1166,7 @@ async function readGroup(stream: ReadableStream<Uint8Array>): Promise<ServedGrou
 async function readEndOfTrack(stream: ReadableStream<Uint8Array>): Promise<number> {
 	const reader = new Reader(stream, undefined, V20);
 	const header = await GroupMessage.decode(reader, V20);
-	const frame = await Frame.decode(reader, header.flags, undefined, V20);
+	const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
 	expect(frame.endOfTrack).toBe(true);
 	expect(await reader.done()).toBe(true);
 	return header.groupId;

@@ -254,8 +254,8 @@ impl MoqBroadcastProducer {
 	/// Retract this broadcast's exact-path advertisement, if any.
 	///
 	/// Local consumers and peers alike stop discovering and requesting it;
-	/// tracks already in flight carry on. Announcing again brings it back. Errors
-	/// with `Closed` on a standalone broadcast (no origin to announce on).
+	/// tracks already in flight carry on. Announcing again brings it back. A no-op
+	/// on a standalone broadcast.
 	pub fn unannounce(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
@@ -983,7 +983,8 @@ impl MoqMediaProducer {
 
 	/// Mark a timeline break and restart handoff measurement without lowering advertised jitter.
 	///
-	/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock.
+	/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock,
+	/// and video must resume on a keyframe.
 	pub fn discontinuity(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();

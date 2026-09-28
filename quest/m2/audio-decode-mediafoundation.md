@@ -20,7 +20,7 @@ ones. Behind the decode seam as the first candidate on `target_os =
   not advertised on that host, not an error at decode time.
 - Fixtures and layout-order tests as in the AudioToolbox quest.
 - Verification runs on a Windows host; the per-PR CI only compiles the
-  platform code, and `just rs windows` runs nightly.
+  platform code (`just rs windows`).
 
 ## Required
 

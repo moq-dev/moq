@@ -57,5 +57,8 @@ Naming trap: `Path` in moq-net is the broadcast namespace path, and
 `Client::with_path` is the MoQ SETUP resource path. A network path needs a
 different name.
 
-Target `dev`, where the crate is `moq-tokio`; the rename has not reached
-`main`.
+Target `main`: `apply_transport` lives in `rs/moq-tokio/src/noq.rs` there
+too, and the max-paths knob is additive.
+
+Public API: an additive transport setting in `moq-tokio`. Wire: none; multipath
+is negotiated by QUIC transport parameters, below MoQ.

@@ -40,6 +40,16 @@ export const JsonConfigSchema = z.looseObject({
 			z.transform((value) => (value === 0 ? undefined : value)),
 		),
 	),
+
+	// How far this track's payloads reach the transport behind the broadcast's earliest rendition,
+	// with the same meaning and encoding as a video rendition's `delay`. Only measured for payloads
+	// that carry a capture time.
+	delay: z.optional(
+		z.pipe(
+			u53Schema,
+			z.transform((value) => (value === 0 ? undefined : value)),
+		),
+	),
 });
 
 /**

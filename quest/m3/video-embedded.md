@@ -24,3 +24,8 @@ libcamera source composes with what already exists, because
 `encode::Producer::publish` is the bring-your-own-Annex-B path and
 `moq_mux::codec::h264` already handles framing, so shelling out to
 `rpicam-vid` is an application concern rather than a moq-video source.
+
+## Required
+
+- Someone with a Raspberry Pi or similar V4L2 M2M device without a usable
+  Vulkan driver validates the EGL import on it

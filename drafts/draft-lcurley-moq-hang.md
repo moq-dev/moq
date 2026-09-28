@@ -391,6 +391,7 @@ type JsonSchema = {
   "broadcast": string | undefined,
   "bitrate": number | undefined,
   "jitter": number | undefined,
+  "delay": number | undefined,
 }
 ~~~
 
@@ -406,6 +407,7 @@ type BinarySchema = {
   "broadcast": string | undefined,
   "bitrate": number | undefined,
   "jitter": number | undefined,
+  "delay": number | undefined,
 }
 ~~~
 
@@ -461,9 +463,14 @@ A `snapshot` group covers a single value (plus any deltas), so its window spans 
 ### broadcast {#data-shared}
 The `broadcast` field carries the same meaning here as it does for a media rendition ({{field-broadcast}}).
 
-### bitrate and jitter {#data-estimates}
+### bitrate, jitter, and delay {#data-estimates}
 The optional `bitrate` field is the track's maximum bitrate in bits per second.
-The optional `jitter` field carries the same meaning and rules as it does for a media rendition ({{field-jitter}}), with a payload in place of a frame.
+The optional `jitter` and `delay` fields carry the same meaning and rules as they do for a media rendition ({{field-jitter}}, {{field-delay}}), with a payload in place of a frame.
+
+A payload's presentation timestamp is its capture time on the broadcast's clock, the one its media renditions use, when the publisher knows it (a datagram's arrival, a sensor read), and otherwise the time the publisher wrote it.
+A publisher measures `jitter` and `delay` only from payloads that carry a capture time, and MUST omit both for a track written without one.
+A publisher MUST NOT use a timestamp on an unrelated clock, such as a device's own uptime, since it would report a meaningless lateness and, through the broadcast-wide minimum, distort every other rendition's `delay`.
+A `snapshot` update that writes no frame, such as an unchanged JSON value, is not a flush and is not measured.
 
 ## Binary Fields {#binary}
 A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
@@ -1101,6 +1108,7 @@ A publisher MAY estimate an unknown final duration from the frame cadence, but M
 - Added optional `bitrate` and `jitter` fields to `json` and `binary` track entries.
 - Added the optional `delay` rendition field: how far a rendition's minimum flush lateness trails the broadcast's earliest rendition, never lowered once advertised and never subtracted across renditions.
 - Recommended namespaced keys for application root sections.
+- Added the optional `delay` field to `json` and `binary` track entries, measured only from payloads stamped with their capture time on the broadcast clock.
 
 # Acknowledgments
 {:numbered="false"}

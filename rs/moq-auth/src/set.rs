@@ -147,6 +147,7 @@ mod tests {
 			subscribe: patterns(&["test-sub/**"]),
 			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 			issued: Some(SystemTime::now()),
+			not_before: None,
 		}
 	}
 

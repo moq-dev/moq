@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.8](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.7...moq-ffi-v0.4.8) - 2026-09-27
+
+### Added
+
+- *(kt)* end a broadcast with end() ([#4259](https://github.com/moq-dev/moq/pull/4259))
+
+### Other
+
+- fix stale agent rules, the moq-net hop range, and the ffi unannounce doc ([#4305](https://github.com/moq-dev/moq/pull/4305))
+- video resumes on a keyframe after discontinuity() ([#4285](https://github.com/moq-dev/moq/pull/4285))
+
+## [0.4.7](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.6...moq-ffi-v0.4.7) - 2026-09-26
+
+### Added
+
+- end a broadcast with close() in every language ([#4031](https://github.com/moq-dev/moq/pull/4031))
+- *(mux)* forward importer discontinuities through publishers ([#4239](https://github.com/moq-dev/moq/pull/4239))
+
+### Other
+
+- rename CLAUDE.md to AGENTS.md ([#4235](https://github.com/moq-dev/moq/pull/4235))
+
 ## [0.4.6](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.5...moq-ffi-v0.4.6) - 2026-09-26
 
 ### Other

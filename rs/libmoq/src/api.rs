@@ -2223,7 +2223,8 @@ pub extern "C" fn moq_publish_media_flush(media: u32, timestamp_us: u64) -> i32 
 
 /// Mark a timeline break and restart handoff measurement without lowering advertised jitter.
 ///
-/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock.
+/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock,
+/// and video must resume on a keyframe.
 /// Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_media_discontinuity(media: u32) -> i32 {

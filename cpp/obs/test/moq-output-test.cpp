@@ -22,9 +22,7 @@
 #include <obs.h>
 #include <obs-module.h>
 
-extern "C" {
 #include "moq.h"
-}
 
 #include "moq-settings.h"
 

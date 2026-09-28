@@ -56,6 +56,15 @@ forwards it without renumbering. A datagram carrying any other Object ID, or a
 status other than Normal, is dropped. JavaScript does not yet carry datagrams
 on moq-transport.
 
+A client may present one credential in its `SETUP` with the `AUTHORIZATION
+TOKEN` option. The server reads a value (`USE_VALUE`, or `REGISTER`, which it
+treats as a value since it advertises no token cache) and hands its Token Type
+and bytes to the application unverified; a relay forwards them to its
+[auth server](/bin/relay/auth#the-contract). An alias reference (`DELETE`,
+`USE_ALIAS`) closes the session with `PROTOCOL_VIOLATION`, a structure that
+does not decode with `KEY_VALUE_FORMATTING_ERROR`, and a second token is
+refused.
+
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [solicit](/draft/moq-solicit) to make announcements opt-in,

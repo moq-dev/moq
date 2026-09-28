@@ -29,7 +29,3 @@ Linux. Latency must not regress at the chosen budget. A no-win keeps 1.
 The [quiescence quest](/quest/m1/perf/uring-quiescence.md) sweeps this
 budget together with its pass budget; land whichever runs first and fold the
 other's sweep in.
-
-## Closes
-
-- [#3120](https://github.com/moq-dev/moq/issues/3120) - close this issue when the quest finishes

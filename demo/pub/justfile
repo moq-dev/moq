@@ -38,7 +38,24 @@ list:
 # Publish Big Buck Bunny to a relay server.
 bbb url='http://localhost:4443' *args:
     just download bbb
-    just ts bbb "{{ url }}" {{ args }}
+    just download bbb-sd
+    cargo build --bin moq
+    ffmpeg -hide_banner -loglevel warning -copyts \
+        -stream_loop -1 -re -i media/bbb.mp4 \
+        -stream_loop -1 -re -i media/bbb-sd.mp4 \
+        -map 0 -map 1:v -c copy -f mpegts -pes_payload_size 0 - \
+        | cargo run --bin moq -- {{ args }} --connect "{{ url }}" --broadcast bbb.hang import ts
+
+# Encode the video-only SD rendition, preserving source timestamps and loop duration.
+encode-bbb-sd:
+    just download bbb
+    python3 bbb.py encode
+
+# Verify the hosted rendition's frames, keyframes, and three complete loops.
+check-bbb:
+    just download bbb
+    just download bbb-sd
+    python3 bbb.py check
 
 # Publish Tears of Steel to a relay server.
 tos url='http://localhost:4443' *args:

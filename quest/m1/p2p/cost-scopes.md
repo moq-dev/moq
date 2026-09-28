@@ -49,5 +49,4 @@ implementation quest it needs.
 
 ## Related
 
-- [Route cost in the JS origin](/quest/m1/route-cost.md) - the ranking that consumes the rule
-- [PoP skipping](/quest/m1/pop-skipping/README.md) - the mesh-side use of warm versus cold
+- [Cluster routing](/quest/m1/cluster-routing.md) - the mesh-side use of cost

@@ -38,7 +38,7 @@ Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way a
 - `if let` / `let else` over a `match` whose only job is to bind. Keep `match` when both arms do work.
 - Derive `Serialize`/`Deserialize`; a hand-written impl is a second copy of the wire shape. Reach for `serde_with` for what the derive can't express.
 - Public modules with short names: `broadcast::Consumer`, not `BroadcastConsumer`. Keep `mod encoder` private and re-export flat as `encode::Encoder`.
-- Workspace members and shared dependency versions live in the root `Cargo.toml`; crates reference deps via `{ workspace = true }`.
+- Workspace members and shared dependency versions live in the root `Cargo.toml`; crates reference deps via `{ workspace = true }`, except internal dev-dependencies, which are path-only so releases publish (`_publish-test` enforces it).
 - Use newtypes and enums instead of untyped strings.
 - Have the language make misuse impossible: terminal operations consume `self`, cleanup in `Drop`, etc.
 
@@ -50,7 +50,7 @@ Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way a
 
 # Testing
 
-- Tests are inline `#[cfg(test)] mod tests`. Time-dependent async tests call `tokio::time::pause()` first.
+- Tests are inline `#[cfg(test)] mod tests`. Time-dependent async tests call `tokio::time::pause()` first, unless they cross real networking that can't be mocked (sockets, smoke tests); those run on the wall clock and assert lower bounds.
 - Run tests through `just` (nextest), not `cargo test`: nextest kills a wedged test as TIMEOUT, cargo hangs forever. A test flagged SLOW is a bug to fix, not a threshold to raise.
 - `just check` compiles default features only, like CI. `just rs features` (nightly) covers `--all-features` / `--no-default-features`. Keep a feature gate around the dependency, not the logic, so the logic's tests stay in the merge gate.
-- Local checks compile only the host platform; `just rs windows` / `macos` must run on that OS and `just rs wasm` covers `moq-wasm`. Say plainly in the PR when platform code is uncompiled.
+- Local checks compile only the host platform; PR CI runs `just rs windows` / `macos` on those hosts, and `just rs wasm` covers `moq-wasm`.

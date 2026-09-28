@@ -13,8 +13,12 @@ The audio quality harness lands on ad-hoc debug probes, which is the right
 trade to get it running. This quest promotes them.
 
 - Take the stage schema the harness already defines (capture, encode, publish
-  flush, network, jitter buffer, decode, render) and expose it the way
-  `moq-stats` exposes relay traffic: an observable readout, not a callback.
+  flush, network, jitter buffer, decode, render) and expose it as fields of
+  `hang::Stats`, the media extension the client stats schema adds to
+  `moq-stats` (`rs/hang/src/stats.rs`, and its `@moq/stats` mirror), rather
+  than a second readout: an observable value a `.stats` broadcast already
+  carries, not a callback. Decided so viewers report latency the same way
+  they report stalls.
 - Both languages, matching names, per the repo's cross-language rule. Scrutinise
   each exported item: a stage nobody outside can act on stays internal.
 - Switch the harness over, deleting the probes it replaces. A ledger with no
@@ -29,9 +33,10 @@ trade to get it running. This quest promotes them.
 
 ## Required
 
-- [Audio quality harness](/quest/m1/audio-quality-harness/README.md) - defines the stage schema and lands the probes this promotes
+- [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - defines the stage schema and lands the probes this promotes
+- [Schema and library](/quest/m1/qos/stats/schema.md) - adds `hang::Stats`, which this extends
 
 ## Related
 
-- [Audio quality harness](/quest/m1/audio-quality-harness/README.md) - defines the stages and is the first consumer
+- [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - defines the stages and is the first consumer
 - [QoS](/quest/m1/qos/README.md) - relay-side health, the same idea from the other end

@@ -43,8 +43,11 @@ AUTH can carry the full grant once the pattern-interest prerequisite lands.
   stream; every other configured token gets its own AUTH stream on an
   AUTH-capable session, so no token is ever granted twice. On moq-transport
   the first token also rides the AUTHORIZATION TOKEN setup option
-  (`ParameterBytes::AuthorizationToken`, `USE_VALUE`, token type 0), which
-  scopes at accept the way the URL does.
+  (`ietf::token::into_setup`, `USE_VALUE`, token type 0), which
+  scopes at accept the way the URL does. While the URL also carries it, the
+  auth server sees the same credential twice: `moq auth serve` admits a SETUP
+  token equal to the `?jwt=` value and refuses two different ones
+  (`serve::Refusal::TwoTokens`). Never send different values in the two places.
 - The relay admits on the URL, then widens. An anonymous connection today is
   admitted with the public grant when one is configured and refused
   otherwise; with this quest a connection with no URL credential and no
@@ -62,7 +65,9 @@ AUTH can carry the full grant once the pattern-interest prerequisite lands.
 - Tests: a client with a configured token against an AUTH-capable relay is
   scoped exactly as the URL variant and the URL carries the token only while
   an old version is offered; the same client against a lite-05 relay still
-  authenticates through the URL; two configured tokens union; a client with
+  authenticates through the URL; a moq-transport client offering a draft
+  without AUTH, carrying the token in both the URL and the setup option, is
+  admitted by `moq auth serve`; two configured tokens union; a client with
   in-band tokens only and no public grant is admitted, and one that presents
   nothing is refused at the deadline; the cross-language harness runs with
   tokens configured.
@@ -77,5 +82,3 @@ Additive.
   token setters sit beside
 - [moq-transport](/quest/m1/auth/moq-transport.md) - supplies the IETF AUTH
   exchange the setup-option token pairs with
-- [Setup token](/quest/m1/setup-token.md) - supplies `setup::Token` and the
-  setup-option encoder

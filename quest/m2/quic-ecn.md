@@ -9,9 +9,9 @@ marks fall back to no ECN, and a viewer's session is unaffected.
 
 ## Plan
 
-ECT(0) marking and ACK ECN counts are carried end to end, but BBR's
-[classic CE response](/quest/m1/bbr-classic-ecn.md) must be corrected before
-it is used as the baseline. This quest adds the scalable policy separately.
+ECT(0) marking and ACK ECN counts are carried end to end, and BBR's classic
+CE response ([moq-dev/noq#12](https://github.com/moq-dev/noq/pull/12), in
+moq-noq 1.3.2) is the baseline. This quest adds the scalable policy separately.
 noq-proto has no ECN knob: `sending_ecn` starts on per path and validation
 failure or an ACK without counts turns it off, so both `off` and `ect1`
 need the fork.
@@ -35,6 +35,5 @@ need the fork.
 
 ## Required
 
-- [Classic BBR ECN](/quest/m1/bbr-classic-ecn.md) - establish a corrected released classic response before comparing L4S
 - [Measure ECN on the backbone](/quest/m1/quic/ecn-measure.md) - the
   provider verdict this quest acts on
