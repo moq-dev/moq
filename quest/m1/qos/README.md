@@ -33,6 +33,9 @@ preflight, consumes them downstream.
 
 ## Quests
 
+- [Lag across a splice](/quest/m1/qos/lag-splice.md) - a route switch
+  neither loses pending lag weight nor keeps weighing a segment replaced
+  before its first frame
 - [Starvation at frame granularity](/quest/m1/qos/starvation-frames.md) - the
   acknowledged frontier moves at every frame boundary through `poll_acked`,
   with a delivery-delay histogram for jitter
