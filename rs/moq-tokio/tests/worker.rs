@@ -404,29 +404,43 @@ async fn generated_certificates_are_refused() {
 	);
 }
 
-/// How many UDP sockets this process holds on `port`, via procfs.
+/// How many UDP sockets this process holds on `addr`, via procfs.
 ///
 /// The group retains every reuseport socket until serving has stopped, so
 /// dropping a server handle must not change this count while the group is
 /// alive: without the retainer the kernel would close the socket and renumber
 /// every member after it. A backend may own more than one descriptor per
 /// member, so the invariant is the stable count rather than its exact value.
-#[cfg(target_os = "linux")]
-fn udp_sockets_on(port: u16) -> usize {
-	let want = format!(":{port:04X}");
-	let mut count = 0;
-	if let Ok(table) = std::fs::read_to_string("/proc/net/udp") {
-		for line in table.lines().skip(1) {
-			let mut fields = line.split_whitespace();
-			// sl, local_address, rem_address, ...: the second field is the bind.
-			if let Some(local) = fields.nth(1)
-				&& local.to_ascii_uppercase().ends_with(&want)
-			{
-				count += 1;
-			}
-		}
-	}
-	count
+///
+/// Matching the full address and joining on this process's descriptors keeps
+/// a stranger's socket out of the count, including one that takes the port
+/// once the group releases it.
+fn udp_sockets_on(addr: std::net::SocketAddr) -> usize {
+	let std::net::SocketAddr::V4(addr) = addr else {
+		panic!("the workers bind IPv4");
+	};
+	// procfs prints the address as the in-memory (network order) u32 in hex.
+	let want = format!("{:08X}:{:04X}", u32::from_ne_bytes(addr.ip().octets()), addr.port());
+
+	let ours: std::collections::HashSet<String> = std::fs::read_dir("/proc/self/fd")
+		.expect("read /proc/self/fd")
+		.filter_map(|fd| std::fs::read_link(fd.ok()?.path()).ok())
+		.filter_map(|link| {
+			let inode = link.to_str()?.strip_prefix("socket:[")?.strip_suffix(']')?;
+			Some(inode.to_string())
+		})
+		.collect();
+
+	let table = std::fs::read_to_string("/proc/net/udp").expect("read /proc/net/udp");
+	table
+		.lines()
+		.skip(1)
+		.filter(|line| {
+			// sl, local_address, rem_address, st, tx:rx, tr:when, retrnsmt, uid, timeout, inode.
+			let fields: Vec<&str> = line.split_whitespace().collect();
+			fields.get(1) == Some(&want.as_str()) && fields.get(9).is_some_and(|inode| ours.contains(*inode))
+		})
+		.count()
 }
 
 /// Dropping a server handle cannot take its socket out of the reuseport group.
@@ -443,9 +457,12 @@ async fn dropping_a_server_keeps_its_socket() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
-	let port = workers.local_addr().port();
+	let addr = workers.local_addr();
+	let port = addr.port();
+	// A stranger on the same port but another address must not be counted.
+	let _stranger = UdpSocket::bind(("127.0.0.2", port)).expect("bind stranger");
 	let mut group = workers.split();
-	let sockets = udp_sockets_on(port);
+	let sockets = udp_sockets_on(addr);
 	assert!(sockets >= 2, "every member holds at least one socket");
 	assert_eq!(group.local_addr().port(), port);
 
@@ -457,7 +474,7 @@ async fn dropping_a_server_keeps_its_socket() {
 	drop(dropped);
 
 	assert_eq!(
-		udp_sockets_on(port),
+		udp_sockets_on(addr),
 		sockets,
 		"dropping a server must not lose its socket while the group lives"
 	);
@@ -468,10 +485,10 @@ async fn dropping_a_server_keeps_its_socket() {
 	let member = members.pop().expect("one member");
 	assert_eq!(member.index(), 0);
 	drop(member);
-	assert_eq!(udp_sockets_on(port), sockets, "the retainer outlives both handles");
+	assert_eq!(udp_sockets_on(addr), sockets, "the retainer outlives both handles");
 
 	group.shutdown().await;
-	assert_eq!(udp_sockets_on(port), 0, "stopping the group releases every socket");
+	assert_eq!(udp_sockets_on(addr), 0, "stopping the group releases every socket");
 }
 
 /// Completing one serving member ends serving for the whole group.
