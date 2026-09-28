@@ -4625,6 +4625,7 @@ dependencies = [
  "moq-stats",
  "moq-tokio",
  "moq-uring",
+ "procfs",
  "qmux",
  "rand 0.10.3",
  "rcgen",
