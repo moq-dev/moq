@@ -20,7 +20,10 @@ config instead of quietly refusing every session.
   shape (a bool, or the listener TLS config) is open. Prefer whatever makes
   the wrong call unrepresentable.
 - `spawn_server` in `rs/moq-cli/src/main.rs` maps any `auth.validate()` error
-  to `Auth::refuse`. Return the error instead, so a bad config stops startup.
+  to `Auth::refuse`. That fallback is only right for a LAN-only mesh with no
+  auth configured, which `MoqSide::validate` permits and whose peers admit
+  through the cluster. Make that case explicit and let any other error stop
+  startup.
 - Update every caller, the tests #4364 added in both `moq-cli` and
   `moq-relay`, and `doc/bin/relay/auth.md` or `doc/lib/rs` wherever they name
   the methods.
