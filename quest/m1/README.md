@@ -40,7 +40,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Optional max age](/quest/m1/ietf-max-age.md) - max age is optional, set only by the publisher, and crosses moq-transport as MAX_CACHE_DURATION
 - [IETF announce count](/quest/m1/ietf-announce-count.md) - an opt-in moq-transport extension carries the replay count, so IETF announce consumers go live without a timer
 - [kio waiter overflow](/quest/m1/kio-waiter-lost.md) - a retained `Waiter` past 8 lists stops adding a duplicate entry to lists it already recorded
-- [moqsink keyframe latch](/quest/m1/moqsink-keyframe-latch.md) - a header-only buffer after a break no longer permanently invalidates a moqsink video pad
 - [Capture re-anchor](/quest/m1/capture-reanchor.md) - a repeating or restarting device clock never rewinds native capture during a fast backlog drain
 - [Splice edge cases](/quest/m1/splice-edges.md) - an unstamped successor, a pruned segment's boundary group, and a warm head during a takeover are each handled correctly
 - [Track tail hardening](/quest/m1/track-tail-hardening.md) - Rust and JS wait out a track's tail by the same rules, with the known hang, count, truncation, grace, and memory holes closed
