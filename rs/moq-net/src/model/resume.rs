@@ -2256,8 +2256,8 @@ impl Subscriber {
 		}
 	}
 
-	/// Poll for the first group the first segment reaching this cursor's floor serves at
-	/// or above it, once its source resolved; see [`track::Subscriber::poll_start`]. A
+	/// Poll for where the source of the first segment reaching this cursor's floor starts,
+	/// raised to the floor, once resolved; see [`track::Subscriber::poll_start`]. A
 	/// segment ending at or below the floor serves nothing here, so its source is not
 	/// waited on. Like [`Self::poll_final`], this only resolves the subscription and
 	/// consumes no groups.
@@ -2273,7 +2273,7 @@ impl Subscriber {
 		};
 		ready!(Self::poll_activate(seg, &self.last_prefs, floor, waiter));
 		match &mut seg.sub {
-			SubState::Active(sub) => Poll::Ready(ready!(sub.poll_start(waiter)).filter(|start| *start >= floor)),
+			SubState::Active(sub) => Poll::Ready(ready!(sub.poll_start(waiter)).map(|start| start.max(floor))),
 			SubState::Done(_) | SubState::Pending(_) => Poll::Ready(None),
 		}
 	}

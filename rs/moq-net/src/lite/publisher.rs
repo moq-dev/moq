@@ -2384,9 +2384,9 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	///
 	/// A relay caches groups in upstream arrival order, and a newer group's stream can
 	/// beat an older one, so the first group here need not be the oldest the source
-	/// serves. `source` is where the source's own feed starts, so the resolved start
-	/// is the lower of the two: resolving from the later group would drop the older one
-	/// for good.
+	/// serves. `source` is where the source's feed starts, raised to this cursor's floor,
+	/// so the resolved start is the lower of the two: resolving from the later group would
+	/// drop the older one for good.
 	fn start(
 		&mut self,
 		group: group::Consumer,
@@ -3149,49 +3149,83 @@ mod serve_group_test {
 		assert_eq!(*log.writes.lock().unwrap(), [0, 1, 0, 1, 2, 3, 2]);
 	}
 
+	/// A lite-07 run over a relay's track, whose upstream subscription still waits on the
+	/// source's SUBSCRIBE_START, on a subscribe stream the test can push updates onto.
+	struct RelayRun {
+		run: TrackRun<ScriptedSession>,
+		stream: Stream<ScriptedSession, Version>,
+		session: ScriptedSession,
+		opens: Arc<Opens>,
+	}
+
+	impl RelayRun {
+		/// Subscribe to `track` from `start_group`.
+		async fn new(track: &mut track::Producer, start_group: u64) -> Self {
+			track.request_start(Some(0)).unwrap();
+			let subscription = track::Subscription::default()
+				.with_start(track::Position::group(start_group))
+				.with_max_age(Duration::from_secs(30));
+			let subscriber = track.subscribe(subscription);
+
+			let mut session = ScriptedSession::new(Vec::new());
+			let (send, recv) = futures::future::poll_fn(|cx| {
+				<ScriptedSession as web_transport_trait::poll::Session>::poll_open_bi(&mut session, cx)
+			})
+			.await
+			.unwrap();
+			let stream = Stream::<ScriptedSession, Version> {
+				writer: Writer::new(send, Version::Lite07),
+				reader: crate::coding::Reader::new(recv, Version::Lite07),
+			};
+			let track_priority = kio::Producer::new(0u8);
+			let opens = Arc::<Opens>::default();
+			let ctx = Subscription {
+				session: session.clone(),
+				id: 0,
+				track_name: "test".into(),
+				priority: PriorityQueue::default(),
+				track_priority: track_priority.consume(),
+				track_priority_seen: 0,
+				version: Version::Lite07,
+				timescale: Some(crate::Timescale::default()),
+				opens: opens.clone(),
+			};
+			let bounds = Bounds {
+				start_group: Some(start_group),
+				start_frame: 0,
+				end_group: None,
+				end_frame: None,
+			};
+			Self {
+				run: TrackRun::new(ctx, subscriber, bounds, track_priority),
+				stream,
+				session,
+				opens,
+			}
+		}
+
+		/// Drive the run until it parks, which it must.
+		fn settle(&mut self) {
+			let Self { run, stream, .. } = self;
+			let res = kio::wait(|waiter| run.poll(stream, waiter)).now_or_never();
+			assert!(res.is_none(), "the run ended");
+		}
+
+		/// How many group streams the run opened.
+		fn opened(&self) -> u64 {
+			self.opens.opened.load(Ordering::Relaxed)
+		}
+	}
+
 	/// A SUBSCRIBE_UPDATE landing while the first group waits on the source's start keeps
 	/// the floor it raised: resolving the start from the held group must not lower it.
 	#[tokio::test]
 	async fn held_first_group_keeps_an_updated_floor() {
 		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
-		// A relay's upstream subscription, still waiting on the source's SUBSCRIBE_START.
-		track.request_start(Some(0)).unwrap();
-		let subscriber = track.subscribe(None);
-
-		let mut session = ScriptedSession::new(Vec::new());
-		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as web_transport_trait::poll::Session>::poll_open_bi(&mut session, cx)
-		})
-		.await
-		.unwrap();
-		let mut stream = Stream::<ScriptedSession, Version> {
-			writer: Writer::new(send, Version::Lite07),
-			reader: crate::coding::Reader::new(recv, Version::Lite07),
-		};
-		let track_priority = kio::Producer::new(0u8);
-		let opens = Arc::<Opens>::default();
-		let ctx = Subscription {
-			session: session.clone(),
-			id: 0,
-			track_name: "test".into(),
-			priority: PriorityQueue::default(),
-			track_priority: track_priority.consume(),
-			track_priority_seen: 0,
-			version: Version::Lite07,
-			timescale: Some(crate::Timescale::default()),
-			opens: opens.clone(),
-		};
-		let bounds = Bounds {
-			start_group: Some(0),
-			start_frame: 0,
-			end_group: None,
-			end_frame: None,
-		};
-		let mut run = TrackRun::new(ctx, subscriber, bounds, track_priority);
-		let mut poll = || kio::wait(|waiter| run.poll(&mut stream, waiter)).now_or_never();
+		let mut relay = RelayRun::new(&mut track, 0).await;
 
 		write_group(&mut track, 5, 0);
-		assert!(poll().is_none());
+		relay.settle();
 
 		// The subscriber moves its start past the held group before the source resolves.
 		let update = lite::SubscribeUpdate {
@@ -3202,21 +3236,35 @@ mod serve_group_test {
 			start_frame: 0,
 			end_frame: None,
 		};
-		session.push(&update.encode_bytes(Version::Lite07).unwrap());
-		assert!(poll().is_none());
+		relay.session.push(&update.encode_bytes(Version::Lite07).unwrap());
+		relay.settle();
 
 		track.start_at(0).unwrap();
-		assert!(poll().is_none());
-		assert_eq!(opens.opened.load(Ordering::Relaxed), 1, "the held group is served");
+		relay.settle();
+		assert_eq!(relay.opened(), 1, "the held group is served");
 
 		// Group 6 is below the updated floor.
 		write_group(&mut track, 6, 6);
-		assert!(poll().is_none());
-		assert_eq!(
-			opens.opened.load(Ordering::Relaxed),
-			1,
-			"served a group below the floor"
-		);
+		relay.settle();
+		assert_eq!(relay.opened(), 1, "served a group below the floor");
+	}
+
+	/// A source whose feed starts below the subscriber's floor serves the floor's group, so
+	/// a newer group arriving first must not resolve the start past it.
+	#[tokio::test]
+	async fn held_first_group_resolves_to_the_floor_under_the_source() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut relay = RelayRun::new(&mut track, 5).await;
+
+		write_group(&mut track, 6, 6);
+		relay.settle();
+		track.start_at(0).unwrap();
+		relay.settle();
+		assert_eq!(relay.opened(), 1, "the held group is served");
+
+		write_group(&mut track, 5, 5);
+		relay.settle();
+		assert_eq!(relay.opened(), 2, "dropped the floor's group");
 	}
 
 	/// A track that ends without a group still ends the subscription, with no stream owed.

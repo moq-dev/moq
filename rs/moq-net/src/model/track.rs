@@ -4006,9 +4006,9 @@ impl Subscriber {
 		}
 	}
 
-	/// Poll for the first group the source's feed serves at or above this cursor's
-	/// floor, once resolved; see [`Consumer::poll_start`]. `None` when the source
-	/// declares none, declares one below the floor, or has closed.
+	/// Poll for where the source's feed starts, raised to this cursor's floor, once
+	/// resolved; see [`Consumer::poll_start`]. A feed starting below the floor serves the
+	/// floor's group too. `None` when the source declares none or has closed.
 	pub(crate) fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		match &mut self.inner {
 			SubscriberKind::Plain(plain) => {
@@ -4017,7 +4017,7 @@ impl Subscriber {
 					true => Poll::Pending,
 					false => Poll::Ready(Ok(state.start_sequence)),
 				});
-				Poll::Ready(ready!(res).ok().flatten().filter(|start| *start >= floor))
+				Poll::Ready(ready!(res).ok().flatten().map(|start| start.max(floor)))
 			}
 			SubscriberKind::Spliced(spliced) => spliced.poll_start(waiter),
 		}
