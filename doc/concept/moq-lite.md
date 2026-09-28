@@ -163,7 +163,11 @@ request rather than narrowing the claim, and no message narrows a route. Token
 scope is any pattern union; the session asks for each member's literal head on
 the prefix-only wire and filters locally. In Rust and TypeScript,
 `origin.scope(root, patterns)` narrows the handle's permissions and presents paths
-relative to `root`. Nested scopes intersect with their parent. A session receiving
+relative to `root`. Nested scopes intersect with their parent. In Rust,
+`origin.mount(at, target)` reads the subtree at `at` from `target` instead: a
+request for `at/rest` joins the one front at `target/rest`, announcements under
+`target` present under `at`, the handle's patterns still authorize `at/rest`,
+and nothing is published beneath `at`. A session receiving
 into that scoped origin asks for the literal heads of its allowed patterns,
 coalescing duplicate or nested heads. An unscoped origin still asks for the empty
 prefix, covering every namespace. These subscriptions include hidden routes;

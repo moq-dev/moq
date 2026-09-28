@@ -950,13 +950,15 @@ impl TableCursor {
 	}
 
 	/// Whether this cursor may observe `entry` at all: advertised, not behind
-	/// the excluded peer (split horizon), and within the cursor's patterns.
+	/// the excluded peer (split horizon), within the cursor's patterns, and
+	/// nameable through its mount.
 	fn visible(&self, entry: &RouteEntry) -> bool {
 		entry.advertised
 			&& self.horizon.admits(entry)
 			&& entry.overlaps(&self.allowed)
 			&& self.discovers(&entry.prefix)
 			&& !self.holes.iter().any(|hole| entry.prefix.has_prefix(hole))
+			&& self.named.as_ref().is_none_or(|(mount, _)| mount.names(&entry.prefix))
 	}
 
 	/// Whether the hidden rule lets this cursor discover a route at `prefix`.
@@ -996,6 +998,14 @@ impl Mount {
 	/// beneath the target. A route covering the target has no handle-side name.
 	fn name(&self, path: &Path) -> Option<PathOwned> {
 		Some(self.at.join(path.strip_prefix(&self.target)?))
+	}
+
+	/// Whether the origin-side absolute `path` has a handle-side name within
+	/// [`Path::MAX_PARTS`], so a reader could ask for it. A route covering the
+	/// target always does.
+	fn names(&self, path: &Path) -> bool {
+		path.strip_prefix(&self.target)
+			.is_none_or(|rest| self.at.parts().count() + rest.parts().count() <= Path::MAX_PARTS)
 	}
 
 	/// The handle-side absolute `patterns` beneath this mount, as origin-side
@@ -1550,9 +1560,16 @@ impl Producer {
 	/// `target`, so a mount never widens a scope, and [`Error::Duplicate`] when
 	/// `at` or `target` overlaps a mount this producer already has: mounts never
 	/// chain, so a target is always read as the origin holds it.
+	/// [`Error::BoundsExceeded`] if either rooted path exceeds [`Path::MAX_PARTS`].
 	pub fn mount(&self, at: impl AsPath, target: impl AsPath) -> Result<Producer, Error> {
 		let at = self.root.join(at).to_owned();
 		let target = self.root.join(target).to_owned();
+		if [&at, &target]
+			.into_iter()
+			.any(|path| path.parts().count() > Path::MAX_PARTS)
+		{
+			return Err(BoundsExceeded.into());
+		}
 		if !self
 			.scope
 			.allowed
@@ -4533,6 +4550,32 @@ mod tests {
 		assert!(matches!(err, Error::BoundsExceeded(_)), "{err:?}");
 		let inside = project.scope(".svc/x", &Patterns::from(Pattern::all())).unwrap();
 		inside.announced().assert_next_wait();
+	}
+
+	/// A mount point deeper than its target never presents a route whose name
+	/// through the mount is past the depth limit, and a mount point past it is refused.
+	#[tokio::test]
+	async fn mount_bounds_the_named_path() {
+		let producer = origin(1).produce();
+		let _near = producer.publish("t/x", Route::default()).unwrap();
+		let deep = format!("t/{}", vec!["d"; Path::MAX_PARTS - 1].join("/"));
+		let _deep = producer.publish(deep.as_str(), Route::default()).unwrap();
+		let project = producer
+			.mount("p1/a/b", "t")
+			.unwrap()
+			.scope("p1", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.consume();
+
+		let mut announced = project.announced();
+		announced.assert_next_active("a/b/x");
+		announced.assert_next_wait();
+
+		let over = vec!["d"; Path::MAX_PARTS + 1].join("/");
+		assert!(matches!(
+			producer.mount(over.as_str(), "t"),
+			Err(Error::BoundsExceeded(_))
+		));
 	}
 
 	/// Nothing is published at or beneath a mount.
