@@ -438,7 +438,7 @@ export class Reload {
 	 * Subscribe to broadcast announcements matching `scope`, spanning reconnects.
 	 *
 	 * The same {@link Announce.Consumer} stream as {@link Established.announced}, but everything active
-	 * is retracted (a `retracted` update) whenever the connection drops and re-announced on
+	 * is retracted (an `end` event) whenever the connection drops and re-announced on
 	 * reconnect, so a consumer draining `next()` never clings to a dead route across a reconnect.
 	 * The `live` marker comes once, from the first session.
 	 *

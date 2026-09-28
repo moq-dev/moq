@@ -240,7 +240,7 @@ export class Subscriber {
 
 	/**
 	 * Replace the stored route for a path that is already announced. A no-op when the
-	 * hops and cost did not change; otherwise consumers hear `updated` so a forwarder
+	 * hops and cost did not change; otherwise consumers hear `update` so a forwarder
 	 * can reprice without retracting.
 	 */
 	#updateAnnounce(path: Path.Valid, route: Route) {

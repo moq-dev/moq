@@ -399,7 +399,7 @@ test("an inline NAMESPACE that starts looping back is retracted", async () => {
 /**
  * NAMESPACE has no REQUEST_UPDATE, so a peer reprices one by re-sending it. The repeat is
  * neither a duplicate nor a retraction: the stored route changes and consumers hear
- * `updated`.
+ * `update`.
  */
 test("a repeated NAMESPACE reprices in place", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
@@ -577,7 +577,7 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 
 /**
  * REQUEST_UPDATE keeps an omitted parameter, so an explicit ROUTE_COST of 0 lands on the
- * path already held without disturbing the announcement. Consumers hear `updated` with the
+ * path already held without disturbing the announcement. Consumers hear `update` with the
  * new cost; the stream ending is what retracts it.
  */
 test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
