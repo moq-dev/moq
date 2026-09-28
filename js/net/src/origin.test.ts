@@ -1558,3 +1558,37 @@ test("a scoped reader sees a local broadcast that only loses to a route outside 
 	chat.close();
 	origin.close();
 });
+
+test("broadcast handles carry the path they were created or requested at", async () => {
+	expect(new BroadcastProducer().consume().path).toBe(Path.empty());
+
+	const origin = new Producer();
+	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*")]));
+	const broadcast = publish(scoped, Path.from("room/alice"));
+	expect(broadcast.consume().path).toBe(Path.from("tenant/room/alice"));
+
+	// Relative to each cursor's root, and kept by a clone.
+	const whole = origin.request(Path.from("tenant/room/alice"));
+	const rooted = scoped.consume().request(Path.from("room/alice"));
+	expect(whole.active.peek()?.path).toBe(Path.from("tenant/room/alice"));
+	expect(rooted.active.peek()?.path).toBe(Path.from("room/alice"));
+	const clone = rooted.active.peek()?.clone();
+	expect(clone?.path).toBe(Path.from("room/alice"));
+
+	// A dynamic handler's standalone broadcast is named by the request, too.
+	const dynamic = origin.dynamic(Path.from("live"));
+	const request = origin.request(Path.from("live/bob"));
+	const pending = await dynamic.requested().next();
+	const served = new BroadcastProducer();
+	pending.value?.accept(served);
+	expect(request.active.peek()?.path).toBe(Path.from("live/bob"));
+
+	clone?.close();
+	whole.close();
+	rooted.close();
+	request.close();
+	served.close();
+	dynamic.close();
+	broadcast.close();
+	origin.close();
+});

@@ -113,7 +113,7 @@ make MoQ's common case.
 
 ## Required
 
-- [Local origin](/quest/m0/local-origin.md) - workers stop reading hop chains before they go
+- moq.pro workers stop electing on hop chains, reading the relay's local origin instead ([moq.pro voice-local-origin](https://github.com/moq-dev/moq.pro/blob/main/quest/m0/voice-local-origin.md))
 - [Wildcard](/quest/m0/wildcard/README.md) - the specificity, pool spread, and reply identity this selection builds on
 - moq.pro's routing simulator reports ([quest](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/routing-simulator.md))
 
