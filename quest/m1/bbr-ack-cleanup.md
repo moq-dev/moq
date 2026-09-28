@@ -56,6 +56,5 @@ is needed.
 
 ## Related
 
-- [Classic ECN](/quest/m1/bbr-classic-ecn.md) - an independent correctness fix in the same controller; coordinate ownership of the shared file
 - [Loss sampling](/quest/m1/quic/bbr-loss-parity.md) - preserve packet metadata needed by the separate loss-sample repair
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - reusable measurement guidance, not a prerequisite for this fix
