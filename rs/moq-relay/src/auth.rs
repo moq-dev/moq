@@ -958,27 +958,19 @@ mod tests {
 		assert_eq!(reason, lease::Reason::Expired);
 	}
 
-	#[tokio::test]
-	async fn a_grant_within_clock_skew_stays_live() {
-		tokio::time::pause();
+	#[tokio::test(start_paused = true)]
+	async fn an_expired_grant_ends_at_once() {
 		use std::time::Duration;
 
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
 		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
-		grant.validate().expect("accepted inside the skew window");
+		assert!(matches!(grant.validate(), Err(moq_auth::Error::GrantExpired)));
+
+		let start = tokio::time::Instant::now();
 		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant));
-		assert!(
-			tokio::time::timeout(Duration::from_secs(1), lease.ended())
-				.await
-				.is_err(),
-			"still live inside the skew window"
-		);
-		assert_eq!(
-			tokio::time::timeout(Duration::from_secs(4), lease.ended())
-				.await
-				.expect("expired once the skew window ended"),
-			lease::Reason::Expired
-		);
+		assert_eq!(lease.ended().await, lease::Reason::Expired);
+		// A millisecond for Tokio's timer resolution.
+		assert!(start.elapsed() <= Duration::from_millis(1), "no grace after expiry");
 	}
 
 	#[test]

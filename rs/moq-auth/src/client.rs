@@ -493,24 +493,38 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_grant_within_clock_skew_stays_live() {
+	async fn an_expired_grant_is_refused() {
 		tokio::time::pause();
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
 		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
 		let client = clock_server(Log::default(), grant, false).await;
-		let consumer = client.connect(request()).await.unwrap();
+		assert!(matches!(client.connect(request()).await, Err(Error::GrantExpired)));
+	}
 
-		tokio::time::sleep(Duration::from_millis(500)).await;
+	#[tokio::test]
+	async fn a_grant_closes_at_its_expiry() {
+		tokio::time::pause();
+		// Whole seconds, as the grant crosses the wire, so the client sees this exact instant.
+		let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+		let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() + 3);
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		grant.expires = Some(expires);
+		let client = clock_server(Log::default(), grant, false).await;
+
+		let remaining = expires.duration_since(SystemTime::now()).unwrap();
+		let consumer = client.connect(request()).await.unwrap();
+		let at = tokio::time::Instant::now() + remaining;
+
 		assert!(
-			tokio::time::timeout(Duration::from_millis(100), consumer.closed())
+			tokio::time::timeout_at(at - Duration::from_secs(1), consumer.closed())
 				.await
 				.is_err(),
-			"still live inside the skew window"
+			"live until its expiry"
 		);
-
-		let reason = tokio::time::timeout(crate::grant::CLOCK_SKEW + Duration::from_secs(1), consumer.closed())
+		// A millisecond for Tokio's timer resolution.
+		let reason = tokio::time::timeout_at(at + Duration::from_millis(1), consumer.closed())
 			.await
-			.expect("expired once the skew window ended");
+			.expect("closed at its expiry, not later");
 		assert_eq!(reason, Reason::Expired);
 	}
 
