@@ -2,9 +2,10 @@
 
 ## Goal
 
-A lite subscriber can tell "not yet" from "never" for every group in its
-subscription. Each sequence in range either arrives on a Group Stream or is
-named by a SUBSCRIBE_DROP, including sequences the publisher skipped. Rust and
+A lite subscriber can tell "not yet" from "never" for every stream group in
+its subscription. Each sequence in range either arrives on a Group Stream, is
+sent as a datagram, or is named by a SUBSCRIBE_DROP, including sequences the
+publisher skipped. Only a lost datagram stays unaccounted. Rust and
 `@moq/net` publishers send it on every lite version that has it, and moq-lite-07
 brings it back in place of `Stream Count`.
 
@@ -24,9 +25,10 @@ Decided:
   that keeps the stream header acts as a one-group drop, an optimization over
   sending the DROP.
 - Publishers send SUBSCRIBE_DROP on lite-03 through lite-06 too: for every group
-  in range they won't deliver (expired, deprioritized, reset) and for every
-  explicit gap. Publishers that skip sequences (`cut` and group discontinuities
-  in the media layers) must mark the gap so the net layer can drop it.
+  in range they won't deliver (expired, deprioritized, or reset without its
+  header delivered) and for every explicit gap. Publishers that skip sequences
+  (`cut` and group discontinuities in the media layers) must mark the gap so
+  the net layer can drop it.
 - Datagram groups stay best effort. A publisher counts a datagram as
   delivered, so a lost one leaves an uncovered hole that waits out the tail
   grace, as today.

@@ -5,7 +5,9 @@
 A reader that awaits only the in-flight group's `read_frame` never parks forever
 after its source fails mid-group. Once the track fails over to a new copy, the
 half-delivered group either completes from that copy or ends with an error, on
-every lite version and for local and remote sources alike.
+every lite version and for local and remote sources alike. The one exception
+is a copy that later drops the group it is serving; that waits on
+[SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md).
 
 Two reports, one mechanism:
 
