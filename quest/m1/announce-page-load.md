@@ -9,8 +9,9 @@ An announcement stream in `@moq/net` treats the `Live` marker like an
   empty set. `Live` comes only after that first session's initial set has
   been delivered. There is no give-up: a failed connection shows up as a
   connection error, never as an empty `Live`.
-- A change landing in the same tick as the last replayed route is yielded
-  after `Live`, not folded into the snapshot ahead of it.
+- A change applied after the last replay hold drops is yielded after `Live`,
+  even when it lands in the same tick, not folded into the snapshot ahead of
+  it. A change applied before the hold drops stays ahead of `Live`.
 
 Every other JS place with the same page-load gap follows the same rule.
 
@@ -30,7 +31,7 @@ Every other JS place with the same page-load gap follows the same rule.
   then `Live`, then diff from the snapshot, as Rust does.
 - Tests: a caught-up test that opens the stream before the first connection,
   one where the first connection fails and no `Live` arrives, and a same-tick
-  test where a change lands with the last replayed route and comes after
+  test where a change applied just after the last hold drops comes after
   `Live`.
 
 ## Required
