@@ -411,6 +411,20 @@ impl TrackState {
 		next_sequence: u64,
 		end_sequence: Option<u64>,
 	) -> Poll<Result<Option<group::Producer>>> {
+		// An abort before the end settled cut the track off. One after it is a clean
+		// end (see `is_complete`): the cached groups were everything the end promised,
+		// so the cursor ends as `poll_recv_group` does, not with the abort.
+		if let Some(err) = &self.abort
+			&& !self.settled
+		{
+			return Poll::Ready(Err(err.clone()));
+		}
+		// Nothing more can arrive once the last producer is gone: the track was sealed
+		// (dropped with its end declared) or aborted with that end settled. Either closed
+		// the channel, so parking is not an option: the consumer would be handed the
+		// abort, or `Dropped`, instead of the end it reached.
+		let closed = self.sealed || self.abort.is_some();
+
 		// If the exclusive end is already at or below where we'd resume, no
 		// group can ever satisfy this call until the cap rises. Pending (not
 		// None) so the consumer is parked rather than told the stream is over.
@@ -418,10 +432,8 @@ impl TrackState {
 		if let Some(end) = end_sequence
 			&& end <= next_sequence
 		{
-			if let Some(err) = &self.abort
-				&& !self.settled
-			{
-				return Poll::Ready(Err(err.clone()));
+			if closed {
+				return Poll::Ready(Ok(None));
 			}
 			return Poll::Pending;
 		}
@@ -441,22 +453,13 @@ impl TrackState {
 			return Poll::Ready(Ok(Some(group.clone())));
 		}
 
-		// No in-range group is cached. Decide whether more could ever arrive. An abort
-		// after the end settled is a clean end (see `is_complete`): the cached groups
-		// above were everything the end promised, so the cursor ends as `poll_recv_group`
-		// does, not with the abort.
-		if let Some(err) = &self.abort
-			&& !self.settled
-		{
-			return Poll::Ready(Err(err.clone()));
-		}
+		// No in-range group is cached. Decide whether more could ever arrive.
 		// `final_sequence` is one past the last possible sequence. If our
 		// floor is already at/past it, nothing else can land in range.
-		// A sealed track produces nothing more either: the last producer
-		// dropped with the boundary already declared, so a gap below it is
-		// the end, not a wait. Cached in-range groups were returned above.
-		// This is the cursor the ordered and spliced readers use.
-		if self.sealed || self.final_sequence.is_some_and(|fin| next_sequence >= fin) {
+		// A closed track produces nothing more either, so a gap below its
+		// boundary is the end, not a wait. Cached in-range groups were
+		// returned above. This is the cursor the ordered and spliced readers use.
+		if closed || self.final_sequence.is_some_and(|fin| next_sequence >= fin) {
 			return Poll::Ready(Ok(None));
 		}
 		Poll::Pending
@@ -6993,6 +6996,60 @@ mod test {
 			.expect("should not block")
 			.map(|group| group.map(|group| group.sequence));
 		assert!(matches!(end, Ok(None)), "expected the clean end, got {end:?}");
+	}
+
+	/// The settled end stands on the ordered cursor even where it has nothing to read:
+	/// capped below the end, and with a gap below the cap. Parking is not an option on a
+	/// closed track (the channel would turn it into the abort), so these end clean.
+	#[tokio::test]
+	async fn abort_after_the_end_settles_ends_clean_below_the_cap() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None).ordered();
+		for sequence in 0..2 {
+			producer
+				.create_group(group::Info { sequence })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		producer.finish_at(2).unwrap();
+		producer.abort(Error::Timeout).unwrap();
+
+		consumer.set_groups(..1);
+		assert_eq!(drain_ordered(&mut consumer), [0]);
+		let end = consumer
+			.next_group()
+			.now_or_never()
+			.expect("should not block")
+			.map(|group| group.map(|group| group.sequence));
+		assert!(
+			matches!(end, Ok(None)),
+			"capped at the end: expected the clean end, got {end:?}"
+		);
+
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None).ordered();
+		for sequence in [0, 2] {
+			producer
+				.create_group(group::Info { sequence })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		producer.finish_at(3).unwrap();
+		producer.abort(Error::Timeout).unwrap();
+
+		consumer.set_groups(..2);
+		assert_eq!(drain_ordered(&mut consumer), [0]);
+		let end = consumer
+			.next_group()
+			.now_or_never()
+			.expect("should not block")
+			.map(|group| group.map(|group| group.sequence));
+		assert!(
+			matches!(end, Ok(None)),
+			"gap below the cap: expected the clean end, got {end:?}"
+		);
 	}
 
 	#[tokio::test]
