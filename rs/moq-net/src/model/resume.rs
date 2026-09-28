@@ -2256,26 +2256,24 @@ impl Subscriber {
 		}
 	}
 
-	/// Poll for where the source of the first segment reaching this cursor's floor starts,
-	/// raised to the floor, once resolved; see [`track::Subscriber::poll_start`]. A
-	/// segment ending at or below the floor serves nothing here, so its source is not
-	/// waited on. Like [`Self::poll_final`], this only resolves the subscription and
-	/// consumes no groups.
+	/// Poll for where the source of the first live segment reaching this cursor's floor
+	/// starts, raised to the floor, once resolved; see [`track::Subscriber::poll_start`].
+	/// A segment ending at or below the floor, or one that already ended, serves nothing
+	/// more here, so its source is not waited on. Like [`Self::poll_final`], this only
+	/// resolves the subscription and consumes no groups.
 	pub(crate) fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		self.poll_sync(waiter);
 		let floor = self.min_sequence;
-		let Some(seg) = self
-			.segments
-			.iter_mut()
-			.find(|seg| seg.last_group().is_none_or(|last| last > floor))
-		else {
-			return Poll::Ready(None);
-		};
-		ready!(Self::poll_activate(seg, &self.last_prefs, floor, waiter));
-		match &mut seg.sub {
-			SubState::Active(sub) => Poll::Ready(ready!(sub.poll_start(waiter)).map(|start| start.max(floor))),
-			SubState::Done(_) | SubState::Pending(_) => Poll::Ready(None),
+		for seg in &mut self.segments {
+			if seg.last_group().is_some_and(|last| last <= floor) {
+				continue;
+			}
+			ready!(Self::poll_activate(seg, &self.last_prefs, floor, waiter));
+			if let SubState::Active(sub) = &mut seg.sub {
+				return Poll::Ready(ready!(sub.poll_start(waiter)).map(|start| start.max(floor)));
+			}
 		}
+		Poll::Ready(None)
 	}
 
 	/// Wait for the final segment's track to end: its group count when it
@@ -2529,6 +2527,32 @@ mod test {
 		track_b.start_at(12).unwrap();
 		let start = kio::wait(|waiter| sub.poll_start(waiter)).now_or_never();
 		assert_eq!(start, Some(Some(12)), "waited on a segment below the floor");
+	}
+
+	/// A segment that already ended serves nothing more, so the start comes from the next
+	/// one rather than falling back to whichever group arrives first.
+	#[tokio::test]
+	async fn poll_start_skips_an_ended_segment() {
+		let (track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+		track_b.request_start(Some(5)).unwrap();
+
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		producer.switch(&consumer_b, Position::group(5)).unwrap();
+		track_a.abort(Error::Cancel).unwrap();
+
+		let mut sub = producer.consume().subscribe(replay());
+		// Reading drains A to its end, leaving nothing for it to serve.
+		recv_pending(&mut sub);
+		assert!(
+			kio::wait(|waiter| sub.poll_start(waiter)).now_or_never().is_none(),
+			"B's source has not resolved yet"
+		);
+
+		track_b.start_at(5).unwrap();
+		let start = kio::wait(|waiter| sub.poll_start(waiter)).now_or_never();
+		assert_eq!(start, Some(Some(5)));
 	}
 
 	#[tokio::test]
