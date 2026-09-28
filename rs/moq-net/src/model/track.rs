@@ -1195,8 +1195,14 @@ fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) {
 	// Decided before the cache goes: the groups below the end are the evidence.
 	state.settled = state.is_settled();
 	state.abort = Some(err);
-	state.clear_cache();
-	state.datagrams.clear();
+	// A settled end is a clean end: the track holds every group it promised, so keep
+	// them for consumers still draining, as `finish()` does. Clearing here would abort
+	// the finished groups a slower reader has not pulled yet, and it would then see the
+	// track end short of them with no error.
+	if !state.settled {
+		state.clear_cache();
+		state.datagrams.clear();
+	}
 	state.close();
 }
 
