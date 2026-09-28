@@ -168,7 +168,7 @@ relative to `root`. Nested scopes intersect with their parent. In Rust,
 request for `at/rest` joins the one front at `target/rest`, announcements under
 `target` present under `at`, the handle's patterns still authorize `at/rest`,
 and nothing is published beneath `at`. Mounts never chain: a mount point that
-overlaps another mount's point or target is refused. A session receiving
+overlaps another mount's point or any target, its own included, is refused. A session receiving
 into that scoped origin asks for the literal heads of its allowed patterns,
 coalescing duplicate or nested heads. An unscoped origin still asks for the empty
 prefix, covering every namespace. These subscriptions include hidden routes;

@@ -1559,7 +1559,7 @@ impl Producer {
 	/// Returns [`Error::Unauthorized`] unless this producer reaches all of
 	/// `target`, so a mount never widens a scope, and [`Error::Duplicate`] when
 	/// `at` or `target` overlaps a mount point this producer already has, or `at`
-	/// overlaps an existing target: mounts never chain, in whatever order they are added,
+	/// overlaps an existing target or its own: mounts never chain, in whatever order they are added,
 	/// so a target is always read as the origin holds it. Mounts may share a target.
 	/// [`Error::BoundsExceeded`] if either rooted path exceeds [`Path::MAX_PARTS`],
 	/// and [`Error::InvalidPath`] if `at` holds a segment no pattern can spell.
@@ -1582,13 +1582,15 @@ impl Producer {
 			return Err(Error::Unauthorized);
 		}
 		// Symmetric, so the order mounts are added never changes which sets are accepted:
-		// no mount point overlaps another mount's point or target. Targets may overlap.
+		// no mount point overlaps any mount's point or target, its own included.
+		// Targets may overlap.
 		let overlaps = |a: &Path, b: &Path| a.has_prefix(b) || b.has_prefix(a);
-		if self
-			.scope
-			.mounts
-			.iter()
-			.any(|mount| overlaps(&at, &mount.at) || overlaps(&target, &mount.at) || overlaps(&at, &mount.target))
+		if overlaps(&at, &target)
+			|| self
+				.scope
+				.mounts
+				.iter()
+				.any(|mount| overlaps(&at, &mount.at) || overlaps(&target, &mount.at) || overlaps(&at, &mount.target))
 		{
 			return Err(Error::Duplicate);
 		}
@@ -4626,6 +4628,13 @@ mod tests {
 		mounted.mount("p1/.other", ".other/p1").unwrap();
 		// Mount points may share a target.
 		mounted.mount("p2/.svc", ".svc/p1").unwrap();
+		// A mount point overlapping its own target is refused like any other overlap.
+		for (at, target) in [("a", "a/b"), ("a/b", "a"), ("a", "a")] {
+			assert!(
+				matches!(producer.mount(at, target), Err(Error::Duplicate)),
+				"{at} -> {target}"
+			);
+		}
 	}
 
 	/// A mount point no pattern can spell could never be announced or authorized.
