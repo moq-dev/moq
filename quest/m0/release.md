@@ -86,4 +86,5 @@ Public API: none beyond the required quests. Wire: none.
 
 ## Required
 
+- [Packaged relay starts](/quest/m0/relay-systemd-unit.md) - the shipped systemd unit passes the config path the relay accepts
 - The merged relay has soaked on moq.pro staging and the maintainer has signed it off

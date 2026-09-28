@@ -20,4 +20,5 @@ decision, with a quest for the chosen mechanism.
 
 ## Related
 
+- [Same-hop importers](/quest/m1/hop-aligned-import.md) - identical tracks from one encoded stream under one first hop, the case this generalizes
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - explicit epochs are what a redundant pair would share
