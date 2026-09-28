@@ -12,9 +12,10 @@ import (
 // discover them. Wire one as both a client's/server's publish source and
 // consume sink for a full-duplex peer.
 //
-// There is no Close: the origin ends once the collector reaches every
-// producer, and its consumers and dynamic handles then fail with [ErrClosed].
-// Keep a producer reachable for as long as the origin should live.
+// There is no Close: the origin ends once the collector reaches every owner
+// (each producer, published broadcast, and [OriginDynamic]), and its consumers
+// then fail with [ErrClosed]. Keep an owner reachable for as long as the origin
+// should live.
 type OriginProducer struct {
 	inner *ffi.MoqOriginProducer
 }

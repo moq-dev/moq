@@ -19,8 +19,8 @@ import (
 const testTimeout = 10 * time.Second
 
 // newOrigin returns an origin that lasts the whole test. An OriginProducer has
-// no Close: the collector ends its origin once nothing reaches the producer,
-// even while consumers and dynamic handles made from it are still in use.
+// no Close: the collector ends its origin once nothing reaches an owner, even
+// while consumers made from it are still in use.
 func newOrigin(t *testing.T) *moq.OriginProducer {
 	origin := moq.NewOriginProducer()
 	t.Cleanup(func() { runtime.KeepAlive(origin) })
