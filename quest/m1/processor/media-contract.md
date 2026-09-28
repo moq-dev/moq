@@ -31,7 +31,3 @@ Land Rust and JavaScript catalog bindings, resolver behavior, and fixtures for
 video, audio, text, missing output, malformed relations, lazy resolution, and
 relative-path escape. The release and the moq.pro (downstream) pin rollout
 stay out of this quest.
-
-## Related
-
-- [JS catalog path](/quest/m1/js-catalog-path.md) - JS rejects an escaping `broadcast` reference like Rust
