@@ -624,22 +624,28 @@ export class Producer {
 		// drained it. The usual case, an already-closed group aging out, keeps its own
 		// terminal state.
 		if (!entry.group.isClosed) entry.group.close(new TooFarBehind());
+		const mirrors = [...entry.mirrors.values()];
+		for (const mirror of mirrors) hooks.evictGroup(mirror);
+		this.#unlink(entry);
+		for (const mirror of mirrors) mirror.close();
+	}
+
+	// Take a cached group's mirrors out of every sink, so a subscriber can no longer
+	// receive them. A reader already holding one keeps it as is.
+	#unlink(entry: CachedGroup): void {
 		for (const [sink, mirror] of entry.mirrors) {
-			hooks.evictGroup(mirror);
 			sink.groups.mutate((groups) => {
 				const i = groups.indexOf(mirror);
 				if (i >= 0) groups.splice(i, 1);
 			});
 			const index = timelineIndex(sink.timeline, mirror.sequence);
 			if (sink.timeline[index] === mirror) sink.timeline.splice(index, 1);
-			mirror.close();
 		}
 		entry.mirrors.clear();
 	}
 
-	// Take a cached group out of the cache and every sink.
-	#drop(entry: CachedGroup): void {
-		this.#evict(entry);
+	// Take a cached group out of the cache lookups.
+	#uncache(entry: CachedGroup): void {
 		this.#cache.splice(this.#cache.indexOf(entry), 1);
 		this.#cached.delete(entry.group.sequence);
 	}
@@ -764,7 +770,8 @@ export class Producer {
 			if (!(existing.group.closed.peek() instanceof Error)) {
 				throw new Error(`duplicate group: sequence=${group.sequence}`);
 			}
-			this.#drop(existing);
+			this.#evict(existing);
+			this.#uncache(existing);
 		}
 
 		// Only advance the shared counter upward (for appendGroup auto-increment).
@@ -871,10 +878,14 @@ export class Producer {
 			this.#declareFinal(this.#sequence.next);
 		}
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
+		// Not evicted: a reader already holding one keeps its frames and sees the abort.
 		const open = abort ? this.#cache.filter((entry) => entry.group.closed.peek() === undefined) : [];
 		closeTrackState(this.#state, abort);
 		for (const { group } of this.#cache) group.close(abort);
-		for (const entry of open) this.#drop(entry);
+		for (const entry of open) {
+			this.#unlink(entry);
+			this.#uncache(entry);
+		}
 		for (const sink of this.#sinks) {
 			for (const group of sink.groups.peek()) group.close(abort);
 			closeTrackState(sink, abort);
