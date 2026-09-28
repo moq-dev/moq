@@ -78,7 +78,7 @@ VPN, the competing UDP flows, and the signalling server at once, and survives
 cell handover through connection migration. That is the pitch, and it is worth
 stating plainly because it is what a builder is comparing against.
 
-## Quests
+## Required
 
 - [Robot teleoperation primitive](/quest/m2/teleop/robot.md) - a `moq-robot`
   crate carrying the track shapes and discovery every teleoperated machine

@@ -256,7 +256,7 @@ no generation, so a client that must distinguish recording generations reads
 the catalog's archive entry ([archive](/quest/m1/archive/README.md)) rather
 than announce state.
 
-## Quests
+## Required
 
 - [Resolve](/quest/m0/wildcard/resolve.md) - a relay resolves a subscribe or
   FETCH for an unannounced path against the best matching wildcard

@@ -31,7 +31,7 @@ The counters and channels land here. The moq.pro (downstream) dashboard work,
 including the health badge, connection-health drill-down, and stream
 preflight, consumes them downstream.
 
-## Quests
+## Required
 
 - [Starvation](/quest/m1/qos/starvation.md) - per broadcast, how far behind
   the acknowledged frontier of its subscriptions is, in media time, plus the

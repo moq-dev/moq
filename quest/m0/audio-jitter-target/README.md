@@ -74,7 +74,7 @@ playback may drift from the live edge before skipping a stalled group, and
 `start`, where to begin on a track that already holds groups. Nothing pads the
 buffer against uneven arrivals.
 
-## Quests
+## Required
 
 - [Watch](/quest/m0/audio-jitter-target/watch.md) - js/watch and js/hang bring the #3517 branch's estimator into conformance
 - [Native](/quest/m0/audio-jitter-target/native.md) - rs/moq-audio grows a measured jitter buffer from the same algorithm

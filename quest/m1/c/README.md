@@ -42,7 +42,7 @@ retires it: [fetch](/quest/m3/libmoq-fetch.md),
 [CMake library](/quest/m3/libmoq-cmake-lib.md), and
 [shutdown](/quest/m3/libmoq-shutdown.md).
 
-## Quests
+## Required
 
 - [C backend](/quest/m1/c/backend.md) - the fork emits an ergonomic C header and implementation from moq-ffi, with its own tests
 - [moq-c package](/quest/m1/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
