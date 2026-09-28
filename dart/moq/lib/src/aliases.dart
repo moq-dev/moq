@@ -40,7 +40,7 @@ typedef OriginDynamic = MoqOriginDynamic;
 /// A requested broadcast not yet accepted: fulfill it with a producer or reject it.
 typedef BroadcastRequest = MoqBroadcastRequest;
 
-/// A stream of route announcements and retractions under a prefix.
+/// A stream of announce events under a prefix.
 typedef AnnounceConsumer = MoqAnnounceConsumer;
 
 /// A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery.
@@ -49,8 +49,24 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// A pending wait for a route to cover a specific path.
 typedef AnnouncedBroadcast = MoqAnnouncedBroadcast;
 
-/// A single route announcement or retraction: its path, route metadata, and active flag.
-typedef AnnounceUpdate = MoqAnnounceUpdate;
+/// A route over a prefix: its origin-relative path, wildcard captures, and route metadata.
+typedef Announce = MoqAnnounce;
+
+/// What an [AnnounceConsumer] yields: [AnnounceEventAnnounced],
+/// [AnnounceEventUpdated], [AnnounceEventRetracted], or [AnnounceEventLive].
+typedef AnnounceEvent = MoqAnnounceEvent;
+
+/// A route now covers the prefix; the stream had none there.
+typedef AnnounceEventAnnounced = AnnouncedMoqAnnounceEvent;
+
+/// The route covering the prefix changed hops or cost.
+typedef AnnounceEventUpdated = UpdatedMoqAnnounceEvent;
+
+/// No route covers the prefix any more; carries its last route.
+typedef AnnounceEventRetracted = RetractedMoqAnnounceEvent;
+
+/// Every route live at subscribe time has been delivered; what follows is live changes.
+typedef AnnounceEventLive = LiveMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;

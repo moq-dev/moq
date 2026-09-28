@@ -489,11 +489,6 @@ impl MoqBroadcastProducer {
 		state.catalog.finish()?;
 		Ok(())
 	}
-
-	/// Deprecated: use `close()`. A broadcast end carries no cause.
-	pub fn finish(&self) -> Result<(), MoqError> {
-		self.close()
-	}
 }
 
 // ---- Dynamic Broadcast Producer ----

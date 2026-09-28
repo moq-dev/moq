@@ -22,20 +22,20 @@ class Moq internal constructor(
     /**
      * Create an unannounced broadcast at [path], invisible to everyone until announced.
      *
-     * Advertise it with `announce` after populating tracks. `close()` (or `use`) ends it once no
-     * `dynamic()` handle remains.
+     * Advertise it with `announce` after populating tracks. `end()` ends it for good; `close()`
+     * (or `use`) releases the handle, which ends it once no `dynamic()` handle remains.
      */
     fun createBroadcast(path: String): BroadcastProducer = session.publish().createBroadcast(path)
 
     /**
-     * Discover routes matching [config] as a [Flow]. Each update stays relative
-     * to the origin. The subscription is acquired on
+     * Discover routes matching [config] as a [Flow] of [AnnounceEvent]. Prefixes stay
+     * relative to the origin. The subscription is acquired on
      * collection and cancelled when collection ends. Use [announced] for the raw handle.
      */
-    fun announcements(config: AnnounceConfig = AnnounceConfig()): Flow<AnnounceUpdate> =
+    fun announcements(config: AnnounceConfig = AnnounceConfig()): Flow<AnnounceEvent> =
         session.consume().announcements(config)
 
-    /** Raw announcement handle for [config]; update prefixes stay relative to the origin. */
+    /** Raw announcement handle for [config]; prefixes stay relative to the origin. */
     fun announced(config: AnnounceConfig = AnnounceConfig()): AnnounceConsumer =
         session.consume().announced(config)
 

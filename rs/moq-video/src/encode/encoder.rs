@@ -970,9 +970,9 @@ mod tests {
 	}
 
 	impl Backend for Delayed {
-		fn encode(&mut self, frame: &Frame, _cut: bool) -> Result<Vec<Encoded>, Error> {
+		fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 			let payload = bytes::Bytes::from(frame.timestamp.as_micros().to_string());
-			let previous = self.pending.replace(Encoded::new(payload, frame.timestamp));
+			let previous = self.pending.replace(Encoded::new(payload, frame.timestamp, cut));
 			Ok(previous.into_iter().collect())
 		}
 

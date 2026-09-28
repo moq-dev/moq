@@ -6,6 +6,15 @@ import 'package:test/test.dart';
 
 const timeout = Duration(seconds: 10);
 
+/// The next announce event that is not Live, which lands wherever the backlog ends.
+Future<AnnounceEvent> nextRoute(AnnounceConsumer announced) async {
+  while (true) {
+    final event = await announced.next().timeout(timeout);
+    if (event == null) throw StateError('announce stream ended');
+    if (event is! AnnounceEventLive) return event;
+  }
+}
+
 void main() {
   test('connects, announces, subscribes, and delivers a frame', () async {
     final relay = MoqOriginProducer(config: MoqOriginConfig());
@@ -29,15 +38,19 @@ void main() {
     final serverSession = await accepted;
     expect(client.bandwidth(), isA<MoqBandwidth>());
 
-    final announcement = client.announcements().first;
+    final announcement = client.announcements().firstWhere(
+      (event) => event is AnnounceEventAnnounced,
+    );
     final broadcast = relay.createBroadcast(path: 'live');
     final track = broadcast.publishTrack(name: 'events', info: null);
     broadcast.announce(route: MoqRoute());
-    final announced = await announcement.timeout(timeout);
-    expect(announced.prefix(), 'live');
+    final announced =
+        (await announcement.timeout(timeout) as AnnounceEventAnnounced)
+            .announce;
+    expect(announced.prefix, 'live');
 
     final requested = await client
-        .requestBroadcast(announced.prefix())
+        .requestBroadcast(announced.prefix)
         .timeout(timeout);
     final consumer = await requested
         .subscribeTrack(name: 'events', subscription: null)
@@ -92,12 +105,16 @@ void main() {
     ).timeout(timeout);
     final serverSession = await accepted;
 
-    final announcement = client.announcements().first;
+    final announcement = client.announcements().firstWhere(
+      (event) => event is AnnounceEventAnnounced,
+    );
     final broadcast = server.createBroadcast('live');
     final track = broadcast.publishTrack(name: 'events', info: null);
     broadcast.announce(route: MoqRoute());
-    final announced = await announcement.timeout(timeout);
-    expect(announced.prefix(), 'live');
+    final announced =
+        (await announcement.timeout(timeout) as AnnounceEventAnnounced)
+            .announce;
+    expect(announced.prefix, 'live');
 
     client.close();
     serverSession.cancel(code: 0);
@@ -166,22 +183,21 @@ void main() {
 
     broadcast.announce(route: MoqRoute());
     final announced = consumer.announced(config: MoqAnnounceConfig());
-    final first = await announced.next().timeout(timeout);
-    expect(first?.prefix(), 'live');
-    expect(first?.active(), isTrue);
+    final first = await nextRoute(announced);
+    expect(first, isA<AnnounceEventAnnounced>());
+    expect((first as AnnounceEventAnnounced).announce.prefix, 'live');
 
     broadcast.unannounce();
-    final retracted = await announced.next().timeout(timeout);
-    expect(retracted?.prefix(), 'live');
-    expect(retracted?.active(), isFalse);
+    final retracted = await nextRoute(announced);
+    expect(retracted, isA<AnnounceEventRetracted>());
+    expect((retracted as AnnounceEventRetracted).announce.prefix, 'live');
     await expectLater(
       consumer.requestBroadcast(path: 'live').timeout(timeout),
       throwsA(anything),
     );
 
     broadcast.announce(route: MoqRoute());
-    final back = await announced.next().timeout(timeout);
-    expect(back?.active(), isTrue);
+    expect(await nextRoute(announced), isA<AnnounceEventAnnounced>());
     await consumer.requestBroadcast(path: 'live').timeout(timeout);
     announced.cancel();
     announced.dispose();
@@ -195,9 +211,31 @@ void main() {
     final broadcast = origin.createBroadcast(path: 'room/alice/chat');
     broadcast.announce(route: MoqRoute());
 
-    final update = await announced.next().timeout(timeout);
-    expect(update?.prefix(), 'room/alice/chat');
-    expect(update?.captures(), ['alice']);
+    final update = await nextRoute(announced) as AnnounceEventAnnounced;
+    expect(update.announce.prefix, 'room/alice/chat');
+    expect(update.announce.captures, ['alice']);
+  });
+
+  test('announced yields Live once caught up', () async {
+    final origin = MoqOriginProducer(config: MoqOriginConfig());
+    final consumer = origin.consume();
+
+    final empty = consumer.announced(config: MoqAnnounceConfig());
+    expect(await empty.next().timeout(timeout), isA<AnnounceEventLive>());
+    empty.cancel();
+    empty.dispose();
+
+    final broadcast = origin.createBroadcast(path: 'cam');
+    broadcast.announce(route: MoqRoute());
+    await consumer.announcedBroadcast(path: 'cam').available().timeout(timeout);
+
+    final announced = consumer.announced(config: MoqAnnounceConfig());
+    final first = await announced.next().timeout(timeout);
+    expect((first as AnnounceEventAnnounced).announce.prefix, 'cam');
+    expect(await announced.next().timeout(timeout), isA<AnnounceEventLive>());
+    announced.cancel();
+    announced.dispose();
+    broadcast.close();
   });
 
   test('dynamic serves a request under a prefix', () async {

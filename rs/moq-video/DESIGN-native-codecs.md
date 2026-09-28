@@ -338,7 +338,7 @@ Where the implementation differs from the plan above:
   This dropped swscale entirely.
 - **One raw frame type, one encoded one.** The plan's `Nv12` input and `Vec<Bytes>`
   output became `moq_video::Frame` (timestamp + `Surface`) in and
-  `moq_video::encode::Encoded` (timestamp + payload) out, with the pixel
+  `moq_video::encode::Encoded` (timestamp + payload + keyframe flag) out, with the pixel
   representations public in `Surface` so a caller can render or re-encode without a
   CPU round trip. Timestamps ride through the codec rather than being attached at
   publish time, so a buffering backend and the `finish()` tail stay in step. The

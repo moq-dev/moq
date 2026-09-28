@@ -32,7 +32,7 @@ player survive the publication lifecycle. See [Media QA](#media-qa).
 | Go | `go/wrapper` (+ `rs/moq-ffi`, import `moq-go/moq`) | `go/scripts/stage.sh` (uniffi-bindgen-go) + `go build` | publish (video + audio) + subscribe |
 | Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | publish (video + audio) + rendered playback |
 | Native JS | `js/net` + `js/hang` + the npm `@moq/web-transport` polyfill | `node` (tsx) and `bun` | subscribe |
-| C | `rs/libmoq` | `cargo build -p libmoq` + `cc` | subscribe |
+| C | `rs/moq-c` | `cargo build -p moq-c` + `cc` | subscribe |
 | GStreamer | `rs/moq-gst` (`moqsrc`) | `cargo build -p moq-gst` + `gst-launch-1.0` | subscribe |
 
 The browser, native JS, C, and GStreamer clients subscribe only by choice
@@ -178,7 +178,7 @@ clients/
     src/probe.ts          subscriber-side measurement, taken at the sinks
     src/instrument.ts     live counts of the platform resources the page holds
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
-  c/subscribe.c           subscribe via rs/libmoq
+  c/subscribe.c           subscribe via rs/moq-c
 ```
 
 ## CI

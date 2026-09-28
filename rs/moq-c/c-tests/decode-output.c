@@ -37,7 +37,7 @@ _Static_assert(offsetof(moq_video_decoder_output, width) == 12, "width moved");
 _Static_assert(offsetof(moq_video_decoder_output, height) == 16, "height moved");
 _Static_assert(sizeof(moq_video_decoder_output) == 24, "decoder output size changed");
 
-// Numeric codes from rs/libmoq/src/error.rs. They are the contract a C caller
+// Numeric codes from rs/moq-c/src/error.rs. They are the contract a C caller
 // matches on; if they drift, this fixture fails and the header is stale.
 #define MOQ_ERR_INVALID_POINTER -6
 #define MOQ_ERR_INVALID_CODE -15

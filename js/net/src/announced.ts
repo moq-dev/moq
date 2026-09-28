@@ -8,14 +8,7 @@ import type { Route } from "./hop.js";
 import type * as Path from "./path.js";
 
 /**
- * What an {@link Update} reports about its prefix.
- *
- * @public
- */
-export type Kind = "announced" | "updated" | "retracted";
-
-/**
- * A route announcement, update, or retraction.
+ * A route over a prefix, delivered inside an {@link Event}.
  *
  * An announcement is always a prefix, never a broadcast: a route claims that
  * {@link prefix} and every path beneath it can be served. By convention a publisher
@@ -25,18 +18,29 @@ export type Kind = "announced" | "updated" | "retracted";
  *
  * @public
  */
-export interface Update {
+export interface Announce {
 	/**
 	 * The prefix the route covers, relative to the origin (for a session, its URL path).
 	 */
 	prefix: Path.Valid;
 	/** What the filter's wildcards stood for, when this prefix pins all of them. */
 	captures: Path.Pattern[] | undefined;
-	/** Whether the prefix was announced, re-priced, or retracted. */
-	kind: Kind;
 	/** Hops and cost of the route; on a retraction, its last advertised values. */
 	route: Route;
 }
+
+/**
+ * What an announcement stream yields.
+ *
+ * `announced`: a route now covers the prefix. `updated`: the route covering it changed
+ * hops or cost, in place. `retracted`: no route covers it any more. `live`: every route
+ * live at subscribe time has been delivered, including those a connected peer was still
+ * sending, so what follows is live changes; yielded at most once, and a caller listing
+ * what is live stops there.
+ *
+ * @public
+ */
+export type Event = ({ kind: "announced" | "updated" | "retracted" } & Announce) | { kind: "live" };
 
 /**
  * Options for an announcement stream.
@@ -53,14 +57,11 @@ export interface Options {
 	hidden?: boolean;
 }
 
-/** Whether a route covers the path after an update of this {@link Kind}. */
-export function isActive(kind: Kind): boolean {
-	return kind !== "retracted";
-}
-
 /** Reactive backing state shared by announcement producers and consumers. */
 class AnnounceState {
-	queue = new Signal<Update[]>([]);
+	queue = new Signal<Event[]>([]);
+	// Whether the live marker was appended, so a repeat (from a stream spanning sessions) is dropped.
+	live = false;
 	closed = new Once<Error | null>();
 }
 
@@ -94,11 +95,15 @@ export class Producer {
 		return makeConsumer(this.#state);
 	}
 
-	/** Writes an announcement to the queue. */
-	append(update: Update) {
+	/** Writes an event to the queue. The `live` marker is written once; later ones are dropped. */
+	append(event: Event) {
 		if (this.#state.closed.peek() !== undefined) throw new Error("announcements are closed");
+		if (event.kind === "live") {
+			if (this.#state.live) return;
+			this.#state.live = true;
+		}
 		this.#state.queue.mutate((queue) => {
-			queue.push(update);
+			queue.push(event);
 		});
 	}
 
@@ -136,17 +141,17 @@ export class Consumer {
 		makeConsumer = (state) => new Consumer(state);
 	}
 
-	/** The announcements as they arrive, until the stream closes. */
-	async *[Symbol.asyncIterator](): AsyncGenerator<Update, void, undefined> {
+	/** The events as they arrive, until the stream closes. */
+	async *[Symbol.asyncIterator](): AsyncGenerator<Event, void, undefined> {
 		for (;;) {
-			const update = await this.next();
-			if (!update) return;
-			yield update;
+			const event = await this.next();
+			if (!event) return;
+			yield event;
 		}
 	}
 
-	/** Returns the next announcement. */
-	async next(): Promise<Update | undefined> {
+	/** Returns the next event, or undefined once the stream closes. */
+	async next(): Promise<Event | undefined> {
 		for (;;) {
 			const announce = this.#state.queue.peek().shift();
 			if (announce) return announce;
@@ -162,5 +167,48 @@ export class Consumer {
 	/** Closes the reader. Idempotent. */
 	close(abort?: Error) {
 		closeState(this.#state, abort);
+	}
+}
+
+/**
+ * When an initial set has landed, for wires that never say where it ends (lite-03/04,
+ * moq-transport): once its stream goes quiet.
+ *
+ * A peer writes its whole set back to back, so the first announcement gets a round trip's
+ * grace and each one after it only has to beat its siblings. Mirrors `Quiet` in `rs/moq-net`.
+ *
+ * @internal
+ */
+export class Quiet {
+	/** How long the stream may stay silent before its first announcement, in ms. */
+	static readonly FIRST = 500;
+	/** How long the stream may stay silent between announcements, in ms. */
+	static readonly GAP = 30;
+
+	#landed: () => void;
+	#timer: ReturnType<typeof setTimeout> | undefined;
+
+	/** Start counting from now; `landed` runs once the stream goes quiet. */
+	constructor(landed: () => void) {
+		this.#landed = landed;
+		this.#timer = setTimeout(() => this.#land(), Quiet.FIRST);
+	}
+
+	/** An announcement arrived: the set is still landing. */
+	heard(): void {
+		if (this.#timer === undefined) return;
+		clearTimeout(this.#timer);
+		this.#timer = setTimeout(() => this.#land(), Quiet.GAP);
+	}
+
+	/** Stop counting without landing, once the stream is gone. Idempotent. */
+	close(): void {
+		clearTimeout(this.#timer);
+		this.#timer = undefined;
+	}
+
+	#land(): void {
+		this.#timer = undefined;
+		this.#landed();
 	}
 }

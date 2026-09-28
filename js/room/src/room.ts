@@ -82,6 +82,7 @@ export class Room {
 		for (;;) {
 			const update = await effect.race(announced.next());
 			if (!update) break;
+			if (update.kind === "live") continue;
 
 			// The scope's `**` captures what lies beneath the prefix. A broad route
 			// that cannot pin that suffix names no participant to open.
@@ -95,7 +96,7 @@ export class Room {
 			const local = this.identity.peek();
 			if (local && parsed.identity === local) continue;
 
-			if (Moq.Announce.isActive(update.kind)) {
+			if (update.kind !== "retracted") {
 				this.#add(parsed.identity, parsed.kind, Moq.Path.from(covered));
 			} else {
 				this.#remove(parsed.identity, parsed.kind);

@@ -268,13 +268,6 @@ func (b *BroadcastProducer) Close() error {
 	return b.inner.Close()
 }
 
-// Finish ends the broadcast.
-//
-// Deprecated: use [BroadcastProducer.Close]; a broadcast end carries no cause.
-func (b *BroadcastProducer) Finish() error {
-	return b.inner.Close()
-}
-
 // BroadcastDynamic is a stream of subscriber-requested tracks.
 type BroadcastDynamic struct {
 	inner *ffi.MoqBroadcastDynamic

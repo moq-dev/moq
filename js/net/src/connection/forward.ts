@@ -4,7 +4,6 @@
  * @module
  */
 import { type Dispose, race } from "@moq/signals";
-import { isActive } from "../announced.ts";
 import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import * as Path from "../path.ts";
 import { wireOf } from "../wire.ts";
@@ -53,6 +52,11 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		const announced = conn.announced(Path.Pattern.subtree(prefix), { hidden: true });
 		const inserted = new Map<Path.Valid, Dynamic>();
 
+		// Taken before the session is handed out, so no announcement stream on the origin misses
+		// it: each overlapping one opened now withholds its live marker until this interest's
+		// initial set lands.
+		const landed = originWire.replaying(prefix);
+
 		// End the stream the moment the session closes rather than waiting for the wire to
 		// error it, so the retractions below land promptly.
 		void conn.closed.then(() => announced.close());
@@ -63,9 +67,13 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				for (;;) {
 					const event = await announced.next();
 					if (!event) break;
+					if (event.kind === "live") {
+						landed();
+						continue;
+					}
 					if (!originWire.accepts(event.prefix)) continue;
 
-					if (isActive(event.kind)) {
+					if (event.kind !== "retracted") {
 						const existing = inserted.get(event.prefix);
 						if (existing) {
 							existing.update(event.route);
@@ -85,6 +93,8 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				// cleanup below retracts everything this stream fed either way.
 				failure = err;
 			} finally {
+				// A dead stream cannot hold the marker back.
+				landed();
 				for (const handle of inserted.values()) handle.close();
 				inserted.clear();
 				announced.close();

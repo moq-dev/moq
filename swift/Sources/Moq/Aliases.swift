@@ -79,6 +79,14 @@ public typealias Datagram = MoqFFI.MoqDatagram
 /// and the advertised costs: warm `cost`, lower wins, plus undiscounted `cold`
 /// (`nil` means the same as `cost`).
 public typealias Route = MoqFFI.MoqRoute
+/// A route over a prefix: the origin-relative `prefix`, what each filter
+/// wildcard matched (`captures`, `nil` for a partial overlap), and the `route`
+/// serving it. Resolve a path with `OriginConsumer.requestBroadcast`.
+public typealias Announce = MoqFFI.MoqAnnounce
+/// What an `AnnounceConsumer` yields: `.announced`, `.updated`, or `.retracted`
+/// carrying an `Announce`, or `.live` once every route live at subscribe time
+/// has been delivered.
+public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// Per-subscription delivery preferences: priority, group ordering, latency
 /// budget, and group range.
 public typealias Subscription = MoqFFI.MoqSubscription

@@ -1,4 +1,4 @@
-# cbindgen configuration for libmoq.
+# cbindgen configuration for moq-c.
 #
 # NOT loaded: build.rs drives cbindgen through `Builder::new()`, which never
 # discovers this file, and passes its own config. The generated moq.h therefore

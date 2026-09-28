@@ -29,9 +29,13 @@ final moq = await Moq.connect('https://relay.example.com');
 // Subscribe. The stream is live, so listen to it rather than awaiting its end.
 moq.announcements(
   options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
-).listen((announcement) {
-  print(announcement.prefix());
-  print(announcement.captures());
+).listen((event) {
+  if (event is AnnounceEventAnnounced) {
+    print(event.announce.prefix);
+    print(event.announce.captures);
+  } else if (event is AnnounceEventLive) {
+    print('caught up; what follows is live');
+  }
 });
 final broadcast = await moq.requestBroadcast('live/camera');
 ```
@@ -66,13 +70,16 @@ The three advertising operations: `moq.createBroadcast(path)` (or
 `origin.createBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.announce(route:)` / `broadcast.unannounce()` own that exact-path
 advertisement, and `broadcast.close()` ends the broadcast for good (a second
-call is a no-op; `finish()` is its deprecated alias); `origin.dynamic_(prefix:, route:)` claims `prefix` and
+call is a no-op); `origin.dynamic_(prefix:, route:)` claims `prefix` and
 every path beneath it (`''` for everything; Dart spells the origin method
 `dynamic_` because `dynamic` is reserved). Hold the returned handle while the
 claim should stay advertised, and reject the requests you will not serve. A
 route is a capability, not an inventory. `announcements(options:)` takes a
-literal prefix plus an optional relative pattern; `announcement.prefix()`
-stays origin-relative and `captures()` reports the wildcard matches. Paths with
+literal prefix plus an optional relative pattern and yields `AnnounceEvent`s:
+`AnnounceEventAnnounced`, `AnnounceEventUpdated`, or `AnnounceEventRetracted`
+carrying an `Announce`, whose `prefix` stays origin-relative and whose
+`captures` reports the wildcard matches, or `AnnounceEventLive` once every route
+live at subscribe time has been delivered. Paths with
 a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless `hidden: true`.
 
 Sessions reconnect with backoff when the transport drops and re-announce local

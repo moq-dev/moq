@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Getter } from "@moq/signals";
+import type * as Announce from "./announce.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import {
 	type AcceptProps,
@@ -21,6 +22,16 @@ import { Milli, Timescale, Timestamp } from "./time.ts";
 import type { Producer as TrackProducer } from "./track.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
+
+/** The next route event, skipping the live marker: these tests pin routes, and the marker has its own. */
+async function nextRoute<E extends { kind: string }>(announced: {
+	next(): Promise<E | undefined>;
+}): Promise<Exclude<E, { kind: "live" }> | undefined> {
+	for (;;) {
+		const event = await announced.next();
+		if (event?.kind !== "live") return event as Exclude<E, { kind: "live" }> | undefined;
+	}
+}
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcast = origin.createBroadcast(path);
@@ -90,14 +101,14 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 
 	// Client discovers announced broadcast
 	const announced = client.announced();
-	const entry = await announced.next();
+	const entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected entry");
 	expect(entry.prefix).toBe("test" as Path.Valid);
 	expect(entry.kind).toBe("announced");
 
 	// Scoped discovery only echoes the suffix on the wire, but presents the whole path.
 	const prefixed = client.announced(Path.Pattern.subtree(Path.from("root")));
-	const prefixedEntry = await prefixed.next();
+	const prefixedEntry = await nextRoute(prefixed);
 	if (!prefixedEntry) throw new Error("expected prefixed entry");
 	expect(prefixedEntry.prefix).toBe("root/child" as Path.Valid);
 	expect(prefixedEntry.kind).toBe("announced");
@@ -374,28 +385,28 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 	const first = publish(origin, Path.from("first"));
 
 	const announced = client.announced();
-	let entry = await announced.next();
+	let entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected announce");
 	expect(entry.prefix).toBe("first" as Path.Valid);
 	expect(entry.kind).toBe("announced");
 
 	// A live announce.
 	const second = publish(origin, Path.from("second"));
-	entry = await announced.next();
+	entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected announce");
 	expect(entry.prefix).toBe("second" as Path.Valid);
 	expect(entry.kind).toBe("announced");
 
 	// Unannounce: retracted by announce id on the wire.
 	second.close();
-	entry = await announced.next();
+	entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected unannounce");
 	expect(entry.prefix).toBe("second" as Path.Valid);
 	expect(entry.kind).toBe("retracted");
 
 	// Re-announce the same path: a fresh announce assigning a fresh id.
 	const secondAgain = publish(origin, Path.from("second"));
-	entry = await announced.next();
+	entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected re-announce");
 	expect(entry.prefix).toBe("second" as Path.Valid);
 	expect(entry.kind).toBe("announced");
@@ -409,10 +420,10 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 });
 
 /** Collect announced prefixes until `until` arrives. */
-async function announcedUntil(announced: { next(): Promise<{ prefix: Path.Valid } | undefined> }, until: string) {
+async function announcedUntil(announced: Announce.Consumer, until: string) {
 	const seen: string[] = [];
 	while (!seen.includes(until)) {
-		const entry = await withTimeout(announced.next(), 1000, `waiting for ${until}`);
+		const entry = await withTimeout(nextRoute(announced), 1000, `waiting for ${until}`);
 		if (!entry) throw new Error("announcements ended");
 		seen.push(entry.prefix);
 	}
@@ -1271,7 +1282,7 @@ test("integration: ietf draft-14 subscriber teardown on last unsubscribe", async
 
 	// Draft-14 only completes SUBSCRIBE_OK once the session is warmed by an announce round-trip.
 	const announced = client.announced();
-	await announced.next();
+	await nextRoute(announced);
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const sub = remote.track("video").subscribe().ordered();
@@ -1902,7 +1913,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 	// The announcement lands in the client's origin.
 	const reader = clientOrigin.consume();
 	const announced = reader.announced();
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("test"), kind: "announced" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("test"), kind: "announced" });
 
 	// Consuming through the origin reaches the wire.
 	const remote = await routed(reader, Path.from("test"));
@@ -1912,7 +1923,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 
 	// Unpublishing retracts the entry over the wire and out of the origin.
 	broadcast.close();
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("test"), kind: "retracted" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("test"), kind: "retracted" });
 	await until(() => !wireOf(reader).routes(Path.from("test")));
 
 	await serving;
@@ -2259,7 +2270,7 @@ test("create then announce is discoverable on the wire", async () => {
 	const broadcast = origin.createBroadcast(Path.from("later"));
 	broadcast.createTrack("chat");
 
-	const pending = announced.next();
+	const pending = nextRoute(announced);
 	broadcast.announce();
 	const entry = await pending;
 	expect(entry?.prefix).toBe("later" as Path.Valid);
@@ -2291,7 +2302,7 @@ test("a handle serves a request under live/** over the wire", async () => {
 	]);
 
 	const announced = client.announced();
-	const entry = await announced.next();
+	const entry = await nextRoute(announced);
 	expect(entry?.prefix).toBe("live" as Path.Valid);
 	expect(entry?.kind).toBe("announced");
 
@@ -2405,3 +2416,58 @@ test("integration: lite draft-05 ends a track with the publisher's reset", async
 	server.close();
 	origin.close();
 });
+
+/**
+ * Connect a client whose origin is fed by a peer publishing `paths`, then read the origin's
+ * announcement stream up to the live marker, returning the paths delivered before it.
+ */
+async function caughtUp(protocol: string, version: number | undefined, paths: string[]): Promise<string[]> {
+	const pair = createMockTransportPair(protocol);
+	const serverOrigin = new OriginProducer();
+	const clientOrigin = new OriginProducer();
+	const broadcasts = paths.map((path) => publish(serverOrigin, Path.from(path)));
+
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client, consume: clientOrigin }),
+		accept(pair.server, url, { version, publish: serverOrigin.consume() }),
+	]);
+
+	const announced = clientOrigin.announced();
+	const seen: string[] = [];
+	for (;;) {
+		const event = await withTimeout(announced.next(), 2000, `${protocol || version}: never caught up`);
+		if (!event) throw new Error("announcements ended");
+		if (event.kind === "live") break;
+		if (event.kind !== "announced") throw new Error(`only announcements before the marker: got ${event.kind}`);
+		seen.push(event.prefix);
+	}
+
+	announced.close();
+	for (const broadcast of broadcasts) broadcast.close();
+	client.close();
+	server.close();
+	serverOrigin.close();
+	clientOrigin.close();
+	return seen.sort();
+}
+
+// Every version reaches the marker after the whole initial set: lite-01/02 via ANNOUNCE_INIT,
+// lite-05+ via ANNOUNCE_OK's count, and lite-03/04 and moq-transport once the stream goes quiet.
+for (const [name, protocol, version] of [
+	["lite draft-01", "", Lite.Version.DRAFT_01],
+	["lite draft-02", "", Lite.Version.DRAFT_02],
+	["lite draft-03", Lite.ALPN_03, undefined],
+	["lite draft-04", Lite.ALPN_04, undefined],
+	["lite draft-05", Lite.ALPN_05, undefined],
+	["lite draft-06", Lite.ALPN_06, undefined],
+	["ietf draft-14", "", Ietf.Version.DRAFT_14],
+	["ietf draft-19", Ietf.ALPN.DRAFT_19, undefined],
+] as const) {
+	test(`integration: ${name} is live after the whole initial set`, async () => {
+		expect(await caughtUp(protocol, version, ["a", "b", "c"])).toEqual(["a", "b", "c"]);
+	});
+
+	test(`integration: ${name} is live with an empty peer`, async () => {
+		expect(await caughtUp(protocol, version, [])).toEqual([]);
+	});
+}

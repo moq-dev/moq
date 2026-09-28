@@ -20,7 +20,7 @@ pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 	let handle = runtime.handle().clone();
 
 	std::thread::Builder::new()
-		.name("libmoq".into())
+		.name("moq-c".into())
 		.spawn(move || {
 			runtime.block_on(std::future::pending::<()>());
 		})
@@ -209,7 +209,7 @@ fn record_error<C: ReturnCode>(ret: &C) {
 
 /// Pointer to this thread's last error message, or null if none was recorded.
 ///
-/// The pointer is valid until the next libmoq call on the same thread.
+/// The pointer is valid until the next moq-c call on the same thread.
 pub fn last_error_ptr() -> *const c_char {
 	LAST_ERROR.with(|cell| {
 		cell.borrow()

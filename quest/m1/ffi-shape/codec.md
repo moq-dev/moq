@@ -17,9 +17,9 @@ key apart from its rendition; pick one convention for both. Go's
 through `demand()` only. Both groups stay behind their cargo features and off
 wasm.
 
-libmoq's codec symbols follow.
+moq-c's codec symbols follow.
 
-Public API: breaking in every binding and libmoq. Wire: none.
+Public API: breaking in every binding and moq-c. Wire: none.
 
 ## Required
 

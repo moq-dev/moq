@@ -17,6 +17,16 @@ import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDon
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, Version } from "./version.ts";
 
+/** The next route event, skipping the live marker: these tests pin routes, and the marker has its own. */
+async function nextRoute<E extends { kind: string }>(announced: {
+	next(): Promise<E | undefined>;
+}): Promise<Exclude<E, { kind: "live" }> | undefined> {
+	for (;;) {
+		const event = await announced.next();
+		if (event?.kind !== "live") return event as Exclude<E, { kind: "live" }> | undefined;
+	}
+}
+
 const VERSION = Version.DRAFT_19;
 
 /** How long to wait for a stream before calling it absent. */
@@ -85,7 +95,7 @@ test("an unsolicited announcement lands", async () => {
 		stream,
 	);
 
-	const next = await announced.next();
+	const next = await nextRoute(announced);
 	expect(next?.prefix).toBe(Path.from("surprise"));
 	expect(next?.kind).toBe("announced");
 
@@ -95,7 +105,7 @@ test("an unsolicited announcement lands", async () => {
 	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream to close");
 	peer.close();
 	await handler;
-	expect(await announced.next()).toMatchObject({
+	expect(await nextRoute(announced)).toMatchObject({
 		prefix: Path.from("surprise"),
 		kind: "retracted",
 	});
@@ -131,7 +141,7 @@ async function inlineNamespace(stream: Stream, path: Path.Valid, cluster?: Clust
  */
 async function syncInline(stream: Stream, announced: announce.Consumer, cluster?: Cluster.Advert): Promise<void> {
 	await inlineNamespace(stream, Path.from("sentinel"), cluster);
-	expect(await announced.next()).toMatchObject({
+	expect(await nextRoute(announced)).toMatchObject({
 		prefix: Path.from("sentinel"),
 		kind: "announced",
 	});
@@ -159,7 +169,7 @@ test("an announcement survives the first of its two sources ending", async () =>
 		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("both") }),
 		request,
 	);
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("both"), kind: "announced" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("both"), kind: "announced" });
 
 	await inlineNamespace(subscription, Path.from("both"));
 	await syncInline(subscription, announced);
@@ -172,7 +182,7 @@ test("an announcement survives the first of its two sources ending", async () =>
 	await handler;
 
 	const next = await Promise.race([
-		announced.next(),
+		nextRoute(announced),
 		new Promise<"nothing">((resolve) => setTimeout(() => resolve("nothing"), 250)),
 	]);
 	expect(next).toBe("nothing");
@@ -195,7 +205,7 @@ test("an announcement ends once its last source does", async () => {
 		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("both") }),
 		request,
 	);
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("both"), kind: "announced" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("both"), kind: "announced" });
 
 	await inlineNamespace(subscription, Path.from("both"));
 	await syncInline(subscription, announced);
@@ -209,7 +219,7 @@ test("an announcement ends once its last source does", async () => {
 	await subscription.writer.u53(SubscribeNamespaceEntryDone.id);
 	await new SubscribeNamespaceEntryDone({ suffix: Path.from("both") }).encode(subscription.writer, VERSION);
 
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("both"), kind: "retracted" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("both"), kind: "retracted" });
 });
 
 /**
@@ -258,7 +268,7 @@ test("a duplicate legacy publish_namespace is still refused", async () => {
 		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("twice") }),
 		first,
 	);
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("twice"), kind: "announced" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("twice"), kind: "announced" });
 
 	// The same namespace again, on its own request.
 	const second = await Stream.open(pair.server, { version: Version.DRAFT_15 });
@@ -273,7 +283,7 @@ test("a duplicate legacy publish_namespace is still refused", async () => {
 	peer.close();
 	await handler;
 
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("twice"), kind: "retracted" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("twice"), kind: "retracted" });
 });
 
 /**
@@ -332,7 +342,7 @@ test("concurrent legacy publish_namespace requests take one reference", async ()
 		second,
 	);
 
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("raced"), kind: "announced" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("raced"), kind: "announced" });
 	await two;
 
 	// Only one reference was taken, so the surviving request ending retracts the path.
@@ -341,7 +351,7 @@ test("concurrent legacy publish_namespace requests take one reference", async ()
 	peer.close();
 	await one;
 
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("raced"), kind: "retracted" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("raced"), kind: "retracted" });
 });
 
 /** The Hop IDs a cluster-negotiated session declared, ours first. */
@@ -380,10 +390,10 @@ test("an inline NAMESPACE that starts looping back is retracted", async () => {
 	const subscription = await acceptSubscribeNamespace(pair.client);
 
 	await inlineNamespace(subscription, Path.from("theirs"), { hops: [PEER], cost: 0n });
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "announced" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("theirs"), kind: "announced" });
 
 	await inlineNamespace(subscription, Path.from("theirs"), { hops: [SELF, PEER], cost: 0n });
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "retracted" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("theirs"), kind: "retracted" });
 });
 
 /**
@@ -400,14 +410,14 @@ test("a repeated NAMESPACE reprices in place", async () => {
 	const subscription = await acceptSubscribeNamespace(pair.client);
 
 	await inlineNamespace(subscription, Path.from("theirs"), { hops: [PEER], cost: 4n });
-	expect(await announced.next()).toMatchObject({
+	expect(await nextRoute(announced)).toMatchObject({
 		prefix: Path.from("theirs"),
 		kind: "announced",
 		route: { hops: [PEER], cost: { warm: 4n, cold: 4n } },
 	});
 
 	await inlineNamespace(subscription, Path.from("theirs"), { hops: [PEER], cost: 0n });
-	expect(await announced.next()).toMatchObject({
+	expect(await nextRoute(announced)).toMatchObject({
 		prefix: Path.from("theirs"),
 		kind: "updated",
 		route: { hops: [PEER], cost: { warm: 0n, cold: 0n } },
@@ -533,7 +543,7 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 		}),
 		request,
 	);
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "announced" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("theirs"), kind: "announced" });
 
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
@@ -547,7 +557,7 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 		VERSION,
 	);
 
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "retracted" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("theirs"), kind: "retracted" });
 	expect(await peer.reader.u53()).toBe(RequestOk.id);
 	await RequestOk.decode(peer.reader, VERSION);
 
@@ -557,7 +567,7 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 		peer.writer,
 		VERSION,
 	);
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "announced" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("theirs"), kind: "announced" });
 	expect(await peer.reader.u53()).toBe(RequestOk.id);
 	await RequestOk.decode(peer.reader, VERSION);
 
@@ -587,7 +597,7 @@ test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
 		}),
 		request,
 	);
-	expect(await announced.next()).toMatchObject({
+	expect(await nextRoute(announced)).toMatchObject({
 		prefix: Path.from("theirs"),
 		kind: "announced",
 		route: { hops: [PEER], cost: { warm: 4n, cold: 4n } },
@@ -602,7 +612,7 @@ test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
 	await new PublishNamespaceUpdate({ requestId: 3n, update: { cost: 0n } }).encode(peer.writer, VERSION);
 	expect(await peer.reader.u53()).toBe(RequestOk.id);
 	await RequestOk.decode(peer.reader, VERSION);
-	expect(await announced.next()).toMatchObject({
+	expect(await nextRoute(announced)).toMatchObject({
 		prefix: Path.from("theirs"),
 		kind: "updated",
 		route: { hops: [PEER], cost: { warm: 0n, cold: 0n } },
@@ -611,7 +621,7 @@ test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
 	// Still announced: the stream ending is what retracts it.
 	peer.close();
 	await handler;
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "retracted" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("theirs"), kind: "retracted" });
 });
 
 /**
@@ -636,7 +646,7 @@ test("a PUBLISH_NAMESPACE update that changes the publisher is refused", async (
 		}),
 		request,
 	);
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "announced" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("theirs"), kind: "announced" });
 
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
@@ -653,7 +663,7 @@ test("a PUBLISH_NAMESPACE update that changes the publisher is refused", async (
 
 	// The refusal closed the stream, which withdrew the advertisement.
 	await handler;
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "retracted" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("theirs"), kind: "retracted" });
 });
 
 /**
@@ -675,7 +685,7 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 	});
 	const request = await Stream.open(pair.server, { version: VERSION });
 	const handler = subscriber.runPublishNamespace(advert, request);
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "announced" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("theirs"), kind: "announced" });
 
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
@@ -683,7 +693,7 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 	await advert.encode(peer.writer, VERSION);
 
 	await expect(handler).rejects.toThrow(ProtocolViolation);
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "retracted" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("theirs"), kind: "retracted" });
 });
 
 /**

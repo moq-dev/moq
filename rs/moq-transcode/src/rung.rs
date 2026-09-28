@@ -183,9 +183,9 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				// The output track closed; nothing more to serve.
 				return Ok(Ended::Closed);
 			},
-			err = rung.broadcast.closed() => {
+			() = rung.broadcast.closed() => {
 				// The source went away while idle; end the rung with it.
-				producer.clone().abort(err)?;
+				producer.clone().abort(moq_net::Error::Dropped)?;
 				return Ok(Ended::Closed);
 			}
 			() = retire.fired() => {
@@ -751,10 +751,12 @@ mod tests {
 		let good = moq_video::encode::Encoded::new(
 			Bytes::from_static(b"hello"),
 			moq_net::Timestamp::from_micros(0).unwrap(),
+			true,
 		);
 		let bad = moq_video::encode::Encoded::new(
 			Bytes::from_static(b"world"),
 			moq_net::Timestamp::from_secs(1 << 60).unwrap(),
+			false,
 		);
 
 		assert!(write(&mut group, &guard, vec![good, bad]).is_err());

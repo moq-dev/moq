@@ -193,13 +193,14 @@ fun GroupConsumer.frames(): Flow<Frame> = flow {
 }
 
 /**
- * Stream of route announcements and retractions matching [config].
+ * Stream of announce events matching [config]. An [AnnounceEventLive] follows the
+ * routes live at subscribe time, so a collector can gather what is live and stop.
  *
  * Acquires the subscription on first collection and cancels it when collection
  * ends, so callers never touch the underlying handle. Use the raw
  * `announced(config)` if you need to hold and cancel the handle yourself.
  */
-fun OriginConsumer.announcements(config: AnnounceConfig = AnnounceConfig()): Flow<AnnounceUpdate> {
+fun OriginConsumer.announcements(config: AnnounceConfig = AnnounceConfig()): Flow<AnnounceEvent> {
     val consumer = this
     return flow {
         val announced = consumer.announced(config)

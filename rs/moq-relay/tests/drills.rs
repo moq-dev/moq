@@ -452,10 +452,10 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 
 	// Resource release: everything that session was feeding is closed, rather
 	// than left parked on a subscription nobody will ever serve again.
-	let err = tokio::time::timeout(TIMEOUT, cancelled.closed())
+	tokio::time::timeout(TIMEOUT, cancelled.closed())
 		.await
 		.expect("the cancelled subscriber's broadcast never closed");
-	println!("resource released: the cancelled broadcast closed with {err}");
+	println!("resource released: the cancelled broadcast closed");
 
 	// ...and the relay survived it: a fresh subscriber still gets served, off the
 	// upstream subscription the cancel left in place.

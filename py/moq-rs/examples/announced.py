@@ -13,9 +13,13 @@ import moq
 async def run(url: str, prefix: str, tls_verify: bool) -> None:
     async with moq.Client(url, tls_verify=tls_verify) as client:
         print(f"watching route announcements under {prefix!r} at {url}")
-        async for announcement in client.announced(prefix):
-            sign = "+" if announcement.active else "-"
-            print(f"  {sign} {announcement.prefix}")
+        async for event in client.announced(prefix):
+            if isinstance(event, moq.AnnounceEventAnnounced):
+                print(f"  + {event.announce.prefix}")
+            elif isinstance(event, moq.AnnounceEventRetracted):
+                print(f"  - {event.announce.prefix}")
+            elif isinstance(event, moq.AnnounceEventLive):
+                print("  (caught up; what follows is live)")
 
 
 def main() -> None:
