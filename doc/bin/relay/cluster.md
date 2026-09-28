@@ -16,6 +16,10 @@ same way so the cluster converges instead of flapping. Both wire protocols
 carry it: natively on moq-lite, and via the [cluster extension](/draft/moq-cluster)
 on moq-transport 17+.
 
+When a moq-lite peer withdraws a broadcast, a relay drops every other route to
+it that passed through that peer, since each was relayed from what the peer
+just withdrew, rather than falling back to them one by one.
+
 Failover routes must carry copies of the same broadcast. For each track, the
 relay requires matching timescale, retention window, publisher priority, and
 group ordering. A source with different properties is refused before its groups

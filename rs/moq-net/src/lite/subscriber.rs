@@ -219,14 +219,14 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			lite::AnnounceBroadcast::Ended { suffix, .. } => {
 				let path = prefix.join(&suffix);
 				tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
-				run.announced.retire(&path);
+				run.announced.withdraw(&path, &self.origin);
 			}
 			lite::AnnounceBroadcast::EndedId { id } => {
 				// Resolve and retire the id; an unknown or already-retired id is a
 				// protocol violation.
 				let path = prefix.join(&run.decoder.end(id)?);
 				tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
-				run.announced.retire(&path);
+				run.announced.withdraw(&path, &self.origin);
 			}
 			lite::AnnounceBroadcast::Restart { id, hops, cost } => {
 				// Resolve the id; it stays live (the replacement reuses it). An unknown
@@ -2649,7 +2649,7 @@ mod tests {
 			.unwrap();
 		cursor.assert_next_active("room/host");
 		assert!(announced.contains(&path.clone()), "the announce was not recorded");
-		announced.retire(&path.clone());
+		announced.withdraw(&path, &subscriber.origin);
 		cursor.assert_next_ended("room/host");
 	}
 }
@@ -2789,9 +2789,19 @@ impl Announced {
 		self.routes.get_mut(path)?.as_mut()
 	}
 
-	fn retire(&mut self, path: &PathOwned) {
+	/// The peer withdrew `path`. When it was relaying a route there, every other
+	/// route at `path` through it came from the one it withdrew, so those go stale
+	/// before this one retracts, rather than each being selected in turn.
+	fn withdraw(&mut self, path: &PathOwned, origin: &crate::origin::Producer) {
 		// Dropping the route closes its sources.
-		self.routes.remove(path);
+		let Some(Some(entry)) = self.routes.remove(path) else {
+			return;
+		};
+		let peer = entry.route.via;
+		// Only a declared identity names the peer in other chains.
+		if peer != crate::Hop::UNKNOWN && entry.route.hops.contains(&peer) {
+			origin.withdrawn(path, peer);
+		}
 	}
 
 	/// Serve queued requests on every ready route: mint a source per requested

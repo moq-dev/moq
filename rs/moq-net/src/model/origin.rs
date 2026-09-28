@@ -737,6 +737,10 @@ struct RouteEntry {
 	/// through it. A broadcast is in the table from creation but serves nobody,
 	/// locally or remotely, until it announces.
 	advertised: bool,
+	/// Whether a peer the chain passes through has since withdrawn this prefix.
+	/// The route was derived from that peer's advertisement, so it serves nobody
+	/// until the peer announces again. See [`Producer::withdrawn`].
+	stale: bool,
 	/// [`prefix_claim`] of [`Self::prefix`], built once at announce time.
 	///
 	/// The announce sync evaluates a route's claim once per (cursor, route) pair,
@@ -746,6 +750,11 @@ struct RouteEntry {
 }
 
 impl RouteEntry {
+	/// Whether cursors see the entry and requests resolve through it.
+	fn live(&self) -> bool {
+		self.advertised && !self.stale
+	}
+
 	fn is_anonymous(&self) -> bool {
 		self.hops.iter().any(|hop| *hop == Hop::UNKNOWN)
 	}
@@ -953,7 +962,7 @@ impl TableCursor {
 	/// the excluded peer (split horizon), within the cursor's patterns, and
 	/// nameable through its mount.
 	fn visible(&self, entry: &RouteEntry) -> bool {
-		entry.advertised
+		entry.live()
 			&& self.horizon.admits(entry)
 			&& entry.overlaps(&self.allowed)
 			&& self.discovers(&entry.prefix)
@@ -1520,6 +1529,22 @@ impl Producer {
 		})
 	}
 
+	/// Hide every route at `prefix` whose hop chain passes through `peer`.
+	///
+	/// For a session whose peer explicitly withdrew `prefix`. Those routes were
+	/// derived from the advertisement the peer just withdrew; left visible, each
+	/// would be selected and re-advertised in turn until it retracts too, so the
+	/// cluster walks every stale path before it converges. They stay hidden until
+	/// the peer announces the prefix again, and the withdrawal is forgotten once
+	/// no route there passes through the peer.
+	pub(crate) fn withdrawn(&self, prefix: impl AsPath, peer: Hop) {
+		let prefix = self.root.join(prefix.as_path()).to_owned();
+		let mut shared = self.shared.lock();
+		shared.withdrawn.entry(prefix.clone()).or_default().insert(peer);
+		shared.restale(&prefix);
+		shared.prune_withdrawn(&prefix);
+	}
+
 	/// Returns a producer rooted at `root` and restricted to matching `patterns`.
 	///
 	/// `root` is relative to this producer's root, and `patterns` are relative to
@@ -1694,8 +1719,15 @@ impl Announcing {
 
 		let mut entries = Vec::with_capacity(self.prefixes.len());
 		for (prefix, claim) in &self.prefixes {
+			// The peer that withdrew the prefix announces it again: routes through it
+			// are live once more.
+			if shared.withdrawn.get_mut(prefix).is_some_and(|peers| peers.remove(&via)) {
+				shared.restale(prefix);
+				shared.prune_withdrawn(prefix);
+			}
 			let id = shared.next_route;
 			shared.next_route += 1;
+			let stale = shared.withdrawn_through(prefix, &route.hops);
 			shared.routes.insert(RouteEntry {
 				id,
 				prefix: prefix.clone(),
@@ -1708,6 +1740,7 @@ impl Announcing {
 				server: serving.server.clone(),
 				source: serving.source.clone(),
 				advertised: serving.advertised,
+				stale,
 				claim: claim.clone(),
 			});
 			shared.sync_route(prefix, claim);
@@ -1798,16 +1831,19 @@ impl AnnounceProducer {
 			return Err(Error::Closed);
 		}
 		for (prefix, id) in &self.entries {
+			let stale = shared.withdrawn_through(prefix, &route.hops);
 			// Each entry keeps its advertised prefix; only the metadata moves.
 			let Some(entry) = shared.routes.entry_mut(prefix, *id) else {
 				return Err(Error::Closed);
 			};
 			entry.hops = route.hops.clone();
+			entry.stale = stale;
 			entry.cost = route.cost;
 			entry.via = route.via;
 			entry.advertised = true;
 			let claim = entry.claim.clone();
 			shared.sync_route(prefix, &claim);
+			shared.prune_withdrawn(prefix);
 		}
 		Ok(())
 	}
@@ -1851,6 +1887,7 @@ impl AnnounceProducer {
 				}
 			}
 			shared.sync_route(&entry.prefix, &entry.claim);
+			shared.prune_withdrawn(&entry.prefix);
 		}
 	}
 }
@@ -2881,6 +2918,15 @@ impl RouteTable {
 			.flat_map(|node| node.entries.iter())
 	}
 
+	/// The routes announced exactly at `prefix`, for a change in place.
+	fn at_mut(&mut self, prefix: &Path) -> impl Iterator<Item = &mut RouteEntry> {
+		let mut node = Some(&mut self.root);
+		for part in prefix.parts() {
+			node = node.and_then(|node| node.children.get_mut(part));
+		}
+		node.into_iter().flat_map(|node| node.entries.iter_mut())
+	}
+
 	/// Every route in the table, for the teardown.
 	fn entries(&self) -> impl Iterator<Item = &RouteEntry> {
 		let mut nodes = Vec::new();
@@ -2998,12 +3044,57 @@ struct OriginState {
 	// a front dies with its watcher and a later request re-creates it.
 	fronts: WeakCache<FrontKey, RemoteFront>,
 
+	// Peers that withdrew a prefix while routes there still passed through them,
+	// which are stale. See [`Producer::withdrawn`].
+	withdrawn: HashMap<PathOwned, HashSet<Hop>>,
+
 	// Set when the origin's driver dropped: new requests fail with `Closed`
 	// immediately and handlers observe the end instead of parking forever.
 	closed: bool,
 }
 
 impl OriginState {
+	/// Whether a peer in `hops` withdrew `prefix`.
+	fn withdrawn_through(&self, prefix: &Path, hops: &Hops) -> bool {
+		if self.withdrawn.is_empty() {
+			return false;
+		}
+		self.withdrawn
+			.get(prefix)
+			.is_some_and(|peers| hops.iter().any(|hop| peers.contains(hop)))
+	}
+
+	/// Recompute which entries at `prefix` are stale after its withdrawals changed.
+	fn restale(&mut self, prefix: &Path) {
+		let peers = self.withdrawn.get(prefix);
+		let mut changed = None;
+		for entry in self.routes.at_mut(prefix) {
+			let stale = peers.is_some_and(|peers| entry.hops.iter().any(|hop| peers.contains(hop)));
+			if entry.stale != stale {
+				entry.stale = stale;
+				changed = Some(entry.claim.clone());
+			}
+		}
+		if let Some(claim) = changed {
+			self.sync_route(prefix, &claim);
+		}
+	}
+
+	/// Forget the withdrawals at `prefix` that no longer hide a route.
+	fn prune_withdrawn(&mut self, prefix: &PathOwned) {
+		if self.withdrawn.is_empty() {
+			return;
+		}
+		let Some(peers) = self.withdrawn.get_mut(prefix) else {
+			return;
+		};
+		let routes = &self.routes;
+		peers.retain(|peer| routes.at(prefix).any(|entry| entry.hops.contains(peer)));
+		if peers.is_empty() {
+			self.withdrawn.remove(prefix);
+		}
+	}
+
 	/// Re-deliver the best route at every presented prefix `prefix` maps to, on
 	/// every cursor it can present on. Called after an entry covering `prefix`
 	/// was added, updated, or removed. `claim` is `prefix`'s [`prefix_claim`],
@@ -3154,7 +3245,7 @@ impl OriginState {
 			let mut candidates = node
 				.entries
 				.iter()
-				.filter(|entry| entry.advertised)
+				.filter(|entry| entry.live())
 				.filter(|entry| entry.scope.matches(path.as_str()))
 				.filter(|entry| horizon.admits(entry))
 				.filter(|entry| entry.qualifies(pin))
@@ -5908,6 +5999,43 @@ mod tests {
 		let scoped = peer.scope("room", &Patterns::from(Pattern::all())).unwrap();
 		let _nested = scoped.dynamic("x", Route::default().with_via(origin(8))).unwrap();
 		assert_eq!(announced.assert_next_active("room/x").source(), Source::Peer(origin(8)));
+	}
+
+	/// A peer withdrawing a prefix hides the routes there through it, so the next
+	/// best is never a path derived from the one withdrawn. Announcing again
+	/// revives them, and nothing is remembered once no route passes through it.
+	#[tokio::test]
+	async fn withdrawn_peer_hides_routes_through_it() {
+		let producer = origin(1).produce();
+		let peer = producer.clone().peer();
+		let mut announced = producer.consume().announced();
+
+		// Publisher 9 ingests at relay 2; relay 3 relays 2's route.
+		let direct = || Route::default().with_hops(hops(&[9, 2])).with_via(origin(2));
+		let first = peer.dynamic("room", direct()).unwrap();
+		let relayed = peer
+			.dynamic("room", Route::default().with_hops(hops(&[9, 2, 3])).with_via(origin(3)))
+			.unwrap();
+		announced.assert_next_active("room");
+		announced.assert_next_wait();
+
+		// Relay 2 withdraws: the relayed copy goes with it rather than taking over.
+		peer.withdrawn("room", origin(2));
+		drop(first);
+		announced.assert_next_ended("room");
+		announced.assert_next_wait();
+
+		// Relay 2 announces again, and the relayed copy is live with it.
+		let second = peer.dynamic("room", direct()).unwrap();
+		announced.assert_next_active("room");
+		assert!(producer.shared.lock().withdrawn.is_empty());
+
+		// Nothing passes through relay 2 once both routes are gone.
+		peer.withdrawn("room", origin(2));
+		drop(second);
+		drop(relayed);
+		announced.assert_next_ended("room");
+		assert!(producer.shared.lock().withdrawn.is_empty());
 	}
 
 	/// A change of source alone is delivered: the same chain and cost arriving
