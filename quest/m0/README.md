@@ -30,7 +30,6 @@ Published API or wire breaks still land on dev; each quest's Plan says so.
 
 ## Required
 
-- [Skip unchanged announce updates](/quest/m0/announce-update-dedupe.md) - a publisher sends an announce update only when the wire route changed
 - [Wildcard](/quest/m0/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
 - [Local origin](/quest/m0/local-origin.md) - localhost workers read only the broadcasts their relay ingested, from the internal listener
 - [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - a browser playout latency regression fails a nightly run instead of arriving as a bug report, and its recorder supplies the jitter target's replay traces

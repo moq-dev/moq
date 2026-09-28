@@ -368,13 +368,9 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 
 	/// Handle a RESTART (an explicit restart status, or a duplicate ANNOUNCE on lite-05).
 	///
-	/// The first hop of the chain identifies the original publisher. When it matches
-	/// the prior advertisement and is a real identity, the broadcast is the same
-	/// content on a new path: this session's route metadata updates in place,
-	/// in-flight tracks keep flowing, and the origin only hands over if the winner
-	/// changed. Consumers observe nothing. When the first hop differs, or is
-	/// [`Hop::UNKNOWN`](crate::Hop::UNKNOWN), the old route detaches gracefully
-	/// and a fresh one attaches, so downstream sees a real Ended + Active.
+	/// A restart carries no content claim, so this session's route re-prices in
+	/// place whatever the new chain says: in-flight tracks keep flowing and the
+	/// origin only hands over if the winner changed.
 	/// The advertisement is already live, so this can attach a route even when the
 	/// original advertisement was declined locally.
 	///
