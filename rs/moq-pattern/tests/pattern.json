@@ -1,5 +1,5 @@
 {
-	"$comment": "Golden vectors shared by rs/moq-net (tests/pattern.rs) and js/net (src/pattern.test.ts). Both test suites read this file, so the two implementations cannot drift apart silently.",
+	"$comment": "Golden vectors shared by rs/moq-pattern (tests/pattern.rs) and js/pattern (src/index.test.ts). Both test suites read this file, so the two implementations cannot drift apart silently.",
 	"parse": [
 		{
 			"text": "",
@@ -197,6 +197,14 @@
 		{
 			"path": "a/b/",
 			"pattern": "a/b/**"
+		},
+		{
+			"path": "a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z/a/b/c/d/e/f",
+			"pattern": "a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z/a/b/c/d/e/f"
+		},
+		{
+			"path": "a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z/a/b/c/d/e/f/g",
+			"error": "too-many-segments"
 		}
 	],
 	"head": [

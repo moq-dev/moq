@@ -63,7 +63,7 @@ Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
 - MSVC is covered by the post-merge nightly, not a branch dispatch: branches
   never dispatch the nightly.
 
-## Quests
+## Required
 
 - [Generator](/quest/m1/cpp/generator.md) - the uniffi 0.32 C++ generator with futures and expected-style errors, pinned and generating `cpp/ffi` in CI
 - [Package](/quest/m1/cpp/package.md) - the `cpp/moq` wrapper, CMake package, release tarball, interop client, and docs

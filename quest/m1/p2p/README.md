@@ -133,7 +133,7 @@ re-derived.
 - Symmetric NATs on both ends fail ICE without TURN. By design the relay
   keeps serving.
 
-## Quests
+## Required
 
 - [Data channel transport](/quest/m1/p2p/transport.md) - `@moq/p2p` speaks qmux over one ordered RTCDataChannel behind the WebTransport shape `@moq/net` consumes
 - [Signaling and policy](/quest/m1/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used

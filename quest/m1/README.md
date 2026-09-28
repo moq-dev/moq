@@ -15,7 +15,7 @@ Give one agent ownership of each shared code area at a time (origin/auth, the
 JS Reader, audio playback, media containers and archive, bindings, worker
 transport, benchmark tooling); worktrees isolate commits, not semantics.
 
-## Quests
+## Required
 
 - [Drill sensitivity](/quest/m1/drill-sensitivity.md) - the nightly drill-sensitivity job passes: the subscriber-leaks-broadcasts mutation applies to the current lite subscriber again
 - [Cluster routing](/quest/m1/cluster-routing.md) - an announcement says where a broadcast originates, not how to reach it, and a relay hears only the prefixes its clients asked for
@@ -40,13 +40,11 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Optional max age](/quest/m1/ietf-max-age.md) - max age is optional, set only by the publisher, and crosses moq-transport as MAX_CACHE_DURATION
 - [IETF announce count](/quest/m1/ietf-announce-count.md) - an opt-in moq-transport extension carries the replay count, so IETF announce consumers go live without a timer
 - [kio waiter overflow](/quest/m1/kio-waiter-lost.md) - a retained `Waiter` past 8 lists stops adding a duplicate entry to lists it already recorded
-- [moqsink keyframe latch](/quest/m1/moqsink-keyframe-latch.md) - a header-only buffer after a break no longer permanently invalidates a moqsink video pad
 - [Capture re-anchor](/quest/m1/capture-reanchor.md) - a repeating or restarting device clock never rewinds native capture during a fast backlog drain
 - [Splice edge cases](/quest/m1/splice-edges.md) - an unstamped successor, a pruned segment's boundary group, and a warm head during a takeover are each handled correctly
 - [Track tail hardening](/quest/m1/track-tail-hardening.md) - Rust and JS wait out a track's tail by the same rules, with the known hang, count, truncation, grace, and memory holes closed
 - [Session death parity](/quest/m1/session-death.md) - a local close ends tracks cleanly in both languages, and JS group readers see the session's error on session death
 - [JS scoped routes](/quest/m1/js-scoped-routes.md) - a scoped JS origin reader announces the preferred route among those in its scope, like Rust, with the fan-out benchmarked
-- [JS subtree at max depth](/quest/m1/js-pattern-depth.md) - `Pattern.subtree` returns the literal path at 32 segments like Rust, pinned by a shared pattern.json vector
 - [moq play decode schedule](/quest/m1/play-decode-schedule.md) - `moq play` video keeps valid pictures across rewinds, reordering deeper than 100 ms, and decoder batches larger than three
 - [moqsrc stop](/quest/m1/moqsrc-stop.md) - moqsrc's stop blocks until its session ends, without deadlocking on a blocked pad push
 - [More tests under load](/quest/m1/test-flakes-2.md) - the second round of load-only failures, fixed at the cause
@@ -60,6 +58,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - unflagged loop wraps move audio and video by one shift, so A/V sync holds across wraps
 - [PipeWire duplicate cameras](/quest/m1/pipewire-dup-cameras.md) - a webcam lists once with PipeWire enabled
 - [Catalog wall clock](/quest/m1/catalog-wall-clock.md) - `Clock::wall_clock` keeps the catalog's full precision instead of truncating to milliseconds
+- [IPv6 TLS names](/quest/m1/ipv6-tls-name.md) - dialing an IPv6 literal completes TLS on WebSocket as on noq, including a bare `::1` host override
 - [Capture control](/quest/m1/capture-control.md) - on dev, `encode::Capture` replaces `CaptureOptions`, an unsupported `cut()` errors, and dropping the last `Control` cancels in-flight opens
 - [Video surface](/quest/m1/video-surface.md) - on dev, moq-ffi's `native` becomes `surface`, refused on platforms with no surface
 - [HLS discontinuity sequence](/quest/m1/hls-discontinuity-sequence.md) - on dev, `Segment::discontinuity` is the absolute sequence, so every cursor agrees

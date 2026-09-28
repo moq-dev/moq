@@ -16,7 +16,7 @@ Publishing remains opt-in, with one **Use MoQ encoders** choice for video and au
 
 The quests separate portable decoding, platform GPU delivery, audio, and publishing so each can land and be validated independently. The existing CPU decode path is a fallback primitive, not a GPU implementation: it explicitly converts every surface to I420. Native frame ownership must cross the FFI boundary without that conversion.
 
-## Quests
+## Required
 
 - [Video source replacement](/quest/m1/obs-moq-video/source.md) - remove FFmpeg and attempt macOS GPU delivery immediately, with a working CPU fallback on other platforms
 - [Audio playback](/quest/m1/obs-moq-video/audio-playback.md) - add synchronized subscribed audio through moq-audio

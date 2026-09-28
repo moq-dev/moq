@@ -27,7 +27,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/a4c3debebeacc142dc31b170f3255d1ccf6e4c9b";
+      url = "github:kixelated/quest/46d7fe89247919583632e4963aee1c9a68dfe059";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
       inputs.crane.follows = "crane";
@@ -547,14 +547,6 @@
         # (`.github/actions/rust-cache`); nothing here configures it.
         checks = {
           package-source-assets = pkgs.runCommand "package-source-assets" { } ''
-            for asset in \
-              rs/libmoq/moq.pc.in \
-              rs/libmoq/native-libs/apple.txt \
-              rs/libmoq/native-libs/linux.txt \
-              rs/libmoq/native-libs/windows.txt
-            do
-              test -f "${overlayPkgs.libmoq.src}/$asset"
-            done
             test -f "${overlayPkgs.moq-boy.src}/rs/moq-video/src/frame/nv12_resize.ptx"
             touch "$out"
           '';

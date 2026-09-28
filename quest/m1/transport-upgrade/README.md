@@ -55,7 +55,7 @@ Shared decisions:
   per-session origin makes that a replacement rather than a join, which is
   immediate either way.
 
-## Quests
+## Required
 
 - [Rust](/quest/m1/transport-upgrade/rust.md) - moq-tokio keeps the QUIC dial after WebSocket wins and migrates through the existing Draining path
 - [JavaScript](/quest/m1/transport-upgrade/js.md) - js/net keeps the WebTransport dial after WebSocket wins and migrates through the client-goaway handover
