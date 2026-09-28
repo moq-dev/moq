@@ -6,7 +6,7 @@
  * @module
  */
 import type { Dispose, Getter } from "@moq/signals";
-import type { Producer as BroadcastProducer } from "./broadcast.ts";
+import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Frame, Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
 import * as Path from "./path.ts";
@@ -179,6 +179,8 @@ export const hooks: {
 		producer: BroadcastProducer,
 		announcer: { announce(route: Route): void; unannounce(): void },
 	) => void;
+	/** Name a broadcast handle by the path an origin created or resolved it at. */
+	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
 } = {
 	makeRequest: () => {
 		throw new Error("track.ts not loaded");
@@ -217,6 +219,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	attachAnnouncer: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	stampPath: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 };
