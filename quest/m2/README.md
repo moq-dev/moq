@@ -13,7 +13,7 @@ feature. A study may end with a measured no-go. Work gated on hardware, a
 partner, or a provider waits in [m3](/quest/m3/README.md); work waiting on an
 upstream release waits in [m4](/quest/m4/README.md).
 
-## Quests
+## Required
 
 - [AV1 metadata separation](/quest/m2/av1-metadata.md) - retain metadata OBUs inline while evaluating separate delivery
 - [SEI separation](/quest/m2/sei/README.md) - retain inline SEI until measured savings or a metadata-only consumer justify a split

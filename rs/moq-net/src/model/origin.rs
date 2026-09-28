@@ -1558,9 +1558,11 @@ impl Producer {
 	///
 	/// Returns [`Error::Unauthorized`] unless this producer reaches all of
 	/// `target`, so a mount never widens a scope, and [`Error::Duplicate`] when
-	/// `at` or `target` overlaps a mount this producer already has: mounts never
-	/// chain, so a target is always read as the origin holds it.
-	/// [`Error::BoundsExceeded`] if either rooted path exceeds [`Path::MAX_PARTS`].
+	/// `at` or `target` overlaps a mount point this producer already has, or `at`
+	/// overlaps an existing target or its own: mounts never chain, in whatever order they are added,
+	/// so a target is always read as the origin holds it. Mounts may share a target.
+	/// [`Error::BoundsExceeded`] if either rooted path exceeds [`Path::MAX_PARTS`],
+	/// and [`Error::InvalidPath`] if `at` holds a segment no pattern can spell.
 	pub fn mount(&self, at: impl AsPath, target: impl AsPath) -> Result<Producer, Error> {
 		let at = self.root.join(at).to_owned();
 		let target = self.root.join(target).to_owned();
@@ -1570,6 +1572,8 @@ impl Producer {
 		{
 			return Err(BoundsExceeded.into());
 		}
+		// A mount point no pattern can spell could never be announced or authorized.
+		Pattern::literal(at.as_str())?;
 		if !self
 			.scope
 			.allowed
@@ -1577,11 +1581,17 @@ impl Producer {
 		{
 			return Err(Error::Unauthorized);
 		}
-		if self.scope.mounts.iter().any(|mount| {
-			[&at, &target]
-				.into_iter()
-				.any(|path| mount.at.has_prefix(path) || path.has_prefix(&mount.at))
-		}) {
+		// Symmetric, so the order mounts are added never changes which sets are accepted:
+		// no mount point overlaps any mount's point or target, its own included.
+		// Targets may overlap.
+		let overlaps = |a: &Path, b: &Path| a.has_prefix(b) || b.has_prefix(a);
+		if overlaps(&at, &target)
+			|| self
+				.scope
+				.mounts
+				.iter()
+				.any(|mount| overlaps(&at, &mount.at) || overlaps(&target, &mount.at) || overlaps(&at, &mount.target))
+		{
 			return Err(Error::Duplicate);
 		}
 		let mounts = self
@@ -4612,7 +4622,31 @@ mod tests {
 		// A target through a mount would read the subtree the mount shadows.
 		assert!(matches!(mounted.mount("p2", "p1/.svc/x"), Err(Error::Duplicate)));
 		assert!(matches!(mounted.mount("p2", "p1"), Err(Error::Duplicate)));
+		// A mount point on a target would chain through it, in either order.
+		assert!(matches!(mounted.mount(".svc/p1/x", ".other"), Err(Error::Duplicate)));
+		assert!(matches!(mounted.mount(".svc", ".other"), Err(Error::Duplicate)));
 		mounted.mount("p1/.other", ".other/p1").unwrap();
+		// Mount points may share a target.
+		mounted.mount("p2/.svc", ".svc/p1").unwrap();
+		// A mount point overlapping its own target is refused like any other overlap.
+		for (at, target) in [("a", "a/b"), ("a/b", "a"), ("a", "a")] {
+			assert!(
+				matches!(producer.mount(at, target), Err(Error::Duplicate)),
+				"{at} -> {target}"
+			);
+		}
+	}
+
+	/// A mount point no pattern can spell could never be announced or authorized.
+	#[test]
+	fn mount_refuses_a_wildcard_mount_point() {
+		let (producer, _driver) = Producer::new(Config::new(origin(1)));
+		for at in ["*", "p1/*", "p1/**", "p1/a*"] {
+			assert!(
+				matches!(producer.mount(at, ".svc/p1"), Err(Error::InvalidPath(_))),
+				"{at}"
+			);
+		}
 	}
 
 	/// Egress through a mount counts under the path the reader named, so it

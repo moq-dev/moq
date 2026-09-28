@@ -45,16 +45,13 @@ work no child does:
   new call per language.
 - `just test interop --all` green on the finished line.
 
-## Quests
+## Required
 
+- [Release](/quest/m0/release.md) - the restructure follows the release rather than riding it
 - [JSON](/quest/m1/ffi-shape/json.md) - the pilot: json becomes its own namespace wrapping a track in every binding and sets the per-language pattern
 - [Net](/quest/m1/ffi-shape/net.md) - client and server take config records, snapshots are records, and the verbs match moq-net
 - [Media](/quest/m1/ffi-shape/media.md) - catalog, import, and container consume move under `media`
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video encoders and decoders move under their own namespaces with one constructor shape
-
-## Required
-
-- [Release](/quest/m0/release.md) - the restructure follows the release rather than riding it
 
 ## Related
 

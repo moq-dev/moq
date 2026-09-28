@@ -18,7 +18,7 @@ This README owns the guide, written once both verbs land: a new
 `curl` equivalents, and reading the relay's stats track, linked from `doc/bin/cli.md`,
 `doc/bin/relay/http.md`, and the site sidebar.
 
-## Quests
+## Required
 
 - [Caught up](/quest/m1/cli-inspect/caught-up.md) - moq-net's announce consumer yields a `Live` marker once the initial set has landed, and shell completion drops its settle timer
 - [ls](/quest/m1/cli-inspect/ls.md) - `moq ls` prints the live set and exits, or follows changes, as paths or JSON lines
