@@ -5,13 +5,14 @@
 A service claims the prefix it could serve rather than enumerating every
 broadcast under it; the client library filters that claim against the
 pattern interest the caller asked for, so nothing on the wire spells a
-wildcard. A claim is priced at what starting the work would cost. Specificity wins first: a concrete
-claim shadows a wildcard regardless of cost, and prices compete within the
-same specificity tier. A terminal concrete refusal does not fall through to
-a catch-all; its claim must be withdrawn. Retracting a wildcard stops new
-work without shedding what is already running.
+wildcard. A claim is priced at what starting the work would cost. The longest
+covering prefix wins first: a concrete announcement shadows a broader claim
+regardless of cost, and prices compete only among claims of the same prefix.
+A terminal concrete refusal does not fall through to a catch-all; its claim
+must be withdrawn. Retracting a claim stops new work without shedding what is
+already running.
 
-Three workloads need this, and they are the three pattern shapes. A transcode
+Three workloads need this. A transcode
 worker today announces a standby derivative for every matching live broadcast,
 so announcements scale as workers times broadcasts; claiming one service
 prefix, it advertises once for the whole fleet. A chat backend
@@ -33,11 +34,10 @@ across the fleet in resident memory.
 Decided in [#3770](https://github.com/moq-dev/moq/pull/3770): publishing is
 prefix-only on every wire and patterns never leave the token or the client library.
 `dynamic(prefix, route)`
-advertises a prefix; a suffix or catch-all claim is expressed as the
-widest prefix that covers it (`**` is the root) and the request is the
-authority, so the advertise half of this questline is re-scoped to prefix
-claims resolved against pattern interest. The three workloads above still
-hold: the transcoder claims its service prefix
+advertises a prefix; the catch-all claim is the root prefix, and the request
+is the authority, so the advertise half of this questline is re-scoped to
+prefix claims resolved against pattern interest. The three workloads above
+still hold: the transcoder claims its service prefix
 ([Where derived output lives](#where-derived-output-lives)), and the archive
 claims the root and refuses what it does not have.
 
@@ -114,8 +114,8 @@ on a generation field.
   concrete claim shadows a healthy pool even when its service is
   broken, its terminal refusal does not fall through, and the shadow lasts
   exactly as long as the claiming session that carries it.
-  The seed still has a floor, because standby and running claims of equal
-  specificity do meet: a standby concrete claim (`with_cost(1000)` is the
+  The seed still has a floor, because standby and running claims of the same
+  prefix do meet: a standby concrete claim (`with_cost(1000)` is the
   existing per-broadcast convention) shares a tier with a running publisher's
   concrete announcement and with warm-advertise's exact-path warm routes. The
   floor MUST exceed the deployment's enforced maximum charged-link count
@@ -169,10 +169,8 @@ on a generation field.
 
 A prefix claim needs the variable part of a path trailing, so a fleet-wide
 service claims its own prefix and mirrors the source path beneath it
-(`.transcode/<pid>/foo.hang`) rather than publishing beneath the source. A
-suffix such as `**/transcode.pro` collapses to the root on the wire, where it
-would pool with the archive's claim and a refusal from the wrong member is
-final. The source's catalog reaches the contribution through a
+(`.transcode/<pid>/foo.hang`) rather than publishing beneath the source. The
+source's catalog reaches the contribution through a
 cross-broadcast reference. The platform layout, grants, and metering are
 the deployment's; moq.pro's is in its
 [wildcard questline](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/wildcard/README.md).

@@ -46,12 +46,12 @@ link costs 1, which reproduces plain hop counting. Each relay adds the price of
 the link an announcement arrived on before forwarding it, so a route's cost is
 the sum of what it crossed.
 
-Wildcard advertisements are forwarded and costed the same way as an exact-path
+Prefix advertisements are forwarded and costed the same way as an exact-path
 route: each hop appends its identity, adds the link price, and passes the
 claim on. An advertisement must be contained by one of the publisher's granted
-prefixes (`grant/**`); an over-wide pattern is refused rather than clamped.
+prefixes (`grant/**`); an over-wide prefix is refused rather than clamped.
 
-Routing prefers the most specific pattern, then a fully identified hop list
+Routing prefers the longest covering prefix, then a fully identified hop list
 over one that holds a 0 (an anonymous hop) at any depth, then the lowest cost,
 then the shortest hop list, then a hash of the requested path and the hop list,
 breaking any remaining tie toward the newest announcement so a reconnecting
@@ -59,8 +59,7 @@ publisher isn't outranked by the session it replaced. Hashing the requested
 path spreads equal-cost advertisers of one prefix, such as a transcode pool,
 across its paths instead of sending every path to one of them, and every relay
 picks the same one for a given path. An assigned identity for an anonymous peer
-is local selection state and is never written into the hop list. Resolving a
-non-prefix pattern into a subscription is not implemented yet.
+is local selection state and is never written into the hop list.
 
 ```toml
 [cluster]
