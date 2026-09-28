@@ -17,7 +17,6 @@ Every other JS place with the same page-load gap follows the same rule.
 
 ## Plan
 
-- Event names: use `Start`/`Update`/`End`/`Live` from the rename under Required.
 - Page load (decided): the JS reconnect loop (`js/net/src/connection/reload.ts`)
   already counts as an answerer for requests through `expect()`; it can also
   hold the replay on the origin until its first session's initial set lands.
@@ -33,7 +32,3 @@ Every other JS place with the same page-load gap follows the same rule.
   one where the first connection fails and no `Live` arrives, and a same-tick
   test where a change applied just after the last hold drops comes after
   `Live`.
-
-## Required
-
-- [#4384](https://github.com/moq-dev/moq/pull/4384) lands on `dev`, renaming the announce events to `Start`/`Update`/`End`/`Live`
