@@ -426,6 +426,9 @@ export class Producer {
 	// read mirrored sinks, never this state directly.
 	#state = new TrackState();
 	#sequence: TrackSequence = { next: 0 };
+	// One past the highest group this producer received. The shared counter above can run
+	// ahead of it: sibling producers of the same track and datagrams advance it too.
+	#received = 0;
 
 	// Recently written source groups, retained for replay to late subscribers and
 	// pruned once idle for longer than the cache window. Each entry tracks the mirror
@@ -728,6 +731,7 @@ export class Producer {
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>() };
 		this.#cache.push(entry);
 		this.#cached.set(group.sequence, entry);
+		this.#received = Math.max(this.#received, group.sequence + 1);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
 		// Give held mirrors the new live edge before pruning their timeline entry,
 		// so their latency guard can preserve a terminal expiry verdict.
@@ -898,7 +902,7 @@ export class Producer {
 	// the track already holds everything it promised. Mirrors the Rust `is_settled`.
 	#settled(): boolean {
 		const final = this.#state.final.peek();
-		if (final === undefined || this.#sequence.next < final) return false;
+		if (final === undefined || this.#received < final) return false;
 		return this.#cache.every(({ group }) => group.sequence >= final || group.closed.peek() === null);
 	}
 
