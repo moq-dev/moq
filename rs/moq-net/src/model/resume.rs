@@ -2256,6 +2256,22 @@ impl Subscriber {
 		}
 	}
 
+	/// Poll for the first group the first segment's source serves at or above this
+	/// cursor's floor, once resolved; see [`track::Subscriber::poll_start`]. Like
+	/// [`Self::poll_final`], this only resolves the subscription and consumes no groups.
+	pub(crate) fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+		self.poll_sync(waiter);
+		let floor = self.min_sequence;
+		let Some(seg) = self.segments.first_mut() else {
+			return Poll::Ready(None);
+		};
+		ready!(Self::poll_activate(seg, &self.last_prefs, floor, waiter));
+		match &mut seg.sub {
+			SubState::Active(sub) => Poll::Ready(ready!(sub.poll_start(waiter)).filter(|start| *start >= floor)),
+			SubState::Done(_) | SubState::Pending(_) => Poll::Ready(None),
+		}
+	}
+
 	/// Wait for the final segment's track to end: its group count when it
 	/// finished, its error when it died, and `None` when there is no segment. Earlier segments don't
 	/// decide the end. Only the subscription is resolved here: consuming groups, or

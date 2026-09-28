@@ -3966,6 +3966,23 @@ impl Subscriber {
 		}
 	}
 
+	/// Poll for the first group the source's feed serves at or above this cursor's
+	/// floor, once resolved; see [`Consumer::poll_start`]. `None` when the source
+	/// declares none, declares one below the floor, or has closed.
+	pub(crate) fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+		match &mut self.inner {
+			SubscriberKind::Plain(plain) => {
+				let floor = plain.min_sequence;
+				let res = plain.poll(waiter, |state| match state.start_pending {
+					true => Poll::Pending,
+					false => Poll::Ready(Ok(state.start_sequence)),
+				});
+				Poll::Ready(ready!(res).ok().flatten().filter(|start| *start >= floor))
+			}
+			SubscriberKind::Spliced(spliced) => spliced.poll_start(waiter),
+		}
+	}
+
 	/// Poll for the track's declared final sequence, without blocking.
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
 		match &mut self.inner {

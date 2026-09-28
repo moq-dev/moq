@@ -2214,6 +2214,8 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	// exclusive final sequence (which may be ahead of the live edge).
 	emit_range: bool,
 	start_sent: bool,
+	// The first servable group, held until the source resolves where its feed starts.
+	first: Option<group::Consumer>,
 	end_sent: bool,
 	// Lite07+ sends SUBSCRIBE_END with the stream count instead of as soon as the
 	// boundary is known, once every group below it has opened its stream.
@@ -2250,6 +2252,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			track_priority_tx,
 			emit_range,
 			start_sent: false,
+			first: None,
 			end_sent: false,
 			count_streams,
 			datagrams,
@@ -2300,6 +2303,27 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				continue;
 			}
 
+			// The first group waits for the source to resolve where its feed starts; datagrams
+			// keep flowing meanwhile.
+			if let Some(group) = self.first.take() {
+				match self.track.poll_start(waiter) {
+					Poll::Ready(source) => {
+						self.start(group, source, stream)?;
+						continue;
+					}
+					Poll::Pending => {
+						self.first = Some(group);
+						if self.datagrams
+							&& let Poll::Ready(Some(datagram)) = self.track.poll_recv_datagram(waiter)?
+						{
+							self.ctx.serve_datagram(datagram);
+							continue;
+						}
+						return Poll::Pending;
+					}
+				}
+			}
+
 			// One cursor drives the whole subscription: poll the cap-aware arrival-order
 			// group and, when enabled, the next best-effort datagram. Groups are polled
 			// first so a datagram burst can't starve them; datagrams flow whenever no
@@ -2308,45 +2332,17 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			if let Poll::Ready(res) = poll_recv_next(&mut self.track, self.datagrams, emit_boundary, waiter) {
 				match res? {
 					Recv::Group(mut group) => {
-						let sequence = group.sequence;
 						if !position_group(&mut group, self.start_frame, self.end_frame) {
 							// Its head is gone, and this subscriber didn't ask for a
 							// partial group. Skip it rather than open a stream that can
 							// only be reset; the next servable group resolves the start.
-							tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "skipping group with a missing head");
+							tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, "skipping group with a missing head");
 							continue;
 						}
-						if self.emit_range && !self.start_sent {
-							self.start_sent = true;
-							// Only the group: the subscriber derives the start frame from
-							// its own request (see `lite::SubscribeStart`).
-							stream
-								.writer
-								.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
-									group: sequence,
-								}))?;
-							// SUBSCRIBE_OK is an implicit drop of everything below the
-							// resolved start (the subscriber records it as a permanent
-							// miss), so a lower group arriving late must not be served
-							// after all. A widening SUBSCRIBE_UPDATE re-lowers the floor,
-							// renegotiating the resolved start along with the demand.
-							self.track.start_at(sequence);
+						match self.emit_range && !self.start_sent {
+							true => self.first = Some(group),
+							false => self.serve(group),
 						}
-
-						let frame_start = group.index();
-						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
-
-						// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
-						let current_priority = self.ctx.track_priority_current();
-						// The subscribe id scopes the group tie-break: one queue serves every
-						// subscription on the session, and only groups of the same one may be
-						// ranked against each other by sequence.
-						let handle = self
-							.ctx
-							.priority
-							.insert(Priority::new(current_priority, self.ctx.id, sequence));
-						self.children
-							.push(GroupServe::new(self.ctx.clone(), sequence, frame_start, handle, group));
 					}
 					Recv::Datagram(datagram) => self.ctx.serve_datagram(datagram),
 					Recv::Boundary(group) => {
@@ -2380,6 +2376,56 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 			return Poll::Pending;
 		}
+	}
+}
+
+impl<S: crate::transport::poll::Session> TrackRun<S> {
+	/// Send SUBSCRIBE_START for the first servable group, then serve it.
+	///
+	/// A relay caches groups in upstream arrival order, and a newer group's stream can
+	/// beat an older one, so the first group here need not be the oldest the source
+	/// serves. `source` is where the source's own feed starts, so the resolved start
+	/// is the lower of the two: resolving from the later group would drop the older one
+	/// for good.
+	fn start(
+		&mut self,
+		group: group::Consumer,
+		source: Option<u64>,
+		stream: &mut Stream<S, Version>,
+	) -> Result<(), Error> {
+		let start = source.map_or(group.sequence, |source| source.min(group.sequence));
+		self.start_sent = true;
+		// Only the group: the subscriber derives the start frame from its own request
+		// (see `lite::SubscribeStart`).
+		stream
+			.writer
+			.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart { group: start }))?;
+		// SUBSCRIBE_START is an implicit drop of everything below the resolved start (the
+		// subscriber records it as a permanent miss), so a lower group arriving late must
+		// not be served after all. A widening SUBSCRIBE_UPDATE re-lowers the floor,
+		// renegotiating the resolved start along with the demand.
+		self.track.start_at(start);
+		self.serve(group);
+		Ok(())
+	}
+
+	/// Open a group machine for `group`.
+	fn serve(&mut self, group: group::Consumer) {
+		let sequence = group.sequence;
+		let frame_start = group.index();
+		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
+
+		// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
+		let current_priority = self.ctx.track_priority_current();
+		// The subscribe id scopes the group tie-break: one queue serves every
+		// subscription on the session, and only groups of the same one may be
+		// ranked against each other by sequence.
+		let handle = self
+			.ctx
+			.priority
+			.insert(Priority::new(current_priority, self.ctx.id, sequence));
+		self.children
+			.push(GroupServe::new(self.ctx.clone(), sequence, frame_start, handle, group));
 	}
 }
 
