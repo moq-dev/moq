@@ -87,7 +87,7 @@ Everything here is additive: `Session::auth()` is new, the relay derives the
 grant from the origin handles it already scopes, and AUTH is added to the
 existing lite-06 ALPN.
 
-## Quests
+## Required
 
 - [Lite stream](/quest/m1/auth/lite.md) - both sides of a lite-06 session
   exchange grants over AUTH streams, exposed as `Session::auth()`, and an

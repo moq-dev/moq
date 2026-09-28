@@ -52,7 +52,7 @@ This README's own work is the no-downgrade report once generated lite ships:
 bundle size, per-frame CPU, and first-frame latency against the hand-written
 js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-benchmarks.md).
 
-## Quests
+## Required
 
 - [VarInt codec](/quest/m1/rs2ts/varint-codec.md) - moq-net encodes through a `VarInt` newtype and a concrete slice-based codec, not generic traits on primitives
 - [JS VarInt](/quest/m1/rs2ts/js-varint.md) - js/net has a 62-bit `VarInt` type with checked `number` conversion and no BigInt on the hot path

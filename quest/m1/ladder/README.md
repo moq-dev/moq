@@ -67,7 +67,7 @@ bitrate; closing or removing stalled tracks; an application-level
 [#2734](https://github.com/moq-dev/moq/issues/2734)); rebuilding unsupported
 encoders on every target change.
 
-## Quests
+## Required
 
 - [Controller](/quest/m1/ladder/controller.md) - one controller owns every
   rung's share, target, stalled state, and send order
