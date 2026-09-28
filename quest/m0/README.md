@@ -91,7 +91,7 @@ Producer and transcode's validated Ladder and coalescing active cursor. Keep
 one video Frame/Surface hierarchy and its deliberate native/wgpu type interop;
 do not add another media abstraction or a renderer crate during stabilization.
 
-## Quests
+## Required
 
 - [Release](/quest/m0/release.md) - the release moq.pro adopts: binding docs, an upgrade page, and a staging soak gate it rather than the merge
 - [Skip unchanged announce updates](/quest/m0/announce-update-dedupe.md) - a publisher sends an announce update only when the wire route changed

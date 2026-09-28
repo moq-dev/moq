@@ -45,6 +45,9 @@ For each finding:
 - If you don't agree with it, reply to the finding and move on.
 - If it's a relatively easy improvement, fix it and push. Update the summary if needed.
 
+Wait for Codex to review the final head before merging.
+Merge only on its thumbs up, or once every Codex finding on the PR is fixed or replied to.
+
 # Follow-ups
 
 If you encounter issues, or findings that are out of scope, create follow-up quests.

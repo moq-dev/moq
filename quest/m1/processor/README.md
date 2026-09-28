@@ -14,7 +14,7 @@ service contract, and credential minting) stay downstream in moq.pro. The
 contract is not vision-specific: captioning, moderation, telemetry extraction,
 and custom transforms use the same worker lifecycle.
 
-## Quests
+## Required
 
 - [Processor media contract](/quest/m1/processor/media-contract.md) - define
   contribution references, source relations, and correlation in the Hang

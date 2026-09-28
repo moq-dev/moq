@@ -71,7 +71,7 @@ this. The acceptor yields classified connections; `moq-rtmp`'s
 `axum_server::Server::from_listener` takes a listener that a channel of
 pre-accepted streams can stand behind.
 
-## Quests
+## Required
 
 - [UDP demux](/quest/m1/one-port/udp-demux.md) - one socket carries QUIC, STUN answers, and the WebRTC media path, with greasing off
 - [TCP acceptor](/quest/m1/one-port/tcp-demux.md) - one listener carries TLS-terminated HTTP, RTMP, and RTMPS
