@@ -11,6 +11,8 @@ Follow whatever shape the lite session settles on. The IETF code is the
 largest module (about 12.7k non-test lines) and today compiles part of itself
 twice (for `Session` and `ControlStreamAdapter<Session>`); collapse that while
 here.
+If the [async feature](/quest/m1/rs2ts/sans-io/async-feature.md) landed
+first with the IETF session behind it, move the session out.
 
 Public API: breaks moq-net's IETF session API; retargets to `dev`. Wire: none.
 
