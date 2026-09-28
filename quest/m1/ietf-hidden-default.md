@@ -33,8 +33,11 @@ Guidance:
   as 16+ (inline NAMESPACE entries).
 - Rewrite the draft's "applies whether or not the peer declared the option"
   rule and keep `just drafts check` green. `doc/concept/moq-lite.md` also
-  says a peer without the extension never discovers hidden routes; update it
-  in the same change.
+  says a peer without the extension never discovers hidden routes, as do the
+  module docs in `rs/moq-net/src/ietf/hidden.rs` and `js/net/src/ietf/hidden.ts`;
+  update them in the same change.
+- It is a wire behavior change in both languages, so run
+  `just test interop --all` before landing.
 - Tests: an undeclared peer sees hidden namespaces, a declared peer without
   the parameter does not, on at least one pre-16 and one 16+ draft. Also fill
   the gaps where nothing is tested today: draft-14/15 with hidden, JS IETF
