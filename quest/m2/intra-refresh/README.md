@@ -36,7 +36,7 @@ Decisions the quests share:
   Backends without the knob refuse refresh mode; NVENC and V4L2 get it now,
   Media Foundation and MediaCodec are follow-ups.
 
-## Quests
+## Required
 
 - [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - JS and Rust viewers join `warmup` earlier and withhold display until recovery, except at a true IDR
 - [H.264 import](/quest/m2/intra-refresh/h264-import.md) - the splitter keeps `recovery_frame_cnt` and import publishes `warmup` from it

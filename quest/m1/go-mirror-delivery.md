@@ -5,7 +5,7 @@
 A recommendation, with a prototype, for delivering the Go binding's
 staticlibs without committing them to git. `moq-dev/moq-go-ffi` commits
 them straight into git today, at 60.2 MiB for linux, 52.7 for windows, and
-39.1 for darwin. That puts the largest file at 60% of GitHub's 100 MB push
+39.1 for darwin. That puts the largest file at 60% of GitHub's 100 MiB per-file
 limit, and each release adds about 210 MiB of history.
 
 ## Plan

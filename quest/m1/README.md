@@ -15,9 +15,8 @@ Give one agent ownership of each shared code area at a time (origin/auth, the
 JS Reader, audio playback, media containers and archive, bindings, worker
 transport, benchmark tooling); worktrees isolate commits, not semantics.
 
-## Quests
+## Required
 
-- [Drill sensitivity](/quest/m1/drill-sensitivity.md) - the nightly drill-sensitivity job passes: the subscriber-leaks-broadcasts mutation applies to the current lite subscriber again
 - [Cluster routing](/quest/m1/cluster-routing.md) - an announcement says where a broadcast originates, not how to reach it, and a relay hears only the prefixes its clients asked for
 - [lite-07 count settle](/quest/m1/lite-count-settle.md) - moq-lite-07 subscribers stop waiting for a subscription's tail once SUBSCRIBE_END's stream count is reached
 - [Dropped sources](/quest/m1/dropped-sources.md) - track consumers see the producer's real error on every end path, never `Dropped`
@@ -32,6 +31,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Remove finish](/quest/m1/broadcast-remove.md) - on dev, the deprecated broadcast end APIs are gone and `closed()` carries no cause
 - [CLI inspection](/quest/m1/cli-inspect/README.md) - `moq ls` lists what is live and `moq fetch` reads a group over MoQ, and a guide shows how to inspect a relay
 - [Session close](/quest/m1/session-close.md) - a graceful session end withdraws announces and waits one second for the ack
+- [Drain before close](/quest/m1/drain-before-close.md) - a closing client delivers its queued stream finishes, so `moq import` ends the catalog cleanly over a real relay
 - [Close codes](/quest/m1/close-codes.md) - a client sees the peer's application close code over WebSocket and raw QUIC, like WebTransport
 - [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
 - [JS caught up](/quest/m1/js-announce-caught-up.md) - @moq/net's announce consumer says when the initial set has landed, like Rust
@@ -41,27 +41,26 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Optional max age](/quest/m1/ietf-max-age.md) - max age is optional, set only by the publisher, and crosses moq-transport as MAX_CACHE_DURATION
 - [IETF announce count](/quest/m1/ietf-announce-count.md) - an opt-in moq-transport extension carries the replay count, so IETF announce consumers go live without a timer
 - [kio waiter overflow](/quest/m1/kio-waiter-lost.md) - a retained `Waiter` past 8 lists stops adding a duplicate entry to lists it already recorded
-- [moqsink keyframe latch](/quest/m1/moqsink-keyframe-latch.md) - a header-only buffer after a break no longer permanently invalidates a moqsink video pad
 - [Capture re-anchor](/quest/m1/capture-reanchor.md) - a repeating or restarting device clock never rewinds native capture during a fast backlog drain
 - [Splice edge cases](/quest/m1/splice-edges.md) - an unstamped successor, a pruned segment's boundary group, and a warm head during a takeover are each handled correctly
 - [Track tail hardening](/quest/m1/track-tail-hardening.md) - Rust and JS wait out a track's tail by the same rules, with the known hang, count, truncation, grace, and memory holes closed
 - [Session death parity](/quest/m1/session-death.md) - a local close ends tracks cleanly in both languages, and JS group readers see the session's error on session death
 - [JS scoped routes](/quest/m1/js-scoped-routes.md) - a scoped JS origin reader announces the preferred route among those in its scope, like Rust, with the fan-out benchmarked
-- [JS subtree at max depth](/quest/m1/js-pattern-depth.md) - `Pattern.subtree` returns the literal path at 32 segments like Rust, pinned by a shared pattern.json vector
-- [moq play decode schedule](/quest/m1/play-decode-schedule.md) - `moq play` video keeps valid pictures across rewinds, reordering deeper than 100 ms, and decoder batches larger than three
 - [moqsrc stop](/quest/m1/moqsrc-stop.md) - moqsrc's stop blocks until its session ends, without deadlocking on a blocked pad push
 - [More tests under load](/quest/m1/test-flakes-2.md) - the second round of load-only failures, fixed at the cause
 - [Auth outage clock](/quest/m1/auth-outage-clock.md) - the relay and moq-auth outage tests run on a paused clock again and assert both bounds of `expires`
+- [Interop contention](/quest/m1/interop-contention.md) - two `just test interop --all` matrices pass side by side, and `just test harness` runs from a clean checkout
 - [UnknownSession log flood](/quest/m1/unknown-session-logs.md) - streams reset before their WebTransport header stop being reported as UnknownSession at WARN
 - [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
 - [Wire compatibility](/quest/m1/wire-compat.md) - a nightly run tests this checkout against the last published release for tokens, session wire, and catalog/container
 - [Accept-side flags](/quest/m1/cli-given-flags.md) - dial-only and local verbs refuse every `--listen-*` flag instead of ignoring it
 - [JS catalog path](/quest/m1/js-catalog-path.md) - `@moq/net` broadcast consumers expose their path and `Catalog.watch` rejects escaping references, like Rust
 - [Full codec string](/quest/m1/publish-codec-string.md) - browser-published video carries the encoder's full RFC 6381 codec string, so native players decode it
-- [TS export jitter](/quest/m1/ts-export-jitter.md) - the video reorder bound follows later catalogs and observed reordering, so a late B-frame never reorders TS output
+- [TS export jitter](/quest/m1/ts-export-jitter.md) - the video reorder bound follows later catalogs and the declared reorder depth, so a late B-frame never reorders TS output; an undeclared stream can reorder once per new maximum depth
 - [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - unflagged loop wraps move audio and video by one shift, so A/V sync holds across wraps
 - [PipeWire duplicate cameras](/quest/m1/pipewire-dup-cameras.md) - a webcam lists once with PipeWire enabled
 - [Catalog wall clock](/quest/m1/catalog-wall-clock.md) - `Clock::wall_clock` keeps the catalog's full precision instead of truncating to milliseconds
+- [IPv6 TLS names](/quest/m1/ipv6-tls-name.md) - dialing an IPv6 literal completes TLS on WebSocket as on noq, including a bare `::1` host override
 - [Capture control](/quest/m1/capture-control.md) - on dev, `encode::Capture` replaces `CaptureOptions`, an unsupported `cut()` errors, and dropping the last `Control` cancels in-flight opens
 - [Video surface](/quest/m1/video-surface.md) - on dev, moq-ffi's `native` becomes `surface`, refused on platforms with no surface
 - [HLS discontinuity sequence](/quest/m1/hls-discontinuity-sequence.md) - on dev, `Segment::discontinuity` is the absolute sequence, so every cursor agrees
@@ -109,7 +108,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Own the QUIC stack](/quest/m1/quic/README.md) - the moq-noq fork carries
   ACK progress, reliable reset, hierarchical scheduling, deadlines, probing,
   keep-alive, peer limits, careful resume, ECN, and qmux
-- [BBR idle burst](/quest/m1/bbr-idle-burst.md) - a BBRv3 burst after a long idle paces near the learned bandwidth, proven by a fork regression
 - [P2P](/quest/m1/p2p/README.md) - opted-in clients serve each other over data channels and iroh while the relay stays the rendezvous and the fallback, under application policy
 - [One port](/quest/m1/one-port/README.md) - a relay speaks QUIC, STUN, WebRTC media, and SRT on one UDP port and HTTP, RTMP, and RTMPS on one TCP port
 - [Signed priority](/quest/m1/signed-priority.md) - on dev, every API priority is an `i8` with 0 as the unset midpoint, and hang's built-ins sit above it
@@ -125,6 +123,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [#3126](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench reports per-interval latency percentiles so the ramp leaves the steady state
 - [Relay session bench](/quest/m1/bench-relay.md) - the same scenario through moq-relay's own connection handling
 - [Bench coverage](/quest/m1/bench-coverage.md) - Criterion targets for moq-mux containers, the hang catalog, moq-auth verification, and moq-pattern matching
+- [Stats producer bench](/quest/m1/stats-producer-bench.md) - the stats drain and encode cost per tick, swept over held paths and tiers and run nightly
 - [Relay profiling](/quest/m1/performance-profiles.md) - reproducible CPU and allocation captures under the existing workloads
 - [Browser benchmarks](/quest/m1/browser-benchmarks.md) - measure JS transport, container, decode, and render costs in an identified browser
 - [Generated @moq/net](/quest/m1/rs2ts/README.md) - the browser runs moq-net as TypeScript generated from the Rust source, retiring js/net's hand-written protocol and model code

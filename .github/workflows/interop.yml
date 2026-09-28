@@ -73,6 +73,9 @@ jobs:
         uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-on-failure: true
+          # A pull request's entry is scoped to its own branch, where no later
+          # run reads it, while it spends the budget the shared store needs.
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
       # runtime libs (`--with-deps` needs the host package manager) so the
