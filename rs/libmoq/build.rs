@@ -42,6 +42,10 @@ fn main() {
 		// header has no include guard unless we ask for one here. Without it a
 		// project reaching moq.h down two include paths gets redefinition errors.
 		pragma_once: true,
+		// C++ has to see these declarations with C linkage. Emitting the `extern "C"`
+		// block here saves every C++ consumer from wrapping the include by hand, which
+		// also wraps the system headers moq.h pulls in.
+		cpp_compat: true,
 		export: cbindgen::ExportConfig {
 			// These enums cross the ABI as plain `uint32_t`, so that an unknown
 			// discriminant from C is an error rather than UB. That leaves no signature
