@@ -1,7 +1,7 @@
+use crate::rml::amf0::Amf0Value;
 use crate::rml::sessions::StreamMetadata;
 use crate::rml::time::RtmpTimestamp;
 use bytes::Bytes;
-use rml_amf0::Amf0Value;
 
 /// Events that can be raised by the client session so that custom business logic can be written
 /// to react to it
