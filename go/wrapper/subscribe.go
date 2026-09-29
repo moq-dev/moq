@@ -5,6 +5,7 @@ import (
 	"iter"
 
 	ffi "moq.dev/moq-ffi/moq"
+	"moq.dev/moq/internal/bridge"
 )
 
 // BroadcastConsumer reads tracks from a broadcast.
@@ -158,12 +159,12 @@ type MediaConsumer struct {
 
 // Next returns the next frame, or (nil, nil) when the track ends.
 func (m *MediaConsumer) Next(ctx context.Context) (*MediaFrame, error) {
-	return runCancellable(ctx, m.inner.Cancel, m.inner.Next)
+	return bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
 }
 
 // Frames ranges over frames until the track ends or the loop breaks.
 func (m *MediaConsumer) Frames(ctx context.Context) iter.Seq2[*MediaFrame, error] {
-	return streamSeq(ctx, m.Next)
+	return bridge.Seq(ctx, m.Next)
 }
 
 // Cancel stops the stream.
@@ -184,12 +185,12 @@ func (m *MediaGroupConsumer) Sequence() uint64 {
 
 // Next returns the next decoded frame, or (nil, nil) when the group ends.
 func (m *MediaGroupConsumer) Next(ctx context.Context) (*MediaFrame, error) {
-	return runCancellable(ctx, m.inner.Cancel, m.inner.Next)
+	return bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
 }
 
 // Frames ranges over decoded frames until the group ends or the loop breaks.
 func (m *MediaGroupConsumer) Frames(ctx context.Context) iter.Seq2[*MediaFrame, error] {
-	return streamSeq(ctx, m.Next)
+	return bridge.Seq(ctx, m.Next)
 }
 
 // Cancel stops the stream.
@@ -209,12 +210,12 @@ func (g *GroupConsumer) Sequence() uint64 {
 
 // ReadFrame returns the next timestamped frame, or (nil, nil) when the group ends.
 func (g *GroupConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
-	return runCancellable(ctx, g.inner.Cancel, g.inner.ReadFrame)
+	return bridge.Call(ctx, g.inner.Cancel, g.inner.ReadFrame)
 }
 
 // Frames ranges over timestamped frames until the group ends or the loop breaks.
 func (g *GroupConsumer) Frames(ctx context.Context) iter.Seq2[*Frame, error] {
-	return streamSeq(ctx, g.ReadFrame)
+	return bridge.Seq(ctx, g.ReadFrame)
 }
 
 // Cancel stops the stream.
@@ -232,7 +233,7 @@ type TrackConsumer struct {
 // or (nil, nil) when the track ends. Prefer this for live, latency-sensitive
 // consumption.
 func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
-	res, err := runHandle(ctx, t.inner.Cancel, func(ctx context.Context) (*ffi.MoqGroupConsumer, error) {
+	res, err := bridge.CallHandle(ctx, t.inner.Cancel, func(ctx context.Context) (*ffi.MoqGroupConsumer, error) {
 		res, err := t.inner.RecvGroup(ctx)
 		if err != nil || res == nil {
 			return nil, err
@@ -250,7 +251,7 @@ func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
 // more than latency. Shares the sequence cursor with ReadFrame: a group one
 // method has already taken is not returned by the other.
 func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
-	res, err := runHandle(ctx, t.inner.Cancel, func(ctx context.Context) (*ffi.MoqGroupConsumer, error) {
+	res, err := bridge.CallHandle(ctx, t.inner.Cancel, func(ctx context.Context) (*ffi.MoqGroupConsumer, error) {
 		res, err := t.inner.NextGroup(ctx)
 		if err != nil || res == nil {
 			return nil, err
@@ -269,13 +270,13 @@ func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
 // Cancelling the context cancels this consumer, not just this call: see
 // package docs.
 func (t *TrackConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
-	return runCancellable(ctx, t.inner.Cancel, t.inner.ReadFrame)
+	return bridge.Call(ctx, t.inner.Cancel, t.inner.ReadFrame)
 }
 
 // RecvDatagram returns the next best-effort datagram in arrival order, or
 // (nil, nil) when the track ends.
 func (t *TrackConsumer) RecvDatagram(ctx context.Context) (*Datagram, error) {
-	return runCancellable(ctx, t.inner.Cancel, t.inner.RecvDatagram)
+	return bridge.Call(ctx, t.inner.Cancel, t.inner.RecvDatagram)
 }
 
 // Info returns the publisher-side track properties learned during subscription.
@@ -290,18 +291,18 @@ func (t *TrackConsumer) Update(subscription Subscription) {
 
 // Groups ranges over groups in sequence order.
 func (t *TrackConsumer) Groups(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
-	return streamSeq(ctx, t.NextGroup)
+	return bridge.Seq(ctx, t.NextGroup)
 }
 
 // GroupsAsArrived ranges over groups in arrival order, including
 // out-of-sequence deliveries.
 func (t *TrackConsumer) GroupsAsArrived(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
-	return streamSeq(ctx, t.RecvGroup)
+	return bridge.Seq(ctx, t.RecvGroup)
 }
 
 // Datagrams ranges over best-effort datagrams in arrival order.
 func (t *TrackConsumer) Datagrams(ctx context.Context) iter.Seq2[*Datagram, error] {
-	return streamSeq(ctx, t.RecvDatagram)
+	return bridge.Seq(ctx, t.RecvDatagram)
 }
 
 // Cancel stops the stream.
@@ -316,12 +317,12 @@ type AudioConsumer struct {
 
 // Next returns the next audio frame, or (nil, nil) when the track ends.
 func (a *AudioConsumer) Next(ctx context.Context) (*AudioFrame, error) {
-	return runCancellable(ctx, a.inner.Cancel, a.inner.Next)
+	return bridge.Call(ctx, a.inner.Cancel, a.inner.Next)
 }
 
 // Frames ranges over audio frames until the track ends or the loop breaks.
 func (a *AudioConsumer) Frames(ctx context.Context) iter.Seq2[*AudioFrame, error] {
-	return streamSeq(ctx, a.Next)
+	return bridge.Seq(ctx, a.Next)
 }
 
 // Cancel stops the stream.
@@ -337,7 +338,7 @@ type VideoConsumer struct {
 // Next returns the next decoded frame, or (nil, nil) when the track ends.
 // Close each frame when done with it.
 func (v *VideoConsumer) Next(ctx context.Context) (*VideoDecodedFrame, error) {
-	res, err := runHandle(ctx, v.inner.Cancel, func(ctx context.Context) (*ffi.MoqVideoDecodedFrame, error) {
+	res, err := bridge.CallHandle(ctx, v.inner.Cancel, func(ctx context.Context) (*ffi.MoqVideoDecodedFrame, error) {
 		res, err := v.inner.Next(ctx)
 		if err != nil || res == nil {
 			return nil, err
@@ -352,7 +353,7 @@ func (v *VideoConsumer) Next(ctx context.Context) (*VideoDecodedFrame, error) {
 
 // Frames ranges over decoded frames until the track ends or the loop breaks.
 func (v *VideoConsumer) Frames(ctx context.Context) iter.Seq2[*VideoDecodedFrame, error] {
-	return streamSeq(ctx, v.Next)
+	return bridge.Seq(ctx, v.Next)
 }
 
 // Cancel stops the stream.
@@ -409,12 +410,12 @@ type CatalogConsumer struct {
 
 // Next returns the next catalog, or (nil, nil) when the track ends.
 func (c *CatalogConsumer) Next(ctx context.Context) (*Catalog, error) {
-	return runCancellable(ctx, c.inner.Cancel, c.inner.Next)
+	return bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
 }
 
 // Updates ranges over catalog updates until the track ends or the loop breaks.
 func (c *CatalogConsumer) Updates(ctx context.Context) iter.Seq2[*Catalog, error] {
-	return streamSeq(ctx, c.Next)
+	return bridge.Seq(ctx, c.Next)
 }
 
 // Cancel stops the stream.

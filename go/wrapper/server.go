@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	ffi "moq.dev/moq-ffi/moq"
+	"moq.dev/moq/internal/bridge"
 )
 
 // Transport is the network transport carrying an incoming session.
@@ -71,7 +72,7 @@ func (r *Request) SetConsume(o *OriginProducer) error {
 // Accept completes the handshake and returns the established session. Hold the
 // session to keep the connection alive.
 func (r *Request) Accept(ctx context.Context) (*Session, error) {
-	inner, err := runHandle(ctx, r.inner.Cancel, r.inner.Accept)
+	inner, err := bridge.CallHandle(ctx, r.inner.Cancel, r.inner.Accept)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +81,7 @@ func (r *Request) Accept(ctx context.Context) (*Session, error) {
 
 // Reject refuses the session with an application error code; 401 and 403 map to unauthorized.
 func (r *Request) Reject(ctx context.Context, code uint16) error {
-	return runErr(ctx, r.inner.Cancel, func(ctx context.Context) error {
+	return bridge.CallErr(ctx, r.inner.Cancel, func(ctx context.Context) error {
 		return r.inner.Reject(ctx, code)
 	})
 }
@@ -178,7 +179,7 @@ func Listen(ctx context.Context, bind string, opts ...ServerOption) (*Server, er
 	}
 	s.inner = inner
 
-	addr, err := runCancellable(ctx, inner.Cancel, inner.Listen)
+	addr, err := bridge.Call(ctx, inner.Cancel, inner.Listen)
 	if err != nil {
 		inner.Cancel()
 		return nil, err

@@ -15,10 +15,6 @@ from moq_ffi import (
     MoqContainerStreamProducer,
     MoqGroupProducer,
     MoqGroupRequest,
-    MoqJsonSnapshotConfig,
-    MoqJsonSnapshotProducer,
-    MoqJsonStreamConfig,
-    MoqJsonStreamProducer,
     MoqMediaProducer,
     MoqMediaStreamProducer,
     MoqTrackDemand,
@@ -428,53 +424,6 @@ class TrackDynamic:
         self._inner.cancel()
 
 
-class JsonSnapshotProducer:
-    """Publish a JSON value that consumers see as a single latest state (lossy).
-
-    Built via :meth:`BroadcastProducer.publish_json_snapshot`. Each :meth:`update` supersedes the
-    last; a late joiner only sees the newest value. Values are any JSON-serializable Python
-    object, encoded as snapshots and merge-patch deltas automatically.
-    """
-
-    def __init__(self, inner: MoqJsonSnapshotProducer) -> None:
-        self._inner = inner
-
-    def demand(self) -> TrackDemand:
-        """A watch-only handle to whether this track has subscribers."""
-        return TrackDemand(self._inner.demand())
-
-    def update(self, value: Any) -> None:
-        """Publish a new value. A no-op if unchanged from the previous update."""
-        self._inner.update(json.dumps(value))
-
-    def finish(self) -> None:
-        """Finish the track, closing any open group."""
-        self._inner.finish()
-
-
-class JsonStreamProducer:
-    """Publish an ordered log of JSON records (lossless).
-
-    Built via :meth:`BroadcastProducer.publish_json_stream`. Every :meth:`append` is
-    preserved and delivered in order. Records are any JSON-serializable Python object.
-    """
-
-    def __init__(self, inner: MoqJsonStreamProducer) -> None:
-        self._inner = inner
-
-    def demand(self) -> TrackDemand:
-        """A watch-only handle to whether this track has subscribers."""
-        return TrackDemand(self._inner.demand())
-
-    def append(self, value: Any) -> None:
-        """Append one record to the log."""
-        self._inner.append(json.dumps(value))
-
-    def finish(self) -> None:
-        """Finish the track, closing the group."""
-        self._inner.finish()
-
-
 class AudioProducer:
     """Publish raw PCM and let libopus encode it on the way out.
 
@@ -786,37 +735,6 @@ class BroadcastProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track
         properties (priority, cache, timescale); omit for defaults."""
         return TrackProducer(self._inner.publish_track(name, info))
-
-    def publish_json_snapshot(
-        self, name: str, *, delta_ratio: int | None = None, compression: bool = False
-    ) -> JsonSnapshotProducer:
-        """Publish a JSON snapshot track (lossy latest-value).
-
-        Each update supersedes the last; a late joiner only sees the newest value.
-        ``delta_ratio`` controls how aggressively deltas are emitted instead of full
-        snapshots (0 disables deltas); ``None`` uses the binding's default. Set
-        ``compression`` to DEFLATE-compress each group; the consumer must pass the same
-        flag. The track is advertised in the broadcast's catalog (``json.tracks.<name>``)
-        until it finishes; a name the catalog already carries is refused.
-        """
-        # Let the record supply delta_ratio's default rather than restating it here.
-        config = (
-            MoqJsonSnapshotConfig(compression=compression)
-            if delta_ratio is None
-            else MoqJsonSnapshotConfig(delta_ratio=delta_ratio, compression=compression)
-        )
-        return JsonSnapshotProducer(self._inner.publish_json_snapshot(name, config))
-
-    def publish_json_stream(self, name: str, *, compression: bool = False) -> JsonStreamProducer:
-        """Publish a JSON stream track (lossless append-log).
-
-        Every appended record is preserved and delivered in order. Set ``compression`` to
-        DEFLATE-compress the group; the consumer must pass the same flag. The track is
-        advertised in the broadcast's catalog (``json.tracks.<name>``) until it finishes; a
-        name the catalog already carries is refused.
-        """
-        config = MoqJsonStreamConfig(compression=compression)
-        return JsonStreamProducer(self._inner.publish_json_stream(name, config))
 
     def set_catalog_section(self, name: str, value: Any) -> None:
         """Set or replace an untyped application section in the catalog.

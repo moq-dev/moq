@@ -3,7 +3,6 @@ package moq_test
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -691,138 +690,6 @@ func TestTrackSparseGroupsAndKnownEnd(t *testing.T) {
 	}
 }
 
-func TestJSONTracks(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-
-	broadcast, err := moq.NewBroadcastProducer()
-	if err != nil {
-		t.Fatal(err)
-	}
-	consumer, err := broadcast.Consume()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	snapshot, err := broadcast.PublishJSONSnapshot("status", moq.JSONSnapshotOptions{Compression: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshotConsumer, err := consumer.SubscribeJSONSnapshot(ctx, "status", moq.JSONSubscribeOptions{Compression: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer snapshotConsumer.Cancel()
-	if err := snapshot.Update(map[string]any{"viewers": 42}); err != nil {
-		t.Fatal(err)
-	}
-	value, err := snapshotConsumer.Next(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(*value, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded["viewers"] != float64(42) {
-		t.Fatalf("snapshot = %s", *value)
-	}
-
-	stream, err := broadcast.PublishJSONStream("events", moq.JSONStreamOptions{Compression: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	streamConsumer, err := consumer.SubscribeJSONStream(ctx, "events", moq.JSONSubscribeOptions{Compression: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer streamConsumer.Cancel()
-	if err := stream.Append(map[string]any{"n": 1}); err != nil {
-		t.Fatal(err)
-	}
-	record, err := streamConsumer.Next(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(*record) != `{"n":1}` {
-		t.Fatalf("record = %s", *record)
-	}
-
-	if err := snapshot.Finish(); err != nil {
-		t.Fatal(err)
-	}
-	if err := stream.Finish(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestJSONDemand(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-
-	broadcast, err := moq.NewBroadcastProducer()
-	if err != nil {
-		t.Fatal(err)
-	}
-	consumer, err := broadcast.Consume()
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := broadcast.PublishJSONSnapshot("status", moq.JSONSnapshotOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	stream, err := broadcast.PublishJSONStream("events", moq.JSONStreamOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshotDemand, err := snapshot.Demand()
-	if err != nil {
-		t.Fatal(err)
-	}
-	streamDemand, err := stream.Demand()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if name := snapshotDemand.Name(); name != "status" {
-		t.Fatalf("Name = %q, want status", name)
-	}
-	if snapshotDemand.IsUsed() {
-		t.Fatal("IsUsed before any subscriber")
-	}
-
-	snapshotConsumer, err := consumer.SubscribeJSONSnapshot(ctx, "status", moq.JSONSubscribeOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	streamConsumer, err := consumer.SubscribeJSONStream(ctx, "events", moq.JSONSubscribeOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := snapshotDemand.Used(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := streamDemand.Used(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	snapshotConsumer.Cancel()
-	streamConsumer.Cancel()
-	if err := snapshotDemand.Unused(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := streamDemand.Unused(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := snapshot.Finish(); err != nil {
-		t.Fatal(err)
-	}
-	if err := snapshotDemand.Used(ctx); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("Used after Finish = %v, want ErrClosed", err)
-	}
-}
-
 func TestDynamicTrackRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -989,7 +856,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	}
 }
 
-// TestRecvGroupCancelRace exercises the core runCancellable path under -race:
+// TestRecvGroupCancelRace exercises the core bridge.Call path under -race:
 // the native RecvGroup runs on an internal goroutine while ctx expiry triggers a
 // concurrent Cancel on the same consumer. No group is ever written, so each read
 // blocks until its short ctx fires. The race detector flags any unsynchronized

@@ -6,6 +6,7 @@ import (
 	"iter"
 
 	ffi "moq.dev/moq-ffi/moq"
+	"moq.dev/moq/internal/bridge"
 )
 
 // AudioOption configures an audio publish.
@@ -275,7 +276,7 @@ type BroadcastDynamic struct {
 
 // RequestedTrack waits for the next subscriber-requested track.
 func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
-	inner, err := runHandle(ctx, d.inner.Cancel, d.inner.RequestedTrack)
+	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedTrack)
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +285,7 @@ func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, e
 
 // Requests ranges over subscriber-requested tracks until the dynamic source ends.
 func (d *BroadcastDynamic) Requests(ctx context.Context) iter.Seq2[*TrackRequest, error] {
-	return streamSeq(ctx, d.RequestedTrack)
+	return bridge.Seq(ctx, d.RequestedTrack)
 }
 
 // Cancel stops the dynamic request stream.
@@ -620,7 +621,7 @@ type TrackDynamic struct {
 
 // RequestedGroup waits for the next uncached group request.
 func (d *TrackDynamic) RequestedGroup(ctx context.Context) (*GroupRequest, error) {
-	inner, err := runHandle(ctx, d.inner.Cancel, d.inner.RequestedGroup)
+	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedGroup)
 	if err != nil {
 		return nil, err
 	}
@@ -629,7 +630,7 @@ func (d *TrackDynamic) RequestedGroup(ctx context.Context) (*GroupRequest, error
 
 // Requests ranges over uncached group requests until the dynamic source ends.
 func (d *TrackDynamic) Requests(ctx context.Context) iter.Seq2[*GroupRequest, error] {
-	return streamSeq(ctx, d.RequestedGroup)
+	return bridge.Seq(ctx, d.RequestedGroup)
 }
 
 // Cancel stops current and future requested-group waits.

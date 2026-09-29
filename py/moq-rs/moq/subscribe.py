@@ -2,19 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
-from typing import Any
 
 from moq_ffi import (
     MoqAudioConsumer,
     MoqBroadcastConsumer,
     MoqCatalogConsumer,
     MoqGroupConsumer,
-    MoqJsonSnapshotConfig,
-    MoqJsonSnapshotConsumer,
-    MoqJsonStreamConfig,
-    MoqJsonStreamConsumer,
     MoqMediaConsumer,
     MoqMediaGroupConsumer,
     MoqTrackConsumer,
@@ -300,67 +294,6 @@ class VideoConsumer:
         self._inner.cancel()
 
 
-class JsonSnapshotConsumer:
-    """Async iterator over a JSON snapshot track, yielding the latest value (lossy).
-
-    Built via :meth:`BroadcastConsumer.subscribe_json_snapshot`. Each item is a parsed Python object.
-    A consumer that has fallen behind collapses the backlog and yields only the latest value.
-    Usable as an async context manager that cancels on exit.
-    """
-
-    def __init__(self, inner: MoqJsonSnapshotConsumer) -> None:
-        self._inner = inner
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> Any:
-        value = await self._inner.next()
-        if value is None:
-            raise StopAsyncIteration
-        return json.loads(value)
-
-    def cancel(self) -> None:
-        """Cancel all current and future next() calls."""
-        self._inner.cancel()
-
-
-class JsonStreamConsumer:
-    """Async iterator over a JSON stream track, yielding every record in order (lossless).
-
-    Built via :meth:`BroadcastConsumer.subscribe_json_stream`. Each item is a parsed Python object.
-    Usable as an async context manager that cancels on exit.
-    """
-
-    def __init__(self, inner: MoqJsonStreamConsumer) -> None:
-        self._inner = inner
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> Any:
-        value = await self._inner.next()
-        if value is None:
-            raise StopAsyncIteration
-        return json.loads(value)
-
-    def cancel(self) -> None:
-        """Cancel all current and future next() calls."""
-        self._inner.cancel()
-
-
 class CatalogConsumer:
     """Async-iterable stream of :class:`Catalog` snapshots as the broadcast updates.
 
@@ -411,23 +344,6 @@ class BroadcastConsumer:
         ``subscription`` tunes delivery priority, group range, and staleness; omit for defaults.
         """
         return TrackConsumer(await self._inner.subscribe_track(name, subscription))
-
-    async def subscribe_json_snapshot(self, name: str, *, compression: bool = False) -> JsonSnapshotConsumer:
-        """Subscribe to a JSON snapshot track (lossy latest-value).
-
-        Yields parsed Python objects. Pass the same ``compression`` the producer used.
-        """
-        # delta_ratio is producer-only, so leave it at its default here.
-        config = MoqJsonSnapshotConfig(compression=compression)
-        return JsonSnapshotConsumer(await self._inner.subscribe_json_snapshot(name, config))
-
-    async def subscribe_json_stream(self, name: str, *, compression: bool = False) -> JsonStreamConsumer:
-        """Subscribe to a JSON stream track (lossless append-log).
-
-        Yields parsed Python objects in order. Pass the same ``compression`` the producer used.
-        """
-        config = MoqJsonStreamConfig(compression=compression)
-        return JsonStreamConsumer(await self._inner.subscribe_json_stream(name, config))
 
     async def fetch_group(
         self,

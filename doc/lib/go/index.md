@@ -124,8 +124,10 @@ QUIC-only relay, and `moq.WithWebSocketDelay` changes the head start.
 returns the closed `moq.Transport` enum.
 `Request.SetPublish`/`SetConsume` return an error if the request is already
 answered, cancelled, or currently accepting; `ErrBusy` is the race with an
-in-flight Accept. JSON tracks
-take anything `encoding/json` handles and return `json.RawMessage`. The rest
+in-flight Accept. JSON tracks live in `moq.dev/moq/json` (import it as `moqjson`):
+`moqjson.NewSnapshotProducer(broadcast, track, options)` takes over a `TrackProducer`
+and `moqjson.NewSnapshotConsumer(track, options)` a `TrackConsumer`, and they take
+anything `encoding/json` handles and return `json.RawMessage`. The rest
 of the [shared feature list](/lib/#what-every-binding-can-do) maps one to
 one: `FetchGroup`/`FetchMediaGroup`, `Dynamic()` with `Requests(ctx)`,
 `Session.Bandwidth()` to divide the send estimate,

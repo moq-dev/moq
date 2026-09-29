@@ -4,6 +4,7 @@ import (
 	"context"
 
 	ffi "moq.dev/moq-ffi/moq"
+	"moq.dev/moq/internal/bridge"
 )
 
 // Session is an established MoQ connection. Hold it (or the Client/Server that
@@ -18,7 +19,7 @@ type Session struct {
 // up waiting and shuts the session down, so a caller that no longer cares about
 // the connection can tear it down by cancelling.
 func (s *Session) Closed(ctx context.Context) error {
-	return runErr(ctx, s.inner.Shutdown, s.inner.Closed)
+	return bridge.CallErr(ctx, s.inner.Shutdown, s.inner.Closed)
 }
 
 // Status blocks until the connection status differs from the one this session
@@ -33,7 +34,7 @@ func (s *Session) Closed(ctx context.Context) error {
 // before the next call is coalesced away, so the outages it hides are the ones
 // that already healed. Don't count outages with it.
 func (s *Session) Status(ctx context.Context) (ConnectionStatus, error) {
-	return runCancellable(ctx, s.inner.Shutdown, s.inner.Status)
+	return bridge.Call(ctx, s.inner.Shutdown, s.inner.Status)
 }
 
 // Epoch is the connection epoch: 1 for the connect that built this session, one

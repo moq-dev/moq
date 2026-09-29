@@ -6,6 +6,7 @@ import (
 	"iter"
 
 	ffi "moq.dev/moq-ffi/moq"
+	"moq.dev/moq/internal/bridge"
 )
 
 // OriginProducer publishes broadcasts under paths and hands out consumers that
@@ -72,7 +73,7 @@ type OriginDynamic struct {
 // RequestedBroadcast blocks until a consumer requests a path with no existing
 // exact-path broadcast.
 func (d *OriginDynamic) RequestedBroadcast(ctx context.Context) (*BroadcastRequest, error) {
-	inner, err := runHandle(ctx, d.inner.Cancel, d.inner.RequestedBroadcast)
+	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedBroadcast)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +83,7 @@ func (d *OriginDynamic) RequestedBroadcast(ctx context.Context) (*BroadcastReque
 // Requests ranges over requested broadcasts until the stream errors or the loop
 // breaks.
 func (d *OriginDynamic) Requests(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
-	return streamSeq(ctx, d.RequestedBroadcast)
+	return bridge.Seq(ctx, d.RequestedBroadcast)
 }
 
 // Update re-prices the route in place: replaces its hops and costs.
@@ -177,7 +178,7 @@ type AnnounceConsumer struct {
 
 // Next returns the next announce event, or (nil, nil) when the stream ends.
 func (a *AnnounceConsumer) Next(ctx context.Context) (AnnounceEvent, error) {
-	res, err := runCancellable(ctx, a.inner.Cancel, a.inner.Next)
+	res, err := bridge.Call(ctx, a.inner.Cancel, a.inner.Next)
 	if err != nil || res == nil {
 		return nil, err
 	}
@@ -186,7 +187,7 @@ func (a *AnnounceConsumer) Next(ctx context.Context) (AnnounceEvent, error) {
 
 // All ranges over announce events until the stream ends or the loop breaks.
 func (a *AnnounceConsumer) All(ctx context.Context) iter.Seq2[AnnounceEvent, error] {
-	return streamSeq(ctx, a.Next)
+	return bridge.Seq(ctx, a.Next)
 }
 
 // Cancel stops the announcement stream.
@@ -201,7 +202,7 @@ type AnnouncedBroadcast struct {
 
 // Available blocks until the broadcast is available and returns its consumer.
 func (a *AnnouncedBroadcast) Available(ctx context.Context) (*BroadcastConsumer, error) {
-	inner, err := runHandle(ctx, a.inner.Cancel, a.inner.Available)
+	inner, err := bridge.CallHandle(ctx, a.inner.Cancel, a.inner.Available)
 	if err != nil {
 		return nil, err
 	}

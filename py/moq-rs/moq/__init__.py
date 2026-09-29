@@ -5,6 +5,8 @@ Real-time pub/sub with built-in caching, fan-out, and prioritization.
 
 from moq_ffi import MoqError as Error
 
+# A submodule, not in __all__: a star import would shadow the stdlib `json`.
+from . import json as json
 from .client import Client, connect
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
@@ -30,8 +32,6 @@ from .publish import (
     ContainerStreamProducer,
     GroupProducer,
     GroupRequest,
-    JsonSnapshotProducer,
-    JsonStreamProducer,
     MediaProducer,
     MediaStreamProducer,
     TrackDemand,
@@ -47,8 +47,6 @@ from .subscribe import (
     BroadcastConsumer,
     CatalogConsumer,
     GroupConsumer,
-    JsonSnapshotConsumer,
-    JsonStreamConsumer,
     MediaConsumer,
     MediaGroupConsumer,
     TrackConsumer,
@@ -141,10 +139,6 @@ __all__ = [
     "GroupConsumer",
     "GroupRequest",
     "GroupProducer",
-    "JsonSnapshotConsumer",
-    "JsonSnapshotProducer",
-    "JsonStreamConsumer",
-    "JsonStreamProducer",
     "MediaConsumer",
     "MediaGroupConsumer",
     "MediaProducer",

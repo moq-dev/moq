@@ -64,7 +64,7 @@ async def main():
         # Raw bytes and JSON
         events = broadcast.publish_track("events")
         events.write_frame(b'{"cmd": "ready"}', 0)
-        status = broadcast.publish_json_snapshot("status", compression=True)
+        status = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status"), compression=True)
         status.update({"state": "live", "viewers": 42})
 
         broadcast.announce()

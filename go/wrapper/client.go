@@ -7,6 +7,7 @@ import (
 	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
+	"moq.dev/moq/internal/bridge"
 )
 
 // ClientOption configures a client created with Dial.
@@ -270,7 +271,7 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	}
 	c.inner = inner
 
-	session, err := runHandle(ctx, inner.Cancel, func(ctx context.Context) (*ffi.MoqSession, error) {
+	session, err := bridge.CallHandle(ctx, inner.Cancel, func(ctx context.Context) (*ffi.MoqSession, error) {
 		return inner.Connect(ctx, url)
 	})
 	if err != nil {

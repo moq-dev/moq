@@ -103,11 +103,13 @@ mkdir -p "$PKG_STAGE"
 
 # --- 1. Copy in-tree source ---
 # The package sits at the module root, so the import path is the module path:
-# `import "moq.dev/moq"` binds `moq` with no alias.
+# `import "moq.dev/moq"` binds `moq` with no alias. Subpackages (`moq.dev/moq/json`,
+# `internal/`) keep their directories. `vendor/` is local `go mod vendor` output.
 cp "$SOURCE_DIR/go.mod" "$PKG_STAGE/"
 cp "$SOURCE_DIR/VERSION" "$PKG_STAGE/"
-for f in "$SOURCE_DIR"/*.go; do
-    cp "$f" "$PKG_STAGE/"
+(cd "$SOURCE_DIR" && find . -path ./vendor -prune -o -name '*.go' -print) | while IFS= read -r f; do
+    mkdir -p "$PKG_STAGE/$(dirname "$f")"
+    cp "$SOURCE_DIR/$f" "$PKG_STAGE/$f"
 done
 
 # Dual-license files lifted from the workspace root.

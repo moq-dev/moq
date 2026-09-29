@@ -85,13 +85,24 @@ before the stream reveals them.
 deriving a unique name from the format. A duplicate name fails, and the
 `OnTrack` variants refuse it because the request already names the track.
 
-JSON tracks are available in two modes. `PublishJSONSnapshot` / `SubscribeJSONSnapshot`
-carry lossy latest state, while `PublishJSONStream` / `SubscribeJSONStream` carry every
-record in order. Producers accept any `encoding/json` value; consumers return
+JSON tracks live in the `moq.dev/moq/json` subpackage, mirroring the `moq-json` crate.
+Import it under an alias next to `encoding/json`. Each type wraps a track:
+`NewSnapshotProducer` / `NewStreamProducer` take over a `TrackProducer` and advertise it
+in the broadcast's catalog, and `NewSnapshotConsumer` / `NewStreamConsumer` take over a
+`TrackConsumer` that has not read a group yet. Snapshots carry lossy latest state; streams
+carry every record in order. Producers accept any `encoding/json` value; consumers return
 `json.RawMessage` so callers choose their own decoded type.
 
-Publishing takes `JSONSnapshotOptions` or `JSONStreamOptions`; both subscribe calls take
-`JSONSubscribeOptions`, where only `Compression` has to match the producer.
+```go
+import moqjson "moq.dev/moq/json"
+
+track, err := broadcast.PublishTrack("status", nil)
+status, err := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{Compression: true})
+err = status.Update(map[string]any{"viewers": 42})
+```
+
+Producers take `SnapshotOptions` or `StreamOptions`; both consumers take
+`ConsumerOptions`, where only `Compression` has to match the producer.
 
 ## Errors
 

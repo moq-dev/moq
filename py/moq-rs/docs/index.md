@@ -64,8 +64,6 @@ asyncio.run(main())
    MediaStreamProducer
    AudioProducer
    VideoProducer
-   JsonSnapshotProducer
-   JsonStreamProducer
 ```
 
 ## Subscribing
@@ -83,8 +81,24 @@ asyncio.run(main())
    MediaConsumer
    AudioConsumer
    CatalogConsumer
-   JsonSnapshotConsumer
-   JsonStreamConsumer
+```
+
+## JSON tracks
+
+`moq.json` mirrors the `moq-json` crate: each type wraps a track from the
+broadcast, and producers advertise it in the catalog.
+
+```{eval-rst}
+.. currentmodule:: moq.json
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   SnapshotProducer
+   StreamProducer
+   SnapshotConsumer
+   StreamConsumer
 ```
 
 ## Origin and announcements
