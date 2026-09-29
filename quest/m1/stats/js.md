@@ -23,7 +23,7 @@ echo path of a catalog soliciting feedback. Both use the `@moq/hang` schemas.
   - An `echo` attribute names the viewer. Once a watched catalog carries an
     `echo` section, the element resolves the echo path against the broadcast,
     appends `<name>.echo`, and publishes there with the fixed feedback track, keyed by rendition alias, the same rule as
-    Rust, and closes it when it stops watching that catalog.
+    Rust, and reconciles it on each catalog update like Rust.
   - Watch elements on one connection watching the same catalog under one
     name share its producer, because a second `createBroadcast` at a path
     closes the first.
