@@ -1027,9 +1027,11 @@ async fn noq_client_close_keeps_predecessor_handover() {
 
 			// Close while the old session is still inside its handover window.
 			while connection.status().await.expect("connection stopped") != moq_tokio::Status::Migrating {}
+			let start = std::time::Instant::now();
 			let err = connection.close().await.expect_err("the predecessor cannot drain");
+			let elapsed = start.elapsed();
 			client.close().await;
-			err
+			(err, elapsed)
 		})
 	});
 
@@ -1070,7 +1072,7 @@ async fn noq_client_close_keeps_predecessor_handover() {
 		.send(moq_tokio::moq_net::goaway::Goaway::new())
 		.expect("send goaway");
 
-	let err = tokio::task::spawn_blocking(move || client.join())
+	let (err, elapsed) = tokio::task::spawn_blocking(move || client.join())
 		.await
 		.unwrap()
 		.expect("client thread panicked");
@@ -1078,6 +1080,12 @@ async fn noq_client_close_keeps_predecessor_handover() {
 	assert!(
 		!matches!(err, moq_tokio::Error::MoqNet(moq_tokio::moq_net::Error::Timeout)),
 		"the handover deadline cuts the close short: {err:?}"
+	);
+	// The window opened just before the status flipped, so most of it remains. Loose,
+	// since this is wall-clock time, but a deadline firing at once would land near zero.
+	assert!(
+		elapsed >= Duration::from_millis(250),
+		"the close waited out the handover window: {elapsed:?}"
 	);
 }
 
