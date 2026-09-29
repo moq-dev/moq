@@ -41,7 +41,6 @@ delivered and clean. The ordering race itself stays in the unit tests.
 ## Required
 
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver, which the lite-07 case checks
-- #4387 merges: a relayed subscription resolves its start from its source, so earlier in-flight groups are not lost (it adds quest/m1/relay-late-joiner-history.md)
 
 ## Related
 
