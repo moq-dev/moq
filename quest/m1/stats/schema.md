@@ -35,8 +35,10 @@ specs both. Nothing produces them yet.
 - `js/hang`: zod schemas mirroring both sections and all three snapshot
   types, field for field. Fixtures are shared through `js/test`.
 - `drafts/draft-lcurley-moq-hang.md` specs the two sections, the snapshot
-  schemas, the `.echo` convention, and the rule that a viewer refuses a
-  feedback name it already serves. Validate with `just drafts check`.
+  schemas, the `.echo` convention, and its serving rule: a viewer
+  accepts any requested track name, reports zeros until a watched catalog
+  claims it, refuses a second claim on a bound name, and caps unclaimed
+  names. Validate with `just drafts check`.
 - Docs: `doc/concept/hang.md`, and a media section in `doc/concept/stats.md`.
 - Tests:
   - fixtures round-trip in both languages;

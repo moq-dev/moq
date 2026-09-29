@@ -20,9 +20,10 @@ feedback to a broadcast soliciting it. Both use the `@moq/hang` schemas.
   - The decoder `Stats` signals grow late frames, stalls and stalled
     duration, underruns from the worklet's count, decode errors, and the
     newest arrival.
-  - An `echo` attribute names the `.echo` broadcast. When the watched catalog
-    has a `echo` section, the element serves the named track, keyed by
-    the publisher's track names.
+  - An `echo` attribute names the `.echo` broadcast, served through the
+    public request API with the same rule as Rust: accept any name with an
+    empty snapshot, fill it once a watched catalog's `echo` section claims
+    it, refuse a second claim, and cap unclaimed names.
 - The existing UI stats panels read the same signals.
 - The demo sets both attributes, so the media test can read a browser
   viewer's feedback through `moq export echo`.
@@ -31,3 +32,5 @@ feedback to a broadcast soliciting it. Both use the `@moq/hang` schemas.
 ## Required
 
 - [Schema](/quest/m1/stats/schema.md) - the zod schemas this fills
+- [JS track requests](/quest/m1/stats/js-requested.md) - the request API the
+  `.echo` broadcast serves through

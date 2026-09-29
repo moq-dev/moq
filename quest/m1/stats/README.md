@@ -46,6 +46,14 @@ Decided while planning. This supersedes the moq-stats extension design of
   viewers publish and which prefix a publisher watches is application policy,
   and the feedback track name, not a path, pairs the two. The name is generic
   so keyframe requests and bandwidth estimates can join later.
+- **An `.echo` broadcast serves tracks on request.** A publisher can see the
+  announcement and subscribe before the viewer has read its catalog, and a
+  refusal is final, so a static broadcast would lose that feedback. The
+  viewer accepts any requested name and writes an empty snapshot at once (all
+  zeros: nothing received from that publisher yet), then fills it when a
+  watched catalog claims the name. The first claim binds it; a second catalog
+  claiming a bound name is refused. A fixed cap on unclaimed names refuses the
+  overflow, so stray requests cannot grow a viewer's tracks without bound.
 - **Feedback track: one snapshot**, `{ transport, tracks: { <publisher track
   name>: echo::Track } }`. It is keyed by the publisher's track names, so
   the publisher looks up its own tracks directly.
@@ -60,9 +68,8 @@ Decided while planning. This supersedes the moq-stats extension design of
     [#2733](https://github.com/moq-dev/moq/issues/2733)-style counters land.
 - **Encoding**: cumulative counters about once a second through
   `moq_json::snapshot`, with the `.z` merge-patch sibling, produced whenever
-  stats are enabled. An unsubscribed track never leaves the process, so no
-  on-demand track API is needed, which JS lacks. Gauges are carried but
-  never summed.
+  stats are enabled. An unsubscribed stats track never leaves the process.
+  Gauges are carried but never summed.
 - **On main.** Every change is additive: optional sections on
   `#[non_exhaustive]` catalog types, and new types. The line left the
   [QoS](/quest/m1/qos/README.md) line, which stays on `dev` for the relay's
@@ -79,6 +86,8 @@ Decided while planning. This supersedes the moq-stats extension design of
   `echo` catalog sections, their snapshot types, and the draft text
 - [Rust reporters](/quest/m1/stats/rust.md) - the CLI, players, encoders, and
   moq-mux remuxes publish stats and feedback
+- [JS track requests](/quest/m1/stats/js-requested.md) - `@moq/net` serves a
+  broadcast's tracks on request, as Rust's `broadcast.dynamic()` does
 - [Browser reporters](/quest/m1/stats/js.md) - `<moq-publish>` publishes
   stats and `<moq-watch>` publishes feedback
 - [Encoder feedback](/quest/m1/stats/encoder-feedback.md) - a Rust encoder

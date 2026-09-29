@@ -26,15 +26,19 @@
   interval and writes it through `moq_json::snapshot`, with the `.z` sibling.
   A TS import flattens `ts::Stats` in as `mpegts`. `transport` comes from
   the connection's `ConnectionStats`.
-- Feedback: for each watched catalog with a `echo` section, the player
-  creates the named track in its `.echo` broadcast and writes
-  `hang::echo::Snapshot` to it. It refuses a name it already serves. A
+- Feedback: the `.echo` broadcast serves through `broadcast.dynamic()`. Each
+  `requested_track()` is accepted, capped for unclaimed names, and answered
+  with an empty `hang::echo::Snapshot`; a watched catalog whose `echo`
+  section names the track claims it, and the player fills it from then on. A
+  second catalog claiming a bound name is refused. A
   path that does not end in `.echo` is refused at parse time.
 - `moq export stats` and `moq export echo` are sinks that skip `.hang` media
   discovery, so they route around `catalog_format`.
 - `doc/bin/cli.md` documents the flags and sinks.
 - The media test publishes with `--stats` and plays with `--echo` against a
-  publisher that solicits feedback. It asserts that the publisher's frame
+  publisher that solicits feedback. A second arm starts the publisher's
+  subscription before the viewer reads the catalog, the race this serving
+  rule exists for. It asserts that the publisher's frame
   count matches what was sent and that the viewer's newest arrival advances.
 
 ## Required
