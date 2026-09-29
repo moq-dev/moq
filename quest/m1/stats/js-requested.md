@@ -16,10 +16,11 @@ subscribe before the viewer knows its track name.
   request by priority, with `accept` returning the track producer and
   `reject` refusing it, and keep the wire layer on the same path so there is
   one queue.
-- Match Rust's lifetime rule: dropping the last handle rejects its queued
-  requests (`Dynamic::drop` in `rs/moq-net/src/model/broadcast.rs`), and a
+- Match Rust's lifetime rule (`Dynamic::drop` in
+  `rs/moq-net/src/model/broadcast.rs`) with an idempotent `close()`, since JS
+  has no destructor: closing the last handle rejects its queued requests. A
   broadcast that never takes a handle treats unknown names exactly as today.
 - Additive on main: a new export on `@moq/net`. Document it in `doc/lib/js`.
 - Tests: an unknown-name subscription reaches the handle and is served after
-  `accept`; `reject` refuses it; a broadcast without the handle refuses as
-  before.
+  `accept`; `reject` refuses it; closing the last handle refuses queued and
+  later requests; a broadcast without the handle refuses as before.

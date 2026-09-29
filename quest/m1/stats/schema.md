@@ -37,8 +37,9 @@ specs both. Nothing produces them yet.
 - `drafts/draft-lcurley-moq-hang.md` specs the two sections, the snapshot
   schemas, the `.echo` convention, and its serving rule: a viewer
   accepts any requested track name, reports zeros until a watched catalog
-  claims it, refuses a second claim on a bound name, and caps unclaimed
-  names. Validate with `just drafts check`.
+  claims it, refuses a second claim on a bound name, caps unclaimed
+  names, and drops an unclaimed track once unsubscribed. Validate with
+  `just drafts check`.
 - Open, to settle before fixing the wire shape: a rendition may reference
   another broadcast, so one track name can name two renditions and a
   snapshot keyed by name collapses them. Candidates: key by the relative

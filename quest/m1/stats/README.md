@@ -53,7 +53,9 @@ Decided while planning. This supersedes the moq-stats extension design of
   zeros: nothing received from that publisher yet), then fills it when a
   watched catalog claims the name. The first claim binds it; a second catalog
   claiming a bound name is refused. A fixed cap on unclaimed names refuses the
-  overflow, so stray requests cannot grow a viewer's tracks without bound.
+  overflow, so stray requests cannot grow a viewer's tracks without bound, and
+  an unclaimed track is dropped once its last subscriber leaves, so stale
+  requests do not hold the cap.
 - **Feedback track: one snapshot**, `{ transport, tracks: { <publisher track
   name>: echo::Track } }`. It is keyed by the publisher's track names, so
   the publisher looks up its own tracks directly.

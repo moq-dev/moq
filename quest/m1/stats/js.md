@@ -23,7 +23,8 @@ feedback to a broadcast soliciting it. Both use the `@moq/hang` schemas.
   - An `echo` attribute names the `.echo` broadcast, served through the
     public request API with the same rule as Rust: accept any name with an
     empty snapshot, fill it once a watched catalog's `echo` section claims
-    it, refuse a second claim, and cap unclaimed names.
+    it, refuse a second claim, cap unclaimed names, and drop an unclaimed
+    track once unsubscribed.
   - Watch elements on one connection naming the same `echo` path share one
     producer and register their catalogs with it, because a second
     `createBroadcast` at a path closes the first.

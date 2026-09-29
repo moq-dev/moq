@@ -27,7 +27,8 @@
   A TS import flattens `ts::Stats` in as `mpegts`. `transport` comes from
   the connection's `ConnectionStats`.
 - Feedback: the `.echo` broadcast serves through `broadcast.dynamic()`. Each
-  `requested_track()` is accepted, capped for unclaimed names, and answered
+  `requested_track()` is accepted, capped for unclaimed names (an unclaimed
+  track is dropped once unsubscribed), and answered
   with an empty `hang::echo::Snapshot`; a watched catalog whose `echo`
   section names the track claims it, and the player fills it from then on. A
   second catalog claiming a bound name is refused. A
@@ -40,6 +41,8 @@
   subscription before the viewer reads the catalog, the race this serving
   rule exists for. It asserts that the publisher's frame
   count matches what was sent and that the viewer's newest arrival advances.
+- A unit test exceeds the unclaimed cap with sequential requests that each
+  disconnect, and a later request is still accepted.
 
 ## Required
 
