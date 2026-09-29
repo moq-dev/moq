@@ -23,7 +23,9 @@ name: Nightly
 # number it grades is a timing one that moves with whatever else the runner is
 # doing. A per-PR arm would fail on unrelated load often enough to be ignored;
 # nightly it competes with nothing, and a regression surfaces a day late against
-# a budget that still means something.
+# a budget that still means something. The recorded-trace replays are the
+# exception: deterministic and seconds long, so audio-quality.yml also gates
+# PRs on them.
 #
 # A failure here lands on main rather than being caught in review, which is the
 # accepted trade. Anything that must block a merge belongs in check.yml.

@@ -12,11 +12,13 @@ just test audio-quality --profiles mild --codecs opus --duration 20
 just test audio-quality --rings plain                          # the production path only
 just test audio-quality --out ~/runs/after                     # keep the run directory
 just test audio-quality --enforce                              # fail on the budgets
+just test audio-quality --replays                              # the replays only, in seconds
 ```
 
-The matrix is codec x profile x ring: 24 rows, about 30 minutes. `--profiles`, `--rings`, and
-`--codecs` take comma-separated lists; `--seed` replays a given impairment. The table prints either
-way, and only `--enforce` (which the nightly job passes) turns a breach into a failed run.
+The matrix is codec x profile x ring: 24 browser rows, about 30 minutes, plus 6 [replay
+rows](#traces) of recorded arrivals. `--profiles`, `--rings`, and `--codecs` take comma-separated
+lists; `--seed` replays a given impairment. The table prints either way, and only `--enforce` (which
+the nightly job passes) turns a breach into a failed run.
 
 ## Rows
 
@@ -67,6 +69,43 @@ The shaper carries UDP and nothing else. The page fetches `/certificate.sha256` 
 dials, so the driver answers that fetch with the relay's own hash (the certificate is pinned by
 hash, so a different port needs nothing more). With nothing listening on TCP there, the WebSocket
 fallback cannot connect: the session is WebTransport through the shaper, or the row is void.
+
+## Traces
+
+The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, each graded as a
+`replay` row whose profile is the file's name:
+
+| Trace | Recorded from |
+| --- | --- |
+| `relay-bbb` | the public relay's `bbb.hang`: one AAC frame per group, flushed in bursts of about seven, the flush-span shape #3477 measured |
+| `local-aac` | this harness's AAC publisher through a local relay: the shallow control |
+| `relay-mic` | `<moq-publish>` in headless Chromium, publishing its fake capture device through the public relay |
+
+A trace is a [`Trace`](clients/js/src/schema.ts): the catalog's audio rendition, the smallest
+PROBE round trip the session saw, and every frame's `[at, timestamp, group]`, with `at` on the
+viewer's clock. `record.ts` stamps a frame as it comes off its group's stream, the way
+`Container.Consumer` receives it, using only public `@moq/net` and `@moq/hang` in the same Chromium
+over WebTransport. It stamps before the consumer's in-order delivery, whose waits and skips depend
+on the delay, so the replay decides those again.
+
+`replay.ts` plays a trace through the player's own `Container.Consumer` and rings on a simulated
+clock ([`js/watch/src/audio/replay.ts`](../../js/watch/src/audio/replay.ts)), at the "auto" delay a
+real `Sync` resolves for the recorded catalog and round trip, and reads each quantum through the
+tap's classifier. The consumer makes the player's group ordering, max age skips, and discontinuity
+resets again at that delay; a group's stream is taken to finish with its last recorded frame. It
+writes the same samples a page does, so `analyze.ts` reduces both alike, and the shaper, transport,
+and clock checks have nothing to void. Decoding is taken as instant. A replay is deterministic, so
+its budgets are exactly what it measured.
+
+```bash
+just test audio-quality-record                        # all three, 35 s each, needs the network
+just test audio-quality-record --lanes relay-bbb
+```
+
+Recording is by hand: the public relay and a browser publisher are not something a nightly run
+should depend on. Re-measure the replay budgets after re-recording. The recorder asks the relay for
+ten seconds of backlog so a late group is kept, which makes a trace's tune-in heavier than a
+player's; the warmup excludes it from the grade.
 
 ## The metric contract
 
@@ -132,7 +171,8 @@ holds by construction.
 
 ## Void rules
 
-A row that cannot be trusted is void, reported rather than graded, and fails an enforced run.
+A row that cannot be trusted is void, reported rather than graded, and fails an enforced run. A
+replay row crosses no shaper, so the `shaper` void does not apply to it.
 
 | Void | Why |
 | --- | --- |
@@ -151,14 +191,19 @@ unmeasured, a void row, or a row with no budget. Tightening a ceiling is a visib
 one needs a reason in review. The file's `note` says how the current ceilings were measured.
 
 The nightly `Audio quality` job runs the matrix under `--enforce` and keeps a failing run directory
-for a week: each process's log, the shaper's counters, every row's raw samples and summary.
+for a week: each process's log, the shaper's counters, every row's raw samples and summary. The
+replays also run under `--enforce` on every PR that touches the player's packages (`js/watch`,
+`js/hang`, `js/net`, `js/signals`) or the harness (`.github/workflows/audio-quality.yml`), so a
+change that moves them updates `budgets.json` in the same PR.
 
 ## Layout
 
 ```text
 run.sh                 builds, starts the relay and publishers, runs each row behind the shaper
+record.sh              records traces/, by hand
 relay.toml             anonymous relay, self-signed cert
 budgets.json           a ceiling per metric per row
+traces/                recorded arrivals, one replay profile each
 clients/js/
   index.html src/page.ts   the watch element, driven from the query string
   src/probe.ts             samples its public signals every 250 ms
@@ -166,6 +211,9 @@ clients/js/
   src/schema.ts            the metric contract
   src/analyze.ts           samples to a summary, unit tested
   driver.ts                one row in headless Chromium, and its void checks
+  recorder.html mic.html   the recorder and the microphone publisher (src/recorder.ts, src/mic.ts)
+  record.ts                one trace in headless Chromium
+  replay.ts                the replay rows, written as a page's samples
   analyze.ts grade.ts      the summary per row, then the table and the verdict
 ```
 
@@ -181,5 +229,5 @@ the profiles now include the fork's batch, step, and order-preserving jitter tre
 ## Not covered
 
 Safari and Firefox, video, and perceptual scoring: the grade is glitches and latency, not an opinion
-about how it sounds. Recorded arrival traces are
-[their own quest](../../quest/m0/audio-quality-harness/traces.md).
+about how it sounds. The `relay-mic` trace captures Chromium's fake device rather than a real
+microphone, so it carries a browser publisher's encode and send cadence but not a sound card's.

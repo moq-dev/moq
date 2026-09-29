@@ -27,8 +27,10 @@ The browser lane and its opt-in shaper profiles have landed in `test/audio-quali
 upstreamed from the reporter's fork on #3477 (`fperex/moq`, branch
 `debug-findings-solution`), without the fork's player or estimator changes.
 The matrix includes bursty and mid-run step paths, and mild/wide jitter preserves
-packet order. Real arrival traces remain for the [jitter target's watch
-quest](/quest/m0/audio-jitter-target/watch.md) to replay.
+packet order. Real arrival traces have landed beside it in
+`test/audio-quality/traces/`, graded as replay rows through the player's
+container consumer and rings, and replayed by the [jitter target's watch
+quest](/quest/m0/audio-jitter-target/watch.md).
 
 Jitter comes from the seeded userspace UDP shaper the transport drills run
 under (`rs/moq-shaper`, documented in `test/drill/README.md`), not from a fake
@@ -42,7 +44,10 @@ audio quality number makes a failure hard to attribute.
 
 Nightly, not per-PR: the matrix is jitter profiles by runtime by codec and
 sample rate, which is more than a merge gate should carry, and `nightly.yml`
-already exists for exactly this trade. Budgets are keyed by the full row, since
+already exists for exactly this trade. The recorded-trace replays are the
+exception: they run in seconds without a browser, so
+`.github/workflows/audio-quality.yml` gates every PR touching the player's
+packages or the harness on them. Budgets are keyed by the full row, since
 each of those dimensions moves the expected floor.
 
 The budgets checked in with the browser lane (#4426) were recorded locally.
@@ -50,10 +55,6 @@ Once the line lands, re-record `test/audio-quality/budgets.json` from the
 nightly runner's first runs, since nightly only runs `main`'s code. Tightening
 the auto rows belongs to the [jitter target's watch
 quest](/quest/m0/audio-jitter-target/watch.md).
-
-## Required
-
-- [Traces](/quest/m0/audio-quality-harness/traces.md) - real arrival traces recorded, checked in, and graded as replay rows
 
 ## Related
 
