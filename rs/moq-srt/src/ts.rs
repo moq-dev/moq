@@ -30,6 +30,11 @@ pub struct Publisher {
 	// A clone of the importer's producer, so an end can close the broadcast
 	// (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
+	// The importer's per-stream counters, logged as `moq import ts` logs them, under a
+	// span naming the path, since one server carries many ingests.
+	log: ts::StatsLog,
+	sampled: tokio::time::Instant,
+	span: tracing::Span,
 }
 
 impl Publisher {
@@ -50,21 +55,34 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			broadcast: handle,
+			log: ts::StatsLog::default(),
+			sampled: tokio::time::Instant::now(),
+			span: tracing::info_span!("srt", %path),
 		})
 	}
 
 	/// Feed a chunk of MPEG-TS bytes (one SRT payload) into the importer.
 	///
 	/// `decode` drains `data` fully, buffering any partial trailing packet in
-	/// its own internal scratch, so there's nothing to retain here.
+	/// its own internal scratch, so there's nothing to retain here. Once every
+	/// [`ts::StatsLog::INTERVAL`] it also logs what moved in the importer's
+	/// per-stream counters.
 	pub fn feed(&mut self, data: Bytes) -> Result<()> {
-		Ok(self.importer.decode(&data).map_err(moq_mux::Error::from)?)
+		self.importer.decode(&data).map_err(moq_mux::Error::from)?;
+		if self.sampled.elapsed() >= ts::StatsLog::INTERVAL {
+			self.sampled = tokio::time::Instant::now();
+			let _span = self.span.enter();
+			self.log.sample(self.importer.stats());
+		}
+		Ok(())
 	}
 
 	/// Flush any buffered media, close out the broadcast's open groups, and end
 	/// the broadcast so the origin unannounces it immediately.
 	pub fn finish(&mut self) -> Result<()> {
 		self.importer.finish().map_err(moq_mux::Error::from)?;
+		// The drain at end of input can publish a frame nothing vouched for.
+		self.span.in_scope(|| self.log.finish(&self.importer.stats()));
 		self.broadcast.close();
 		Ok(())
 	}
@@ -162,6 +180,94 @@ mod tests {
 	/// moq-mux's export tests replay.
 	const BBB5S: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/scte35/bbb5s.ts");
 
+	/// The PCR a packet's adaptation field carries, in 27 MHz ticks.
+	fn pcr(pkt: &[u8]) -> Option<u64> {
+		if pkt[3] & 0x20 == 0 || pkt[4] < 7 || pkt[5] & 0x10 == 0 {
+			return None;
+		}
+		let base = (u64::from(pkt[6]) << 25)
+			| (u64::from(pkt[7]) << 17)
+			| (u64::from(pkt[8]) << 9)
+			| (u64::from(pkt[9]) << 1)
+			| (u64::from(pkt[10]) >> 7);
+		Some(base * 300 + ((u64::from(pkt[10] & 0x01) << 8) | u64::from(pkt[11])))
+	}
+
+	/// Each packet of `ts` with the program clock it arrives at, counted from the first PCR.
+	fn timed(ts: &[u8]) -> impl Iterator<Item = (Duration, &[u8; 188])> {
+		let mut first = None;
+		let mut now = Duration::ZERO;
+		ts.as_chunks::<188>().0.iter().map(move |pkt| {
+			if let Some(pcr) = pcr(pkt) {
+				let first = *first.get_or_insert(pcr);
+				now = Duration::from_nanos((pcr - first) * 1_000 / 27);
+			}
+			(now, pkt)
+		})
+	}
+
+	/// `ts` with the PES on `pid` suppressed from its first PES start at or after `from` to
+	/// its first at or after `to`, as an encoder whose one input died behind a running mux
+	/// emits it: the PCR kept in adaptation-only packets, everything else null stuffing, and
+	/// the counters after the gap renumbered so continuity stays legal. The stimulus the
+	/// moq-mux TS import tests check is legal.
+	fn suppress(ts: &[u8], pid: u16, from: Duration, to: Duration) -> Vec<u8> {
+		let mut null = [0xff; 188];
+		null[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+
+		let mut out = Vec::with_capacity(ts.len());
+		let (mut active, mut done) = (false, false);
+		let (mut last_cc, mut dropped) = (0, 0u8);
+		for (now, pkt) in timed(ts) {
+			let mut pkt = *pkt;
+			if (u16::from(pkt[1] & 0x1f) << 8) | u16::from(pkt[2]) == pid {
+				if pkt[1] & 0x40 != 0 {
+					if !active && !done && now >= from {
+						active = true;
+					} else if active && now >= to {
+						(active, done) = (false, true);
+					}
+				}
+				let payload = pkt[3] & 0x10 != 0;
+				if active {
+					dropped = (dropped + u8::from(payload)) & 0x0f;
+					pkt = match pcr(&pkt) {
+						Some(_) => {
+							let mut clock = [0xff; 188];
+							clock[..6].copy_from_slice(&[0x47, pkt[1] & 0x1f, pkt[2], 0x20 | last_cc, 183, 0x10]);
+							clock[6..12].copy_from_slice(&pkt[6..12]);
+							clock
+						}
+						None => null,
+					};
+				} else {
+					pkt[3] = (pkt[3] & 0xf0) | (pkt[3].wrapping_sub(dropped) & 0x0f);
+					if payload {
+						last_cc = pkt[3] & 0x0f;
+					}
+				}
+			}
+			out.extend_from_slice(&pkt);
+		}
+		assert!(done, "the fixture must resume the PID before it ends");
+		out
+	}
+
+	/// Publish `ts` on `path` one SRT payload (7 packets) at a time, each delivered when the
+	/// program clock says it is due.
+	async fn ingest(origin: &moq_net::origin::Producer, path: &str, ts: &[u8]) {
+		let mut publisher = Publisher::new(origin, path, Default::default()).unwrap();
+		let mut clock = Duration::ZERO;
+		for payload in timed(ts).collect::<Vec<_>>().chunks(7) {
+			let (due, _) = payload[0];
+			tokio::time::advance(due.saturating_sub(clock)).await;
+			clock = clock.max(due);
+			let bytes: Vec<u8> = payload.iter().flat_map(|(_, pkt)| pkt.iter().copied()).collect();
+			publisher.feed(bytes.into()).unwrap();
+		}
+		publisher.finish().unwrap();
+	}
+
 	/// One payload-only TS packet carrying a complete PSI section (PUSI + pointer_field
 	/// 0), padded to 188 with stuffing.
 	fn psi_packet(pid: u16, section: &[u8]) -> Vec<u8> {
@@ -227,6 +333,40 @@ mod tests {
 		let broadcast = consumer.request_broadcast("live/cam0").await.unwrap();
 		let info = broadcast.track("0.avc3").unwrap().query().await.unwrap();
 		assert_eq!(info.max_age, Duration::from_secs(3));
+	}
+
+	/// A video PID that goes silent behind a running mux is logged against its ingest path,
+	/// and neither the same feed intact nor the audio that kept delivering is.
+	#[tokio::test(start_paused = true)]
+	#[tracing_test::traced_test]
+	async fn publisher_reports_a_silent_pid() {
+		const VIDEO: u16 = 0x100;
+		let origin = produce_origin();
+		ingest(&origin, "intact", BBB5S).await;
+		let stimulus = suppress(BBB5S, VIDEO, Duration::from_millis(1500), Duration::from_millis(3500));
+		ingest(&origin, "silent", &stimulus).await;
+
+		logs_assert(|lines: &[&str]| {
+			let stopped: Vec<_> = lines
+				.iter()
+				.filter(|line| line.contains("stopped delivering access units"))
+				.collect();
+			let reported = |path: &str, pid: u16| {
+				stopped
+					.iter()
+					.any(|line| line.contains(&format!("path={path}")) && line.contains(&format!("pid={pid} ")))
+			};
+			if !reported("silent", VIDEO) {
+				return Err(format!("the silent video PID was not reported: {stopped:?}"));
+			}
+			if reported("intact", VIDEO) {
+				return Err(format!("the intact feed's video was reported: {stopped:?}"));
+			}
+			if reported("silent", 0x101) || reported("intact", 0x101) {
+				return Err(format!("the audio kept delivering: {stopped:?}"));
+			}
+			Ok(())
+		});
 	}
 
 	/// SRT is a contribution protocol, so SCTE-35 cues survive ingest and egress.
