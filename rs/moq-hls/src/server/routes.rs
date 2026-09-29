@@ -792,4 +792,113 @@ mod tests {
 		drop((catalog, catalog_broadcast));
 		pair.accept.abort();
 	}
+
+	/// A player trailing the live edge still gets the ended playlist and any segment already in
+	/// the cache once the publisher is gone, and a segment that never reached the cache 404s
+	/// rather than hanging on a publisher that will never answer.
+	#[tokio::test]
+	async fn a_lingering_broadcast_serves_its_cached_tail() {
+		let pair = lite_pair().await;
+		let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
+		broadcast.announce(Default::default()).expect("announce");
+		let (catalog, registration, track, mut media) = publish_video(&mut broadcast, video_config(), None);
+		write_three_gops(&mut media);
+
+		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
+		wait_listed(&app, "/live/video/video0/media.m3u8", "seg/1.m4s").await;
+		assert_eq!(status(&app, "/live/video/video0/seg/0.m4s").await, StatusCode::OK);
+
+		let remote = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().request_broadcast("live"))
+			.await
+			.expect("remote resolve timed out")
+			.expect("remote broadcast");
+		drop((catalog, registration, track, media, broadcast));
+		tokio::time::timeout(TIMEOUT, remote.closed())
+			.await
+			.expect("publisher close timed out");
+
+		let response = oneshot(app.clone(), "/live/video/video0/media.m3u8").await;
+		assert_eq!(response.status(), StatusCode::OK);
+		let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+		assert!(String::from_utf8_lossy(&body).contains("seg/0.m4s"));
+		assert_eq!(status(&app, "/live/video/video0/seg/0.m4s").await, StatusCode::OK);
+		let uncached = tokio::time::timeout(TIMEOUT, status(&app, "/live/video/video0/seg/1.m4s"))
+			.await
+			.expect("an uncached segment of an ended broadcast answers");
+		assert_eq!(uncached, StatusCode::NOT_FOUND);
+
+		pair.accept.abort();
+	}
+
+	/// Publish `live` with three GOPs on `origin`; dropping the returned handle ends it.
+	fn publish_live(origin: &moq_net::origin::Producer) -> Box<dyn std::any::Any> {
+		let mut broadcast = origin.create_broadcast("live").expect("publish");
+		broadcast.announce(Default::default()).expect("announce");
+		let (catalog, registration, track, mut media) = publish_video(&mut broadcast, video_config(), None);
+		write_three_gops(&mut media);
+		Box::new((catalog, registration, track, media, broadcast))
+	}
+
+	/// Serve `live` from a fresh publish, fetch its first segment, then end the broadcast and
+	/// wait until the server has seen it end.
+	async fn serve_then_end(linger: Duration) -> (moq_net::origin::Producer, Server, axum::Router) {
+		let origin = moq_tokio::origin::spawn();
+		let publisher = publish_live(&origin);
+		let config = crate::export::Config {
+			linger,
+			..Default::default()
+		};
+		let server = Server::new(origin.consume(), config);
+		let app = server.router();
+		wait_listed(&app, "/live/video/video0/media.m3u8", "seg/1.m4s").await;
+		assert_eq!(status(&app, "/live/video/video0/seg/0.m4s").await, StatusCode::OK);
+
+		let broadcaster = server.broadcaster("live").await.expect("live broadcaster");
+		drop(publisher);
+		tokio::time::timeout(TIMEOUT, broadcaster.closed())
+			.await
+			.expect("broadcast end timed out");
+		(origin, server, app)
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_ended_broadcast_lingers_then_404s() {
+		let linger = Duration::from_secs(30);
+		let (_origin, _server, app) = serve_then_end(linger).await;
+
+		tokio::time::sleep(linger - Duration::from_secs(1)).await;
+		assert_eq!(status(&app, "/live/video/video0/media.m3u8").await, StatusCode::OK);
+		assert_eq!(status(&app, "/live/video/video0/seg/0.m4s").await, StatusCode::OK);
+
+		tokio::time::sleep(Duration::from_secs(2)).await;
+		assert_eq!(status(&app, "/live/master.m3u8").await, StatusCode::NOT_FOUND);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_zero_linger_drops_an_ended_broadcast() {
+		let (_origin, server, _app) = serve_then_end(Duration::ZERO).await;
+		assert!(server.broadcaster("live").await.is_none());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_republish_takes_over_a_lingering_broadcast() {
+		let (origin, server, app) = serve_then_end(Duration::from_secs(30)).await;
+		let ended = server.broadcaster("live").await.expect("lingering broadcaster");
+		assert!(ended.is_closed());
+
+		let _publisher = publish_live(&origin);
+		let fresh = tokio::time::timeout(TIMEOUT, async {
+			loop {
+				let current = server.broadcaster("live").await.expect("a broadcaster");
+				if !current.is_closed() {
+					return current;
+				}
+				tokio::time::sleep(Duration::from_millis(50)).await;
+			}
+		})
+		.await
+		.expect("the republish never took over");
+		assert!(!Arc::ptr_eq(&ended, &fresh));
+		wait_listed(&app, "/live/video/video0/media.m3u8", "seg/1.m4s").await;
+	}
 }

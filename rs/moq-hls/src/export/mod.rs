@@ -62,12 +62,22 @@ pub struct Config {
 	/// records are evicted once the remaining segments still cover this span; keep it within
 	/// the relay's group-cache retention, since segments are fetched from there on request.
 	pub window: Duration,
+	/// How long the HTTP `Server` keeps serving a broadcast after it ends, so a player
+	/// trailing the live edge can finish its last segments. A republish of the same name takes
+	/// over at once, and zero drops the broadcast as soon as it ends. After the end, only segments
+	/// already in the group cache can be served, so keep it within that retention, as for `window`.
+	/// The default covers the default `window` plus a 30 s grace; raise it along with `window`.
+	pub linger: Duration,
 }
 
 impl Default for Config {
 	fn default() -> Self {
+		let window = Duration::from_secs(16);
 		Self {
-			window: Duration::from_secs(16),
+			window,
+			// The window a trailing player may still be working through, plus a grace for its
+			// playlist poll interval.
+			linger: window + Duration::from_secs(30),
 		}
 	}
 }

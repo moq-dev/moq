@@ -23,6 +23,9 @@ across every rendition, to build playlists, then fetches exactly the groups a
 requested segment covers from the relay's cache and transmuxes them to CMAF on
 demand. So a segment is servable for as long as the relay's
 [cache](/bin/relay/config#cache) retains it, and idle renditions cost nothing.
+An ended broadcast stays servable for 46 s (the default window plus 30 s), so a
+player trailing the live edge can finish the segments already cached; a
+republish of the same name takes over at once.
 Because segments are aligned, the same number names the same span of content in
 every media playlist; a record with nothing for a rendition renders as
 `EXT-X-GAP` and a jump in content time as `EXT-X-DISCONTINUITY`. A broadcast

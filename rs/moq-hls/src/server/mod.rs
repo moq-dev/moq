@@ -67,6 +67,11 @@ use crate::export::{Broadcaster, Config};
 /// How long to wait for a requested broadcast to be announced by the relay.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a request for an ended, lingering broadcast waits for a republish before serving
+/// the ended one. An announced broadcast resolves off the replayed announce set, so this covers
+/// a replay rather than a real wait; it stays short because every such request pays it.
+const REPUBLISH_PROBE: Duration = Duration::from_millis(250);
+
 /// HLS export HTTP server. Cheap to clone (shared inner).
 #[derive(Clone)]
 pub struct Server {
@@ -100,37 +105,53 @@ impl Server {
 	/// Get or create the [`Broadcaster`] for `name`, resolving the broadcast from
 	/// the relay (waiting briefly for its announcement). Returns `None` if the
 	/// broadcast never shows up.
+	///
+	/// An ended broadcast is still returned for [`Config::linger`], unless the name
+	/// has been republished, which takes over.
 	pub async fn broadcaster(&self, name: &str) -> Option<Arc<Broadcaster>> {
-		{
-			let mut broadcasters = self.inner.broadcasters.lock().unwrap();
-			if let Some(existing) = broadcasters.get(name) {
-				if !existing.is_closed() {
-					return Some(existing.clone());
-				}
-				broadcasters.remove(name);
+		// A live broadcaster is served as is. An ended one is still in the map only while it
+		// lingers (the eviction task removes it after), but a republish must win over it, or
+		// the previous run's ended playlist would be served in its place.
+		let lingering = {
+			let broadcasters = self.inner.broadcasters.lock().unwrap();
+			match broadcasters.get(name) {
+				Some(existing) if !existing.is_closed() => return Some(existing.clone()),
+				Some(existing) if !self.inner.config.linger.is_zero() => Some(existing.clone()),
+				_ => None,
 			}
-		}
+		};
 
 		// Confirm a route covers the broadcast (and it is in scope) before building a
 		// broadcaster; `Broadcaster::new` re-resolves it through the origin, which also
 		// lets a rendition's catalog `broadcast` field reference a sibling broadcast.
-		tokio::time::timeout(RESOLVE_TIMEOUT, self.inner.origin.routed(name))
-			.await
-			.ok()
-			.flatten()?;
+		let resolve = match lingering {
+			Some(_) => REPUBLISH_PROBE,
+			None => RESOLVE_TIMEOUT,
+		};
+		let Ok(Some(_)) = tokio::time::timeout(resolve, self.inner.origin.routed(name)).await else {
+			return lingering;
+		};
 
 		let source = moq_mux::Source::new(self.inner.origin.consume(), name);
-		let broadcaster = Broadcaster::new(source, self.inner.config.clone())
-			.await
-			.map_err(|err| tracing::warn!(%err, %name, "failed to resolve broadcast catalog"))
-			.ok()?;
+		let broadcaster = match Broadcaster::new(source, self.inner.config.clone()).await {
+			Ok(broadcaster) => broadcaster,
+			Err(err) => {
+				tracing::warn!(%err, %name, "failed to resolve broadcast catalog");
+				return lingering;
+			}
+		};
+		// The route can outlast its broadcast for a moment, resolving the ended one again.
+		if broadcaster.is_closed()
+			&& let Some(lingering) = lingering
+		{
+			return Some(lingering);
+		}
 
 		let mut broadcasters = self.inner.broadcasters.lock().unwrap();
-		if let Some(existing) = broadcasters.get(name) {
-			if !existing.is_closed() {
-				return Some(existing.clone());
-			}
-			broadcasters.remove(name);
+		if let Some(existing) = broadcasters.get(name)
+			&& !existing.is_closed()
+		{
+			return Some(existing.clone());
 		}
 
 		let name = name.to_string();
@@ -140,13 +161,19 @@ impl Server {
 	}
 }
 
+/// Drop `broadcaster` once its broadcast has ended and lingered, unless a republish already
+/// replaced it.
 async fn evict_closed(inner: Arc<Inner>, name: String, broadcaster: Arc<Broadcaster>) {
 	broadcaster.closed().await;
+	// Weak while it lingers, so a republish that replaces it frees it right away.
+	let lingering = Arc::downgrade(&broadcaster);
+	drop(broadcaster);
+	tokio::time::sleep(inner.config.linger).await;
 
 	let mut broadcasters = inner.broadcasters.lock().unwrap();
 	if broadcasters
 		.get(&name)
-		.is_some_and(|current| Arc::ptr_eq(current, &broadcaster))
+		.is_some_and(|current| std::ptr::eq(Arc::as_ptr(current), lingering.as_ptr()))
 	{
 		broadcasters.remove(&name);
 	}
@@ -288,7 +315,7 @@ mod tests {
 		assert!(server.inner.broadcasters.lock().unwrap().contains_key("live"));
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn eviction_keeps_newer_cached_instance() {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());

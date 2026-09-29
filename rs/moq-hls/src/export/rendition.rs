@@ -106,7 +106,7 @@ struct Media {
 }
 
 struct Handle {
-	binding: Arc<moq_mux::Binding>,
+	binding: Arc<Bound>,
 	/// Skip incoming timeline rows until the current bind resolves (set when a sibling is rebound).
 	waiting: bool,
 }
@@ -115,7 +115,7 @@ impl Media {
 	fn bind(upstream: &Upstream, rel: Option<&moq_net::path::RelativeOwned>) -> moq_mux::Result<Self> {
 		Ok(Self {
 			handle: Mutex::new(Handle {
-				binding: Arc::new(upstream.bind(rel)?),
+				binding: Arc::new(Bound::new(upstream.bind(rel)?)),
 				waiting: false,
 			}),
 			sibling: sibling(upstream, rel),
@@ -132,19 +132,19 @@ impl Media {
 	/// Drop listed rows and rebind when a sibling publisher has been replaced; return the
 	/// binding those rows belong to. Fetch from this handle, not a later `sync`: a replacement
 	/// that lands between a range lookup and `track` would otherwise serve the old groups.
-	fn sync(&self, window: &segments::Producer) -> Arc<moq_mux::Binding> {
+	fn sync(&self, window: &segments::Producer) -> Arc<Bound> {
 		let Some((source, rel)) = &self.sibling else {
 			return self.handle.lock().expect("media lock poisoned").binding.clone();
 		};
 		let mut handle = self.handle.lock().expect("media lock poisoned");
-		match handle.binding.poll_broadcast(&kio::Waiter::noop()) {
+		match handle.binding.binding.poll_broadcast(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(broadcast)) if broadcast.is_closed() => {
 				// The bound sibling ended, and a broadcast end carries no cause, so a rival
 				// publisher looks the same as a clean VOD end. Rows listed for it must not
 				// be served from the replacement.
 				window.clear();
 				if let Ok(next) = source.bind(Some(rel)) {
-					handle.binding = Arc::new(next);
+					handle.binding = Arc::new(Bound::new(next));
 				}
 				handle.waiting = true;
 			}
@@ -155,12 +155,29 @@ impl Media {
 				// set waiting: an initial Unroutable (announce still in flight) must
 				// still list the catalog's rows.
 				if let Ok(next) = source.bind(Some(rel)) {
-					handle.binding = Arc::new(next);
+					handle.binding = Arc::new(Bound::new(next));
 				}
 			}
 			Poll::Pending => {}
 		}
 		handle.binding.clone()
+	}
+}
+
+/// A bound broadcast, plus the media track last resolved on it.
+struct Bound {
+	binding: moq_mux::Binding,
+	/// An ended broadcast refuses new track lookups, but a handle already out still reads the
+	/// groups left in its cache, so a lingering export keeps serving them from this one.
+	track: Mutex<Option<moq_net::track::Consumer>>,
+}
+
+impl Bound {
+	fn new(binding: moq_mux::Binding) -> Self {
+		Self {
+			binding,
+			track: Mutex::new(None),
+		}
 	}
 }
 
@@ -634,12 +651,14 @@ impl Rendition {
 	/// never looks the path up ad hoc: a same-path republish installs a new broadcast whose
 	/// group numbering restarts, and those bytes must not be served under rows produced for
 	/// the publisher it replaced.
-	async fn track(
-		&self,
-		binding: &moq_mux::Binding,
-	) -> Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)> {
-		let broadcast = binding.broadcast().await.ok()?;
-		let track = broadcast.track(&self.name).ok()?;
+	async fn track(&self, bound: &Bound) -> Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)> {
+		let broadcast = bound.binding.broadcast().await.ok()?;
+		let mut last = bound.track.lock().expect("track lock poisoned");
+		let track = match broadcast.track(&self.name) {
+			Ok(track) => last.insert(track).clone(),
+			// Ended: fall back to the handle resolved while it was live, if any.
+			Err(_) => last.clone()?,
+		};
 		Some((broadcast, track))
 	}
 
