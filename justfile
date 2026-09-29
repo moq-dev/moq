@@ -72,10 +72,6 @@ check $BASE="":
 ci $JOB $BASE="":
     sh/dispatch.sh "ci-$JOB" "$BASE"
 
-# Print `build=true` when CI job JOB has more than lints in scope, so it sets up the build.
-ci-scope $JOB $BASE="":
-    sh/dispatch.sh "scope-$JOB" "$BASE"
-
 # Auto-fix lint and formatting for what the branch changed since BASE.
 fix $BASE="":
     sh/dispatch.sh fix "$BASE"
