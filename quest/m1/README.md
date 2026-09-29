@@ -27,6 +27,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
 - [Error messages](/quest/m1/error-display.md) - Python, Go, and Dart print `MoqError` with Rust's message, as Kotlin and Swift do
 - [Session close](/quest/m1/session-close.md) - a graceful session end withdraws announces and waits one second for the ack
+- [Graceful close in bindings](/quest/m1/bindings-graceful-close.md) - moq-ffi and every wrapper drain a session on close like Rust, so OBS and the wrappers keep the tail of a publish
 - [Drain before close](/quest/m1/drain-before-close.md) - a closing client delivers its queued stream finishes, so `moq import` ends the catalog cleanly over a real relay
 - [Close codes](/quest/m1/close-codes.md) - a client sees the peer's application close code over WebSocket and raw QUIC, like WebTransport
 - [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
@@ -186,3 +187,4 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Ship capture and playback](/quest/m1/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
 - [io_uring flow control](/quest/m1/uring-flow-control-windows.md) - the relay's io_uring workers honor the QUIC flow-control windows instead of refusing them
 - [Remove effect.cancel](/quest/m1/effect-cancel.md) - `@moq/signals` drops the deprecated `Effect.cancel` on dev
+- [Fetch deadlines](/quest/m1/fetch-deadlines.md) - `moq fetch`'s timeout covers the read, not the setup before it
