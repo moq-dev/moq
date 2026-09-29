@@ -240,7 +240,7 @@ test("rejects the removed source prop instead of publishing nothing", async () =
 
 // Models a browser that gates audio on a gesture: a context built without user activation starts
 // suspended, renders nothing, and `resume()` never settles until the page has been interacted with.
-function installGatedWebAudio() {
+function installGatedWebAudio(addModule: () => Promise<void> = () => Promise.resolve()) {
 	const page = new EventTarget();
 	let activated = false;
 	const contexts: GatedContext[] = [];
@@ -250,7 +250,7 @@ function installGatedWebAudio() {
 	class GatedContext extends EventTarget {
 		state: string = "suspended";
 		sampleRate: number;
-		audioWorklet = { addModule: () => Promise.resolve() };
+		audioWorklet = { addModule };
 		constructor(options?: AudioContextOptions) {
 			super();
 			this.sampleRate = options?.sampleRate ?? 48_000;
@@ -409,4 +409,23 @@ test("drops the format while the context is interrupted", async () => {
 
 	capture.close();
 	await settle();
+});
+
+// Regression: a worklet that failed to load left `blocked` clear on an activated page, so the encoder
+// held the catalog for audio that could never arrive, and every other rendition with it.
+test("blocks when the worklet fails to load", async () => {
+	using webaudio = installGatedWebAudio(() => Promise.reject(new Error("addModule failed")));
+	const error = spyOn(console, "error").mockImplementation(() => {});
+
+	webaudio.gesture();
+	const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never });
+	await settle();
+
+	expect(webaudio.contexts[0].state).toBe("running");
+	expect(capture.out.blocked.peek()).toBe(true);
+	expect(capture.out.format.peek()).toBeUndefined();
+
+	capture.close();
+	await settle();
+	error.mockRestore();
 });

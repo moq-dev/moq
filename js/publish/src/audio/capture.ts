@@ -60,8 +60,8 @@ type CaptureOutput = {
 	// The format the frames arrive in, or undefined while there's no capture.
 	format: Signal<Format | undefined>;
 
-	// Whether a track can't capture yet, so no format is on its way: disabled, or suspended until the
-	// page's first click or keypress.
+	// Whether a track can't capture, so no format is on its way: disabled, suspended until the page's
+	// first click or keypress, or its worklet failed to load.
 	blocked: Signal<boolean>;
 
 	// The head of the Web Audio graph, when there is one, so callers can tap the raw capture.
@@ -158,19 +158,13 @@ export class Capture {
 		// load. A context built then starts suspended and renders nothing until one arrives.
 		const running = Util.Gesture.unlock(effect, context);
 
-		// A context starts suspended even after a gesture, until it resumes a moment later; only one
-		// still waiting on the page's first gesture may wait indefinitely.
-		effect.run((inner) => {
-			const blocked = !inner.get(running) && !navigator.userActivation?.hasBeenActive;
-			inner.set(this.#out.blocked, blocked, false);
-		});
-
 		const root = new MediaStreamAudioSourceNode(context, {
 			mediaStream: new MediaStream([source.track]),
 		});
 		effect.cleanup(() => root.disconnect());
 
 		const loaded = new Signal(false);
+		const failed = new Signal(false);
 
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
@@ -178,8 +172,21 @@ export class Capture {
 			// module registration was abandoned, so building against its name would throw. Gate on the race
 			// result, not `context.state`, because `AudioContext.close()` only flips `.state` to "closed"
 			// synchronously on Chrome (Firefox/Safari report "suspended").
-			const ok = await effect.race(context.audioWorklet.addModule(CaptureWorklet).then(() => true));
-			if (ok) loaded.set(true);
+			try {
+				const ok = await effect.race(context.audioWorklet.addModule(CaptureWorklet).then(() => true));
+				if (ok) loaded.set(true);
+			} catch (err) {
+				failed.set(true);
+				throw err;
+			}
+		});
+
+		// A context starts suspended even after a gesture, until it resumes a moment later; only one
+		// still waiting on the page's first gesture may wait indefinitely. A worklet that failed to load
+		// never captures at all.
+		effect.run((inner) => {
+			const gesture = !inner.get(running) && !navigator.userActivation?.hasBeenActive;
+			inner.set(this.#out.blocked, inner.get(failed) || gesture, false);
 		});
 
 		// Only capture while the graph runs. The worklet stamps frames from when it is built, so one built
