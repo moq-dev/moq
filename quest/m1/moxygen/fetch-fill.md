@@ -40,11 +40,12 @@ merged unanswered, and the maintainer ruled that each blocks the line:
   publisher priority): on the first object each must be explicit.
 - **The upstream FETCH ignores the requested frame offset**
   ([r4113942733](https://github.com/moq-dev/moq/pull/4276#discussion_r4113942733)).
-  `group::Request::frame_start()` carries the downstream reader's start, and
-  `accept` already inserts the group at that offset, but the upstream FETCH
-  always asks from object 0 and the decoder numbers from 0. An upstream that
-  evicted the prefix but holds the suffix refuses a request it could have
-  answered. Ask from `frame_start` and number the fill from it, so the
+  `group::Request::frame_start()` carries the downstream reader's start, but
+  the upstream FETCH always asks from object 0, the decoder numbers from 0,
+  and the handler never calls `start_at` on the producer `accept` returns,
+  though `frame_start`'s docs require it. An upstream that evicted the
+  prefix but holds the suffix refuses a request it could have answered. Ask
+  from `frame_start`, `start_at` it, and number the fill from it, so the
   request, the decoder, and the producer agree on where the group starts.
 
 Each fix gets a regression test in the existing subscriber test module that
