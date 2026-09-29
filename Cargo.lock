@@ -4305,6 +4305,7 @@ dependencies = [
  "moq-tokio",
  "moq-transcode",
  "moq-video",
+ "mpeg2ts",
  "pollster",
  "reqwest",
  "rustls",

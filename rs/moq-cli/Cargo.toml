@@ -128,6 +128,8 @@ sd-notify = { workspace = true }
 # the wrong catalog track apart from one reading the right one: `moq-mux`'s producer
 # publishes hang and MSF from the same source, so both answer for an ordinary broadcast.
 moq-msf = { path = "../moq-msf" }
+# Writes the PAT and PMTs, CRCs included, of the two-program input `import ts --program all` splits.
+mpeg2ts = "0.6.0"
 # `test_relay` stands up a real relay for the `fetch` tests to read through.
 moq-relay = { path = "../moq-relay", default-features = false, features = ["test-support"] }
 tempfile = { workspace = true }
