@@ -3,7 +3,16 @@ import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { type Computed, Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import {
+	type Computed,
+	Effect,
+	type Getter,
+	getter,
+	type Inputs,
+	type Readonlys,
+	readonlys,
+	Signal,
+} from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { type Baseline, Estimator } from "../jitter";
 import type { AudioFrame, Capture, Format } from "./capture";
