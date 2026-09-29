@@ -197,8 +197,7 @@ impl Workers {
 		while let Some(member) = group.member().context("failed to clone a reuseport member")? {
 			members.push(member);
 		}
-		// Whatever the first member bound, which is the requested address unless
-		// it asked for an ephemeral port.
+		// The requested address, with an ephemeral port resolved.
 		let addr = group.addr();
 
 		// The moq-lite ALPNs this listener speaks: the operator's version
