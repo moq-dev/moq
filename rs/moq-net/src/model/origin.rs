@@ -1139,6 +1139,8 @@ pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<PathOwned> {
 pub(crate) struct Hidden {
 	/// Report hidden routes too.
 	include: bool,
+	/// Measure visibility from the request prefix instead of authorization heads.
+	from: Option<PathOwned>,
 	/// Report only what a feed scoped to these heads hides, for a stream that tops
 	/// up a feed already carrying everything visible from them.
 	beyond: Option<Vec<PathOwned>>,
@@ -1147,7 +1149,8 @@ pub(crate) struct Hidden {
 impl Hidden {
 	/// Whether a cursor hanging at `heads` reports a route at `prefix`.
 	fn discovers(&self, heads: &[PathOwned], prefix: &Path) -> bool {
-		(self.include || !hides(heads, prefix)) && self.beyond.as_ref().is_none_or(|outer| hides(outer, prefix))
+		(self.include || !hides(self.from.as_ref().map(std::slice::from_ref).unwrap_or(heads), prefix))
+			&& self.beyond.as_ref().is_none_or(|outer| hides(outer, prefix))
 	}
 
 	/// This rule for a cursor reading through `mount`, whose heads sit on the
@@ -1159,6 +1162,7 @@ impl Hidden {
 		});
 		Self {
 			include: self.include,
+			from: self.from.as_ref().and_then(|head| mount.translate_head(head)),
 			beyond,
 		}
 	}
@@ -3764,7 +3768,21 @@ impl Consumer {
 	/// A clone whose [`announced`](Self::announced) reports only the routes a feed
 	/// from `outer` hides, for a stream topping up that feed.
 	pub(crate) fn beyond(mut self, outer: &Consumer) -> Self {
-		self.hidden.beyond = Some(interest_prefixes(&outer.scope.allowed));
+		self.hidden.beyond = Some(
+			outer
+				.hidden
+				.from
+				.clone()
+				.map(|head| vec![head])
+				.unwrap_or_else(|| interest_prefixes(&outer.scope.allowed)),
+		);
+		self
+	}
+
+	/// Set wire discovery visibility relative to this consumer's requested root.
+	pub(crate) fn discovery(mut self, hidden: bool) -> Self {
+		self.hidden.include = hidden;
+		self.hidden.from = Some(self.root.clone());
 		self
 	}
 
@@ -3861,7 +3879,12 @@ impl Consumer {
 			let allowed = mount.translate(&self.scope.allowed);
 			// Hidden at the mount point means hidden throughout: the dot segment is above
 			// everything the mount holds. A top-up feed's rule moves onto the target.
-			if allowed.is_empty() || !(self.hidden.include || !hides(&heads, &mount.at)) {
+			if allowed.is_empty()
+				|| !(self.hidden.include
+					|| !hides(
+						self.hidden.from.as_ref().map(std::slice::from_ref).unwrap_or(&heads),
+						&mount.at,
+					)) {
 				continue;
 			}
 			cursors.push(cursor(

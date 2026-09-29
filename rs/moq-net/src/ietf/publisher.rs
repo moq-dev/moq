@@ -1731,7 +1731,9 @@ where
 
 		// Split horizon, as the solicited loop applies it: never advertise a route back
 		// to the peer it came from.
-		let origin = self.excluding(&peer);
+		let origin = self
+			.excluding(&peer)
+			.discovery(!self.peer_setup.get().await.hidden || self.origin.includes_hidden());
 
 		let ns = Namespaces::new(peer, Target::Requests(None));
 		self.run_namespaces(origin, crate::Path::empty().to_owned(), ns).await
@@ -1809,12 +1811,10 @@ where
 			_ => Target::Inline(stream),
 		};
 
-		// Hidden namespaces are left out unless the peer opted in (MoQ Hidden). A publish
+		// Peers that declared MoQ Hidden filter namespaces unless they opted in. A publish
 		// origin that already opted in (the caller's choice for this peer) keeps them.
-		let origin = match msg.hidden {
-			true => origin.with_hidden(true),
-			false => origin,
-		};
+		let declared = self.peer_setup.get().await.hidden;
+		let origin = origin.discovery(!declared || msg.hidden || self.origin.includes_hidden());
 
 		// Unless the peer asked to be told only on request, it has already heard what an
 		// unsolicited PUBLISH_NAMESPACE can say. Repeating it here would leave it holding
@@ -1823,8 +1823,8 @@ where
 		// until the peer is done with it.
 		let origin = match self.requires_solicitation().await {
 			true => origin,
-			false if self.origin.includes_hidden() => origin.empty(),
-			false => origin.beyond(&self.origin),
+			false if !declared || self.origin.includes_hidden() => origin.empty(),
+			false => origin.beyond(&self.origin.clone().discovery(false)),
 		};
 
 		let ns = Namespaces::new(peer, target);
@@ -4142,19 +4142,47 @@ mod tests {
 	/// were opened. One stream means the entry rode the subscription inline; two means
 	/// it went out as its own PUBLISH_NAMESPACE request.
 	async fn advertise_both_ways(solicit: Option<bool>) -> (usize, usize) {
-		let log = advertise_with_hidden(solicit, "", false).await;
+		let log = advertise_with_hidden(Discovery {
+			solicit,
+			..Discovery::default()
+		})
+		.await;
 		(occurrences(&log, b"cam"), log.bi_opens())
 	}
 
 	/// [`advertise_both_ways`] with a hidden `.stats/node` beside `cam`, and the peer's
 	/// SUBSCRIBE_NAMESPACE for `prefix` opting in to hidden namespaces or not.
-	async fn advertise_with_hidden(
+	struct Discovery<'a> {
+		version: Version,
+		declared: bool,
 		solicit: Option<bool>,
-		prefix: &str,
+		prefix: &'a str,
 		hidden: bool,
-	) -> crate::lite::test_transport::Log {
-		const VERSION: Version = Version::Draft17;
+		scoped: bool,
+	}
 
+	impl Default for Discovery<'_> {
+		fn default() -> Self {
+			Self {
+				version: Version::Draft17,
+				declared: true,
+				solicit: Some(true),
+				prefix: "",
+				hidden: false,
+				scoped: false,
+			}
+		}
+	}
+
+	async fn advertise_with_hidden(case: Discovery<'_>) -> crate::lite::test_transport::Log {
+		let Discovery {
+			version,
+			declared: hidden_declared,
+			solicit,
+			prefix,
+			hidden,
+			scoped,
+		} = case;
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
 		let _stats = origin.announce(".stats/node", crate::origin::Route::default()).unwrap();
@@ -4164,21 +4192,34 @@ mod tests {
 		// PUBLISH_NAMESPACE request.
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![
 			Vec::new(),
-			publish_namespace_ok(VERSION).await,
+			publish_namespace_ok(version).await,
 		]);
 		let log = session.log.clone();
 
+		let setup = peer::PeerSetup::default();
+		setup.set(peer::Peer {
+			solicit,
+			hidden: hidden_declared,
+			..Default::default()
+		});
+		let consume = match scoped {
+			true => origin
+				.consume()
+				.scope("", &crate::Pattern::subtree(".stats").unwrap().into())
+				.unwrap(),
+			false => origin.consume(),
+		};
 		let publisher = Publisher::new(
 			crate::time::Clock::tokio(),
 			session.clone(),
-			origin.consume(),
+			consume,
 			Control::new(None, false),
 			None,
-			declared(solicit),
-			VERSION,
+			setup,
+			version,
 		);
 
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), version).await.unwrap();
 		let msg = ietf::SubscribeNamespace {
 			request_id: RequestId(1),
 			namespace: crate::Path::new(prefix),
@@ -4216,11 +4257,52 @@ mod tests {
 			(Some(true), "", true, 1, 1),
 			(Some(true), ".stats", false, 0, 1),
 		] {
-			let log = advertise_with_hidden(solicit, prefix, hidden).await;
+			let log = advertise_with_hidden(Discovery {
+				solicit,
+				prefix,
+				hidden,
+				..Discovery::default()
+			})
+			.await;
 			let case = format!("solicit {solicit:?}, prefix {prefix:?}, hidden {hidden}");
 			assert_eq!(occurrences(&log, b"cam"), cam, "{case}");
 			// An inline entry names its suffix, so count the leaf.
 			assert_eq!(occurrences(&log, b"node"), stats, "{case}");
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn hidden_discovery_obeys_peer_setup_and_requested_prefix() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft19,
+			Version::Draft22,
+		] {
+			for declared in [false, true] {
+				for solicit in [Some(false), Some(true)] {
+					for scoped in [false, true] {
+						for (prefix, hidden) in [("", false), ("", true), (".stats", false)] {
+							let log = advertise_with_hidden(Discovery {
+								version,
+								declared,
+								solicit,
+								prefix,
+								hidden,
+								scoped,
+							})
+							.await;
+							let expected = usize::from(!declared || hidden || prefix == ".stats");
+							assert_eq!(
+								occurrences(&log, b"node"),
+								expected,
+								"{version:?}: declared={declared}, solicit={solicit:?}, scoped={scoped}, prefix={prefix}, hidden={hidden}"
+							);
+						}
+					}
+				}
+			}
 		}
 	}
 
