@@ -28,6 +28,9 @@ track name would collapse them.
   publisher sets `track` only when it must; or move the reader change to
   `dev` behind a catalog version. The maintainer settled it as additive on
   main; confirm the forward-compatibility cost before starting.
+- The MSF conversion in `rs/moq-mux` names MSF tracks by the key today.
+  It carries the wire name and keeps the alias through a round-trip test, or
+  refuses a catalog whose `track` differs from its alias.
 - Scope: `rs/hang`, `js/hang`, their readers, `drafts/draft-lcurley-moq-hang.md`
   (validate with `just drafts check`), and `doc/concept/hang.md`.
 - Tests: an old catalog resolves each track name to its key; a catalog with

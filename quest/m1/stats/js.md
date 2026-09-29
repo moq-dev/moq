@@ -20,7 +20,8 @@ echo path of a catalog soliciting feedback. Both use the `@moq/hang` schemas.
   - The decoder `Stats` signals grow late frames, stalls and stalled
     duration, underruns from the worklet's count, decode errors, and the
     newest arrival.
-  - An `echo` attribute names the viewer. Once a watched catalog carries an
+  - An `echo` attribute names the viewer, refused unless it is one path
+    segment, as in Rust. Once a watched catalog carries an
     `echo` section, the element resolves the echo path against the broadcast,
     appends `<name>.echo`, and publishes there with the fixed feedback track, keyed by rendition alias, the same rule as
     Rust, and reconciles it on each catalog update like Rust.
