@@ -24,6 +24,9 @@ feedback to a broadcast soliciting it. Both use the `@moq/hang` schemas.
     public request API with the same rule as Rust: accept any name with an
     empty snapshot, fill it once a watched catalog's `echo` section claims
     it, refuse a second claim, and cap unclaimed names.
+  - Watch elements on one connection naming the same `echo` path share one
+    producer and register their catalogs with it, because a second
+    `createBroadcast` at a path closes the first.
 - The existing UI stats panels read the same signals.
 - The demo sets both attributes, so the media test can read a browser
   viewer's feedback through `moq export echo`.
