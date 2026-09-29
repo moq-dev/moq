@@ -22,6 +22,12 @@ track name would collapse them.
 - Every reader that subscribes by the map key resolves the wire name through
   one helper instead, in Rust and JS, so no path keeps assuming key equals
   name. Publishers keep writing no `track` unless they need it.
+- Open: a released reader ignores `track` and subscribes by the key, so it
+  cannot play a rendition whose `track` differs from its alias. Candidates:
+  accept that, since such a listing was not expressible before and a
+  publisher sets `track` only when it must; or move the reader change to
+  `dev` behind a catalog version. The maintainer settled it as additive on
+  main; confirm the forward-compatibility cost before starting.
 - Scope: `rs/hang`, `js/hang`, their readers, `drafts/draft-lcurley-moq-hang.md`
   (validate with `just drafts check`), and `doc/concept/hang.md`.
 - Tests: an old catalog resolves each track name to its key; a catalog with
