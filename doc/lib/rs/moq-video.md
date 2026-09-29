@@ -40,9 +40,10 @@ are returned rather than treated as an empty list. Other platforms return
 `Error::Unsupported`.
 
 With `pipewire` enabled, `capture::cameras` also lists PipeWire camera nodes as
-`pipewire:<node name>` after the V4L2 devices. A PipeWire V4L2 node is hidden
-only when its device path was already listed by V4L2, so identical webcams stay
-distinct and PipeWire-only cameras remain visible. Explicit `pipewire:<node name>`
+`pipewire:<node name>` after the V4L2 devices. V4L2 lists only devices offering
+YUYV or MJPEG. A PipeWire V4L2 node is hidden only when its device path was
+already listed by V4L2, so identical webcams stay distinct, and PipeWire-only
+cameras and NV12- or RGB-only V4L2 devices remain visible through PipeWire. Explicit `pipewire:<node name>`
 selectors still open hidden nodes, and `pipewire` alone opens the
 camera with the highest session priority, the session manager's default. That
 reaches cameras V4L2 cannot: a Raspberry Pi CSI camera behind libcamera, and any
