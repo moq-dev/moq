@@ -549,6 +549,31 @@ describe("setLatency", () => {
 		buffer.setLatency(90);
 		expect(buffer.stalled).toBe(false);
 	});
+
+	it("keeps playing through a deeper floor the buffer already covers", () => {
+		const buffer = create({ rate: 1000, channels: 1, capacity: 256, latency: 100 });
+		insert(buffer, 0, 40, { channels: 1, value: 1.0 });
+		insert(buffer, 40, 110, { channels: 1, value: 2.0 });
+
+		buffer.setLatency(110);
+		expect(buffer.stalled).toBe(false);
+		// The skip lands on the new floor: the last 110 samples.
+		expect(read(buffer, 1, 1)[0][0]).toBe(2.0);
+	});
+
+	it("resumes a refill once a shallower floor is already covered", () => {
+		const buffer = create({ rate: 1000, channels: 1, capacity: 256, latency: 100 });
+		insert(buffer, 0, 100, { channels: 1, value: 1.0 });
+		read(buffer, 50, 1);
+
+		buffer.setLatency(110);
+		expect(buffer.stalled).toBe(true);
+
+		// No further frame arrives, as when the source stops, so only the lower floor can resume it.
+		buffer.setLatency(50);
+		expect(buffer.stalled).toBe(false);
+		expect(read(buffer, 1, 1)[0][0]).toBe(1.0);
+	});
 });
 
 describe("stalled getter", () => {

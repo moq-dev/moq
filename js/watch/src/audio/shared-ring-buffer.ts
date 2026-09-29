@@ -300,11 +300,15 @@ export class SharedRingBuffer {
 		// Advance WRITE (only forward)
 		Atomics.store(this.#control, WRITE, i32Max(Atomics.load(this.#control, WRITE), end));
 
-		// Un-stall: if buffered data >= LATENCY
-		const currentRead = readOf(Atomics.load(this.#state, 0));
-		const currentWrite = Atomics.load(this.#control, WRITE);
+		this.#resume();
+	}
+
+	// Un-stall once the buffered data covers LATENCY.
+	#resume(): void {
+		const read = readOf(Atomics.load(this.#state, 0));
+		const write = Atomics.load(this.#control, WRITE);
 		const latency = Atomics.load(this.#control, LATENCY);
-		if (((currentWrite - currentRead) | 0) >= latency && latency > 0) {
+		if (((write - read) | 0) >= latency && latency > 0) {
 			Atomics.store(this.#control, STALLED, 0);
 		}
 	}
@@ -376,17 +380,23 @@ export class SharedRingBuffer {
 	 *
 	 * A deeper floor parks playback until it refills. Video holds the extra delay on its own, so
 	 * audio that kept draining at the old depth would run ahead by the difference. Parking keeps
-	 * what is buffered, so a rise costs only its own size in silence.
+	 * what is buffered, so a rise costs only its own size in silence, and none if the buffer
+	 * already covers the new floor.
 	 */
 	setLatency(samples: number): void {
 		const previous = Atomics.exchange(this.#control, LATENCY, samples);
-		if (previous <= 0 || samples <= previous) return;
+		if (previous > 0 && samples > previous) {
+			Atomics.store(this.#control, STALLED, 1);
+			// A reader already past the STALLED check would still publish its quantum. Moving the
+			// word fails its exchange, and one that snapshots after this sees STALLED. Two keeps the
+			// epoch even, since odd belongs to `truncate`.
+			this.#step(2);
+		}
 
-		Atomics.store(this.#control, STALLED, 1);
-		// A reader already past the STALLED check would still publish its quantum. Moving the word
-		// fails its exchange, and one that snapshots after this sees STALLED. Two keeps the epoch
-		// even, since odd belongs to `truncate`.
-		this.#step(2);
+		// Parked, the playhead holds still, so this measures exactly what is buffered. It also
+		// resumes a refill that a shallower floor has already covered, which `insert` would only
+		// notice on the next frame, never for a source that has stopped.
+		this.#resume();
 	}
 
 	/**

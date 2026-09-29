@@ -419,7 +419,7 @@ describe("resize", () => {
 
 		expect(buffer.capacity).toBe(50);
 		expect(buffer.length).toBe(50); // Truncated to new capacity
-		expect(buffer.stalled).toBe(true); // Should trigger stall
+		expect(buffer.stalled).toBe(false); // Already covers the new floor
 	});
 
 	it("should be a no-op when capacity is unchanged", () => {
@@ -458,7 +458,7 @@ describe("resize", () => {
 		buffer.resize(50 as Time.Milli);
 		expect(buffer.capacity).toBe(50);
 		expect(buffer.length).toBe(50);
-		expect(buffer.stalled).toBe(true);
+		expect(buffer.stalled).toBe(false);
 	});
 
 	it("should handle resize when buffer is empty", () => {
@@ -495,17 +495,16 @@ describe("resize", () => {
 		expect(buffer.stalled).toBe(false);
 	});
 
-	it("should exit stall and read new data after resize", () => {
+	it("should resume and then read new data after a shrinking resize", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Time.Milli });
 
 		// Write some initial data
 		write(buffer, 0 as Time.Milli, 50, { channels: 1, value: 1.0 });
 
-		// Resize to smaller buffer
+		// Resize to a floor the buffered data already covers
 		buffer.resize(50 as Time.Milli);
-		expect(buffer.stalled).toBe(true);
+		expect(buffer.stalled).toBe(false);
 
-		// Write new data to fill the buffer and exit stall
 		// The overflow will discard preserved samples and advance readIndex
 		write(buffer, 50 as Time.Milli, 50, { channels: 1, value: 2.0 });
 		expect(buffer.stalled).toBe(false);
@@ -804,5 +803,19 @@ describe("latency increase", () => {
 
 		buffer.resize(90 as Time.Milli);
 		expect(buffer.stalled).toBe(false);
+	});
+
+	it("resumes a refill once a shallower floor is already covered", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Time.Milli });
+		write(buffer, 0 as Time.Milli, 100, { channels: 1, value: 1.0 });
+		read(buffer, 50, 1);
+
+		buffer.resize(110 as Time.Milli);
+		expect(buffer.stalled).toBe(true);
+
+		// No further frame arrives, as when the source stops, so only the lower floor can resume it.
+		buffer.resize(50 as Time.Milli);
+		expect(buffer.stalled).toBe(false);
+		expect(read(buffer, 1, 1)[0][0]).toBe(1.0);
 	});
 });
