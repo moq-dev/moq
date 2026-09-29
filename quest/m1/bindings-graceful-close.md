@@ -2,7 +2,7 @@
 
 ## Goal
 
-On dev, `shutdown` in moq-ffi and every wrapper (py, swift, kt, go, dart, and the generated C/C++) drains the session the way `moq_net::Session::close` and `moq_tokio::Connection::close` do. Finished tracks deliver their last groups and FIN before the session ends, bounded by the same deadline. OBS and the language bindings stop losing the tail of a publish when they stop.
+On dev, `shutdown` in moq-ffi and every wrapper (py, swift, kt, go, dart, and the generated C/C++) drains the session the way `moq_net::Session::close` and `moq_tokio::Connection::close` do. Finished tracks deliver their last groups and FIN before the session ends, bounded by the same deadline. The language bindings stop losing the tail of a publish when they stop. OBS gets this only once it moves off hand-written libmoq onto the generated C++, which [C++ through moq-ffi](/quest/m1/cpp/README.md) owns; libmoq takes no more shutdown work.
 
 ## Plan
 
