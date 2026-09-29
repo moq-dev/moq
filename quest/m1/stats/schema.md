@@ -28,9 +28,10 @@ and the hang draft specs both. Nothing produces them yet.
   - stalls, stalled duration, and underruns;
   - the newest media timestamp received, with the wall time it arrived;
   - the playout latency, as a gauge.
-- Both snapshots key by the catalog's rendition alias, and a rendition that
-  references another broadcast is reported under its alias in the catalog
-  that lists it (decided in the [README](/quest/m1/stats/README.md)).
+- Both snapshots key by the catalog's rendition alias. Feedback covers a
+  rendition that references another broadcast under its alias in the catalog
+  that lists it; the publisher snapshot omits referenced renditions (decided
+  in the [README](/quest/m1/stats/README.md)).
 - `Transport` is shared: rtt, estimated rate, bytes and packets lost, and
   sample age. Every field is optional, because a browser has only PROBE rtt.
 - Every field is defaulted, zero and `None` are omitted, unknown fields are

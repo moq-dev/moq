@@ -38,8 +38,10 @@ kind.
   catalog's rendition keys, which [catalog track
   alias](/quest/m1/catalog-track-alias.md) makes aliases unique within a
   catalog. Nothing repeats the catalog's `video`/`audio` nesting; the kind
-  comes from the catalog entry. A rendition that references another
-  broadcast is reported to the catalog that lists it, under its alias there.
+  comes from the catalog entry. A viewer reports a rendition that references
+  another broadcast to the catalog that lists it, under its alias there. The
+  publisher's own snapshot covers only renditions it writes and omits
+  referenced ones, whose sender reports them in its own catalog.
   Reason: a track name alone collides once a catalog lists renditions from
   several broadcasts.
 - **Viewer: feedback only when solicited.** Most publishers do not read

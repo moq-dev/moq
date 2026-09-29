@@ -21,8 +21,10 @@ it already follows. Keyframe requests stay out.
   - The counters are cumulative, so the handle keeps the previous snapshot
     per viewer and diffs it. A counter that goes backwards means a restarted
     viewer and resets that baseline.
-  - Viewers that stop reporting age out on the stats interval, so one stall
-    long ago never lowers the target forever.
+  - A viewer counts while its `.echo` broadcast is announced, not by the age
+    of its last report: an unchanged snapshot sends no frame, so a quiet
+    healthy viewer must not age out. Diffing already makes one stall long
+    ago contribute nothing to later intervals.
 - Trust (2026-09-29): the token prefix is the boundary. Any viewer the
   application's tokens let publish under the echo path counts. How far
   viewers may move the target is application-specific (a simulcast ladder
@@ -33,7 +35,7 @@ it already follows. Keyframe requests stay out.
   application's policy.
 - `moq_mux::rate::Control` takes that signal beside the bandwidth estimate.
   A stalled share above the threshold steps the target down like a bandwidth
-  drop, never below the floor; recovery follows the existing attack curve,
+  drop, never below the floor; recovery follows the existing decay ramp,
   and the estimate stays the ceiling. Audio does not follow its grant today
   (`Options::bandwidth` in `rs/moq-audio/src/encode/producer.rs` reserves
   only). It follows this signal only once the grant quest lands; until then
