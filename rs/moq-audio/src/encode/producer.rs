@@ -928,7 +928,9 @@ mod tests {
 				settings: Settings::from_input(crate::encode::Codec::Aac, &input),
 				..Options::default()
 			};
+			let stub = crate::encode::backend::stub::install();
 			let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+			drop(stub);
 
 			let track = consumer
 				.track("audio")

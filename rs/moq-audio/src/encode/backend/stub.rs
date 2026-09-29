@@ -1,5 +1,8 @@
 //! A stand-in AAC encoder, so the AAC front end is testable on a host with no
-//! platform encoder. Selectable only by name, and only in tests.
+//! platform encoder. A test opts in with [`install`]; every other test sees the
+//! real tiers.
+
+use std::cell::Cell;
 
 use bytes::Bytes;
 
@@ -11,6 +14,30 @@ pub(crate) const NAME: &str = "stub";
 
 /// The AudioToolbox AAC-LC encoder delay, which is what a real backend reports.
 pub(crate) const DELAY: usize = 2112;
+
+thread_local! {
+	static INSTALLED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Stand the stub in for the platform tier on this thread until the guard drops.
+pub(crate) fn install() -> Installed {
+	INSTALLED.set(true);
+	Installed(())
+}
+
+/// Whether this thread has the stub installed.
+pub(super) fn installed() -> bool {
+	INSTALLED.get()
+}
+
+/// Uninstalls the stub on drop.
+pub(crate) struct Installed(());
+
+impl Drop for Installed {
+	fn drop(&mut self) {
+		INSTALLED.set(false);
+	}
+}
 
 /// Emits each frame's index as its payload, and cannot retune.
 pub(crate) struct Stub {

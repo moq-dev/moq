@@ -84,10 +84,10 @@ const SOFTWARE: &[Candidate] = &[
 	},
 ];
 
-/// Test-only backends, tried after every real one so a host with a real encoder
-/// never opens one. They stand in for a codec this host has no encoder for.
+/// The platform tier on a test thread that called [`stub::install`], so AAC tests
+/// open the same backend on every host and every other test sees the real tiers.
 #[cfg(test)]
-const FALLBACK: &[Candidate] = &[Candidate {
+const STUB_PLATFORM: &[Candidate] = &[Candidate {
 	name: stub::NAME,
 	codecs: &[Codec::Aac],
 	open: stub::Stub::open,
@@ -104,10 +104,15 @@ pub(crate) fn open(settings: &Settings) -> Result<Box<dyn Backend>, Error> {
 		)));
 	}
 
-	let tried = candidates(&settings.kind, PLATFORM, SOFTWARE);
 	#[cfg(test)]
-	let tried = [tried, FALLBACK.iter().collect()].concat();
-	select(settings, tried)
+	let platform = match stub::installed() {
+		true => STUB_PLATFORM,
+		false => PLATFORM,
+	};
+	#[cfg(not(test))]
+	let platform = PLATFORM;
+
+	select(settings, candidates(&settings.kind, platform, SOFTWARE))
 }
 
 /// The candidates `kind` allows, in the order to try them.
@@ -278,12 +283,20 @@ mod tests {
 	/// gates this to the hosts without one.
 	#[test]
 	fn aac_without_a_platform_encoder_is_refused() {
-		// The real tiers only: `open` adds the test stub.
-		let err = select(&aac(Kind::Auto), candidates(&Kind::Auto, PLATFORM, SOFTWARE))
-			.err()
-			.expect("no AAC encoder on this host");
+		let err = open(&aac(Kind::Auto)).err().expect("no AAC encoder on this host");
 		let message = err.to_string();
 		assert!(message.contains("aac") && message.contains("none"), "{message}");
+	}
+
+	/// The stub stands in for the platform tier only, so `Software` still refuses
+	/// AAC with it installed.
+	#[test]
+	fn stub_is_not_software() {
+		let _stub = stub::install();
+		assert_eq!(open(&aac(Kind::Auto)).unwrap().name(), stub::NAME);
+
+		let err = open(&aac(Kind::Software)).err().expect("no software AAC encoder");
+		assert!(err.to_string().contains("no software aac"), "{err}");
 	}
 
 	fn named(codec: Codec, name: &str) -> Settings {
@@ -297,6 +310,7 @@ mod tests {
 	/// A codec's own name opens that codec, like `Auto`.
 	#[test]
 	fn codec_names_open_their_codec() {
+		let _stub = stub::install();
 		assert_eq!(open(&named(Codec::Opus, "opus")).unwrap().name(), libopus::NAME);
 		assert_eq!(open(&named(Codec::Pcm, "pcm")).unwrap().name(), pcm::NAME);
 		assert_eq!(open(&named(Codec::Aac, "aac")).unwrap().name(), stub::NAME);
