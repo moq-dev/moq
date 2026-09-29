@@ -159,7 +159,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [MSF caption roles](/quest/m1/captions-msf.md) - an MSF caption, subtitle, or sign-language track survives conversion to a hang catalog
 - [CEA-608/708](/quest/m1/captions-cea.md) - captions carried inside video SEI become a real text rendition at import
 - [Colour model](/quest/m1/color-model.md) - the catalog describes a rendition's colour and HDR properties instead of leaving a TODO
-- [#2067](/quest/m1/2067-test-open-gop-h-264-tune-in-end-to-end-leading-picture.md) - Open-GOP H.264: a regression fixture and a measured cold tune-in
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - a viewer joining at a recovery point drops the leading pictures it cannot decode; continuous viewers keep them
 - [Catalog warmup](/quest/m1/catalog-warmup.md) - `warmup` on video and audio renditions, in the catalog and the draft
 - [Audio warmup](/quest/m1/audio-warmup.md) - a viewer joining an Opus rendition mid-stream never hears the unconverged first 80 ms
