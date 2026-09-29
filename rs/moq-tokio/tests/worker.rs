@@ -22,6 +22,72 @@ fn free_udp_port() -> u16 {
 	port
 }
 
+/// The socket inodes this process holds bound to `port`, of which there must be
+/// at least one: every UDP socket, but only a TCP listener.
+///
+/// Asked of this process's own descriptors, for two reasons. Rebinding the port
+/// races any concurrent process's ephemeral bind, which may take a freed port.
+/// And `/proc/net/udp` is served in chunks that skip entries while other
+/// processes churn sockets.
+fn bound(port: u16) -> std::collections::HashSet<u64> {
+	use std::os::fd::FromRawFd;
+	use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+	let mut bound = std::collections::HashSet::new();
+	for entry in std::fs::read_dir("/proc/self/fd").expect("read /proc/self/fd") {
+		let entry = entry.expect("read /proc/self/fd");
+		let Some(fd) = entry.file_name().to_str().and_then(|name| name.parse().ok()) else {
+			continue;
+		};
+		// Duplicated rather than borrowed: another thread may close the original
+		// meanwhile, which fails the duplicate instead of pulling the descriptor
+		// out from under a borrow, and the copy pins the socket it names.
+		let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+		if dup < 0 {
+			continue;
+		}
+		// SAFETY: `dup` is a fresh descriptor that nothing else owns.
+		let file = std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(dup) });
+		let Ok(meta) = file.metadata() else { continue };
+		if !meta.file_type().is_socket() {
+			continue;
+		}
+		let socket = socket2::SockRef::from(&file);
+		let owned = match socket.r#type() {
+			Ok(socket2::Type::DGRAM) => true,
+			Ok(socket2::Type::STREAM) => socket.is_listener().unwrap_or(false),
+			_ => false,
+		};
+		let on_port = socket
+			.local_addr()
+			.ok()
+			.and_then(|addr| addr.as_socket())
+			.map(|addr| addr.port())
+			== Some(port);
+		if owned && on_port {
+			bound.insert(meta.ino());
+		}
+	}
+	assert!(!bound.is_empty(), "this process holds no socket on port {port}");
+	bound
+}
+
+/// The inode of the socket at a `/proc/self/fd` entry, or `None` for anything else.
+fn socket_inode(path: &std::path::Path) -> Option<u64> {
+	use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+	let meta = std::fs::metadata(path).ok()?;
+	meta.file_type().is_socket().then(|| meta.ino())
+}
+
+/// The inodes of every socket this process has open.
+fn open_sockets() -> std::collections::HashSet<u64> {
+	std::fs::read_dir("/proc/self/fd")
+		.expect("read /proc/self/fd")
+		.filter_map(|entry| socket_inode(&entry.ok()?.path()))
+		.collect()
+}
+
 /// A self-signed certificate on disk. Workers refuse `tls.generate`, since each
 /// would generate one of its own and serve a different identity.
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -84,11 +150,10 @@ async fn dropping_the_workers_releases_the_port() {
 			std::future::pending::<()>().await;
 		});
 	}
+	let owned = bound(addr.port());
 	group.shutdown().await;
 
-	// A plain bind refuses a port any socket still holds, reuseport or not, so this
-	// succeeds only if every worker's socket is really gone.
-	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("workers left the port bound");
+	assert!(owned.is_disjoint(&open_sockets()), "workers left the port bound");
 }
 
 /// The future factory runs on the worker, so the future may hold local state
@@ -227,9 +292,10 @@ async fn dropping_unserved_workers_releases_the_port() {
 	let workers =
 		bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS)).expect("bind workers");
 	let addr = workers.local_addr();
+	let owned = bound(addr.port());
 	drop(workers);
 
-	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("workers left the port bound");
+	assert!(owned.is_disjoint(&open_sockets()), "workers left the port bound");
 }
 
 /// The group holds one port, so an ephemeral bind is the port its first member
@@ -247,13 +313,14 @@ async fn an_ephemeral_port_is_shared_by_the_group() {
 	assert_eq!(workers.len(), usize::from(WORKERS));
 
 	let addr = workers.local_addr();
+	let owned = bound(addr.port());
 	assert_ne!(addr.port(), 0, "the group reports the port it bound");
 
 	// A plain bind refuses a port any socket holds, so this fails while the
 	// group is alive and succeeds once every member has let go.
 	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect_err("the group must hold its port");
 	workers.shutdown().await;
-	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("the group must release its port");
+	assert!(owned.is_disjoint(&open_sockets()), "the group must release its port");
 }
 
 /// `SO_REUSEPORT` groups by address and UID, so a second group on a served
@@ -404,45 +471,6 @@ async fn generated_certificates_are_refused() {
 	);
 }
 
-/// How many UDP sockets this process holds on `addr`, via procfs.
-///
-/// The group retains every reuseport socket until serving has stopped, so
-/// dropping a server handle must not change this count while the group is
-/// alive: without the retainer the kernel would close the socket and renumber
-/// every member after it. A backend may own more than one descriptor per
-/// member, so the invariant is the stable count rather than its exact value.
-///
-/// Matching the full address and joining on this process's descriptors keeps
-/// a stranger's socket out of the count, including one that takes the port
-/// once the group releases it.
-fn udp_sockets_on(addr: std::net::SocketAddr) -> usize {
-	let std::net::SocketAddr::V4(addr) = addr else {
-		panic!("the workers bind IPv4");
-	};
-	// procfs prints the address as the in-memory (network order) u32 in hex.
-	let want = format!("{:08X}:{:04X}", u32::from_ne_bytes(addr.ip().octets()), addr.port());
-
-	let ours: std::collections::HashSet<String> = std::fs::read_dir("/proc/self/fd")
-		.expect("read /proc/self/fd")
-		.filter_map(|fd| std::fs::read_link(fd.ok()?.path()).ok())
-		.filter_map(|link| {
-			let inode = link.to_str()?.strip_prefix("socket:[")?.strip_suffix(']')?;
-			Some(inode.to_string())
-		})
-		.collect();
-
-	let table = std::fs::read_to_string("/proc/net/udp").expect("read /proc/net/udp");
-	table
-		.lines()
-		.skip(1)
-		.filter(|line| {
-			// sl, local_address, rem_address, st, tx:rx, tr:when, retrnsmt, uid, timeout, inode.
-			let fields: Vec<&str> = line.split_whitespace().collect();
-			fields.get(1) == Some(&want.as_str()) && fields.get(9).is_some_and(|inode| ours.contains(*inode))
-		})
-		.count()
-}
-
 /// Dropping a server handle cannot take its socket out of the reuseport group.
 ///
 /// The group retains every socket until serving has stopped, so the survivors
@@ -457,13 +485,10 @@ async fn dropping_a_server_keeps_its_socket() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
-	let addr = workers.local_addr();
-	let port = addr.port();
-	// A stranger on the same port but another address must not be counted.
-	let _stranger = UdpSocket::bind(("127.0.0.2", port)).expect("bind stranger");
+	let port = workers.local_addr().port();
 	let mut group = workers.split();
-	let sockets = udp_sockets_on(addr);
-	assert!(sockets >= 2, "every member holds at least one socket");
+	let sockets = bound(port);
+	assert!(sockets.len() >= 2, "every member holds at least one socket");
 	assert_eq!(group.local_addr().port(), port);
 
 	let mut members = group.members();
@@ -474,7 +499,7 @@ async fn dropping_a_server_keeps_its_socket() {
 	drop(dropped);
 
 	assert_eq!(
-		udp_sockets_on(addr),
+		bound(port),
 		sockets,
 		"dropping a server must not lose its socket while the group lives"
 	);
@@ -485,10 +510,13 @@ async fn dropping_a_server_keeps_its_socket() {
 	let member = members.pop().expect("one member");
 	assert_eq!(member.index(), 0);
 	drop(member);
-	assert_eq!(udp_sockets_on(addr), sockets, "the retainer outlives both handles");
+	assert_eq!(bound(port), sockets, "the retainer outlives both handles");
 
 	group.shutdown().await;
-	assert_eq!(udp_sockets_on(addr), 0, "stopping the group releases every socket");
+	assert!(
+		sockets.is_disjoint(&open_sockets()),
+		"stopping the group releases every socket"
+	);
 }
 
 /// Completing one serving member ends serving for the whole group.
@@ -503,6 +531,7 @@ async fn completing_a_member_stops_its_siblings() {
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
 	let addr = workers.local_addr();
+	let owned = bound(addr.port());
 	let mut group = workers.split();
 	let mut members = group.members();
 	assert_eq!(members.len(), 2);
@@ -540,7 +569,7 @@ async fn completing_a_member_stops_its_siblings() {
 		.expect("a stopped sibling must not hang");
 
 	group.shutdown().await;
-	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("the group must release its port");
+	assert!(owned.is_disjoint(&open_sockets()), "the group must release its port");
 }
 
 /// Cancelling one serving member ends serving for the whole group.
@@ -552,6 +581,7 @@ async fn cancelling_a_member_stops_its_siblings() {
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
 	let addr = workers.local_addr();
+	let owned = bound(addr.port());
 	let mut group = workers.split();
 	let mut members = group.members();
 
@@ -583,7 +613,7 @@ async fn cancelling_a_member_stops_its_siblings() {
 		.expect("a cancelled sibling must not hang");
 
 	group.shutdown().await;
-	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("the group must release its port");
+	assert!(owned.is_disjoint(&open_sockets()), "the group must release its port");
 }
 
 /// A panicking serving member ends serving for the whole group, and the panic
@@ -596,6 +626,7 @@ async fn a_panicking_member_stops_its_siblings() {
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
 	let addr = workers.local_addr();
+	let owned = bound(addr.port());
 	let mut group = workers.split();
 	let mut members = group.members();
 
@@ -627,7 +658,7 @@ async fn a_panicking_member_stops_its_siblings() {
 		.expect("a panicking sibling must not hang");
 
 	group.shutdown().await;
-	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("the group must release its port");
+	assert!(owned.is_disjoint(&open_sockets()), "the group must release its port");
 }
 
 /// Explicit shutdown with work in flight stops every worker and joins.
@@ -639,6 +670,7 @@ async fn shutdown_with_work_in_flight_joins() {
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
 	let addr = workers.local_addr();
+	let owned = bound(addr.port());
 	let mut group = workers.split();
 	let mut tasks = Vec::new();
 	for member in group.members() {
@@ -655,7 +687,7 @@ async fn shutdown_with_work_in_flight_joins() {
 			.expect("shutdown must stop every member");
 	}
 
-	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("shutdown must release the port");
+	assert!(owned.is_disjoint(&open_sockets()), "shutdown must release the port");
 }
 
 /// Dropping the owner with work in flight stops every worker without joining
@@ -668,6 +700,7 @@ async fn dropping_the_group_with_work_in_flight_stops() {
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
 	let addr = workers.local_addr();
+	let owned = bound(addr.port());
 	let mut group = workers.split();
 	let mut tasks = Vec::new();
 	{
@@ -687,5 +720,8 @@ async fn dropping_the_group_with_work_in_flight_stops() {
 			.expect("dropping the group must stop every member");
 	}
 
-	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("dropping the group must release the port");
+	assert!(
+		owned.is_disjoint(&open_sockets()),
+		"dropping the group must release the port"
+	);
 }

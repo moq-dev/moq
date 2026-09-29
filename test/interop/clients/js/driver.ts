@@ -1,5 +1,5 @@
 /**
- * Drives a headless Chromium against the vite-built page (dist/) for the interop matrix. publish
+ * Drives a headless Chromium against the vite-built page (see `serve`) for the interop matrix. publish
  * streams fake camera/microphone input until killed; subscribe verifies rendered playback,
  * pause/resume, and optionally browser-to-browser audio.
  *

@@ -74,8 +74,15 @@ jobs:
 
       # No Rust cache: this workflow only runs on pull requests, which may not
       # save one, so it would have nothing to restore.
-      - name: Install just and cargo-ndk
-        run: cargo install --locked "just@$JUST_VERSION" "cargo-ndk@$CARGO_NDK_VERSION"
+      - name: Install cargo-ndk
+        run: cargo install --locked "cargo-ndk@$CARGO_NDK_VERSION"
+
+      # A checksummed release binary, where `cargo install` would spend ~2 minutes
+      # building just from source.
+      - name: Install just
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: just@${{ env.JUST_VERSION }}
 
       - name: Check
         run: just rs android

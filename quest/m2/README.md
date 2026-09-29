@@ -20,6 +20,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - compare immutable track definitions with explicit catalog-to-group binding
 - [Archive recovery listing](/quest/m2/archive-recovery-listing.md) - a resumed DVR lists what changed since its checkpoint, not every stored group
 - [Archive backward timestamps](/quest/m2/archive-backward-timestamps.md) - a resumed recording refuses a track whose timestamps go backward
+- [IETF drain before close](/quest/m2/ietf-drain-before-close.md) - moq-transport sessions deliver finished tracks before a graceful close, as moq-lite does
 - [moq play drain tail](/quest/m2/play-drain-tail.md) - retired renditions and finite tracks play their last 10 ms of audio
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio
 - [Mobile ownership](/quest/m2/mobile-ownership.md) - decide whether Rust or platform code owns mobile capture, codecs, and rendering

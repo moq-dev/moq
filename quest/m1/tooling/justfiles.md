@@ -86,8 +86,17 @@ wanted), `_shell`, `_flake` as its one-liner, `clean`, the rs `package` and
 `fuzz` bodies, and the OBS `compile`, `_includes`, `_unit`, `test`, `check`,
 and `preset` bodies.
 
+Arguments reach tools intact: `just rs test`, `check-test`, and
+`capture-test` interpolate `{{ args }}` today, so a quoted nextest filterset
+becomes a shell syntax error (#4342). Recipes that forward arguments use
+`[positional-arguments]` and `"$@"`. No self-test for it, per the rule above.
+
 Docs: `doc/setup/dev.md`, `CONTRIBUTING.md`, `test/README.md`, and the
 `AGENTS.md` mentions of `just wasm` follow the survivors. Verify with `just
 check`, `just ci test`, and `just check --all`, and confirm every recipe name
 check.yml, cache.yml, nightly.yml, interop.yml, wasm.yml, obs.yml, swift.yml,
 and release-*.yml invoke still resolves.
+
+## Closes
+
+- [#4342](https://github.com/moq-dev/moq/issues/4342) - close this issue when the quest finishes

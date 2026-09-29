@@ -8,6 +8,7 @@ import { NotFound } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import { Route } from "./hop.ts";
 import { hooks, type TrackSequence } from "./internal.ts";
+import * as Path from "./path.ts";
 import * as track from "./track.ts";
 import { registerWire, trackOf, type Broadcast as Wire } from "./wire.ts";
 
@@ -20,6 +21,7 @@ export interface Announcer {
 }
 
 let attachAnnouncer: (producer: Producer, announcer: Announcer) => void;
+let stampProducer: (producer: Producer, path: Path.Valid) => void;
 
 /** Reactive backing state shared by broadcast producers and consumers. */
 class BroadcastState {
@@ -158,6 +160,7 @@ async function fetchGroup(
 export class Producer {
 	#state = new BroadcastState();
 	#announcer?: Announcer;
+	#path = Path.empty();
 
 	constructor() {
 		registerWire(this, this.#wire(false));
@@ -168,6 +171,9 @@ export class Producer {
 			producer.#announcer = announcer;
 		};
 		hooks.attachAnnouncer = attachAnnouncer;
+		stampProducer = (producer, path) => {
+			producer.#path = path;
+		};
 	}
 
 	/**
@@ -178,9 +184,9 @@ export class Producer {
 		return this.#state.closed;
 	}
 
-	/** A read handle for this broadcast. */
+	/** A read handle for this broadcast, named by the path the origin created it at. */
 	consume(): Consumer {
-		return makeConsumer(this.#state);
+		return makeConsumer({ state: this.#state, path: this.#path });
 	}
 
 	async #requested(): Promise<track.Request | undefined> {
@@ -277,9 +283,15 @@ export class Producer {
 	}
 }
 
+// What a new consumer handle inherits: the shared broadcast plus the path naming it.
+interface Shared {
+	state: BroadcastState;
+	path: Path.Valid;
+}
+
 // Constructs a Consumer from within this module without exposing a public constructor
 // that would leak the unexported BroadcastState. Assigned in the class's static block.
-let makeConsumer: (state: BroadcastState) => Consumer;
+let makeConsumer: (shared: Shared) => Consumer;
 
 /**
  * The read side of a broadcast.
@@ -291,13 +303,15 @@ let makeConsumer: (state: BroadcastState) => Consumer;
  */
 export class Consumer {
 	#state: BroadcastState;
+	#path: Path.Valid;
 
 	// Guards against a double close() on this handle over-decrementing the consumer count.
 	#closed = false;
 
-	protected constructor(state?: never);
-	protected constructor(state?: BroadcastState) {
-		this.#state = state ?? new BroadcastState();
+	protected constructor(shared?: never);
+	protected constructor(shared?: Shared) {
+		this.#state = shared?.state ?? new BroadcastState();
+		this.#path = shared?.path ?? Path.empty();
 		this.#state.consumers++;
 		registerWire(this, {
 			subscribe: (name, options) => subscribe(this.#state, name, options, true),
@@ -308,7 +322,23 @@ export class Consumer {
 	}
 
 	static {
-		makeConsumer = (state) => new Consumer(state as never);
+		makeConsumer = (shared) => new Consumer(shared as never);
+		hooks.stampPath = (target, path) => {
+			if (target instanceof Consumer) target.#path = path;
+			else stampProducer(target, path);
+		};
+	}
+
+	/**
+	 * The path this handle names the broadcast by, which relative references in its catalog
+	 * (hang's `broadcast` field) resolve against.
+	 *
+	 * An origin stamps each handle it hands out with the path it was requested at, relative to
+	 * that origin handle's scope root, and a broadcast it created with the path it was created at.
+	 * Empty for a standalone broadcast, which is then its own root: any `..` reference escapes.
+	 */
+	get path(): Path.Valid {
+		return this.#path;
 	}
 
 	/**
@@ -325,8 +355,8 @@ export class Consumer {
 	/**
 	 * Return another handle to the same broadcast, reference-counted with this one.
 	 *
-	 * Both handles read the same tracks and share one {@link closed} state; the broadcast
-	 * closes only once *every* handle has {@link close}d. Used by the connection's per-path
+	 * Both handles read the same tracks, carry the same {@link path}, and share one {@link closed}
+	 * state; the broadcast closes only once *every* handle has {@link close}d. Used by the connection's per-path
 	 * consume cache to share one subscription across callers. Subclasses that resolve info over
 	 * the wire override this to preserve their type (see the wire layer's consumed broadcast).
 	 */
@@ -334,10 +364,10 @@ export class Consumer {
 		return new Consumer(this.shareState());
 	}
 
-	// Hand this consumer's backing state to a clone. Opaque (`never`) so the state type stays
-	// unexported; a subclass passes it straight back into its own `super(...)`.
+	// Hand this consumer's backing state and path to a clone. Opaque (`never`) so the state type
+	// stays unexported; a subclass passes it straight back into its own `super(...)`.
 	protected shareState(): never {
-		return this.#state as never;
+		return { state: this.#state, path: this.#path } satisfies Shared as never;
 	}
 
 	/** Get a lazy handle for a track on this broadcast. Repeat subscriptions dedupe onto one upstream subscription. */
