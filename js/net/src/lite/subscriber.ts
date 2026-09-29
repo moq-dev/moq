@@ -8,7 +8,7 @@ import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
-import { type Reader, Stream } from "../stream.ts";
+import { type OpenOptions, type Reader, Stream } from "../stream.ts";
 import { TAIL_GRACE_MS, Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
@@ -24,7 +24,7 @@ import {
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import * as DatagramStream from "./datagram_stream.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
-import type { Group as GroupMessage } from "./group.ts";
+import { frameDecoder, type Group as GroupMessage, readFrames } from "./group.ts";
 import { sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
@@ -40,18 +40,21 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, restartSupported, Version } from "./version.ts";
+import {
+	hasAnnounceId,
+	hasAnnounceOk,
+	hasDatagrams,
+	hasProbeRtt,
+	hasStreamCount,
+	restartSupported,
+	Version,
+} from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
 // drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC streams
 // (Chrome ~100) and we open with waitUntilAvailable, so past the cap the open blocks
 // until the peer frees a slot. The timeout turns a stall into a clear error.
 const SUBSCRIBE_SETUP_TIMEOUT_MS = 10_000;
-
-/** Decode an unsigned zigzag varint back to a signed delta (mirrors Rust `VarInt::to_zigzag`). */
-function unzigzag(v: bigint): bigint {
-	return (v >> 1n) ^ -(v & 1n);
-}
 
 // The TRACK stream and implicit SUBSCRIBE acceptance are lite-05+.
 function supportsTrackStream(version: Version): boolean {
@@ -83,6 +86,8 @@ interface SubscribeEntry {
 	// (SUBSCRIBE_END), once it declares them.
 	start?: number;
 	end?: number;
+	// Group streams opened by the publisher, when SUBSCRIBE_END carries the count.
+	streams?: number;
 }
 
 /**
@@ -692,17 +697,33 @@ export class Subscriber {
 
 	// Opens a TRACK stream, reads the single TRACK_INFO, and FINs. Lite-05+ only.
 	async #trackInfo(broadcast: Path.Valid, track: string): Promise<TrackInfo> {
-		const stream = await Stream.open(this.#quic);
-		try {
+		return this.#exchange(undefined, async (stream) => {
 			await stream.writer.u53(StreamId.Track);
 			await new TrackMessage(broadcast, track).encode(stream.writer, this.version);
 			const info = await TrackInfo.decode(stream.reader, this.version);
 			// The publisher FINs after TRACK_INFO; FIN our side too.
 			stream.close();
 			return info;
+		});
+	}
+
+	// Opens a stream and runs a request/response exchange on it, resetting the stream if `run`
+	// fails. Subscriber.close() also resets it while `run` is pending, so a peer that never
+	// answers cannot hold it open, and a stream that opens after the close is reset at once.
+	async #exchange<T>(options: OpenOptions | undefined, run: (stream: Stream) => Promise<T>): Promise<T> {
+		const closed = this.#closed.signal;
+		closed.throwIfAborted();
+		const stream = await Stream.open(this.#quic, options);
+		const abort = () => stream.abort(error(closed.reason));
+		closed.addEventListener("abort", abort);
+		try {
+			closed.throwIfAborted();
+			return await run(stream);
 		} catch (err) {
 			stream.abort(error(err));
 			throw err;
+		} finally {
+			closed.removeEventListener("abort", abort);
 		}
 	}
 
@@ -774,61 +795,82 @@ export class Subscriber {
 				throw new Error("fetch group requires moq-lite-05 or newer");
 			}
 
-			const info = await this.#trackInfo(broadcast, track);
-			const priority = options.priority ?? 0;
-			const stream = await Stream.open(this.#quic, { sendOrder: sendOrder({ priority }) });
-
+			// Lite has no FETCH_OK, so a publisher that never answers would hold the setup forever.
+			// Subscriber.close() closing the group releases every caller at any stage, and resets
+			// the streams the setup opened.
+			const setup = this.#fetchSetup(broadcast, track, sequence, options);
+			let accepted: { stream: Stream; info: TrackInfo };
 			try {
-				await stream.writer.u53(StreamId.Fetch);
-				await new FetchMessage({ broadcast, track, priority, group: sequence }).encode(
-					stream.writer,
-					this.version,
-				);
-				// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
-				// done() buffers that byte so the response pump can decode it normally.
-				await stream.reader.done();
+				accepted = await untilClosed(group, setup);
 			} catch (err: unknown) {
-				stream.abort(error(err));
+				// A setup that finishes just after the close hands back a stream nobody will read.
+				void setup.then(
+					({ stream }) => stream.abort(error(err)),
+					() => void 0,
+				);
 				throw err;
 			}
 
-			void this.#runFetchResponse(stream, group, Time.Timescale(info.timescale));
+			void this.#runFetchResponse(accepted.stream, group, Time.Timescale(accepted.info.timescale));
 		} catch (err: unknown) {
 			group.close(error(err));
 			throw err;
 		}
 	}
 
+	// Resolve the track's timescale, then open the FETCH stream and wait for it to be accepted.
+	async #fetchSetup(
+		broadcast: Path.Valid,
+		track: string,
+		sequence: number,
+		options: track.FetchGroupOptions,
+	): Promise<{ stream: Stream; info: TrackInfo }> {
+		const info = await this.#trackInfo(broadcast, track);
+		const priority = options.priority ?? 0;
+		return this.#exchange({ sendOrder: sendOrder({ priority }) }, async (stream) => {
+			await stream.writer.u53(StreamId.Fetch);
+			await new FetchMessage({ broadcast, track, priority, group: sequence }).encode(stream.writer, this.version);
+			// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
+			// done() buffers that byte so the response pump can decode it normally.
+			await stream.reader.done();
+			return { stream, info };
+		});
+	}
+
 	// Read the FETCH response (bare zigzag-delta-timestamped frames) into the group, then
 	// FIN. A stream-level failure aborts the group so its reader observes the gap.
 	async #runFetchResponse(stream: Stream, group: netGroup.Producer, timescale: Time.Timescale): Promise<void> {
 		try {
-			let prevTs = 0n;
+			const decode = frameDecoder(timescale);
 
 			// Serve until the stream FINs, the group closes, or every reader leaves. A group can
 			// stay open indefinitely (a catalog or JSON stream), so an abandoned fetch is stopped by
 			// demand, not by the stream ending. `unused` is watched across frames as one stable
 			// promise; the check is level-triggered, so a coalesced fetch that arrives before we
 			// cancel re-arms and resumes.
-			const idle = Symbol("idle");
-			let unused = group.unused().then(() => idle);
+			const idle: unique symbol = Symbol("idle");
+			let unused = group.unused().then((): typeof idle => idle);
+			// A decode consumes its frame whenever it lands, so one outstanding across a re-arm is
+			// kept and awaited again rather than abandoned with its frame.
+			let pending: Promise<netGroup.Frame | undefined> | undefined;
 			for (;;) {
-				const done = await race([stream.reader.done(), group.closed, unused]);
-				if (done === idle) {
-					if (!group.isClosed && group.used.peek()) {
-						unused = group.unused().then(() => idle);
-						continue;
+				// Buffered frames are written without an await, as in a group stream.
+				let frame = pending === undefined ? stream.reader.tryDecode(decode) : undefined;
+				if (!frame) {
+					pending ??= stream.reader.decodeMaybe(decode);
+					const next = await race([pending, group.closed, unused]);
+					if (next === idle) {
+						if (!group.isClosed && group.used.peek()) {
+							unused = group.unused().then((): typeof idle => idle);
+							continue;
+						}
+						break;
 					}
-					break;
+					pending = undefined;
+					if (!next || next instanceof Error) break;
+					frame = next;
 				}
-				if (done !== false) break;
-
-				prevTs += unzigzag(await stream.reader.u62());
-				const timestamp = new Time.Timestamp(Number(prevTs), timescale);
-				const size = await stream.reader.u53();
-				const payload = await stream.reader.read(size);
-				if (!payload) break;
-				group.writeFrame({ payload, timestamp });
+				group.writeFrame(frame);
 			}
 
 			group.close();
@@ -858,6 +900,7 @@ export class Subscriber {
 			} else if ("end" in resp) {
 				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
 				entry.end = resp.end.group;
+				if (hasStreamCount(this.version)) entry.streams = resp.end.streams;
 				// A local close can win the race with the response; there is nothing left to end.
 				if (entry.track.closed.peek() !== undefined) continue;
 				try {
@@ -873,13 +916,10 @@ export class Subscriber {
 
 	// Wait for the group streams the publisher still owes once it has ended the subscription.
 	//
-	// Its FIN says every group below the end is accounted for, but QUIC does not order streams,
-	// so one can still be in flight. Wait until each group from SUBSCRIBE_START to the end has
-	// a stream (read to its end) or a SUBSCRIBE_DROP. A group reset before its header arrived
-	// never shows up, so give up on missing groups after the subscription's effective max age,
-	// then end cleanly with them skipped like any stale group. That is a wall-clock stopgap for
-	// a presentation-time budget; a publisher sending SUBSCRIBE_DROP for every group it reset
-	// would account for them with no timer at all.
+	// lite-07 counts streams, so skipped sequences owe nothing. Older drafts account for
+	// the range using received headers and SUBSCRIBE_DROP. A counted stream reset before
+	// its header leaves no trace, so the grace still bounds that wait. Streams whose
+	// headers arrived keep reading until their own FIN or reset.
 	#settleTail(entry: SubscribeEntry): Promise<void> {
 		const { tail, track } = entry;
 		// Already the smaller of the subscriber's and the track's max age.
@@ -887,6 +927,7 @@ export class Subscriber {
 		const grace = maxAge > 0 ? maxAge : TAIL_GRACE_MS;
 
 		const complete = () => {
+			if (entry.streams !== undefined) return tail.streams >= entry.streams;
 			// Without SUBSCRIBE_END (older drafts) nothing says which groups are owed.
 			if (entry.end === undefined) return false;
 			// Without SUBSCRIBE_START the publisher served no group at all.
@@ -1005,31 +1046,7 @@ export class Subscriber {
 				scale = timescale.peek();
 			}
 
-			// A non-zero scale means every frame is prefixed with a zigzag-delta timestamp
-			// (the lite-05 FRAME format), which we decode into a Timestamp at that scale.
-			// Scale 0 (pre-lite-05) carries no timestamp, so we wall-clock-stamp.
-			let prevTs = 0n;
-
-			for (;;) {
-				// Only the group's own stream ends it: a track that closes first has already
-				// closed (or aborted) this group through its cache.
-				const done = await race([stream.done(), producer.closed]);
-				if (done !== false) break;
-
-				let timestamp: Time.Timestamp;
-				if (scale !== 0) {
-					prevTs += unzigzag(await stream.u62());
-					timestamp = new Time.Timestamp(Number(prevTs), Time.Timescale(scale));
-				} else {
-					timestamp = Time.Timestamp.now();
-				}
-
-				const size = await stream.u53();
-				const payload = await stream.read(size);
-				if (!payload) break;
-
-				producer.writeFrame({ payload, timestamp });
-			}
+			await readFrames(stream, producer, scale);
 
 			producer.close();
 			stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
@@ -1176,14 +1193,31 @@ export class Subscriber {
 	 * session died, since those tracks were cut off rather than ended.
 	 */
 	close(err?: Error) {
-		this.#closed.abort();
+		// A fetch or setup exchange cut off by the session is incomplete even on a deliberate
+		// close, so it always ends with an error.
+		const cut = err ?? new StreamError(StreamCode.SessionClosed, { message: "session closed" });
+		this.#closed.abort(cut);
 
 		for (const { track } of this.#subscribes.values()) {
 			track.close(err);
 		}
 
 		this.#subscribes.clear();
+
+		// This also releases callers still awaiting acceptance.
+		for (const { group } of this.#fetches.values()) {
+			group.close(cut);
+		}
 	}
+}
+
+// Settles with `step`, or rejects with the group's error once it closes first. A publisher
+// may never answer a FETCH, so Subscriber.close() closing the group is what releases it.
+async function untilClosed<T>(group: netGroup.Producer, step: Promise<T>): Promise<T> {
+	const value = await race([step, group.closed]);
+	const closed = group.closed.peek();
+	if (closed !== undefined) throw closed ?? new Error("fetch closed before it was accepted");
+	return value as T;
 }
 
 /**

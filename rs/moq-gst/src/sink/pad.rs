@@ -52,7 +52,9 @@ struct Media {
 	/// Apply a timeline break before the next valid frame, using the normal write error path.
 	discontinuity: bool,
 	/// A video break closed the group, and a pause resumes mid-GOP, so deltas drop until a keyframe
-	/// opens the next one.
+	/// opens the next one. Stays set once armed: a successful decode may publish nothing (a
+	/// header-only buffer), and a delta only misses its keyframe while no group is open, which for
+	/// video means after a break.
 	keyframe: bool,
 }
 
@@ -69,7 +71,6 @@ impl Media {
 			Err(moq_mux::Error::MissingKeyframe(_)) if self.keyframe => return Ok(false),
 			result => result?,
 		}
-		self.keyframe = false;
 		// One group (one QUIC stream) per audio packet, so the relay forwards it without waiting for
 		// the next.
 		if self.audio {
@@ -1758,6 +1759,32 @@ mod tests {
 		assert_eq!(push(&mut pad, delta.clone(), 100), PushOutcome::Dropped);
 		assert_eq!(push(&mut pad, h264_keyframe_au(), 133), PushOutcome::Published);
 		assert_eq!(push(&mut pad, delta, 166), PushOutcome::Published);
+	}
+
+	// A header-only buffer after a break publishes no frame, so no group opens and the deltas that
+	// follow must still drop rather than invalidate the pad.
+	#[test]
+	fn video_header_only_buffer_keeps_waiting_for_the_keyframe() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("video")));
+		pad.observe_segment(time_segment());
+		// The SPS and PPS of the keyframe AU, without its IDR slice.
+		let keyframe = h264_keyframe_au();
+		let headers = keyframe.slice(..keyframe.len() - 9);
+		let delta = Bytes::from_static(&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]);
+		let now = Instant::now();
+		let push = |pad: &mut Pad, data: Bytes, pts: u64| {
+			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
+				.unwrap()
+		};
+		assert_eq!(push(&mut pad, keyframe.clone(), 0), PushOutcome::Published);
+		pad.discontinuity();
+		assert_eq!(push(&mut pad, headers, 33), PushOutcome::Published);
+		assert_eq!(push(&mut pad, delta.clone(), 66), PushOutcome::Dropped);
+		assert_eq!(push(&mut pad, keyframe, 100), PushOutcome::Published);
+		assert_eq!(push(&mut pad, delta, 133), PushOutcome::Published);
 	}
 
 	// Text and opaque tracks carry no codec jitter, so asking them to measure one is a mistake to report

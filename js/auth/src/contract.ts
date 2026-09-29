@@ -36,6 +36,17 @@ export const PeerSchema = z.object({
 });
 export type Peer = z.infer<typeof PeerSchema>;
 
+/** A credential from a moq-transport SETUP's `AUTHORIZATION TOKEN` option, unparsed. */
+export const TokenSchema = z.object({
+	/** The moq-transport Token Type: 0 is negotiated out of band (a JWT to `moq auth serve`), 1 is a Common Access Token. */
+	kind: z.int().check(z.nonnegative()),
+	/** The token bytes, base64url without padding. The final character must leave no stray bits, as Rust decodes it. */
+	value: z
+		.string()
+		.check(z.regex(/^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-][AQgw]|[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048])?$/)),
+});
+export type Token = z.infer<typeof TokenSchema>;
+
 /** Byte totals for a session, both directions from the relay's point of view. */
 export const BytesSchema = z.object({
 	/** Bytes the relay sent to the peer. */
@@ -64,6 +75,8 @@ const BaseRequestSchema = z.object({
 	path: z.string(),
 	/** The raw query string, without the leading `?`. */
 	query: z.optional(z.string()),
+	/** The credential a moq-transport client presented in its SETUP. */
+	token: z.optional(TokenSchema),
 	/** The direction the client declared at SETUP; absent means both. */
 	role: z.optional(RoleSchema),
 	/** The verified client certificate, when one was presented. */
@@ -73,8 +86,8 @@ const BaseRequestSchema = z.object({
 /**
  * Everything a relay knows about a session, sent to the auth server on every event.
  *
- * Nothing is parsed on the relay's behalf: the server keys policy on the raw `path`
- * and `query`, so no query parameter is special. The same shape carries every event;
+ * Nothing is parsed on the relay's behalf: the server keys policy on the raw `path`,
+ * `query`, and `token`, so no query parameter is special. The same shape carries every event;
  * an `end` adds what the session did.
  */
 export const RequestSchema = z.discriminatedUnion("event", [
@@ -114,6 +127,8 @@ export const GrantSchema = z
 		subscribe: z.optional(PatternListSchema),
 		/** The path the patterns are relative to, replacing the dialed one. Absent means the dialed path. */
 		root: z.optional(z.string()),
+		/** Subtrees read from elsewhere: each path, relative to the root, resolves at the absolute path it maps to. Read-only. */
+		mounts: z.optional(z.record(z.string(), z.string())),
 		/** When the session closes, as whole unix seconds. */
 		expires: z.optional(z.int()),
 		/** How long until the relay asks again, in whole seconds. Zero would be a tight loop. */

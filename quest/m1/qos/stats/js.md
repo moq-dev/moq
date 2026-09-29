@@ -35,7 +35,3 @@ dashboard reads relay stats through the package instead of its own copies.
 
 - [Schema and library](/quest/m1/qos/stats/schema.md) - the wire shape this
   mirrors
-
-## Closes
-
-- [#2735](https://github.com/moq-dev/moq/issues/2735) - close this issue when the quest finishes

@@ -2,12 +2,12 @@ use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
 use super::session::{MoqClient, MoqSession};
-use crate::binary::MoqBinaryConfig;
 use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqSubscription;
 use crate::consumer::MoqTrackConsumer;
 use crate::error::MoqError;
+use crate::flate::MoqFlateConfig;
 use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
 use crate::media::{MoqAudioFormat, MoqAudioInit, MoqFrame, MoqVideoFormat, MoqVideoInit};
 use crate::session::{MoqBackoff, MoqConnectionStatus};
@@ -4546,23 +4546,23 @@ async fn json_tracks_are_advertised_in_the_catalog() {
 	assert!(published_catalog(&broadcast).json.tracks.is_empty());
 }
 
-/// Binary tracks carry their mode and (optional) media type in the catalog.
+/// Flate tracks carry their mode and (optional) media type in the catalog.
 #[tokio::test]
-async fn binary_tracks_are_advertised_in_the_catalog() {
+async fn flate_tracks_are_advertised_in_the_catalog() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let thumb = broadcast
-		.publish_binary_snapshot(
+		.publish_flate_snapshot(
 			"thumbnail".into(),
-			MoqBinaryConfig {
+			MoqFlateConfig {
 				compression: false,
 				mime: Some("image/jpeg".into()),
 			},
 		)
 		.unwrap();
 	let log = broadcast
-		.publish_binary_stream(
+		.publish_flate_stream(
 			"log".into(),
-			MoqBinaryConfig {
+			MoqFlateConfig {
 				compression: false,
 				mime: None,
 			},
@@ -4604,9 +4604,9 @@ async fn data_track_names_cannot_collide() {
 		.unwrap();
 	assert!(
 		broadcast
-			.publish_binary_stream(
+			.publish_flate_stream(
 				"state".into(),
-				MoqBinaryConfig {
+				MoqFlateConfig {
 					compression: false,
 					mime: None,
 				},

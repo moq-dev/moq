@@ -192,8 +192,8 @@ fn valid_reference(source: &moq_mux::Source, broadcast: Option<&moq_net::path::R
 	source.resolve_reference(broadcast).is_some()
 }
 
-/// Find the first catalog rendition for the given codec and build a
-/// [`codec::Track`] subscribed to it, honoring an optional cross-broadcast
+/// Find a catalog rendition for the given codec (the best one, for video) and
+/// build a [`codec::Track`] subscribed to it, honoring an optional cross-broadcast
 /// reference (the rendition's catalog `broadcast` field). Returns `None` if no
 /// rendition matches.
 async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -> Result<Option<codec::Track>> {
@@ -218,12 +218,7 @@ async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -
 				Codec::Av1 => VideoCodecKind::AV1,
 				_ => unreachable!(),
 			};
-			let Some((name, config)) = catalog
-				.video
-				.renditions
-				.iter()
-				.find(|(_, c)| c.codec.kind() == target && valid_reference(source, c.broadcast.as_ref()))
-			else {
+			let Some((name, config)) = pick_video(source, catalog, target) else {
 				return Ok(None);
 			};
 			let track = source.subscribe_track(config.broadcast.as_ref(), name).await?;
@@ -231,6 +226,19 @@ async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -
 		}
 		other => Err(Error::UnsupportedCodec(format!("{other:?}"))),
 	}
+}
+
+/// The best [ranked](hang::catalog::Video::ranked) video rendition in `target`'s codec
+/// that `source` can reach.
+fn pick_video<'a>(
+	source: &moq_mux::Source,
+	catalog: &'a Catalog,
+	target: VideoCodecKind,
+) -> Option<(&'a String, &'a hang::catalog::VideoConfig)> {
+	catalog
+		.video
+		.ranked()
+		.find(|(_, c)| c.codec.kind() == target && valid_reference(source, c.broadcast.as_ref()))
 }
 
 /// Per-rendition pump task. Reads frames, converts the timestamp into the
@@ -343,6 +351,39 @@ mod tests {
 		};
 
 		assert_eq!(egress.catalog_codecs(), vec![Codec::Vp8]);
+	}
+
+	#[test]
+	fn picks_the_best_video_rendition_whatever_its_name() {
+		let origin = produce_origin();
+		let source = moq_mux::Source::new(origin.consume(), "a/pub");
+		let mut catalog = Catalog::default();
+
+		let rendition = |height: u32| {
+			let mut config = VideoConfig::new(H264 {
+				profile: 0x42,
+				constraints: 0,
+				level: 0x1e,
+				inline: false,
+			});
+			config.coded_width = Some(height * 16 / 9);
+			config.coded_height = Some(height);
+			config
+		};
+		// Name order would pick the lowest rendition.
+		catalog.video.renditions.insert("a".to_string(), rendition(360));
+		catalog.video.renditions.insert("b".to_string(), rendition(1080));
+		catalog.video.renditions.insert("c".to_string(), rendition(720));
+		catalog
+			.video
+			.renditions
+			.insert("d".to_string(), VideoConfig::new(VideoCodec::VP8));
+
+		let (name, _) = pick_video(&source, &catalog, VideoCodecKind::H264).unwrap();
+		assert_eq!(name, "b");
+		let (name, _) = pick_video(&source, &catalog, VideoCodecKind::VP8).unwrap();
+		assert_eq!(name, "d");
+		assert!(pick_video(&source, &catalog, VideoCodecKind::AV1).is_none());
 	}
 
 	#[test]

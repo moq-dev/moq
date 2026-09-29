@@ -1,27 +1,25 @@
-# [M] Bindings expose the Gop enum
+# [S] Bindings expose refresh mode
 
 ## Goal
 
-Every binding names the group structure the way the core does: the ffi record,
-the moq-c C struct, and the Python, Swift, Kotlin, Dart, and Go wrappers take
-a keyframe interval or a refresh cycle and nothing else, and `cut()` keeps its
-meaning in both modes. This replaces the published `gop` integer in moq-ffi
-and changes the moq-c C struct layout, so it targets `dev`.
+Every binding names the group structure the way the core does: the moq-ffi
+record and the Python, Swift, Kotlin, Dart, and Go wrappers take a keyframe
+interval or a refresh cycle and nothing else, and `cut()` keeps its meaning in
+both modes.
 
 ## Plan
 
-- `rs/moq-ffi/src/video.rs`: `MoqVideoEncoderOutput.gop: Option<u32>` becomes
-  a `MoqVideoGop` enum record mirroring `Gop`, defaulting to keyframes at two
-  seconds. `MoqVideoProducer::cut()` already has the right name.
-- `rs/moq-c/src/video.rs`: `moq_video_encoder_output` gains a
-  `moq_video_gop` discriminant beside `gop`, zero meaning keyframes, and
-  `moq.h` is regenerated (build.rs does not do it on source-only changes).
-  `cpp/obs/src` follows the header.
+- [Codecs](/quest/m1/ffi-shape/codec.md) already replaces the `gop` integer
+  with a `MoqVideoGop` enum mirroring the non-exhaustive `Gop`, so this adds
+  the refresh variant beside `Keyframe` in `rs/moq-ffi/src/video.rs`, which
+  is additive and lands on `main`. `MoqVideoProducer::cut()` already has the
+  right name.
+- moq-ffi only: the generated C and C++ bindings inherit the variant.
 - Hand-written wrappers and docs per the cross-package table: `py/moq-rs`,
-  `swift/`, `kt/`, `dart/moq`, `go/wrapper/moq`, and `doc/lib/{py,swift,kt,go,dart,c}`.
-  Go gets no uniffi default, so its zero value must read as keyframe mode.
+  `swift/`, `kt/`, `dart/moq`, `go/wrapper`, and `doc/lib/{py,swift,kt,go,dart}`.
 - Run `just test interop --all` for the cross-language check.
 
 ## Required
 
-- [Encode config](/quest/m2/intra-refresh/encode-config.md) - the core enum this mirrors
+- [Encode config](/quest/m2/intra-refresh/encode-config.md) - the core refresh variant this mirrors
+- [Codecs](/quest/m1/ffi-shape/codec.md) - the `MoqVideoGop` enum this extends

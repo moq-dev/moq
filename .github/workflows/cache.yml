@@ -5,8 +5,14 @@ name: Cache
 #
 # Actions scopes cache reads to the current branch plus the default branch, so
 # only caches written here on `main` are reachable from a pull request. This
-# workflow is therefore the single trusted writer, with one store per runner
-# architecture. The action refuses to publish from a pull request regardless.
+# workflow is therefore the single trusted writer. The action refuses to publish
+# from a pull request regardless.
+#
+# The Rust store is ARM64 only, because every job that restores it runs there.
+# Each store is about 6 GB against the repository's 10 GB budget, and Actions
+# evicts least recently used first, so an x86 store nobody on a pull request
+# read was enough to push out the one they all do. The x86 leg still pushes its
+# dev shell, which the x86 jobs substitute.
 #
 # This runs the unscoped suite rather than the diff-scoped one: the point is to
 # leave artifacts for whatever a future PR happens to touch, not to check `main`
@@ -45,13 +51,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04-arm, ubuntu-latest]
+        include:
+          - runner: ubuntu-24.04-arm
+            rust: true
+          - runner: ubuntu-latest
+            rust: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
 
     steps:
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
         with:
           tool-cache: false
 
@@ -96,6 +106,7 @@ jobs:
       # `workflow_dispatch` above prime a cold store; the action otherwise saves
       # only on pushes to the default branch.
       - name: Rust cache
+        if: matrix.rust
         uses: ./.github/actions/rust-cache
         with:
           save-on-dispatch: true
@@ -104,12 +115,13 @@ jobs:
       # and the test artifacts (codegen + linked test binaries). They share
       # little, and a PR usually needs both.
       - name: Check
+        if: matrix.rust
         run: nix develop --command just ci check --all
         env:
           MOQ_STRICT: 1
 
       - name: Test
-        if: ${{ !cancelled() }}
+        if: ${{ matrix.rust && !cancelled() }}
         run: nix develop --command just ci test --all
         env:
           MOQ_STRICT: 1

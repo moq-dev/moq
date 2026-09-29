@@ -2,55 +2,29 @@
 
 ## Goal
 
-moq-ffi and moq-c publish and subscribe a compressed track of opaque frames,
-and every wrapper (Python, Swift, Kotlin, Go, Dart, C) reaches it. A track
-written from C decodes in the browser with `@moq/flate` and vice versa.
+The hand-written wrappers (Python, Swift, Kotlin, Go, Dart) expose flate
+tracks, the snapshot and stream opaque tracks moq-ffi already generates, in
+their own idiom beside the JSON entry. A track published from a wrapper
+decodes in the browser with `@moq/flate` and vice versa.
 
 ## Plan
 
-Bind the track wrapper, not the codec: the bindings' job is to make the group
-discipline unrepresentable to misuse, and a bare `frame()` call across an FFI
-boundary invites the desync the wrapper exists to prevent.
+moq-ffi publishes opaque tracks today (`publish_flate_snapshot` and
+`publish_flate_stream`). Only the generated bindings reach them; no wrapper does. This quest binds the existing
+track modes, not the bare codec: a `frame()` call across the FFI boundary
+invites the window desync the track modes exist to prevent.
 
-moq-ffi, next to `json.rs` and named the same way:
+- moq-ffi has no consume side for these tracks. Add it next to the JSON
+  consumers so each wrapper can read what it writes.
+- Wrappers per the Cross-Package Sync table: `go/wrapper/json.go`,
+  `py/moq-rs/moq/{publish,subscribe}.py`, `swift/Sources/Moq/Json.swift`,
+  `kt/moq`'s `Json.kt` with its `Aliases.kt` re-exports, and
+  `dart/moq/lib/src/aliases.dart` each gain a flate sibling. If
+  [FFI shape](/quest/m1/ffi-shape/README.md) has landed, follow its `flate`
+  namespace instead.
+- Document in `doc/lib/{py,swift,kt,go,dart}` beside the JSON entry.
+- Tests: a round trip in each wrapper that has tests, and one cross-language
+  check that a wrapper-published group decodes with `@moq/flate`. Run
+  `just test interop --all`.
 
-- `MoqBroadcastProducer::publish_flate(name, MoqFlateConfig) -> MoqFlateProducer`
-  with `append_group() -> MoqFlateGroupProducer`, `finish()`, `abort(code)`.
-- `MoqFlateGroupProducer::write_frame(MoqFrame)`, `finish()`, `abort(code)`.
-  A failed write aborts the group and the handle refuses further writes.
-- `MoqBroadcastConsumer::subscribe_flate(name, MoqFlateConfig) -> MoqFlateConsumer`
-  with `next_group() -> Option<MoqFlateGroupConsumer>`, `cancel()`.
-- `MoqFlateGroupConsumer::read_frame() -> Option<MoqFrame>`, `cancel()`.
-- `MoqFlateConfig { level = 6, max_frame_size = 64 MiB }` as `#[uniffi(default)]`
-  literals, with the same drift test `json.rs` keeps against the crate defaults.
-
-Frames cross as `MoqFrame` so the transport timestamp survives, as on the raw
-track API; only the payload is compressed. Explicit groups rather than a flat `append(bytes)` because the window resets
-at the boundary and the caller chooses where that is; a helper that rolls
-groups on a size or count budget can follow if a consumer asks.
-
-moq-c mirrors `moq_publish_json_*` and `moq_consume_json_*`:
-`moq_publish_flate`, `moq_publish_flate_group`, `moq_publish_flate_frame`,
-`moq_publish_flate_group_finish`, `moq_publish_flate_finish`,
-`moq_consume_flate`, `moq_consume_flate_group`, `moq_consume_flate_frame`,
-`moq_consume_flate_frame_free`, `moq_consume_flate_close`, with a
-`moq_flate_config` struct. Follow the terminal-status callback contract for
-the consume side and regenerate `moq.h`.
-
-Wrappers per the Cross-Package Sync table: the uniffi bindings regenerate;
-`go/wrapper/moq/json.go`, `py/moq-rs/moq/{publish,subscribe}.py`,
-`swift/Sources/Moq/Json.swift`, `kt/moq`'s `Json.kt` with its `Aliases.kt`
-re-exports and `Flows.kt` extensions, and `dart/moq` each gain a hand-written
-sibling. Document in `doc/lib/{c,py,swift,kt,go,dart}` beside the JSON entry.
-
-Tests: a moq-ffi round trip next to `json_snapshot_roundtrip`, a moq-c C
-round trip in `src/test.rs`, and one cross-language check that a C-published
-group decodes with the shared vector from the track quest. Run
-`just test interop --all`.
-
-Public API impact: additive on moq-ffi, moq-c, and every wrapper; `main`.
-Wire impact: none.
-
-## Required
-
-- [Track wrapper](/quest/m2/flate/track.md) - the surface being bound
+Public API: additive on moq-ffi and every wrapper. Wire: none.

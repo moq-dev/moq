@@ -219,14 +219,14 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			lite::AnnounceBroadcast::Ended { suffix, .. } => {
 				let path = prefix.join(&suffix);
 				tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
-				run.announced.retire(&path);
+				run.announced.withdraw(&path);
 			}
 			lite::AnnounceBroadcast::EndedId { id } => {
 				// Resolve and retire the id; an unknown or already-retired id is a
 				// protocol violation.
 				let path = prefix.join(&run.decoder.end(id)?);
 				tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
-				run.announced.retire(&path);
+				run.announced.withdraw(&path);
 			}
 			lite::AnnounceBroadcast::Restart { id, hops, cost } => {
 				// Resolve the id; it stays live (the replacement reuses it). An unknown
@@ -2701,7 +2701,7 @@ mod tests {
 			.unwrap();
 		cursor.assert_next_active("room/host");
 		assert!(announced.contains(&path.clone()), "the announce was not recorded");
-		announced.retire(&path.clone());
+		announced.withdraw(&path);
 		cursor.assert_next_ended("room/host");
 	}
 
@@ -2815,8 +2815,8 @@ struct SubStream<S: crate::transport::poll::Session> {
 	tail: kio::Producer<Tail>,
 	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
 	served: Option<u64>,
-	/// The track's exclusive end (SUBSCRIBE_END), once declared.
-	end: Option<u64>,
+	/// The track's exclusive end and stream count (SUBSCRIBE_END), once declared.
+	end: Option<lite::SubscribeEnd>,
 }
 
 impl<S: crate::transport::poll::Session> SubStream<S> {
@@ -2825,7 +2825,7 @@ impl<S: crate::transport::poll::Session> SubStream<S> {
 	/// `None` when nothing says which: drafts before SUBSCRIBE_END only have the FIN.
 	/// Without a SUBSCRIBE_START the publisher served no group at all.
 	fn owed(&self, requested_end: Option<u64>) -> Option<std::ops::Range<u64>> {
-		let end = self.end?;
+		let end = self.end.as_ref()?.group;
 		let end = requested_end.map_or(end, |requested| requested.min(end));
 		Some(self.served.unwrap_or(end)..end)
 	}
@@ -2889,9 +2889,12 @@ impl Announced {
 		self.routes.get_mut(path)?.as_mut()
 	}
 
-	fn retire(&mut self, path: &PathOwned) {
-		// Dropping the route closes its sources.
-		self.routes.remove(path);
+	/// Retire this session's advertisement without invalidating another live
+	/// session from the same peer. Dropping its sources closes their requests.
+	fn withdraw(&mut self, path: &PathOwned) {
+		if let Some(Some(entry)) = self.routes.remove(path) {
+			entry.dynamic.withdrawn();
+		}
 	}
 
 	/// Serve queued requests on every ready route: mint a source per requested
@@ -3602,11 +3605,13 @@ enum ServeMode<S: crate::transport::poll::Session> {
 	/// exactly like the old inline await.
 	Establish(Establish<S>),
 	/// The upstream FIN'd, so the track is over, but QUIC does not order streams: keep
-	/// the subscription routable until every group it owes is accounted for (a stream's
-	/// header or a SUBSCRIBE_DROP), or the grace gives up on one reset before its header.
+	/// the subscription routable until the counted headers arrive (lite-07), or every
+	/// owed group is accounted for (older drafts). The grace bounds a stream reset
+	/// before its header arrived.
 	Tail {
 		settle: Settle,
 		owed: Option<std::ops::Range<u64>>,
+		streams: Option<u64>,
 	},
 }
 
@@ -3653,10 +3658,13 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 						}
 					}
 				}
-				ServeMode::Tail { settle, owed } => {
+				ServeMode::Tail { settle, owed, streams } => {
 					let _ = self.fetches.poll(waiter);
 					if settle
-						.poll(waiter, |tail| owed.clone().is_some_and(|owed| tail.covers(owed)))
+						.poll(waiter, |tail| match streams {
+							Some(streams) => tail.streams() >= *streams,
+							None => owed.clone().is_some_and(|owed| tail.covers(owed)),
+						})
 						.is_ready()
 					{
 						return Poll::Ready(ServeEnd::Finished);
@@ -3769,7 +3777,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 										if let Err(err) = self.serving.finish_at(end.group) {
 											tracing::warn!(track = %serve.name, group = end.group, %err, "invalid subscribe end");
 										}
-										active.end = Some(end.group);
+										active.end = Some(end.clone());
 									}
 									// SUBSCRIBE_START names the first group this feed serves:
 									// the publisher skipped everything below it (e.g. it could
@@ -3831,6 +3839,11 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 								self.mode = ServeMode::Tail {
 									settle: Settle::new(&serve.subscriber.runtime, active.tail.consume(), grace),
 									owed: active.owed(requested_end),
+									streams: active
+										.end
+										.as_ref()
+										.filter(|_| serve.subscriber.version.has_stream_count())
+										.map(|end| end.streams),
 								};
 								continue;
 							}

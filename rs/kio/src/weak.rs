@@ -48,6 +48,14 @@ impl<T> Weak<T> {
 		}
 		.produce()
 	}
+
+	/// Read the state while another handle keeps it allocated, even once the channel
+	/// closed. Counts as neither a producer nor a consumer. `None` once it was dropped.
+	pub fn read<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
+		let state = self.state.upgrade()?;
+		let state = Ref { state: state.lock() };
+		Some(f(&state))
+	}
 }
 
 impl<T> Default for Weak<T> {
@@ -397,6 +405,22 @@ mod test {
 
 		drop(consumer);
 		assert!(weak.upgrade().is_none());
+	}
+
+	/// A closed channel stays readable through the weak handle while any handle keeps
+	/// it allocated, without that read reopening it or counting as demand.
+	#[test]
+	fn weak_reads_a_closed_channel() {
+		let producer = Producer::new(7u32);
+		let weak = producer.downgrade();
+		let consumer = producer.consume();
+
+		drop(producer);
+		assert_eq!(weak.read(|value| *value), Some(7));
+		assert!(weak.upgrade().is_none(), "reading does not reopen it");
+
+		drop(consumer);
+		assert_eq!(weak.read(|value| *value), None);
 	}
 
 	/// An upgrade racing the last producer's drop either loses (no handle) or wins

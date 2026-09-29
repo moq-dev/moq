@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/moq-dev/moq/compare/moq-auth-v0.1.4...moq-auth-v0.1.5) - 2026-09-27
+
+### Added
+
+- *(net)* the SETUP AUTHORIZATION TOKEN option reaches the verifier ([#4278](https://github.com/moq-dev/moq/pull/4278))
+
+### Fixed
+
+- *(auth)* root public and mTLS rules at / ([#4318](https://github.com/moq-dev/moq/pull/4318))
+
+### Other
+
+- *(auth)* run the outage grant test on the real clock ([#4291](https://github.com/moq-dev/moq/pull/4291))
+
+## [0.1.4](https://github.com/moq-dev/moq/compare/moq-auth-v0.1.3...moq-auth-v0.1.4) - 2026-09-26
+
+### Fixed
+
+- *(auth)* keep accepted grants on fixed expiry deadlines ([#4237](https://github.com/moq-dev/moq/pull/4237))
+
 ## [0.1.3](https://github.com/moq-dev/moq/compare/moq-auth-v0.1.2...moq-auth-v0.1.3) - 2026-09-26
 
 ### Other

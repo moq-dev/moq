@@ -1,7 +1,7 @@
 use crate::runtime::Timers as _;
 use crate::{SessionError, announce, frame, group, origin, track};
 use std::{
-	collections::HashMap,
+	collections::{BTreeSet, HashMap},
 	ops::Bound,
 	sync::{
 		Arc,
@@ -203,11 +203,10 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		stream: &mut Stream<S, Version>,
 		origin: &origin::Consumer,
 		announced: &mut announce::Consumer,
-		prefix: impl crate::AsPath,
 		self_origin: Hop,
 		version: Version,
 	) -> Result<(), Error> {
-		let mut run = AnnounceRun::new(prefix.as_path().to_owned(), self_origin, version);
+		let mut run = AnnounceRun::new(self_origin, version);
 		kio::wait(|waiter| run.poll(stream, origin, announced, waiter)).await
 	}
 }
@@ -529,10 +528,10 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 							| Error::Stream(crate::StreamError::Cancel)
 							| Error::Session(crate::SessionError::Cancel)
 							| Error::Transport(_) => {
-								tracing::debug!(prefix = %origin.absolute(&run.prefix), "announcing cancelled");
+								tracing::debug!(prefix = %origin.absolute(""), "announcing cancelled");
 							}
 							err => {
-								tracing::warn!(%err, prefix = %origin.absolute(&run.prefix), "announcing error");
+								tracing::warn!(%err, prefix = %origin.absolute(""), "announcing error");
 							}
 						}
 						self.stream.take().expect("stream present").writer.abort(&err);
@@ -550,13 +549,16 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		// fatal stream close), rather than erroring, which would reset the stream.
 		// The wire prefix decodes as a literal path; convert it explicitly to its
 		// subtree grant, refusing anything that cannot be a subtree.
+		// The cursor is rooted at the prefix so every update arrives named as its
+		// wire suffix, a route covering the prefix included: that one presents at
+		// the root, as the empty suffix.
 		let scope = crate::Pattern::subtree(prefix.as_str())
-			.map(crate::Patterns::from)
+			.map(|subtree| subtree.rebase(prefix.as_str()))
 			.unwrap_or_default();
 		let origin = self
 			.shared
 			.origin
-			.scope("", &scope)
+			.scope(&prefix, &scope)
 			.unwrap_or_else(|_| self.shared.origin.empty());
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
@@ -569,7 +571,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 			false => origin,
 		};
 		let announced = origin.announced();
-		let run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
+		let run = AnnounceRun::new(self.shared.self_origin, self.shared.version);
 		self.state = AnnounceState::Run { origin, announced, run };
 	}
 }
@@ -577,7 +579,6 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 /// The announce loop's state, minus the handles it borrows per poll so the test
 /// shim can supply its own.
 struct AnnounceRun {
-	prefix: crate::PathOwned,
 	self_origin: Hop,
 	version: Version,
 	// Lite06+: announce ids. Every `active` we send implicitly assigns the next
@@ -600,25 +601,14 @@ enum AnnouncePhase {
 }
 
 impl AnnounceRun {
-	fn new(prefix: crate::PathOwned, self_origin: Hop, version: Version) -> Self {
+	fn new(self_origin: Hop, version: Version) -> Self {
 		Self {
-			prefix,
 			self_origin,
 			version,
 			encoder: lite::AnnounceEncoder::new(version),
 			live: HashMap::new(),
 			phase: AnnouncePhase::Init,
 		}
-	}
-
-	/// Where an update travels on this stream: its prefix relative to the requested
-	/// prefix, which the origin's scope guarantees it sits under.
-	fn suffix(&self, update: &announce::Announce) -> crate::PathOwned {
-		update
-			.prefix
-			.strip_prefix(&self.prefix)
-			.expect("origin returned a route outside the requested prefix")
-			.to_owned()
 	}
 
 	/// The chain and cost to put on the wire for `route`, or `None` when it must
@@ -717,7 +707,7 @@ impl AnnounceRun {
 						announce::Event::Live => continue,
 					};
 					let absolute = origin.absolute(&update.prefix);
-					let suffix = self.suffix(&update);
+					let suffix = update.prefix;
 
 					if active {
 						if self.outgoing(&update.route, &absolute).is_none() {
@@ -752,7 +742,7 @@ impl AnnounceRun {
 						announce::Event::Live => continue,
 					};
 					let absolute = origin.absolute(&update.prefix);
-					let suffix = self.suffix(&update);
+					let suffix = update.prefix;
 
 					if active {
 						let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
@@ -832,7 +822,7 @@ impl AnnounceRun {
 			};
 
 			let absolute = origin.absolute(&update.prefix);
-			let suffix = self.suffix(&update);
+			let suffix = update.prefix;
 
 			if !active {
 				self.retract(stream, suffix, &absolute)?;
@@ -1775,7 +1765,7 @@ mod announce_test {
 		let task = tokio::spawn(async move {
 			let mut announced = consumer.announced();
 			let self_origin = consumer.hop();
-			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, "", self_origin, VERSION).await
+			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION).await
 		});
 		settle().await;
 
@@ -1879,7 +1869,7 @@ mod announce_test {
 		let task = tokio::spawn(async move {
 			let mut announced = consumer.announced();
 			let self_origin = consumer.hop();
-			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, "", self_origin, VERSION).await
+			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION).await
 		});
 		settle().await;
 
@@ -2245,6 +2235,10 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	// exclusive final sequence (which may be ahead of the live edge).
 	emit_range: bool,
 	start_sent: bool,
+	// The first servable group, held until the source resolves where its feed starts.
+	first: Option<group::Consumer>,
+	// Groups skipped for a missing head before the start resolved, which it must not name.
+	skipped: BTreeSet<u64>,
 	end_sent: bool,
 	// Lite07+ sends SUBSCRIBE_END with the stream count instead of as soon as the
 	// boundary is known, once every group below it has opened its stream.
@@ -2281,6 +2275,8 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			track_priority_tx,
 			emit_range,
 			start_sent: false,
+			first: None,
+			skipped: BTreeSet::new(),
 			end_sent: false,
 			count_streams,
 			datagrams,
@@ -2331,6 +2327,27 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				continue;
 			}
 
+			// The first group waits for the source to resolve where its feed starts; datagrams
+			// keep flowing meanwhile.
+			if let Some(group) = self.first.take() {
+				match self.track.poll_start(waiter) {
+					Poll::Ready(source) => {
+						self.start(group, source, stream)?;
+						continue;
+					}
+					Poll::Pending => {
+						self.first = Some(group);
+						if self.datagrams
+							&& let Poll::Ready(Some(datagram)) = self.track.poll_recv_datagram(waiter)?
+						{
+							self.ctx.serve_datagram(datagram);
+							continue;
+						}
+						return Poll::Pending;
+					}
+				}
+			}
+
 			// One cursor drives the whole subscription: poll the cap-aware arrival-order
 			// group and, when enabled, the next best-effort datagram. Groups are polled
 			// first so a datagram burst can't starve them; datagrams flow whenever no
@@ -2339,45 +2356,20 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			if let Poll::Ready(res) = poll_recv_next(&mut self.track, self.datagrams, emit_boundary, waiter) {
 				match res? {
 					Recv::Group(mut group) => {
-						let sequence = group.sequence;
 						if !position_group(&mut group, self.start_frame, self.end_frame) {
 							// Its head is gone, and this subscriber didn't ask for a
 							// partial group. Skip it rather than open a stream that can
 							// only be reset; the next servable group resolves the start.
-							tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "skipping group with a missing head");
+							tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, "skipping group with a missing head");
+							if self.emit_range && !self.start_sent {
+								self.skipped.insert(group.sequence);
+							}
 							continue;
 						}
-						if self.emit_range && !self.start_sent {
-							self.start_sent = true;
-							// Only the group: the subscriber derives the start frame from
-							// its own request (see `lite::SubscribeStart`).
-							stream
-								.writer
-								.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
-									group: sequence,
-								}))?;
-							// SUBSCRIBE_OK is an implicit drop of everything below the
-							// resolved start (the subscriber records it as a permanent
-							// miss), so a lower group arriving late must not be served
-							// after all. A widening SUBSCRIBE_UPDATE re-lowers the floor,
-							// renegotiating the resolved start along with the demand.
-							self.track.start_at(sequence);
+						match self.emit_range && !self.start_sent {
+							true => self.first = Some(group),
+							false => self.serve(group),
 						}
-
-						let frame_start = group.index();
-						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
-
-						// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
-						let current_priority = self.ctx.track_priority_current();
-						// The subscribe id scopes the group tie-break: one queue serves every
-						// subscription on the session, and only groups of the same one may be
-						// ranked against each other by sequence.
-						let handle = self
-							.ctx
-							.priority
-							.insert(Priority::new(current_priority, self.ctx.id, sequence));
-						self.children
-							.push(GroupServe::new(self.ctx.clone(), sequence, frame_start, handle, group));
 					}
 					Recv::Datagram(datagram) => self.ctx.serve_datagram(datagram),
 					Recv::Boundary(group) => {
@@ -2411,6 +2403,63 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 			return Poll::Pending;
 		}
+	}
+}
+
+impl<S: crate::transport::poll::Session> TrackRun<S> {
+	/// Send SUBSCRIBE_START for the first servable group, then serve it.
+	///
+	/// A relay caches groups in upstream arrival order, and a newer group's stream can
+	/// beat an older one, so the first group here need not be the oldest the source
+	/// serves. `source` is where the source's feed starts, raised to this cursor's floor,
+	/// so the resolved start is the lower of the two: resolving from the later group would
+	/// drop the older one for good.
+	fn start(
+		&mut self,
+		group: group::Consumer,
+		source: Option<u64>,
+		stream: &mut Stream<S, Version>,
+	) -> Result<(), Error> {
+		let mut start = source.map_or(group.sequence, |source| source.min(group.sequence));
+		// A skipped group is never served, so it cannot be where the feed starts. This stops
+		// at the held group at the latest, since it was not skipped.
+		while self.skipped.contains(&start) {
+			start += 1;
+		}
+		self.skipped.clear();
+		self.start_sent = true;
+		// Only the group: the subscriber derives the start frame from its own request
+		// (see `lite::SubscribeStart`).
+		stream
+			.writer
+			.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart { group: start }))?;
+		// SUBSCRIBE_START is an implicit drop of everything below the resolved start (the
+		// subscriber records it as a permanent miss), so a lower group arriving late must
+		// not be served after all. A widening SUBSCRIBE_UPDATE re-lowers the floor,
+		// renegotiating the resolved start along with the demand. Raised, not assigned: an
+		// update that landed while the group was held may already have raised it past.
+		self.track.raise_start_to(start);
+		self.serve(group);
+		Ok(())
+	}
+
+	/// Open a group machine for `group`.
+	fn serve(&mut self, group: group::Consumer) {
+		let sequence = group.sequence;
+		let frame_start = group.index();
+		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
+
+		// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
+		let current_priority = self.ctx.track_priority_current();
+		// The subscribe id scopes the group tie-break: one queue serves every
+		// subscription on the session, and only groups of the same one may be
+		// ranked against each other by sequence.
+		let handle = self
+			.ctx
+			.priority
+			.insert(Priority::new(current_priority, self.ctx.id, sequence));
+		self.children
+			.push(GroupServe::new(self.ctx.clone(), sequence, frame_start, handle, group));
 	}
 }
 
@@ -3135,6 +3184,155 @@ mod serve_group_test {
 		assert_eq!(*log.writes.lock().unwrap(), [0, 1, 0, 1, 2, 3, 2]);
 	}
 
+	/// A lite-07 run over a relay's track, whose upstream subscription still waits on the
+	/// source's SUBSCRIBE_START, on a subscribe stream the test can push updates onto.
+	struct RelayRun {
+		run: TrackRun<ScriptedSession>,
+		stream: Stream<ScriptedSession, Version>,
+		session: ScriptedSession,
+		opens: Arc<Opens>,
+	}
+
+	impl RelayRun {
+		/// Subscribe to `track` from `start_group`.
+		async fn new(track: &mut track::Producer, start_group: u64) -> Self {
+			track.request_start(Some(0)).unwrap();
+			let subscription = track::Subscription::default()
+				.with_start(track::Position::group(start_group))
+				.with_max_age(Duration::from_secs(30));
+			let subscriber = track.subscribe(subscription);
+
+			let mut session = ScriptedSession::new(Vec::new());
+			let (send, recv) = futures::future::poll_fn(|cx| {
+				<ScriptedSession as web_transport_trait::poll::Session>::poll_open_bi(&mut session, cx)
+			})
+			.await
+			.unwrap();
+			let stream = Stream::<ScriptedSession, Version> {
+				writer: Writer::new(send, Version::Lite07),
+				reader: crate::coding::Reader::new(recv, Version::Lite07),
+			};
+			let track_priority = kio::Producer::new(0u8);
+			let opens = Arc::<Opens>::default();
+			let ctx = Subscription {
+				session: session.clone(),
+				id: 0,
+				track_name: "test".into(),
+				priority: PriorityQueue::default(),
+				track_priority: track_priority.consume(),
+				track_priority_seen: 0,
+				version: Version::Lite07,
+				timescale: Some(crate::Timescale::default()),
+				opens: opens.clone(),
+			};
+			let bounds = Bounds {
+				start_group: Some(start_group),
+				start_frame: 0,
+				end_group: None,
+				end_frame: None,
+			};
+			Self {
+				run: TrackRun::new(ctx, subscriber, bounds, track_priority),
+				stream,
+				session,
+				opens,
+			}
+		}
+
+		/// Drive the run until it parks, which it must.
+		fn settle(&mut self) {
+			let Self { run, stream, .. } = self;
+			let res = kio::wait(|waiter| run.poll(stream, waiter)).now_or_never();
+			assert!(res.is_none(), "the run ended");
+		}
+
+		/// How many group streams the run opened.
+		fn opened(&self) -> u64 {
+			self.opens.opened.load(Ordering::Relaxed)
+		}
+
+		/// Whether the first thing written was SUBSCRIBE_START at `group`.
+		fn started_at(&self, group: u64) -> bool {
+			let start = lite::SubscribeResponse::Start(lite::SubscribeStart { group });
+			let start = start.encode_bytes(Version::Lite07).unwrap();
+			self.session.log.writes.lock().unwrap().starts_with(&start)
+		}
+	}
+
+	/// A SUBSCRIBE_UPDATE landing while the first group waits on the source's start keeps
+	/// the floor it raised: resolving the start from the held group must not lower it.
+	#[tokio::test]
+	async fn held_first_group_keeps_an_updated_floor() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut relay = RelayRun::new(&mut track, 0).await;
+
+		write_group(&mut track, 5, 0);
+		relay.settle();
+
+		// The subscriber moves its start past the held group before the source resolves.
+		let update = lite::SubscribeUpdate {
+			priority: 0,
+			max_age: Duration::ZERO,
+			start_group: Some(7),
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		};
+		relay.session.push(&update.encode_bytes(Version::Lite07).unwrap());
+		relay.settle();
+
+		track.start_at(0).unwrap();
+		relay.settle();
+		assert_eq!(relay.opened(), 1, "the held group is served");
+
+		// Group 6 is below the updated floor.
+		write_group(&mut track, 6, 6);
+		relay.settle();
+		assert_eq!(relay.opened(), 1, "served a group below the floor");
+	}
+
+	/// A source whose feed starts below the subscriber's floor serves the floor's group, so
+	/// a newer group arriving first must not resolve the start past it.
+	#[tokio::test]
+	async fn held_first_group_resolves_to_the_floor_under_the_source() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut relay = RelayRun::new(&mut track, 5).await;
+
+		write_group(&mut track, 6, 6);
+		relay.settle();
+		track.start_at(0).unwrap();
+		relay.settle();
+		assert_eq!(relay.opened(), 1, "the held group is served");
+
+		write_group(&mut track, 5, 5);
+		relay.settle();
+		assert_eq!(relay.opened(), 2, "dropped the floor's group");
+		assert!(relay.started_at(5));
+	}
+
+	/// A group skipped for a missing head before the start resolves is never served, so
+	/// SUBSCRIBE_START must not name it, even where the source's feed starts.
+	#[tokio::test]
+	async fn held_first_group_starts_past_a_skipped_head() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut relay = RelayRun::new(&mut track, 5).await;
+
+		// Group 5's first frame is gone.
+		let mut headless = track.create_group(group::Info { sequence: 5 }).unwrap();
+		headless.start_at(1).unwrap();
+		headless
+			.write_frame(Timestamp::from_millis(5).unwrap(), b"x".as_slice())
+			.unwrap();
+		headless.finish().unwrap();
+		write_group(&mut track, 6, 6);
+		relay.settle();
+
+		track.start_at(5).unwrap();
+		relay.settle();
+		assert_eq!(relay.opened(), 1, "the held group is served");
+		assert!(relay.started_at(6), "named the skipped group");
+	}
+
 	/// A track that ends without a group still ends the subscription, with no stream owed.
 	#[tokio::test]
 	async fn lite07_end_counts_zero_streams() {
@@ -3279,7 +3477,6 @@ mod tests {
 			&mut stream,
 			&consumer,
 			&mut announced,
-			crate::Path::new(""),
 			self_origin,
 			Version::Lite01,
 		));

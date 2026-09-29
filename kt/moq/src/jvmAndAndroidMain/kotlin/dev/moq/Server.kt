@@ -30,9 +30,8 @@ class Server internal constructor(
     private val publishOrigin: OriginProducer?,
 ) : AutoCloseable {
     /**
-     * Create a live broadcast at [path], served to incoming sessions.
+     * Create an unannounced broadcast at [path], served to incoming sessions once announced.
      *
-     * The origin announces the path so subscribers can discover it, becoming visible
      * Advertise it with `announce` after populating tracks. `end()` ends it for
      * good; `close()` (or `use`) releases the handle, which ends it once no
      * `dynamic()` handle remains.

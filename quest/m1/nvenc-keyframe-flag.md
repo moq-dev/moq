@@ -17,7 +17,7 @@ Annex-B slice type.
   mean what the moq-mux importer treats as a group start (an H.264 IDR, an
   H.265 IRAP), so check both codecs on hardware.
 - The NVIDIA tests skip under the Nix shell unless the driver libraries are on
-  the loader path; see [NVDEC teardown](/quest/m1/nvdec-teardown.md).
+  the loader path; see [GPU CI](/quest/m1/gpu-ci.md).
 
 ## Related
 

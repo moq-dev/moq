@@ -70,6 +70,17 @@ const ClaimsFields = {
 	exp: z.optional(z.int()),
 	/** Issued-at time, as a whole unix timestamp in seconds. */
 	iat: z.optional(z.int()),
+	/** Not-before time, as a whole unix timestamp in seconds. Enforced by verification. */
+	nbf: z.optional(z.int()),
+};
+
+// Registered claims that narrow nothing: an issuer's bookkeeping, read and dropped.
+// Every other claim is refused, since an unknown one may narrow the grant, and a
+// misspelled `root` would otherwise widen it to everything.
+const IgnoredFields = {
+	iss: z.optional(z.unknown()),
+	sub: z.optional(z.unknown()),
+	jti: z.optional(z.unknown()),
 };
 
 const PrefixListSchema = z.union([z.string(), z.array(z.string())]);
@@ -82,12 +93,18 @@ const PrefixListSchema = z.union([z.string(), z.array(z.string())]);
  * exactly what it says: `alice` is one broadcast, `alice/**` is a subtree, and `**` is
  * everything under the root. Legacy `moq-token` claims read too, each `put`/`get`
  * prefix `p` as the subtree `p/**`, and signing writes that form whenever it says the
- * same thing. Any other field fails verification.
+ * same thing. The registered `iss`, `sub`, and `jti` claims are read and dropped; any
+ * other field fails verification.
  */
 export const ClaimsSchema = z
 	.pipe(
-		z.strictObject({ ...ClaimsFields, put: z.optional(PrefixListSchema), get: z.optional(PrefixListSchema) }),
-		z.transform(decodeGrants),
+		z.strictObject({
+			...ClaimsFields,
+			...IgnoredFields,
+			put: z.optional(PrefixListSchema),
+			get: z.optional(PrefixListSchema),
+		}),
+		z.transform(({ iss: _iss, sub: _sub, jti: _jti, ...claims }, ctx) => decodeGrants(claims, ctx)),
 	)
 	.check(
 		// Emptiness, not just presence: `publish: []` grants nothing, and the Rust crate

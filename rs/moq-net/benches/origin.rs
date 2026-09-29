@@ -81,6 +81,55 @@ fn bench_announce(c: &mut Criterion) {
 	group.finish();
 }
 
+/// `bench_announce` read through mounts: `publishers` routes under the fleet-wide
+/// `.svc/p0`, watched by `subscribers` project sessions that each mount it at
+/// their own `<project>/.svc`. Every mount aliases the one target, the worst
+/// case, so each announcement reaches every mounted cursor. Compare against
+/// `origin/announce` for what a mount adds per cursor.
+fn bench_announce_mounted(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/announce_mounted");
+	for (publishers, subscribers) in SHAPES {
+		let id = BenchmarkId::from_parameter(format!("{publishers}p_{subscribers}s"));
+		group.bench_function(id, |b| {
+			let (producer, _driver) = origin::Producer::new(origin::Config::default());
+			let _publishers: Vec<_> = (0..publishers)
+				.map(|i| {
+					producer
+						.publish(format!(".svc/p0/{i}"), origin::Route::default())
+						.unwrap()
+				})
+				.collect();
+			let mut cursors: Vec<announce::Consumer> = (0..subscribers)
+				.map(|project| {
+					producer
+						.mount(format!("p{project}/.svc"), ".svc/p0")
+						.unwrap()
+						.scope(format!("p{project}"), &Patterns::from(Pattern::all()))
+						.unwrap()
+						.consume()
+						.with_hidden(true)
+						.announced()
+				})
+				.collect();
+			for cursor in &mut cursors {
+				while cursor.next().now_or_never().flatten().is_some() {}
+			}
+
+			b.iter(|| {
+				let handle = producer.publish(".svc/p0/incoming", origin::Route::default()).unwrap();
+				for cursor in &mut cursors {
+					cursor.next().now_or_never().flatten().expect("announce delivered");
+				}
+				drop(handle);
+				for cursor in &mut cursors {
+					cursor.next().now_or_never().flatten().expect("retract delivered");
+				}
+			});
+		});
+	}
+	group.finish();
+}
+
 /// A relay's own stats fan-out: `.stats/<project>/node/<node>` for every project
 /// on every node, watched by one cursor per peer, each scoped to one project.
 /// Cursors differ in scope, so none can be collapsed, and an announcement under
@@ -377,6 +426,7 @@ fn bench_handoff(c: &mut Criterion) {
 criterion_group!(
 	benches,
 	bench_announce,
+	bench_announce_mounted,
 	bench_announce_fleet,
 	bench_announce_duplicate,
 	bench_announce_fronts,

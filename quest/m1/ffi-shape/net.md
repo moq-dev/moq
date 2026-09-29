@@ -40,9 +40,7 @@ are renamed.
   this line removes, but dropping it costs every quick-start a hop (raised in
   #3959).
 
-moq-c's affected symbols follow.
-
-Public API: breaking in every binding and moq-c. Wire: none.
+Public API: breaking in every binding. Wire: none.
 
 ## Required
 

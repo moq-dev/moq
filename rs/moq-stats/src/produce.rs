@@ -901,16 +901,16 @@ fn requested_track_shape(name: &str) -> Option<RequestedShape> {
 	})
 }
 
-/// Change-detection state for one `(path, tier, side)` slot, owned by the
-/// publish task. The task is single-threaded so this needs no atomics.
+/// Emission state for one `(path, tier, side)` slot, owned by the publish
+/// task. The task is single-threaded so this needs no atomics.
 #[derive(Default)]
 struct SlotState {
-	/// Last [`Traffic`] we emitted for this slot, used to detect changes that
-	/// warrant re-emission.
-	prev_emitted: Option<Traffic>,
+	/// Whether any counter on this side has moved since the registry created
+	/// the entry.
+	moved: bool,
 }
 
-/// Change-detection state for one `(path, tier)`: a [`SlotState`] per side.
+/// Emission state for one `(path, tier)`: a [`SlotState`] per side.
 #[derive(Default)]
 struct SideSlots {
 	publisher: SlotState,
@@ -919,7 +919,7 @@ struct SideSlots {
 	seen: u64,
 }
 
-/// Change-detection state for one session-track root, mirroring [`SlotState`].
+/// Change-detection state for one session-track root.
 #[derive(Default)]
 struct SessionSlotState {
 	prev_emitted: Option<Presence>,
@@ -927,40 +927,28 @@ struct SessionSlotState {
 	seen: u64,
 }
 
-/// Per-drain work for a single `(side, tier)` slot: update the slot's
-/// `prev_emitted` and hand `snap` to `emit` iff the slot is live or changed
-/// this drain.
+/// Per-drain work for a single `(side, tier)` slot: hand `snap` to `emit` once
+/// the side has moved, on every drain until the registry drops the entry.
 fn process_slot(snap: Traffic, slot_state: &mut SlotState, emit: impl FnOnce(Traffic)) {
-	// A slot is live while any started counter still exceeds its `*_ended`
-	// counterpart: a guard is held, so a subscription could begin at any
-	// moment. Live slots are emitted every drain so a downstream "currently
-	// active" view always sees the full set. Once every pair is equal no
-	// traffic can flow and the entry is on its way out (the registry pruned
-	// it as soon as the last guard released its handle).
-	let live = !snap.is_idle();
-
-	// Include the entry whenever it's live OR its snapshot changed this
-	// drain. Change-driven inclusion catches bumps since the previous drain
-	// (incl. sub-interval flickers) and emits the final close snapshot on the
-	// drain a slot transitions to fully closed.
+	// A side can go idle while its entry lives on: the last viewer leaves but
+	// the publisher still holds the path, so the egress counters are kept and
+	// resume where they stopped. Omitting it would make its return look like a
+	// fresh entry to a reader diffing frames, and the old total would count
+	// twice. So once moved, a side stays in every frame until `flush` drops its
+	// state with the entry, and a path missing from a frame really restarted.
 	//
-	// `None` (slot never emitted) is treated as the default Traffic so a
-	// first-drain all-zeros snap on an unused tier-side slot doesn't count
-	// as a "change". Without this, every entry would surface in all four
-	// tracks with zeros on the drain after creation even if only one slot
-	// is actually in use.
-	let prev_snap = slot_state.prev_emitted.unwrap_or_default();
-	let changed = snap != prev_snap;
-	if changed {
-		slot_state.prev_emitted = Some(snap);
-	}
-	if live || changed {
+	// A side that never moved stays out, so an entry with traffic on one side
+	// does not surface on the other track as zeros. A live side has a started
+	// counter above zero, so it has always moved.
+	slot_state.moved |= snap != Traffic::default();
+	if slot_state.moved {
 		emit(snap);
 	}
 }
 
-/// Per-drain work for one session-track root: same live-or-changed rule as
-/// [`process_slot`].
+/// Per-drain work for one session-track root: emit it while a session is
+/// connected, and on the drain its counters change. A root's counters are
+/// dropped with its last session, so it never idles in the registry.
 fn process_session_slot(snap: Presence, slot_state: &mut SessionSlotState, emit: impl FnOnce(Presence)) {
 	let live = snap.active() > 0;
 	let prev_snap = slot_state.prev_emitted.unwrap_or_default();
@@ -1282,8 +1270,7 @@ mod tests {
 		// A subscription that opens AND closes within a single drain window
 		// must still surface as a complete broadcasts start/end cycle. The
 		// cumulative counters retain broadcasts_started=1/broadcasts_ended=1, and the
-		// change-driven inclusion surfaces the entry even though it's net-idle
-		// by drain time.
+		// entry surfaces because it moved, even though it's net-idle by drain time.
 		let (producer, origin) = test_producer(Some("sjc"));
 		{
 			// Subscribe, read one 123-byte frame, then drop everything within the
@@ -1303,6 +1290,66 @@ mod tests {
 		assert_eq!(snap.broadcasts_ended, 1);
 		assert_eq!(snap.bytes, 123);
 		assert_eq!(snap.frames, 1);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_path_stays_in_the_frame_while_its_counters_live() {
+		// The publisher holds `foo/bar` throughout while viewers come and go, so
+		// the registry keeps its egress counters between them. A reader diffing
+		// frames must see the path the whole time: if it vanished, its return
+		// (carrying the first viewer's bytes) would look like a fresh entry.
+		let (producer, origin) = test_producer(Some("sjc"));
+		let registry = producer.registry();
+		let data = produce_origin();
+		let source = data
+			.clone()
+			.with_stats(registry.tier(Tier::default()).session("publisher"))
+			.publish("foo/bar", origin::Route::default())
+			.expect("publish");
+		let mut video = source.create_track("video", None).expect("create_track");
+		let egress = data
+			.consume()
+			.with_stats(registry.tier(Tier::default()).session("viewer"));
+
+		async fn view(egress: &origin::Consumer, video: &mut track::Producer, size: usize) {
+			let broadcast = egress.request_broadcast("foo/bar").await.expect("resolve");
+			let mut sub = broadcast
+				.track("video")
+				.expect("track")
+				.subscribe(None)
+				.await
+				.expect("subscribe");
+			let mut group = video.append_group().expect("group");
+			group.write_frame(Timestamp::ZERO, vec![0u8; size]).expect("write");
+			group.finish().expect("finish");
+			let mut group = sub.recv_group().await.expect("recv").expect("group");
+			while group.read_frame().await.expect("read").is_some() {}
+		}
+
+		view(&egress, &mut video, 1000).await;
+		let (_, stats) = announced(&origin).await;
+		for _ in 0..3 {
+			drive_tick().await;
+			let frame = read_last_frame(&stats, "publisher.json").await;
+			let snap = frame.get("foo/bar").expect("kept while its counters live");
+			assert_eq!(snap.bytes, 1000);
+			assert!(snap.is_idle(), "the viewer left");
+		}
+
+		view(&egress, &mut video, 500).await;
+		drive_tick().await;
+		let frame = read_last_frame(&stats, "publisher.json").await;
+		assert_eq!(frame["foo/bar"].bytes, 1500, "resumed, not restarted");
+
+		// Once nothing holds the path the registry drops it, and so does the frame.
+		drop((video, source));
+		drive_tick().await;
+		drive_tick().await;
+		let frame = read_last_frame(&stats, "publisher.json").await;
+		assert!(
+			!frame.contains_key("foo/bar"),
+			"dropped with its counters, got {frame:?}"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]

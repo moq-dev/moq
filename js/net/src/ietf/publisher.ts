@@ -3,7 +3,7 @@ import type * as broadcast from "../broadcast.ts";
 import { controlTimeout, error, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { type Route, routesEqual } from "../hop.ts";
-import { hiddenBelow, hooks } from "../internal.ts";
+import { hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
@@ -11,7 +11,7 @@ import { Milli, Timescale } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
-import { type Advertised, wireOf } from "../wire.ts";
+import { type Advertised, type Advertisements, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
 import { requestReason, toRequestCode } from "./error.ts";
@@ -161,7 +161,7 @@ export class Publisher {
 	// session leaves its broadcasts alone. The namespaces are advertised with an unsolicited
 	// PUBLISH_NAMESPACE (see {@link runPublishNamespaces}), or on request if the peer asked
 	// for that (see {@link runSubscribeNamespace}).
-	#advertised: Getter<ReadonlyMap<Path.Valid, Advertised> | undefined>;
+	#advertised: Getter<Advertisements | undefined>;
 	#publish?: OriginConsumer;
 
 	// What every advertisement carries on a session that negotiated the MoQ Cluster
@@ -518,7 +518,7 @@ export class Publisher {
 			});
 
 			try {
-				await hooks.guardGroup(group, header.encode(stream, this.#session.version));
+				await hooks.guardGroup(group, () => header.encode(stream, this.#session.version));
 				// The first written object goes on the wire as its absolute id, so a trimmed
 				// head shows the true numbering rather than a silently renumbered group.
 				let first = true;
@@ -547,8 +547,7 @@ export class Publisher {
 						const obj = new Frame({ payload: read.frame.payload, timestamp: read.frame.timestamp });
 						const delta = first ? read.sequence : 0;
 						first = false;
-						await hooks.guardGroup(
-							group,
+						await hooks.guardGroup(group, () =>
 							obj.encode(stream, header.flags, timescale, this.#session.version, delta),
 						);
 					} finally {
@@ -785,7 +784,7 @@ export class Publisher {
 				// waits for its reply only notifies listeners already registered.
 				// TODO Make a better helper within Signals.
 				let dispose!: Dispose;
-				const changed = new Promise<ReadonlyMap<Path.Valid, Advertised> | undefined>((resolve) => {
+				const changed = new Promise<Advertisements | undefined>((resolve) => {
 					dispose = this.#advertised.changed(resolve);
 				});
 
@@ -795,12 +794,7 @@ export class Publisher {
 					break;
 				}
 
-				const updated = new Map<Path.Valid, Advertised>();
-				for (const [covered, snap] of advertised) {
-					const suffix = Path.stripPrefix(prefix, covered);
-					if (suffix === null || !carries(covered)) continue;
-					updated.set(suffix, snap);
-				}
+				const updated = presented(prefix, advertised, carries);
 
 				// A namespace that is gone, or that a republish replaced, takes its refusal with
 				// it: the peer refused a broadcast, not a path forever, so a different one at
@@ -915,7 +909,7 @@ export class Publisher {
 				// through it and leave the namespace unadvertised until something unrelated
 				// changed.
 				// TODO Make a better helper within Signals.
-				const changed = new Promise<ReadonlyMap<Path.Valid, Advertised> | undefined>((resolve) => {
+				const changed = new Promise<Advertisements | undefined>((resolve) => {
 					dispose = this.#advertised.changed(resolve);
 				});
 
@@ -926,10 +920,10 @@ export class Publisher {
 				}
 
 				const updated = new Map<Path.Valid, Advertised>();
-				for (const [covered, snap] of advertised) {
+				for (const [covered, candidates] of advertised) {
 					// Unasked, a hidden namespace stays off the wire (MoQ Hidden).
-					if (hiddenBelow(Path.empty(), covered)) continue;
-					updated.set(covered, snap);
+					if (hiddenBelow(Path.empty(), covered) || candidates.length === 0) continue;
+					updated.set(covered, candidates[0]);
 				}
 
 				// A namespace that is gone, or that a republish replaced, takes its refusal with

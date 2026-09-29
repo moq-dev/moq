@@ -90,6 +90,9 @@ pub enum Error {
 	#[error("token has expired")]
 	TokenExpired,
 
+	#[error("token is not valid yet")]
+	TokenNotYetValid,
+
 	#[error(transparent)]
 	Pattern(#[from] moq_pattern::InvalidPattern),
 
@@ -98,6 +101,9 @@ pub enum Error {
 
 	#[error("grant asks to be revalidated but never expires")]
 	UnboundedRevalidate,
+
+	#[error("session limits need a revalidate cadence, which ages out the slots of a relay that died")]
+	LimitsWithoutRevalidate,
 
 	#[error("grant asks to be revalidated at no interval")]
 	ZeroRevalidate,

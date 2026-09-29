@@ -4,7 +4,7 @@
 # `just obs compile` type-checks the sources on any platform with nothing to
 # download. The recipes below build a loadable plugin, which is a bigger ask:
 #
-# Linux:   `nix develop` provides obs-studio/qt6/ffmpeg/cmake, then `just obs build`.
+# Linux:   `nix develop .#obs` provides obs-studio/qt6/ffmpeg/cmake, then `just obs build`.
 # macOS:   native, NOT nix. Needs full Xcode; run outside `nix develop` (its
 #          toolchain breaks the Xcode build). `just obs setup` downloads
 #          libobs/Qt6/ffmpeg via buildspec.json (obs-deps).
@@ -126,10 +126,10 @@ compile:
     done
     exit $status
 
-# Compile and link the plugin the way CI does, against the dev shell's own
+# Compile and link the plugin the way CI does, against the `.#obs` shell's own
 # libobs/Qt6/ffmpeg, then run the unit tests. Linux-only in practice: it's the
 # one platform where nixpkgs has obs-studio, so nothing has to be downloaded.
-# Manual elsewhere, like `just rs macos`.
+# Manual elsewhere.
 #
 # The tests run here without ThreadSanitizer because this is the only recipe CI
 # invokes (.github/workflows/obs.yml). `just obs test` is manual, so on its own
@@ -223,9 +223,9 @@ _includes:
 # Unit-test the plugin sources against stubbed libobs/moq-c/ffmpeg, under
 # ThreadSanitizer.
 #
-# Manual, like `just rs macos` and `just rs windows`, because ThreadSanitizer
-# needs its own build. `just obs ci` runs the same tests without it, so a
-# regression these assertions catch still turns PR CI red; the sanitizer is what
+# Manual because ThreadSanitizer needs its own build. `just obs ci` runs the
+# same tests without it, so a regression these assertions catch still turns PR
+# CI red; the sanitizer is what
 # adds the races on top. Run this whenever you touch src/, especially the session
 # callback plumbing, whose orderings the build can't check.
 test:

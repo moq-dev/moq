@@ -28,6 +28,12 @@ quest adds AAC through platform encoders; no software AAC dependency is selected
   backend's first packet. A backend that reports its own header (a magic
   cookie, `csd-0`, `MF_MT_USER_DATA`) must produce one equal to the synthesized
   ASC, asserted in its tests.
+- The line branch's `aac-encode-refusals` quest makes `Config::encode` refuse
+  a channel count no channelConfiguration names instead of writing stereo, so
+  that synthesis is fallible and `Producer` refuses such a layout at
+  construction. JS matches: `@moq/hang`'s `audioSpecificConfig` throws for the
+  same counts (#4119, on the line). This absorbs the former m2
+  aac-encode-refusal quest, a duplicate of that line quest.
 - Frame size is the codec's (1024 samples for AAC), so `frame_duration` is
   validated per codec rather than against the Opus table.
 - Bitrate updates go through the backend; one that cannot change rate

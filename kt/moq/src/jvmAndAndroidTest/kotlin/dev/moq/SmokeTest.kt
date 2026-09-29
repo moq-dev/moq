@@ -162,6 +162,7 @@ class SmokeTest {
                 broadcast.end()
                 broadcast.end()
                 assertFailsWith<MoqException> { consumer.subscribeTrack("events", null) }
+                assertFailsWith<MoqException> { broadcast.publishTrack("events", null) }
             }
         }
     }

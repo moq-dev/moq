@@ -34,7 +34,3 @@ out of scope: it kills the process rather than destroying the VM.
   exit code. Run it in the existing `kt` CI job.
 
 Public API: none; the hook is internal to the binding. Wire: none.
-
-## Related
-
-- [moq-c shutdown](/quest/m1/libmoq-shutdown.md) - the same hazard class for the C ABI and the OBS plugin

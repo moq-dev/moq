@@ -220,7 +220,7 @@ async function decode(key: PublicKey | SymmetricKey, token: string): Promise<unk
 	return JSON.parse(new TextDecoder().decode(payload));
 }
 
-/** Verify a token's signature and this crate's strict claims, expiry, and key scope. */
+/** Verify a token's signature and this crate's strict claims, expiry, not-before, and key scope. */
 async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Claims> {
 	const payload = await decode(key, token);
 	let claims: Claims;
@@ -229,7 +229,9 @@ async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Cla
 	} catch (error) {
 		throw new Error(`Failed to parse token claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
-	if (claims.exp !== undefined && claims.exp <= Date.now() / 1000) throw new Error("Token has expired");
+	const now = Date.now() / 1000;
+	if (claims.exp !== undefined && claims.exp <= now) throw new Error("Token has expired");
+	if (claims.nbf !== undefined && claims.nbf > now) throw new Error("Token is not yet valid");
 	ensureClaimsWithinScope(key, claims);
 	return claims;
 }

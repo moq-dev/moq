@@ -36,9 +36,9 @@ pub enum Error {
 	#[error("json: {0}")]
 	Json(#[from] moq_json::Error),
 
-	/// Error publishing or consuming binary payloads over a track.
-	#[error("binary: {0}")]
-	Binary(#[from] moq_binary::Error),
+	/// Error publishing or consuming opaque payloads over a track.
+	#[error("flate: {0}")]
+	Flate(#[from] moq_flate::Error),
 
 	/// A catalog entry declares a track mode this build does not implement.
 	#[error("unsupported track mode: {0}")]
@@ -245,6 +245,10 @@ pub enum Error {
 	/// A rendition tried to lower delay already advertised to subscribers.
 	#[error("catalog delay cannot decrease for a published rendition")]
 	DelayDecreased,
+
+	/// A capture instant is ahead of the broadcast clock's now, or before its epoch.
+	#[error("capture time is outside the broadcast clock")]
+	InvalidCapture,
 }
 
 impl Error {

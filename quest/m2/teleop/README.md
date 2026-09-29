@@ -24,11 +24,10 @@ server walks the announce stream to fan the viewers in
 demo and private to it. Every integrator rebuilds the announce fan-in, the
 operator arbitration, and the latency instrumentation from scratch.
 
-Two things are genuinely missing rather than merely undocumented: the hang
-catalog is video plus audio only (location tracks arrived in moq#401 and were
-dropped when the catalog became generic), and `moq-video`'s V4L2-M2M encoder
-backend is compiled into no released `moq-cli`, so the boards that fly have no
-native hardware-encode path anyone can install.
+The hang catalog is no longer a gap: it advertises data tracks in its `json`
+and `binary` sections beside video and audio. What is genuinely missing is
+`moq-video`'s V4L2-M2M encoder backend in a released `moq-cli`, so the boards
+that fly have no native hardware-encode path anyone can install.
 
 ### Two delivery classes, one session
 
@@ -45,8 +44,9 @@ a lossy link produces latency spikes rather than delivery, and an emulation
 study on a long-RTT profile measured command staleness more than twice as bad
 for QUIC reliable streams as for DDS best-effort: correct and useless.
 
-The split is a framing decision, not a subscription flag, and `moq-json`
-already implements both halves as its snapshot and stream modes. What that
+The split is a framing decision, not a subscription flag, and `moq-json` and
+`moq-flate` already implement both halves as their snapshot and stream
+modes. What that
 means for the primitive is in [robot](/quest/m2/teleop/robot.md), and what it
 means for a protocol multiplexing many message rates onto one link is in
 [mavlink](/quest/m2/teleop/mavlink.md).
@@ -78,7 +78,7 @@ VPN, the competing UDP flows, and the signalling server at once, and survives
 cell handover through connection migration. That is the pitch, and it is worth
 stating plainly because it is what a builder is comparing against.
 
-## Quests
+## Required
 
 - [Robot teleoperation primitive](/quest/m2/teleop/robot.md) - a `moq-robot`
   crate carrying the track shapes and discovery every teleoperated machine
@@ -98,8 +98,8 @@ stating plainly because it is what a builder is comparing against.
 - [V4L2-M2M encoding](/quest/m2/teleop/v4l2-encode.md) - a released `moq-cli`
   reaches `moq-video`'s hardware encoder on the boards that fly, and the boards
   worth buying are written down
-- [Teleoperation use-case docs](/quest/m2/teleop/docs.md) - `doc/concept/use-case/other.md`
-  becomes the teleoperation page, with a runnable non-media example beside it
+- [Teleoperation use-case docs](/quest/m2/teleop/docs.md) - `doc/concept/use-case/`
+  gains a teleoperation page, with a runnable non-media example beside it
 - [ROS 2 bridge](/quest/m2/teleop/ros2.md) - a ROS 2 bridge sibling to the
   MAVLink one, carrying topics over the same two delivery classes
 - [Cross-track correlation](/quest/m2/teleop/correlation.md) - a command, the

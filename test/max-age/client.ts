@@ -31,7 +31,12 @@ const session = await connect({
 try {
 	if (mode === "subscribe") {
 		const announcements = origin.consume().announced();
-		await announcements.next();
+		// `live` can come first while the relay has yet to learn the publisher's route.
+		for (;;) {
+			const event = await announcements.next();
+			assert(event, "announcements closed");
+			if (event.kind === "start" && event.prefix === "age") break;
+		}
 		const request = origin.consume().request(Path.from("age"));
 		let broadcast = request.active.peek();
 		while (!broadcast) broadcast = await request.active.changed();

@@ -41,7 +41,10 @@ moq <MoQ side> fetch <track> [options]
 The **MoQ side** goes first and attaches the process to the network:
 `--connect <url>` dials a relay (the path is the auth path, `?jwt=`
 carries a token), and `--broadcast <name>` names the broadcast. A process can
-instead host sessions with `--listen`, or both at once. `moq import --help` lists the sources and `moq import rtmp --help` a specific one.
+instead host sessions with `--listen`, or both at once. A listener admits
+clients by `--auth-url` or `--auth-public`, as the relay does (see
+[Authentication](/bin/relay/auth)); public rules ignore certificates, so
+`--auth-public` refuses to start with `--listen-tls-root`. `moq import --help` lists the sources and `moq import rtmp --help` a specific one.
 
 ```bash
 # Publish a file (remux to MPEG-TS without re-encoding)
@@ -111,10 +114,13 @@ behind it. Once the speaker owns the clock, video follows the speaker instead.
 Video receives encoded frames independently of decoding, so a tune-in burst can
 update that clock even while the window is waiting for its first picture.
 Encoded video is retained within the delay budget with byte accounting; a skip
-resumes at a keyframe. Decoding starts at most 100 ms before presentation, and
-the window holds at most three decoded pictures. A stalled window loses its
-oldest picture instead of blocking reception. The configured delay therefore
-does not turn into seconds of raw video surfaces.
+resumes at a keyframe. Decoding starts 100 ms before the earliest picture still
+owed is due, so B-frame reordering and pictures the decoder holds back are
+covered however deep they go. The window holds at most three decoded pictures;
+a larger decoder batch waits for room rather than pushing out pictures not yet
+shown. A stalled window loses its oldest picture once a newer one is due,
+instead of blocking reception. The configured delay therefore does not turn
+into seconds of raw video surfaces.
 
 Each role follows the catalog for as long as it lasts. Each decoder starts at
 the newest cached group, including when a rendition is reopened, so playback
@@ -161,8 +167,8 @@ watches them. On NVIDIA the whole pipeline stays on the GPU; `--frames cpu`
 forces decoded frames into CPU memory instead of the default `native`.
 Requires the `transcode` feature.
 
-The source is the tallest rendition this host can decode with `--decoder`, so a
-software-only host transcodes from an H.264 rendition rather than a taller H.265
+The source is the largest rendition this host can decode with `--decoder`, so a
+software-only host transcodes from an H.264 rendition rather than a larger H.265
 or AV1 one. When no rendition decodes, the command exits naming the decoder's
 refusal.
 

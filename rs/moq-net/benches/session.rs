@@ -637,6 +637,61 @@ fn allocations() {
 	}
 }
 
+/// Withdraw a batch across a full mesh, sweeping both peers and prefixes.
+/// Paused protocol time lets the quiet-point timeout drain pending work without
+/// including a real wait in the measured duration.
+fn withdrawal(c: &mut Criterion) {
+	let mut group = c.benchmark_group("session_withdrawal");
+	group.sample_size(10);
+	for relays in [4, 8, 16] {
+		for broadcasts in [1, 32] {
+			group.bench_function(format!("{relays}r_{broadcasts}b"), |b| {
+				b.iter_custom(|iters| {
+					let mut elapsed = Duration::ZERO;
+					for _ in 0..iters {
+						let rt = runtime();
+						elapsed += rt.block_on(async {
+							tokio::time::pause();
+							let shape = Shape {
+								relays,
+								publishers: 0,
+								..Shape::BASE
+							};
+							let cluster = Cluster::new("moq-lite-06", shape).await;
+							let mut announced = cluster.relays.last().unwrap().consume().announced();
+							let live: Vec<_> = (0..broadcasts)
+								.map(|i| {
+									cluster.relays[i % (relays - 1)]
+										.publish(path(i), Default::default())
+										.unwrap()
+								})
+								.collect();
+							while tokio::time::timeout(Duration::from_secs(1), announced.next())
+								.await
+								.is_ok()
+							{}
+							let start = Instant::now();
+							drop(live);
+							let mut retracted = 0;
+							while let Ok(Some(event)) =
+								tokio::time::timeout(Duration::from_secs(1), announced.next()).await
+							{
+								assert!(matches!(event, moq_net::announce::Event::End(_)), "{event:?}");
+								retracted += 1;
+							}
+							let elapsed = start.elapsed();
+							assert_eq!(retracted, broadcasts);
+							elapsed
+						});
+					}
+					elapsed
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
 fn session(c: &mut Criterion) {
 	if std::env::var_os("SESSION_ALLOCS").is_some() {
 		allocations();
@@ -754,5 +809,5 @@ fn session(c: &mut Criterion) {
 	);
 }
 
-criterion_group!(benches, session);
+criterion_group!(benches, session, withdrawal);
 criterion_main!(benches);

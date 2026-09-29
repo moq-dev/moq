@@ -58,7 +58,7 @@ relay_config() {
         "listen = \"127.0.0.1:$port\"" \
         '' \
         '[auth]' \
-        'public = ""' \
+        'public = "**"' \
         "${runtime_config[@]}" >"$path"
 }
 

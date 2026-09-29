@@ -18,7 +18,12 @@ cached groups, not a leak elsewhere. An earlier run saw growth on IETF only,
 but lite was then 30x slower per round, so it wrote far fewer groups; compare
 by groups written, not by wall time.
 
-Reproduce with a focused test first. Unexpired groups at higher throughput,
+#4378 (after these runs) fixed one candidate cause: an ended track's latest
+group was exempt from idle expiry and the pool sweep never reached an ended
+track, so stale consumers pinned its groups. Re-measure on current `main`
+first; if RSS now plateaus, delete this quest.
+
+Otherwise reproduce with a focused test. Unexpired groups at higher throughput,
 expiry not running on some path, or groups held outside the pool's accounting
 would each explain it. Fix what is actually wrong. Consider whether an
 unbounded default is the right default for an origin at all.

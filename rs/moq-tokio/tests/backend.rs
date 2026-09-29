@@ -338,39 +338,29 @@ async fn reload_test() {
 	server_config.tls.cert = vec![cert.clone()];
 	server_config.tls.key = vec![key.clone()];
 
-	#[cfg(feature = "watch")]
-	if moq_tokio::watch::Files::new(std::slice::from_ref(&cert)).is_err() {
-		eprintln!("skipping reload_test: host cannot start an inotify watcher");
-		return;
-	}
-
 	let server = server_config
 		.init(moq_tokio::quic::Config::default())
 		.expect("failed to init server");
 	let server = server.listen().await.expect("failed to listen");
+
+	// Every process the user runs shares one inotify instance limit, so a loaded host can refuse
+	// the listener its watcher. Judge by the listener's own watcher: a separate probe would race
+	// the rest of the host for the same limit.
+	#[cfg(feature = "watch")]
+	if tracing_test::internal::logs_with_scope_contain("moq_tokio", "hot reload disabled") {
+		eprintln!("skipping reload_test: host cannot start an inotify watcher");
+		return;
+	}
+
 	let certificates = server.certificates();
 	let before = certificates.fingerprints();
 	assert_eq!(before.len(), 1);
 
-	// The reload task is spawned while the listener is built and registers its
-	// watcher the first time the runtime polls it, which may be after this point.
-	// Rotating before then would replace the files with nothing watching them.
-	tokio::time::sleep(Duration::from_millis(200)).await;
-
-	// Rotate in place, the way cert-manager or a secret mount would.
+	// Rotate in place, the way cert-manager or a secret mount would. The listener registered its
+	// watch before returning, so the rotation cannot land before it.
 	let (new_cert, new_key) = write_self_signed(dir.path(), "rotated", "localhost");
 	std::fs::rename(&new_cert, &cert).expect("rotate cert");
 	std::fs::rename(&new_key, &key).expect("rotate key");
-
-	tokio::time::sleep(Duration::from_secs(2)).await;
-	assert!(
-		tracing_test::internal::logs_with_scope_contain("moq_tokio", "reloading server certificates"),
-		"no reload log"
-	);
-	assert!(
-		!tracing_test::internal::logs_with_scope_contain("moq_tokio", "hot reload disabled"),
-		"watcher failed"
-	);
 
 	let reloaded = tokio::time::timeout(TIMEOUT, async {
 		loop {
@@ -384,6 +374,10 @@ async fn reload_test() {
 	.await
 	.expect("certificate reload timed out");
 
+	assert!(
+		tracing_test::internal::logs_with_scope_contain("moq_tokio", "reloading server certificates"),
+		"no reload log"
+	);
 	assert_eq!(reloaded.len(), 1);
 	drop(server);
 }
@@ -669,6 +663,64 @@ async fn iroh_connect() {
 }
 
 // ── Noq backend ─────────────────────────────────────────────────────
+
+/// A client that closes before its runtime stops tells the server at once, instead of
+/// leaving it to the idle timeout, which is what a process exiting on a signal does.
+#[cfg(feature = "noq")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn noq_client_close_reaches_server() {
+	let quic = moq_tokio::quic::Config::default();
+	assert!(
+		quic.idle_timeout > TIMEOUT,
+		"an idle timeout inside TIMEOUT would hide a lost close"
+	);
+
+	let mut server_config = moq_tokio::listen::Config::default();
+	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
+	server_config.tls.generate = vec!["localhost".into()];
+	let server = server_config.init(quic.clone()).expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
+	let url: url::Url = format!("moqt://localhost:{}", server.local_addr().unwrap().port())
+		.parse()
+		.unwrap();
+
+	// The client gets a runtime of its own, gone as soon as the client returns: nothing
+	// drives its endpoint afterwards, exactly as when a process exits.
+	let client = std::thread::spawn(move || {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("client runtime");
+		runtime.block_on(async move {
+			let mut config = moq_tokio::connect::Config::default();
+			config.tls.insecure = Some(true);
+			config.bind = Some("127.0.0.1:0".parse().unwrap());
+			let client = config
+				.init(quic)
+				.expect("failed to init client")
+				.with_subscriber(moq_tokio::origin::spawn());
+			let (client, connection) = connect_once(client, url).await.expect("client connect failed");
+			drop(connection);
+			client.close().await;
+		});
+	});
+
+	let request = tokio::time::timeout(TIMEOUT, server.accept())
+		.await
+		.expect("accept timed out")
+		.expect("no incoming connection");
+	let session = request.ok().await.expect("server handshake failed");
+	tokio::task::spawn_blocking(move || client.join())
+		.await
+		.unwrap()
+		.expect("client thread panicked");
+
+	let err = tokio::time::timeout(TIMEOUT, session.closed())
+		.await
+		.expect("the server never heard the close");
+	assert!(!err.to_string().contains("timed out"), "{err}");
+}
 
 #[cfg(feature = "noq")]
 #[tracing_test::traced_test]

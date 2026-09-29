@@ -87,7 +87,7 @@ Everything here is additive: `Session::auth()` is new, the relay derives the
 grant from the origin handles it already scopes, and AUTH is added to the
 existing lite-06 ALPN.
 
-## Quests
+## Required
 
 - [Lite stream](/quest/m1/auth/lite.md) - both sides of a lite-06 session
   exchange grants over AUTH streams, exposed as `Session::auth()`, and an
@@ -96,6 +96,8 @@ existing lite-06 ALPN.
   each lite-06 cell's grant and that a publish outside it fails loud
 - [Unauthorized reset](/quest/m1/auth/unauthorized.md) - a subscription that
   loses access resets with a dedicated UNAUTHORIZED stream code
+- [AUTH_OK preflight](/quest/m1/auth/auth-ok-preflight.md) - an unencodable IETF grant answers NOT_SUPPORTED with nothing written, as JS already does
+- [AUTH endings](/quest/m1/auth/error-codes.md) - an out-of-range AUTH_ERROR code is refused, and both sides settle and recompute grants when a stream ends
 - [Origin narrowing](/quest/m1/auth/narrowing.md) - a live grant narrows in
   place: subscriptions outside it reset, publishes outside it abort, and relay
   revalidation stops closing the session
@@ -106,6 +108,8 @@ existing lite-06 ALPN.
   grant does not, and REQUEST_UPDATE refreshes it
 - [moq-transport](/quest/m1/auth/moq-transport.md) - the same exchange as a
   setup-option extension on draft-17+, specified in a new draft
+- [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
+  reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi and moq-c
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave

@@ -675,6 +675,12 @@ impl ScriptedSession {
 		}
 	}
 
+	/// Append to the shared script: the peer sending more on a stream it already opened.
+	/// Nothing is woken, so the test re-polls the reader itself.
+	pub fn push(&self, bytes: &[u8]) {
+		self.script.lock().unwrap().extend_from_slice(bytes);
+	}
+
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
 	/// replies normally and is simply out of stream credit until then.
 	pub fn gated_open(scripts: Vec<Vec<u8>>, gate: kio::Consumer<bool>) -> Self {

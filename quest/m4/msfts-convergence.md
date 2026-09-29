@@ -20,7 +20,3 @@ change on either side. Update `drafts/draft-lcurley-moq-mpegts.md` and
 ## Required
 
 - msfts#33 (https://github.com/mondain/msfts/issues/33) settles the ES-level payload unit
-
-## Closes
-
-- [#3731](https://github.com/moq-dev/moq/issues/3731) - close this issue when the quest finishes

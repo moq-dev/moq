@@ -101,10 +101,11 @@ let
   moqCInfo = crateInfo ../rs/moq-c/Cargo.toml;
 
   # The native libraries an external linker must pass alongside libmoq.a.
-  # rs/moq-c/native-libs/ is the single source: build.rs bakes it into moq-c.pc
-  # and rs/moq-c/CMakeLists.txt reads it for in-tree consumers. This installPhase
-  # substitutes the find_package template directly rather than running CMake, so
-  # format the same list here, matching CMakeLists.txt's MOQ_NATIVE_LIBS_QUOTED.
+  # rs/moq-c/native-libs/ is the single source: rs/moq-c/CMakeLists.txt reads
+  # it for in-tree consumers, and this installPhase substitutes it into the
+  # moq-c.pc and find_package templates directly rather than running CMake, so
+  # format it the way each expects: `Libs.private` flags, and CMakeLists.txt's
+  # MOQ_NATIVE_LIBS_QUOTED.
   moqCNativeLibs =
     let
       platform =
@@ -116,30 +117,20 @@ let
           "linux";
       lines = final.lib.splitString "\n" (builtins.readFile ../rs/moq-c/native-libs/${platform}.txt);
       entries = builtins.filter (line: line != "" && !(final.lib.hasPrefix "#" line)) lines;
-      quote =
-        entry:
-        if final.lib.hasPrefix "framework:" entry then
-          ''"-framework ${final.lib.removePrefix "framework:" entry}"''
-        else
-          ''"${entry}"'';
+      framework = entry: "-framework ${final.lib.removePrefix "framework:" entry}";
+      isFramework = final.lib.hasPrefix "framework:";
     in
-    final.lib.concatMapStringsSep " " quote entries;
+    {
+      pc = final.lib.concatMapStringsSep " " (
+        entry: if isFramework entry then framework entry else "-l${entry}"
+      ) entries;
+      cmake = final.lib.concatMapStringsSep " " (
+        entry: if isFramework entry then ''"${framework entry}"'' else ''"${entry}"''
+      ) entries;
+    };
 
   moqCArgs = moqCInfo // {
-    # moq-c's build.rs reads moq-c.pc.in and native-libs/*.txt at compile time to
-    # generate the pkgconfig file. craneLib.cleanCargoSource's default filter
-    # drops both, which makes build.rs skip pkgconfig generation (see the
-    # `if let Ok(template)` in rs/moq-c/build.rs) or fail reading the lib list,
-    # and the installPhase's `cp .../moq-c.pc` then fails.
-    src = final.lib.cleanSourceWith {
-      src = ../.;
-      name = "source";
-      filter =
-        path: type:
-        (final.lib.hasSuffix ".pc.in" path)
-        || (final.lib.hasInfix "/rs/moq-c/native-libs/" path)
-        || (filterCargoSources path type);
-    };
+    src = cleanCargoSource;
     cargoExtraArgs = "-p moq-c";
     doCheck = false;
     nativeBuildInputs = with final; [
@@ -168,21 +159,40 @@ let
       mkdir -p $out/lib/pkgconfig $out/include $out/lib/cmake/moq-c
 
       # Ask cargo's build log where it put things instead of reconstructing the
-      # paths, which a cross --target build moves. build.rs lays out its
-      # OUT_DIR like this prefix, minus the staticlib.
+      # paths, which a cross --target build moves. build.rs writes the header
+      # to include/ under its OUT_DIR.
       jq=${final.lib.getExe final.jq}
       lib=$($jq -r 'select(.reason == "compiler-artifact") | .filenames[] | select(endswith("/libmoq.a"))' "$cargoBuildLog")
       gen=$($jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("/moq-c#")) | .out_dir' "$cargoBuildLog")
       cp "$lib" $out/lib/
       cp "$gen/include/moq.h" $out/include/
-      cp "$gen/lib/pkgconfig/moq-c.pc" $out/lib/pkgconfig/
+
+      # Rendered here rather than by build.rs: the template's paths are relative
+      # to the .pc, which only holds once libmoq.a sits beside pkgconfig/.
+      pc=$out/lib/pkgconfig/moq-c.pc
+      substitute ${../rs/moq-c/moq-c.pc.in} "$pc" \
+        --subst-var-by VERSION "${moqCInfo.version}" \
+        --subst-var-by LIBS_PRIVATE ${final.lib.escapeShellArg moqCNativeLibs.pc}
+      if grep -nE '@[A-Z_]+@' "$pc"; then
+        echo "unsubstituted placeholder in moq-c.pc (see above)" >&2
+        exit 1
+      fi
+      # Resolve the paths the way a consumer's pkg-config will, so a template
+      # whose libdir or includedir misses what this prefix ships fails here.
+      for check in libdir:libmoq.a includedir:moq.h; do
+        dir=$(PKG_CONFIG_PATH=$out/lib/pkgconfig pkg-config --variable="''${check%%:*}" moq-c)
+        if [ ! -f "$dir/''${check#*:}" ]; then
+          echo "moq-c.pc ''${check%%:*} $dir has no ''${check#*:}" >&2
+          exit 1
+        fi
+      done
 
       major_version="$(echo "${moqCInfo.version}" | cut -d. -f1)"
       substitute ${../rs/moq-c/cmake/moq-c-config.cmake.in} \
         $out/lib/cmake/moq-c/moq-c-config.cmake \
         --subst-var-by LIB_FILE libmoq.a \
         --subst-var-by VERSION "${moqCInfo.version}" \
-        --subst-var-by MOQ_NATIVE_LIBS_QUOTED ${final.lib.escapeShellArg moqCNativeLibs}
+        --subst-var-by MOQ_NATIVE_LIBS_QUOTED ${final.lib.escapeShellArg moqCNativeLibs.cmake}
       substitute ${../rs/moq-c/cmake/moq-c-config-version.cmake.in} \
         $out/lib/cmake/moq-c/moq-c-config-version.cmake \
         --subst-var-by VERSION "${moqCInfo.version}" \

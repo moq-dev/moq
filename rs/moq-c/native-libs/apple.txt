@@ -2,7 +2,7 @@
 # targets. Cargo injects these itself for Rust consumers, but a C/C++ toolchain
 # linking the staticlib has to spell them out.
 #
-# Canonical list. build.rs bakes it into moq-c.pc, CMakeLists.txt reads it for the
+# Canonical list. nix/overlay.nix bakes it into moq-c.pc, CMakeLists.txt reads it for the
 # moq::c target and the installed find_package config, and test/interop/interop.sh
 # links its C client with it. Keep the derived consumers reading this file rather
 # than repeating the list.

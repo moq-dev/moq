@@ -27,9 +27,8 @@ The reference implementation. Every crate is on
 | [moq-auth](/lib/rs/moq-auth) | The authorization contract: requests, grants, leases, the HTTP client, the reference server, JWT keys, signing, and verification, plus listing live sessions and pushing a re-check. |
 | [moq-room](/lib/rs/moq-room) | Headless rooms: announce-derived roster, token claims, and a chat track. |
 | [moq-json](/lib/rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
-| [moq-binary](/lib/rs/moq-binary) | Opaque payloads over tracks: snapshots or append logs. |
+| [moq-flate](/lib/rs/moq-flate) | Opaque payloads over tracks, optionally compressed with group-scoped DEFLATE: snapshots or append logs. |
 | [moq-e2ee](https://docs.rs/moq-e2ee) | End-to-end encryption of groups, datagrams, and track names, scoped to a publisher epoch. |
-| [moq-flate](https://docs.rs/moq-flate) | Group-scoped DEFLATE for any track. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
 | [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtc](https://docs.rs/moq-rtc) | The [gateways](/bin/), as libraries you can embed with your own auth. |

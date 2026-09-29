@@ -38,7 +38,7 @@ while extending this harness rather than creating another benchmark runner.
 
 ## Required
 
-- [Thin justfiles](/quest/m1/tooling/justfiles.md) - finish benchmark script relocation before changing its lifecycle
+- [Tooling](/quest/m1/tooling/README.md) - the recipe and script layout `just bench` runs under
 
 ## Related
 

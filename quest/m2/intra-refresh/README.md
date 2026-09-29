@@ -36,7 +36,7 @@ Decisions the quests share:
   Backends without the knob refuse refresh mode; NVENC and V4L2 get it now,
   Media Foundation and MediaCodec are follow-ups.
 
-## Quests
+## Required
 
 - [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - JS and Rust viewers join `warmup` earlier and withhold display until recovery, except at a true IDR
 - [H.264 import](/quest/m2/intra-refresh/h264-import.md) - the splitter keeps `recovery_frame_cnt` and import publishes `warmup` from it
@@ -44,7 +44,7 @@ Decisions the quests share:
 - [Encode config](/quest/m2/intra-refresh/encode-config.md) - refresh mode extends the settled GOP contract; the producer cuts groups per sweep and publishes `warmup`
 - [NVENC refresh](/quest/m2/intra-refresh/nvenc-refresh.md) - the NVENC backend encodes refresh mode for H.264 and HEVC
 - [V4L2 refresh](/quest/m2/intra-refresh/v4l2-refresh.md) - the V4L2 backend encodes refresh mode
-- [Bindings](/quest/m2/intra-refresh/bindings.md) - ffi, moq-c, and every wrapper expose the `Gop` enum
+- [Bindings](/quest/m2/intra-refresh/bindings.md) - moq-ffi and every wrapper expose refresh mode, additive on the ffi-shape `Gop` enum
 - [Export sync flags](/quest/m2/intra-refresh/export-sync-flags.md) - fmp4, MKV, and HLS stop advertising a refresh group start as a sync sample
 
 ## Related

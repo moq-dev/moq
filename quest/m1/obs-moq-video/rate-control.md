@@ -12,8 +12,9 @@ configured rate.
 
 ## Plan
 
-Uses the reservation surface from moq-c (`moq_session_bandwidth`,
-`moq_bandwidth_reserve`, `moq_reservation_grant`). Apply grants through
+Uses the moq-ffi reservation surface through the generated C++ package
+(`MoqSession::bandwidth`, `MoqBandwidth::reserve`, `MoqReservation::grant`),
+not the hand-written moq-c, since the plugin moves off it first. Apply grants through
 the shape `moq_mux::rate::Control` uses (drops at once, raises ramp,
 hysteresis) rather than pushing every change into `obs_encoder_update`; whether
 that policy sits in moq-ffi behind the reservation or in the plugin depends on
@@ -24,3 +25,7 @@ whether a second binding wants it. Verify against a shaped uplink and with
 ## Required
 
 - [OBS migration](/quest/m1/cpp/obs.md) - the plugin is on the generated C++ first
+
+## Related
+
+- [Audio follows the grant](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the shared rate policy audio adopts; OBS audio still reserves only

@@ -31,10 +31,10 @@ With CMake, point `CMAKE_PREFIX_PATH` at the extracted archive, then
 
 From source, `add_subdirectory(rs/moq-c)` in CMake gives the same `moq::c`
 target. A bare `cargo build --release -p moq-c` writes `target/release/libmoq.a`,
-and `moq.h` plus `moq-c.pc` land in the build script's `OUT_DIR` under `include/`
-and `lib/pkgconfig/`, a hashed path that `--message-format=json` reports as
-`out_dir`. That `moq-c.pc` expects the install layout, with `libmoq.a` in `lib/`
-beside `pkgconfig/`.
+and `moq.h` lands in the build script's `OUT_DIR` under `include/`, a hashed
+path that `--message-format=json` reports as `out_dir`. It writes no `moq-c.pc`;
+`nix build .#moq-c` produces the same install layout as the release tarball,
+pkg-config file included.
 
 ## Shape of the API
 
@@ -68,7 +68,7 @@ if (session < 0)
 
 For a locally encoded media track, call `moq_publish_media_flush(media, timestamp_us)` after `moq_publish_media_frame` with the same broadcast-clock PTS. The monotonic handoff time is sampled inside moq-c. Do not call it for file, pipe, or network imports; those remain clock-free. Invalid handles and unrepresentable timestamps return a negative error code.
 
-Call `moq_publish_media_discontinuity(media)` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds.
+Call `moq_publish_media_discontinuity(media)` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a video track, resume with a keyframe: a delta frame before it fails.
 
 ## Connection stats
 

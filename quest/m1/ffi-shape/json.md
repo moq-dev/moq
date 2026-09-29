@@ -1,11 +1,12 @@
-# [M] JSON gets its own namespace in every binding
+# [M] JSON and flate get their own namespaces in every binding
 
 ## Goal
 
-JSON tracks live under `json` in moq-ffi and every wrapper, constructed from a
-track producer or consumer as in `moq-json`, and `BroadcastProducer`/`BroadcastConsumer` lose
-`publish_json_*`/`subscribe_json_*`. The per-language namespace pattern this
-sets is what the other children copy.
+JSON tracks live under `json` and opaque tracks under `flate` in moq-ffi and
+every wrapper, constructed from a track producer or consumer as in `moq-json`
+and `moq-flate`, and `BroadcastProducer`/`BroadcastConsumer` lose
+`publish_json_*`/`subscribe_json_*` and `publish_flate_*`. The per-language
+namespace pattern this sets is what the other children copy.
 
 ## Plan
 
@@ -25,10 +26,8 @@ keep doing so, and the rest may follow.
 Watch for Go import cycles: a subpackage takes the root's broadcast handle, so
 the root must not import it back.
 
-moq-c's JSON symbols move to `moq_json_*`.
+`flate` is the same shape over opaque bytes: moq-ffi's `flate.rs`
+(`publish_flate_snapshot`, `publish_flate_stream`) moves under it, mirroring
+`moq_flate::{snapshot, stream}`.
 
-Public API: breaking in every binding and moq-c. Wire: none.
-
-## Required
-
-- [Release](/quest/m0/release.md) - the restructure follows the release rather than riding it
+Public API: breaking in every binding. Wire: none.

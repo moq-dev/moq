@@ -63,15 +63,27 @@ export const SELECTORS = {
 	fixture: "#fixture",
 } as const;
 
+/** Activate the player's pause button without depending on pointer hit testing. */
+export async function pause(page: Page): Promise<void> {
+	// Enter focuses and activates the real button even when the chrome auto-hides.
+	await page.locator(SELECTORS.ui).locator(SELECTORS.pauseControl).press("Enter");
+}
+
 /** How often a wait re-reads the page. */
 export const POLL_INTERVAL_MS = 100;
 
 /** Sleep for `ms`. */
 export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Serve the prebuilt page on localhost, a secure context so WebTransport and WebCodecs are enabled. */
+/**
+ * Serve the prebuilt page on localhost, a secure context so WebTransport and WebCodecs are enabled.
+ *
+ * `interop.sh` builds the page into its run directory, so a concurrent run's rebuild cannot empty
+ * it mid-load; outside a harness run, it is vite's default `dist/`.
+ */
 export function serve(): { origin: string; stop: () => void } {
-	const root = join(new URL(".", import.meta.url).pathname, "dist");
+	const run = process.env.MOQ_TEST_RUN;
+	const root = run ? join(run, "js-dist") : join(new URL(".", import.meta.url).pathname, "dist");
 	const server = Bun.serve({
 		port: 0,
 		async fetch(req) {

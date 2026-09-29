@@ -31,6 +31,7 @@ pub mod solicit;
 mod subscribe;
 mod subscribe_namespace;
 mod subscriber;
+pub(crate) mod token;
 mod track;
 mod version;
 

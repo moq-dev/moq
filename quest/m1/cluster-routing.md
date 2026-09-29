@@ -1,0 +1,124 @@
+# [XL] Cluster routing
+
+## Goal
+
+A broadcast event reaches each relay at most once, and a relay learns only the
+prefixes its own clients asked for. An announcement says a path exists at an
+origin relay, at a cost; how to reach that origin comes from a shared relay
+topology, so no announcement inside a cluster carries a hop list. This quest
+records the design; its wire and implementation quests are planned from the
+simulator's report.
+
+Non-goals: warm re-origination (a warm relay would be one more origin with a
+cost, so leave room for it), and a permanently mixed-version cluster.
+
+## Plan
+
+### Why not path vector or Babel
+
+Today every relay advertises its best route to every peer not already in the
+hop chain. One publish costs about R·(d-1) announces for R relays of mesh
+degree d, every relay learns every broadcast (`.stats` and `.internal`
+included), and a link change rewrites every route crossing it. On moq.pro's
+live fleet (26 PoPs, average degree about 5) each relay receives every event
+about five times. Babel ([RFC 8966](https://www.rfc-editor.org/rfc/rfc8966))
+shrinks the message and skips equal-cost reroutes, but it is still distance
+vector: the same fan-out, the same global knowledge, and no loop freedom
+when several sources claim a prefix (section 2.7), which pools and wildcards
+make MoQ's common case.
+
+### Decisions
+
+- Existence is split from reachability. An announcement carries the path, its
+  origin relay, and the origin's cost, and nothing about the path to it.
+- An existence event carries the origin's seqno, scoped to its incarnation. A
+  relay applies an event only when it is newer than the last it applied for
+  that path and origin, and keeps an ended path's seqno, so a start delayed on
+  a stale tree or a failed-over registry cannot revive it. Babel keeps
+  feasibility past withdrawal for the same reason
+  ([RFC 8966 section 3.7.3](https://www.rfc-editor.org/rfc/rfc8966#section-3.7.3)).
+- The topology is configured: `--cluster-connect` or the connect API gives the
+  relay graph and link costs. Relays flood per-link liveness among themselves
+  with a per-link seqno. The seqno is scoped to the relay's incarnation, so a
+  restarted relay's links supersede its stale ones instead of looking older.
+  Gossip discovery (`cluster.mesh`) stays for zero-config self-hosting and
+  derives the topology from what it discovers; it need not scale.
+- A relay picks the origin with the lowest shortest-path distance plus origin
+  cost, ties broken by rendezvous hashing (HRW) of the requested path and the
+  origin id, and forwards along its shortest path. Distance compares cost,
+  then hop count, so every hop strictly shortens it even across `?cost=0`
+  links. That is a shortest path to a virtual node linked to every origin, so
+  it is loop-free whenever relays agree on the topology. Specificity still
+  ranks first, per [Wildcard](/quest/m0/wildcard/README.md).
+- The first relay's choice rides the SUBSCRIBE, and transit relays forward
+  toward that origin by topology alone, never re-selecting. Re-selection
+  against another existence view loops: a relay that lost a specific claim
+  falls back to a broader one through a relay still routing to the specific
+  one ([RFC 8966 section 3.5.4](https://www.rfc-editor.org/rfc/rfc8966#section-3.5.4)).
+  If the origin no longer serves the path, it refuses, and the first relay
+  selects again.
+- SUBSCRIBE and FETCH carry a visited-relay list end to end. It catches loops
+  while liveness views disagree and names the path for stats. Narrowing it to
+  cluster hops is later work. The serving origin's identity rides the reply,
+  per Wildcard's Spread quest.
+- Announcements are on demand. A relay forwards only the union of its clients'
+  ANNOUNCE_REQUEST prefixes, never the empty prefix. A wide prefix that many
+  edges' viewers request is that customer's cost. `.stats` becomes ordinary
+  demand.
+- Registries are an optional, configured tier: moq-relay in a registry mode,
+  one or more per region.
+  - An ingest relay registers its broadcasts with its nearest registry, and an
+    edge sends its ANNOUNCE_REQUEST there.
+  - Registries form a small full mesh and flood existence among themselves, so
+    an event crosses an ocean once per remote registry, not once per relay.
+    Announce latency is about one round trip to the nearest registry,
+    whatever the path length.
+  - A relay fails over to the next-nearest registry and reconciles its view
+    instead of treating the lost session as ends, so a registry failure never
+    reports a live broadcast offline.
+  - With no registry reachable, a relay freezes: it keeps its view, learns
+    nothing new, and alerts. Falling back to flooding would cascade the
+    failure.
+- Without registries (self-hosting), existence floods along the shortest-path
+  tree, one copy per relay. A relay forwards an event only when it changes its
+  view, so a duplicate copy, from trees built on disagreeing liveness, stops
+  there.
+- Between clusters, announcements stay path vector with cluster ids as the
+  hops, like BGP between autonomous systems. A customer's on-prem cluster is
+  one hop, and an announcement naming the receiving cluster is dropped.
+- The cluster switches versions as a whole; older lite and IETF sessions stay
+  at its edges.
+
+### Open questions
+
+- Sharding registries by HRW over a prefix key once one registry cannot hold
+  everything, and what that key is.
+- A mixed-version bridge, if a fleet cannot switch at once.
+- How long a relay keeps an ended path's seqno. A new origin incarnation
+  clears it; within one, it must outlive every delayed copy of the start.
+- How an edge routes a SUBSCRIBE for a path none of its clients asked to
+  announce. It holds no route for it, and asking a registry first adds a round
+  trip before the first byte.
+- What a cold ANNOUNCE_REQUEST reports as live. Answering from the local view
+  keeps a relay from waiting on peers but reports an empty set until the
+  registry's replay lands, on every new prefix rather than in a rare race.
+- What remains of announce compression's hop-tail half (`Hop Base` and
+  `Hop Keep` in the lite draft) once only cluster boundaries carry hops.
+- What replaces `--hop` first-hop failover. Today two publishers sharing a Hop
+  ID are one source that relays fail over between at a group boundary
+  (`doc/bin/cli.md` "Redundant publishers",
+  `doc/concept/use-case/contribution.md`). Inside a cluster no announcement
+  carries a hop list, so two encoders on different ingest relays become two
+  origins. Keep the documented behavior or change the docs in the same PR.
+
+## Required
+
+- moq.pro workers stop electing on hop chains, reading the relay's local origin instead ([moq.pro voice-local-origin](https://github.com/moq-dev/moq.pro/blob/main/quest/m0/voice-local-origin.md))
+- [Wildcard](/quest/m0/wildcard/README.md) - the specificity, pool spread, and reply identity this selection builds on
+- moq.pro's routing simulator reports ([quest](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/routing-simulator.md))
+
+## Related
+
+- [Skip unchanged announce updates](/quest/m0/announce-update-dedupe.md) - cuts duplicate updates on today's routing
+- [Redundant ingest](/quest/m2/redundant-ingest.md) - builds on the `--hop` failover this must keep or replace
+- [Routing cost domains](/quest/m2/routing-cost-domains.md) - cost across the cluster boundaries this keeps path vector

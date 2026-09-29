@@ -24,9 +24,7 @@ once the shape is in front of you, and prefer one path. Go's
 `FetchMediaGroup` takes an options struct. Media producers watch subscribers
 through `demand()` only.
 
-moq-c's media symbols move to `moq_media_*`, and `cpp/obs` adapts.
-
-Public API: breaking in every binding and moq-c. Wire: none.
+Public API: breaking in every binding. Wire: none.
 
 ## Required
 

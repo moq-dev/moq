@@ -21,6 +21,7 @@ mod requests;
 pub(crate) mod resume;
 mod subscription;
 mod time;
+mod timed;
 mod weak_cache;
 
 #[cfg(test)]
@@ -35,6 +36,7 @@ pub(crate) use subscription::Cap;
 // not under a role module.
 pub use datagram::*;
 pub use time::*;
+pub use timed::Timed;
 
 /// Publishing broadcasts, announcing routes, and consuming both through an origin.
 pub mod origin {

@@ -443,51 +443,83 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_grant_within_clock_skew_stays_live() {
+	async fn an_expired_grant_is_refused() {
 		tokio::time::pause();
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
 		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
 		let client = clock_server(Log::default(), grant, false).await;
-		let consumer = client.connect(request()).await.unwrap();
-
-		tokio::time::sleep(Duration::from_millis(500)).await;
-		assert!(
-			tokio::time::timeout(Duration::from_millis(100), consumer.closed())
-				.await
-				.is_err(),
-			"still live inside the skew window"
-		);
-
-		let reason = tokio::time::timeout(crate::grant::CLOCK_SKEW + Duration::from_secs(1), consumer.closed())
-			.await
-			.expect("expired once the skew window ended");
-		assert_eq!(reason, Reason::Expired);
+		assert!(matches!(client.connect(request()).await, Err(Error::GrantExpired)));
 	}
 
 	#[tokio::test]
-	async fn an_outage_keeps_the_grant_until_expires() {
+	async fn a_grant_closes_at_its_expiry() {
 		tokio::time::pause();
-		let log = Log::default();
-		let client = clock_server(
-			log.clone(),
-			grant(Some(Duration::from_secs(3)), Some(Duration::from_secs(1))),
-			false,
-		)
-		.await;
-		let consumer = client.connect(request()).await.unwrap();
+		// Whole seconds, as the grant crosses the wire, so the client sees this exact instant.
+		// An hour out, so a slow runner cannot expire it before `connect` answers.
+		let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+		let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() + 3600);
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		grant.expires = Some(expires);
+		let client = clock_server(Log::default(), grant, false).await;
 
-		tokio::time::sleep(Duration::from_millis(1500)).await;
-		assert!(log.revalidates() >= 1, "re-checks happened");
+		// The client reads both clocks somewhere inside `connect`, so bracket it: the
+		// bounds hold however long it takes.
+		let (wall, tick) = (SystemTime::now(), tokio::time::Instant::now());
+		let consumer = client.connect(request()).await.unwrap();
+		let earliest = tick + expires.duration_since(SystemTime::now()).unwrap();
+		let latest = tokio::time::Instant::now() + expires.duration_since(wall).unwrap();
+
+		// A millisecond either side for Tokio's timer resolution.
+		let tolerance = Duration::from_millis(1);
+		assert!(
+			tokio::time::timeout_at(earliest - tolerance, consumer.closed())
+				.await
+				.is_err(),
+			"live until its expiry"
+		);
+		let reason = tokio::time::timeout_at(latest + tolerance, consumer.closed())
+			.await
+			.expect("closed at its expiry, not later");
+		assert_eq!(reason, Reason::Expired);
+	}
+
+	/// On the real clock: a paused one jumps to the expiry timer whenever the runtime
+	/// waits on a socket, and macOS delivers loopback asynchronously, so the lease can
+	/// expire and drop the re-check before the server sees it. Load only delays the
+	/// close, so asserting it never lands before `expires` holds on a busy machine.
+	#[tokio::test]
+	async fn an_outage_keeps_the_grant_until_expires() {
+		// Whole seconds, as the grant crosses the wire, so the client sees this exact instant.
+		let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+		let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() + 3);
+
+		let log = Log::default();
+		let server = server(log.clone(), move |request| match request.event {
+			Event::Connect => {
+				let mut grant = grant(None, Some(Duration::from_secs(1)));
+				grant.expires = Some(expires);
+				ResponseTemplate::new(200).set_body_json(grant)
+			}
+			Event::Revalidate => ResponseTemplate::new(503),
+			Event::End { .. } => ResponseTemplate::new(200),
+		})
+		.await;
+		let consumer = client(&server).connect(request()).await.unwrap();
+
+		let reason = tokio::time::timeout(Duration::from_secs(10), consumer.closed())
+			.await
+			.expect("expired");
+		assert_eq!(reason, Reason::Expired);
+		assert!(SystemTime::now() >= expires, "an outage must not close before expires");
+		assert!(
+			log.revalidates() >= 1,
+			"no re-check reached the server during the outage"
+		);
 		assert_eq!(
 			consumer.grant().publish,
 			patterns(&["**"]),
 			"the grant stands through the outage"
 		);
-
-		let reason = tokio::time::timeout(Duration::from_secs(5), consumer.closed())
-			.await
-			.expect("expired");
-		assert_eq!(reason, Reason::Expired);
 		assert!(matches!(
 			log.end().await.event,
 			Event::End {

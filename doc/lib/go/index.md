@@ -75,7 +75,7 @@ broadcast.Close()    // keep the producer reachable while publishing, then close
 
 For locally encoded media, call `MediaProducer.Flush(timestampUs)` after `WriteFrame` with the same broadcast-clock PTS. It measures catalog jitter at the transport handoff. File, pipe, and network imports should omit `Flush`; built-in encoders observe their own output.
 
-Call `media.Discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds.
+Call `media.Discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a video track, resume with a keyframe: a delta frame before it fails.
 
 The three advertising operations: `client.CreateBroadcast(path)` (or
 `origin.CreateBroadcast`) returns an unannounced producer, invisible to everyone;
@@ -93,6 +93,12 @@ live at subscribe time has been delivered. Break on `AnnounceEventLive` to list
 what is live and stop.
 Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
 `Hidden: true`.
+
+An `OriginProducer` from `moq.NewOriginProducer` has no `Close`: its origin
+ends when the garbage collector reaches the last producer, and every consumer
+and `OriginDynamic` made from it then fails with `moq.ErrClosed`. Keep the
+producer reachable (a field on a long-lived struct, or `runtime.KeepAlive`) for
+as long as the origin should serve.
 
 Every call that can block takes a `context.Context` first. Cancelling it
 returns `ctx.Err()` promptly and tears the in-flight native work down, so a

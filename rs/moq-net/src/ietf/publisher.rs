@@ -1779,10 +1779,16 @@ where
 		// erroring, which would look fatal to the peer.
 		// The wire prefix decodes as a literal path; convert it explicitly to its
 		// subtree grant, refusing anything that cannot be a subtree.
+		// The cursor is rooted at the prefix so every update arrives named as its
+		// wire suffix, a route covering the prefix included: that one presents at
+		// the root, as the empty suffix.
 		let scope = crate::Pattern::subtree(prefix.as_str())
-			.map(crate::Patterns::from)
+			.map(|subtree| subtree.rebase(prefix.as_str()))
 			.unwrap_or_default();
-		let origin = self.origin.scope("", &scope).unwrap_or_else(|_| self.origin.empty());
+		let origin = self
+			.origin
+			.scope(&prefix, &scope)
+			.unwrap_or_else(|_| self.origin.empty());
 
 		// The extension changes what an advertisement carries, so nothing can be
 		// sent until the peer's SETUP says whether it speaks it. The same SETUP says
@@ -2009,11 +2015,8 @@ where
 		update: crate::announce::Announce,
 		active: bool,
 	) -> Result<(), Error> {
-		let path = update.prefix;
-		let suffix = path
-			.strip_prefix(prefix)
-			.expect("origin returned invalid prefix")
-			.to_owned();
+		let suffix = update.prefix;
+		let path = prefix.join(&suffix);
 
 		if active {
 			// A repeat for a live suffix is a metadata update: keep the

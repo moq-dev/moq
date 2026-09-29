@@ -22,6 +22,15 @@ set working-directory := '.'
 default:
     @just --justfile {{ justfile() }} --list test
 
+# Port isolation across private temp roots and keyboard activation under a canvas.
+# The browser check is not `*.test.ts`: plain `bun test` runs lack Playwright Chromium,
+# which this recipe installs, as the interop and wasm harnesses do.
+harness:
+    ./lib/harness.test.sh
+    cd .. && bun install --frozen-lockfile
+    cd interop/clients/js && bunx playwright install chromium
+    cd interop/clients/js && bun test ./harness.browser.ts
+
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
 # sanity check). `interop --all` runs the full matrix: rust + python + go +

@@ -27,6 +27,12 @@ Precedent for what this catches: NVENC validation on an RTX 3070 Ti found that
 NVENC rejects stream-ordered pool memory, so buffers registered with it must
 come from plain `cuMemAlloc`. That is not a bug any amount of review finds.
 
+## Required
+
+- Someone with the hardware runs it: an Intel GPU exposing the VAAPI low-power
+  entrypoint, a second render node, a V4L2 capture device with DMA-BUF export,
+  a Windows machine with MJPEG and YUY2 cameras, and a live camera per platform
+
 ## Related
 
 - [Validate PipeWire cameras on a portal and a Pi](/quest/m3/pipewire-camera-hardware.md) - the camera portal and a Pi CSI node, which are a different machine from this list

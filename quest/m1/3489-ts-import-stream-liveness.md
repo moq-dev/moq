@@ -32,8 +32,10 @@ audio half is visible, late, through #3372's resync line.
   resync message. The SRT gateway reports nothing today; that surface is
   [SRT import stats](/quest/m1/srt-import-stats.md).
 - Name and shape the counters so the TR 101 290 quest adopts them as its
-  `PID_error` check, and leave the catalog `stalled` bit alone; that is the
-  ladder and client stats work.
+  `PID_error` check, and leave the catalog `stalled` bit alone: the importer
+  already sets it for a quiet video PID (`Stream::tick` after each decode
+  batch, #3630). These counters add no timeout; anything that must bound a
+  wait on a silent PID (the shared-shift quest) brings its own.
 - Tests with the issue's stimulus shape: suppress one PID's PES while keeping
   its PCR and continuity legal, assert the row's count stops and the gap
   grows; audio and SCTE-35 arms.
