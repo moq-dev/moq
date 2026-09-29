@@ -771,31 +771,38 @@ describe("buffered mode", () => {
 	});
 });
 
-describe("latency increase re-anchor", () => {
-	it("resize() does not re-stall a mid-playback ring, but reset() does", () => {
+describe("latency increase", () => {
+	// Video holds a deeper floor on its own, so audio has to park for the difference or it runs
+	// ahead. Flushing instead cost the whole floor in silence for every rise, however small.
+	it("parks a playing ring until the deeper floor refills, keeping what it buffered", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Time.Milli });
 
-		// Fill to the floor so playback starts (un-stalls), then play some samples.
+		// Fill to the floor so playback starts, then play half of it.
 		write(buffer, 0 as Time.Milli, 100, { channels: 1, value: 1.0 });
 		expect(buffer.stalled).toBe(false);
 		read(buffer, 50, 1);
 
-		// Raising the latency floor grows the target but must NOT re-stall a ring mid-playback:
-		// resize() only re-stalls an empty ring, so it keeps draining at the old depth. This is
-		// exactly why setLatency() alone doesn't re-buffer -- the desync the Decoder re-anchor fixes.
-		buffer.resize(200 as Time.Milli);
+		buffer.resize(110 as Time.Milli);
+		expect(buffer.stalled).toBe(true);
+		expect(buffer.length).toBe(50);
+
+		// Refilling to the 110-sample floor takes 60 more samples, not the whole floor.
+		write(buffer, 100 as Time.Milli, 59, { channels: 1, value: 2.0 });
+		expect(buffer.stalled).toBe(true);
+		write(buffer, 159 as Time.Milli, 1, { channels: 1, value: 2.0 });
 		expect(buffer.stalled).toBe(false);
 
-		// reset() re-stalls, so the ring refills to the (new) floor before playing again. The Decoder
-		// calls reset() on a latency-floor increase (#runLatencyReanchor) to re-anchor to the cushion.
-		buffer.reset();
-		expect(buffer.stalled).toBe(true);
+		// Playback resumes where it parked rather than at the refill.
+		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(50 as Time.Milli);
+		expect(read(buffer, 1, 1)[0][0]).toBe(1.0);
+	});
 
-		// ...and it refills to the *new* 200-sample floor, not the old 100: still stalled at 199,
-		// un-stalls only once the 200th sample lands. This proves resize(200) moved the target.
-		write(buffer, 0 as Time.Milli, 199, { channels: 1, value: 1.0 });
-		expect(buffer.stalled).toBe(true);
-		write(buffer, 199 as Time.Milli, 1, { channels: 1, value: 1.0 });
+	it("keeps playing through a shallower floor", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Time.Milli });
+		write(buffer, 0 as Time.Milli, 100, { channels: 1, value: 1.0 });
+		read(buffer, 50, 1);
+
+		buffer.resize(90 as Time.Milli);
 		expect(buffer.stalled).toBe(false);
 	});
 });

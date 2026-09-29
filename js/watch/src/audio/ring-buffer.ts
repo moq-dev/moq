@@ -65,7 +65,13 @@ export class AudioRingBuffer {
 	}
 
 	resize(latency: Time.Milli): void {
-		this.#latencySamples = Math.ceil(this.rate * Time.Second.fromMilli(latency));
+		const latencySamples = Math.ceil(this.rate * Time.Second.fromMilli(latency));
+
+		// A deeper floor parks playback until it refills. Video holds the extra delay on its own, so
+		// audio that kept draining at the old depth would run ahead by the difference. Parking keeps
+		// what is buffered, so a rise costs only its own size in silence.
+		if (latencySamples > this.#latencySamples) this.#stalled = true;
+		this.#latencySamples = latencySamples;
 
 		const newCapacity = this.#capacityFor(this.#latencySamples);
 		if (newCapacity === this.capacity) return;

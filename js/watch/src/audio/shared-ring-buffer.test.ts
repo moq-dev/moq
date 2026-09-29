@@ -476,6 +476,38 @@ describe("setLatency", () => {
 		const output2 = read(buffer, 128, 1);
 		expect(output2[0].length).toBe(20);
 	});
+
+	// Video holds a deeper floor on its own, so audio has to park for the difference or it runs
+	// ahead. Flushing instead cost the whole floor in silence for every rise, however small.
+	it("parks a playing ring until the deeper floor refills, keeping what it buffered", () => {
+		const buffer = create({ rate: 1000, channels: 1, capacity: 256, latency: 100 });
+		insert(buffer, 0, 100, { channels: 1, value: 1.0 });
+		expect(buffer.stalled).toBe(false);
+		read(buffer, 50, 1);
+
+		buffer.setLatency(110);
+		expect(buffer.stalled).toBe(true);
+		expect(read(buffer, 128, 1)[0].length).toBe(0);
+
+		// Refilling to the 110-sample floor takes 60 more samples, not the whole floor.
+		insert(buffer, 100, 59, { channels: 1, value: 2.0 });
+		expect(buffer.stalled).toBe(true);
+		insert(buffer, 159, 1, { channels: 1, value: 2.0 });
+		expect(buffer.stalled).toBe(false);
+
+		// Playback resumes where it parked rather than at the refill.
+		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(50 as Time.Milli);
+		expect(read(buffer, 1, 1)[0][0]).toBe(1.0);
+	});
+
+	it("keeps playing through a shallower floor", () => {
+		const buffer = create({ rate: 1000, channels: 1, capacity: 256, latency: 100 });
+		insert(buffer, 0, 100, { channels: 1, value: 1.0 });
+		read(buffer, 50, 1);
+
+		buffer.setLatency(90);
+		expect(buffer.stalled).toBe(false);
+	});
 });
 
 describe("stalled getter", () => {

@@ -371,9 +371,16 @@ export class SharedRingBuffer {
 		return count;
 	}
 
-	/** Update the target latency in samples. */
+	/**
+	 * Update the target latency in samples. Main thread only.
+	 *
+	 * A deeper floor parks playback until it refills. Video holds the extra delay on its own, so
+	 * audio that kept draining at the old depth would run ahead by the difference. Parking keeps
+	 * what is buffered, so a rise costs only its own size in silence.
+	 */
 	setLatency(samples: number): void {
-		Atomics.store(this.#control, LATENCY, samples);
+		const previous = Atomics.exchange(this.#control, LATENCY, samples);
+		if (previous > 0 && samples > previous) Atomics.store(this.#control, STALLED, 1);
 	}
 
 	/**
