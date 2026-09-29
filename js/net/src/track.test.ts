@@ -1,4 +1,4 @@
-import { expect, setSystemTime, test } from "bun:test";
+import { expect, setSystemTime, spyOn, test } from "bun:test";
 import { TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { hooks } from "./internal.ts";
@@ -1711,6 +1711,37 @@ test("an omitted publisher limit retains old groups", async () => {
 		producer.close();
 		clock.restore();
 	}
+});
+
+test("a late subscriber to a closed unlimited track is not held by the producer", async () => {
+	const producer = new TrackProducer("unlimited").accept();
+	const source = producer.appendGroup();
+	source.writeString("last");
+	source.close();
+	producer.close();
+
+	// Counts the map entries subscribing leaves behind, rather than the heap: nothing ages an
+	// unlimited track's cache out, so any entry keyed by the subscriber would outlive it.
+	const added: [Map<unknown, unknown>, unknown][] = [];
+	const set = Map.prototype.set;
+	const spy = spyOn(Map.prototype, "set").mockImplementation(function (this: Map<unknown, unknown>, key, value) {
+		added.push([this, key]);
+		return set.call(this, key, value);
+	});
+	let subscriber: ReturnType<TrackProducer["subscribe"]>;
+	try {
+		subscriber = producer.subscribe();
+	} finally {
+		spy.mockRestore();
+	}
+
+	const group = await subscriber.recvGroup();
+	expect(await group?.readString()).toBe("last");
+	expect(await subscriber.recvGroup()).toBeUndefined();
+	subscriber.close();
+	await settle();
+
+	expect(added.filter(([map, key]) => map.has(key)).length).toBe(0);
 });
 
 test("an abort keeps finished groups for a slow reader, then reports it", async () => {

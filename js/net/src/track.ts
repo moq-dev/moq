@@ -570,13 +570,8 @@ export class Producer {
 				// Update demand: once the last subscriber leaves, the consumer wire (watching
 				// {@link unused}) tears the upstream down instead of downloading to nobody.
 				this.#used.set(this.#sinks.size > 0);
-				// The producer closing every sink leaves the sink's buffered mirrors readable.
-				// Bounded retention keeps them tracked so they age out with the cache;
-				// unlimited retention never ages anything out, so it leaves them to the reader.
 				if (this.#state.closed.peek() !== undefined) {
-					if (this.#state.info.peek()?.maxAge === undefined) {
-						for (const entry of this.#cache) entry.mirrors.delete(sink);
-					}
+					this.#release(sink);
 					dispose();
 					return;
 				}
@@ -596,7 +591,18 @@ export class Producer {
 		for (const entry of this.#cache) this.#mirror(entry, sink);
 
 		sink.final.set(this.#state.final.peek());
-		if (closed !== undefined) closeTrackState(sink, closed instanceof Error ? closed : undefined);
+		if (closed !== undefined) {
+			this.#release(sink);
+			closeTrackState(sink, closed instanceof Error ? closed : undefined);
+		}
+	}
+
+	// A closed track leaves a sink's buffered mirrors readable. Bounded retention keeps them
+	// tracked so they age out with the cache; unlimited retention never ages anything out,
+	// so it leaves them to the reader.
+	#release(sink: TrackState): void {
+		if (this.#state.info.peek()?.maxAge !== undefined) return;
+		for (const entry of this.#cache) entry.mirrors.delete(sink);
 	}
 
 	// Recompute from every live sink because an update or close can narrow as well as widen
