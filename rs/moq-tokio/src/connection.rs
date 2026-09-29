@@ -461,6 +461,8 @@ struct State {
 	/// The currently-connected session, or `None` while reconnecting. Read by
 	/// [`Monitor`] to snapshot live connection stats.
 	session: Option<moq_net::Session>,
+	/// The loop's [`Draining`] predecessor, so [`Connection::close`] drains it too.
+	predecessor: Option<moq_net::Session>,
 }
 
 /// The producer side of everything a [`Connection`] handle can observe.
@@ -723,25 +725,30 @@ impl Connection {
 		self.task.handle.abort();
 	}
 
-	/// Stop the loop for every clone, closing the live session once the data it
-	/// queued has been delivered.
+	/// Stop the loop for every clone, closing the live session (and any predecessor
+	/// still finishing after a GOAWAY) once the data it queued has been delivered.
 	///
 	/// See [`moq_net::Session::close`]: finished tracks deliver their last groups and
 	/// FIN first, bounded by a one second deadline. Call this before
 	/// [`Client::close`], which closes the transport without waiting. Returns `Ok`
-	/// when nothing was live, and the session's error if it did not drain.
+	/// when nothing was live, and a session's error if it did not drain.
 	pub async fn close(self) -> crate::Result<()> {
-		// Refuse redials and take the session under one lock: see [`CloseGuard`].
-		let session = {
+		// Refuse redials and take the sessions under one lock: see [`CloseGuard`].
+		let (session, predecessor) = {
 			let mut closed = self.task.closed.lock().unwrap();
 			*closed = Some(moq_net::Error::Cancel);
-			self.state.read().session.clone()
+			let state = self.state.read();
+			(state.session.clone(), state.predecessor.clone())
 		};
 		self.task.handle.abort();
-		match session {
-			Some(session) => Ok(session.close().await?),
-			None => Ok(()),
-		}
+		let close = |session: Option<moq_net::Session>| async move {
+			match session {
+				Some(session) => session.close().await,
+				None => Ok(()),
+			}
+		};
+		let (session, predecessor) = tokio::join!(close(session), close(predecessor));
+		Ok(session.and(predecessor)?)
 	}
 
 	async fn run(shared: &Shared, client: Client, addrs: Addrs) -> crate::Result<()> {
@@ -824,7 +831,7 @@ impl Connection {
 						if let Some(mut old) = draining.take() {
 							old.retire();
 						}
-						draining = Some(Draining::new(session, goaway.handover(msg.timeout())));
+						draining = Some(Draining::new(session, goaway.handover(msg.timeout()), &shared.state));
 
 						if healthy {
 							delay = initial;
@@ -1192,10 +1199,15 @@ struct Draining {
 	session: moq_net::Session,
 	closed: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
 	deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+	/// Mirrors the session into [`State::predecessor`] for as long as this lives.
+	state: kio::Producer<State>,
 }
 
 impl Draining {
-	fn new(session: moq_net::Session, handover: Duration) -> Self {
+	fn new(session: moq_net::Session, handover: Duration, state: &kio::Producer<State>) -> Self {
+		if let Ok(mut state) = state.write() {
+			state.predecessor = Some(session.clone());
+		}
 		let closed = {
 			let session = session.clone();
 			Box::pin(async move {
@@ -1207,6 +1219,7 @@ impl Draining {
 			session,
 			closed,
 			deadline: Box::pin(tokio::time::sleep(handover)),
+			state: state.clone(),
 		}
 	}
 
@@ -1227,6 +1240,14 @@ impl Draining {
 			return true;
 		}
 		false
+	}
+}
+
+impl Drop for Draining {
+	fn drop(&mut self) {
+		if let Ok(mut state) = self.state.write() {
+			state.predecessor = None;
+		}
 	}
 }
 
