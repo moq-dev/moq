@@ -10,24 +10,12 @@ mod support;
 use std::{collections::HashMap, time::Duration};
 
 use moq_net::{Hop, Version, announce, broadcast, origin};
-use support::harness::{MockConnectOptions, MockPair, connect_mock};
+use support::harness::{MockPair, peer};
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
 	tokio::spawn(support::harness::run(driver));
 	producer
-}
-
-/// Peer two relays the way `moq-relay`'s cluster does: one session, both directions.
-async fn peer(version: Version, a: &origin::Producer, b: &origin::Producer) -> MockPair {
-	let a = a.clone().peer();
-	let b = b.clone().peer();
-	let mut options = MockConnectOptions::new(version);
-	options.client_publish = Some(a.consume().with_hidden(true));
-	options.client_subscribe = Some(a);
-	options.server_publish = Some(b.consume().with_hidden(true));
-	options.server_subscribe = Some(b);
-	connect_mock(options).await
 }
 
 /// Every update per prefix until the cursor goes quiet. Time is paused, so the

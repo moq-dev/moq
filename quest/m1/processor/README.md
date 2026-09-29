@@ -5,7 +5,9 @@
 A customer runs a worker in its own environment, connects outbound to a MoQ
 deployment, reads only eligible source media, and publishes an on-demand
 contribution under the processor's own prefix, mirroring the source path
-(for example `.<processor>/<source path>`). The platform supplies
+(for example `.pro/<processor>/<source path>`, the
+[wildcard](/quest/m0/wildcard/README.md) line's derived-output layout). The
+platform supplies
 registration, scoped credentials, routing, demand, status, and usage
 visibility; it does not upload or execute customer code.
 

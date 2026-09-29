@@ -4479,6 +4479,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-test",
  "url",
  "web-async",
  "webm-iterable",
@@ -4635,6 +4636,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "socket2 0.6.5",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.21",
@@ -4744,6 +4746,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-test",
 ]
 
 [[package]]
@@ -4809,6 +4812,7 @@ dependencies = [
  "serde",
  "serde_with",
  "sha2",
+ "socket2 0.6.5",
  "subtle",
  "tempfile",
  "thiserror 2.0.21",

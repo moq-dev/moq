@@ -21,15 +21,20 @@ every wire (Wildcard's decision) and suffix routing is dropped, so leading-star
 and suffix advertise patterns have nothing to authorize. Token claim patterns
 keep their suffix support for publish and subscribe.
 
+Decided: an advertised prefix must overlap the advertise scope, not sit
+inside it, and a wider claim only routes the requests the scope covers. This
+matches how the relay authorizes advertisements today.
+
 Preserve current customer credentials in the wire and authorization design:
 existing claims retain their current publish-implies-advertise behavior, while
 the new v1 claim separates the capabilities. Land the claims, SDK,
 origin-scope, relay authorization, and tests without combining the release or
 the moq.pro (downstream) pin rollout into this quest.
 
-Cover containment, rebasing, missing versus empty advertise scope, v0
-compatibility, token revalidation, concrete announce, publish, FETCH, and a
-prefix demand that receives only an exact short-lived publish grant.
+Cover overlap and per-request filtering, rebasing, missing versus empty
+advertise scope, v0 compatibility, token revalidation, concrete announce,
+publish, FETCH, and a prefix demand that receives only an exact short-lived
+publish grant.
 
 ## Required
 
