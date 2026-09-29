@@ -9,8 +9,8 @@ use crate::consumer::MoqTrackConsumer;
 use crate::error::MoqError;
 use crate::flate::{MoqFlateConfig, MoqFlateSnapshotProducer, MoqFlateStreamProducer};
 use crate::json::{
-	MoqJsonSnapshotConfig, MoqJsonSnapshotConsumer, MoqJsonSnapshotProducer, MoqJsonStreamConfig, MoqJsonStreamConsumer,
-	MoqJsonStreamProducer,
+	MoqJsonSnapshotConfig, MoqJsonSnapshotConsumer, MoqJsonSnapshotProducer, MoqJsonStreamConfig,
+	MoqJsonStreamConsumer, MoqJsonStreamProducer,
 };
 use crate::media::{MoqAudioFormat, MoqAudioInit, MoqFrame, MoqVideoFormat, MoqVideoInit};
 use crate::session::{MoqBackoff, MoqConnectionStatus};
@@ -638,7 +638,10 @@ async fn json_snapshot_roundtrip() {
 	};
 	let track = broadcast.publish_track("meta".into(), None).unwrap();
 	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();
-	assert!(matches!(track.name(), Err(MoqError::Closed)), "the producer takes over the track");
+	assert!(
+		matches!(track.name(), Err(MoqError::Closed)),
+		"the producer takes over the track"
+	);
 	let consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "meta").await, config).unwrap();
 
 	producer.update(r#"{"a":1}"#.into()).unwrap();
@@ -687,7 +690,8 @@ async fn json_demand() {
 	assert_eq!(stream_demand.name(), "events");
 	assert!(!snapshot_demand.is_used());
 
-	let snapshot_consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "status").await, snapshot_config).unwrap();
+	let snapshot_consumer =
+		MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "status").await, snapshot_config).unwrap();
 	let stream_consumer = MoqJsonStreamConsumer::new(&*subscribe(&broadcast, "events").await, stream_config).unwrap();
 
 	tokio::time::timeout(TIMEOUT, snapshot_demand.used())
@@ -817,7 +821,12 @@ async fn json_consumer_takes_an_unread_track() {
 	let track = broadcast.publish_track("events".into(), None).unwrap();
 	let config = MoqJsonStreamConfig { compression: false };
 
-	let read = broadcast.consume().unwrap().subscribe_track("events".into(), None).await.unwrap();
+	let read = broadcast
+		.consume()
+		.unwrap()
+		.subscribe_track("events".into(), None)
+		.await
+		.unwrap();
 	track.append_group().unwrap();
 	tokio::time::timeout(TIMEOUT, read.recv_group())
 		.await

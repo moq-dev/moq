@@ -125,9 +125,8 @@ impl MoqJsonSnapshotProducer {
 		let config = moq_mux::json::Config::default()
 			.with_compression(config.compression)
 			.with_delta_ratio(config.delta_ratio);
-		let producer = track.adopt(|track| {
-			broadcast.with_state(|state| Ok(state.catalog.json_snapshot::<Value>(track, config)?))
-		})?;
+		let producer = track
+			.adopt(|track| broadcast.with_state(|state| Ok(state.catalog.json_snapshot::<Value>(track, config)?)))?;
 		Ok(Arc::new(Self {
 			inner: std::sync::Mutex::new(Some(producer)),
 		}))
@@ -231,9 +230,8 @@ impl MoqJsonStreamProducer {
 	) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let config = moq_mux::json::Config::default().with_compression(config.compression);
-		let producer = track.adopt(|track| {
-			broadcast.with_state(|state| Ok(state.catalog.json_stream::<Value>(track, config)?))
-		})?;
+		let producer = track
+			.adopt(|track| broadcast.with_state(|state| Ok(state.catalog.json_stream::<Value>(track, config)?)))?;
 		Ok(Arc::new(Self {
 			inner: std::sync::Mutex::new(Some(producer)),
 		}))
