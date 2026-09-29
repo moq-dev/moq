@@ -61,8 +61,9 @@ knows their clocks are synchronized. The catalog says where PTS zero was on the
 publisher's clock, never whether the viewer's clock agrees with it. If you do
 know, set `delay` to `target - (arrived - captured)`, where `arrived` is the
 viewer's `Date.now()` for the frame that arrived earliest relative to its
-timestamp, since `<moq-watch>` anchors playback on that frame. It adds the
-largest active rendition's buffer on top, so a frame renders at about
+timestamp, since `<moq-watch>` anchors playback on that frame. That holds only
+with the default zero `buffer`; a lookahead moves the anchor. `<moq-watch>` adds
+the largest active rendition's buffer on top, so a frame renders at about
 `captured + target` plus that buffer: the rendition's catalog `delay` plus its
 `jitter` (one video frame or one codec frame when unset), and for audio the
 worklet quantum too. Viewers only line up when that buffer matches, and a
