@@ -13,7 +13,7 @@ const PCR_HZ: u64 = 27_000_000;
 /// Bits per transport packet.
 const PACKET_BITS: u64 = 188 * 8;
 /// The 33-bit base times 300 plus the 9-bit extension: the PCR wraps here.
-const PCR_WRAP: u64 = (1 << 33) * 300;
+pub(super) const PCR_WRAP: u64 = (1 << 33) * 300;
 /// How much PCR time one window spans before it is judged.
 const WINDOW: u64 = 2 * PCR_HZ;
 /// Intervals are pooled into samples this long before they are compared. One
@@ -23,7 +23,7 @@ const WINDOW: u64 = 2 * PCR_HZ;
 const SAMPLE: u64 = WINDOW / 4;
 /// A PCR interval longer than this is a gap or a wrap gone wrong, not a sample:
 /// TR 101 290 already flags anything over 100 ms.
-const MAX_INTERVAL: u64 = PCR_HZ;
+pub(super) const MAX_INTERVAL: u64 = PCR_HZ;
 /// How far one sample may sit from a rate and still agree with it, in thousandths.
 /// A hardware multiplexer's rate wanders more than a percent between half-second
 /// samples while its whole-window average holds far tighter; a VBR source is off by

@@ -908,6 +908,261 @@ async fn noq_client_close_drains_finished_track() {
 		.expect("client thread panicked");
 }
 
+/// A GOAWAY leaves the old session serving its subscriptions after the replacement
+/// connects, and a close then drains that predecessor too rather than dropping it.
+#[cfg(feature = "noq")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn noq_client_close_drains_migrated_predecessor() {
+	// Several congestion windows, so it is still in flight when the close starts.
+	let payload: Vec<u8> = (0..64 * 1024).map(|i| i as u8).collect();
+
+	let quic = moq_tokio::quic::Config::default();
+	let mut server_config = moq_tokio::listen::Config::default();
+	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
+	server_config.tls.generate = vec!["localhost".into()];
+	let server = server_config.init(quic.clone()).expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
+	let url: url::Url = format!("moqt://localhost:{}", server.local_addr().unwrap().port())
+		.parse()
+		.unwrap();
+
+	// The client's runtime is gone as soon as it returns, as when a process exits.
+	let (subscribed_tx, subscribed_rx) = tokio::sync::oneshot::channel::<()>();
+	let (migrated_tx, migrated_rx) = tokio::sync::oneshot::channel::<()>();
+	let expected = payload.clone();
+	let client = std::thread::spawn(move || {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("client runtime");
+		runtime.block_on(async move {
+			let origin = moq_tokio::origin::spawn();
+			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
+			broadcast.announce(Default::default()).expect("failed to announce");
+			let mut track = broadcast.create_track("video", None).expect("failed to create track");
+
+			let mut config = moq_tokio::connect::Config::default();
+			config.tls.insecure = Some(true);
+			config.bind = Some("127.0.0.1:0".parse().unwrap());
+			let client = config
+				.init(quic)
+				.expect("failed to init client")
+				.with_publisher(origin.consume());
+			let mut connection = client.connect(url).established().await.expect("client connect failed");
+
+			while track.subscription().is_none() {
+				track.subscription_changed().await.expect("track closed");
+			}
+			subscribed_tx.send(()).unwrap();
+
+			// Once the replacement is live, only the predecessor serves the subscription.
+			while connection.epoch() < 2 || !connection.connected() {
+				connection.status().await.expect("connection stopped");
+			}
+			migrated_tx.send(()).unwrap();
+
+			let mut group = track.append_group().expect("failed to append group");
+			group
+				.write_frame(moq_tokio::moq_net::Timestamp::ZERO, payload)
+				.expect("failed to write frame");
+			group.finish().expect("failed to finish group");
+			track.finish().expect("failed to finish track");
+
+			connection.close().await.expect("the close drains");
+			client.close().await;
+		});
+	});
+
+	let request = tokio::time::timeout(TIMEOUT, server.accept())
+		.await
+		.expect("accept timed out")
+		.expect("no incoming connection");
+	let origin = moq_tokio::origin::spawn();
+	let consumer = origin.consume();
+	let mut announcements = consumer.announced();
+	let first = request
+		.with_subscriber(origin)
+		.ok()
+		.await
+		.expect("server handshake failed");
+
+	tokio::time::timeout(TIMEOUT, announcements.next())
+		.await
+		.expect("announce timed out")
+		.expect("origin closed");
+	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
+	let mut track = tokio::time::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
+		.await
+		.expect("subscribe timed out")
+		.expect("subscribe failed");
+
+	// Receiving is what sends the subscription, so read in the background.
+	let received = tokio::spawn(async move {
+		let mut group = track
+			.recv_group()
+			.await
+			.expect("recv_group failed")
+			.expect("track ended before the group");
+		let frame = group
+			.read_frame()
+			.await
+			.expect("read_frame failed")
+			.expect("group ended before the frame");
+		(frame.payload, track.recv_group().await.map(|group| group.is_some()))
+	});
+	tokio::time::timeout(TIMEOUT, subscribed_rx)
+		.await
+		.expect("the subscription never reached the client")
+		.expect("client thread panicked");
+
+	first
+		.drain()
+		.send(moq_tokio::moq_net::goaway::Goaway::new())
+		.expect("send goaway");
+	let request = tokio::time::timeout(TIMEOUT, server.accept())
+		.await
+		.expect("the replacement never dialed")
+		.expect("no incoming connection");
+	let _second = request
+		.with_subscriber(moq_tokio::origin::spawn())
+		.ok()
+		.await
+		.expect("server handshake failed");
+	tokio::time::timeout(TIMEOUT, migrated_rx)
+		.await
+		.expect("the client never migrated")
+		.expect("client thread panicked");
+
+	let (payload, end) = tokio::time::timeout(TIMEOUT, received)
+		.await
+		.expect("the track timed out")
+		.expect("reader panicked");
+	assert!(payload[..] == expected[..], "the frame arrives whole");
+	match end {
+		Ok(false) => {}
+		Ok(true) => panic!("an unexpected second group"),
+		Err(err) => panic!("the track ends with {err} instead of finishing"),
+	}
+
+	tokio::task::spawn_blocking(move || client.join())
+		.await
+		.unwrap()
+		.expect("client thread panicked");
+}
+
+/// A close cuts a predecessor that cannot drain off at its handover deadline,
+/// rather than holding it for the full one second close window.
+#[cfg(feature = "noq")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn noq_client_close_keeps_predecessor_handover() {
+	let quic = moq_tokio::quic::Config::default();
+	let mut server_config = moq_tokio::listen::Config::default();
+	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
+	server_config.tls.generate = vec!["localhost".into()];
+	let server = server_config.init(quic.clone()).expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
+	let url: url::Url = format!("moqt://localhost:{}", server.local_addr().unwrap().port())
+		.parse()
+		.unwrap();
+
+	let (subscribed_tx, subscribed_rx) = tokio::sync::oneshot::channel::<()>();
+	let client = std::thread::spawn(move || {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("client runtime");
+		runtime.block_on(async move {
+			let origin = moq_tokio::origin::spawn();
+			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
+			broadcast.announce(Default::default()).expect("failed to announce");
+			// Never finished, so the predecessor serving it cannot drain.
+			let mut track = broadcast.create_track("video", None).expect("failed to create track");
+
+			let mut config = moq_tokio::connect::Config::default();
+			config.tls.insecure = Some(true);
+			config.bind = Some("127.0.0.1:0".parse().unwrap());
+			// Well under the one second close window.
+			config.goaway.handover = Duration::from_millis(500);
+			let client = config
+				.init(quic)
+				.expect("failed to init client")
+				.with_publisher(origin.consume());
+			let mut connection = client.connect(url).established().await.expect("client connect failed");
+
+			while track.subscription().is_none() {
+				track.subscription_changed().await.expect("track closed");
+			}
+			subscribed_tx.send(()).unwrap();
+
+			// Close while the old session is still inside its handover window.
+			while connection.status().await.expect("connection stopped") != moq_tokio::Status::Migrating {}
+			let start = std::time::Instant::now();
+			let err = connection.close().await.expect_err("the predecessor cannot drain");
+			let elapsed = start.elapsed();
+			client.close().await;
+			(err, elapsed)
+		})
+	});
+
+	let request = tokio::time::timeout(TIMEOUT, server.accept())
+		.await
+		.expect("accept timed out")
+		.expect("no incoming connection");
+	let origin = moq_tokio::origin::spawn();
+	let consumer = origin.consume();
+	let mut announcements = consumer.announced();
+	let first = request
+		.with_subscriber(origin)
+		.ok()
+		.await
+		.expect("server handshake failed");
+
+	tokio::time::timeout(TIMEOUT, announcements.next())
+		.await
+		.expect("announce timed out")
+		.expect("origin closed");
+	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
+	let mut track = tokio::time::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
+		.await
+		.expect("subscribe timed out")
+		.expect("subscribe failed");
+	// Receiving is what sends the subscription, so read in the background.
+	let _received = tokio::spawn(async move { track.recv_group().await.map(|group| group.is_some()) });
+	tokio::time::timeout(TIMEOUT, subscribed_rx)
+		.await
+		.expect("the subscription never reached the client")
+		.expect("client thread panicked");
+
+	first
+		.drain()
+		.send(moq_tokio::moq_net::goaway::Goaway::new())
+		.expect("send goaway");
+
+	let (err, elapsed) = tokio::task::spawn_blocking(move || client.join())
+		.await
+		.unwrap()
+		.expect("client thread panicked");
+	// The one second close window would have ended it with a timeout instead.
+	assert!(
+		!matches!(err, moq_tokio::Error::MoqNet(moq_tokio::moq_net::Error::Timeout)),
+		"the handover deadline cuts the close short: {err:?}"
+	);
+	// The window opened just before the status flipped, so most of it remains. Loose,
+	// since this is wall-clock time, but a deadline firing at once would land near zero.
+	assert!(
+		elapsed >= Duration::from_millis(250),
+		"the close waited out the handover window: {elapsed:?}"
+	);
+}
+
 #[cfg(feature = "noq")]
 #[tracing_test::traced_test]
 #[tokio::test]

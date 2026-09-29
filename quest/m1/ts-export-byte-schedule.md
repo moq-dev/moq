@@ -22,8 +22,9 @@ UDP sink is out of scope; delivery stays with an external tool.
   cap (fail loud, or drop to VBR with a warning) and record the choice here.
 - The CLI `Delivery` pacer releases one slice per PCR interval; confirm it
   still writes on the schedule the PCRs describe.
-- Grade the distribution of bytes between consecutive PCRs, not only
-  adjacency: extend `test/ts/pcr-timing.py` (or add a check beside it) and run
-  it in the existing TS test recipe against a CBR fixture.
+- `test/ts/pcr-timing.py`'s `pcr-schedule` grades the bytes between
+  consecutive PCRs, report-only in the TS recipe. Once the schedule lands, gate
+  it there with `--schedule-pct-min`, against a fixture whose keyframes outgrow
+  a PCR slot; the generated clip mostly pads and passes already.
 - `doc/bin/cli.md`: say that export pads to `mpegts.muxRate` on a constant-rate
   schedule and what latency that adds.
