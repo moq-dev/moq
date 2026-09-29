@@ -85,11 +85,13 @@ while let Some(request) = server.accept().await {
 Two ways to serve `rtmps://`:
 
 - **Let the gateway terminate TLS.** Set `Config::tls` (or call
-  `Server::with_tls`) with a `rustls::ServerConfig`, and the listener serves
-  RTMPS alongside plaintext RTMP on the same port: a client that opens with a
-  TLS ClientHello is TLS-terminated, any other is served as plaintext. Build the
-  config from a `moq_tokio::tls::Listen` instance (RTMPS has no ALPN), or supply
-  any `rustls::ServerConfig`.
+  `Server::with_tls`) to a `Tls` carrying a `rustls::ServerConfig`.
+  `Tls::Optional` serves RTMPS alongside plaintext RTMP on the same port: a
+  client that opens with a TLS ClientHello is TLS-terminated, any other is
+  served as plaintext. `Tls::Required` serves RTMPS only and refuses a plaintext
+  client at its first byte, so stream keys never cross the network unencrypted.
+  Build the config from a `moq_tokio::tls::Listen` instance (RTMPS has no ALPN),
+  or supply any `rustls::ServerConfig`.
 
   ```rust
   let mut tls = moq_tokio::tls::Listen::default();
@@ -98,7 +100,8 @@ Two ways to serve `rtmps://`:
 
   let mut rtmp = moq_rtmp::Config::default();
   rtmp.listen = Some("0.0.0.0:1935".parse()?);
-  rtmp.tls = Some(server_config); // Arc<rustls::ServerConfig>: rtmp:// and rtmps://
+  rtmp.tls = Some(moq_rtmp::Tls::Required(server_config)); // rtmps:// only
+  // Tls::Optional(server_config) serves rtmp:// and rtmps:// on the same port
   ```
 
 - **Bring your own transport.** Accept the connection and complete the TLS

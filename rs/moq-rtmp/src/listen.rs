@@ -61,18 +61,22 @@ pub struct Config {
 	/// and the memory matters. Only affects ingest (publishes); egress ignores it.
 	pub import_max_age: Option<Duration>,
 
-	/// TLS configuration for RTMPS (RTMP over TLS). When set, the
-	/// [`listen`](Self::listen) address serves both: a client that opens with a
-	/// TLS ClientHello (`rtmps://`) is TLS-terminated, any other is served as
-	/// plaintext (`rtmp://`). Build it with
-	/// `moq_tokio::tls::Listen::server_config` (pass an empty ALPN list) or
-	/// any [`rustls::ServerConfig`]. Leave `None` for plaintext only.
+	/// TLS for RTMPS (RTMP over TLS) on the [`listen`](Self::listen) address, or `None`
+	/// for plaintext only.
+	///
+	/// [`Optional`](crate::Tls::Optional) serves both: a client that opens with a TLS
+	/// ClientHello (`rtmps://`) is TLS-terminated, any other is served as plaintext
+	/// (`rtmp://`). [`Required`](crate::Tls::Required) serves `rtmps://` only and refuses
+	/// a plaintext client at its first byte, so stream keys never cross the network
+	/// unencrypted. Build the [`rustls::ServerConfig`] with
+	/// `moq_tokio::tls::Listen::server_config` (pass an empty ALPN list); an
+	/// `Arc<rustls::ServerConfig>` converts into `Tls::Optional`.
 	///
 	/// To serve RTMP and RTMPS on separate ports instead, clone one base config
 	/// and call [`run`] for each listener against a cloned origin; the clones
 	/// share one [`ActivePaths`].
 	#[cfg(feature = "tls")]
-	pub tls: Option<std::sync::Arc<rustls::ServerConfig>>,
+	pub tls: Option<crate::Tls>,
 
 	active: ActivePaths,
 }
@@ -116,9 +120,13 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 	let mut server = Server::bind(listen).await?;
 
 	#[cfg(feature = "tls")]
-	let tls = config.tls.is_some();
+	let tls = match &config.tls {
+		None => "off",
+		Some(crate::Tls::Optional(_)) => "optional",
+		Some(crate::Tls::Required(_)) => "required",
+	};
 	#[cfg(not(feature = "tls"))]
-	let tls = false;
+	let tls = "off";
 
 	#[cfg(feature = "tls")]
 	if let Some(tls) = config.tls.clone() {
