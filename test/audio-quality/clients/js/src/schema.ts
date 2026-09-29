@@ -240,6 +240,12 @@ export type Ring = "isolated" | "plain";
 export type Codec = "opus" | "aac";
 
 /**
+ * Where a row played: a headless browser over the shaper, or a {@link Trace} replayed through the
+ * player's rings on a simulated clock, whose profile is the trace's name.
+ */
+export type Runtime = "chromium" | "replay";
+
+/**
  * One matrix cell.
  *
  * A budget is keyed by the whole thing. The codec, its rate, and the ring each move the expected
@@ -247,7 +253,7 @@ export type Codec = "opus" | "aac";
  * threshold.
  */
 export type Row = {
-	runtime: "chromium";
+	runtime: Runtime;
 	codec: Codec;
 	/** Sample rate in Hz. */
 	rate: number;
@@ -266,7 +272,7 @@ export function parseRow(key: string): Row {
 	const profile = parts.slice(3, -1).join("-");
 	const hz = Number.parseInt(rate ?? "", 10);
 	if (
-		runtime !== "chromium" ||
+		(runtime !== "chromium" && runtime !== "replay") ||
 		(codec !== "opus" && codec !== "aac") ||
 		(ring !== "isolated" && ring !== "plain") ||
 		!Number.isFinite(hz) ||
@@ -275,6 +281,48 @@ export function parseRow(key: string): Row {
 		throw new Error(`not a row key: ${key}`);
 	}
 	return { runtime, codec, rate: hz, profile, ring };
+}
+
+// ── what the recorder keeps ─────────────────────────────────────────────────
+
+/**
+ * One audio frame reaching the viewer's container consumer: when, on the `viewer` clock; its
+ * timestamp, on the `media` clock; and the group that carried it.
+ */
+export type Arrival = [at: Ms, timestamp: Ms, group: number];
+
+/** A recorded arrival trace, as checked in under `traces/`. The file name is its profile. */
+export type Trace = {
+	/** Bumped when a field's meaning changes. */
+	version: 1;
+	/** Where it was recorded: the relay, the broadcast, its publisher, the date. */
+	source: string;
+	/** The shape it carries, and why it is kept. */
+	description: string;
+	/** The transport the session negotiated. */
+	transport: string;
+	/** The smallest round trip the connection's PROBE reported, which "auto" sizes from. */
+	rtt: Ms | null;
+	/** The audio rendition, as the catalog advertised it. */
+	config: {
+		codec: string;
+		sampleRate: number;
+		numberOfChannels: number;
+		container: { kind: string };
+		jitter?: number;
+		delay?: number;
+		[key: string]: unknown;
+	};
+	/** Every arrival in order, `at` counted from the first. */
+	arrivals: Arrival[];
+};
+
+/** The codec a trace's rendition is, as a row names it. */
+export function traceCodec(trace: Trace): Codec {
+	const codec = trace.config.codec;
+	if (codec === "opus") return "opus";
+	if (codec.startsWith("mp4a")) return "aac";
+	throw new Error(`no row codec for ${codec}`);
 }
 
 // ── what the page emits ─────────────────────────────────────────────────────

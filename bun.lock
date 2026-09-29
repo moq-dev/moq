@@ -346,6 +346,10 @@
     "test/audio-quality/clients/js": {
       "name": "@moq/audio-quality",
       "dependencies": {
+        "@moq/hang": "workspace:*",
+        "@moq/net": "workspace:*",
+        "@moq/publish": "workspace:*",
+        "@moq/signals": "workspace:*",
         "@moq/watch": "workspace:*",
       },
       "devDependencies": {

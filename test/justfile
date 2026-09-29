@@ -85,6 +85,14 @@ drill *args:
 audio-quality *args:
     ./audio-quality/run.sh "$@"
 
+# Records the arrival traces under audio-quality/traces/ that the replay rows grade: the
+# public relay's bbb.hang, a local relay's AAC tone, and a browser microphone through the
+# public relay. Needs the network. Narrow it with `--lanes relay-bbb --duration 35`.
+
+# Re-record the audio quality arrival traces.
+audio-quality-record *args:
+    ./audio-quality/record.sh "$@"
+
 # Removes one recovery behavior at a time in a disposable copy of the tree and
 # requires the drill covering it to fail, for the reason the mutation names. The
 # checkout is never modified. `--list` shows the mutations.

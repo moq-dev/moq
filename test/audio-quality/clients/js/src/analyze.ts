@@ -142,8 +142,11 @@ export function analyze(input: Input): Summary {
 	const notes = [...input.notes];
 
 	// ── the shaper's verdict ────────────────────────────────────────────────
+	// A replay row never crosses one: its path is the recording.
 	const shaper = input.shaper;
-	if (!shaper) {
+	if (row.runtime === "replay") {
+		// Nothing to check.
+	} else if (!shaper) {
 		voids.push({ assertion: "shaper", detail: "left no report, so nothing says the path was shaped" });
 	} else if (shaper.status !== 0) {
 		voids.push({ assertion: "shaper", detail: `exited ${shaper.status}: the profile never acted as configured` });

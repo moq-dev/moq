@@ -19,7 +19,13 @@ ALL_PROFILES=(near-zero mild wide fixed-250)
 ALL_RINGS=(isolated plain)
 ALL_CODECS=(opus aac)
 
-PROFILES=("${ALL_PROFILES[@]}")
+# Every recorded trace is a profile too, replayed through the rings instead of played in a browser.
+ALL_TRACES=()
+for trace in "$AQ_DIR"/traces/*.json; do
+    ALL_TRACES+=("$(basename "$trace" .json)")
+done
+
+PROFILES=("${ALL_PROFILES[@]}" "${ALL_TRACES[@]}")
 RINGS=("${ALL_RINGS[@]}")
 CODECS=("${ALL_CODECS[@]}")
 DURATION=60
@@ -111,7 +117,7 @@ valid() {
     echo "error: unknown $name '$want' (known: $*)" >&2
     exit 2
 }
-for p in "${PROFILES[@]}"; do valid "$p" profile "${ALL_PROFILES[@]}"; done
+for p in "${PROFILES[@]}"; do valid "$p" profile "${ALL_PROFILES[@]}" "${ALL_TRACES[@]}"; done
 for r in "${RINGS[@]}"; do valid "$r" ring "${ALL_RINGS[@]}"; done
 for c in "${CODECS[@]}"; do valid "$c" codec "${ALL_CODECS[@]}"; done
 
@@ -147,17 +153,33 @@ shaper_of() {
 }
 
 ROWS=()
-for codec in "${CODECS[@]}"; do
-    for profile in "${PROFILES[@]}"; do
+TRACES=()
+for profile in "${PROFILES[@]}"; do
+    if [[ " ${ALL_TRACES[*]} " == *" $profile "* ]]; then
+        TRACES+=("$profile")
+        continue
+    fi
+    for codec in "${CODECS[@]}"; do
         for ring in "${RINGS[@]}"; do
             ROWS+=("chromium-$codec-$(rate_of "$codec")-$profile-$ring")
         done
     done
 done
 
+# A trace's codec and rate are its recording's, so replay.ts names those rows.
+joined() {
+    local IFS=,
+    echo "$*"
+}
+replay=(bun "$CLIENT/replay.ts" --traces "$AQ_DIR/traces" --profiles "$(joined "${TRACES[@]}")")
+replay+=(--rings "$(joined "${RINGS[@]}")" --codecs "$(joined "${CODECS[@]}")")
+listed=$("${replay[@]}" --list)
+mapfile -t REPLAYS <<<"$listed"
+[[ -n "$listed" ]] || REPLAYS=()
+
 if [[ $LIST -eq 1 ]]; then
-    printf '%s\n' "${ROWS[@]}"
-    echo "${#ROWS[@]} rows at ${DURATION}s each, seed $SEED" >&2
+    printf '%s\n' "${ROWS[@]}" "${REPLAYS[@]}"
+    echo "${#ROWS[@]} rows at ${DURATION}s each, seed $SEED; ${#REPLAYS[@]} replays of their recorded trace" >&2
     exit 0
 fi
 
@@ -285,6 +307,20 @@ for tag in "${ROWS[@]}"; do
         failed=1
     }
 done
+
+# ── replays ─────────────────────────────────────────────────────────────────
+# Simulated time, so the whole set takes seconds, and deterministic, so the budgets are exact.
+if [[ ${#REPLAYS[@]} -gt 0 ]]; then
+    echo ""
+    echo "replaying ${#REPLAYS[@]} rows"
+    "${replay[@]}" --out "$HARNESS_RUN" || failed=1
+    for tag in "${REPLAYS[@]}"; do
+        bun "$CLIENT/analyze.ts" --run "$HARNESS_RUN" --row "$tag" >"$HARNESS_RUN/$tag.summary.md" || {
+            echo "analyze failed for $tag" >&2
+            failed=1
+        }
+    done
+fi
 
 # ── grade ───────────────────────────────────────────────────────────────────
 echo ""
