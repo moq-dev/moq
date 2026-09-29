@@ -841,13 +841,15 @@ impl Connection {
 						// replacement at a group boundary. Tearing it down here instead
 						// would drop every group published until the replacement caught up.
 						tracing::info!(peer = %Endpoint(&url), "upstream GOAWAY; migrating");
-						shared.migrating();
 						// Retire any predecessor first: overwriting would drop its deadline
 						// on the floor and leave it holding the connection open.
 						if let Some(mut old) = draining.take() {
 							old.retire();
 						}
 						draining = Some(Draining::new(session, goaway.handover(msg.timeout()), &shared.state));
+						// After the predecessor is published, so a close woken by this
+						// status finds it and honors its handover deadline.
+						shared.migrating();
 
 						if healthy {
 							delay = initial;
