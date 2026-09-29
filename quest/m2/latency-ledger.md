@@ -14,9 +14,9 @@ trade to get it running. This quest promotes them.
 
 - Take the stage schema the harness already defines (capture, encode, publish
   flush, network, jitter buffer, decode, render) and expose it as fields of
-  `hang::Stats`, the media extension the client stats schema adds to
-  `moq-stats` (`rs/hang/src/stats.rs`, and its `@moq/stats` mirror), rather
-  than a second readout: an observable value a `.stats` broadcast already
+  the hang stats and feedback snapshots (`rs/hang/src/stats.rs`,
+  `rs/hang/src/feedback.rs`, and their `@moq/hang` mirrors), rather than a
+  second readout: an observable value a stats or `.echo` track already
   carries, not a callback. Decided so viewers report latency the same way
   they report stalls.
 - Both languages, matching names, per the repo's cross-language rule. Scrutinise
@@ -34,7 +34,7 @@ trade to get it running. This quest promotes them.
 ## Required
 
 - [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - defines the stage schema and lands the probes this promotes
-- [Schema and library](/quest/m1/qos/stats/schema.md) - adds `hang::Stats`, which this extends
+- [Media stats schema](/quest/m1/stats/schema.md) - adds the stats and feedback snapshots this extends
 
 ## Related
 

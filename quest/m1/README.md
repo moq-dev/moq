@@ -105,7 +105,8 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [FLV rebind before header](/quest/m1/flv-rebind.md) - single-track FLV switches to a better rendition announced before the header
 - [FLV catalog stream](/quest/m1/flv-catalog-stream.md) - on dev, `flv::Export` takes a catalog stream like fmp4, replacing `with_select`
 - [Own the QUIC stack](/quest/m1/quic/README.md) - the moq-noq fork carries ACK progress, reliable reset, hierarchical scheduling, deadlines, peer limits, and qmux
-- [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms, and client stats broadcasts from publishers and viewers, on dev
+- [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms, on dev
+- [Media stats](/quest/m1/stats/README.md) - publishers announce a stats track in the catalog, viewers answer soliciting publishers through `.echo` broadcasts, and a Rust encoder adapts to them
 - [Drain](/quest/m1/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
 - [Strict Redirect::resolve](/quest/m1/redirect-resolve.md) - on dev, `Redirect::resolve` can no longer quietly turn a refused redirect into a redial
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - a session that came up over WebSocket moves to QUIC once the QUIC dial lands, handing over at a group boundary

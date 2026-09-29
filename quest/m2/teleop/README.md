@@ -111,8 +111,8 @@ stating plainly because it is what a builder is comparing against.
 - [e2ee](/quest/m1/e2ee/README.md) - the answer for a protected control link
 - [Text schema](/quest/m1/text-schema.md) - non-media tracks in a catalog,
   arrived at from the media side
-- [Client stats](/quest/m1/qos/stats/schema.md) - publisher-reported stats
-  as a `.stats` broadcast (moq#2734); teleop's latency instrumentation
-  extends that extension rather than adding a second stats surface
+- [Media stats](/quest/m1/stats/schema.md) - publisher-reported stats
+  on a catalog-announced track (moq#2734); teleop's latency instrumentation
+  extends those types rather than adding a second stats surface
 - [Video hardware validation](/quest/m3/video-hardware.md) - the VAAPI run
   that covers Intel ground robots and NUC companions
