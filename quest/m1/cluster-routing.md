@@ -139,10 +139,12 @@ registry. What decides the wire:
   on average against 94.
 - Liveness is the split's dominant cost at scale: flooding every link repeats
   each report once per neighbour. At 1020 relays (mean degree 35), a link
-  loss and restore plus a relay loss and restart cost about 300 MiB of
-  liveness against under 1 MiB of existence for twenty publishes, while a
-  publish costs exactly one message per relay. A reduced flooding topology
-  ([RFC 9667](https://www.rfc-editor.org/rfc/rfc9667)) is the known fix.
+  loss and restore plus a relay loss and restart cost about 290 MiB of
+  liveness flooding and 54 MiB of session-up digests against under 1 MiB of
+  existence for twenty publishes, while a publish costs exactly one message
+  per relay. A reduced flooding topology
+  ([RFC 9667](https://www.rfc-editor.org/rfc/rfc9667)) is the known fix for
+  the flooding.
 - Failure detection, not routing, sets every outage window: a silent link or
   relay loss is noticed after the 30 s QUIC idle timeout in every candidate,
   and subscribes through it go nowhere until then. Cluster sessions need a
