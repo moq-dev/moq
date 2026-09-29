@@ -122,3 +122,4 @@ make MoQ's common case.
 - [Skip unchanged announce updates](/quest/m0/announce-update-dedupe.md) - cuts duplicate updates on today's routing
 - [Redundant ingest](/quest/m2/redundant-ingest.md) - builds on the `--hop` failover this must keep or replace
 - [Routing cost domains](/quest/m2/routing-cost-domains.md) - cost across the cluster boundaries this keeps path vector
+- [Cross-relay delivery under bursts](/quest/m1/cross-relay-bursts.md) - its #4349 report also shows closed broadcasts announced for up to 229 s and flapping between Retracted and Announced across nodes, evidence for per-incarnation seqnos
