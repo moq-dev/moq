@@ -165,6 +165,7 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
+	#hidden: boolean;
 
 	// The origin this session serves, borrowed: it outlives the session, and closing the
 	// session leaves its broadcasts alone. The namespaces are advertised with an unsolicited
@@ -188,6 +189,7 @@ export class Publisher {
 		session,
 		publish,
 		requiresSolicitation,
+		hidden = false,
 		cluster,
 	}: {
 		/** The WebTransport session, for uni streams. */
@@ -198,6 +200,8 @@ export class Publisher {
 		publish?: OriginConsumer;
 		/** Whether the peer's SETUP asked to be told on request (MoQ Solicit). */
 		requiresSolicitation: boolean;
+		/** Whether the peer declared MoQ Hidden. */
+		hidden?: boolean;
 		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
 		cluster?: Cluster.Hops;
 	}) {
@@ -207,6 +211,7 @@ export class Publisher {
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
 		this.#publish = publish;
 		this.#requiresSolicitation = requiresSolicitation;
+		this.#hidden = hidden;
 		this.#advert = Cluster.advertise(cluster);
 	}
 
@@ -749,8 +754,8 @@ export class Publisher {
 			// peer asked to be told only on request, it has already heard everything visible
 			// from the empty prefix unasked, so this stream carries only what that hid.
 			const carries = (covered: Path.Valid) =>
-				(msg.hidden || !hiddenBelow(prefix, covered)) &&
-				(this.#requiresSolicitation || hiddenBelow(Path.empty(), covered));
+				(!this.#hidden || msg.hidden || !hiddenBelow(prefix, covered)) &&
+				(this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered)));
 
 			// Reports whether the peer now holds the namespace: an inline entry always
 			// lands, but a PUBLISH_NAMESPACE request can be declined.
@@ -926,8 +931,8 @@ export class Publisher {
 
 				const updated = new Map<Path.Valid, Advertised>();
 				for (const [covered, candidates] of advertised) {
-					// Unasked, a hidden namespace stays off the wire (MoQ Hidden).
-					if (hiddenBelow(Path.empty(), covered) || candidates.length === 0) continue;
+					// Only peers that declared MoQ Hidden filter unsolicited discovery.
+					if ((this.#hidden && hiddenBelow(Path.empty(), covered)) || candidates.length === 0) continue;
 					updated.set(covered, candidates[0]);
 				}
 

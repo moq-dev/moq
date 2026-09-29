@@ -118,8 +118,12 @@ const announced = connection.announced(Path.Pattern.all(), { hidden: true });
 On the wire, moq-lite 07 (`moq-lite-07-wip`, opt-in only) carries the opt-in
 on each announce request, and
 moq-transport carries it as a `SUBSCRIBE_NAMESPACE` parameter once the peer's
-`SETUP` says it understands one ([hidden](/draft/moq-hidden)). An older peer
-never opts in, so it never discovers hidden routes. Rust sessions always opt in
+`SETUP` says it understands one ([hidden](/draft/moq-hidden)). An older MoQ Lite peer
+never opts in, so it never discovers hidden routes.
+IETF peers that omit the MoQ Hidden setup option receive all authorized
+namespaces, including dot-prefixed namespaces. Peers that declare it opt in
+per subscription; a prefix naming the dot segment itself also lists its
+children. Rust sessions always opt in
 on the wire and filter per local reader, so a relay mirrors everything and
 each consumer decides.
 

@@ -2591,13 +2591,15 @@ mod tests {
 	#[cfg(all(feature = "watch", feature = "noq"))]
 	#[test]
 	fn reloadable_client_roots_disable_server_resumption() {
-		use std::io::Write;
-
 		let (ca_a, server_cert, server_key, client_cert, client_key) = signed_certificates();
 		let (ca_b, _, _, _, _) = signed_certificates();
-		let mut root_file = tempfile::NamedTempFile::new().unwrap();
-		root_file.write_all(ca_a.as_bytes()).unwrap();
-		let paths = vec![root_file.path().to_path_buf()];
+		// A dedicated directory, not `/tmp`: the watcher registers the parent, so
+		// unrelated churn there fires a reload that can read `ca_a` and store it
+		// after this test's own `reload()` installed `ca_b`.
+		let dir = tempfile::TempDir::new().unwrap();
+		let root_path = dir.path().join("root.pem");
+		std::fs::write(&root_path, ca_a).unwrap();
+		let paths = vec![root_path.clone()];
 		let provider = crypto::provider();
 
 		let build_client = |cert, key| {
@@ -2657,7 +2659,7 @@ mod tests {
 			rustls::HandshakeKind::Full
 		);
 
-		std::fs::write(root_file.path(), ca_b).unwrap();
+		std::fs::write(&root_path, ca_b).unwrap();
 		reload.reload();
 		assert!(handshake_kinds(reloadable_client, reloadable).is_err());
 	}
@@ -2665,13 +2667,13 @@ mod tests {
 	#[cfg(all(feature = "watch", feature = "noq"))]
 	#[test]
 	fn custom_roots_reload_for_new_client_and_server_handshakes() {
-		use std::io::Write;
-
 		let (ca_a, server_a, _, client_a, _) = signed_certificates();
 		let (ca_b, server_b, _, client_b, _) = signed_certificates();
-		let mut root_file = tempfile::NamedTempFile::new().unwrap();
-		root_file.write_all(ca_a.as_bytes()).unwrap();
-		let paths = vec![root_file.path().to_path_buf()];
+		// A dedicated directory, not `/tmp`: see `reloadable_client_roots_disable_server_resumption`.
+		let dir = tempfile::TempDir::new().unwrap();
+		let root_path = dir.path().join("root.pem");
+		std::fs::write(&root_path, ca_a).unwrap();
+		let paths = vec![root_path.clone()];
 		let provider = crypto::provider();
 
 		let custom = CustomRoots::new(paths.clone()).unwrap();
@@ -2707,7 +2709,7 @@ mod tests {
 		assert!(client_verifier.verify_client_cert(&client_a, &[], now).is_ok());
 		assert!(client_verifier.verify_client_cert(&client_b, &[], now).is_err());
 
-		std::fs::write(root_file.path(), ca_b).unwrap();
+		std::fs::write(&root_path, ca_b).unwrap();
 		server_verifier.inner.state.reload();
 		client_verifier.inner.state.reload();
 
@@ -2719,7 +2721,7 @@ mod tests {
 		assert!(client_verifier.verify_client_cert(&client_a, &[], now).is_err());
 
 		// A malformed replacement must not erase the last valid verifier.
-		std::fs::write(root_file.path(), "not a PEM certificate").unwrap();
+		std::fs::write(&root_path, "not a PEM certificate").unwrap();
 		server_verifier.inner.state.reload();
 		client_verifier.inner.state.reload();
 		assert!(

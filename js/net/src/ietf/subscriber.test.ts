@@ -1060,6 +1060,32 @@ test("returning demand survives a blocked unsubscribe", async () => {
 	session.close();
 });
 
+test("local readers filter hidden unsolicited namespaces from a legacy peer", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
+	const plain = subscriber.announced();
+	const opted = subscriber.announced(undefined, { hidden: true });
+	const handlers: Promise<void>[] = [];
+	const streams: Stream[] = [];
+	for (const path of [".stats/node", "visible"]) {
+		const stream = await Stream.open(pair.server, { version: VERSION });
+		streams.push(stream);
+		handlers.push(
+			subscriber.runPublishNamespace(
+				new PublishNamespace({ requestId: 0n, trackNamespace: Path.from(path) }),
+				stream,
+			),
+		);
+	}
+	expect((await plain.next())?.prefix).toBe(Path.from("visible"));
+	expect((await opted.next())?.prefix).toBe(Path.from(".stats/node"));
+	expect((await opted.next())?.prefix).toBe(Path.from("visible"));
+	for (const stream of streams) stream.close();
+	plain.close();
+	opted.close();
+	await Promise.all(handlers);
+});
+
 test("object extension limit accepts 64 KiB and stops one byte over before reading", async () => {
 	for (const size of [65536, 65537]) {
 		for (const first of [true, false]) {

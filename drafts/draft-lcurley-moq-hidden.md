@@ -24,7 +24,7 @@ informative:
 --- abstract
 
 This document defines an extension for MoQ Transport {{moqt}} that hides namespaces from discovery.
-A namespace with a field starting with `.` below the prefix a subscriber asked for is left out of the advertisements it receives, unless its SUBSCRIBE_NAMESPACE opts in.
+For peers that negotiate this extension, a namespace with a field starting with `.` below the prefix a subscriber asked for is left out of the advertisements it receives, unless its SUBSCRIBE_NAMESPACE opts in.
 A platform can then add internal namespaces, such as statistics, without them turning up in applications that list everything and use what they find.
 
 --- note_Note_to_Readers
@@ -52,7 +52,7 @@ This extension reserves a leading `.` for such namespaces, as file systems do fo
 A hidden namespace is still published, routed, and subscribed to like any other; it is only left out of discovery by default.
 A subscriber that wants hidden namespaces too says so on the SUBSCRIBE_NAMESPACE that would list them.
 
-The name alone decides: there is no publisher-side flag, so a namespace cannot be hidden from one subscriber and listed to another under the same prefix.
+For peers that declare this extension, the namespace name and the requested prefix determine whether an opt-in is needed.
 
 
 # Setup Negotiation
@@ -70,7 +70,7 @@ A receiver MUST ignore the value.
 An endpoint MUST NOT send the HIDDEN parameter to a peer that did not declare this option, because an unknown parameter fails decoding.
 A subscriber that wants hidden namespaces therefore waits for the peer's SETUP before sending SUBSCRIBE_NAMESPACE.
 
-The rest of this extension applies whether or not the peer declared the option: a peer that never heard of it never opts in, so it is never told about hidden namespaces.
+The filtering rules below apply only to peers that declared this option. A publisher MUST NOT hide namespaces from discovery solely because of a leading `.` when the peer did not declare it. Such peers receive all authorized namespaces, as in unextended MoQ Transport.
 
 
 # Opting In {#parameter}
@@ -90,11 +90,12 @@ A receiver MUST close the session with a PROTOCOL_VIOLATION on any other value.
 
 # Advertising {#advertising}
 
-A publisher SHOULD NOT advertise a hidden namespace in response to a SUBSCRIBE_NAMESPACE that did not opt in.
+For a peer that declared the HIDDEN Setup Option, a publisher SHOULD NOT advertise a hidden namespace in response to a SUBSCRIBE_NAMESPACE that did not opt in.
 Hiding is a convenience for discovery, not access control, so a publisher MAY treat a subscriber it trusts, such as another relay in its own cluster, as opted in.
 
-An unsolicited PUBLISH_NAMESPACE answers no prefix, so it is measured against the empty one: a publisher SHOULD NOT send one for a hidden namespace.
+An unsolicited PUBLISH_NAMESPACE answers no prefix, so it is measured against the empty one: a publisher SHOULD NOT send one for a hidden namespace to a peer that declared the HIDDEN Setup Option.
 When unsolicited advertisements are live, a SUBSCRIBE_NAMESPACE is answered with only the namespaces they left out, which is to say those hidden from the empty prefix, that the subscription may see.
+A peer that did not declare the option already receives all namespaces unsolicited, so its subscription adds no duplicate advertisements.
 That covers both an opt-in and a prefix that names a hidden field itself, and no namespace is advertised twice.
 
 Hiding narrows discovery and nothing else.
@@ -132,6 +133,13 @@ Both values are even, so each is a bare varint.
 
 
 --- back
+
+# Changelog
+
+## Since draft-lcurley-moq-hidden-00 (in progress)
+
+- Apply hidden filtering only to peers that declared the HIDDEN Setup Option.
+- Measure visibility from the requested namespace prefix, independently of authorization scope.
 
 # Acknowledgments
 {:numbered="false"}
