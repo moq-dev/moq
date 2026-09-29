@@ -1652,3 +1652,8 @@ for (const end of [
 		}
 	});
 }
+
+test("LegacyFormat rejects a timestamp past 2^53 - 1 instead of rounding", () => {
+	const frame = Varint.encode(2n ** 53n + 1n);
+	expect(() => new LegacyFormat("video").decode(frame)).toThrow(/larger than 53-bits/);
+});

@@ -11,7 +11,7 @@ decodes in the browser with `@moq/flate` and vice versa.
 
 moq-ffi publishes opaque tracks today (`publish_binary_snapshot` and
 `publish_binary_stream`, #4137), renamed after `flate` by
-[moq-binary folds into moq-flate](/quest/m1/flate-binary.md). Only the
+moq-binary's fold into moq-flate ([#4425](https://github.com/moq-dev/moq/pull/4425), on `dev`). Only the
 generated bindings reach them; no wrapper does. This quest binds the existing
 track modes, not the bare codec: a `frame()` call across the FFI boundary
 invites the window desync the track modes exist to prevent.
@@ -30,7 +30,3 @@ invites the window desync the track modes exist to prevent.
   `just test interop --all`.
 
 Public API: additive on moq-ffi and every wrapper. Wire: none.
-
-## Required
-
-- [moq-binary folds into moq-flate](/quest/m1/flate-binary.md) - the flate snapshot and stream tracks and their moq-ffi names

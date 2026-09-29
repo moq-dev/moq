@@ -38,7 +38,3 @@ Questions the planning session must answer:
 ## Closes
 
 - [#1838](https://github.com/moq-dev/moq/issues/1838) - close this issue when the quest finishes
-
-## Related
-
-- [TS import liveness](/quest/m1/3489-ts-import-stream-liveness.md) - the stream-stall case this model names `PID_error`
