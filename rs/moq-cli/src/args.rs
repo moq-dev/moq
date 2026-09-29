@@ -282,6 +282,17 @@ impl Invocation {
 	/// Called before anything binds a port or dials out, so a refused invocation has
 	/// no side effects to unwind.
 	pub fn validate(&self) -> anyhow::Result<()> {
+		for command in &self.stages {
+			if let Command::Export(export) = command
+				&& let Some(stdout) = export.sink.stdout()
+			{
+				anyhow::ensure!(
+					stdout.linger.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
+					"--linger needs an output that can mark a restart, and only `export ts` can"
+				);
+			}
+		}
+
 		// One stage is what the CLI has always run, so nothing below can bite.
 		if self.stages.len() == 1 {
 			return Ok(());
@@ -846,6 +857,7 @@ impl ExportSink {
 		let container = |format, container: &Container| Stdout {
 			format,
 			max_age: container.max_age.into_std(),
+			linger: container.linger.into_std(),
 			fragment_duration: None,
 			mux_rate: None,
 		};
@@ -874,6 +886,7 @@ impl ExportSink {
 pub struct Stdout {
 	pub format: SubscribeFormat,
 	pub max_age: Duration,
+	pub linger: Duration,
 	pub fragment_duration: Option<Duration>,
 	pub mux_rate: Option<u64>,
 }
@@ -885,6 +898,11 @@ pub struct Container {
 	/// How stale a group may get before it is skipped (e.g. `500ms`, `1s`).
 	#[usage(long, default = "500ms")]
 	pub max_age: crate::duration::Duration,
+
+	/// How long to wait for the broadcast to come back once it ends (e.g. `10s`).
+	/// `ts` only; the output stops while it is gone and resumes flagged as a break.
+	#[usage(long, default = "0s")]
+	pub linger: crate::duration::Duration,
 
 	/// The released spelling of [`Self::max_age`].
 	#[usage(long = "latency-max", hide = true)]
@@ -954,6 +972,24 @@ mod tests {
 		assert_eq!(cli.stages.len(), 1);
 		assert_eq!(cli.stages[0].name(), "import");
 		assert!(cli.validate().is_ok());
+	}
+
+	/// Only TS can mark where a returned broadcast restarts, so only `export ts` may linger.
+	#[test]
+	fn linger_is_ts_only() {
+		let parse = |format: &str, linger: &str| {
+			Invocation::try_parse_from(["moq", "--connect", "http://relay", "export", format, "--linger", linger])
+				.unwrap()
+		};
+		assert!(parse("ts", "10s").validate().is_ok());
+		for format in ["fmp4", "mkv", "flv", "h264", "h265"] {
+			let err = parse(format, "10s").validate().unwrap_err().to_string();
+			assert!(err.contains("--linger"), "{format}: {err}");
+			assert!(
+				parse(format, "0s").validate().is_ok(),
+				"{format}: no linger is always fine"
+			);
+		}
 	}
 
 	/// A released spelling is refused, and the error names what to write instead.

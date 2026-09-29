@@ -302,6 +302,14 @@ not arrival order, so two exporters of one broadcast emit them in one order. A
 track quiet for longer is muxed around until it catches up; a sparse track
 (SCTE-35) costs that wait once per cue. `--max-age 0` keeps arrival order.
 
+A stdout export ends with the broadcast. `export ts --linger 10s` waits that
+long for the broadcast to come back instead: a publisher that restarts within
+it is picked up under the same PIDs, with the break flagged (PCR discontinuity,
+PAT/PMT re-sent). Nothing is written while it is gone. When the linger runs out,
+the exit code is that of the last end: 0 if the broadcast finished cleanly, 1 if
+it dropped or failed. The default is `0s`, which exits on the first end the same
+way. Only `ts` can mark the restart, so the other formats refuse `--linger`.
+
 ## Debugging
 
 `RUST_LOG=debug` prints the negotiated version and every subscription.

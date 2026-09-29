@@ -4952,3 +4952,170 @@ async fn export_stuffing_keeps_the_fractional_remainder() {
 	);
 	assert!(clocked.nulls > 0, "no null stuffing was emitted");
 }
+
+/// Publish a Legacy AAC rendition named `name`.
+fn aac_rendition(
+	broadcast: &mut moq_net::broadcast::Producer,
+	catalog: &mut crate::catalog::Producer,
+	name: &str,
+) -> Producer<HangContainer> {
+	let track = broadcast
+		.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.audio))
+		.unwrap();
+	let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+	cfg.container = Container::Legacy;
+	catalog.modify().unwrap().audio.renditions.insert(name.to_string(), cfg);
+	Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data))
+}
+
+/// Write one AAC frame at `ms`, in a group of its own.
+fn write_aac(producer: &mut Producer<HangContainer>, ms: u64) {
+	producer
+		.write(Frame {
+			timestamp: Timestamp::from_millis(ms).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
+			keyframe: true,
+		})
+		.unwrap();
+	producer.cut(None).unwrap();
+}
+
+/// Count the PES packets across `frames`.
+fn pes_count(frames: &[Frame]) -> usize {
+	let bytes: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let mut reader = TsPacketReader::new(Cursor::new(bytes));
+	let mut count = 0;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if matches!(packet.payload, Some(TsPayload::PesStart(_))) {
+			count += 1;
+		}
+	}
+	count
+}
+
+/// Pull frames until the export ends, returning them and how it ended.
+async fn drain_to_end<E: tscat::Catalog>(export: &mut Export<E>) -> (Vec<Frame>, crate::Result<()>) {
+	let mut out = Vec::new();
+	loop {
+		match tokio::time::timeout(Duration::from_secs(5), export.next())
+			.await
+			.expect("the export ends")
+		{
+			Ok(Some(frame)) => out.push(frame),
+			Ok(None) => return (out, Ok(())),
+			Err(err) => return (out, Err(err)),
+		}
+	}
+}
+
+/// A track that leaves the catalog after the PMT is read to its own end rather than
+/// refused as a layout change. A publisher retires a rendition as its track ends, and
+/// that catalog update can land before the track's last frames and its finish do, so
+/// this retires the rendition first: the order in which the old check misread a clean
+/// end as a removed track.
+#[tokio::test(start_paused = true)]
+async fn a_track_leaving_the_catalog_is_read_to_its_end() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut kept = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let mut leaving = aac_rendition(&mut broadcast, &mut catalog, "b.aac");
+
+	let mut export = Export::new(crate::source::announced(&consumer))
+		.await
+		.unwrap()
+		.with_max_age(RECORDING_MAX_AGE);
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut kept, ms);
+		write_aac(&mut leaving, ms);
+	}
+	let mut frames = drain_frames(&mut export).await;
+	assert!(!frames.is_empty(), "the program started");
+
+	catalog.modify().unwrap().audio.renditions.remove("b.aac");
+	for ms in (200..300).step_by(20) {
+		write_aac(&mut kept, ms);
+		write_aac(&mut leaving, ms);
+	}
+	leaving.finish().unwrap();
+	for ms in (300..400).step_by(20) {
+		write_aac(&mut kept, ms);
+	}
+	kept.finish().unwrap();
+	catalog.finish().unwrap();
+
+	let (rest, end) = drain_to_end(&mut export).await;
+	end.expect("a track leaving the catalog is not a layout change");
+	frames.extend(rest);
+	assert_eq!(pes_count(&frames), 20 + 15, "every frame of both tracks went out");
+}
+
+/// A broadcast that ends and is published again carries on in the same export: the
+/// returned catalog resubscribes the program's tracks, the clock break is flagged once,
+/// and the PAT/PMT go out again for a receiver re-acquiring after the gap. Both ways a
+/// broadcast ends, a clean finish and a drop, resume the same way.
+async fn resume_after(finish: bool) {
+	let origin = crate::source::produce_origin();
+	let source = crate::Source::new(origin.consume(), "live");
+	let publish = || {
+		let mut broadcast = origin.publish("live", Default::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		(broadcast, catalog)
+	};
+
+	let (mut broadcast, mut catalog) = publish();
+	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let ended = source.broadcast().await.unwrap();
+	let mut export = Export::new(source.clone())
+		.await
+		.unwrap()
+		.with_max_age(RECORDING_MAX_AGE);
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut track, ms);
+	}
+	let mut before = drain_frames(&mut export).await;
+	if finish {
+		track.finish().unwrap();
+		catalog.finish().unwrap();
+	}
+	drop((broadcast, catalog, track));
+	let (rest, end) = drain_to_end(&mut export).await;
+	before.extend(rest);
+	assert_eq!(end.is_ok(), finish, "a finish ends cleanly and a drop fails: {end:?}");
+
+	// The returned catalog lists the track only in its second snapshot, and the restarted
+	// publisher's clock starts over.
+	let (mut broadcast, mut catalog) = publish();
+	std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
+	source.returned(&ended).await.unwrap();
+	export.resume().await.unwrap();
+	let mut after = drain_frames(&mut export).await;
+	assert!(after.is_empty(), "nothing to carry before the track is listed");
+	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut track, ms);
+	}
+	after.extend(drain_frames(&mut export).await);
+	track.finish().unwrap();
+	catalog.finish().unwrap();
+	let (rest, end) = drain_to_end(&mut export).await;
+	after.extend(rest);
+	end.unwrap();
+
+	assert_eq!(export.discontinuity(), 1, "the return is one break");
+	assert_eq!(count_discontinuity(&before), 0);
+	assert_eq!(count_discontinuity(&after), 1, "the break is flagged once");
+	assert!(count_pid(&after, 0x0000) >= 1, "PAT re-emitted after the return");
+	assert_eq!(pes_count(&after), 10, "the returned broadcast's frames all went out");
+}
+
+#[tokio::test(start_paused = true)]
+async fn resume_after_a_finish() {
+	resume_after(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn resume_after_a_drop() {
+	resume_after(false).await;
+}

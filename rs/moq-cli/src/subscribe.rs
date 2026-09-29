@@ -139,6 +139,9 @@ pub struct SubscribeArgs {
 	/// How far playback may drift from the live edge before skipping groups.
 	pub max_age: Duration,
 
+	/// How long to wait for the broadcast to come back after it ends (TS only).
+	pub linger: Duration,
+
 	/// Cap the output duration: publisher groups by default for fMP4, video GOPs for MKV.
 	pub fragment_duration: Option<Duration>,
 
@@ -300,6 +303,8 @@ impl Subscribe {
 		// is re-framed as ADTS. `fragment_duration` does not apply to TS. `with_ts`
 		// selects the `mpegts` catalog extension so undecoded elementary streams
 		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.
+		let source = self.source.clone();
+		let mut broadcast = source.broadcast().await?;
 		let mut ts = moq_mux::container::ts::Export::with_ts(self.source, self.catalog)
 			.await?
 			.with_max_age(self.args.max_age);
@@ -316,23 +321,49 @@ impl Subscribe {
 		// bounded; it needs to know whether each frame was waited for, hence the
 		// hand-rolled poll instead of `ts.next()`.
 		let mut delivery = Delivery::new(self.args.max_age);
+		let linger = self.args.linger;
 		loop {
-			let mut waited = false;
-			let frame = hang::moq_net::kio::wait(|waiter| match ts.poll_next(waiter) {
-				std::task::Poll::Pending => {
-					waited = true;
-					std::task::Poll::Pending
+			let end = loop {
+				let mut waited = false;
+				let frame = hang::moq_net::kio::wait(|waiter| match ts.poll_next(waiter) {
+					std::task::Poll::Pending => {
+						waited = true;
+						std::task::Poll::Pending
+					}
+					ready => ready,
+				})
+				.await;
+
+				let frame = match frame {
+					Ok(Some(frame)) => frame,
+					Ok(None) => break Ok(()),
+					Err(err) => break Err(err),
+				};
+				delivery.update(&frame, ts.discontinuity());
+				delivery.deliver(&frame, waited, &mut stdout).await?;
+			};
+
+			// Any end waits out the linger, and on expiry the last one is the result: a
+			// clean catalog finish exits 0, a drop or any other failure exits 1.
+			if linger.is_zero() {
+				return Ok(end?);
+			}
+			match &end {
+				Ok(()) => tracing::info!(?linger, "broadcast finished, waiting for it to return"),
+				Err(err) => tracing::warn!(%err, ?linger, "broadcast ended, waiting for it to return"),
+			}
+			match tokio::time::timeout(linger, source.returned(&broadcast)).await {
+				Ok(returned) => {
+					broadcast = returned?;
+					ts.resume().await?;
+					tracing::info!("broadcast returned, resuming");
 				}
-				ready => ready,
-			})
-			.await?;
-
-			let Some(frame) = frame else { break };
-			delivery.update(&frame, ts.discontinuity());
-			delivery.deliver(&frame, waited, &mut stdout).await?;
+				Err(_) => {
+					tracing::info!(?linger, "broadcast did not return");
+					return Ok(end?);
+				}
+			}
 		}
-
-		Ok(())
 	}
 
 	async fn run_flv(self) -> anyhow::Result<()> {

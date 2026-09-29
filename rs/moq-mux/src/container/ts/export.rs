@@ -16,7 +16,7 @@
 //! length-prefixed -> Annex-B conversion, re-injecting the parameter sets as
 //! inline NALs on every keyframe. CMAF tracks are rejected with a clear error.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
@@ -112,6 +112,10 @@ fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 pub struct Export<E: catalog::Catalog = ()> {
 	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer<E>>,
+	catalog_format: CatalogFormat,
+	/// Tracks [`Self::resume`] left on the ended broadcast, resubscribed as the
+	/// returned catalog lists them.
+	stale: HashSet<String>,
 	max_age: Duration,
 
 	tracks: HashMap<String, Track>,
@@ -540,6 +544,8 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(Self {
 			source,
 			catalog: Some(catalog),
+			catalog_format,
+			stale: HashSet::new(),
 			max_age: Duration::ZERO,
 			tracks: HashMap::new(),
 			counters: HashMap::new(),
@@ -923,7 +929,13 @@ impl<E: catalog::Catalog> Export<E> {
 			}
 		}
 
-		// The program tables are written once; reject layout changes afterwards.
+		// The program tables are written once; reject a track added afterwards.
+		//
+		// A track that leaves the catalog is not a layout change: it keeps its PID and is
+		// read to its own end. A publisher retires a rendition as its track finishes or
+		// drops, and the catalog update races that end on another stream, so the leaving
+		// cannot say which it was. The track's end does: a finish ends it cleanly, and a
+		// drop is the error the export reports.
 		if self.psi.is_some() {
 			for name in active.keys() {
 				anyhow::ensure!(
@@ -931,11 +943,8 @@ impl<E: catalog::Catalog> Export<E> {
 					"TS track layout changed after PAT/PMT was emitted: '{name}' added"
 				);
 			}
-			for name in self.tracks.keys() {
-				anyhow::ensure!(
-					active.contains_key(name),
-					"TS track layout changed after PAT/PMT was emitted: '{name}' removed"
-				);
+			if !self.stale.is_empty() {
+				self.resubscribe(&catalog, &mpegts)?;
 			}
 			let es_pids: Vec<u16> = self.tracks.values().map(|t| t.pid).collect();
 			reject_colliding_si_pids(&mpegts, self.pmt_pid(), &es_pids)?;
@@ -1042,6 +1051,34 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(())
 	}
 
+	/// Point each stale track this snapshot lists at the returned broadcast.
+	///
+	/// The PIDs and PMT stay as announced. A track the returned catalog does not list stays
+	/// finished, silent on its PID.
+	fn resubscribe(&mut self, catalog: &Catalog<E>, mpegts: &catalog::Mpegts) -> anyhow::Result<()> {
+		for (name, track) in self.tracks.iter_mut() {
+			if !self.stale.contains(name) {
+				continue;
+			}
+			let source = if let Some(config) = catalog.video.renditions.get(name) {
+				ExportSource::for_video(&self.source, name, config, self.max_age)?
+			} else if let Some(config) = catalog.audio.renditions.get(name) {
+				ExportSource::for_audio(&self.source, name, config, self.max_age)?
+			} else if mpegts.tracks.get(name).is_some_and(|t| t.verbatim.is_some()) {
+				Some(ExportSource::for_stream(&self.source, name, self.max_age)?)
+			} else {
+				None
+			};
+			let Some(source) = source else {
+				continue;
+			};
+			self.stale.remove(name);
+			track.source = source;
+			track.finished = false;
+		}
+		Ok(())
+	}
+
 	/// Insert a freshly created export track.
 	fn insert_track(
 		&mut self,
@@ -1075,6 +1112,37 @@ impl<E: catalog::Catalog> Export<E> {
 	/// independent source counters; this counter describes the emitted program.
 	pub fn discontinuity(&self) -> u64 {
 		self.emitted_epoch
+	}
+
+	/// Carry on with the broadcast that replaced the one this export was reading.
+	///
+	/// Call it once [`Source::returned`](crate::Source::returned) has resolved, after
+	/// [`next`](Self::next) returned `None` or an error. Whatever the ended broadcast left
+	/// unwritten is dropped and the program clock restarts, so the next output flags the
+	/// break and re-emits the PAT/PMT. The returned catalog resubscribes each track as it
+	/// lists it, under the program already announced; one that adds a track fails as a
+	/// layout change.
+	pub async fn resume(&mut self) -> Result<(), crate::Error> {
+		self.catalog = Some(self.source.catalog::<E>(self.catalog_format).await?);
+		self.si_flushed = false;
+		// A name no entry carries, so the returned catalog repoints every SI entry.
+		for si in self.si.values_mut() {
+			si.track.clear();
+		}
+		if self.psi.is_none() {
+			// Nothing announced yet: the returned catalog builds the program afresh.
+			self.tracks.clear();
+		}
+		// Whatever the ended broadcast left is done, including a track whose error ended
+		// the export: polled again, it would end this one too.
+		for (name, track) in self.tracks.iter_mut() {
+			track.finished = true;
+			track.pending = None;
+			track.discontinuity = 0;
+			self.stale.insert(name.clone());
+		}
+		self.rewind();
+		Ok(())
 	}
 
 	/// Discard uncommitted bytes and restart the program clock. Every rendition
