@@ -416,7 +416,7 @@ async fn decode(
 	// Counters reported so far, so only the change is logged. A live feed is
 	// diagnosed by the rate at which these climb, and stdin may never end, so
 	// they have to surface as they accumulate rather than at exit.
-	let mut log = ts::StatsLog::default();
+	let mut log = ts::stats::Log::default();
 	let mut sampled = tokio::time::Instant::now();
 
 	// Run the read/decode loop so an error surfaces here rather than
@@ -430,7 +430,7 @@ async fn decode(
 			}
 			decoder.decode_chunk(&buffer)?;
 
-			if sampled.elapsed() >= ts::StatsLog::INTERVAL {
+			if sampled.elapsed() >= ts::stats::Log::INTERVAL {
 				sampled = tokio::time::Instant::now();
 				if let Some(stats) = decoder.stats() {
 					log.sample(stats);

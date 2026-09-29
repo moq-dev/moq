@@ -1,3 +1,5 @@
+//! Reporting on the per-stream counters [`Import::stats`](super::Import::stats) returns.
+
 use std::collections::BTreeSet;
 
 use super::{Stats, StreamStats};
@@ -8,14 +10,14 @@ use super::{Stats, StreamStats};
 /// Feed it a snapshot every [`INTERVAL`](Self::INTERVAL) of wall time. The caller owns the
 /// timer, since what counts as "now" differs between a CLI, a server, and a test.
 #[derive(Default)]
-pub struct StatsLog {
+pub struct Log {
 	previous: Option<Stats>,
 	/// Streams already reported quiet, so a silence is logged when it starts and not again
 	/// until the stream has delivered.
 	quiet: BTreeSet<u16>,
 }
 
-impl StatsLog {
+impl Log {
 	/// How often to [`sample`](Self::sample).
 	///
 	/// Long enough that every continuous stream delivers many access units in between, so a
@@ -102,7 +104,7 @@ mod test {
 			stats
 		};
 
-		let mut log = StatsLog::default();
+		let mut log = Log::default();
 		for (video, audio) in [(10, 10), (10, 20), (10, 30), (11, 40), (11, 50)] {
 			log.sample(sample(video, audio));
 		}
@@ -137,7 +139,7 @@ mod test {
 			stats
 		};
 
-		let mut log = StatsLog::default();
+		let mut log = Log::default();
 		log.sample(sample(0, 10));
 		log.sample(sample(0, 20));
 		log.finish(&sample(1, 21));

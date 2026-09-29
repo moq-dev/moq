@@ -23,7 +23,6 @@ mod export;
 mod import;
 mod mux_rate;
 mod si;
-mod stats_log;
 
 // The `mpegts` catalog section (per-track PID + descriptors plus verbatim carriage
 // of undecoded elementary streams) and the `Catalog` capability, re-exported flat so
@@ -33,7 +32,8 @@ mod catalog;
 pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, Program, SiEntry, Track, Verbatim};
 pub use export::*;
 pub use import::*;
-pub use stats_log::StatsLog;
+
+pub mod stats;
 
 #[cfg(test)]
 mod export_test;

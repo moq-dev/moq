@@ -32,7 +32,7 @@ pub struct Publisher {
 	broadcast: moq_net::broadcast::Producer,
 	// The importer's per-stream counters, logged as `moq import ts` logs them, under a
 	// span naming the path, since one server carries many ingests.
-	log: ts::StatsLog,
+	log: ts::stats::Log,
 	sampled: tokio::time::Instant,
 	span: tracing::Span,
 }
@@ -55,7 +55,7 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			broadcast: handle,
-			log: ts::StatsLog::default(),
+			log: ts::stats::Log::default(),
 			sampled: tokio::time::Instant::now(),
 			span: tracing::info_span!("srt", %path),
 		})
@@ -65,11 +65,11 @@ impl Publisher {
 	///
 	/// `decode` drains `data` fully, buffering any partial trailing packet in
 	/// its own internal scratch, so there's nothing to retain here. Once every
-	/// [`ts::StatsLog::INTERVAL`] it also logs what moved in the importer's
+	/// [`ts::stats::Log::INTERVAL`] it also logs what moved in the importer's
 	/// per-stream counters.
 	pub fn feed(&mut self, data: Bytes) -> Result<()> {
 		self.importer.decode(&data).map_err(moq_mux::Error::from)?;
-		if self.sampled.elapsed() >= ts::StatsLog::INTERVAL {
+		if self.sampled.elapsed() >= ts::stats::Log::INTERVAL {
 			self.sampled = tokio::time::Instant::now();
 			let _span = self.span.enter();
 			self.log.sample(self.importer.stats());
