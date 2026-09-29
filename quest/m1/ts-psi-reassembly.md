@@ -39,20 +39,20 @@ Settled decisions:
   aborts as the `mpeg2ts` reader does. The section is refused whole, never
   half-applied, so fail-loud holds at section granularity. A malformed
   adaptation field on the PAT or a PMT PID, which ends the import today too,
-  costs that section the same way. A feed that never
-  delivers a good PAT and PMT still publishes nothing. Line noise on a live
-  feed then costs one repetition (0.5 s at most), not the broadcast; today one
-  flipped CRC byte on `bbb.ts` makes `decode` return `CRC32 mismatch` and
-  `moq import ts` exit.
-- Each dropped section is counted in `Import::stats` as a cumulative
-  `crc_error`, so a corrupt feed is visible rather than silently held on a
-  stale table. It is stream-wide on `Stats`, since the PAT and PMT PIDs have no
-  elementary-stream row, and named for the TR 101 290 check that
-  [TS import health](/quest/m2/ts-import-health.md) adopts; a section that
-  fails to parse for another reason is left to that quest's `PAT_error` and
-  `PMT_error`. `Stats` is `#[non_exhaustive]`, so the new field is additive;
-  its docs (today per elementary stream) and `is_empty` widen to cover it, and
-  `moq-cli`'s `log_stats` reports it.
+  costs that section the same way. A feed that never delivers a good PAT and
+  PMT still publishes nothing. Line noise on a live feed then costs one
+  repetition (0.5 s at most), not the broadcast; today one flipped CRC byte on
+  `bbb.ts` makes `decode` return `CRC32 mismatch` and `moq import ts` exit.
+- Each section dropped for a CRC mismatch is counted in `Import::stats` as a
+  cumulative `crc_error`, so a corrupt feed is visible rather than silently
+  held on a stale table. It is stream-wide on `Stats`, since the PAT and PMT
+  PIDs have no elementary-stream row, and named for the TR 101 290 check that
+  [TS import health](/quest/m2/ts-import-health.md) adopts. A section dropped
+  for another reason (a malformed adaptation field, a parse failure) is not a
+  `crc_error`; that quest counts it under `PAT_error` or `PMT_error`. `Stats`
+  is `#[non_exhaustive]`, so the new field is additive; its docs (today per
+  elementary stream) and `is_empty` widen to cover it, and `moq-cli`'s
+  `log_stats` reports it.
 - `ts::programs()` reads through the same PAT path, so a PAT spanning packets
   is found before any program publishes.
 - One quest, because the demux refactor alone changes nothing observable.

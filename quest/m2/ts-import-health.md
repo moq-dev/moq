@@ -18,7 +18,10 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
   `rs/moq-mux/src/container/ts` that takes 188-byte packets and keeps the
   counters. No new crate: nothing outside the tree consumes one. The importer
   already classifies sync, continuity and TEI for routing; routing reads the
-  module's classification rather than keeping a second.
+  module's classification rather than keeping a second. A packet with
+  `transport_error_indicator` set counts `Transport_error` and nothing else:
+  TR 101 290 derives no further error from it, so it feeds no continuity,
+  PCR, PTS or CRC check.
 - **Counters are named for the ETSI check** in snake case
   (`continuity_count_error`, ...), cumulative for the importer's life like
   `resyncs`: stream-wide on `ts::Stats`, per PID on the PID's row. No
@@ -100,7 +103,8 @@ Implementation:
   150 ms PCR gap counts one repetition and one discontinuity error, an 80 ms
   gap counts nothing, a signalled 500 ms jump counts nothing, a placed wrap
   counts nothing, and a 1 s PTS gap on one PID counts one there and nowhere
-  else.
+  else. A TEI packet that also jumps its continuity counter counts one
+  `Transport_error` and no `Continuity_count_error`.
 
 ## Required
 
