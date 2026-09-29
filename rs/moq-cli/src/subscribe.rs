@@ -352,17 +352,12 @@ impl Subscribe {
 				Ok(()) => tracing::info!(?linger, "broadcast finished, waiting for it to return"),
 				Err(err) => tracing::warn!(%err, ?linger, "broadcast ended, waiting for it to return"),
 			}
-			match tokio::time::timeout(linger, source.returned(&broadcast)).await {
-				Ok(returned) => {
-					broadcast = returned?;
-					ts.resume().await?;
-					tracing::info!("broadcast returned, resuming");
-				}
-				Err(_) => {
-					tracing::info!(?linger, "broadcast did not return");
-					return Ok(end?);
-				}
-			}
+			let Some(returned) = resume_within(&source, &broadcast, &mut ts, linger).await? else {
+				tracing::info!(?linger, "broadcast did not return");
+				return Ok(end?);
+			};
+			broadcast = returned;
+			tracing::info!("broadcast returned, resuming");
 		}
 	}
 
@@ -383,6 +378,28 @@ impl Subscribe {
 		}
 
 		Ok(())
+	}
+}
+
+/// Wait up to `linger` for the `ended` broadcast to return and `ts` to resume on it.
+///
+/// The linger bounds the whole return, catalog subscription included: a returned
+/// broadcast whose catalog never resolves must not hold the export past it. `None`
+/// when it did not return in time.
+async fn resume_within(
+	source: &moq_mux::Source,
+	ended: &hang::moq_net::broadcast::Consumer,
+	ts: &mut moq_mux::container::ts::Export<moq_mux::container::ts::Ext>,
+	linger: Duration,
+) -> anyhow::Result<Option<hang::moq_net::broadcast::Consumer>> {
+	let resume = async {
+		let returned = source.returned(ended).await?;
+		ts.resume().await?;
+		anyhow::Ok(returned)
+	};
+	match tokio::time::timeout(linger, resume).await {
+		Ok(returned) => Ok(Some(returned?)),
+		Err(_) => Ok(None),
 	}
 }
 
@@ -705,5 +722,32 @@ mod tests {
 		delivery.update(&next, 1);
 		delivery.deliver(&next, false, &mut out).await.unwrap();
 		assert_eq!(now.elapsed(), Duration::from_millis(40));
+	}
+
+	/// A broadcast that returns but never serves its catalog gives up at the linger,
+	/// rather than waiting on the catalog past it.
+	#[tokio::test(start_paused = true)]
+	async fn a_return_without_a_catalog_expires_with_the_linger() {
+		let (origin, driver) = hang::moq_net::origin::Producer::new(Default::default());
+		tokio::spawn(hang::moq_net::time::run(driver));
+		let source = moq_mux::Source::new(origin.consume(), "live");
+
+		let mut first = origin.publish("live", Default::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut first, Default::default()).unwrap();
+		let ended = source.broadcast().await.unwrap();
+		let mut ts = moq_mux::container::ts::Export::with_ts(source.clone(), CatalogFormat::Hang)
+			.await
+			.unwrap();
+		drop((first, catalog));
+
+		// Back, but its catalog request is never answered.
+		let second = origin.publish("live", Default::default()).unwrap();
+		let _unanswered = second.dynamic();
+
+		let linger = Duration::from_secs(10);
+		let start = tokio::time::Instant::now();
+		let resumed = resume_within(&source, &ended, &mut ts, linger).await.unwrap();
+		assert!(resumed.is_none(), "a return that never resumes is no return");
+		assert_eq!(start.elapsed(), linger);
 	}
 }
