@@ -31,12 +31,15 @@ qualifying once its route's first hop changes (`qualifies` in
 it, which stops new requests while its live copies play out. Draining needs
 no abort plumbing and no draft narrowing.
 
-Decided 2026-09-29 by the maintainer: one rule for both kinds of front. Any
-first-hop change on a front's route ends that front, anonymous or named:
-in-flight tracks drain, and new requests get a fresh front. Why: pinning an
-anonymous front to its route id rather than a publisher is an implementation
-detail, and it should not let a new publisher inherit the old broadcast's
-track info.
+Decided 2026-09-29 by the maintainer: one rule for both kinds of front. A
+front never serves through a publisher other than the one it started with.
+A named front may still resume through another route from its own
+publisher, as lite allows; once none remains it ends. An anonymous front has
+no publisher to match, so a first-hop change on its route ends it. Either
+way in-flight tracks drain and new requests get a fresh front. Why: pinning
+an anonymous front to its route id rather than a publisher is an
+implementation detail, and it should not let a new publisher inherit the old
+broadcast's track info.
 
 Decided 2026-09-29: accept the compatibility break. Released moq-net (0.3.5
 and later) refuses a first-hop REQUEST_UPDATE with a retry interval of 0,
@@ -60,7 +63,8 @@ withdraw fallback and no negotiation.
   `js/net/src/ietf/subscriber.ts` close the stream today.
 - Rust model: end an anonymous front on a first-hop change, removing an
   accidental asymmetry. A named front is pinned by publisher
-  (`Pin::Publisher`), so a first-hop update disqualifies it. An anonymous
+  (`Pin::Publisher`), so a first-hop update disqualifies that route and the
+  front resumes through another route from its publisher, or ends. An anonymous
   front (first hop 0) is pinned to a route id (`Pin::Route`), which an
   in-place update keeps, so today it goes on serving new requests through the
   new publisher with the old broadcast's cached track info.
@@ -81,8 +85,9 @@ withdraw fallback and no negotiation.
   in-flight subscription keeps receiving the old publisher's groups until
   that copy ends and never receives a group from the new one; a request
   after the update resolves through the new publisher without the old
-  publisher's track info. Cover an anonymous (hop 0) to named change, and a
-  lite ANNOUNCE_UPDATE in JS. Run `just test interop --all`.
+  publisher's track info. Cover an anonymous (hop 0) to named change, a named
+  front that resumes through a remaining route from its own publisher and
+  never through the new one, and a lite ANNOUNCE_UPDATE in JS. Run `just test interop --all`.
 
 Public API: none. Wire: the cluster extension's update semantics change (no
 message or parameter changes), breaking first-hop updates toward released
