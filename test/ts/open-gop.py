@@ -274,13 +274,14 @@ def main():
         # A capture cut short can end inside a GOP; only a leading picture it reached is owed.
         owed = sum(len(lead) for lead in kept.values())
         found = sum(1 for i, lead in kept.items() for j in lead if delta(cap[j].pts, cap[i].pts) < 0)
-        crossed = len([i for i in kept if not src[start + i].idr])
+        # Only a recovery point with a captured leading picture tests anything.
+        crossed = len([i for i, lead in kept.items() if lead and not src[start + i].idr])
         ok = not moved and found == owed and crossed >= MIN_RECOVERY_POINTS
         detail = f"{found}/{owed} leading picture(s) across {crossed} recovery point(s)"
         if moved:
             detail += f"; {len(moved)} AU(s) presented away from the source's offset, first at {moved[0]}"
         if crossed < MIN_RECOVERY_POINTS:
-            detail += f"; the capture crosses fewer than {MIN_RECOVERY_POINTS} recovery points"
+            detail += f"; the capture reaches leading pictures at fewer than {MIN_RECOVERY_POINTS} recovery points"
         check("leading-pictures", HARD, ok, detail)
 
         raps = [i for i in range(len(cap)) if is_rap(src[start + i])]
