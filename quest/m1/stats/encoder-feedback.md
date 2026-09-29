@@ -21,9 +21,11 @@ it already follows. Keyframe requests stay out.
   - The counters are cumulative, so the handle keeps the previous snapshot
     per viewer and diffs it. A counter that goes backwards means a restarted
     viewer and resets that baseline.
-  - A viewer counts while its `.echo` broadcast is announced, not by the age
-    of its last report: an unchanged snapshot sends no frame, so a quiet
-    healthy viewer must not age out. Diffing already makes one stall long
+  - A viewer counts toward a rendition once its snapshot has a row for that
+    alias, so viewers of other rungs never dilute the share, and stays
+    counted while its `.echo` broadcast is announced, not by the age of its
+    last report: an unchanged snapshot sends no frame, so a quiet healthy
+    viewer must not age out. Diffing already makes one stall long
     ago contribute nothing to later intervals.
 - Trust (2026-09-29): the token prefix is the boundary. Any viewer the
   application's tokens let publish under the echo path counts. How far
