@@ -429,3 +429,36 @@ test("blocks when the worklet fails to load", async () => {
 	await settle();
 	error.mockRestore();
 });
+
+// Any graph construction that throws blocks the same way, e.g. a channel count the node refuses.
+test("blocks when the worklet node can't be built, until its inputs change", async () => {
+	using webaudio = installGatedWebAudio();
+	const error = spyOn(console, "error").mockImplementation(() => {});
+	const Working = globalThis.AudioWorkletNode;
+	Object.defineProperty(globalThis, "AudioWorkletNode", {
+		configurable: true,
+		writable: true,
+		value: class {
+			constructor() {
+				throw new Error("NotSupportedError");
+			}
+		},
+	});
+
+	webaudio.gesture();
+	const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never, channelCount: 64 });
+	await settle();
+	expect(webaudio.contexts[0].state).toBe("running");
+	expect(capture.blocked.peek()).toBe(true);
+
+	// A new channel count rebuilds the graph, so the failure no longer stands.
+	Object.defineProperty(globalThis, "AudioWorkletNode", { configurable: true, writable: true, value: Working });
+	capture.channelCount.set(1);
+	await settle();
+	expect(capture.blocked.peek()).toBe(false);
+	expect(webaudio.worklets.length).toBe(1);
+
+	capture.close();
+	await settle();
+	error.mockRestore();
+});

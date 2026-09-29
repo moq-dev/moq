@@ -221,7 +221,7 @@ export class Encoder {
 			if (effect.get(this.#out.catalog) !== undefined) return true;
 			if (effect.get(this.#fatal) !== undefined || effect.get(this.#failures) > 0) return true;
 			const capture = effect.get(this.in.capture);
-			return capture !== undefined && effect.get(capture.blocked);
+			return capture !== undefined && !!effect.get(capture.blocked);
 		});
 
 		this.#signals.run(this.#runCapture.bind(this));
