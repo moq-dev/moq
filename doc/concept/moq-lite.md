@@ -51,9 +51,12 @@ and `SUBSCRIBE_DROP`.
 
 Rust origin readers can keep reading an in-flight group after its source fails.
 A group reader waiting on a replacement copy opens a latest subscription even
-when the caller is not polling for the next group. If that copy refuses the
-subscription or has advanced past the group, the read ends with an error. If
-the group is still latest, its remaining frames can continue from that copy.
+when the caller is not polling for the next group, and holds it until the group
+ends. If that copy refuses the subscription, the read ends with an error. On
+moq-lite 06, `SUBSCRIBE_START` says whether the group is still coming, so a
+newer group overtaking it on the wire does not end the wait. Older versions and
+local copies declare no start, so a copy that has advanced past the group ends
+the read with an error. Otherwise its remaining frames continue from that copy.
 This also applies when waiting for the group's completion; no FETCH is issued.
 A replacement that later drops the group it is serving still needs
 SUBSCRIBE\_DROP support to resolve that wait.
