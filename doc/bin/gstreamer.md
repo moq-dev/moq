@@ -88,6 +88,12 @@ timeline epoch and resets the handoff baseline. The pause does not inflate
 advertised jitter, and previously measured maxima remain. Resumed timestamps
 must continue forward on the broadcast media clock.
 
+A video pad joining mid-GOP drops delta frames until its first keyframe. If a
+source rewinds below the producer's live edge without signalling a break, the
+pad drops that frame and waits for a keyframe at or beyond the live edge. It
+keeps the rendition alive and preserves the media timeline; it does not shift
+rewound timestamps forward.
+
 ## moqsrc
 
 Pads are named by kind and appear as the catalog announces renditions:

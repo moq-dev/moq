@@ -17,7 +17,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 
 ## Required
 
-- [Late joiner history](/quest/m1/relay-late-joiner-history.md) - a subscriber joining a relay's track from group 0 later still receives the cached finished group below the live one
 - [Cluster routing](/quest/m1/cluster-routing.md) - an announcement says where a broadcast originates, not how to reach it, and a relay hears only the prefixes its clients asked for
 - [Exact scope](/quest/m1/exact-scope.md) - a reader never sees an exact broadcast outside its scope, in Rust or JS; prefix routes above it still present as the empty path
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
@@ -30,10 +29,8 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Close codes](/quest/m1/close-codes.md) - a client sees the peer's application close code over WebSocket and raw QUIC, like WebTransport
 - [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
 - [WebTransport close upstream](/quest/m1/wt-close-upstream.md) - web-transport-moq delivers the close capsule itself, and moq-tokio's `CLOSE_LINGER` is deleted
-- [Live in apps](/quest/m1/announce-live-apps.md) - the demo and `@moq/room` show "no broadcasts" from the `live` marker, which waits for the first session on page load
 - [IETF hidden default](/quest/m1/ietf-hidden-default.md) - a moq-transport peer without the MoQ Hidden option is advertised hidden namespaces; one with it filters per subscription
 - [Watch refusal](/quest/m1/watch-refusal.md) - `<moq-watch>` shows an origin refusal as an error instead of sitting offline
-- [moqsink recoverable errors](/quest/m1/moqsink-keyframe-latch.md) - a leading delta or a timestamp rewind drops frames until a keyframe instead of invalidating a moqsink pad
 - [Splice edge cases](/quest/m1/splice-edges.md) - an unstamped successor, a pruned segment's boundary group, and a warm head during a takeover are each handled correctly
 - [Resumed groups](/quest/m1/resume-latest.md) - a half-delivered group ends once the new copy is past it, so a group-only reader never parks after a mid-group failover
 - [Track tail hardening](/quest/m1/track-tail-hardening.md) - Rust and JS wait out a track's tail by the same rules, with the known hang, count, truncation, grace, and memory holes closed
@@ -41,6 +38,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [FIN wait expiry](/quest/m1/fin-wait-expiry.md) - a group awaiting its FIN ack still expires and follows priority updates on lite and IETF
 - [Cross-relay bursts](/quest/m1/cross-relay-bursts.md) - bursty small-group tracks cross two relays without lost groups, unanswered FETCHes, or stalls
+- [Request stream cancel](/quest/m1/request-stream-serve.md) - a lite publisher stops resolving a SUBSCRIBE or FETCH once the requester FINs or resets, through one wrapper that owns every request stream's reader
 - [JS closed-track leak](/quest/m1/js-closed-track-leak.md) - on dev, a subscriber that joins a closed JS track with unlimited retention is released instead of cached forever
 - [Session death parity](/quest/m1/session-death.md) - a local close ends tracks cleanly in both languages, and JS group readers see the session's error on session death
 - [Watch video guards](/quest/m1/watch-video-guards.md) - promoting a video track holds the last picture, and an older group never reaches the codec between live deltas
@@ -50,16 +48,14 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Interop audio cold start](/quest/m1/interop-audio-cold-start.md) - the interop audio tone check stops failing on cold start, fixed at its cause
 - [Auth outage clock](/quest/m1/auth-outage-clock.md) - the relay and moq-auth outage tests run on a paused clock again and assert both bounds of `expires`
 - [Legacy end overshoot](/quest/m1/legacy-end-overshoot.md) - browser playback survives a group that starts inside the previous group's estimated end
-- [Slow group log](/quest/m1/slow-group-log.md) - a starved viewer reports skipped groups once per catch-up, not once per group
 - [UnknownSession log flood](/quest/m1/unknown-session-logs.md) - streams reset before their WebTransport header stop being reported as UnknownSession at WARN
 - [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
-- [CI hygiene](/quest/m1/ci-hygiene.md) - a push to one PR never cancels another's run, and a failed run never saves the Rust cache
 - [Wire compatibility](/quest/m1/wire-compat.md) - a nightly run tests this checkout against the last published release for tokens, session wire, and catalog/container
 - [Full codec string](/quest/m1/publish-codec-string.md) - browser-published video carries the encoder's full RFC 6381 codec string, so native players decode it
 - [TS program selection](/quest/m1/ts-programs.md) - `import ts` refuses a multi-program stream unless `--program <n|all>` picks one or publishes each
 - [TS export jitter](/quest/m1/ts-export-jitter.md) - the video reorder bound follows later catalogs and the declared reorder depth, so a late B-frame never reorders TS output; an undeclared stream can reorder once per new maximum depth
 - [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - unflagged loop wraps move audio and video by one shift, so A/V sync holds across wraps
-- [ffmpeg muxdelay](/quest/m1/ts-publish-muxdelay.md) - the documented MPEG-TS publish line adds `-muxdelay 0`, so quiet audio is not clumped
+- [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md) - `import ts` reads a PAT or PMT that spans packets or follows a nonzero pointer_field instead of aborting
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - importers sharing a `--hop` and fed one stream publish identical groups and timestamps, so failover survives
 - [PipeWire duplicate cameras](/quest/m1/pipewire-dup-cameras.md) - a webcam lists once with PipeWire enabled
 - [Catalog wall clock](/quest/m1/catalog-wall-clock.md) - `Clock::wall_clock` keeps the catalog's full precision instead of truncating to milliseconds
@@ -165,7 +161,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [#3021](/quest/m1/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - GStreamer maps every pad onto one continuous broadcast clock across source restarts
 - [Export linger](/quest/m1/export-linger.md) - every `moq export` waits `--linger` for a broadcast to return, and exits 0 on a clean end and 1 on a drop
 - [TS byte schedule](/quest/m1/ts-export-byte-schedule.md) - moq export ts places PCRs and padding on the byte grid `mpegts.muxRate` implies, so a receiver can clock off arrival
-- [#3489](/quest/m1/3489-ts-import-stream-liveness.md) - moq import ts: every elementary stream reports its access units and how long it has been quiet
 - [SRT import stats](/quest/m1/srt-import-stats.md) - the SRT gateway reports the same per-stream counters instead of nothing
 - [Text availability](/quest/m1/text-schema.md) - a text track publishes its own coverage index instead of copying the media timeline
 - [ID3 catalog section](/quest/m1/id3.md) - timed ID3 as a first-class container-neutral catalog section
