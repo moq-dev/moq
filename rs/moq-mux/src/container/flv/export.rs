@@ -11,7 +11,8 @@
 //!
 //! By default FLV carries a single video and a single audio stream, so only the
 //! best video rendition (see [`Video::ranked`](hang::catalog::Video::ranked)) and
-//! the first audio rendition are muxed and the rest are ignored. With
+//! the first audio rendition are muxed and the rest are ignored. The video pick
+//! follows the catalog until the stream header goes out, then stays. With
 //! [`with_multitrack`](Export::with_multitrack) every rendition is muxed instead,
 //! each as an enhanced-RTMP multitrack track addressed by its own track id (use
 //! this only for a player that advertised the `Multitrack` capability).
@@ -327,8 +328,8 @@ impl Export {
 		// Only bind before the header is emitted: the sequence-header (config) tags
 		// go out with the header, and there's no in-band way to introduce a new
 		// track's config mid-stream, so a rendition first seen afterward is left
-		// unmuxed rather than emitted as undecodable config-less frames. (This
-		// mirrors the single-track path ignoring extra renditions.)
+		// unmuxed rather than emitted as undecodable config-less frames. Until then a
+		// single-track stream rebinds to a better-ranked video rendition.
 		if !self.header_emitted {
 			self.bind_video(&catalog)?;
 			self.bind_audio(&catalog)?;
@@ -364,6 +365,16 @@ impl Export {
 			});
 			ranked
 		};
+
+		// Before the header, a single-track stream follows the best rendition, so a
+		// snapshot that lacks it doesn't fix the pick. Dropping the bound track
+		// unsubscribes it; nothing was emitted from it yet.
+		if !self.multitrack
+			&& let Some((best, _)) = renditions.first()
+			&& self.video.first().is_some_and(|t| &t.name != *best)
+		{
+			self.video.clear();
+		}
 
 		for (name, config) in renditions {
 			if !self.multitrack && !self.video.is_empty() {

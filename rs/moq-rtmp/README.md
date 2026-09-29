@@ -89,7 +89,10 @@ Two ways to serve `rtmps://`:
   RTMPS alongside plaintext RTMP on the same port: a client that opens with a
   TLS ClientHello is TLS-terminated, any other is served as plaintext. Build the
   config from a `moq_tokio::tls::Listen` instance (RTMPS has no ALPN), or supply
-  any `rustls::ServerConfig`.
+  any `rustls::ServerConfig`. Set `Config::plaintext = false` (or
+  `Server::with_plaintext(false)`) to serve RTMPS only: a plaintext client is
+  refused at its first byte, so stream keys never cross the network
+  unencrypted. Refusing plaintext without a TLS config is an error at startup.
 
   ```rust
   let mut tls = moq_tokio::tls::Listen::default();
@@ -99,6 +102,7 @@ Two ways to serve `rtmps://`:
   let mut rtmp = moq_rtmp::Config::default();
   rtmp.listen = Some("0.0.0.0:1935".parse()?);
   rtmp.tls = Some(server_config); // Arc<rustls::ServerConfig>: rtmp:// and rtmps://
+  rtmp.plaintext = false; // optional: rtmps:// only
   ```
 
 - **Bring your own transport.** Accept the connection and complete the TLS
