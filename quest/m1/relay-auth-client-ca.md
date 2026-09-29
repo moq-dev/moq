@@ -24,6 +24,10 @@ config instead of quietly refusing every session.
   auth configured, which `MoqSide::validate` permits and whose peers admit
   through the cluster. Make that case explicit and let any other error stop
   startup.
+- A listener TLS client CA on a listener with no QUIC backend (its QUIC
+  owned elsewhere, see `quic_owned_elsewhere` in `rs/moq-relay/src/relay.rs`)
+  is never checked, so refuse that config at load instead of silently
+  ignoring the CA.
 - Update every caller, the tests #4364 added in both `moq-cli` and
   `moq-relay`, and `doc/bin/relay/auth.md` or `doc/lib/rs` wherever they name
   the methods.
