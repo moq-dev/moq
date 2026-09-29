@@ -13,9 +13,12 @@ retry.
   `timeout_at(deadline, ...)`, so connect, TLS, announce, and subscribe share
   the budget with the read, and under load setup alone can spend it.
 - moq-cli `complete::tests::a_stage_broadcast_picks_the_catalog_to_read`
-  ([#4084](https://github.com/moq-dev/moq/pull/4084)) and
+  ([#4084](https://github.com/moq-dev/moq/pull/4084)),
   `the_catalog_format_on_the_line_is_honored`
-  ([#4089](https://github.com/moq-dev/moq/pull/4089)).
+  ([#4089](https://github.com/moq-dev/moq/pull/4089)), and
+  `a_relay_on_the_line_answers_broadcast`: both of the latter pair came back
+  empty after the fixed 1.5 s `CEILING` on a loaded runner
+  ([#4404](https://github.com/moq-dev/moq/pull/4404)).
 - moq-net `model::group::test::drop_unfinished_warns` counts WARNs through a
   global tracing capture, so another test's WARN, or a missed one, changes
   the count ([#4104](https://github.com/moq-dev/moq/pull/4104)). The
