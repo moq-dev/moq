@@ -24,3 +24,4 @@ inline; line count is not the test.
 ## Required
 
 - [Demo scripts](/quest/m1/tooling/demo-scripts.md) - the demo justfiles' inline bash moves into scripts, the last logic left inside recipes
+- [Forward arguments](/quest/m1/tooling/forward-args.md) - recipes pass a quoted nextest filterset through intact instead of re-splitting it
