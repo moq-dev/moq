@@ -69,7 +69,7 @@ The simplest way to publish a stream:
 | `muted`     | boolean | false    | Mute audio capture              |
 | `invisible` | boolean | false    | Disable video capture           |
 | `preview`   | string  | `"source"` | What the preview renders: `"source"`, `"encoded"`, `"none"` |
-| `announce`  | string  | `"source"` | When to advertise: `"always"`, `"never"`, `"source"` (once media is captured). A camera source waits for every enabled track. The broadcast is created while connected either way. |
+| `announce`  | string  | `"source"` | When to advertise: `"always"`, `"never"`, `"source"` (once media is captured). A camera source waits for every enabled track, and `"source"` waits until each captured track's config resolves or fails, so the first catalog lists every rendition. The broadcast is created while connected either way. |
 
 A nested `<video>` shows the raw capture; a `<canvas>` is drawn by the element.
 Camera and microphone failures are observable through `el.sources.video`
@@ -90,11 +90,6 @@ request permission immediately. Create an enabled screen source during the user 
 authorizes screen capture, or pass a live input that is false until that gesture. Audio capture
 that starts before the page's first click or keypress waits for one: browsers suspend Web Audio
 until then, and the audio rendition stays out of the catalog until samples flow.
-
-The catalog is withheld until every encoder with a source resolves its first config, so a
-subscriber's first catalog lists every rendition. An encoder that can't resolve one stops holding it:
-a microphone waiting for a gesture, a camera with no supported codec, or a failed encoder. Another
-producer opts in by setting `rendition.expected` while its config resolves.
 
 ```typescript
 import * as Publish from "@moq/publish";

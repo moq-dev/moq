@@ -18,7 +18,8 @@ export type BroadcastInput = {
 
 	// Whether to announce the broadcast. Defaults to true. Until it is announced nobody can
 	// see or subscribe to it. The flip rather than a gate on creating it: tracks can be
-	// populated while this is false, then announced once ready.
+	// populated while this is false, then announced once ready. The catalog is served only while
+	// announced, so its first snapshot is the one current at announce time.
 	announce: Getter<boolean>;
 
 	// The broadcast name.
@@ -84,12 +85,6 @@ export class Broadcast {
 	// The writable track producer signals backing each Rendition's read-only `track`, keyed by name.
 	// A static network track is exposed here only while at least one subscriber uses it.
 	readonly #tracks = new Map<string, Signal<Moq.Track.Producer | undefined>>();
-
-	// The renditions whose config has arrived at least once.
-	readonly #resolved = new WeakSet<Rendition<unknown>>();
-
-	// Held on the catalog while an expected rendition has yet to resolve.
-	#reservation?: { close(): void };
 
 	#signals = new Effect();
 
@@ -171,17 +166,9 @@ export class Broadcast {
 		const audio: Record<string, Catalog.AudioConfig> = {};
 		const text: Record<string, Catalog.TextConfig> = {};
 
-		// Whether an expected rendition has yet to resolve its first config, which withholds the whole
-		// catalog. Only the first: a config that later drops out (a camera swap) publishes as usual.
-		let pending = false;
-
 		for (const rendition of Object.values(renditions)) {
 			const config = enabled ? effect.get(rendition.config) : undefined;
-			if (config === undefined) {
-				if (enabled && !this.#resolved.has(rendition) && effect.get(rendition.expected)) pending = true;
-				continue;
-			}
-			this.#resolved.add(rendition);
+			if (config === undefined) continue;
 
 			if (rendition.kind === "video") {
 				video[rendition.name] = config as Catalog.VideoConfig;
@@ -194,9 +181,6 @@ export class Broadcast {
 
 		const display = effect.get(this.in.display);
 		const flip = effect.get(this.in.flip);
-
-		// Reserve before the edit and release after it, so neither side publishes a partial catalog.
-		if (pending) this.#reservation ??= this.catalog.reserve();
 
 		this.catalog.mutate((catalog) => {
 			if (Object.keys(video).length > 0) {
@@ -223,11 +207,6 @@ export class Broadcast {
 				delete catalog.text;
 			}
 		});
-
-		if (!pending) {
-			this.#reservation?.close();
-			this.#reservation = undefined;
-		}
 	}
 
 	#run(effect: Effect) {
@@ -247,32 +226,38 @@ export class Broadcast {
 		const broadcast = origin.createBroadcast(name);
 		effect.cleanup(() => broadcast.close());
 
-		effect.run((inner) => {
-			if (inner.get(this.in.announce)) broadcast.announce();
-			else broadcast.unannounce();
-		});
-
 		// Expose it before serving so an application reacting to `net` can insert its own tracks.
 		this.net.set(broadcast);
 		effect.cleanup(() => {
 			if (this.net.peek() === broadcast) this.net.set(undefined);
 		});
 
-		// Catalog tracks are shared across every subscriber and always hold the latest value.
-		for (const [name, compression] of [
-			[Broadcast.CATALOG_TRACK, false],
-			[Broadcast.CATALOG_TRACK_COMPRESSED, true],
-		] as const) {
-			// A catalog may publish once and stay unchanged for the broadcast's whole life. Keep
-			// that sole closed snapshot replayable so a viewer arriving after the ordinary media
-			// retention window can still bootstrap.
-			const track = broadcast.createTrack(name, {
-				maxAge: Moq.Time.Milli(Number.MAX_SAFE_INTEGER),
-				priority: Catalog.PRIORITY.catalog,
-			});
-			effect.cleanup(() => track.close());
-			this.catalog.serve(track, effect, { compression });
-		}
+		effect.run((inner) => {
+			if (!inner.get(this.in.announce)) {
+				broadcast.unannounce();
+				return;
+			}
+
+			// Serve the catalog only while announced. Nobody can find the broadcast before then, so an
+			// earlier catalog would only leave a stale first snapshot behind; this way the first one is
+			// whatever the catalog holds at announce time.
+			for (const [name, compression] of [
+				[Broadcast.CATALOG_TRACK, false],
+				[Broadcast.CATALOG_TRACK_COMPRESSED, true],
+			] as const) {
+				// A catalog may publish once and stay unchanged for the broadcast's whole life. Keep
+				// that sole closed snapshot replayable so a viewer arriving after the ordinary media
+				// retention window can still bootstrap.
+				const track = broadcast.createTrack(name, {
+					maxAge: Moq.Time.Milli(Number.MAX_SAFE_INTEGER),
+					priority: Catalog.PRIORITY.catalog,
+				});
+				inner.cleanup(() => track.close());
+				this.catalog.serve(track, inner, { compression });
+			}
+
+			broadcast.announce();
+		});
 
 		// Static tracks fan out to every subscriber. Keep the encoder-facing handle demand-gated
 		// so capture and encoding still stop when the final subscriber leaves.

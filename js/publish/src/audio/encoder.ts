@@ -3,7 +3,7 @@ import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { type Computed, Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { type Baseline, Estimator } from "../jitter";
 import type { AudioFrame, Capture, Format } from "./capture";
@@ -169,6 +169,16 @@ export class Encoder {
 	// reconfiguring it would be a retry, so the rendition stays down for the life of this encoder.
 	#fatal = new Signal<Error | undefined>(undefined);
 
+	// Whether the current codec settings can't resolve against the captured format.
+	#invalid = new Signal(false);
+
+	/**
+	 * @internal Whether the catalog config resolved, or can't until something outside the encoder
+	 * changes: a failed encoder or capture, invalid codec settings, or a capture waiting on the page's
+	 * first gesture. `<moq-publish>` holds its first announce until this is set.
+	 */
+	readonly settled: Computed<boolean>;
+
 	#signals = new Effect();
 	#estimator = new Estimator();
 
@@ -195,6 +205,13 @@ export class Encoder {
 			const capture = effect.get(this.in.capture);
 			if (!capture) return;
 			effect.proxy(this.#out.root, capture.out.root);
+		});
+
+		this.settled = this.#signals.computed((effect) => {
+			if (effect.get(this.#out.catalog) !== undefined) return true;
+			if (effect.get(this.#fatal) !== undefined || effect.get(this.#invalid)) return true;
+			const capture = effect.get(this.in.capture);
+			return capture !== undefined && effect.get(capture.blocked);
 		});
 
 		this.#signals.run(this.#runCapture.bind(this));
@@ -254,15 +271,6 @@ export class Encoder {
 
 		// Publish the resolved config; undefined (no capture) drops it from the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
-
-		// A captured source resolves into a config, so hold the catalog for it meanwhile. Not while
-		// capture is blocked (e.g. on a gesture) or the encoder failed: no config may ever come.
-		effect.run((effect) => {
-			const capture = effect.get(this.in.capture);
-			if (!capture || !effect.get(this.in.enabled) || effect.get(this.#fatal)) return;
-			if (effect.get(capture.in.source) === undefined || effect.get(capture.out.blocked)) return;
-			effect.set(rendition.expected, true, false);
-		});
 
 		// The pipeline outlives any one subscription: it is built as soon as capture runs and
 		// #encode reads the live producer per frame rather than subscribing to it. Rebuilding on a
@@ -343,7 +351,14 @@ export class Encoder {
 			return;
 		}
 
-		effect.set(this.#config, resolve(captured, effect.get(this.codec)));
+		let config: Resolved;
+		try {
+			config = resolve(captured, effect.get(this.codec));
+		} catch (err) {
+			effect.set(this.#invalid, true, false);
+			throw err;
+		}
+		effect.set(this.#config, config);
 	}
 
 	// Publish the config immediately so a consumer can request the demand-gated track. Once encoding

@@ -31,7 +31,7 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `source` | `camera`, `screen`, or `file`. |
 | `muted`, `invisible` | Disable audio or video capture. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
-| `announce` | When to advertise: once a `source` is live (default), `always`, or `never`. A camera source waits for every enabled track. The broadcast is created while connected either way, but nobody can see or subscribe to it until it is announced. |
+| `announce` | When to advertise: once a `source` is live (default), `always`, or `never`. A camera source waits for every enabled track, and `source` waits until each captured track's config resolves or fails, so the first catalog lists every rendition. The broadcast is created while connected either way, but nobody can see or subscribe to it until it is announced. |
 
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.
@@ -138,12 +138,6 @@ construction, so build an enabled screen source inside the user gesture that
 authorizes screen capture. Audio capture that starts before the page's first
 click or keypress waits for one: browsers suspend Web Audio until then, and the
 audio rendition stays out of the catalog until samples flow.
-
-The catalog is withheld until every encoder with a source resolves its first
-config, so a subscriber's first catalog lists every rendition. An encoder that
-can't resolve one stops holding it: a microphone waiting for a gesture, a
-camera with no supported codec, or a failed encoder. Another producer opts in
-by setting `rendition.expected` while its config resolves.
 
 Every input and output is a signal from [`@moq/signals`](/lib/js/signals).
 Load from a CDN (`https://esm.sh/@moq/publish/element`) for a no-build embed.

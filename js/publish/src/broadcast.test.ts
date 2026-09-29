@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { Origin, Path, Track } from "@moq/net";
-import { Effect } from "@moq/signals";
+import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast.ts";
 
 // Effects and signal writes coalesce onto microtasks, so a chain of registration -> config -> catalog
@@ -70,71 +70,6 @@ test("a rendition with an undefined config is omitted from the catalog", async (
 	await settle();
 	catalog = await readCatalog(broadcast);
 	expect(catalog?.video).toBeUndefined();
-
-	broadcast.close();
-});
-
-test("withholds the catalog until every expected rendition resolves", async () => {
-	const broadcast = new Broadcast({ enabled: true });
-
-	const video = broadcast.video("video");
-	const audio = broadcast.audio("audio");
-	video.expected.set(true);
-	audio.expected.set(true);
-	await settle();
-
-	const effect = new Effect();
-	const track = new Track.Producer("catalog.json");
-	broadcast.catalog.serve(track, effect);
-	const subscriber = track.subscribe().ordered();
-
-	// Audio resolves first: nothing is published while video is still outstanding, not even a seed.
-	audio.config.set(audioConfig);
-	await settle();
-	broadcast.catalog.mutate((c) => {
-		c.scte35 = { splices: [] };
-	});
-
-	video.config.set(videoConfig);
-	await settle();
-
-	// The first snapshot is the complete one.
-	const first = await subscriber.nextGroup();
-	expect(first?.sequence).toBe(0);
-	const catalog = (await first?.readJson()) as Catalog.Root;
-	expect(Object.keys(catalog.video?.renditions ?? {})).toEqual(["video"]);
-	expect(Object.keys(catalog.audio?.renditions ?? {})).toEqual(["audio"]);
-	expect(catalog.scte35).toEqual({ splices: [] });
-
-	// Only the first config is awaited: a later drop (e.g. a device swap) publishes incrementally.
-	audio.config.set(undefined);
-	await settle();
-	const second = await subscriber.nextGroup();
-	const next = (await second?.readJson()) as Catalog.Root | undefined;
-	expect(next).toBeDefined();
-	expect(next?.audio).toBeUndefined();
-
-	effect.close();
-	broadcast.close();
-});
-
-test("an expected rendition that stops expecting releases the catalog", async () => {
-	const broadcast = new Broadcast({ enabled: true });
-
-	const video = broadcast.video("video");
-	const audio = broadcast.audio("audio");
-	video.expected.set(true);
-	audio.expected.set(true);
-	audio.config.set(audioConfig);
-	await settle();
-
-	// e.g. the camera is disabled before its codec probe finished.
-	video.expected.set(false);
-	await settle();
-
-	const catalog = await readCatalog(broadcast);
-	expect(catalog?.video).toBeUndefined();
-	expect(Object.keys(catalog?.audio?.renditions ?? {})).toEqual(["audio"]);
 
 	broadcast.close();
 });
@@ -210,6 +145,39 @@ test("serves the catalog through a shared static track", async () => {
 	subscriber.close();
 	await settle();
 	expect(broadcast.net.peek()).toBe(net);
+
+	broadcast.close();
+});
+
+// Regression: the catalog was served from the moment the origin existed, so the snapshots published
+// while renditions resolved stayed on the track and a subscriber could start from a partial one.
+test("serves no catalog until announced, so the first snapshot is the one at announce time", async () => {
+	const announce = new Signal(false);
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Origin.Producer(),
+		name: Path.from("test.hang"),
+		announce,
+	});
+	await settle();
+
+	// Renditions resolve in separate ticks while unannounced.
+	broadcast.video("video").config.set(videoConfig);
+	await settle();
+	broadcast.audio("audio").config.set(audioConfig);
+	await settle();
+
+	announce.set(true);
+	await settle();
+
+	const net = broadcast.net.peek();
+	if (!net) throw new Error("expected a network producer once connected");
+
+	const group = await net.track(Broadcast.CATALOG_TRACK).subscribe().ordered().nextGroup();
+	expect(group?.sequence).toBe(0);
+	const catalog = (await group?.readJson()) as Catalog.Root;
+	expect(Object.keys(catalog.video?.renditions ?? {})).toEqual(["video"]);
+	expect(Object.keys(catalog.audio?.renditions ?? {})).toEqual(["audio"]);
 
 	broadcast.close();
 });

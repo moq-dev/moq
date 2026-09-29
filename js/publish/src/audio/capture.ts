@@ -60,10 +60,6 @@ type CaptureOutput = {
 	// The format the frames arrive in, or undefined while there's no capture.
 	format: Signal<Format | undefined>;
 
-	// Whether a track can't capture, so no format is on its way: disabled, suspended until the page's
-	// first click or keypress, or its worklet failed to load.
-	blocked: Signal<boolean>;
-
 	// The head of the Web Audio graph, when there is one, so callers can tap the raw capture.
 	// Undefined for decoded samples, which never touch Web Audio.
 	root: Signal<AudioNode | undefined>;
@@ -89,10 +85,17 @@ export class Capture {
 	readonly #out: CaptureOutput = {
 		frames: new Signal<Fanout<AudioFrame> | undefined>(undefined),
 		format: new Signal<Format | undefined>(undefined),
-		blocked: new Signal(false),
 		root: new Signal<AudioNode | undefined>(undefined),
 	};
 	readonly out = readonlys(this.#out);
+
+	readonly #blocked = new Signal(false);
+
+	/**
+	 * @internal Whether a track's format can't arrive until something outside the capture changes: the
+	 * page's first click or keypress, or a new source after its graph failed to build.
+	 */
+	readonly blocked: Getter<boolean> = this.#blocked;
 
 	#signals = new Effect();
 
@@ -134,10 +137,7 @@ export class Capture {
 
 	#runTrack(source: SourceConfig, effect: Effect): void {
 		// Releasing the capture device while muted is the whole point of gating on `enabled`.
-		if (!effect.get(this.in.enabled)) {
-			effect.set(this.#out.blocked, true, false);
-			return;
-		}
+		if (!effect.get(this.in.enabled)) return;
 
 		const settings = source.track.getSettings();
 		const sampleRate = effect.get(this.sampleRate) ?? pickCaptureRate(settings.sampleRate);
@@ -148,15 +148,30 @@ export class Capture {
 		// the prop or the track's applied getUserMedia constraint, and force the worklet to mix to it.
 		const requestedChannels = effect.get(this.channelCount) ?? requestedChannelCount(source.track);
 
-		const context = new AudioContext({
-			latencyHint: "interactive",
-			sampleRate,
-		});
+		let context: AudioContext;
+		try {
+			context = new AudioContext({
+				latencyHint: "interactive",
+				sampleRate,
+			});
+		} catch (err) {
+			// e.g. a sample rate the browser refuses: no graph, so no format however long we wait.
+			effect.set(this.#blocked, true, false);
+			throw err;
+		}
 		effect.cleanup(() => context.close());
 
 		// Nothing guarantees a gesture has happened yet: a pre-granted microphone reaches here on page
 		// load. A context built then starts suspended and renders nothing until one arrives.
 		const running = Util.Gesture.unlock(effect, context);
+		const failed = new Signal(false);
+
+		// A context starts suspended even after a gesture, until it resumes a moment later; only one
+		// still waiting on the page's first gesture may wait indefinitely.
+		effect.run((inner) => {
+			const gesture = !inner.get(running) && !navigator.userActivation?.hasBeenActive;
+			inner.set(this.#blocked, inner.get(failed) || gesture, false);
+		});
 
 		const root = new MediaStreamAudioSourceNode(context, {
 			mediaStream: new MediaStream([source.track]),
@@ -164,7 +179,6 @@ export class Capture {
 		effect.cleanup(() => root.disconnect());
 
 		const loaded = new Signal(false);
-		const failed = new Signal(false);
 
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
@@ -179,14 +193,6 @@ export class Capture {
 				failed.set(true);
 				throw err;
 			}
-		});
-
-		// A context starts suspended even after a gesture, until it resumes a moment later; only one
-		// still waiting on the page's first gesture may wait indefinitely. A worklet that failed to load
-		// never captures at all.
-		effect.run((inner) => {
-			const gesture = !inner.get(running) && !navigator.userActivation?.hasBeenActive;
-			inner.set(this.#out.blocked, inner.get(failed) || gesture, false);
 		});
 
 		// Only capture while the graph runs. The worklet stamps frames from when it is built, so one built

@@ -22,11 +22,11 @@ Guidance:
 - The catalog is built from the resolved config today, before any frame is
   encoded. Either hold the rendition out of the catalog until the first
   output reports its `decoderConfig`, or update it then; keep the stall and
-  jitter reporting working either way. `Broadcast` withholds the whole
-  catalog until an `expected` rendition's first config arrives, so holding it
-  out keeps every viewer waiting; and since the encoder only runs while the
-  track is subscribed, holding it until the first output deadlocks unless the
-  encoder runs without demand until then.
+  jitter reporting working either way. `<moq-publish>` holds its first
+  announce until every captured encoder settles, so holding the rendition out
+  keeps the whole broadcast unannounced; and since the encoder only runs
+  while the track is subscribed, holding it until the first output deadlocks
+  unless the encoder runs without demand until then.
 - Check what each browser returns for a bare hint. If one echoes the hint
   back, derive the string from the bitstream (SPS for H.264/H.265, the
   sequence header for AV1, the uncompressed header for VP9), or fail loud

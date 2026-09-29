@@ -137,9 +137,6 @@ export class Encoder {
 	// The codec the browser will actually encode with, tagged with the inputs it was probed against.
 	#codec = new Signal<Detected | undefined>(undefined);
 
-	// Whether the latest probe found no codec, so no config is coming for these inputs.
-	#unsupported = new Signal(false);
-
 	// Uncapped target bitrate (pixels, maxBitrate), the reservation's ceiling.
 	#ceiling = new Signal<number | undefined>(undefined);
 
@@ -149,6 +146,15 @@ export class Encoder {
 	// Only the codec prefix the user asked for, narrowed out of `config` so tuning any other knob
 	// doesn't re-probe the hardware.
 	#codecFilter: Computed<string>;
+
+	// Whether the current inputs can't produce a config: no supported codec, or an invalid knob.
+	#failed = new Signal(false);
+
+	/**
+	 * @internal Whether the catalog config resolved, or failed and won't until an input changes.
+	 * `<moq-publish>` holds its first announce until this is set.
+	 */
+	readonly settled: Computed<boolean>;
 
 	#signals = new Effect();
 	#stalled = new Catalog.Stalled.Detector();
@@ -168,6 +174,9 @@ export class Encoder {
 		};
 		this.config = Signal.from(props?.config);
 		this.#codecFilter = this.#signals.computed((effect) => effect.get(this.config)?.codec ?? "");
+		this.settled = this.#signals.computed(
+			(effect) => effect.get(this.#out.catalog) !== undefined || effect.get(this.#failed),
+		);
 
 		this.#signals.run(this.#runCatalog.bind(this));
 		this.#signals.run(this.#runCodec.bind(this));
@@ -187,15 +196,6 @@ export class Encoder {
 
 		// Publish the resolved catalog config; undefined (while disabled) drops it from the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
-
-		// A captured source resolves into a config, so hold the catalog for it meanwhile, unless the
-		// probe found no codec and none is coming.
-		effect.run((effect) => {
-			const capture = effect.get(this.in.capture);
-			const source = capture ? effect.get(capture.in.source) : undefined;
-			const expected = effect.get(this.in.enabled) && source !== undefined && !effect.get(this.#unsupported);
-			effect.set(rendition.expected, expected, false);
-		});
 
 		// Encode only while enabled and a subscriber is attached (the demand gate).
 		effect.run((effect) => {
@@ -431,7 +431,7 @@ export class Encoder {
 
 				effect.set(this.#codec, { ...detected, required, ...dimensions });
 			} catch (err) {
-				effect.set(this.#unsupported, true, false);
+				effect.set(this.#failed, true, false);
 				throw err;
 			}
 		});
@@ -551,6 +551,7 @@ export class Encoder {
 			sourcePixels;
 		if (user?.maxScale !== undefined) {
 			if (!Number.isFinite(user.maxScale) || user.maxScale <= 0) {
+				effect.set(this.#failed, true, false);
 				throw new Error(`maxScale must be a finite number greater than 0: ${user.maxScale}`);
 			}
 			maxPixels = Math.min(maxPixels, sourcePixels * user.maxScale);

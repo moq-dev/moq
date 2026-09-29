@@ -356,15 +356,15 @@ test("captures once a gesture resumes a context built before one", async () => {
 	expect(webaudio.contexts[0].state).toBe("suspended");
 	expect(webaudio.worklets.length).toBe(0);
 	expect(capture.out.format.peek()).toBeUndefined();
-	// Blocked, so the encoder stops holding the catalog for audio that may never come.
-	expect(capture.out.blocked.peek()).toBe(true);
+	// Blocked, so `<moq-publish>` doesn't hold its announce for audio that may never come.
+	expect(capture.blocked.peek()).toBe(true);
 
 	const before = performance.now() * 1000;
 	webaudio.gesture();
 	await settle();
 
 	expect(webaudio.contexts[0].state).toBe("running");
-	expect(capture.out.blocked.peek()).toBe(false);
+	expect(capture.blocked.peek()).toBe(false);
 	expect(webaudio.worklets.length).toBe(1);
 
 	// The worklet is anchored when the graph starts, not when the source appeared, so audio stays on
@@ -394,7 +394,7 @@ test("drops the format while the context is interrupted", async () => {
 	await settle();
 	expect(capture.out.format.peek()).toBeUndefined();
 	// The page was activated, so the context is expected back without another gesture.
-	expect(capture.out.blocked.peek()).toBe(false);
+	expect(capture.blocked.peek()).toBe(false);
 	expect(capture.out.frames.peek()).toBeUndefined();
 	// The retired worklet is cut from the source, or it keeps posting alongside its replacement.
 	expect(webaudio.roots[0].outputs.size).toBe(0);
@@ -411,8 +411,8 @@ test("drops the format while the context is interrupted", async () => {
 	await settle();
 });
 
-// Regression: a worklet that failed to load left `blocked` clear on an activated page, so the encoder
-// held the catalog for audio that could never arrive, and every other rendition with it.
+// Regression: a worklet that failed to load left the capture unblocked on an activated page, so
+// `<moq-publish>` waited forever on audio that could never arrive, and every other rendition with it.
 test("blocks when the worklet fails to load", async () => {
 	using webaudio = installGatedWebAudio(() => Promise.reject(new Error("addModule failed")));
 	const error = spyOn(console, "error").mockImplementation(() => {});
@@ -422,7 +422,7 @@ test("blocks when the worklet fails to load", async () => {
 	await settle();
 
 	expect(webaudio.contexts[0].state).toBe("running");
-	expect(capture.out.blocked.peek()).toBe(true);
+	expect(capture.blocked.peek()).toBe(true);
 	expect(capture.out.format.peek()).toBeUndefined();
 
 	capture.close();

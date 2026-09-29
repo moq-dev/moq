@@ -24,14 +24,6 @@ export class Rendition<Config> {
 	readonly config = new Signal<Config | undefined>(undefined);
 
 	/**
-	 * Whether the producer is resolving a {@link config}, written by the producer.
-	 *
-	 * While set, the broadcast withholds its catalog until this rendition's first config arrives, so
-	 * a subscriber never locks onto one missing it. Leave it unset when a config may never arrive.
-	 */
-	readonly expected = new Signal<boolean>(false);
-
-	/**
 	 * The live track producer while a subscriber is attached, `undefined` otherwise.
 	 * Producers should encode only while this is set (the demand gate).
 	 */
