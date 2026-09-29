@@ -148,6 +148,15 @@
 	color: #22c55e;
 }
 
+.language-icon {
+	width: 2rem;
+	height: 2rem;
+	object-fit: contain;
+	display: inline-block;
+	vertical-align: middle;
+	margin-right: 0.5rem;
+}
+
 /* Feature layout - emoji in top right corner */
 .VPFeature {
 	position: relative;
