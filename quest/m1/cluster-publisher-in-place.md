@@ -59,7 +59,9 @@ withdraw fallback and no negotiation.
   `retract()` and announces again, so a forwarding relay withdraws the
   namespace. Emit an in-place update instead, and end subscriptions pinned to
   the old publisher, matching Rust.
-- JS: [JS IETF reprice](/quest/m1/js-ietf-reprice.md) follows the new rule.
+- JS sender `js/net/src/ietf/publisher.ts` (`runPublishNamespaces`): once
+  JS IETF reprice gives it in-place updates, a first-hop change uses them too
+  instead of withdrawing.
 - Docs: `doc/bin/relay/cluster.md`, and any `doc/concept` page that
   describes the cluster extension, say a publisher change updates in place
   and ends subscriptions pinned to the old publisher.
@@ -73,6 +75,10 @@ withdraw fallback and no negotiation.
 Public API: none. Wire: the cluster extension's update semantics change (no
 message or parameter changes), breaking first-hop updates toward released
 relays as decided above.
+
+## Required
+
+- [JS IETF reprice](/quest/m1/js-ietf-reprice.md) - the JS IETF publisher updates a held namespace in place, which a first-hop change then reuses
 
 ## Related
 
