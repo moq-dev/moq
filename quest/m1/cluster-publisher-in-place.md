@@ -45,8 +45,18 @@ prefers updating over quickly toggling a namespace.
   Run `just test interop --all`.
 
 Public API: none. Wire: the cluster extension's update semantics change (no
-message or parameter changes); a peer on the old text would see an in-place
-update it expected as a withdrawal, which only this tree's relays speak.
+message or parameter changes).
+
+Open question, compatibility: released moq-net (0.3.5 and later) refuses a
+first-hop REQUEST_UPDATE with a retry interval of 0, which the sender reads
+as never, so a moved publisher would stay withdrawn on that session during a
+rolling upgrade. Options:
+
+- Fall back: a sender whose first-hop update is refused withdraws and
+  advertises fresh, ignoring that refusal's interval. No wire change; drop
+  the fallback once 0.3.x relays are gone. (recommended)
+- Negotiate: a new setup option gates in-place first-hop updates. Adds wire.
+- Accept the break: cluster relays upgrade together.
 
 ## Related
 
