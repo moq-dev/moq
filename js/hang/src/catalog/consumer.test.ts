@@ -2,7 +2,15 @@ import { expect, test } from "bun:test";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { TRACK } from "./format";
-import { checkRenditions, EscapingBroadcast, MAX_RENDITIONS, type Root, TooManyRenditions, watch } from "./root";
+import {
+	checkRenditions,
+	checkResolvable,
+	EscapingBroadcast,
+	MAX_RENDITIONS,
+	type Root,
+	TooManyRenditions,
+	watch,
+} from "./root";
 
 function catalog(count: number): Root {
 	return {
@@ -27,6 +35,24 @@ test("the shared cap accepts 64 renditions and refuses 65 with a typed error", (
 			text: { renditions: { captions: {} } },
 		} as unknown as Root),
 	).toThrow(TooManyRenditions);
+});
+
+test("the shared containment check covers every section carrying a broadcast reference", () => {
+	// @moq/watch runs this same check on the hangz, MSF, and manual catalogs, so a section left
+	// out here would exempt its tracks everywhere.
+	const base = Moq.Path.from("a/b");
+	for (const [section, key] of [
+		["video", "renditions"],
+		["audio", "renditions"],
+		["text", "renditions"],
+		["json", "tracks"],
+		["binary", "tracks"],
+	]) {
+		const reference = (broadcast: string) =>
+			({ [section]: { [key]: { entry: { broadcast: Moq.Path.normalizeRelative(broadcast) } } } }) as Root;
+		expect(() => checkResolvable(reference("../../x"), base)).toThrow(EscapingBroadcast);
+		expect(checkResolvable(reference("../x"), base)).toBeDefined();
+	}
 });
 
 test("watch refuses an oversized catalog update", async () => {
