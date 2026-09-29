@@ -39,11 +39,12 @@ retry.
   subscribe tests already use `#[tokio::test(start_paused = true)]`), or
   assert on an event instead of a deadline. If a test is slow under load
   because the code under test is slow, fix that.
-- Fetch timeout: the fixture runs real sockets against an in-process relay,
-  where a paused clock would fire QUIC timers while packets are in flight.
-  Separate the setup and read deadlines (or start the read deadline once the
-  subscription is live), and test the read timeout with the frames already
-  delivered, rather than racing a wall budget that setup can consume.
+- Fetch timeout: test on a paused clock (maintainer decision, 2026-09-28).
+  The fixture runs real sockets against an in-process relay, where a paused
+  clock fires QUIC timers while packets are in flight, so first make the
+  timers mockable: run the fixture over an in-memory transport, or drive
+  noq's timers from the test clock, whichever is smaller. Also separate the
+  setup and read deadlines so setup never spends the read's budget.
 - WARN counting: capture per test (a scoped subscriber or a filter on the
   test's own span) instead of a process-global count.
 - The race test shares one port only so both transports sit behind one URL.
