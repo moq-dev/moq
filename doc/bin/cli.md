@@ -46,7 +46,7 @@ clients by `--auth-url` or `--auth-public`, as the relay does (see
 
 ```bash
 # Publish a file (remux to MPEG-TS without re-encoding)
-ffmpeg -re -i video.mp4 -c copy -f mpegts -pes_payload_size 0 - | \
+ffmpeg -re -i video.mp4 -c copy -f mpegts -pes_payload_size 0 -muxdelay 0 - | \
     moq --connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 
 # Pull it back out
@@ -70,6 +70,14 @@ so it breaks every track's timeline and the exported clock declares the break in
 turn. The same flag on an elementary PID other than the program PCR PID, a
 continuity-counter gap, and the 33-bit timestamp rollover move no clock and
 declare nothing. FLV covers H.264 + AAC.
+
+`import ts` samples each elementary stream's access-unit count once a second and
+logs a stream whose count stopped advancing, with how long it has been quiet on
+the program clock, once per silence. The mux can keep flowing, PCR and
+continuity intact, around a PID that delivers nothing, and no transport check
+downstream sees it. A sparse stream such as SCTE-35 goes quiet between cues, so
+the line reports rather than alarms; `Import::stats` carries the same counters
+for a caller that sets its own limit.
 
 MPEG-TS export restarts its clock and table cadence after a declared marker,
 discarding the old mux buffer. The first new clock packet signals the break and

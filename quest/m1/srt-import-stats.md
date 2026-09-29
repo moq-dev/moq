@@ -14,8 +14,4 @@ most, and today `rs/moq-srt/src/ts.rs` only calls `decode`.
 - Share the logging presentation with `rs/moq-cli/src/publish.rs` where
   needed so the two front doors report the same rows.
 - Test: the SRT harness feeds the suppressed-PID stimulus from the TS
-  liveness quest and asserts the gateway reports the stalled row.
-
-## Required
-
-- [#3489](/quest/m1/3489-ts-import-stream-liveness.md) - the rows this forwards
+  import tests and asserts the gateway reports the stalled row.
