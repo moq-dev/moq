@@ -79,6 +79,18 @@ downstream sees it. A sparse stream such as SCTE-35 goes quiet between cues, so
 the line reports rather than alarms; `Import::stats` carries the same counters
 for a caller that sets its own limit.
 
+MPEG-TS import takes one program. A multi-program stream is refused before
+anything is published, naming its programs, rather than merged onto one clock;
+a PAT that adds a program mid-stream ends the import the same way.
+`--program 2` imports program 2 alone. `--program all` publishes each program
+the first PAT lists as its own broadcast, with its own clock and catalog, keeping
+the catalog suffix last: `--broadcast event.hang` publishes `event/1.hang`,
+`event/2.hang`, and so on. `export ts` writes one program per broadcast.
+
+```bash
+moq --connect https://relay.example.com/anon --broadcast event.hang import ts --program all < mux.ts
+```
+
 MPEG-TS export restarts its clock and table cadence after a declared marker,
 discarding the old mux buffer. The first new clock packet signals the break and
 stdout pacing re-anchors. Every rendition joins the new program generation;

@@ -41,22 +41,21 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Request stream cancel](/quest/m1/request-stream-serve.md) - a lite publisher stops resolving a SUBSCRIBE or FETCH once the requester FINs or resets, through one wrapper that owns every request stream's reader
 - [JS closed-track leak](/quest/m1/js-closed-track-leak.md) - on dev, a subscriber that joins a closed JS track with unlimited retention is released instead of cached forever
 - [Session death parity](/quest/m1/session-death.md) - a local close ends tracks cleanly in both languages, and JS group readers see the session's error on session death
-- [Watch video guards](/quest/m1/watch-video-guards.md) - promoting a video track holds the last picture, and an older group never reaches the codec between live deltas
 - [Watch decoder recovery](/quest/m1/watch-decoder-recovery.md) - one malformed packet rebuilds the audio or video decoder instead of ending playback
 - [Watch and publish under CSP](/quest/m1/csp-assets.md) - blob workers stay the default; strict-CSP apps host the files and set a base URL
 - [More tests under load](/quest/m1/test-flakes-2.md) - the second round of load-only failures, fixed at the cause
 - [Interop audio cold start](/quest/m1/interop-audio-cold-start.md) - the interop audio tone check stops failing on cold start, fixed at its cause
+- [CI runner stalls](/quest/m1/ci-runner-stalls.md) - the 0.4 to 0.8 s freezes of both interop tracks on CI are attributed from a week of nightlies and fixed or told apart from playback bugs
+- [Catalog estimate rate](/quest/m1/catalog-estimate-rate.md) - a rising `jitter`/`delay` estimate republishes the catalog at most once a second, in js/publish and moq-mux
 - [Auth outage clock](/quest/m1/auth-outage-clock.md) - the relay and moq-auth outage tests run on a paused clock again and assert both bounds of `expires`
 - [Legacy end overshoot](/quest/m1/legacy-end-overshoot.md) - browser playback survives a group that starts inside the previous group's estimated end
 - [UnknownSession log flood](/quest/m1/unknown-session-logs.md) - streams reset before their WebTransport header stop being reported as UnknownSession at WARN
 - [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
 - [Wire compatibility](/quest/m1/wire-compat.md) - a nightly run tests this checkout against the last published release for tokens, session wire, and catalog/container
 - [Full codec string](/quest/m1/publish-codec-string.md) - browser-published video carries the encoder's full RFC 6381 codec string, so native players decode it
-- [TS program selection](/quest/m1/ts-programs.md) - `import ts` refuses a multi-program stream unless `--program <n|all>` picks one or publishes each
 - [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - unflagged loop wraps move audio and video by one shift, so A/V sync holds across wraps
 - [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md) - `import ts` reads a PAT or PMT that spans packets or follows a nonzero pointer_field instead of aborting, and one corrupted section costs a repetition and a counted `CRC_error`, not the import
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - importers sharing a `--hop` and fed one stream publish identical groups and timestamps, so failover survives
-- [Catalog wall clock](/quest/m1/catalog-wall-clock.md) - `Clock::wall_clock` keeps the catalog's full precision instead of truncating to milliseconds
 - [Capture control](/quest/m1/capture-control.md) - on dev, `encode::Capture` replaces `CaptureOptions` without a `clock` field (it reads the catalog's), an unsupported `cut()` errors, and dropping the last `Control` cancels in-flight opens
 - [Video surface](/quest/m1/video-surface.md) - on dev, moq-ffi's `native` becomes `surface`, refused on platforms with no surface
 - [HLS discontinuity sequence](/quest/m1/hls-discontinuity-sequence.md) - on dev, `Segment::discontinuity` is the absolute sequence, so every cursor agrees
@@ -85,10 +84,8 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Opus concealment](/quest/m1/opus-conceal.md) - a lost Opus packet conceals the last packet's length, not 120 ms
 - [Audio codecs](/quest/m1/audio-codecs/README.md) - platform audio codecs, explicit unsupported cases, and channel layouts up to 7.1
 - [Opus mapping family](/quest/m1/opus-mapping-family.md) - on dev, the Opus head config keeps its mapping family only in `mapping`
-- [Opus catalog rate](/quest/m1/opus-catalog-rate.md) - MKV Opus import publishes the 48 kHz codec rate in the catalog, not the OpusHead input rate
 - [mp4-atom dOps mapping](/quest/m1/mp4-atom-dops-mapping.md) - a released mp4-atom reads and writes any `dOps` channel mapping family and table
 - [CMAF surround Opus](/quest/m1/cmaf-opus-surround.md) - fMP4 import and export carry an Opus channel mapping table
-- [js/hang dOps pre-skip](/quest/m1/js-dops-pre-skip.md) - CMAF encoding in js/hang stops hard-coding a 312-sample pre-skip
 - [GPU CI](/quest/m1/gpu-ci.md) - NVIDIA tests run nightly on a self-hosted GPU runner, and `just rs nvidia` runs them locally instead of skipping
 - [JS rendition ranking](/quest/m1/js-ranked.md) - `@moq/hang` ranks video renditions like Rust, and `@moq/watch`'s fallback uses it
 - [Audio rendition pick](/quest/m1/audio-ranked.md) - single-track FLV/RTMP and WHEP serve the best audio rendition, not the first by name
