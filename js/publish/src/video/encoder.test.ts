@@ -307,6 +307,7 @@ test("hardware encoding takes priority over software H.264", async () => {
 		await settle();
 		expect(encoder.out.resolved.peek()?.hardwareAcceleration).toBe("prefer-hardware");
 		expect(probe.mock.calls.every(([config]) => config.hardwareAcceleration === "prefer-hardware")).toBe(true);
+		expect(encoder.settled.peek()).toBe(true);
 	} finally {
 		encoder.close();
 		probe.mockRestore();
@@ -330,9 +331,39 @@ test("software-only AV1 is refused even when explicitly requested", async () => 
 		expect(probe.mock.calls.some(([config]) => config.hardwareAcceleration === "prefer-software")).toBe(false);
 		expect(encoder.out.resolved.peek()).toBeUndefined();
 		expect(error).toHaveBeenCalled();
+		// No codec fits, so `<moq-publish>` must stop waiting on this rendition to announce.
+		expect(encoder.settled.peek()).toBe(true);
 	} finally {
 		encoder.close();
 		probe.mockRestore();
+		error.mockRestore();
+	}
+});
+
+// Regression: only the codec probe and `maxScale` settled the encoder on failure, so a knob that broke
+// resolution later (a negative bitrate) held `<moq-publish>`'s announce forever.
+test("an invalid knob settles the encoder without a config", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	const error = spyOn(console, "error").mockImplementation(() => {});
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1920, height: 1080 }) },
+	};
+	const config = new Signal<{ bitrateScale?: number } | undefined>({ bitrateScale: -1 });
+	const encoder = new Encoder("video", { enabled: true, capture: capture as never, config });
+	try {
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeUndefined();
+		expect(encoder.settled.peek()).toBe(true);
+		expect(error).toHaveBeenCalled();
+
+		// Fixing the knob clears the failure and resolves a config.
+		config.set(undefined);
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeDefined();
+		expect(encoder.settled.peek()).toBe(true);
+	} finally {
+		encoder.close();
 		error.mockRestore();
 	}
 });
