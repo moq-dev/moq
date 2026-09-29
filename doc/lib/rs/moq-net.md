@@ -67,6 +67,12 @@ cleanup time into its returned deadline. A standalone pool needs `gc(now)`
 called by its owner, at least by the returned deadline; `None` means expiry is
 disabled.
 
+The origin driver finishes once every owner is gone: each `origin::Producer`
+clone, published broadcast, and `origin::Dynamic`. Producer-side children pin
+their parent where no cycle exists, so a handler can drop its producer and keep
+serving. Read handles (`origin::Consumer`, announce cursors) never pin it: they
+see `Closed` once the owners are gone.
+
 Cache activity is dated lazily: reads and writes mark a group active without
 reading a clock, and the next `gc` pass stamps it with the supplied instant.
 Expiry is therefore approximate; a late `gc` extends retention.

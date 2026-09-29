@@ -32,17 +32,29 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # Full history so `just ci check` can diff against origin/$GITHUB_BASE_REF.
           fetch-depth: 0
+
+      # Quests, agent config, and root Markdown compile nothing, so a diff of only
+      # those skips the disk cleanup and Rust cache that exist for the build.
+      - name: Scope
+        id: scope
+        run: |
+          base=$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)
+          files=$(git diff --name-only "$base")
+          if grep -qvE '^(quest/|\.claude/|[^/]+\.md$)' <<< "$files"; then
+            echo build=true >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Free disk space
+        if: steps.scope.outputs.build
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
+        with:
+          tool-cache: false
 
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
@@ -63,6 +75,7 @@ jobs:
       # scope such an entry to the PR's own branch anyway, where no later PR
       # could read it while it ate the repository's 10 GB budget.
       - name: Rust cache
+        if: steps.scope.outputs.build
         uses: ./.github/actions/rust-cache
 
       # The same recipe a developer runs locally. It diffs against
@@ -88,11 +101,6 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -100,7 +108,26 @@ jobs:
           # Full history so `just ci test` can diff against origin/$GITHUB_BASE_REF.
           fetch-depth: 0
 
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+      # Same scope as the `check` job. No test covers those files either, so the
+      # job skips everything and reports green instead of spending a minute of
+      # setup to run nothing.
+      - name: Scope
+        id: scope
+        run: |
+          base=$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)
+          files=$(git diff --name-only "$base")
+          if grep -qvE '^(quest/|\.claude/|[^/]+\.md$)' <<< "$files"; then
+            echo build=true >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Free disk space
+        if: steps.scope.outputs.build
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
+        with:
+          tool-cache: false
+
+      - if: steps.scope.outputs.build
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
           # Trust the flake's cachix substituter. `nixConfig` in flake.nix is
@@ -115,11 +142,13 @@ jobs:
 
       # Restore only, same as the `check` job above.
       - name: Rust cache
+        if: steps.scope.outputs.build
         uses: ./.github/actions/rust-cache
 
       # NEXTEST_PROFILE picks up the longer hang timeout in .config/nextest.toml;
       # without it a runner under load could trip the local one.
       - name: Test
+        if: steps.scope.outputs.build
         run: nix develop --command just ci test
         env:
           MOQ_STRICT: 1

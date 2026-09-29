@@ -86,6 +86,12 @@ relative to the origin and `ann.Captures()` reports the wildcard matches.
 Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
 `Hidden: true`.
 
+An `OriginProducer` from `moq.NewOriginProducer` has no `Close`: its origin
+ends when the garbage collector reaches the last owner (each producer, published
+broadcast, and `OriginDynamic`), and every consumer made from it then fails with
+`moq.ErrClosed`. Keep an owner reachable (a field on a long-lived struct, or
+`runtime.KeepAlive`) for as long as the origin should serve.
+
 Every call that can block takes a `context.Context` first. Cancelling it
 returns `ctx.Err()` promptly and tears the in-flight native work down, so a
 per-call deadline bounds resource use rather than just your wait. What it tears
