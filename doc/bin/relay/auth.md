@@ -58,8 +58,8 @@ ingest here). A 2xx with a grant admits. A 401 or 403 refuses.
 Anything else at connect, a timeout, a 5xx, or an unparseable body, refuses and
 logs an error; nothing is admitted because the server was down. A grant that
 names nothing refuses, and one with `revalidate` but no `expires` is refused
-as invalid. A grant already less than five seconds past `expires` is accepted
-for the remainder of that clock-skew window; future expiries are unchanged.
+as invalid, as is one whose `expires` is already at or before now: expiry is
+exact, with no grace for clock skew, so keep the auth server's clock in sync.
 The client and relay snapshot each accepted grant's deadline on a monotonic
 clock, so later polls, outages, and wall-clock adjustments do not restart it.
 
@@ -165,7 +165,7 @@ after which it can never sign a broader token.
 | `root` | Base path. Optional. |
 | `publish` | Patterns the bearer may publish under `root`. `**` means everything; omitted means no publishing. |
 | `subscribe` | Patterns the bearer may subscribe to under `root`. Same rules. |
-| `exp`, `iat`, `nbf` | Expiry, issue time, and not-before. `exp` is enforced for the whole session, not just at connect, and a token is refused before its `nbf`. |
+| `exp`, `iat`, `nbf` | Expiry, issue time, and not-before. `exp` is enforced for the whole session, not just at connect, and a token is refused from its `exp` on and before its `nbf`. |
 | `iss`, `sub`, `jti` | Read and ignored. |
 
 Any other claim refuses the token with its name, `aud` included: an unknown

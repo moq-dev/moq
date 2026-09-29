@@ -2490,18 +2490,20 @@ impl Consumer {
 	/// whatever it last declared, since nothing will resolve it anymore.
 	pub(crate) fn poll_start(&self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		match &self.inner {
-			ConsumerKind::Plain(state) => {
-				let res = state.poll(waiter, |state| match state.start_pending && state.abort.is_none() {
-					true => Poll::Pending,
-					false => Poll::Ready(state.start_sequence),
-				});
-				match res {
-					Poll::Ready(Ok(start)) => Poll::Ready(start),
-					Poll::Ready(Err(state)) => Poll::Ready(state.start_sequence),
-					Poll::Pending => Poll::Pending,
-				}
-			}
+			ConsumerKind::Plain(state) => Self::poll_state_start(state, waiter),
 			ConsumerKind::Spliced(_) => Poll::Ready(None),
+		}
+	}
+
+	/// [`Self::poll_start`] over one track's state, shared with [`Subscriber::poll_start`].
+	fn poll_state_start(state: &kio::Consumer<TrackState>, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+		let res = state.poll(waiter, |state| match state.start_pending && state.abort.is_none() {
+			true => Poll::Pending,
+			false => Poll::Ready(state.start_sequence),
+		});
+		match ready!(res) {
+			Ok(start) => Poll::Ready(start),
+			Err(state) => Poll::Ready(state.start_sequence),
 		}
 	}
 
@@ -4003,6 +4005,19 @@ impl Subscriber {
 			(SubscriberKind::Plain(a), SubscriberKind::Plain(b)) => a.state.same_channel(&b.state),
 			(SubscriberKind::Spliced(a), SubscriberKind::Spliced(b)) => a.is_clone(b),
 			_ => false,
+		}
+	}
+
+	/// Poll for where the source's feed starts, raised to this cursor's floor, once
+	/// resolved; see [`Consumer::poll_start`]. A feed starting below the floor serves the
+	/// floor's group too. `None` when the source declares none.
+	pub(crate) fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+		match &mut self.inner {
+			SubscriberKind::Plain(plain) => {
+				let start = ready!(Consumer::poll_state_start(&plain.state, waiter));
+				Poll::Ready(start.map(|start| start.max(plain.min_sequence)))
+			}
+			SubscriberKind::Spliced(spliced) => spliced.poll_start(waiter),
 		}
 	}
 
