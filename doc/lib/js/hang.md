@@ -52,9 +52,8 @@ for await (const root of Catalog.watch(broadcast)) {
   no segment index, so a DVR view can label its timeline from it either way.
 - A `Date` holds whole milliseconds, so anything finer in the clock is
   truncated.
-- `wallClockTime` throws on an invalid input or a clock total past the
-  safe-integer range, but a result past the `Date` range comes back as an
-  invalid `Date` rather than throwing.
+- A result past the `Date` range comes back as an invalid `Date`, not an
+  exception, so check it before use.
 
 Two machines' wall times are only comparable when your application already
 knows their clocks are synchronized. The catalog says where PTS zero was on the
