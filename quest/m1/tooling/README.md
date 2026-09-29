@@ -25,3 +25,4 @@ inline; line count is not the test.
 
 - [Demo scripts](/quest/m1/tooling/demo-scripts.md) - the demo justfiles' inline bash moves into scripts, the last logic left inside recipes
 - [Forward arguments](/quest/m1/tooling/forward-args.md) - recipes pass a quoted nextest filterset through intact instead of re-splitting it
+- [Check scope](/quest/m1/tooling/check-scope.md) - check.yml's build-or-skip decision comes from sh/dispatch.sh instead of an inline diff grep
