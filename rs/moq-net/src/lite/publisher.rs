@@ -585,9 +585,19 @@ struct AnnounceRun {
 	// were never seen by the peer). Lite07 also picks compression bases here.
 	encoder: lite::AnnounceEncoder,
 	// The routes the peer currently holds, keyed by the suffix under the requested
-	// prefix. The value is the announce id on versions that assign them.
-	live: HashMap<crate::PathOwned, Option<u64>>,
+	// prefix.
+	live: HashMap<crate::PathOwned, Advertised>,
 	phase: AnnouncePhase,
+}
+
+/// What the peer holds for one advertised suffix.
+struct Advertised {
+	/// The announce id, on versions that assign them.
+	id: Option<u64>,
+	/// The chain and cost last put on the wire. The origin also reports changes the
+	/// wire cannot carry (the route's source, servability), which must not restart.
+	hops: Hops,
+	cost: crate::origin::Cost,
 }
 
 enum AnnouncePhase {
@@ -646,11 +656,11 @@ impl AnnounceRun {
 		hops: Hops,
 		cost: crate::origin::Cost,
 	) -> Result<(), Error> {
-		let (id, wire, hops) = self.encoder.start(suffix.clone(), hops);
-		self.live.insert(suffix, id);
+		let (id, wire, chain) = self.encoder.start(suffix.clone(), hops.clone());
+		self.live.insert(suffix, Advertised { id, hops, cost });
 		stream.writer.buffer(&lite::AnnounceBroadcast::Active {
 			suffix: wire,
-			hops,
+			hops: chain,
 			cost,
 		})?;
 		Ok(())
@@ -663,12 +673,12 @@ impl AnnounceRun {
 		suffix: crate::PathOwned,
 		absolute: &crate::Path,
 	) -> Result<(), Error> {
-		let Some(id) = self.live.remove(&suffix) else {
+		let Some(advertised) = self.live.remove(&suffix) else {
 			// Filtered on the way out; the peer never saw it.
 			return Ok(());
 		};
 		tracing::debug!(route = %absolute, "unannounce");
-		match id {
+		match advertised.id {
 			Some(id) => {
 				self.encoder.end(id);
 				stream.writer.buffer(&lite::AnnounceBroadcast::EndedId { id })?
@@ -809,12 +819,16 @@ impl AnnounceRun {
 			}
 
 			match self.outgoing(&update.route, &absolute) {
-				Some((hops, cost)) => match self.live.get(&suffix) {
+				Some((hops, cost)) => match self.live.get_mut(&suffix) {
+					// The peer would decode what it already holds.
+					Some(advertised) if advertised.hops == hops && advertised.cost == cost => {}
 					// A metadata update on a live advertisement: restart it in
 					// place (lite-05 restarts via a duplicate ANNOUNCE).
-					Some(&id) if lite::restart_supported(self.version) => {
+					Some(advertised) if lite::restart_supported(self.version) => {
 						tracing::debug!(route = %absolute, "reannounce");
-						match id {
+						advertised.hops = hops.clone();
+						advertised.cost = cost;
+						match advertised.id {
 							Some(id) => {
 								let hops = self.encoder.update(id, hops);
 								stream
@@ -1819,6 +1833,43 @@ mod announce_test {
 		h.announcement
 			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(7))
 			.unwrap();
+		settle().await;
+		h.assert_idle();
+	}
+
+	/// A new best route the wire cannot tell apart (another session, same chain and
+	/// cost) sends nothing, in either direction.
+	#[tokio::test(start_paused = true)]
+	async fn source_flip_is_quiet() {
+		let h = harness().await;
+		let peer = h
+			.origin
+			.clone()
+			.peer()
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_hops(pub_hops()).with_cost(7),
+			)
+			.unwrap();
+		settle().await;
+		h.assert_idle();
+
+		drop(peer);
+		settle().await;
+		h.assert_idle();
+	}
+
+	/// Costs past the wire ceiling clamp to the same value, so moving between them
+	/// sends nothing.
+	#[tokio::test(start_paused = true)]
+	async fn clamped_cost_change_is_quiet() {
+		let mut h = harness().await;
+		let route = |cost| crate::origin::Route::default().with_hops(pub_hops()).with_cost(cost);
+		h.announcement.update(route(u64::MAX)).unwrap();
+		settle().await;
+		assert_eq!(h.wire.take_announces().len(), 1, "expected the clamped restart");
+
+		h.announcement.update(route(u64::MAX - 1)).unwrap();
 		settle().await;
 		h.assert_idle();
 	}

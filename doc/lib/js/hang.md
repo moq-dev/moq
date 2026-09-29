@@ -22,7 +22,8 @@ import * as Container from "@moq/hang/container";
 `Catalog.watch(broadcast)` iterates validated catalog roots. It throws
 `Catalog.TooManyRenditions` for an update above the 64 rendition limit, and
 `Catalog.EscapingBroadcast` for a `broadcast` reference that walks above the
-handle's `path`.
+handle's `path`. Run the same checks on a catalog from another source with
+`Catalog.checkRenditions(root)` and `Catalog.checkResolvable(root, base)`.
 `Hang.Timeline.Consumer.subscribe(broadcast, root.archive)` reads segment
 `push`, `pop`, and `skip` events when a root advertises an archive.
 

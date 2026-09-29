@@ -355,8 +355,8 @@ impl AnnounceBroadcast<'_> {
 			AnnounceStatus::Ended => Self::Ended { suffix, hops },
 			// On lite-05 a restart travels as a duplicate ANNOUNCE (a second `Active`), so accept
 			// the draft's explicit `restart` status and treat it the same. Either way the
-			// subscriber retires an already-announced path before republishing it; for an unknown
-			// path it's a fresh announce. Older versions never defined this status, so it's an
+			// subscriber re-prices an already-announced path in place; for an unknown path it's a
+			// fresh announce. Older versions never defined this status, so it's an
 			// invalid value there.
 			AnnounceStatus::Restart if restart_supported(version) => Self::Active {
 				suffix: PathRef::literal(suffix),
@@ -431,7 +431,7 @@ enum AnnounceStatus {
 	Ended = 0,
 	Active = 1,
 	/// The explicit restart status, accepted on decode for forward/cross-compatibility. We never
-	/// encode it: a replacement goes out as an `Ended` + `Active` pair.
+	/// encode it: a lite-05 restart goes out as a duplicate `Active`.
 	Restart = 2,
 }
 
