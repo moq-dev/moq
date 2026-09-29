@@ -7,6 +7,7 @@
  */
 import * as Moq from "@moq/net";
 import { Effect, readonlys, Signal } from "@moq/signals";
+import * as Announce from "./announce";
 import * as Audio from "./audio";
 import { Broadcast } from "./broadcast";
 import * as Preview from "./preview";
@@ -25,7 +26,8 @@ export type SourceType = "camera" | "screen" | "file";
  *
  * `always` announces immediately, `never` never announces, and `source` waits until media is
  * actually being captured. A camera source waits for every enabled track, so a refused microphone
- * cannot advertise a partial broadcast. Defaults to `source`.
+ * cannot advertise a partial broadcast. `source` also waits until every captured track's config
+ * resolves or fails, so a subscriber's first catalog lists every rendition. Defaults to `source`.
  */
 export type AnnounceMode = "always" | "source" | "never";
 
@@ -165,18 +167,6 @@ export default class MoqPublish extends HTMLElement {
 			this.#eitherEnabled.set(!muted || !invisible);
 		});
 
-		this.signals.run((effect) => {
-			const announce = effect.get(this.controls.announce);
-			// A camera source is one publication: wait for every enabled track so denying
-			// either permission cannot advertise a partial broadcast.
-			const video = effect.get(this.#videoSource) !== undefined;
-			const audio = effect.get(this.#audioSource) !== undefined;
-			const camera = effect.get(this.controls.source) === "camera";
-			const ready =
-				!camera || ((!effect.get(this.#videoEnabled) || video) && (!effect.get(this.#audioEnabled) || audio));
-			this.#announcing.set(announce === "always" || (announce === "source" && (video || audio) && ready));
-		});
-
 		this.#capture = new Video.Capture({ source: this.#videoSource });
 		this.signals.cleanup(() => this.#capture.close());
 
@@ -212,6 +202,13 @@ export default class MoqPublish extends HTMLElement {
 			bandwidth: this.connection.bandwidth,
 		});
 		this.signals.cleanup(() => this.audio.close());
+
+		Announce.run(this.signals, this.#announcing, {
+			mode: this.controls.announce,
+			camera: this.signals.computed((effect) => effect.get(this.controls.source) === "camera"),
+			video: { enabled: this.#videoEnabled, source: this.#videoSource, settled: this.video.settled },
+			audio: { enabled: this.#audioEnabled, source: this.#audioSource, settled: this.audio.settled },
+		});
 
 		// Watch to see if the preview element is added or removed.
 		const setPreview = () => {

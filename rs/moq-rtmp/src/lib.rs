@@ -48,10 +48,12 @@
 //!
 //! RTMPS (RTMP over TLS) is supported two ways:
 //!
-//! - **Let the gateway terminate TLS**: set [`Config::tls`] (or call
-//!   [`Server::with_tls`]) with a [`rustls::ServerConfig`], and the listener
-//!   serves `rtmps://` alongside `rtmp://` on the same port, telling them apart
-//!   by the client's first byte.
+//! - **Let the gateway terminate TLS** (the default `tls` feature): set
+//!   `Config::tls` (or call `Server::with_tls`) with a `rustls::ServerConfig`,
+//!   and the listener serves `rtmps://` alongside `rtmp://` on the same port,
+//!   telling them apart by the client's first byte. Set [`Config::plaintext`] to `false` (or call
+//!   [`Server::with_plaintext`]) to refuse the plaintext clients and serve
+//!   `rtmps://` only.
 //! - **Bring your own transport**: accept the connection and complete the TLS
 //!   handshake yourself (any [`Stream`]: a `tokio_rustls` stream, a custom
 //!   socket, a test pipe), then hand the established stream to [`accept_stream`].

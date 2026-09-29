@@ -748,6 +748,101 @@ async fn export_picks_the_best_selected_rendition() {
 	assert_eq!(snap.audio.renditions.len(), 1, "audio is selected too");
 }
 
+/// A single-track export whose first snapshot lacks the best rendition switches to
+/// it when it appears before the header goes out.
+#[tokio::test(start_paused = true)]
+async fn export_rebinds_to_a_better_rendition_before_the_header() {
+	use hang::catalog::{Container, H264, VideoConfig};
+	use moq_net::Timestamp;
+
+	use crate::container::Producer;
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let consumer = producer.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+
+	// The small rendition is Annex-B (no description), so its header can't resolve
+	// until a keyframe arrives, which keeps the stream header pending.
+	let small = producer.create_track(producer.unique_name(".avc3"), None).unwrap();
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: true,
+	});
+	config.container = Container::Legacy;
+	config.coded_width = Some(640);
+	config.coded_height = Some(360);
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert(small.name().to_string(), config);
+	let _small = Producer::new(
+		small,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+
+	let mut exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	assert!(
+		tokio::time::timeout(Duration::from_millis(100), exporter.next())
+			.await
+			.is_err(),
+		"the header waits on the small rendition's config"
+	);
+
+	// The best rendition shows up before any header went out.
+	let description = avcc_level(0x1e);
+	let large = producer.create_track(producer.unique_name(".avc1"), None).unwrap();
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1e,
+		inline: false,
+	});
+	config.container = Container::Legacy;
+	config.description = Some(Bytes::from(description.clone()));
+	config.coded_width = Some(1920);
+	config.coded_height = Some(1080);
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert(large.name().to_string(), config);
+	let mut large = Producer::new(
+		large,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	large
+		.write(crate::container::Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(&[0, 0, 0, 1, 0x65]),
+			keyframe: true,
+		})
+		.unwrap();
+
+	let header = tokio::time::timeout(Duration::from_millis(100), exporter.next())
+		.await
+		.expect("the header follows the better rendition")
+		.unwrap()
+		.unwrap();
+	assert!(
+		header.windows(description.len()).any(|w| w == description.as_slice()),
+		"the sequence header carries the better rendition's avcC"
+	);
+
+	let frame = tokio::time::timeout(Duration::from_millis(100), exporter.next())
+		.await
+		.expect("the better rendition's frame follows")
+		.unwrap()
+		.unwrap();
+	assert_eq!(frame[0], super::TAG_VIDEO);
+	assert!(frame.windows(5).any(|w| w == [0, 0, 0, 1, 0x65]));
+}
+
 struct ParsedTag {
 	tag_type: u8,
 	timestamp: u32,
