@@ -47,6 +47,17 @@ nonzero effective maximum age, or one second when no maximum age is set.
 moq-lite 05 and 06 instead account for group sequences using received headers
 and `SUBSCRIBE_DROP`.
 
+## Group reads across failover
+
+Rust origin readers can keep reading an in-flight group after its source fails.
+A group reader waiting on a replacement copy opens a latest subscription even
+when the caller is not polling for the next group. If that copy refuses the
+subscription or has advanced past the group, the read ends with an error. If
+the group is still latest, its remaining frames can continue from that copy.
+This also applies when waiting for the group's completion; no FETCH is issued.
+A replacement that later drops the group it is serving still needs
+SUBSCRIBE\_DROP support to resolve that wait.
+
 ## Discovery
 
 A session can ask for announcements matching a path prefix. The peer replies

@@ -911,9 +911,8 @@ fn last_group(end: Option<Position>) -> Option<u64> {
 /// mid-group therefore reaches an already-handed-out group with no bookkeeping, and a
 /// reader that never touches the subscription again still picks the continuation up.
 ///
-/// A copy that dies (or never arrives) stalls the group rather than erroring it, the
-/// same way a dead segment stalls the track; the loss is only surfaced once no
-/// replacement can arrive.
+/// A copy that dies waits for a replacement route. A missing continuation requests
+/// that route's latest group; a refusal or a live edge past this group ends the wait.
 pub(crate) struct Group {
 	state: kio::Consumer<ResumeState>,
 	/// The logical subscription's live max age budget.
@@ -933,6 +932,9 @@ pub(crate) struct Group {
 	/// The route being read: its segment, the exclusive frame bound the segment puts on
 	/// this group, and this reader's positioned copy.
 	current: Option<Current>,
+
+	/// Demand held while a group-only reader waits on a replacement copy.
+	waiting: Option<(u64, kio::Pending<track::Subscribing>)>,
 
 	/// The segment whose copy died under us, and why.
 	dead: Option<(u64, Error)>,
@@ -979,6 +981,7 @@ impl Clone for Group {
 			index: self.index,
 			end: self.end,
 			current,
+			waiting: None,
 			dead: self.dead.clone(),
 			stale_stats: self.stale_stats.clone(),
 		}
@@ -1001,6 +1004,7 @@ impl Group {
 			index,
 			end: None,
 			current: None,
+			waiting: None,
 			dead: None,
 			stale_stats: Default::default(),
 		}
@@ -1144,6 +1148,38 @@ impl Group {
 		}
 	}
 
+	/// Ask the replacement for its live edge even when the parent subscriber is idle.
+	fn poll_copy(
+		&mut self,
+		segment: u64,
+		track: &track::Consumer,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<group::Consumer>>> {
+		if let Poll::Ready(Some(copy)) = track.poll_peek_group(self.sequence, waiter) {
+			self.waiting = None;
+			return Poll::Ready(Ok(Some(copy)));
+		}
+		if self.waiting.as_ref().is_none_or(|(id, _)| *id != segment) {
+			self.waiting = Some((segment, track.subscribe(None)));
+		}
+		let result = (|| {
+			// The pending handle owns the demand; accepting it checks refusals without
+			// moving this group's cursor or asking for historical data via FETCH.
+			ready!(self.waiting.as_ref().expect("registered above").1.poll_ok(waiter))?;
+			if track
+				.peek_latest()
+				.is_some_and(|latest| latest.sequence > self.sequence)
+			{
+				return Poll::Ready(Err(Error::NotFound));
+			}
+			track.poll_peek_group(self.sequence, waiter).map(Ok)
+		})();
+		if result.is_ready() {
+			self.waiting = None;
+		}
+		result
+	}
+
 	/// Point `current` at the route owning frame `index` of this group.
 	///
 	/// `Ready(Ok(false))` once the group can produce nothing more, and `Ready(Err(_))`
@@ -1155,10 +1191,10 @@ impl Group {
 				frame: self.index,
 			};
 			let dead = self.dead.as_ref().map(|(segment, _)| *segment);
-			let sequence = self.sequence;
 			let found = ready!(self.poll_covering(position, dead, waiter));
 
 			let Some((segment, track, Some(cap), bound)) = found else {
+				self.waiting = None;
 				// No segment covers the position, but a latched copy still drains:
 				// a pruned segment's cursor holds exactly the frames it owned (its
 				// cap was its produced edge), so read it dry before giving up. Once
@@ -1180,7 +1216,7 @@ impl Group {
 			}
 
 			// The route may not have delivered this group yet, so wait on its cache.
-			let Some(group) = ready!(track.poll_peek_group(sequence, waiter)) else {
+			let Some(group) = ready!(self.poll_copy(segment, &track, waiter))? else {
 				// This route will never have it; fall back to whichever segment replaces it.
 				self.dead = Some((segment, Error::NotFound));
 				continue;
@@ -1345,9 +1381,10 @@ impl Group {
 		loop {
 			let dead = self.dead.as_ref().map(|(segment, _)| *segment);
 			let Some((segment, track, _, bound)) = ready!(self.poll_covering(seam, dead, waiter)) else {
+				self.waiting = None;
 				return Poll::Ready(Ok(cap));
 			};
-			match ready!(track.poll_peek_group(self.sequence, waiter)) {
+			match ready!(self.poll_copy(segment, &track, waiter))? {
 				// The continuation's copy declares the count: its own count
 				// already includes the frames it skipped.
 				Some(continuation) => {
@@ -4068,13 +4105,9 @@ mod test {
 		);
 	}
 
-	/// A route that has run ahead of the seam but has not been given up on still parks.
-	///
-	/// It may yet deliver the missing frames out of order, and its own progress is what
-	/// moved the resume point past them, so its being ahead is not evidence the frames
-	/// are gone. Only a route already declared dead strands the reader.
+	/// Latest-only recovery ends a missing continuation once the replacement is ahead.
 	#[tokio::test]
-	async fn live_route_ahead_of_the_seam_still_parks() {
+	async fn live_route_ahead_of_the_seam_ends_the_group() {
 		let (track_a, consumer_a) = track_pair("a");
 		let (mut track_b, consumer_b) = track_pair("b");
 
@@ -4097,15 +4130,9 @@ mod test {
 		assert_eq!(recv(&mut sub), 1);
 
 		assert!(
-			reading.read_frame().now_or_never().is_none(),
-			"a live route may still fill the seam out of order"
+			matches!(reading.read_frame().now_or_never(), Some(Err(Error::NotFound))),
+			"latest recovery cannot request an older continuation"
 		);
-
-		// Once it does, the reader picks up where it left off.
-		let mut group = track_b.create_group(group::Info { sequence: 0 }).unwrap();
-		group.start_at(2).unwrap();
-		group.write_frame(Timestamp::ZERO, b"b2".to_vec()).unwrap();
-		assert_eq!(read(&mut reading), b"b2");
 	}
 
 	#[tokio::test]
@@ -4746,13 +4773,10 @@ mod test {
 		drop(group);
 		track_a.abort(Error::Dropped).unwrap();
 
-		// While B covers the seam the count is still open: B may serve frame 2.
+		// Until B advances, it may still serve frame 2.
+		assert!(reading.finished().now_or_never().is_none());
 		write_group(&mut track_b, 1, "b1");
 		assert_eq!(recv(&mut sub), 1);
-		assert!(
-			reading.finished().now_or_never().is_none(),
-			"the seam is still coverable"
-		);
 
 		// Enough failovers prune A and B: nothing can serve the seam anymore, so
 		// the cap is the end.
@@ -4814,10 +4838,62 @@ mod test {
 		}
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn group_only_read_requests_latest_continuation() {
+		group_only_continuation(false).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn group_only_finish_requests_latest_continuation() {
+		group_only_continuation(true).await;
+	}
+
+	async fn group_only_continuation(finish: bool) {
+		let (track_a, consumer_a) = track_pair("a");
+		let (track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"head".to_vec()).unwrap();
+		if finish {
+			producer.takeover(&consumer_b).unwrap();
+		}
+		let mut reading = sub.recv_group().await.unwrap().unwrap();
+		drop(sub);
+		if !finish {
+			assert_eq!(read(&mut reading), b"head");
+		}
+		if !finish {
+			producer.takeover(&consumer_b).unwrap();
+		}
+		if !finish {
+			track_a.abort(Error::Dropped).unwrap();
+		}
+		if finish {
+			assert!(reading.finished().now_or_never().is_none());
+		} else {
+			assert!(reading.read_frame().now_or_never().is_none());
+		}
+		assert_eq!(track_b.subscription().expect("group-only demand").start, None);
+		let mut copy = track_b.create_group(group::Info { sequence: 0 }).unwrap();
+		copy.write_frame(Timestamp::ZERO, b"head".to_vec()).unwrap();
+		copy.write_frame(Timestamp::ZERO, b"tail".to_vec()).unwrap();
+		copy.finish().unwrap();
+		if finish {
+			reading.finished().await.unwrap();
+			assert_eq!(read(&mut reading), b"head");
+			assert_eq!(read(&mut reading), b"tail");
+		} else {
+			assert_eq!(read(&mut reading), b"tail");
+		}
+		assert!(track_b.subscription().is_none(), "resolved wait releases demand");
+	}
+
 	/// `finished()` resolves when the seam's covering route skip-declared the
 	/// group: its segment geometrically covers the continuation, but its
-	/// SUBSCRIBE_START floor proves the group will never arrive, so the cap is
-	/// the end. Polled without draining, and woken by the successor's track (the
+	/// SUBSCRIBE_START floor proves the group will never arrive. Advancing the
+	/// latest group makes that loss an error. Polled without draining (the
 	/// seam probe parks on the peek), not just the segment list.
 	#[tokio::test]
 	async fn finished_resolves_when_the_successor_skips_the_seam() {
@@ -4840,18 +4916,18 @@ mod test {
 		assert!(reading.finished().now_or_never().is_none(), "the seam is coverable");
 
 		// B declares it starts at group 1 and produces it: group 0's continuation
-		// is skipped for good, so the cap is the end.
+		// is skipped for good, so its missing continuation is an error.
 		track_b.start_at(1).unwrap();
 		write_group(&mut track_b, 1, "b1");
 		assert_eq!(recv(&mut sub), 1);
-		assert_eq!(
+		assert!(matches!(
 			reading
 				.finished()
 				.now_or_never()
 				.expect("a skip-declared seam must resolve the count")
-				.unwrap(),
-			2
-		);
+				.unwrap_err(),
+			Error::NotFound
+		));
 	}
 
 	/// A reader that already latched a pruned segment's copy keeps draining it: the

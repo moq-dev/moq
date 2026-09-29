@@ -32,8 +32,7 @@ Decided:
 - Datagram groups stay best effort. A publisher counts a datagram as
   delivered, so a lost one leaves an uncovered hole that waits out the tail
   grace, as today.
-- A resumed group ([Resumed groups](/quest/m1/resume-latest.md)) that is the
-  new copy's latest ends with the DROP's error when the copy drops it.
+- A resumed group that is the new copy's latest ends with the DROP's error when the copy drops it.
 
 Update `drafts/draft-lcurley-moq-lite.md` (SUBSCRIBE_DROP, SUBSCRIBE_END, the
 lite-07 changelog), `doc/concept/moq-lite.md`, and the Rust and JS lite
