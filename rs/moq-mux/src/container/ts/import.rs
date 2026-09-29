@@ -139,6 +139,9 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// The source's mapping onto the broadcast clock, set by [`live`](Self::live). `None`
 	/// publishes the source's unwrapped PTS verbatim.
 	anchor: Option<crate::clock::Anchor>,
+	/// The program number chosen by [`with_program`](Self::with_program). `None` imports the
+	/// multiplex's only program and refuses a PAT that lists more than one.
+	program: Option<u16>,
 }
 
 impl<E: catalog::Catalog> Import<E> {
@@ -183,7 +186,18 @@ impl<E: catalog::Catalog> Import<E> {
 			last_pts: None,
 			media_unwrap: PtsUnwrap::default(),
 			anchor: None,
+			program: None,
 		}
+	}
+
+	/// Import only the program numbered `program` in the PAT, ignoring the rest of the multiplex.
+	///
+	/// Without this, a PAT that lists more than one program fails the import with
+	/// [`MultipleProgramsError`] rather than merging them onto one clock. A PAT that does not
+	/// list `program` fails it too.
+	pub fn with_program(mut self, program: u16) -> Self {
+		self.program = Some(program);
+		self
 	}
 
 	/// Publish on the broadcast clock rather than the source's own PTS.
@@ -385,6 +399,10 @@ impl<E: catalog::Catalog> Import<E> {
 		let pid = packet.header.pid;
 		match packet.payload {
 			Some(TsPayload::Pmt(pmt)) => {
+				// PMTs of several programs may share one PID; only the chosen one maps streams.
+				if self.program.is_some_and(|program| program != pmt.program_num) {
+					return Ok(());
+				}
 				// Which PID speaks for the program clock, so a `discontinuity_indicator` there
 				// can be read as a timebase reset rather than a counter jump.
 				if self.pcr_pid != pmt.pcr_pid {
@@ -440,12 +458,7 @@ impl<E: catalog::Catalog> Import<E> {
 			}
 			Some(TsPayload::PesStart(pes)) => self.handle_pes_start(pid, pes)?,
 			Some(TsPayload::PesContinuation(bytes)) => self.handle_pes_continuation(pid, &bytes)?,
-			// Learn the PMT PIDs so the routing gate in `decode` lets them through.
-			Some(TsPayload::Pat(pat)) => {
-				self.pmt_pids
-					.extend(pat.table.iter().map(|entry| entry.program_map_pid));
-				self.record_program_identity(&pat)?;
-			}
+			Some(TsPayload::Pat(pat)) => self.handle_pat(&pat)?,
 			_ => {}
 		}
 		Ok(())
@@ -849,19 +862,46 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
+	/// Pick the imported program from a PAT and learn its PMT PID, so the routing gate in
+	/// `decode` lets that PMT through and no other.
+	///
+	/// Every PAT is checked, so a program added mid-stream ends an unselected import, and a
+	/// selected program that disappears ends a selected one; media already published stays.
+	fn handle_pat(&mut self, pat: &mpeg2ts::ts::payload::Pat) -> anyhow::Result<()> {
+		// program_number 0 is the network PID association, not a program.
+		let programs: Vec<_> = pat.table.iter().filter(|entry| entry.program_num != 0).collect();
+		let numbers = || programs.iter().map(|entry| entry.program_num).collect::<Vec<_>>();
+		let entry = match self.program {
+			Some(program) => match programs.iter().find(|entry| entry.program_num == program) {
+				Some(entry) => entry,
+				None => anyhow::bail!(
+					"transport stream has no program {program}; its PAT lists {}",
+					list_programs(&numbers())
+				),
+			},
+			None => match programs.as_slice() {
+				[] => return Ok(()),
+				[entry] => entry,
+				_ => return Err(MultipleProgramsError { programs: numbers() }.into()),
+			},
+		};
+		self.pmt_pids.insert(entry.program_map_pid);
+		self.record_program_identity(pat.transport_stream_id, entry)
+	}
+
 	/// Capture the transport/service identity (TSID, service number, PMT PID) from the
 	/// PAT into the catalog service record, once. No-op without `mpegts` support.
-	fn record_program_identity(&mut self, pat: &mpeg2ts::ts::payload::Pat) -> anyhow::Result<()> {
+	fn record_program_identity(
+		&mut self,
+		transport_stream_id: u16,
+		entry: &mpeg2ts::ts::ProgramAssociation,
+	) -> anyhow::Result<()> {
 		if !self.supports_mpegts || self.identity_recorded {
 			return Ok(());
 		}
-		// program_number 0 is the network PID association, not a service; skip it.
-		let Some(entry) = pat.table.iter().find(|entry| entry.program_num != 0) else {
-			return Ok(());
-		};
 		if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
 			let program = mpegts.program.get_or_insert_with(Default::default);
-			program.transport_stream_id = pat.transport_stream_id;
+			program.transport_stream_id = transport_stream_id;
 			program.program_number = entry.program_num;
 			program.pmt_pid = entry.program_map_pid.as_u16();
 		}
@@ -955,6 +995,51 @@ impl<E: catalog::Catalog> Import<E> {
 		);
 		si.abort(err);
 	}
+}
+
+/// A PAT listed more than one program, and the [`Import`] was not told which one to take.
+///
+/// Importing them all onto one broadcast would put unrelated clocks on one timeline, so the
+/// import stops instead. Pick one with [`Import::with_program`].
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("transport stream carries {} programs ({})", .programs.len(), list_programs(.programs))]
+pub struct MultipleProgramsError {
+	/// The program numbers the PAT lists, in PAT order.
+	pub programs: Vec<u16>,
+}
+
+fn list_programs(programs: &[u16]) -> String {
+	programs.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
+}
+
+/// The program numbers listed by the first whole PAT in `data`, in PAT order, or `None` if
+/// there is none yet.
+///
+/// For choosing importers before any exists: each [`Import`] reads the PAT itself.
+pub fn programs(data: &[u8]) -> Option<Vec<u16>> {
+	let mut off = 0;
+	while let Some(rel) = memchr::memchr(0x47, &data[off..]) {
+		off += rel;
+		let packet = data.get(off..off + TsPacket::SIZE)?;
+		// PID 0 opening a section. The section CRC rejects a sync byte found in payload.
+		if packet[1] & 0x5f == 0x40
+			&& packet[2] == 0
+			&& let Ok(Some(TsPacket {
+				payload: Some(TsPayload::Pat(pat)),
+				..
+			})) = TsPacketReader::new(packet).read_ts_packet()
+		{
+			return Some(
+				pat.table
+					.iter()
+					.map(|entry| entry.program_num)
+					.filter(|&program| program != 0)
+					.collect(),
+			);
+		}
+		off += 1;
+	}
+	None
 }
 
 /// What each demuxed elementary stream delivered, and the audio frame sync it lost or could
@@ -3288,23 +3373,34 @@ mod test {
 	///
 	/// The clock rides the first elementary stream, as a real mux puts it on the video.
 	fn synth_pmt(es: &[(StreamType, u16)], cuei: bool) -> Vec<u8> {
+		synth_programs(&[(1, 0x0100, es)], cuei)
+	}
+
+	/// A program to synthesize: `(program_num, pmt_pid, [(stream_type, pid)])`.
+	type SynthProgram<'a> = (u16, u16, &'a [(StreamType, u16)]);
+
+	/// Serialize one PAT listing every program, then each program's PMT, as [`synth_pmt`]
+	/// does for one.
+	fn synth_programs(programs: &[SynthProgram], cuei: bool) -> Vec<u8> {
 		use mpeg2ts::ts::payload::{Pat, Pmt};
 		use mpeg2ts::ts::{
 			ContinuityCounter, Descriptor, EsInfo, Pid, ProgramAssociation, TransportScramblingControl, TsHeader,
 			TsPacket, TsPacketWriter, TsPayload, VersionNumber, WriteTsPacket,
 		};
 
-		const PMT_PID: u16 = 0x0100;
 		let pat = Pat {
 			transport_stream_id: 1,
 			version_number: VersionNumber::default(),
-			table: vec![ProgramAssociation {
-				program_num: 1,
-				program_map_pid: Pid::new(PMT_PID).unwrap(),
-			}],
+			table: programs
+				.iter()
+				.map(|&(program_num, pmt_pid, _)| ProgramAssociation {
+					program_num,
+					program_map_pid: Pid::new(pmt_pid).unwrap(),
+				})
+				.collect(),
 		};
-		let pmt = Pmt {
-			program_num: 1,
+		let pmt = |program_num: u16, es: &[(StreamType, u16)]| Pmt {
+			program_num,
 			pcr_pid: es.first().map(|&(_, pid)| Pid::new(pid).unwrap()),
 			version_number: VersionNumber::default(),
 			program_info: if cuei {
@@ -3342,7 +3438,9 @@ mod test {
 
 		let mut out = Vec::new();
 		write(&mut out, Pid::PAT, TsPayload::Pat(pat));
-		write(&mut out, PMT_PID, TsPayload::Pmt(pmt));
+		for &(program_num, pmt_pid, es) in programs {
+			write(&mut out, pmt_pid, TsPayload::Pmt(pmt(program_num, es)));
+		}
 		out
 	}
 
@@ -5322,6 +5420,99 @@ mod test {
 		}
 		assert_eq!(out.len(), 2, "both renditions must exist");
 		out
+	}
+
+	/// A two-program multiplex whose clocks sit an hour apart: program 1's MP2 on
+	/// `0x0061` starts at 1 s, program 2's on `0x0071` at 3601 s.
+	fn two_programs() -> Vec<u8> {
+		let mut data = synth_programs(
+			&[
+				(1, 0x0100, &[(StreamType::Mpeg1Audio, 0x0061)]),
+				(2, 0x0200, &[(StreamType::Mpeg1Audio, 0x0071)]),
+			],
+			false,
+		);
+		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
+		data.extend(mp2_pes(0x0071, 0, 3_601 * 90_000, [0xCC, 0xDD]));
+		data
+	}
+
+	#[test]
+	fn a_multi_program_input_is_refused_before_publishing() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let err = import.decode(&two_programs()).unwrap_err();
+		assert_eq!(
+			err.downcast_ref::<super::MultipleProgramsError>(),
+			Some(&super::MultipleProgramsError { programs: vec![1, 2] }),
+			"{err:#}"
+		);
+		assert!(catalog.snapshot().audio.renditions.is_empty(), "nothing was published");
+	}
+
+	#[test]
+	fn a_program_added_mid_stream_ends_the_import() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg1Audio, 0x0061)], false))
+			.unwrap();
+		import.decode(&mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB])).unwrap();
+
+		let err = import.decode(&two_programs()).unwrap_err();
+		assert!(err.downcast_ref::<super::MultipleProgramsError>().is_some(), "{err:#}");
+		assert_eq!(
+			catalog.snapshot().audio.renditions.len(),
+			1,
+			"program 1 stays published"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_selected_program_publishes_only_its_streams_on_its_clock() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve()).with_program(2);
+		import.decode(&two_programs()).unwrap();
+		import.finish().unwrap();
+
+		let snapshot = catalog.snapshot();
+		let names: Vec<_> = snapshot.audio.renditions.keys().collect();
+		assert_eq!(names.len(), 1, "only program 2's stream: {names:?}");
+		let (frames, _) = read_breaks(&consumer, names[0]).await;
+		assert!(!frames.is_empty(), "program 2 published");
+		assert!(
+			frames
+				.iter()
+				.all(|frame| frame.payload[4] == 0xCC || frame.payload[4] == 0xDD),
+			"no program 1 frame leaks in"
+		);
+		assert_eq!(frames[0].timestamp.as_micros(), 3_601_000_000, "program 2's own PTS");
+	}
+
+	#[test]
+	fn a_selected_program_the_pat_does_not_list_is_refused() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve()).with_program(3);
+
+		let err = import.decode(&two_programs()).unwrap_err().to_string();
+		assert!(err.contains("no program 3") && err.contains("1, 2"), "{err}");
+	}
+
+	#[test]
+	fn programs_reads_the_first_whole_pat() {
+		let data = two_programs();
+		assert_eq!(super::programs(&data), Some(vec![1, 2]));
+		// A sync byte in leading junk is skipped; a truncated PAT is not a PAT yet.
+		let mut shifted = vec![0x47, 0x40, 0x00, 0x10];
+		shifted.extend_from_slice(&data);
+		assert_eq!(super::programs(&shifted), Some(vec![1, 2]));
+		assert_eq!(super::programs(&data[..100]), None);
 	}
 
 	/// Two MP2 renditions, the first of which the PMT designates as the PCR PID.
