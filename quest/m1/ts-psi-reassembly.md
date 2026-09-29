@@ -51,8 +51,8 @@ Settled decisions:
   for another reason (a malformed adaptation field, a parse failure) is not a
   `crc_error`; that quest counts it under `PAT_error` or `PMT_error`. `Stats`
   is `#[non_exhaustive]`, so the new field is additive; its docs (today per
-  elementary stream) and `is_empty` widen to cover it, and `moq-cli`'s
-  `log_stats` reports it.
+  elementary stream) and `is_empty` widen to cover it, and `ts::stats::Log`
+  reports it.
 - `ts::programs()` reads through the same PAT path, so a PAT spanning packets
   is found before any program publishes.
 - One quest, because the demux refactor alone changes nothing observable.
@@ -67,7 +67,3 @@ control: a feed whose only PAT is corrupt publishes nothing and counts it.
 
 Folded in from `ts-import-psi-crc` while landing the TR 101 290 plan (#4496):
 that quest duplicated this one's bad-CRC drop and `CRC_error` count.
-
-## Required
-
-- [moq import ts: select programs](/quest/m1/ts-programs.md) - `ts::programs()` and `with_program`, which this quest's PAT path and tests build on

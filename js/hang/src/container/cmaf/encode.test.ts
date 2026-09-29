@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { readIsoBoxes, readTrun, type TrackRunBox } from "@svta/cml-iso-bmff";
-import { encodeDataSegment } from "./encode.ts";
+import { u53 } from "../../catalog/integers.ts";
+import { createAudioInitSegment, encodeDataSegment } from "./encode.ts";
 
 for (const kind of ["audio", "video"] as const) {
 	for (const keyframe of [false, true]) {
@@ -23,3 +24,18 @@ for (const kind of ["audio", "video"] as const) {
 		});
 	}
 }
+
+test("opus init segment without a description trims no pre-skip", () => {
+	const init = createAudioInitSegment({
+		codec: "opus",
+		sampleRate: u53(48_000),
+		numberOfChannels: u53(2),
+		container: { kind: "legacy" },
+	});
+	const at = new TextDecoder().decode(init).indexOf("dOps");
+	expect(at).toBeGreaterThan(0);
+	// dOps payload: version (1), channel count (1), pre-skip (2, big-endian).
+	const dops = new DataView(init.buffer, init.byteOffset + at + 4, 4);
+	expect(dops.getUint8(1)).toBe(2);
+	expect(dops.getUint16(2, false)).toBe(0);
+});
