@@ -5,7 +5,8 @@
 Every predicate over a MoQ broadcast path uses one matcher. Tokens,
 origin scopes, announce interests, and public access rules can express
 `pid/*/chat` and `**/*.hang` without maintaining competing glob dialects.
-Routing is not a predicate here: advertisements stay prefixes.
+Routing is not a predicate here: advertisements stay prefixes, and
+[announcement shapes](/quest/m3/announce-shapes.md) owns non-prefix routing.
 
 Literal paths remain coordinates, not sets. Roots, joins, exact broadcast
 names, URL paths, filesystem paths, and object-store keys keep their own
