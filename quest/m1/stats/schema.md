@@ -46,6 +46,10 @@ and the hang draft specs both. Nothing produces them yet.
   schemas, and the `.echo` convention: one broadcast per soliciting catalog,
   under the catalog's echo path, announced after the viewer reads the
   catalog. Validate with `just drafts check`.
+- Open: the MSF catalog conversion in `rs/moq-mux` copies only the media
+  sections and `ext`, so `stats` and `echo` drop silently under
+  `--catalog-format msf`. Candidates: carry them through MSF with a
+  round-trip test, or refuse `--stats` and `--echo` with MSF.
 - Docs: `doc/concept/hang.md`, and a media section in `doc/concept/stats.md`.
 - Tests:
   - fixtures round-trip in both languages;
