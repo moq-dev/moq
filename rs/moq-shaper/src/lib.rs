@@ -253,13 +253,14 @@ fn unapplied(config: &Config, stats: &Stats) -> Vec<&'static str> {
 /// Whether the batches `setup` configures implausibly never held a datagram.
 ///
 /// A batch holds every datagram but the one that fills it, so it acts on at
-/// least `1 - 1 / count` of them. What it holds counts as delayed once the
-/// batch leaves.
-fn unbatched(setup: &Setup, stats: &Stats) -> bool {
+/// least `1 - 1 / count` of them. `batched` counts only what a batch held, not
+/// what the profile delayed, so a batch that never changed a departure is caught
+/// even behind a delay.
+fn unbatched(setup: &Setup, stats: &Stats, batched: u64) -> bool {
 	let chance = |options: &Options| options.batch.map_or(0.0, |batch| 1.0 - 1.0 / batch.count as f64);
 	let silence = (1.0 - chance(&setup.up)).powf(stats.up.packets as f64)
 		* (1.0 - chance(&setup.down)).powf(stats.down.packets as f64);
-	stats.up.delayed + stats.down.delayed == 0 && silence < IMPLAUSIBLE
+	batched == 0 && silence < IMPLAUSIBLE
 }
 
 /// A token-bucket rate limit with a bounded queue behind it.
@@ -452,7 +453,12 @@ impl Shaper {
 			.into_iter()
 			.map(String::from)
 			.collect();
-		if unbatched(&self.setup, &stats) {
+		let batched = self
+			.tally
+			.iter()
+			.map(|tally| tally.batched.load(Ordering::Relaxed))
+			.sum();
+		if unbatched(&self.setup, &stats, batched) {
 			missing.push("batch".to_string());
 		}
 		for (name, options, tally, counters) in [
@@ -492,6 +498,8 @@ struct Tally {
 	reordered: AtomicU64,
 	/// The most steps any one link has applied.
 	stepped: AtomicU64,
+	/// Datagrams a batch held past when they would otherwise have left.
+	batched: AtomicU64,
 }
 
 impl Tally {
@@ -727,9 +735,12 @@ impl Held {
 		};
 		let at = latest.max(closed);
 		for mut parcel in self.parcels.drain(..) {
-			// A hold is a delay, counted once whichever stage gave it.
-			if at > parcel.at && !parcel.delayed {
-				bump(&tally.delayed);
+			if at > parcel.at {
+				bump(&tally.batched);
+				// A hold is a delay, counted once whichever stage gave it.
+				if !parcel.delayed {
+					bump(&tally.delayed);
+				}
 			}
 			parcel.at = at;
 			ready.push(parcel);
@@ -1511,6 +1522,23 @@ mod tests {
 		assert_eq!(ready.iter().map(|parcel| parcel.at).collect::<Vec<_>>(), [closes]);
 		assert_eq!(held.parcels.len(), 1, "the late datagram joined the closed batch");
 		assert_eq!(held.closes, Some(closes + ms(1) + ms(160)));
+		assert_eq!(tally.snapshot().delayed, 4);
+		assert_eq!(tally.batched.load(Ordering::Relaxed), 4);
+
+		// Behind a delay longer than the window, a lone datagram leaves when the
+		// delay says: the batch held nothing, whatever `delayed` counts.
+		ready.clear();
+		let mut held = Held::default();
+		let tally = Tally::default();
+		let late = Parcel {
+			at: now + ms(1000),
+			delayed: true,
+			..parcel(now)
+		};
+		held.hold(batch, late, &mut ready, &tally);
+		held.release(held.closes.unwrap(), &mut ready, &tally);
+		assert_eq!(ready[0].at, now + ms(1000));
+		assert_eq!(tally.batched.load(Ordering::Relaxed), 0);
 	}
 
 	#[tokio::test]
@@ -1634,13 +1662,15 @@ mod tests {
 		};
 
 		// (1/7)^2 is 2%: two datagrams through batches of seven prove nothing.
-		assert!(!unbatched(&setup, &quiet(2)));
+		assert!(!unbatched(&setup, &quiet(2), 0));
 		// (1/7)^10 is 4e-9: ten datagrams a batch never held means no batch.
-		assert!(unbatched(&setup, &quiet(10)));
+		assert!(unbatched(&setup, &quiet(10), 0));
+		assert!(!unbatched(&setup, &quiet(10), 6));
 
-		let mut held = quiet(10);
-		held.up.delayed = 6;
-		assert!(!unbatched(&setup, &held));
+		// A delay the profile gave is not a batch holding anything.
+		let mut delayed = quiet(10);
+		delayed.up.delayed = 10;
+		assert!(unbatched(&setup, &delayed, 0));
 	}
 
 	/// How long after `at` each of `sizes` leaves one link, fed at the same instant.

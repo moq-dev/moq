@@ -44,7 +44,8 @@ fixed preset regressed, and a fixed preset is what many viewers land on. Loss, r
 limits stay off: the buffer's job is absorbing arrival spread, and congestion response would make a
 failure hard to attribute. The `mild` and `wide` profiles preserve datagram order and share one path across the page's sessions.
 `bursty` and `step` use the shaper's named profiles on that same shared path. The step is timed from
-shaper startup, before the page connects; `--duration` must exceed 30 s so playback spans it.
+shaper startup, before the page connects; the driver gives up on a row with no audio 20 s in, so the
+measured window starts before the step, and `--duration` must exceed 30 s so playback spans it.
 
 The AAC arm keeps ffmpeg's default PES packing, whose multi-frame bursts are the flush-span shape
 the reporter measured on the public relay (#3477). The source is a sine tone rather than a film, so a
@@ -140,7 +141,7 @@ A row that cannot be trusted is void, reported rather than graded, and fails an 
 | `ring` | `crossOriginIsolated` does not match the row's ring, so the other ring ran. |
 | `clock` | The AudioContext clock was unreadable or ran more than 1% off the viewer's. |
 | `window` | No audio after the warmup. |
-| `driver` | The page never reached a session or first audio within 30 s, or the driver threw. |
+| `driver` | The page never reached a session and first audio within 20 s, or the driver threw. |
 
 ## Budgets
 
