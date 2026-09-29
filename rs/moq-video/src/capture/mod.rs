@@ -497,8 +497,9 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 /// List the available cameras and the identifiers [`Source::Camera`] accepts.
 ///
 /// On Linux with the `pipewire` feature, V4L2 devices come first and PipeWire
-/// camera nodes follow, so a webcam that PipeWire also serves appears once per
-/// backend. A session without PipeWire lists V4L2 alone. Inside a sandbox the
+/// camera nodes follow, excluding V4L2 paths already listed by the V4L2 backend.
+/// PipeWire-only cameras remain visible. A session without PipeWire lists V4L2
+/// alone. Inside a sandbox the
 /// PipeWire nodes come through the camera portal, which may ask the user for
 /// camera access.
 pub async fn cameras() -> Result<Vec<Camera>, Error> {
@@ -510,7 +511,10 @@ pub async fn cameras() -> Result<Vec<Camera>, Error> {
 	{
 		let cameras = blocking(v4l2::cameras).await?;
 		#[cfg(feature = "pipewire")]
-		let cameras = [cameras, pipewire::camera::cameras().await?].concat();
+		let cameras = {
+			let pipewire = pipewire::camera::cameras(&cameras).await?;
+			[cameras, pipewire].concat()
+		};
 		Ok(cameras)
 	}
 	#[cfg(target_os = "windows")]
