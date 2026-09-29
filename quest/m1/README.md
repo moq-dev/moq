@@ -25,7 +25,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [moq-binary folds into moq-flate](/quest/m1/flate-binary.md) - on dev, moq-flate and @moq/flate own the opaque snapshot and stream tracks and moq-binary is deleted
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
-- [Error messages](/quest/m1/error-display.md) - Python, Go, and Dart print `MoqError` with Rust's message, as Kotlin and Swift do
 - [Session close](/quest/m1/session-close.md) - a graceful session end withdraws announces and waits one second for the ack
 - [Drain before close](/quest/m1/drain-before-close.md) - a closing client delivers its queued stream finishes, so `moq import` ends the catalog cleanly over a real relay
 - [Close codes](/quest/m1/close-codes.md) - a client sees the peer's application close code over WebSocket and raw QUIC, like WebTransport
