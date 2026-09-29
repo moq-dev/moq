@@ -99,6 +99,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command bun js/net/bench/frames.ts
 
+      # Times one varint encode and decode per wire format. No threshold: it only
+      # has to keep running, and its numbers are the baseline for the generated codec.
+      - name: JS varint benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command bun js/net/bench/varint.ts
+
       # Fails if publishing a group costs more as the track retains more groups,
       # which means the latency guard or the cache went back to scanning them all.
       - name: JS track retention benchmark

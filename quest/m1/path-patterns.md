@@ -3,9 +3,9 @@
 ## Goal
 
 Every predicate over a MoQ broadcast path uses one matcher. Tokens,
-origin scopes, announce interests, public access rules, and wildcard
-advertisements can express `pid/*/chat` and `**/transcode.pro` without
-maintaining competing glob dialects.
+origin scopes, announce interests, and public access rules can express
+`pid/*/chat` and `**/*.hang` without maintaining competing glob dialects.
+Routing is not a predicate here: advertisements stay prefixes.
 
 Literal paths remain coordinates, not sets. Roots, joins, exact broadcast
 names, URL paths, filesystem paths, and object-store keys keep their own
@@ -98,5 +98,5 @@ matches, containment refusal, and old-version behavior.
 
 ## Related
 
-- [Wildcard advertisements](/quest/m0/wildcard/README.md) - routing adopts the
-  matcher while retaining its own cost, pool, refusal, and resolution work
+- [Wildcard advertisements](/quest/m0/wildcard/README.md) - routes on prefix
+  claims; the matcher only filters them against consume-side interest

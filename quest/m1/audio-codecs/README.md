@@ -35,6 +35,12 @@ Encode mirrors decode: an `encode::backend` seam, `Codec::Aac` meaning AAC-LC
 at the input's layout, and platform encoders behind it. Opus encode stays
 mono/stereo.
 
+The next merge from main conflicts in `rs/moq-audio/src/decode/decoder.rs`:
+[#4442](https://github.com/moq-dev/moq/pull/4442) conceals one Opus frame on
+loss there, while this line moved that logic into `decode/backend/libopus.rs`.
+Port the fix by hand, taking the concealed duration from the multistream
+packet rather than the single-stream call.
+
 The core configuration and layout contracts land in main. These quests implement
 surround and backend dispatch on that contract; each platform then lands as
 its own decode and encode quest so verification stays per host. The

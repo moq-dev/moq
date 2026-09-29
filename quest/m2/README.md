@@ -20,6 +20,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - compare immutable track definitions with explicit catalog-to-group binding
 - [Archive recovery listing](/quest/m2/archive-recovery-listing.md) - a resumed DVR lists what changed since its checkpoint, not every stored group
 - [Archive backward timestamps](/quest/m2/archive-backward-timestamps.md) - a resumed recording refuses a track whose timestamps go backward
+- [IETF drain before close](/quest/m2/ietf-drain-before-close.md) - moq-transport sessions deliver finished tracks before a graceful close, as moq-lite does
 - [moq play drain tail](/quest/m2/play-drain-tail.md) - retired renditions and finite tracks play their last 10 ms of audio
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio
 - [Mobile ownership](/quest/m2/mobile-ownership.md) - decide whether Rust or platform code owns mobile capture, codecs, and rendering
@@ -31,6 +32,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Audio loss recovery](/quest/m2/audio-loss-recovery.md) - prove a useful Opus recovery policy before exposing another option
 - [Opus implementation](/quest/m2/audio-opus-backend.md) - compare current codec quality, CPU, and optional build costs
 - [Latency ledger](/quest/m2/latency-ledger.md) - a session reports where its end-to-end audio delay went, stage by stage
+- [JS LOC duration marker](/quest/m2/js-loc-duration-marker.md) - `@moq/loc`'s producer ends each video group with the empty duration frame, as moq-mux does
 - [JS discontinuity](/quest/m2/js-discontinuity.md) - on dev, JS `discontinuity()` without an end writes no cadence-estimated end, like Rust
 - [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
@@ -73,6 +75,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Send buffer pools](/quest/m2/quic-buffer-pool.md) - whether pooled send buffers beat Bytes in the stream send path
 - [AF_XDP UDP path](/quest/m2/af-xdp.md) - the kernel-bypass verdict on today's virtio hosts that gates DPDK
 - [GOP overhead](/quest/m2/gop-overhead.md) - price the I-frames a short GOP pays for, deciding whether a long GOP plus a keyframe request is worth designing
+- [Per-program SI](/quest/m2/ts-program-si.md) - a selected TS program's broadcast carries only its own service's SDT and EIT
 - [#1838](/quest/m2/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - plan TR 101 290 stream-health monitoring into implementation quests
 - [Teleoperation](/quest/m2/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
 - [SIP media stack](/quest/m2/sip-stack.md) - terminate one inbound SIP audio call leg and expose it as Opus frames

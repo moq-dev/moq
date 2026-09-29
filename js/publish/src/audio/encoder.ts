@@ -3,7 +3,16 @@ import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import {
+	type Computed,
+	Effect,
+	type Getter,
+	getter,
+	type Inputs,
+	type Readonlys,
+	readonlys,
+	Signal,
+} from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { type Baseline, Estimator } from "../jitter";
 import type { AudioFrame, Capture, Format } from "./capture";
@@ -169,6 +178,17 @@ export class Encoder {
 	// reconfiguring it would be a retry, so the rendition stays down for the life of this encoder.
 	#fatal = new Signal<Error | undefined>(undefined);
 
+	// How many resolution runs threw for their current inputs (e.g. invalid codec settings), so no
+	// config is coming until one reruns.
+	#failures = new Signal(0);
+
+	/**
+	 * @internal Whether the catalog config resolved, or can't until something outside the encoder
+	 * changes: a failed encoder or capture, invalid codec settings, or a capture waiting on the page's
+	 * first gesture. `<moq-publish>` holds its first announce until this is set.
+	 */
+	readonly settled: Computed<boolean>;
+
 	#signals = new Effect();
 	#estimator = new Estimator();
 
@@ -197,9 +217,28 @@ export class Encoder {
 			effect.proxy(this.#out.root, capture.out.root);
 		});
 
+		this.settled = this.#signals.computed((effect) => {
+			if (effect.get(this.#out.catalog) !== undefined) return true;
+			if (effect.get(this.#fatal) !== undefined || effect.get(this.#failures) > 0) return true;
+			const capture = effect.get(this.in.capture);
+			return capture !== undefined && !!effect.get(capture.blocked);
+		});
+
 		this.#signals.run(this.#runCapture.bind(this));
-		this.#signals.run(this.#runConfig.bind(this));
-		this.#signals.run(this.#runCatalog.bind(this));
+
+		// Every step that resolves the config counts a throw as a failure, so a bad input settles the
+		// gate instead of holding the announce forever.
+		for (const run of [this.#runConfig, this.#runCatalog]) {
+			this.#signals.run((effect) => {
+				try {
+					run.call(this, effect);
+				} catch (err) {
+					this.#failures.update((n) => n + 1);
+					effect.cleanup(() => this.#failures.update((n) => n - 1));
+					throw err;
+				}
+			});
+		}
 		this.#signals.run(this.#runRegister.bind(this));
 	}
 
