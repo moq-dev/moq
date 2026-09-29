@@ -45,6 +45,13 @@ prefix is safe (an exact route widened to a prefix still leaks) or whether the
 route is withheld. Update `js/net` and `drafts/draft-lcurley-moq-lite.md` in
 the same PR.
 
+Today ANNOUNCE_START carries a path relative to the requested prefix, which
+the receiver joins back on (`rs/moq-net/src/lite/subscriber.rs`). A suffix
+interest (`**/transcode.pro`) has no literal prefix to join, and a matching
+route is not its suffix, so the draft must define how each advertisement is
+anchored and rebased for each interest shape, with the cross-shape overlap
+cases as vectors both languages test.
+
 Only these four shapes go on the wire. A richer interest pattern
 (`pid/*/chat`) stays a consume-side filter over the widest shape that covers
 it, as [path patterns](/quest/m1/path-patterns.md) decided for every pattern
@@ -69,7 +76,8 @@ known exact-scope spots:
   above the root as covering, and `Candidate.exact` is local-only today.
 - Test in both languages, locally and across a relay hop: an exact broadcast
   at `/a` and a prefix route at `/a` both survive a root-scoped hop, and read
-  through a `/a/b` scope yield only the prefix. #4479's regressions and benchmark are a starting point.
+  through a `/a/b` scope yield only the prefix. #4479's regressions and
+  benchmark are a starting point.
 
 ### Benchmark first
 
@@ -80,14 +88,15 @@ every announcement and every new cursor. Requests hit the same wall:
 for the longest covering claim, so a suffix advertisement must also be found
 by SUBSCRIBE and FETCH resolution, with the same specificity rules as prefix
 claims. Extend `rs/moq-net/benches/origin.rs` with suffix and exact cursors
-and route lookups, each swept over publishers and subscribers. The slopes
-decide between a reversed-segment index and dropping suffix shapes from the
-quest.
+and route lookups, each swept over publishers and subscribers, and extend
+`js/net/bench/forward.ts` the same way, since `Scope.projectRoutes` scans
+routes independently of Rust. The slopes decide between a reversed-segment
+index and dropping suffix shapes from the quest.
 
 A non-prefix advertisement needs authorizing:
 [advertise auth](/quest/m1/processor/advertise-auth.md) scopes are prefix-only
-today. Token patterns (`moq-pattern`, `moq_auth::Claims`) already match
-suffixes and do not change.
+today, and this quest extends them to the new shapes. Token patterns
+(`moq-pattern`, `moq_auth::Claims`) already match suffixes and do not change.
 
 ## Related
 
