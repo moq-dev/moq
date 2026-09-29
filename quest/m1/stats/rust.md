@@ -16,11 +16,13 @@
 - Counters come from the source, per track, as cumulative `stats()`
   snapshots: no callback, no per-frame lock.
   - Publisher: the `moq-video` and `moq-audio` encode producers count frames,
-    bytes, keyframes, and drops. The `moq-mux` importers and exporters count
-    the frames and bytes they write per track. A remux never encodes, so
-    without them the CLI would have nothing to report for `moq import`.
+    bytes, keyframes, and drops. The `moq-mux` importers count the frames and
+    bytes they write per track. A remux never encodes, so without them the
+    CLI would have nothing to report for `moq import`.
   - Viewer: the decode and render paths count received, decoded, late,
-    stalled, underruns, and errors. `underruns` in
+    stalled, underruns, and errors. The `moq-mux` exporters count the frames
+    and bytes they receive per track, so `moq export --echo` reports a row
+    for each rendition it remuxes. `underruns` in
     `rs/moq-audio/src/playback` is already counted privately.
 - `moq-cli` folds the counters into `hang::stats::Snapshot` on the stats
   interval and writes it through `moq_json::snapshot`, with the `.z` sibling.

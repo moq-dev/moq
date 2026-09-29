@@ -100,6 +100,12 @@ kind.
 Open, to settle before [encoder feedback](/quest/m1/stats/encoder-feedback.md)
 starts:
 
+- **Referenced-rendition feedback.** A derivative catalog (a `moq-transcode`
+  passthrough) collects feedback for a source rendition it lists, but owns
+  no encoder for it, and the source encoder reads only its own catalog's
+  prefix. Candidates: the derivative forwards those rows to the source's
+  echo path, or the source encoder also reads catalogs that reference it,
+  or referenced renditions stay report-only.
 - **Shared echo prefixes.** Two catalogs can resolve their echo paths to one
   prefix (`../viewers` from `room/a/live` and `room/b/live`). Then a viewer
   using one name for both closes one `.echo` with the other, and each
