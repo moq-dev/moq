@@ -66,7 +66,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [RTMP TLS only](/quest/m1/rtmp-tls-only.md) - an RTMP listener configured for TLS can refuse plaintext instead of sniffing and serving it
 - [HLS linger](/quest/m1/hls-linger.md) - `moq_hls::Server` serves an ended broadcast for its playlist window plus grace, so the moq.pro edge drops its own pool
 - [Remove live()](/quest/m1/remove-live.md) - on dev, importers publish stream timestamps verbatim, the catalog clock maps them to wall time, and an encoder restart becomes a new epoch
-- [iroh versions](/quest/m1/iroh-lite-wip.md) - `iroh://` negotiates the configured versions, so `moq-lite-07-wip` can be opted into
 - [Go and Dart doc samples](/quest/m1/doc-samples-go-dart.md) - Go and Dart doc samples compile against their wrappers
 - [Data capture in bindings](/quest/m1/data-capture-bindings.md) - moq-ffi and every wrapper pass a data frame's capture time, and the JSON window producer takes one
 - [Moxygen compatibility](/quest/m1/moxygen/README.md) - one subgroup per group, whole-group FETCH, and one datagram per group, never a full moxygen pass

@@ -339,6 +339,13 @@ impl Server {
 			unix_allow,
 		);
 
+		// The endpoint was bound before this server's versions were known, so it
+		// accepts nothing until they name its ALPNs.
+		#[cfg(feature = "iroh")]
+		if let Some(endpoint) = iroh.as_ref() {
+			iroh::listen(endpoint, &versions)?;
+		}
+
 		let mut moq = moq_net::Server::new().with_versions(versions.clone()).with_stats(stats);
 		if let Some(publisher) = publisher {
 			moq = moq.with_publisher(publisher);
@@ -632,11 +639,14 @@ impl Server {
 				}
 				Some(_conn) = iroh_accept => {
 					#[cfg(feature = "iroh")]
-					self.accept.push(async move {
-						let Accepted { session, url, identity, authority, link } = super::iroh::accept(_conn).await?;
-						let request = server.accept_request(tokio::time::Instant::now().into_std(), crate::transport::Session::new(session)).await?;
-						Ok(Request { transport: Transport::Iroh, url, identity, authority, link, kind: RequestKind::Iroh(Box::new(request)) })
-					}.boxed());
+					{
+						let alpns = versions.alpns();
+						self.accept.push(async move {
+							let Accepted { session, url, identity, authority, link } = super::iroh::accept(_conn, alpns).await?;
+							let request = server.accept_request(tokio::time::Instant::now().into_std(), crate::transport::Session::new(session)).await?;
+							Ok(Request { transport: Transport::Iroh, url, identity, authority, link, kind: RequestKind::Iroh(Box::new(request)) })
+						}.boxed());
+					}
 				}
 				Some(_res) = ws_accept => {
 					#[cfg(feature = "websocket")]
