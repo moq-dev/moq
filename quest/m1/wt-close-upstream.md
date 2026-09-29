@@ -1,4 +1,4 @@
-# [S] WebTransport close delivers its capsule upstream
+# [XS] WebTransport close delivers its capsule upstream
 
 ## Goal
 
@@ -20,20 +20,27 @@ detached task until `closed()` resolves, capped at a 10s `CLOSE_LINGER`.
 
 Decided 2026-09-29: fix it at the source and remove the timeout workaround.
 
-- In moq-dev/noq, the close path keeps whatever the capsule needs alive until
-  it is delivered, without the caller's help. Its regression test drops the
-  session right after `close()` and asserts the peer reads the capsule
-  before the H3 control stream ends; it must fail on 1.3.2. A Rust peer
-  alone proves nothing: `session_close_surfaces_a_rejection_code` in
-  `rs/moq-tokio/tests/broadcast.rs` passed on 1.3.2 without the linger,
-  because only Chromium treats the control stream's end as fatal. Add a
-  browser check too if the playwright harness makes it cheap.
-- Release `web-transport-moq` 1.3.x and bump the pin on `main` (2.x on `dev`
-  if it has moved).
+The upstream fix makes the close task own a clone of the whole session:
+[moq-dev/noq#23](https://github.com/moq-dev/noq/pull/23) for 2.x (`dev`) and
+its backport [moq-dev/noq#24](https://github.com/moq-dev/noq/pull/24) for
+1.3.x (`main`). Their `tests/close_capsule.rs` drops the session right after
+`close()` against a hand-rolled HTTP/3 peer and fails on 1.3.2 and 2.0.0.
+
+Remaining, once the releases carrying them are published:
+
+- Bump the `web-transport-moq` pin on `main` (and on `dev` if 2.0.x lands
+  first).
 - Delete `CLOSE_LINGER`, its task, and its mock-session tests from
-  moq-tokio.
+  moq-tokio. They are exactly what #4429 added, so reverting it is enough.
+
+A browser check was skipped: the playwright harness has no close-code
+scenario, so it is not cheap.
 
 Public API: none. Wire: none.
+
+## Required
+
+- A `web-transport-moq` 1.3.x release that carries moq-dev/noq#24
 
 ## Related
 
