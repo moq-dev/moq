@@ -90,8 +90,8 @@ QUIC-only relay, and `client.setWebsocketDelay(_:)` changes the head start, in
 microseconds.
 
 `Server` binds, generates or loads TLS, and hands you each request to
-`accept()` or `reject(code:)`; `request.transport` is a `Transport` enum. JSON tracks take `Codable` types
-(`publishJsonSnapshot(name:of:)`, `subscribeJsonStream(name:as:)`), and the
+`accept()` or `reject(code:)`; `request.transport` is a `Transport` enum. JSON tracks live under `Json` and take `Codable` types
+(`Json.SnapshotProducer<Value>(broadcast:track:)`, `Json.StreamConsumer<Value>(track:)`), and the
 rest of the [shared feature list](/lib/#what-every-binding-can-do) maps one
 to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix:)` for broadcasts, `appendDatagram`/
 `datagrams`, `setCatalogSection`, `demand()` for `used()`/`unused()`. `session.bandwidth()`

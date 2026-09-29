@@ -86,8 +86,10 @@ QUIC-only relay, and a `websocketDelay` `Duration` changes the head start.
 `accept()`/`reject()`. Generated configuration setters, including
 `MoqRequest.setPublish`/`setConsume`, throw if a connect, listen, or accept is
 in flight, or after cancel. `MoqRequest.transport()` returns a `Transport` enum.
-JSON tracks take `@Serializable` types
-(`publishJsonSnapshot`, `publishJsonStream`, `valuesAs<T>()`), and the rest of
+JSON tracks live in the `dev.moq.json` package and take `@Serializable` types:
+`SnapshotProducer(broadcast, track, SnapshotConfig())` takes over a track from
+`publishTrack`, `SnapshotConsumer(track, SnapshotConfig())` one from
+`subscribeTrack`, and `valuesAs<T>()` decodes. The rest of
 the [shared feature list](/lib/#what-every-binding-can-do) maps one to one:
 `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix)` for broadcasts, `appendDatagram`/`datagrams()`,
 `setCatalogSection`, `demand()` for `used()`/`unused()`. `session.bandwidth()` divides the

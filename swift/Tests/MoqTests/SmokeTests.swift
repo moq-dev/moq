@@ -231,9 +231,10 @@ final class SmokeTests: XCTestCase {
         }
 
         let broadcast = try BroadcastProducer()
-        let producer = try broadcast.publishJsonSnapshot(name: "status", of: Status.self, compression: true)
-        let consumer = try await broadcast.consume().subscribeJsonSnapshot(
-            name: "status", as: Status.self, compression: true)
+        let producer = try Json.SnapshotProducer<Status>(
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "status"), compression: true)
+        let consumer = try Json.SnapshotConsumer<Status>(
+            track: try await broadcast.consume().subscribeTrack(name: "status"), compression: true)
 
         try producer.update(Status(state: "live", viewers: 42))
         let first = try await consumer.next()
@@ -255,9 +256,10 @@ final class SmokeTests: XCTestCase {
         }
 
         let broadcast = try BroadcastProducer()
-        let producer = try broadcast.publishJsonStream(name: "events", of: Event.self)
-        let consumer = try await broadcast.consume().subscribeJsonStream(
-            name: "events", as: Event.self)
+        let producer = try Json.StreamProducer<Event>(
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "events"))
+        let consumer = try Json.StreamConsumer<Event>(
+            track: try await broadcast.consume().subscribeTrack(name: "events"))
 
         for n in 0..<3 {
             try producer.append(Event(n: n))
@@ -272,16 +274,20 @@ final class SmokeTests: XCTestCase {
 
     func testJsonProducersReportDemand() async throws {
         let broadcast = try BroadcastProducer()
-        let snapshot = try broadcast.publishJsonSnapshot(name: "status", of: [String: Int].self)
-        let stream = try broadcast.publishJsonStream(name: "events", of: [String: Int].self)
+        let snapshot = try Json.SnapshotProducer<[String: Int]>(
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "status"))
+        let stream = try Json.StreamProducer<[String: Int]>(
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "events"))
         let snapshotDemand = try snapshot.demand()
         let streamDemand = try stream.demand()
         XCTAssertEqual(snapshotDemand.name, "status")
         XCTAssertFalse(snapshotDemand.isUsed)
         let consumer = try broadcast.consume()
 
-        let snapshotConsumer = try await consumer.subscribeJsonSnapshot(name: "status", as: [String: Int].self)
-        let streamConsumer = try await consumer.subscribeJsonStream(name: "events", as: [String: Int].self)
+        let snapshotConsumer = try Json.SnapshotConsumer<[String: Int]>(
+            track: try await consumer.subscribeTrack(name: "status"))
+        let streamConsumer = try Json.StreamConsumer<[String: Int]>(
+            track: try await consumer.subscribeTrack(name: "events"))
         try await snapshotDemand.used()
         try await streamDemand.used()
         XCTAssertTrue(snapshotDemand.isUsed)

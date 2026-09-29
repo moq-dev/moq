@@ -8,6 +8,12 @@ import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
+import dev.moq.json.SnapshotConfig
+import dev.moq.json.SnapshotConsumer
+import dev.moq.json.SnapshotProducer
+import dev.moq.json.StreamConfig
+import dev.moq.json.update
+import dev.moq.json.valuesAs
 import kotlinx.serialization.Serializable
 import uniffi.moq.MoqException
 import kotlin.test.Test
@@ -124,8 +130,8 @@ class SmokeTest {
             framerate = 60.0,
             optimizeForLatency = true,
         )
-        val snapshot: JsonSnapshotConfig = JsonSnapshotConfig(deltaRatio = 8u, compression = false)
-        val stream: JsonStreamConfig = JsonStreamConfig(compression = false)
+        val snapshot: SnapshotConfig = SnapshotConfig(deltaRatio = 8u, compression = false)
+        val stream: StreamConfig = StreamConfig(compression = false)
         val properties: VideoProperties = VideoProperties(rotation = 315.0)
         val backoff: Backoff = Backoff(
             initialUs = 500_000uL,
@@ -284,11 +290,11 @@ class SmokeTest {
     @Test
     fun `typed json snapshot round-trips a serializable value`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = JsonSnapshotConfig(deltaRatio = 0u, compression = false)
-            val producer = broadcast.publishJsonSnapshot("status", config)
+            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             producer.update(Status(state = "live"))
 
-            val consumer = broadcast.consume().subscribeJsonSnapshot("status", config)
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
             assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first())
         }
     }
@@ -296,12 +302,13 @@ class SmokeTest {
     @Test
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = JsonSnapshotConfig(deltaRatio = 0u, compression = false)
-            val demand: TrackDemand = broadcast.publishJsonSnapshot("status", config).demand()
+            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
+            val demand: TrackDemand = producer.demand()
             assertEquals("status", demand.name())
             assertEquals(false, demand.isUsed())
 
-            val consumer = broadcast.consume().subscribeJsonSnapshot("status", config)
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
             demand.used()
             consumer.cancel()
             demand.unused()
@@ -316,11 +323,11 @@ class SmokeTest {
     @Test
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = JsonSnapshotConfig(deltaRatio = 0u, compression = false)
-            val producer = broadcast.publishJsonSnapshot("status", config)
+            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             producer.update("""{"state":"raw"}""")
 
-            val consumer = broadcast.consume().subscribeJsonSnapshot("status", config)
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
             assertEquals(Status(state = "raw"), consumer.valuesAs<Status>().first())
         }
     }

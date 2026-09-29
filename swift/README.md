@@ -78,11 +78,14 @@ and `TrackConsumer.datagrams` streams them in arrival order. Payloads are capped
 Datagrams require a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport,
 pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
 
-JSON tracks carry your own `Codable` types with the framing handled for you. You opt into one of two
-distinct modes: `publishJsonSnapshot`/`subscribeJsonSnapshot` (lossy latest-value, a subscriber only
-sees the newest value) or `publishJsonStream`/`subscribeJsonStream` (lossless append-log, every record
-preserved in order). Values encode/decode at the boundary with `JSONEncoder`/`JSONDecoder`; the consumer
-is an `AsyncSequence` of the decoded type. Pass matching `compression` on both sides.
+JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and carry your own
+`Codable` types with the framing handled for you. Each type wraps a track: a producer takes over a
+`TrackProducer` and advertises it in the broadcast's catalog, and a consumer takes over a
+`TrackConsumer`. You opt into one of two distinct modes: `Json.SnapshotProducer`/`Json.SnapshotConsumer`
+(lossy latest-value, a subscriber only sees the newest value) or `Json.StreamProducer`/`Json.StreamConsumer`
+(lossless append-log, every record preserved in order). Values encode/decode at the boundary with
+`JSONEncoder`/`JSONDecoder`; the consumer is an `AsyncSequence` of the decoded type. Pass matching
+`compression` on both sides.
 
 ## Local development
 

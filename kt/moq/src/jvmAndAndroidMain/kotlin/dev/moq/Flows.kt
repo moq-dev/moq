@@ -84,29 +84,6 @@ fun VideoConsumer.frames(): Flow<VideoDecodedFrame> = flow {
     if (cause is CancellationException) cancel()
 }
 
-/**
- * Stream of JSON values (as strings) from a snapshot track, yielding the latest reconstructed
- * value. A consumer that has fallen behind collapses the backlog to the latest.
- */
-fun JsonSnapshotConsumer.values(): Flow<String> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
-
-/** Stream of JSON records (as strings) from a stream track, in order. */
-fun JsonStreamConsumer.values(): Flow<String> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
-
 /** Stream of groups in sequence order, skipping forward if the reader falls behind. */
 fun TrackConsumer.groups(): Flow<GroupConsumer> = flow {
     while (true) {

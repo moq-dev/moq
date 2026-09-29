@@ -99,14 +99,6 @@ typealias VideoConsumer = uniffi.moq.MoqVideoConsumer
 typealias VideoProducer = uniffi.moq.MoqVideoProducer
 /** The read side of a broadcast's catalog: yields updates as the set of tracks changes. */
 typealias CatalogConsumer = uniffi.moq.MoqCatalogConsumer
-/** Publishes lossy latest-value JSON snapshots. */
-typealias JsonSnapshotProducer = uniffi.moq.MoqJsonSnapshotProducer
-/** Consumes reconstructed latest-value JSON snapshots. */
-typealias JsonSnapshotConsumer = uniffi.moq.MoqJsonSnapshotConsumer
-/** Publishes a lossless stream of JSON records. */
-typealias JsonStreamProducer = uniffi.moq.MoqJsonStreamProducer
-/** Consumes a lossless stream of JSON records. */
-typealias JsonStreamConsumer = uniffi.moq.MoqJsonStreamConsumer
 
 // Data types.
 /** A broadcast's catalog: its tracks and their properties, plus any application sections. */
@@ -191,10 +183,6 @@ typealias ErrorScope = uniffi.moq.MoqErrorScope
 typealias ProtocolKind = uniffi.moq.MoqProtocolKind
 /** A protocol failure: scope, verbatim wire code, kind, and a diagnostic message. */
 typealias ProtocolError = uniffi.moq.MoqProtocolError
-/** Configures a lossy latest-value JSON track. */
-typealias JsonSnapshotConfig = uniffi.moq.MoqJsonSnapshotConfig
-/** Configures a lossless JSON stream track. */
-typealias JsonStreamConfig = uniffi.moq.MoqJsonStreamConfig
 
 // NOTE: a few types are intentionally NOT aliased. `MoqContainer` (sealed) and
 // `MoqException` (sealed) need subtype access (`MoqContainer.Loc`,
