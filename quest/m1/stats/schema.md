@@ -3,14 +3,14 @@
 ## Goal
 
 `hang::Catalog` carries two optional root sections, `stats: { track }` and
-`feedback: { track }`. hang defines the snapshot types those tracks carry: the
+`echo: { track }`. hang defines the snapshot types those tracks carry: the
 publisher's per-track and transport counters, and a viewer's per-track and
 transport feedback. Rust and JS parse the same fixtures, and the hang draft
 specs both. Nothing produces them yet.
 
 ## Plan
 
-- `rs/hang/src/catalog`: `Stats { track }` and `Feedback { track }`, both
+- `rs/hang/src/catalog`: `Stats { track }` and `Echo { track }`, both
   `#[non_exhaustive]`, as `Option` fields on `Catalog` that are omitted from
   the wire when absent. Additive on main.
 - `rs/hang/src/stats.rs`: the publisher snapshot,
@@ -18,7 +18,7 @@ specs both. Nothing produces them yet.
   The generic lets moq-mux flatten `{ mpegts: ts::Stats }` in beside it, the
   way `Catalog<E>` takes `ts::Ext`. `Track` holds sent frames, sent bytes,
   keyframes, skipped frames, and the target bitrate as a gauge.
-- `rs/hang/src/feedback.rs`:
+- `rs/hang/src/echo.rs`:
   `Snapshot { transport, tracks: BTreeMap<String, Track> }`, keyed by the
   soliciting publisher's track names. `Track` holds:
   - received frames and bytes, decoded, late, and decode errors;
@@ -30,7 +30,7 @@ specs both. Nothing produces them yet.
 - Every field is defaulted, zero and `None` are omitted, unknown fields are
   ignored, and each type is `#[non_exhaustive]`. Durations are milliseconds
   and rates bits per second, as in `moq-stats`.
-- A helper names the `.echo` suffix (`hang::feedback::is_echo(path)`), so a
+- A helper names the `.echo` suffix (`hang::echo::is_echo(path)`), so a
   reader filters at announce time.
 - `js/hang`: zod schemas mirroring both sections and all three snapshot
   types, field for field. Fixtures are shared through `js/test`.

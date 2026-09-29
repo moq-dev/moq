@@ -33,7 +33,7 @@ Decided while planning. This supersedes the moq-stats extension design of
   entry. The stats stay off the catalog track, which would otherwise churn
   for every viewer on each interval.
 - **Viewer: feedback only when solicited.** Most publishers do not read
-  feedback, so a publisher solicits it with a root `feedback: { track }`
+  feedback, so a publisher solicits it with a root `echo: { track }`
   section naming the track it will read; absent means none. The section is an
   object so later fields stay additive. The publisher chooses the name and
   keeps it unique; a viewer refuses a second catalog claiming a name it
@@ -47,12 +47,12 @@ Decided while planning. This supersedes the moq-stats extension design of
   and the feedback track name, not a path, pairs the two. The name is generic
   so keyframe requests and bandwidth estimates can join later.
 - **Feedback track: one snapshot**, `{ transport, tracks: { <publisher track
-  name>: feedback::Track } }`. It is keyed by the publisher's track names, so
+  name>: echo::Track } }`. It is keyed by the publisher's track names, so
   the publisher looks up its own tracks directly.
 - **One type per role, shared across kinds.**
   - `stats::Track`: sent frames and bytes, keyframes, skipped frames, target
     bitrate.
-  - `feedback::Track`: received, decoded, late, decode errors, stalls,
+  - `echo::Track`: received, decoded, late, decode errors, stalls,
     stalled duration, underruns, newest arrival, latency.
   - A kind's unused fields are omitted.
   - `transport` is one type at both roles: rtt, rate, loss, sample age. A
@@ -76,7 +76,7 @@ Decided while planning. This supersedes the moq-stats extension design of
 ## Required
 
 - [Schema](/quest/m1/stats/schema.md) - hang defines the `stats` and
-  `feedback` catalog sections, their snapshot types, and the draft text
+  `echo` catalog sections, their snapshot types, and the draft text
 - [Rust reporters](/quest/m1/stats/rust.md) - the CLI, players, encoders, and
   moq-mux remuxes publish stats and feedback
 - [Browser reporters](/quest/m1/stats/js.md) - `<moq-publish>` publishes

@@ -12,7 +12,7 @@ Keyframe requests stay out.
 ## Plan
 
 - `encode::Options` in `rs/moq-video` and `rs/moq-audio` (the producer
-  options, beside `bandwidth`) gains `feedback: Option<feedback::Consumer>`.
+  options, beside `bandwidth`) gains `echo: Option<echo::Consumer>`.
   - The handle is built from an `origin::Consumer`, a prefix, and the
     feedback track name the catalog advertises.
   - It consumes `.echo` announcements under the prefix, subscribes to that
@@ -30,8 +30,8 @@ Keyframe requests stay out.
   the ceiling. Audio does not follow its grant today (`Options::bandwidth` in
   `rs/moq-audio/src/encode/producer.rs` reserves only). It follows this
   signal only once the grant quest lands; until then the loop drives video.
-- `moq import --feedback <prefix>` and `moq transcode --feedback <prefix>`
-  set the catalog's `feedback` section and wire the handle. Each rung of the
+- `moq import --echo <prefix>` and `moq transcode --echo <prefix>`
+  set the catalog's `echo` section and wire the handle. Each rung of the
   ladder reads its own tracks.
 - Test: the CLI publishes to a relay, and two `moq play --echo` viewers
   report under the prefix, one of them throttled through the impairment

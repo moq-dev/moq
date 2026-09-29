@@ -21,7 +21,7 @@ feedback to a broadcast soliciting it. Both use the `@moq/hang` schemas.
     duration, underruns from the worklet's count, decode errors, and the
     newest arrival.
   - An `echo` attribute names the `.echo` broadcast. When the watched catalog
-    has a `feedback` section, the element serves the named track, keyed by
+    has a `echo` section, the element serves the named track, keyed by
     the publisher's track names.
 - The existing UI stats panels read the same signals.
 - The demo sets both attributes, so the media test can read a browser

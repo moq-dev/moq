@@ -15,7 +15,7 @@ trade to get it running. This quest promotes them.
 - Take the stage schema the harness already defines (capture, encode, publish
   flush, network, jitter buffer, decode, render) and expose it as fields of
   the hang stats and feedback snapshots (`rs/hang/src/stats.rs`,
-  `rs/hang/src/feedback.rs`, and their `@moq/hang` mirrors), rather than a
+  `rs/hang/src/echo.rs`, and their `@moq/hang` mirrors), rather than a
   second readout: an observable value a stats or `.echo` track already
   carries, not a callback. Decided so viewers report latency the same way
   they report stalls.

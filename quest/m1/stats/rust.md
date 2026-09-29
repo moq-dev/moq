@@ -26,9 +26,9 @@
   interval and writes it through `moq_json::snapshot`, with the `.z` sibling.
   A TS import flattens `ts::Stats` in as `mpegts`. `transport` comes from
   the connection's `ConnectionStats`.
-- Feedback: for each watched catalog with a `feedback` section, the player
+- Feedback: for each watched catalog with a `echo` section, the player
   creates the named track in its `.echo` broadcast and writes
-  `hang::feedback::Snapshot` to it. It refuses a name it already serves. A
+  `hang::echo::Snapshot` to it. It refuses a name it already serves. A
   path that does not end in `.echo` is refused at parse time.
 - `moq export stats` and `moq export echo` are sinks that skip `.hang` media
   discovery, so they route around `catalog_format`.
