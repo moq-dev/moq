@@ -22,7 +22,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Exact scope](/quest/m1/exact-scope.md) - a reader never sees an exact broadcast outside its scope, in Rust or JS; prefix routes above it still present as the empty path
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
-- [moq-binary folds into moq-flate](/quest/m1/flate-binary.md) - on dev, moq-flate and @moq/flate own the opaque snapshot and stream tracks and moq-binary is deleted
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
 - [Error messages](/quest/m1/error-display.md) - Python, Go, and Dart print `MoqError` with Rust's message, as Kotlin and Swift do
@@ -30,7 +29,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Graceful close in bindings](/quest/m1/bindings-graceful-close.md) - on dev, `shutdown` drains a session in moq-ffi and every wrapper like Rust, so the wrappers keep the tail of a publish
 - [Close codes](/quest/m1/close-codes.md) - a client sees the peer's application close code over WebSocket and raw QUIC, like WebTransport
 - [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
-- [Live in apps](/quest/m1/announce-live-apps.md) - the demo and `@moq/room` show "no broadcasts" from the `live` marker, which waits for the first session on page load
+- [WebTransport close upstream](/quest/m1/wt-close-upstream.md) - web-transport-moq delivers the close capsule itself, and moq-tokio's `CLOSE_LINGER` is deleted
 - [IETF hidden default](/quest/m1/ietf-hidden-default.md) - a moq-transport peer without the MoQ Hidden option is advertised hidden namespaces; one with it filters per subscription
 - [Watch refusal](/quest/m1/watch-refusal.md) - `<moq-watch>` shows an origin refusal as an error instead of sitting offline
 - [moqsink recoverable errors](/quest/m1/moqsink-keyframe-latch.md) - a leading delta or a timestamp rewind drops frames until a keyframe instead of invalidating a moqsink pad
@@ -41,6 +40,8 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [FIN wait expiry](/quest/m1/fin-wait-expiry.md) - a group awaiting its FIN ack still expires and follows priority updates on lite and IETF
 - [Cross-relay bursts](/quest/m1/cross-relay-bursts.md) - bursty small-group tracks cross two relays without lost groups, unanswered FETCHes, or stalls
+- [Request stream cancel](/quest/m1/request-stream-serve.md) - a lite publisher stops resolving a SUBSCRIBE or FETCH once the requester FINs or resets, through one wrapper that owns every request stream's reader
+- [JS closed-track leak](/quest/m1/js-closed-track-leak.md) - on dev, a subscriber that joins a closed JS track with unlimited retention is released instead of cached forever
 - [Session death parity](/quest/m1/session-death.md) - a local close ends tracks cleanly in both languages, and JS group readers see the session's error on session death
 - [Watch video guards](/quest/m1/watch-video-guards.md) - promoting a video track holds the last picture, and an older group never reaches the codec between live deltas
 - [Watch decoder recovery](/quest/m1/watch-decoder-recovery.md) - one malformed packet rebuilds the audio or video decoder instead of ending playback
@@ -59,6 +60,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [TS export jitter](/quest/m1/ts-export-jitter.md) - the video reorder bound follows later catalogs and the declared reorder depth, so a late B-frame never reorders TS output; an undeclared stream can reorder once per new maximum depth
 - [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - unflagged loop wraps move audio and video by one shift, so A/V sync holds across wraps
 - [ffmpeg muxdelay](/quest/m1/ts-publish-muxdelay.md) - the documented MPEG-TS publish line adds `-muxdelay 0`, so quiet audio is not clumped
+- [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md) - `import ts` reads a PAT or PMT that spans packets or follows a nonzero pointer_field instead of aborting
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - importers sharing a `--hop` and fed one stream publish identical groups and timestamps, so failover survives
 - [PipeWire duplicate cameras](/quest/m1/pipewire-dup-cameras.md) - a webcam lists once with PipeWire enabled
 - [Catalog wall clock](/quest/m1/catalog-wall-clock.md) - `Clock::wall_clock` keeps the catalog's full precision instead of truncating to milliseconds
@@ -74,6 +76,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Data capture in bindings](/quest/m1/data-capture-bindings.md) - moq-ffi and every wrapper pass a data frame's capture time, and the JSON window producer takes one
 - [Moxygen compatibility](/quest/m1/moxygen/README.md) - one subgroup per group, whole-group FETCH, and one datagram per group, never a full moxygen pass
 - [JS IETF reprice](/quest/m1/js-ietf-reprice.md) - `@moq/net`'s IETF publisher reprices a held namespace in place, like Rust, instead of withdraw-then-advertise
+- [Cluster publisher in place](/quest/m1/cluster-publisher-in-place.md) - under the IETF cluster extension a publisher change updates an advertisement in place, like lite, and never splices across publishers
 - [JS IETF datagrams](/quest/m1/js-ietf-datagram.md) - `@moq/net` sends and receives datagram groups over moq-transport, like Rust
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic producer per track name in both languages, with the sequence namespace surviving a replacement
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - generic on-demand group serving and IETF FETCH for browser publishers
