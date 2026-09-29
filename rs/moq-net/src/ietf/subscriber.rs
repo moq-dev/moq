@@ -1830,13 +1830,13 @@ where
 								// each is read to its end, or a bounded grace for any reset before
 								// its header (the draft says to use a timeout). The count is a hint:
 								// a published peer sends 0, which waits out the grace.
-								let tail = self
+								let held = self
 									.state
 									.lock()
 									.subscribes
 									.get(&request_id)
-									.map(|held| held.tail.consume());
-								if let Some(tail) = tail {
+									.map(|held| (held.tail.consume(), held.fill.clone()));
+								if let Some((tail, fill)) = held {
 									let mut settle = Settle::new(&self.runtime, tail);
 									kio::wait(|waiter| {
 										if !fetch_done
@@ -1845,7 +1845,7 @@ where
 										{
 											fetch_done = true;
 										}
-										settle.poll(waiter, |tail| count > 0 && tail.streams() >= count)
+										poll_settled(&mut settle, waiter, &fill, count)
 									})
 									.await;
 								}
@@ -2482,7 +2482,7 @@ where
 		reading: &mut Reading,
 	) -> Result<Option<group::Producer>, Error> {
 		reading.park();
-		let claimed = kio::wait(|waiter| {
+		let settled = kio::wait(|waiter| {
 			if let Poll::Ready(err) = track.poll_closed(waiter) {
 				return Poll::Ready(Err(err));
 			}
@@ -2493,15 +2493,18 @@ where
 			});
 
 			match settled {
-				Poll::Ready(Ok(mut fill)) => Poll::Ready(fill.claim(sequence, start)),
+				Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
 				// The subscription went away underneath us.
 				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Dropped)),
 				Poll::Pending => Poll::Pending,
 			}
 		})
 		.await;
+		// Hold the end open again before taking the head: once the fill is claimed, this
+		// stream is the only thing saying the group is still being read.
 		reading.resume();
-		claimed
+		settled?;
+		fill.write().map_err(|_| Error::Dropped)?.claim(sequence, start)
 	}
 }
 
@@ -2941,6 +2944,15 @@ fn advance_fill_group(
 
 	producer.finish()?;
 	open_fill_group(track, head, sequence)
+}
+
+/// Ready once a finished subscription's data streams are accounted for: Stream Count of
+/// their headers, and no fill outstanding. A tail parked on its head holds nothing open
+/// itself, so the fill does until the head is claimed.
+fn poll_settled(settle: &mut Settle, waiter: &kio::Waiter, fill: &kio::Producer<Fill>, count: u64) -> Poll<()> {
+	// Read before the tail: Done is terminal, so the answer cannot go stale.
+	let filled = !fill.read().outstanding();
+	settle.poll(waiter, |tail| filled && count > 0 && tail.streams() >= count)
 }
 
 /// A refused or missing joining FETCH continues the subscription live: drop the outstanding
@@ -6044,6 +6056,42 @@ mod stitch_tests {
 			]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done), "the head was claimed");
+	}
+
+	/// A tail parked on its head stops holding the end open, so the finished fill does until
+	/// the head is claimed: otherwise the subscription looks settled between the fill
+	/// finishing and the tail waking, and ends before the tail is read.
+	#[tokio::test]
+	async fn an_unclaimed_fill_holds_the_end_open() {
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![
+				fill_stream(SEQUENCE, &[b"head-0", b"head-1"]),
+				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
+			],
+		);
+		let mut fill = h.stream().await;
+		let mut tail = h.stream().await;
+
+		let mut serve_tail = h.subscriber.clone();
+		let mut tailing = std::pin::pin!(serve_tail.recv_group(&mut tail));
+		assert!(
+			futures::poll!(tailing.as_mut()).is_pending(),
+			"the tail waits for its head"
+		);
+		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
+
+		let state = h.subscriber.state.lock().subscribes[&REQUEST].tail.consume();
+		let count = state.read().streams();
+		let mut settle = Settle::new(&crate::time::Clock::tokio(), state);
+		let mut settled = std::pin::pin!(kio::wait(|waiter| poll_settled(&mut settle, waiter, &h.fill, count)));
+		assert!(
+			futures::poll!(settled.as_mut()).is_pending(),
+			"the head is still owed to the tail"
+		);
+
+		tailing.await.expect("tail");
+		settled.await;
 	}
 
 	#[tokio::test]
