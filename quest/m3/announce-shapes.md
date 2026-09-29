@@ -86,9 +86,13 @@ A suffix cannot walk it, so a naive match costs the whole announce table on
 every announcement and every new cursor. Requests hit the same wall:
 `request_broadcast` resolves through `best_route`, which walks the prefix trie
 for the longest covering claim, so a suffix advertisement must also be found
-by SUBSCRIBE and FETCH resolution, with the same specificity rules as prefix
-claims. Extend `rs/moq-net/benches/origin.rs` with suffix and exact cursors
-and route lookups, each swept over publishers and subscribers, and extend
+by SUBSCRIBE and FETCH resolution. Longest prefix cannot rank `a/**` against
+`**/z` for `a/x/z`, so define one total cross-shape precedence and tie rule
+that Rust, JS, and relays share; path patterns' structural specificity is the
+natural starting point.
+
+Extend `rs/moq-net/benches/origin.rs` with suffix and exact cursors and route
+lookups, each swept over publishers and subscribers, and extend
 `js/net/bench/forward.ts` the same way, since `Scope.projectRoutes` scans
 routes independently of Rust. The slopes decide between a reversed-segment
 index and dropping suffix shapes from the quest.
