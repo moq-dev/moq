@@ -188,23 +188,31 @@ build_relay_cli() {
     [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq"
 }
 
-# Editable-install the workspace Python build (maturin builds rs/moq-ffi, then
-# the moq-rs wrapper installs on top) into the repo-root .venv. `import moq`
-# then resolves to this checkout, not a PyPI wheel.
+# Build the workspace Python packages as wheels (maturin builds rs/moq-ffi, hatchling
+# the moq-rs wrapper) and install them into a venv in the run directory, so `import moq`
+# resolves to this checkout rather than a PyPI wheel. The shared .venv is off limits: a
+# concurrent run's `just py build` uninstalls the package there while this run's
+# clients are importing it.
 prepare_python() {
     have uv || {
         mark_broken python "uv not found"
         return
     }
-    echo "building python client (workspace moq via maturin)..."
-    if (cd "$WORKSPACE" && just py build) >"$HARNESS_RUN/py-build.log" 2>&1; then
-        PY="$WORKSPACE/.venv/bin/python"
-        [[ -x "$PY" ]] || {
-            mark_broken python "workspace .venv python not found after build"
-            sed 's/^/        /' "$HARNESS_RUN/py-build.log" >&2 || true
-        }
+    echo "building python client (workspace moq wheels)..."
+    local venv="$HARNESS_RUN/py-venv" wheels="$HARNESS_RUN/py-wheels"
+    # maturin stages the bindings at a fixed path under the cargo target dir, so one
+    # build at a time per target. Debug like the other clients; its build backend
+    # defaults to release.
+    if (cd "$WORKSPACE" &&
+        harness_locked "$TARGET_BASE/.moq-test-maturin.lock" \
+            env MATURIN_PEP517_ARGS="--profile dev --locked" \
+            uv build --wheel --package moq-ffi --out-dir "$wheels" &&
+        uv build --wheel --package moq-rs --out-dir "$wheels" &&
+        uv venv "$venv" &&
+        uv pip install --python "$venv/bin/python" --no-deps "$wheels"/*.whl) >"$HARNESS_RUN/py-build.log" 2>&1; then
+        PY="$venv/bin/python"
     else
-        mark_broken python "just py build failed"
+        mark_broken python "wheel build failed"
         sed 's/^/        /' "$HARNESS_RUN/py-build.log" >&2 || true
     fi
 }
@@ -230,7 +238,9 @@ prepare_js() {
         elif ! (cd "$CLIENTS/js" && bun run check) >"$HARNESS_RUN/js-check.log" 2>&1; then
             mark_broken js "type check failed"
             sed 's/^/        /' "$HARNESS_RUN/js-check.log" >&2 || true
-        elif ! (cd "$CLIENTS/js" && bunx vite build) >"$HARNESS_RUN/js-vite.log" 2>&1; then
+        # Into the run directory, where harness.ts serves it from: vite empties its output
+        # first, so a shared dist/ vanishes under a concurrent run's page loads.
+        elif ! (cd "$CLIENTS/js" && bunx vite build --outDir "$HARNESS_RUN/js-dist" --emptyOutDir) >"$HARNESS_RUN/js-vite.log" 2>&1; then
             mark_broken js "vite build failed"
             sed 's/^/        /' "$HARNESS_RUN/js-vite.log" >&2 || true
         fi

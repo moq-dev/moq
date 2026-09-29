@@ -1,5 +1,6 @@
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
+import { Path } from "@moq/net";
 import * as z from "@zod/mini";
 import { ArchiveSchema } from "./archive";
 import { AudioSchema } from "./audio";
@@ -7,6 +8,7 @@ import { BinarySchema } from "./binary";
 import { ClockSchema } from "./clock";
 import { TRACK } from "./format";
 import { JsonSchema } from "./json";
+import type { RelativeBroadcast } from "./path";
 import { PRIORITY } from "./priority";
 import { section } from "./section";
 import { TextSchema } from "./text";
@@ -70,12 +72,49 @@ export function checkRenditions(root: Root): Root {
 	return root;
 }
 
-/** Subscribe to a broadcast's catalog and iterate validated root updates. */
+/** A catalog update carried a `broadcast` reference that walks above its reader's root. */
+export class EscapingBroadcast extends Error {
+	/** The offending reference, normalized. */
+	readonly broadcast: RelativeBroadcast;
+
+	constructor(broadcast: RelativeBroadcast) {
+		super(`catalog broadcast reference escapes the root: ${broadcast}`);
+		this.name = "EscapingBroadcast";
+		this.broadcast = broadcast;
+	}
+}
+
+/** Refuse an update with a `broadcast` reference that walks above the root from `base`. */
+export function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
+	// Every section carrying a `broadcast` reference must be listed here; one left out
+	// silently exempts its tracks from the check.
+	const sections = [
+		root.video?.renditions,
+		root.audio?.renditions,
+		root.text?.renditions,
+		root.json?.tracks,
+		root.binary?.tracks,
+	];
+	for (const section of sections) {
+		for (const { broadcast } of Object.values(section ?? {})) {
+			if (broadcast && Path.tryResolve(base, broadcast) === undefined) throw new EscapingBroadcast(broadcast);
+		}
+	}
+	return root;
+}
+
+/**
+ * Subscribe to a broadcast's catalog and iterate validated root updates.
+ *
+ * Throws {@link TooManyRenditions} or {@link EscapingBroadcast} on an update that fails
+ * validation. `broadcast` references are checked against the handle's `path` and yielded
+ * unresolved.
+ */
 export async function* watch(broadcast: Moq.Broadcast.Consumer): AsyncIterable<Root> {
 	const track = broadcast.track(TRACK).subscribe({ priority: PRIORITY.catalog });
 	try {
 		const consumer = new Json.Snapshot.Consumer<Root>({ track, schema: RootSchema });
-		for await (const root of consumer) yield checkRenditions(root);
+		for await (const root of consumer) yield checkResolvable(checkRenditions(root), broadcast.path);
 	} finally {
 		track.close();
 	}
