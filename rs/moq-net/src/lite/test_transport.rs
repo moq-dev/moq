@@ -559,7 +559,16 @@ pub struct ScriptedRecv {
 	/// Report EOF once the script is exhausted rather than parking, so a test can drive
 	/// a read loop all the way through its exit path. See [`ScriptedSession::eof`].
 	eof: bool,
+	/// Set by [`ScriptedSession::close`], overriding `eof`.
+	close: Arc<Mutex<Option<Close>>>,
 	log: Log,
+}
+
+/// How a scripted peer closes its send side. See [`ScriptedSession::close`].
+#[derive(Clone, Copy, Debug)]
+pub enum Close {
+	Fin,
+	Reset,
 }
 
 impl poll::RecvStream for ScriptedRecv {
@@ -579,8 +588,12 @@ impl poll::RecvStream for ScriptedRecv {
 		};
 
 		match take {
-			0 if self.eof => Poll::Ready(Ok(None)),
-			0 => Poll::Pending,
+			0 => match *self.close.lock().unwrap() {
+				Some(Close::Fin) => Poll::Ready(Ok(None)),
+				Some(Close::Reset) => Poll::Ready(Err(SinkError)),
+				None if self.eof => Poll::Ready(Ok(None)),
+				None => Poll::Pending,
+			},
 			take => Poll::Ready(Ok(Some(take))),
 		}
 	}
@@ -605,6 +618,8 @@ pub struct ScriptedSession {
 	pub log: Log,
 	/// Whether an exhausted script reports EOF instead of parking.
 	eof: bool,
+	/// Shared with every stream, like `script`. See [`Self::close`].
+	close: Arc<Mutex<Option<Close>>>,
 	script: Arc<Mutex<Vec<u8>>>,
 	/// Per-stream scripts popped by `open_bi` in order; `None` shares `script`
 	/// across every stream.
@@ -624,6 +639,7 @@ impl ScriptedSession {
 		Self {
 			log: Log::default(),
 			eof: false,
+			close: Default::default(),
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
 			open_gate: None,
@@ -680,6 +696,12 @@ impl ScriptedSession {
 		self.script.lock().unwrap().extend_from_slice(bytes);
 	}
 
+	/// Close the peer's send side once the script runs out. Nothing is woken, so the
+	/// test re-polls the reader itself.
+	pub fn close(&self, close: Close) {
+		*self.close.lock().unwrap() = Some(close);
+	}
+
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
 	/// replies normally and is simply out of stream credit until then.
 	pub fn gated_open(scripts: Vec<Vec<u8>>, gate: kio::Consumer<bool>) -> Self {
@@ -702,6 +724,7 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok(ScriptedRecv {
 			script: Arc::new(Mutex::new(script)),
 			eof: self.eof,
+			close: self.close.clone(),
 			log: self.log.clone(),
 		}))
 	}
@@ -733,6 +756,7 @@ impl poll::Session for ScriptedSession {
 			ScriptedRecv {
 				script,
 				eof: self.eof,
+				close: self.close.clone(),
 				log: self.log.clone(),
 			},
 		)))
