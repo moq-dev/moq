@@ -377,3 +377,29 @@ test("draft-06 has no room for a base", async () => {
 	};
 	await expect(bytes((w) => encodeAnnounceBroadcast(w, msg, Version.DRAFT_06), Version.DRAFT_06)).rejects.toThrow();
 });
+
+// Costs saturate at 2^62-1 on every version: a larger one from a lite-07 peer reads as the
+// ceiling, and one set locally goes out as the ceiling, so a cost always forwards to lite-06.
+test("route costs saturate at 2^62-1 on every version", async () => {
+	const ceiling = 2n ** 62n - 1n;
+	const huge = 2n ** 64n - 1n;
+	for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
+		const got = await roundTrip(
+			{ status: "active", suffix: Path.from("x"), hops: [], cost: { warm: huge, cold: huge } },
+			version,
+		);
+		expect(got).toMatchObject({ cost: { warm: ceiling, cold: ceiling } });
+	}
+
+	// ANNOUNCE_START: path base, path keep, empty suffix, hop base, no hops, hop keep, then
+	// warm and cold at 2^64-1, which only lite-07's varints can carry.
+	const wire = await bytes(async (w) => {
+		await w.u53(0);
+		await w.u53(24);
+		for (const b of [0, 0, 0, 0, 0, 0]) await w.u8(b);
+		await w.u62(huge);
+		await w.u62(huge);
+	}, Version.DRAFT_07);
+	const got = await decodeAnnounceBroadcast(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07);
+	expect(got).toMatchObject({ cost: { warm: ceiling, cold: ceiling } });
+});

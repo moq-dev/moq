@@ -356,7 +356,8 @@ where
 ///
 /// The ceiling is the wire's, not the model's: lite-06 carries each cost as a QUIC
 /// varint, which tops out at 2^62-1, so a larger value could be selected on but
-/// never forwarded.
+/// never forwarded. It applies on every version, lite-07's 64-bit varints included,
+/// so a cost stays forwardable to a QUIC-varint version.
 const MAX_COST: u64 = (1 << 62) - 1;
 
 /// What pulling content via a route costs, in two magnitudes that accumulate
