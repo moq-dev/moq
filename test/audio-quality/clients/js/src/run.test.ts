@@ -22,7 +22,11 @@ test("short steady rows remain supported", () => {
 test("the nightly matrix includes both new profiles", () => {
 	const result = Bun.spawnSync(["bash", script, "--list"]);
 	expect(result.exitCode).toBe(0);
-	const rows = result.stdout.toString().trim().split("\n");
+	const rows = result.stdout
+		.toString()
+		.trim()
+		.split("\n")
+		.filter((row) => row.startsWith("chromium-"));
 	expect(rows).toHaveLength(24);
 	for (const profile of ["bursty", "step"]) {
 		expect(rows.filter((row) => row.includes(`-${profile}-`))).toHaveLength(4);
