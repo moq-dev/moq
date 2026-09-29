@@ -51,6 +51,8 @@ Decisions settled while planning:
 
 ## Required
 
+- [Per-track stats](/quest/m1/qos/stats/per-track.md) - decide whether media
+  stats ride one track per catalog track, before the schema settles
 - [Schema and library](/quest/m1/qos/stats/schema.md) - moq-stats takes an
   extension, serves per-broadcast tracks, and hang defines the media stats
 - [Rust reporters](/quest/m1/qos/stats/rust.md) - the CLI, players, and

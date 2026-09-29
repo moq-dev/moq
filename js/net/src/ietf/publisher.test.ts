@@ -970,6 +970,34 @@ test("an advertisement carries the announced route and re-prices in place", asyn
 	origin.close();
 });
 
+/**
+ * MoQ Cluster carries the warm cost only, and nothing at all without it, so a route change
+ * the peer cannot see must not withdraw and advertise the namespace again.
+ */
+test.each([
+	["a cold-only re-price with Cluster", HopSchema.parse(9n)],
+	["any re-price without Cluster", undefined],
+])("%s sends nothing", async (_, peer) => {
+	const self: Hop = HopSchema.parse(7n);
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
+	const broadcast = origin.createBroadcast(Path.from("mine"));
+	broadcast.announce({ cost: { warm: 4n, cold: 4n } });
+	void pub.runPublishNamespaces();
+
+	const stream = await nextStream(pair.client);
+	if (!stream) throw new Error("no PUBLISH_NAMESPACE for the broadcast");
+	expect(await stream.reader.u53()).toBe(PublishNamespace.id);
+	const msg = await PublishNamespace.decode(stream.reader, VERSION, peer !== undefined);
+	expect(msg.trackNamespace).toBe(Path.from("mine"));
+	await acceptPublishNamespace(stream);
+
+	broadcast.announce({ cost: { warm: peer === undefined ? 8n : 4n, cold: 9n } });
+	expect(await nextStream(pair.client)).toBeUndefined();
+
+	origin.close();
+});
+
 test("subscription completion sends PUBLISH_DONE on every supported draft", async () => {
 	const versions = [
 		Version.DRAFT_14,

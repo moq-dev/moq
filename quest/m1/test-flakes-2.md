@@ -8,11 +8,17 @@ reliably, each fixed at its cause, never by raising a timeout or adding a
 retry.
 
 - moq-cli `fetch::tests::a_frame_read_times_out` asserts on a 500 ms wall
-  deadline ([#4084](https://github.com/moq-dev/moq/pull/4084)).
+  deadline ([#4084](https://github.com/moq-dev/moq/pull/4084)). The cause
+  (#4431): `rs/moq-cli/src/fetch.rs` wraps the whole run in one
+  `timeout_at(deadline, ...)`, so connect, TLS, announce, and subscribe share
+  the budget with the read, and under load setup alone can spend it.
 - moq-cli `complete::tests::a_stage_broadcast_picks_the_catalog_to_read`
-  ([#4084](https://github.com/moq-dev/moq/pull/4084)) and
+  ([#4084](https://github.com/moq-dev/moq/pull/4084)),
   `the_catalog_format_on_the_line_is_honored`
-  ([#4089](https://github.com/moq-dev/moq/pull/4089)).
+  ([#4089](https://github.com/moq-dev/moq/pull/4089)), and
+  `a_relay_on_the_line_answers_broadcast`: both of the latter pair came back
+  empty after the fixed 1.5 s `CEILING` on a loaded runner
+  ([#4404](https://github.com/moq-dev/moq/pull/4404)).
 - moq-net `model::group::test::drop_unfinished_warns` counts WARNs through a
   global tracing capture, so another test's WARN, or a missed one, changes
   the count ([#4104](https://github.com/moq-dev/moq/pull/4104)). The
@@ -29,6 +35,14 @@ retry.
 - `just test media` late join failed once after
   [#4181](https://github.com/moq-dev/moq/pull/4181): "joined at frame 111, 16
   frames behind 127", against a budget of one GOP (15).
+- js/publish audio encoder test "a rendition trailing the broadcast's
+  earliest advertises delay" reads the real clock, so it fails when its file
+  runs alone (timestamps go negative early in the process) (#4414). Mock time.
+- moq-mux `container::ts::export_test::debounce_opens_without_a_media_clock`
+  died with SIGTERM once in a combined run. It is marked
+  `start_paused = true` but sleeps 1.2 s of real time, because the debounce
+  reads `crate::Clock`, which uses `std::time::Instant`, so the paused tokio
+  clock never reaches it.
 
 ## Plan
 
@@ -36,6 +50,16 @@ retry.
   subscribe tests already use `#[tokio::test(start_paused = true)]`), or
   assert on an event instead of a deadline. If a test is slow under load
   because the code under test is slow, fix that.
+- Fetch timeout: test on a paused clock (maintainer decision, 2026-09-28).
+  The fixture runs real sockets against an in-process relay, where a paused
+  clock fires QUIC timers while packets are in flight, so first make the
+  timers mockable: run the fixture over an in-memory transport, or drive
+  noq's timers from the test clock, whichever is smaller. Keep the one
+  absolute 30 s deadline, matching the relay's `/fetch`; on a paused clock
+  setup costs no time, so it can't spend the read's budget.
+- moq-mux debounce: let the test drive `crate::Clock`'s time (a tokio
+  `Instant` under test, or an injected source) so the window passes on the
+  paused clock, and drop the real sleep.
 - WARN counting: capture per test (a scoped subscriber or a filter on the
   test's own span) instead of a process-global count.
 - The race test shares one port only so both transports sit behind one URL.

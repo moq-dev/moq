@@ -46,7 +46,7 @@ clients by `--auth-url` or `--auth-public`, as the relay does (see
 
 ```bash
 # Publish a file (remux to MPEG-TS without re-encoding)
-ffmpeg -re -i video.mp4 -c copy -f mpegts -pes_payload_size 0 - | \
+ffmpeg -re -i video.mp4 -c copy -f mpegts -pes_payload_size 0 -muxdelay 0 - | \
     moq --connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 
 # Pull it back out
@@ -70,6 +70,26 @@ so it breaks every track's timeline and the exported clock declares the break in
 turn. The same flag on an elementary PID other than the program PCR PID, a
 continuity-counter gap, and the 33-bit timestamp rollover move no clock and
 declare nothing. FLV covers H.264 + AAC.
+
+`import ts` samples each elementary stream's access-unit count once a second and
+logs a stream whose count stopped advancing, with how long it has been quiet on
+the program clock, once per silence. The mux can keep flowing, PCR and
+continuity intact, around a PID that delivers nothing, and no transport check
+downstream sees it. A sparse stream such as SCTE-35 goes quiet between cues, so
+the line reports rather than alarms; `Import::stats` carries the same counters
+for a caller that sets its own limit.
+
+MPEG-TS import takes one program. A multi-program stream is refused before
+anything is published, naming its programs, rather than merged onto one clock;
+a PAT that adds a program mid-stream ends the import the same way.
+`--program 2` imports program 2 alone. `--program all` publishes each program
+the first PAT lists as its own broadcast, with its own clock and catalog, keeping
+the catalog suffix last: `--broadcast event.hang` publishes `event/1.hang`,
+`event/2.hang`, and so on. `export ts` writes one program per broadcast.
+
+```bash
+moq --connect https://relay.example.com/anon --broadcast event.hang import ts --program all < mux.ts
+```
 
 MPEG-TS export restarts its clock and table cadence after a declared marker,
 discarding the old mux buffer. The first new clock packet signals the break and
@@ -200,9 +220,9 @@ zero-based `frame` and padded standard base64.
 
 `<track>` is the literal track name. `/fetch` splits its path on the last `/`,
 so the two agree only for names without one. Fetch only dials `--connect`, and
-refuses a listener or cluster flag. It gives up after 30 seconds, as `/fetch`
-does, and exits non-zero when the broadcast or group is not found (before
-writing anything), the relay refuses, or the deadline passes.
+refuses any listener, cluster, auth, or `--hop` flag. It gives up after 30
+seconds, as `/fetch` does, and exits non-zero when the broadcast or group is not
+found (before writing anything), the relay refuses, or the deadline passes.
 
 ## Multiple stages
 

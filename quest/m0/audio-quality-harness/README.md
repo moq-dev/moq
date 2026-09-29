@@ -45,6 +45,12 @@ sample rate, which is more than a merge gate should carry, and `nightly.yml`
 already exists for exactly this trade. Budgets are keyed by the full row, since
 each of those dimensions moves the expected floor.
 
+The budgets checked in with the browser lane (#4426) were recorded locally.
+Once the line lands, re-record `test/audio-quality/budgets.json` from the
+nightly runner's first runs, since nightly only runs `main`'s code. Tightening
+the auto rows belongs to the [jitter target's watch
+quest](/quest/m0/audio-jitter-target/watch.md).
+
 ## Required
 
 - [Traces](/quest/m0/audio-quality-harness/traces.md) - real arrival traces recorded, checked in, and graded as replay rows

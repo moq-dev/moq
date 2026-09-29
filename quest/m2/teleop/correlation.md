@@ -20,7 +20,7 @@ anchors or mutable `set_wall` epochs. Report whether a mapping is present,
 but never infer that hosts are synchronized from its presence. State the clock
 assumption beside the API, since a join across unsynchronized hosts can look
 valid while being wrong. The library provides no clock-sync mechanism; see
-[#2278](/quest/m1/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md).
+[#2278](https://github.com/moq-dev/moq/issues/2278).
 
 This is also the answer to Kyber's headline claim of continuous drift
 computation onto one unified timeline. Worth answering on the merits:

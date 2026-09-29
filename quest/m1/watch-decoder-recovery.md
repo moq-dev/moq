@@ -25,4 +25,3 @@ instead of spinning.
 ## Related
 
 - [Audio warmup](/quest/m1/audio-warmup.md) - the same audio loops and priming
-- [Watch video guards](/quest/m1/watch-video-guards.md) - keeps bad input from reaching the video codec

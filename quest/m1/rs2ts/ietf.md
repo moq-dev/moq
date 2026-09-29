@@ -9,7 +9,7 @@ the hand-written js/net IETF code (about 8.7k lines) is deleted, with
 ## Plan
 
 Values above 2^53 are legal on the IETF wire (request ids, track aliases);
-they stay exact as `VarInt` and only fail where code converts them to
+they stay exact as `U64` and only fail where code converts them to
 `number`.
 
 Public API: breaks `@moq/net`; retargets to `dev`. Wire: none.

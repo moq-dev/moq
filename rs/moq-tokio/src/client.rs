@@ -45,9 +45,14 @@ pub struct Client {
 	/// The single resolved set of protocol versions, used to advertise moq ALPNs across
 	/// every transport (passed into the QUIC backend's `connect` and used directly for
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
-	/// can't diverge between transports. iroh is the exception: it negotiates over the
-	/// full `moq_net::ALPNS` rather than the configured subset, so it reads nothing here.
-	#[cfg(any(feature = "noq", feature = "websocket", feature = "tcp", feature = "uds"))]
+	/// can't diverge between transports.
+	#[cfg(any(
+		feature = "noq",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
 	versions: moq_net::Versions,
 	/// The URL from [`connect.url`](crate::connect::Config::url), dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
@@ -128,7 +133,13 @@ impl Client {
 
 		Ok(Self {
 			moq: moq_net::Client::new().with_versions(versions.clone()),
-			#[cfg(any(feature = "noq", feature = "websocket", feature = "tcp", feature = "uds"))]
+			#[cfg(any(
+				feature = "noq",
+				feature = "iroh",
+				feature = "websocket",
+				feature = "tcp",
+				feature = "uds"
+			))]
 			versions,
 			connect: config.url,
 			timeout,
@@ -243,6 +254,9 @@ impl Client {
 	/// Clones share one endpoint, so this closes theirs too. Dropping the connections
 	/// only queues the close, which nothing sends once the runtime stops: a process
 	/// that exits without this leaves each peer waiting out its idle timeout.
+	///
+	/// This closes at once, discarding stream data the peer has not acknowledged yet.
+	/// Call [`Connection::close`] on each connection first to deliver it.
 	///
 	/// Only the noq endpoint is closed. WebSocket, TCP, and UDS sessions end when their
 	/// [`Connection`] is dropped (the kernel closes the socket on exit), and an iroh
@@ -389,7 +403,8 @@ impl Client {
 		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().ok_or(Error::IrohDisabled)?;
 			let target = request_target(&url);
-			let (session, binding) = crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied()).await?;
+			let (session, binding) =
+				crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied(), &self.versions).await?;
 
 			let moq = match binding {
 				crate::iroh::Binding::Raw => self.moq_with_path(target),
