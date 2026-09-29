@@ -227,3 +227,5 @@ distinguish recording generations reads the catalog's archive entry
   with an HRW tie-break, built on this line's longest-prefix rule
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - derived output
   mirrors the source path, `@<epoch>` segment included
+- [Suffix announce](/quest/m3/suffix-announce.md) - moq-lite-only suffix
+  claims, deferred until a service prefix cannot express one
