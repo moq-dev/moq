@@ -31,7 +31,7 @@ pub use self::server::ServerSessionError;
 pub use self::server::ServerSessionEvent;
 pub use self::server::ServerSessionResult;
 
-use rml_amf0::Amf0Value;
+use crate::rml::amf0::Amf0Value;
 use std::collections::HashMap;
 
 /// Contains the metadata information a stream may advertise on publishing
