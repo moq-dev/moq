@@ -17,8 +17,9 @@ pub enum Kind {
 	Auto,
 	/// Require a software backend.
 	Software,
-	/// Require a backend by its stable lowercase name: `"libopus"`, `"pcm"`, or
-	/// `"symphonia"`.
+	/// Require the track to be this codec, by its lowercase name: `"opus"`,
+	/// `"pcm"`, or `"aac"`. Any other codec is refused. The library still picks
+	/// the backend, platform first.
 	Named(String),
 }
 
@@ -367,6 +368,24 @@ pub(crate) mod tests {
 
 		assert!(matches!(
 			Decoder::new(&catalog, &Config::default()),
+			Err(Error::Unsupported(_))
+		));
+	}
+
+	/// Published moq-audio accepts the codec's name, not a backend's.
+	#[cfg(feature = "aac")]
+	#[test]
+	fn named_aac_decodes_aac() {
+		let config = Config {
+			kind: Kind::Named("aac".into()),
+		};
+		assert!(Decoder::new(&aac_catalog(), &config).is_ok());
+
+		let config = Config {
+			kind: Kind::Named("opus".into()),
+		};
+		assert!(matches!(
+			Decoder::new(&aac_catalog(), &config),
 			Err(Error::Unsupported(_))
 		));
 	}

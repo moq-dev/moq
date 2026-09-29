@@ -34,8 +34,10 @@ policy. Decoding likewise separates low-level `decode::Config`, PCM
 | `aec` | Acoustic echo cancellation (a port of WebRTC's), so a laptop with no headset doesn't feed itself back |
 
 `decode` picks a backend per track the way `moq-video` does: a platform decoder
-first, then software. `decode::Config::kind` forces one (`Kind::Software`, or
-`Kind::Named` with a name below), and `Decoder::name()` reports what opened.
+first, then software. `decode::Config::kind` narrows it: `Kind::Software` skips
+the platform tier, and `Kind::Named` requires the track to be a codec, by its
+name (`"opus"`, `"pcm"`, or `"aac"`), and refuses any other. Backends are never
+named; `Decoder::name()` reports which one opened.
 
 | Backend | Decodes | Hosts |
 | --- | --- | --- |
@@ -57,7 +59,8 @@ catalog with neither. A description that is present but malformed (truncated,
 wrong signature, a new major version, or a channel count its mapping family
 forbids) is refused rather than falling back to the catalog's fields.
 
-`encode` selects the same way, through `encode::Settings::kind`, and
+`encode` selects the same way, through `encode::Settings::kind`, where
+`Kind::Named` requires `Settings::codec` to match the codec name, and
 `Encoder::name()` reports what opened.
 
 | Backend | Encodes | Hosts |

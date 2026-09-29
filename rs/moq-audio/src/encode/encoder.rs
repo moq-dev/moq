@@ -80,7 +80,9 @@ pub enum Kind {
 	Auto,
 	/// Require a software backend.
 	Software,
-	/// Require a backend by its stable lowercase name: `"libopus"` or `"pcm"`.
+	/// Require [`Settings::codec`] to be this codec, by its lowercase name:
+	/// `"opus"`, `"pcm"`, or `"aac"`. Any other codec is refused. The library
+	/// still picks the backend, platform first.
 	Named(String),
 }
 
@@ -839,12 +841,9 @@ mod tests {
 		assert!(matches!(Encoder::new(&settings), Err(Error::Unsupported(_))));
 	}
 
-	/// AAC settings routed to the test stub, since this host has no AAC encoder.
+	/// AAC settings, which open the test stub since this host has no AAC encoder.
 	fn aac(layout: Layout) -> Settings {
-		Settings {
-			kind: Kind::Named(backend::stub::NAME.into()),
-			..Settings::from_input(Codec::Aac, &Input::new(48_000, layout))
-		}
+		Settings::from_input(Codec::Aac, &Input::new(48_000, layout))
 	}
 
 	/// The ASC is synthesized from the settings, so it exists before any packet.
