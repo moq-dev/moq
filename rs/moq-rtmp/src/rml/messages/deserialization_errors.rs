@@ -1,4 +1,4 @@
-use rml_amf0::Amf0DeserializationError;
+use crate::rml::amf0::Amf0DeserializationError;
 use thiserror::Error;
 
 use std::io;

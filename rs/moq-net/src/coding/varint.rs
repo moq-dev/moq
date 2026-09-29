@@ -536,7 +536,9 @@ where
 	VarInt: Decode<V>,
 {
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		VarInt::decode(r, version).map(|v| v.into_inner() as usize)
+		// Truncating on 32-bit targets (wasm32) would let an oversized length pass a size cap.
+		let v = VarInt::decode(r, version)?;
+		v.into_inner().try_into().map_err(|_| DecodeError::BoundsExceeded)
 	}
 }
 
