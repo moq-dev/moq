@@ -75,10 +75,11 @@ but does not end it; see the findings below.
   origin id, and forwards along its shortest path. Distance compares cost,
   then hop count, so every hop strictly shortens it even across `?cost=0`
   links. That is a shortest path to a virtual node linked to every origin, so
-  it is loop-free whenever relays agree on the topology. Specificity still
-  ranks first, per [Wildcard](/quest/m0/wildcard/README.md). The simulator
-  saw no loop while views agreed, and HRW split an equal-cost pool 63/49
-  where today's hash of the announced prefix sends all of it to one sibling.
+  it is loop-free whenever relays agree on the topology. The longest covering
+  prefix still ranks first, per [Wildcard](/quest/m0/wildcard/README.md). The
+  simulator saw no loop while views agreed, and HRW split an equal-cost pool
+  63/49 where today's hash of the announced prefix sends all of it to one
+  sibling.
 - The first relay's choice rides the SUBSCRIBE, and transit relays forward
   toward that origin by topology alone, never re-selecting. Re-selection
   against another existence view loops: a relay that lost a specific claim
@@ -199,7 +200,7 @@ registry. What decides the wire:
 ## Required
 
 - moq.pro workers stop electing on hop chains, reading the relay's local origin instead ([moq.pro voice-local-origin](https://github.com/moq-dev/moq.pro/blob/main/quest/m0/voice-local-origin.md))
-- [Wildcard](/quest/m0/wildcard/README.md) - the specificity, pool spread, and reply identity this selection builds on
+- [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity this selection builds on
 
 ## Related
 
