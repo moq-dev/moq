@@ -1,4 +1,4 @@
-/** Time one varint encode and one decode, for both wire formats, at each QUIC varint size. */
+/** Time one varint encode and one decode, for both wire formats, at their 1, 2, 4, and 8-byte sizes. */
 import { Version } from "../src/ietf/version.ts";
 import { Cursor } from "../src/stream.ts";
 import * as Varint from "../src/varint.ts";
@@ -10,18 +10,63 @@ const reps = 9;
 const scratch = new ArrayBuffer(9);
 let checksum = 0;
 
-// QUIC varints (lite, and moq-transport before draft-17), and leading-ones (draft-17+).
+// QUIC varints (lite, and moq-transport before draft-17), and leading-ones (draft-17+), each at the
+// largest value of its 1, 2, 4, and 8-byte forms that a `number` holds.
 const formats = [
-	{ name: "quic", version: undefined, encode: Varint.encodeTo },
-	{ name: "leading-ones", version: Version.DRAFT_17, encode: Varint.encodeLeadingOnesTo },
+	{
+		name: "quic",
+		version: undefined,
+		encode: Varint.encodeTo,
+		values: [2 ** 6 - 1, 2 ** 14 - 1, 2 ** 30 - 1, Number.MAX_SAFE_INTEGER],
+	},
+	{
+		name: "leading-ones",
+		version: Version.DRAFT_17,
+		encode: Varint.encodeLeadingOnesTo,
+		values: [2 ** 7 - 1, 2 ** 14 - 1, 2 ** 28 - 1, Number.MAX_SAFE_INTEGER],
+	},
 ];
-// The largest value of each QUIC size. In leading-ones form they take 1, 2, 5, and 8 bytes.
-const values = [
-	{ name: "1-byte", value: 2 ** 6 - 1 },
-	{ name: "2-byte", value: 2 ** 14 - 1 },
-	{ name: "4-byte", value: 2 ** 30 - 1 },
-	{ name: "8-byte", value: Number.MAX_SAFE_INTEGER },
-];
+
+interface Case {
+	name: string;
+	ops: [string, () => void][];
+}
+
+const cases: Case[] = [];
+for (const format of formats) {
+	for (const value of format.values) {
+		const one = format.encode(scratch, value).slice();
+		const encoded = new Uint8Array(one.byteLength * run);
+		for (let i = 0; i < run; i++) encoded.set(one, i * one.byteLength);
+
+		cases.push({
+			name: `${format.name},${one.byteLength}-byte`,
+			ops: [
+				[
+					"encode",
+					() => {
+						for (let i = 0; i < run; i++) checksum += format.encode(scratch, value).byteLength;
+					},
+				],
+				[
+					"decode",
+					() => {
+						const cursor = new Cursor(encoded, format.version);
+						for (let i = 0; i < run; i++) checksum += cursor.u53();
+					},
+				],
+				// The same, as the VarInt the generated codec will use, which allocates.
+				[
+					"decode-varint",
+					() => {
+						const cursor = new Cursor(encoded, format.version);
+						for (let i = 0; i < run; i++) checksum += cursor.varint().lo;
+					},
+				],
+			],
+		});
+	}
+}
 
 // Nanoseconds per varint for the fastest of several reps, since a slower one measured the machine.
 function time(body: () => void): number {
@@ -34,29 +79,11 @@ function time(body: () => void): number {
 	return best;
 }
 
+// Run every case once first, so the JIT has seen all of them and the first row isn't timing warmup.
+for (const { ops } of cases) for (const [, body] of ops) for (let i = 0; i < runs; i++) body();
+
 console.log("format,value,op,ns_per_op");
-for (const format of formats) {
-	for (const { name, value } of values) {
-		const one = format.encode(scratch, value).slice();
-		const encoded = new Uint8Array(one.byteLength * run);
-		for (let i = 0; i < run; i++) encoded.set(one, i * one.byteLength);
-
-		const encode = time(() => {
-			for (let i = 0; i < run; i++) checksum += format.encode(scratch, value).byteLength;
-		});
-		const decode = time(() => {
-			const cursor = new Cursor(encoded, format.version);
-			for (let i = 0; i < run; i++) checksum += cursor.u53();
-		});
-		// The same, as the VarInt the generated codec will use, which allocates.
-		const decodeVarInt = time(() => {
-			const cursor = new Cursor(encoded, format.version);
-			for (let i = 0; i < run; i++) checksum += cursor.varint().lo;
-		});
-
-		console.log(`${format.name},${name},encode,${encode.toFixed(1)}`);
-		console.log(`${format.name},${name},decode,${decode.toFixed(1)}`);
-		console.log(`${format.name},${name},decode-varint,${decodeVarInt.toFixed(1)}`);
-	}
+for (const { name, ops } of cases) {
+	for (const [op, body] of ops) console.log(`${name},${op},${time(body).toFixed(1)}`);
 }
 if (checksum === 0) throw new Error("benchmark did no work");

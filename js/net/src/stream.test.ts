@@ -826,3 +826,26 @@ test("Writer varint refuses a QUIC varint past 62 bits before emitting bytes", a
 	await expect(writer.varint(VarInt.MAX)).rejects.toThrow(/larger than 62-bits/);
 	expect(written).toEqual([]);
 });
+
+test("Reader u53 decodes every size in both formats, one byte per chunk", async () => {
+	const values = [0, 63, 64, 127, 128, 16383, 16384, 2 ** 21, 2 ** 28 - 1, 2 ** 28, 2 ** 30 - 1, 2 ** 30];
+	values.push(2 ** 35, 2 ** 42, 2 ** 49, Number.MAX_SAFE_INTEGER);
+	for (const version of [undefined, Version.DRAFT_17]) {
+		const { stream, written } = createTestWritableStream();
+		const writer = new Writer(stream, version);
+		for (const value of values) await writer.u53(value);
+		writer.close();
+		await writer.closed;
+
+		const bytes = concatChunks(written);
+		const chunked = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const byte of bytes) controller.enqueue(new Uint8Array([byte]));
+				controller.close();
+			},
+		});
+		const reader = new Reader(chunked, undefined, version);
+		for (const value of values) expect(await reader.u53()).toBe(value);
+		expect(await reader.done()).toBe(true);
+	}
+});

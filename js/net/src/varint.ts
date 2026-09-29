@@ -8,7 +8,6 @@
 import {
 	lengthLeadingOnes,
 	lengthQuic,
-	POW32,
 	parts,
 	peekLeadingOnes,
 	peekQuic,
@@ -16,6 +15,7 @@ import {
 	readQuic,
 	split,
 	toBigInt,
+	toNumber,
 	writeLeadingOnes,
 	writeQuic,
 } from "./util/varint.ts";
@@ -109,10 +109,10 @@ export function decodeBigInt(buf: Uint8Array): [bigint, Uint8Array] {
 
 /**
  * Decodes a QUIC variable-length integer from a buffer.
- * Values above 53 bits lose precision; use {@link decodeBigInt} for exact decoding.
+ * Throws above `Number.MAX_SAFE_INTEGER` rather than rounding; use {@link decodeBigInt} for those.
  */
 export function decode(buf: Uint8Array): [number, Uint8Array] {
 	const size = sizeOf(buf, peekQuic);
 	const lo = readQuic(buf, 0, size);
-	return [parts.hi * POW32 + lo, buf.subarray(size)];
+	return [toNumber(parts.hi, lo), buf.subarray(size)];
 }

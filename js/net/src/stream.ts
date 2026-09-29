@@ -13,9 +13,9 @@ import {
 	peekQuic,
 	readLeadingOnes,
 	readQuic,
-	SAFE_HI,
 	split,
 	toBigInt,
+	toNumber,
 	VarInt,
 	writeLeadingOnes,
 	writeQuic,
@@ -432,11 +432,18 @@ export class Cursor {
 	#offset = 0;
 	// Resolved once, since every varint read branches on it.
 	#leadingOnes: boolean;
+	// First bytes below this are a whole 1-byte varint, and below this + 0x40 a 2-byte one whose
+	// value is the low 6 bits and the next byte. Both formats share that shape; only the bound moves.
+	#short: number;
+	// First bytes below this are a varint of at most 4 bytes: 0xc0 for QUIC, 0xf0 for leading-ones.
+	#word: number;
 
 	constructor(buffer: Uint8Array, version?: IetfVersion) {
 		this.#buffer = buffer;
 		this.version = version;
 		this.#leadingOnes = isLeadingOnes(version);
+		this.#short = this.#leadingOnes ? 0x80 : 0x40;
+		this.#word = this.#leadingOnes ? 0xf0 : 0xc0;
 	}
 
 	/** How many bytes have been read. */
@@ -508,10 +515,30 @@ export class Cursor {
 
 	/** Read a varint as a `number`, throwing if it is above `Number.MAX_SAFE_INTEGER`. */
 	u53(): number {
+		// Most varints are 1 or 2 bytes, which skip the general decode.
+		this.#ensure(1);
+		const b = this.#buffer;
+		const o = this.#offset;
+		const first = b[o];
+		if (first < this.#short) {
+			this.#offset = o + 1;
+			return first;
+		}
+		if (first < this.#short + 0x40) {
+			this.#ensure(2);
+			this.#offset = o + 2;
+			return ((first & 0x3f) << 8) | b[o + 1];
+		}
+		// Up to 4 bytes still fits 28 (leading-ones) or 30 (QUIC) bits, with no upper half.
+		if (first < this.#word) {
+			const size = this.#leadingOnes ? peekLeadingOnes(first) : 4;
+			this.#ensure(size);
+			this.#offset = o + size;
+			if (size === 3) return ((first & 0x1f) << 16) | (b[o + 1] << 8) | b[o + 2];
+			return ((first & (this.#leadingOnes ? 0x0f : 0x3f)) << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3];
+		}
 		const lo = this.#varint();
-		const hi = parts.hi;
-		if (hi >= SAFE_HI) throw new Error(`value larger than 53-bits: ${toBigInt(hi, lo)}`);
-		return hi * POW32 + lo;
+		return toNumber(parts.hi, lo);
 	}
 
 	/** Read a varint as a bigint. A leading-ones varint may exceed 62 bits. */

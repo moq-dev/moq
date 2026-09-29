@@ -18,8 +18,8 @@
 
 /** 2^32, the weight of the upper half. */
 export const POW32 = 0x1_0000_0000;
-/** An upper half at or above this is past `Number.MAX_SAFE_INTEGER`. */
-export const SAFE_HI = 2 ** 21;
+// An upper half at or above this is past `Number.MAX_SAFE_INTEGER`.
+const SAFE_HI = 2 ** 21;
 
 /**
  * The upper half of the last value decoded or split. Each returns its lower half and leaves the
@@ -40,6 +40,12 @@ export function split(v: number | bigint): number {
 	if (v >> 64n) throw new RangeError(`value exceeds 64 bits: ${v}`);
 	parts.hi = Number(v >> 32n);
 	return Number(v & 0xffffffffn);
+}
+
+/** Join two halves into a `number`, throwing if it is above `Number.MAX_SAFE_INTEGER` rather than rounding. */
+export function toNumber(hi: number, lo: number): number {
+	if (hi >= SAFE_HI) throw new RangeError(`value larger than 53-bits: ${toBigInt(hi, lo)}`);
+	return hi * POW32 + lo;
 }
 
 /** Join two halves into a bigint, exact up to 64 bits. */
@@ -87,8 +93,7 @@ export class VarInt {
 
 	/** Convert to a `number`, throwing if it is above `Number.MAX_SAFE_INTEGER`. */
 	toNumber(): number {
-		if (this.hi >= SAFE_HI) throw new RangeError(`value larger than 53-bits: ${this.toString()}`);
-		return this.hi * POW32 + this.lo;
+		return toNumber(this.hi, this.lo);
 	}
 
 	/** Convert to a bigint, exactly. */
