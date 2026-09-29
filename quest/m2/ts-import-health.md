@@ -92,8 +92,8 @@ Implementation:
   declared by `discontinuity_indicator`, the one duplicate ISO 13818-1
   2.4.3.3 permits, and a payload-less packet repeating its counter are not
   errors.
-- `rs/moq-cli/src/publish.rs` `log_stats` logs a line when a counter moves,
-  as it does for resyncs.
+- `ts::stats::Log` logs a line when a counter moves, as it does for
+  resyncs.
 - Measure `decode` throughput on `test_data/kyrion_mpeg2av_ac3.ts` before and
   after; the checks read header bytes the loop already reads, so a measurable
   cost is a finding.
@@ -112,5 +112,4 @@ Implementation:
 
 ## Related
 
-- [SRT import stats](/quest/m1/srt-import-stats.md) - the gateway forwards the same `stats()`
 - [TS health stats](/quest/m2/ts-health-stats.md) - where these counters are published
