@@ -642,7 +642,7 @@ struct Task {
 	closed: CloseGuard,
 }
 
-/// Serializes [`Connection::abort`] against the loop publishing a fresh session.
+/// Serializes [`Connection::abort`] and [`Connection::close`] against the loop publishing a fresh session.
 ///
 /// Aborting a tokio task doesn't interrupt it before its next yield, so a redial
 /// completing in that window would otherwise hand [`Shared::connected`] a session
@@ -721,6 +721,27 @@ impl Connection {
 			session.abort(err);
 		}
 		self.task.handle.abort();
+	}
+
+	/// Stop the loop for every clone, closing the live session once the data it
+	/// queued has been delivered.
+	///
+	/// See [`moq_net::Session::close`]: finished tracks deliver their last groups and
+	/// FIN first, bounded by a one second deadline. Call this before
+	/// [`Client::close`], which closes the transport without waiting. Returns `Ok`
+	/// when nothing was live, and the session's error if it did not drain.
+	pub async fn close(self) -> crate::Result<()> {
+		// Refuse redials and take the session under one lock: see [`CloseGuard`].
+		let session = {
+			let mut closed = self.task.closed.lock().unwrap();
+			*closed = Some(moq_net::Error::Cancel);
+			self.state.read().session.clone()
+		};
+		self.task.handle.abort();
+		match session {
+			Some(session) => Ok(session.close().await?),
+			None => Ok(()),
+		}
 	}
 
 	async fn run(shared: &Shared, client: Client, addrs: Addrs) -> crate::Result<()> {

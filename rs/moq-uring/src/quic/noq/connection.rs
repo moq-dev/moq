@@ -811,8 +811,11 @@ impl Driver {
 		Poll::Pending
 	}
 
-	/// Fill one transmit buffer and stage it. Ignores noq's pacing hint;
-	/// the congestion controller still bounds each train.
+	/// Fill one transmit buffer and stage it.
+	///
+	/// Pacing happens inside `poll_transmit`: a paced path returns nothing
+	/// and arms a timer that `poll_timeout` reports, and the driver loop
+	/// flushes again once it fires.
 	fn flush_one(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut tx = match self.socket.poll_acquire(waiter) {
 			Poll::Ready(Ok(tx)) => tx,
