@@ -47,7 +47,12 @@ nonzero effective maximum age, or one second when no maximum age is set.
 moq-lite 05 and 06 instead account for group sequences using received headers,
 datagrams, and `SUBSCRIBE_DROP`, from the start group the subscription last
 asked for. A lost datagram is not owed, but its hole waits out the grace like a
-lost stream. A group at or past the declared end aborts the track.
+lost stream.
+
+From moq-lite 06, an end that contradicts the groups received aborts the track:
+a group at or past `SUBSCRIBE_END`, or a `SUBSCRIBE_END` below a group already
+received. moq-lite 05 specified an inclusive end, so there it only drops that
+group or the early boundary.
 
 ## Discovery
 

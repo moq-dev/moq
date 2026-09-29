@@ -899,7 +899,13 @@ export class Subscriber {
 				try {
 					entry.track.finishAt(entry.end);
 				} catch (err) {
-					throw new ProtocolViolation(`invalid SUBSCRIBE_END: ${reason(error(err))}`);
+					// lite-05 specified an inclusive end, and @moq/net 0.1.3 to 0.1.9 sent one, so
+					// there an end below a received group only costs the early boundary: the FIN
+					// still finishes the track. Later drafts made it exclusive.
+					if (this.version !== Version.DRAFT_05) {
+						throw new ProtocolViolation(`invalid SUBSCRIBE_END: ${reason(error(err))}`);
+					}
+					console.warn(`invalid SUBSCRIBE_END: ${reason(error(err))}`);
 				}
 			} else if ("drop" in resp) {
 				entry.tail.account(resp.drop.start, resp.drop.end + 1);
@@ -1024,8 +1030,10 @@ export class Subscriber {
 		const read = tail.open(group.sequence);
 
 		try {
-			// The publisher contradicted its own end, which no later group can repair.
-			if (entry.end !== undefined && group.sequence >= entry.end) {
+			// The publisher contradicted its own end, which no later group can repair. lite-05
+			// specified an inclusive end, so its last group lands on it: the write below drops
+			// only that group there.
+			if (entry.end !== undefined && group.sequence >= entry.end && this.version !== Version.DRAFT_05) {
 				const violation = new ProtocolViolation(
 					`group ${group.sequence} is at or past the declared end ${entry.end}`,
 				);

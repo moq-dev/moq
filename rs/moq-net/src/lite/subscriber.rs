@@ -773,8 +773,17 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						let mut group = match entry.producer.create_group(group_info) {
 							Ok(group) => group,
 							// The group is at or past the end the publisher declared, which no
-							// later stream can repair.
-							Err(Error::Closed) => {
+							// later stream can repair. Before lite-05 only a local finish sets
+							// an end, and lite-05 specified an inclusive one, so its last
+							// group lands on it: drop only that stream there.
+							Err(Error::Closed)
+								if !matches!(
+									self.subscriber.version,
+									Version::Lite01
+										| Version::Lite02 | Version::Lite03
+										| Version::Lite04 | Version::Lite05
+								) =>
+							{
 								tracing::warn!(group = hdr.sequence, "group past the declared end of track");
 								let _ = entry.producer.clone().abort(Error::ProtocolViolation);
 								return Poll::Ready(Err(Error::ProtocolViolation));
@@ -1441,48 +1450,124 @@ mod tests {
 	}
 
 	/// A group at or past the end the publisher declared contradicts that end, which no later
-	/// stream can repair, so the whole track fails rather than ending clean without it.
+	/// stream can repair, so the whole track fails rather than ending clean without it. lite-05
+	/// specified an inclusive end, so there it costs only that group's stream.
 	#[tokio::test]
 	async fn a_group_past_the_declared_end_aborts_the_track() {
 		use crate::transport::poll::Session as _;
 
-		let mut script = Vec::new();
-		lite::Group {
-			subscribe: 7,
-			sequence: 3,
-			frame_start: 0,
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut script = Vec::new();
+			lite::Group {
+				subscribe: 7,
+				sequence: 3,
+				frame_start: 0,
+			}
+			.encode(&mut script, version)
+			.unwrap();
+			let mut session = crate::lite::test_transport::ScriptedSession::eof(script);
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::Clock::tokio(),
+				session: session.clone(),
+				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version,
+				peer_setup: Default::default(),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+			});
+
+			let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+			track.finish_at(3).unwrap();
+			subscriber.subscribes.lock().insert(
+				7,
+				TrackEntry {
+					producer: track.clone(),
+					timescale: Some(Timescale::default()),
+					tail: Default::default(),
+				},
+			);
+
+			let (_, recv) = session.open_bi().await.unwrap();
+			let mut group = GroupRecv::new(subscriber, Reader::new(recv, version));
+			let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
+			match version {
+				Version::Lite05 => {
+					assert!(matches!(res, Err(Error::Closed)), "{version:?}: {res:?}");
+					assert!(
+						track.closed().now_or_never().is_none(),
+						"{version:?}: the track lives on"
+					);
+				}
+				_ => {
+					assert!(matches!(res, Err(Error::ProtocolViolation)), "{version:?}: {res:?}");
+					assert!(matches!(track.closed().now_or_never(), Some(Error::ProtocolViolation)));
+				}
+			}
 		}
-		.encode(&mut script, VERSION)
-		.unwrap();
-		let mut session = crate::lite::test_transport::ScriptedSession::eof(script);
-		let subscriber = Subscriber::new(SubscriberConfig {
-			runtime: crate::time::Clock::tokio(),
-			session: session.clone(),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-			recv_bandwidth: None,
-			version: VERSION,
-			peer_setup: Default::default(),
-			peer_hop: None,
-			cost: None,
-			going_away: Default::default(),
-		});
+	}
 
-		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
-		track.finish_at(3).unwrap();
-		subscriber.subscribes.lock().insert(
-			7,
-			TrackEntry {
-				producer: track.clone(),
-				timescale: Some(Timescale::default()),
-				tail: Default::default(),
-			},
-		);
+	/// A SUBSCRIBE_END below a group already received contradicts that group. lite-05
+	/// specified an inclusive end, and `@moq/net` 0.1.3 to 0.1.9 sent one, so there it only
+	/// costs the early boundary; later drafts abort the track.
+	#[tokio::test(start_paused = true)]
+	async fn a_subscribe_end_below_a_received_group() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut responses = Vec::new();
+			lite::SubscribeResponse::Start(lite::SubscribeStart { group: 0 })
+				.encode(&mut responses, version)
+				.unwrap();
+			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 2, streams: 1 })
+				.encode(&mut responses, version)
+				.unwrap();
+			let session = crate::lite::test_transport::ScriptedSession::eof(responses);
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::Clock::tokio(),
+				session,
+				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version,
+				peer_setup: Default::default(),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+			});
+			let serve = TrackServe {
+				subscriber,
+				path: Path::new("room").to_owned(),
+				name: "video".to_string(),
+			};
+			let broadcast = crate::broadcast::Info::new().produce();
+			let request = broadcast.reserve_track("video").unwrap();
+			let serving = ServeLoop::new(&serve, request, Default::default(), Some(Timescale::default()));
+			let mut group = serving.serving.create_group(group::Info { sequence: 2 }).unwrap();
+			group.write_frame(crate::Timestamp::ZERO, b"2".as_slice()).unwrap();
+			group.finish().unwrap();
+			let mut reader = broadcast
+				.consume()
+				.track("video")
+				.unwrap()
+				.subscribe(None)
+				.await
+				.unwrap();
+			let mut running = TrackServeRun {
+				serve,
+				state: TrackRunState::Serve(serving),
+			};
+			kio::wait(|waiter| kio::Task::poll(&mut running, waiter)).await;
 
-		let (_, recv) = session.open_bi().await.unwrap();
-		let mut group = GroupRecv::new(subscriber, Reader::new(recv, VERSION));
-		let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
-		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
-		assert!(matches!(track.closed().now_or_never(), Some(Error::ProtocolViolation)));
+			let end = loop {
+				match reader.recv_group().await {
+					Ok(Some(_)) => continue,
+					end => break end.map(|group| group.map(|group| group.sequence)),
+				}
+			};
+			match version {
+				Version::Lite05 => assert!(matches!(end, Ok(None)), "{version:?}: {end:?}"),
+				_ => assert!(matches!(end, Err(Error::ProtocolViolation)), "{version:?}: {end:?}"),
+			}
+		}
 	}
 
 	/// Drive the subscriber with a peer's response bytes followed by FIN.
@@ -3851,15 +3936,22 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 									// consumers learn the boundary early; the later stream FIN
 									// then finds the track already finished.
 									lite::SubscribeResponse::End(end) => {
-										// finish_at rejects a boundary at or below the live
-										// edge, which is what a peer sending an inclusive bound
-										// looks like once the final group has already arrived.
-										// Don't abort: the stream FIN still finishes the track,
-										// so this only costs the early boundary. Warn anyway,
-										// since it's our only signal that a peer disagrees
-										// about the encoding.
+										// finish_at rejects a boundary at or below a group
+										// already received. lite-05 specified an inclusive end,
+										// and `@moq/net` 0.1.3 to 0.1.9 sent one, so there it
+										// only costs the early boundary: warn, and let the FIN
+										// finish the track. Later drafts made it exclusive, so
+										// the publisher contradicted its own end.
 										if let Err(err) = self.serving.finish_at(end.group) {
-											tracing::warn!(track = %serve.name, group = end.group, %err, "invalid subscribe end");
+											match serve.subscriber.version {
+												Version::Lite05 => {
+													tracing::warn!(track = %serve.name, group = end.group, %err, "invalid subscribe end")
+												}
+												_ => {
+													tracing::warn!(track = %serve.name, group = end.group, %err, "subscribe end below a received group");
+													return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));
+												}
+											}
 										}
 										active.end = Some(end.clone());
 									}

@@ -211,14 +211,19 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		expect(reader.final()).toBe(0);
 	});
 
-	test("a group at or past SUBSCRIBE_END aborts the track", async () => {
+	// lite-05 specified an inclusive end, so there the group costs only its own stream.
+	test(`a group at or past SUBSCRIBE_END ${version === Version.DRAFT_05 ? "is dropped" : "aborts the track"}`, async () => {
 		const { subscriber, reader, respond } = await subscribed(version);
 		await respond({ start: new SubscribeStart(0) });
 		await respond({ end: new SubscribeEnd(2, 2) });
 		expect(await reader.finished()).toBe(2);
 
 		await groupStream(subscriber, 2).handled;
-		expect(await reader.closed).toBeInstanceOf(ProtocolViolation);
+		if (version === Version.DRAFT_05) {
+			expect(await settlesWithin(Promise.resolve(reader.closed), 50)).toBe(false);
+		} else {
+			expect(await reader.closed).toBeInstanceOf(ProtocolViolation);
+		}
 	});
 
 	test("a floor below SUBSCRIBE_START owes nothing below it", async () => {
@@ -275,16 +280,22 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		expect(await lower.closed).toBeNull();
 	});
 
-	test("a SUBSCRIBE_END below a group already received aborts the track", async () => {
-		const { subscriber, reader, respond } = await subscribed(version);
+	// lite-05 specified an inclusive end, and @moq/net 0.1.3 to 0.1.9 sent one, so there an end
+	// below a received group only costs the early boundary.
+	test(`a SUBSCRIBE_END below a group already received ${version === Version.DRAFT_05 ? "finishes clean" : "aborts the track"}`, async () => {
+		const { subscriber, reader, respond, fin } = await subscribed(version);
 		await respond({ start: new SubscribeStart(0) });
 		const group = groupStream(subscriber, 3);
 		group.finish();
 		await group.handled;
 		await respond({ end: new SubscribeEnd(2, 2) });
 
-		const closed = await reader.closed;
-		expect(closed).toBeInstanceOf(Error);
+		if (version === Version.DRAFT_05) {
+			await fin();
+			expect(await reader.closed).toBeNull();
+		} else {
+			expect(await reader.closed).toBeInstanceOf(ProtocolViolation);
+		}
 	});
 });
 
