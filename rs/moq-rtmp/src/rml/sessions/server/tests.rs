@@ -1,8 +1,11 @@
 use super::*;
+use crate::rml::amf0;
+use crate::rml::amf0::Amf0Value;
 use crate::rml::chunk_io::ChunkDeserializer;
-use crate::rml::messages::{MessagePayload, PeerBandwidthLimitType, RtmpMessage, UserControlEventType};
+use crate::rml::messages::{
+	MessageDeserializationError, MessagePayload, PeerBandwidthLimitType, RtmpMessage, UserControlEventType,
+};
 use bytes::BytesMut;
-use rml_amf0::Amf0Value;
 use std::collections::HashMap;
 
 const DEFAULT_CHUNK_SIZE: u32 = 1111;
@@ -1688,4 +1691,80 @@ fn verify_is_onstatus(subject: &RtmpMessage, expected_status: &str, expected_cod
 
 		x => panic!("Expected Amf0Command command, instead received: {:?}", x),
 	}
+}
+
+#[test]
+fn amf0_nesting_limit() {
+	// A bounded stack, so unbounded recursion overflows instead of passing on a large default.
+	std::thread::Builder::new()
+		.stack_size(2 * 1024 * 1024)
+		.spawn(|| {
+			// Object, ECMA array, and strict array markers.
+			for marker in [3, 8, 10] {
+				for depth in [64, 65, 100_000] {
+					// AMF0 data, AMF0 command, and their AMF3-labelled forms.
+					for type_id in [18, 20, 15, 17] {
+						let packet = nested_amf0_packet(marker, depth, type_id);
+						let (mut session, _) = ServerSession::new(ServerSessionConfig::new()).unwrap();
+						let result = session.handle_input(&packet);
+						let case = format!("marker {marker}, depth {depth}, type {type_id}");
+						if depth <= 64 {
+							assert!(result.is_ok(), "{case}: {result:?}");
+						} else {
+							assert!(
+								matches!(
+									result,
+									Err(ServerSessionError::MessageDeserializationError(
+										MessageDeserializationError::Amf0DeserializationError(
+											amf0::Amf0DeserializationError::MaxDepthExceeded
+										)
+									))
+								),
+								"{case}: expected nesting error, got {result:?}"
+							);
+						}
+					}
+				}
+			}
+		})
+		.unwrap()
+		.join()
+		.unwrap();
+}
+
+/// Builds wire bytes directly so preparing the input does not recurse.
+fn nested_amf0_packet(marker: u8, depth: usize, type_id: u8) -> Vec<u8> {
+	let mut data = amf0::serialize(&vec![Amf0Value::Utf8String("test".into())]).unwrap();
+	if type_id == 20 || type_id == 17 {
+		data.extend_from_slice(&[0; 9]); // transaction number
+	}
+	for _ in 0..depth {
+		data.push(marker);
+		if marker == 8 || marker == 10 {
+			data.extend_from_slice(&1u32.to_be_bytes());
+		}
+		if marker == 3 || marker == 8 {
+			data.extend_from_slice(&[0, 1, b'x']);
+		}
+	}
+	data.push(5); // null leaf
+	if marker == 3 || marker == 8 {
+		for _ in 0..depth {
+			data.extend_from_slice(&[0, 0, 9]);
+		}
+	}
+	if type_id == 17 {
+		data.insert(0, 0); // AMF0 command labelled AMF3
+	}
+	let payload = MessagePayload {
+		timestamp: RtmpTimestamp::new(0),
+		type_id,
+		message_stream_id: 0,
+		data: Bytes::from(data),
+	};
+	ChunkSerializer::new()
+		.serialize(&payload, true, false)
+		.unwrap()
+		.bytes
+		.to_vec()
 }

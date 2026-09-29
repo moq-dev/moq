@@ -50,7 +50,3 @@ carries one SDT entry with a valid CRC and only its own EIT; an unselected
 import keeps the sections verbatim; a selection missing from the SDT carries
 none; an SDT version that drops the selected service retires the earlier one;
 and the re-exported TS still parses.
-
-## Required
-
-- [moq import ts: select programs](/quest/m1/ts-programs.md) - `ts::Import::with_program`, which this filtering hangs off
