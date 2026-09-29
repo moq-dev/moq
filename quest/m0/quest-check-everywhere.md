@@ -16,7 +16,9 @@
   that fail today and fix what the new check reports.
 - `just ci check` runs `quest check` on pull requests only. Also run it on
   push to `main`, `dev`, and `quest/**`, so a direct merge commit (such as
-  `main` merged into a line) can't land a broken tree.
+  `main` merged into a line) can't land a broken tree. Use a dedicated job
+  that runs `quest check` unconditionally: `check.yml`'s scope steps diff
+  against `origin/$GITHUB_BASE_REF`, which is empty on a push.
 
 Public API: none. Wire: none.
 

@@ -10,8 +10,9 @@ track or session, the follow-up #4357 left.
 Decided 2026-09-28: `FetchGroupOptions` (`js/net/src/track.ts`) gains
 `signal?: AbortSignal`, the standard JS idiom, and additive.
 
-- Thread it through `js/net/src/broadcast.ts` and both
-  `lite/subscriber.ts` and `ietf/subscriber.ts`.
+- Thread it through `js/net/src/broadcast.ts` and `lite/subscriber.ts`.
+  `ietf/subscriber.ts` rejects `fetchGroup` today (moq-transport has no
+  one-shot group fetch), so it stays unchanged.
 - Fetches for the same group share one stream (`lite/subscriber.ts`), so an
   abort releases this caller's share and rejects its promise with the
   signal's reason. The stream is cancelled only when the last sharer leaves.
