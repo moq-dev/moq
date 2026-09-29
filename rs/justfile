@@ -127,10 +127,13 @@ capture-test *args:
 # than a denying clippy: the capture plumbing is dead on a target without a
 # capture backend.
 
-# Compile the Android backends, which the host-target check skips.
+# Compile the Android backends, which the host-target check skips, and assert the
+# moq-ffi library links logcat: `Log::init` is silent on Android without it.
 [positional-arguments]
 android *args:
     cargo ndk -t arm64-v8a --platform 26 check --locked -p moq-video --all-targets "$@"
+    cargo ndk -t arm64-v8a --platform 26 -o target/android-jni build --locked -p moq-ffi "$@"
+    nm -D --undefined-only target/android-jni/arm64-v8a/libmoq_ffi.so | grep -q __android_log_
 
 # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a wasm32
 # build sees the code. Not to be confused with `just js wasm`, which builds the

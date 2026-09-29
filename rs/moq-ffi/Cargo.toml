@@ -26,7 +26,6 @@ crate-type = ["staticlib", "cdylib"]
 # They are unavailable on wasm32 regardless: the browser encodes via WebCodecs.
 default = ["audio", "video"]
 
-android-logcat = ["moq-tokio/android-logcat"]
 audio = ["dep:moq-audio"]
 video = ["dep:moq-video", "dep:pollster"]
 
