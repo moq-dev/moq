@@ -1577,14 +1577,11 @@ mod tests {
 	/// holds a task, a stream, and the track until the peer answers, which may be never.
 	#[tokio::test]
 	async fn an_unused_track_stops_waiting_for_info() {
-		let (_gate, gate) = {
-			let gate = kio::Producer::new(false);
-			let consumer = gate.consume();
-			(gate, consumer)
-		};
+		// Held closed, so the read stage's stream opens but its peer never answers.
+		let gate = kio::Producer::new(false);
 		for (stage, session) in [
 			("open", SinkSession::default()),
-			("read", SinkSession::gated_bi(gate.clone())),
+			("read", SinkSession::gated_bi(gate.consume())),
 		] {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::Clock::tokio(),
@@ -3387,7 +3384,6 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 					// wins inside `reject_unused`, and the wait goes on.
 					let pending = request.as_ref().expect("request pending");
 					if pending.poll_unused(waiter).is_ready() && pending.reject_unused(Error::Cancel) {
-						request.take();
 						self.state = TrackRunState::Done;
 						return Poll::Ready(());
 					}

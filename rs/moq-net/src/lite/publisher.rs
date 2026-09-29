@@ -963,10 +963,7 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 			// read error means it reset the stream and stopped waiting. Drop the lookup
 			// then, so the abandonment reaches our own upstream instead of pinning it
 			// for an answer nobody reads.
-			if matches!(
-				self.state,
-				TrackInfoState::Hop { .. } | TrackInfoState::Request { .. } | TrackInfoState::Query { .. }
-			) {
+			if !matches!(self.state, TrackInfoState::Decode) {
 				let stream = self.stream.as_mut().expect("stream present");
 				let mut cx = Context::from_waker(waiter.waker());
 				if let Poll::Ready(Err(err)) = stream.reader.poll_closed(&mut cx) {
