@@ -53,4 +53,4 @@ and the re-exported TS still parses.
 
 ## Required
 
-- Program selection ([#4505](https://github.com/moq-dev/moq/pull/4505)) is on main
+- [moq import ts: select programs](/quest/m1/ts-programs.md) - `ts::Import::with_program`, which this filtering hangs off
