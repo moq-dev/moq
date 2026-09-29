@@ -53,7 +53,3 @@ a PMT spanning two packets, a PAT behind a nonzero `pointer_field`, a
 multi-packet PAT with enough programs to need it (read by `ts::programs()` and
 by `with_program`), and a PMT with a corrupt CRC that is dropped and counted
 while the import keeps its previous PMT.
-
-## Required
-
-- [moq import ts: select programs](/quest/m1/ts-programs.md) - `ts::programs()` and `with_program`, which this quest's PAT path and tests build on
