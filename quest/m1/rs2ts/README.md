@@ -31,20 +31,20 @@ Decided in planning (2026-09-27), with the spike data in
   cargo feature; rs2ts reads the crate without it and JS reimplements the
   helpers with Promises. No second crate.
 - Varints are not bounded to 2^53 on the wire: 62 bits in QUIC form, 64 in
-  leading-ones form. Rust's `VarInt` newtype carries Encode/Decode and JS has
-  a 64-bit `VarInt` type with checked conversion to and from `number`.
+  leading-ones form. JS holds any `u64` as a `U64` with checked conversion to
+  and from `number`; varints are only its wire encoding.
 - The generated TypeScript is committed and a CI lane regenerates it and
   fails on drift, so JS contributors and npm publishing never need the
   nightly toolchain Charon pins. It lives inside js/net and `@moq/net` stays
   the package.
-- The `@moq/net` API may change (disposable handles, `VarInt`) as long as it
+- The `@moq/net` API may change (disposable handles, `U64`) as long as it
   is no worse to use; watch, publish, hang, and the demos update in the same
   change.
 - Parity: `just test interop --all`, plus moq-net's own tests translated with
   the code once they run on a mock clock instead of tokio.
 - The line lands on `dev`: the Rust refactors break moq-net's published API,
   and the translator and generated code build on them. Only the additive
-  JS `VarInt` (`js/net/src/util/varint.ts`) is on `main`, package-internal.
+  JS `U64` (`js/net/src/util/u64.ts`) is on `main`, package-internal.
 - Hand-written js/net fixes keep landing until the generated path replaces
   them; it is months out.
 

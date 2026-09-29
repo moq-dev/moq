@@ -3,20 +3,17 @@ import { fromTransport, StreamCode, StreamError, toStreamCode, toTransport } fro
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import { TimeoutError, withTimeout } from "./util/timeout.ts";
+import { POW32, toBigInt, toNumber, U64 } from "./util/u64.ts";
 import { decodeUtf8 } from "./util/utf8.ts";
 import {
 	lengthLeadingOnes,
 	lengthQuic,
-	POW32,
 	parts,
 	peekLeadingOnes,
 	peekQuic,
 	readLeadingOnes,
 	readQuic,
 	split,
-	toBigInt,
-	toNumber,
-	VarInt,
 	writeLeadingOnes,
 	writeQuic,
 } from "./util/varint.ts";
@@ -382,7 +379,7 @@ export class Reader {
 		return this.decode(U62);
 	}
 
-	async varint(): Promise<VarInt> {
+	async varint(): Promise<U64> {
 		return this.decode(VARINT);
 	}
 
@@ -548,9 +545,9 @@ export class Cursor {
 	}
 
 	/** Read a varint. */
-	varint(): VarInt {
+	varint(): U64 {
 		const lo = this.#varint();
-		return new VarInt(parts.hi, lo);
+		return new U64(parts.hi, lo);
 	}
 
 	// Decode the next varint in the version's format, returning its lower half and leaving the upper in `parts`.
@@ -637,7 +634,7 @@ export class Writer {
 			throw new Error(`overflow, value larger than 32-bits: ${v.toString()}`);
 		}
 
-		// We don't use a VarInt, so it always takes 4 bytes.
+		// We don't use a varint, so it always takes 4 bytes.
 		// This could be improved but nothing is standardized yet.
 		await this.write(setInt32(this.#scratch, v));
 	}
@@ -654,7 +651,7 @@ export class Writer {
 		await this.#varint(parts.hi, lo);
 	}
 
-	async varint(v: VarInt) {
+	async varint(v: U64) {
 		await this.#varint(v.hi, v.lo);
 	}
 

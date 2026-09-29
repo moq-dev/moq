@@ -55,7 +55,7 @@ for (const format of formats) {
 						for (let i = 0; i < run; i++) checksum += cursor.u53();
 					},
 				],
-				// The same, as the VarInt the generated codec will use, which allocates.
+				// The same, as the U64 the generated codec will use, which allocates.
 				[
 					"decode-varint",
 					() => {

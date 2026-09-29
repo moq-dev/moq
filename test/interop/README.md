@@ -203,6 +203,6 @@ The interop workflow runs it alongside the real-transport matrix.
 Every `just test interop` run starts with `varint_interop` in moq-net, which
 hands moq-net's QUIC and leading-ones encodings of each varint size boundary
 (plus 2^53, where a JS `number` stops being exact, and 2^62 - 1) to
-`varint.ts`. That script decodes them with js/net's `VarInt`, checks its
+`varint.ts`. That script decodes them into js/net's `U64`, checks its
 `number` conversion, and returns js/net's own encodings, which Rust requires to
 match byte for byte and decode back to the same value.

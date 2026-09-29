@@ -13,7 +13,7 @@ import {
 import { Version } from "./ietf/version.ts";
 import { type Cursor, Reader, Stream, Writer } from "./stream.ts";
 import { TimeoutError } from "./util/timeout.ts";
-import { VarInt } from "./util/varint.ts";
+import { U64 } from "./util/u64.ts";
 
 // Helper to create a writable stream that captures written data
 function createTestWritableStream(): { stream: WritableStream<Uint8Array>; written: Uint8Array[] } {
@@ -809,7 +809,7 @@ test("Writer and Reader varint round-trip every size in both formats", async () 
 				: values;
 		const { stream, written } = createTestWritableStream();
 		const writer = new Writer(stream, version);
-		for (const value of all) await writer.varint(VarInt.fromBigInt(value));
+		for (const value of all) await writer.varint(U64.fromBigInt(value));
 		writer.close();
 		await writer.closed;
 
@@ -822,8 +822,8 @@ test("Writer and Reader varint round-trip every size in both formats", async () 
 test("Writer varint refuses a QUIC varint past 62 bits before emitting bytes", async () => {
 	const { stream, written } = createTestWritableStream();
 	const writer = new Writer(stream);
-	await expect(writer.varint(VarInt.fromBigInt(2n ** 62n))).rejects.toThrow(/larger than 62-bits/);
-	await expect(writer.varint(VarInt.MAX)).rejects.toThrow(/larger than 62-bits/);
+	await expect(writer.varint(U64.fromBigInt(2n ** 62n))).rejects.toThrow(/larger than 62-bits/);
+	await expect(writer.varint(U64.MAX)).rejects.toThrow(/larger than 62-bits/);
 	expect(written).toEqual([]);
 });
 

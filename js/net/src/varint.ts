@@ -5,6 +5,7 @@
  * @module
  */
 
+import { toBigInt, toNumber } from "./util/u64.ts";
 import {
 	lengthLeadingOnes,
 	lengthQuic,
@@ -14,8 +15,6 @@ import {
 	readLeadingOnes,
 	readQuic,
 	split,
-	toBigInt,
-	toNumber,
 	writeLeadingOnes,
 	writeQuic,
 } from "./util/varint.ts";
