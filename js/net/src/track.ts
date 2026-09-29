@@ -856,8 +856,8 @@ export class Producer {
 		if (!Number.isSafeInteger(final) || final < 0) throw new RangeError(`invalid track end: ${final}`);
 		const declared = this.#state.final.peek();
 		if (declared !== undefined) throw new Error(`track already ends at ${declared}`);
-		if (final < this.#sequence.next) {
-			throw new Error(`track end ${final} is below the next sequence ${this.#sequence.next}`);
+		if (final < this.#received) {
+			throw new Error(`track end ${final} is below the next sequence ${this.#received}`);
 		}
 		this.#declareFinal(final);
 	}
@@ -881,7 +881,7 @@ export class Producer {
 		if (this.#state.closed.peek() !== undefined) return;
 		if (abort && this.#settled()) abort = undefined;
 		if (abort === undefined && this.#state.final.peek() === undefined) {
-			this.#declareFinal(this.#sequence.next);
+			this.#declareFinal(this.#received);
 		}
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
