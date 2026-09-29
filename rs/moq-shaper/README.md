@@ -38,7 +38,6 @@ profile never acted.
 | `--batch`, `--batch-window` | Hold datagrams until this many wait, or the window closes, then release them together. See [Batches](#batches). |
 | `--shared` | Every client shares one link each way. See [Shared path](#shared-path). |
 | `--profile` | A built-in profile's name, or a profile TOML file, in place of the flags that shape the path. See [Profiles](#profiles). |
-| `--tcp-passthrough` | Also pipe TCP on the listening port to the target, untouched. See [TCP](#tcp). |
 | `--report` | Write the profile, seed and counters to this file as JSON at exit. See [Report](#report). |
 | `--report-interval` | Print the same JSON as one line on stdout this often. |
 
@@ -133,7 +132,7 @@ delay = "5ms"
 ```
 
 `--profile` takes a file's path, or one of the built-ins in `profiles/`, embedded in the binary. The
-audio-quality lane (`test/audio-quality/`) runs the first five.
+audio-quality lane (`test/audio-quality/`) uses `bursty` and `step`, plus its own flag profiles.
 
 | Name | What it models |
 | --- | --- |
@@ -141,17 +140,8 @@ audio-quality lane (`test/audio-quality/`) runs the first five.
 | `mild` | A healthy wired LAN: 5ms delay, 5ms sigma, in order. |
 | `bursty` | A paced hop: seven datagrams per 160ms window, released together. |
 | `step` | 5ms for thirty seconds, then 60ms, with no recovery. |
-| `high-rtt` | An intercontinental path: 75ms one way, 30ms sigma, in order. |
-| `lossy` | 2% loss, with 1% of datagrams skipping a 20ms delay to overtake. |
 
 Each built-in is a shared path, as a browser page's sessions on one host would be.
-
-## TCP
-
-A relay serves `/certificate.sha256` over HTTP on the port number it serves QUIC on, and a browser fetches
-it before it dials WebTransport. With `tcp_passthrough`, the shaper listens for TCP on its own port and
-pipes each connection to the target untouched, so the page loads through it. TCP is never impaired: a
-reliable transport cannot shed load, so shaping it would only measure how TCP retransmits.
 
 ## Counters
 

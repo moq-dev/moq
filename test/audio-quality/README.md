@@ -14,7 +14,7 @@ just test audio-quality --out ~/runs/after                     # keep the run di
 just test audio-quality --enforce                              # fail on the budgets
 ```
 
-The matrix is codec x profile x ring: 16 rows, about 20 minutes. `--profiles`, `--rings`, and
+The matrix is codec x profile x ring: 24 rows, about 30 minutes. `--profiles`, `--rings`, and
 `--codecs` take comma-separated lists; `--seed` replays a given impairment. The table prints either
 way, and only `--enforce` (which the nightly job passes) turns a breach into a failed run.
 
@@ -33,17 +33,18 @@ decides which ring ran.
 | Profile | Path | Delay |
 | --- | --- | --- |
 | `near-zero` | through the shaper, untreated | auto |
-| `mild` | 5 ms one way, plus or minus 5 ms uniform | auto |
-| `wide` | 40 ms one way, plus or minus 40 ms uniform | auto |
+| `mild` | 5 ms one way, 5 ms Gaussian sigma, in order | auto |
+| `wide` | 40 ms one way, 40 ms Gaussian sigma, in order | auto |
+| `bursty` | batches of seven datagrams, released within 160 ms | auto |
+| `step` | 5 ms one way, stepping to 60 ms at 30 s | auto |
 | `fixed-250` | through the shaper, untreated | a fixed 250 ms |
 
 `fixed-250` is the control: every other row adapts, so without it the whole matrix could pass while a
 fixed preset regressed, and a fixed preset is what many viewers land on. Loss, reorder, and rate
 limits stay off: the buffer's job is absorbing arrival spread, and congestion response would make a
-failure hard to attribute. The shaper's uniform jitter does reorder datagrams whose spacing is
-smaller than it, so `wide` measures some reordering along with the spread. The bursty and mid-run
-step profiles need shaper features that are not here yet
-([quest](../../quest/m0/audio-quality-harness/shaper-profiles.md)).
+failure hard to attribute. The `mild` and `wide` profiles preserve datagram order and share one path across the page's sessions.
+`bursty` and `step` use the shaper's named profiles on that same shared path. The step is timed from
+shaper startup, before the page connects; `--duration` must exceed 30 s so playback spans it.
 
 The AAC arm keeps ffmpeg's default PES packing, whose multi-frame bursts are the flush-span shape
 the reporter measured on the public relay (#3477). The source is a sine tone rather than a film, so a
@@ -172,9 +173,9 @@ clients/js/
 The harness is the reporter's, from #3477: fperex built it on their fork `fperex/moq` (branches
 `debug/rt-audio` and `debug-findings-solution`), with the black-box probe, the analyzer's skip-ahead
 rule, the Playwright matrix over `moq-shaper`, the budget file graded under `--enforce`, and the
-nightly job. This lane upstreams it on its own, without the fork's player, estimator, or shaper
-changes: the underrun count comes from a tap on the output rather than a counter in the player, and
-the profiles are the ones the shaper on `main` can express.
+nightly job. The harness and opt-in shaper features preserve that author's credit. The player and estimator
+changes remain separate: the underrun count comes from a tap on the output rather than a counter in the player, and
+the profiles now include the fork's batch, step, and order-preserving jitter treatments.
 
 ## Not covered
 

@@ -65,9 +65,6 @@ struct Args {
 	/// Every client shares one link each way, instead of each getting its own.
 	#[arg(long)]
 	shared: bool,
-	/// Also pipe TCP on the listening port to the target, untouched.
-	#[arg(long)]
-	tcp_passthrough: bool,
 	/// Write the profile, seed and counters to this file as JSON at exit.
 	#[arg(long)]
 	report: Option<PathBuf>,
@@ -87,8 +84,12 @@ enum JitterModel {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	let args = Args::parse();
+	anyhow::ensure!(
+		args.report_interval.is_none_or(|period| !period.is_zero()),
+		"the report interval must be positive"
+	);
 
-	let (name, mut setup) = match &args.profile {
+	let (name, setup) = match &args.profile {
 		Some(profile) => {
 			let preset = moq_shaper::Preset::load(profile)?;
 			let mut setup = preset.setup(args.listen, args.target);
@@ -99,7 +100,6 @@ async fn main() -> anyhow::Result<()> {
 		}
 		None => (None, flags(&args)),
 	};
-	setup.tcp_passthrough = args.tcp_passthrough;
 
 	let treatment = match &name {
 		Some(name) => format!("profile {name}"),

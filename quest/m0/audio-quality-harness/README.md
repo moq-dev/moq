@@ -23,13 +23,12 @@ are. The native lane moved to m1 as a standalone quest (decided in the
 same budgets and metric schema so the two implementations can be compared
 rather than merely both passing.
 
-The browser lane has landed as `test/audio-quality/`, upstreamed from the
-reporter's fork on #3477 (`fperex/moq`, branch `debug-findings-solution`) on
-its own, without the fork's player, estimator, or shaper changes. That leaves
-the two things that needed them: real arrival traces, which the [jitter
-target's watch quest](/quest/m0/audio-jitter-target/watch.md) replays, and the
-bursty and step profiles, which need shaper features the fork has and `main`
-does not.
+The browser lane and its opt-in shaper profiles have landed in `test/audio-quality/`,
+upstreamed from the reporter's fork on #3477 (`fperex/moq`, branch
+`debug-findings-solution`), without the fork's player or estimator changes.
+The matrix includes bursty and mid-run step paths, and mild/wide jitter preserves
+packet order. Real arrival traces remain for the [jitter target's watch
+quest](/quest/m0/audio-jitter-target/watch.md) to replay.
 
 Jitter comes from the seeded userspace UDP shaper the transport drills run
 under (`rs/moq-shaper`, documented in `test/drill/README.md`), not from a fake
@@ -49,7 +48,6 @@ each of those dimensions moves the expected floor.
 ## Required
 
 - [Traces](/quest/m0/audio-quality-harness/traces.md) - real arrival traces recorded, checked in, and graded as replay rows
-- [Shaper profiles](/quest/m0/audio-quality-harness/shaper-profiles.md) - the bursty and mid-run step profiles, once moq-shaper can express them
 
 ## Related
 

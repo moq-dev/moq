@@ -1,31 +1,23 @@
-//! The binary end to end: a profile by name, the TCP passthrough, and the
+//! The binary end to end: a profile by name and the
 //! counters it reports while it runs and when it stops.
 #![cfg(unix)]
 
 use std::{
-	io::{BufRead, BufReader, Read, Write},
-	net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
+	io::{BufRead, BufReader},
+	net::{SocketAddr, UdpSocket},
 	process::{Command, Stdio},
 	time::Duration,
 };
 
 #[test]
 fn a_profile_run_reports_its_counters() {
-	// The target answers TCP on the port number it takes datagrams on, as a relay does.
 	let target = UdpSocket::bind("127.0.0.1:0").unwrap();
 	let target_addr = target.local_addr().unwrap();
-	let http = TcpListener::bind(target_addr).unwrap();
-	std::thread::spawn(move || {
-		let (mut stream, _) = http.accept().unwrap();
-		let mut buf = [0u8; 64];
-		let size = stream.read(&mut buf).unwrap();
-		stream.write_all(&buf[..size]).unwrap();
-	});
 
 	let report = std::env::temp_dir().join(format!("moq-shaper-report-{}.json", std::process::id()));
 	let mut shaper = Command::new(env!("CARGO_BIN_EXE_moq-shaper"))
 		.args(["--listen", "127.0.0.1:0", "--target", &target_addr.to_string()])
-		.args(["--profile", "mild", "--seed", "7", "--tcp-passthrough"])
+		.args(["--profile", "mild", "--seed", "7"])
 		.args(["--report-interval", "100ms", "--report", report.to_str().unwrap()])
 		.stdout(Stdio::piped())
 		.spawn()
@@ -47,12 +39,6 @@ fn a_profile_run_reports_its_counters() {
 	for _ in 0..50 {
 		target.recv_from(&mut buf).expect("a datagram never arrived");
 	}
-
-	let mut tcp = TcpStream::connect(addr).unwrap();
-	tcp.write_all(b"/certificate.sha256").unwrap();
-	let mut buf = [0u8; 64];
-	let size = tcp.read(&mut buf).unwrap();
-	assert_eq!(&buf[..size], b"/certificate.sha256");
 
 	// A line each interval, once the traffic has been counted.
 	let interim = loop {
@@ -80,4 +66,22 @@ fn a_profile_run_reports_its_counters() {
 	assert_eq!(json["up"]["packets"], 50);
 	assert_eq!(json["up"]["delayed"], 50);
 	assert_eq!(json["up"]["lost"], 0);
+}
+
+#[test]
+fn a_zero_report_interval_is_refused_before_binding() {
+	let result = Command::new(env!("CARGO_BIN_EXE_moq-shaper"))
+		.args([
+			"--listen",
+			"127.0.0.1:0",
+			"--target",
+			"127.0.0.1:9",
+			"--report-interval",
+			"0s",
+		])
+		.output()
+		.unwrap();
+	assert!(!result.status.success());
+	assert!(result.stdout.is_empty(), "bound before refusing the interval");
+	assert!(String::from_utf8_lossy(&result.stderr).contains("report interval must be positive"));
 }

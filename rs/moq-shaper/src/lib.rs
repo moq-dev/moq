@@ -14,7 +14,7 @@
 //! unimpaired pass, so [`Shaper::verify`] fails when an impairment the profile
 //! configures never acted and the traffic makes that silence implausible.
 //!
-//! A [`Setup`] adds opt-in options to a [`Config`]: a TCP passthrough, a jitter
+//! A [`Setup`] adds opt-in options to a [`Config`]: a jitter
 //! model that keeps the order, one link shared by every client, batches, steps,
 //! and named profiles loaded as a [`Preset`]. The README says why each exists.
 
@@ -37,12 +37,7 @@ pub use preset::Preset;
 use anyhow::Context;
 use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus};
 use serde::{Deserialize, Serialize};
-use tokio::{
-	net::{TcpListener, TcpStream, UdpSocket},
-	sync::mpsc,
-	task::JoinSet,
-	time::Instant,
-};
+use tokio::{net::UdpSocket, sync::mpsc, task::JoinSet, time::Instant};
 
 /// How one direction of the path treats each datagram.
 ///
@@ -315,13 +310,6 @@ pub struct Config {
 pub struct Setup {
 	/// Where to listen and forward, the seed, and each direction's profile.
 	pub config: Config,
-	/// Also accept TCP on the listening port and pipe it to the target untouched.
-	///
-	/// A relay serves HTTP on the port number it serves QUIC on, and a browser
-	/// fetches the certificate hash from it before it dials WebTransport. TCP is
-	/// never impaired: a reliable transport cannot shed load, so shaping it
-	/// would measure how TCP retransmits.
-	pub tcp_passthrough: bool,
 	/// Every client shares one link each way, the way clients behind one access
 	/// link do, rather than each getting its own.
 	///
@@ -339,7 +327,6 @@ impl From<Config> for Setup {
 	fn from(config: Config) -> Self {
 		Self {
 			config,
-			tcp_passthrough: false,
 			shared: false,
 			up: Options::default(),
 			down: Options::default(),
@@ -412,16 +399,6 @@ impl Shaper {
 			.with_context(|| format!("bind {}", config.bind))?;
 		let addr = listen.local_addr()?;
 
-		// The port the UDP socket got, since a relay serves HTTP on its QUIC port.
-		let tcp = match setup.tcp_passthrough {
-			true => Some(
-				TcpListener::bind(addr)
-					.await
-					.with_context(|| format!("bind the TCP passthrough on {addr}"))?,
-			),
-			false => None,
-		};
-
 		let tally = Arc::new([Tally::default(), Tally::default()]);
 		let failed = Arc::new(OnceLock::new());
 		let task = tokio::spawn({
@@ -429,7 +406,7 @@ impl Shaper {
 			let tally = tally.clone();
 			let failed = failed.clone();
 			async move {
-				if let Err(err) = run(Arc::new(listen), tcp, setup, tally).await {
+				if let Err(err) = run(Arc::new(listen), setup, tally).await {
 					let _ = failed.set(format!("{err:#}"));
 				}
 			}
@@ -527,12 +504,7 @@ fn bump(counter: &AtomicU64) {
 /// A flow is a socket of its own toward the target, so the target sees one
 /// address per client just as it would without the shaper in the way. Each
 /// flow takes a link of its own each way, unless the path is shared.
-async fn run(
-	listen: Arc<UdpSocket>,
-	tcp: Option<TcpListener>,
-	setup: Setup,
-	tally: Arc<[Tally; 2]>,
-) -> anyhow::Result<()> {
+async fn run(listen: Arc<UdpSocket>, setup: Setup, tally: Arc<[Tally; 2]>) -> anyhow::Result<()> {
 	let config = &setup.config;
 	let mut flows = HashMap::<SocketAddr, Flow>::new();
 	let mut tasks = JoinSet::new();
@@ -553,11 +525,7 @@ async fn run(
 				res.context("flow task panicked")??;
 				continue;
 			}
-			res = accept(tcp.as_ref()) => {
-				let (stream, _) = res.context("accept a TCP connection")?;
-				tasks.spawn(pipe(stream, config.target));
-				continue;
-			}
+
 		};
 		let now = Instant::now();
 
@@ -620,23 +588,6 @@ fn link(
 		start,
 		queue,
 	)))
-}
-
-/// The next TCP connection, or never without a passthrough.
-async fn accept(tcp: Option<&TcpListener>) -> std::io::Result<(TcpStream, SocketAddr)> {
-	match tcp {
-		Some(listener) => listener.accept().await,
-		None => std::future::pending().await,
-	}
-}
-
-/// Copy one TCP connection to the target and back, untouched.
-async fn pipe(mut client: TcpStream, target: SocketAddr) -> anyhow::Result<()> {
-	// Either end refusing or hanging up ends that connection, not the shaper.
-	if let Ok(mut server) = TcpStream::connect(target).await {
-		let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
-	}
-	Ok(())
 }
 
 /// A socket that can reach `target`: loopback for a loopback target, so the
@@ -831,7 +782,9 @@ impl Link {
 		while self.steps.last().is_some_and(|step| self.start + step.at <= now) {
 			let step = self.steps.pop().expect("a step is due");
 			if let Some(rate) = &step.rate {
-				self.full_at = self.refilled(rate, now);
+				// Credit accrues at the new rate from the scheduled transition,
+				// even when no datagram arrived at that instant.
+				self.full_at = self.refilled(rate, self.start + step.at);
 			}
 			step.apply(&mut self.profile);
 		}
@@ -1182,56 +1135,6 @@ mod tests {
 			..Default::default()
 		};
 		refused(undelayed, "needs a delay").await;
-	}
-
-	#[tokio::test]
-	async fn tcp_passes_through_untouched() {
-		use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-		// A relay answering HTTP on its QUIC port, reduced to an echo.
-		let server = TcpListener::bind(LOCALHOST).await.unwrap();
-		let target = server.local_addr().unwrap();
-		tokio::spawn(async move {
-			let (mut stream, _) = server.accept().await.unwrap();
-			let mut buf = [0u8; 64];
-			let size = stream.read(&mut buf).await.unwrap();
-			stream.write_all(&buf[..size]).await.unwrap();
-		});
-
-		// A profile that would lose every datagram, to show TCP skips it.
-		let blackhole = Profile {
-			loss: 1.0,
-			..Default::default()
-		};
-		let config = Config {
-			bind: LOCALHOST,
-			target,
-			seed: 13,
-			up: blackhole.clone(),
-			down: blackhole,
-		};
-		let shaper = Shaper::bind(Setup {
-			tcp_passthrough: true,
-			..config.into()
-		})
-		.await
-		.unwrap();
-
-		let mut client = TcpStream::connect(shaper.addr()).await.unwrap();
-		client.write_all(b"/certificate.sha256").await.unwrap();
-		let mut buf = [0u8; 64];
-		let size = tokio::time::timeout(Duration::from_secs(2), client.read(&mut buf))
-			.await
-			.unwrap()
-			.unwrap();
-		assert_eq!(&buf[..size], b"/certificate.sha256");
-		assert_eq!(shaper.stats(), Stats::default(), "TCP reached the datagram path");
-	}
-
-	#[tokio::test]
-	async fn tcp_is_refused_without_the_passthrough() {
-		let (shaper, _client) = setup(1, Profile::default(), Profile::default()).await;
-		assert!(TcpStream::connect(shaper.addr()).await.is_err());
 	}
 
 	/// An echo server, a shaper `setup` builds from a config aimed at it, and a
@@ -1841,6 +1744,12 @@ mod tests {
 		// 100 bytes of the backlog are still owed, and now drain in 50ms, so
 		// a fresh 100 bytes leave once those and themselves are paid.
 		assert_eq!(owed(&mut link, start + ms(100), &[100]), [ms(100)]);
+
+		// A quiet link still changes rates at the step, not at its next arrival.
+		let (queue, _) = mpsc::unbounded_channel();
+		let mut link = Link::new(&profile, &options, 7, 0, start, queue);
+		owed(&mut link, start, &[100, 100, 100]);
+		assert_eq!(owed(&mut link, start + ms(200), &[100]), [ms(0)]);
 	}
 
 	#[tokio::test]

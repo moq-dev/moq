@@ -11,8 +11,6 @@ const BUILTIN: &[(&str, &str)] = &[
 	("mild", include_str!("../profiles/mild.toml")),
 	("bursty", include_str!("../profiles/bursty.toml")),
 	("step", include_str!("../profiles/step.toml")),
-	("high-rtt", include_str!("../profiles/high-rtt.toml")),
-	("lossy", include_str!("../profiles/lossy.toml")),
 ];
 
 /// A named, seeded treatment of both directions, loaded from a TOML profile.
@@ -60,7 +58,6 @@ impl Preset {
 				up: self.up.0.clone(),
 				down: self.down.0.clone(),
 			},
-			tcp_passthrough: false,
 			shared: self.shared,
 			up: self.up.1.clone(),
 			down: self.down.1.clone(),
