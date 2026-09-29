@@ -80,6 +80,19 @@ Decided while planning. This supersedes the moq-stats extension design of
   `doc/concept/stats.md` gains a media section beside the relay's, and
   `drafts/draft-lcurley-moq-hang.md` specs the wire.
 
+Open, to settle before [encoder feedback](/quest/m1/stats/encoder-feedback.md)
+starts:
+
+- **Feedback trust.** Every viewer that can publish under the watched prefix
+  counts equally, so one viewer can report false stalls and lower quality for
+  the rest. Candidates: a trusted reporter prefix, authenticated reports, or
+  a bound on each viewer's influence.
+- **Feedback name collisions.** Subscriptions to one track name share a
+  track, so a publisher that picks, or guesses, a name another publisher
+  claimed first on the same viewer reads that publisher's feedback; refusing
+  the second claim does not isolate them. Candidates: an unguessable name, or
+  binding the track to the soliciting publisher.
+
 ## Required
 
 - [Schema](/quest/m1/stats/schema.md) - hang defines the `stats` and

@@ -1,4 +1,4 @@
-# [M] hang defines the stats and feedback sections and their snapshots
+# [M] hang defines the stats and echo sections and their snapshots
 
 ## Goal
 

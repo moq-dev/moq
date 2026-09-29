@@ -38,10 +38,12 @@ Keyframe requests stay out.
   profile. The target bitrate drops within two intervals of the throttled
   viewer reporting stalls, and recovers after it stops.
 - Document the flag in `doc/bin/cli.md` and the loop in the moq-video README.
+- Open: feedback trust and name collisions, listed in the
+  [README](/quest/m1/stats/README.md). Settle both before starting.
 
 ## Required
 
-- [Schema](/quest/m1/stats/schema.md) - the feedback section and snapshot
+- [Schema](/quest/m1/stats/schema.md) - the `echo` section and feedback snapshot
 - [Rust reporters](/quest/m1/stats/rust.md) - the viewers that report and
   the CLI it wires
 
