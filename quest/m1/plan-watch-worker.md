@@ -60,7 +60,8 @@ browser harness pieces instead of starting another.
 The rewritten implementation quest names the chosen model, the public handle
 shape of `Player` and `<moq-watch>`, what happens to the composable classes,
 the worker bundling (the publish capture worker's `?worker&inline` is the
-precedent; note the CSP `worker-src blob:` consequence), and the follow-up
+precedent; like it, the worker ships a lazy blob plus a hostable file under
+the package's assets base, per [strict CSP](/quest/m1/csp-assets.md)), and the follow-up
 quest for moving publish onto the same worker if the handle model wins.
 
 ## Related
