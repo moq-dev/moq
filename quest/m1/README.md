@@ -28,8 +28,8 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Session close](/quest/m1/session-close.md) - a graceful session end withdraws announces and waits one second for the ack
 - [Drain before close](/quest/m1/drain-before-close.md) - a closing client delivers its queued stream finishes, so `moq import` ends the catalog cleanly over a real relay
 - [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
-- [Page-load marker](/quest/m1/announce-page-load.md) - an announcement stream opened before the first connection waits for its replay before `live`
-- [Empty state](/quest/m1/announce-empty-state.md) - watch, room, and the demo show "no broadcasts" once `live` arrives with nothing announced
+- [Live and offline](/quest/m1/announce-offline.md) - announce streams toggle between `live` and `offline`, holding the set across a reconnect
+- [Empty state](/quest/m1/announce-empty-state.md) - watch, room, and the demo show loading, "no broadcasts", or reconnecting from the `live`/`offline` toggle
 - [JS active count](/quest/m1/js-active-count.md) - @moq/net speaks MoQ Active Count, so its IETF announce consumers go live without a timer
 - [Watch refusal](/quest/m1/watch-refusal.md) - `<moq-watch>` shows an origin refusal as an error instead of sitting offline
 - [kio waiter overflow](/quest/m1/kio-waiter-lost.md) - a retained `Waiter` past 8 lists stops adding a duplicate entry to lists it already recorded
