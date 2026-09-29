@@ -1739,7 +1739,6 @@ test("a late subscriber to a closed unlimited track is not held by the producer"
 	expect(await group?.readString()).toBe("last");
 	expect(await subscriber.recvGroup()).toBeUndefined();
 	subscriber.close();
-	await settle();
 
 	expect(added.filter(([map, key]) => map.has(key)).length).toBe(0);
 });
