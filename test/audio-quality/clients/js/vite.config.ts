@@ -11,9 +11,16 @@
 import { defineConfig } from "vite";
 import { workletInline } from "../../../../js/common/vite-plugin-worklet";
 
-/** esnext keeps WebCodecs / WebTransport syntax intact for headless Chromium. */
+/**
+ * esnext keeps WebCodecs / WebTransport syntax intact for headless Chromium. Three pages: the player
+ * under measurement, and the recorder and microphone publisher that `record.ts` drives.
+ */
 export default defineConfig({
 	base: "./",
 	plugins: [workletInline()],
-	build: { target: "esnext", outDir: "dist" },
+	build: {
+		target: "esnext",
+		outDir: "dist",
+		rollupOptions: { input: ["index.html", "recorder.html", "mic.html"] },
+	},
 });

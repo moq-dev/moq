@@ -25,11 +25,12 @@ rather than merely both passing.
 
 The browser lane has landed as `test/audio-quality/`, upstreamed from the
 reporter's fork on #3477 (`fperex/moq`, branch `debug-findings-solution`) on
-its own, without the fork's player, estimator, or shaper changes. That leaves
-the two things that needed them: real arrival traces, which the [jitter
-target's watch quest](/quest/m0/audio-jitter-target/watch.md) replays, and the
-bursty and step profiles, which need shaper features the fork has and `main`
-does not.
+its own, without the fork's player, estimator, or shaper changes. Real arrival
+traces have landed beside it in `test/audio-quality/traces/`, graded as replay
+rows through the player's container consumer and rings, and replayed by the
+[jitter target's watch quest](/quest/m0/audio-jitter-target/watch.md). That
+leaves the bursty and step profiles, which need shaper features the fork has
+and `main` does not.
 
 Jitter comes from the seeded userspace UDP shaper the transport drills run
 under (`rs/moq-shaper`, documented in `test/drill/README.md`), not from a fake
@@ -43,7 +44,10 @@ audio quality number makes a failure hard to attribute.
 
 Nightly, not per-PR: the matrix is jitter profiles by runtime by codec and
 sample rate, which is more than a merge gate should carry, and `nightly.yml`
-already exists for exactly this trade. Budgets are keyed by the full row, since
+already exists for exactly this trade. The recorded-trace replays are the
+exception: they run in seconds without a browser, so
+`.github/workflows/audio-quality.yml` gates every PR touching the player's
+packages or the harness on them. Budgets are keyed by the full row, since
 each of those dimensions moves the expected floor.
 
 The budgets checked in with the browser lane (#4426) were recorded locally.
@@ -54,7 +58,6 @@ quest](/quest/m0/audio-jitter-target/watch.md).
 
 ## Required
 
-- [Traces](/quest/m0/audio-quality-harness/traces.md) - real arrival traces recorded, checked in, and graded as replay rows
 - [Shaper profiles](/quest/m0/audio-quality-harness/shaper-profiles.md) - the bursty and mid-run step profiles, once moq-shaper can express them
 
 ## Related
