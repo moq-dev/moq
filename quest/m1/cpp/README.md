@@ -31,11 +31,12 @@ Rust side carried across. Continuations run on a default bounded dispatcher
 unless the application installs its own (`uniffi::set_async_dispatcher`); OBS
 installs one that hops to its own threads.
 
-Errors never throw. The fork gains an `error_style = expected` flag so every
-generated method returns `moq::expected<T, moq::Error>` and futures deliver the
-same, which is what lets Unreal and other `-fno-exceptions` builds consume the
-package. `moq::expected` is `std::expected` on C++23 and a bundled
-`tl::expected` below it.
+Errors never throw. The fork's `error_style = "expected"` flag makes every
+fallible generated method return `uniffi::expected<T, moq::MoqError>` and every
+future deliver the same, which is what lets Unreal and other `-fno-exceptions`
+builds consume the package. `uniffi::expected` is `std::expected` on C++23 and a
+bundled `tl::expected` below it; the `moq::` layer renames both. Callback
+interfaces are refused under that flag until one is needed.
 
 One library, C++17 floor (OBS's baseline), feature-gated extras: `co_await`
 on a future under `__cpp_impl_coroutine`, `std::expected` under
@@ -60,17 +61,16 @@ Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
   burden every call site.
 - Callback interfaces are refused under `error_style = "expected"` until a
   consumer needs one; their bridge is built on `std::exception_ptr`.
-- MSVC is covered by the post-merge nightly, not a branch dispatch: branches
-  never dispatch the nightly.
+- MSVC is covered by `platform.yml` on every pull request, not a branch
+  dispatch of the nightly.
 
 ## Required
 
-- [Generator](/quest/m1/cpp/generator.md) - the uniffi 0.32 C++ generator with futures and expected-style errors, pinned and generating `cpp/ffi` in CI
-- [Package](/quest/m1/cpp/package.md) - the `cpp/moq` wrapper, CMake package, release tarball, interop client, and docs
+- [Client settings parity](/quest/m1/cpp/client-config.md) - moq-ffi offers libmoq's client knobs, and the OBS advanced settings get back the ones the migration dropped
+- [Session report parity](/quest/m1/cpp/session-report.md) - a session reports its negotiated draft and reconnect failures, so the OBS dock shows them again
 - [Cancel](/quest/m1/cpp/cancel.md) - a cancelled or consumed future reports `valid() == false`, like `std::future`, and a read of it aborts with a message naming the misuse
 - [macOS alias check](/quest/m1/cpp/macos-alias-check.md) - `just cpp check` passes its alias step with the BSD `sed` macOS ships
 - [C++ standard](/quest/m1/cpp/cxx-standard.md) - a consumer that sets C++23 only on its own target links the package
-- [OBS migration](/quest/m1/cpp/obs.md) - the OBS plugin moves from libmoq handles and trampolines to the generated C++
 
 ## Related
 

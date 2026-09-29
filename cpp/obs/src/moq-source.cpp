@@ -5,12 +5,18 @@
 #include <util/darray.h>
 #include <util/dstr.h>
 
-#include <atomic>
+#include <moq/moq.hpp>
+
+#include <algorithm>
 #include <climits>
+#include <cstring>
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
-#include <errno.h>
-#include <time.h>
+#include <unordered_map>
+#include <utility>
 
 #ifdef _WIN32
 #define strncasecmp _strnicmp
@@ -23,13 +29,13 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/samplefmt.h>
 }
-#include "moq.h"
 
 #include "moq-source.h"
 #include "moq-url.h"
+#include "moq-worker.h"
 #include "logger.h"
 
-// Map codec string from moq_video_config to FFmpeg codec ID
+// Map a catalog video codec string to an FFmpeg codec ID
 static AVCodecID codec_string_to_id(const char *codec, size_t len)
 {
 	if (!codec || len == 0) {
@@ -65,7 +71,7 @@ static AVCodecID codec_string_to_id(const char *codec, size_t len)
 	return AV_CODEC_ID_NONE;
 }
 
-// Map an audio codec string from moq_audio_config to an FFmpeg codec ID. Catalog codec strings follow the
+// Map a catalog audio codec string to an FFmpeg codec ID. Catalog codec strings follow the
 // WebCodecs registry: "mp4a.40.2" (AAC-LC), "mp4a.40.5"/"mp4a.40.29" (HE-AAC v1/v2), "opus".
 static AVCodecID audio_codec_string_to_id(const char *codec, size_t len)
 {
@@ -131,124 +137,56 @@ static enum speaker_layout audio_layout_to_speakers(const AVChannelLayout *layou
 	}
 }
 
-struct moq_source {
-	obs_source_t *source;
+struct moq_source;
 
-	// Settings - current active connection settings
-	char *url;
-	char *broadcast;
-
-	// Shutdown flag - set when destroy begins, callbacks should exit early
-	std::atomic<bool> shutting_down;
-
-	// Lifetime reference count, guarded by mutex. ctx must outlive every libmoq
-	// subscription that was handed `ctx` as user_data: each delivers exactly one
-	// terminal callback (status <= 0), the documented last touch of user_data
-	// (libmoq >= 0.3.0). We hold one reference for the OBS-owned source plus one
-	// per outstanding subscription (session, catalog, video track); a
-	// subscription's reference is released by its terminal callback (see
-	// subscription_ref). destroy drops the owner reference and waits for the
-	// count to reach zero before freeing.
-	int refs;
-	pthread_cond_t refs_zero; // signaled when refs reaches 0
-
-	// Session handles (all negative = invalid)
-	std::atomic<uint32_t> generation; // Increments on reconnect
-	bool reconnect_in_progress;       // True while reconnect is happening
-	int32_t origin;
-	int32_t session;
-	int32_t request;
-	int32_t consume;
-	int32_t catalog_handle;
-	int32_t video_track;
-	uint64_t catalog_attempt;
-	uint64_t video_attempt;
-	int32_t audio_track;
-	uint64_t audio_attempt;
-
-	// Audio decoder state (audio rendition 0, when the catalog carries one). Frames arrive encoded
-	// (AAC/Opus) with the broadcast's presentation timestamps; decoded to PCM and handed to OBS as async
-	// audio carrying those timestamps, so OBS aligns them with the async video.
-	AVCodecContext *audio_codec_ctx;
-	uint32_t audio_sample_rate;
-	uint32_t audio_channels;
-	uint64_t audio_frames_output;
-
-	// Decoder state
-	AVCodecContext *codec_ctx;
-	AVCodecID current_codec_id;         // Currently configured codec
-	enum AVPixelFormat current_pix_fmt; // Current pixel format for sws_ctx
-	struct SwsContext *sws_ctx;
-	bool got_keyframe;
-	uint32_t frames_waiting_for_keyframe; // Count of skipped frames while waiting
-	uint32_t consecutive_decode_errors;   // Count of consecutive decode failures
-
-	// Output frame buffer
-	struct obs_source_frame frame;
-	uint8_t *frame_buffer;
-
-	// Threading
-	pthread_mutex_t mutex;
-};
-
-// RAII helper that releases a subscription's lifetime reference when its async
-// callback returns. libmoq (>= 0.3.0) hands `ctx` to each subscription as
-// user_data and guarantees exactly one terminal callback (status code <= 0),
-// after which user_data is never touched again. Each callback constructs one of
-// these with `terminal` set on that terminal code; on scope exit it drops the
-// matching reference and wakes moq_source_destroy when the last one is gone.
-// Releasing on scope exit (not entry) keeps ctx valid for the whole callback
-// body, including a terminal callback that still reads ctx before returning.
-//
-// Because libmoq runs all callbacks on a single runtime thread, a subscription's
-// reference is held continuously from registration through its terminal
-// callback, so ctx is always valid on entry to any of its callbacks - no
-// shutting_down pre-check is needed for safety.
 namespace {
-struct subscription_ref {
-	struct moq_source *ctx;
-	bool terminal;
 
-	subscription_ref(struct moq_source *c, bool is_terminal) : ctx(c), terminal(is_terminal) {}
+// One subscribed track: what it is, the consumer once subscribed, and the pending
+// call that resolves, subscribes, or reads its next frame. Dropping it cancels that call.
+struct Track {
+	using Decode = void (*)(struct moq_source *, const moq::MediaFrame &);
 
-	~subscription_ref()
+	Track(const char *kind, std::string name, moq::Container container, Decode decode)
+		: kind(kind),
+		  name(std::move(name)),
+		  container(std::move(container)),
+		  decode(decode)
 	{
-		if (!terminal)
-			return;
-		pthread_mutex_lock(&ctx->mutex);
-		if (--ctx->refs == 0)
-			pthread_cond_broadcast(&ctx->refs_zero);
-		pthread_mutex_unlock(&ctx->mutex);
 	}
 
-	subscription_ref(const subscription_ref &) = delete;
-	subscription_ref &operator=(const subscription_ref &) = delete;
+	// "Video" or "Audio", for the log.
+	const char *kind;
+	std::string name;
+	moq::Container container;
+	// Decodes one frame and hands it to OBS, under ctx->mutex.
+	Decode decode;
+
+	std::shared_ptr<moq::MediaConsumer> consumer;
+	std::optional<moq::Continuation> call;
 };
 
-// user_data for a single moq_origin_announced_broadcast. The generation must travel
-// with the request rather than live on ctx: a reconnect can issue a new request while
-// an older one still has a delivery in flight, and a single slot on ctx would let
-// that stale delivery read the new generation and pass the staleness check.
-// Allocated before the request exists and freed by its terminal on_broadcast.
-struct broadcast_request {
-	struct moq_source *ctx;
-	uint32_t gen;
-};
+// Everything one connect owns, from the client to the tracks. A reconnect, a
+// settings change, a terminal failure, or destroy drops it whole, which cancels
+// every pending call it holds.
+struct Connection {
+	std::string url;
+	std::string broadcast;
 
-// Identifies one subscription even after a reconnect or catalog update replaces
-// the handle stored on moq_source. The caller keeps the state alive until the
-// registration call returns; the terminal callback owns callback_data.
-struct callback_state {
-	struct moq_source *ctx;
-	uint32_t gen;
-	uint64_t attempt;
-	std::atomic<bool> terminal{false};
+	std::shared_ptr<moq::Client> client;
+	std::shared_ptr<moq::Session> session;
+	std::shared_ptr<moq::AnnouncedBroadcast> announced;
+	std::shared_ptr<moq::BroadcastConsumer> consumer;
+	std::shared_ptr<moq::CatalogConsumer> catalog;
 
-	callback_state(struct moq_source *ctx, uint32_t gen, uint64_t attempt) : ctx(ctx), gen(gen), attempt(attempt) {}
-};
+	// The connect, then the session's status transitions.
+	std::optional<moq::Continuation> session_call;
+	// Waiting for the broadcast to be announced, then subscribing to its catalog.
+	std::optional<moq::Continuation> broadcast_call;
+	// The next catalog update.
+	std::optional<moq::Continuation> catalog_call;
 
-struct callback_data {
-	std::shared_ptr<callback_state> state;
+	std::shared_ptr<Track> video;
+	std::shared_ptr<Track> audio;
 };
 
 struct prepared_decoder {
@@ -276,7 +214,48 @@ struct prepared_audio_decoder {
 			avcodec_free_context(&codec_ctx);
 	}
 };
+
 } // namespace
+
+struct moq_source {
+	obs_source_t *source = nullptr;
+
+	// Guards everything below. Every continuation takes it, so it also serializes
+	// them against update and destroy on the OBS threads.
+	std::mutex mutex;
+
+	// Settings - current active connection settings
+	std::string url;
+	std::string broadcast;
+
+	// The current connection, or null while disconnected. A continuation for any
+	// other connection is stale and returns without touching anything.
+	std::shared_ptr<Connection> connection;
+
+	// Audio decoder state (audio rendition 0, when the catalog carries one). Frames arrive encoded
+	// (AAC/Opus) with the broadcast's presentation timestamps; decoded to PCM and handed to OBS as async
+	// audio carrying those timestamps, so OBS aligns them with the async video.
+	AVCodecContext *audio_codec_ctx = nullptr;
+	uint32_t audio_sample_rate = 0;
+	uint32_t audio_channels = 0;
+	uint64_t audio_frames_output = 0;
+
+	// Decoder state
+	AVCodecContext *codec_ctx = nullptr;
+	AVCodecID current_codec_id = AV_CODEC_ID_NONE;        // Currently configured codec
+	enum AVPixelFormat current_pix_fmt = AV_PIX_FMT_NONE; // Current pixel format for sws_ctx
+	struct SwsContext *sws_ctx = nullptr;
+	bool got_keyframe = false;
+	uint32_t frames_waiting_for_keyframe = 0; // Count of skipped frames while waiting
+	uint32_t consecutive_decode_errors = 0;   // Count of consecutive decode failures
+
+	// Output frame buffer
+	struct obs_source_frame frame = {};
+	uint8_t *frame_buffer = nullptr;
+
+	// Runs every continuation; destroy stops it before freeing the source.
+	MoQWorker worker;
+};
 
 // Forward declarations
 static void moq_source_update(void *data, obs_data_t *settings);
@@ -284,83 +263,64 @@ static void moq_source_destroy(void *data);
 static obs_properties_t *moq_source_properties(void *data);
 static void moq_source_get_defaults(obs_data_t *settings);
 
-// MoQ callbacks
-static void on_session_status(void *user_data, int32_t code);
-static void on_broadcast(void *user_data, int32_t broadcast);
-static void on_catalog(void *user_data, int32_t catalog);
-static void on_video_frame(void *user_data, int32_t frame_id);
-static void on_audio_frame(void *user_data, int32_t frame_id);
-
 // Helper functions
 static void moq_source_reconnect(struct moq_source *ctx);
 static void moq_source_disconnect_locked(struct moq_source *ctx);
 static void moq_source_blank_video(struct moq_source *ctx);
-static std::unique_ptr<prepared_decoder> moq_source_prepare_decoder(const struct moq_video_config *config);
+static void moq_source_on_connect(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				  moq::expected<std::shared_ptr<moq::Session>> result);
+static void moq_source_on_broadcast(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				    moq::expected<std::shared_ptr<moq::BroadcastConsumer>> result);
+static void moq_source_on_catalogs(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				   moq::expected<std::shared_ptr<moq::CatalogConsumer>> result);
+static void moq_source_watch_status(struct moq_source *ctx, const std::shared_ptr<Connection> &conn);
+static void moq_source_on_status(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				 moq::expected<moq::ConnectionStatus> result);
+static void moq_source_on_catalog(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				  moq::expected<std::optional<moq::Catalog>> result);
+static void moq_source_next_catalog(struct moq_source *ctx, const std::shared_ptr<Connection> &conn);
+static std::unique_ptr<prepared_decoder> moq_source_prepare_decoder(const moq::Video &config);
 static void moq_source_install_decoder_locked(struct moq_source *ctx, std::unique_ptr<prepared_decoder> decoder);
 static void moq_source_destroy_decoder_locked(struct moq_source *ctx);
 static void moq_source_clear_video_locked(struct moq_source *ctx);
-static void moq_source_subscribe_video(struct moq_source *ctx, int32_t catalog, uint32_t current_gen);
-static std::unique_ptr<prepared_audio_decoder> moq_source_prepare_audio_decoder(const struct moq_audio_config *config);
+static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				       const moq::Catalog &catalog);
+static std::unique_ptr<prepared_audio_decoder> moq_source_prepare_audio_decoder(const moq::Audio &config);
 static void moq_source_install_audio_decoder_locked(struct moq_source *ctx,
 						    std::unique_ptr<prepared_audio_decoder> decoder);
 static void moq_source_destroy_audio_decoder_locked(struct moq_source *ctx);
 static void moq_source_clear_audio_locked(struct moq_source *ctx);
-static void moq_source_decode_audio_frame(struct moq_source *ctx, int32_t frame_id);
-static void moq_source_subscribe_audio(struct moq_source *ctx, int32_t catalog, uint32_t current_gen);
-static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id);
+static void moq_source_decode_audio_frame(struct moq_source *ctx, const moq::MediaFrame &frame_data);
+static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				       const moq::Catalog &catalog);
+static void moq_source_decode_frame(struct moq_source *ctx, const moq::MediaFrame &frame_data);
+
+// Wraps a continuation so it runs under ctx->mutex, and only while `conn` is still
+// the source's connection. Dropping a connection cancels its calls, but a result
+// that already completed may be queued on the worker by then.
+template<typename Output, typename Callback>
+static std::function<void(Output)> moq_source_current(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+						      Callback callback)
+{
+	return [ctx, weak = std::weak_ptr<Connection>(conn), callback = std::move(callback)](Output output) {
+		std::lock_guard<std::mutex> lock(ctx->mutex);
+		auto current = weak.lock();
+		if (!current || current != ctx->connection)
+			return;
+		callback(ctx, current, std::move(output));
+	};
+}
 
 static void *moq_source_create(obs_data_t *settings, obs_source_t *source)
 {
-	struct moq_source *ctx = (struct moq_source *)bzalloc(sizeof(struct moq_source));
+	auto *ctx = new moq_source();
 	ctx->source = source;
 
-	// Initialize shutdown flag
-	ctx->shutting_down = false;
-
-	// One lifetime reference for the OBS-owned source itself; each subscription
-	// adds its own while outstanding.
-	ctx->refs = 1;
-	pthread_cond_init(&ctx->refs_zero, NULL);
-
-	// Initialize handles to invalid values
-	ctx->generation = 0;
-	ctx->reconnect_in_progress = false;
-	ctx->origin = -1;
-	ctx->session = -1;
-	ctx->request = -1;
-	ctx->consume = -1;
-	ctx->catalog_handle = -1;
-	ctx->video_track = -1;
-	ctx->audio_track = -1;
-	ctx->audio_attempt = 0;
-	ctx->audio_codec_ctx = NULL;
-	ctx->audio_sample_rate = 0;
-	ctx->audio_channels = 0;
-	ctx->audio_frames_output = 0;
-	ctx->catalog_attempt = 0;
-	ctx->video_attempt = 0;
-
-	// Initialize decoder state
-	ctx->codec_ctx = NULL;
-	ctx->current_codec_id = AV_CODEC_ID_NONE;
-	ctx->current_pix_fmt = AV_PIX_FMT_NONE;
-	ctx->sws_ctx = NULL;
-	ctx->got_keyframe = false;
-	ctx->frames_waiting_for_keyframe = 0;
-	ctx->consecutive_decode_errors = 0;
-	ctx->frame_buffer = NULL;
-
-	// Initialize threading
-	pthread_mutex_init(&ctx->mutex, NULL);
-
-	// Initialize OBS frame structure - dimensions will be set dynamically from stream
-	ctx->frame.width = 0;
-	ctx->frame.height = 0;
+	// Dimensions will be set dynamically from the stream.
 	ctx->frame.format = VIDEO_FORMAT_RGBA;
-	ctx->frame.linesize[0] = 0;
 
 	// Load settings from OBS - this will auto-connect if settings are valid
-	// (moq_source_update detects settings changed from NULL and reconnects)
+	// (moq_source_update detects settings changed from empty and reconnects)
 	moq_source_update(ctx, settings);
 
 	return ctx;
@@ -368,56 +328,20 @@ static void *moq_source_create(obs_data_t *settings, obs_source_t *source)
 
 static void moq_source_destroy(void *data)
 {
-	struct moq_source *ctx = (struct moq_source *)data;
+	auto *ctx = static_cast<struct moq_source *>(data);
 
-	pthread_mutex_lock(&ctx->mutex);
-	ctx->shutting_down = true;
-
-	// Close every subscription. Each was handed `ctx` as user_data and now
-	// delivers its terminal callback, which releases the matching reference.
-	// Closing via the handle makes that terminal fire promptly (libmoq's close
-	// path wins over any pending update), so the wait below is real quiescence,
-	// not a timing guess.
-	moq_source_disconnect_locked(ctx);
-
-	// Drop the owner reference, then wait for the outstanding subscriptions to
-	// deliver their terminal callbacks before freeing ctx. The generous bounded
-	// wait is a backstop against a subscription that never terminates (a libmoq
-	// bug or an unaccounted handle): far better to log and proceed than to hang
-	// OBS on source deletion. In normal operation the terminals arrive within
-	// milliseconds and the timeout is never reached.
-	bool timed_out = false;
-	if (--ctx->refs > 0) {
-		struct timespec deadline;
-		timespec_get(&deadline, TIME_UTC);
-		deadline.tv_sec += 2;
-		while (ctx->refs > 0) {
-			if (pthread_cond_timedwait(&ctx->refs_zero, &ctx->mutex, &deadline) == ETIMEDOUT) {
-				LOG_WARNING("Teardown timed out with %d MoQ callback(s) still outstanding; "
-					    "leaking ctx to avoid a use-after-free",
-					    ctx->refs);
-				timed_out = true;
-				break;
-			}
-		}
+	{
+		// Dropping the connection cancels every call it had pending.
+		std::lock_guard<std::mutex> lock(ctx->mutex);
+		moq_source_disconnect_locked(ctx);
 	}
-	pthread_mutex_unlock(&ctx->mutex);
 
-	// A subscription callback still holds ctx (it references ctx->mutex,
-	// ctx->refs, ctx->refs_zero). Freeing now would be a use-after-free when
-	// that callback fires, so intentionally leak instead. This only happens on
-	// the abnormal timeout path above.
-	if (timed_out)
-		return;
+	// Drops whatever is still queued and waits out a continuation in flight, which
+	// may be parked on ctx->mutex; so this must not hold it. Nothing touches ctx
+	// once it returns.
+	ctx->worker.Stop();
 
-	bfree(ctx->url);
-	bfree(ctx->broadcast);
-	// Note: frame_buffer is already freed by moq_source_disconnect_locked
-
-	pthread_cond_destroy(&ctx->refs_zero);
-	pthread_mutex_destroy(&ctx->mutex);
-
-	bfree(ctx);
+	delete ctx;
 }
 
 // Relay URLs can embed credentials (userinfo) or a query/path token; MoQRedactUrl
@@ -425,42 +349,35 @@ static void moq_source_destroy(void *data)
 
 static void moq_source_update(void *data, obs_data_t *settings)
 {
-	struct moq_source *ctx = (struct moq_source *)data;
+	auto *ctx = static_cast<struct moq_source *>(data);
 
-	const char *url = obs_data_get_string(settings, "url");
-	const char *broadcast = obs_data_get_string(settings, "broadcast");
+	const char *url_value = obs_data_get_string(settings, "url");
+	const char *broadcast_value = obs_data_get_string(settings, "broadcast");
+	const std::string url = url_value ? url_value : "";
+	const std::string broadcast = broadcast_value ? broadcast_value : "";
 
-	pthread_mutex_lock(&ctx->mutex);
-
-	// Check if settings actually changed
-	bool url_changed = (!ctx->url && url && strlen(url) > 0) || (ctx->url && !url) ||
-			   (ctx->url && url && strcmp(ctx->url, url) != 0);
-	bool broadcast_changed = (!ctx->broadcast && broadcast && strlen(broadcast) > 0) ||
-				 (ctx->broadcast && !broadcast) ||
-				 (ctx->broadcast && broadcast && strcmp(ctx->broadcast, broadcast) != 0);
-	bool settings_changed = url_changed || broadcast_changed;
-
-	// Store the new settings
-	bfree(ctx->url);
-	ctx->url = bstrdup(url);
-	bfree(ctx->broadcast);
-	ctx->broadcast = bstrdup(broadcast);
+	bool settings_changed;
+	{
+		std::lock_guard<std::mutex> lock(ctx->mutex);
+		settings_changed = url != ctx->url || broadcast != ctx->broadcast;
+		ctx->url = url;
+		ctx->broadcast = broadcast;
+	}
 
 	// Check if new settings are valid for connection
-	bool valid = ctx->url && ctx->broadcast && strlen(ctx->url) > 0 && strlen(ctx->broadcast) > 0;
-
-	pthread_mutex_unlock(&ctx->mutex);
+	const bool valid = !url.empty() && !broadcast.empty();
 
 	// If settings changed and are valid, reconnect
 	if (settings_changed && valid) {
 		LOG_INFO("Settings changed, reconnecting (url=%s, broadcast=%s)", MoQRedactUrl(url).c_str(),
-			 broadcast ? broadcast : "(null)");
+			 broadcast.c_str());
 		moq_source_reconnect(ctx);
 	} else if (settings_changed && !valid) {
 		LOG_INFO("Settings changed but invalid - disconnecting");
-		pthread_mutex_lock(&ctx->mutex);
-		moq_source_disconnect_locked(ctx);
-		pthread_mutex_unlock(&ctx->mutex);
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			moq_source_disconnect_locked(ctx);
+		}
 		moq_source_blank_video(ctx);
 	}
 }
@@ -483,719 +400,351 @@ static obs_properties_t *moq_source_properties(void *data)
 	return props;
 }
 
-// Forward declaration for use in callback
-static void moq_source_start_consume(struct moq_source *ctx, uint32_t expected_gen);
-
-// MoQ callback implementations
-static void on_session_status(void *user_data, int32_t code)
+// Tear down the connection after a failure to reach playable media, leaving the
+// source disconnected so the next update/reconnect starts clean.
+//
+// NOTE: Caller must hold ctx->mutex.
+static void moq_source_fail_locked(struct moq_source *ctx)
 {
-	auto *data = static_cast<callback_data *>(user_data);
-	auto state = data->state;
-	struct moq_source *ctx = state->ctx;
-
-	// Hold this session subscription's reference for the callback's lifetime. A
-	// terminal status (<= 0) means the session task has ended and will not touch
-	// ctx again, so the reference is released when `ref` goes out of scope.
-	subscription_ref ref(ctx, code <= 0);
-	std::unique_ptr<callback_data> owned;
-	if (code <= 0) {
-		state->terminal = true;
-		owned.reset(data);
-	}
-
-	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->shutting_down.load()) {
-		// Teardown in progress; nothing to do (a terminal callback still
-		// releases its reference via `ref`).
-		pthread_mutex_unlock(&ctx->mutex);
-		return;
-	}
-	if (ctx->generation != state->gen) {
-		LOG_DEBUG("Ignoring stale session status callback");
-		pthread_mutex_unlock(&ctx->mutex);
-		return;
-	}
-	uint32_t current_gen = state->gen;
-	if (code <= 0)
-		ctx->session = -1;
-	else if (ctx->origin < 0) {
-		LOG_DEBUG("Ignoring session status callback - already disconnected");
-		pthread_mutex_unlock(&ctx->mutex);
-		return;
-	}
-
-	// libmoq status codes (>= 0.3.0):
-	//   > 0 : (re)connected, carrying the connection epoch (1 = first connect,
-	//         2 = first reconnect, ...). The session auto-reconnects internally.
-	//   = 0 : closed cleanly via moq_session_close (terminal) - we initiated it.
-	//   < 0 : reconnect permanently gave up or fatal error (terminal).
-	if (code > 0) {
-		pthread_mutex_unlock(&ctx->mutex);
-		LOG_INFO("MoQ session connected (generation %u, epoch %d)", current_gen, code);
-		// Start consuming only on the first connect. On later epochs libmoq has
-		// re-subscribed our existing consumer automatically (the origin outlives
-		// the connection), so recreating it would leak handles.
-		if (code == 1) {
-			moq_source_start_consume(ctx, current_gen);
-		}
-	} else if (code == 0) {
-		// Clean close - we asked for this (disconnect/reconnect/destroy). The
-		// handle is already being torn down; nothing to do here.
-		pthread_mutex_unlock(&ctx->mutex);
-		LOG_DEBUG("MoQ session closed cleanly (generation %u)", current_gen);
-	} else {
-		// Terminal error (e.g. auth failure, or reconnect gave up). Tear down
-		// every subscription, not just the session, so the catalog/video
-		// subscriptions also fire their terminal callbacks and release their
-		// references promptly instead of lingering until the source is destroyed.
-		LOG_ERROR("MoQ session error: %d (generation %u)", code, current_gen);
-		moq_source_disconnect_locked(ctx);
-		pthread_mutex_unlock(&ctx->mutex);
-
-		// Blank the video to show error state
-		moq_source_blank_video(ctx);
-	}
+	moq_source_disconnect_locked(ctx);
+	moq_source_blank_video(ctx);
 }
 
-static void on_catalog(void *user_data, int32_t catalog)
-{
-	auto *data = static_cast<callback_data *>(user_data);
-	auto state = data->state;
-	struct moq_source *ctx = state->ctx;
-
-	// Hold the catalog subscription's reference for the callback's lifetime;
-	// release it when this is the terminal callback (catalog <= 0).
-	subscription_ref ref(ctx, catalog <= 0);
-	std::unique_ptr<callback_data> owned;
-	if (catalog <= 0) {
-		state->terminal = true;
-		owned.reset(data);
-	}
-
-	if (catalog <= 0) {
-		pthread_mutex_lock(&ctx->mutex);
-		bool current = ctx->generation == state->gen && ctx->catalog_attempt == state->attempt;
-		if (current)
-			ctx->catalog_handle = -1;
-		pthread_mutex_unlock(&ctx->mutex);
-		if (catalog < 0) {
-			LOG_ERROR("Catalog subscription error: %d", catalog);
-			// Surface a current subscription failure, but not a stale callback or
-			// our own teardown.
-			if (current && !ctx->shutting_down.load())
-				moq_source_blank_video(ctx);
-		} else {
-			LOG_DEBUG("Catalog subscription closed cleanly");
-		}
-		return;
-	}
-
-	LOG_INFO("Catalog callback received: %d", catalog);
-
-	// `catalog` is a catalog *snapshot* id (a different slab from the
-	// subscription handle stored in ctx->catalog_handle). It must be freed with
-	// moq_consume_catalog_free on every path below - never closed.
-	pthread_mutex_lock(&ctx->mutex);
-	bool stale = ctx->shutting_down.load() || ctx->generation != state->gen ||
-		     ctx->catalog_attempt != state->attempt || ctx->consume < 0;
-	uint32_t current_gen = state->gen;
-	pthread_mutex_unlock(&ctx->mutex);
-	if (stale) {
-		// Disconnected or shutting down; ignore this snapshot.
-		moq_consume_catalog_free(catalog);
-		return;
-	}
-	// Audio and video are independent catalog sections. Attempt both from this
-	// snapshot before freeing it, even when either rendition is absent or
-	// unsupported.
-	moq_source_subscribe_video(ctx, catalog, current_gen);
-	moq_source_subscribe_audio(ctx, catalog, current_gen);
-	moq_consume_catalog_free(catalog);
-}
-
-static void moq_source_subscribe_video(struct moq_source *ctx, int32_t catalog, uint32_t current_gen)
-{
-	struct moq_video_config video_config;
-	if (moq_consume_video_config(catalog, 0, &video_config) < 0) {
-		LOG_INFO("Catalog has no video rendition; audio only");
-		pthread_mutex_lock(&ctx->mutex);
-		bool clear = ctx->generation == current_gen && !ctx->shutting_down.load() && ctx->consume >= 0;
-		if (clear)
-			moq_source_clear_video_locked(ctx);
-		pthread_mutex_unlock(&ctx->mutex);
-		if (clear)
-			moq_source_blank_video(ctx);
-		return;
-	}
-
-	// Build the decoder without replacing the current one. The snapshot owns the
-	// config pointers, so preparation also copies everything the decoder needs.
-	auto decoder = moq_source_prepare_decoder(&video_config);
-	if (!decoder) {
-		LOG_ERROR("Failed to initialize decoder");
-		pthread_mutex_lock(&ctx->mutex);
-		bool clear = ctx->generation == current_gen && !ctx->shutting_down.load() && ctx->consume >= 0;
-		if (clear)
-			moq_source_clear_video_locked(ctx);
-		pthread_mutex_unlock(&ctx->mutex);
-		if (clear)
-			moq_source_blank_video(ctx);
-		return;
-	}
-	// Pre-account for the video track subscription before handing ctx to libmoq,
-	// so its reference is in place the instant the subscription exists. Reserve
-	// the next attempt without making it current until creation succeeds, so a
-	// rejected replacement does not invalidate the existing track.
-	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->generation != current_gen || ctx->shutting_down.load() || ctx->consume < 0) {
-		pthread_mutex_unlock(&ctx->mutex);
-		return;
-	}
-	uint64_t video_attempt = ctx->video_attempt + 1;
-	ctx->refs++;
-	pthread_mutex_unlock(&ctx->mutex);
-	auto video_state = std::make_shared<callback_state>(ctx, current_gen, video_attempt);
-	auto *video_data = new callback_data{video_state};
-
-	// Subscribe to the video track (index 0). This takes the catalog snapshot,
-	// not the consume handle, and does not retain it.
-	int32_t track = moq_consume_video(catalog, 0, 0, on_video_frame, video_data);
-	if (track < 0) {
-		LOG_ERROR("Failed to subscribe to video track: %d", track);
-		delete video_data;
-		pthread_mutex_lock(&ctx->mutex);
-		// No subscription was created, so no terminal will fire; undo the ref.
-		if (--ctx->refs == 0)
-			pthread_cond_broadcast(&ctx->refs_zero);
-		pthread_mutex_unlock(&ctx->mutex);
-		return;
-	}
-
-	// The video track subscription now exists and will deliver a terminal
-	// on_video_frame (<= 0) that releases the reference added above - even on the
-	// cleanup path below.
-	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->generation == current_gen && ctx->video_attempt + 1 == video_attempt && !ctx->shutting_down.load() &&
-	    !video_state->terminal.load()) {
-		// A catalog update can arrive while a track is already subscribed; close
-		// the previous one so its terminal callback releases its reference (else
-		// it would linger until teardown's bounded wait).
-		int32_t old_track = ctx->video_track;
-		moq_source_install_decoder_locked(ctx, std::move(decoder));
-		ctx->video_attempt = video_attempt;
-		ctx->video_track = track;
-		pthread_mutex_unlock(&ctx->mutex);
-		if (old_track >= 0)
-			moq_consume_video_cancel(old_track);
-		LOG_INFO("Subscribed to video track successfully");
-	} else {
-		// Stale or shutting down: close the track we just created; its terminal
-		// callback releases the reference added above.
-		pthread_mutex_unlock(&ctx->mutex);
-		if (!video_state->terminal.load())
-			moq_consume_video_cancel(track);
-	}
-}
-
-static void on_video_frame(void *user_data, int32_t frame_id)
-{
-	auto *data = static_cast<callback_data *>(user_data);
-	auto state = data->state;
-	struct moq_source *ctx = state->ctx;
-
-	// Hold the video track subscription's reference for the callback's lifetime
-	// (which includes the FFmpeg decode in moq_source_decode_frame); release it
-	// on the terminal callback (frame_id <= 0).
-	subscription_ref ref(ctx, frame_id <= 0);
-	std::unique_ptr<callback_data> owned;
-	if (frame_id <= 0) {
-		state->terminal = true;
-		owned.reset(data);
-		pthread_mutex_lock(&ctx->mutex);
-		if (ctx->generation == state->gen && ctx->video_attempt == state->attempt)
-			ctx->video_track = -1;
-		pthread_mutex_unlock(&ctx->mutex);
-	}
-
-	if (frame_id <= 0) {
-		if (frame_id < 0)
-			LOG_ERROR("Video track error: %d", frame_id);
-		else
-			LOG_DEBUG("Video track closed cleanly");
-		return;
-	}
-
-	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->shutting_down.load() || ctx->generation != state->gen || ctx->video_attempt != state->attempt ||
-	    ctx->consume < 0) {
-		// Shutting down or disconnected: drop the frame.
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
-		return;
-	}
-	pthread_mutex_unlock(&ctx->mutex);
-
-	moq_source_decode_frame(ctx, frame_id);
-}
-
-// Subscribe to audio rendition `index` of a catalog snapshot (the caller still owns the snapshot) and
-// install the matching decoder. Mirrors the video path: pre-account the subscription's lifetime reference
-// and reserve the next attempt, subscribe with a callback_state carrying (generation, attempt), then make it
-// current under the mutex only on success. A broadcast with no audio rendition stays video-only (not an error).
-static void moq_source_subscribe_audio(struct moq_source *ctx, int32_t catalog, uint32_t current_gen)
-{
-	struct moq_audio_config audio_config;
-	if (moq_consume_audio_config(catalog, 0, &audio_config) < 0) {
-		LOG_INFO("Catalog has no audio rendition; video only");
-		pthread_mutex_lock(&ctx->mutex);
-		if (ctx->generation == current_gen && !ctx->shutting_down.load() && ctx->consume >= 0)
-			moq_source_clear_audio_locked(ctx);
-		pthread_mutex_unlock(&ctx->mutex);
-		return;
-	}
-	auto decoder = moq_source_prepare_audio_decoder(&audio_config);
-	if (!decoder) {
-		LOG_ERROR("Failed to initialize audio decoder; stopping audio");
-		pthread_mutex_lock(&ctx->mutex);
-		if (ctx->generation == current_gen && !ctx->shutting_down.load() && ctx->consume >= 0)
-			moq_source_clear_audio_locked(ctx);
-		pthread_mutex_unlock(&ctx->mutex);
-		return;
-	}
-	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->generation != current_gen || ctx->shutting_down.load() || ctx->consume < 0) {
-		pthread_mutex_unlock(&ctx->mutex);
-		return;
-	}
-	uint64_t audio_attempt = ctx->audio_attempt + 1;
-	ctx->refs++;
-	pthread_mutex_unlock(&ctx->mutex);
-	auto audio_state = std::make_shared<callback_state>(ctx, current_gen, audio_attempt);
-	auto *audio_data = new callback_data{audio_state};
-
-	int32_t track = moq_consume_audio(catalog, 0, 0, on_audio_frame, audio_data);
-	if (track < 0) {
-		LOG_ERROR("Failed to subscribe to audio track: %d", track);
-		delete audio_data;
-		pthread_mutex_lock(&ctx->mutex);
-		if (--ctx->refs == 0)
-			pthread_cond_broadcast(&ctx->refs_zero);
-		pthread_mutex_unlock(&ctx->mutex);
-		return;
-	}
-	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->generation == current_gen && ctx->audio_attempt + 1 == audio_attempt && !ctx->shutting_down.load() &&
-	    !audio_state->terminal.load()) {
-		int32_t old_track = ctx->audio_track;
-		uint32_t sample_rate = decoder->sample_rate;
-		uint32_t channels = decoder->channels;
-		moq_source_install_audio_decoder_locked(ctx, std::move(decoder));
-		ctx->audio_attempt = audio_attempt;
-		ctx->audio_track = track;
-		pthread_mutex_unlock(&ctx->mutex);
-		if (old_track >= 0)
-			moq_consume_audio_cancel(old_track);
-		LOG_INFO("Subscribed to audio track successfully (%u Hz, %u ch)", sample_rate, channels);
-	} else {
-		pthread_mutex_unlock(&ctx->mutex);
-		if (!audio_state->terminal.load())
-			moq_consume_audio_cancel(track);
-	}
-}
-
-static void on_audio_frame(void *user_data, int32_t frame_id)
-{
-	auto *data = static_cast<callback_data *>(user_data);
-	auto state = data->state;
-	struct moq_source *ctx = state->ctx;
-
-	// Same lifetime contract as the video track: hold the subscription's reference for the callback,
-	// release it on the terminal callback (frame_id <= 0).
-	subscription_ref ref(ctx, frame_id <= 0);
-	std::unique_ptr<callback_data> owned;
-	if (frame_id <= 0) {
-		state->terminal = true;
-		owned.reset(data);
-		pthread_mutex_lock(&ctx->mutex);
-		if (ctx->generation == state->gen && ctx->audio_attempt == state->attempt)
-			ctx->audio_track = -1;
-		pthread_mutex_unlock(&ctx->mutex);
-	}
-
-	if (frame_id <= 0) {
-		if (frame_id < 0)
-			LOG_ERROR("Audio track error: %d", frame_id);
-		else
-			LOG_DEBUG("Audio track closed cleanly");
-		return;
-	}
-
-	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->shutting_down.load() || ctx->generation != state->gen || ctx->audio_attempt != state->attempt ||
-	    ctx->consume < 0) {
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
-		return;
-	}
-	pthread_mutex_unlock(&ctx->mutex);
-
-	moq_source_decode_audio_frame(ctx, frame_id);
-}
-
-// Helper function implementations
 static void moq_source_reconnect(struct moq_source *ctx)
 {
-	// Increment generation to invalidate old callbacks
-	pthread_mutex_lock(&ctx->mutex);
-
-	// Never start a new connection once teardown has begun: it would register a
-	// subscription after destroy already closed everything, leaking its
-	// reference until the bounded wait times out. (OBS serializes update/destroy
-	// so this is defense-in-depth.)
-	if (ctx->shutting_down.load()) {
-		pthread_mutex_unlock(&ctx->mutex);
-		return;
-	}
-
-	// Check if reconnect is already in progress
-	if (ctx->reconnect_in_progress) {
-		LOG_DEBUG("Reconnect already in progress, skipping");
-		pthread_mutex_unlock(&ctx->mutex);
-		return;
-	}
-
-	ctx->reconnect_in_progress = true;
-	uint32_t new_gen = ctx->generation.load() + 1;
-	LOG_INFO("Reconnecting (generation %u -> %u)", ctx->generation.load(), new_gen);
-	ctx->generation.store(new_gen);
+	std::lock_guard<std::mutex> lock(ctx->mutex);
 	moq_source_disconnect_locked(ctx);
-
-	// Copy URL while holding mutex for thread safety
-	char *url_copy = bstrdup(ctx->url);
-	pthread_mutex_unlock(&ctx->mutex);
 
 	// Blank video while reconnecting to avoid showing stale frames
 	moq_source_blank_video(ctx);
 
-	// No delay needed before reconnecting: libmoq origins and sessions are fully
-	// independent (each origin is a distinct random instance, each session its own
-	// task), so the new connection shares no client-side state with the one we just
-	// closed. moq_origin_close removes the origin synchronously, and moq_session_close
-	// only signals the old session's task to wind down asynchronously on the libmoq
-	// runtime thread - nothing the new origin/session can collide with. (The previous
-	// os_sleep_ms(50) here was a timing band-aid that provided no real guarantee.)
+	auto conn = std::make_shared<Connection>();
+	conn->url = ctx->url;
+	conn->broadcast = ctx->broadcast;
+	// The source dials with the defaults. Neither origin side is wired, so the
+	// session's consume side carries the remote's announcements.
+	conn->client = moq::Client::init();
+	ctx->connection = conn;
 
-	// Create origin for consuming (outside mutex since it may block)
-	int32_t new_origin = moq_origin_create();
-	if (new_origin < 0) {
-		LOG_ERROR("Failed to create origin: %d", new_origin);
-		bfree(url_copy);
-		pthread_mutex_lock(&ctx->mutex);
-		ctx->reconnect_in_progress = false;
-		pthread_mutex_unlock(&ctx->mutex);
-		return;
-	}
-	auto state = std::make_shared<callback_state>(ctx, new_gen, 0);
-	auto *data = new callback_data{state};
+	LOG_INFO("Connecting to MoQ server: %s", MoQRedactUrl(conn->url).c_str());
 
-	// Pre-account for the session subscription before handing ctx to libmoq: the
-	// connection can fail and fire its terminal on_session_status from the
-	// runtime thread immediately, and that must not decrement the reference
-	// before we have added it.
-	pthread_mutex_lock(&ctx->mutex);
-	ctx->origin = new_origin;
-	ctx->refs++;
-	pthread_mutex_unlock(&ctx->mutex);
-
-	// Connect to MoQ server (consume will happen in on_session_status callback)
-	int32_t new_session = moq_session_connect(url_copy, strlen(url_copy),
-						  NULL,       // config: the source dials with the defaults
-						  0,          // origin_publish
-						  new_origin, // origin_consume
-						  on_session_status, data);
-	bfree(url_copy);
-
-	if (new_session < 0) {
-		LOG_ERROR("Failed to connect to MoQ server: %d", new_session);
-		delete data;
-		pthread_mutex_lock(&ctx->mutex);
-		if (ctx->origin == new_origin) {
-			moq_origin_close(new_origin);
-			ctx->origin = -1;
-		}
-		// No session subscription was created, so no terminal will fire; undo
-		// the reference we pre-added above.
-		if (--ctx->refs == 0)
-			pthread_cond_broadcast(&ctx->refs_zero);
-		ctx->reconnect_in_progress = false;
-		pthread_mutex_unlock(&ctx->mutex);
-		return;
-	}
-
-	// Now update ctx with the new handles, checking if generation changed
-	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->generation != new_gen || ctx->origin != new_origin || ctx->shutting_down.load() ||
-	    state->terminal.load()) {
-		// The attempt ended or was superseded while the handles were being
-		// created. Clean up anything its callback did not already retire.
-		ctx->reconnect_in_progress = false;
-		bool close_origin = ctx->origin == new_origin;
-		if (close_origin)
-			ctx->origin = -1;
-		pthread_mutex_unlock(&ctx->mutex);
-		LOG_INFO("Session became stale during reconnect setup, cleaning up resources");
-		if (!state->terminal.load())
-			moq_session_close(new_session);
-		if (close_origin)
-			moq_origin_close(new_origin);
-		return;
-	}
-	ctx->session = new_session;
-	ctx->reconnect_in_progress = false;
-	LOG_INFO("Connecting to MoQ server (generation %u)", new_gen);
-	pthread_mutex_unlock(&ctx->mutex);
+	conn->session_call = conn->client->connect(conn->url).then(
+		ctx->worker.Executor(),
+		moq_source_current<moq::expected<std::shared_ptr<moq::Session>>>(ctx, conn, moq_source_on_connect));
 }
 
-// Tear down the consume-path handles after a failure to reach playable media,
-// leaving the source disconnected so the next update/reconnect starts clean.
-//
-// NOTE: Caller must hold ctx->mutex when calling this function.
-static void moq_source_abort_consume_locked(struct moq_source *ctx, uint32_t expected_gen)
+static void moq_source_on_connect(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				  moq::expected<std::shared_ptr<moq::Session>> result)
 {
-	// A newer generation already owns these handles; leave them alone.
-	if (ctx->generation != expected_gen)
+	if (!result) {
+		LOG_ERROR("MoQ session error: %s", result.error().to_string().c_str());
+		moq_source_fail_locked(ctx);
 		return;
-
-	if (ctx->consume >= 0) {
-		moq_consume_close(ctx->consume);
-		ctx->consume = -1;
 	}
 
-	if (ctx->session >= 0) {
-		moq_session_close(ctx->session);
-		ctx->session = -1;
-	}
+	conn->session = *result;
+	LOG_INFO("MoQ session connected (epoch %llu)", (unsigned long long)conn->session->epoch());
+	moq_source_watch_status(ctx, conn);
 
-	if (ctx->origin >= 0) {
-		moq_origin_close(ctx->origin);
-		ctx->origin = -1;
+	// Wait for the broadcast to be announced. Announcements arrive over the session
+	// after it connects, so resolving against only what is announced *now* would race
+	// them and blank the source for a broadcast that is live.
+	auto announced = conn->session->consume()->announced_broadcast(conn->broadcast);
+	if (!announced) {
+		LOG_ERROR("Failed to request broadcast '%s': %s", conn->broadcast.c_str(),
+			  announced.error().to_string().c_str());
+		moq_source_fail_locked(ctx);
+		return;
 	}
+	conn->announced = *announced;
+	LOG_INFO("Requesting broadcast: %s", conn->broadcast.c_str());
+
+	conn->broadcast_call = conn->announced->available().then(
+		ctx->worker.Executor(), moq_source_current<moq::expected<std::shared_ptr<moq::BroadcastConsumer>>>(
+						ctx, conn, moq_source_on_broadcast));
 }
 
-// Called after session is connected successfully
-static void moq_source_start_consume(struct moq_source *ctx, uint32_t expected_gen)
+static void moq_source_on_broadcast(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				    moq::expected<std::shared_ptr<moq::BroadcastConsumer>> result)
 {
-	// Check if origin is still valid and generation matches
-	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->origin < 0 || ctx->generation != expected_gen) {
-		pthread_mutex_unlock(&ctx->mutex);
-		LOG_INFO("Skipping stale consume (generation mismatch or invalid origin)");
+	if (!result) {
+		LOG_ERROR("Failed to resolve broadcast '%s': %s", conn->broadcast.c_str(),
+			  result.error().to_string().c_str());
+		moq_source_fail_locked(ctx);
 		return;
 	}
-	// Capture values while holding mutex
-	int32_t origin = ctx->origin;
-	char *broadcast_copy = bstrdup(ctx->broadcast);
 
-	// Pre-account for the request before handing ctx to libmoq, so its reference
-	// is in place the instant the request exists (see the note on
-	// subscription_ref). Undone below only if creation fails.
-	ctx->refs++;
-	pthread_mutex_unlock(&ctx->mutex);
+	conn->consumer = *result;
+	conn->broadcast_call = conn->consumer->subscribe_catalog().then(
+		ctx->worker.Executor(), moq_source_current<moq::expected<std::shared_ptr<moq::CatalogConsumer>>>(
+						ctx, conn, moq_source_on_catalogs));
+}
 
-	struct broadcast_request *req = (struct broadcast_request *)bzalloc(sizeof(struct broadcast_request));
-	req->ctx = ctx;
-	req->gen = expected_gen;
+static void moq_source_on_catalogs(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				   moq::expected<std::shared_ptr<moq::CatalogConsumer>> result)
+{
+	if (!result) {
+		LOG_ERROR("Failed to subscribe to catalog: %s", result.error().to_string().c_str());
+		moq_source_fail_locked(ctx);
+		return;
+	}
 
-	// Wait for the broadcast to be announced. This runs off the session-connected
-	// callback, and announcements arrive over the session after it connects, so
-	// resolving against only what is announced *now* (moq_origin_request) would race
-	// them and blank the source for a broadcast that is live. libmoq copies the path,
-	// so it need not outlive this call, and delivers the broadcast handle
-	// asynchronously to on_broadcast.
-	int32_t request =
-		moq_origin_announced_broadcast(origin, broadcast_copy, strlen(broadcast_copy), on_broadcast, req);
-	if (request < 0) {
-		LOG_ERROR("Failed to request broadcast '%s': %d", broadcast_copy, request);
-		bfree(broadcast_copy);
-		// No request was created, so no terminal will fire to free either of these.
-		bfree(req);
-		pthread_mutex_lock(&ctx->mutex);
-		if (--ctx->refs == 0)
-			pthread_cond_broadcast(&ctx->refs_zero);
-		moq_source_abort_consume_locked(ctx, expected_gen);
-		pthread_mutex_unlock(&ctx->mutex);
+	conn->catalog = *result;
+	LOG_INFO("Consuming broadcast: %s", conn->broadcast.c_str());
+	moq_source_next_catalog(ctx, conn);
+}
+
+// Follows the session's connect and reconnect transitions until it gives up.
+static void moq_source_watch_status(struct moq_source *ctx, const std::shared_ptr<Connection> &conn)
+{
+	conn->session_call = conn->session->status().then(
+		ctx->worker.Executor(),
+		moq_source_current<moq::expected<moq::ConnectionStatus>>(ctx, conn, moq_source_on_status));
+}
+
+static void moq_source_on_status(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				 moq::expected<moq::ConnectionStatus> result)
+{
+	if (!result) {
+		// Reconnecting gave up (or the relay refused us). Tear down every
+		// subscription, not just the session, and blank to show the error.
+		LOG_ERROR("MoQ session error: %s", result.error().to_string().c_str());
+		moq_source_fail_locked(ctx);
+		return;
+	}
+
+	switch (*result) {
+	case moq::ConnectionStatus::kConnected:
+		// The existing subscriptions ride out the gap; nothing to redo.
+		LOG_INFO("MoQ session reconnected (epoch %llu)", (unsigned long long)conn->session->epoch());
+		break;
+	case moq::ConnectionStatus::kDisconnected:
+		LOG_WARNING("MoQ session dropped, reconnecting");
+		break;
+	case moq::ConnectionStatus::kMigrating:
+		LOG_INFO("MoQ session migrating");
+		break;
+	}
+	moq_source_watch_status(ctx, conn);
+}
+
+static void moq_source_next_catalog(struct moq_source *ctx, const std::shared_ptr<Connection> &conn)
+{
+	conn->catalog_call = conn->catalog->next().then(
+		ctx->worker.Executor(),
+		moq_source_current<moq::expected<std::optional<moq::Catalog>>>(ctx, conn, moq_source_on_catalog));
+}
+
+static void moq_source_on_catalog(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				  moq::expected<std::optional<moq::Catalog>> result)
+{
+	if (!result) {
+		LOG_ERROR("Catalog subscription error: %s", result.error().to_string().c_str());
+		moq_source_blank_video(ctx);
+		return;
+	}
+	if (!*result) {
+		LOG_DEBUG("Catalog subscription closed cleanly");
+		return;
+	}
+
+	LOG_INFO("Catalog update received");
+	// Audio and video are independent catalog sections. Attempt both from this
+	// update, even when either rendition is absent or unsupported.
+	moq_source_subscribe_video(ctx, conn, **result);
+	moq_source_subscribe_audio(ctx, conn, **result);
+	moq_source_next_catalog(ctx, conn);
+}
+
+// The rendition a catalog lists first by name, matching the order the catalog keeps.
+template<typename Rendition>
+static const std::pair<const std::string, Rendition> *
+moq_source_first_rendition(const std::unordered_map<std::string, Rendition> &renditions)
+{
+	const std::pair<const std::string, Rendition> *first = nullptr;
+	for (const auto &entry : renditions) {
+		if (!first || entry.first < first->first)
+			first = &entry;
+	}
+	return first;
+}
+
+static void moq_source_on_subscribed(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				     const std::shared_ptr<Track> &track,
+				     moq::expected<std::shared_ptr<moq::MediaConsumer>> result);
+static void moq_source_read_track(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				  const std::shared_ptr<Track> &track);
+static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				const std::shared_ptr<Track> &track,
+				moq::expected<std::optional<moq::MediaFrame>> result);
+
+// The track, while it is still the connection's current video or audio track.
+static std::shared_ptr<Track> moq_source_track(const Connection &conn, const std::weak_ptr<Track> &weak)
+{
+	auto track = weak.lock();
+	return track && (track == conn.video || track == conn.audio) ? track : nullptr;
+}
+
+// Wraps a track's continuation so it runs only while `track` is still current.
+template<typename Output>
+static std::function<void(Output)>
+moq_source_track_current(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+			 const std::shared_ptr<Track> &track,
+			 void (*callback)(struct moq_source *, const std::shared_ptr<Connection> &,
+					  const std::shared_ptr<Track> &, Output))
+{
+	return moq_source_current<Output>(ctx, conn,
+					  [weak = std::weak_ptr<Track>(track),
+					   callback](struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+						     Output output) {
+						  if (auto track = moq_source_track(*conn, weak))
+							  callback(ctx, conn, track, std::move(output));
+					  });
+}
+
+static void moq_source_on_resolved(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				   const std::shared_ptr<Track> &track,
+				   moq::expected<std::shared_ptr<moq::BroadcastConsumer>> result)
+{
+	if (!result) {
+		LOG_ERROR("Failed to resolve %s track broadcast: %s", track->kind, result.error().to_string().c_str());
+		return;
+	}
+	track->call = (*result)
+			      ->subscribe_media(track->name, track->container, std::nullopt)
+			      .then(ctx->worker.Executor(),
+				    moq_source_track_current<moq::expected<std::shared_ptr<moq::MediaConsumer>>>(
+					    ctx, conn, track, moq_source_on_subscribed));
+}
+
+static void moq_source_on_subscribed(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				     const std::shared_ptr<Track> &track,
+				     moq::expected<std::shared_ptr<moq::MediaConsumer>> result)
+{
+	if (!result) {
+		LOG_ERROR("Failed to subscribe to %s track: %s", track->kind, result.error().to_string().c_str());
+		return;
+	}
+	track->consumer = *result;
+	LOG_INFO("Subscribed to %s track successfully", track->kind);
+	moq_source_read_track(ctx, conn, track);
+}
+
+// Reads the track one frame at a time into its decoder.
+static void moq_source_read_track(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				  const std::shared_ptr<Track> &track)
+{
+	track->call = track->consumer->next().then(
+		ctx->worker.Executor(), moq_source_track_current<moq::expected<std::optional<moq::MediaFrame>>>(
+						ctx, conn, track, moq_source_on_frame));
+}
+
+static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				const std::shared_ptr<Track> &track,
+				moq::expected<std::optional<moq::MediaFrame>> result)
+{
+	if (!result) {
+		LOG_ERROR("%s track error: %s", track->kind, result.error().to_string().c_str());
+		return;
+	}
+	if (!*result) {
+		LOG_DEBUG("%s track closed cleanly", track->kind);
+		return;
+	}
+	track->decode(ctx, **result);
+	// The frame may have stopped the track (an audio decode failure).
+	if (moq_source_track(*conn, track) == track)
+		moq_source_read_track(ctx, conn, track);
+}
+
+// Resolves the rendition's broadcast (it may live in a sibling), subscribes to the
+// track, then reads it, each as a call `track` owns, so replacing or dropping the
+// track cancels whichever one is pending.
+static void moq_source_subscribe_track(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				       const std::shared_ptr<Track> &track, const std::optional<std::string> &broadcast)
+{
+	track->call = conn->consumer->resolve(broadcast).then(
+		ctx->worker.Executor(),
+		moq_source_track_current<moq::expected<std::shared_ptr<moq::BroadcastConsumer>>>(
+			ctx, conn, track, moq_source_on_resolved));
+}
+
+static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				       const moq::Catalog &catalog)
+{
+	const auto *rendition = moq_source_first_rendition(catalog.video);
+	if (!rendition) {
+		LOG_INFO("Catalog has no video rendition; audio only");
+		moq_source_clear_video_locked(ctx);
 		moq_source_blank_video(ctx);
 		return;
 	}
 
-	LOG_INFO("Requesting broadcast: %s", broadcast_copy);
-	bfree(broadcast_copy);
-
-	// The request now exists and will deliver a terminal on_broadcast (<= 0) that
-	// releases the reference added above. Store the handle so disconnect can
-	// close it, which makes that terminal fire promptly.
-	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->generation == expected_gen && !ctx->shutting_down.load()) {
-		ctx->request = request;
-		pthread_mutex_unlock(&ctx->mutex);
-	} else {
-		// Stale or shutting down: close it; its terminal releases the reference.
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_origin_announced_broadcast_cancel(request);
+	// Build the decoder before replacing the current one, so a rendition we can't
+	// decode leaves nothing half installed.
+	auto decoder = moq_source_prepare_decoder(rendition->second);
+	if (!decoder) {
+		LOG_ERROR("Failed to initialize decoder");
+		moq_source_clear_video_locked(ctx);
+		moq_source_blank_video(ctx);
+		return;
 	}
+
+	// A catalog update can arrive while a track is already subscribed; replacing it
+	// cancels the previous one.
+	moq_source_install_decoder_locked(ctx, std::move(decoder));
+	conn->video = std::make_shared<Track>("Video", rendition->first, rendition->second.container,
+					      moq_source_decode_frame);
+	moq_source_subscribe_track(ctx, conn, conn->video, rendition->second.broadcast);
 }
 
-// Receives the announced broadcast: a positive handle once announced, then exactly
-// once more with a terminal code (0 = finished, including after
-// moq_origin_announced_broadcast_cancel; < 0 = error). The terminal is the last touch
-// of user_data, so it both frees the request context and releases the request's
-// lifetime reference via subscription_ref.
-static void on_broadcast(void *user_data, int32_t broadcast)
+// Subscribe to the first audio rendition and install the matching decoder. A
+// broadcast with no audio rendition stays video-only (not an error).
+static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				       const moq::Catalog &catalog)
 {
-	struct broadcast_request *req = (struct broadcast_request *)user_data;
-	struct moq_source *ctx = req->ctx;
-	uint32_t expected_gen = req->gen;
-
-	// Hold the request's reference for the callback's lifetime; release it when
-	// this is the terminal callback (broadcast <= 0).
-	subscription_ref ref(ctx, broadcast <= 0);
-
-	// The terminal is libmoq's last touch of user_data, so the request context
-	// dies with it. Everything below reads the copies taken above instead.
-	if (broadcast <= 0)
-		bfree(req);
-
-	pthread_mutex_lock(&ctx->mutex);
-
-	// A terminated request must not be closed again: drop the handle, but only
-	// while this generation still owns it.
-	if (broadcast <= 0 && ctx->generation == expected_gen)
-		ctx->request = -1;
-
-	if (ctx->shutting_down.load() || ctx->generation != expected_gen) {
-		pthread_mutex_unlock(&ctx->mutex);
-		// A delivered handle is ours even when we no longer want it.
-		if (broadcast > 0)
-			moq_consume_close(broadcast);
-		LOG_INFO("Skipping stale broadcast (generation mismatch or shutting down)");
+	const auto *rendition = moq_source_first_rendition(catalog.audio);
+	if (!rendition) {
+		LOG_INFO("Catalog has no audio rendition; video only");
+		moq_source_clear_audio_locked(ctx);
+		return;
+	}
+	auto decoder = moq_source_prepare_audio_decoder(rendition->second);
+	if (!decoder) {
+		LOG_ERROR("Failed to initialize audio decoder; stopping audio");
+		moq_source_clear_audio_locked(ctx);
 		return;
 	}
 
-	if (broadcast == 0) {
-		// We closed the request (disconnect/reconnect/destroy); nothing to do.
-		pthread_mutex_unlock(&ctx->mutex);
-		LOG_DEBUG("Broadcast request finished (generation %u)", expected_gen);
-		return;
-	}
-
-	if (broadcast < 0) {
-		LOG_ERROR("Failed to resolve broadcast '%s': %d", ctx->broadcast, broadcast);
-		moq_source_abort_consume_locked(ctx, expected_gen);
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_source_blank_video(ctx);
-		return;
-	}
-
-	ctx->consume = broadcast;
-
-	// Pre-account for the catalog subscription before handing ctx to libmoq, so
-	// its reference is in place the instant the subscription exists (see the
-	// note on subscription_ref). Undone below only if creation fails.
-	uint64_t catalog_attempt = ++ctx->catalog_attempt;
-	ctx->refs++;
-	pthread_mutex_unlock(&ctx->mutex);
-	auto state = std::make_shared<callback_state>(ctx, expected_gen, catalog_attempt);
-	auto *data = new callback_data{state};
-
-	// Subscribe to catalog updates
-	int32_t catalog_handle = moq_consume_catalog(broadcast, on_catalog, data);
-	if (catalog_handle < 0) {
-		LOG_ERROR("Failed to subscribe to catalog: %d", catalog_handle);
-		delete data;
-		pthread_mutex_lock(&ctx->mutex);
-		// No subscription was created, so no terminal will fire; undo the ref.
-		if (--ctx->refs == 0)
-			pthread_cond_broadcast(&ctx->refs_zero);
-		moq_source_abort_consume_locked(ctx, expected_gen);
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_source_blank_video(ctx);
-		return;
-	}
-
-	// The catalog subscription now exists and will deliver a terminal on_catalog
-	// (<= 0) that releases the reference added above. Store the subscription
-	// handle so disconnect can close it, which makes that terminal fire promptly.
-	// (This is the real subscription handle, distinct from the catalog snapshot
-	// ids delivered to on_catalog.)
-	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->generation == expected_gen && ctx->catalog_attempt == catalog_attempt && !ctx->shutting_down.load() &&
-	    !state->terminal.load()) {
-		ctx->catalog_handle = catalog_handle;
-		LOG_INFO("Consuming broadcast: %s", ctx->broadcast);
-		pthread_mutex_unlock(&ctx->mutex);
-	} else {
-		// Stale or shutting down: close it; its terminal releases the reference.
-		pthread_mutex_unlock(&ctx->mutex);
-		if (!state->terminal.load())
-			moq_consume_catalog_cancel(catalog_handle);
-	}
+	LOG_INFO("Subscribing to audio track (%u Hz, %u ch)", decoder->sample_rate, decoder->channels);
+	moq_source_install_audio_decoder_locked(ctx, std::move(decoder));
+	conn->audio = std::make_shared<Track>("Audio", rendition->first, rendition->second.container,
+					      moq_source_decode_audio_frame);
+	moq_source_subscribe_track(ctx, conn, conn->audio, rendition->second.broadcast);
 }
 
-// NOTE: Caller must hold ctx->mutex when calling this function.
-//
-// The moq_*_close calls below only *signal* each subscription to wind down;
-// libmoq delivers the terminal callback asynchronously on its runtime thread,
-// never synchronously from within close(). That is what lets us close under the
-// mutex here without the terminal callback's subscription_ref re-entering the
-// mutex on this same thread (which would self-deadlock).
+// NOTE: Caller must hold ctx->mutex.
 static void moq_source_clear_video_locked(struct moq_source *ctx)
 {
-	ctx->video_attempt++;
-	if (ctx->video_track >= 0) {
-		moq_consume_video_cancel(ctx->video_track);
-		ctx->video_track = -1;
-	}
+	if (ctx->connection)
+		ctx->connection->video.reset();
 	moq_source_destroy_decoder_locked(ctx);
 	ctx->got_keyframe = false;
 	ctx->frames_waiting_for_keyframe = 0;
 	ctx->consecutive_decode_errors = 0;
 }
 
+// NOTE: Caller must hold ctx->mutex.
 static void moq_source_disconnect_locked(struct moq_source *ctx)
 {
-	// Invalidate callbacks before closing their handles. A late terminal from an
-	// older subscription must not retire the replacement's handle.
-	ctx->catalog_attempt++;
 	moq_source_clear_video_locked(ctx);
 	moq_source_clear_audio_locked(ctx);
 
-	if (ctx->catalog_handle >= 0) {
-		moq_consume_catalog_cancel(ctx->catalog_handle);
-		ctx->catalog_handle = -1;
-	}
-
-	// An unresolved wait still owes a terminal on_broadcast; closing it makes that
-	// fire (with 0) instead of leaving it pending until the source dies. This is the
-	// path that ends a wait for a broadcast that is never announced.
-	if (ctx->request >= 0) {
-		moq_origin_announced_broadcast_cancel(ctx->request);
-		ctx->request = -1;
-	}
-
-	if (ctx->consume >= 0) {
-		moq_consume_close(ctx->consume);
-		ctx->consume = -1;
-	}
-
-	if (ctx->session >= 0) {
-		moq_session_close(ctx->session);
-		ctx->session = -1;
-	}
-
-	if (ctx->origin >= 0) {
-		moq_origin_close(ctx->origin);
-		ctx->origin = -1;
-	}
+	// Dropping the connection cancels whatever it was waiting on, including a wait
+	// for a broadcast that is never announced.
+	if (ctx->connection && ctx->connection->session)
+		ctx->connection->session->shutdown();
+	ctx->connection.reset();
 }
 
 // Blanks the video preview by outputting a NULL frame
@@ -1206,18 +755,12 @@ static void moq_source_blank_video(struct moq_source *ctx)
 	LOG_DEBUG("Video preview blanked");
 }
 
-static std::unique_ptr<prepared_decoder> moq_source_prepare_decoder(const struct moq_video_config *config)
+static std::unique_ptr<prepared_decoder> moq_source_prepare_decoder(const moq::Video &config)
 {
 	// Map codec string to FFmpeg codec ID dynamically
-	AVCodecID codec_id = codec_string_to_id(config->codec, config->codec_len);
+	AVCodecID codec_id = codec_string_to_id(config.codec.data(), config.codec.size());
 	if (codec_id == AV_CODEC_ID_NONE) {
-		// Log the codec string for debugging (may not be null-terminated)
-		char codec_str[64] = {0};
-		size_t copy_len = config->codec_len < sizeof(codec_str) - 1 ? config->codec_len : sizeof(codec_str) - 1;
-		if (config->codec && copy_len > 0) {
-			memcpy(codec_str, config->codec, copy_len);
-		}
-		LOG_ERROR("Unknown or unsupported codec: '%s'", codec_str);
+		LOG_ERROR("Unknown or unsupported codec: '%s'", config.codec.c_str());
 		return nullptr;
 	}
 
@@ -1230,31 +773,32 @@ static std::unique_ptr<prepared_decoder> moq_source_prepare_decoder(const struct
 
 	auto decoder = std::make_unique<prepared_decoder>();
 	decoder->codec_id = codec_id;
-	decoder->codec.assign(config->codec, config->codec_len);
+	decoder->codec = config.codec;
 	decoder->codec_ctx = avcodec_alloc_context3(codec);
 	if (!decoder->codec_ctx) {
 		LOG_ERROR("Failed to allocate codec context");
 		return nullptr;
 	}
 
-	// Get dimensions from config - required for buffer allocation. Zero means the
+	// Get dimensions from config - required for buffer allocation. Absent means the
 	// catalog didn't declare it; the codec context keeps its own.
-	if (config->coded_width > 0) {
-		decoder->codec_ctx->width = (int)config->coded_width;
-		decoder->width = config->coded_width;
+	if (config.coded && config.coded->width > 0) {
+		decoder->codec_ctx->width = (int)config.coded->width;
+		decoder->width = config.coded->width;
 	}
-	if (config->coded_height > 0) {
-		decoder->codec_ctx->height = (int)config->coded_height;
-		decoder->height = config->coded_height;
+	if (config.coded && config.coded->height > 0) {
+		decoder->codec_ctx->height = (int)config.coded->height;
+		decoder->height = config.coded->height;
 	}
 
 	// Use codec description as extradata (contains SPS/PPS for H.264, VPS/SPS/PPS for HEVC, etc.)
-	if (config->description && config->description_len > 0) {
+	if (config.description && !config.description->empty()) {
+		const auto &description = *config.description;
 		decoder->codec_ctx->extradata =
-			(uint8_t *)av_mallocz(config->description_len + AV_INPUT_BUFFER_PADDING_SIZE);
+			(uint8_t *)av_mallocz(description.size() + AV_INPUT_BUFFER_PADDING_SIZE);
 		if (decoder->codec_ctx->extradata) {
-			memcpy(decoder->codec_ctx->extradata, config->description, config->description_len);
-			decoder->codec_ctx->extradata_size = static_cast<int>(config->description_len);
+			memcpy(decoder->codec_ctx->extradata, description.data(), description.size());
+			decoder->codec_ctx->extradata_size = static_cast<int>(description.size());
 		}
 	}
 
@@ -1328,39 +872,13 @@ static void moq_source_destroy_decoder_locked(struct moq_source *ctx)
 	ctx->current_pix_fmt = AV_PIX_FMT_NONE;
 }
 
-static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
+// NOTE: Caller must hold ctx->mutex.
+static void moq_source_decode_frame(struct moq_source *ctx, const moq::MediaFrame &frame_data)
 {
-	// Fast path: check atomic flag before taking lock
-	if (ctx->shutting_down.load()) {
-		moq_consume_frame_free(frame_id);
-		return;
-	}
-
-	pthread_mutex_lock(&ctx->mutex);
-
-	// Double-check after acquiring lock (may have changed)
-	if (ctx->shutting_down.load()) {
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
-		return;
-	}
-
 	// Check if decoder is still valid (may have been destroyed during reconnect)
 	// Note: sws_ctx and frame_buffer may be NULL on first frame - they're created dynamically
-	if (!ctx->codec_ctx) {
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
+	if (!ctx->codec_ctx)
 		return;
-	}
-
-	// Get frame data
-	struct moq_frame frame_data;
-	if (moq_consume_frame(frame_id, &frame_data) < 0) {
-		LOG_ERROR("Failed to get frame data");
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
-		return;
-	}
 
 	// Skip non-keyframes until we get the first one
 	if (!ctx->got_keyframe && !frame_data.keyframe) {
@@ -1369,8 +887,6 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 			LOG_INFO("Waiting for keyframe... (skipped %u frames so far)",
 				 ctx->frames_waiting_for_keyframe);
 		}
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
 		return;
 	}
 
@@ -1378,7 +894,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 	if (frame_data.keyframe) {
 		if (!ctx->got_keyframe) {
 			LOG_INFO("Got keyframe after waiting for %u frames, payload_size=%zu",
-				 ctx->frames_waiting_for_keyframe, frame_data.payload_size);
+				 ctx->frames_waiting_for_keyframe, frame_data.payload.size());
 			// Flush decoder to ensure clean state when starting from keyframe
 			avcodec_flush_buffers(ctx->codec_ctx);
 		}
@@ -1390,13 +906,11 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 	// Create AVPacket from frame data
 	AVPacket *packet = av_packet_alloc();
 	if (!packet) {
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
 		return;
 	}
 
-	packet->data = (uint8_t *)frame_data.payload;
-	packet->size = static_cast<int>(frame_data.payload_size);
+	packet->data = const_cast<uint8_t *>(frame_data.payload.data());
+	packet->size = static_cast<int>(frame_data.payload.size());
 	packet->pts = frame_data.timestamp_us / 1000; // Convert to milliseconds
 	packet->dts = packet->pts;
 
@@ -1421,16 +935,12 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 				LOG_ERROR("Error sending packet to decoder: %s", errbuf);
 			}
 		}
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
 		return;
 	}
 
 	// Receive decoded frames
 	AVFrame *frame = av_frame_alloc();
 	if (!frame) {
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
 		return;
 	}
 
@@ -1454,8 +964,6 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 			}
 		}
 		av_frame_free(&frame);
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
 		return;
 	}
 
@@ -1484,8 +992,6 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 		if (frame->width <= 0 || frame->height <= 0 || frame->width > 16384 || frame->height > 16384) {
 			LOG_ERROR("Invalid decoded frame dimensions: %dx%d", frame->width, frame->height);
 			av_frame_free(&frame);
-			pthread_mutex_unlock(&ctx->mutex);
-			moq_consume_frame_free(frame_id);
 			return;
 		}
 
@@ -1493,8 +999,6 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 		if (decoded_pix_fmt == AV_PIX_FMT_NONE) {
 			LOG_ERROR("Invalid decoded frame pixel format: %d", decoded_pix_fmt);
 			av_frame_free(&frame);
-			pthread_mutex_unlock(&ctx->mutex);
-			moq_consume_frame_free(frame_id);
 			return;
 		}
 
@@ -1514,8 +1018,6 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 				  av_get_pix_fmt_name(decoded_pix_fmt) ? av_get_pix_fmt_name(decoded_pix_fmt)
 								       : "unknown");
 			av_frame_free(&frame);
-			pthread_mutex_unlock(&ctx->mutex);
-			moq_consume_frame_free(frame_id);
 			return;
 		}
 
@@ -1527,8 +1029,6 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 				  new_buffer_size);
 			sws_freeContext(new_sws_ctx);
 			av_frame_free(&frame);
-			pthread_mutex_unlock(&ctx->mutex);
-			moq_consume_frame_free(frame_id);
 			return;
 		}
 
@@ -1557,26 +1057,20 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 	sws_scale(ctx->sws_ctx, (const uint8_t *const *)frame->data, frame->linesize, 0, ctx->frame.height, dst_data,
 		  dst_linesize);
 
-	// Update OBS frame timestamp and output. OBS expects nanoseconds; libmoq
-	// delivers microseconds.
+	// Update OBS frame timestamp and output. OBS expects nanoseconds; frames
+	// carry microseconds.
 	ctx->frame.timestamp = frame_data.timestamp_us * 1000;
 	obs_source_output_video(ctx->source, &ctx->frame);
 
 	av_frame_free(&frame);
-	pthread_mutex_unlock(&ctx->mutex);
-	moq_consume_frame_free(frame_id);
 }
 
 // ---- Audio -------------------------------------------------------------------
-static std::unique_ptr<prepared_audio_decoder> moq_source_prepare_audio_decoder(const struct moq_audio_config *config)
+static std::unique_ptr<prepared_audio_decoder> moq_source_prepare_audio_decoder(const moq::Audio &config)
 {
-	AVCodecID codec_id = audio_codec_string_to_id(config->codec, config->codec_len);
+	AVCodecID codec_id = audio_codec_string_to_id(config.codec.data(), config.codec.size());
 	if (codec_id == AV_CODEC_ID_NONE) {
-		char codec_str[64] = {0};
-		size_t n = config->codec_len < sizeof(codec_str) - 1 ? config->codec_len : sizeof(codec_str) - 1;
-		if (config->codec && n > 0)
-			memcpy(codec_str, config->codec, n);
-		LOG_ERROR("Unknown or unsupported audio codec: '%s'", codec_str);
+		LOG_ERROR("Unknown or unsupported audio codec: '%s'", config.codec.c_str());
 		return nullptr;
 	}
 	const AVCodec *codec = avcodec_find_decoder(codec_id);
@@ -1590,17 +1084,18 @@ static std::unique_ptr<prepared_audio_decoder> moq_source_prepare_audio_decoder(
 		LOG_ERROR("Failed to allocate audio codec context");
 		return nullptr;
 	}
-	decoder->sample_rate = config->sample_rate;
-	decoder->channels = config->channel_count;
-	decoder->codec_ctx->sample_rate = static_cast<int>(config->sample_rate);
-	av_channel_layout_default(&decoder->codec_ctx->ch_layout, static_cast<int>(config->channel_count));
-	decoder->codec_ctx->pkt_timebase = AVRational{1, 1000000}; // libmoq frame timestamps are microseconds
-	if (config->description && config->description_len > 0) {
+	decoder->sample_rate = config.sample_rate;
+	decoder->channels = config.channel_count;
+	decoder->codec_ctx->sample_rate = static_cast<int>(config.sample_rate);
+	av_channel_layout_default(&decoder->codec_ctx->ch_layout, static_cast<int>(config.channel_count));
+	decoder->codec_ctx->pkt_timebase = AVRational{1, 1000000}; // frame timestamps are microseconds
+	if (config.description && !config.description->empty()) {
+		const auto &description = *config.description;
 		decoder->codec_ctx->extradata =
-			(uint8_t *)av_mallocz(config->description_len + AV_INPUT_BUFFER_PADDING_SIZE);
+			(uint8_t *)av_mallocz(description.size() + AV_INPUT_BUFFER_PADDING_SIZE);
 		if (decoder->codec_ctx->extradata) {
-			memcpy(decoder->codec_ctx->extradata, config->description, config->description_len);
-			decoder->codec_ctx->extradata_size = static_cast<int>(config->description_len);
+			memcpy(decoder->codec_ctx->extradata, description.data(), description.size());
+			decoder->codec_ctx->extradata_size = static_cast<int>(description.size());
 		}
 	}
 	if (avcodec_open2(decoder->codec_ctx, codec, NULL) < 0) {
@@ -1634,52 +1129,30 @@ static void moq_source_destroy_audio_decoder_locked(struct moq_source *ctx)
 // NOTE: caller holds ctx->mutex.
 static void moq_source_clear_audio_locked(struct moq_source *ctx)
 {
-	ctx->audio_attempt++;
-	if (ctx->audio_track >= 0) {
-		moq_consume_audio_cancel(ctx->audio_track);
-		ctx->audio_track = -1;
-	}
+	if (ctx->connection)
+		ctx->connection->audio.reset();
 	moq_source_destroy_audio_decoder_locked(ctx);
 }
 
-static void moq_source_decode_audio_frame(struct moq_source *ctx, int32_t frame_id)
+// NOTE: caller holds ctx->mutex.
+static void moq_source_decode_audio_frame(struct moq_source *ctx, const moq::MediaFrame &frame_data)
 {
-	if (ctx->shutting_down.load()) {
-		moq_consume_frame_free(frame_id);
+	if (!ctx->audio_codec_ctx)
 		return;
-	}
-	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->shutting_down.load() || !ctx->audio_codec_ctx) {
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
-		return;
-	}
-	struct moq_frame frame_data;
-	if (moq_consume_frame(frame_id, &frame_data) < 0) {
-		LOG_ERROR("Failed to get audio frame data");
+	if (frame_data.payload.size() > INT_MAX) {
+		LOG_ERROR("Audio frame is too large to decode: %zu bytes", frame_data.payload.size());
 		moq_source_clear_audio_locked(ctx);
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
-		return;
-	}
-	if (frame_data.payload_size > INT_MAX) {
-		LOG_ERROR("Audio frame is too large to decode: %zu bytes", frame_data.payload_size);
-		moq_source_clear_audio_locked(ctx);
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
 		return;
 	}
 	AVPacket *packet = av_packet_alloc();
-	if (!packet || av_new_packet(packet, static_cast<int>(frame_data.payload_size)) < 0) {
+	if (!packet || av_new_packet(packet, static_cast<int>(frame_data.payload.size())) < 0) {
 		LOG_ERROR("Failed to allocate audio packet");
 		av_packet_free(&packet);
 		moq_source_clear_audio_locked(ctx);
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
 		return;
 	}
-	if (frame_data.payload_size > 0)
-		memcpy(packet->data, frame_data.payload, frame_data.payload_size);
+	if (frame_data.payload.size() > 0)
+		memcpy(packet->data, frame_data.payload.data(), frame_data.payload.size());
 	packet->pts = static_cast<int64_t>(frame_data.timestamp_us);
 	packet->dts = packet->pts;
 	int ret = avcodec_send_packet(ctx->audio_codec_ctx, packet);
@@ -1687,16 +1160,12 @@ static void moq_source_decode_audio_frame(struct moq_source *ctx, int32_t frame_
 	if (ret < 0) {
 		LOG_ERROR("Failed to send audio packet to decoder: %d", ret);
 		moq_source_clear_audio_locked(ctx);
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
 		return;
 	}
 	AVFrame *frame = av_frame_alloc();
 	if (!frame) {
 		LOG_ERROR("Failed to allocate decoded audio frame");
 		moq_source_clear_audio_locked(ctx);
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
 		return;
 	}
 	while ((ret = avcodec_receive_frame(ctx->audio_codec_ctx, frame)) == 0) {
@@ -1734,8 +1203,6 @@ static void moq_source_decode_audio_frame(struct moq_source *ctx, int32_t frame_
 		moq_source_clear_audio_locked(ctx);
 	}
 	av_frame_free(&frame);
-	pthread_mutex_unlock(&ctx->mutex);
-	moq_consume_frame_free(frame_id);
 }
 
 // Registration function

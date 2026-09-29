@@ -14,7 +14,7 @@ MoQ publishing can encode OBS's mixed audio with moq-audio Opus while preserving
 
 ## Required
 
-- [OBS migration](/quest/m1/cpp/obs.md) - the plugin is on the generated C++ first
+- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the plugin is on the generated C++ first
 - [Encoder presets](/quest/m1/obs-moq-video/presets.md) - shared policy and truthful reporting
 
 ## Related

@@ -565,12 +565,12 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 		QString("<a href=\"https://doc.moq.dev/bin/obs\">%1</a>").arg(QString::fromUtf8(PLUGIN_VERSION_STRING)));
 	pluginVer->setToolTip("OBS plugin docs on doc.moq.dev");
 
-	auto *libmoqVer = new QLabel(aboutPage);
-	libmoqVer->setOpenExternalLinks(true);
-	libmoqVer->setTextInteractionFlags(Qt::TextBrowserInteraction);
-	libmoqVer->setText(
-		QString("<a href=\"https://doc.moq.dev/lib/c/\">%1</a>").arg(QString::fromUtf8(MOQ_VERSION_STRING)));
-	libmoqVer->setToolTip("libmoq C API docs on doc.moq.dev");
+	auto *moqVer = new QLabel(aboutPage);
+	moqVer->setOpenExternalLinks(true);
+	moqVer->setTextInteractionFlags(Qt::TextBrowserInteraction);
+	moqVer->setText(
+		QString("<a href=\"https://doc.moq.dev/lib/cpp/\">%1</a>").arg(QString::fromUtf8(MOQ_VERSION_STRING)));
+	moqVer->setToolTip("moq C++ API docs on doc.moq.dev");
 
 	auto *moqDevLink = new QLabel(aboutPage);
 	moqDevLink->setOpenExternalLinks(true);
@@ -587,7 +587,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	detectedLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
 	verForm->addRow("Plugin", pluginVer);
-	verForm->addRow("libmoq", libmoqVer);
+	verForm->addRow("moq-cpp", moqVer);
 	verForm->addRow("moq.dev", moqDevLink);
 	verForm->addRow("moq.pro", moqProLink);
 	verForm->addRow("Available video encoders", detectedLabel);

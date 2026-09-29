@@ -7,6 +7,9 @@ namespace MoQError {
 
 enum class Kind { Unauthorized, Forbidden, Certificate, Timeout, Network, Connect, Offline, Other };
 
+// What the output recorded a failure as, beside its text. None means no failure.
+enum Code : int { None = 0, Unauthorized, Forbidden, Connect, Offline, Other };
+
 inline Kind Classify(int code, std::string reason)
 {
 	for (char &c : reason) {
@@ -16,9 +19,9 @@ inline Kind Classify(int code, std::string reason)
 	auto has = [&](const char *text) {
 		return reason.find(text) != std::string::npos;
 	};
-	if (has("unauthorized") || code == -34)
+	if (has("unauthorized") || code == Code::Unauthorized)
 		return Kind::Unauthorized;
-	if (has("forbidden") || code == -35)
+	if (has("forbidden") || code == Code::Forbidden)
 		return Kind::Forbidden;
 	// Fetching the pin happens before TLS verification and can fail on an outage.
 	const bool fetching = has("failed to fetch fingerprint") || has("fingerprint request failed") ||
@@ -29,9 +32,9 @@ inline Kind Classify(int code, std::string reason)
 		return Kind::Timeout;
 	if (fetching || has("failed to connect") || has("dns"))
 		return Kind::Network;
-	if (code == -5 || has("connect error"))
+	if (code == Code::Connect || has("connect error"))
 		return Kind::Connect;
-	if (code == -17 || reason == "offline")
+	if (code == Code::Offline || reason == "offline")
 		return Kind::Offline;
 	return Kind::Other;
 }

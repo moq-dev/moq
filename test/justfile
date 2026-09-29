@@ -34,8 +34,8 @@ harness:
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
 # sanity check). `interop --all` runs the full matrix: rust + python + go +
-# browser publish; everyone subscribes (incl. native node/bun JS, the C libmoq
-# client, and the GStreamer moqsrc plugin). --timeout 30 gives headless Chromium
+# C++ + browser publish; everyone subscribes (incl. native node/bun JS, the C
+# libmoq client, and the GStreamer moqsrc plugin). --timeout 30 gives headless Chromium
 # cold-start headroom. Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
 # Both runs first check js/net's varints against moq-net's encoder at every size boundary.
@@ -45,7 +45,7 @@ interop *args:
     just rs test -p moq-net --lib varint_interop --run-ignored all
     if [[ "${1:-}" == --all ]]; then
         shift
-        ./interop/interop.sh --publishers rust,python,go,js --subscribers rust,python,go,js,js-native-node,js-native-bun,c,gst --timeout 30 "$@"
+        ./interop/interop.sh --publishers rust,python,go,cpp,js --subscribers rust,python,go,cpp,js,js-native-node,js-native-bun,c,gst --timeout 30 "$@"
     else
         ./interop/interop.sh "$@"
     fi

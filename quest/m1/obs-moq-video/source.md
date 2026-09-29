@@ -16,7 +16,7 @@ The MoQ source loads and plays supported video without FFmpeg's video libraries 
 
 ## Required
 
-- [OBS migration](/quest/m1/cpp/obs.md) - the plugin is on the generated C++ before decode changes
+- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the plugin is on the generated C++ before decode changes
 
 ## Related
 

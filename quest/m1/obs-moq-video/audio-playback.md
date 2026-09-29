@@ -18,7 +18,7 @@ Decided: the earlier receive branch (#3498, merged only into the stranded `codex
 
 ## Required
 
-- [OBS migration](/quest/m1/cpp/obs.md) - the plugin is on the generated C++ first
+- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the plugin is on the generated C++ first
 
 ## Related
 

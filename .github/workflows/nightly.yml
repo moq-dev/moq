@@ -9,8 +9,8 @@ name: Nightly
 # no artifacts with the default one, which is several minutes of duplicate work
 # that a PR gate can't justify for how rarely it catches something. `obs` is
 # diff-independent because its PR-time counterpart can't be: obs.yml has to
-# name the paths that can break an external link to libmoq.a, and no list of
-# paths covers every one of them (see the comment there).
+# name the paths that can break an external link to a Rust staticlib, and no
+# list of paths covers every one of them (see the comment there).
 #
 # The `release-*` jobs are diff-independent because the release workflows only
 # ever run on a tag: a change that compiles under plain cargo can still break a
@@ -121,9 +121,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just rs audit
 
-      # The OBS plugin and libmoq's C fixtures are the only things that link
-      # libmoq.a from outside cargo, so a stale `rs/libmoq/native-libs/*.txt`
-      # breaks them and nothing else. obs.yml lists the inputs that can do that,
+      # The OBS plugin (over moq-ffi) and libmoq's C fixtures link a Rust
+      # staticlib from outside cargo, so a stale `rs/libmoq/native-libs/*.txt`
+      # breaks them and no cargo build. obs.yml lists the inputs that can do that,
       # but a list of paths can't be complete: a build script emitting
       # `cargo::rustc-link-lib` needs no manifest change, and widening that
       # filter to `rs/**` would run a link on nearly every PR. Being
@@ -224,6 +224,12 @@ jobs:
   release-libmoq:
     name: libmoq
     uses: ./.github/workflows/libmoq.yml
+    permissions:
+      contents: write
+
+  release-cpp:
+    name: Release C++
+    uses: ./.github/workflows/release-cpp.yml
     permissions:
       contents: write
 

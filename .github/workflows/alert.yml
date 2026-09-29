@@ -39,6 +39,7 @@ on:
       - Nightly
       - Platform
       - release-brew
+      - Release C++
       - Release Dart
       - Release Dart FFI
       - Release Go

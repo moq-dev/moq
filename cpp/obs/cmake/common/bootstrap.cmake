@@ -49,12 +49,15 @@ string(JSON _name GET ${buildspec} name)
 string(JSON _website GET ${buildspec} website)
 string(JSON _author GET ${buildspec} author)
 string(JSON _email GET ${buildspec} email)
-string(JSON _version GET ${buildspec} version)
+# The plugin's own version, human-owned like cpp/moq/VERSION.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" _version LIMIT_COUNT 1)
+if(NOT _version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  message(FATAL_ERROR "Unsupported version '${_version}' in ${CMAKE_CURRENT_SOURCE_DIR}/VERSION (want x.y.z)")
+endif()
 string(JSON _bundleId GET ${buildspec} platformConfig macos bundleId)
 
-# Release CI builds the plugin against a specific libmoq release and versions it
-# to match (see build.sh --libmoq-release), so allow overriding the buildspec
-# version. Everything below derives PLUGIN_VERSION_* from _version.
+# build.sh --version stamps a different version than VERSION's, so allow
+# overriding it. Everything below derives PLUGIN_VERSION_* from _version.
 if(DEFINED PLUGIN_VERSION_OVERRIDE AND NOT PLUGIN_VERSION_OVERRIDE STREQUAL "")
   set(_version "${PLUGIN_VERSION_OVERRIDE}")
 endif()

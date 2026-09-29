@@ -7,59 +7,43 @@
 #include <string>
 #include <vector>
 
-#include "moq.h"
-
 namespace MoQSettings {
 
 namespace {
 
 // Keys. These are stable: they land in scene collections and in the dock's settings
 // file, so renaming one silently drops whatever the user had configured.
-constexpr const char *VERSION = "version";
 constexpr const char *BIND = "bind";
-constexpr const char *CONNECT_TIMEOUT = "connect_timeout_ms";
-constexpr const char *FAILOVER_DELAY = "failover_delay_ms";
 
 constexpr const char *TLS_DISABLE_VERIFY = "tls_disable_verify";
 constexpr const char *TLS_FINGERPRINT = "tls_fingerprint";
 constexpr const char *TLS_ROOT = "tls_root";
-constexpr const char *TLS_HOST_NAME = "tls_host_name";
 
 constexpr const char *BACKOFF_INITIAL = "backoff_initial_ms";
 constexpr const char *BACKOFF_MAX = "backoff_max_ms";
 constexpr const char *BACKOFF_TIMEOUT = "backoff_timeout_ms";
 
-constexpr const char *QUIC_CONGESTION_CONTROL = "quic_congestion_control";
 constexpr const char *QUIC_MAX_STREAMS = "quic_max_streams";
-constexpr const char *QUIC_IDLE_TIMEOUT = "quic_idle_timeout_ms";
-constexpr const char *QUIC_KEEP_ALIVE = "quic_keep_alive_ms";
-constexpr const char *QUIC_GSO = "quic_gso";
-constexpr const char *QUIC_MTU_DISCOVERY = "quic_mtu_discovery";
-constexpr const char *QUIC_QLOG = "quic_qlog";
 
 constexpr const char *WEBSOCKET_ENABLED = "websocket_enabled";
 constexpr const char *WEBSOCKET_DELAY = "websocket_delay_ms";
 
-// Read a string setting, returning nullptr when it's unset or empty. libmoq's optional
-// string setters take exactly that: NULL means "leave at the default".
+// moq-ffi documents these defaults on the MoqClient setters but does not report them,
+// so they are repeated here. The backoff defaults come from moq::Backoff itself.
+constexpr long long QUIC_MAX_STREAMS_DEFAULT = 1024;
+constexpr bool WEBSOCKET_ENABLED_DEFAULT = true;
+constexpr long long WEBSOCKET_DELAY_DEFAULT_MS = 200;
+
+// Read a string setting, returning nullptr when it's unset or empty, which leaves the
+// knob at the library default.
 const char *OptionalString(obs_data_t *settings, const char *key)
 {
 	const char *value = obs_data_get_string(settings, key);
 	return (value && *value) ? value : nullptr;
 }
 
-// Resolve a tri-state choice (AUTO / "on" / "off") into an override, if any.
-bool TriState(obs_data_t *settings, const char *key, bool *out)
-{
-	const char *value = OptionalString(settings, key);
-	if (!value)
-		return false;
-	*out = strcmp(value, "on") == 0;
-	return true;
-}
-
 // Read an integer setting inside the range declared by its Field. Scene collections
-// are editable JSON, so the widget bounds alone do not protect the unsigned C API.
+// are editable JSON, so the widget bounds alone do not protect the unsigned API.
 uint64_t Amount(obs_data_t *settings, const char *key)
 {
 	const long long value = obs_data_get_int(settings, key);
@@ -70,41 +54,6 @@ uint64_t Amount(obs_data_t *settings, const char *key)
 
 	LOG_ERROR("Advanced integer setting has no Field: %s", key);
 	return 0;
-}
-
-// Enumerate a libmoq capability into menu options. The names live beside the caller's
-// static field table because Option borrows their pointers.
-std::vector<Option> CapabilityOptions(int (*enumerate)(moq_string *, size_t), const char *automatic,
-				      std::vector<std::string> &names)
-{
-	std::vector<Option> options = {{automatic, AUTO}};
-
-	int count = enumerate(nullptr, 0);
-	if (count <= 0)
-		return options;
-
-	std::vector<moq_string> raw(static_cast<size_t>(count));
-	const int reported = enumerate(raw.data(), raw.size());
-	if (reported < 0)
-		return options;
-	const size_t written = std::min(raw.size(), static_cast<size_t>(reported));
-
-	names.clear();
-	names.reserve(written);
-	for (size_t i = 0; i < written; ++i)
-		names.emplace_back(raw[i].data, raw[i].len);
-
-	for (const std::string &name : names)
-		options.push_back({name.c_str(), name.c_str()});
-	return options;
-}
-
-// The protocol versions this build of libmoq offers, so the menu can't drift from what
-// a dial accepts.
-std::vector<Option> VersionOptions()
-{
-	static std::vector<std::string> names;
-	return CapabilityOptions(moq_versions, "Automatic (offer all)", names);
 }
 
 // Shorthands so the table below reads as data rather than aggregate initializers.
@@ -124,82 +73,14 @@ Field Text(const char *key, const char *label, const char *tooltip = nullptr)
 	return Field{key, label, tooltip, Kind::Text, 0, 0, 0, false, 0, "", {}, false, nullptr};
 }
 
-Field Choose(const char *key, const char *label, std::vector<Option> options, bool editable = false,
-	     const char *tooltip = nullptr)
-{
-	return Field{key, label, tooltip, Kind::Choice, 0, 0, 0, false, 0, AUTO, std::move(options), editable, nullptr};
-}
-
 Field File(const char *key, const char *label, const char *filter, const char *tooltip = nullptr)
 {
 	return Field{key, label, tooltip, Kind::File, 0, 0, 0, false, 0, "", {}, false, filter};
 }
 
-Field Directory(const char *key, const char *label, const char *tooltip = nullptr)
+long long Millis(uint64_t us)
 {
-	return Field{key, label, tooltip, Kind::Directory, 0, 0, 0, false, 0, "", {}, false, nullptr};
-}
-
-// The tri-state used wherever the library default depends on the transport.
-std::vector<Option> AutoOnOff()
-{
-	return {{"Automatic", AUTO}, {"Enabled", "on"}, {"Disabled", "off"}};
-}
-
-// libmoq's own defaults, so the table below doesn't repeat numbers that live in
-// moq-tokio and drift the moment one is retuned. Same reason Fields() reads the
-// version list from moq_versions instead of listing drafts.
-//
-// moq_client_defaults reports them in one shot. Local to the plugin rather than a
-// libmoq type, since the UI edits signed integers.
-struct DefaultValues {
-	long long connect_timeout_ms = 0;
-	long long failover_delay_ms = 0;
-	long long backoff_initial_ms = 0;
-	long long backoff_max_ms = 0;
-	long long backoff_timeout_ms = 0;
-	long long quic_max_streams = 0;
-	long long quic_idle_timeout_ms = 0;
-	long long quic_keep_alive_ms = 0;
-	long long websocket_delay_ms = 0;
-	bool websocket_enabled = false;
-	bool loaded = false;
-};
-
-// The library's defaults, read once. A failure leaves `loaded` false, which
-// BuildConfig refuses on rather than writing zeros into a scene collection.
-const DefaultValues &LibraryDefaults()
-{
-	static const DefaultValues defaults = [] {
-		DefaultValues d;
-
-		const moq_client_config config = moq_client_defaults();
-
-		// Every knob the UI edits must be one libmoq reports a default for, or the
-		// field would be built around a zero nobody chose.
-		if (!config.has_connect_timeout || !config.has_failover_delay || !config.has_backoff_initial ||
-		    !config.has_backoff_max || !config.has_backoff_timeout || !config.has_quic_max_streams ||
-		    !config.has_quic_idle_timeout || !config.has_websocket_enabled) {
-			LOG_ERROR("libmoq reported an incomplete set of defaults");
-			return d;
-		}
-
-		d.connect_timeout_ms = (long long)(config.connect_timeout_us / 1000);
-		d.failover_delay_ms = (long long)(config.failover_delay_us / 1000);
-		d.backoff_initial_ms = (long long)(config.backoff_initial_us / 1000);
-		d.backoff_max_ms = (long long)(config.backoff_max_us / 1000);
-		d.backoff_timeout_ms = (long long)(config.backoff_timeout_us / 1000);
-		d.quic_max_streams = (long long)config.quic_max_streams;
-		d.quic_idle_timeout_ms = (long long)(config.quic_idle_timeout_us / 1000);
-		// Absent means "no keep-alive", which the UI shows as zero.
-		d.quic_keep_alive_ms = config.has_quic_keep_alive ? (long long)(config.quic_keep_alive_us / 1000) : 0;
-		d.websocket_delay_ms = config.has_websocket_delay ? (long long)(config.websocket_delay_us / 1000) : 0;
-		d.websocket_enabled = config.websocket_enabled;
-		d.loaded = true;
-		return d;
-	}();
-
-	return defaults;
+	return static_cast<long long>(us / 1000);
 }
 
 } // namespace
@@ -207,21 +88,12 @@ const DefaultValues &LibraryDefaults()
 const std::vector<Field> &Fields()
 {
 	static const std::vector<Field> fields = [] {
-		const DefaultValues &d = LibraryDefaults();
+		const moq::Backoff backoff{};
 		std::vector<Field> f;
 
-		// Protocol. Editable so a work-in-progress draft, which is never offered by
-		// default and so never listed, can still be typed in.
-		f.push_back(Choose(VERSION, "Protocol version", VersionOptions(), true,
-				   "Pin the handshake to one draft instead of offering every supported version."));
 		f.push_back(Text(BIND, "Bind address",
 				 "Local UDP address to send from, e.g. 192.0.2.7:0 to pin the outgoing "
 				 "interface. Leave empty for any."));
-		f.push_back(Number(CONNECT_TIMEOUT, "Connect timeout (ms)", d.connect_timeout_ms, 0, 600000, 1000,
-				   "How long one connection attempt may take, dial and handshake together. "
-				   "0 waits forever."));
-		f.push_back(Number(FAILOVER_DELAY, "Happy Eyeballs delay (ms)", d.failover_delay_ms, 0, 10000, 50,
-				   "How long to wait before also trying the next address DNS returned."));
 
 		// TLS.
 		f.push_back(Toggle(TLS_DISABLE_VERIFY, "Skip certificate verification", false,
@@ -235,50 +107,26 @@ const std::vector<Field> &Fields()
 				 "ignoring this pin."));
 		f.push_back(File(TLS_ROOT, "Root certificate (PEM)", "PEM (*.pem *.crt);;All Files (*)",
 				 "Trust this CA instead of the system roots."));
-		f.push_back(Text(TLS_HOST_NAME, "Server name override (SNI)",
-				 "Validate the certificate against this name instead of the host in the "
-				 "URL, so a relay can be reached by IP."));
 
 		// Reconnect.
-		f.push_back(Number(BACKOFF_INITIAL, "Reconnect delay (ms)", d.backoff_initial_ms, 1, 60000, 100,
+		f.push_back(Number(BACKOFF_INITIAL, "Reconnect delay (ms)", Millis(backoff.initial_us), 1, 60000, 100,
 				   "Delay before the first reconnect attempt; it grows from here."));
-		f.push_back(Number(BACKOFF_MAX, "Reconnect delay cap (ms)", d.backoff_max_ms, 1, 600000, 1000,
+		f.push_back(Number(BACKOFF_MAX, "Reconnect delay cap (ms)", Millis(backoff.max_us), 1, 600000, 1000,
 				   "Ceiling on the growing reconnect delay."));
-		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", d.backoff_timeout_ms, 0, 3600000, 1000,
+		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", Millis(backoff.timeout_us), 0, 3600000, 1000,
 				   "Total time to keep retrying before the stream fails. Also how long the "
 				   "broadcast lingers for viewers across the gap. 0 retries forever."));
 
 		// QUIC transport.
-		f.push_back(Choose(
-			QUIC_CONGESTION_CONTROL, "Congestion control",
-			{{"Automatic", AUTO}, {"Delay-based (BBR)", "delay"}, {"Loss-based (CUBIC)", "loss"}}, false,
-			"Delay-based keeps queues short and the send rate steady enough for an "
-			"encoder to track. Loss-based chases throughput instead."));
-		f.push_back(Number(QUIC_MAX_STREAMS, "Max concurrent streams", d.quic_max_streams, 1, 65536, 1,
+		f.push_back(Number(QUIC_MAX_STREAMS, "Max concurrent streams", QUIC_MAX_STREAMS_DEFAULT, 1, 65536, 1,
 				   "MoQ opens a stream per group, so a busy publisher wants this high."));
-		f.push_back(Number(QUIC_IDLE_TIMEOUT, "Idle timeout (ms)", d.quic_idle_timeout_ms, 0, 600000, 1000,
-				   "How long an idle connection survives before it is dropped."));
-		f.push_back(Number(QUIC_KEEP_ALIVE, "Keep-alive interval (ms)", d.quic_keep_alive_ms, 0, 60000, 100,
-				   "0 disables the keep-alive pings."));
-		f.push_back(Choose(QUIC_GSO, "UDP segmentation offload", AutoOnOff(), false,
-				   "Batches sends into one syscall. Turn it off if large sends vanish; some "
-				   "NICs and middleboxes mangle segmented packets."));
-		f.push_back(Choose(QUIC_MTU_DISCOVERY, "Path MTU discovery", AutoOnOff(), false,
-				   "Probe the path so packets use the largest size it allows. Turn it "
-				   "off if discovery itself causes drops."));
-		// Only when this build can capture: setting a directory without support
-		// fails the dial, so offering it would be a control that only breaks things.
-		if (moq_qlog_supported()) {
-			f.push_back(Directory(QUIC_QLOG, "qlog directory",
-					      "Write QUIC connection traces here for diagnosing stalls. Leave "
-					      "empty to disable; the files get large."));
-		}
 
 		// WebSocket fallback.
-		f.push_back(Toggle(WEBSOCKET_ENABLED, "WebSocket fallback", d.websocket_enabled,
+		f.push_back(Toggle(WEBSOCKET_ENABLED, "WebSocket fallback", WEBSOCKET_ENABLED_DEFAULT,
 				   "Race a WebSocket connection against QUIC so a network that blocks UDP "
 				   "still goes live. Turn it off to measure the QUIC path alone."));
-		f.push_back(Number(WEBSOCKET_DELAY, "WebSocket fallback delay (ms)", d.websocket_delay_ms, 0, 10000, 50,
+		f.push_back(Number(WEBSOCKET_DELAY, "WebSocket fallback delay (ms)", WEBSOCKET_DELAY_DEFAULT_MS, 0,
+				   10000, 50,
 				   "How long QUIC gets a head start before the WebSocket attempt joins in."));
 
 		return f;
@@ -351,106 +199,50 @@ void AddProperties(obs_properties_t *props)
 	obs_properties_add_group(props, ENABLED, "Advanced", OBS_GROUP_CHECKABLE, group);
 }
 
-bool BuildConfig(obs_data_t *settings, Config *out)
+bool Configure(obs_data_t *settings, moq::Client &client, std::string *error)
 {
-	*out = Config{};
 	if (!settings || !obs_data_get_bool(settings, ENABLED))
-		return true; // advanced off: Pointer() stays NULL, so the dial uses the defaults
+		return true; // advanced off: the client keeps the library defaults
 
-	// Every numeric field defaulted to zero, so the settings on hand describe a config
-	// nobody chose. Refusing beats dialing with a 0ms idle timeout the user never asked
-	// for. LibraryDefaults() already logged why.
-	if (!LibraryDefaults().loaded) {
-		LOG_ERROR("Advanced settings unavailable: libmoq did not report its defaults");
-		return false;
-	}
-
-	out->enabled = true;
-	moq_client_config &config = out->value;
-
-	// Each string is copied into `out` first, so the pointer libmoq reads at dial
-	// time survives this function and the settings object it came from.
-	auto borrow = [](const char *value, std::string *storage, const char **ptr, uintptr_t *len) {
-		if (!value)
-			return;
-		*storage = value;
-		*ptr = storage->c_str();
-		*len = storage->size();
+	// Stops at the first setter moq-ffi rejects, naming the setting it came from.
+	auto apply = [&](const char *key, moq::expected<void> result) {
+		if (!result && error)
+			*error = std::string(key) + ": " + result.error().to_string();
+		return result.has_value();
 	};
 
-	if (const char *version = OptionalString(settings, VERSION)) {
-		out->version = version;
-		out->version_item = {out->version.c_str(), out->version.size()};
-		config.versions = &out->version_item;
-		config.versions_len = 1;
+	if (const char *bind = OptionalString(settings, BIND)) {
+		if (!apply(BIND, client.set_bind(bind)))
+			return false;
 	}
 
-	borrow(OptionalString(settings, BIND), &out->bind, &config.bind, &config.bind_len);
-
-	config.connect_timeout_us = (uint64_t)Amount(settings, CONNECT_TIMEOUT) * 1000;
-	config.has_connect_timeout = true;
-	config.failover_delay_us = (uint64_t)Amount(settings, FAILOVER_DELAY) * 1000;
-	config.has_failover_delay = true;
-
-	config.tls_disable_verify = obs_data_get_bool(settings, TLS_DISABLE_VERIFY);
-
+	if (obs_data_get_bool(settings, TLS_DISABLE_VERIFY)) {
+		if (!apply(TLS_DISABLE_VERIFY, client.set_tls_verify(false)))
+			return false;
+	}
 	if (const char *fingerprint = OptionalString(settings, TLS_FINGERPRINT)) {
-		out->fingerprint = fingerprint;
-		out->fingerprint_item = {out->fingerprint.c_str(), out->fingerprint.size()};
-		config.tls_fingerprints = &out->fingerprint_item;
-		config.tls_fingerprints_len = 1;
+		if (!apply(TLS_FINGERPRINT, client.set_tls_fingerprints({fingerprint})))
+			return false;
 	}
-
 	if (const char *root = OptionalString(settings, TLS_ROOT)) {
-		out->root = root;
-		out->root_item = {out->root.c_str(), out->root.size()};
-		config.tls_roots = &out->root_item;
-		config.tls_roots_len = 1;
+		if (!apply(TLS_ROOT, client.set_tls_roots({root})))
+			return false;
 	}
 
-	borrow(OptionalString(settings, TLS_HOST_NAME), &out->host_name, &config.tls_host_name,
-	       &config.tls_host_name_len);
+	moq::Backoff backoff{};
+	backoff.initial_us = Amount(settings, BACKOFF_INITIAL) * 1000;
+	backoff.max_us = Amount(settings, BACKOFF_MAX) * 1000;
+	backoff.timeout_us = Amount(settings, BACKOFF_TIMEOUT) * 1000;
+	if (!apply(BACKOFF_INITIAL, client.set_backoff(backoff)))
+		return false;
 
-	config.backoff_initial_us = (uint64_t)Amount(settings, BACKOFF_INITIAL) * 1000;
-	config.has_backoff_initial = true;
-	config.backoff_max_us = (uint64_t)Amount(settings, BACKOFF_MAX) * 1000;
-	config.has_backoff_max = true;
-	config.backoff_timeout_us = (uint64_t)Amount(settings, BACKOFF_TIMEOUT) * 1000;
-	config.has_backoff_timeout = true;
+	if (!apply(QUIC_MAX_STREAMS, client.set_quic_max_streams(Amount(settings, QUIC_MAX_STREAMS))))
+		return false;
 
-	config.quic_max_streams = (uint64_t)Amount(settings, QUIC_MAX_STREAMS);
-	config.has_quic_max_streams = true;
-	config.quic_idle_timeout_us = (uint64_t)Amount(settings, QUIC_IDLE_TIMEOUT) * 1000;
-	config.has_quic_idle_timeout = true;
-	config.quic_keep_alive_us = (uint64_t)Amount(settings, QUIC_KEEP_ALIVE) * 1000;
-	config.has_quic_keep_alive = true;
-
-	// The tri-states stay unset when the user left them on Automatic, which is what
-	// keeps the transport free to pick. That is exactly what the has_* flag carries.
-	bool toggle = false;
-	if (TriState(settings, QUIC_GSO, &toggle)) {
-		config.quic_gso = toggle;
-		config.has_quic_gso = true;
-	}
-
-	if (TriState(settings, QUIC_MTU_DISCOVERY, &toggle)) {
-		config.quic_mtu_discovery = toggle;
-		config.has_quic_mtu_discovery = true;
-	}
-
-	borrow(OptionalString(settings, QUIC_CONGESTION_CONTROL), &out->congestion, &config.quic_congestion_control,
-	       &config.quic_congestion_control_len);
-
-	// A scene collection written by a qlog-capable build keeps the key even where the
-	// field is hidden, and applying it there would fail the dial for a setting the user
-	// can no longer see, let alone clear.
-	borrow(moq_qlog_supported() ? OptionalString(settings, QUIC_QLOG) : nullptr, &out->qlog, &config.quic_qlog,
-	       &config.quic_qlog_len);
-
-	config.websocket_enabled = obs_data_get_bool(settings, WEBSOCKET_ENABLED);
-	config.has_websocket_enabled = true;
-	config.websocket_delay_us = (uint64_t)Amount(settings, WEBSOCKET_DELAY) * 1000;
-	config.has_websocket_delay = true;
+	if (!apply(WEBSOCKET_ENABLED, client.set_websocket_enabled(obs_data_get_bool(settings, WEBSOCKET_ENABLED))))
+		return false;
+	if (!apply(WEBSOCKET_DELAY, client.set_websocket_delay(Amount(settings, WEBSOCKET_DELAY) * 1000)))
+		return false;
 
 	return true;
 }
