@@ -43,7 +43,9 @@ audio quality number makes a failure hard to attribute.
 
 Nightly, not per-PR: the matrix is jitter profiles by runtime by codec and
 sample rate, which is more than a merge gate should carry, and `nightly.yml`
-already exists for exactly this trade. Budgets are keyed by the full row, since
+already exists for exactly this trade. The recorded-trace replays are the
+exception: they run in seconds without a browser, so [Replay
+CI](/quest/m0/audio-quality-harness/replay-ci.md) gates PRs on them. Budgets are keyed by the full row, since
 each of those dimensions moves the expected floor.
 
 The budgets checked in with the browser lane (#4426) were recorded locally.
@@ -54,6 +56,7 @@ quest](/quest/m0/audio-jitter-target/watch.md).
 
 ## Required
 
+- [Replay CI](/quest/m0/audio-quality-harness/replay-ci.md) - the trace replays gate every PR that touches the player
 - [Shaper profiles](/quest/m0/audio-quality-harness/shaper-profiles.md) - the bursty and mid-run step profiles, once moq-shaper can express them
 
 ## Related

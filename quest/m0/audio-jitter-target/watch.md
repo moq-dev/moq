@@ -81,7 +81,9 @@ against it is likely cheaper than patching the branch's:
   `replay.test.ts`, move the replay's target onto the estimator, and tighten
   the harness's exact replay budgets with it.
 - Manual run against the public relay on Chrome and Safari, the two rows the
-  issue measured. Measure the publisher's audio encoder input-to-output lag in
+  issue measured. Re-record the `relay-mic` trace in the same run with a real
+  microphone (`just test audio-quality-record`); the checked-in one used
+  Chromium's fake capture device. Measure the publisher's audio encoder input-to-output lag in
   the same run using the reporter's instrumented harness; #3518 fixed the known
   cause, so the 7.35 s lag and the 88 to 275 ms/s drift the issue reported
   stand unconfirmed. If drift survives, the suspects are `writeFrame` opening a
