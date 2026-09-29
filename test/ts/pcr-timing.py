@@ -11,11 +11,16 @@ instrument pointed at another:
     release     when the bytes carrying them were handed over  (--live only)
     position    where the PCR packets sit among the media bytes
 
+and a constant-rate stream makes a fourth, which `schedule` grades: that the bytes
+between consecutive PCRs are the bytes the mux rate implies for that interval.
+
 Every check is an invariant on the stream, not an assertion about how the stream
 was produced. `release` grades arrival against the PCR's *own* values rather than
 against a wall clock, so it needs no reference clock, no source file and no
 declared mux rate; the price is that a clock running at the wrong rate stays
 internally consistent under it and has to be caught by `value` and `position`.
+`schedule` takes the rate from --mux-rate when the caller knows it, and otherwise
+estimates it from the capture and says so.
 
 Exit status is 0 when every hard check passes, 1 otherwise. `--strict` promotes
 the report-only (shape) checks to hard.
@@ -461,6 +466,103 @@ def check_position(scan, args):
     )
 
 
+def check_schedule(scan, args):
+    """The bytes between consecutive PCRs must be the bytes the mux rate implies.
+
+    `position` asks whether PCR packets are spread among the media bytes; this asks
+    whether they are spread at the right rate. A constant-rate stream is one where the
+    byte distance between two PCRs, over the time between their values, is the mux rate
+    for every interval and not merely on average, and that is what a receiver recovering
+    its clock from packet arrival depends on. A census of the whole capture cannot see
+    it: a stream padded to the right total with its bytes heaped between a few PCRs reads
+    as constant-rate in aggregate and at almost no individual interval.
+
+    The rate comes from --mux-rate when the caller knows it, which also pins the absolute
+    rate the way nothing else here does. Otherwise it is estimated from the graded
+    intervals themselves, so the aggregate is right by construction and what is left to
+    grade is only how evenly the bytes are laid over the PCRs. The report says which.
+    The estimate is total bytes over total time, so a transient in a short sample, such
+    as a start that is not yet padded, biases every interval's error by the same amount;
+    pass the rate whenever it is known.
+
+    Report-only unless --schedule-pct-min is given: a VBR stream has no schedule to keep,
+    and `export ts` is VBR unless a mux rate is declared, so only the caller knows whether
+    this property was promised.
+    """
+    hard = args.schedule_pct_min is not None
+    severity = HARD if hard else SHAPE
+    required = args.schedule_pct_min if hard else 99.0
+    # One PID only. Two PIDs each on a correct grid, offset from one another, pool into a
+    # grid of half the interval with half the bytes in each slot, which is a schedule
+    # neither of them keeps. pcr-single-pid already fails a stream carrying two; grading
+    # the busier one keeps this check's answer about one clock rather than about both.
+    pids = collections.Counter(pid for _, _, _, pid in scan.pcr)
+    pid = pids.most_common(1)[0][0] if pids else None
+    on_pid = [(k, e) for k, e in enumerate(scan.pcr) if e[3] == pid]
+    graded = []
+    skipped = 0
+    for (_, a), (kb, b) in zip(on_pid, on_pid[1:]):
+        seconds = (b[1] - a[1]) / TICKS_PER_MS / 1000.0
+        # An interval spanning a signalled new time base measures nothing, as in the value
+        # check. A non-positive one is a duplicate packet (legal) or a backwards clock (the
+        # value check's defect to report); neither has a rate to compare against.
+        if kb in scan.new_base or seconds <= 0:
+            skipped += 1
+            continue
+        graded.append(((b[0] - a[0]) * PKT, seconds))
+    if len(graded) < 3:
+        # Asked to gate, an ungradable stream is a failure rather than a clean one.
+        return ("pcr-schedule", severity, not hard, "not measured (too few PCR intervals on one PID)", {})
+
+    aggregate = 8.0 * sum(n for n, _ in graded) / sum(s for _, s in graded)
+    rate = args.mux_rate if args.mux_rate else aggregate
+    source = "declared" if args.mux_rate else "estimated from the capture"
+    want = [rate * s / 8.0 for _, s in graded]
+    # Adding 0.0 turns an exact -0.0 into 0.0, so an exact schedule does not print as -0%.
+    err = [100.0 * (n / w - 1.0) + 0.0 for (n, _), w in zip(graded, want)]
+    # PCR packets can only sit on packet boundaries, so a mux whose PCR values are on a
+    # time grid is up to a packet off at every interval even when its schedule is exact.
+    # Below ~19 kB per interval one packet is more than 1 %, and a percentage alone would
+    # fail a correct low-rate stream on quantisation.
+    slack = [max(args.schedule_tolerance_pct / 100.0 * w, PKT) for w in want]
+    within = sum(1 for (n, _), w, s in zip(graded, want, slack) if abs(n - w) <= s)
+    median_s = statistics.median(s for _, s in graded)
+    detail = {
+        "pid": pid,
+        "other_pcr_pids": sorted(p for p in pids if p != pid),
+        "count": len(graded),
+        "skipped": skipped,
+        "rate_bps": round(rate),
+        "rate_source": "declared" if args.mux_rate else "estimated",
+        "aggregate_bps": round(aggregate),
+        "median_bytes": statistics.median(n for n, _ in graded),
+        "nominal_bytes_at_median_interval": round(rate * median_s / 8.0),
+        "min_bytes": min(n for n, _ in graded),
+        "max_bytes": max(n for n, _ in graded),
+        "rel_err_p1_pct": round(percentile(err, 1), 2),
+        "rel_err_median_pct": round(statistics.median(err), 2),
+        "rel_err_p99_pct": round(percentile(err, 99), 2),
+        "rel_err_max_abs_pct": round(max(abs(e) for e in err), 2),
+        "tolerance_pct": args.schedule_tolerance_pct,
+        "within_tolerance": within,
+        "within_tolerance_pct": round(100.0 * within / len(graded), 2),
+        "required_pct": required,
+    }
+    aggregate_note = f", aggregate {aggregate:,.0f} b/s" if args.mux_rate else ""
+    return (
+        "pcr-schedule",
+        severity,
+        detail["within_tolerance_pct"] >= required,
+        f"{within}/{len(graded)} intervals ({detail['within_tolerance_pct']:g}%) within "
+        f"±{args.schedule_tolerance_pct:g}% (or one packet) of the bytes {rate:,.0f} b/s implies "
+        f"({source}{aggregate_note}); median gap {detail['median_bytes']:,.0f} B against "
+        f"{detail['nominal_bytes_at_median_interval']:,} B, error p1 {detail['rel_err_p1_pct']:+g}% "
+        f"median {detail['rel_err_median_pct']:+g}% p99 {detail['rel_err_p99_pct']:+g}%, "
+        f"worst {detail['rel_err_max_abs_pct']:g}%",
+        detail,
+    )
+
+
 CHECKS = [
     check_sync,
     check_continuity,
@@ -468,6 +570,7 @@ CHECKS = [
     check_value_interval,
     check_release,
     check_position,
+    check_schedule,
 ]
 
 
@@ -542,9 +645,31 @@ def main():
     ap.add_argument(
         "--adjacent-pct-max", type=float, default=1.0, help="share of clustered PCRs before pcr-position flags"
     )
+    ap.add_argument(
+        "--mux-rate",
+        type=float,
+        metavar="BPS",
+        help="the constant rate pcr-schedule grades against, in bits per second (default: estimated from the capture)",
+    )
+    ap.add_argument(
+        "--schedule-tolerance-pct",
+        type=float,
+        default=1.0,
+        help="how far an interval's bytes may be from what the mux rate implies, as a percentage; "
+        "one packet is always allowed (default 1)",
+    )
+    ap.add_argument(
+        "--schedule-pct-min",
+        type=float,
+        metavar="PCT",
+        help="share of PCR intervals that must be within the schedule tolerance; giving it makes "
+        "pcr-schedule a hard check (default: report-only, flagging below 99)",
+    )
     ap.add_argument("--strict", action="store_true", help="fail on shape checks too")
     ap.add_argument("--report-json", help="write the full report here")
     args = ap.parse_args()
+    if args.mux_rate is not None and args.mux_rate <= 0:
+        ap.error("--mux-rate must be positive")
 
     if args.live:
         scan = scan_live(args.seconds)
