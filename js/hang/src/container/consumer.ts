@@ -304,7 +304,8 @@ export class Consumer {
 	#checkMaxAge() {
 		if (this.#active === undefined) return;
 
-		let skipped = false;
+		let skipped = 0;
+		const start = this.#groups[0]?.consumer.sequence;
 		let hole = false;
 
 		// Keep skipping the oldest group while the buffered span exceeds the max age.
@@ -333,9 +334,6 @@ export class Consumer {
 
 			this.#groups.shift();
 			this.#active = this.#groups[0]?.consumer.sequence;
-			console.warn(
-				`skipping slow group: track=${this.#track.name} ${first.consumer.sequence} -> ${this.#active}`,
-			);
 
 			const nextStart = this.#groups[0]?.frames.at(0)?.timestamp ?? this.#groups[0]?.end;
 			const marker = !first.empty && !first.media;
@@ -344,13 +342,16 @@ export class Consumer {
 			}
 			first.consumer.close();
 			first.frames.length = 0;
-			skipped = true;
+			skipped++;
 			this.#gap = true;
 		}
 
 		if (hole) this.#markPlayhead();
 
 		if (skipped) {
+			console.warn(
+				`skipping slow groups: track=${this.#track.name} ${start} -> ${this.#active} count=${skipped}`,
+			);
 			this.#updateBuffered();
 
 			// Wake up any consumers waiting for a new frame.
