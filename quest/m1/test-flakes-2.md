@@ -32,6 +32,9 @@ retry.
 - `just test media` late join failed once after
   [#4181](https://github.com/moq-dev/moq/pull/4181): "joined at frame 111, 16
   frames behind 127", against a budget of one GOP (15).
+- js/publish audio encoder test "a rendition trailing the broadcast's
+  earliest advertises delay" reads the real clock, so it fails when its file
+  runs alone (timestamps go negative early in the process) (#4414). Mock time.
 
 ## Plan
 
