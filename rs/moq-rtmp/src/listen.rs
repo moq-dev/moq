@@ -61,22 +61,25 @@ pub struct Config {
 	/// and the memory matters. Only affects ingest (publishes); egress ignores it.
 	pub import_max_age: Option<Duration>,
 
-	/// TLS for RTMPS (RTMP over TLS) on the [`listen`](Self::listen) address, or `None`
-	/// for plaintext only.
-	///
-	/// [`Optional`](crate::Tls::Optional) serves both: a client that opens with a TLS
-	/// ClientHello (`rtmps://`) is TLS-terminated, any other is served as plaintext
-	/// (`rtmp://`). [`Required`](crate::Tls::Required) serves `rtmps://` only and refuses
-	/// a plaintext client at its first byte, so stream keys never cross the network
-	/// unencrypted. Build the [`rustls::ServerConfig`] with
-	/// `moq_tokio::tls::Listen::server_config` (pass an empty ALPN list); an
-	/// `Arc<rustls::ServerConfig>` converts into `Tls::Optional`.
+	/// TLS configuration for RTMPS (RTMP over TLS). When set, the
+	/// [`listen`](Self::listen) address serves both: a client that opens with a
+	/// TLS ClientHello (`rtmps://`) is TLS-terminated, any other is served as
+	/// plaintext (`rtmp://`), unless [`plaintext`](Self::plaintext) is `false`.
+	/// Build it with
+	/// `moq_tokio::tls::Listen::server_config` (pass an empty ALPN list) or
+	/// any [`rustls::ServerConfig`]. Leave `None` for plaintext only.
 	///
 	/// To serve RTMP and RTMPS on separate ports instead, clone one base config
 	/// and call [`run`] for each listener against a cloned origin; the clones
 	/// share one [`ActivePaths`].
 	#[cfg(feature = "tls")]
-	pub tls: Option<crate::Tls>,
+	pub tls: Option<std::sync::Arc<rustls::ServerConfig>>,
+
+	/// Accept plaintext `rtmp://` alongside `tls`. Set `false` to serve
+	/// `rtmps://` only: a plaintext client is refused at its first byte, so stream keys
+	/// never cross the network unencrypted. [`run`] fails at startup if this is `false`
+	/// with no `tls` to serve instead.
+	pub plaintext: bool,
 
 	active: ActivePaths,
 }
@@ -90,6 +93,7 @@ impl Default for Config {
 			import_max_age: None,
 			#[cfg(feature = "tls")]
 			tls: None,
+			plaintext: true,
 			active: ActivePaths::default(),
 		}
 	}
@@ -116,14 +120,13 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 		unreachable!("pending future never resolves");
 	};
 
-	#[cfg_attr(not(feature = "tls"), allow(unused_mut))]
 	let mut server = Server::bind(listen).await?;
 
 	#[cfg(feature = "tls")]
-	let tls = match &config.tls {
-		None => "off",
-		Some(crate::Tls::Optional(_)) => "optional",
-		Some(crate::Tls::Required(_)) => "required",
+	let tls = match (&config.tls, config.plaintext) {
+		(None, _) => "off",
+		(Some(_), true) => "optional",
+		(Some(_), false) => "required",
 	};
 	#[cfg(not(feature = "tls"))]
 	let tls = "off";
@@ -132,6 +135,9 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 	if let Some(tls) = config.tls.clone() {
 		server = server.with_tls(tls);
 	}
+	server = server.with_plaintext(config.plaintext);
+	// Fail at startup, not by dropping every client.
+	server.check()?;
 
 	tracing::info!(%listen, prefix = %config.prefix, tls, "RTMP ingest listening");
 
@@ -307,6 +313,20 @@ mod tests {
 		assert!(active.claim("live/cam0").is_some());
 
 		drop(other);
+	}
+
+	#[tokio::test]
+	async fn plaintext_off_without_tls_fails_at_startup() {
+		let config = Config {
+			listen: Some("127.0.0.1:0".parse().unwrap()),
+			plaintext: false,
+			..Config::default()
+		};
+
+		let err = run(moq_tokio::origin::spawn(), config)
+			.await
+			.expect_err("nothing could connect");
+		assert!(err.to_string().contains("no TLS config"), "{err}");
 	}
 
 	#[test]

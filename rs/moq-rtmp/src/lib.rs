@@ -49,10 +49,11 @@
 //! RTMPS (RTMP over TLS) is supported two ways:
 //!
 //! - **Let the gateway terminate TLS**: set [`Config::tls`] (or call
-//!   [`Server::with_tls`]) to a [`Tls`] carrying a [`rustls::ServerConfig`].
-//!   [`Tls::Optional`] serves `rtmps://` alongside `rtmp://` on the same port,
-//!   telling them apart by the client's first byte; [`Tls::Required`] refuses the
-//!   plaintext clients.
+//!   [`Server::with_tls`]) with a [`rustls::ServerConfig`], and the listener
+//!   serves `rtmps://` alongside `rtmp://` on the same port, telling them apart
+//!   by the client's first byte. Set [`Config::plaintext`] to `false` (or call
+//!   [`Server::with_plaintext`]) to refuse the plaintext clients and serve
+//!   `rtmps://` only.
 //! - **Bring your own transport**: accept the connection and complete the TLS
 //!   handshake yourself (any [`Stream`]: a `tokio_rustls` stream, a custom
 //!   socket, a test pipe), then hand the established stream to [`accept_stream`].
@@ -91,8 +92,6 @@ pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(2);
 pub use dial::Client;
 pub use error::{Error, Result};
 pub use listen::{ActivePaths, Config, PathGuard, run};
-#[cfg(feature = "tls")]
-pub use server::Tls;
 pub use server::{Conn, PUBLISH_IDLE_TIMEOUT, Play, Publish, Request, Server, Stream, accept_stream, configure_socket};
 
 /// Re-export of the `rustls` version this crate builds [`Config::tls`] against,

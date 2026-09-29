@@ -34,9 +34,10 @@ Any other player receives one video rendition: the largest picture (then
 highest bitrate) in a codec it advertised. A push carries the largest one.
 
 Implemented in pure Rust (no librtmp). The CLI speaks plaintext `rtmp://`
-only. The library adds RTMPS when the embedder supplies a TLS config, either
-`Tls::Optional` (`rtmps://` and plaintext `rtmp://` share the port, so stream
-keys can still arrive unencrypted) or `Tls::Required` (`rtmps://` only; a
-plaintext client is refused at its first byte and the refusal is logged with the
-peer address). FLAC and MP3 enhanced-audio payloads are dropped because hang has no
+only. The library adds RTMPS on the same port when the embedder supplies a TLS
+config, and by default still accepts plaintext `rtmp://` there, so stream keys
+can arrive unencrypted. The embedder can set `plaintext` to `false` to serve
+`rtmps://` only: a plaintext client is refused at its first byte and the refusal
+is logged with the peer address. Refusing plaintext without a TLS config fails
+at startup. FLAC and MP3 enhanced-audio payloads are dropped because hang has no
 catalog codec for them.
