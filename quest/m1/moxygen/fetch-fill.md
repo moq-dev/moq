@@ -19,10 +19,10 @@ merged unanswered, and the maintainer ruled that each blocks the line:
   ([r4113942736](https://github.com/moq-dev/moq/pull/4276#discussion_r4113942736)).
   FETCH_OK names an `end_location`, but it never reaches the decoder. If the
   peer cleanly ends the stream early, the group is finished and cached short,
-  and later readers see a normal end. Check the last object received against
-  what FETCH_OK promised before finishing the producer, and abort the group
-  otherwise. That only works when `end_location` names a concrete last
-  object: for a whole-group request our own `run_fetch_stream` answers with
+  and later readers see a normal end. Check the exclusive received boundary
+  (last object ID + 1) against FETCH_OK's `end_location`, which is exclusive,
+  before finishing the producer, and abort the group otherwise. That only
+  works when `end_location` names a concrete object: for a whole-group request our own `run_fetch_stream` answers with
   the requested boundary (`(group + 1, 0)`), so a stream holding only object
   0 looks like a valid one-object group. The line's accepted declines keep
   that requested end, so for this case find a wire signal that marks a
@@ -35,7 +35,9 @@ merged unanswered, and the maintainer ruled that each blocks the line:
   exists. On the first object `prior_group` is `None` and `next` is 0, so an
   anonymous object is cached under the requested group. The first object must
   carry explicit IDs resolving to the requested group and start object; refuse
-  it as a protocol violation otherwise.
+  it as a protocol violation otherwise. The same holds for every field that
+  inherits from a predecessor (draft-15+ `FetchSubgroup::Prior`, an omitted
+  publisher priority): on the first object each must be explicit.
 - **The upstream FETCH ignores the requested frame offset**
   ([r4113942733](https://github.com/moq-dev/moq/pull/4276#discussion_r4113942733)).
   `group::Request::frame_start()` carries the downstream reader's start, and
