@@ -73,6 +73,9 @@ struct Opus {
 	inner: *mut OpusDecoder,
 	pre_skip_remaining: usize,
 	max_frame_size: usize,
+	/// Frames per channel in the last packet that decoded, which is what a lost
+	/// packet most likely carried. `None` until one has.
+	last_frame_size: Option<usize>,
 	in_dtx: bool,
 }
 
@@ -135,6 +138,7 @@ impl Decoder {
 			inner,
 			pre_skip_remaining: head.pre_skip as usize,
 			max_frame_size: (opus::DECODE_RATE as usize * MAX_FRAME_MS) / 1000,
+			last_frame_size: None,
 			in_dtx: false,
 		};
 
@@ -281,13 +285,26 @@ impl Decoder {
 
 	/// Decode one packet into interleaved `f32` PCM and report its codec activity.
 	///
-	/// Empty Opus packets invoke packet-loss concealment. Loss during DTX remains
-	/// classified as DTX, while loss during active audio remains active.
+	/// An empty Opus packet marks one lost packet and conceals as much audio as the
+	/// last packet that decoded held, so a lost 20 ms packet yields 20 ms. It is
+	/// refused with [`Error::Decode`] before any packet has decoded, since there is
+	/// no length to conceal. Loss during DTX remains classified as DTX, while loss
+	/// during active audio remains active.
 	pub fn decode(&mut self, packet: &[u8]) -> Result<Decoded, Error> {
 		match &mut self.backend {
 			Backend::Opus(opus) => {
 				let channels = self.layout.channels() as usize;
-				let mut out = vec![0.0f32; opus.max_frame_size * channels];
+				// libopus conceals exactly `frame_size` samples for a lost packet, and
+				// the decoder can't know how long it was, so assume the last one's length.
+				// A real packet decodes into the most it can hold.
+				let frame_size = if packet.is_empty() {
+					opus.last_frame_size.ok_or_else(|| {
+						Error::Decode("opus packet lost before any packet decoded, so no length to conceal".into())
+					})?
+				} else {
+					opus.max_frame_size
+				};
+				let mut out = vec![0.0f32; frame_size * channels];
 				// SAFETY: `inner` owns a live OpusDecoder; packet/out slices are
 				// bounded by the lengths we pass.
 				let samples = unsafe {
@@ -296,12 +313,15 @@ impl Decoder {
 						packet.as_ptr(),
 						packet.len() as i32,
 						out.as_mut_ptr(),
-						opus.max_frame_size as i32,
+						frame_size as i32,
 						0,
 					)
 				};
 				if samples < 0 {
 					return Err(crate::opus::decode_error(samples));
+				}
+				if !packet.is_empty() {
+					opus.last_frame_size = Some(samples as usize);
 				}
 				out.truncate(samples as usize * channels);
 				let trim_frames = opus.pre_skip_remaining.min(samples as usize);
@@ -502,6 +522,29 @@ pub(crate) mod tests {
 			assert_eq!(decoder.decode(&packets[0]).unwrap().samples.len(), 960 - 312);
 			assert_eq!(decoder.decode(&packets[1]).unwrap().samples.len(), 960);
 		}
+	}
+
+	/// One lost packet conceals one packet's worth of audio, not the 120 ms
+	/// libopus would fill given the whole buffer.
+	#[test]
+	fn opus_conceals_the_length_of_the_last_packet() {
+		let packets = opus_packets(3);
+		let mut decoder = Decoder::new(
+			&opus_catalog(moq_mux::codec::opus::Config::new(48_000, 1)),
+			&Config::default(),
+		)
+		.unwrap();
+
+		// Nothing decoded yet, so there is no length to conceal.
+		assert!(matches!(decoder.decode(&[]), Err(Error::Decode(_))));
+
+		for packet in &packets {
+			decoder.decode(packet).unwrap();
+		}
+		assert_eq!(decoder.decode(&[]).unwrap().samples.len(), 960);
+
+		// Concealment doesn't change the length: the next loss is the same size.
+		assert_eq!(decoder.decode(&[]).unwrap().samples.len(), 960);
 	}
 
 	#[test]
