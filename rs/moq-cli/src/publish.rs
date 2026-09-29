@@ -132,65 +132,6 @@ pub struct CaptureArgs {
 	pub no_audio: bool,
 }
 
-/// How often `import ts` compares the importer's per-stream counters.
-///
-/// Long enough that every continuous stream delivers many access units in between, so a
-/// count that did not move is a stream that stopped rather than one between frames.
-const STATS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// Logs what moved in the importer's per-stream counters from one sample to the next.
-#[derive(Default)]
-struct StatsLog {
-	previous: Option<ts::Stats>,
-	/// Streams already reported quiet, so a silence is logged when it starts and not again
-	/// until the stream has delivered.
-	quiet: std::collections::BTreeSet<u16>,
-}
-
-impl StatsLog {
-	/// Compare a sample taken [`STATS_INTERVAL`] after the last.
-	fn sample(&mut self, latest: ts::Stats) {
-		self.sync(&latest);
-		for (pid, stream) in &latest.streams {
-			let previous = self.previous.as_ref().and_then(|previous| previous.streams.get(pid));
-			if previous.is_none_or(|previous| previous.units != stream.units) {
-				self.quiet.remove(pid);
-			} else if self.quiet.insert(*pid) {
-				tracing::info!(
-					pid = *pid,
-					track = stream.track,
-					units = stream.units,
-					quiet = ?stream.quiet,
-					"elementary stream stopped delivering access units"
-				);
-			}
-		}
-		self.previous = Some(latest);
-	}
-
-	/// Report the streams whose frame-sync counters moved, one line each.
-	///
-	/// The importer already warns on each individual resync; this is the running total, which
-	/// is what an operator turns into a rate.
-	fn sync(&self, latest: &ts::Stats) {
-		let lost = |stream: &ts::StreamStats| (stream.resyncs, stream.discarded, stream.unconfirmed);
-		for (pid, stream) in &latest.streams {
-			let previous = self.previous.as_ref().and_then(|previous| previous.streams.get(pid));
-			if previous.map_or((0, 0, 0), lost) == lost(stream) {
-				continue;
-			}
-			tracing::info!(
-				pid = *pid,
-				track = stream.track,
-				resyncs = stream.resyncs,
-				discarded = stream.discarded,
-				unconfirmed = stream.unconfirmed,
-				"audio frame sync lost"
-			);
-		}
-	}
-}
-
 enum PublishDecoder {
 	Avc3 {
 		split: Box<moq_mux::codec::h264::Split>,
@@ -475,7 +416,7 @@ async fn decode(
 	// Counters reported so far, so only the change is logged. A live feed is
 	// diagnosed by the rate at which these climb, and stdin may never end, so
 	// they have to surface as they accumulate rather than at exit.
-	let mut log = StatsLog::default();
+	let mut log = ts::stats::Log::default();
 	let mut sampled = tokio::time::Instant::now();
 
 	// Run the read/decode loop so an error surfaces here rather than
@@ -489,7 +430,7 @@ async fn decode(
 			}
 			decoder.decode_chunk(&buffer)?;
 
-			if sampled.elapsed() >= STATS_INTERVAL {
+			if sampled.elapsed() >= ts::stats::Log::INTERVAL {
 				sampled = tokio::time::Instant::now();
 				if let Some(stats) = decoder.stats() {
 					log.sample(stats);
@@ -504,10 +445,9 @@ async fn decode(
 	// a bare Error::Dropped.
 	let outcome = result.and_then(|()| decoder.finish());
 	// The drain at end of input can publish a frame nothing vouched for, so the
-	// final snapshot is only complete after `finish`. It covers less than an interval, so
-	// only the frame sync is compared.
+	// final snapshot is only complete after `finish`.
 	if let Some(stats) = decoder.stats() {
-		log.sync(&stats);
+		log.finish(&stats);
 	}
 	match outcome {
 		Ok(()) => catalog.finish(),
@@ -920,44 +860,6 @@ mod tests {
 		let last = last.expect("a catalog");
 		assert_eq!(last.video.renditions.len(), 1, "the video rendition is still listed");
 		assert_eq!(last.audio.renditions.len(), 1, "the audio rendition is still listed");
-	}
-
-	/// A stream whose count stops across a sample is logged once, with its silence, and again
-	/// only after it has delivered in between; a stream that keeps counting never is, and
-	/// neither reports frame sync it never lost.
-	#[test]
-	#[tracing_test::traced_test]
-	fn stats_log_reports_a_stream_that_stopped() {
-		const VIDEO: u16 = 0x100;
-		const AUDIO: u16 = 0x101;
-		let sample = |video: u64, audio: u64| {
-			let mut stats = ts::Stats::default();
-			for (pid, track, units) in [(VIDEO, ".avc3", video), (AUDIO, ".mp2", audio)] {
-				let mut stream = ts::StreamStats::default();
-				stream.track = track;
-				stream.units = units;
-				stream.quiet = Some(Duration::from_millis(40));
-				stats.streams.insert(pid, stream);
-			}
-			stats
-		};
-
-		let mut log = StatsLog::default();
-		for (video, audio) in [(10, 10), (10, 20), (10, 30), (11, 40), (11, 50)] {
-			log.sample(sample(video, audio));
-		}
-
-		logs_assert(|lines: &[&str]| {
-			let stopped: Vec<_> = lines
-				.iter()
-				.filter(|line| line.contains("stopped delivering access units"))
-				.collect();
-			match stopped.as_slice() {
-				[first, second] if [first, second].iter().all(|line| line.contains("pid=256")) => Ok(()),
-				_ => Err(format!("expected two lines for the video PID, got {stopped:?}")),
-			}
-		});
-		assert!(!logs_contain("audio frame sync lost"), "nothing lost frame sync");
 	}
 
 	/// Read the first frame of a verbatim track back as raw bytes.
