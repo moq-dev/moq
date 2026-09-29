@@ -83,6 +83,12 @@ impl Profile {
 			self.jitter,
 			self.delay
 		);
+		// With no delay to vary, `verify` has nothing to hold the jitter to.
+		anyhow::ensure!(
+			self.jitter.is_zero() || !self.delay.is_zero(),
+			"jitter {:?} needs a delay to vary",
+			self.jitter
+		);
 		if let Some(rate) = &self.rate {
 			anyhow::ensure!(rate.bits_per_second > 0, "a rate limit of zero passes nothing");
 		}
@@ -1261,6 +1267,7 @@ mod tests {
 	fn gaussian_jitter_never_leaves_before_it_arrived() {
 		// A sigma far past the delay, so most draws would be negative unclamped.
 		let wide = Profile {
+			delay: Duration::from_millis(1),
 			jitter: Duration::from_millis(50),
 			..Default::default()
 		};
@@ -1355,6 +1362,27 @@ mod tests {
 		.await;
 		assert_eq!(round_trip(&client, 20).await, (0..20).collect::<Vec<_>>());
 		shaper.verify().unwrap();
+
+		// With no delay, `verify` could never tell the jitter acted.
+		let undelayed = Profile {
+			jitter: Duration::from_millis(5),
+			..Default::default()
+		};
+		let err = Shaper::bind(Setup {
+			up: GAUSSIAN,
+			..Config {
+				bind: LOCALHOST,
+				target: LOCALHOST,
+				seed: 0,
+				up: undelayed,
+				down: Profile::default(),
+			}
+			.into()
+		})
+		.await
+		.err()
+		.expect("accepted gaussian jitter with no delay");
+		assert!(format!("{err:#}").contains("needs a delay to vary"), "{err:#}");
 	}
 
 	/// Two clients take turns sending `count` numbered datagrams up the path

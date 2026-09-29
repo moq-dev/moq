@@ -64,7 +64,7 @@ later datagram can overtake an earlier one. A drill wants that, and `jitter` may
 
 `gaussian` treats `jitter` as a sigma, clamps the draw at zero, and never lets a datagram leave before the
 one in front of it: queueing delay on a FIFO path, which stretches and compresses the spacing and never
-changes the order. Only `reorder` overtakes. This matters beyond realism: QUIC reads an overtake as loss,
+changes the order. The sigma may exceed `delay`, but a nonzero `jitter` still needs a nonzero `delay`. Only `reorder` overtakes. This matters beyond realism: QUIC reads an overtake as loss,
 retransmits and backs off, so a run meant to measure a jittery path ends up measuring the congestion
 response. On a 5ms delay with 5ms of jitter, reordering alone dragged a receiver's audio buffer from
 120ms to nearly two seconds.
