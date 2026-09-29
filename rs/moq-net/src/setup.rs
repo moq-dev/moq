@@ -10,6 +10,9 @@ use crate::{
 	ietf, lite,
 };
 
+// SETUP only carries negotiation parameters. Bound it independently of control messages.
+pub(crate) const MAX_SETUP_SIZE: usize = 64 * 1024;
+
 const CLIENT_SETUP: u8 = 0x20;
 const SERVER_SETUP: u8 = 0x21;
 
@@ -72,6 +75,7 @@ impl Decode<Version> for Setup {
 		if kind != SETUP_V17 {
 			return Err(DecodeError::InvalidValue);
 		}
+		// The fixed u16 length is already below MAX_SETUP_SIZE.
 		let size = u16::decode(r, v)? as usize;
 		if r.remaining() < size {
 			return Err(DecodeError::Short);
@@ -145,9 +149,16 @@ impl Decode<Version> for Client {
 
 		let size = match SetupVersion::from_version(v) {
 			SetupVersion::Draft14 | SetupVersion::Draft15Plus => u16::decode(r, v)? as usize,
-			SetupVersion::LiteLegacy => u64::decode(r, v)? as usize,
+			SetupVersion::LiteLegacy => usize::decode(r, v)?,
 			SetupVersion::Modern | SetupVersion::Unsupported => return Err(DecodeError::Version),
 		};
+
+		if size > MAX_SETUP_SIZE {
+			return Err(DecodeError::MessageTooLarge {
+				size,
+				max: MAX_SETUP_SIZE,
+			});
+		}
 
 		if r.remaining() < size {
 			return Err(DecodeError::Short);
@@ -160,7 +171,9 @@ impl Decode<Version> for Client {
 				// Draft15+: no versions list, parameters only.
 				coding::Versions::from([v.into()])
 			}
-			SetupVersion::Draft14 | SetupVersion::LiteLegacy => coding::Versions::decode(&mut msg, v)?,
+			SetupVersion::Draft14 | SetupVersion::LiteLegacy => {
+				coding::Versions::decode(&mut msg, v).map_err(DecodeError::complete)?
+			}
 			SetupVersion::Modern | SetupVersion::Unsupported => return Err(DecodeError::Version),
 		};
 
@@ -249,9 +262,16 @@ impl Decode<Version> for Server {
 
 		let size = match SetupVersion::from_version(v) {
 			SetupVersion::Draft14 | SetupVersion::Draft15Plus => u16::decode(r, v)? as usize,
-			SetupVersion::LiteLegacy => u64::decode(r, v)? as usize,
+			SetupVersion::LiteLegacy => usize::decode(r, v)?,
 			SetupVersion::Modern | SetupVersion::Unsupported => return Err(DecodeError::Version),
 		};
+
+		if size > MAX_SETUP_SIZE {
+			return Err(DecodeError::MessageTooLarge {
+				size,
+				max: MAX_SETUP_SIZE,
+			});
+		}
 
 		if r.remaining() < size {
 			return Err(DecodeError::Short);
@@ -260,7 +280,9 @@ impl Decode<Version> for Server {
 		let mut msg = r.copy_to_bytes(size);
 		let version = match SetupVersion::from_version(v) {
 			SetupVersion::Draft15Plus => v.into(),
-			SetupVersion::Draft14 | SetupVersion::LiteLegacy => coding::Version::decode(&mut msg, v)?,
+			SetupVersion::Draft14 | SetupVersion::LiteLegacy => {
+				coding::Version::decode(&mut msg, v).map_err(DecodeError::complete)?
+			}
 			SetupVersion::Modern | SetupVersion::Unsupported => return Err(DecodeError::Version),
 		};
 

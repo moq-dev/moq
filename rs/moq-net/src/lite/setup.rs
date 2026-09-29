@@ -185,6 +185,8 @@ pub struct Setup {
 }
 
 impl Message for Setup {
+	const MAX_SIZE: usize = crate::setup::MAX_SETUP_SIZE;
+
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_setup_stream() {
 			return Err(DecodeError::Version);
