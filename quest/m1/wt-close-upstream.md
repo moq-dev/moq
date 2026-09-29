@@ -21,14 +21,17 @@ detached task until `closed()` resolves, capped at a 10s `CLOSE_LINGER`.
 Decided 2026-09-29: fix it at the source and remove the timeout workaround.
 
 - In moq-dev/noq, the close path keeps whatever the capsule needs alive until
-  it is delivered, without the caller's help. Add a regression test there
-  that drops the session right after `close()`.
+  it is delivered, without the caller's help. Its regression test drops the
+  session right after `close()` and asserts the peer reads the capsule
+  before the H3 control stream ends; it must fail on 1.3.2. A Rust peer
+  alone proves nothing: `session_close_surfaces_a_rejection_code` in
+  `rs/moq-tokio/tests/broadcast.rs` passed on 1.3.2 without the linger,
+  because only Chromium treats the control stream's end as fatal. Add a
+  browser check too if the playwright harness makes it cheap.
 - Release `web-transport-moq` 1.3.x and bump the pin on `main` (2.x on `dev`
   if it has moved).
 - Delete `CLOSE_LINGER`, its task, and its mock-session tests from
-  moq-tokio. #4429 has no end-to-end test, so add a moq-tokio regression
-  where a refused `https://` session reports its code to the client and
-  fails on the 1.3.2 pin without the linger.
+  moq-tokio.
 
 Public API: none. Wire: none.
 
