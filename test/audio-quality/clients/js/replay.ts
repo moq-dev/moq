@@ -57,11 +57,13 @@ const traces = readdirSync(dir)
 const profiles = values.profiles === undefined ? undefined : split(values.profiles);
 const rings = split(values.rings);
 const codecs = split(values.codecs);
-for (const [name, list, known] of [
+const selectors: [string, string[], string[]][] = [
+	["profile", profiles ?? [], traces.map((t) => t.profile)],
 	["ring", rings, ["isolated", "plain"]],
 	["codec", codecs, ["opus", "aac"]],
-] as const) {
-	const unknown = list.find((v) => !(known as readonly string[]).includes(v));
+];
+for (const [name, list, known] of selectors) {
+	const unknown = list.find((v) => !known.includes(v));
 	if (unknown !== undefined) {
 		console.error(`unknown ${name} '${unknown}' (known: ${known.join(", ")})`);
 		process.exit(2);
