@@ -115,6 +115,10 @@ mesh = true
 
 A relay with `node` and `mesh` but no `connect` is a passive rendezvous.
 
+Gossip trusts every node advertised under `.internal/origins/` and dials it
+with `cluster.token`. Keep client grants off `.internal/`: a client that can
+publish there can add a peer that receives the token.
+
 On a LAN there may be no seed peer to gossip through. `[cluster.lan]` advertises
 this relay over mDNS and dials the peers that advertise back, so a rack or a
 home lab meshes with no seed list. A `moq --cluster-lan` process on the same
