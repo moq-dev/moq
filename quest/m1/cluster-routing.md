@@ -50,7 +50,8 @@ but does not end it; see the findings below.
 - A new incarnation is learned from existence, never inferred from liveness:
   it announces a reset (its incarnation at seqno 0) that ends everything the
   old one published, and a relay applies a reset and the records after it as
-  one batch. Purging on a liveness report instead drops a restarted origin's
+  one batch. Incarnations are ordered, so a delayed reset from an older one is
+  dropped. Purging on a liveness report instead drops a restarted origin's
   broadcasts until their re-announce lands, which the simulator showed as live
   broadcasts reported offline.
 - The topology is configured: `--cluster-connect` or the connect API gives the
@@ -148,7 +149,7 @@ registry. What decides the wire:
 - Failure detection, not routing, sets every outage window: a silent link or
   relay loss is noticed after the 30 s QUIC idle timeout in every candidate,
   and subscribes through it go nowhere until then. Cluster sessions need a
-  short keepalive.
+  short idle timeout; a keepalive only keeps a quiet session open.
 - One registry per region and two cost about the same; two halves the
   busiest registry's load. A registration sent on a dead registry session
   that nobody has noticed yet waits for the failover.
