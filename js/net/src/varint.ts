@@ -14,7 +14,6 @@ import {
 	peekQuic,
 	readLeadingOnes,
 	readQuic,
-	SAFE_HI,
 	split,
 	toBigInt,
 	writeLeadingOnes,
@@ -30,89 +29,6 @@ export const MAX_U30 = 2 ** 30 - 1;
 /** Largest value representable without precision loss (`Number.MAX_SAFE_INTEGER`, 53 bits). */
 export const MAX_U53 = Number.MAX_SAFE_INTEGER;
 
-// hi at or above this is past 2^62 - 1.
-const MAX_HI = 2 ** 30;
-
-/**
- * An unsigned integer below 2^62, the full range of a varint.
- *
- * Held as two 32-bit halves so it encodes and decodes without a BigInt. Converting to a `number`
- * throws past 2^53 rather than rounding.
- */
-export class VarInt {
-	/** The value 0. */
-	static readonly ZERO = new VarInt(0, 0);
-	/** The largest value, 2^62 - 1. */
-	static readonly MAX = new VarInt(MAX_HI - 1, POW32 - 1);
-
-	/** The upper 30 bits. */
-	readonly hi: number;
-	/** The lower 32 bits. */
-	readonly lo: number;
-
-	/** Join the upper 30 and lower 32 bits, throwing if either is out of range. */
-	constructor(hi: number, lo: number) {
-		if (!Number.isInteger(hi) || hi < 0 || hi >= MAX_HI) {
-			throw new RangeError(`overflow, value larger than 62-bits: upper half ${hi}`);
-		}
-		if (!Number.isInteger(lo) || lo < 0 || lo >= POW32) throw new RangeError(`invalid lower half: ${lo}`);
-		this.hi = hi;
-		this.lo = lo;
-	}
-
-	/** Convert a non-negative safe integer, throwing on anything else. */
-	static fromNumber(v: number): VarInt {
-		if (!Number.isSafeInteger(v) || v < 0) throw new RangeError(`invalid varint: ${v}`);
-		return new VarInt(Math.floor(v / POW32), v >>> 0);
-	}
-
-	/** Convert a bigint, throwing unless it is in [0, 2^62). */
-	static fromBigInt(v: bigint): VarInt {
-		if (v < 0n || v >> 62n) throw new RangeError(`invalid varint: ${v}`);
-		return new VarInt(Number(v >> 32n), Number(v & 0xffffffffn));
-	}
-
-	/** Convert to a `number`, throwing if it is above `Number.MAX_SAFE_INTEGER`. */
-	toNumber(): number {
-		if (this.hi >= SAFE_HI) throw new RangeError(`value larger than 53-bits: ${this.toString()}`);
-		return this.hi * POW32 + this.lo;
-	}
-
-	/** Convert to a bigint, exactly. */
-	toBigInt(): bigint {
-		return toBigInt(this.hi, this.lo);
-	}
-
-	/** The value in decimal. */
-	toString(): string {
-		return this.hi < SAFE_HI ? String(this.hi * POW32 + this.lo) : this.toBigInt().toString();
-	}
-
-	/** Negative if this is less than `other`, zero if equal, positive if greater. */
-	compare(other: VarInt): number {
-		return this.hi - other.hi || this.lo - other.lo;
-	}
-
-	/** Whether this equals `other`. */
-	equals(other: VarInt): boolean {
-		return this.hi === other.hi && this.lo === other.lo;
-	}
-
-	/** This plus a non-negative safe integer, throwing if the sum reaches 2^62. */
-	add(delta: number): VarInt {
-		if (!Number.isSafeInteger(delta) || delta < 0) throw new RangeError(`invalid delta: ${delta}`);
-		const lo = this.lo + (delta >>> 0);
-		return new VarInt(this.hi + Math.floor(delta / POW32) + (lo >= POW32 ? 1 : 0), lo >>> 0);
-	}
-}
-
-// Like split, but also taking a VarInt.
-function load(v: number | bigint | VarInt): number {
-	if (!(v instanceof VarInt)) return split(v);
-	parts.hi = v.hi;
-	return v.lo;
-}
-
 // The size of the varint at the start of `buf`, throwing unless all of it is there.
 function sizeOf(buf: Uint8Array, size: (first: number) => number): number {
 	if (buf.length === 0) throw new Error("buffer is empty");
@@ -122,21 +38,21 @@ function sizeOf(buf: Uint8Array, size: (first: number) => number): number {
 }
 
 /** Number of bytes needed to encode a value in the leading-ones varint format. */
-export function sizeLeadingOnes(v: number | bigint | VarInt): number {
-	const lo = load(v);
+export function sizeLeadingOnes(v: number | bigint): number {
+	const lo = split(v);
 	return lengthLeadingOnes(parts.hi, lo);
 }
 
 /** Encode a value in leading-ones varint format into the provided buffer, returning the written subarray. */
-export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint | VarInt): Uint8Array {
-	const lo = load(v);
+export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint): Uint8Array {
+	const lo = split(v);
 	const buf = new Uint8Array(dst, 0, lengthLeadingOnes(parts.hi, lo));
 	writeLeadingOnes(buf, parts.hi, lo, buf.length);
 	return buf;
 }
 
 /** Encode a value in leading-ones varint format into a freshly allocated buffer. */
-export function encodeLeadingOnes(v: number | bigint | VarInt): Uint8Array {
+export function encodeLeadingOnes(v: number | bigint): Uint8Array {
 	return encodeLeadingOnesTo(new ArrayBuffer(9), v);
 }
 
@@ -166,8 +82,8 @@ export function size(v: number): number {
  * Encodes a value as a QUIC variable-length integer into the provided buffer,
  * returning the written subarray.
  */
-export function encodeTo(dst: ArrayBuffer, v: number | bigint | VarInt): Uint8Array {
-	const lo = load(v);
+export function encodeTo(dst: ArrayBuffer, v: number | bigint): Uint8Array {
+	const lo = split(v);
 	const buf = new Uint8Array(dst, 0, lengthQuic(parts.hi, lo));
 	writeQuic(buf, parts.hi, lo, buf.length);
 	return buf;
@@ -177,7 +93,7 @@ export function encodeTo(dst: ArrayBuffer, v: number | bigint | VarInt): Uint8Ar
  * Encodes a value as a QUIC variable-length integer.
  * Returns a new Uint8Array containing the encoded bytes.
  */
-export function encode(v: number | bigint | VarInt): Uint8Array {
+export function encode(v: number | bigint): Uint8Array {
 	return encodeTo(new ArrayBuffer(8), v);
 }
 

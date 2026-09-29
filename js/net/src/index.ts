@@ -30,5 +30,3 @@ export * as Time from "./time.ts";
 export * as Track from "./track.ts";
 /** Varint encoding and decoding, in QUIC's format and moq-transport's leading-ones format. */
 export * as Varint from "./varint.ts";
-/** An unsigned integer below 2^62, the full range of a varint. */
-export { VarInt } from "./varint.ts";

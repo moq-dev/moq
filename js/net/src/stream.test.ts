@@ -13,7 +13,7 @@ import {
 import { Version } from "./ietf/version.ts";
 import { type Cursor, Reader, Stream, Writer } from "./stream.ts";
 import { TimeoutError } from "./util/timeout.ts";
-import { VarInt } from "./varint.ts";
+import { VarInt } from "./util/varint.ts";
 
 // Helper to create a writable stream that captures written data
 function createTestWritableStream(): { stream: WritableStream<Uint8Array>; written: Uint8Array[] } {
@@ -802,20 +802,27 @@ test("Writer and Reader varint round-trip every size in both formats", async () 
 	const values = [0n, 63n, 64n, 127n, 128n, 2n ** 14n, 2n ** 21n, 2n ** 28n, 2n ** 30n, 2n ** 32n, 2n ** 35n];
 	values.push(2n ** 42n, 2n ** 49n, 2n ** 53n, 2n ** 56n, 2n ** 62n - 1n);
 	for (const version of [undefined, Version.DRAFT_16, Version.DRAFT_17, Version.DRAFT_19]) {
+		// Only leading-ones varints reach past 62 bits.
+		const all =
+			version === Version.DRAFT_17 || version === Version.DRAFT_19
+				? [...values, 2n ** 62n, 2n ** 64n - 1n]
+				: values;
 		const { stream, written } = createTestWritableStream();
 		const writer = new Writer(stream, version);
-		for (const value of values) await writer.varint(VarInt.fromBigInt(value));
+		for (const value of all) await writer.varint(VarInt.fromBigInt(value));
 		writer.close();
 		await writer.closed;
 
 		const reader = new Reader(undefined, concatChunks(written), version);
-		for (const value of values) expect((await reader.varint()).toBigInt()).toBe(value);
+		for (const value of all) expect((await reader.varint()).toBigInt()).toBe(value);
 		expect(await reader.done()).toBe(true);
 	}
 });
 
-test("Reader varint rejects a leading-ones varint past 62 bits", async () => {
-	const bytes = new Uint8Array([0xff, 0x40, 0, 0, 0, 0, 0, 0, 0]);
-	expect(await new Reader(undefined, bytes, Version.DRAFT_17).u62()).toBe(2n ** 62n);
-	await expect(new Reader(undefined, bytes, Version.DRAFT_17).varint()).rejects.toThrow(/62-bits/);
+test("Writer varint refuses a QUIC varint past 62 bits before emitting bytes", async () => {
+	const { stream, written } = createTestWritableStream();
+	const writer = new Writer(stream);
+	await expect(writer.varint(VarInt.fromBigInt(2n ** 62n))).rejects.toThrow(/larger than 62-bits/);
+	await expect(writer.varint(VarInt.MAX)).rejects.toThrow(/larger than 62-bits/);
+	expect(written).toEqual([]);
 });

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { Version } from "../../js/net/src/ietf/version.ts";
 import { Reader, Writer } from "../../js/net/src/stream.ts";
-import { VarInt } from "../../js/net/src/varint.ts";
+import { VarInt } from "../../js/net/src/util/varint.ts";
 
 // Each value is a decimal string, since JSON numbers round past 2^53.
 const input: { values: string[]; quic: number[][]; leadingOnes: number[][] } = JSON.parse(process.argv[2]);

@@ -16,10 +16,10 @@ import {
 	SAFE_HI,
 	split,
 	toBigInt,
+	VarInt,
 	writeLeadingOnes,
 	writeQuic,
 } from "./util/varint.ts";
-import { VarInt } from "./varint.ts";
 
 // Decode raw transport errors before mapping so they cannot bypass the negotiated
 // registry. Ordinary errors already send 0 and retain their local identity.
@@ -520,7 +520,7 @@ export class Cursor {
 		return toBigInt(parts.hi, lo);
 	}
 
-	/** Read a varint, throwing if a leading-ones varint exceeds 62 bits. */
+	/** Read a varint. */
 	varint(): VarInt {
 		const lo = this.#varint();
 		return new VarInt(parts.hi, lo);

@@ -1,4 +1,4 @@
-/** Time one varint encode and one decode, for both wire formats, at a 1-byte and an 8-byte value. */
+/** Time one varint encode and one decode, for both wire formats, at each QUIC varint size. */
 import { Version } from "../src/ietf/version.ts";
 import { Cursor } from "../src/stream.ts";
 import * as Varint from "../src/varint.ts";
@@ -15,10 +15,12 @@ const formats = [
 	{ name: "quic", version: undefined, encode: Varint.encodeTo },
 	{ name: "leading-ones", version: Version.DRAFT_17, encode: Varint.encodeLeadingOnesTo },
 ];
-// 8 bytes in both formats: 2^49 <= v < 2^53.
+// The largest value of each QUIC size. In leading-ones form they take 1, 2, 5, and 8 bytes.
 const values = [
-	{ name: "small", value: 37 },
-	{ name: "8-byte", value: 2 ** 50 + 12_345 },
+	{ name: "1-byte", value: 2 ** 6 - 1 },
+	{ name: "2-byte", value: 2 ** 14 - 1 },
+	{ name: "4-byte", value: 2 ** 30 - 1 },
+	{ name: "8-byte", value: Number.MAX_SAFE_INTEGER },
 ];
 
 // Nanoseconds per varint for the fastest of several reps, since a slower one measured the machine.

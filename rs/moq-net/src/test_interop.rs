@@ -24,7 +24,8 @@ pub(crate) fn fin(version: &str, started: bool, clean: bool, responses: Vec<u8>)
 	serde_json::from_slice(&bun("bare-fin.ts", input)).expect("JS publisher returned response bytes")
 }
 
-/// Every varint size boundary in both formats, plus the 2^53 edge of a JS `number`.
+/// Every varint size boundary in both formats, plus the 2^53 edge of a JS `number`. js/net's own
+/// tests cover leading-ones values past 2^62 - 1, where moq-net's `VarInt` stops.
 #[test]
 #[ignore = "requires Bun; run by just test interop"]
 fn varint_interop() {
@@ -51,7 +52,8 @@ fn varint_interop() {
 		"quic": values.iter().map(quic).collect::<Vec<_>>(),
 		"leadingOnes": values.iter().map(leading_ones).collect::<Vec<_>>(),
 	});
-	let output: serde_json::Value = serde_json::from_slice(&bun("varint.ts", input)).expect("JS returned its encodings");
+	let output: serde_json::Value =
+		serde_json::from_slice(&bun("varint.ts", input)).expect("JS returned its encodings");
 	let js = |format: &str| -> Vec<Vec<u8>> { serde_json::from_value(output[format].clone()).unwrap() };
 
 	for ((value, js_quic), js_leading) in values.iter().zip(js("quic")).zip(js("leadingOnes")) {

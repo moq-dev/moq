@@ -30,9 +30,9 @@ Decided in planning (2026-09-27), with the spike data in
   and bytes out, no runtime. The async helper methods move behind an `async`
   cargo feature; rs2ts reads the crate without it and JS reimplements the
   helpers with Promises. No second crate.
-- Varints stay 62-bit on the wire; the spec is not bounded to 2^53. Rust's
-  `VarInt` newtype carries Encode/Decode and JS gets a matching `VarInt` type
-  with checked conversion to and from `number`.
+- Varints are not bounded to 2^53 on the wire: 62 bits in QUIC form, 64 in
+  leading-ones form. Rust's `VarInt` newtype carries Encode/Decode and JS has
+  a 64-bit `VarInt` type with checked conversion to and from `number`.
 - The generated TypeScript is committed and a CI lane regenerates it and
   fails on drift, so JS contributors and npm publishing never need the
   nightly toolchain Charon pins. It lives inside js/net and `@moq/net` stays
@@ -44,7 +44,7 @@ Decided in planning (2026-09-27), with the spike data in
   the code once they run on a mock clock instead of tokio.
 - The line lands on `dev`: the Rust refactors break moq-net's published API,
   and the translator and generated code build on them. Only the additive
-  JS `VarInt` (`js/net/src/varint.ts`) is on `main`.
+  JS `VarInt` (`js/net/src/util/varint.ts`) is on `main`, package-internal.
 - Hand-written js/net fixes keep landing until the generated path replaces
   them; it is months out.
 
