@@ -30,6 +30,12 @@ Decided with the maintainer:
 A pending trailing publish folds into any structural publish that happens
 first. Unit tests drive the window on a mocked clock in both languages.
 
+The churn fans out (every rise reaches every subscriber on every track), so
+add a benchmark swept over tracks x subscribers that drives a rising estimate
+and counts catalog publishes and subscribe updates. It shows the saving now and
+catches a regression later as a slope. `moq-mux` has no benches yet; add one
+there or extend `rs/moq-net/benches/session.rs`.
+
 Public API: none expected. Wire: none; catalog contents are unchanged, only
 how often they are sent.
 
