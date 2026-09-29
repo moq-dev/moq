@@ -1,6 +1,6 @@
+use crate::rml::amf0;
+use crate::rml::amf0::Amf0Value;
 use bytes::Bytes;
-use rml_amf0;
-use rml_amf0::Amf0Value;
 use std::io::Cursor;
 
 use crate::rml::messages::RtmpMessage;
@@ -19,14 +19,14 @@ pub fn serialize(
 	];
 
 	values.append(&mut additional_arguments);
-	let bytes = rml_amf0::serialize(&values)?;
+	let bytes = amf0::serialize(&values)?;
 
 	Ok(Bytes::from(bytes))
 }
 
 pub fn deserialize(data: Bytes) -> Result<RtmpMessage, MessageDeserializationError> {
 	let mut cursor = Cursor::new(data);
-	let mut arguments = rml_amf0::deserialize(&mut cursor)?;
+	let mut arguments = amf0::deserialize(&mut cursor)?;
 
 	let command_name: String;
 	let transaction_id: f64;
@@ -71,9 +71,9 @@ pub fn deserialize(data: Bytes) -> Result<RtmpMessage, MessageDeserializationErr
 #[cfg(test)]
 mod tests {
 	use super::{deserialize, serialize};
+	use crate::rml::amf0;
+	use crate::rml::amf0::Amf0Value;
 	use bytes::Bytes;
-	use rml_amf0;
-	use rml_amf0::Amf0Value;
 	use std::collections::HashMap;
 	use std::io::Cursor;
 
@@ -84,7 +84,7 @@ mod tests {
 		// A command with fewer than the 3 required values must error, not panic
 		// the drain(..3) (this path deserializes untrusted network input).
 		for values in [vec![], vec![Amf0Value::Utf8String("connect".to_string())]] {
-			let bytes = Bytes::from(rml_amf0::serialize(&values).unwrap());
+			let bytes = Bytes::from(amf0::serialize(&values).unwrap());
 			assert!(deserialize(bytes).is_err());
 		}
 	}
@@ -108,7 +108,7 @@ mod tests {
 		.unwrap();
 
 		let mut cursor = Cursor::new(raw_message);
-		let result = rml_amf0::deserialize(&mut cursor).unwrap();
+		let result = amf0::deserialize(&mut cursor).unwrap();
 
 		let expected = vec![
 			Amf0Value::Utf8String("test".to_string()),
@@ -139,7 +139,7 @@ mod tests {
 			Amf0Value::Number(52.0),
 		];
 
-		let bytes = Bytes::from(rml_amf0::serialize(&values).unwrap());
+		let bytes = Bytes::from(amf0::serialize(&values).unwrap());
 		let expected = RtmpMessage::Amf0Command {
 			command_name: "test".to_string(),
 			transaction_id: 23.0,

@@ -1,8 +1,9 @@
 use super::*;
+use crate::rml::amf0;
+use crate::rml::amf0::Amf0Value;
 use crate::rml::chunk_io::ChunkDeserializer;
 use crate::rml::messages::{MessagePayload, PeerBandwidthLimitType, RtmpMessage, UserControlEventType};
 use bytes::BytesMut;
-use rml_amf0::Amf0Value;
 use std::collections::HashMap;
 
 const DEFAULT_CHUNK_SIZE: u32 = 1111;
@@ -1687,5 +1688,93 @@ fn verify_is_onstatus(subject: &RtmpMessage, expected_status: &str, expected_cod
 		}
 
 		x => panic!("Expected Amf0Command command, instead received: {:?}", x),
+	}
+}
+
+#[test]
+fn amf0_nesting_limit() {
+	const CASE: &str = "MOQ_RTMP_AMF0_CASE";
+	if let Ok(case) = std::env::var(CASE) {
+		let parts: Vec<usize> = case.split(',').map(|part| part.parse().unwrap()).collect();
+		let (marker, depth, type_id) = (parts[0] as u8, parts[1], parts[2] as u8);
+		std::thread::Builder::new()
+			.stack_size(2 * 1024 * 1024)
+			.spawn(move || {
+				// Build wire bytes directly so the test does not recurse while preparing input.
+				let mut data = amf0::serialize(&vec![amf0::Amf0Value::Utf8String("test".into())]).unwrap();
+				if type_id == 20 || type_id == 17 {
+					data.extend_from_slice(&[0; 9]); // transaction number
+				}
+				for _ in 0..depth {
+					data.push(marker);
+					if marker == 8 || marker == 10 {
+						data.extend_from_slice(&1u32.to_be_bytes());
+					}
+					if marker == 3 || marker == 8 {
+						data.extend_from_slice(&[0, 1, b'x']);
+					}
+				}
+				data.push(5); // null leaf
+				if marker == 3 || marker == 8 {
+					for _ in 0..depth {
+						data.extend_from_slice(&[0, 0, 9]);
+					}
+				}
+				if type_id == 17 {
+					data.insert(0, 0); // AMF0 command labelled AMF3
+				}
+				let payload = crate::rml::messages::MessagePayload {
+					timestamp: crate::rml::time::RtmpTimestamp::new(0),
+					type_id,
+					message_stream_id: 0,
+					data: bytes::Bytes::from(data),
+				};
+				let packet = crate::rml::chunk_io::ChunkSerializer::new()
+					.serialize(&payload, true, false)
+					.unwrap();
+				let (mut session, _) = super::ServerSession::new(super::ServerSessionConfig::new()).unwrap();
+				let result = session.handle_input(&packet.bytes);
+				if depth <= 64 {
+					assert!(result.is_ok(), "{result:?}");
+				} else {
+					assert!(
+						matches!(
+							result,
+							Err(super::ServerSessionError::MessageDeserializationError(
+								crate::rml::messages::MessageDeserializationError::Amf0DeserializationError(
+									amf0::Amf0DeserializationError::MaxDepthExceeded
+								)
+							))
+						),
+						"expected nesting error, got {result:?}"
+					);
+				}
+			})
+			.unwrap()
+			.join()
+			.unwrap();
+		return;
+	}
+	for marker in [3, 8, 10] {
+		for depth in [64, 65, 100_000] {
+			for type_id in [18, 20, 15, 17] {
+				let case = format!("{marker},{depth},{type_id}");
+				let output = std::process::Command::new(std::env::current_exe().unwrap())
+					.args([
+						"--exact",
+						"rml::sessions::server::tests::amf0_nesting_limit",
+						"--nocapture",
+					])
+					.env(CASE, &case)
+					.output()
+					.unwrap();
+				assert!(
+					output.status.success(),
+					"case {case}: {}\n{}",
+					String::from_utf8_lossy(&output.stdout),
+					String::from_utf8_lossy(&output.stderr)
+				);
+			}
+		}
 	}
 }

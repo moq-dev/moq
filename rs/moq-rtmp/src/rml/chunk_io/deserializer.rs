@@ -178,7 +178,7 @@ impl ChunkDeserializer {
 	/// This method should almost always be called only in reaction to receiving a `SetChunkSize`
 	/// message from the other end.
 	pub fn set_max_chunk_size(&mut self, new_size: usize) -> Result<(), ChunkDeserializationError> {
-		if new_size > 2147483647 {
+		if new_size == 0 || new_size > 2147483647 {
 			return Err(ChunkDeserializationError::InvalidMaxChunkSize { chunk_size: new_size });
 		}
 
@@ -457,6 +457,18 @@ fn get_csid(buffer: &[u8]) -> ParsedValue<u32> {
 
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn chunk_size_floor() {
+		let mut decoder = super::ChunkDeserializer::new();
+		assert!(matches!(
+			decoder.set_max_chunk_size(0),
+			Err(super::ChunkDeserializationError::InvalidMaxChunkSize { chunk_size: 0 })
+		));
+		assert_eq!(decoder.get_max_chunk_size(), 128);
+		decoder.set_max_chunk_size(1).unwrap();
+		assert_eq!(decoder.get_max_chunk_size(), 1);
+	}
+
 	use super::*;
 	use crate::rml::time::RtmpTimestamp;
 	use byteorder::{BigEndian, LittleEndian, WriteBytesExt};
