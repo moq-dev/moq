@@ -162,6 +162,10 @@ pub struct Config {
 	pub websocket: Option<crate::websocket::Listener>,
 
 	/// An Iroh endpoint to accept sessions from.
+	///
+	/// The server owns the endpoint's listener: it replaces the endpoint's ALPN set with its
+	/// configured versions, accepts every incoming connection, and closes it on shutdown.
+	/// Don't give one endpoint to two servers; dialing through clones of it is fine.
 	#[cfg(feature = "iroh")]
 	pub iroh: Option<iroh::Endpoint>,
 
