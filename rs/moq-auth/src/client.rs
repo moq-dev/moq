@@ -493,24 +493,43 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_grant_within_clock_skew_stays_live() {
+	async fn an_expired_grant_is_refused() {
 		tokio::time::pause();
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
 		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
 		let client = clock_server(Log::default(), grant, false).await;
-		let consumer = client.connect(request()).await.unwrap();
+		assert!(matches!(client.connect(request()).await, Err(Error::GrantExpired)));
+	}
 
-		tokio::time::sleep(Duration::from_millis(500)).await;
+	#[tokio::test]
+	async fn a_grant_closes_at_its_expiry() {
+		tokio::time::pause();
+		// Whole seconds, as the grant crosses the wire, so the client sees this exact instant.
+		// An hour out, so a slow runner cannot expire it before `connect` answers.
+		let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+		let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() + 3600);
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		grant.expires = Some(expires);
+		let client = clock_server(Log::default(), grant, false).await;
+
+		// The client reads both clocks somewhere inside `connect`, so bracket it: the
+		// bounds hold however long it takes.
+		let (wall, tick) = (SystemTime::now(), tokio::time::Instant::now());
+		let consumer = client.connect(request()).await.unwrap();
+		let earliest = tick + expires.duration_since(SystemTime::now()).unwrap();
+		let latest = tokio::time::Instant::now() + expires.duration_since(wall).unwrap();
+
+		// A millisecond either side for Tokio's timer resolution.
+		let tolerance = Duration::from_millis(1);
 		assert!(
-			tokio::time::timeout(Duration::from_millis(100), consumer.closed())
+			tokio::time::timeout_at(earliest - tolerance, consumer.closed())
 				.await
 				.is_err(),
-			"still live inside the skew window"
+			"live until its expiry"
 		);
-
-		let reason = tokio::time::timeout(crate::grant::CLOCK_SKEW + Duration::from_secs(1), consumer.closed())
+		let reason = tokio::time::timeout_at(latest + tolerance, consumer.closed())
 			.await
-			.expect("expired once the skew window ended");
+			.expect("closed at its expiry, not later");
 		assert_eq!(reason, Reason::Expired);
 	}
 

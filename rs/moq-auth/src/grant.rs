@@ -4,19 +4,6 @@ use serde_with::{DurationSeconds, TimestampSeconds, serde_as};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-/// A grant that expired this recently still stands: the auth server's clock may run behind.
-pub(crate) const CLOCK_SKEW: Duration = Duration::from_secs(5);
-
-/// How long until `at`. A deadline up to [`CLOCK_SKEW`] in the past still has the
-/// remaining window; anything older is zero. Future deadlines are unchanged, so a
-/// grant that expires in ten seconds still expires in ten seconds.
-fn until(at: SystemTime) -> Duration {
-	match at.duration_since(SystemTime::now()) {
-		Ok(remaining) => remaining,
-		Err(late) => CLOCK_SKEW.saturating_sub(late.duration()),
-	}
-}
-
 /// What a session may do, as the auth server answered.
 ///
 /// A 2xx carrying one of these admits; anything else refuses. A grant that names
@@ -74,15 +61,15 @@ impl Grant {
 		}
 	}
 
-	/// Snapshot the expiry on Tokio's clock, allowing five seconds of past clock skew.
+	/// Snapshot the expiry on Tokio's clock; one already past is now.
 	#[cfg(feature = "tokio")]
 	pub fn deadline(&self) -> Option<tokio::time::Instant> {
-		self.expires.map(|at| tokio::time::Instant::now() + until(at))
+		let remaining = self.expires?.duration_since(SystemTime::now()).unwrap_or_default();
+		Some(tokio::time::Instant::now() + remaining)
 	}
 
 	/// Refuse a grant that admits nothing, asks to be revalidated without a bound or
-	/// at no interval, or has already expired. A few seconds of clock skew are
-	/// tolerated so an auth server whose clock runs behind still admits.
+	/// at no interval, or has already expired.
 	pub fn validate(&self) -> crate::Result<()> {
 		if self.publish.is_empty() && self.subscribe.is_empty() {
 			return Err(crate::Error::UselessGrant);
@@ -94,7 +81,7 @@ impl Grant {
 		if self.revalidate.is_some_and(|cadence| cadence.is_zero()) {
 			return Err(crate::Error::ZeroRevalidate);
 		}
-		if self.expires.is_some_and(|expires| until(expires).is_zero()) {
+		if self.expires.is_some_and(|expires| expires <= SystemTime::now()) {
 			return Err(crate::Error::GrantExpired);
 		}
 		Ok(())
@@ -175,10 +162,11 @@ mod tests {
 		grant.revalidate = Some(Duration::from_secs(1));
 		assert!(matches!(grant.validate(), Err(crate::Error::UnboundedRevalidate)));
 
-		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
-		grant.validate().unwrap();
+		// Exact: no grace for an auth server whose clock runs behind.
+		grant.expires = Some(SystemTime::now());
+		assert!(matches!(grant.validate(), Err(crate::Error::GrantExpired)));
 
-		grant.expires = Some(SystemTime::now() - CLOCK_SKEW - Duration::from_secs(1));
+		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
 		assert!(matches!(grant.validate(), Err(crate::Error::GrantExpired)));
 
 		grant.expires = Some(SystemTime::now() + Duration::from_secs(60));
@@ -186,5 +174,25 @@ mod tests {
 
 		grant.revalidate = Some(Duration::ZERO);
 		assert!(matches!(grant.validate(), Err(crate::Error::ZeroRevalidate)));
+	}
+
+	#[cfg(feature = "tokio")]
+	#[tokio::test(start_paused = true)]
+	async fn deadline_is_the_exact_expiry() {
+		let start = tokio::time::Instant::now();
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		assert_eq!(grant.deadline(), None);
+
+		grant.expires = Some(SystemTime::now() + Duration::from_secs(10));
+		let deadline = grant.deadline().unwrap();
+		assert!(deadline <= start + Duration::from_secs(10), "not later than the expiry");
+		assert!(deadline > start + Duration::from_secs(9));
+
+		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
+		assert_eq!(
+			grant.deadline(),
+			Some(start),
+			"a past expiry is now, not a grace window"
+		);
 	}
 }

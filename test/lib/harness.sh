@@ -195,16 +195,25 @@ harness_port() {
 
 # Claim one port. Private; `harness_port` is the entry point.
 harness_port_take() {
-    local root="$1" port="$2" lock="$1/.lock-$2"
+    local root="$1" port="$2"
+    harness_locked "$root/.lock-$port" "$HARNESS_LIB/reserve.sh" "$root" "$port" "$$" "$HARNESS_RUN" || return $?
+    HARNESS_PORTS+=("$root/$port")
+}
+
+# Run CMD holding an exclusive advisory lock on FILE: `harness_locked <file> <cmd...>`.
+# CMD is an executable, not a shell function. For a step that writes somewhere every
+# run shares, so concurrent runs take turns instead of clobbering each other.
+harness_locked() {
+    local lock="$1"
+    shift
     if command -v flock >/dev/null 2>&1; then
-        flock "$lock" "$HARNESS_LIB/reserve.sh" "$root" "$port" "$$" "$HARNESS_RUN" || return $?
+        flock "$lock" "$@"
     elif command -v lockf >/dev/null 2>&1; then
-        lockf -k "$lock" "$HARNESS_LIB/reserve.sh" "$root" "$port" "$$" "$HARNESS_RUN" || return $?
+        lockf -k "$lock" "$@"
     else
-        echo "error: port reservations require flock or lockf" >&2
+        echo "error: the test harness requires flock or lockf" >&2
         return 2
     fi
-    HARNESS_PORTS+=("$root/$port")
 }
 
 # Record an endpoint this run stood up: `harness_endpoint <label> <url>`.

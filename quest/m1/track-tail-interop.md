@@ -25,15 +25,14 @@ What stood in the way when the Rust half landed:
   first frame. It needs a mode that reads a track to its end and reports how it
   ended and which groups it saw.
 
-Also cover the stream count:
+Also cover the drop case:
 
-- On moq-lite-07 add a count case: both subscribers settle on the
-  SUBSCRIBE_END stream count (#4224), so a group the publisher skipped or
-  never opened ends the track without waiting out the grace. Folded in from
-  the lite-count-settle quest, whose local Rust and JS regressions landed;
-  this Rust-JS case was all it had left.
+- On moq-lite-07 add a drop case: both subscribers settle on SUBSCRIBE_DROP,
+  so a group the publisher skipped or never opened ends the track without
+  waiting out the grace. lite-07 replaces the SUBSCRIBE_END stream count
+  (#4224) with it.
 - The harness exposed a relay start-floor defect: when a newer group arrives
-  first, earlier in-flight groups can be lost. #4387 fixes it, so the count
+  first, earlier in-flight groups can be lost. #4387 fixes it, so the drop
   proof waits on it.
 
 QUIC on localhost rarely reorders, so this is a smoke check that the end is
@@ -41,8 +40,9 @@ delivered and clean. The ordering race itself stays in the unit tests.
 
 ## Required
 
+- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver, which the lite-07 case checks
 - #4387 merges: a relayed subscription resolves its start from its source, so earlier in-flight groups are not lost (it adds quest/m1/relay-late-joiner-history.md)
 
 ## Related
 
-- [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - makes the count exact by keeping a reset stream's header
+- [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - keeps a reset stream's header, so the reset acts as a one-group drop
