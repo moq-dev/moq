@@ -29,11 +29,13 @@ Mapping decided in planning:
   `[Symbol.dispose]`; `Arc`/`Rc` of a type with drop glue become an explicit
   refcount. JS is single-threaded, so `Mutex` and atomics become plain
   access.
-- Rust `VarInt` maps to the [JS VarInt](/quest/m1/rs2ts/js-varint.md) type.
+- Rust `u64` (and `VarInt` while it lasts) maps to js/net's `U64`
+  (`js/net/src/util/u64.ts`), read and written as a varint by
+  `Cursor.varint()` and `Writer.varint()`.
   Integers up to 32 bits and `usize` map to `number` with checked arithmetic
   that throws on overflow; never wrap silently. A `u64` or `i64` never maps
   to a lossy `number`: the model accepts `u64::MAX` (e.g.
-  `model/subscription.rs`), so each one either becomes `VarInt` or an
+  `model/subscription.rs`), so each one either becomes `U64` or an
   `Option` in the source, or maps to a full-width 64-bit TypeScript type.
 
 Guidance:
@@ -56,4 +58,3 @@ translates. Wire: none.
 ## Required
 
 - [VarInt codec](/quest/m1/rs2ts/varint-codec.md) - the codec shape the translator targets
-- [JS VarInt](/quest/m1/rs2ts/js-varint.md) - the TypeScript type `VarInt` maps to

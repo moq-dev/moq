@@ -1,4 +1,4 @@
-# [XS] moq play plays a finished track's last samples
+# [S] moq play plays a finished track's last samples
 
 ## Goal
 
@@ -13,11 +13,13 @@ tolerates the gap.
 ## Plan
 
 The 10 ms stop exists because polling the last partial period costs a wakeup
-per iteration and never settles. Fix it at the sink instead of the poll: let
-a dropped or finished `moq_audio::playback::Sink` play out what it holds
-before leaving the mix, or give it an end-of-stream that the mixer honors, so
-`drain` no longer needs a threshold. If that belongs in moq-audio's playback
-API, keep the change additive.
+per iteration and never settles. Fix it at the sink instead of the poll
+(maintainer decision, 2026-09-28): `Sink::finish` consumes the sink and
+returns a `Drain` that resolves once the mixer has played everything the sink
+held, then leaves the mix. `drain` awaits it and loses its threshold. Lowering
+the threshold to zero is rejected: it is the wakeup spin above. The change to
+moq-audio's playback API is additive; dropping a sink still leaves the mix
+immediately.
 
 Tighten `an_audio_rendition_switch_leaves_no_gap` (the `play::fake::Recorder`
 already models the cut on drop) so the lost tail fails it, and add a finite
