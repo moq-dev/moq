@@ -672,7 +672,7 @@ export class Subscriber {
 
 	// Opens a TRACK stream, reads the single TRACK_INFO, and FINs. Lite-05+ only.
 	async #trackInfo(broadcast: Path.Valid, track: string): Promise<TrackInfo> {
-		return this.#exchange(undefined, async (stream) => {
+		return this.#exchange({ version: this.version }, async (stream) => {
 			await stream.writer.u53(StreamId.Track);
 			await new TrackMessage(broadcast, track).encode(stream.writer, this.version);
 			const info = await TrackInfo.decode(stream.reader, this.version);
@@ -685,10 +685,10 @@ export class Subscriber {
 	// Opens a stream and runs a request/response exchange on it, resetting the stream if `run`
 	// fails. Subscriber.close() also resets it while `run` is pending, so a peer that never
 	// answers cannot hold it open, and a stream that opens after the close is reset at once.
-	async #exchange<T>(options: OpenOptions | undefined, run: (stream: Stream) => Promise<T>): Promise<T> {
+	async #exchange<T>(options: OpenOptions, run: (stream: Stream) => Promise<T>): Promise<T> {
 		const closed = this.#closed.signal;
 		closed.throwIfAborted();
-		const stream = await Stream.open(this.#quic, { ...options, version: this.version });
+		const stream = await Stream.open(this.#quic, options);
 		const abort = () => stream.abort(error(closed.reason));
 		closed.addEventListener("abort", abort);
 		try {
@@ -802,7 +802,7 @@ export class Subscriber {
 	): Promise<{ stream: Stream; info: TrackInfo }> {
 		const info = await this.#trackInfo(broadcast, track);
 		const priority = options.priority ?? 0;
-		return this.#exchange({ sendOrder: sendOrder({ priority }) }, async (stream) => {
+		return this.#exchange({ sendOrder: sendOrder({ priority }), version: this.version }, async (stream) => {
 			await stream.writer.u53(StreamId.Fetch);
 			await new FetchMessage({ broadcast, track, priority, group: sequence }).encode(stream.writer, this.version);
 			// A byte or an empty-group FIN accepts the fetch; a reset rejects it.

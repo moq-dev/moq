@@ -474,8 +474,9 @@ impl Decode<lite::Version> for VarInt {
 			| lite::Version::Lite04
 			| lite::Version::Lite05
 			| lite::Version::Lite06 => Self::decode_quic(r),
-			// The 9-byte form reaches 2^64-1, but lite values stay within the QUIC range
-			// so a relay can forward them to any older lite peer.
+			// Lite-07 values span the full 64 bits, but `VarInt` is still 62-bit here, so a
+			// larger value is a loud decode error, never a truncation. Known limitation, lifted
+			// when the VarInt codec quest (quest/m1/rs2ts/varint-codec.md) widens `VarInt`.
 			_ => match Self::decode_leading_ones(r)? {
 				x if x > Self::MAX => Err(DecodeError::BoundsExceeded),
 				x => Ok(x),
@@ -790,10 +791,10 @@ mod tests {
 		assert_eq!(decoded.into_inner(), 0x1_2345_6789_ABCD);
 	}
 
-	/// A 9-byte value above 2^62-1 decodes on the IETF wire but must fail on lite-07
-	/// rather than wrap or truncate into the 62-bit `VarInt`.
+	/// Lite-07 values above 2^62-1 are legal on the wire, but the 62-bit `VarInt` cannot
+	/// hold them yet, so they must fail loud rather than wrap or truncate.
 	#[test]
-	fn lite07_rejects_values_above_62_bits() {
+	fn lite07_values_above_62_bits_fail_loud() {
 		for wire in [[0xFF, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], [0xFF; 9]] {
 			let err = VarInt::decode(&mut &wire[..], lite::Version::Lite07).unwrap_err();
 			assert!(matches!(err, DecodeError::BoundsExceeded), "{wire:02x?}: {err:?}");

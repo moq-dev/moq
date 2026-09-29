@@ -1,4 +1,5 @@
 /** Sweep frame size and chunk size for one Reader.read of a fragmented frame. */
+import { Version } from "../src/lite/version.ts";
 import { Reader } from "../src/stream.ts";
 
 const frameSizes = [16 * 1024, 256 * 1024, 1024 * 1024];
@@ -31,7 +32,7 @@ for (const frameSize of frameSizes) {
 					controller.close();
 				},
 			});
-			const reader = new Reader(stream);
+			const reader = new Reader(stream, undefined, Version.DRAFT_06);
 
 			const start = performance.now();
 			const read = await reader.read(frameSize);

@@ -204,6 +204,7 @@ The interop workflow runs it alongside the real-transport matrix.
 `just test lite-varint` has JS decode Rust's lite-06 (QUIC) and lite-07
 (leading-ones) encodings of every varint length boundary up to 2^62-1, a SETUP
 carrying a 62-bit Hop ID, a datagram, and a GROUP stream with frames, then
-checks that JS's own encoding of what it decoded is byte for byte Rust's. On
-lite-07 it also checks that JS refuses a value past 2^62-1 in both directions,
-as Rust does. The interop workflow runs it next to `bare-fin`.
+checks that JS's own encoding of what it decoded is byte for byte Rust's. Past
+2^62-1 the range is per version: JS writes lite-07's 64-bit values, which Rust
+must refuse with a decode error until its `VarInt` widens, and both sides refuse
+them on lite-06. The interop workflow runs it next to `bare-fin`.

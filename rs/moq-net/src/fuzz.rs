@@ -448,7 +448,8 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 ///
 /// The decoded value is deliberately not asserted to be within [`VarInt::MAX`]: on the
 /// IETF wire the leading-ones form spans the full `u64` by design, so a 9-byte encoding
-/// decodes above the 62-bit ceiling (lite-07 refuses it at decode instead).
+/// decodes above the 62-bit ceiling. Lite-07 allows the same range, but refuses it at
+/// decode until `VarInt` widens to 64 bits.
 pub fn varint(data: &[u8]) -> bool {
 	let Some((&selector, rest)) = data.split_first() else {
 		return false;

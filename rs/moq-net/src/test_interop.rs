@@ -22,7 +22,7 @@ pub(crate) fn fin(version: &str, started: bool, clean: bool, responses: Vec<u8>)
 
 #[cfg(test)]
 mod tests {
-	use crate::coding::{Encode, VarInt};
+	use crate::coding::{Decode, Encode, VarInt};
 	use crate::lite::{self, Version};
 
 	/// Every leading-ones length boundary, plus the JS safe-integer edge and the 62-bit ceiling.
@@ -60,10 +60,14 @@ mod tests {
 		setup: Vec<u8>,
 		datagram: Vec<u8>,
 		group: Vec<u8>,
+		beyond: Vec<u8>,
 	}
 
 	/// JS decodes what Rust encodes back to the same values, and its own encoding of those
 	/// values is byte for byte Rust's, on lite-06 (QUIC) and lite-07 (leading-ones).
+	///
+	/// Past 2^62-1 the range is per version. JS writes lite-07's 64-bit values, which Rust
+	/// must refuse with a decode error until its `VarInt` widens; on lite-06 JS refuses them.
 	#[test]
 	#[ignore = "requires Bun; run by just test lite-varint in interop CI"]
 	fn lite_varint_interop() {
@@ -108,6 +112,19 @@ mod tests {
 			assert_eq!(echo.setup, setup, "{version}: SETUP");
 			assert_eq!(echo.datagram, datagram, "{version}: datagram");
 			assert_eq!(echo.group, group, "{version}: group");
+
+			match version {
+				Version::Lite07 => {
+					let mut expected = vec![0xFF, 0x40, 0, 0, 0, 0, 0, 0, 0];
+					expected.extend([0xFF; 9]);
+					assert_eq!(echo.beyond, expected, "{version}: JS's 64-bit encodings");
+					for wire in echo.beyond.chunks(9) {
+						let err = VarInt::decode(&mut &wire[..], version).unwrap_err();
+						assert!(matches!(err, crate::coding::DecodeError::BoundsExceeded), "{err:?}");
+					}
+				}
+				_ => assert!(echo.beyond.is_empty(), "{version}: JS wrote a value past 2^62-1"),
+			}
 		}
 	}
 }

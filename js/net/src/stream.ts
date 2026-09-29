@@ -9,7 +9,7 @@ import * as Varint from "./varint.ts";
 
 // Decode raw transport errors before mapping so they cannot bypass the negotiated
 // registry. Ordinary errors already send 0 and retain their local identity.
-function withCode(reason: unknown, stream?: StreamVersion): unknown {
+function withCode(reason: unknown, stream: StreamVersion): unknown {
 	const version = asIetf(stream);
 	const decoded = fromTransport(reason, { version });
 	const code = toStreamCode(decoded, { version });
@@ -51,26 +51,26 @@ async function openWithin<T>(opening: Promise<T>, timeout: number, discard: (str
 }
 
 /**
- * The negotiated version a stream's bytes follow: a moq-transport draft, a moq-lite draft, or
- * absent before negotiation (QUIC varints and the moq-lite stream codes).
+ * The version a stream's bytes follow: a moq-transport draft or a moq-lite draft. Required on
+ * every stream so the varint form never defaults silently; a stream opened before negotiation
+ * names the version its handshake is encoded with.
  */
 export type StreamVersion = IetfVersion | LiteVersion;
 
 const LITE: ReadonlySet<number> = new Set(Object.values(Lite));
 
-function isLite(version?: StreamVersion): version is LiteVersion {
-	return version !== undefined && LITE.has(version);
+function isLite(version: StreamVersion): version is LiteVersion {
+	return LITE.has(version);
 }
 
 /** The moq-transport draft a stream follows, or undefined on moq-lite, whose stream codes are the same on every draft. */
-export function asIetf(version?: StreamVersion): IetfVersion | undefined {
+export function asIetf(version: StreamVersion): IetfVersion | undefined {
 	return isLite(version) ? undefined : version;
 }
 
 // Every draft newer than these counts leading ones, so a new version falls forward.
-function isLeadingOnes(version?: StreamVersion): boolean {
+function isLeadingOnes(version: StreamVersion): boolean {
 	switch (version) {
-		case undefined:
 		case Version.DRAFT_14:
 		case Version.DRAFT_15:
 		case Version.DRAFT_16:
@@ -86,19 +86,13 @@ function isLeadingOnes(version?: StreamVersion): boolean {
 	}
 }
 
-// The leading-ones form reaches 2^64-1, but moq-lite values stay within the QUIC range so a
-// relay can forward them to an older moq-lite peer.
-const MAX_U62 = 2n ** 62n - 1n;
-
-// Encode `v` into `dst` in the varint form `version` uses.
-function encodeTo(dst: ArrayBuffer, v: number | bigint, version?: StreamVersion): Uint8Array {
-	if (!isLeadingOnes(version)) return Varint.encodeTo(dst, v);
-	if (v > MAX_U62 && isLite(version)) throw new RangeError(`value larger than 62-bits: ${v.toString()}`);
-	return Varint.encodeLeadingOnesTo(dst, v);
+// Encode `v` into `dst` in the varint form `version` uses: QUIC up to 2^62-1, leading-ones up to 2^64-1.
+function encodeTo(dst: ArrayBuffer, v: number | bigint, version: StreamVersion): Uint8Array {
+	return isLeadingOnes(version) ? Varint.encodeLeadingOnesTo(dst, v) : Varint.encodeTo(dst, v);
 }
 
 /** Encode one varint in the form `version` uses, for a body written outside a {@link Writer}. */
-export function encodeVarint(v: number | bigint, version?: StreamVersion): Uint8Array {
+export function encodeVarint(v: number | bigint, version: StreamVersion): Uint8Array {
 	return encodeTo(new ArrayBuffer(9), v, version);
 }
 
@@ -117,7 +111,7 @@ export type SendStream = WritableStream<Uint8Array> & { sendOrder?: number };
 /** Options for opening an outgoing stream. */
 export interface OpenOptions {
 	/** The negotiated version, which selects the varint encoding. */
-	version?: StreamVersion;
+	version: StreamVersion;
 
 	/**
 	 * The transport send order, where HIGHER values are transmitted first.
@@ -158,7 +152,7 @@ export class Stream {
 	constructor(props: {
 		writable: WritableStream<Uint8Array>;
 		readable: ReadableStream<Uint8Array>;
-		version?: StreamVersion;
+		version: StreamVersion;
 	});
 	/** Pair halves that were opened separately, as the SETUP exchange does. */
 	constructor(props: { writer: Writer; reader: Reader });
@@ -169,15 +163,17 @@ export class Stream {
 		reader?: Reader;
 		version?: StreamVersion;
 	}) {
-		const writer = props.writer ?? (props.writable && new Writer(props.writable, props.version));
-		const reader = props.reader ?? (props.readable && new Reader(props.readable, undefined, props.version));
+		const version = props.version;
+		const writer = props.writer ?? (props.writable && version !== undefined && new Writer(props.writable, version));
+		const reader =
+			props.reader ?? (props.readable && version !== undefined && new Reader(props.readable, undefined, version));
 		if (!writer || !reader) throw new Error("stream needs both halves");
 
 		this.writer = writer;
 		this.reader = reader;
 	}
 
-	static async accept(quic: WebTransport, version?: StreamVersion): Promise<Stream | undefined> {
+	static async accept(quic: WebTransport, version: StreamVersion): Promise<Stream | undefined> {
 		for (;;) {
 			const reader =
 				quic.incomingBidirectionalStreams.getReader() as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
@@ -196,7 +192,7 @@ export class Stream {
 	 * @param options - The version its varints encode with, and the send order ranking it
 	 *   against the session's other streams
 	 */
-	static async open(quic: WebTransport, options?: OpenOptions): Promise<Stream> {
+	static async open(quic: WebTransport, options: OpenOptions): Promise<Stream> {
 		const { readable, writable } = await openWithin(
 			quic.createBidirectionalStream(sendOptions(options)),
 			options?.timeout ?? OPEN_TIMEOUT_MS,
@@ -205,7 +201,7 @@ export class Stream {
 				void stream.readable.cancel().catch(() => void 0);
 			},
 		);
-		return new Stream({ readable, writable, version: options?.version });
+		return new Stream({ readable, writable, version: options.version });
 	}
 
 	close() {
@@ -235,12 +231,16 @@ export class Reader {
 	#closed?: Promise<void>;
 	// The decode that last ran short and how far, so a retry can wait for those bytes.
 	#short?: { decode: (c: Cursor) => unknown; err: Short };
-	version?: StreamVersion;
+	version: StreamVersion;
 
 	// Either stream or buffer MUST be provided.
-	constructor(stream: ReadableStream<Uint8Array>, buffer?: Uint8Array, version?: StreamVersion);
-	constructor(stream: undefined, buffer: Uint8Array, version?: StreamVersion);
-	constructor(stream?: ReadableStream<Uint8Array>, buffer?: Uint8Array, version?: StreamVersion) {
+	constructor(stream: ReadableStream<Uint8Array>, buffer: Uint8Array | undefined, version: StreamVersion);
+	constructor(stream: undefined, buffer: Uint8Array, version: StreamVersion);
+	constructor(
+		stream: ReadableStream<Uint8Array> | undefined,
+		buffer: Uint8Array | undefined,
+		version: StreamVersion,
+	) {
 		this.#buffer = buffer ?? new Uint8Array();
 		this.#stream = stream;
 		this.#reader = this.#stream?.getReader();
@@ -453,11 +453,11 @@ const EMPTY = new Short(1);
  * anything before its last read, must not swallow what it throws, and must read at least a byte.
  */
 export class Cursor {
-	readonly version?: StreamVersion;
+	readonly version: StreamVersion;
 	#buffer: Uint8Array;
 	#offset = 0;
 
-	constructor(buffer: Uint8Array, version?: StreamVersion) {
+	constructor(buffer: Uint8Array, version: StreamVersion) {
 		this.#buffer = buffer;
 		this.version = version;
 	}
@@ -601,7 +601,6 @@ export class Cursor {
 		else totalSize = 9; // ones === 8
 
 		const [value] = Varint.decodeLeadingOnes(this.read(totalSize));
-		if (value > MAX_U62 && isLite(this.version)) throw new Error(`value larger than 62-bits: ${value.toString()}`);
 		return value;
 	}
 }
@@ -624,9 +623,9 @@ export class Writer {
 	// Fixed at 9 bytes (leading-ones max).
 	#scratch: ArrayBuffer;
 
-	version?: StreamVersion;
+	version: StreamVersion;
 
-	constructor(stream: WritableStream<Uint8Array>, version?: StreamVersion) {
+	constructor(stream: WritableStream<Uint8Array>, version: StreamVersion) {
 		this.#stream = stream;
 		this.#scratch = new ArrayBuffer(9);
 		this.#writer = this.#stream.getWriter();
@@ -720,14 +719,14 @@ export class Writer {
 	 * @param options - The version its varints encode with, and the send order ranking it
 	 *   against the session's other streams
 	 */
-	static async open(quic: WebTransport, options?: OpenOptions): Promise<Writer> {
+	static async open(quic: WebTransport, options: OpenOptions): Promise<Writer> {
 		const writable = await openWithin(
 			quic.createUnidirectionalStream(sendOptions(options)) as Promise<WritableStream<Uint8Array>>,
 			options?.timeout ?? OPEN_TIMEOUT_MS,
 			(stream) => void stream.abort().catch(() => void 0),
 		);
 
-		return new Writer(writable, options?.version);
+		return new Writer(writable, options.version);
 	}
 
 	/**
@@ -787,9 +786,9 @@ function setInt32(dst: ArrayBuffer, v: number): Uint8Array {
 // Returns the next stream from the connection
 export class Readers {
 	#reader: ReadableStreamDefaultReader<ReadableStream<Uint8Array>>;
-	#version?: StreamVersion;
+	#version: StreamVersion;
 
-	constructor(quic: WebTransport, version?: StreamVersion) {
+	constructor(quic: WebTransport, version: StreamVersion) {
 		this.#reader = quic.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 			ReadableStream<Uint8Array>
 		>;

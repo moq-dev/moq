@@ -116,6 +116,11 @@ export class Connection implements Established {
 		this.url = url;
 		this.#quic = quic;
 		this.#session = session;
+		// The session stream was opened at the SETUP exchange's version; the rest of it speaks this one.
+		if (session) {
+			session.reader.version = version;
+			session.writer.version = version;
+		}
 		this.version = versionName(version);
 		this.#version = version;
 		this.transport = transportOf(quic);

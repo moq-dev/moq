@@ -36,7 +36,7 @@ function groupStream(subscriber: Subscriber, sequence: number) {
 	const readable = new ReadableStream<Uint8Array>({ start: (c) => (controller = c) });
 	const handled = subscriber.runGroup(
 		new GroupMessage({ subscribe: 0n, sequence }),
-		new Reader(readable, undefined, undefined),
+		new Reader(readable, undefined, subscriber.version),
 	);
 	return {
 		write: (payload: string) => controller.enqueue(frame(payload)),

@@ -25,7 +25,7 @@ function concat(chunks: Uint8Array[]): Uint8Array {
 	return out;
 }
 
-async function bytes(f: (w: Writer) => Promise<void>, version?: Version): Promise<Uint8Array> {
+async function bytes(f: (w: Writer) => Promise<void>, version: Version): Promise<Uint8Array> {
 	const written: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
@@ -79,8 +79,8 @@ test("AnnounceBroadcast skips an unknown type on draft-06", async () => {
 		await w.u53(4);
 		await w.u53(1);
 		await w.u8(0);
-	});
-	const reader = new Reader(undefined, encoded);
+	}, Version.DRAFT_06);
+	const reader = new Reader(undefined, encoded, Version.DRAFT_06);
 	expect(await decodeAnnounceBroadcast(reader, Version.DRAFT_06)).toEqual({ status: "skipped" });
 });
 
@@ -96,33 +96,45 @@ test("AnnounceBroadcast drops the route cost before draft-06", async () => {
 
 test("AnnounceBroadcast rejects cross-version forms", async () => {
 	await expect(
-		bytes((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 1n }, Version.DRAFT_05)),
+		bytes((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 1n }, Version.DRAFT_05), Version.DRAFT_05),
 	).rejects.toThrow();
 	await expect(
-		bytes((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 1n, hops: [] }, Version.DRAFT_05)),
+		bytes(
+			(w) => encodeAnnounceBroadcast(w, { status: "restart", id: 1n, hops: [] }, Version.DRAFT_05),
+			Version.DRAFT_05,
+		),
 	).rejects.toThrow();
 	await expect(
-		bytes((w) => encodeAnnounceBroadcast(w, { status: "ended", suffix: Path.from("room/cam") }, Version.DRAFT_06)),
+		bytes(
+			(w) => encodeAnnounceBroadcast(w, { status: "ended", suffix: Path.from("room/cam") }, Version.DRAFT_06),
+			Version.DRAFT_06,
+		),
 	).rejects.toThrow();
 });
 
 test("AnnounceBroadcast accepts explicit restart status on draft-05", async () => {
-	const wire = await bytes((w) =>
-		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room/cam"), hops: [] }, Version.DRAFT_05),
+	const wire = await bytes(
+		(w) =>
+			encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room/cam"), hops: [] }, Version.DRAFT_05),
+		Version.DRAFT_05,
 	);
 	wire[1] = 2;
 
-	const got = await decodeAnnounceBroadcast(new Reader(undefined, wire), Version.DRAFT_05);
+	const got = await decodeAnnounceBroadcast(new Reader(undefined, wire, Version.DRAFT_05), Version.DRAFT_05);
 	expect(got).toEqual({ status: "active", suffix: Path.from("room/cam"), hops: [] });
 });
 
 test("AnnounceBroadcast rejects explicit restart status before draft-05", async () => {
-	const wire = await bytes((w) =>
-		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room/cam"), hops: [] }, Version.DRAFT_04),
+	const wire = await bytes(
+		(w) =>
+			encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room/cam"), hops: [] }, Version.DRAFT_04),
+		Version.DRAFT_04,
 	);
 	wire[1] = 2;
 
-	await expect(decodeAnnounceBroadcast(new Reader(undefined, wire), Version.DRAFT_04)).rejects.toThrow();
+	await expect(
+		decodeAnnounceBroadcast(new Reader(undefined, wire, Version.DRAFT_04), Version.DRAFT_04),
+	).rejects.toThrow();
 });
 
 async function requestRoundTrip(msg: AnnounceRequest, version: Version): Promise<AnnounceRequest> {
@@ -144,8 +156,8 @@ test("AnnounceRequest drops excludeHop on draft-06", async () => {
 	const got = await requestRoundTrip(msg, Version.DRAFT_06);
 	expect(got.excludeHop).toBe(0n);
 
-	const with05 = await bytes((w) => msg.encode(w, Version.DRAFT_05));
-	const with06 = await bytes((w) => msg.encode(w, Version.DRAFT_06));
+	const with05 = await bytes((w) => msg.encode(w, Version.DRAFT_05), Version.DRAFT_05);
+	const with06 = await bytes((w) => msg.encode(w, Version.DRAFT_06), Version.DRAFT_06);
 	expect(with06.byteLength).toBeLessThan(with05.byteLength);
 });
 
@@ -163,7 +175,11 @@ test("AnnounceRequest carries hidden from draft-07", async () => {
 // conforming publisher.
 test("AnnounceOk accepts the reserved unknown origin", async () => {
 	const msg = new AnnounceOk(UNKNOWN_HOP, 3);
-	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_05)));
+	const reader = new Reader(
+		undefined,
+		await bytes((w) => msg.encode(w, Version.DRAFT_05), Version.DRAFT_05),
+		Version.DRAFT_05,
+	);
 	const got = await AnnounceOk.decode(reader, Version.DRAFT_05);
 	expect(got.hop).toBe(UNKNOWN_HOP);
 	expect(got.active).toBe(3);
@@ -171,7 +187,11 @@ test("AnnounceOk accepts the reserved unknown origin", async () => {
 
 test("AnnounceOk round-trips a declared origin", async () => {
 	const msg = new AnnounceOk(HopSchema.parse(42n), 1);
-	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_05)));
+	const reader = new Reader(
+		undefined,
+		await bytes((w) => msg.encode(w, Version.DRAFT_05), Version.DRAFT_05),
+		Version.DRAFT_05,
+	);
 	const got = await AnnounceOk.decode(reader, Version.DRAFT_05);
 	expect(got.hop).toBe(HopSchema.parse(42n));
 	expect(got.active).toBe(1);
@@ -184,7 +204,9 @@ test("a hop chain that revisits a hop is refused in both directions", async () =
 
 	// Outbound: refused before it reaches the wire. A receiver must close the session over
 	// a repeated Hop ID, so sending one costs someone else their session.
-	await expect(bytes((w) => encodeAnnounceBroadcast(w, looped, Version.DRAFT_06))).rejects.toThrow("appears twice");
+	await expect(bytes((w) => encodeAnnounceBroadcast(w, looped, Version.DRAFT_06), Version.DRAFT_06)).rejects.toThrow(
+		"appears twice",
+	);
 
 	// Inbound: encode a chain that is legal, then rewrite its last hop to repeat the
 	// first. Only a non-conforming sender produces these bytes, which is why they have to
@@ -194,7 +216,7 @@ test("a hop chain that revisits a hop is refused in both directions", async () =
 		suffix: Path.from("room"),
 		hops: [four, eight, HopSchema.parse(9n)],
 	};
-	const forged = await bytes((w) => encodeAnnounceBroadcast(w, legal, Version.DRAFT_06));
+	const forged = await bytes((w) => encodeAnnounceBroadcast(w, legal, Version.DRAFT_06), Version.DRAFT_06);
 	const nine = forged.lastIndexOf(9);
 	expect(nine).toBeGreaterThan(0);
 	forged[nine] = 4;
@@ -202,12 +224,12 @@ test("a hop chain that revisits a hop is refused in both directions", async () =
 	// The type carries the consequence, not just the text: the subscriber's dispatch closes
 	// the session on `instanceof ProtocolViolation`, so a plain Error here would reset the
 	// stream and leave a nonconforming peer free to repeat itself.
-	await expect(decodeAnnounceBroadcast(new Reader(undefined, forged), Version.DRAFT_06)).rejects.toThrow(
-		ProtocolViolation,
-	);
-	await expect(decodeAnnounceBroadcast(new Reader(undefined, forged), Version.DRAFT_06)).rejects.toThrow(
-		"appears twice",
-	);
+	await expect(
+		decodeAnnounceBroadcast(new Reader(undefined, forged, Version.DRAFT_06), Version.DRAFT_06),
+	).rejects.toThrow(ProtocolViolation);
+	await expect(
+		decodeAnnounceBroadcast(new Reader(undefined, forged, Version.DRAFT_06), Version.DRAFT_06),
+	).rejects.toThrow("appears twice");
 
 	// Repeated unknowns are not a loop: 0 identifies nothing, so any number of hops may
 	// be unknown. A lite-03 announcement is nothing but these.
@@ -340,10 +362,10 @@ test("a keep without a base is a violation on draft-07", async () => {
 		await w.u53(0);
 		await w.u53(8);
 		for (const b of [0, 1, 0, 0, 0, 0, 0, 0]) await w.u8(b);
-	});
-	await expect(decodeAnnounceBroadcast(new Reader(undefined, wire), Version.DRAFT_07)).rejects.toThrow(
-		ProtocolViolation,
-	);
+	}, Version.DRAFT_07);
+	await expect(
+		decodeAnnounceBroadcast(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07),
+	).rejects.toThrow(ProtocolViolation);
 });
 
 test("draft-06 has no room for a base", async () => {
@@ -353,5 +375,5 @@ test("draft-06 has no room for a base", async () => {
 		hops: [],
 		pathBase: { distance: 1n, keep: 1 },
 	};
-	await expect(bytes((w) => encodeAnnounceBroadcast(w, msg, Version.DRAFT_06))).rejects.toThrow();
+	await expect(bytes((w) => encodeAnnounceBroadcast(w, msg, Version.DRAFT_06), Version.DRAFT_06)).rejects.toThrow();
 });

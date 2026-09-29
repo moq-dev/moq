@@ -43,10 +43,19 @@ const varints = await write(async (w) => {
 	for (const v of values) await w.u62(v);
 });
 
-// Past 2^62-1 the 9-byte form still parses, but moq-lite refuses it both ways, as Rust does.
+// Past 2^62-1 the range is per version: lite-07 carries the full 64 bits, which JS writes and
+// reads back and Rust (62-bit until its VarInt widens) must refuse loudly; lite-06's QUIC form
+// cannot express it, so JS refuses to write it, as Rust does.
+const huge = [1n << 62n, (1n << 64n) - 1n];
+let beyond: number[] = [];
 if (version === Version.DRAFT_07) {
-	await assert.rejects(reader([0xff, 0x40, 0, 0, 0, 0, 0, 0, 0]).u62());
-	await assert.rejects(write((w) => w.u62(1n << 62n)));
+	beyond = await write(async (w) => {
+		for (const v of huge) await w.u62(v);
+	});
+	const back = reader(beyond);
+	for (const v of huge) assert.equal(await back.u62(), v);
+} else {
+	for (const v of huge) await assert.rejects(write((w) => w.u62(v)));
 }
 
 const setup = await Setup.decode(reader(input.setup), version);
@@ -84,5 +93,6 @@ console.log(
 		setup: setupBytes,
 		datagram: datagramBytes,
 		group: groupBytes,
+		beyond,
 	}),
 );
