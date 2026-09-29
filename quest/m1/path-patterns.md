@@ -81,7 +81,9 @@ AUTH grants on moq-lite-06 carry the shared pattern semantics, without
 changing older protocol versions. Interest stays a prefix: [#3770](https://github.com/moq-dev/moq/pull/3770)
 keeps patterns off the announce wire, so ANNOUNCE_REQUEST and
 SUBSCRIBE_NAMESPACE carry the prefix the caller asked for and a wildcard is
-an optional filter on the consume side.
+an optional filter on the consume side. [Announcement shapes](/quest/m3/announce-shapes.md)
+later adds only exact, suffix, and prefix+suffix to moq-lite's ANNOUNCE_REQUEST;
+any other pattern stays a consume-side filter.
 
 Replace lite-06 AUTH grant prefixes with patterns in Rust and JavaScript in
 the same change. Update the lite draft and version-gated fixtures together.

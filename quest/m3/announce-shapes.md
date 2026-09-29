@@ -45,6 +45,11 @@ prefix is safe (an exact route widened to a prefix still leaks) or whether the
 route is withheld. Update `js/net` and `drafts/draft-lcurley-moq-lite.md` in
 the same PR.
 
+Only these four shapes go on the wire. A richer interest pattern
+(`pid/*/chat`) stays a consume-side filter over the widest shape that covers
+it, as [path patterns](/quest/m1/path-patterns.md) decided for every pattern
+before this quest.
+
 ### Model
 
 The origin model needs an `exact` route kind distinct from `source`: today
