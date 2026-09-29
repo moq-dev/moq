@@ -31,6 +31,11 @@ track name would collapse them.
   track name. Candidates: keep this to video and audio, as decided, or give
   every section with `broadcast` a `track` through the same helper so
   resolution is uniform.
+- Open: video and audio are separate maps, so one key can appear in both.
+  Within one broadcast that already means one track for two kinds, but with
+  `broadcast` references it parses today. Candidates: refuse a cross-kind
+  duplicate (a validation tightening on main), or accept it and kind-qualify
+  the stats and echo keys.
 
 ## Related
 

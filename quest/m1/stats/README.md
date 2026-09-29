@@ -95,6 +95,17 @@ kind.
   `doc/concept/stats.md` gains a media section beside the relay's, and
   `drafts/draft-lcurley-moq-hang.md` specs the wire.
 
+Open, to settle before [encoder feedback](/quest/m1/stats/encoder-feedback.md)
+starts:
+
+- **Shared echo prefixes.** Two catalogs can resolve their echo paths to one
+  prefix (`../viewers` from `room/a/live` and `room/b/live`). Then a viewer
+  using one name for both closes one `.echo` with the other, and each
+  publisher reads the other's reports under a shared alias. Candidates:
+  require each catalog's echo prefix to be its own, as application policy
+  like the token rights, or carry the catalog's broadcast in the snapshot
+  and ignore reports for another.
+
 ## Required
 
 - [Catalog track alias](/quest/m1/catalog-track-alias.md) - rendition keys
