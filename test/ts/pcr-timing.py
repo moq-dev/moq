@@ -29,6 +29,7 @@ the report-only (shape) checks to hard.
 import argparse
 import collections
 import json
+import math
 import select
 import statistics
 import sys
@@ -552,7 +553,8 @@ def check_schedule(scan, args):
     return (
         "pcr-schedule",
         severity,
-        detail["within_tolerance_pct"] >= required,
+        # The exact counts, not the rounded share: 20,000 of 20,001 rounds to 100.
+        100.0 * within >= required * len(graded),
         f"{within}/{len(graded)} intervals ({detail['within_tolerance_pct']:g}%) within "
         f"±{args.schedule_tolerance_pct:g}% (or one packet) of the bytes {rate:,.0f} b/s implies "
         f"({source}{aggregate_note}); median gap {detail['median_bytes']:,.0f} B against "
@@ -668,6 +670,10 @@ def main():
     ap.add_argument("--strict", action="store_true", help="fail on shape checks too")
     ap.add_argument("--report-json", help="write the full report here")
     args = ap.parse_args()
+    for flag in ("mux_rate", "schedule_tolerance_pct", "schedule_pct_min"):
+        value = getattr(args, flag)
+        if value is not None and not math.isfinite(value):
+            ap.error(f"--{flag.replace('_', '-')} must be finite")
     if args.mux_rate is not None and args.mux_rate <= 0:
         ap.error("--mux-rate must be positive")
 
