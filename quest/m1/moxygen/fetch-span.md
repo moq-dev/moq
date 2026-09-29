@@ -9,17 +9,18 @@ sequence.
 
 ## Plan
 
-The standalone FETCH walk asks `track::Consumer::fetch_group` for every
-sequence from start to the newest group, stepping over each miss. With no
-fetch handler, every miss resolves at once, so a range over millions of
-missing sequences runs without yielding. With a handler, a relay sends one
-upstream FETCH per missing sequence. Either way a single request from a peer
-buys work proportional to the newest sequence number.
+With no fetch handler, the standalone FETCH walk already skips a hole to the
+next cached group, so a publisher answering from its own cache pays for the
+groups it returns (`fetch/span` and `fetch/present` in `rs/moq-net/benches/fetch.rs`).
 
-Seek the next group the track can serve instead of stepping by one. Where a
-relay cannot know which groups its upstream still holds, decide what bound
-or refusal is honest rather than probing blindly. Benchmark range span and
-present-group count as separate axes.
+A relay with a handler still steps by one: every missing sequence below the
+newest group is its own upstream FETCH. FETCH is authoritative, so a local
+hole cannot be answered as absent. Resolve each run of local misses with one
+upstream request instead, the way moxygen's `MoQCache` fetches one interval
+per cache gap. That needs a range request on `track::Dynamic` (or
+`group::Request`), a multi-group receive path in the IETF subscriber, and a
+decision for moq-lite, whose FETCH names a single group. Settle the shape
+with the maintainer first.
 
 ## Related
 
