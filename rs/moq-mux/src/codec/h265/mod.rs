@@ -236,7 +236,9 @@ pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
 				.get(highest)
 				.or(sub_layers.last())?
 				.elemental_duration_in_tc_minus1?;
-			let units = (elemental + 1) * u64::from(timing.num_units_in_tick.get());
+			let units = elemental
+				.checked_add(1)?
+				.checked_mul(u64::from(timing.num_units_in_tick.get()))?;
 			Some((units, u64::from(timing.time_scale.get())))
 		});
 	Some(crate::codec::video::Reorder {
