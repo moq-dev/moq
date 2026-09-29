@@ -8,7 +8,10 @@ description: SRT contribution and playback
 `moq import srt` accepts SRT pushes (`--listen`) or pulls from a remote SRT
 source (`--connect`); `moq export srt` serves SRT to players or pushes to a
 remote. The payload is MPEG-TS, so the same codecs as [`import ts`](/bin/cli)
-apply: H.264/H.265 video and AAC, MP2, AC-3, or E-AC-3 audio.
+apply: H.264/H.265 video and AAC, MP2, AC-3, or E-AC-3 audio. Ingest logs the
+same per-stream lines as `import ts`, under an `srt{path=...}` span: an
+elementary stream that stopped delivering access units, and audio frame sync
+lost.
 
 ```bash
 # Accept a contribution feed and publish it

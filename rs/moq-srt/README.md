@@ -8,7 +8,9 @@ by its stream id `m=` mode:
 - `m=publish` (the default): ingest. Demux the connection's transport stream
   with [`moq-mux`](../moq-mux) and publish it into a MoQ origin as an ordinary
   broadcast. The contribution-ingest analogue of `moq-cli` HLS import and
-  `moq-rtc`'s WHIP.
+  `moq-rtc`'s WHIP. Once a second it logs the importer's per-stream counters
+  the way `moq import ts` does, so a PID that goes silent behind a running mux
+  is named.
 - `m=request`: egress. Re-mux a broadcast from the origin back to MPEG-TS and
   stream it to the caller, so `vlc srt://...` and `ffmpeg -i srt://...` can play
   any broadcast the origin carries (H.264/H.265 video, AAC/AC-3/MP2 audio).

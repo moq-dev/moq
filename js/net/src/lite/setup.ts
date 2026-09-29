@@ -24,6 +24,9 @@ const PARAM_HOP = 0x5n;
 /** Cap on the number of parameters in a bag, matching the Rust decoder. */
 const MAX_PARAMS = 64;
 
+/** SETUP only carries negotiation parameters, so it gets a far smaller cap than other messages. */
+const MAX_SETUP_SIZE = 64 * 1024;
+
 /**
  * The probe capability an endpoint advertises in SETUP.
  *
@@ -265,12 +268,12 @@ export class Setup {
 	/** Encode the SETUP message with its size prefix. Throws on pre-lite-05 versions. */
 	async encode(w: Writer, version: Version): Promise<void> {
 		Setup.#guard(version);
-		return Message.encode(w, this.#encode.bind(this));
+		return Message.encode(w, this.#encode.bind(this), MAX_SETUP_SIZE);
 	}
 
 	/** Decode a SETUP message with its size prefix. Throws on pre-lite-05 versions. */
 	static async decode(r: Reader, version: Version): Promise<Setup> {
 		Setup.#guard(version);
-		return Message.decode(r, Setup.#decode);
+		return Message.decode(r, Setup.#decode, MAX_SETUP_SIZE);
 	}
 }

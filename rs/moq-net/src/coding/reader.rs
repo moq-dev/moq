@@ -410,6 +410,113 @@ mod tests {
 		}
 	}
 
+	fn refuses_frame<T: Decode<V> + Debug, V: StreamCodes + Clone>(prefix: &[u8], version: V, oversized: bool) {
+		let mut reader = Reader::new(Chunks([b"following bytes".as_slice()].into()), version);
+		reader.buffer.extend_from_slice(prefix);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let result = reader.poll_decode::<T>(&mut cx);
+		if oversized {
+			assert!(
+				matches!(
+					result,
+					Poll::Ready(Err(Error::Decode(DecodeError::MessageTooLarge { .. })))
+				),
+				"{result:?}"
+			);
+		} else {
+			assert!(
+				matches!(result, Poll::Ready(Err(Error::Decode(DecodeError::InvalidValue)))),
+				"{result:?}"
+			);
+		}
+		assert_eq!(reader.buffer.len(), prefix.len());
+		assert_eq!(reader.stream.0.len(), 1, "read past the complete frame");
+	}
+
+	#[test]
+	fn malformed_complete_frames_are_refused() {
+		use crate::{Version, ietf, lite, setup};
+		refuses_frame::<lite::Setup, _>(&[0], lite::Version::Lite05, false);
+		refuses_frame::<lite::Goaway, _>(&[0], lite::Version::Lite05, false);
+		refuses_frame::<ietf::GoAway, _>(&[0, 0], ietf::Version::Draft20, false);
+		for version in [
+			Version::Lite(lite::Version::Lite01),
+			Version::Lite(lite::Version::Lite02),
+			Version::Ietf(ietf::Version::Draft14),
+		] {
+			let prefix = if version.is_lite() {
+				&[0x20, 0][..]
+			} else {
+				&[0x20, 0, 0][..]
+			};
+			refuses_frame::<setup::Client, _>(prefix, version, false);
+			let prefix = if version.is_lite() {
+				&[0x21, 0][..]
+			} else {
+				&[0x21, 0, 0][..]
+			};
+			refuses_frame::<setup::Server, _>(prefix, version, false);
+		}
+	}
+
+	#[test]
+	fn oversized_setup_is_refused_at_the_prefix() {
+		use crate::{Version, lite, setup};
+		for version in [lite::Version::Lite01, lite::Version::Lite02] {
+			for size in [65537u64, (1 << 40) + 1] {
+				let mut prefix = vec![0x20];
+				size.encode(&mut prefix, version).unwrap();
+				refuses_frame::<setup::Client, _>(&prefix, Version::Lite(version), true);
+				prefix[0] = 0x21;
+				refuses_frame::<setup::Server, _>(&prefix, Version::Lite(version), true);
+			}
+		}
+		for version in [lite::Version::Lite05, lite::Version::Lite06] {
+			let mut prefix = Vec::new();
+			65537u64.encode(&mut prefix, version).unwrap();
+			refuses_frame::<lite::Setup, _>(&prefix, version, true);
+		}
+	}
+
+	#[test]
+	fn setup_at_the_limit_waits_for_its_body() {
+		use crate::{Version, lite, setup};
+		for version in [lite::Version::Lite01, lite::Version::Lite02] {
+			let mut prefix = vec![0x20];
+			65536u64.encode(&mut prefix, version).unwrap();
+			assert!(matches!(
+				setup::Client::decode(&mut prefix.as_slice(), Version::Lite(version)),
+				Err(DecodeError::Short)
+			));
+			prefix[0] = 0x21;
+			assert!(matches!(
+				setup::Server::decode(&mut prefix.as_slice(), Version::Lite(version)),
+				Err(DecodeError::Short)
+			));
+		}
+		for version in [lite::Version::Lite05, lite::Version::Lite06] {
+			let mut prefix = Vec::new();
+			65536u64.encode(&mut prefix, version).unwrap();
+			assert!(matches!(
+				lite::Setup::decode(&mut prefix.as_slice(), version),
+				Err(DecodeError::Short)
+			));
+		}
+	}
+
+	#[test]
+	fn fragmented_setup_waits_for_its_body() {
+		let mut reader = Reader::new(Chunks([b"\x01".as_slice()].into()), crate::lite::Version::Lite05);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		assert!(reader.poll_decode::<crate::lite::Setup>(&mut cx).is_pending());
+		reader.stream.0.push_back(b"\x00");
+		assert!(matches!(
+			reader.poll_decode::<crate::lite::Setup>(&mut cx),
+			Poll::Ready(Ok(_))
+		));
+		assert!(reader.buffer.is_empty());
+	}
+
 	/// A consumer parked on the group cannot run until this task yields, so a burst of
 	/// chunks owes exactly one wake: at the boundary, from whoever wrote them. Every
 	/// other exit hands the wake to the caller's `finish` or `abort`.
