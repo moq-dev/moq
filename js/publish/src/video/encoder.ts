@@ -147,8 +147,9 @@ export class Encoder {
 	// doesn't re-probe the hardware.
 	#codecFilter: Computed<string>;
 
-	// Whether the current inputs can't produce a config: no supported codec, or an invalid knob.
-	#failed = new Signal(false);
+	// How many resolution runs threw for their current inputs (no supported codec, an invalid knob),
+	// so no config is coming until one reruns.
+	#failures = new Signal(0);
 
 	/**
 	 * @internal Whether the catalog config resolved, or failed and won't until an input changes.
@@ -175,14 +176,28 @@ export class Encoder {
 		this.config = Signal.from(props?.config);
 		this.#codecFilter = this.#signals.computed((effect) => effect.get(this.config)?.codec ?? "");
 		this.settled = this.#signals.computed(
-			(effect) => effect.get(this.#out.catalog) !== undefined || effect.get(this.#failed),
+			(effect) => effect.get(this.#out.catalog) !== undefined || effect.get(this.#failures) > 0,
 		);
 
-		this.#signals.run(this.#runCatalog.bind(this));
-		this.#signals.run(this.#runCodec.bind(this));
-		this.#signals.run(this.#runResolved.bind(this));
-		this.#signals.run(this.#runDimensions.bind(this));
+		// Every step that resolves the config counts a throw as a failure, so a bad input settles the
+		// gate instead of holding the announce forever.
+		for (const run of [this.#runCatalog, this.#runCodec, this.#runResolved, this.#runDimensions]) {
+			this.#signals.run((effect) => {
+				try {
+					run.call(this, effect);
+				} catch (err) {
+					this.#fail(effect);
+					throw err;
+				}
+			});
+		}
 		this.#signals.run(this.#runRegister.bind(this));
+	}
+
+	// Count a failure until `effect` reruns with new inputs.
+	#fail(effect: Effect): void {
+		this.#failures.update((n) => n + 1);
+		effect.cleanup(() => this.#failures.update((n) => n - 1));
 	}
 
 	// Register the rendition on the broadcast and drive its catalog + encode loop. Re-registers cleanly
@@ -431,7 +446,7 @@ export class Encoder {
 
 				effect.set(this.#codec, { ...detected, required, ...dimensions });
 			} catch (err) {
-				effect.set(this.#failed, true, false);
+				this.#fail(effect);
 				throw err;
 			}
 		});
@@ -551,7 +566,6 @@ export class Encoder {
 			sourcePixels;
 		if (user?.maxScale !== undefined) {
 			if (!Number.isFinite(user.maxScale) || user.maxScale <= 0) {
-				effect.set(this.#failed, true, false);
 				throw new Error(`maxScale must be a finite number greater than 0: ${user.maxScale}`);
 			}
 			maxPixels = Math.min(maxPixels, sourcePixels * user.maxScale);

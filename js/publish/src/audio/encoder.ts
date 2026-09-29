@@ -178,8 +178,9 @@ export class Encoder {
 	// reconfiguring it would be a retry, so the rendition stays down for the life of this encoder.
 	#fatal = new Signal<Error | undefined>(undefined);
 
-	// Whether the current codec settings can't resolve against the captured format.
-	#invalid = new Signal(false);
+	// How many resolution runs threw for their current inputs (e.g. invalid codec settings), so no
+	// config is coming until one reruns.
+	#failures = new Signal(0);
 
 	/**
 	 * @internal Whether the catalog config resolved, or can't until something outside the encoder
@@ -218,14 +219,26 @@ export class Encoder {
 
 		this.settled = this.#signals.computed((effect) => {
 			if (effect.get(this.#out.catalog) !== undefined) return true;
-			if (effect.get(this.#fatal) !== undefined || effect.get(this.#invalid)) return true;
+			if (effect.get(this.#fatal) !== undefined || effect.get(this.#failures) > 0) return true;
 			const capture = effect.get(this.in.capture);
 			return capture !== undefined && effect.get(capture.blocked);
 		});
 
 		this.#signals.run(this.#runCapture.bind(this));
-		this.#signals.run(this.#runConfig.bind(this));
-		this.#signals.run(this.#runCatalog.bind(this));
+
+		// Every step that resolves the config counts a throw as a failure, so a bad input settles the
+		// gate instead of holding the announce forever.
+		for (const run of [this.#runConfig, this.#runCatalog]) {
+			this.#signals.run((effect) => {
+				try {
+					run.call(this, effect);
+				} catch (err) {
+					this.#failures.update((n) => n + 1);
+					effect.cleanup(() => this.#failures.update((n) => n - 1));
+					throw err;
+				}
+			});
+		}
 		this.#signals.run(this.#runRegister.bind(this));
 	}
 
@@ -360,14 +373,7 @@ export class Encoder {
 			return;
 		}
 
-		let config: Resolved;
-		try {
-			config = resolve(captured, effect.get(this.codec));
-		} catch (err) {
-			effect.set(this.#invalid, true, false);
-			throw err;
-		}
-		effect.set(this.#config, config);
+		effect.set(this.#config, resolve(captured, effect.get(this.codec)));
 	}
 
 	// Publish the config immediately so a consumer can request the demand-gated track. Once encoding
