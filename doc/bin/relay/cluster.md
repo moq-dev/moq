@@ -116,8 +116,14 @@ mesh = true
 A relay with `node` and `mesh` but no `connect` is a passive rendezvous.
 
 Gossip trusts every node advertised under `.internal/origins/` and dials it
-with `cluster.token`. Keep client grants off `.internal/`: a client that can
-publish there can add a peer that receives the token.
+with `cluster.token`, unless the advertised URL carries its own `?jwt=`. Keep
+client grants off `.internal/`: a client that can publish there can add a peer
+that receives the token.
+
+Give `node` an authenticated TLS scheme (`https://`, `wss://`, `moqt://`, or
+`moql://`). Peers dial that URL with the token, so `ws://` and `tcp://` send it
+in cleartext, and `http://` pins a fingerprint fetched over plain HTTP and
+may fall back to `ws://`.
 
 On a LAN there may be no seed peer to gossip through. `[cluster.lan]` advertises
 this relay over mDNS and dials the peers that advertise back, so a rack or a
