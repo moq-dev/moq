@@ -41,5 +41,4 @@ survives the standby joining and the incumbent stopping.
 ## Related
 
 - [Redundant ingest](/quest/m2/redundant-ingest.md) - splicing across first hops and two encoders, which this does not attempt
-- [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - the TS re-anchor shift that must stay input-derived
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - a redundant pair shares one epoch

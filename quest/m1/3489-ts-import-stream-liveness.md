@@ -35,7 +35,7 @@ audio half is visible, late, through #3372's resync line.
   `PID_error` check, and leave the catalog `stalled` bit alone: the importer
   already sets it for a quiet video PID (`Stream::tick` after each decode
   batch, #3630). These counters add no timeout; anything that must bound a
-  wait on a silent PID (the shared-shift quest) brings its own.
+  wait on a silent PID brings its own, as the TS re-anchor hold does on the PCR.
 - Tests with the issue's stimulus shape: suppress one PID's PES while keeping
   its PCR and continuity legal, assert the row's count stops and the gap
   grows; audio and SCTE-35 arms.

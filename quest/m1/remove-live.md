@@ -36,6 +36,9 @@ the opposite: every gateway opting into `live()`):
   crate-private `clock::Anchor`, and `SourceMap` if nothing else uses it.
   fMP4 passthrough stops rewriting `tfdt`. A published `moq-mux` API break,
   so this targets `dev`.
+- The TS importer's re-anchor shift for unflagged loop wraps is not that
+  anchor: it is shared by the program, bounded on the PCR, and must stay
+  input-derived.
 
 Tests: per importer, a source starting at a large PTS publishes that PTS and
 a catalog clock that maps it to near the arrival time; a rewind ends the
@@ -47,4 +50,3 @@ replace `ts_import_publishes_on_the_broadcast_clock` in moq-cli.
 
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - the new epoch an encoder restart becomes
 - [Catalog wall clock](/quest/m1/catalog-wall-clock.md) - the PTS-to-wall conversion this relies on, at full precision
-- [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - the TS re-anchor shift that must stay input-derived

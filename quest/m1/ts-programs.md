@@ -31,7 +31,3 @@ clock; `--program all` publishes both broadcasts, each timed correctly. Update
 ## Closes
 
 - [#4353](https://github.com/moq-dev/moq/issues/4353) - close this issue when the quest finishes
-
-## Related
-
-- [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - its per-program shift assumes the single program this settles
