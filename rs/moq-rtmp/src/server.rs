@@ -228,8 +228,8 @@ const ACCEPT_RETRY_MAX: Duration = Duration::from_secs(5);
 
 /// An RTMP server that yields each connection's pending request as a [`Request`].
 ///
-/// Build it with [`bind`](Self::bind), optionally enable RTMPS with
-/// [`with_tls`](Self::with_tls), then loop on [`accept`](Self::accept). The
+/// Build it with [`bind`](Self::bind), optionally enable RTMPS with `with_tls`
+/// (the `tls` feature), then loop on [`accept`](Self::accept). The
 /// handshake and the connect exchange happen inside `accept`, so a [`Request`] is
 /// only produced once a client actually wants to publish or play.
 pub struct Server {
