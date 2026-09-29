@@ -67,7 +67,7 @@ Extract into your OBS plugins directory. The archives are unsigned, so
 Gatekeeper and SmartScreen warn on first load. Linux builds from source:
 
 ```bash
-nix develop
+nix develop .#obs
 just obs build
 ```
 
