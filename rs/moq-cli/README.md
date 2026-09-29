@@ -32,7 +32,7 @@ moq --connect https://relay.example.com/anon \
 ### Publish to a remote relay
 
 ```bash
-ffmpeg -i input.mp4 -c copy -f mpegts -pes_payload_size 0 - | \
+ffmpeg -i input.mp4 -c copy -f mpegts -pes_payload_size 0 -muxdelay 0 - | \
     moq --connect https://relay.example.com --broadcast my-stream.hang import ts
 ```
 
@@ -54,7 +54,7 @@ moq --connect https://relay.example.com --broadcast my-stream.hang play
 Hosts a MoQ server and publishes a single broadcast read from stdin into it. Useful for local testing without a separate relay process.
 
 ```bash
-ffmpeg -i input.mp4 -c copy -f mpegts -pes_payload_size 0 - | \
+ffmpeg -i input.mp4 -c copy -f mpegts -pes_payload_size 0 -muxdelay 0 - | \
     moq --listen '[::]:4443' --listen-tls-generate localhost --broadcast my-stream.hang import ts
 ```
 
