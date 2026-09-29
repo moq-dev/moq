@@ -32,6 +32,11 @@ retry.
 - `just test media` late join failed once after
   [#4181](https://github.com/moq-dev/moq/pull/4181): "joined at frame 111, 16
   frames behind 127", against a budget of one GOP (15).
+- moq-mux `container::ts::export_test::debounce_opens_without_a_media_clock`
+  died with SIGTERM once in a combined run. It is marked
+  `start_paused = true` but sleeps 1.2 s of real time, because the debounce
+  reads `crate::Clock`, which uses `std::time::Instant`, so the paused tokio
+  clock never reaches it.
 
 ## Plan
 
@@ -46,6 +51,9 @@ retry.
   noq's timers from the test clock, whichever is smaller. Keep the one
   absolute 30 s deadline, matching the relay's `/fetch`; on a paused clock
   setup costs no time, so it can't spend the read's budget.
+- moq-mux debounce: let the test drive `crate::Clock`'s time (a tokio
+  `Instant` under test, or an injected source) so the window passes on the
+  paused clock, and drop the real sleep.
 - WARN counting: capture per test (a scoped subscriber or a filter on the
   test's own span) instead of a process-global count.
 - The race test shares one port only so both transports sit behind one URL.
