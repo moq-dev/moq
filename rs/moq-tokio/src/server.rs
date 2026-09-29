@@ -162,6 +162,10 @@ pub struct Config {
 	pub websocket: Option<crate::websocket::Listener>,
 
 	/// An Iroh endpoint to accept sessions from.
+	///
+	/// The server owns the endpoint's listener: it replaces the endpoint's ALPN set with its
+	/// configured versions, accepts every incoming connection, and closes it on shutdown.
+	/// Don't give one endpoint to two servers; dialing through clones of it is fine.
 	#[cfg(feature = "iroh")]
 	pub iroh: Option<iroh::Endpoint>,
 
@@ -338,6 +342,13 @@ impl Server {
 			#[cfg(all(feature = "uds", unix))]
 			unix_allow,
 		);
+
+		// The endpoint was bound before this server's versions were known, so it
+		// accepts nothing until they name its ALPNs.
+		#[cfg(feature = "iroh")]
+		if let Some(endpoint) = iroh.as_ref() {
+			iroh::listen(endpoint, &versions)?;
+		}
 
 		let mut moq = moq_net::Server::new().with_versions(versions.clone()).with_stats(stats);
 		if let Some(publisher) = publisher {
@@ -632,11 +643,14 @@ impl Server {
 				}
 				Some(_conn) = iroh_accept => {
 					#[cfg(feature = "iroh")]
-					self.accept.push(async move {
-						let Accepted { session, url, identity, authority, link } = super::iroh::accept(_conn).await?;
-						let request = server.accept_request(tokio::time::Instant::now().into_std(), crate::transport::Session::new(session)).await?;
-						Ok(Request { transport: Transport::Iroh, url, identity, authority, link, kind: RequestKind::Iroh(Box::new(request)) })
-					}.boxed());
+					{
+						let alpns = versions.alpns();
+						self.accept.push(async move {
+							let Accepted { session, url, identity, authority, link } = super::iroh::accept(_conn, alpns).await?;
+							let request = server.accept_request(tokio::time::Instant::now().into_std(), crate::transport::Session::new(session)).await?;
+							Ok(Request { transport: Transport::Iroh, url, identity, authority, link, kind: RequestKind::Iroh(Box::new(request)) })
+						}.boxed());
+					}
 				}
 				Some(_res) = ws_accept => {
 					#[cfg(feature = "websocket")]
@@ -867,8 +881,8 @@ impl StreamBind {
 /// Bound by [`Server::bind`] (they need a runtime). [`Server::listen`] then starts
 /// each accept loop; a bind-only listener starts them on the first
 /// [`Listener::accept`] instead. Each loop feeds completed [`Request`]s back over
-/// a channel. The tasks own their listeners and are stopped when the [`Listener`]
-/// closes or drops, so bound sockets don't linger.
+/// a channel. The tasks own their listeners and in-flight handshakes, and are
+/// stopped when the [`Listener`] closes or drops, so no socket lingers.
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 struct StreamListeners {
 	binds: Vec<StreamBind>,
@@ -1024,21 +1038,31 @@ fn spawn_tcp_loop(
 ) -> tokio::task::JoinHandle<()> {
 	let local = listener.local_addr().ok();
 	tokio::spawn(async move {
+		// Owned by the loop so stopping it (listener close or drop) also aborts
+		// every in-flight handshake, releasing its socket.
+		let mut handshakes = tokio::task::JoinSet::new();
 		loop {
-			match listener.accept_with_addr().await {
-				Some(Ok((session, remote))) => {
-					let link = Link {
-						remote: Some(remote),
-						local,
-						..Default::default()
-					};
-					spawn_stream_request(session, Transport::Tcp, link, server.clone(), tx.clone())
+			let pending = tokio::select! {
+				pending = listener.accept_pending() => pending,
+				Some(_) = handshakes.join_next() => continue,
+			};
+			let server = server.clone();
+			let tx = tx.clone();
+			handshakes.spawn(async move {
+				match pending.await {
+					Ok((session, remote)) => {
+						let link = Link {
+							remote: Some(remote),
+							local,
+							..Default::default()
+						};
+						stream_request(session, Transport::Tcp, link, server, tx).await
+					}
+					// Per-connection: a failed `accept(2)` is the listener's own to
+					// classify and pace, and never surfaces here.
+					Err(err) => tracing::warn!(%err, "tcp qmux handshake failed"),
 				}
-				// Per-connection: a failed `accept(2)` is the listener's own to
-				// classify and pace, and never surfaces here.
-				Some(Err(err)) => tracing::warn!(%err, "tcp qmux handshake failed"),
-				None => break,
-			}
+			});
 		}
 	})
 }
@@ -1051,58 +1075,65 @@ fn spawn_unix_loop(
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) -> tokio::task::JoinHandle<()> {
 	tokio::spawn(async move {
+		// Owned by the loop, as in `spawn_tcp_loop`.
+		let mut handshakes = tokio::task::JoinSet::new();
 		loop {
-			match listener.accept().await {
-				Some(Ok((session, cred))) => {
-					// Enforce the allowlist (if any) before reading SETUP bytes from the peer.
-					if let Some(allow) = &allow
-						&& !allow.permits(&cred)
-					{
-						tracing::warn!(uid = cred.uid, gid = cred.gid, pid = ?cred.pid, "unix connection rejected by allow list");
-						continue;
+			let pending = tokio::select! {
+				pending = listener.accept_pending() => pending,
+				Some(_) = handshakes.join_next() => continue,
+			};
+			let server = server.clone();
+			let tx = tx.clone();
+			let allow = allow.clone();
+			handshakes.spawn(async move {
+				match pending.await {
+					Ok((session, cred)) => {
+						// Enforce the allowlist (if any) before reading SETUP bytes from the peer.
+						if let Some(allow) = &allow
+							&& !allow.permits(&cred)
+						{
+							tracing::warn!(uid = cred.uid, gid = cred.gid, pid = ?cred.pid, "unix connection rejected by allow list");
+							return;
+						}
+						stream_request(session, Transport::Unix, Link::default(), server, tx).await;
 					}
-					spawn_stream_request(session, Transport::Unix, Link::default(), server.clone(), tx.clone());
+					// Per-connection, as in `spawn_tcp_loop`.
+					Err(err) => tracing::warn!(%err, "unix qmux handshake failed"),
 				}
-				// Per-connection, as in `spawn_tcp_loop`.
-				Some(Err(err)) => tracing::warn!(%err, "unix qmux handshake failed"),
-				None => break,
-			}
+			});
 		}
 	})
 }
 
-/// Read the SETUP from an accepted stream session (concurrently, so one slow or
-/// malicious peer doesn't stall the listener) and forward the resulting request.
+/// Read SETUP in the connection task and forward the resulting request.
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-fn spawn_stream_request(
+async fn stream_request(
 	session: qmux::Session,
 	transport: Transport,
 	link: Link,
 	server: moq_net::Server,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) {
-	tokio::spawn(async move {
-		match server
-			.accept_request(
-				tokio::time::Instant::now().into_std(),
-				crate::transport::Session::new(session),
-			)
-			.await
-		{
-			Ok(request) => {
-				let request = Request {
-					transport,
-					url: None,
-					authority: None,
-					identity: None,
-					link,
-					kind: RequestKind::Qmux(Box::new(request)),
-				};
-				let _ = tx.send(request).await;
-			}
-			Err(err) => tracing::debug!(%err, "stream SETUP handshake failed"),
+	match server
+		.accept_request(
+			tokio::time::Instant::now().into_std(),
+			crate::transport::Session::new(session),
+		)
+		.await
+	{
+		Ok(request) => {
+			let request = Request {
+				transport,
+				url: None,
+				authority: None,
+				identity: None,
+				link,
+				kind: RequestKind::Qmux(Box::new(request)),
+			};
+			let _ = tx.send(request).await;
 		}
-	});
+		Err(err) => tracing::debug!(%err, "stream SETUP handshake failed"),
+	}
 }
 
 /// An accepted connection whose MoQ SETUP has already been exchanged.
@@ -1493,6 +1524,108 @@ impl Request {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The second handshake must finish while the first peer is still stalled.
+	/// Reading the first server bytes proves it reached the handshake before we
+	/// connect the second peer; EOF would mean its handshake already failed.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn tcp_stalled_handshake_does_not_block_accept() {
+		use tokio::io::AsyncReadExt;
+		let listener = crate::tcp::Listener::bind("127.0.0.1:0".parse().unwrap())
+			.await
+			.unwrap()
+			.with_protocols(["moq-lite-06"]);
+		let addr = listener.local_addr().unwrap();
+		let (tx, _rx) = tokio::sync::mpsc::channel(1);
+		let task = spawn_tcp_loop(listener, moq_net::Server::new(), tx);
+		let mut stalled = tokio::net::TcpStream::connect(addr).await.unwrap();
+		stalled.read_u8().await.expect("first handshake started");
+		let mut remaining = Vec::new();
+		tokio::select! {
+			biased;
+			_ = stalled.read_to_end(&mut remaining) => panic!("first handshake ended before second completed"),
+			result = qmux::tcp::Config::new(qmux::Version::QMux01)
+				.protocols(["moq-lite-06"]).connect(addr) => {
+				result.expect("second handshake completes");
+			}
+		}
+		task.abort();
+		let _ = task.await;
+	}
+
+	#[cfg(all(feature = "uds", unix))]
+	#[tokio::test]
+	async fn unix_stalled_handshake_does_not_block_accept() {
+		use tokio::io::AsyncReadExt;
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("listener.sock");
+		let listener = crate::unix::Listener::bind(&path)
+			.await
+			.unwrap()
+			.with_protocols(["moq-lite-06"]);
+		let (tx, _rx) = tokio::sync::mpsc::channel(1);
+		let task = spawn_unix_loop(listener, moq_net::Server::new(), None, tx);
+		let mut stalled = tokio::net::UnixStream::connect(&path).await.unwrap();
+		stalled.read_u8().await.expect("first handshake started");
+		let mut remaining = Vec::new();
+		tokio::select! {
+			biased;
+			_ = stalled.read_to_end(&mut remaining) => panic!("first handshake ended before second completed"),
+			result = qmux::uds::Config::new(qmux::Version::QMux01)
+				.protocols(["moq-lite-06"]).connect(&path) => {
+				result.expect("second handshake completes");
+			}
+		}
+		task.abort();
+		let _ = task.await;
+	}
+
+	/// Stopping the accept loop must drop a stalled handshake at once. Each
+	/// handshake task holds a `tx` clone, so the channel closes only when they are
+	/// all gone. Time pauses only once the socket I/O is done (a paused runtime
+	/// waiting on the kernel would skip ahead to qmux's own handshake timeout), so
+	/// a leaked task leaves the runtime idle and fires the 1s timeout first.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn tcp_stop_aborts_stalled_handshake() {
+		use tokio::io::AsyncReadExt;
+		let listener = crate::tcp::Listener::bind("127.0.0.1:0".parse().unwrap())
+			.await
+			.unwrap()
+			.with_protocols(["moq-lite-06"]);
+		let addr = listener.local_addr().unwrap();
+		let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+		let task = spawn_tcp_loop(listener, moq_net::Server::new(), tx);
+		let mut stalled = tokio::net::TcpStream::connect(addr).await.unwrap();
+		stalled.read_u8().await.expect("handshake started");
+		tokio::time::pause();
+		task.abort();
+		let _ = task.await;
+		let closed = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
+		assert!(matches!(closed, Ok(None)), "stalled handshake outlived its accept loop");
+	}
+
+	#[cfg(all(feature = "uds", unix))]
+	#[tokio::test]
+	async fn unix_stop_aborts_stalled_handshake() {
+		use tokio::io::AsyncReadExt;
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("listener.sock");
+		let listener = crate::unix::Listener::bind(&path)
+			.await
+			.unwrap()
+			.with_protocols(["moq-lite-06"]);
+		let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+		let task = spawn_unix_loop(listener, moq_net::Server::new(), None, tx);
+		let mut stalled = tokio::net::UnixStream::connect(&path).await.unwrap();
+		stalled.read_u8().await.expect("handshake started");
+		tokio::time::pause();
+		task.abort();
+		let _ = task.await;
+		let closed = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
+		assert!(matches!(closed, Ok(None)), "stalled handshake outlived its accept loop");
+	}
 
 	#[test]
 	fn version_help_lists_every_parseable_name() {
