@@ -504,7 +504,7 @@ async fn follow_catalog(
 			// returning None) while we wait for the remaining pumps to drain.
 			next = catalog_consumer.next(), if !catalog_closed => {
 				match next? {
-					Some(catalog) => reconcile(&catalog, &mut active, &mut pumps, &broadcast, &element),
+					Some(catalog) => reconcile(&catalog, &mut active, &mut pumps, &broadcast, &element, shutdown),
 					// Catalog track closed. Don't cancel the pumps: let each reach its
 					// natural Ok(None) -> EOS end so downstream sees a clean EOS rather than a
 					// bare pad drop. We just stop reconciling and wait for them to drain.
@@ -548,6 +548,7 @@ fn reconcile(
 	pumps: &mut tokio::task::JoinSet<()>,
 	broadcast: &moq_net::broadcast::Consumer,
 	element: &glib::WeakRef<super::MoqSrc>,
+	shutdown: &watch::Receiver<bool>,
 ) {
 	struct Desired {
 		kind: TrackKind,
@@ -649,6 +650,7 @@ fn reconcile(
 					container,
 					state: state.clone(),
 					cancel: cancel_rx,
+					shutdown: shutdown.clone(),
 				}
 				.run(),
 			),
@@ -735,6 +737,8 @@ struct Pump {
 	/// Shared with this rendition's [`ActiveTrack::state`].
 	state: Arc<PumpState>,
 	cancel: watch::Receiver<bool>,
+	/// The session's shutdown, which [`SessionController::stop`] sets before it flushes the pads.
+	shutdown: watch::Receiver<bool>,
 }
 
 impl Pump {
@@ -751,6 +755,7 @@ impl Pump {
 			container,
 			state,
 			mut cancel,
+			shutdown,
 		} = self;
 		// Resolves once the publisher answers, with the track info or with an error (which is
 		// what ending a broadcast produces for a name nobody served). A publisher that answers
@@ -785,6 +790,11 @@ impl Pump {
 		let Some(pad) = create_pad(&element, &descriptor, &caps) else {
 			return;
 		};
+		// Stop flushes only the pads it finds, and this one may have been added just after, while
+		// this pump's cancel is still on its way. Flushing it here keeps a push from blocking stop.
+		if *shutdown.borrow() {
+			let _ = pad.set_active(false);
+		}
 
 		let mut reference_ts = None;
 		loop {
@@ -1746,6 +1756,26 @@ mod session_tests {
 		assert!(is_closed(&connection));
 	}
 
+	/// The state change itself is what an application waits on, so it has to be the one that stops.
+	#[test]
+	fn paused_to_ready_returns_after_the_connection_closes() {
+		let element = element();
+		element.set_property("url", "https://127.0.0.1:1");
+		element.set_property("broadcast", "test");
+		element.set_state(gst::State::Paused).expect("start the source");
+		let connection = element
+			.imp()
+			.session
+			.lock()
+			.unwrap()
+			.as_ref()
+			.unwrap()
+			.connection
+			.clone();
+		element.set_state(gst::State::Ready).expect("stop the source");
+		assert!(is_closed(&connection));
+	}
+
 	// A notify or bus sync handler can stop the element from a runtime worker. With the tasks parked,
 	// their wakeups land in that worker's own LIFO slot, which no other worker can steal, so blocking
 	// the worker outright would never let them run.
@@ -1799,6 +1829,40 @@ mod session_tests {
 		session.stop(&element);
 		assert!(pad.parent().is_none(), "the pad outlived stop");
 		assert!(is_closed(&connection));
+	}
+
+	/// A pump whose subscription resolves while stop flushes the pads adds its own just after, with
+	/// its cancel still on the way. A push on that pad must not block stop either.
+	#[test]
+	fn a_pad_added_after_stop_flushed_does_not_block() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let (broadcast, _catalog, mut producer) = video_broadcast();
+		element.connect_pad_added(|_, pad| {
+			pad.add_probe(gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER, |_, _| {
+				gst::PadProbeReturn::Ok
+			});
+		});
+		producer.write(keyframe()).unwrap();
+
+		let (_cancel, cancel) = watch::channel(false);
+		let (_shutdown, shutdown) = watch::channel(true);
+		let pump = super::Pump {
+			element: element.downgrade(),
+			kind: super::TrackKind::Video,
+			name: "video".into(),
+			caps: gst::Caps::new_empty_simple("video/x-h264"),
+			track: broadcast.consume().track("video").unwrap(),
+			container: moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+			state: std::sync::Arc::new(super::PumpState::new()),
+			cancel,
+			shutdown,
+		};
+		super::RUNTIME
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), super::RUNTIME.spawn(pump.run())).await })
+			.expect("a push on a pad added after the flush blocked")
+			.unwrap();
+		assert!(pads(&element, "video_").is_empty(), "the pad outlived its pump");
 	}
 
 	/// A bus sync or pad handler can stop the element from inside a pump's push. Waiting for the
