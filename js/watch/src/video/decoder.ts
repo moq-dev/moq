@@ -437,16 +437,20 @@ class DecoderTrack {
 				if (!next) break;
 
 				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
-				if (this.#onDiscontinuity(next.discontinuity)) {
-					previous = undefined;
-					latest = undefined;
-				}
+				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
 
 				const { frame } = next;
 				if (!frame) continue; // The group is done
 
-				// An older keyframe would replace the codec references needed by live deltas.
-				if (latest !== undefined && next.group < latest) continue;
+				// An older keyframe would replace the codec references needed by live deltas. Group
+				// sequences only grow within a subscription, so a discontinuity (which a stale marker
+				// can raise) never resets this guard. Rejected payloads still count as received bytes.
+				const stale = latest !== undefined && next.group < latest;
+				this.stats.update((current) => ({
+					frameCount: (current?.frameCount ?? 0) + (stale ? 0 : 1),
+					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
+				}));
+				if (stale) continue;
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
@@ -457,12 +461,6 @@ class DecoderTrack {
 					data: frame.payload,
 					timestamp: frame.timestamp,
 				});
-
-				// Track both frame count and bytes received for stats in the UI
-				this.stats.update((current) => ({
-					frameCount: (current?.frameCount ?? 0) + 1,
-					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
-				}));
 
 				// Track decode buffer: frames sent to decoder but not yet rendered. Only bridge from
 				// the previous frame when the consumer says nothing is missing in between. Group ids
@@ -522,26 +520,24 @@ class DecoderTrack {
 				if (!next) break;
 
 				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
-				if (this.#onDiscontinuity(next.discontinuity)) {
-					previous = undefined;
-					latest = undefined;
-				}
+				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
 
 				const { frame } = next;
 				if (!frame) continue;
 
-				// An older keyframe would replace the codec references needed by live deltas.
-				if (latest !== undefined && next.group < latest) continue;
+				// An older keyframe would replace the codec references needed by live deltas. Group
+				// sequences only grow within a subscription, so a discontinuity (which a stale marker
+				// can raise) never resets this guard. Rejected payloads still count as received bytes.
+				const stale = latest !== undefined && next.group < latest;
+				this.stats.update((current) => ({
+					frameCount: (current?.frameCount ?? 0) + (stale ? 0 : 1),
+					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
+				}));
+				if (stale) continue;
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
 				this.sync.received(timestamp, "video");
-
-				// Track stats
-				this.stats.update((current) => ({
-					frameCount: (current?.frameCount ?? 0) + 1,
-					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
-				}));
 
 				// Track decode buffer (see #runLegacy: bridge on the consumer's continuity signal,
 				// never on group adjacency, which proves nothing about the timeline).

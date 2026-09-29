@@ -265,18 +265,25 @@ it("promoting from no active track holds its picture and timestamp until a frame
 	}
 });
 
+// A late marker from older history raises a discontinuity without making older groups newer.
+function marker(group: number, end: number, discontinuity: number): Read {
+	return { group, discontinuity, continuous: false, frame: undefined, end: Time.Micro(end) };
+}
+
 for (const kind of ["legacy", "cmaf"] as const) {
-	it(`${kind} skips older groups before decode and resets that guard on discontinuity`, async () => {
+	it(`${kind} skips older groups before decode, even across a stale marker's discontinuity`, async () => {
 		const playback = await guardedPlayback(kind, [
 			sample(10, 1000),
 			sample(9, 900),
 			sample(10, 1100),
-			sample(2, 200, 1),
-			sample(1, 100, 1),
-			sample(2, 300, 1),
+			marker(8, 850, 1),
+			sample(7, 700, 1),
+			sample(11, 1200, 1),
 		]);
 		try {
-			expect(playback.submitted).toEqual([1000, 1100, 200, 300]);
+			expect(playback.submitted).toEqual([1000, 1100, 1200]);
+			// Rejected payloads were still received, but never counted as frames.
+			expect(playback.decoder.out.stats.peek()).toEqual({ frameCount: 3, bytesReceived: 5 });
 		} finally {
 			playback.close();
 		}
