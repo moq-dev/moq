@@ -10,7 +10,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
-// Compiled and inlined as a blob URL via vite-plugin-worklet.
+// Bundled as a separate file in production and a blob URL in development.
 import { Fanout } from "../fanout";
 import CaptureWorklet from "./capture-worklet.ts?worklet";
 import { isSampleSource, normalizeSource, type SampleSource, type Source, type SourceConfig } from "./types";

@@ -8,6 +8,7 @@
 		"harness.ts",
 		"harness.browser.ts",
 		"media.ts",
+		"worklet-csp.ts",
 		"src",
 		"vite.config.ts",
 		"../../../../js/common/worklet.d.ts"

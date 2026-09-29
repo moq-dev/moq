@@ -77,12 +77,16 @@ jobs:
           # run reads it, while it spends the budget the shared store needs.
           save-if: ${{ github.event_name != 'pull_request' }}
 
-      # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
+      # Playwright's browsers aren't in the nix devShell. Install them plus their apt
       # runtime libs (`--with-deps` needs the host package manager) so the
       # browser client can launch headless Chromium. interop.sh's own
       # `playwright install` then no-ops.
-      - name: Playwright Chromium
-        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
+      - name: Playwright Chromium and Firefox
+        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium firefox"
+        shell: bash -leo pipefail {0}
+
+      - name: Worklet CSP (Chromium and Firefox)
+        run: nix develop --command bun test/interop/clients/js/worklet-csp.ts
         shell: bash -leo pipefail {0}
 
       - name: Harness regressions

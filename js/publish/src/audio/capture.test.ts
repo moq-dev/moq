@@ -1,7 +1,7 @@
 import { expect, mock, spyOn, test } from "bun:test";
 import { Effect, Signal } from "@moq/signals";
 
-// The capture pulls its processor in as a `?worklet` blob URL, which the bun test loader can't
+// The capture pulls its processor in through a `?worklet` URL import, which the bun test loader can't
 // resolve. Stub it so the module imports; the value is only ever passed to our fake addModule.
 mock.module("./capture-worklet.ts?worklet", () => ({ default: "blob:fake-capture" }));
 

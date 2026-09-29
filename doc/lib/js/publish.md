@@ -141,3 +141,20 @@ audio rendition stays out of the catalog until samples flow.
 
 Every input and output is a signal from [`@moq/signals`](/lib/js/signals).
 Load from a CDN (`https://esm.sh/@moq/publish/element`) for a no-build embed.
+
+## Audio worklet assets
+
+Production builds ship the audio worklet as a separate JavaScript file. Keep
+that asset when deploying the package: its URL is resolved with
+`new URL("./assets/…js", import.meta.url)`. The worklet can then load under
+`Content-Security-Policy: script-src 'self'` when served from the page's origin.
+
+Your consumer bundler must resolve static `new URL(..., import.meta.url)`
+assets inside dependencies and emit them as files. [Vite](https://vite.dev/guide/assets.html#new-url-url-import-meta-url) and
+[webpack 5](https://webpack.js.org/guides/asset-modules/#url-assets) support this pattern; esbuild needs an asset-URL plugin. Disable asset inlining for
+these JavaScript files if your bundler would otherwise produce a `data:` URL.
+Deploy the emitted assets alongside the application bundle.
+
+The development server still uses `blob:` worklet URLs, so its CSP needs to
+allow those. The publish capture worker remains inline and separately requires
+`worker-src blob:` when that worker is used.

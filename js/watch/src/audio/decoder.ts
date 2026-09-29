@@ -21,7 +21,7 @@ import { type AudioBuffer, createAudioBuffer } from "./buffer";
 import { type DecoderConfig, decoderConfig, type PlaybackIdentity, playbackIdentity } from "./config";
 import { Handover } from "./handover";
 import { reanchorFloor, ringSamples } from "./latency";
-// Compiled and inlined as a blob URL via vite-plugin-worklet.
+// Bundled as a separate file in production and a blob URL in development.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
 import { type DecodedSpan, Terminal } from "./terminal";
