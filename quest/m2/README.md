@@ -75,6 +75,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Send buffer pools](/quest/m2/quic-buffer-pool.md) - whether pooled send buffers beat Bytes in the stream send path
 - [AF_XDP UDP path](/quest/m2/af-xdp.md) - the kernel-bypass verdict on today's virtio hosts that gates DPDK
 - [GOP overhead](/quest/m2/gop-overhead.md) - price the I-frames a short GOP pays for, deciding whether a long GOP plus a keyframe request is worth designing
+- [Per-program SI](/quest/m2/ts-program-si.md) - a selected TS program's broadcast carries only its own service's SDT and EIT
 - [#1838](/quest/m2/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - plan TR 101 290 stream-health monitoring into implementation quests
 - [Teleoperation](/quest/m2/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
 - [SIP media stack](/quest/m2/sip-stack.md) - terminate one inbound SIP audio call leg and expose it as Opus frames
