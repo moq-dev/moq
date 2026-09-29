@@ -47,8 +47,10 @@ kind.
   absent means none. The section is an object so later fields stay additive.
   Root key collisions with application extensions are accepted, not guarded.
 - **Echo path in the catalog** (2026-09-29). `path` is relative to the
-  broadcast serving the catalog (e.g. `viewers/`), and a viewer publishes its
-  `.echo` broadcast under it at a name the application gives it. The
+  broadcast serving the catalog and resolves like a rendition's `broadcast`
+  (URL-style, so from `room/live`, `viewers` is `room/viewers` and
+  `live/viewers` is `room/live/viewers`). A viewer publishes its `.echo`
+  broadcast under the resolved prefix at a name the application gives it. The
   application issues tokens to match. Reason: applications control the
   layout and the token rights, and the publisher reads exactly that prefix.
 - **One `.echo` broadcast per catalog** (2026-09-29). A viewer announces it

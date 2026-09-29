@@ -46,6 +46,9 @@ it already follows. Keyframe requests stay out.
   profile. The target bitrate drops within two intervals of the throttled
   viewer reporting stalls, and recovers after it stops. A unit test on mocked
   time checks that the quorum and floor bound one viewer's influence.
+- A benchmark sweeps viewers and renditions per snapshot, runs at least
+  nightly, and shows one interval's fold growing with the rows it reads, not
+  a full-table scan per rendition.
 - Document the flag in `doc/bin/cli.md` and the loop and its config in the
   moq-video README.
 

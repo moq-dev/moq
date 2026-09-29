@@ -27,7 +27,8 @@
   A TS import flattens `ts::Stats` in as `mpegts`. `transport` comes from
   the connection's `ConnectionStats`.
 - Feedback: after reading a catalog with an `echo` section, the player
-  publishes `<broadcast>/<echo path>/<name>.echo` with the fixed feedback
+  resolves the echo path against the broadcast, appends `<name>.echo`, and
+  publishes there with the fixed feedback
   track, keyed by the catalog's rendition aliases, and unannounces it when it
   stops watching. A name that is not a single path segment is refused at
   parse time.

@@ -19,7 +19,10 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
   `ts::Ext`, and `hang` stays TS-free.
 - Open: an export is a viewer, which has no stats track and reports only
   through a soliciting catalog's `.echo` feedback, so where `moq export ts
-  --stats` publishes its egress rows is unsettled.
+  --stats` publishes its egress rows is unsettled. Candidates: extend the
+  solicited `.echo` snapshot with a flattened container section, give viewers
+  their own stats surface, or narrow this quest to import. Leaning toward
+  narrowing, since the other two widen the settled stats design.
 - **Counters sum, gauges do not.** Every check is a cumulative counter, which
   keeps `.z` deltas small and lets an aggregate sum; the PID's `quiet` is a gauge and
   merges newest-wins.

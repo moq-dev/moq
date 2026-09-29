@@ -28,7 +28,9 @@ track name would collapse them.
   two renditions naming the same `track` in different broadcasts round-trips
   in both languages and plays each.
 - Open: text, JSON, and binary sections also carry `broadcast` and key by
-  track name. Decide whether they gain `track` in this change or stay as is.
+  track name. Candidates: keep this to video and audio, as decided, or give
+  every section with `broadcast` a `track` through the same helper so
+  resolution is uniform.
 
 ## Related
 

@@ -13,7 +13,9 @@ and the hang draft specs both. Nothing produces them yet.
 - `rs/hang/src/catalog`: `Stats { track }` and `Echo { path }`, both
   `#[non_exhaustive]`, as `Option` fields on `Catalog` that are omitted from
   the wire when absent. `path` is relative to the broadcast serving the
-  catalog, like a rendition's `broadcast`. Additive on main.
+  catalog and resolves through `Path::resolve`, like a rendition's
+  `broadcast`; `<name>.echo` is appended to the result. One shared-path
+  fixture pins that in both languages. Additive on main.
 - `rs/hang/src/stats.rs`: the publisher snapshot,
   `Snapshot<E = ()> { transport, renditions: BTreeMap<String, Track>, #[serde(flatten)] ext: E }`.
   The generic lets moq-mux flatten `{ mpegts: ts::Stats }` in beside it, the
