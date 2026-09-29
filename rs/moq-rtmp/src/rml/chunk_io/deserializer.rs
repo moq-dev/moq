@@ -457,22 +457,22 @@ fn get_csid(buffer: &[u8]) -> ParsedValue<u32> {
 
 #[cfg(test)]
 mod tests {
+	use super::*;
+	use crate::rml::time::RtmpTimestamp;
+	use byteorder::{BigEndian, LittleEndian, WriteBytesExt};
+	use std::io::{Cursor, Write};
+
 	#[test]
 	fn chunk_size_floor() {
-		let mut decoder = super::ChunkDeserializer::new();
+		let mut decoder = ChunkDeserializer::new();
 		assert!(matches!(
 			decoder.set_max_chunk_size(0),
-			Err(super::ChunkDeserializationError::InvalidMaxChunkSize { chunk_size: 0 })
+			Err(ChunkDeserializationError::InvalidMaxChunkSize { chunk_size: 0 })
 		));
 		assert_eq!(decoder.get_max_chunk_size(), 128);
 		decoder.set_max_chunk_size(1).unwrap();
 		assert_eq!(decoder.get_max_chunk_size(), 1);
 	}
-
-	use super::*;
-	use crate::rml::time::RtmpTimestamp;
-	use byteorder::{BigEndian, LittleEndian, WriteBytesExt};
-	use std::io::{Cursor, Write};
 
 	#[test]
 	fn can_read_type_0_chunk_with_small_chunk_stream_id_and_small_timestamp() {
