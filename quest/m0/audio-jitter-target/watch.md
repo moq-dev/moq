@@ -75,8 +75,8 @@ against it is likely cheaper than patching the branch's:
   that down: a stored preference silently winning over the default is its own
   bug, and it also means auto gets far less real exposure than it looks like.
 - Replay recorded traces rather than synthetic ones of the same shape. The
-  #3477 traces are gone, so record fresh ones with the [browser
-  harness](/quest/m0/audio-quality-harness/browser.md) (decided with the
+  #3477 traces are gone, so record fresh ones with the [audio quality
+  harness](/quest/m0/audio-quality-harness/traces.md) (decided with the
   maintainer instead of asking the reporter). Trim a copy into the repository
   and replay it through both rings in `replay.test.ts`.
 - Manual run against the public relay on Chrome and Safari, the two rows the
@@ -97,7 +97,7 @@ that quest can adopt it without a second estimator change.
 
 ## Required
 
-- [Browser harness](/quest/m0/audio-quality-harness/browser.md) - records the arrival traces this quest replays
+- [Traces](/quest/m0/audio-quality-harness/traces.md) - records the arrival traces this quest replays
 
 ## Related
 
