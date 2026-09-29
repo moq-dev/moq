@@ -9,7 +9,7 @@ are identical across all of them.
 ## Plan
 
 `moq-flate` and `@moq/flate` absorb `moq-binary`'s snapshot and stream modes
-in [moq-binary folds into moq-flate](/quest/m1/flate-binary.md), so the crate
+in moq-binary's fold into moq-flate ([#4425](https://github.com/moq-dev/moq/pull/4425), on `dev`), so the crate
 already owns the per-group window a caller could otherwise desynchronize. The
 track wrapper this line once planned was dropped for that reason. What
 remains is reaching those tracks from the hand-written binding wrappers.
