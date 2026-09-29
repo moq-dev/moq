@@ -72,7 +72,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Go and Dart doc samples](/quest/m1/doc-samples-go-dart.md) - Go and Dart doc samples compile against their wrappers
 - [Data capture in bindings](/quest/m1/data-capture-bindings.md) - moq-ffi and every wrapper pass a data frame's capture time, and the JSON window producer takes one
 - [Moxygen compatibility](/quest/m1/moxygen/README.md) - one subgroup per group, whole-group FETCH, and one datagram per group, never a full moxygen pass
-- [JS IETF reprice](/quest/m1/js-ietf-reprice.md) - `@moq/net`'s IETF publisher reprices a held namespace with REQUEST_UPDATE, like Rust, instead of withdraw-then-advertise
+- [JS IETF reprice](/quest/m1/js-ietf-reprice.md) - `@moq/net`'s IETF publisher reprices a held namespace in place, like Rust, instead of withdraw-then-advertise
 - [JS IETF datagrams](/quest/m1/js-ietf-datagram.md) - `@moq/net` sends and receives datagram groups over moq-transport, like Rust
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic producer per track name in both languages, with the sequence namespace surviving a replacement
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - generic on-demand group serving and IETF FETCH for browser publishers
