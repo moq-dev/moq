@@ -30,8 +30,10 @@ Every other JS place with the same page-load gap follows the same rule.
   `take` keeps draining the shared, lexicographic `pending` map). When the
   last replay hold drops, record the prefixes whose diff is still pending,
   keep emitting from the live table, and yield `Live` once that set is empty.
-  No frozen snapshot: the JS stream is already a coalescing diff of the
-  table, which is the same model.
+  No frozen snapshot. The JS stream is not that model today:
+  `AnnounceState.queue` (`js/net/src/announced.ts`) appends every diff, so a
+  queued event can't be folded, cancelled, or overtaken. Replace it with one
+  pending entry per prefix, taken in path order, as Rust's `pending` map is.
 - Tests: a caught-up test that opens the stream before the first connection,
   one where the first connection fails and no `Live` arrives, and barrier
   tests for a change to an owed prefix after the hold drops (folded ahead of
