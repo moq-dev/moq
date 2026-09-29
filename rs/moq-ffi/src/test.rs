@@ -7,8 +7,11 @@ use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqSubscription;
 use crate::consumer::MoqTrackConsumer;
 use crate::error::MoqError;
-use crate::flate::MoqFlateConfig;
-use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
+use crate::flate::{MoqFlateConfig, MoqFlateSnapshotProducer, MoqFlateStreamProducer};
+use crate::json::{
+	MoqJsonSnapshotConfig, MoqJsonSnapshotConsumer, MoqJsonSnapshotProducer, MoqJsonStreamConfig, MoqJsonStreamConsumer,
+	MoqJsonStreamProducer,
+};
 use crate::media::{MoqAudioFormat, MoqAudioInit, MoqFrame, MoqVideoFormat, MoqVideoInit};
 use crate::session::{MoqBackoff, MoqConnectionStatus};
 
@@ -616,6 +619,16 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 	assert_eq!(frame.timestamp_us, 20_000);
 }
 
+/// Subscribe to `name` on `broadcast` as a raw track, for a typed consumer to take over.
+async fn subscribe(broadcast: &MoqBroadcastProducer, name: &str) -> Arc<MoqTrackConsumer> {
+	broadcast
+		.consume()
+		.unwrap()
+		.subscribe_track(name.into(), None)
+		.await
+		.unwrap()
+}
+
 #[tokio::test]
 async fn json_snapshot_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -623,13 +636,10 @@ async fn json_snapshot_roundtrip() {
 		delta_ratio: 8,
 		compression: true,
 	};
-	let producer = broadcast.publish_json_snapshot("meta".into(), config.clone()).unwrap();
-	let consumer = broadcast
-		.consume()
-		.unwrap()
-		.subscribe_json_snapshot("meta".into(), config)
-		.await
-		.unwrap();
+	let track = broadcast.publish_track("meta".into(), None).unwrap();
+	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();
+	assert!(matches!(track.name(), Err(MoqError::Closed)), "the producer takes over the track");
+	let consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "meta").await, config).unwrap();
 
 	producer.update(r#"{"a":1}"#.into()).unwrap();
 	let value = tokio::time::timeout(TIMEOUT, consumer.next())
@@ -667,27 +677,18 @@ async fn json_demand() {
 		compression: true,
 	};
 	let stream_config = MoqJsonStreamConfig { compression: true };
-	let snapshot = broadcast
-		.publish_json_snapshot("status".into(), snapshot_config.clone())
-		.unwrap();
-	let stream = broadcast
-		.publish_json_stream("events".into(), stream_config.clone())
-		.unwrap();
+	let track = broadcast.publish_track("status".into(), None).unwrap();
+	let snapshot = MoqJsonSnapshotProducer::new(&broadcast, &track, snapshot_config.clone()).unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let stream = MoqJsonStreamProducer::new(&broadcast, &track, stream_config.clone()).unwrap();
 	let snapshot_demand = snapshot.demand().unwrap();
 	let stream_demand = stream.demand().unwrap();
 	assert_eq!(snapshot_demand.name(), "status");
 	assert_eq!(stream_demand.name(), "events");
 	assert!(!snapshot_demand.is_used());
 
-	let consumer = broadcast.consume().unwrap();
-	let snapshot_consumer = consumer
-		.subscribe_json_snapshot("status".into(), snapshot_config)
-		.await
-		.unwrap();
-	let stream_consumer = consumer
-		.subscribe_json_stream("events".into(), stream_config)
-		.await
-		.unwrap();
+	let snapshot_consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "status").await, snapshot_config).unwrap();
+	let stream_consumer = MoqJsonStreamConsumer::new(&*subscribe(&broadcast, "events").await, stream_config).unwrap();
 
 	tokio::time::timeout(TIMEOUT, snapshot_demand.used())
 		.await
@@ -757,13 +758,9 @@ async fn demand_handle_outlives_finish() {
 async fn json_stream_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let config = MoqJsonStreamConfig { compression: true };
-	let producer = broadcast.publish_json_stream("events".into(), config.clone()).unwrap();
-	let consumer = broadcast
-		.consume()
-		.unwrap()
-		.subscribe_json_stream("events".into(), config)
-		.await
-		.unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let producer = MoqJsonStreamProducer::new(&broadcast, &track, config.clone()).unwrap();
+	let consumer = MoqJsonStreamConsumer::new(&*subscribe(&broadcast, "events").await, config).unwrap();
 
 	for n in 0..3 {
 		producer.append(format!(r#"{{"n":{n}}}"#)).unwrap();
@@ -778,6 +775,67 @@ async fn json_stream_roundtrip() {
 		);
 	}
 	producer.finish().unwrap();
+}
+
+/// A JSON producer serves a track a subscriber requested, which the broadcast never created by name.
+#[tokio::test]
+async fn json_on_requested_track() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let config = MoqJsonStreamConfig { compression: false };
+
+	// The subscribe stays pending until the request is accepted, so run it concurrently.
+	let subscribe = {
+		let consumer = broadcast.consume().unwrap();
+		tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await })
+	};
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for requested track")
+		.unwrap();
+	let producer = MoqJsonStreamProducer::new(&broadcast, &request.accept(None).unwrap(), config.clone()).unwrap();
+	let track = tokio::time::timeout(TIMEOUT, subscribe)
+		.await
+		.expect("timed out waiting for the subscribe")
+		.unwrap()
+		.unwrap();
+	let consumer = MoqJsonStreamConsumer::new(&track, config).unwrap();
+
+	producer.append(r#"{"n":1}"#.into()).unwrap();
+	let value = tokio::time::timeout(TIMEOUT, consumer.next())
+		.await
+		.expect("timed out waiting for json stream record")
+		.unwrap()
+		.expect("expected a record");
+	assert_eq!(value, r#"{"n":1}"#);
+}
+
+/// A JSON consumer refuses a track that has already read a group, and closes one it takes over.
+#[tokio::test]
+async fn json_consumer_takes_an_unread_track() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let config = MoqJsonStreamConfig { compression: false };
+
+	let read = broadcast.consume().unwrap().subscribe_track("events".into(), None).await.unwrap();
+	track.append_group().unwrap();
+	tokio::time::timeout(TIMEOUT, read.recv_group())
+		.await
+		.expect("timed out waiting for a group")
+		.unwrap()
+		.expect("expected a group");
+	assert!(matches!(
+		MoqJsonStreamConsumer::new(&read, config.clone()),
+		Err(MoqError::AlreadyCommitted)
+	));
+
+	let unread = subscribe(&broadcast, "events").await;
+	MoqJsonStreamConsumer::new(&unread, config.clone()).unwrap();
+	assert!(matches!(unread.recv_group().await, Err(MoqError::Cancelled)));
+	assert!(matches!(
+		MoqJsonStreamConsumer::new(&unread, config),
+		Err(MoqError::Closed)
+	));
 }
 
 #[tokio::test]
@@ -4537,18 +4595,21 @@ fn published_catalog(
 #[tokio::test]
 async fn json_tracks_are_advertised_in_the_catalog() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let snapshot = broadcast
-		.publish_json_snapshot(
-			"status".into(),
-			MoqJsonSnapshotConfig {
-				delta_ratio: 4,
-				compression: true,
-			},
-		)
-		.unwrap();
-	let stream = broadcast
-		.publish_json_stream("events".into(), MoqJsonStreamConfig { compression: false })
-		.unwrap();
+	let snapshot = MoqJsonSnapshotProducer::new(
+		&broadcast,
+		&broadcast.publish_track("status".into(), None).unwrap(),
+		MoqJsonSnapshotConfig {
+			delta_ratio: 4,
+			compression: true,
+		},
+	)
+	.unwrap();
+	let stream = MoqJsonStreamProducer::new(
+		&broadcast,
+		&broadcast.publish_track("events".into(), None).unwrap(),
+		MoqJsonStreamConfig { compression: false },
+	)
+	.unwrap();
 
 	let catalog = published_catalog(&broadcast);
 	let entry = catalog.json.tracks.get("status").expect("snapshot track advertised");
@@ -4573,24 +4634,24 @@ async fn json_tracks_are_advertised_in_the_catalog() {
 #[tokio::test]
 async fn flate_tracks_are_advertised_in_the_catalog() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let thumb = broadcast
-		.publish_flate_snapshot(
-			"thumbnail".into(),
-			MoqFlateConfig {
-				compression: false,
-				mime: Some("image/jpeg".into()),
-			},
-		)
-		.unwrap();
-	let log = broadcast
-		.publish_flate_stream(
-			"log".into(),
-			MoqFlateConfig {
-				compression: false,
-				mime: None,
-			},
-		)
-		.unwrap();
+	let thumb = MoqFlateSnapshotProducer::new(
+		&broadcast,
+		&broadcast.publish_track("thumbnail".into(), None).unwrap(),
+		MoqFlateConfig {
+			compression: false,
+			mime: Some("image/jpeg".into()),
+		},
+	)
+	.unwrap();
+	let log = MoqFlateStreamProducer::new(
+		&broadcast,
+		&broadcast.publish_track("log".into(), None).unwrap(),
+		MoqFlateConfig {
+			compression: false,
+			mime: None,
+		},
+	)
+	.unwrap();
 	thumb.update(vec![0xff, 0xd8, 0xff]).unwrap();
 	log.append(vec![1, 2, 3]).unwrap();
 
@@ -4613,30 +4674,28 @@ async fn flate_tracks_are_advertised_in_the_catalog() {
 }
 
 /// A second data track under a name the catalog already carries is refused, leaving the first.
+///
+/// The broadcast refuses a duplicate track itself, so the collision comes from a track created on
+/// another broadcast. The refused track's handle stays open for the caller.
 #[tokio::test]
 async fn data_track_names_cannot_collide() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let first = broadcast
-		.publish_json_snapshot(
-			"state".into(),
-			MoqJsonSnapshotConfig {
-				delta_ratio: 0,
-				compression: false,
-			},
-		)
-		.unwrap();
+	let first = MoqJsonSnapshotProducer::new(
+		&broadcast,
+		&broadcast.publish_track("state".into(), None).unwrap(),
+		MoqJsonSnapshotConfig {
+			delta_ratio: 0,
+			compression: false,
+		},
+	)
+	.unwrap();
+	let other = MoqBroadcastProducer::new().unwrap();
+	let track = other.publish_track("state".into(), None).unwrap();
 	assert!(
-		broadcast
-			.publish_flate_stream(
-				"state".into(),
-				MoqFlateConfig {
-					compression: false,
-					mime: None,
-				},
-			)
-			.is_err(),
+		MoqJsonStreamProducer::new(&broadcast, &track, MoqJsonStreamConfig { compression: false }).is_err(),
 		"a duplicate data track name should fail"
 	);
+	assert_eq!(track.name().unwrap(), "state");
 	assert_eq!(
 		published_catalog(&broadcast)
 			.json

@@ -1,19 +1,20 @@
 //! Generic JSON tracks over the FFI boundary.
 //!
-//! Wraps [`moq_json`] so native callers can publish and consume JSON on an arbitrary named
-//! track, in either mode: `snapshot` (lossy latest-value, RFC 7396 merge-patch deltas) or
-//! `stream` (lossless append-log). Values cross the boundary as JSON strings; the caller parses
-//! and serializes on its own side.
+//! Wraps [`moq_json`] so native callers can publish and consume JSON on a track, in either mode:
+//! `snapshot` (lossy latest-value, RFC 7396 merge-patch deltas) or `stream` (lossless
+//! append-log). Each type is constructed from the track it wraps, so a track accepted from a
+//! request works as well as one created by name. Values cross the boundary as JSON strings; the
+//! caller parses and serializes on its own side.
 
 use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::consumer::MoqBroadcastConsumer;
+use crate::consumer::MoqTrackConsumer;
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
-use crate::producer::MoqBroadcastProducer;
+use crate::producer::{MoqBroadcastProducer, MoqTrackProducer};
 use moq_mux::catalog::hang::Extra;
 
 /// Options for a JSON snapshot track (lossy latest-value mode).
@@ -98,85 +99,6 @@ mod tests {
 	}
 }
 
-// ---- Entry points ----
-
-#[uniffi::export]
-impl MoqBroadcastProducer {
-	/// Publish a JSON snapshot track (lossy latest-value) by name, advertised in the catalog.
-	///
-	/// The broadcast's catalog carries `json.tracks.<name>` (`mode: snapshot`, and
-	/// `compression: deflate` when set) for as long as the track lives; finishing or dropping the
-	/// producer retires it. Errors if the catalog already carries an entry under `name`.
-	pub fn publish_json_snapshot(
-		&self,
-		name: String,
-		config: MoqJsonSnapshotConfig,
-	) -> Result<Arc<MoqJsonSnapshotProducer>, MoqError> {
-		let _guard = crate::ffi::enter();
-		self.with_state(|state| {
-			let track = state.broadcast.create_track(name, None)?;
-			let config = moq_mux::json::Config::default()
-				.with_compression(config.compression)
-				.with_delta_ratio(config.delta_ratio);
-			let producer = state.catalog.json_snapshot::<Value>(track, config)?;
-			Ok(Arc::new(MoqJsonSnapshotProducer {
-				inner: std::sync::Mutex::new(Some(producer)),
-			}))
-		})
-	}
-
-	/// Publish a JSON stream track (lossless append-log) by name, advertised in the catalog.
-	///
-	/// The broadcast's catalog carries `json.tracks.<name>` (`mode: stream`) for as long as the
-	/// track lives. Errors if the catalog already carries an entry under `name`.
-	pub fn publish_json_stream(
-		&self,
-		name: String,
-		config: MoqJsonStreamConfig,
-	) -> Result<Arc<MoqJsonStreamProducer>, MoqError> {
-		let _guard = crate::ffi::enter();
-		self.with_state(|state| {
-			let track = state.broadcast.create_track(name, None)?;
-			let config = moq_mux::json::Config::default().with_compression(config.compression);
-			let producer = state.catalog.json_stream::<Value>(track, config)?;
-			Ok(Arc::new(MoqJsonStreamProducer {
-				inner: std::sync::Mutex::new(Some(producer)),
-			}))
-		})
-	}
-}
-
-#[uniffi::export]
-impl MoqBroadcastConsumer {
-	/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
-	///
-	/// Pass the same [`MoqJsonSnapshotConfig::compression`] the producer used.
-	pub async fn subscribe_json_snapshot(
-		&self,
-		name: String,
-		config: MoqJsonSnapshotConfig,
-	) -> Result<Arc<MoqJsonSnapshotConsumer>, MoqError> {
-		let track = self.inner().track(&name)?.subscribe(None).await?;
-		let consumer = moq_json::snapshot::Consumer::<Value>::new(track, config.into());
-		Ok(Arc::new(MoqJsonSnapshotConsumer {
-			task: Task::new(SnapshotConsumer { inner: consumer }),
-		}))
-	}
-
-	/// Subscribe to a JSON stream track (lossless append-log) by name.
-	pub async fn subscribe_json_stream(
-		&self,
-		name: String,
-		config: MoqJsonStreamConfig,
-	) -> Result<Arc<MoqJsonStreamConsumer>, MoqError> {
-		let track = self.inner().track(&name)?.subscribe(None).await?;
-		let consumer = moq_json::stream::Consumer::<Value>::new(track, config.into());
-		Ok(Arc::new(MoqJsonStreamConsumer {
-			task: Task::new(StreamConsumer { inner: consumer }),
-		}))
-	}
-}
-
 // ---- Snapshot ----
 
 /// Publishes a JSON value that consumers see as a single latest state.
@@ -187,6 +109,30 @@ pub struct MoqJsonSnapshotProducer {
 
 #[uniffi::export]
 impl MoqJsonSnapshotProducer {
+	/// Publish `track` as a JSON snapshot track (lossy latest-value), advertised in `broadcast`'s catalog.
+	///
+	/// The catalog carries `json.tracks.<name>` (`mode: snapshot`, and `compression: deflate` when
+	/// set) for as long as the producer lives; finishing or dropping it retires the entry. Takes
+	/// over `track`, whose handle is closed afterward. Errors if the catalog already carries an
+	/// entry under the track's name.
+	#[uniffi::constructor]
+	pub fn new(
+		broadcast: &MoqBroadcastProducer,
+		track: &MoqTrackProducer,
+		config: MoqJsonSnapshotConfig,
+	) -> Result<Arc<Self>, MoqError> {
+		let _guard = crate::ffi::enter();
+		let config = moq_mux::json::Config::default()
+			.with_compression(config.compression)
+			.with_delta_ratio(config.delta_ratio);
+		let producer = track.adopt(|track| {
+			broadcast.with_state(|state| Ok(state.catalog.json_snapshot::<Value>(track, config)?))
+		})?;
+		Ok(Arc::new(Self {
+			inner: std::sync::Mutex::new(Some(producer)),
+		}))
+	}
+
 	/// Publish a new value, encoded as a snapshot or delta automatically. `value` is a JSON
 	/// document. A no-op if unchanged from the previous update.
 	pub fn update(&self, value: String) -> Result<(), MoqError> {
@@ -234,6 +180,19 @@ pub struct MoqJsonSnapshotConsumer {
 
 #[uniffi::export]
 impl MoqJsonSnapshotConsumer {
+	/// Read `track` as a JSON snapshot track (lossy latest-value).
+	///
+	/// Pass the same [`MoqJsonSnapshotConfig::compression`] the producer used. Takes over
+	/// `track`, whose handle is closed afterward; errors if it has already read a group.
+	#[uniffi::constructor]
+	pub fn new(track: &MoqTrackConsumer, config: MoqJsonSnapshotConfig) -> Result<Arc<Self>, MoqError> {
+		let _guard = crate::ffi::enter();
+		let consumer = moq_json::snapshot::Consumer::<Value>::new(track.take()?, config.into());
+		Ok(Arc::new(Self {
+			task: Task::new(SnapshotConsumer { inner: consumer }),
+		}))
+	}
+
 	/// Get the next value as a JSON string. Returns `None` once the track ends.
 	///
 	/// A consumer that has fallen behind collapses the backlog and yields only the latest value.
@@ -259,6 +218,27 @@ pub struct MoqJsonStreamProducer {
 
 #[uniffi::export]
 impl MoqJsonStreamProducer {
+	/// Publish `track` as a JSON stream track (lossless append-log), advertised in `broadcast`'s catalog.
+	///
+	/// The catalog carries `json.tracks.<name>` (`mode: stream`) for as long as the producer
+	/// lives. Takes over `track`, whose handle is closed afterward. Errors if the catalog already
+	/// carries an entry under the track's name.
+	#[uniffi::constructor]
+	pub fn new(
+		broadcast: &MoqBroadcastProducer,
+		track: &MoqTrackProducer,
+		config: MoqJsonStreamConfig,
+	) -> Result<Arc<Self>, MoqError> {
+		let _guard = crate::ffi::enter();
+		let config = moq_mux::json::Config::default().with_compression(config.compression);
+		let producer = track.adopt(|track| {
+			broadcast.with_state(|state| Ok(state.catalog.json_stream::<Value>(track, config)?))
+		})?;
+		Ok(Arc::new(Self {
+			inner: std::sync::Mutex::new(Some(producer)),
+		}))
+	}
+
 	/// Append one record to the log. `value` is a JSON document.
 	pub fn append(&self, value: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -305,6 +285,19 @@ pub struct MoqJsonStreamConsumer {
 
 #[uniffi::export]
 impl MoqJsonStreamConsumer {
+	/// Read `track` as a JSON stream track (lossless append-log).
+	///
+	/// Pass the same [`MoqJsonStreamConfig::compression`] the producer used. Takes over `track`,
+	/// whose handle is closed afterward; errors if it has already read a group.
+	#[uniffi::constructor]
+	pub fn new(track: &MoqTrackConsumer, config: MoqJsonStreamConfig) -> Result<Arc<Self>, MoqError> {
+		let _guard = crate::ffi::enter();
+		let consumer = moq_json::stream::Consumer::<Value>::new(track.take()?, config.into());
+		Ok(Arc::new(Self {
+			task: Task::new(StreamConsumer { inner: consumer }),
+		}))
+	}
+
 	/// Get the next record as a JSON string. Returns `None` once the track ends.
 	pub async fn next(&self) -> Result<Option<String>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await

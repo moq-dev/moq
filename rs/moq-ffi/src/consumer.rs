@@ -119,8 +119,7 @@ impl MoqBroadcastConsumer {
 		}
 	}
 
-	/// Access the underlying `moq_net::broadcast::Consumer` for sibling
-	/// modules (e.g. `audio`) that need to subscribe a typed track.
+	#[cfg(test)]
 	pub(crate) fn inner(&self) -> &moq_net::broadcast::Consumer {
 		&self.inner
 	}
@@ -542,6 +541,29 @@ impl MoqTrackConsumer {
 			control,
 			info,
 		}
+	}
+
+	/// Hand the subscription to a typed reader (a JSON consumer, say), closing this handle.
+	///
+	/// Errors with [`MoqError::AlreadyCommitted`] once a group read has started, since the reader
+	/// would miss whatever that read consumed.
+	pub(crate) fn take(&self) -> Result<moq_net::track::Subscriber, MoqError> {
+		let mut guard = self.shared.inner.lock().expect("track reader");
+		match guard.as_ref().map(|inner| &inner.track) {
+			Some(Cursor::Uncommitted(_)) => {}
+			Some(_) => return Err(MoqError::AlreadyCommitted),
+			None => return Err(MoqError::Closed),
+		}
+		let Some(TrackInner {
+			track: Cursor::Uncommitted(track),
+		}) = guard.take()
+		else {
+			unreachable!("just matched Uncommitted");
+		};
+		drop(guard);
+		// Wake any datagram read still parked on the subscriber this handle no longer owns.
+		self.cancel_lanes();
+		Ok(track)
 	}
 
 	fn cancel_lanes(&self) {

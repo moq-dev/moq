@@ -675,6 +675,19 @@ impl MoqTrackProducer {
 		let track = guard.as_ref().ok_or(MoqError::Closed)?;
 		Ok(track.demand())
 	}
+
+	/// Hand the track to a typed writer that `f` builds (a JSON producer, say), closing this
+	/// handle once `f` succeeds so the writer is the track's only producer. On failure the
+	/// handle stays open.
+	pub(crate) fn adopt<R>(
+		&self,
+		f: impl FnOnce(moq_net::track::Producer) -> Result<R, MoqError>,
+	) -> Result<R, MoqError> {
+		let mut guard = self.inner.lock().unwrap();
+		let out = f(guard.as_ref().ok_or(MoqError::Closed)?.clone())?;
+		guard.take();
+		Ok(out)
+	}
 }
 
 #[uniffi::export]
