@@ -7,8 +7,8 @@ When an MPEG-TS import selects a program (`ts::Import::with_program`, so
 program's broadcast carries SI describing only its own service. Other services'
 EIT sub-tables are dropped, and the SDT for this transport stream is rewritten
 to list only the selected service. Network-wide tables (NIT, BAT, TDT/TOT, SDT
-other, EIT other) pass through unchanged. An import without a selection keeps
-capturing every section byte-for-byte, as today.
+other, EIT other) pass through unchanged. An import without a selection does
+no filtering by program and keeps today's capture behavior.
 
 ## Plan
 
@@ -19,8 +19,8 @@ Settled decisions:
   unchanged. Filtering at export was rejected: every subscriber would still
   receive the whole multiplex's schedule.
 - Filter only under an explicit selection. A single-program input whose SDT
-  lists extra services is left alone, because default capture promises verbatim
-  sections.
+  lists extra services is left alone, because default capture keeps the
+  sections it accepts verbatim.
 - EIT actual (`table_id` 0x4E and 0x50..=0x5F): keep a sub-table only when its
   `table_id_extension` (the service_id) is the selected program_number. Whole
   sub-tables are dropped; nothing is rewritten. EIT other (0x4F and
@@ -35,8 +35,10 @@ Settled decisions:
   hand-written table. [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md)
   needs it too, and whichever change lands first adds it.
 - When the SDT has no entry for the selected service, carry no SDT actual rather
-  than fabricating a table the source never gave for this service. A later
-  version that lists it is captured normally.
+  than fabricating a table the source never gave for this service. If a later
+  version drops the service, the next snapshot retires the SDT captured before
+  it, and its catalog entry goes too if nothing else is left on it. A later
+  version that lists the service again is captured normally.
 - A `(PID, table_id)` whose every sub-table is filtered away gets no catalog
   `mpegts.si` entry or track.
 - The same change updates the program-selection paragraph in `doc/bin/cli.md`
@@ -46,7 +48,8 @@ Test with a synthetic two-service multiplex whose SDT lists both services
 across two sections, with EIT present/following for each. Each selected import
 carries one SDT entry with a valid CRC and only its own EIT; an unselected
 import keeps the sections verbatim; a selection missing from the SDT carries
-none; and the re-exported TS still parses.
+none; an SDT version that drops the selected service retires the earlier one;
+and the re-exported TS still parses.
 
 ## Required
 
