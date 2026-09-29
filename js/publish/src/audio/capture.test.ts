@@ -310,6 +310,13 @@ function installGatedWebAudio() {
 		MediaStream: class {},
 		MediaStreamAudioSourceNode: FakeGraphNode,
 		AudioWorkletNode: GatedWorklet,
+		navigator: {
+			userActivation: {
+				get hasBeenActive() {
+					return activated;
+				},
+			},
+		},
 	};
 
 	const originals = new Map<string, PropertyDescriptor | undefined>();
@@ -349,12 +356,15 @@ test("captures once a gesture resumes a context built before one", async () => {
 	expect(webaudio.contexts[0].state).toBe("suspended");
 	expect(webaudio.worklets.length).toBe(0);
 	expect(capture.out.format.peek()).toBeUndefined();
+	// Blocked, so the encoder stops holding the catalog for audio that may never come.
+	expect(capture.out.blocked.peek()).toBe(true);
 
 	const before = performance.now() * 1000;
 	webaudio.gesture();
 	await settle();
 
 	expect(webaudio.contexts[0].state).toBe("running");
+	expect(capture.out.blocked.peek()).toBe(false);
 	expect(webaudio.worklets.length).toBe(1);
 
 	// The worklet is anchored when the graph starts, not when the source appeared, so audio stays on
@@ -383,6 +393,8 @@ test("drops the format while the context is interrupted", async () => {
 	webaudio.contexts[0].transition("interrupted");
 	await settle();
 	expect(capture.out.format.peek()).toBeUndefined();
+	// The page was activated, so the context is expected back without another gesture.
+	expect(capture.out.blocked.peek()).toBe(false);
 	expect(capture.out.frames.peek()).toBeUndefined();
 	// The retired worklet is cut from the source, or it keeps posting alongside its replacement.
 	expect(webaudio.roots[0].outputs.size).toBe(0);

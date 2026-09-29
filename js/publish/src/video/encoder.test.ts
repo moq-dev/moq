@@ -1,7 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
+import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
+import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
-import { Signal } from "@moq/signals";
+import { Effect, Signal } from "@moq/signals";
+import { Broadcast } from "../broadcast";
 import { Baseline } from "../jitter";
 import { Encoder } from "./encoder";
 
@@ -332,6 +335,47 @@ test("software-only AV1 is refused even when explicitly requested", async () => 
 		expect(error).toHaveBeenCalled();
 	} finally {
 		encoder.close();
+		probe.mockRestore();
+		error.mockRestore();
+	}
+});
+
+test("a video rendition with no supported codec stops holding the catalog", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	const probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async () => ({ supported: false }));
+	const error = spyOn(console, "error").mockImplementation(() => {});
+
+	const broadcast = new Broadcast({ enabled: true });
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1920, height: 1080 }) },
+	};
+	const encoder = new Encoder("video", { enabled: true, broadcast, capture: capture as never });
+	for (let i = 0; i < 5; i++) await Promise.resolve();
+
+	// The video rendition holds the catalog while its probe runs, then releases it once no codec fits.
+	const audio = broadcast.audio("audio");
+	audio.expected.set(true);
+	audio.config.set({
+		codec: "opus",
+		sampleRate: 48_000 as Catalog.AudioConfig["sampleRate"],
+		numberOfChannels: 2 as Catalog.AudioConfig["numberOfChannels"],
+		container: { kind: "legacy" },
+	});
+
+	const effect = new Effect();
+	const track = new Moq.Track.Producer("catalog.json");
+	broadcast.catalog.serve(track, effect);
+	try {
+		const catalog = await new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() }).next();
+		expect(probe).toHaveBeenCalled();
+		expect(catalog?.video).toBeUndefined();
+		expect(Object.keys(catalog?.audio?.renditions ?? {})).toEqual(["audio"]);
+		expect(error).toHaveBeenCalled();
+	} finally {
+		effect.close();
+		encoder.close();
+		broadcast.close();
 		probe.mockRestore();
 		error.mockRestore();
 	}

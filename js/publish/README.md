@@ -92,8 +92,9 @@ that starts before the page's first click or keypress waits for one: browsers su
 until then, and the audio rendition stays out of the catalog until samples flow.
 
 The catalog is withheld until every encoder with a source resolves its first config, so a
-subscriber's first catalog lists every rendition. With a microphone that includes the wait for a
-gesture. Another producer opts in by setting `rendition.expected` while its config resolves.
+subscriber's first catalog lists every rendition. An encoder that can't resolve one stops holding it:
+a microphone waiting for a gesture, a camera with no supported codec, or a failed encoder. Another
+producer opts in by setting `rendition.expected` while its config resolves.
 
 ```typescript
 import * as Publish from "@moq/publish";

@@ -60,6 +60,10 @@ type CaptureOutput = {
 	// The format the frames arrive in, or undefined while there's no capture.
 	format: Signal<Format | undefined>;
 
+	// Whether a track can't capture yet, so no format is on its way: disabled, or suspended until the
+	// page's first click or keypress.
+	blocked: Signal<boolean>;
+
 	// The head of the Web Audio graph, when there is one, so callers can tap the raw capture.
 	// Undefined for decoded samples, which never touch Web Audio.
 	root: Signal<AudioNode | undefined>;
@@ -85,6 +89,7 @@ export class Capture {
 	readonly #out: CaptureOutput = {
 		frames: new Signal<Fanout<AudioFrame> | undefined>(undefined),
 		format: new Signal<Format | undefined>(undefined),
+		blocked: new Signal(false),
 		root: new Signal<AudioNode | undefined>(undefined),
 	};
 	readonly out = readonlys(this.#out);
@@ -129,7 +134,10 @@ export class Capture {
 
 	#runTrack(source: SourceConfig, effect: Effect): void {
 		// Releasing the capture device while muted is the whole point of gating on `enabled`.
-		if (!effect.get(this.in.enabled)) return;
+		if (!effect.get(this.in.enabled)) {
+			effect.set(this.#out.blocked, true, false);
+			return;
+		}
 
 		const settings = source.track.getSettings();
 		const sampleRate = effect.get(this.sampleRate) ?? pickCaptureRate(settings.sampleRate);
@@ -149,6 +157,13 @@ export class Capture {
 		// Nothing guarantees a gesture has happened yet: a pre-granted microphone reaches here on page
 		// load. A context built then starts suspended and renders nothing until one arrives.
 		const running = Util.Gesture.unlock(effect, context);
+
+		// A context starts suspended even after a gesture, until it resumes a moment later; only one
+		// still waiting on the page's first gesture may wait indefinitely.
+		effect.run((inner) => {
+			const blocked = !inner.get(running) && !navigator.userActivation?.hasBeenActive;
+			inner.set(this.#out.blocked, blocked, false);
+		});
 
 		const root = new MediaStreamAudioSourceNode(context, {
 			mediaStream: new MediaStream([source.track]),

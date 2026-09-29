@@ -137,6 +137,9 @@ export class Encoder {
 	// The codec the browser will actually encode with, tagged with the inputs it was probed against.
 	#codec = new Signal<Detected | undefined>(undefined);
 
+	// Whether the latest probe found no codec, so no config is coming for these inputs.
+	#unsupported = new Signal(false);
+
 	// Uncapped target bitrate (pixels, maxBitrate), the reservation's ceiling.
 	#ceiling = new Signal<number | undefined>(undefined);
 
@@ -185,11 +188,13 @@ export class Encoder {
 		// Publish the resolved catalog config; undefined (while disabled) drops it from the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
 
-		// A captured source resolves into a config, so hold the catalog for it meanwhile.
+		// A captured source resolves into a config, so hold the catalog for it meanwhile, unless the
+		// probe found no codec and none is coming.
 		effect.run((effect) => {
 			const capture = effect.get(this.in.capture);
 			const source = capture ? effect.get(capture.in.source) : undefined;
-			effect.set(rendition.expected, effect.get(this.in.enabled) && source !== undefined, false);
+			const expected = effect.get(this.in.enabled) && source !== undefined && !effect.get(this.#unsupported);
+			effect.set(rendition.expected, expected, false);
 		});
 
 		// Encode only while enabled and a subscriber is attached (the demand gate).
@@ -420,10 +425,15 @@ export class Encoder {
 		const required = effect.get(this.#codecFilter) ?? "";
 
 		effect.spawn(async () => {
-			const detected = await this.#bestCodec(required, dimensions);
-			if (!detected) return;
+			try {
+				const detected = await this.#bestCodec(required, dimensions);
+				if (!detected) return;
 
-			effect.set(this.#codec, { ...detected, required, ...dimensions });
+				effect.set(this.#codec, { ...detected, required, ...dimensions });
+			} catch (err) {
+				effect.set(this.#unsupported, true, false);
+				throw err;
+			}
 		});
 	}
 

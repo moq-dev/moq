@@ -255,11 +255,13 @@ export class Encoder {
 		// Publish the resolved config; undefined (no capture) drops it from the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
 
-		// A captured source resolves into a config, so hold the catalog for it meanwhile.
+		// A captured source resolves into a config, so hold the catalog for it meanwhile. Not while
+		// capture is blocked (e.g. on a gesture) or the encoder failed: no config may ever come.
 		effect.run((effect) => {
 			const capture = effect.get(this.in.capture);
-			const source = capture ? effect.get(capture.in.source) : undefined;
-			effect.set(rendition.expected, effect.get(this.in.enabled) && source !== undefined, false);
+			if (!capture || !effect.get(this.in.enabled) || effect.get(this.#fatal)) return;
+			if (effect.get(capture.in.source) === undefined || effect.get(capture.out.blocked)) return;
+			effect.set(rendition.expected, true, false);
 		});
 
 		// The pipeline outlives any one subscription: it is built as soon as capture runs and
