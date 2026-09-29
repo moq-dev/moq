@@ -459,6 +459,23 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn http_error_redacts_url() {
+		// A freed port refuses the connection, so reqwest fails with the dialed URL attached.
+		let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+		let address = listener.local_addr().expect("local address");
+		drop(listener);
+
+		let url = format!("http://user:pass@{address}/?jwt=secret").parse().unwrap();
+		let err = Client::new(url, None).unwrap().connect(request()).await.unwrap_err();
+
+		assert!(matches!(err, Error::Unavailable(_)), "unexpected error: {err}");
+		let printed = format!("{err} {err:?}");
+		for secret in ["jwt", "secret", "user:pass"] {
+			assert!(!printed.contains(secret), "error leaked {secret}: {printed}");
+		}
+	}
+
+	#[tokio::test]
 	async fn revalidate_runs_on_cadence_and_applies_the_reply() {
 		let log = Log::default();
 		let server = server(log.clone(), |request| {
