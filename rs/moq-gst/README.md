@@ -27,6 +27,9 @@ sudo apt update && sudo apt install gstreamer1.0-moq
 ### Fedora / RHEL / Rocky / AlmaLinux
 
 ```bash
+# DNF5 (Fedora 41+)
+sudo dnf config-manager addrepo --from-repofile https://rpm.moq.dev/moq.repo
+# DNF4 (Fedora 39-40, RHEL / Rocky / AlmaLinux 9)
 sudo dnf config-manager --add-repo https://rpm.moq.dev/moq.repo
 sudo dnf install gstreamer1-moq
 ```
