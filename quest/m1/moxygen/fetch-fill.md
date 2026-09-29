@@ -24,10 +24,10 @@ merged unanswered, and the maintainer ruled that each blocks the line:
   otherwise. That only works when `end_location` names a concrete last
   object: for a whole-group request our own `run_fetch_stream` answers with
   the requested boundary (`(group + 1, 0)`), so a stream holding only object
-  0 looks like a valid one-object group. For that case, find the wire signal
-  that marks a complete group (an End of Group status object, or a concrete
-  `end_location` from the publisher, fixing ours to send one) and require it;
-  if the drafts we speak offer none, ask the maintainer rather than guess.
+  0 looks like a valid one-object group. The line's accepted declines keep
+  that requested end, so for this case find a wire signal that marks a
+  complete group (such as an End of Group status object) and require it; if
+  the drafts we speak offer none, ask the maintainer rather than guess.
 - **A first object with no IDs is accepted**
   ([r4113942737](https://github.com/moq-dev/moq/pull/4276#discussion_r4113942737)).
   The `(false, None | Some(1))` arm treats omitted Group and Object IDs as
