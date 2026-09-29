@@ -38,14 +38,16 @@ sides explicitly enable it.
 
 On moq-lite 07, `SUBSCRIBE_END` counts the group streams opened for the
 subscription. Rust and TypeScript stop waiting for missing streams once that
-many headers have arrived; skipped group sequences add no wait. Groups already
-being received continue until their own stream ends or resets.
+many headers have arrived; skipped group sequences add no wait. A stream whose
+header arrived is always read to its end before the subscription completes.
 
 A stream reset before its header arrived cannot be counted, so the subscriber
 still allows a grace period for late streams. The grace uses the subscription's
 nonzero effective maximum age, or one second when no maximum age is set.
-moq-lite 05 and 06 instead account for group sequences using received headers
-and `SUBSCRIBE_DROP`.
+moq-lite 05 and 06 instead account for group sequences using received headers,
+datagrams, and `SUBSCRIBE_DROP`, from the start group the subscription last
+asked for. A lost datagram is not owed, but its hole waits out the grace like a
+lost stream. A group at or past the declared end aborts the track.
 
 ## Discovery
 

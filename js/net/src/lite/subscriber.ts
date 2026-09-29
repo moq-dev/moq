@@ -82,6 +82,8 @@ interface SubscribeEntry {
 	// The group streams received, so the subscription can wait for the ones still owed
 	// after the publisher ends it.
 	tail: Tail;
+	// The first group the SUBSCRIBE asked for, if any.
+	requested?: number;
 	// The first group the publisher serves (SUBSCRIBE_START) and the track's exclusive end
 	// (SUBSCRIBE_END), once it declares them.
 	start?: number;
@@ -652,7 +654,20 @@ export class Subscriber {
 		}
 
 		// Register before opening SUBSCRIBE so a racing GROUP stream finds the entry.
-		const entry: SubscribeEntry = { track: producer, timescale, tail: new Tail() };
+		const entry: SubscribeEntry = {
+			track: producer,
+			timescale,
+			// The effective max age is the stopgap grace: the wrong clock (it bounds
+			// presentation-time drift), but it is how long the subscriber was willing to wait
+			// for a late group anyway. Already the smaller of the subscriber's and the track's.
+			tail: new Tail({
+				grace: () => {
+					const maxAge = producer.subscription.peek()?.maxAge ?? Time.Milli.zero;
+					return maxAge > 0 ? maxAge : TAIL_GRACE_MS;
+				},
+			}),
+			requested: msg.startGroup,
+		};
 		this.#subscribes.set(id, entry);
 
 		state.stream = await Stream.open(this.#quic);
@@ -872,6 +887,9 @@ export class Subscriber {
 
 			if ("start" in resp) {
 				entry.start = resp.start.group;
+				// The groups the SUBSCRIBE asked for below it are unavailable, whatever the
+				// demand asks later.
+				if (entry.requested !== undefined) entry.tail.account(entry.requested, entry.start);
 			} else if ("end" in resp) {
 				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
 				entry.end = resp.end.group;
@@ -897,9 +915,6 @@ export class Subscriber {
 	// headers arrived keep reading until their own FIN or reset.
 	#settleTail(entry: SubscribeEntry): Promise<void> {
 		const { tail, track } = entry;
-		// Already the smaller of the subscriber's and the track's max age.
-		const maxAge = track.subscription.peek()?.maxAge ?? Time.Milli.zero;
-		const grace = maxAge > 0 ? maxAge : TAIL_GRACE_MS;
 
 		const complete = () => {
 			if (entry.streams !== undefined) return tail.streams >= entry.streams;
@@ -907,13 +922,17 @@ export class Subscriber {
 			if (entry.end === undefined) return false;
 			// Without SUBSCRIBE_START the publisher served no group at all.
 			if (entry.start === undefined) return true;
-			const bounds = groupBounds(track.subscription.peek()?.groups ?? {});
-			const start = Math.max(entry.start, bounds.start);
+			// Owed from the floor the demand last asked for, which an update can move either
+			// way, or where SUBSCRIBE_START resolved a live-edge one. The groups the SUBSCRIBE
+			// asked for below its SUBSCRIBE_START were accounted for when it arrived.
+			const groups = track.subscription.peek()?.groups;
+			const bounds = groupBounds(groups ?? {});
+			const start = groups?.start === undefined ? entry.start : bounds.start;
 			const end = bounds.end === undefined ? entry.end : Math.min(entry.end, bounds.end);
 			return tail.covers(start, end);
 		};
 
-		return tail.settle(complete, grace, track.closed);
+		return tail.settle(complete, track.closed);
 	}
 
 	/**
@@ -1005,6 +1024,14 @@ export class Subscriber {
 		const read = tail.open(group.sequence);
 
 		try {
+			// The publisher contradicted its own end, which no later group can repair.
+			if (entry.end !== undefined && group.sequence >= entry.end) {
+				const violation = new ProtocolViolation(
+					`group ${group.sequence} is at or past the declared end ${entry.end}`,
+				);
+				track.close(violation);
+				throw violation;
+			}
 			track.writeGroup(producer);
 
 			// Block until the timescale is known; the group's stream can arrive before

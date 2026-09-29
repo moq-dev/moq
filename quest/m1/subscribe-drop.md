@@ -46,5 +46,4 @@ without waiting out the grace.
 
 ## Related
 
-- [Track tail hardening](/quest/m1/track-tail-hardening.md) - the same tail accounting, in both languages
 - [Track tail interop](/quest/m1/track-tail-interop.md) - the Rust-JS proof of the lite-07 drop case
