@@ -2,58 +2,17 @@ set fallback
 
 # Run the web demo (default).
 #
-# Picks the first free port at/after 4443 (both UDP for QUIC and TCP for HTTP)
-# so multiple worktrees can run `just dev` without colliding. The relay reads
-
-# the port from MOQ_LISTEN/MOQ_WEB_HTTP_LISTEN, overriding localhost.toml.
+# Picks the first free port at/after 4443 so multiple worktrees can run
+# `just dev` without colliding; see sh/demo/run.sh.
 default:
-    #!/usr/bin/env bash
-    set -euo pipefail
     bun install
-
-    port=$(just port)
-    if [ "$port" != "4443" ]; then
-    	echo ">>> Port 4443 is busy, using $port instead" >&2
-    fi
-
-    base="http://localhost:$port"
-
-    # Scope the bind env vars to the relay only. The unified `moq` binary also
-    # reads MOQ_LISTEN, so exporting it globally would make the `pub` client
-    # try to start a server (and fail without a TLS cert).
-    bun run concurrently --kill-others --names rly,bbb,web --prefix-colors auto \
-    	"MOQ_LISTEN='[::]:$port' MOQ_WEB_HTTP_LISTEN='[::]:$port' just relay" \
-    	"just wait $base/certificate.sha256 && just pub bbb $base" \
-    	"just wait $base/certificate.sha256 && just web serve $base"
-
-# Find the first free port at/after `start` (checked on both TCP and UDP).
-# `lsof` isn't available everywhere (e.g. Git Bash on Windows); without it we
-# can't probe, so fall back to `start` and let the relay surface a bind error if
-
-# it's actually taken.
-[private]
-port start="4443":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    port={{ start }}
-    if command -v lsof >/dev/null 2>&1; then
-    	while lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1 \
-    		|| lsof -nP -iUDP:"$port" -t >/dev/null 2>&1; do
-    		port=$((port + 1))
-    	done
-    fi
-    echo "$port"
+    ../sh/demo/run.sh
 
 # Wait for the localhost relay to be ready by repeatedly requesting the cert
+[positional-arguments]
 [private]
 wait url="http://localhost:4443/certificate.sha256":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for i in $(seq 1 600); do
-    	curl -sf "{{ url }}" > /dev/null 2>&1 && exit 0
-    	sleep 1
-    done
-    exit 1
+    ../sh/demo/wait.sh "$@"
 
 # Throttle UDP traffic for testing (macOS only, requires sudo).
 throttle:
