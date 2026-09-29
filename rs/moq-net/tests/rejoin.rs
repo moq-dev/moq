@@ -25,8 +25,7 @@ async fn read_all(group: &mut group::Consumer) -> moq_net::Result<Vec<Vec<u8>>> 
 	Ok(frames)
 }
 
-/// A rejoin recovers the reset group, unless its missing tail is historical on a version
-/// that cannot declare where the replacement starts.
+/// A rejoin recovers the group reset on leave, whether or not the live edge moved past it.
 ///
 /// The relay cancels its idle upstream subscription, resetting that group mid-transfer.
 /// Resuming the rejoin at the frame where the reset landed would ask upstream for a tail
@@ -93,21 +92,15 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 					}
 				}
 				let reset = rejoined.iter().find(|(seq, _)| *seq == 1).expect("reset group");
+				// The reader asks for the group it is missing, so the reset group comes back
+				// whole even once the live edge has moved past it.
+				assert_eq!(
+					reset.1.as_ref().unwrap(),
+					&vec![b"b0".to_vec(), b"b1".to_vec()],
+					"{version}"
+				);
 				if advance {
-					// lite-06 declares where the replacement starts, so the reset group is
-					// still promised. lite-05 declares nothing, and a live edge past the
-					// missing tail is the only sign it will never come.
-					match version {
-						"moq-lite-06" => assert_eq!(reset.1.as_ref().unwrap(), &vec![b"b0".to_vec(), b"b1".to_vec()]),
-						_ => assert!(
-							matches!(reset.1, Err(moq_net::Error::NotFound)),
-							"{version}: {:?}",
-							reset.1
-						),
-					}
 					assert_eq!(rejoined.last().unwrap().1.as_ref().unwrap(), &vec![b"c0".to_vec()]);
-				} else {
-					assert_eq!(reset.1.as_ref().unwrap(), &vec![b"b0".to_vec(), b"b1".to_vec()]);
 				}
 			})
 			.await

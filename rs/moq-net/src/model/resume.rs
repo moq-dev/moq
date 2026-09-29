@@ -911,9 +911,9 @@ fn last_group(end: Option<Position>) -> Option<u64> {
 /// mid-group therefore reaches an already-handed-out group with no bookkeeping, and a
 /// reader that never touches the subscription again still picks the continuation up.
 ///
-/// A copy that dies waits for a replacement route. A missing continuation requests
-/// that route's latest group; a refusal ends the wait, as does a live edge past this
-/// group when the route declares no start.
+/// A copy that dies waits for a replacement route. A missing continuation subscribes
+/// that route from the frame this group needs; a refusal ends the wait, as does a live
+/// edge past this group when the route declares no start.
 pub(crate) struct Group {
 	state: kio::Consumer<ResumeState>,
 	/// The logical subscription's live max age budget.
@@ -934,14 +934,36 @@ pub(crate) struct Group {
 	/// this group, and this reader's positioned copy.
 	current: Option<Current>,
 
-	/// Demand held while a group-only reader waits on a replacement copy.
-	waiting: Option<(u64, kio::Pending<track::Subscribing>)>,
+	/// Demand held on a replacement copy until this group ends, since the parent
+	/// subscriber may be idle.
+	waiting: Option<Waiting>,
 
 	/// The segment whose copy died under us, and why.
 	dead: Option<(u64, Error)>,
 
 	/// The tagged logical subscriber's meter for route-copy expiry only.
 	stale_stats: crate::stats::Meter,
+}
+
+/// A group reader's own subscription on one segment's route, starting at the frame
+/// it needs. A floor never widens the parent's request past it, where a live-edge
+/// start would erase the parent's continuation floor from the aggregate.
+struct Waiting {
+	segment: u64,
+	start: Position,
+	track: track::Consumer,
+	pending: kio::Pending<track::Subscribing>,
+}
+
+impl Waiting {
+	fn new(segment: u64, start: Position, track: &track::Consumer) -> Self {
+		Self {
+			segment,
+			start,
+			track: track.clone(),
+			pending: track.subscribe(track::Subscription::default().with_start(start)),
+		}
+	}
 }
 
 struct Current {
@@ -982,7 +1004,12 @@ impl Clone for Group {
 			index: self.index,
 			end: self.end,
 			current,
-			waiting: None,
+			// Each reader holds its own demand, so dropping the original cannot
+			// strand a clone still reading the tail.
+			waiting: self
+				.waiting
+				.as_ref()
+				.map(|w| Waiting::new(w.segment, w.start, &w.track)),
 			dead: self.dead.clone(),
 			stale_stats: self.stale_stats.clone(),
 		}
@@ -1149,26 +1176,29 @@ impl Group {
 		}
 	}
 
-	/// Ask the replacement for its live edge even when the parent subscriber is idle.
+	/// Ask the replacement for this group's continuation even when the parent subscriber
+	/// is idle.
 	///
-	/// The demand outlives the peek: a copy whose header has arrived still needs it
-	/// for the tail, so it is released only once the group ends or moves routes.
+	/// The demand outlives the peek: a copy whose header has arrived, even before
+	/// this reader first looked, still needs it for the tail. It is released only
+	/// once the group ends or moves routes.
 	fn poll_copy(
 		&mut self,
 		segment: u64,
+		start: Position,
 		track: &track::Consumer,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<group::Consumer>>> {
-		if let Poll::Ready(Some(copy)) = track.poll_peek_group(self.sequence, waiter) {
-			return Poll::Ready(Ok(Some(copy)));
-		}
-		if self.waiting.as_ref().is_none_or(|(id, _)| *id != segment) {
-			self.waiting = Some((segment, track.subscribe(None)));
+		if self.waiting.as_ref().is_none_or(|w| w.segment != segment) {
+			self.waiting = Some(Waiting::new(segment, start, track));
 		}
 		let result = (|| {
+			if let Poll::Ready(Some(copy)) = track.poll_peek_group(self.sequence, waiter) {
+				return Poll::Ready(Ok(Some(copy)));
+			}
 			// The pending handle owns the demand; accepting it checks refusals without
 			// moving this group's cursor or asking for historical data via FETCH.
-			ready!(self.waiting.as_ref().expect("registered above").1.poll_ok(waiter))?;
+			ready!(self.waiting.as_ref().expect("registered above").pending.poll_ok(waiter))?;
 			// A declared start already tells the peek whether this group is coming, even
 			// when a newer group's stream overtakes it. Without one, a live edge past
 			// this group is the only sign it never will.
@@ -1223,7 +1253,7 @@ impl Group {
 			}
 
 			// The route may not have delivered this group yet, so wait on its cache.
-			let Some(group) = ready!(self.poll_copy(segment, &track, waiter))? else {
+			let Some(group) = ready!(self.poll_copy(segment, position, &track, waiter))? else {
 				// This route will never have it; fall back to whichever segment replaces it.
 				self.dead = Some((segment, Error::NotFound));
 				continue;
@@ -1400,7 +1430,7 @@ impl Group {
 				self.waiting = None;
 				return Poll::Ready(Ok(cap));
 			};
-			match ready!(self.poll_copy(segment, &track, waiter))? {
+			match ready!(self.poll_copy(segment, seam, &track, waiter))? {
 				// The continuation's copy declares the count: its own count
 				// already includes the frames it skipped.
 				Some(continuation) => {
@@ -4891,12 +4921,12 @@ mod test {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn group_only_read_requests_latest_continuation() {
+	async fn group_only_read_requests_its_continuation() {
 		group_only_continuation(false).await;
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn group_only_finish_requests_latest_continuation() {
+	async fn group_only_finish_requests_its_continuation() {
 		group_only_continuation(true).await;
 	}
 
@@ -4925,7 +4955,11 @@ mod test {
 			track_a.abort(Error::Dropped).unwrap();
 		}
 		assert!(parked(&mut reading));
-		assert_eq!(track_b.subscription().expect("group-only demand").start, None);
+		// Demand starts at the frame the reader needs: its cursor, or the seam past A's copy.
+		assert_eq!(
+			track_b.subscription().expect("group-only demand").start,
+			Some(Position { group: 0, frame: 1 })
+		);
 
 		// The header arriving does not end the wait: the tail still needs the demand.
 		let mut copy = track_b.create_group(group::Info { sequence: 0 }).unwrap();
@@ -4941,6 +4975,39 @@ mod test {
 		}
 		assert_eq!(read(&mut reading), b"tail");
 		assert!(reading.read_frame().await.unwrap().is_none());
+		assert!(track_b.subscription().is_none(), "the finished group releases demand");
+	}
+
+	/// A replacement cached before the reader first looks still needs demand for its
+	/// tail, and a clone keeps that demand after the original reader is dropped.
+	#[tokio::test(start_paused = true)]
+	async fn cached_replacement_holds_demand_across_clones() {
+		let (track_a, consumer_a) = track_pair("a");
+		let (track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"head".to_vec()).unwrap();
+		let mut reading = sub.recv_group().await.unwrap().unwrap();
+		drop(sub);
+		assert_eq!(read(&mut reading), b"head");
+
+		producer.takeover(&consumer_b).unwrap();
+		track_a.abort(Error::Dropped).unwrap();
+		let mut copy = track_b.create_group(group::Info { sequence: 0 }).unwrap();
+		copy.write_frame(Timestamp::ZERO, b"head".to_vec()).unwrap();
+		assert!(reading.read_frame().now_or_never().is_none());
+		assert!(track_b.subscription().is_some(), "a cached header still needs demand");
+
+		let mut clone = reading.clone();
+		drop(reading);
+		assert!(track_b.subscription().is_some(), "the clone keeps its own demand");
+
+		copy.write_frame(Timestamp::ZERO, b"tail".to_vec()).unwrap();
+		copy.finish().unwrap();
+		assert_eq!(read(&mut clone), b"tail");
+		assert!(clone.read_frame().await.unwrap().is_none());
 		assert!(track_b.subscription().is_none(), "the finished group releases demand");
 	}
 
