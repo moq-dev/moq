@@ -80,7 +80,9 @@ pub enum Kind {
 	Auto,
 	/// Require a software backend.
 	Software,
-	/// Require a backend by its stable lowercase name: `"libopus"` or `"pcm"`.
+	/// Require [`Settings::codec`] to be this codec, by its lowercase name:
+	/// `"opus"`, `"pcm"`, or `"aac"`. Any other codec is refused. The library
+	/// still picks the backend, platform first.
 	Named(String),
 }
 
@@ -839,18 +841,29 @@ mod tests {
 		assert!(matches!(Encoder::new(&settings), Err(Error::Unsupported(_))));
 	}
 
-	/// AAC settings routed to the test stub, since this host has no AAC encoder.
 	fn aac(layout: Layout) -> Settings {
-		Settings {
-			kind: Kind::Named(backend::stub::NAME.into()),
-			..Settings::from_input(Codec::Aac, &Input::new(48_000, layout))
-		}
+		Settings::from_input(Codec::Aac, &Input::new(48_000, layout))
+	}
+
+	/// Open `settings` on the test stub, since this host has no AAC encoder.
+	fn stub(settings: &Settings) -> Result<Encoder, Error> {
+		let _stub = backend::stub::install();
+		Encoder::new(settings)
+	}
+
+	/// Without the stub, the public constructor sees the real tiers and refuses.
+	#[test]
+	fn aac_is_refused_without_an_encoder() {
+		let err = Encoder::new(&aac(Layout::Stereo))
+			.err()
+			.expect("no AAC encoder on this host");
+		assert!(matches!(err, Error::Unsupported(_)), "{err}");
 	}
 
 	/// The ASC is synthesized from the settings, so it exists before any packet.
 	#[test]
 	fn aac_catalog_carries_the_synthesized_asc() {
-		let enc = Encoder::new(&aac(Layout::Stereo)).unwrap();
+		let enc = stub(&aac(Layout::Stereo)).unwrap();
 		assert_eq!(enc.name(), backend::stub::NAME);
 		assert_eq!(enc.frame_size(), 1024);
 
@@ -875,7 +888,7 @@ mod tests {
 			(Layout::FivePointOne, 6),
 			(Layout::SevenPointOne, 7),
 		] {
-			let catalog = Encoder::new(&aac(layout)).unwrap().catalog();
+			let catalog = stub(&aac(layout)).unwrap().catalog();
 			let description = catalog.description.unwrap();
 			assert_eq!(description[1] >> 3 & 0xF, config, "{layout:?}");
 			assert_eq!(catalog.channel_count, layout.channels(), "{layout:?}");
@@ -887,10 +900,7 @@ mod tests {
 			Layout::SixPointOne,
 			Layout::Discrete(2),
 		] {
-			assert!(
-				matches!(Encoder::new(&aac(layout)), Err(Error::Unsupported(_))),
-				"{layout:?}"
-			);
+			assert!(matches!(stub(&aac(layout)), Err(Error::Unsupported(_))), "{layout:?}");
 		}
 	}
 
@@ -902,13 +912,13 @@ mod tests {
 			frame_duration: Duration::from_micros(21_333),
 			..aac(Layout::Stereo)
 		};
-		assert_eq!(Encoder::new(&settings).unwrap().frame_size(), 1024);
+		assert_eq!(stub(&settings).unwrap().frame_size(), 1024);
 
 		let settings = Settings {
 			frame_duration: Duration::from_millis(20),
 			..aac(Layout::Stereo)
 		};
-		let err = Encoder::new(&settings).err().expect("20 ms is 960 samples");
+		let err = stub(&settings).err().expect("20 ms is 960 samples");
 		assert!(err.to_string().contains("1024"), "{err}");
 	}
 
@@ -918,13 +928,13 @@ mod tests {
 			dtx: true,
 			..aac(Layout::Stereo)
 		};
-		assert!(matches!(Encoder::new(&settings), Err(Error::Unsupported(_))));
+		assert!(matches!(stub(&settings), Err(Error::Unsupported(_))));
 	}
 
 	/// A backend that can't retune keeps its opening rate.
 	#[test]
 	fn fixed_rate_backend_keeps_its_opening_rate() {
-		let mut enc = Encoder::new(&Settings {
+		let mut enc = stub(&Settings {
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(96_000)),
 			..aac(Layout::Stereo)
 		})
@@ -940,7 +950,7 @@ mod tests {
 	/// The drain pushes the encoder delay out through whole silent frames.
 	#[test]
 	fn aac_finish_drains_the_encoder_delay() {
-		let mut enc = Encoder::new(&aac(Layout::Mono)).unwrap();
+		let mut enc = stub(&aac(Layout::Mono)).unwrap();
 		assert_eq!(enc.folded_delay(), backend::stub::DELAY);
 		enc.encode(&[0.0; 1024]).unwrap();
 

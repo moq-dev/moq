@@ -8,7 +8,9 @@
 //! read back from the backend.
 //!
 //! [`open`] tries the platform encoders before the software ones, skipping any
-//! that does not emit the codec, and refuses when none opens. The software tier
+//! that does not emit the codec, and refuses when none opens. [`Kind::Named`]
+//! names the codec, not a backend, so which backend encodes it stays the
+//! library's choice. The software tier
 //! is libopus for Opus and a passthrough for PCM. AAC has no software encoder,
 //! so it is only as available as the platform's, and no platform encoder is
 //! wired in yet.
@@ -54,7 +56,8 @@ pub(crate) trait Backend: Send {
 	/// rate: Opus lookahead, AAC encoder delay.
 	fn delay(&self) -> usize;
 
-	/// The stable lowercase name [`Kind::Named`] selects this backend by.
+	/// The stable lowercase name of this backend, as [`Encoder::name`](super::Encoder::name)
+	/// reports it. Callers never select by it.
 	fn name(&self) -> &str;
 }
 
@@ -81,21 +84,35 @@ const SOFTWARE: &[Candidate] = &[
 	},
 ];
 
-/// Test-only backends, in neither tier so `Auto` and `Software` never pick one:
-/// they exist to be asked for by name.
+/// The platform tier on a test thread that called [`stub::install`], so AAC tests
+/// open the same backend on every host and every other test sees the real tiers.
 #[cfg(test)]
-const NAMED_ONLY: &[Candidate] = &[Candidate {
+const STUB_PLATFORM: &[Candidate] = &[Candidate {
 	name: stub::NAME,
 	codecs: &[Codec::Aac],
 	open: stub::Stub::open,
 }];
 
-#[cfg(not(test))]
-const NAMED_ONLY: &[Candidate] = &[];
-
 /// Open the first backend that emits the codec and accepts the settings.
 pub(crate) fn open(settings: &Settings) -> Result<Box<dyn Backend>, Error> {
-	select(settings, candidates(&settings.kind, PLATFORM, SOFTWARE))
+	if let Kind::Named(requested) = &settings.kind
+		&& requested != settings.codec.as_str()
+	{
+		return Err(Error::Unsupported(format!(
+			"audio encoder {requested:?} is unavailable for {}",
+			settings.codec
+		)));
+	}
+
+	#[cfg(test)]
+	let platform = match stub::installed() {
+		true => STUB_PLATFORM,
+		false => PLATFORM,
+	};
+	#[cfg(not(test))]
+	let platform = PLATFORM;
+
+	select(settings, candidates(&settings.kind, platform, SOFTWARE))
 }
 
 /// The candidates `kind` allows, in the order to try them.
@@ -104,14 +121,9 @@ pub(crate) fn open(settings: &Settings) -> Result<Box<dyn Backend>, Error> {
 /// this host compiles in.
 fn candidates<'a>(kind: &Kind, platform: &'a [Candidate], software: &'a [Candidate]) -> Vec<&'a Candidate> {
 	match kind {
-		Kind::Auto => platform.iter().chain(software).collect(),
 		Kind::Software => software.iter().collect(),
-		Kind::Named(name) => platform
-			.iter()
-			.chain(software)
-			.chain(NAMED_ONLY)
-			.filter(|c| c.name == name)
-			.collect(),
+		// `open` has already checked that a name matches the codec.
+		Kind::Auto | Kind::Named(_) => platform.iter().chain(software).collect(),
 	}
 }
 
@@ -150,9 +162,8 @@ fn select(settings: &Settings, candidates: Vec<&Candidate>) -> Result<Box<dyn Ba
 		false => available.join(", "),
 	};
 	Err(Error::Unsupported(match &settings.kind {
-		Kind::Named(name) => format!("no audio encoder named {name:?} for {codec} (this build has: {available})"),
 		Kind::Software => format!("no software {codec} audio encoder (this build has: {available})"),
-		Kind::Auto => format!("no {codec} audio encoder (this build has: {available})"),
+		Kind::Auto | Kind::Named(_) => format!("no {codec} audio encoder (this build has: {available})"),
 	}))
 }
 
@@ -245,22 +256,11 @@ mod tests {
 		assert_eq!(name, "software");
 	}
 
+	/// A codec name is not a backend selector: it tries the same tiers as `Auto`.
 	#[test]
-	fn named_forces_one() {
-		let name = pick(
-			Kind::Named("software".into()),
-			&[PLATFORM_STUB],
-			&[PCM_ONLY, SOFTWARE_STUB],
-		)
-		.unwrap();
-		assert_eq!(name, "software");
-	}
-
-	/// A named backend that refuses the settings is the answer: nothing else is tried.
-	#[test]
-	fn named_refusal_does_not_fall_back() {
-		let err = pick(Kind::Named("refusing".into()), &[REFUSING], &[SOFTWARE_STUB]).unwrap_err();
-		assert!(err.to_string().contains("not these settings"), "{err}");
+	fn named_codec_picks_like_auto() {
+		let name = pick(Kind::Named("aac".into()), &[PLATFORM_STUB], &[SOFTWARE_STUB]).unwrap();
+		assert_eq!(name, "platform");
 	}
 
 	#[test]
@@ -288,36 +288,47 @@ mod tests {
 		assert!(message.contains("aac") && message.contains("none"), "{message}");
 	}
 
-	/// An unknown name says what this build has for the codec instead.
+	/// The stub stands in for the platform tier only, so `Software` still refuses
+	/// AAC with it installed.
 	#[test]
-	fn unknown_name_lists_the_alternatives() {
-		let settings = Settings {
-			kind: Kind::Named("opus".into()),
-			..Settings::default()
-		};
-		let message = open(&settings)
-			.err()
-			.expect("no backend is named after its codec")
-			.to_string();
-		assert!(
-			message.contains("\"opus\"") && message.contains(libopus::NAME),
-			"{message}"
-		);
+	fn stub_is_not_software() {
+		let _stub = stub::install();
+		assert_eq!(open(&aac(Kind::Auto)).unwrap().name(), stub::NAME);
+
+		let err = open(&aac(Kind::Software)).err().expect("no software AAC encoder");
+		assert!(err.to_string().contains("no software aac"), "{err}");
 	}
 
-	#[test]
-	fn software_backends_open_by_name() {
-		let settings = Settings {
-			kind: Kind::Named(libopus::NAME.into()),
+	fn named(codec: Codec, name: &str) -> Settings {
+		Settings {
+			codec,
+			kind: Kind::Named(name.into()),
 			..Settings::default()
-		};
-		assert_eq!(open(&settings).unwrap().name(), libopus::NAME);
+		}
+	}
 
-		let settings = Settings {
-			codec: Codec::Pcm,
-			kind: Kind::Named(pcm::NAME.into()),
-			..Settings::default()
-		};
-		assert_eq!(open(&settings).unwrap().name(), pcm::NAME);
+	/// A codec's own name opens that codec, like `Auto`.
+	#[test]
+	fn codec_names_open_their_codec() {
+		let _stub = stub::install();
+		assert_eq!(open(&named(Codec::Opus, "opus")).unwrap().name(), libopus::NAME);
+		assert_eq!(open(&named(Codec::Pcm, "pcm")).unwrap().name(), pcm::NAME);
+		assert_eq!(open(&named(Codec::Aac, "aac")).unwrap().name(), stub::NAME);
+	}
+
+	/// A name for another codec is refused, not quietly swapped for the settings' codec.
+	#[test]
+	fn another_codecs_name_is_refused() {
+		assert!(matches!(open(&named(Codec::Opus, "pcm")), Err(Error::Unsupported(_))));
+	}
+
+	/// Backend names are internal: asking for one is refused like any unknown name.
+	#[test]
+	fn backend_names_are_refused() {
+		let message = open(&named(Codec::Opus, libopus::NAME))
+			.err()
+			.expect("libopus is a backend, not a codec")
+			.to_string();
+		assert!(message.contains("\"libopus\"") && message.contains("opus"), "{message}");
 	}
 }
