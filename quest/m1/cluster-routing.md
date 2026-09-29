@@ -172,6 +172,10 @@ registry. What decides the wire:
 - A mixed-version bridge, if a fleet cannot switch at once.
 - How long a relay keeps an ended path's seqno. A new origin incarnation
   clears it; within one, it must outlive every delayed copy of the start.
+- How a push to a new tree child ends what the child missed within the same
+  incarnation. Its reset only marks a new incarnation, so the push may need a
+  watermark like the registry reconcile's: it ends only what the child holds
+  at or below it, and a delayed push cannot erase newer records.
 - How long a relay keeps the records of an origin that never comes back. They
   stop being reported once it is unreachable, but nothing removes them.
 - How an edge routes a SUBSCRIBE for a path none of its clients asked to
