@@ -56,11 +56,12 @@ for await (const root of Catalog.watch(broadcast)) {
 Two machines' wall times are only comparable when your application already
 knows their clocks are synchronized. The catalog says where PTS zero was on the
 publisher's clock, never whether the viewer's clock agrees with it. If you do
-know, the delay that renders a frame `target` after capture, on every viewer at
-once, is `target - (arrived - captured)`, where `arrived` is the viewer's
-`Date.now()` when the frame arrived. `<moq-watch>` trails the earliest frame it
-received by `delay`, so measure `arrived` on that frame and set the result on
-`delay`.
+know, set `delay` to `target - (arrived - captured)`, where `arrived` is the
+viewer's `Date.now()` for the frame that arrived earliest relative to its
+timestamp, since `<moq-watch>` anchors playback on that frame. It adds the
+largest rendition jitter on top, so a frame renders at about `captured + target`
+plus that jitter: one video frame, or the codec frame plus the worklet quantum
+for audio, unless the catalog sets `jitter`.
 
 The library never does this for you. Playback stays arrival-based: it does not
 read the `clock`, estimate the viewer's clock from the session RTT, or
