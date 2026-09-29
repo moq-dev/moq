@@ -22,7 +22,9 @@ publisher, and the subscriber re-requests through the best remaining route.
 The Rust model already does this for lite and IETF when the old first hop
 is named: a front pinned to `Pin::Publisher` stops qualifying once its
 route's first hop changes (`qualifies` in `rs/moq-net/src/model/origin.rs`),
-and `selected(None)` in `front.rs` ends it.
+and `selected(None)` in `front.rs` ends it. Another route from the old
+publisher still qualifies, so a subscription fails over to it at a group
+boundary instead of ending, as lite's same-first-hop rule already allows.
 
 Decided 2026-09-29: accept the compatibility break. Released moq-net (0.3.5
 and later) refuses a first-hop REQUEST_UPDATE with a retry interval of 0,
@@ -64,7 +66,8 @@ withdraw fallback and no negotiation.
 - Tests in both languages: a first-hop change sends one update and no
   withdrawal, the receiver applies it without closing the stream, and a
   subscription pinned to the old publisher ends rather than resuming on the
-  new one, including an anonymous (hop 0) to named change. The same for a
+  new one, including an anonymous (hop 0) to named change, and resumes
+  instead when another route from the old publisher remains. The same for a
   lite ANNOUNCE_UPDATE in JS. Run `just test interop --all`.
 
 Public API: none. Wire: the cluster extension's update semantics change (no
