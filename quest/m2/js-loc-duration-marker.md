@@ -4,8 +4,9 @@
 
 `@moq/loc`'s `Producer` ends each video group with the empty frame that closes
 its last frame's duration, as `moq-mux`'s LOC producer does after
-[#4450](https://github.com/moq-dev/moq/pull/4450). Readers from
-`@moq/loc` 0.2.3 and `moq-mux` 0.10.0 on skip it.
+[#4450](https://github.com/moq-dev/moq/pull/4450). Readers skip it from
+`@moq/loc` 0.2.3 and `moq-mux` 0.10.0 onward (the Rust skip landed in
+[#3575](https://github.com/moq-dev/moq/pull/3575)).
 
 ## Plan
 
