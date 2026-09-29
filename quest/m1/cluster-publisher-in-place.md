@@ -1,4 +1,4 @@
-# [S] A publisher change updates a cluster advertisement in place
+# [M] A publisher change updates a cluster advertisement in place
 
 ## Goal
 
@@ -28,14 +28,20 @@ prefers updating over quickly toggling a namespace.
   changelog entry. Run `just drafts check`.
 - Rust `rs/moq-net/src/ietf/publisher.rs` (`sync_namespace`): the
   PUBLISH_NAMESPACE path stops withdrawing on a first-hop change; the inline
-  path already updates in place. The receiving relay never splices across a
-  first-hop change, if it doesn't already.
+  path already updates in place.
+- Receivers in both languages accept a first-hop change in place instead of
+  treating it as a new advertisement: `run_publish_namespace_updates` in
+  `rs/moq-net/src/ietf/subscriber.rs` and `runPublishNamespace` in
+  `js/net/src/ietf/subscriber.ts` refuse it today, closing the stream, and
+  Rust's inline NAMESPACE path replaces the source. In-flight subscriptions
+  stay on their old source and are never spliced onto the new one.
 - JS: [JS IETF reprice](/quest/m1/js-ietf-reprice.md) follows the new rule.
 - Docs: `doc/bin/relay/cluster.md`, and any `doc/concept` page that
   describes the cluster extension, say a publisher change updates in place.
 - Tests in both languages: a first-hop change sends one update and no
-  withdrawal, and a subscription served by the old publisher keeps running
-  until that source ends, then ends rather than resuming on the new one.
+  withdrawal, the receiver applies it without closing the stream, and a
+  subscription served by the old publisher keeps running until that source
+  ends, then ends rather than resuming on the new one.
   Run `just test interop --all`.
 
 Public API: none. Wire: the cluster extension's update semantics change (no
