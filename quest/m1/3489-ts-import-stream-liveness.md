@@ -31,9 +31,11 @@ audio half is visible, late, through #3372's resync line.
   whose count stopped advancing across a sample, distinct from the audio
   resync message. The SRT gateway reports nothing today; that surface is
   [SRT import stats](/quest/m1/srt-import-stats.md).
-- Name and shape the counters so the TR 101 290 quest adopts them as its
-  `PID_error` check, and leave the catalog `stalled` bit alone: the importer
-  already sets it for a quiet video PID (`Stream::tick` after each decode
+- Keep the counters' own names: they cover TR 101 290 `PID_error` and are
+  stricter (access units, not packets), so
+  [TS import health](/quest/m2/ts-import-health.md) maps the ETSI check onto
+  them in docs rather than a field. Leave the catalog `stalled` bit alone:
+  the importer already sets it for a quiet video PID (`Stream::tick` after each decode
   batch, #3630). These counters add no timeout; anything that must bound a
   wait on a silent PID (the shared-shift quest) brings its own.
 - Tests with the issue's stimulus shape: suppress one PID's PES while keeping
@@ -47,5 +49,5 @@ audio half is visible, late, through #3372's resync line.
 ## Related
 
 - [SRT import stats](/quest/m1/srt-import-stats.md) - the same rows read from the SRT gateway
-- [TS import health](/quest/m2/ts-import-health.md) - the TR 101 290 counters that adopt these rows as `PID_error`
+- [TS import health](/quest/m2/ts-import-health.md) - the TR 101 290 counters, whose `PID_error` these rows cover
 - [Client stats](/quest/m1/qos/stats/schema.md) - where per-rendition liveness rides a publisher's stats broadcast

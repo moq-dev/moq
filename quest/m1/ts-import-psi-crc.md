@@ -26,7 +26,8 @@ for the next.
   granularity.
 - `ts::Stats` gains a cumulative `crc_error`, named for the ETSI check like
   the counters in [TS import health](/quest/m2/ts-import-health.md), which
-  counts the other parse failures under `PAT_error` and `PMT_error`.
+  counts the other parse failures under `PAT_error` and `PMT_error`. Additive
+  on main: `Stats` is `#[non_exhaustive]`.
 - Tests: the stimulus above on the PAT and on the PMT, asserting decode
   succeeds, the layout survives, the counter reads one, and a later good PMT
   revision still applies. A positive control: a feed whose only PAT is

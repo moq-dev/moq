@@ -75,11 +75,9 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Send buffer pools](/quest/m2/quic-buffer-pool.md) - whether pooled send buffers beat Bytes in the stream send path
 - [AF_XDP UDP path](/quest/m2/af-xdp.md) - the kernel-bypass verdict on today's virtio hosts that gates DPDK
 - [GOP overhead](/quest/m2/gop-overhead.md) - price the I-frames a short GOP pays for, deciding whether a long GOP plus a keyframe request is worth designing
-- [TS import PSI CRC](/quest/m2/ts-import-psi-crc.md) - one corrupted PAT or PMT costs a repetition and a `CRC_error`, not the import
-- [TS import health](/quest/m2/ts-import-health.md) - `moq import ts` counts the TR 101 290 priority 1 errors of the feed it receives
-- [TS import timing](/quest/m2/ts-import-timing.md) - the feed's PCR repetition, PCR discontinuity, and PTS errors, graded on its own values
-- [TS export health](/quest/m2/ts-export-health.md) - `moq export ts` counts the errors our muxer can make at runtime in the TS it emits
-- [TS health stats](/quest/m2/ts-health-stats.md) - the TS counters ride the client `.stats` broadcast as a `ts` section
+- [TS import health](/quest/m2/ts-import-health.md) - `moq import ts` counts the TR 101 290 errors of the feed it receives, PCR and PTS graded on its own values
+- [TS export liveness](/quest/m2/ts-export-liveness.md) - `moq export ts` reports each elementary stream's access units and quiet gap, catching a per-track stall
+- [TS health stats](/quest/m2/ts-health-stats.md) - the TS counters ride the stats plumbing beside the media counters
 - [Teleoperation](/quest/m2/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
 - [SIP media stack](/quest/m2/sip-stack.md) - terminate one inbound SIP audio call leg and expose it as Opus frames
 - [Carrier voice](/quest/m2/carrier-voice/README.md) - determine whether MoQ should be the call fabric for programmable carrier voice
