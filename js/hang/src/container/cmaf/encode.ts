@@ -873,8 +873,8 @@ function createDOpsBox(channelCount: number, sampleRate: number, description?: s
 
 	dOps[offset++] = 0; // Version
 	dOps[offset++] = channelCount;
-	view.setUint16(offset, 312, false);
-	offset += 2; // PreSkip (typical value)
+	view.setUint16(offset, 0, false);
+	offset += 2; // PreSkip: unknown without an OpusHead, so trim nothing, like the Rust exporter
 	view.setUint32(offset, sampleRate, false);
 	offset += 4; // InputSampleRate
 	view.setInt16(offset, 0, false);

@@ -63,7 +63,7 @@
 //!   reaps a play session whose viewer vanished without closing.
 //!
 //! Pure Rust: the RTMP handshake, chunk codec, and session state machine live in
-//! the vendored `rml` module (a fork of `rml_rtmp`), with no librtmp or ffmpeg
+//! the vendored `rml` module (forks of `rml_rtmp` and `rml_amf0`), with no librtmp or ffmpeg
 //! dependency.
 
 #![warn(missing_docs)]
@@ -74,7 +74,7 @@ mod dial;
 mod error;
 mod flv;
 mod listen;
-// Vendored fork of rml_rtmp; see the module docs.
+// Vendored forks of rml_rtmp and rml_amf0; see the module docs.
 mod rml;
 mod server;
 
