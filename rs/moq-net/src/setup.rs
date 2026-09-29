@@ -192,6 +192,9 @@ impl Encode<Version> for Client {
 		let mut sizer = Sizer::default();
 		self.encode_inner(&mut sizer, v)?;
 		let size = sizer.size;
+		if size > MAX_SETUP_SIZE {
+			return Err(EncodeError::TooLarge);
+		}
 
 		match SetupVersion::from_version(v) {
 			SetupVersion::Draft14 | SetupVersion::Draft15Plus => {
@@ -239,6 +242,9 @@ impl Encode<Version> for Server {
 		let mut sizer = Sizer::default();
 		self.encode_inner(&mut sizer, v)?;
 		let size = sizer.size;
+		if size > MAX_SETUP_SIZE {
+			return Err(EncodeError::TooLarge);
+		}
 
 		match SetupVersion::from_version(v) {
 			SetupVersion::Draft14 | SetupVersion::Draft15Plus => {
@@ -290,5 +296,31 @@ impl Decode<Version> for Server {
 			version,
 			parameters: msg,
 		})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Never emit a legacy SETUP our own receiver would refuse.
+	#[test]
+	fn encode_enforces_the_setup_limit() {
+		let v = Version::Lite(lite::Version::Lite01);
+		let parameters = Bytes::from(vec![0; MAX_SETUP_SIZE]);
+
+		let client = Client {
+			versions: coding::Versions::from([v.into()]),
+			parameters: parameters.clone(),
+		};
+		let mut buf = Vec::new();
+		assert!(matches!(client.encode(&mut buf, v), Err(EncodeError::TooLarge)));
+
+		let server = Server {
+			version: v.into(),
+			parameters,
+		};
+		let mut buf = Vec::new();
+		assert!(matches!(server.encode(&mut buf, v), Err(EncodeError::TooLarge)));
 	}
 }

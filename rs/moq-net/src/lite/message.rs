@@ -38,6 +38,10 @@ impl<T: Message> Encode<Version> for T {
 		tracing::trace!(?self, "encoding");
 		let mut sizer = Sizer::default();
 		self.encode_msg(&mut sizer, version)?;
+		// Never emit a body our own receiver would refuse.
+		if sizer.size > Self::MAX_SIZE {
+			return Err(EncodeError::TooLarge);
+		}
 		sizer.size.encode(w, version)?;
 		self.encode_msg(w, version)
 	}

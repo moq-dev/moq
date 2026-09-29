@@ -365,6 +365,29 @@ mod tests {
 		}
 	}
 
+	/// Never emit a SETUP our own receiver would refuse.
+	#[test]
+	fn encode_enforces_the_setup_limit() {
+		// Count, id, and a 4-byte length varint precede the path.
+		let at_limit = crate::setup::MAX_SETUP_SIZE - 6;
+		let msg = Setup {
+			path: Some("a".repeat(at_limit)),
+			..Default::default()
+		};
+		assert_eq!(round_trip(&msg), msg);
+
+		let msg = Setup {
+			path: Some("a".repeat(at_limit + 1)),
+			..Default::default()
+		};
+		let mut buf = bytes::BytesMut::new();
+		assert!(matches!(
+			msg.encode(&mut buf, Version::Lite05),
+			Err(EncodeError::TooLarge)
+		));
+		assert!(buf.is_empty());
+	}
+
 	#[test]
 	fn path_round_trip() {
 		let msg = Setup {
