@@ -19,6 +19,9 @@ answered. A connection that fails shows an error state, not an empty one.
   request needs its own caught-up-and-absent state, behind the same page-load
   hold, for watch to show "not live" instead of waiting.
 - Libraries expose the state as a signal; wording stays in the demo.
+- Tests in `js/room/src/room.test.ts` and `js/watch/src/broadcast.test.ts`:
+  loading before `live`, empty once caught up with nothing announced, and
+  error (never empty) when the connection fails.
 
 Public API: any state signal on `@moq/room` or `@moq/watch` is additive.
 Wire: none.
