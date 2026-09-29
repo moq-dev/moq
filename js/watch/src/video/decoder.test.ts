@@ -1,6 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
-import type * as Moq from "@moq/net";
+import * as Container from "@moq/hang/container";
+import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
@@ -147,3 +148,137 @@ describe("Decoder jitter across a source switch", () => {
 		}
 	});
 });
+
+// Drain reactive work without advancing playback time.
+async function microtasks() {
+	for (let i = 0; i < 40; i++) await Promise.resolve();
+}
+
+class Picture {
+	closed = false;
+	displayWidth = 16;
+	displayHeight = 16;
+	readonly timestamp: number;
+	constructor(timestamp: number) {
+		this.timestamp = timestamp;
+	}
+	clone() {
+		return new Picture(this.timestamp);
+	}
+	close() {
+		this.closed = true;
+	}
+}
+
+type Read = NonNullable<Awaited<ReturnType<Container.Consumer["next"]>>>;
+function sample(group: number, timestamp: number, discontinuity = 0): Read {
+	return {
+		group,
+		discontinuity,
+		continuous: true,
+		frame: { timestamp: Time.Micro(timestamp), payload: new Uint8Array([1]), keyframe: true },
+	};
+}
+
+async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[]) {
+	const originalDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
+	const originalChunk = Object.getOwnPropertyDescriptor(globalThis, "EncodedVideoChunk");
+	const submitted: number[] = [];
+	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async () => reads.shift());
+	class Codec {
+		state = "configured";
+		readonly callbacks: VideoDecoderInit;
+		constructor(callbacks: VideoDecoderInit) {
+			this.callbacks = callbacks;
+		}
+		configure() {}
+		decode(chunk: EncodedVideoChunk) {
+			submitted.push(chunk.timestamp);
+			this.callbacks.output(new Picture(chunk.timestamp) as unknown as VideoFrame);
+		}
+		close() {
+			this.state = "closed";
+		}
+	}
+	Object.defineProperty(globalThis, "VideoDecoder", { configurable: true, value: Codec });
+	Object.defineProperty(globalThis, "EncodedVideoChunk", {
+		configurable: true,
+		value: class {
+			timestamp: number;
+			constructor(init: EncodedVideoChunkInit) {
+				this.timestamp = init.timestamp;
+			}
+		},
+	});
+	const video = config({ codedWidth: 16, codedHeight: 16, description: "01640028ffe100046764002801000268ee" });
+	if (kind === "cmaf")
+		video.container = { kind, init: Buffer.from(Container.Cmaf.createVideoInitSegment(video)).toString("base64") };
+	const producer = new Moq.Broadcast.Producer();
+	const consumer = producer.consume();
+	const catalog = new Signal<Catalog.Root>({ video: { renditions: { video } } });
+	const broadcast = new Signal<Broadcast | undefined>({
+		out: { catalog },
+		relativeBroadcast: () => consumer,
+	} as unknown as Broadcast);
+	const source = new Source({ broadcast, supported: async () => true });
+	const sync = new Sync({ delay: "instant" });
+	const enabled = new Signal(true);
+	const decoder = new Decoder({ source, sync, enabled });
+	await microtasks();
+	return {
+		decoder,
+		enabled,
+		submitted,
+		close() {
+			decoder.close();
+			source.close();
+			sync.close();
+			consumer.close();
+			producer.close();
+			next.mockRestore();
+			for (const [name, original] of [
+				["VideoDecoder", originalDecoder],
+				["EncodedVideoChunk", originalChunk],
+			] as const) {
+				if (original) Object.defineProperty(globalThis, name, original);
+				else Reflect.deleteProperty(globalThis, name);
+			}
+		},
+	};
+}
+
+it("promoting from no active track holds its picture and timestamp until a frame arrives", async () => {
+	const playback = await guardedPlayback("legacy", [sample(10, 1000)]);
+	try {
+		const held = playback.decoder.out.frame.peek();
+		expect(held).toBeDefined();
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(1));
+		playback.enabled.set(false);
+		await microtasks();
+		playback.enabled.set(true);
+		await microtasks();
+		expect(playback.decoder.out.frame.peek()).toBe(held);
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(1));
+		expect((held as unknown as Picture).closed).toBe(false);
+	} finally {
+		playback.close();
+	}
+});
+
+for (const kind of ["legacy", "cmaf"] as const) {
+	it(`${kind} skips older groups before decode and resets that guard on discontinuity`, async () => {
+		const playback = await guardedPlayback(kind, [
+			sample(10, 1000),
+			sample(9, 900),
+			sample(10, 1100),
+			sample(2, 200, 1),
+			sample(1, 100, 1),
+			sample(2, 300, 1),
+		]);
+		try {
+			expect(playback.submitted).toEqual([1000, 1100, 200, 300]);
+		} finally {
+			playback.close();
+		}
+	});
+}

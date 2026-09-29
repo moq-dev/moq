@@ -140,8 +140,8 @@ export class Consumer {
 
 				// Arriving below the delivery cursor is not a reason to drop a group. Groups are
 				// sent newest-first, so the head of a subscription arrives after the live edge it
-				// was served alongside, and both consumers can still place one: audio writes into
-				// a timestamp-indexed ring, video drops a late frame at render. How far back one
+				// was served alongside. Audio can place older groups in its timestamp-indexed ring;
+				// video must reject older groups before decode to preserve codec references. How far back one
 				// may be is the subscription's own max age, applied before it ever reaches here.
 				const group: Group = {
 					consumer,

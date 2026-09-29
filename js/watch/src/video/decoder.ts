@@ -222,12 +222,13 @@ export class Decoder {
 		// proxy() would share the same reference, allowing the source to close our frame.
 		effect.run((inner) => {
 			const frame = inner.get(active.frame);
+			if (!frame) return; // A promoted track holds the previous picture until its first frame.
+			this.#out.timestamp.set(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
 			this.#out.frame.update((prev) => {
 				prev?.close();
-				return frame?.clone();
+				return frame.clone();
 			});
 		});
-		effect.proxy(this.#out.timestamp, active.timestamp);
 		effect.proxy(this.#out.buffered, active.buffered);
 	}
 
@@ -428,6 +429,7 @@ class DecoderTrack {
 		});
 
 		let previous: Time.Micro | undefined;
+		let latest: number | undefined;
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -435,10 +437,16 @@ class DecoderTrack {
 				if (!next) break;
 
 				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
-				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
+				if (this.#onDiscontinuity(next.discontinuity)) {
+					previous = undefined;
+					latest = undefined;
+				}
 
 				const { frame } = next;
 				if (!frame) continue; // The group is done
+
+				// An older keyframe would replace the codec references needed by live deltas.
+				if (latest !== undefined && next.group < latest) continue;
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
@@ -467,6 +475,7 @@ class DecoderTrack {
 
 				previous = frame.timestamp;
 
+				latest = next.group;
 				decoder.decode(chunk);
 			}
 		});
@@ -505,6 +514,7 @@ class DecoderTrack {
 		});
 
 		let previous: Time.Micro | undefined;
+		let latest: number | undefined;
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -512,10 +522,16 @@ class DecoderTrack {
 				if (!next) break;
 
 				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
-				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
+				if (this.#onDiscontinuity(next.discontinuity)) {
+					previous = undefined;
+					latest = undefined;
+				}
 
 				const { frame } = next;
 				if (!frame) continue;
+
+				// An older keyframe would replace the codec references needed by live deltas.
+				if (latest !== undefined && next.group < latest) continue;
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
@@ -536,6 +552,7 @@ class DecoderTrack {
 				previous = frame.timestamp;
 
 				if (decoder.state === "closed") break;
+				latest = next.group;
 				decoder.decode(
 					new EncodedVideoChunk({
 						type: frame.keyframe ? "key" : "delta",
