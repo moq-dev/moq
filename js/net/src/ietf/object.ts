@@ -1,4 +1,4 @@
-import { type Cursor, type Reader, Writer } from "../stream.ts";
+import { asIetf, type Cursor, type Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -108,7 +108,7 @@ function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | undefine
 
 	while (c.remaining > 0) {
 		const step = c.u62();
-		const id = !hasDeltaObjectPropertyTypes(c.version) || first ? step : prevType + step;
+		const id = !hasDeltaObjectPropertyTypes(asIetf(c.version)) || first ? step : prevType + step;
 		first = false;
 		prevType = id;
 
@@ -281,7 +281,13 @@ export class Frame {
 	 * `idDelta` is the first object's absolute Object ID and zero for every later one, so a
 	 * group whose head was trimmed by a filter still puts the true numbering on the wire.
 	 */
-	async encode(w: Writer, flags: GroupFlags, timescale: Timescale, version = w.version, idDelta = 0): Promise<void> {
+	async encode(
+		w: Writer,
+		flags: GroupFlags,
+		timescale: Timescale,
+		version = asIetf(w.version),
+		idDelta = 0,
+	): Promise<void> {
 		await w.u53(idDelta);
 
 		if (flags.hasExtensions) {
@@ -391,7 +397,7 @@ export class FetchFrame {
 	}
 
 	/** Encode this object at `position`, stamping it in the track's timescale. */
-	async encode(w: Writer, position: FetchPosition, timescale: Timescale, version = w.version): Promise<void> {
+	async encode(w: Writer, position: FetchPosition, timescale: Timescale, version = asIetf(w.version)): Promise<void> {
 		if (position.first) {
 			// Include the priority too: "same as the prior object" has no prior to refer to.
 			const properties = this.timestamp !== undefined ? FETCH_PROPERTIES : 0;

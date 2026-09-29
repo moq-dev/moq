@@ -132,8 +132,8 @@ async function subscribeEnd(sequences: number[], version: Version = Version.DRAF
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version });
+	const server = await Stream.accept(pair.server, version);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	const msg = new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 });
@@ -1046,8 +1046,8 @@ test("lite draft-07: subscribe end waits for groups below a declared finish", as
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_07);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 	void publisher.runSubscribe(
 		new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
@@ -1101,8 +1101,8 @@ async function heldOpenEnd() {
 		return createUni(options);
 	});
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_07);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 	void publisher.runSubscribe(
 		new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),

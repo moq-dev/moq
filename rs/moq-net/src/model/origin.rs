@@ -36,7 +36,7 @@ use crate::{
 /// on the wire, names nobody, and marks the chain anonymous for route selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Hop {
-	/// 62-bit identifier. Encoded as a QUIC varint on the wire.
+	/// 62-bit identifier, so it fits a varint on every wire version.
 	id: u64,
 }
 

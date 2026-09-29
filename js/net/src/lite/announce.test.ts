@@ -25,10 +25,11 @@ function concat(chunks: Uint8Array[]): Uint8Array {
 	return out;
 }
 
-async function bytes(f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
+async function bytes(f: (w: Writer) => Promise<void>, version?: Version): Promise<Uint8Array> {
 	const written: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
+		version,
 	);
 	await f(writer);
 	writer.close();
@@ -37,7 +38,11 @@ async function bytes(f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
 }
 
 async function roundTrip(msg: AnnounceBroadcast, version: Version): Promise<AnnounceBroadcast> {
-	const reader = new Reader(undefined, await bytes((w) => encodeAnnounceBroadcast(w, msg, version)));
+	const reader = new Reader(
+		undefined,
+		await bytes((w) => encodeAnnounceBroadcast(w, msg, version), version),
+		version,
+	);
 	return decodeAnnounceBroadcast(reader, version);
 }
 
@@ -121,7 +126,7 @@ test("AnnounceBroadcast rejects explicit restart status before draft-05", async 
 });
 
 async function requestRoundTrip(msg: AnnounceRequest, version: Version): Promise<AnnounceRequest> {
-	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, version)));
+	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, version), version), version);
 	return AnnounceRequest.decode(reader, version);
 }
 
@@ -225,7 +230,7 @@ function unhex(text: string): Uint8Array {
 
 // Resolve every announcement on a lite-07 stream, as the subscriber does.
 async function resolveStream(data: Uint8Array) {
-	const reader = new Reader(undefined, data);
+	const reader = new Reader(undefined, data, Version.DRAFT_07);
 	const history = new AnnounceHistory();
 	const out: unknown[] = [];
 	for (;;) {
@@ -260,7 +265,7 @@ const GOLDEN_RESOLVED = [
 // Pinned from the Rust encoder (`lite::compress::tests::golden_stream_is_pinned`), so the
 // JS decoder is checked against real compressed output.
 const GOLDEN =
-	"001600000a726f6f6d2f612f63616d000251116222000000000d0102036d696301017333010000020a00010180004444010000010101000d02010162020180005555010000";
+	"001600000a726f6f6d2f612f63616d00029111a222000000000d0102036d69630101b3330100000209000101c04444010000010101000c020101620201c05555010000";
 
 test("AnnounceHistory resolves the Rust encoder's compressed stream", async () => {
 	expect(await resolveStream(unhex(GOLDEN))).toEqual(GOLDEN_RESOLVED);
@@ -268,7 +273,7 @@ test("AnnounceHistory resolves the Rust encoder's compressed stream", async () =
 
 // JS always encodes literally; Rust decodes these bytes too (`js_literal_stream_decodes`).
 const JS_LITERAL =
-	"001600000a726f6f6d2f612f63616d000251116222000000001600000a726f6f6d2f612f6d6963000273336222000000020c0000028000444462220000000101010014000006726f6f6d2f620002800055556222000000";
+	"001600000a726f6f6d2f612f63616d00029111a222000000001600000a726f6f6d2f612f6d69630002b333a222000000020b000002c04444a2220000000101010013000006726f6f6d2f620002c05555a222000000";
 
 test("the literal draft-07 stream matches what Rust decodes", async () => {
 	const wire = await bytes(async (w) => {
@@ -291,7 +296,7 @@ test("the literal draft-07 stream matches what Rust decodes", async () => {
 			{ status: "active", suffix: Path.from("room/b"), hops: [hop(0x5555n), relay], cost },
 			v,
 		);
-	});
+	}, Version.DRAFT_07);
 	expect(hex(wire)).toBe(JS_LITERAL);
 	expect(await resolveStream(wire)).toEqual(GOLDEN_RESOLVED);
 });

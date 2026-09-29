@@ -79,6 +79,9 @@ just test interop --publishers rust,python --subscribers rust,c,js-native-bun
 # Subscription termination: Rust/JS response bytes over in-memory transports.
 just test bare-fin
 
+# Lite varints: Rust/JS encodings of boundary values and messages.
+just test lite-varint
+
 # Negative control: no publisher, every subscriber must time out.
 just test interop-negative
 
@@ -195,3 +198,12 @@ transport. It checks bare FIN before and after SUBSCRIBE\_START on lite-05/06/07
 and FIN without PUBLISH\_DONE on IETF draft-19. Clean-end controls use the same
 path. This tests response interoperability, not network delivery or relay behavior.
 The interop workflow runs it alongside the real-transport matrix.
+
+## Lite varints
+
+`just test lite-varint` has JS decode Rust's lite-06 (QUIC) and lite-07
+(leading-ones) encodings of every varint length boundary up to 2^62-1, a SETUP
+carrying a 62-bit Hop ID, a datagram, and a GROUP stream with frames, then
+checks that JS's own encoding of what it decoded is byte for byte Rust's. On
+lite-07 it also checks that JS refuses a value past 2^62-1 in both directions,
+as Rust does. The interop workflow runs it next to `bare-fin`.

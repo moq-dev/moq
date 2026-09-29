@@ -6,9 +6,8 @@
  */
 
 import { type Hop, HopSchema } from "../hop.ts";
-import type { Reader, Writer } from "../stream.ts";
+import { encodeVarint, Reader, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
-import * as Varint from "../varint.ts";
 import * as Message from "./message.ts";
 import { hasSetupStream, type Version } from "./version.ts";
 
@@ -111,20 +110,21 @@ class Parameters {
 		return this.#entries.get(id);
 	}
 
-	/** Set a parameter to a varint value, replacing any existing entry. */
-	setVarint(id: bigint, value: number | bigint) {
-		this.#entries.set(id, Varint.encode(Number(value)));
+	/** Set a parameter to a varint value in `version`'s encoding, replacing any existing entry. */
+	setVarint(id: bigint, value: number | bigint, version: Version) {
+		this.#entries.set(id, encodeVarint(value, version));
 	}
 
-	/** Decode a parameter as a single varint, if present. Throws if trailing bytes remain. */
-	getVarint(id: bigint): bigint | undefined {
+	/** Decode a parameter as a single varint in `version`'s encoding, if present. Throws if trailing bytes remain. */
+	async getVarint(id: bigint, version: Version): Promise<bigint | undefined> {
 		const bytes = this.#entries.get(id);
 		if (bytes === undefined) return undefined;
-		const [value, remain] = Varint.decode(bytes);
-		if (remain.byteLength !== 0) {
+		const r = new Reader(undefined, bytes, version);
+		const value = await r.u62();
+		if (!(await r.done())) {
 			throw new Error("trailing bytes after varint parameter");
 		}
-		return BigInt(value);
+		return value;
 	}
 
 	async encode(w: Writer) {
@@ -222,29 +222,29 @@ export class Setup {
 		}
 	}
 
-	async #encode(w: Writer) {
+	async #encode(w: Writer, version: Version) {
 		const params = new Parameters();
 		// None is the wire default, so omit it to keep the message empty when nothing is set.
 		if (this.probe !== ProbeLevel.None) {
-			params.setVarint(PARAM_PROBE, this.probe);
+			params.setVarint(PARAM_PROBE, this.probe, version);
 		}
 		if (this.path !== undefined) {
 			params.setBytes(PARAM_PATH, new TextEncoder().encode(this.path));
 		}
 		// Both is the wire default, sent as the absence of the parameter.
 		if (this.role !== Role.Both) {
-			params.setVarint(PARAM_ROLE, this.role);
+			params.setVarint(PARAM_ROLE, this.role, version);
 		}
 		if (this.hop !== undefined && this.hop !== 0n) {
-			params.setVarint(PARAM_HOP, this.hop);
+			params.setVarint(PARAM_HOP, this.hop, version);
 		}
 		await params.encode(w);
 	}
 
-	static async #decode(r: Reader): Promise<Setup> {
+	static async #decode(r: Reader, version: Version): Promise<Setup> {
 		const params = await Parameters.decode(r);
 
-		const probeCode = params.getVarint(PARAM_PROBE);
+		const probeCode = await params.getVarint(PARAM_PROBE, version);
 		const probe = probeCode === undefined ? ProbeLevel.None : probeFromCode(probeCode);
 
 		// An empty path is valid and means the same as omitting the parameter, so a
@@ -252,11 +252,11 @@ export class Setup {
 		const pathBytes = params.getBytes(PARAM_PATH);
 		const path = pathBytes === undefined ? undefined : decodeUtf8(pathBytes);
 
-		const roleCode = params.getVarint(PARAM_ROLE);
+		const roleCode = await params.getVarint(PARAM_ROLE, version);
 		const role = roleCode === undefined ? Role.Both : roleFromCode(roleCode);
 
 		// 0 carries no identity (it cannot be excluded), so it decodes as absent.
-		const hopRaw = params.getVarint(PARAM_HOP);
+		const hopRaw = await params.getVarint(PARAM_HOP, version);
 		const hop = hopRaw === undefined || hopRaw === 0n ? undefined : HopSchema.parse(hopRaw);
 
 		return new Setup({ probe, path, role, hop });
@@ -265,12 +265,12 @@ export class Setup {
 	/** Encode the SETUP message with its size prefix. Throws on pre-lite-05 versions. */
 	async encode(w: Writer, version: Version): Promise<void> {
 		Setup.#guard(version);
-		return Message.encode(w, this.#encode.bind(this));
+		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 
 	/** Decode a SETUP message with its size prefix. Throws on pre-lite-05 versions. */
 	static async decode(r: Reader, version: Version): Promise<Setup> {
 		Setup.#guard(version);
-		return Message.decode(r, Setup.#decode);
+		return Message.decode(r, (r) => Setup.#decode(r, version));
 	}
 }

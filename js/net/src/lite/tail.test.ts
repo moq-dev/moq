@@ -56,14 +56,14 @@ async function subscribed(version: Version, maxAge = GRACE) {
 	const subscriber = new Subscriber(pair.client, version, randomHop());
 	const reader = subscriber.consume(Path.from("room")).track("video").subscribe({ maxAge });
 
-	const info = await Stream.accept(pair.server);
+	const info = await Stream.accept(pair.server, version);
 	if (!info) throw new Error("the subscriber never asked for TRACK_INFO");
 	expect(await info.reader.u53()).toBe(StreamId.Track);
 	await TrackMessage.decode(info.reader, version);
 	await new TrackInfo({ maxAge: 60_000 }).encode(info.writer, version);
 	info.close();
 
-	const sub = await Stream.accept(pair.server);
+	const sub = await Stream.accept(pair.server, version);
 	if (!sub) throw new Error("the subscriber never subscribed");
 	expect(await sub.reader.u53()).toBe(StreamId.Subscribe);
 	await Subscribe.decode(sub.reader, version);

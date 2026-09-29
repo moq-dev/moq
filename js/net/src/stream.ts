@@ -2,13 +2,15 @@ import { race } from "@moq/signals";
 import { fromTransport, StreamCode, StreamError, toStreamCode, toTransport } from "./error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
+import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
 import { TimeoutError, withTimeout } from "./util/timeout.ts";
 import { decodeUtf8 } from "./util/utf8.ts";
 import * as Varint from "./varint.ts";
 
 // Decode raw transport errors before mapping so they cannot bypass the negotiated
 // registry. Ordinary errors already send 0 and retain their local identity.
-function withCode(reason: unknown, version?: IetfVersion): unknown {
+function withCode(reason: unknown, stream?: StreamVersion): unknown {
+	const version = asIetf(stream);
 	const decoded = fromTransport(reason, { version });
 	const code = toStreamCode(decoded, { version });
 	return code === StreamCode.Internal && decoded === reason ? reason : toTransport(code, decoded.message);
@@ -48,13 +50,56 @@ async function openWithin<T>(opening: Promise<T>, timeout: number, discard: (str
 	}
 }
 
-function isLeadingOnes(version?: IetfVersion): boolean {
-	return (
-		version !== undefined &&
-		version !== Version.DRAFT_14 &&
-		version !== Version.DRAFT_15 &&
-		version !== Version.DRAFT_16
-	);
+/**
+ * The negotiated version a stream's bytes follow: a moq-transport draft, a moq-lite draft, or
+ * absent before negotiation (QUIC varints and the moq-lite stream codes).
+ */
+export type StreamVersion = IetfVersion | LiteVersion;
+
+const LITE: ReadonlySet<number> = new Set(Object.values(Lite));
+
+function isLite(version?: StreamVersion): version is LiteVersion {
+	return version !== undefined && LITE.has(version);
+}
+
+/** The moq-transport draft a stream follows, or undefined on moq-lite, whose stream codes are the same on every draft. */
+export function asIetf(version?: StreamVersion): IetfVersion | undefined {
+	return isLite(version) ? undefined : version;
+}
+
+// Every draft newer than these counts leading ones, so a new version falls forward.
+function isLeadingOnes(version?: StreamVersion): boolean {
+	switch (version) {
+		case undefined:
+		case Version.DRAFT_14:
+		case Version.DRAFT_15:
+		case Version.DRAFT_16:
+		case Lite.DRAFT_01:
+		case Lite.DRAFT_02:
+		case Lite.DRAFT_03:
+		case Lite.DRAFT_04:
+		case Lite.DRAFT_05:
+		case Lite.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+// The leading-ones form reaches 2^64-1, but moq-lite values stay within the QUIC range so a
+// relay can forward them to an older moq-lite peer.
+const MAX_U62 = 2n ** 62n - 1n;
+
+// Encode `v` into `dst` in the varint form `version` uses.
+function encodeTo(dst: ArrayBuffer, v: number | bigint, version?: StreamVersion): Uint8Array {
+	if (!isLeadingOnes(version)) return Varint.encodeTo(dst, v);
+	if (v > MAX_U62 && isLite(version)) throw new RangeError(`value larger than 62-bits: ${v.toString()}`);
+	return Varint.encodeLeadingOnesTo(dst, v);
+}
+
+/** Encode one varint in the form `version` uses, for a body written outside a {@link Writer}. */
+export function encodeVarint(v: number | bigint, version?: StreamVersion): Uint8Array {
+	return encodeTo(new ArrayBuffer(9), v, version);
 }
 
 /**
@@ -71,8 +116,8 @@ export type SendStream = WritableStream<Uint8Array> & { sendOrder?: number };
 
 /** Options for opening an outgoing stream. */
 export interface OpenOptions {
-	/** The negotiated IETF version, which selects the varint encoding. */
-	version?: IetfVersion;
+	/** The negotiated version, which selects the varint encoding. */
+	version?: StreamVersion;
 
 	/**
 	 * The transport send order, where HIGHER values are transmitted first.
@@ -113,7 +158,7 @@ export class Stream {
 	constructor(props: {
 		writable: WritableStream<Uint8Array>;
 		readable: ReadableStream<Uint8Array>;
-		version?: IetfVersion;
+		version?: StreamVersion;
 	});
 	/** Pair halves that were opened separately, as the SETUP exchange does. */
 	constructor(props: { writer: Writer; reader: Reader });
@@ -122,7 +167,7 @@ export class Stream {
 		readable?: ReadableStream<Uint8Array>;
 		writer?: Writer;
 		reader?: Reader;
-		version?: IetfVersion;
+		version?: StreamVersion;
 	}) {
 		const writer = props.writer ?? (props.writable && new Writer(props.writable, props.version));
 		const reader = props.reader ?? (props.readable && new Reader(props.readable, undefined, props.version));
@@ -132,7 +177,7 @@ export class Stream {
 		this.reader = reader;
 	}
 
-	static async accept(quic: WebTransport, version?: IetfVersion): Promise<Stream | undefined> {
+	static async accept(quic: WebTransport, version?: StreamVersion): Promise<Stream | undefined> {
 		for (;;) {
 			const reader =
 				quic.incomingBidirectionalStreams.getReader() as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
@@ -190,12 +235,12 @@ export class Reader {
 	#closed?: Promise<void>;
 	// The decode that last ran short and how far, so a retry can wait for those bytes.
 	#short?: { decode: (c: Cursor) => unknown; err: Short };
-	version?: IetfVersion;
+	version?: StreamVersion;
 
 	// Either stream or buffer MUST be provided.
-	constructor(stream: ReadableStream<Uint8Array>, buffer?: Uint8Array, version?: IetfVersion);
-	constructor(stream: undefined, buffer: Uint8Array, version?: IetfVersion);
-	constructor(stream?: ReadableStream<Uint8Array>, buffer?: Uint8Array, version?: IetfVersion) {
+	constructor(stream: ReadableStream<Uint8Array>, buffer?: Uint8Array, version?: StreamVersion);
+	constructor(stream: undefined, buffer: Uint8Array, version?: StreamVersion);
+	constructor(stream?: ReadableStream<Uint8Array>, buffer?: Uint8Array, version?: StreamVersion) {
 		this.#buffer = buffer ?? new Uint8Array();
 		this.#stream = stream;
 		this.#reader = this.#stream?.getReader();
@@ -211,7 +256,7 @@ export class Reader {
 		// Every read of this stream funnels through here, so decoding the peer's reset code
 		// once is enough to keep the raw transport error out of every caller (and every app).
 		const result = await this.#reader.read().catch((err: unknown) => {
-			throw fromTransport(err, { version: this.version });
+			throw fromTransport(err, { version: asIetf(this.version) });
 		});
 
 		if (result.done) {
@@ -381,7 +426,7 @@ export class Reader {
 	// shape depending on which one won. Derived once, so racing it per frame doesn't allocate.
 	get closed(): Promise<void> {
 		this.#closed ??= (this.#reader?.closed ?? Promise.resolve()).catch((err: unknown) => {
-			throw fromTransport(err, { version: this.version });
+			throw fromTransport(err, { version: asIetf(this.version) });
 		});
 		return this.#closed;
 	}
@@ -408,11 +453,11 @@ const EMPTY = new Short(1);
  * anything before its last read, must not swallow what it throws, and must read at least a byte.
  */
 export class Cursor {
-	readonly version?: IetfVersion;
+	readonly version?: StreamVersion;
 	#buffer: Uint8Array;
 	#offset = 0;
 
-	constructor(buffer: Uint8Array, version?: IetfVersion) {
+	constructor(buffer: Uint8Array, version?: StreamVersion) {
 		this.#buffer = buffer;
 		this.version = version;
 	}
@@ -487,10 +532,10 @@ export class Cursor {
 	// Returns a Number using 53-bits, the max Javascript can use for integer math.
 	u53(): number {
 		// Most varints fit in 4 bytes, which decode without a bigint.
+		this.#ensure(1);
+		const b = this.#buffer;
+		const o = this.#offset;
 		if (!isLeadingOnes(this.version)) {
-			this.#ensure(1);
-			const b = this.#buffer;
-			const o = this.#offset;
 			const size = 1 << (b[o] >> 6);
 			if (size < 8) {
 				this.#ensure(size);
@@ -499,6 +544,15 @@ export class Cursor {
 				if (size === 2) return ((b[o] & 0x3f) << 8) | b[o + 1];
 				return (b[o] & 0x3f) * 2 ** 24 + ((b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]);
 			}
+		} else if (b[o] < 0xf0) {
+			// 0xxxxxxx, 10xxxxxx, 110xxxxx, and 1110xxxx carry up to 28 bits.
+			const size = Math.clz32(~(b[o] << 24)) + 1;
+			this.#ensure(size);
+			this.#offset += size;
+			if (size === 1) return b[o];
+			if (size === 2) return ((b[o] & 0x3f) << 8) | b[o + 1];
+			if (size === 3) return ((b[o] & 0x1f) << 16) | (b[o + 1] << 8) | b[o + 2];
+			return ((b[o] & 0x0f) << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3];
 		}
 
 		const v = this.u62();
@@ -526,6 +580,7 @@ export class Cursor {
 	#leadingOnes(): bigint {
 		this.#ensure(1);
 		const b = this.#buffer[this.#offset];
+		if (b < 0xf0) return BigInt(this.u53());
 
 		// Count leading 1-bits
 		let ones = 0;
@@ -546,6 +601,7 @@ export class Cursor {
 		else totalSize = 9; // ones === 8
 
 		const [value] = Varint.decodeLeadingOnes(this.read(totalSize));
+		if (value > MAX_U62 && isLite(this.version)) throw new Error(`value larger than 62-bits: ${value.toString()}`);
 		return value;
 	}
 }
@@ -568,9 +624,9 @@ export class Writer {
 	// Fixed at 9 bytes (leading-ones max).
 	#scratch: ArrayBuffer;
 
-	version?: IetfVersion;
+	version?: StreamVersion;
 
-	constructor(stream: WritableStream<Uint8Array>, version?: IetfVersion) {
+	constructor(stream: WritableStream<Uint8Array>, version?: StreamVersion) {
 		this.#stream = stream;
 		this.#scratch = new ArrayBuffer(9);
 		this.#writer = this.#stream.getWriter();
@@ -620,26 +676,18 @@ export class Writer {
 		if (!Number.isSafeInteger(v) || v < 0) {
 			throw new RangeError(`invalid u53: ${v}`);
 		}
-		if (isLeadingOnes(this.version)) {
-			await this.write(Varint.encodeLeadingOnesTo(this.#scratch, v));
-		} else {
-			await this.write(Varint.encodeTo(this.#scratch, v));
-		}
+		await this.write(encodeTo(this.#scratch, v, this.version));
 	}
 
 	async u62(v: bigint) {
-		if (isLeadingOnes(this.version)) {
-			await this.write(Varint.encodeLeadingOnesTo(this.#scratch, v));
-		} else {
-			await this.write(Varint.encodeTo(this.#scratch, v));
-		}
+		await this.write(encodeTo(this.#scratch, v, this.version));
 	}
 
 	async write(v: Uint8Array) {
 		// Mirrors Reader.#fill: every write funnels through here, so a STOP_SENDING from the
 		// peer surfaces as a typed code rather than the transport's own error shape.
 		await this.#writer.write(v).catch((err: unknown) => {
-			throw fromTransport(err, { version: this.version });
+			throw fromTransport(err, { version: asIetf(this.version) });
 		});
 	}
 
@@ -657,7 +705,7 @@ export class Writer {
 	// typed code it would get from a write.
 	get closed(): Promise<void> {
 		this.#closed ??= this.#writer.closed.catch((err: unknown) => {
-			throw fromTransport(err, { version: this.version });
+			throw fromTransport(err, { version: asIetf(this.version) });
 		});
 		return this.#closed;
 	}
@@ -739,9 +787,9 @@ function setInt32(dst: ArrayBuffer, v: number): Uint8Array {
 // Returns the next stream from the connection
 export class Readers {
 	#reader: ReadableStreamDefaultReader<ReadableStream<Uint8Array>>;
-	#version?: IetfVersion;
+	#version?: StreamVersion;
 
-	constructor(quic: WebTransport, version?: IetfVersion) {
+	constructor(quic: WebTransport, version?: StreamVersion) {
 		this.#reader = quic.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 			ReadableStream<Uint8Array>
 		>;

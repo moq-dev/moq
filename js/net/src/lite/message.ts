@@ -27,6 +27,7 @@ export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {
 				}
 			},
 		}),
+		writer.version,
 	);
 
 	await f(temp);
@@ -44,7 +45,7 @@ export async function decode<T>(reader: Reader, f: (r: Reader) => Promise<T>): P
 	const size = await reader.u53();
 	const data = await reader.read(size);
 
-	const limit = new Reader(undefined, data);
+	const limit = new Reader(undefined, data, reader.version);
 	const msg = await f(limit);
 
 	// Check that we consumed exactly the right number of bytes

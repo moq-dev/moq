@@ -11,7 +11,8 @@ import {
 	StreamError,
 } from "./error.ts";
 import { Version } from "./ietf/version.ts";
-import { type Cursor, Reader, Stream, Writer } from "./stream.ts";
+import { Version as Lite } from "./lite/version.ts";
+import { type Cursor, Reader, Stream, type StreamVersion, Writer } from "./stream.ts";
 import { TimeoutError } from "./util/timeout.ts";
 
 // Helper to create a writable stream that captures written data
@@ -796,3 +797,53 @@ for (const [version, tooFarBehind] of [
 		if (version !== undefined) expect((err as StreamError).message).toContain("70");
 	});
 }
+
+async function written(version: Lite, f: (w: Writer) => Promise<void>): Promise<number[]> {
+	const { stream, written } = createTestWritableStream();
+	const writer = new Writer(stream, version);
+	await f(writer);
+	writer.close();
+	await writer.closed;
+	return [...concatChunks(written)];
+}
+
+test("lite-07 varints count leading ones; lite-06 keeps the QUIC form", async () => {
+	expect(await written(Lite.DRAFT_06, (w) => w.u53(100))).toEqual([0x40, 0x64]);
+	expect(await written(Lite.DRAFT_07, (w) => w.u53(100))).toEqual([0x64]);
+	expect(await written(Lite.DRAFT_07, (w) => w.u62(2n ** 62n - 1n))).toEqual([
+		0xff, 0x3f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	]);
+
+	expect(await new Reader(undefined, new Uint8Array([0x40, 0x64]), Lite.DRAFT_06).u53()).toBe(100);
+	expect(await new Reader(undefined, new Uint8Array([0x80, 0x64]), Lite.DRAFT_07).u53()).toBe(100);
+	// The 7-byte form, reserved only on draft-17.
+	const seven = new Uint8Array([0xfd, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd]);
+	expect(await new Reader(undefined, seven, Lite.DRAFT_07).u62()).toBe(0x1_2345_6789_abcdn);
+});
+
+test("lite-07 refuses values past 2^62-1, which the IETF leading-ones wire allows", async () => {
+	const over = new Uint8Array([0xff, 0x40, 0, 0, 0, 0, 0, 0, 0]);
+	expect(await new Reader(undefined, over, Version.DRAFT_18).u62()).toBe(2n ** 62n);
+	await expect(new Reader(undefined, over, Lite.DRAFT_07).u62()).rejects.toThrow("62-bits");
+	await expect(written(Lite.DRAFT_07, (w) => w.u62(2n ** 62n))).rejects.toThrow("62-bits");
+});
+
+test("a lite-07 stream decodes reset codes with the moq-lite registry", async () => {
+	// 0x4 is GOING_AWAY on moq-lite but a foreign code on draft-17.
+	const reset = async (version: StreamVersion) => {
+		const reader = new Reader(
+			new ReadableStream<Uint8Array>({
+				start: (controller) => controller.error(new Reset(4)),
+			}),
+			undefined,
+			version,
+		);
+		const err = await reader.closed.then(
+			() => undefined,
+			(e: unknown) => e,
+		);
+		return (err as StreamError).code;
+	};
+	expect(await reset(Lite.DRAFT_07)).toBe(StreamCode.GoingAway);
+	expect(await reset(Version.DRAFT_17)).toBe(StreamCode.Internal);
+});

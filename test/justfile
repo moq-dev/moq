@@ -109,3 +109,7 @@ wasm *args:
 # Cross-language subscription termination over in-memory transports.
 bare-fin:
     just rs test -p moq-net --lib bare_fin_interop --run-ignored all
+
+# Cross-language lite varints: boundary values and varint-heavy messages, both directions.
+lite-varint:
+    just rs test -p moq-net --lib lite_varint_interop --run-ignored all

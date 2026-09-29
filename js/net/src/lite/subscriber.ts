@@ -209,7 +209,7 @@ export class Subscriber {
 		// to reset the stream, not just close our side of it.
 		let stream: Stream;
 		try {
-			stream = await Stream.open(this.#quic);
+			stream = await Stream.open(this.#quic, { version: this.version });
 		} catch (err: unknown) {
 			announced.close(error(err));
 			return;
@@ -655,7 +655,7 @@ export class Subscriber {
 		const entry: SubscribeEntry = { track: producer, timescale, tail: new Tail() };
 		this.#subscribes.set(id, entry);
 
-		state.stream = await Stream.open(this.#quic);
+		state.stream = await Stream.open(this.#quic, { version: this.version });
 		await state.stream.writer.u53(StreamId.Subscribe);
 		await msg.encode(state.stream.writer, this.version);
 
@@ -688,7 +688,7 @@ export class Subscriber {
 	async #exchange<T>(options: OpenOptions | undefined, run: (stream: Stream) => Promise<T>): Promise<T> {
 		const closed = this.#closed.signal;
 		closed.throwIfAborted();
-		const stream = await Stream.open(this.#quic, options);
+		const stream = await Stream.open(this.#quic, { ...options, version: this.version });
 		const abort = () => stream.abort(error(closed.reason));
 		closed.addEventListener("abort", abort);
 		try {
@@ -1082,7 +1082,7 @@ export class Subscriber {
 	// Decode one datagram body and hand it to the matching subscription's producer. Drops the
 	// datagram (best-effort) if the subscription is unknown/closed or its timescale isn't resolved.
 	async #routeDatagram(payload: Uint8Array): Promise<void> {
-		const dg = await DatagramMessage.decode(payload);
+		const dg = await DatagramMessage.decode(payload, this.version);
 
 		const entry = this.#subscribes.get(dg.subscribe);
 		if (!entry) return; // Unknown or already-closed subscription.
@@ -1135,7 +1135,7 @@ export class Subscriber {
 		// transport hiccup) MUST NOT tear down the connection. On error, drop the
 		// estimates so consumers know they're stale.
 		try {
-			const stream = await Stream.open(this.#quic);
+			const stream = await Stream.open(this.#quic, { version: this.version });
 			await stream.writer.u53(StreamId.Probe);
 
 			for (;;) {

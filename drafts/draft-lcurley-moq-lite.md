@@ -29,6 +29,7 @@ normative:
     date: false
   RFC3986:
   RFC6455:
+  RFC9000:
   RFC9002:
 
 informative:
@@ -678,6 +679,12 @@ A group whose frame does not fit is simply not eligible for datagram delivery.
 
 # Encoding
 This section covers the encoding of each message.
+
+## Variable-Length Integers {#varint}
+A field marked `(i)` is a variable-length integer.
+moq-lite-07 uses the leading-ones encoding of [moqt]: the number of leading 1 bits in the first byte gives the length, from 1 byte carrying 7 bits to 9 bytes carrying 64, and every length is valid.
+Earlier versions use the two-bit length prefix of [RFC9000], Section 16.
+In either encoding a value MUST NOT exceed 2^62-1, so a relay can forward any value to a peer on an earlier version; a larger value is a PROTOCOL_VIOLATION.
 
 ## Message Length
 Most messages are prefixed with a variable-length integer indicating the number of bytes in the message payload that follows.
@@ -1335,6 +1342,7 @@ The `Message Length` describes the payload size on the wire.
 ## moq-lite-07
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
+- Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, capped at 2^62-1.
 - Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
 - Added `Stream Count` to SUBSCRIBE_END: the number of Group Streams opened for the subscription. SUBSCRIBE_END is now sent once every counted Group Stream has opened, rather than as soon as the final group is known.
 - Removed SUBSCRIBE_DROP and its type 0x2; a group without a Group Stream is not counted.
