@@ -439,20 +439,35 @@ impl Shaper {
 		}
 	}
 
-	/// Fail unless the shaper is still forwarding and every impairment the
-	/// profile configures acted on some datagram, in either direction.
+	/// Fail unless the shaper is still forwarding, every impairment the profile
+	/// configures acted on some datagram, and some datagram saw every step, in
+	/// either direction.
 	///
 	/// An impairment is only held to that once the traffic makes its silence
-	/// implausible: a short run can see no loss, but never no delay.
+	/// implausible: a short run can see no loss, but never no delay. A step is
+	/// held to it once its direction carried anything: traffic that all came
+	/// before the step never saw the path change.
 	pub fn verify(&self) -> anyhow::Result<Stats> {
 		let stats = self.stats();
 		if let Some(err) = self.failed.get() {
 			anyhow::bail!("the shaper stopped forwarding: {err} ({stats})");
 		}
 
-		let mut missing = unapplied(&self.setup.config, &stats);
+		let mut missing: Vec<String> = unapplied(&self.setup.config, &stats)
+			.into_iter()
+			.map(String::from)
+			.collect();
 		if unbatched(&self.setup, &stats) {
-			missing.push("batch");
+			missing.push("batch".to_string());
+		}
+		for (name, options, tally, counters) in [
+			("up", &self.setup.up, &self.tally[UP], &stats.up),
+			("down", &self.setup.down, &self.tally[DOWN], &stats.down),
+		] {
+			let reached = tally.stepped.load(Ordering::Relaxed) as usize;
+			if let Some(step) = options.steps.get(reached).filter(|_| counters.packets > 0) {
+				missing.push(format!("the {name} step at {:?}", step.at));
+			}
 		}
 		anyhow::ensure!(
 			missing.is_empty(),
@@ -480,6 +495,8 @@ struct Tally {
 	throttled: AtomicU64,
 	delayed: AtomicU64,
 	reordered: AtomicU64,
+	/// The most steps any one link has applied.
+	stepped: AtomicU64,
 }
 
 impl Tally {
@@ -694,6 +711,11 @@ impl Held {
 	/// Hold `parcel`, releasing the batch into `ready` once it is full.
 	fn hold(&mut self, batch: Batch, parcel: Parcel, ready: &mut Vec<Parcel>, tally: &Tally) {
 		let arrived = parcel.arrived;
+		// The window may have closed before its timer fired; the batch it closed
+		// leaves without this datagram, which starts the next one.
+		if let Some(closes) = self.closes.filter(|&closes| closes <= arrived) {
+			self.release(closes, ready, tally);
+		}
 		self.closes.get_or_insert(arrived + batch.window);
 		self.parcels.push(parcel);
 		if self.parcels.len() >= batch.count {
@@ -744,8 +766,10 @@ struct Link {
 	floor: Instant,
 	/// When the run started, which a step's `at` counts from.
 	start: Instant,
-	/// The steps still to come, soonest last.
+	/// Every step, earliest first.
 	steps: Vec<Step>,
+	/// How many of `steps` have applied.
+	stepped: usize,
 	queue: mpsc::UnboundedSender<Parcel>,
 }
 
@@ -772,21 +796,23 @@ impl Link {
 			full_at: start,
 			floor: start,
 			start,
-			steps: options.steps.iter().rev().cloned().collect(),
+			steps: options.steps.clone(),
+			stepped: 0,
 			queue,
 		}
 	}
 
 	/// Apply every step the run has reached by `now`, in order.
-	fn step(&mut self, now: Instant) {
-		while self.steps.last().is_some_and(|step| self.start + step.at <= now) {
-			let step = self.steps.pop().expect("a step is due");
+	fn step(&mut self, now: Instant, tally: &Tally) {
+		while let Some(step) = self.steps.get(self.stepped).filter(|step| self.start + step.at <= now) {
 			if let Some(rate) = &step.rate {
 				// Credit accrues at the new rate from the scheduled transition,
 				// even when no datagram arrived at that instant.
 				self.full_at = self.refilled(rate, self.start + step.at);
 			}
 			step.apply(&mut self.profile);
+			self.stepped += 1;
+			tally.stepped.fetch_max(self.stepped as u64, Ordering::Relaxed);
 		}
 	}
 
@@ -822,7 +848,7 @@ impl Link {
 	/// When a datagram of `size` bytes arriving `now` leaves, and whether it was
 	/// counted as delayed, or `None` when it is dropped.
 	fn treat(&mut self, now: Instant, size: usize, tally: &Tally) -> Option<(Instant, bool)> {
-		self.step(now);
+		self.step(now, tally);
 		bump(&tally.packets);
 
 		// Every draw happens for every datagram, whatever the profile, so one
@@ -1480,6 +1506,16 @@ mod tests {
 		held.release(closes, &mut ready, &tally);
 		assert_eq!(ready.iter().map(|parcel| parcel.at).collect::<Vec<_>>(), [closes]);
 		assert_eq!(tally.snapshot().delayed, 3);
+		ready.clear();
+
+		// A datagram that arrives after the window closed, before its timer fired,
+		// starts the next batch rather than joining the closed one.
+		held.hold(batch, parcel(now + ms(200)), &mut ready, &tally);
+		let closes = held.closes.unwrap();
+		held.hold(batch, parcel(closes + ms(1)), &mut ready, &tally);
+		assert_eq!(ready.iter().map(|parcel| parcel.at).collect::<Vec<_>>(), [closes]);
+		assert_eq!(held.parcels.len(), 1, "the late datagram joined the closed batch");
+		assert_eq!(held.closes, Some(closes + ms(1) + ms(160)));
 	}
 
 	#[tokio::test]
@@ -1755,7 +1791,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_step_gets_worse_part_way_through() {
 		let ms = Duration::from_millis;
-		let (_shaper, client) = shaped(|config| Setup {
+		let (shaper, client) = shaped(|config| Setup {
 			up: stepped(vec![Step {
 				at: ms(150),
 				delay: Some(ms(60)),
@@ -1786,6 +1822,24 @@ mod tests {
 			after > before + ms(30),
 			"median latency went from {before:?} to {after:?}"
 		);
+		shaper.verify().unwrap();
+	}
+
+	#[tokio::test]
+	async fn a_step_the_run_never_reached_is_unapplied() {
+		let (shaper, client) = shaped(|config| Setup {
+			down: stepped(vec![Step {
+				at: Duration::from_secs(60),
+				delay: Some(Duration::from_millis(60)),
+				..Default::default()
+			}]),
+			..config.into()
+		})
+		.await;
+		assert_eq!(round_trip(&client, 10).await, (0..10).collect::<Vec<_>>());
+
+		let err = shaper.verify().expect_err("a run that ended before its step passed");
+		assert!(format!("{err:#}").contains("the down step at 60s"), "{err:#}");
 	}
 
 	#[tokio::test]
