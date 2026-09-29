@@ -34,4 +34,3 @@ group arriving after a newer one never reaches the decoder.
 ## Related
 
 - [#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - another fix in the same decoder
-- [Watch decoder recovery](/quest/m1/watch-decoder-recovery.md) - a bad feed today ends video for the subscription

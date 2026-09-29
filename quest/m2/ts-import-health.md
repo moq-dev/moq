@@ -112,5 +112,4 @@ Implementation:
 
 ## Related
 
-- [SRT import stats](/quest/m1/srt-import-stats.md) - the gateway forwards the same `stats()`
 - [TS health stats](/quest/m2/ts-health-stats.md) - where these counters are published
