@@ -19,9 +19,10 @@ quickly toggling a namespace.
 
 Decided 2026-09-29: a first-hop update ends subscriptions pinned to the old
 publisher, and the subscriber re-requests through the best remaining route.
-The Rust model already does this for lite and IETF: a front pinned to
-`Pin::Publisher` stops qualifying once its route's first hop changes
-(`qualifies` in `rs/moq-net/src/model/origin.rs`).
+The Rust model already does this for lite and IETF when the old first hop
+is named: a front pinned to `Pin::Publisher` stops qualifying once its
+route's first hop changes (`qualifies` in `rs/moq-net/src/model/origin.rs`),
+and `selected(None)` in `front.rs` ends it.
 
 Decided 2026-09-29: accept the compatibility break. Released moq-net (0.3.5
 and later) refuses a first-hop REQUEST_UPDATE with a retry interval of 0,
@@ -49,6 +50,9 @@ withdraw fallback and no negotiation.
   `js/net/src/ietf/subscriber.ts` close the stream today. The update then ends
   subscriptions pinned to the old publisher; JS matches Rust if it doesn't
   already.
+- Rust model: an anonymous front (first hop 0) is pinned to its route
+  (`Pin::Route`), so it keeps serving when that route's first hop changes to
+  a named publisher. End it on a first-hop change too.
 - JS lite `js/net/src/lite/subscriber.ts`: a different first hop calls
   `retract()` and announces again, so a forwarding relay withdraws the
   namespace. Emit an in-place update instead, and end subscriptions pinned to
@@ -60,8 +64,8 @@ withdraw fallback and no negotiation.
 - Tests in both languages: a first-hop change sends one update and no
   withdrawal, the receiver applies it without closing the stream, and a
   subscription pinned to the old publisher ends rather than resuming on the
-  new one. The same for a lite ANNOUNCE_UPDATE in JS. Run
-  `just test interop --all`.
+  new one, including an anonymous (hop 0) to named change. The same for a
+  lite ANNOUNCE_UPDATE in JS. Run `just test interop --all`.
 
 Public API: none. Wire: the cluster extension's update semantics change (no
 message or parameter changes), breaking first-hop updates toward released
