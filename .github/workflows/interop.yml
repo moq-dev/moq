@@ -123,6 +123,14 @@ jobs:
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
+      # The same round-trip over an open-GOP clip: every leading picture after a
+      # recovery point must come back, in decode order.
+      - name: TS open GOP
+        run: nix develop --command just test ts --open-gop
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
       # Builds the sparse-EPG and pending-version fixtures and round-trips
       # them, asserting the schedule survives and pending sections are dropped.
       - name: EIT fixtures

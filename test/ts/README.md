@@ -11,12 +11,14 @@ is VBR, inserts no null packets, and paces PCR once per media frame, so several
 broadcast-shape checks are expected to flag. The report quantifies exactly where
 and by how much.
 
-Three instruments live here. `compliance.py` (via `run.sh`) grades a captured file
+Four instruments live here. `compliance.py` (via `run.sh`) grades a captured file
 against the IRD model. [`pcr-timing.py`](#pcr-timing-pcr-timingpy) grades a live
 pipe, which is the only way to see *when* the exporter released each PCR.
 [`table-anchor.py`](#table-anchoring-table-anchorpy) grades two exporters of one
 broadcast against each other, which is the only way to see whether a table's
 emission points come from the media or from the exporter's own clock.
+[`open-gop.py`](#open-gop-open-goppy) grades an open-GOP capture against its
+source, access unit by access unit.
 
 ## Running
 
@@ -28,6 +30,7 @@ just test ts --strict           # also fail on broadcast-shape warnings
 just test ts --with-eit         # add a synthetic EPG first, report which SI survived
 just test ts --live             # grade PCR release timing off the live pipe
 just test ts --pair             # two exporters of one broadcast, grade table anchoring
+just test ts --open-gop         # open-GOP clip; its leading pictures must survive
 ```
 
 `--live` swaps the analyzer, not the rig: the same round-trip runs, but the
@@ -259,6 +262,38 @@ rather than leaving a percentage to interpret:
                     -> a timer started with the exporter, not an anchor in the media
 ```
 
+## Open GOP (`open-gop.py`)
+
+Broadcast contribution encoders commonly send open GOP: after the first IDR, each
+keyframe is a non-IDR I picture flagged by a recovery-point SEI, and the B pictures
+that follow it in decode order but are presented before it (its leading pictures)
+reference the previous GOP. Only a viewer that already holds that GOP can decode
+them. Dropping them is right at a tune-in, which the transport cannot see, so the
+round-trip has to hand every one of them on, in decode order.
+
+`--open-gop` swaps the generated clip for an x264 `open-gop=1` encode whose 24-frame
+GOP and fixed B placement put three leading pictures behind every recovery point,
+round-trips it, and runs `open-gop.py` on the source and capture before the
+compliance report. With `--source`, it grades a real capture instead, and fails if
+that capture has no leading pictures to grade.
+
+```bash
+./open-gop.py source.ts capture.ts
+```
+
+Access units are matched by their slice data, so the comparison ignores the
+parameter sets and delimiters the round-trip may re-insert and the timestamp
+rebase.
+
+| Check | Severity | What it verifies |
+|---|---|---|
+| `fixture` | hard | the source has at least two non-IDR recovery points with leading pictures |
+| `decode-order` | hard | the capture is one contiguous run of the source's access units from a random-access point, with DTS strictly increasing |
+| `leading-pictures` | hard | every leading picture in that run is there and keeps the presentation offset the source gave it |
+| `random-access-indicator` | shape | the exporter flags exactly the random-access access units |
+| `recovery-point-sei` | shape | each recovery point keeps its SEI |
+| `dts-before-pts` | shape | no access unit is stamped to decode after it presents |
+
 ## EIT fixtures
 
 No capture in this repository carries EIT (PID 0x0012), so nothing exercises the
@@ -356,9 +391,10 @@ exporter re-emits SI on its own repetition cadence rather than the source's.
 
 ## CI
 
-`.github/workflows/interop.yml` runs `just test ts` and then `just test ts-eit`
-after the interop matrix (nightly, on demand, and on PRs touching `test/ts/`).
-The second recipe is `eit-roundtrip.sh`: it builds the sparse-schedule and
+`.github/workflows/interop.yml` runs `just test ts`, `just test ts --open-gop`,
+and `just test ts-eit` after the interop matrix (nightly, on demand, and on PRs
+touching `test/ts/`).
+`ts-eit` is `eit-roundtrip.sh`: it builds the sparse-schedule and
 pending-version fixtures from a generated clip, round-trips them through a
 relay, and censuses the capture, so a break in the generators or in the SI
 carriage they pin fails a PR instead of landing silently. TSDuck comes from the

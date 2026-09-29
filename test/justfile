@@ -88,7 +88,8 @@ drill-sensitivity *args:
 # burstiness, instantaneous bitrate, T-STD). Flags: `--analyze-only file.ts`
 # (skip the round-trip), `--strict` (fail on shape warnings), `--source file.ts`
 # (use a real capture), `--live` (grade PCR release timing and byte position off
-# the pipe instead, which a capture cannot carry; nightly runs this arm). See
+# the pipe instead, which a capture cannot carry; nightly runs this arm),
+# `--open-gop` (an open-GOP clip whose leading pictures must survive). See
 # ts/README.md.
 
 # Check the subscriber's MPEG-TS output for IRD compliance.
