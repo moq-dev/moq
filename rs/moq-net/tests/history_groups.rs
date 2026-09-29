@@ -171,3 +171,94 @@ async fn a_fresh_subscriber_receives_the_finished_older_group() {
 	}
 	assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// Read known frame counts so the open live group never advances paused time to
+/// the relay's linger deadline while waiting for a FIN that will not arrive.
+async fn read_history(sub: &mut moq_net::track::Subscriber) {
+	let mut sequences = Vec::new();
+	for _ in 0..2 {
+		let mut group = sub.recv_group().await.unwrap().unwrap();
+		let frames = match group.sequence {
+			5 => 3,
+			6 => 2,
+			sequence => panic!("unexpected group {sequence}"),
+		};
+		for _ in 0..frames {
+			assert!(group.read_frame().await.unwrap().is_some());
+		}
+		sequences.push(group.sequence);
+	}
+	sequences.sort();
+	assert_eq!(sequences, [5, 6]);
+}
+
+#[tokio::test]
+async fn a_late_subscriber_receives_the_relays_cached_history() {
+	tokio::time::pause();
+	// Older drafts canonicalize group 0 to the live edge instead of replay.
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let publisher = produce_origin(1);
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let track = broadcast
+		.create_track("history", Info::default().with_max_age(FOREVER))
+		.unwrap();
+	broadcast.announce(Default::default()).unwrap();
+	let relay = produce_origin(2);
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(relay.clone());
+	let upstream = connect_mock(options).await;
+	let first = produce_origin(3);
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(relay.consume());
+	options.client_subscribe = Some(first.clone());
+	let first_pair = connect_mock(options).await;
+	let consumer = first.consume();
+	consumer.routed("bcast").await.unwrap();
+	let remote = consumer.request_broadcast("bcast").await.unwrap();
+	let subscription = Subscription::default()
+		.with_max_age(FOREVER)
+		.with_start(Position::group(0));
+	let first_subscription = subscription.clone();
+	let first_reader = tokio::spawn(async move {
+		let mut sub = remote
+			.track("history")
+			.unwrap()
+			.subscribe(first_subscription)
+			.await
+			.unwrap();
+		read_history(&mut sub).await;
+		sub
+	});
+	track.used().await.unwrap();
+	upstream.server_transport.hold_unis();
+	let mut old = track.create_group(moq_net::group::Info { sequence: 5 }).unwrap();
+	for _ in 0..3 {
+		old.write_frame(Timestamp::now(), &b"old"[..]).unwrap();
+	}
+	old.finish().unwrap();
+	let mut live = track.create_group(moq_net::group::Info { sequence: 6 }).unwrap();
+	for _ in 0..2 {
+		live.write_frame(Timestamp::now(), &b"live"[..]).unwrap();
+	}
+	// Both streams open before paused time advances; 10ms stays below linger.
+	tokio::time::sleep(Duration::from_millis(10)).await;
+	upstream.server_transport.release_unis_reversed();
+	let first_sub = tokio::time::timeout(TIMEOUT, first_reader)
+		.await
+		.expect("first subscriber history")
+		.unwrap();
+	let late = produce_origin(4);
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(relay.consume());
+	options.client_subscribe = Some(late.clone());
+	let late_pair = connect_mock(options).await;
+	let consumer = late.consume();
+	consumer.routed("bcast").await.unwrap();
+	let remote = consumer.request_broadcast("bcast").await.unwrap();
+	let mut late_sub = remote.track("history").unwrap().subscribe(subscription).await.unwrap();
+	tokio::time::timeout(TIMEOUT, read_history(&mut late_sub))
+		.await
+		.unwrap_or_else(|_| panic!("{version}: late subscriber history"));
+	drop((first_sub, late_sub, first_pair, late_pair, upstream, live));
+}

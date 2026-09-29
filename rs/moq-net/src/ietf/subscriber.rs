@@ -2263,6 +2263,11 @@ where
 			Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
 				let _ = producer.abort(err);
 			}
+			Err(err @ Error::Decode(DecodeError::MessageTooLarge { .. })) => {
+				let _ = producer.abort(err.clone());
+				// Return the refusal to the dispatcher so it sends STOP_SENDING.
+				return Err(err);
+			}
 			Err(err) => {
 				tracing::debug!(%err, group = %producer.sequence, "group error");
 				let _ = producer.abort(err);
@@ -2320,6 +2325,25 @@ enum Ended {
 /// Object status: no object at or past this location exists (every implemented draft).
 const END_OF_TRACK: u64 = 0x4;
 
+// Implementation limit for object extension blocks, independent of the IETF draft.
+const MAX_OBJECT_EXTENSIONS: usize = 64 * 1024;
+
+#[derive(Debug)]
+struct ObjectExtensionsLength(usize);
+
+impl Decode<Version> for ObjectExtensionsLength {
+	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
+		let size = usize::decode(buf, version)?;
+		if size > MAX_OBJECT_EXTENSIONS {
+			return Err(DecodeError::MessageTooLarge {
+				size,
+				max: MAX_OBJECT_EXTENSIONS,
+			});
+		}
+		Ok(Self(size))
+	}
+}
+
 /// The start of a subgroup stream's first object, peeked before its group is created.
 #[derive(Debug, Clone, Copy)]
 struct FirstObject {
@@ -2336,7 +2360,7 @@ impl<const EXTENSIONS: bool> Decode<Version> for PeekFirst<EXTENSIONS> {
 	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
 		let id = u64::decode(buf, version)?;
 		if EXTENSIONS {
-			let size = usize::decode(buf, version)?;
+			let ObjectExtensionsLength(size) = ObjectExtensionsLength::decode(buf, version)?;
 			if buf.remaining() < size {
 				return Err(DecodeError::Short);
 			}
@@ -2930,7 +2954,7 @@ impl GroupIngest {
 					};
 				}
 				IngestPhase::ExtSize => {
-					let size: usize = ready!(reader.poll_decode(&mut cx))?;
+					let ObjectExtensionsLength(size) = ready!(reader.poll_decode(&mut cx))?;
 					self.phase = IngestPhase::ExtBytes { size };
 				}
 				IngestPhase::ExtBytes { size } => {
@@ -5996,6 +6020,62 @@ mod stitch_tests {
 			]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done), "the head was claimed");
+	}
+
+	#[tokio::test]
+	async fn object_extension_limit() {
+		for size in [65536usize, 65537] {
+			for first in [true, false] {
+				let mut script = Vec::new();
+				ietf::GroupHeader {
+					track_alias: ALIAS,
+					group_id: SEQUENCE,
+					sub_group_id: 0,
+					publisher_priority: 0,
+					flags: ietf::GroupFlags {
+						has_extensions: true,
+						..Default::default()
+					},
+				}
+				.encode(&mut script, VERSION)
+				.unwrap();
+				if !first {
+					// A complete first object exercises the ingestion path on the next one.
+					script.extend_from_slice(&[0, 0, 1, 42]);
+				}
+				0u64.encode(&mut script, VERSION).unwrap();
+				size.encode(&mut script, VERSION).unwrap();
+				if size == 65536 {
+					// Unknown even properties with value zero, valid with delta type ids.
+					script.resize(script.len() + size, 0);
+					script.extend_from_slice(&[1, 42]);
+				}
+				// Over-limit lengths deliberately carry no extension bytes.
+				let h = Harness::new(Fill::Done, vec![script]);
+				let mut consumer = h.track.subscribe(None);
+				let mut stream = h.stream().await;
+				let result = h.subscriber.clone().recv_group(&mut stream).await;
+				if size == 65536 {
+					result.unwrap();
+					let (_, frames) = read_group(&mut consumer).await;
+					assert_eq!(frames.len(), if first { 1 } else { 2 });
+				} else {
+					assert!(matches!(
+						result,
+						Err(Error::Decode(DecodeError::MessageTooLarge {
+							size: 65537,
+							max: 65536
+						}))
+					));
+					// The stream dispatcher uses this mapping to stop only this stream.
+					assert_eq!(
+						crate::StreamError::from(&result.unwrap_err()),
+						crate::StreamError::MalformedTrack
+					);
+				}
+				assert!(h.session.log.closes().is_empty());
+			}
+		}
 	}
 
 	/// Append an END_OF_TRACK object: delta 0, an empty payload, then its status.
