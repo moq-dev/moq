@@ -92,11 +92,18 @@ impl FrameChannel {
 			return;
 		}
 		// A backlog drained faster than real time maps ahead of arrival, so a
-		// re-anchor floors strictly above the last delivered timestamp.
-		let floor = state.native.map_or(arrived, |native| {
-			let next = native.mapped.checked_add(Timestamp::from_micros(1).unwrap());
-			arrived.max(next.expect("capture timestamp fits"))
-		});
+		// re-anchor floors strictly above the last delivered timestamp. A device
+		// clock that jumped to the end of the timeline leaves no room above it.
+		let floor = match state.native {
+			None => arrived,
+			Some(native) => match native.mapped.checked_add(Timestamp::from_micros(1).unwrap()) {
+				Ok(next) => arrived.max(next),
+				Err(err) => {
+					drop(state);
+					return self.fail(err.into());
+				}
+			},
+		};
 		let anchor = match state.native {
 			Some(native) if source > native.last => native,
 			_ => Native {
@@ -349,6 +356,23 @@ mod tests {
 			33_000,
 			"the device's spacing resumes"
 		);
+	}
+
+	/// A device clock that jumps to the last representable timestamp leaves no room
+	/// for a later re-anchor, which must end the stream with an error rather than
+	/// panic the pump thread and leave the consumer parked.
+	#[tokio::test]
+	async fn a_device_clock_at_the_end_of_the_timeline_fails_the_stream() {
+		let chan = FrameChannel::new();
+		let us = |micros| Timestamp::from_micros(micros).unwrap();
+		let at = |millis| chan.epoch + std::time::Duration::from_millis(millis);
+
+		chan.push_native_at(frame(1), us(0), at(0));
+		chan.push_native_at(frame(2), us((1 << 62) - 1), at(1));
+		chan.push_native_at(frame(3), us(0), at(2));
+
+		assert!(matches!(chan.recv().await, Err(Error::TimeOverflow(_))));
+		assert!(chan.recv().await.unwrap().is_none());
 	}
 
 	/// A driver that reports one constant timestamp must not stamp every frame
