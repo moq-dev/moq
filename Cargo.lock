@@ -4479,6 +4479,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-test",
  "url",
  "web-async",
  "webm-iterable",
@@ -4745,6 +4746,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-test",
 ]
 
 [[package]]

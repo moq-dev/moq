@@ -132,29 +132,6 @@ pub struct CaptureArgs {
 	pub no_audio: bool,
 }
 
-/// Report the streams whose frame-sync counters moved since `previous`, one line each.
-///
-/// The importer already warns on each individual resync; this is the running total, which is
-/// what an operator turns into a rate.
-fn log_stats(latest: Option<&ts::Stats>, previous: Option<&ts::Stats>) {
-	let Some(latest) = latest else {
-		return;
-	};
-	for (pid, stream) in &latest.streams {
-		if previous.and_then(|previous| previous.streams.get(pid)) == Some(stream) {
-			continue;
-		}
-		tracing::info!(
-			pid = *pid,
-			track = stream.track,
-			resyncs = stream.resyncs,
-			discarded = stream.discarded,
-			unconfirmed = stream.unconfirmed,
-			"audio frame sync lost"
-		);
-	}
-}
-
 enum PublishDecoder {
 	Avc3 {
 		split: Box<moq_mux::codec::h264::Split>,
@@ -184,8 +161,8 @@ impl PublishDecoder {
 		Ok(())
 	}
 
-	/// Audio frame sync the decoder has lost so far, for the formats that scan for it.
-	/// `None` where the container frames audio explicitly and so can't lose sync.
+	/// What each elementary stream has delivered and the audio frame sync lost so far, for
+	/// the formats that report it.
 	fn stats(&self) -> Option<ts::Stats> {
 		match self {
 			Self::Ts(d) => Some(d.stats()),
@@ -436,10 +413,11 @@ async fn decode(
 ) -> anyhow::Result<()> {
 	let mut buffer = bytes::BytesMut::new();
 
-	// Damage reported so far, so only the change is logged. A live feed is
+	// Counters reported so far, so only the change is logged. A live feed is
 	// diagnosed by the rate at which these climb, and stdin may never end, so
 	// they have to surface as they accumulate rather than at exit.
-	let mut reported = decoder.stats();
+	let mut log = ts::stats::Log::default();
+	let mut sampled = tokio::time::Instant::now();
 
 	// Run the read/decode loop so an error surfaces here rather than
 	// dropping the decoder (and its tracks) with a bare Error::Dropped.
@@ -452,10 +430,11 @@ async fn decode(
 			}
 			decoder.decode_chunk(&buffer)?;
 
-			let latest = decoder.stats();
-			if latest != reported {
-				log_stats(latest.as_ref(), reported.as_ref());
-				reported = latest;
+			if sampled.elapsed() >= ts::stats::Log::INTERVAL {
+				sampled = tokio::time::Instant::now();
+				if let Some(stats) = decoder.stats() {
+					log.sample(stats);
+				}
 			}
 		}
 	}
@@ -467,7 +446,9 @@ async fn decode(
 	let outcome = result.and_then(|()| decoder.finish());
 	// The drain at end of input can publish a frame nothing vouched for, so the
 	// final snapshot is only complete after `finish`.
-	log_stats(decoder.stats().as_ref(), reported.as_ref());
+	if let Some(stats) = decoder.stats() {
+		log.finish(&stats);
+	}
 	match outcome {
 		Ok(()) => catalog.finish(),
 		Err(err) => {

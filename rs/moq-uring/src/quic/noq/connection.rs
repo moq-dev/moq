@@ -367,7 +367,7 @@ pub(crate) fn launch(
 		key,
 		deadline: owner.timer(),
 		scratch: Vec::with_capacity(TRAIN_SEGMENTS * SEGMENT),
-		blocked: false,
+		close_staged: false,
 	};
 	let future = async move { kio::wait(|waiter| driver.poll(waiter)).await };
 	(shared, future)
@@ -676,9 +676,10 @@ struct Driver {
 	/// Egress staging: noq-proto writes into a `Vec`, so a train is built
 	/// here and copied into the socket's registered buffer.
 	scratch: Vec<u8>,
-	/// The last flush found the transmit pool drained, so nothing it owed the
-	/// peer has reached the wire yet.
-	blocked: bool,
+	/// A CONNECTION_CLOSE has been handed to the socket. Not implied by a
+	/// flush that came back empty: noq paces the close like any other packet,
+	/// so it can sit behind a pacing timer after the application asked for it.
+	close_staged: bool,
 }
 
 impl Driver {
@@ -706,6 +707,9 @@ impl Driver {
 			// (and a retransmit for each packet that arrives after), so the
 			// driver runs until noq says the drain is over.
 			if self.shared.conn.borrow().is_drained() {
+				// A close noq never managed to send (the server's
+				// anti-amplification limit can withhold it) ends here too.
+				self.publish_close();
 				return Poll::Ready(());
 			}
 
@@ -713,7 +717,9 @@ impl Driver {
 				self.shared.state.borrow_mut().fail(err);
 				return Poll::Ready(());
 			}
-			self.publish_close();
+			if self.close_staged {
+				self.publish_close();
+			}
 
 			// Arm, *then* poll: the poll is what registers the waiter, so
 			// polling before the set would leave the firing to wake nobody
@@ -777,15 +783,12 @@ impl Driver {
 	/// Publish the terminal error for a close this side asked for.
 	///
 	/// noq raises no event for it, so the driver is what reports it, and
-	/// only once the flush above has staged the CONNECTION_CLOSE, since an
-	/// application is free to stop driving the worker the moment
+	/// only once the CONNECTION_CLOSE is staged (or the drain is over), since
+	/// an application is free to stop driving the worker the moment
 	/// `poll_closed` resolves. Staged is not delivered: the send is
 	/// fire-and-forget, so a worker torn down in the same breath can still
 	/// take the packet with it and leave the peer to idle out.
 	fn publish_close(&mut self) {
-		if self.blocked || !self.shared.conn.borrow().is_closed() {
-			return;
-		}
 		let mut state = self.shared.state.borrow_mut();
 		let Some((code, reason)) = state.local_close.take() else {
 			return;
@@ -818,12 +821,8 @@ impl Driver {
 			Poll::Ready(Ok(tx)) => tx,
 			Poll::Ready(Err(err)) => return Poll::Ready(Err(Error::Io(err.to_string()))),
 			// Backpressure: a completed send re-polls us.
-			Poll::Pending => {
-				self.blocked = true;
-				return Poll::Pending;
-			}
+			Poll::Pending => return Poll::Pending,
 		};
-		self.blocked = false;
 
 		let segments = (tx.len() / SEGMENT).min(TRAIN_SEGMENTS);
 		if segments == 0 {
@@ -835,15 +834,14 @@ impl Driver {
 		let segments = std::num::NonZeroUsize::new(segments).expect("segments was checked above");
 
 		self.scratch.clear();
-		let transmit = match self
-			.shared
-			.conn
-			.borrow_mut()
-			.poll_transmit(Instant::now(), segments, &mut self.scratch)
-		{
-			Some(transmit) => transmit,
+		let (transmit, closing) = {
+			let mut conn = self.shared.conn.borrow_mut();
 			// Nothing to send, or paced; the buffer returns to the pool on drop.
-			None => return Poll::Pending,
+			let Some(transmit) = conn.poll_transmit(Instant::now(), segments, &mut self.scratch) else {
+				return Poll::Pending;
+			};
+			// Once closed, noq transmits nothing but the CONNECTION_CLOSE.
+			(transmit, conn.is_closed())
 		};
 
 		tx[..transmit.size].copy_from_slice(&self.scratch[..transmit.size]);
@@ -858,6 +856,7 @@ impl Driver {
 		if let Err(err) = tx.send(transmit) {
 			return Poll::Ready(Err(Error::Io(err.to_string())));
 		}
+		self.close_staged |= closing;
 		// A flush frees datagram-send queue space.
 		self.shared.state.borrow_mut().datagram_send_waiters.wake();
 		Poll::Ready(Ok(()))

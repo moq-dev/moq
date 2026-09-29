@@ -147,6 +147,16 @@ export class Encoder {
 	// doesn't re-probe the hardware.
 	#codecFilter: Computed<string>;
 
+	// How many resolution runs threw for their current inputs (no supported codec, an invalid knob),
+	// so no config is coming until one reruns.
+	#failures = new Signal(0);
+
+	/**
+	 * @internal Whether the catalog config resolved, or failed and won't until an input changes.
+	 * `<moq-publish>` holds its first announce until this is set.
+	 */
+	readonly settled: Computed<boolean>;
+
 	#signals = new Effect();
 	#stalled = new Catalog.Stalled.Detector();
 	#firstCaptured?: Time.Micro;
@@ -165,12 +175,29 @@ export class Encoder {
 		};
 		this.config = Signal.from(props?.config);
 		this.#codecFilter = this.#signals.computed((effect) => effect.get(this.config)?.codec ?? "");
+		this.settled = this.#signals.computed(
+			(effect) => effect.get(this.#out.catalog) !== undefined || effect.get(this.#failures) > 0,
+		);
 
-		this.#signals.run(this.#runCatalog.bind(this));
-		this.#signals.run(this.#runCodec.bind(this));
-		this.#signals.run(this.#runResolved.bind(this));
-		this.#signals.run(this.#runDimensions.bind(this));
+		// Every step that resolves the config counts a throw as a failure, so a bad input settles the
+		// gate instead of holding the announce forever.
+		for (const run of [this.#runCatalog, this.#runCodec, this.#runResolved, this.#runDimensions]) {
+			this.#signals.run((effect) => {
+				try {
+					run.call(this, effect);
+				} catch (err) {
+					this.#fail(effect);
+					throw err;
+				}
+			});
+		}
 		this.#signals.run(this.#runRegister.bind(this));
+	}
+
+	// Count a failure until `effect` reruns with new inputs.
+	#fail(effect: Effect): void {
+		this.#failures.update((n) => n + 1);
+		effect.cleanup(() => this.#failures.update((n) => n - 1));
 	}
 
 	// Register the rendition on the broadcast and drive its catalog + encode loop. Re-registers cleanly
@@ -413,10 +440,15 @@ export class Encoder {
 		const required = effect.get(this.#codecFilter) ?? "";
 
 		effect.spawn(async () => {
-			const detected = await this.#bestCodec(required, dimensions);
-			if (!detected) return;
+			try {
+				const detected = await this.#bestCodec(required, dimensions);
+				if (!detected) return;
 
-			effect.set(this.#codec, { ...detected, required, ...dimensions });
+				effect.set(this.#codec, { ...detected, required, ...dimensions });
+			} catch (err) {
+				this.#fail(effect);
+				throw err;
+			}
 		});
 	}
 
