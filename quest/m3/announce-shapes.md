@@ -55,7 +55,11 @@ before this quest.
 The origin model needs an `exact` route kind distinct from `source`: today
 only a local broadcast (`source` set) is exact, and a forwarded route is
 always a prefix. Carrying the kind also tightens `serves()` for a remote exact
-route. The known exact-scope spots:
+route. An exact and a prefix route can share a path, but `sync_cursor`
+presents one best entry per path and the lite announce state
+(`AnnounceRun.live`, pending updates) is keyed by path alone, so today one
+shape hides the other on the wire. Shape likely joins that identity. The
+known exact-scope spots:
 
 - Rust: `sync_cursor` in `rs/moq-net/src/model/origin.rs` admits an exact
   entry by prefix overlap; match it against the reader's patterns instead.
@@ -64,8 +68,8 @@ route. The known exact-scope spots:
 - JS: `Scope.projectRoutes` in `js/net/src/origin.ts` treats every entry
   above the root as covering, and `Candidate.exact` is local-only today.
 - Test in both languages, locally and across a relay hop: an exact broadcast
-  at `/a` and a prefix route at `/a`, read through a `/a/b` scope, yield only
-  the prefix. #4479's regressions and benchmark are a starting point.
+  at `/a` and a prefix route at `/a` both survive a root-scoped hop, and read
+  through a `/a/b` scope yield only the prefix. #4479's regressions and benchmark are a starting point.
 
 ### Benchmark first
 
