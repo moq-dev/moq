@@ -722,6 +722,118 @@ async fn noq_client_close_reaches_server() {
 	assert!(!err.to_string().contains("timed out"), "{err}");
 }
 
+/// A client that finishes its track and closes before its runtime stops still delivers
+/// the queued group and the track's finish, instead of the close discarding them.
+#[cfg(feature = "noq")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn noq_client_close_drains_finished_track() {
+	// Small, since the debug build logging every packet is slow and the drain has
+	// one second. Queued right before the close, it is still unacknowledged then.
+	let payload: Vec<u8> = (0..1024).map(|i| i as u8).collect();
+
+	let quic = moq_tokio::quic::Config::default();
+	let mut server_config = moq_tokio::listen::Config::default();
+	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
+	server_config.tls.generate = vec!["localhost".into()];
+	let server = server_config.init(quic.clone()).expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
+	let url: url::Url = format!("moqt://localhost:{}", server.local_addr().unwrap().port())
+		.parse()
+		.unwrap();
+
+	// The client gets a runtime of its own, gone as soon as the client returns: nothing
+	// drives its endpoint afterwards, exactly as when a process exits.
+	let expected = payload.clone();
+	let client = std::thread::spawn(move || {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("client runtime");
+		runtime.block_on(async move {
+			let origin = moq_tokio::origin::spawn();
+			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
+			broadcast.announce(Default::default()).expect("failed to announce");
+			let mut track = broadcast.create_track("video", None).expect("failed to create track");
+
+			let mut config = moq_tokio::connect::Config::default();
+			config.tls.insecure = Some(true);
+			config.bind = Some("127.0.0.1:0".parse().unwrap());
+			let client = config
+				.init(quic)
+				.expect("failed to init client")
+				.with_publisher(origin.consume());
+			let (client, connection) = connect_once(client, url).await.expect("client connect failed");
+
+			// Write only once the server's subscription is being served.
+			while track.subscription().is_none() {
+				track.subscription_changed().await.expect("track closed");
+			}
+			let mut group = track.append_group().expect("failed to append group");
+			group
+				.write_frame(moq_tokio::moq_net::Timestamp::ZERO, payload)
+				.expect("failed to write frame");
+			group.finish().expect("failed to finish group");
+			track.finish().expect("failed to finish track");
+
+			connection.close().await.expect("the close drains");
+			client.close().await;
+		});
+	});
+
+	let request = tokio::time::timeout(TIMEOUT, server.accept())
+		.await
+		.expect("accept timed out")
+		.expect("no incoming connection");
+	let origin = moq_tokio::origin::spawn();
+	let consumer = origin.consume();
+	let mut announcements = consumer.announced();
+	let _session = request
+		.with_subscriber(origin)
+		.ok()
+		.await
+		.expect("server handshake failed");
+
+	tokio::time::timeout(TIMEOUT, announcements.next())
+		.await
+		.expect("announce timed out")
+		.expect("origin closed");
+	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
+	let mut track = tokio::time::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
+		.await
+		.expect("subscribe timed out")
+		.expect("subscribe failed");
+
+	let mut group = tokio::time::timeout(TIMEOUT, track.recv_group())
+		.await
+		.expect("recv_group timed out")
+		.expect("recv_group failed")
+		.expect("track ended before the group");
+	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("read_frame timed out")
+		.expect("read_frame failed")
+		.expect("group ended before the frame");
+	assert!(frame.payload[..] == expected[..], "the frame arrives whole");
+
+	let end = tokio::time::timeout(TIMEOUT, track.recv_group())
+		.await
+		.expect("the track end timed out");
+	match end {
+		Ok(None) => {}
+		Ok(Some(_)) => panic!("an unexpected second group"),
+		Err(err) => panic!("the track ends with {err} instead of finishing"),
+	}
+
+	tokio::task::spawn_blocking(move || client.join())
+		.await
+		.unwrap()
+		.expect("client thread panicked");
+}
+
 #[cfg(feature = "noq")]
 #[tracing_test::traced_test]
 #[tokio::test]
