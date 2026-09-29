@@ -20,6 +20,7 @@
 //! RTMPS (RTMP over TLS): [`Server::with_tls`] makes the listener terminate TLS
 //! before the RTMP handshake for any client that opens with a ClientHello, so
 //! `rtmps://` and `rtmp://` clients share one port with no other change.
+//! [`Server::with_plaintext`] can refuse the plaintext ones.
 //! If you'd rather own the transport (custom TLS, a non-TCP socket, a test
 //! pipe), accept the connection and complete any handshake yourself, then hand
 //! the established stream to [`accept_stream`]; everything here is generic over
@@ -227,17 +228,20 @@ const ACCEPT_RETRY_MAX: Duration = Duration::from_secs(5);
 
 /// An RTMP server that yields each connection's pending request as a [`Request`].
 ///
-/// Build it with [`bind`](Self::bind), optionally enable RTMPS with
-/// [`with_tls`](Self::with_tls), then loop on [`accept`](Self::accept). The
+/// Build it with [`bind`](Self::bind), optionally enable RTMPS with `with_tls`
+/// (the `tls` feature), then loop on [`accept`](Self::accept). The
 /// handshake and the connect exchange happen inside `accept`, so a [`Request`] is
 /// only produced once a client actually wants to publish or play.
 pub struct Server {
 	listener: TcpListener,
 
-	/// When set, each accepted connection is TLS-terminated (RTMPS) before the
-	/// RTMP handshake.
+	/// When set, each accepted connection that opens with a ClientHello is
+	/// TLS-terminated (RTMPS) before the RTMP handshake.
 	#[cfg(feature = "tls")]
 	tls: Option<tokio_rustls::TlsAcceptor>,
+
+	/// Whether a connection that is not TLS is served as plaintext RTMP.
+	plaintext: bool,
 
 	/// In-flight handshakes; each resolves to a ready [`Request`], or `None` if
 	/// the connection closed or errored before issuing a publish or play.
@@ -263,6 +267,7 @@ impl Server {
 			listener,
 			#[cfg(feature = "tls")]
 			tls: None,
+			plaintext: true,
 			pending: FuturesUnordered::new(),
 			accept_delay: ACCEPT_RETRY_MIN,
 			accept_retry: None,
@@ -271,13 +276,39 @@ impl Server {
 
 	/// Serve RTMPS (`rtmps://`) alongside plaintext RTMP on this one port: a
 	/// connection that opens with a TLS ClientHello is TLS-terminated, any other is
-	/// served as plaintext. Pass a `rustls::ServerConfig` (e.g. from
+	/// served as plaintext unless [`with_plaintext`](Self::with_plaintext) refuses it.
+	/// Pass a `rustls::ServerConfig` (e.g. from
 	/// `moq_tokio::tls::Listen::server_config` with an empty ALPN list), or
 	/// `None` to serve plaintext only.
 	#[cfg(feature = "tls")]
 	pub fn with_tls(mut self, tls: impl Into<Option<std::sync::Arc<rustls::ServerConfig>>>) -> Self {
 		self.tls = tls.into().map(tokio_rustls::TlsAcceptor::from);
 		self
+	}
+
+	/// Whether to accept plaintext `rtmp://` (the default). Pass `false` to refuse it and
+	/// serve `rtmps://` only, so stream keys never cross the network unencrypted: a
+	/// client that does not open with a TLS ClientHello is dropped at its first byte.
+	/// That needs `with_tls`, or [`accept`](Self::accept) refuses to run.
+	pub fn with_plaintext(mut self, allow: bool) -> Self {
+		self.plaintext = allow;
+		self
+	}
+
+	/// Refuse a server that would accept no connection at all: plaintext turned off with
+	/// no TLS to serve instead.
+	pub(crate) fn check(&self) -> Result<()> {
+		#[cfg(feature = "tls")]
+		let tls = self.tls.is_some();
+		#[cfg(not(feature = "tls"))]
+		let tls = false;
+
+		if !self.plaintext && !tls {
+			return Err(crate::Error::Session(
+				"plaintext RTMP is refused but no TLS config is set, so no client could connect".to_string(),
+			));
+		}
+		Ok(())
 	}
 
 	/// The local address the listener is bound to.
@@ -290,8 +321,14 @@ impl Server {
 	/// New connections are accepted and handshaked concurrently; this returns the
 	/// next one to reach its `publish` or `play` command. Connections that close or
 	/// error before either are dropped without surfacing here. Returns `None` only
-	/// if the listener itself stops (it currently never does).
+	/// if the listener itself stops (it currently never does) or the server refuses
+	/// plaintext without TLS, which is logged as an error.
 	pub async fn accept(&mut self) -> Option<Request<Conn>> {
+		if let Err(err) = self.check() {
+			tracing::error!(%err, "RTMP server misconfigured; not accepting connections");
+			return None;
+		}
+
 		loop {
 			// Copied out so the timer arm below doesn't borrow `self` alongside the other two.
 			let retry = self.accept_retry;
@@ -314,7 +351,7 @@ impl Server {
 						self.accept_delay = ACCEPT_RETRY_MIN;
 						configure_socket(&stream, peer);
 						#[cfg(feature = "tls")]
-						let tls = self.tls.clone();
+						let (tls, plaintext) = (self.tls.clone(), self.plaintext);
 						self.pending.push(Box::pin(async move {
 							// The TLS handshake (if any) and the RTMP handshake share one
 							// budget, so a client that stalls either is dropped.
@@ -327,6 +364,10 @@ impl Server {
 											.await
 											.map_err(|e| anyhow::anyhow!("rtmps tls handshake: {e}"))?,
 									)),
+									_ if !plaintext => {
+										tracing::warn!(%peer, "refusing plaintext RTMP: this listener requires TLS (rtmps://)");
+										return Ok(None);
+									}
 									_ => Conn::Plain(stream),
 								};
 								#[cfg(not(feature = "tls"))]
@@ -2219,20 +2260,17 @@ mod tests {
 		client.abort();
 	}
 
-	/// The same publish flow, but over TLS: prove [`Server::with_tls`] terminates
-	/// RTMPS and yields an identical [`Request`], and that the same port still serves
-	/// a plaintext client. Gated on `tls` (RTMPS support); the cert is generated by
-	/// the `moq-tokio` dev-dependency.
+	/// A throwaway self-signed server config for `localhost` plus a client connector that
+	/// trusts anything. The cert is generated by the `moq-tokio` dev-dependency.
 	#[cfg(feature = "tls")]
-	#[tokio::test]
-	async fn rtmps_and_rtmp_share_one_port() {
+	fn tls_fixture() -> (std::sync::Arc<rustls::ServerConfig>, tokio_rustls::TlsConnector) {
 		use std::sync::Arc;
 
 		use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 		use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 		use rustls::{DigitallySignedStruct, SignatureScheme};
 
-		// Accept any server cert: the test uses a throwaway self-signed cert.
+		// Accept any server cert: the tests use a throwaway self-signed cert.
 		#[derive(Debug)]
 		struct NoVerify(Arc<rustls::crypto::CryptoProvider>);
 
@@ -2273,26 +2311,28 @@ mod tests {
 
 		let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
 
-		// Server: a self-signed cert for `localhost`, fronting the RTMP listener.
 		let mut tls = moq_tokio::tls::Listen::default();
 		tls.generate = vec!["localhost".to_string()];
 		let server_config = tls.server_config(vec![]).expect("build RTMPS server config");
 
-		let mut server = Server::bind("127.0.0.1:0".parse().unwrap())
-			.await
+		let client_config = rustls::ClientConfig::builder_with_provider(provider.clone())
+			.with_safe_default_protocol_versions()
 			.unwrap()
-			.with_tls(server_config);
-		let addr = server.local_addr().unwrap();
+			.dangerous()
+			.with_custom_certificate_verifier(Arc::new(NoVerify(provider)))
+			.with_no_client_auth();
 
-		// Client: TLS-connect (no verify), then run the ordinary RTMP client.
+		(server_config, tokio_rustls::TlsConnector::from(Arc::new(client_config)))
+	}
+
+	/// Publish over TLS: prove the server terminates RTMPS and yields an identical
+	/// [`Request`].
+	#[cfg(feature = "tls")]
+	async fn rtmps_publish(server: &mut Server, connector: tokio_rustls::TlsConnector) {
+		use rustls::pki_types::ServerName;
+
+		let addr = server.local_addr().unwrap();
 		let client = tokio::spawn(async move {
-			let client_config = rustls::ClientConfig::builder_with_provider(provider.clone())
-				.with_safe_default_protocol_versions()
-				.unwrap()
-				.dangerous()
-				.with_custom_certificate_verifier(Arc::new(NoVerify(provider)))
-				.with_no_client_auth();
-			let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
 			let tcp = TcpStream::connect(addr).await.unwrap();
 			let server_name = ServerName::try_from("localhost").unwrap();
 			let stream = connector.connect(server_name, tcp).await.unwrap();
@@ -2312,6 +2352,22 @@ mod tests {
 		};
 		publish.reject("test rejection").await.unwrap();
 		client.abort();
+	}
+
+	/// By default a server with TLS terminates RTMPS and still serves a plaintext client on the
+	/// same port. Gated on `tls` (RTMPS support).
+	#[cfg(feature = "tls")]
+	#[tokio::test]
+	async fn rtmps_and_rtmp_share_one_port() {
+		let (server_config, connector) = tls_fixture();
+
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap())
+			.await
+			.unwrap()
+			.with_tls(server_config);
+		let addr = server.local_addr().unwrap();
+
+		rtmps_publish(&mut server, connector).await;
 
 		let plain = tokio::spawn(async move {
 			let stream = TcpStream::connect(addr).await.unwrap();
@@ -2326,5 +2382,54 @@ mod tests {
 		};
 		play.reject("test rejection").await.unwrap();
 		plain.abort();
+	}
+
+	/// With plaintext turned off, a server refuses a plaintext client at its first byte,
+	/// without waiting for the request timeout, and keeps serving RTMPS afterwards.
+	#[cfg(feature = "tls")]
+	#[tokio::test]
+	async fn rtmps_required_refuses_plaintext() {
+		let (server_config, connector) = tls_fixture();
+
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap())
+			.await
+			.unwrap()
+			.with_tls(server_config)
+			.with_plaintext(false);
+		let addr = server.local_addr().unwrap();
+
+		// The connection is handled inside `accept`, so drive it while the plaintext client
+		// opens with an RTMP C0.
+		let plain = tokio::spawn(async move {
+			let mut stream = TcpStream::connect(addr).await.unwrap();
+			stream.write_all(&[0x03]).await.unwrap();
+			// A refusal closes the socket: EOF, or a reset when unread bytes were pending.
+			// A served client would instead be sent the handshake S0/S1.
+			let mut buf = [0u8; 1];
+			matches!(stream.read(&mut buf).await, Ok(0) | Err(_))
+		});
+
+		// The refusal comes well inside REQUEST_TIMEOUT, so a client that stayed open
+		// (a bug) fails the outer timeout rather than passing quietly.
+		let refused = tokio::select! {
+			refused = tokio::time::timeout(Duration::from_secs(5), plain) => refused,
+			request = server.accept() => panic!("plaintext client yielded a request: {}", request.is_some()),
+		};
+		assert!(refused.expect("plaintext client was not refused").unwrap());
+
+		rtmps_publish(&mut server, connector).await;
+	}
+
+	/// Refusing plaintext with no TLS to serve instead would listen for nothing, so the
+	/// server refuses to run rather than dropping every client.
+	#[tokio::test]
+	async fn plaintext_off_without_tls_is_refused() {
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap())
+			.await
+			.unwrap()
+			.with_plaintext(false);
+
+		assert!(server.check().is_err());
+		assert!(server.accept().await.is_none());
 	}
 }

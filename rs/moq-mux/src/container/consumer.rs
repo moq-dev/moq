@@ -1340,7 +1340,7 @@ mod tests {
 		assert_eq!(micros, vec![0, 100_000], "markers skipped, next group reached");
 	}
 
-	/// LOC consumers skip an empty payload so later producers can write the duration marker.
+	/// LOC video consumers skip an empty payload: it is the duration marker, not media.
 	#[tokio::test]
 	async fn loc_empty_payload_is_skipped() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));

@@ -4,21 +4,25 @@
 
 A hang publisher can announce a stats track in its catalog, and a publisher
 that wants to hear from its viewers can solicit feedback there too. The
-publisher's `stats` track is one snapshot of what it sent, per track and for
-its connection. Each viewer publishes one `.echo` broadcast carrying a
-feedback track for every soliciting publisher it watches: what it received
-and played, per track, and its own connection. A dashboard reads both the
-same way a publisher does, and a Rust encoder adapts its bitrate to what its
-viewers report. Stats and feedback cost nothing on the network unless someone
-subscribes. Not here: the relay's `moq-stats` layout, which stays as it is;
-clock synchronization; any requirement that a client report; and feedback as
-an input to billing, authorization, or route selection.
+publisher's `stats` track is one snapshot of what it sent, per rendition and
+for its connection. A viewer publishes one `.echo` broadcast per soliciting
+catalog it reads, carrying what it received and played, per rendition, and
+its own connection. A dashboard reads both the same way a publisher does, and
+a Rust encoder adapts its bitrate to what its viewers report. Stats and
+feedback cost nothing on the network unless someone subscribes. Not here: the
+relay's `moq-stats` layout, which stays as it is; clock synchronization; any
+requirement that a client report; and feedback as an input to billing,
+authorization, or route selection.
 
 ## Plan
 
 Decided while planning. This supersedes the moq-stats extension design of
-[#4145](https://github.com/moq-dev/moq/pull/4145) and revives
-[moq#2734](https://github.com/moq-dev/moq/issues/2734) in a reshaped form:
+[#4145](https://github.com/moq-dev/moq/pull/4145), revives
+[moq#2734](https://github.com/moq-dev/moq/issues/2734) in a reshaped form, and
+answers the per-track stats question raised in
+[#4496](https://github.com/moq-dev/moq/pull/4496): one snapshot track per
+catalog keyed by rendition, not a stats track per rendition and not a sum per
+kind.
 
 - **Media stats leave moq-stats.** The relay is media-agnostic and keeps
   `Traffic`, `Presence`, and `.stats/node/<node>` unchanged. Media stats are
@@ -26,39 +30,46 @@ Decided while planning. This supersedes the moq-stats extension design of
   extension, `Merge` wrapper, or flattened generic is needed. One layout for
   relay and clients is given up on purpose.
 - **Publisher: `stats: { track }` in the catalog.** A root section naming one
-  snapshot track: `{ transport, tracks: { <track name>: stats::Track } }`,
+  snapshot track: `{ transport, renditions: { <alias>: stats::Track } }`,
   plus container sections flattened in the way `Catalog<E>` flattens
-  `ts::Ext`. It is keyed by the catalog's own track names, so nothing repeats
-  the catalog's `video`/`audio` nesting; the kind comes from the catalog
-  entry. The stats stay off the catalog track, which would otherwise churn
+  `ts::Ext`. The stats stay off the catalog track, which would otherwise churn
   for every viewer on each interval.
+- **Keyed by rendition alias** (2026-09-29). Both snapshots key by the
+  catalog's rendition keys, which [catalog track
+  alias](/quest/m1/catalog-track-alias.md) makes aliases unique within a
+  catalog. Nothing repeats the catalog's `video`/`audio` nesting; the kind
+  comes from the catalog entry. A rendition that references another
+  broadcast is reported to the catalog that lists it, under its alias there.
+  Reason: a track name alone collides once a catalog lists renditions from
+  several broadcasts.
 - **Viewer: feedback only when solicited.** Most publishers do not read
-  feedback, so a publisher solicits it with a root `echo: { track }`
-  section naming the track it will read; absent means none. The section is an
-  object so later fields stay additive. The publisher chooses the name and
-  keeps it unique; a viewer refuses a second catalog claiming a name it
-  already serves.
-- **`.echo` broadcasts.** A viewer publishes one broadcast whose path ends in
-  `.echo`, at a path its token allows, with one feedback track per soliciting
-  publisher, named as that publisher's catalog asks. It is not a hang
-  broadcast and has no catalog, so no player lists it as content, and the
-  suffix lets a reader filter at announce time. Paths are arbitrary: where
-  viewers publish and which prefix a publisher watches is application policy,
-  and the feedback track name, not a path, pairs the two. The name is generic
-  so keyframe requests and bandwidth estimates can join later.
-- **An `.echo` broadcast serves tracks on request.** A publisher can see the
-  announcement and subscribe before the viewer has read its catalog, and a
-  refusal is final, so a static broadcast would lose that feedback. The
-  viewer accepts any requested name and writes an empty snapshot at once (all
-  zeros: nothing received from that publisher yet), then fills it when a
-  watched catalog claims the name. The first claim binds it; a second catalog
-  claiming a bound name is refused. A fixed cap on unclaimed names refuses the
-  overflow, so stray requests cannot grow a viewer's tracks without bound, and
-  an unclaimed track is dropped once its last subscriber leaves, so stale
-  requests do not hold the cap.
-- **Feedback track: one snapshot**, `{ transport, tracks: { <publisher track
-  name>: echo::Track } }`. It is keyed by the publisher's track names, so
-  the publisher looks up its own tracks directly.
+  feedback, so a publisher solicits it with a root `echo: { path }` section;
+  absent means none. The section is an object so later fields stay additive.
+  Root key collisions with application extensions are accepted, not guarded.
+- **Echo path in the catalog** (2026-09-29). `path` is relative to the
+  broadcast serving the catalog (e.g. `viewers/`), and a viewer publishes its
+  `.echo` broadcast under it at a name the application gives it. The
+  application issues tokens to match. Reason: applications control the
+  layout and the token rights, and the publisher reads exactly that prefix.
+- **One `.echo` broadcast per catalog** (2026-09-29). A viewer announces it
+  only after reading the soliciting catalog, and it carries one feedback
+  track at a fixed name hang defines. It is not a hang broadcast and has no
+  catalog, so no player lists it as content, and the suffix lets a reader
+  filter at announce time. The name is generic so keyframe requests and
+  bandwidth estimates can join later. Reason: a shared `.echo` serving a
+  track per publisher needed accept-any-name serving, claims, refusals, and
+  an unclaimed cap to survive name collisions and a publisher subscribing
+  before the viewer read the catalog; one broadcast per catalog removes the
+  collisions, the race, and the cap with less code, and needs no JS track
+  request API.
+- **Trust is the token prefix** (2026-09-29). Whoever the application's
+  tokens let publish under the echo path may report, and no report is
+  authenticated beyond that. How far one viewer may move the encoder is
+  application-specific (a simulcast ladder suffers less from one viewer than
+  a single rendition), so the encoder's built-in step-down policy takes a
+  tunable config that the application can adjust or disable.
+- **Feedback track: one snapshot**, `{ transport, renditions: { <alias>:
+  echo::Track } }`, so the publisher looks up its own renditions directly.
 - **One type per role, shared across kinds.**
   - `stats::Track`: sent frames and bytes, keyframes, skipped frames, target
     bitrate.
@@ -82,27 +93,14 @@ Decided while planning. This supersedes the moq-stats extension design of
   `doc/concept/stats.md` gains a media section beside the relay's, and
   `drafts/draft-lcurley-moq-hang.md` specs the wire.
 
-Open, to settle before [encoder feedback](/quest/m1/stats/encoder-feedback.md)
-starts:
-
-- **Feedback trust.** Every viewer that can publish under the watched prefix
-  counts equally, so one viewer can report false stalls and lower quality for
-  the rest. Candidates: a trusted reporter prefix, authenticated reports, or
-  a bound on each viewer's influence.
-- **Feedback name collisions.** Subscriptions to one track name share a
-  track, so a publisher that picks, or guesses, a name another publisher
-  claimed first on the same viewer reads that publisher's feedback; refusing
-  the second claim does not isolate them. Candidates: an unguessable name, or
-  binding the track to the soliciting publisher.
-
 ## Required
 
+- [Catalog track alias](/quest/m1/catalog-track-alias.md) - rendition keys
+  become aliases, the key both snapshots use
 - [Schema](/quest/m1/stats/schema.md) - hang defines the `stats` and
   `echo` catalog sections, their snapshot types, and the draft text
 - [Rust reporters](/quest/m1/stats/rust.md) - the CLI, players, encoders, and
   moq-mux remuxes publish stats and feedback
-- [JS track requests](/quest/m1/stats/js-requested.md) - `@moq/net` serves a
-  broadcast's tracks on request, as Rust's `broadcast.dynamic()` does
 - [Browser reporters](/quest/m1/stats/js.md) - `<moq-publish>` publishes
   stats and `<moq-watch>` publishes feedback
 - [Encoder feedback](/quest/m1/stats/encoder-feedback.md) - a Rust encoder

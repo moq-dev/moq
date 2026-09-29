@@ -282,6 +282,16 @@ harness_endpoint relay "$URL"
 # (a file has none left in it). It stops itself after its own window, so the
 # round-trip below still bounds the run.
 
+# SCHEDULE carries the rate pcr-timing.py's schedule check grades against. The
+# generated clip is muxed at $BITRATE, which is the rate the catalog records and the
+# exporter pads to. Left to estimate, the grader divides total bytes by the PCR span,
+# and any transient drags that off the true rate: an unpadded first half-second put it
+# ~3 % low over a 20 s window, which then read every correctly padded interval as off
+# schedule. A --source capture's rate is not known here, so for that the grader
+# estimates it and says so.
+SCHEDULE=()
+[[ -z "$SOURCE" ]] && SCHEDULE=(--mux-rate "$BITRATE")
+
 # Both halves matter and `wait` can only report one, so record each. The
 # exporter's own status is not incidental here: it decides whether the grader saw
 # the whole window or graded a stream that ended under it.
@@ -293,7 +303,7 @@ grade_live() {
     timeout -k 3 $((DURATION + 20)) \
         "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts 2>"$HARNESS_RUN/sub.log" |
         python3 "$DIR/pcr-timing.py" --live --seconds "$DURATION" --release-pct-max 1 $STRICT \
-            ${PASSTHRU[@]+"${PASSTHRU[@]}"} >"$HARNESS_RUN/timing.out" 2>&1
+            ${SCHEDULE[@]+"${SCHEDULE[@]}"} ${PASSTHRU[@]+"${PASSTHRU[@]}"} >"$HARNESS_RUN/timing.out" 2>&1
     printf '%s\n' "${PIPESTATUS[0]} ${PIPESTATUS[1]}" >"$HARNESS_RUN/timing.rc"
 }
 
@@ -475,6 +485,18 @@ echo
 if ! analyze "$SUB_TS" "$SRC_TS"; then
     echo >&2
     echo "error: compliance analysis failed (see round-trip logs below)" >&2
+    dump_logs
+    exit 1
+fi
+
+# compliance.py grades rate in aggregate and over fixed windows, neither of which says
+# whether the bytes between consecutive PCRs are the ones the mux rate implies, so the
+# capture goes through pcr-timing.py as well. Its hard checks gate here as they do under
+# --live; pcr-schedule is a shape check, so it reports without gating unless --strict.
+echo
+if ! python3 "$DIR/pcr-timing.py" "$SUB_TS" ${SCHEDULE[@]+"${SCHEDULE[@]}"} $STRICT; then
+    echo >&2
+    echo "error: PCR timing analysis failed (see round-trip logs below)" >&2
     dump_logs
     exit 1
 fi

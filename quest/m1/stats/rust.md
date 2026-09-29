@@ -4,12 +4,12 @@
 
 - `moq import --stats` and `moq publish --stats` announce a stats track in
   the catalog and fill it with what they send.
-- `moq play` and `moq export`, given `--echo <path>`, publish an `.echo`
-  broadcast and serve a feedback track to every watched broadcast that
-  solicits one.
+- `moq play` and `moq export`, given `--echo <name>`, publish an `.echo`
+  broadcast under each watched catalog's echo path and fill its feedback
+  track.
 - `moq export stats <broadcast>` prints a broadcast's stats snapshots, and
-  `moq export echo <path>` prints an `.echo` broadcast's feedback, as JSON
-  lines.
+  `moq export echo <prefix>` prints the feedback of every `.echo` broadcast
+  under a prefix, as JSON lines.
 
 ## Plan
 
@@ -26,23 +26,17 @@
   interval and writes it through `moq_json::snapshot`, with the `.z` sibling.
   A TS import flattens `ts::Stats` in as `mpegts`. `transport` comes from
   the connection's `ConnectionStats`.
-- Feedback: the `.echo` broadcast serves through `broadcast.dynamic()`. Each
-  `requested_track()` is accepted, capped for unclaimed names (an unclaimed
-  track is dropped once unsubscribed), and answered
-  with an empty `hang::echo::Snapshot`; a watched catalog whose `echo`
-  section names the track claims it, and the player fills it from then on. A
-  second catalog claiming a bound name is refused. A
-  path that does not end in `.echo` is refused at parse time.
+- Feedback: after reading a catalog with an `echo` section, the player
+  publishes `<broadcast>/<echo path>/<name>.echo` with the fixed feedback
+  track, keyed by the catalog's rendition aliases, and unannounces it when it
+  stops watching. A name that is not a single path segment is refused at
+  parse time.
 - `moq export stats` and `moq export echo` are sinks that skip `.hang` media
   discovery, so they route around `catalog_format`.
 - `doc/bin/cli.md` documents the flags and sinks.
 - The media test publishes with `--stats` and plays with `--echo` against a
-  publisher that solicits feedback. A second arm starts the publisher's
-  subscription before the viewer reads the catalog, the race this serving
-  rule exists for. It asserts that the publisher's frame
+  publisher that solicits feedback. It asserts that the publisher's frame
   count matches what was sent and that the viewer's newest arrival advances.
-- A unit test exceeds the unclaimed cap with sequential requests that each
-  disconnect, and a later request is still accepted.
 
 ## Required
 

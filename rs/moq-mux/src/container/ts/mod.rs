@@ -33,6 +33,8 @@ pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, Program, SiEntry, T
 pub use export::*;
 pub use import::*;
 
+pub mod stats;
+
 #[cfg(test)]
 mod export_test;
 #[cfg(test)]
