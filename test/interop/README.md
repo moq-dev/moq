@@ -165,6 +165,8 @@ contract](../README.md).
 ```text
 interop.sh              orchestrator: build clients, run the relay + matrix or media checks
 interop.toml            relay config (anonymous, self-signed localhost)
+bare-fin.ts             the JS side of `just test bare-fin`, driven by moq-net's tests
+varint.ts               the JS side of the varint check, driven by moq-net's tests
 clients/
   python/interop.py       publish/subscribe via py/moq-rs (import moq)
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
@@ -195,3 +197,12 @@ transport. It checks bare FIN before and after SUBSCRIBE\_START on lite-05/06/07
 and FIN without PUBLISH\_DONE on IETF draft-19. Clean-end controls use the same
 path. This tests response interoperability, not network delivery or relay behavior.
 The interop workflow runs it alongside the real-transport matrix.
+
+## Varints
+
+Every `just test interop` run starts with `varint_interop` in moq-net, which
+hands moq-net's QUIC and leading-ones encodings of each varint size boundary
+(plus 2^53, where a JS `number` stops being exact, and 2^62 - 1) to
+`varint.ts`. That script decodes them with js/net's `VarInt`, checks its
+`number` conversion, and returns js/net's own encodings, which Rust requires to
+match byte for byte and decode back to the same value.

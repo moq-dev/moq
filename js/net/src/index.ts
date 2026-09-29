@@ -28,5 +28,7 @@ export * as Path from "./path.ts";
 export * as Time from "./time.ts";
 /** Track role handles. */
 export * as Track from "./track.ts";
-/** QUIC variable-length integer encoding and decoding. */
+/** Varint encoding and decoding, in QUIC's format and moq-transport's leading-ones format. */
 export * as Varint from "./varint.ts";
+/** An unsigned integer below 2^62, the full range of a varint. */
+export { VarInt } from "./varint.ts";

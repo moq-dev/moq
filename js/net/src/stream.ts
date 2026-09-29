@@ -4,7 +4,22 @@ import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import { TimeoutError, withTimeout } from "./util/timeout.ts";
 import { decodeUtf8 } from "./util/utf8.ts";
-import * as Varint from "./varint.ts";
+import {
+	lengthLeadingOnes,
+	lengthQuic,
+	POW32,
+	parts,
+	peekLeadingOnes,
+	peekQuic,
+	readLeadingOnes,
+	readQuic,
+	SAFE_HI,
+	split,
+	toBigInt,
+	writeLeadingOnes,
+	writeQuic,
+} from "./util/varint.ts";
+import { VarInt } from "./varint.ts";
 
 // Decode raw transport errors before mapping so they cannot bypass the negotiated
 // registry. Ordinary errors already send 0 and retain their local identity.
@@ -367,6 +382,10 @@ export class Reader {
 		return this.decode(U62);
 	}
 
+	async varint(): Promise<VarInt> {
+		return this.decode(VARINT);
+	}
+
 	// Returns false if there is more data to read, blocking if it hasn't been received yet.
 	async done(): Promise<boolean> {
 		if (this.#buffer.byteLength > 0 || this.#chunked > 0) return false;
@@ -411,10 +430,13 @@ export class Cursor {
 	readonly version?: IetfVersion;
 	#buffer: Uint8Array;
 	#offset = 0;
+	// Resolved once, since every varint read branches on it.
+	#leadingOnes: boolean;
 
 	constructor(buffer: Uint8Array, version?: IetfVersion) {
 		this.#buffer = buffer;
 		this.version = version;
+		this.#leadingOnes = isLeadingOnes(version);
 	}
 
 	/** How many bytes have been read. */
@@ -484,69 +506,46 @@ export class Cursor {
 		return (b[o] << 8) | b[o + 1];
 	}
 
-	// Returns a Number using 53-bits, the max Javascript can use for integer math.
+	/** Read a varint as a `number`, throwing if it is above `Number.MAX_SAFE_INTEGER`. */
 	u53(): number {
-		// Most varints fit in 4 bytes, which decode without a bigint.
-		if (!isLeadingOnes(this.version)) {
-			this.#ensure(1);
-			const b = this.#buffer;
-			const o = this.#offset;
-			const size = 1 << (b[o] >> 6);
-			if (size < 8) {
-				this.#ensure(size);
-				this.#offset += size;
-				if (size === 1) return b[o] & 0x3f;
-				if (size === 2) return ((b[o] & 0x3f) << 8) | b[o + 1];
-				return (b[o] & 0x3f) * 2 ** 24 + ((b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]);
-			}
-		}
-
-		const v = this.u62();
-		if (v > Varint.MAX_U53) {
-			throw new Error(`value larger than 53-bits: ${v.toString()}`);
-		}
-		return Number(v);
+		const lo = this.#varint();
+		const hi = parts.hi;
+		if (hi >= SAFE_HI) throw new Error(`value larger than 53-bits: ${toBigInt(hi, lo)}`);
+		return hi * POW32 + lo;
 	}
 
-	// NOTE: Returns a bigint instead of a number since it may be larger than 53-bits
+	/** Read a varint as a bigint. A leading-ones varint may exceed 62 bits. */
 	u62(): bigint {
-		return isLeadingOnes(this.version) ? this.#leadingOnes() : this.#quicVarint();
+		const lo = this.#varint();
+		return toBigInt(parts.hi, lo);
 	}
 
-	#quicVarint(): bigint {
-		this.#ensure(1);
-		const size = 1 << (this.#buffer[this.#offset] >> 6);
-		if (size < 8) return BigInt(this.u53());
-
-		const slice = this.read(8);
-		const view = new DataView(slice.buffer, slice.byteOffset, slice.byteLength);
-		return view.getBigUint64(0) & 0x3fffffffffffffffn;
+	/** Read a varint, throwing if a leading-ones varint exceeds 62 bits. */
+	varint(): VarInt {
+		const lo = this.#varint();
+		return new VarInt(parts.hi, lo);
 	}
 
-	#leadingOnes(): bigint {
+	// Decode the next varint in the version's format, returning its lower half and leaving the upper in `parts`.
+	#varint(): number {
 		this.#ensure(1);
-		const b = this.#buffer[this.#offset];
-
-		// Count leading 1-bits
-		let ones = 0;
-		for (let bit = 7; bit >= 0; bit--) {
-			if (b & (1 << bit)) ones++;
-			else break;
+		const b = this.#buffer;
+		const o = this.#offset;
+		let size: number;
+		if (this.#leadingOnes) {
+			size = peekLeadingOnes(b[o]);
+			// 1111110x is a 7-byte form. Draft-17 rejects it; draft-18+ allows it per #1595.
+			if (size === 7 && this.version === Version.DRAFT_17) {
+				throw new Error("invalid leading-ones varint: 1111110x prefix is reserved on draft-17");
+			}
+			this.#ensure(size);
+			this.#offset += size;
+			return readLeadingOnes(b, o, size);
 		}
-
-		// 1111110x is a 7-byte form. Draft-17 rejects it; draft-18+ allows it per #1595.
-		if (ones === 6 && this.version === Version.DRAFT_17) {
-			throw new Error("invalid leading-ones varint: 1111110x prefix is reserved on draft-17");
-		}
-
-		let totalSize: number;
-		if (ones <= 5) totalSize = ones + 1;
-		else if (ones === 6) totalSize = 7;
-		else if (ones === 7) totalSize = 8;
-		else totalSize = 9; // ones === 8
-
-		const [value] = Varint.decodeLeadingOnes(this.read(totalSize));
-		return value;
+		size = peekQuic(b[o]);
+		this.#ensure(size);
+		this.#offset += size;
+		return readQuic(b, o, size);
 	}
 }
 
@@ -557,6 +556,7 @@ const U8 = (c: Cursor) => c.u8();
 const U16 = (c: Cursor) => c.u16();
 const U53 = (c: Cursor) => c.u53();
 const U62 = (c: Cursor) => c.u62();
+const VARINT = (c: Cursor) => c.varint();
 
 // Writer wraps a stream and writes chunks of data
 export class Writer {
@@ -564,8 +564,7 @@ export class Writer {
 	#stream: WritableStream<Uint8Array>;
 	#closed?: Promise<void>;
 
-	// Scratch buffer for writing varints.
-	// Fixed at 9 bytes (leading-ones max).
+	// Scratch buffer for each primitive write, sized for the longest (a 9-byte leading-ones varint).
 	#scratch: ArrayBuffer;
 
 	version?: IetfVersion;
@@ -620,19 +619,28 @@ export class Writer {
 		if (!Number.isSafeInteger(v) || v < 0) {
 			throw new RangeError(`invalid u53: ${v}`);
 		}
-		if (isLeadingOnes(this.version)) {
-			await this.write(Varint.encodeLeadingOnesTo(this.#scratch, v));
-		} else {
-			await this.write(Varint.encodeTo(this.#scratch, v));
-		}
+		await this.#varint(Math.floor(v / POW32), v >>> 0);
 	}
 
 	async u62(v: bigint) {
+		const lo = split(v);
+		await this.#varint(parts.hi, lo);
+	}
+
+	async varint(v: VarInt) {
+		await this.#varint(v.hi, v.lo);
+	}
+
+	#varint(hi: number, lo: number): Promise<void> {
+		let buf: Uint8Array;
 		if (isLeadingOnes(this.version)) {
-			await this.write(Varint.encodeLeadingOnesTo(this.#scratch, v));
+			buf = new Uint8Array(this.#scratch, 0, lengthLeadingOnes(hi, lo));
+			writeLeadingOnes(buf, hi, lo, buf.length);
 		} else {
-			await this.write(Varint.encodeTo(this.#scratch, v));
+			buf = new Uint8Array(this.#scratch, 0, lengthQuic(hi, lo));
+			writeQuic(buf, hi, lo, buf.length);
 		}
+		return this.write(buf);
 	}
 
 	async write(v: Uint8Array) {

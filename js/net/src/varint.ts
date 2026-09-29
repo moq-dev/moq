@@ -1,9 +1,25 @@
 /**
- * QUIC variable-length integer encoding and decoding.
+ * Variable-length integers: QUIC's (RFC 9000 Section 16) and moq-transport's leading-ones form.
  * https://www.rfc-editor.org/rfc/rfc9000#section-16
  *
  * @module
  */
+
+import {
+	lengthLeadingOnes,
+	lengthQuic,
+	POW32,
+	parts,
+	peekLeadingOnes,
+	peekQuic,
+	readLeadingOnes,
+	readQuic,
+	SAFE_HI,
+	split,
+	toBigInt,
+	writeLeadingOnes,
+	writeQuic,
+} from "./util/varint.ts";
 
 /** Largest value that fits in a 1-byte varint (6 bits). */
 export const MAX_U6 = 2 ** 6 - 1;
@@ -14,177 +30,125 @@ export const MAX_U30 = 2 ** 30 - 1;
 /** Largest value representable without precision loss (`Number.MAX_SAFE_INTEGER`, 53 bits). */
 export const MAX_U53 = Number.MAX_SAFE_INTEGER;
 
-// Leading-ones varint encoding/decoding (draft-17 Section 1.4.1)
-// Encoding scheme:
-// 0xxxxxxx        → 1 byte  (7 bits)
-// 10xxxxxx + 1B   → 2 bytes (14 bits)
-// 110xxxxx + 2B   → 3 bytes (21 bits)
-// 1110xxxx + 3B   → 4 bytes (28 bits)
-// 11110xxx + 4B   → 5 bytes (35 bits)
-// 111110xx + 5B   → 6 bytes (42 bits)
-// 1111110x + 6B   → 7 bytes (49 bits), draft-18+ only (invalid in draft-17 per #1595)
-// 11111110 + 7B   → 8 bytes (56 bits)
-// 11111111 + 8B   → 9 bytes (64 bits)
+// hi at or above this is past 2^62 - 1.
+const MAX_HI = 2 ** 30;
 
-const MAX_U64 = (1n << 64n) - 1n;
+/**
+ * An unsigned integer below 2^62, the full range of a varint.
+ *
+ * Held as two 32-bit halves so it encodes and decodes without a BigInt. Converting to a `number`
+ * throws past 2^53 rather than rounding.
+ */
+export class VarInt {
+	/** The value 0. */
+	static readonly ZERO = new VarInt(0, 0);
+	/** The largest value, 2^62 - 1. */
+	static readonly MAX = new VarInt(MAX_HI - 1, POW32 - 1);
+
+	/** The upper 30 bits. */
+	readonly hi: number;
+	/** The lower 32 bits. */
+	readonly lo: number;
+
+	/** Join the upper 30 and lower 32 bits, throwing if either is out of range. */
+	constructor(hi: number, lo: number) {
+		if (!Number.isInteger(hi) || hi < 0 || hi >= MAX_HI) {
+			throw new RangeError(`overflow, value larger than 62-bits: upper half ${hi}`);
+		}
+		if (!Number.isInteger(lo) || lo < 0 || lo >= POW32) throw new RangeError(`invalid lower half: ${lo}`);
+		this.hi = hi;
+		this.lo = lo;
+	}
+
+	/** Convert a non-negative safe integer, throwing on anything else. */
+	static fromNumber(v: number): VarInt {
+		if (!Number.isSafeInteger(v) || v < 0) throw new RangeError(`invalid varint: ${v}`);
+		return new VarInt(Math.floor(v / POW32), v >>> 0);
+	}
+
+	/** Convert a bigint, throwing unless it is in [0, 2^62). */
+	static fromBigInt(v: bigint): VarInt {
+		if (v < 0n || v >> 62n) throw new RangeError(`invalid varint: ${v}`);
+		return new VarInt(Number(v >> 32n), Number(v & 0xffffffffn));
+	}
+
+	/** Convert to a `number`, throwing if it is above `Number.MAX_SAFE_INTEGER`. */
+	toNumber(): number {
+		if (this.hi >= SAFE_HI) throw new RangeError(`value larger than 53-bits: ${this.toString()}`);
+		return this.hi * POW32 + this.lo;
+	}
+
+	/** Convert to a bigint, exactly. */
+	toBigInt(): bigint {
+		return toBigInt(this.hi, this.lo);
+	}
+
+	/** The value in decimal. */
+	toString(): string {
+		return this.hi < SAFE_HI ? String(this.hi * POW32 + this.lo) : this.toBigInt().toString();
+	}
+
+	/** Negative if this is less than `other`, zero if equal, positive if greater. */
+	compare(other: VarInt): number {
+		return this.hi - other.hi || this.lo - other.lo;
+	}
+
+	/** Whether this equals `other`. */
+	equals(other: VarInt): boolean {
+		return this.hi === other.hi && this.lo === other.lo;
+	}
+
+	/** This plus a non-negative safe integer, throwing if the sum reaches 2^62. */
+	add(delta: number): VarInt {
+		if (!Number.isSafeInteger(delta) || delta < 0) throw new RangeError(`invalid delta: ${delta}`);
+		const lo = this.lo + (delta >>> 0);
+		return new VarInt(this.hi + Math.floor(delta / POW32) + (lo >= POW32 ? 1 : 0), lo >>> 0);
+	}
+}
+
+// Like split, but also taking a VarInt.
+function load(v: number | bigint | VarInt): number {
+	if (!(v instanceof VarInt)) return split(v);
+	parts.hi = v.hi;
+	return v.lo;
+}
+
+// The size of the varint at the start of `buf`, throwing unless all of it is there.
+function sizeOf(buf: Uint8Array, size: (first: number) => number): number {
+	if (buf.length === 0) throw new Error("buffer is empty");
+	const n = size(buf[0]);
+	if (buf.length < n) throw new Error(`buffer too short: need ${n} bytes, have ${buf.length}`);
+	return n;
+}
 
 /** Number of bytes needed to encode a value in the leading-ones varint format. */
-export function sizeLeadingOnes(v: number | bigint): number {
-	const b = BigInt(v);
-	if (b < 0n) throw new RangeError(`value is negative: ${v}`);
-	if (b > MAX_U64) throw new RangeError(`value exceeds 64 bits: ${v}`);
-	if (b < 1n << 7n) return 1;
-	if (b < 1n << 14n) return 2;
-	if (b < 1n << 21n) return 3;
-	if (b < 1n << 28n) return 4;
-	if (b < 1n << 35n) return 5;
-	if (b < 1n << 42n) return 6;
-	if (b < 1n << 56n) return 8;
-	return 9;
+export function sizeLeadingOnes(v: number | bigint | VarInt): number {
+	const lo = load(v);
+	return lengthLeadingOnes(parts.hi, lo);
 }
 
 /** Encode a value in leading-ones varint format into the provided buffer, returning the written subarray. */
-export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint): Uint8Array {
-	const x = BigInt(v);
-	if (x < 0n) throw new RangeError(`underflow, value is negative: ${v}`);
-	if (x > MAX_U64) throw new RangeError(`value exceeds 64 bits: ${v}`);
-
-	const view = new DataView(dst);
-
-	if (x < 1n << 7n) {
-		view.setUint8(0, Number(x));
-		return new Uint8Array(dst, 0, 1);
-	}
-	if (x < 1n << 14n) {
-		view.setUint8(0, 0x80 | Number(x >> 8n));
-		view.setUint8(1, Number(x & 0xffn));
-		return new Uint8Array(dst, 0, 2);
-	}
-	if (x < 1n << 21n) {
-		view.setUint8(0, 0xc0 | Number(x >> 16n));
-		view.setUint16(1, Number(x & 0xffffn));
-		return new Uint8Array(dst, 0, 3);
-	}
-	if (x < 1n << 28n) {
-		view.setUint8(0, 0xe0 | Number(x >> 24n));
-		view.setUint8(1, Number((x >> 16n) & 0xffn));
-		view.setUint16(2, Number(x & 0xffffn));
-		return new Uint8Array(dst, 0, 4);
-	}
-	if (x < 1n << 35n) {
-		view.setUint8(0, 0xf0 | Number(x >> 32n));
-		view.setUint32(1, Number(x & 0xffffffffn));
-		return new Uint8Array(dst, 0, 5);
-	}
-	if (x < 1n << 42n) {
-		view.setUint8(0, 0xf8 | Number(x >> 40n));
-		view.setUint8(1, Number((x >> 32n) & 0xffn));
-		view.setUint32(2, Number(x & 0xffffffffn));
-		return new Uint8Array(dst, 0, 6);
-	}
-	if (x < 1n << 56n) {
-		// 11111110 + 7 bytes
-		view.setUint8(0, 0xfe);
-		view.setUint8(1, Number((x >> 48n) & 0xffn));
-		view.setUint16(2, Number((x >> 32n) & 0xffffn));
-		view.setUint32(4, Number(x & 0xffffffffn));
-		return new Uint8Array(dst, 0, 8);
-	}
-	// 11111111 + 8 bytes
-	view.setUint8(0, 0xff);
-	view.setBigUint64(1, x);
-	return new Uint8Array(dst, 0, 9);
+export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint | VarInt): Uint8Array {
+	const lo = load(v);
+	const buf = new Uint8Array(dst, 0, lengthLeadingOnes(parts.hi, lo));
+	writeLeadingOnes(buf, parts.hi, lo, buf.length);
+	return buf;
 }
 
 /** Encode a value in leading-ones varint format into a freshly allocated buffer. */
-export function encodeLeadingOnes(v: number | bigint): Uint8Array {
+export function encodeLeadingOnes(v: number | bigint | VarInt): Uint8Array {
 	return encodeLeadingOnesTo(new ArrayBuffer(9), v);
 }
 
-/** Decode a leading-ones varint, returning the value and the remaining buffer. */
+/**
+ * Decode a leading-ones varint, returning the value and the remaining buffer.
+ *
+ * Accepts the 7-byte form, which only draft-18+ allows, since there is no version here to check.
+ */
 export function decodeLeadingOnes(buf: Uint8Array): [bigint, Uint8Array] {
-	if (buf.length === 0) throw new Error("buffer is empty");
-
-	const b = buf[0];
-	// Count leading 1-bits
-	let ones = 0;
-	for (let bit = 7; bit >= 0; bit--) {
-		if (b & (1 << bit)) ones++;
-		else break;
-	}
-
-	// 1111110x is a 7-byte form: invalid on draft-17, allowed on draft-18+ per #1595.
-	// This standalone decoder is permissive (Postel-style) since we lack version context here.
-
-	let totalSize: number;
-	if (ones <= 5) totalSize = ones + 1;
-	else if (ones === 6) totalSize = 7;
-	else if (ones === 7) totalSize = 8;
-	else totalSize = 9; // ones === 8
-
-	if (buf.length < totalSize) {
-		throw new Error(`buffer too short: need ${totalSize} bytes, have ${buf.length}`);
-	}
-
-	const view = new DataView(buf.buffer, buf.byteOffset, totalSize);
-	const remain = buf.subarray(totalSize);
-	let value: bigint;
-
-	switch (ones) {
-		case 0:
-			value = BigInt(b);
-			break;
-		case 1:
-			value = (BigInt(b & 0x3f) << 8n) | BigInt(buf[1]);
-			break;
-		case 2:
-			value = (BigInt(b & 0x1f) << 16n) | BigInt(view.getUint16(1));
-			break;
-		case 3:
-			value = (BigInt(b & 0x0f) << 24n) | (BigInt(buf[1]) << 16n) | (BigInt(buf[2]) << 8n) | BigInt(buf[3]);
-			break;
-		case 4:
-			value = (BigInt(b & 0x07) << 32n) | BigInt(view.getUint32(1));
-			break;
-		case 5:
-			value =
-				(BigInt(b & 0x03) << 40n) |
-				(BigInt(buf[1]) << 32n) |
-				(BigInt(buf[2]) << 24n) |
-				(BigInt(buf[3]) << 16n) |
-				(BigInt(buf[4]) << 8n) |
-				BigInt(buf[5]);
-			break;
-		case 6: {
-			// 1111110x + 6 bytes = 49 bits (draft-18+)
-			value =
-				(BigInt(b & 0x01) << 48n) |
-				(BigInt(buf[1]) << 40n) |
-				(BigInt(buf[2]) << 32n) |
-				(BigInt(buf[3]) << 24n) |
-				(BigInt(buf[4]) << 16n) |
-				(BigInt(buf[5]) << 8n) |
-				BigInt(buf[6]);
-			break;
-		}
-		case 7: {
-			// 11111110 + 7 bytes = 56 usable bits
-			const hi = new Uint8Array(8);
-			hi[0] = 0;
-			hi.set(buf.subarray(1, 8), 1);
-			value = new DataView(hi.buffer).getBigUint64(0);
-			break;
-		}
-		case 8: {
-			// 11111111 + 8 bytes = 64 bits
-			value = new DataView(buf.buffer, buf.byteOffset + 1, 8).getBigUint64(0);
-			break;
-		}
-		default:
-			throw new Error("impossible");
-	}
-
-	return [value, remain];
+	const size = sizeOf(buf, peekLeadingOnes);
+	const lo = readLeadingOnes(buf, 0, size);
+	return [toBigInt(parts.hi, lo), buf.subarray(size)];
 }
 
 /**
@@ -198,63 +162,22 @@ export function size(v: number): number {
 	throw new Error(`overflow, value larger than 53-bits: ${v}`);
 }
 
-// Helper functions for writing to an ArrayBuffer
-function setUint8(dst: ArrayBuffer, v: number): Uint8Array {
-	const buffer = new Uint8Array(dst, 0, 1);
-	buffer[0] = v;
-	return buffer;
-}
-
-function setUint16(dst: ArrayBuffer, v: number): Uint8Array {
-	const view = new DataView(dst, 0, 2);
-	view.setUint16(0, v);
-	return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-}
-
-function setUint32(dst: ArrayBuffer, v: number): Uint8Array {
-	const view = new DataView(dst, 0, 4);
-	view.setUint32(0, v);
-	return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-}
-
-function setUint64(dst: ArrayBuffer, v: bigint): Uint8Array {
-	const view = new DataView(dst, 0, 8);
-	view.setBigUint64(0, v);
-	return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-}
-
-const MAX_U62 = 2n ** 62n - 1n;
-
 /**
- * Encodes a number or bigint into a scratch buffer.
- * Used by stream.ts to avoid allocations.
+ * Encodes a value as a QUIC variable-length integer into the provided buffer,
+ * returning the written subarray.
  */
-export function encodeTo(dst: ArrayBuffer, v: number | bigint): Uint8Array {
-	const b = BigInt(v);
-	if (b < 0n) {
-		throw new Error(`underflow, value is negative: ${v}`);
-	}
-	if (b > MAX_U62) {
-		throw new Error(`overflow, value larger than 62-bits: ${v}`);
-	}
-	const n = Number(b);
-	if (n <= MAX_U6) {
-		return setUint8(dst, n);
-	}
-	if (n <= MAX_U14) {
-		return setUint16(dst, n | 0x4000);
-	}
-	if (n <= MAX_U30) {
-		return setUint32(dst, n | 0x80000000);
-	}
-	return setUint64(dst, b | 0xc000000000000000n);
+export function encodeTo(dst: ArrayBuffer, v: number | bigint | VarInt): Uint8Array {
+	const lo = load(v);
+	const buf = new Uint8Array(dst, 0, lengthQuic(parts.hi, lo));
+	writeQuic(buf, parts.hi, lo, buf.length);
+	return buf;
 }
 
 /**
- * Encodes a number or bigint as a QUIC variable-length integer.
+ * Encodes a value as a QUIC variable-length integer.
  * Returns a new Uint8Array containing the encoded bytes.
  */
-export function encode(v: number | bigint): Uint8Array {
+export function encode(v: number | bigint | VarInt): Uint8Array {
 	return encodeTo(new ArrayBuffer(8), v);
 }
 
@@ -263,34 +186,9 @@ export function encode(v: number | bigint): Uint8Array {
  * Returns a tuple of [value, remaining buffer].
  */
 export function decodeBigInt(buf: Uint8Array): [bigint, Uint8Array] {
-	if (buf.length === 0) {
-		throw new Error("buffer is empty");
-	}
-
-	const size = 1 << ((buf[0] & 0xc0) >> 6);
-
-	if (buf.length < size) {
-		throw new Error(`buffer too short: need ${size} bytes, have ${buf.length}`);
-	}
-
-	const view = new DataView(buf.buffer, buf.byteOffset, size);
-	const remain = buf.subarray(size);
-
-	let value: bigint;
-
-	if (size === 1) {
-		value = BigInt(buf[0] & 0x3f);
-	} else if (size === 2) {
-		value = BigInt(view.getUint16(0) & 0x3fff);
-	} else if (size === 4) {
-		value = BigInt(view.getUint32(0) & 0x3fffffff);
-	} else if (size === 8) {
-		value = view.getBigUint64(0) & 0x3fffffffffffffffn;
-	} else {
-		throw new Error("impossible");
-	}
-
-	return [value, remain];
+	const size = sizeOf(buf, peekQuic);
+	const lo = readQuic(buf, 0, size);
+	return [toBigInt(parts.hi, lo), buf.subarray(size)];
 }
 
 /**
@@ -298,6 +196,7 @@ export function decodeBigInt(buf: Uint8Array): [bigint, Uint8Array] {
  * Values above 53 bits lose precision; use {@link decodeBigInt} for exact decoding.
  */
 export function decode(buf: Uint8Array): [number, Uint8Array] {
-	const [value, remain] = decodeBigInt(buf);
-	return [Number(value), remain];
+	const size = sizeOf(buf, peekQuic);
+	const lo = readQuic(buf, 0, size);
+	return [parts.hi * POW32 + lo, buf.subarray(size)];
 }

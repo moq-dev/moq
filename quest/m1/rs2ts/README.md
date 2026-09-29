@@ -44,7 +44,7 @@ Decided in planning (2026-09-27), with the spike data in
   the code once they run on a mock clock instead of tokio.
 - The line lands on `dev`: the Rust refactors break moq-net's published API,
   and the translator and generated code build on them. Only the additive
-  [JS VarInt](/quest/m1/rs2ts/js-varint.md) lands on `main`.
+  JS `VarInt` (`js/net/src/varint.ts`) is on `main`.
 - Hand-written js/net fixes keep landing until the generated path replaces
   them; it is months out.
 
@@ -55,7 +55,6 @@ js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-ben
 ## Required
 
 - [VarInt codec](/quest/m1/rs2ts/varint-codec.md) - moq-net encodes through a `VarInt` newtype and a concrete slice-based codec, not generic traits on primitives
-- [JS VarInt](/quest/m1/rs2ts/js-varint.md) - js/net has a 62-bit `VarInt` type with checked `number` conversion and no BigInt on the hot path
 - [rs2ts](/quest/m1/rs2ts/translator.md) - a Charon-based translator emits readable TypeScript for moq-net's lite codec, committed and checked for drift in CI
 - [Sans-IO moq-net](/quest/m1/rs2ts/sans-io/README.md) - moq-net builds and runs without a runtime; async helpers sit behind an `async` feature
 - [Mock-clock tests](/quest/m1/rs2ts/mock-clock.md) - moq-net's tests run on the sans-IO clock instead of tokio, so they translate with the code
