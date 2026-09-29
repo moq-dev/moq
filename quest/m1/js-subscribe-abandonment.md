@@ -9,13 +9,15 @@ of receiving an abandonment error.
 
 The setup path is the same on main, so the fix lands there.
 
-- `waitAbandoned` (`js/net/src/ietf/subscriber.ts:423-428`) checks demand and
-  resolves through `Promise.race`; another microtask can attach a viewer before
-  the catch closes the producer at `:449`. Reproduce that ordering in
-  `js/net/src/ietf/subscriber.test.ts`: the case at `:673` covers only the
-  established serving loop.
+- `waitAbandoned` (in `#runSubscribe`, `js/net/src/ietf/subscriber.ts`)
+  checks demand and resolves through `race`; another microtask can attach a
+  viewer before the catch awaits `sessionCause` and rejects the request.
+  Reproduce that ordering in `js/net/src/ietf/subscriber.test.ts`: "returning
+  demand survives a blocked unsubscribe" covers only the established serving
+  loop.
 - Recheck demand and commit the close in the same synchronous continuation,
-  the way the serving loop does (`:511-523`). When demand returns, keep the
+  the way the serving loop after SUBSCRIBE_OK does (its `producer.used`
+  re-check before `producer.close()`). When demand returns, keep the
   existing setup operation and timeout budget.
 - Cover abandonment before SUBSCRIBE_OK, demand returning before the commit,
   and late setup completion. Verify cancellation and alias cleanup still happen

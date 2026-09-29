@@ -1,4 +1,7 @@
-import type { Reader, Writer } from "../stream.ts";
+import { race } from "@moq/signals";
+import type * as netGroup from "../group.ts";
+import type { Cursor, Reader, Writer } from "../stream.ts";
+import * as Time from "../time.ts";
 import * as Message from "./message.ts";
 import { hasFrameBounds, type Version } from "./version.ts";
 
@@ -61,27 +64,44 @@ export class Group {
 	}
 }
 
-export class Frame {
-	payload: Uint8Array;
+/** Decode an unsigned zigzag varint back to a signed delta (mirrors Rust `VarInt::to_zigzag`). */
+function unzigzag(v: bigint): bigint {
+	return (v >> 1n) ^ -(v & 1n);
+}
 
-	constructor(payload: Uint8Array) {
-		this.payload = payload;
+/**
+ * A synchronous decode for one frame of a group or FETCH response stream.
+ *
+ * A non-zero `scale` means every frame is prefixed with a zigzag-delta timestamp (the lite-05
+ * FRAME format), decoded into a Timestamp at that scale. Scale 0 (pre-lite-05) carries no
+ * timestamp, so frames are wall-clock stamped on arrival.
+ */
+export function frameDecoder(scale: number): (c: Cursor) => netGroup.Frame {
+	if (scale === 0) {
+		return (c) => ({ payload: c.read(c.u53()), timestamp: Time.Timestamp.now() });
 	}
 
-	async #encode(w: Writer) {
-		await w.write(this.payload);
-	}
+	const timescale = Time.Timescale(scale);
+	let prevTs = 0n;
+	return (c) => {
+		const delta = unzigzag(c.u62());
+		const payload = c.read(c.u53());
+		// After the last read, so a decode that ran short and gets retried adds the delta once.
+		prevTs += delta;
+		return { payload, timestamp: new Time.Timestamp(Number(prevTs), timescale) };
+	};
+}
 
-	static async #decode(r: Reader): Promise<Frame> {
-		const payload = await r.readAll();
-		return new Frame(payload);
-	}
+/** Write a group stream's frames into `producer` until the stream ends or the producer closes. */
+export async function readFrames(stream: Reader, producer: netGroup.Producer, scale: number): Promise<void> {
+	const decode = frameDecoder(scale);
 
-	async encode(w: Writer): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader): Promise<Frame> {
-		return Message.decode(r, Frame.#decode);
+	for (;;) {
+		// Every frame already buffered is written without an await, so the reader wakes once
+		// per batch rather than once per frame. Only the group's own stream ends it: a track
+		// that closes first has already closed (or aborted) this group through its cache.
+		const frame = stream.tryDecode(decode) ?? (await race([stream.decodeMaybe(decode), producer.closed]));
+		if (!frame || frame instanceof Error) return;
+		producer.writeFrame(frame);
 	}
 }

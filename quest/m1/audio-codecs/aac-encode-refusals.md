@@ -15,7 +15,10 @@ refused, not logged and written as stereo, the way the ADTS writer refuses it.
   still refused unless the caller supplies a layout; guessing speaker
   positions is what this removes.
 - Callers in `moq-audio` (encoder config, description synthesis) already
-  validate first; check they keep their error messages.
+  validate first; check they keep their error messages. `Producer` synthesizes
+  the ASC at construction, so it refuses such a layout there.
+- JS already matches: `@moq/hang`'s `audioSpecificConfig` throws for the same
+  counts (#4119). Test every count from 1 to 8 and one beyond.
 
 Public API: `Config::encode` (or its constructor) changes. Wire: none.
 

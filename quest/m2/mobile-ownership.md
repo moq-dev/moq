@@ -18,14 +18,9 @@ capture quests in this questline start only once this is settled.
   Kotlin over `moq-ffi`, what the iroh-live reimplementation says about the
   Rust-native audience, and the copy cost of byte-array frames measured on a
   device.
-- Record the verdict here and in `rs/moq-ffi/CLAUDE.md`, and re-estimate
+- Record the verdict here and in `rs/moq-ffi/AGENTS.md`, and re-estimate
   [Android capture](/quest/m2/mobile-capture-android.md) and
   [iOS capture](/quest/m2/mobile-capture-ios.md) against it; both target
   `moq-video`, so replace them with the required platform-owned implementation
   quests if the answer is option 1. Update [mobile completion](/quest/m2/mobile-completion.md)
   to require those replacements before abandoning the Rust capture quests.
-
-## Related
-
-- [Decoded frame ownership](/quest/m1/decoded-frames.md) - established shared frame lifetime; reuse it for any later native mobile views
-- [Decoded frame ownership](/quest/m1/decoded-frames.md) - independently supplies portable pixels from Rust decoding

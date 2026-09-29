@@ -325,6 +325,14 @@ impl NoqClient {
 		})
 	}
 
+	/// Close every connection, then wait until each has sent its close to the peer.
+	pub async fn close(self) {
+		self.quic.close(noq::VarInt::from_u32(0), b"client shutdown");
+		// Not `wait_idle`, which also sits out each connection's 3 PTO closing
+		// period: that only repeats the close to a peer that already has it.
+		self.quic.wait_all_draining().await;
+	}
+
 	pub async fn connect(
 		&self,
 		tls: &rustls::ClientConfig,

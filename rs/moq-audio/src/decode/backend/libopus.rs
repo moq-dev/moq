@@ -4,8 +4,8 @@
 //! family 0 (mono/stereo) stream decodes: one stream, coupled when stereo.
 
 use unsafe_libopus::{
-	OPUS_OK, OPUS_RESET_STATE, OpusMSDecoder, opus_multistream_decode_float, opus_multistream_decoder_create,
-	opus_multistream_decoder_ctl_impl, opus_multistream_decoder_destroy, varargs,
+	OPUS_OK, OPUS_RESET_STATE, OPUS_SET_GAIN_REQUEST, OpusMSDecoder, opus_multistream_decode_float,
+	opus_multistream_decoder_create, opus_multistream_decoder_ctl_impl, opus_multistream_decoder_destroy, varargs,
 };
 
 use super::Backend;
@@ -23,7 +23,6 @@ const STEREO: &[u8] = &[0, 1];
 
 pub(super) struct Libopus {
 	inner: *mut OpusMSDecoder,
-	sample_rate: u32,
 	layout: Layout,
 	/// For each canonical channel, the Vorbis-order channel it comes from, when they differ.
 	reorder: Option<&'static [usize]>,
@@ -38,22 +37,18 @@ pub(super) struct Libopus {
 unsafe impl Send for Libopus {}
 
 impl Libopus {
-	/// Parses the OpusHead `description` when one is present. A missing description
-	/// falls back to the catalog's sample rate and channel count, which must then
-	/// be mono or stereo. A description that does not parse is refused: guessing
-	/// family 0 would decode those packets with the wrong stream layout.
+	/// Decodes at 48 kHz with the pre-skip and output gain the OpusHead
+	/// `description` declares; its input rate is metadata. A missing description
+	/// falls back to the catalog's channel count, which must then be mono or
+	/// stereo. A description that does not parse is refused: guessing family 0
+	/// would decode those packets with the wrong stream layout.
 	///
 	/// Channel mapping family 1 decodes up to 7.1 in the canonical [`Layout`]
 	/// order; every other family is refused, since none declares speakers.
 	pub(super) fn open(catalog: &hang::catalog::AudioConfig) -> Result<Box<dyn Backend>, Error> {
-		let head = match catalog.description.as_ref() {
-			Some(desc) => moq_mux::codec::opus::Config::parse(&mut desc.as_ref())
-				.map_err(|err| Error::Unsupported(format!("opus description: {err}")))?,
-			None => moq_mux::codec::opus::Config::new(catalog.sample_rate, catalog.channel_count),
-		};
-		let (sample_rate, channel_count, pre_skip) = (head.sample_rate, head.channel_count, head.pre_skip);
+		let head = opus::head(catalog)?;
+		let channel_count = head.channel_count;
 
-		opus::validate_rate(sample_rate)?;
 		let (streams, coupled, table, layout, reorder) = match &head.mapping {
 			None => {
 				let table = match opus::validate_channels(channel_count)? {
@@ -81,7 +76,7 @@ impl Libopus {
 		// and the out-pointer is valid; inner is checked for null below.
 		let inner = unsafe {
 			opus_multistream_decoder_create(
-				sample_rate as i32,
+				opus::DECODE_RATE as i32,
 				table.len() as i32,
 				streams,
 				coupled,
@@ -93,17 +88,27 @@ impl Libopus {
 			return Err(opus::error(err, "opus_multistream_decoder_create"));
 		}
 
-		Ok(Box::new(Self {
+		// Owned before the gain ctl so a failure there still destroys the decoder.
+		let decoder = Self {
 			inner,
-			sample_rate,
 			layout,
 			reorder,
 			streams: streams as u8,
-			// OpusHead counts pre-skip at 48 kHz whatever rate the decoder runs at.
-			pre_skip: (pre_skip as usize * sample_rate as usize) / 48_000,
-			max_frame_size: (sample_rate as usize * MAX_FRAME_MS) / 1000,
+			pre_skip: head.pre_skip as usize,
+			max_frame_size: (opus::DECODE_RATE as usize * MAX_FRAME_MS) / 1000,
 			in_dtx: false,
-		}))
+		};
+
+		// Same Q7.8 dB units as OpusHead, and it survives OPUS_RESET_STATE.
+		// SAFETY: `inner` owns a live decoder and OPUS_SET_GAIN takes one i32.
+		let rc = unsafe {
+			opus_multistream_decoder_ctl_impl(decoder.inner, OPUS_SET_GAIN_REQUEST, varargs![head.output_gain as i32])
+		};
+		if rc != OPUS_OK {
+			return Err(opus::error(rc, "OPUS_SET_GAIN"));
+		}
+
+		Ok(Box::new(decoder))
 	}
 }
 
@@ -186,7 +191,7 @@ impl Backend for Libopus {
 	}
 
 	fn sample_rate(&self) -> u32 {
-		self.sample_rate
+		opus::DECODE_RATE
 	}
 
 	fn layout(&self) -> Layout {

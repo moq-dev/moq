@@ -18,6 +18,15 @@ import (
 // job instead of hanging it.
 const testTimeout = 10 * time.Second
 
+// newOrigin returns an origin that lasts the whole test. An OriginProducer has
+// no Close: the collector ends its origin once nothing reaches the producer,
+// even while consumers and dynamic handles made from it are still in use.
+func newOrigin(t *testing.T) *moq.OriginProducer {
+	origin := moq.NewOriginProducer()
+	t.Cleanup(func() { runtime.KeepAlive(origin) })
+	return origin
+}
+
 // opusHead builds a valid OpusHead init buffer (RFC 7845): 48 kHz, 2 channels.
 func opusHead() []byte {
 	buf := []byte("OpusHead")
@@ -30,7 +39,7 @@ func opusHead() []byte {
 }
 
 func TestOriginLifecycle(t *testing.T) {
-	origin := moq.NewOriginProducer()
+	origin := newOrigin(t)
 	_ = origin.Consume()
 	dynamic, err := origin.Dynamic("", moq.Route{})
 	if err != nil {
@@ -43,7 +52,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	origin := moq.NewOriginProducer()
+	origin := newOrigin(t)
 	dynamic, err := origin.Dynamic("", moq.Route{})
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +124,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	if err := track.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	if err := served.Finish(); err != nil {
+	if err := served.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -135,8 +144,24 @@ func TestPublishAudioLifecycle(t *testing.T) {
 	if err := media.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	if err := broadcast.Finish(); err != nil {
+	if err := broadcast.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBroadcastCloseTwiceIsNoop(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broadcast.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := broadcast.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if _, err := broadcast.PublishTrack("events", nil); err == nil {
+		t.Fatal("PublishTrack after Close succeeded")
 	}
 }
 
@@ -179,7 +204,7 @@ func TestEncodeAudioWithOpusObject(t *testing.T) {
 		if err := producer.Finish(); err != nil {
 			t.Fatal(err)
 		}
-		if err := broadcast.Finish(); err != nil {
+		if err := broadcast.Close(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -221,7 +246,7 @@ func TestEncodeAudioFrameDurations(t *testing.T) {
 		t.Fatalf("err = %v, want ErrAudio: 2 ms is not an opus frame duration", err)
 	}
 
-	if err := broadcast.Finish(); err != nil {
+	if err := broadcast.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -235,7 +260,7 @@ func TestVideoPropertiesUseDefaultedFields(t *testing.T) {
 	if err := broadcast.SetVideoProperties(moq.VideoProperties{Rotation: &rotation}); err != nil {
 		t.Fatal(err)
 	}
-	if err := broadcast.Finish(); err != nil {
+	if err := broadcast.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -247,7 +272,7 @@ func TestDecodeVideoFormat(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	origin := moq.NewOriginProducer()
+	origin := newOrigin(t)
 	broadcast, err := origin.CreateBroadcast("video-decode-format")
 	if err != nil {
 		t.Fatal(err)
@@ -350,7 +375,7 @@ func TestDecodeVideoFormat(t *testing.T) {
 	if err := video.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	if err := broadcast.Finish(); err != nil {
+	if err := broadcast.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -449,7 +474,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	origin := moq.NewOriginProducer()
+	origin := newOrigin(t)
 	broadcast, err := origin.CreateBroadcast("live")
 	if err != nil {
 		t.Fatal(err)
@@ -806,7 +831,7 @@ func TestDynamicTrackRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer broadcast.Finish()
+	defer broadcast.Close()
 
 	dynamic, err := broadcast.Dynamic()
 	if err != nil {
@@ -882,7 +907,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer broadcast.Finish()
+	defer broadcast.Close()
 
 	dynamic, err := broadcast.Dynamic()
 	if err != nil {
@@ -974,7 +999,7 @@ func TestRecvGroupCancelRace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer broadcast.Finish()
+	defer broadcast.Close()
 
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
@@ -1007,7 +1032,7 @@ func TestConsumerCancelConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer broadcast.Finish()
+	defer broadcast.Close()
 
 	track, err := broadcast.PublishTrack("x", nil)
 	if err != nil {
@@ -1033,7 +1058,7 @@ func TestConsumerCancelConcurrent(t *testing.T) {
 // dynamic handler, then proves the origin still resolves: the cancel has to abort
 // that one request rather than the consumer it was made on.
 func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
-	origin := moq.NewOriginProducer()
+	origin := newOrigin(t)
 	dynamic, err := origin.Dynamic("", moq.Route{})
 	if err != nil {
 		t.Fatal(err)
@@ -1075,7 +1100,7 @@ func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer served.Finish()
+	defer served.Close()
 
 	resolved := make(chan error, 1)
 	go func() {
@@ -1108,7 +1133,7 @@ func TestSubscribeTrackCancelKeepsTheBroadcast(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer broadcast.Finish()
+	defer broadcast.Close()
 
 	dynamic, err := broadcast.Dynamic()
 	if err != nil {
@@ -1177,7 +1202,7 @@ func TestUsedCancelKeepsTheTrack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer broadcast.Finish()
+	defer broadcast.Close()
 
 	track, err := broadcast.PublishTrack("status", nil)
 	if err != nil {
@@ -1224,7 +1249,7 @@ func TestCancelDoesNotLeakGoroutines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer broadcast.Finish()
+	defer broadcast.Close()
 
 	dynamic, err := broadcast.Dynamic()
 	if err != nil {
@@ -1290,7 +1315,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	origin := moq.NewOriginProducer()
+	origin := newOrigin(t)
 	broadcast, err := origin.CreateBroadcast("live")
 	if err != nil {
 		t.Fatal(err)
@@ -1338,7 +1363,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	if _, err := consumer.RequestBroadcast(ctx, "live"); err != nil {
 		t.Fatal(err)
 	}
-	if err := broadcast.Finish(); err != nil {
+	if err := broadcast.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1347,7 +1372,7 @@ func TestAnnouncedPatternCaptures(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	origin := moq.NewOriginProducer()
+	origin := newOrigin(t)
 	filter := "*/chat"
 	announced, err := origin.Consume().Announced(moq.AnnounceOptions{Prefix: "room", Filter: &filter})
 	if err != nil {
@@ -1389,7 +1414,7 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	origin := moq.NewOriginProducer()
+	origin := newOrigin(t)
 	filter := ""
 	announced, err := origin.Consume().Announced(moq.AnnounceOptions{Prefix: "room/alice/chat", Filter: &filter})
 	if err != nil {
@@ -1421,7 +1446,7 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	origin := moq.NewOriginProducer()
+	origin := newOrigin(t)
 	dynamic, err := origin.Dynamic("live", moq.Route{})
 	if err != nil {
 		t.Fatal(err)

@@ -27,9 +27,13 @@ What remains is the publisher side. The allocator
 estimate by `track::Info::priority`, filling a tier before the next sees a
 bit and splitting max-min fair within one. A controller that assigns
 descending priorities down the ladder gets correct allocation from that
-alone. Send order is the same number, not a separate question:
-`Priority::cmp` (`rs/moq-net/src/lite/priority.rs`) ranks by track priority
-first, so the same number decides what to produce and what to send first;
+alone. Send order is a different number today: `Priority::cmp`
+(`rs/moq-net/src/lite/priority.rs`) ranks first by `Priority.track`, which is
+the subscriber's priority from SUBSCRIBE (`msg.priority` in
+`rs/moq-net/src/lite/publisher.rs`), not the publisher's `Info::priority`.
+The controller quest makes the publisher's number the tiebreak after it, so
+the same number decides what to produce and, among equal subscriber
+priorities, what to send first;
 [Scope track priority](/quest/m1/track-priority-scope.md) settles what that
 ranking means on the first mile versus a cluster session before the
 controller depends on it.
@@ -67,7 +71,7 @@ bitrate; closing or removing stalled tracks; an application-level
 [#2734](https://github.com/moq-dev/moq/issues/2734)); rebuilding unsupported
 encoders on every target change.
 
-## Quests
+## Required
 
 - [Controller](/quest/m1/ladder/controller.md) - one controller owns every
   rung's share, target, stalled state, and send order

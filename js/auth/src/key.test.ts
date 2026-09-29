@@ -694,7 +694,7 @@ test("verify - claims validation during verification", async () => {
 	expect(verifiedClaims.root).toBe("test-path");
 });
 
-test("verify - a token carrying the retired put/get prefix fields is refused", async () => {
+test("verify - a legacy put/get prefix token reads as subtrees", async () => {
 	const key = Key.parse(encodeJwk(testKey));
 	const secret = await crypto.subtle.importKey(
 		"raw",
@@ -707,7 +707,25 @@ test("verify - a token carrying the retired put/get prefix fields is refused", a
 	const legacy = await new SignJWT({ root: "test-path", put: ["alice"], get: [""] })
 		.setProtectedHeader({ alg: "HS256", kid: testKey.kid })
 		.sign(secret);
-	await expect(Key.verify(key, legacy)).rejects.toThrow(/put|Unrecognized/);
+	const claims = await Key.verify(key, legacy);
+	expect(claims.publish).toEqual(["alice/**"]);
+	expect(claims.subscribe).toEqual(["**"]);
+});
+
+test("sign - subtree grants are written as legacy put/get", async () => {
+	const key = Key.parse(encodeJwk(testKey));
+	const token = await Key.sign(key, { root: "test-path", publish: ["alice/**"], subscribe: ["**"] });
+	const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString());
+	expect(payload).toEqual({ root: "test-path", put: ["alice"], get: [""] });
+});
+
+test("sign - legacy-shaped input cannot slip past a key scope", async () => {
+	const scoped: Key = {
+		...Key.parse(encodeJwk(testKey)),
+		scope: { root: "demo", publish: ["inside/**"] },
+	};
+	const legacy = { root: "demo", put: ["outside"] } as unknown as Parameters<typeof Key.sign>[1];
+	await expect(Key.sign(scoped, legacy)).rejects.toThrow(/scope/);
 });
 
 test("key scope is enforced when signing and verifying", async () => {
@@ -739,4 +757,38 @@ test("key scope treats absolute and rooted grants alike", async () => {
 	await expect(Key.sign(scoped, { root: "", publish: ["**"] })).rejects.toThrow("exceed the key scope");
 	// Roles are independent: a publish-only scope grants no subscribe.
 	await expect(Key.sign(scoped, { root: "project", subscribe: ["live/**"] })).rejects.toThrow("exceed the key scope");
+});
+
+/** Sign an arbitrary payload with `testKey`, bypassing the claims schema, as another issuer might. */
+async function signRaw(payload: Record<string, unknown>): Promise<string> {
+	const secret = new TextEncoder().encode("test-secret-that-is-long-enough-for-hmac-sha256");
+	return new SignJWT(payload).setProtectedHeader({ alg: "HS256", typ: "JWT" }).sign(secret);
+}
+
+// An issuer's bookkeeping is read and dropped; anything else is refused by name, since it
+// might narrow the grant, and a misspelled `root` would widen it to everything.
+test("verify - only registered claims", async () => {
+	const key = Key.parse(encodeJwk(testKey));
+	const now = Math.floor(Date.now() / 1000);
+
+	const token = await signRaw({ root: "room", publish: ["**"], iss: "api", sub: "alice", jti: "1", iat: now });
+	const claims = await Key.verify(key, token);
+	expect(claims.root).toBe("room");
+	expect(claims).not.toHaveProperty("iss");
+
+	for (const [claim, payload] of [
+		["rooot", { rooot: "room/123", publish: ["**"] }],
+		["user_id", { root: "room", publish: ["**"], user_id: 7 }],
+		["cluster", { root: "room", put: [""], cluster: true }],
+		["aud", { root: "room", publish: ["**"], aud: "relay" }],
+	] as const) {
+		await expect(Key.verify(key, await signRaw(payload))).rejects.toThrow(claim);
+	}
+});
+
+test("verify - enforces not before", async () => {
+	const key = Key.parse(encodeJwk(testKey));
+	const now = Math.floor(Date.now() / 1000);
+	expect((await Key.verify(key, await signRaw({ publish: ["**"], nbf: now - 60 }))).nbf).toBe(now - 60);
+	await expect(Key.verify(key, await signRaw({ publish: ["**"], nbf: now + 3600 }))).rejects.toThrow();
 });

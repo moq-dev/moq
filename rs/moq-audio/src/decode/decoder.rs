@@ -51,10 +51,11 @@ pub struct Decoder {
 impl Decoder {
 	/// Build a decoder from a catalog [`AudioConfig`](hang::catalog::AudioConfig).
 	///
-	/// Opus parses the OpusHead `description` if present, falling back to the
-	/// catalog's declared sample rate and channel count. PCM uses those catalog
-	/// fields directly and requires an absent `description`. AAC reads its
-	/// AudioSpecificConfig, synthesizing one from the catalog when absent.
+	/// Opus decodes at 48 kHz with the pre-skip and gain its OpusHead
+	/// `description` declares, refusing a malformed head; without a description
+	/// it takes the catalog's channel count and applies neither. PCM uses the
+	/// catalog fields directly and requires an absent `description`. AAC reads
+	/// its AudioSpecificConfig, synthesizing one from the catalog when absent.
 	pub fn new(catalog: &hang::catalog::AudioConfig, config: &Config) -> Result<Self, Error> {
 		let backend = backend::open(catalog, config)?;
 		let delay = backend.delay();
@@ -123,7 +124,7 @@ impl Decoder {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 	use super::*;
 
 	/// Three consecutive AAC-LC frames of a 440 Hz full-scale sine, mono at
@@ -213,6 +214,125 @@ mod tests {
 
 		// Not a valid TOC byte sequence: libopus reports OPUS_INVALID_PACKET.
 		assert!(matches!(decoder.decode(&[0xFF; 3]), Err(Error::Decode(_))));
+	}
+
+	/// Real Opus: 20 ms packets of a continuous 440 Hz sine, mono, from libopus
+	/// with its 312-sample lookahead.
+	pub(crate) fn opus_packets(count: usize) -> Vec<bytes::Bytes> {
+		let mut encoder = crate::encode::Encoder::new(&crate::encode::Settings::new(48_000, Layout::Mono)).unwrap();
+		let frames = encoder.frame_size();
+		(0..count)
+			.map(|packet| {
+				let pcm: Vec<f32> = (packet * frames..(packet + 1) * frames)
+					.map(|i| (std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin() * 0.5)
+					.collect();
+				encoder.encode(&pcm).unwrap().payload
+			})
+			.collect()
+	}
+
+	/// A catalog shaped like an import's: the OpusHead input rate as the catalog rate.
+	pub(crate) fn opus_catalog(head: moq_mux::codec::opus::Config) -> hang::catalog::AudioConfig {
+		let mut catalog =
+			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, head.sample_rate, head.channel_count);
+		catalog.description = Some(head.encode().unwrap());
+		catalog
+	}
+
+	fn rms(samples: &[f32]) -> f32 {
+		(samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+	}
+
+	/// The OpusHead input rate is metadata: 44.1 kHz and unknown (0) are valid
+	/// heads, and no input rate changes the 48 kHz clock the packets decode on.
+	#[test]
+	fn opus_decodes_at_48k_whatever_the_input_rate() {
+		let packets = opus_packets(2);
+		for input_rate in [0, 8_000, 24_000, 44_100, 48_000, 96_000] {
+			let head = moq_mux::codec::opus::Config::new(input_rate, 1).with_pre_skip(312);
+			let mut decoder = Decoder::new(&opus_catalog(head), &Config::default()).unwrap();
+			assert_eq!(decoder.sample_rate(), 48_000, "input rate {input_rate}");
+
+			// The pre-skip is 48 kHz samples, trimmed once.
+			assert_eq!(decoder.decode(&packets[0]).unwrap().samples.len(), 960 - 312);
+			assert_eq!(decoder.decode(&packets[1]).unwrap().samples.len(), 960);
+		}
+	}
+
+	#[test]
+	fn opus_applies_the_declared_gain() {
+		let packets = opus_packets(5);
+		let decode = |output_gain: i16| {
+			let mut head = moq_mux::codec::opus::Config::new(48_000, 1);
+			head.output_gain = output_gain;
+			let mut decoder = Decoder::new(&opus_catalog(head), &Config::default()).unwrap();
+			let mut last = Vec::new();
+			for packet in &packets {
+				last = decoder.decode(packet).unwrap().samples;
+			}
+			// A reset after loss keeps the gain.
+			decoder.reset().unwrap();
+			let reset = decoder.decode(&packets[4]).unwrap().samples;
+			(rms(&last), rms(&reset))
+		};
+
+		// -6.02 dB in Q7.8 halves the amplitude.
+		let (plain, plain_reset) = decode(0);
+		let (quiet, quiet_reset) = decode(-1541);
+		assert!((quiet / plain - 0.5).abs() < 0.001, "gain ratio {}", quiet / plain);
+		assert!(
+			(quiet_reset / plain_reset - 0.5).abs() < 0.001,
+			"gain ratio after reset {}",
+			quiet_reset / plain_reset
+		);
+	}
+
+	/// A present description is the stream's configuration, so a broken one is
+	/// refused rather than replaced by the catalog's fields.
+	#[test]
+	fn opus_refuses_a_malformed_description() {
+		let valid = moq_mux::codec::opus::Config::new(48_000, 2).encode().unwrap().to_vec();
+		let mut version = valid.clone();
+		version[8] = 16;
+		let mut channels = valid.clone();
+		channels[9] = 3;
+		let mut signature = valid.clone();
+		signature[0] = b'X';
+		// Family 1 promising a table that is not there.
+		let mut table = valid.clone();
+		table[18] = 1;
+
+		for (name, description) in [
+			("truncated", valid[..18].to_vec()),
+			("empty", Vec::new()),
+			("signature", signature),
+			("version", version),
+			("channels", channels),
+			("table", table),
+		] {
+			let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+			catalog.description = Some(description.into());
+			assert!(
+				matches!(Decoder::new(&catalog, &Config::default()), Err(Error::Unsupported(_))),
+				"{name}"
+			);
+		}
+	}
+
+	/// Without a description the catalog shapes the stream, which has no pre-skip.
+	#[test]
+	fn opus_decodes_without_a_description() {
+		let packets = opus_packets(1);
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 24_000, 1);
+		let mut decoder = Decoder::new(&catalog, &Config::default()).unwrap();
+		assert_eq!(decoder.sample_rate(), 48_000);
+		assert_eq!(decoder.decode(&packets[0]).unwrap().samples.len(), 960);
+
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 6);
+		assert!(matches!(
+			Decoder::new(&catalog, &Config::default()),
+			Err(Error::Unsupported(_))
+		));
 	}
 
 	#[test]

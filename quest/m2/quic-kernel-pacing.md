@@ -3,9 +3,12 @@
 ## Goal
 
 A measured verdict on handing packet pacing to the kernel. Today noq's pacer
-is a userspace token bucket, and the io_uring driver ignores its hint
-entirely: a GSO train leaves as one burst, bounded only by the congestion
-window. Either the kernel paces each train (`SO_TXTIME` with the `etf` or
+is a userspace token bucket on both runtimes: `poll_transmit` holds a train
+until the pacing timer fires, which the io_uring driver arms through
+`poll_timeout` like the tokio driver does, but a released GSO train still
+leaves the NIC as one burst. The `flush_one` comment in
+`rs/moq-uring/src/quic/noq/connection.rs` saying the driver ignores the hint
+is stale from quiche. Either the kernel paces each train (`SO_TXTIME` with the `etf` or
 `fq` qdisc, per-packet transmit times in the cmsg the driver already builds)
 and burstiness at the bottleneck drops without costing CPU, or the burst is
 shown not to matter on the fleet's paths.

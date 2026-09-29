@@ -40,7 +40,10 @@ export function playbackIdentity(config: Catalog.AudioConfig): PlaybackIdentity 
 	};
 }
 
-/** The jitter to add to the sync buffer for a rendition, in milliseconds. */
+/**
+ * The sync buffer a rendition needs, in milliseconds: its catalog `delay` behind the broadcast's
+ * earliest rendition plus its own jitter.
+ */
 export function playbackJitter(config: Catalog.AudioConfig): Time.Milli {
 	// A publisher advertising 0 is claiming frames are never delayed, which no encoder can do, so
 	// fall back to the codec's frame duration the same way an absent field does.
@@ -48,7 +51,7 @@ export function playbackJitter(config: Catalog.AudioConfig): Time.Milli {
 
 	// Add the worklet render quantum so the ring buffer has margin between frame arrivals.
 	const overhead = Math.ceil((WORKLET_QUANTUM / config.sampleRate) * 1000);
-	return Time.Milli(codecJitter + overhead);
+	return Time.Milli((config.delay ?? 0) + codecJitter + overhead);
 }
 
 // Estimate the minimum jitter (frame duration) based on the audio codec.

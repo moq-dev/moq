@@ -453,6 +453,29 @@ test("an unstamped immediate successor leaves reach unbounded", async () => {
 	expect((await track.recvGroup())?.sequence).toBe(2);
 });
 
+// Groups can arrive out of sequence order; the immediate successor bounds reach even when it
+// arrived last.
+test("a late-arriving successor bounds a group's reach", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: Milli(5000) });
+	const track = producer.subscribe({ maxAge: Milli(500) });
+
+	for (const [sequence, ms] of [
+		[0, 0],
+		[2, 3000],
+		[1, 200],
+	]) {
+		const group = new GroupProducer(sequence);
+		group.writeFrame({ payload: enc.encode(`${ms}`), timestamp: Timestamp.fromMillis(ms) });
+		group.close();
+		producer.writeGroup(group);
+	}
+
+	// Group 0 reaches at most 200ms, where group 1 starts, so it is past the budget.
+	// Group 1 reaches 3000ms, the edge itself.
+	expect((await track.recvGroup())?.sequence).toBe(1);
+	expect((await track.recvGroup())?.sequence).toBe(2);
+});
+
 // The ordered frame helpers ride the same cursor, so they see the same budget: a
 // backlog inside it is drained in full, and what is past it is skipped.
 test("ordered frame reads follow the budget", async () => {
@@ -807,7 +830,7 @@ test("a handed-out frame cancels its in-flight operation when it expires", async
 	const operation = new Promise<void>((resolve) => {
 		release = resolve;
 	});
-	const guarded = hooks.guardGroup(group, operation);
+	const guarded = hooks.guardGroup(group, () => operation);
 	producer.writeString("new");
 
 	await expect(guarded).rejects.toThrow("max age budget");
@@ -830,7 +853,7 @@ test("a guarded write keeps the position of the frame removed from the buffer", 
 	const operation = new Promise<void>((resolve) => {
 		release = resolve;
 	});
-	const guarded = hooks.guardGroup(group, operation);
+	const guarded = hooks.guardGroup(group, () => operation);
 
 	producer.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(1_000) });
 	// A group beyond the edge, so group 0's reach (1s) is provably behind it: a group is
@@ -859,7 +882,7 @@ test("clean source closure stays provisional while a frame write can expire", as
 	const operation = new Promise<void>((resolve) => {
 		release = resolve;
 	});
-	const guarded = hooks.guardGroup(group, operation);
+	const guarded = hooks.guardGroup(group, () => operation);
 
 	const edge = producer.appendGroup();
 	edge.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(1_000) });
@@ -958,6 +981,36 @@ test("retention reclaims a group the publisher abandoned open", async () => {
 
 		// A gap, not a clean finish: the publisher never ended this group.
 		await expect(group.readFrame()).rejects.toBeInstanceOf(TooFarBehind);
+	} finally {
+		clock.restore();
+	}
+});
+
+test("an idle live edge ages out once a newer group arrives", async () => {
+	const clock = mockMonotonicTime(10_000);
+	try {
+		const producer = new TrackProducer("test").accept({ maxAge: Milli(100) });
+		const track = producer.subscribe({ maxAge: Milli(100) });
+		const edge = producer.appendGroup();
+		edge.writeString("first");
+
+		const group = await track.recvGroup();
+		if (!group) throw new Error("missing group");
+		expect(await group.readString()).toBe("first");
+
+		// A prune while it is still the live edge keeps it, and finds nothing else to age out.
+		clock.set(10_200);
+		producer.subscribe({ maxAge: Milli(100) });
+
+		// A successor ends the exemption, and the group is long past the window, so the
+		// write evicts it rather than a later wakeup.
+		clock.set(10_300);
+		producer.appendGroup();
+		const read = group.readFrame().then(
+			() => "clean end",
+			(err: unknown) => err,
+		);
+		expect(await Promise.race([read, settle().then(() => "still parked")])).toBeInstanceOf(TooFarBehind);
 	} finally {
 		clock.restore();
 	}
@@ -1633,4 +1686,114 @@ test("finished rejects when the track aborts or closes without an end", async ()
 	clean.appendGroup().close();
 	clean.close();
 	expect(await reader.finished()).toBe(1);
+});
+
+test("an abort keeps finished groups for a slow reader, then reports it", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: Milli(10_000) });
+	const arrival = producer.subscribe({ maxAge: Milli(10_000) });
+	const ordered = producer.subscribe({ maxAge: Milli(10_000) }).ordered();
+	for (let i = 0; i < 2; i++) {
+		const group = producer.appendGroup();
+		group.writeString(`g${i}`);
+		group.close();
+	}
+	producer.appendGroup().writeString("open");
+	const boom = new Error("boom");
+	producer.close(boom);
+
+	for (const next of [() => arrival.recvGroup(), () => ordered.nextGroup()]) {
+		for (let i = 0; i < 2; i++) {
+			const group = await next();
+			expect(group?.sequence).toBe(i);
+			expect(await group?.readString()).toBe(`g${i}`);
+		}
+		// The open group nobody will finish is not handed out.
+		await expect(next()).rejects.toBe(boom);
+	}
+});
+
+test("an abort after the declared end settles ends clean", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: Milli(10_000) });
+	const arrival = producer.subscribe({ maxAge: Milli(10_000) });
+	const ordered = producer.subscribe({ maxAge: Milli(10_000) }).ordered();
+	for (let i = 0; i < 2; i++) {
+		const group = producer.appendGroup();
+		group.writeString(`g${i}`);
+		group.close();
+	}
+	producer.finishAt(2);
+	producer.close(new Error("boom"));
+
+	for (const next of [() => arrival.recvGroup(), () => ordered.nextGroup()]) {
+		expect((await next())?.sequence).toBe(0);
+		expect((await next())?.sequence).toBe(1);
+		expect(await next()).toBeUndefined();
+	}
+});
+
+test("an abort after the declared end reached by a datagram ends clean", () => {
+	const producer = new TrackProducer("test").accept();
+	producer.appendDatagram(Timestamp.fromMillis(0), enc.encode("d"));
+	producer.finishAt(1);
+	producer.close(new Error("boom"));
+	expect(producer.closed.peek()).toBeNull();
+});
+
+test("an ended track's buffered groups age out for a stale subscriber", () => {
+	// Nothing writes after the close, so only the prune wakeup can reclaim them. Stub the
+	// timers so the test fires exactly the wakeups still armed, at a mocked time.
+	const clock = mockMonotonicTime(10_000);
+	const realSet = globalThis.setTimeout;
+	const realClear = globalThis.clearTimeout;
+	const armed = new Map<object, () => void>();
+	// @ts-expect-error a stub, not a full setTimeout
+	globalThis.setTimeout = (fn: () => void) => {
+		const handle = { unref: () => {} };
+		armed.set(handle, fn);
+		return handle;
+	};
+	// @ts-expect-error a stub, not a full clearTimeout
+	globalThis.clearTimeout = (handle: object) => armed.delete(handle);
+
+	try {
+		for (const abort of [undefined, new Error("boom")]) {
+			clock.set(10_000);
+			armed.clear();
+			const producer = new TrackProducer("test").accept({ maxAge: Milli(30) });
+			const stale = producer.subscribe({ maxAge: Milli(30) });
+			const group = producer.appendGroup();
+			group.writeString("x");
+			group.close();
+			producer.close(abort);
+
+			clock.set(10_100);
+			for (const [handle, fire] of [...armed]) {
+				armed.delete(handle);
+				fire();
+			}
+			// Nothing buffered is left: the subscriber sees only how the track ended.
+			if (abort) expect(() => stale.tryRecvGroup()).toThrow(abort);
+			else expect(stale.tryRecvGroup()).toBeUndefined();
+		}
+	} finally {
+		globalThis.setTimeout = realSet;
+		globalThis.clearTimeout = realClear;
+		clock.restore();
+	}
+});
+
+test("an abort leaves a group already taken readable, then reports the abort", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: Milli(10_000) });
+	const arrival = producer.subscribe({ maxAge: Milli(10_000) });
+	const ordered = producer.subscribe({ maxAge: Milli(10_000) }).ordered();
+	producer.appendGroup().writeString("held");
+	const held = [await arrival.recvGroup(), await ordered.nextGroup()];
+	const boom = new Error("boom");
+	producer.close(boom);
+
+	for (const group of held) {
+		expect(group?.sequence).toBe(0);
+		expect(await group?.readString()).toBe("held");
+		await expect(group?.readFrame()).rejects.toBe(boom);
+	}
 });

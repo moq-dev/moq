@@ -109,6 +109,32 @@ test("concurrent dynamic producers share a sequence namespace", async () => {
 	broadcast.close();
 });
 
+test("a sibling producer's groups do not settle an aborted end", async () => {
+	const broadcast = new BroadcastProducer();
+	const firstSubscriber = broadcast.track("media").subscribe();
+	const secondSubscriber = broadcast.track("media").subscribe();
+	const firstRequest = await wireOf(broadcast).requested();
+	const secondRequest = await wireOf(broadcast).requested();
+	if (!firstRequest || !secondRequest) throw new Error("expected requests");
+	const firstProducer = firstRequest.accept();
+	const secondProducer = secondRequest.accept();
+
+	const reader = firstProducer.subscribe();
+	firstProducer.finishAt(3);
+	for (let i = 0; i < 3; i++) secondProducer.appendGroup().close();
+	const boom = new Error("boom");
+	firstProducer.close(boom);
+
+	// The first producer never received the groups its end promised, so it was cut off.
+	expect(firstProducer.closed.peek()).toBe(boom);
+	await expect(reader.recvGroup()).rejects.toBe(boom);
+
+	firstSubscriber.close();
+	secondSubscriber.close();
+	secondProducer.close();
+	broadcast.close();
+});
+
 test("closing a broadcast rejects a dequeued request", async () => {
 	const broadcast = new BroadcastProducer();
 	const subscriber = broadcast.track("media").subscribe();

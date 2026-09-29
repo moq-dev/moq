@@ -25,6 +25,11 @@ pub enum Error {
 	#[error("invalid OpusHead signature")]
 	InvalidSignature,
 
+	/// The OpusHead major version (the upper four bits) is not one this parser
+	/// understands, so none of its fields can be trusted (RFC 7845 §5.1).
+	#[error("unsupported OpusHead version {0}")]
+	UnsupportedVersion(u8),
+
 	/// The channel count is zero, or more than the channel mapping family allows:
 	/// family 0 covers mono/stereo and family 1 up to eight channels.
 	#[error("channel mapping family does not allow {0} channels")]
@@ -39,8 +44,11 @@ pub enum Error {
 	#[error("invalid OpusHead channel mapping table")]
 	InvalidMappingTable,
 
-	/// [`Mapping::new`] was given family 0, which has no mapping table.
-	#[error("channel mapping family {0} has no mapping table")]
+	/// A channel mapping family the operation cannot carry: family 0 given to
+	/// [`Mapping::new`], which has no table; a [`Config::encode`] whose
+	/// `mapping_family` is not its `mapping`'s; or a container with no room for
+	/// the table.
+	#[error("unsupported channel mapping family {0}")]
 	UnsupportedMappingFamily(u8),
 }
 
@@ -50,23 +58,34 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Config {
-	/// Original input sample rate in Hz.
+	/// Original input sample rate in Hz, or 0 when unknown.
+	///
+	/// Metadata only: Opus always runs on a 48 kHz clock, and this need not be a
+	/// rate Opus can decode at (44.1 kHz is common).
 	pub sample_rate: u32,
 	/// Number of output channels.
 	pub channel_count: u32,
 	/// Number of decoded 48 kHz samples to discard at stream start.
 	pub pre_skip: u16,
+	/// Gain to apply to the decoded output, in Q7.8 dB.
+	pub output_gain: i16,
+	/// Channel mapping family; 0 is mono/stereo with no mapping table.
+	///
+	/// Always `mapping`'s family, or 0 without one.
+	pub mapping_family: u8,
 	/// The channel mapping table, or `None` for family 0 (mono/stereo, one stream).
 	pub mapping: Option<Mapping>,
 }
 
 impl Config {
-	/// Build a mono/stereo Opus config with no pre-skip.
+	/// Build a mono/stereo Opus config with no pre-skip or gain.
 	pub fn new(sample_rate: u32, channel_count: u32) -> Self {
 		Self {
 			sample_rate,
 			channel_count,
 			pre_skip: 0,
+			output_gain: 0,
+			mapping_family: 0,
 			mapping: None,
 		}
 	}
@@ -79,9 +98,9 @@ impl Config {
 
 	/// Parse an OpusHead buffer (RFC 7845 §5.1).
 	///
-	/// Verifies the magic signature; reads channel count, pre-skip, sample rate,
-	/// and the channel mapping, refusing a channel count the family forbids or an
-	/// inconsistent mapping table; ignores gain. Any trailing bytes are consumed.
+	/// Accepts any minor version and refuses a new major version. Reads the
+	/// channel mapping, refusing a channel count the family forbids or an
+	/// inconsistent mapping table. Bytes after the header are left in `buf`.
 	pub fn parse<T: Buf>(buf: &mut T) -> Result<Self> {
 		if buf.remaining() < 19 {
 			return Err(Error::HeadTooShort);
@@ -91,38 +110,44 @@ impl Config {
 			return Err(Error::InvalidSignature);
 		}
 
-		buf.advance(1); // Skip version
+		let version = buf.get_u8();
+		if version > 15 {
+			return Err(Error::UnsupportedVersion(version));
+		}
 		let channel_count = buf.get_u8() as u32;
 		let pre_skip = buf.get_u16_le();
 		let sample_rate = buf.get_u32_le();
-		buf.advance(2); // Skip gain until if/when we support it.
-		let family = buf.get_u8();
+		let output_gain = buf.get_i16_le();
+		let mapping_family = buf.get_u8();
 
-		let mapping = match family {
+		let mapping = match mapping_family {
 			0 if (1..=2).contains(&channel_count) => None,
 			0 => return Err(Error::UnsupportedChannelCount(channel_count)),
 			family => Some(Mapping::parse(buf, family, channel_count as u8)?),
 		};
 
-		if buf.remaining() > 0 {
-			buf.advance(buf.remaining());
-		}
-
 		Ok(Self {
 			sample_rate,
 			channel_count,
 			pre_skip,
+			output_gain,
+			mapping_family,
 			mapping,
 		})
 	}
 
-	/// Encode an OpusHead packet (RFC 7845 §5.1) with zero gain, followed by
-	/// the channel mapping table when there is one.
+	/// Encode an OpusHead packet (RFC 7845 §5.1), followed by the channel mapping
+	/// table when there is one.
 	///
 	/// Errors with [`Error::UnsupportedChannelCount`] when `channel_count` is not
 	/// 1 or 2 without a `mapping` (family 0 is only defined for mono/stereo), or
-	/// is not the mapping's own channel count.
+	/// is not the mapping's own channel count, and with
+	/// [`Error::UnsupportedMappingFamily`] when `mapping_family` is not the
+	/// mapping's family.
 	pub fn encode(&self) -> Result<Bytes> {
+		if self.mapping_family != self.mapping.map_or(0, |mapping| mapping.family()) {
+			return Err(Error::UnsupportedMappingFamily(self.mapping_family));
+		}
 		let valid = match &self.mapping {
 			None => (1..=2).contains(&self.channel_count),
 			Some(mapping) => self.channel_count == mapping.table().len() as u32,
@@ -137,7 +162,7 @@ impl Config {
 		head.push(self.channel_count as u8);
 		head.extend_from_slice(&self.pre_skip.to_le_bytes());
 		head.extend_from_slice(&self.sample_rate.to_le_bytes());
-		head.extend_from_slice(&0i16.to_le_bytes()); // output gain
+		head.extend_from_slice(&self.output_gain.to_le_bytes());
 		match &self.mapping {
 			None => head.push(0),
 			Some(mapping) => {
@@ -228,21 +253,54 @@ mod tests {
 		assert!(matches!(err, Error::UnsupportedChannelCount(6)));
 	}
 
-	/// A 19-byte head with the given channel count and mapping family.
-	fn head(channels: u8, family: u8) -> Vec<u8> {
-		let mut head = Config::new(48_000, 2).encode().unwrap().to_vec();
-		head[9] = channels;
-		head[18] = family;
+	/// A 19-byte head with the given version, channels, gain, and family.
+	fn head(version: u8, channels: u8, gain: i16, family: u8) -> Vec<u8> {
+		let mut head = b"OpusHead".to_vec();
+		head.push(version);
+		head.push(channels);
+		head.extend_from_slice(&312u16.to_le_bytes());
+		head.extend_from_slice(&44_100u32.to_le_bytes());
+		head.extend_from_slice(&gain.to_le_bytes());
+		head.push(family);
 		head
+	}
+
+	#[test]
+	fn parses_gain_and_input_rate() {
+		let bytes = head(1, 2, -1536, 0);
+		let parsed = Config::parse(&mut bytes.as_slice()).unwrap();
+		assert_eq!(parsed.sample_rate, 44_100);
+		assert_eq!(parsed.pre_skip, 312);
+		assert_eq!(parsed.output_gain, -1536);
+		assert_eq!(parsed.mapping_family, 0);
+
+		// The gain survives a round trip.
+		let encoded = parsed.encode().unwrap();
+		assert_eq!(encoded.as_ref(), bytes.as_slice());
+	}
+
+	#[test]
+	fn parse_accepts_minor_versions_only() {
+		for version in [0, 1, 15] {
+			assert!(Config::parse(&mut head(version, 2, 0, 0).as_slice()).is_ok());
+		}
+		assert!(matches!(
+			Config::parse(&mut head(16, 2, 0, 0).as_slice()),
+			Err(Error::UnsupportedVersion(16))
+		));
 	}
 
 	#[test]
 	fn parses_a_mapping_table() {
 		// 5.1 in family 1: four streams, two coupled, Vorbis order.
-		let mut bytes = head(6, 1);
+		let mut bytes = head(1, 6, 0, 1);
 		bytes.extend_from_slice(&[4, 2, 0, 4, 1, 2, 3, 5]);
-		let parsed = Config::parse(&mut bytes.as_slice()).unwrap();
+		let trailing = [bytes.as_slice(), b"trailing"].concat();
+		let mut buf = trailing.as_slice();
+		let parsed = Config::parse(&mut buf).unwrap();
+		assert_eq!(buf, b"trailing");
 		assert_eq!(parsed.channel_count, 6);
+		assert_eq!(parsed.mapping_family, 1);
 
 		let mapping = parsed.mapping.unwrap();
 		assert_eq!(mapping.family(), 1);
@@ -258,6 +316,7 @@ mod tests {
 	fn encodes_the_vorbis_mappings() {
 		for channels in 1..=8u8 {
 			let mut config = Config::new(48_000, channels as u32);
+			config.mapping_family = 1;
 			config.mapping = Some(Mapping::vorbis(channels).unwrap());
 			let head = config.encode().unwrap();
 			assert_eq!(head.len(), 21 + channels as usize, "{channels} channels");
@@ -278,14 +337,23 @@ mod tests {
 
 		// The channel count must agree with the table.
 		let mut config = Config::new(48_000, 5);
+		config.mapping_family = 1;
 		config.mapping = Some(five_one);
 		assert!(matches!(config.encode(), Err(Error::UnsupportedChannelCount(5))));
+
+		// So must the family, both ways.
+		let mut config = Config::new(48_000, 6);
+		config.mapping = Some(five_one);
+		assert!(matches!(config.encode(), Err(Error::UnsupportedMappingFamily(0))));
+		let mut config = Config::new(48_000, 2);
+		config.mapping_family = 1;
+		assert!(matches!(config.encode(), Err(Error::UnsupportedMappingFamily(1))));
 	}
 
 	#[test]
 	fn parse_rejects_channel_counts_the_family_does_not_allow() {
 		for (channels, family) in [(0, 0), (3, 0), (0, 1), (9, 1), (0, 255)] {
-			let mut bytes = head(channels, family);
+			let mut bytes = head(1, channels, 0, family);
 			bytes.extend_from_slice(&[1, 0]);
 			bytes.extend(std::iter::repeat_n(0, channels as usize));
 			assert!(
@@ -302,10 +370,10 @@ mod tests {
 	fn parse_rejects_a_bad_mapping_table() {
 		// Family 1 promising a table that is not there, or only half of it.
 		assert!(matches!(
-			Config::parse(&mut head(2, 1).as_slice()),
+			Config::parse(&mut head(1, 2, 0, 1).as_slice()),
 			Err(Error::MappingTableTooShort)
 		));
-		let mut short = head(2, 1);
+		let mut short = head(1, 2, 0, 1);
 		short.extend_from_slice(&[1, 1, 0]);
 		assert!(matches!(
 			Config::parse(&mut short.as_slice()),
@@ -320,7 +388,7 @@ mod tests {
 			// A channel index past the two decoded channels.
 			[1, 1, 0, 2],
 		] {
-			let mut bytes = head(2, 1);
+			let mut bytes = head(1, 2, 0, 1);
 			bytes.extend_from_slice(&table);
 			assert!(
 				matches!(Config::parse(&mut bytes.as_slice()), Err(Error::InvalidMappingTable)),
@@ -329,7 +397,7 @@ mod tests {
 		}
 
 		// 255 is a silent channel, not an index.
-		let mut silent = head(2, 1);
+		let mut silent = head(1, 2, 0, 1);
 		silent.extend_from_slice(&[1, 0, 0, 255]);
 		assert_eq!(
 			Config::parse(&mut silent.as_slice()).unwrap().mapping.unwrap().table(),

@@ -41,8 +41,9 @@ The core configuration and layout contracts land in main. These quests implement
 surround and backend dispatch on that contract; each platform then lands as
 its own decode and encode quest so verification stays per host.
 
-## Quests
+## Required
 
+- [Named codecs](/quest/m1/audio-codecs/named-codecs.md) - `decode::Kind::Named` keeps the published codec names and picks backends internally; must land before the line merges
 - [AudioToolbox decode](/quest/m1/audio-codecs/decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
 - [HE-AAC catalog output](/quest/m1/audio-codecs/he-aac-catalog-output.md) - HE-AAC catalog entries name the output rate and layout, not the LC core
 - [TS Opus export refusals](/quest/m1/audio-codecs/ts-opus-export-refusals.md) - the TS exporter refuses Opus heads its channel code cannot describe instead of mislabeling them
@@ -55,7 +56,7 @@ its own decode and encode quest so verification stays per host.
 ## Related
 
 - [OBS native codecs](/quest/m1/obs-moq-video/README.md) - the OBS source and encoder adapters consume this through moq-ffi; #3498 narrowed OBS to what moq-audio decodes today
-- [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - Windows and Android verification needs a host; the Windows and macOS CI gates run nightly, not per PR
+- [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - Windows and Android verification needs a host; the Windows and macOS CI gates only compile
 - [Dart codec parity](/quest/m1/dart-codecs.md) - Dart gains these once it builds with the `audio` feature
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
 - [Media Foundation encode](/quest/m2/audio-encode-mediafoundation.md) - Windows encodes AAC-LC

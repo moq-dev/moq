@@ -1,24 +1,22 @@
-# [S] JS names the break discontinuity()
+# [XS] JS discontinuity() writes no estimated end
 
 ## Goal
 
-`@moq/hang`'s container producer spells its two operations the way Rust
-`moq_mux::container::Producer` does: `cut(end?)` closes the current group,
-and `discontinuity()` closes it and writes the empty marker group that tells
-subscribers to re-anchor. Today JS's public `cut()` writes the marker, so the
-same name means a routine group close in Rust and a timeline break in JS.
+`@moq/hang`'s `discontinuity()` without an explicit end closes the group with
+no cadence-estimated end, as Rust `moq_mux::container::Producer::discontinuity`
+does. Whatever resumes can land sooner than one estimated frame later (a
+capture swap), and an end past it reads as a rewind to every consumer.
 
 ## Plan
 
-[#4045](https://github.com/moq-dev/moq/pull/4045) deletes
-`quest/m1/js-publish-discontinuity.md`, since #3982 already put the marker
-in `cut()`; this rename is the only remaining JS work.
+The rename landed on `dev` in #4141 and kept the old behavior: in
+`js/hang/src/container/legacy.ts`, `discontinuity(end?)` calls `#close(end)`,
+which fills a missing `end` with `#end + #interval`. Rust's `discontinuity()`
+calls `close(None, None)` and clears the cadence first.
 
-In `js/hang/src/container/legacy.ts`, rename the public `cut(end?)` to
-`discontinuity()` (taking the same optional end) and keep the routine close
-private until a caller needs it public. Move `js/publish/src/video/encoder.ts`
-and any other caller over, and keep data tracks skipping a sequence the way
-Rust's `discontinuity()` does if a JS data-track caller appears. Rust is
-untouched.
+Give the break its own close path that passes no estimate when the caller
+gave no end, leaving the routine close's estimate alone. Test that a
+discontinuity after a steady cadence writes no end past the last frame.
 
-Public API: breaking in published `@moq/hang`, so it targets `dev`. Wire: none.
+Public API: behavior change in `@moq/hang`'s `discontinuity()`, which exists
+only on `dev`, so it targets `dev`. Wire: none.

@@ -185,3 +185,15 @@ test("blocked reads leave nothing behind on the pending group read", async () =>
 	subscriber.close();
 	producer.finish();
 });
+
+test("each record keeps its capture timestamp", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer({ track });
+	producer.append(new Uint8Array([1]), Time.Timestamp.fromMillis(1_000));
+	producer.append(new Uint8Array([2]), Time.Timestamp.fromMillis(2_000));
+	producer.finish();
+
+	const group = await track.subscribe().ordered().nextGroup();
+	expect((await group?.readFrame())?.timestamp.as(Time.Timescale.MILLI)).toBe(1_000);
+	expect((await group?.readFrame())?.timestamp.as(Time.Timescale.MILLI)).toBe(2_000);
+});

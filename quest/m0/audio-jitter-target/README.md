@@ -25,6 +25,20 @@ additive and target `main`: the native knob is a new field on a
 `#[non_exhaustive]` struct, and the browser estimator is a new module plus a
 new `spread` observation.
 
+Decided for landing: the line merges to `main`, not `dev`, with a changelog
+note for two behavior changes treated as fixes. `@moq/watch` `Sync` takes a
+numeric delay literally instead of adding the rendition delay on top
+([#3954](https://github.com/moq-dev/moq/pull/3954)), and `moq play --delay`
+defaults to `auto` instead of `100ms`
+([#3967](https://github.com/moq-dev/moq/pull/3967)). The old additive delay
+was wrong, and both compile unchanged for existing callers. The line branch is
+about 200 commits behind `main` with conflicts in `js/watch/src/sync.ts` and
+`rs/moq-cli`; merge `main` in (never rebase the shared branch) before
+finishing the watch quest. The raw #3477 traces are gone, so record fresh
+traces with the [audio quality
+harness](/quest/m0/audio-quality-harness/README.md) instead of asking the
+reporter; they replace the #3477 traces wherever the quests name them.
+
 The algorithm is written down at `doc/concept/audio-jitter.md`, with a
 conformance corpus beside it that both implementations will read.
 
@@ -60,7 +74,7 @@ playback may drift from the live edge before skipping a stalled group, and
 `start`, where to begin on a track that already holds groups. Nothing pads the
 buffer against uneven arrivals.
 
-## Quests
+## Required
 
 - [Watch](/quest/m0/audio-jitter-target/watch.md) - js/watch and js/hang bring the #3517 branch's estimator into conformance
 - [Native](/quest/m0/audio-jitter-target/native.md) - rs/moq-audio grows a measured jitter buffer from the same algorithm
@@ -71,7 +85,6 @@ buffer against uneven arrivals.
 
 ## Related
 
-- [Jitter clock](/quest/m1/jitter-flush-clock.md) - the advertised jitter (#3513 landed the flush span), which `doc/concept/audio-jitter.md` settles as a floor on the measured target
-- [Audio quality harness](/quest/m1/audio-quality-harness/README.md) - the automated proof, built on its own schedule
+- [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - the automated proof, and the recorder of the traces the watch quest replays
 - [Time stretch](/quest/m1/watch-audio-time-stretch.md) - inaudible convergence, on top of this
 - [Plan: A/V clock](/quest/m0/plan-av-clock.md) - the clock this target eventually feeds

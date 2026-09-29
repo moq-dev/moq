@@ -9,6 +9,11 @@ An OBS compositor frame reaches moq-video's VideoToolbox encoder without a GPU-t
 - Inspect OBS's OpenGL compositor, `encode_texture2`, and mac-videotoolbox input path. Determine whether the output allocation is IOSurface-backed and exportable. OBS's encoder currently copies CPU planes into its own pixel buffer; a CVPixelBuffer in moq-video alone does not remove that upstream readback.
 - Prefer retained IOSurface/CVPixelBuffer storage in the format VideoToolbox accepts. Otherwise prototype GPU color conversion/blit into an IOSurface-backed NV12 pool. Specify GL/Metal/CoreVideo interop, graphics-context thread affinity, completion fences, and when OBS may recycle the source.
 - Reuse the native PixelBuffer surface and the moq-video VideoToolbox backend. Retain the destination until encoding completes, including dropped submissions and cancellation. Bound the pool and handle resolution/HDR changes and device failure.
+- Measure and map the encoder presets on VideoToolbox while on the
+  hardware. Today it applies real-time, no-reordering controls and reports
+  `LowLatency` whatever preset was asked; give Balanced and Quality the
+  controls VideoToolbox has (real-time off, quality or speed priority)
+  without reordering, and report what took.
 - Verify no CPU readback using GPU/API traces and copy counters. Compare direct import or GPU blit against the CPU baseline at 1080p60 and 4K where supported. Check decoded color bars and moving timestamps, latency percentiles, audio sync, stop/restart, and long-running pool reuse on Apple hardware.
 
 ## Required

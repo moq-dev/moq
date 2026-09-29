@@ -1,7 +1,6 @@
 //! A cluster peer that predates the hidden opt-in still discovers the relay's
 //! `.`-named broadcasts, so a mixed-version mesh keeps `.internal/origins`.
 
-use std::net::TcpListener;
 use std::time::Duration;
 
 use moq_relay::cluster::{self, Peer};
@@ -28,21 +27,16 @@ where
 		.expect("test thread panicked");
 }
 
-/// A stream-only moq server on a free loopback TCP port, speaking only `version`.
-fn bind_free_tcp_server(version: moq_net::Version) -> (u16, moq_tokio::Server) {
-	for _ in 0..20 {
-		let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-		let port = probe.local_addr().expect("local addr").port();
-		drop(probe);
-
-		let mut config = moq_tokio::listen::Config::default();
-		config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
-		config.version = vec![version];
-		if let Ok(server) = config.init(Default::default()) {
-			return (port, server);
-		}
-	}
-	panic!("could not bind a free TCP port after 20 attempts");
+/// A stream-only moq server listening on an ephemeral loopback TCP port,
+/// speaking only `version`, and that port.
+async fn listen_tcp(version: moq_net::Version) -> (u16, moq_tokio::Listener) {
+	let mut config = moq_tokio::listen::Config::default();
+	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	config.version = vec![version];
+	let server = config.init(Default::default()).expect("server init");
+	let listener = server.listen().await.expect("listen");
+	let port = listener.tcp_local_addr().expect("TCP listener is configured").port();
+	(port, listener)
 }
 
 #[test]
@@ -58,11 +52,10 @@ async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	tokio::time::timeout(TEST_TIMEOUT, async {
-		let (port, server) = bind_free_tcp_server(version);
+		let (port, mut server) = listen_tcp(version).await;
 		let peer_origin = moq_tokio::origin::spawn();
 		let mut discovered = peer_origin.consume().with_hidden(true).announced();
 		let accept = tokio::spawn(async move {
-			let mut server = server.listen().await.expect("listen");
 			let request = server.accept().await.expect("cluster dial");
 			let session = request.with_subscriber(peer_origin).ok().await.expect("accept");
 			session.closed().await;

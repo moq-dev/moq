@@ -70,7 +70,7 @@ fn bench_register(c: &mut Criterion) {
 	g.finish();
 }
 
-/// Re-poll with a still-registered waiter, including retirement and slot reuse.
+/// Re-poll with a still-registered waiter, which the list recognizes and skips.
 fn bench_reregister(c: &mut Criterion) {
 	let mut g = c.benchmark_group("waiter_reregister");
 	for &n in &SIZES {
@@ -118,7 +118,7 @@ fn bench_cancel(c: &mut Criterion) {
 
 /// The cycle a poll function actually drives: hold the park, register with L lists,
 /// then one list wakes. The re-poll arrives with live registrations still parked on
-/// the other lists, requiring retirement before re-registration.
+/// the other lists, which it keeps, re-registering only on the list that woke.
 fn bench_park_cycle(c: &mut Criterion) {
 	let mut g = c.benchmark_group("waiter_park_cycle");
 	// Include broad polls that remain parked on many quiet lists.

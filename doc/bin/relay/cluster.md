@@ -16,6 +16,12 @@ same way so the cluster converges instead of flapping. Both wire protocols
 carry it: natively on moq-lite, and via the [cluster extension](/draft/moq-cluster)
 on moq-transport 17+.
 
+When a moq-lite-04 or later peer withdraws its last advertisement for a broadcast, a relay
+drops every other route to it that passed through that peer, since each was
+relayed from what the peer just withdrew, rather than falling back to them one
+by one. During reconnect, another session from that peer can still advertise
+the broadcast; an old session's withdrawal does not invalidate that route.
+
 Failover routes must carry copies of the same broadcast. For each track, the
 relay requires matching timescale, retention window, publisher priority, and
 group ordering. A source with different properties is refused before its groups
@@ -177,7 +183,8 @@ accepting relay admits a peer through the same lease as any client: its
 certificate is reported to the auth server, which grants it, so a mesh needs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server of
 your own that grants the cluster CA) behind `--auth-url`. A relay on
-`--auth-public '**'` admits peers through that grant instead. LAN peers
+`--auth-public '**'` admits peers through that grant instead, as long as they
+send no `cluster.token`: public rules refuse a token. LAN peers
 authenticate with the mDNS credential on `/.cluster/<credential>`, a secret
 the relay minted for itself and checks locally, and never receive
 `cluster.token`. Dials retry forever with capped backoff, so a rejected peer

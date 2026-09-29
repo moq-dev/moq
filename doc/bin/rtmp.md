@@ -29,6 +29,10 @@ the [`moq-rtmp`](https://docs.rs/moq-rtmp) library, which hands you each
 publish or play request to accept, map to a path, or reject. The CLI listener
 is unauthenticated; firewall it.
 
+A player that advertises enhanced-RTMP multitrack receives every rendition.
+Any other player receives one video rendition: the largest picture (then
+highest bitrate) in a codec it advertised. A push carries the largest one.
+
 Implemented in pure Rust (no librtmp). The CLI speaks plaintext `rtmp://`
 only; the library adds RTMPS on the same port when the embedder supplies a TLS
 config. FLAC and MP3 enhanced-audio payloads are dropped because hang has no

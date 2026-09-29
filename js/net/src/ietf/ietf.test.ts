@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import * as Path from "../path.ts";
-import { Reader, Writer } from "../stream.ts";
+import { type Cursor, Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import * as Varint from "../varint.ts";
 import * as GoAway from "./goaway.ts";
@@ -551,20 +551,19 @@ test("Subscribe v14: rejects invalid filter type", async () => {
 	).rejects.toThrow();
 });
 
-test("SubscribeOk v14: rejects non-zero expires", async () => {
-	const invalidBytes = new Uint8Array([
-		0x01, // subscribe_id
-		0x05, // INVALID: expires = 5
+test("SubscribeOk v14: ignores non-zero expires", async () => {
+	const body = [
+		0x01, // request_id
+		0x00, // track_alias
+		0x05, // expires = 5
 		0x02, // group_order
 		0x00, // content_exists
 		0x00, // num_params
-	]);
+	];
+	const bytes = new Uint8Array([0x00, body.length, ...body]);
 
-	await expect(
-		(async () => {
-			await decodeVersioned(invalidBytes, Subscribe.SubscribeOk.decode, Version.DRAFT_14);
-		})(),
-	).rejects.toThrow();
+	const decoded = await decodeVersioned(bytes, Subscribe.SubscribeOk.decode, Version.DRAFT_14);
+	expect(decoded.requestId).toBe(1n);
 });
 
 // Unicode tests
@@ -1591,11 +1590,8 @@ test("Frame object time: draft-15 uses absolute property types", async () => {
 	expect(await props.u62()).toBe(96_000n);
 	expect(await props.done()).toBe(true);
 
-	const decoded = await Frame.decode(
-		new Reader(undefined, encoded, Version.DRAFT_15),
-		flags,
-		Timescale.MILLI,
-		Version.DRAFT_15,
+	const decoded = await new Reader(undefined, encoded, Version.DRAFT_15).decode((c) =>
+		Frame.decode(c, flags, Timescale.MILLI),
 	);
 	expect(decoded.timestamp?.value).toBe(96_000);
 	expect(decoded.timestamp?.scale).toBe(Timescale.MILLI);
@@ -1659,14 +1655,64 @@ test("Frame object time: draft-16 starts delta property types", async () => {
 	expect(await props.u62()).toBe(96_000n);
 	expect(await props.done()).toBe(true);
 
-	const decoded = await Frame.decode(
-		new Reader(undefined, encoded, Version.DRAFT_16),
-		flags,
-		Timescale.MILLI,
-		Version.DRAFT_16,
+	const decoded = await new Reader(undefined, encoded, Version.DRAFT_16).decode((c) =>
+		Frame.decode(c, flags, Timescale.MILLI),
 	);
 	expect(decoded.timestamp?.value).toBe(96_000);
 	expect(decoded.timestamp?.scale).toBe(Timescale.MILLI);
+});
+
+test("Frame decodes objects split at every byte", async () => {
+	const flags: GroupFlags = {
+		hasExtensions: true,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd: true,
+		hasPriority: true,
+		firstObject: true,
+	};
+	const frames = [
+		new Frame({ payload: new Uint8Array([1]), timestamp: new Timestamp(96_000, Timescale.MILLI) }),
+		new Frame({ payload: new Uint8Array(300).fill(2), timestamp: new Timestamp(96_033, Timescale.MILLI) }),
+	];
+	const bytes = concatChunks(await Promise.all(frames.map((f) => encodeFrameVersioned(f, flags, Version.DRAFT_20))));
+	const reader = new Reader(
+		new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const byte of bytes) controller.enqueue(new Uint8Array([byte]));
+				controller.close();
+			},
+		}),
+		undefined,
+		Version.DRAFT_20,
+	);
+
+	const decode = (c: Cursor) => Frame.decode(c, flags, Timescale.MILLI);
+	for (const frame of frames) {
+		const decoded = await reader.decodeMaybe(decode);
+		expect(decoded?.payload).toEqual(frame.payload);
+		expect(decoded?.timestamp?.value).toBe(frame.timestamp?.value);
+	}
+	expect(await reader.decodeMaybe(decode)).toBeUndefined();
+});
+
+// The properties block is sized on the wire, so a property running past it is malformed, not
+// a reason to wait for more of the stream.
+test("Frame rejects a property that runs past its block", async () => {
+	const flags: GroupFlags = {
+		hasExtensions: true,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd: true,
+		hasPriority: true,
+		firstObject: true,
+	};
+	// Delta 0, a 2-byte block holding a Timestamp id and the first byte of a 2-byte value, a
+	// 1-byte payload, then bytes the block must not borrow.
+	const reader = new Reader(undefined, new Uint8Array([0, 2, 0x10, 0x80, 1, 0xaa, 0x01]), Version.DRAFT_20);
+	await expect(reader.decode((c) => Frame.decode(c, flags, Timescale.MILLI))).rejects.toThrow(
+		"message is shorter than its fields",
+	);
 });
 
 // A fetch stream's first object is the only one carrying absolute ids, so a wrong flag byte

@@ -9,7 +9,7 @@ cargo install --locked cargo-fuzz
 just rs fuzz lite
 ```
 
-The targets are `lite`, `ietf`, `varint`, `path`, and `pattern`. Extra arguments pass through to
+The targets are `lite`, `announce`, `ietf`, `varint`, `path`, and `pattern`. Extra arguments pass through to
 libFuzzer, so `just rs fuzz lite -- -max_total_time=300` bounds a run.
 
 The Nightly workflow runs every target for five minutes and uploads failure inputs
@@ -41,6 +41,8 @@ Beyond "does not panic":
   where a parameter map reaches the wire, since those encoders walk a `HashMap` and its
   iteration order differs per instance (moq-lite SETUP, and draft-14/15, which unlike
   draft-16+ do not sort by key first).
+- A lite-07 announce stream our decoder accepts, recompressed by our encoder, resolves
+  to the same announcements.
 - `Path::relative` inverts `Path::resolve`, and never produces a reference that walks
   above the root.
 

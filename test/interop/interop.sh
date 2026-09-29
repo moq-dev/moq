@@ -188,23 +188,31 @@ build_relay_cli() {
     [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq"
 }
 
-# Editable-install the workspace Python build (maturin builds rs/moq-ffi, then
-# the moq-rs wrapper installs on top) into the repo-root .venv. `import moq`
-# then resolves to this checkout, not a PyPI wheel.
+# Build the workspace Python packages as wheels (maturin builds rs/moq-ffi, hatchling
+# the moq-rs wrapper) and install them into a venv in the run directory, so `import moq`
+# resolves to this checkout rather than a PyPI wheel. The shared .venv is off limits: a
+# concurrent run's `just py build` uninstalls the package there while this run's
+# clients are importing it.
 prepare_python() {
     have uv || {
         mark_broken python "uv not found"
         return
     }
-    echo "building python client (workspace moq via maturin)..."
-    if (cd "$WORKSPACE" && just py build) >"$HARNESS_RUN/py-build.log" 2>&1; then
-        PY="$WORKSPACE/.venv/bin/python"
-        [[ -x "$PY" ]] || {
-            mark_broken python "workspace .venv python not found after build"
-            sed 's/^/        /' "$HARNESS_RUN/py-build.log" >&2 || true
-        }
+    echo "building python client (workspace moq wheels)..."
+    local venv="$HARNESS_RUN/py-venv" wheels="$HARNESS_RUN/py-wheels"
+    # maturin stages the bindings at a fixed path under the cargo target dir, so one
+    # build at a time per target. Debug like the other clients; its build backend
+    # defaults to release.
+    if (cd "$WORKSPACE" &&
+        harness_locked "$TARGET_BASE/.moq-test-maturin.lock" \
+            env MATURIN_PEP517_ARGS="--profile dev --locked" \
+            uv build --wheel --package moq-ffi --out-dir "$wheels" &&
+        uv build --wheel --package moq-rs --out-dir "$wheels" &&
+        uv venv "$venv" &&
+        uv pip install --python "$venv/bin/python" --no-deps "$wheels"/*.whl) >"$HARNESS_RUN/py-build.log" 2>&1; then
+        PY="$venv/bin/python"
     else
-        mark_broken python "just py build failed"
+        mark_broken python "wheel build failed"
         sed 's/^/        /' "$HARNESS_RUN/py-build.log" >&2 || true
     fi
 }
@@ -230,7 +238,9 @@ prepare_js() {
         elif ! (cd "$CLIENTS/js" && bun run check) >"$HARNESS_RUN/js-check.log" 2>&1; then
             mark_broken js "type check failed"
             sed 's/^/        /' "$HARNESS_RUN/js-check.log" >&2 || true
-        elif ! (cd "$CLIENTS/js" && bunx vite build) >"$HARNESS_RUN/js-vite.log" 2>&1; then
+        # Into the run directory, where harness.ts serves it from: vite empties its output
+        # first, so a shared dist/ vanishes under a concurrent run's page loads.
+        elif ! (cd "$CLIENTS/js" && bunx vite build --outDir "$HARNESS_RUN/js-dist" --emptyOutDir) >"$HARNESS_RUN/js-vite.log" 2>&1; then
             mark_broken js "vite build failed"
             sed 's/^/        /' "$HARNESS_RUN/js-vite.log" >&2 || true
         fi
@@ -256,7 +266,7 @@ prepare_go() {
     }
     echo "building go client (workspace moq-go via uniffi-bindgen-go)..."
     local staged ffi_pkg wrapper_pkg src="$HARNESS_RUN/go-client"
-    if ! staged=$(bash "$WORKSPACE/go/scripts/stage.sh" 2>"$HARNESS_RUN/go-stage.log"); then
+    if ! staged=$(bash "$WORKSPACE/go/scripts/stage.sh" --output "$HARNESS_RUN/go-stage" 2>"$HARNESS_RUN/go-stage.log"); then
         mark_broken go "go/scripts/stage.sh failed"
         sed 's/^/        /' "$HARNESS_RUN/go-stage.log" >&2 || true
         return
@@ -281,10 +291,10 @@ prepare_go() {
 }
 
 # Build libmoq (the C staticlib + cbindgen header) and compile the C subscriber
-# against it. cargo writes moq.h to $TARGET_BASE/include and libmoq.a to the
-# profile dir.
+# against it. cargo writes libmoq.a to the profile dir, and build.rs writes
+# moq.h into its OUT_DIR, which only cargo's JSON messages name.
 prepare_c() {
-    local cc="${CC:-cc}" header lib os_libs
+    local cc="${CC:-cc}" out_dir header lib os_libs
     have "$cc" || {
         mark_broken c "no C compiler ($cc) on PATH"
         return
@@ -292,19 +302,21 @@ prepare_c() {
     echo "building c client (workspace libmoq + cc)..."
     local flag=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
-    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p libmoq) >"$HARNESS_RUN/c-build.log" 2>&1; then
+    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p libmoq --message-format=json-render-diagnostics) >"$HARNESS_RUN/c-build.json" 2>"$HARNESS_RUN/c-build.log"; then
         mark_broken c "cargo build -p libmoq failed"
         sed 's/^/        /' "$HARNESS_RUN/c-build.log" >&2 || true
         return
     fi
-    header="$TARGET_BASE/include/moq.h"
+    out_dir=$(grep '"reason":"build-script-executed"' "$HARNESS_RUN/c-build.json" | grep libmoq |
+        sed -n 's/.*"out_dir":"\([^"]*\)".*/\1/p' | tail -1) || true
+    header="$out_dir/include/moq.h"
     lib="$TARGET_BASE/$PROFILE/libmoq.a"
     [[ -f "$header" && -f "$lib" ]] || {
         mark_broken c "libmoq artifacts missing ($header / $lib)"
         return
     }
     # cargo can't inject libmoq.a's native deps into an external link, so read
-    # them from the same list build.rs and CMake use.
+    # them from the same list moq.pc and CMake use.
     local native_libs
     case "$(uname -s)" in
         Darwin) native_libs="$WORKSPACE/rs/libmoq/native-libs/apple.txt" ;;
@@ -319,7 +331,7 @@ prepare_c() {
         esac
     done <"$native_libs"
     C_INTEROP="$HARNESS_RUN/c-interop"
-    if ! "$cc" "$CLIENTS/c/subscribe.c" -I"$TARGET_BASE/include" -L"$TARGET_BASE/$PROFILE" -lmoq "${os_libs[@]}" -o "$C_INTEROP" >"$HARNESS_RUN/c-compile.log" 2>&1; then
+    if ! "$cc" "$CLIENTS/c/subscribe.c" -I"$out_dir/include" -L"$TARGET_BASE/$PROFILE" -lmoq "${os_libs[@]}" -o "$C_INTEROP" >"$HARNESS_RUN/c-compile.log" 2>&1; then
         mark_broken c "cc compile failed"
         sed 's/^/        /' "$HARNESS_RUN/c-compile.log" >&2 || true
     fi

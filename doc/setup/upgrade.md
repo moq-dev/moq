@@ -18,7 +18,7 @@ error lists and rerun.
 ## Wire
 
 Older protocol versions still negotiate, so relays and clients can be upgraded
-in any order, apart from [re-minting tokens](#relay-and-cli) and two wire
+in any order, apart from [pattern-only token grants](#relay-and-cli) and two wire
 changes:
 
 - The lite 06 ALPN is `moq-lite-06`, not `moq-lite-06-wip`. An explicit
@@ -65,16 +65,46 @@ Other changes to a deployment:
 - **Grants are patterns, not prefixes.** `anon` is now exactly the broadcast
   `anon`; write `anon/**` for the subtree. This applies to `--auth-public`,
   TOML `public`, and the `[auth.public]` table, which is now
-  `public_subscribe` / `public_publish`.
-- **Re-mint tokens.** JWT `publish` and `subscribe` claims are patterns, so a
-  token granting `alice` covers only `alice`; sign `alice/**` instead. Tokens
-  carrying the retired `put` or `get` claims fail verification, so re-mint
-  them when the relay and auth server upgrade.
+  `public_subscribe` / `public_publish`. A public or mTLS pattern with no
+  wildcard refuses to start, naming the subtree to write, rather than pick
+  one reading silently. The patterns are rooted at `/`, as in 0.14, so
+  `anon/**` admits a client dialed at `/anon` and refuses one dialed outside
+  `anon/`. Earlier 0.15 releases rooted them at the dialed path instead.
+- **Token grants are patterns.** JWT `publish` and `subscribe` claims are
+  patterns, so a token granting `alice` covers only `alice`; sign `alice/**`
+  instead. Existing `put`/`get` tokens and key scopes keep working as subtrees,
+  and subtree-only grants are still signed in that form, so a `moq-token`
+  deployment can upgrade issuers and verifiers in either order. Verifiers on
+  the pattern-only `moq-auth` 0.1.0/0.1.1 or `@moq/auth` 0.1.x/0.2.0 refuse
+  that form, so upgrade them before their issuers. Grants only a pattern can
+  express need an upgraded verifier.
+- **Removed auth settings refuse to start.** 0.14's `[auth]` `key`, `key_dir`,
+  `auth_api`, `domains`, `mtls_tier`, and `[auth.tls]`, and their flags and
+  `MOQ_AUTH_*` variables, stop the relay with the replacement named rather
+  than being ignored.
+- **Token claims.** `iss`, `sub`, and `jti` are ignored and `nbf` is enforced.
+  Any other claim refuses the token with its name, `aud` and `cluster`
+  included, where 0.14 ignored all but `aud`: an issuer adding app claims such
+  as `user_id` must drop them.
+- **Every credential is evaluated or refused.** A relay on `--auth-public`
+  refuses a session presenting a token, as 0.14 did, including peers sending
+  `cluster.token`, and refuses to start with a client CA. `moq auth serve`
+  refuses a session presenting both a JWT and a certificate, so a peer
+  presents one or the other.
+- **`moq auth serve` never re-checks or expires by default**, as 0.14 never
+  did. `--revalidate` needs `--expires`, and `--limit-*` needs `--revalidate`.
 - **mTLS admits nothing on its own.** A verified client certificate is reported
   to the auth server, which grants it. `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` restores the old full access for every certificate
   the relay's client CA verifies, so keep that CA to cluster peers.
 - **`moq --listen` needs auth.** A CLI listener refuses to start without
   `--auth-url` or `--auth-public` instead of accepting everyone.
+- **Other 0.14 auth differences kept.** A 0.14 peer that dials with a
+  cluster JWT no longer sees `.internal/origins` gossip; peers identify by
+  certificate or LAN path. An auth server's `root` alias may have any depth.
+  A path in `--cluster-connect` is not refused, although it shifts the mesh
+  frame. `moq auth serve --key` takes a file, not an https or JWKS URL.
+  `moq auth sign --root` is the token root and JS `verify --root` the dialed
+  path. `/.cluster*` roots are reserved. `--auth-public a,b` splits on commas.
 - **noq is the only QUIC stack** (#3811). The `quinn` and `quiche` cargo
   features and the backend setting are gone.
 - **Stats counters** are `*_started` / `*_ended` (`sessions_started`,
@@ -133,7 +163,7 @@ The JavaScript packages have no changelog; this list follows the breaking
 PRs, so a minor rename may be missing.
 
 - **@moq/token is @moq/auth.** `sign` / `verify` are `Key.sign` / `Key.verify`,
-  and claims are pattern unions (see [Re-mint tokens](#relay-and-cli)).
+  and claims are pattern unions (see [Token grants are patterns](#relay-and-cli)).
 - **One `Connection`** (#3614, #3636). `Connection.Reload` is
   `new Moq.Connection({ url })`, which pools one connection per relay. `closed`
   settles only on `close()`; the error that stopped retrying is `error`.

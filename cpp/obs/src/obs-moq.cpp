@@ -27,9 +27,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "moq-dock.h"
 #endif
 
-extern "C" {
 #include "moq.h"
-}
 
 #ifdef _WIN64
 #include <windows.h>

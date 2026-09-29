@@ -50,6 +50,13 @@ stay that way there. Surround Opus is pure Rust, so it is the one multichannel
 path every host has. Opus mapping families other than 0 and 1 (ambisonics, and
 255's unpositioned channels) are refused, since they declare no speakers.
 
+Opus always decodes at 48 kHz, its own clock, whatever input rate the OpusHead
+records (44.1 kHz and unknown included), and applies the head's pre-skip and
+output gain. A track without a description decodes mono or stereo from the
+catalog with neither. A description that is present but malformed (truncated,
+wrong signature, a new major version, or a channel count its mapping family
+forbids) is refused rather than falling back to the catalog's fields.
+
 `encode` selects the same way, through `encode::Settings::kind`, and
 `Encoder::name()` reports what opened.
 

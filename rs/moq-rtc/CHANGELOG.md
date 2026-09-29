@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8](https://github.com/moq-dev/moq/compare/moq-rtc-v0.3.7...moq-rtc-v0.3.8) - 2026-09-27
+
+### Fixed
+
+- *(egress)* single-rendition egress serves the best rendition ([#4293](https://github.com/moq-dev/moq/pull/4293))
+
+## [0.3.7](https://github.com/moq-dev/moq/compare/moq-rtc-v0.3.6...moq-rtc-v0.3.7) - 2026-09-26
+
+### Added
+
+- end a broadcast with close() in every language ([#4031](https://github.com/moq-dev/moq/pull/4031))
+
+## [0.3.6](https://github.com/moq-dev/moq/compare/moq-rtc-v0.3.5...moq-rtc-v0.3.6) - 2026-09-26
+
+### Other
+
+- updated the following local packages: moq-net, hang, moq-mux
+
+## [0.3.5](https://github.com/moq-dev/moq/compare/moq-rtc-v0.3.4...moq-rtc-v0.3.5) - 2026-09-25
+
+### Other
+
+- updated the following local packages: moq-net, moq-mux, hang
+
 ## [0.3.4](https://github.com/moq-dev/moq/compare/moq-rtc-v0.3.3...moq-rtc-v0.3.4) - 2026-09-25
 
 ### Other

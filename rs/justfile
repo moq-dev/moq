@@ -291,6 +291,15 @@ _wants-capture $PACKAGES:
     set -euo pipefail
     grep -qwE '(moq-video|moq-audio)' <<< "$(just rs _names "$PACKAGES")"
 
+# True when the selection includes moq-cli, whose `play` media tasks are off the
+# default feature set. Selection pulls in dependents, so a diff to anything the
+# player is built from (moq-audio, moq-video, moq-mux) lands here too.
+[private]
+_wants-play $PACKAGES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    grep -qw 'moq-cli' <<< "$(just rs _names "$PACKAGES")"
+
 # True when the selection includes moq-relay, whose io_uring listener is off the
 # default feature set. Selection pulls in dependents, so a diff to any crate the
 # relay is built from (moq-uring, moq-sock, moq-tokio) lands here too.
@@ -495,9 +504,20 @@ check-changed $FILES $TEST="false":
 
     # moq-video's and moq-audio's device code is behind `capture`, which is off
     # by default, so the pass above never compiles it. Only nightly's
-    # `--all-features` did, and a break there lands on main.
+    # `--all-features` did, and a break there lands on main. With TEST=true the
+    # lint rides the test build, as in `check-test`.
     if [[ "$packages" == "ALL" ]] || just rs _wants-capture "$packages"; then
-    	just rs capture
+    	if [[ "$TEST" == true ]]; then
+    		CARGO_BUILD_WARNINGS=deny just rs capture-test
+    	else
+    		just rs capture
+    	fi
+    fi
+
+    # moq-cli's media tasks are behind `play`, off by default, so the test pass
+    # above never runs them. Only `check` tests, so the lint-only CI job skips it.
+    if [[ "$TEST" == true ]] && { [[ "$packages" == "ALL" ]] || just rs _wants-play "$packages"; }; then
+    	just rs play
     fi
 
     # moq-relay's io_uring listener is behind `io-uring`, off by default, so the
@@ -558,24 +578,21 @@ fix-changed $FILES:
     	just rs wasm-fix
     fi
 
-# Runs the `#[cfg(target_os = "windows")]` code past the compiler: moq-video's
-# Media Foundation capture/encode/decode and its D3D11 frames, which the Linux
-# gate skips entirely. Cross-compiling can't stand in, because openh264-sys2
-# builds vendored C++ that needs an MSVC toolchain and openh264 is a
-# non-optional dependency.
-#
-# Windows runners are throttled too hard for a per-PR gate, so nightly.yml runs
-# this once a day instead. A break there lands on main rather than being caught
-# in review, which is the same trade the other nightly gates make.
+# Runs the `#[cfg(windows)]` code past the compiler, which the Linux gate skips
+# entirely: moq-video's Media Foundation capture/encode/decode and its D3D11
+# frames, moq-nvenc's Windows loader, and the Winsock paths in moq-tokio. A
+# native host rather than a cross-compile, because openh264-sys2's vendored C++
+# needs an MSVC toolchain. platform.yml runs this on every pull request and
+# every push to main and dev.
 #
 # Default features rather than `--all-features`: jemalloc doesn't build on
-# MSVC, while moq-video's Linux-only `nvidia` default
-# are already no-ops off Linux. moq-gst is excluded because it links
-# GStreamer via pkg-config, which the Windows runner doesn't have.
+# MSVC, and the Linux-only features (vaapi, pipewire, io-uring) have nothing to
+# compile here. moq-gst is excluded because it links GStreamer via pkg-config,
+# which the runner doesn't have.
 #
 # `moq-cli/play` and `moq-cli/capture` are named explicitly because they are
-# off by default, and they are the only thing that compiles the cli's own
-# device and render code.
+# off by default, and they are what turns on the device and render code in
+# moq-video, moq-audio, and the cli itself.
 
 # Compile the whole workspace on a Windows host. Must run ON Windows.
 windows *args:
@@ -598,25 +615,18 @@ uring *args:
 uring-check *args:
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
 
-# Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
-# VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,
-# plus moq-audio's ScreenCaptureKit system audio and TCC permission pre-check.
+# Runs the Apple-gated code past the compiler: moq-video's VideoToolbox
+# encode/decode and its ScreenCaptureKit / AVFoundation capture, moq-audio's
+# ScreenCaptureKit system audio and TCC permission pre-check, and moq-sock's
+# BSD socket-buffer sysctl. platform.yml runs this alongside `windows`.
 #
-# Same trade as `windows`: nightly.yml runs this once a day rather than gating a
-# merge on a Mac runner. The moq-video half also has a release-time backstop,
-# since libmoq's `libmoq-v*` tag build compiles it on Apple Silicon. The
-# moq-audio half has none: libmoq and moq-ffi take it codecs-only, so no release
-# build compiles its capture backend and this recipe is the only thing that does.
-#
-# Scoped to those two crates instead of the workspace, because they hold all
-# the Apple-gated code the Linux gate misses. moq-ffi (and through it the
-# Swift/Kotlin/Go wrappers) already compiles on macOS in swift.yml.
-# `--all-features` also compiles the off-by-default cpal hosts and PipeWire
-# capture, which are Linux-only and no-ops here, so it costs nothing extra.
+# The same workspace and features as `windows`, for the same reasons: moq-gst
+# needs GStreamer, and the cli's `play` and `capture` features are what turn on
+# the device and render code.
 
-# Compile the Apple-only code paths. Must run ON macOS.
+# Compile the whole workspace on a macOS host. Must run ON macOS.
 macos *args:
-    cargo check --locked -p moq-video -p moq-audio --all-targets --all-features {{ args }}
+    cargo check --locked --workspace --exclude moq-gst {{ no_fuzz }} --all-targets --features "moq-cli/play moq-cli/capture" {{ args }}
 
 # The Linux device code: moq-video's V4L2 and X11 capture and moq-audio's cpal
 # capture, all behind the off-by-default `capture` feature. `check-changed` runs
@@ -627,6 +637,13 @@ macos *args:
 # Compile and lint the capture feature, which the default check skips.
 capture *args:
     cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture {{ args }} -- -D warnings
+
+# The capture publishers' tests (the clock fixtures among them) drive synthetic
+# devices, so they need no hardware and run with every PR that reaches either crate.
+
+# Test the capture feature, which the default test pass skips.
+capture-test *args:
+    just rs test -p moq-video -p moq-audio --features moq-video/capture,moq-audio/capture {{ args }}
 
 # Same idea as `windows`/`macos`, for Android: moq-video's MediaCodec encoder and
 # decoder, its `Surface::HardwareBuffer` variant, and the `frame::android` module
@@ -703,7 +720,7 @@ relay-minimal:
 #
 # Outside nextest on purpose. The staticlib link alone takes ~2 minutes, past the
 # hang budget in `.config/nextest.toml` once the rest of the workspace builds
-# beside it, and `rs/CLAUDE.md` says to make a slow test fast, not to raise the
+# beside it, and `rs/AGENTS.md` says to make a slow test fast, not to raise the
 # ceiling. obs.yml runs this on every PR that touches rs/libmoq, right after it
 # has built the same debug libmoq.a for the plugin, and nightly.yml covers the
 # paths that filter misses.
@@ -723,27 +740,27 @@ c-tests:
 
     cargo build --locked -p libmoq
 
-    # Ask cargo where it put the staticlib rather than assuming target/debug:
-    # CARGO_TARGET_DIR and a configured build target (`target/<triple>/debug`)
-    # both move it, and guessing wrong would link a stale copy or nothing.
-    # Replays the build above from cache, so it costs a process, not a compile.
-    lib=$(cargo build --locked -p libmoq --message-format=json |
-        jq -r 'select(.reason == "compiler-artifact") | .filenames[] | select(endswith("/libmoq.a"))' |
-        tail -1)
+    # Ask cargo where it put the staticlib and the header rather than assuming
+    # target/debug: CARGO_TARGET_DIR and a configured build target
+    # (`target/<triple>/debug`) both move them, and guessing wrong would link a
+    # stale copy or nothing. Replays the build above from cache, so it costs a
+    # process, not a compile.
+    log=$(cargo build --locked -p libmoq --message-format=json)
+    lib=$(jq -r 'select(.reason == "compiler-artifact") | .filenames[] | select(endswith("/libmoq.a"))' <<<"$log" | tail -1)
     if [ -z "$lib" ]; then
         echo "cargo reported no libmoq.a for libmoq" >&2
         exit 1
     fi
-    # The header sits beside the profile directory: rs/libmoq/build.rs writes it
-    # to `<target>/include`, one level above `<target>/<profile>/libmoq.a`.
     profile=$(dirname "$lib")
-    include="$(dirname "$profile")/include"
-    if [ ! -f "$include/moq.h" ]; then
+    # rs/libmoq/build.rs writes the header into its OUT_DIR.
+    out_dir=$(jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("libmoq")) | .out_dir' <<<"$log" | tail -1)
+    include="$out_dir/include"
+    if [ -z "$out_dir" ] || [ ! -f "$include/moq.h" ]; then
         echo "$include/moq.h missing after 'cargo build --locked -p libmoq'" >&2
         exit 1
     fi
 
-    # Same list build.rs (moq.pc), CMakeLists.txt, and test/interop/interop.sh read:
+    # Same list nix/overlay.nix (moq.pc), CMakeLists.txt, and test/interop/interop.sh read:
     # `framework:Foo` is a linker framework flag, anything else a plain library.
     case "$(uname -s)" in
         Darwin) native_libs=rs/libmoq/native-libs/apple.txt ;;
@@ -886,6 +903,23 @@ test-changed $FILES:
     	*)     echo "rs: testing $(just rs _names "$packages")"; just rs test --no-tests=pass $packages ;;
     esac
 
+    # Mirrors `check-changed`: the capture tests are off the default feature set.
+    if [[ "$packages" == "ALL" ]] || just rs _wants-capture "$packages"; then
+    	just rs capture-test
+    fi
+
+    if [[ "$packages" == "ALL" ]] || just rs _wants-play "$packages"; then
+    	just rs play
+    fi
+
+# The media tasks run against a recorder rather than a device (see
+# `rs/moq-cli/src/play/fake.rs`), so this needs no speaker or display, only the
+# device crates' build dependencies, which the dev shell carries.
+
+# Test moq-cli's `play` feature, which default features leave out.
+play *args:
+    just rs test -p moq-cli --features play {{ args }}
+
 # Compile and run the `/// ```` examples, which nextest skips.
 doctest *args:
     cargo test --locked --doc {{ args }}
@@ -925,7 +959,7 @@ loom *args:
 # run, and libFuzzer writes what it discovers to the FIRST corpus directory, which is
 # why the generated seeds are passed second and stay read-only.
 #
-# TARGET is lite, ietf, varint, or path. Arguments pass through, so
+# TARGET is lite, announce, ietf, varint, path, or pattern. Arguments pass through, so
 # `just rs fuzz lite -- -max_total_time=300` bounds a run. See rs/moq-net/fuzz/README.md.
 fuzz target *args:
     #!/usr/bin/env bash

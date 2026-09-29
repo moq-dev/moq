@@ -42,7 +42,7 @@ Decided:
   prefix route. Document this rather than promise it works.
 - Derived output lives under the epoch it came from
   (`pid/foo.hang/@e/transcode.pro`), so nested epochs must parse. This moves
-  the [wildcard](/quest/m1/wildcard/README.md) line's derived-output example
+  the [wildcard](/quest/m0/wildcard/README.md) line's derived-output example
   down one segment, and its suffix patterns still match.
 
 This README owns:
@@ -55,14 +55,11 @@ This README owns:
   consume behavior, takeover and fallback, bare-path resolution, and the
   prefix-route opt-out.
 
-## Quests
+## Required
 
+- [Epoch primitive](/quest/m1/epoch.md) - the shared `Epoch` type and path split
 - [Origin](/quest/m1/broadcast-epoch/origin.md) - moq-net publish mints an epoch, consumers follow the newest live one, and bare requests resolve to it on every version
 - [Apps](/quest/m1/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web publish under epochs and play bare names
 - [Gateways](/quest/m1/broadcast-epoch/gateways.md) - RTMP, SRT, and WHIP ingest mint an epoch per incoming connection, so an encoder reconnect is a clean takeover
 - [Bindings](/quest/m1/broadcast-epoch/bindings.md) - moq-ffi, libmoq, and every wrapper expose the epoch and inherit the default
 - [GStreamer and OBS](/quest/m1/broadcast-epoch/gst-obs.md) - moqsink and the OBS plugin publish each run under a fresh epoch
-
-## Required
-
-- [Epoch primitive](/quest/m1/epoch.md) - the shared `Epoch` type and path split

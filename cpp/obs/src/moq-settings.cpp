@@ -7,9 +7,7 @@
 #include <string>
 #include <vector>
 
-extern "C" {
 #include "moq.h"
-}
 
 namespace MoQSettings {
 

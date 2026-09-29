@@ -1,11 +1,11 @@
-# [S] hang: expose the broadcast wall clock
+# [XS] hang: document the broadcast wall clock
 
 ## Goal
 
-A browser application can read the broadcast's fixed PTS-to-wall mapping
-through `js/hang`, alongside archive timeline records when present, so an application that knows its
-viewers share a clock can compute the delay that renders one frame at one
-instant everywhere, and a DVR view can map presentation time to wall time.
+A browser application can find how to map presentation time to wall time
+from `doc/lib/js/hang.md`, so an application that knows its viewers share a
+clock can compute the delay that renders one frame at one instant everywhere,
+and a DVR view can label its timeline.
 
 The library itself never synchronizes playback on wall time. That is the
 decision behind [#2278](https://github.com/moq-dev/moq/issues/2278): frame
@@ -17,20 +17,15 @@ sync exchange over a track.
 
 ## Plan
 
-Expose the catalog contract selected by the continuous broadcast clock quest,
-using one mapping across tracks and source restarts. The current timeline is
-a broadcast-wide segment index, not a per-rendition track. Reuse the existing
-consumer and signal machinery where present; do not assume the old `setWall`
-producer or create per-record clock epochs. Keep `js/watch` arrival-based Sync
-unchanged. Document PTS-to-wall conversion and the requirement that an
-application knows whether remote clocks are synchronized.
-
-Verify application access using the built-in publisher integration, including
-a live-only broadcast with no archive timeline.
-
-## Required
-
-- [CLI import clock](/quest/m1/cli-import-clock.md) - built-in publishers populate the mapping applications read
+The API already exists: the catalog root's optional `clock` (`ClockSchema`,
+`Clock`) and `wallClockTime(clock, pts, ptsTimescale)` in
+`js/hang/src/catalog/clock.ts`, exported from `@moq/hang/catalog`. Only the
+docs are missing. Add a short section to `doc/lib/js/hang.md`: read `clock`
+from a catalog root, convert a frame's PTS with `wallClockTime`, note that a
+live-only broadcast carries it without an `archive` entry, that the mapping is
+fixed for the broadcast's life, and that comparing wall times across machines
+requires the application to know their clocks are synchronized. Keep
+`js/watch` arrival-based Sync unchanged.
 
 ## Closes
 
