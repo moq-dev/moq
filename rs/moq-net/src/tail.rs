@@ -105,6 +105,20 @@ impl Tail {
 		self.expire(now);
 	}
 
+	/// Restart the age of every gap reaching into `groups`, which the demand newly asks for.
+	pub fn demand(&mut self, groups: Range<u64>, now: Instant) {
+		if groups.is_empty() {
+			return;
+		}
+		let mut below = 0;
+		for run in &mut self.runs {
+			if below < groups.end && groups.start < run.groups.start {
+				run.since = now;
+			}
+			below = run.groups.end;
+		}
+	}
+
 	/// Fold every gap older than the grace into the runs around it.
 	pub fn expire(&mut self, now: Instant) {
 		let grace = self.grace;
@@ -287,6 +301,28 @@ mod tests {
 
 		tail.expire(start + GRACE);
 		assert_eq!(groups(&tail), vec![0..10], "both halves opened at the start");
+	}
+
+	/// A gap the demand newly asks for is late only from then, however old the run above it.
+	#[test]
+	fn a_lowered_floor_restarts_the_gap_age() {
+		let start = Instant::now();
+		let mut tail = Tail::new(GRACE);
+		tail.account(3..4, start);
+		tail.account(9..10, start);
+
+		let lowered = start + GRACE * 2;
+		tail.demand(1..3, lowered);
+		tail.account(1..2, lowered);
+		assert_eq!(
+			groups(&tail),
+			vec![1..2, 3..10],
+			"only the gap the floor reached restarts"
+		);
+		assert!(!tail.covers(1..4));
+
+		tail.expire(lowered + GRACE);
+		assert!(tail.covers(1..10));
 	}
 
 	/// The grace gives up on streams that never arrived, never on one still being read:

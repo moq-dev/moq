@@ -142,6 +142,23 @@ describe("Tail", () => {
 		expect(t.covers(0, 10)).toBe(true);
 	});
 
+	test("a lowered floor restarts the gap age", () => {
+		const { clock, tail: t } = tail();
+		t.account(3, 4);
+		t.account(9, 10);
+
+		clock.now = GRACE * 2;
+		t.demand(1, 3);
+		t.account(1, 2);
+		expect(t.covers(1, 4)).toBe(false);
+		// Only the gap the floor reached restarts.
+		expect(t.covers(3, 10)).toBe(true);
+
+		clock.now = GRACE * 3;
+		t.account(9, 10);
+		expect(t.covers(1, 10)).toBe(true);
+	});
+
 	test("the grace waits for a stream being read", async () => {
 		const t = new Tail({ grace: () => Milli(10) });
 		const read = t.open(0);

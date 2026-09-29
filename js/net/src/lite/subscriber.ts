@@ -589,7 +589,7 @@ export class Subscriber {
 			const subscriptionUpdates =
 				this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02
 					? undefined
-					: this.#runSubscriptionUpdates(id, broadcast, producer, msg, stream);
+					: this.#runSubscriptionUpdates(id, broadcast, entry, msg, stream);
 
 			// Terminal conditions (stream end, track close, a failed subscription update) settle at most
 			// once; race them into one stable promise so the demand loop doesn't re-subscribe each pass.
@@ -955,10 +955,11 @@ export class Subscriber {
 	async #runSubscriptionUpdates(
 		id: bigint,
 		broadcast: Path.Valid,
-		track: track.Producer,
+		entry: SubscribeEntry,
 		msg: Subscribe,
 		stream: Stream,
 	): Promise<void> {
+		const track = entry.track;
 		const stopped: Promise<null> = race([track.closed, stream.reader.closed]).then(() => null);
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
@@ -982,6 +983,12 @@ export class Subscriber {
 			// request is: the error closes the track, so every local subscriber sees it.
 			const bounds = groupBounds(current.groups);
 			if (emptyRange({ startGroup: bounds.start, endGroup: bounds.end })) throw new Error(EMPTY_RANGE);
+
+			// A lowered floor owes groups nobody asked for until now.
+			if (current.groups?.start !== undefined) {
+				const floor = lastSent.groups?.start === undefined ? entry.start : groupBounds(lastSent.groups).start;
+				entry.tail.demand(bounds.start, floor ?? Number.POSITIVE_INFINITY);
+			}
 
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxAge/etc.

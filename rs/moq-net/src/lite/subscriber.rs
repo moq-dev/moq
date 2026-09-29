@@ -3255,6 +3255,11 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						active.max_age = subscription.max_age;
 						if let Ok(mut tail) = active.tail.write() {
 							tail.set_grace(tail::grace(subscription.max_age));
+							// A lowered floor owes groups nobody asked for until now.
+							if let Some(start) = subscription.start {
+								let floor = active.start.map(|start| start.group).or(active.served);
+								tail.demand(start.group..floor.unwrap_or(u64::MAX), self.subscriber.runtime.now());
+							}
 						}
 						active.start = subscription.start;
 						if supports_update {

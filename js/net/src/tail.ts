@@ -84,6 +84,18 @@ export class Tail {
 		this.#account(start, end);
 	}
 
+	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */
+	demand(start: number, end: number): void {
+		if (start >= end) return;
+		const now = this.#now();
+		let below = 0;
+		this.#runs = this.#runs.map((run) => {
+			const reached = below < end && start < run.start;
+			below = run.end;
+			return reached ? { ...run, since: now } : run;
+		});
+	}
+
 	/** Whether every sequence in `[start, end)` is accounted for. */
 	covers(start: number, end: number): boolean {
 		if (start >= end) return true;
