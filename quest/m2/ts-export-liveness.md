@@ -2,9 +2,9 @@
 
 ## Goal
 
-`Export::stats` returns `ts::Stats` with #3489's per-PID row for every
-elementary stream the exporter writes: the access-unit count and the gap since
-the last, on the output's own PCR. An operator can tell that one track stalled
+`Export::stats` returns `ts::Stats` with the import's per-PID row (#4502) for
+every elementary stream the exporter writes: `units`, the access-unit count,
+and `quiet`, the time since the last, on the output's own PCR. An operator can tell that one track stalled
 at the exporter while PSI and the other PIDs kept flowing. The other fields of
 `ts::Stats` stay zero at egress. `moq export ts` logs a line when a row stops
 advancing.
@@ -40,15 +40,11 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
 Implementation:
 
 - `rs/moq-mux/src/container/ts/export.rs`: count an access unit per PID when
-  its PES is written, and the gap on the output PCR. Fix the stale "TR 101
+  its PES is written, and the quiet time on the output PCR. Fix the stale "TR 101
   290 flags a gap over 40 ms" comment near `PCR_INTERVAL` (V1.4.1's limit is
   100 ms), and the matching 40 ms defaults and the "inserts no null packets,
   and paces PCR once per media frame" sentence in `test/ts/README.md`.
 - `rs/moq-cli/src/subscribe.rs` logs a stopped row the way `publish.rs` does.
 - Tests in `export_test.rs`: a healthy export advances every row; a track that
-  stops mid-run grows its gap while PSI and the other PIDs continue, the
+  stops mid-run grows its quiet time while PSI and the other PIDs continue, the
   #3533 shape.
-
-## Required
-
-- [#3489](/quest/m1/3489-ts-import-stream-liveness.md) - the per-PID row this reuses

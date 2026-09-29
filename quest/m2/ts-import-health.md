@@ -5,8 +5,8 @@
 An operator polling `moq import ts`, or `moq-srt` through the same importer,
 reads cumulative counters for the TR 101 290 checks that grade a contribution
 feed at ingest: `TS_sync_loss`, `Sync_byte_error`, `PAT_error`,
-`Continuity_count_error`, `PMT_error`, `Transport_error`, `CRC_error`,
-`PCR_repetition_error`, `PCR_discontinuity_indicator_error` and `PTS_error`.
+`Continuity_count_error`, `PMT_error`, `Transport_error`, `CRC_error` (on
+PAT and PMT), `PCR_repetition_error`, `PCR_discontinuity_indicator_error` and `PTS_error`.
 Counters only: ETSI's fixed limits, no configuration, no verdict, and nothing
 changes in what is published.
 
@@ -25,20 +25,29 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
   last-event timestamp and no green/amber/red roll-up; the rate is what an
   operator alarms on, and the stats sample dates the event.
 - **Limits are ETSI TR 101 290 V1.4.1's and fixed**: 0.5 s for PAT and PMT,
-  loss of sync after five corrupted sync bytes and regain after two, 100 ms
+  loss of sync after two or more consecutive corrupted sync bytes and
+  acquisition after five consecutive correct ones (ISO 13818-1 G.1), 100 ms
   for PCR repetition (the 40 ms limit left TS 101 154 in 2005), 0 to 100 ms
   for PCR discontinuity, 700 ms for PTS. The PMT names the PIDs, and every
   packet is checked, so there is no sampling to configure.
 - **No `PID_error` field.** ETSI defines it as a PMT-listed PID with no
-  packets for a user-specified period. #3489's per-PID rows (access units and
-  the gap since the last) cover it and are stricter: a dead video path behind a
+  packets for a user-specified period. The per-PID rows #3489 landed in
+  #4502 (`units`, access units delivered, and `quiet`, the time since the
+  last) cover it and are stricter: a dead video path behind a
   live mux still sends adaptation-field-only PCR packets on its PID, which a
   packet count reads as live
   ([T27](https://github.com/tdrapier-wbd/moq-mpegts-paper/blob/d4c7573f9519a1c9c4882fab2021fbf82616fdcc/lab/test-27-liveness-detector.md)).
   The rows keep #3489's names so no field claims the ETSI name for a different
   measurement, and the consumer picks the window, as #3489 decided. The docs
   map `PID_error` onto them.
-- **Intervals run on the transport clock** #3489 parses, accumulated step by
+- **`CRC_error` covers PAT and PMT only.** TR 101 290 names CAT, PAT, PMT,
+  NIT, EIT, BAT, SDT and TOT, and its table 5.1b cuts that to PAT and PMT for
+  systems with reduced SI, which a contribution feed is. The importer parses
+  only PAT and PMT, and [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md)
+  already drops a bad-CRC section and counts it as `crc_error`; this quest
+  adopts that field. SI captured verbatim (NIT, SDT, EIT, BAT, TOT) is not
+  CRC-checked, and CAT is out with the scrambled services below.
+- **Intervals run on the program clock** #4502 reads, accumulated step by
   step with a jump bound: one corrupt PCR taken as an absolute distance
   fabricated a 23,861 s outage on every PID in the campaign's detector (T27).
   A clock that stops freezes every interval; the consumer sees that case as
@@ -95,8 +104,7 @@ Implementation:
 
 ## Required
 
-- [TS import PSI CRC](/quest/m1/ts-import-psi-crc.md) - `CRC_error` needs a CRC failure the importer survives
-- [#3489](/quest/m1/3489-ts-import-stream-liveness.md) - the transport clock and the per-PID rows that cover `PID_error`
+- [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md) - the bad-CRC PAT or PMT the importer survives and counts as `crc_error`
 
 ## Related
 

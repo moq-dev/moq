@@ -6,7 +6,7 @@
 counters so a dashboard reads the TR 101 290 counters and per-PID liveness
 beside the media and delivery counters, with no new transport. No health
 roll-up in-tree: green, amber or red per priority is the consumer's reading of
-counter rates and PID gaps.
+counter rates and PID quiet times.
 
 ## Plan
 
@@ -19,7 +19,7 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
   catalog's `mpegts` key, the counters stay owned by moq-mux beside
   `ts::Ext`, and `hang` stays TS-free.
 - **Counters sum, gauges do not.** Every check is a cumulative counter, which
-  keeps `.z` deltas small and lets an aggregate sum; the PID gap is a gauge and
+  keeps `.z` deltas small and lets an aggregate sum; the PID's `quiet` is a gauge and
   merges newest-wins.
 - `ts::Stats` gains serde, every field defaulted and unknown fields ignored;
   `StreamStats.track` becomes owned so the type deserializes.
