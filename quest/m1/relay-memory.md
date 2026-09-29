@@ -28,17 +28,14 @@ committed, since they need `#[doc(hidden)]` size probes on private types.
 Rebuild them from this description and restate the per-broadcast and
 per-route cost, the per-peer session bookkeeping (`announce_ids`, `held`,
 `watched`), and the shed threshold on a degree-5, 1 GB node, before anyone
-quotes a number again. Two committed directions depend on the answer:
-chat-shaped traffic (one broadcast per channel or per chatter) and
-[PoP skipping](/quest/m1/pop-skipping/README.md), which triples average
-degree and adds a second, more specific route per carried broadcast.
+quotes a number again. Chat-shaped traffic (one broadcast per channel or
+per chatter) depends on the answer.
 
-Asking peers for announcements only while something watches was considered
-and dropped: every loop-free way to forward coalesced interest through a
-cyclic mesh (a hop budget, an originator set, cost-decreasing interest over
-coarse claims) adds teardown churn or new wire state, for a saving nobody
-has measured. Shrink the table itself instead.
+On-demand announcements are now [Cluster routing](/quest/m1/cluster-routing.md)'s
+plan: a relay learns only the prefixes its own clients request, which bounds
+the table by demand. These numbers size that saving.
 
 ## Related
 
+- [Cluster routing](/quest/m1/cluster-routing.md) - on-demand announcements shrink the table this measures
 - [Perf](/quest/m1/perf/README.md) - the hot-path work that owns the remaining per-cell cost

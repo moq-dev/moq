@@ -1,4 +1,4 @@
-# [L] js/net: decode messages synchronously from buffered bytes
+# [M] js/net: decode messages synchronously from buffered bytes
 
 ## Goal
 
@@ -20,21 +20,22 @@ write converts flow-controlled bytes into heap objects. A single-message slot
 was tried in #2820 and broke ordering, because `take()` cannot yield to the
 decoder without letting a group pop slip in between.
 
-Every `Reader` primitive in `js/net/src/stream.ts` (`u62`, `u53`, `read`,
-`string`, ...) is async and routes through a fill, even when the bytes are
-already buffered. All 23 `static async decode` message decoders under
-`js/net/src/lite/` are written against it, plus four `decodeMaybe` variants.
+`Reader` in `js/net/src/stream.ts` already decodes synchronously: a decode is
+a function over a `Cursor`, whose reads throw an internal short signal when the
+buffered bytes run out. `tryDecode` returns undefined and consumes nothing in
+that case, and `decode`/`decodeMaybe` are the one async driver that fills and
+retries. The primitives (`u62`, `u53`, `read`, `string`, ...) are that driver
+applied to the `Cursor` reads, and the group and FETCH frame loops drain every
+buffered frame with `tryDecode` (`js/net/bench/frames.ts`). The 22
+`static async decode` message decoders under `js/net/src/lite/`, plus four
+`decodeMaybe` variants, still await a primitive per field.
 
-- Give `Reader` a synchronous decode over its buffer: the primitives read from
-  `#buffer` and signal "incomplete" when it runs short, and one generic async
-  driver fills and retries. The decoders then have a single synchronous body
-  each; the async form is the driver applied to it, not a second copy.
-- Convert all 23 decoders, so the `Reader` has one contract rather than a
-  sync path for control messages and an async one for the rest.
+- Convert all 26 decoders to a single synchronous body over a `Cursor`, with
+  the async form as `reader.decode(...)` rather than a second copy. `Message`
+  in `lite/message.ts` becomes a sync size-prefixed wrapper.
 - The publisher drains controls synchronously in its loop and
   `SubscriptionControls` goes away.
-- Tests: a decoder given a partial buffer reports incomplete without
-  consuming; the publisher applies N buffered updates before the next group
+- Tests: the publisher applies N buffered updates before the next group
   pop; a partial update with a group already ready waits for the second fill
   and pops the group under the new range, so incomplete is never read as "no
   control pending"; the flood case stays bounded.

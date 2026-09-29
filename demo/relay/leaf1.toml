@@ -13,10 +13,11 @@ bind = "[::]:4445"
 tls.cert = ["leaf1.crt"]
 tls.key = ["leaf1.key"]
 
-# Trust client certificates signed by this CA for mTLS peer auth. The
-# certificate is a fact for the auth source below; an auth server grants
-# peers through `--mtls-publish` / `--mtls-subscribe`.
-tls.root = ["ca.pem"]
+# To authenticate peers by certificate, trust client certificates signed by
+# this CA and switch `[auth]` below to the auth server, which grants them
+# through `--mtls-publish` / `--mtls-subscribe`. Public rules ignore
+# certificates, so the relay refuses a client CA alongside them.
+# tls.root = ["ca.pem"]
 
 [connect]
 # Present this certificate and key on outbound cluster connections; the
@@ -44,7 +45,7 @@ public = "**"
 
 # To exercise JWT + public-pattern auth instead, drop `public` above, run
 # `moq auth serve --key root.jwk --public-subscribe 'anon/**' --public-subscribe 'demo/**' --public-publish 'anon/**' --mtls-publish '**' --mtls-subscribe '**'`,
-# and point the relay at it:
+# point the relay at it, and uncomment `listen.tls.root` above:
 # url = "http://127.0.0.1:4440/"
 
 [stats]

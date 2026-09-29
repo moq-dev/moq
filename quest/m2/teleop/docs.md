@@ -2,12 +2,12 @@
 
 ## Goal
 
-`doc/concept/use-case/other.md` stops being a zero-byte stub and becomes the
-teleoperation page, with a runnable non-media example beside it.
+`doc/concept/use-case/` gains a teleoperation page, listed in its
+`index.md`, with a runnable non-media example beside it.
 
 ## Plan
 
-The docs have no non-media tutorial. `rs/moq-native/examples/{chat,clock}.rs`
+The docs have no non-media tutorial. `rs/moq-tokio/examples/{chat,clock}.rs`
 and `rs/moq-json/examples/telemetry.rs` all publish something that is not audio
 or video, but none is presented as the way to carry application data, and
 telemetry.rs measures wire savings rather than teaching the shape.

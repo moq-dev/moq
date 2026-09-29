@@ -42,7 +42,7 @@ Decided in the review of
 
 Docs stay inline in the change that makes them stale. No new guide.
 
-## Quests
+## Required
 
 - [Sparse FETCH ranges](/quest/m1/moxygen/fetch-span.md) - a FETCH costs the groups it returns, not the span of its range
 - [Group fetch fill](/quest/m1/moxygen/fetch-fill.md) - a cache fill from an IETF upstream is complete or refused, validated against FETCH_OK, and asks from the frame the reader wants

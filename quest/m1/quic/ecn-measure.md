@@ -14,7 +14,8 @@ A manual procedure on Linux, run as root, with the commands and what to
 record written here so the dualpi2 run and any later provider re-check
 repeat it.
 
-Use the released [classic BBR ECN fix](/quest/m1/bbr-classic-ecn.md) for the
+Use moq-noq 1.3.2 or later, which carries the classic BBR CE response
+([moq-dev/noq#12](https://github.com/moq-dev/noq/pull/12)), for the
 controller-response verdict and record the exact dependency version. Provider
 mark-survival captures alone do not establish a controller response; a result
 from 1.3.1 is a defective baseline, not evidence that classic ECN cannot help.
@@ -35,7 +36,3 @@ from 1.3.1 is a defective baseline, not evidence that classic ECN cannot help.
   and the tcpdump summaries beside the numbers in the L4S quest's Plan.
   If neither provider preserves the marks, say so there: L4S stays off and
   the marking response is only a lab result.
-
-## Required
-
-- [Classic BBR ECN](/quest/m1/bbr-classic-ecn.md) - the final response verdict needs the corrected released controller

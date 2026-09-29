@@ -95,8 +95,8 @@ the same independence without fighting the browser.
 Rust already does the serving-side work: `best_route` re-runs on every table
 change and a live subscription re-splices onto a cheaper route with the same
 first hop at a group boundary, while an anonymous chain never wins. The JS
-origin re-selects on provider change but ranks newest-first; that is
-[route cost in the JS origin](/quest/m1/route-cost.md). The JS handshake
+origin ranks the same way (`compareRoutes` in `js/net/src/origin.ts`: cost,
+then fewest hops, then newest). The JS handshake
 already declares a random hop id, so browser hops are identified; the roster
 id is that hop id, held once per origin rather than once per session.
 
@@ -110,16 +110,8 @@ relay's route ties the relay and loses on chain length.
 [Cost across scopes](/quest/m1/p2p/cost-scopes.md) writes the rule before
 the watcher depends on it.
 
-### Fallback: a Rust + WASM in-tab hop
-
-If JS transit or ranking proves hard, the browser side can be moq-net in
-WASM: `moq-wasm` already runs it over `web-transport-wasm`. A WASM hop would
-hold the relay and peer sessions in Rust, giving one implementation of
-signaling, policy, ranking, transit, and migration, and TS apps would connect
-to it over an in-memory transport. It costs a web-sys data channel poll
-transport, an in-memory bridge into `@moq/net`, and parsing every frame twice
-in the tab. Recorded here so that decision is made with numbers, not
-re-derived.
+No Rust + WASM in-tab hop: [rs2ts](/quest/m1/rs2ts/remove-wasm.md) removes the
+WASM build, so the browser side stays TypeScript.
 
 ### Risks
 
@@ -133,7 +125,7 @@ re-derived.
 - Symmetric NATs on both ends fail ICE without TURN. By design the relay
   keeps serving.
 
-## Quests
+## Required
 
 - [Data channel transport](/quest/m1/p2p/transport.md) - `@moq/p2p` speaks qmux over one ordered RTCDataChannel behind the WebTransport shape `@moq/net` consumes
 - [Signaling and policy](/quest/m1/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used
@@ -148,7 +140,6 @@ re-derived.
 ## Related
 
 - [Peer grants](/quest/m1/auth/peer-grant.md) - the hop-bound credential a direct session presents; HMAC keys issue none
-- [Route cost in the JS origin](/quest/m1/route-cost.md) - the watcher-side route pick this line needs
 - [One port](/quest/m1/one-port/README.md) - the relay answers STUN on its QUIC port
 - [E2EE](/quest/m1/e2ee/README.md) - what a peer would need if the token scope stopped being the trust boundary
 - [qmux on the QUIC core](/quest/m1/quic/qmux.md) - the stream core the unordered follow-up rides

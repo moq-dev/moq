@@ -421,9 +421,16 @@ export class Pattern {
 		return new Pattern(splitPath(path).map((value) => ({ kind: "literal", value })));
 	}
 
-	/** The pattern matching `path` and everything beneath it: `path/**`. The empty path yields `**`. */
+	/**
+	 * The pattern matching `path` and everything beneath it: `path/**`.
+	 *
+	 * The empty path yields `**`, and a path of {@link Pattern.MAX_SEGMENTS} yields the
+	 * literal, since nothing can sit beneath it.
+	 */
 	static subtree(path: string): Pattern {
-		return new Pattern([...splitPath(path).map((value): Segment => ({ kind: "literal", value })), GLOBSTAR]);
+		const segments = splitPath(path).map((value): Segment => ({ kind: "literal", value }));
+		if (segments.length < MAX_PATTERN_SEGMENTS) segments.push(GLOBSTAR);
+		return new Pattern(segments);
 	}
 
 	/** The pattern matching every path: `**`. */

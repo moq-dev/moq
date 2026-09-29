@@ -237,6 +237,23 @@ impl Client {
 		Connection::new(self.clone(), addrs.into())
 	}
 
+	/// Close every QUIC connection this client dialed, once each peer has been sent the
+	/// close.
+	///
+	/// Clones share one endpoint, so this closes theirs too. Dropping the connections
+	/// only queues the close, which nothing sends once the runtime stops: a process
+	/// that exits without this leaves each peer waiting out its idle timeout.
+	///
+	/// Only the noq endpoint is closed. WebSocket, TCP, and UDS sessions end when their
+	/// [`Connection`] is dropped (the kernel closes the socket on exit), and an iroh
+	/// endpoint passed to `with_iroh` is closed by its owner.
+	pub async fn close(self) {
+		#[cfg(feature = "noq")]
+		if let Some(noq) = self.noq {
+			noq.close().await;
+		}
+	}
+
 	/// Connect to the configured [`connect.url`](crate::connect::Config::url) URL, publishing
 	/// `origin` to it.
 	///

@@ -69,8 +69,8 @@ target_include_directories(moq INTERFACE ${RUST_INCLUDE_DIR})
 target_link_libraries(moq INTERFACE "${RUST_LIB}")
 
 # System libraries Rust std/deps pull in. When the staticlib is linked into a
-# C/C++ target by an external linker, cargo can't inject these itself. build.rs
-# reads the same files for moq.pc, so the two never drift.
+# C/C++ target by an external linker, cargo can't inject these itself.
+# nix/overlay.nix reads the same files for moq.pc, so the two never drift.
 #
 # Reads native-libs/<platform>.txt into MOQ_NATIVE_LIBS: `framework:Foo` becomes
 # a linker framework flag, anything else a plain library name.

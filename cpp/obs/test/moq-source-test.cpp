@@ -41,8 +41,8 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/samplefmt.h>
 #include <libswscale/swscale.h>
-#include "moq.h"
 }
+#include "moq.h"
 
 #include "moq-source.h"
 

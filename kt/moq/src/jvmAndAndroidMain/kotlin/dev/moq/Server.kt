@@ -30,11 +30,10 @@ class Server internal constructor(
     private val publishOrigin: OriginProducer?,
 ) : AutoCloseable {
     /**
-     * Create a live broadcast at [path], served to incoming sessions.
+     * Create an unannounced broadcast at [path], served to incoming sessions once announced.
      *
-     * The origin announces the path so subscribers can discover it, becoming visible
-     * Advertise it with `announce` after populating tracks. `close()` (or `use`)
-     * ends it once no `dynamic()` handle remains.
+     * Advertise it with `announce` after populating tracks. `end()` ends it immediately;
+     * `close()` (or `use`) ends it once no `dynamic()` handle remains.
      */
     fun createBroadcast(path: String): BroadcastProducer {
         val origin = publishOrigin ?: throw IllegalStateException("no publish origin configured")

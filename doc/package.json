@@ -13,11 +13,11 @@
 	},
 	"devDependencies": {
 		"@types/bun": "^1.4.2",
-		"@types/node": "^26.5.1",
+		"@types/node": "^26.6.2",
 		"typescript": "7.0.2",
 		"vitepress": "^1.6.4",
 		"vitepress-plugin-llms": "^1.14.0",
-		"wrangler": "^4.131.2",
+		"wrangler": "^4.135.0",
 		"yaml": "^2.9.1"
 	}
 }

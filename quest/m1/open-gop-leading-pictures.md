@@ -25,16 +25,23 @@ everyone.
   sample of a group to `keyframe`, and `js/watch/src/video/decoder.ts` submits
   it as `"key"`): for the first group after any non-continuous transition,
   skip delta frames stamped before that group's keyframe. That covers a
-  subscribe, a declared discontinuity, and a latency skip: `#checkLatency`
+  subscribe, a declared discontinuity, and a latency skip: `#checkMaxAge`
   records the skip through `#gap` and `next()` reports the next frame with
   `continuous: false`. Latency skip also bumps playhead generation (startup
   delay) but does not flush the decoder. Leading pictures after that
   non-continuous transition are still skipped, as above; a viewer that skipped
   into a later GOP lacks its references just like a cold join.
   Every continuous group is passed through untouched.
-- The same rule in the Rust decode path (`moq-video` decode consumers), with
-  an equivalent non-continuous signal from `container::Consumer`, so native
-  playback and the transcoder tune in the same way.
+- The same rule in the Rust decode path (`moq-video` decode consumers), so
+  native playback and the transcoder tune in the same way.
+- This quest owns the Rust non-continuous signal, which audio warmup and
+  consumer warmup reuse rather than each adding one. Today
+  `moq_mux::container::Consumer::poll_read` returns a bare frame, and
+  `discontinuity()` is a counter bumped on a declared marker group, an
+  unproven delivered hole, or a latency skip, but not on the subscribe itself.
+  Add the equivalent of JS `continuous`: false on the first frame after the
+  subscribe and after every bump, true otherwise. It changes the moq-mux
+  consumer API, so pick main or dev by whether the shape is additive.
 - Tests: a synthetic group with a keyframe followed by two earlier-stamped
   deltas is trimmed on the first group and kept on the second; and a viewer
   that plays continuously, then latency-skips into a later open GOP, has that
@@ -48,3 +55,4 @@ everyone.
 ## Related
 
 - [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - the `recovery_frame_cnt > 0` case this rule does not cover
+- [Audio warmup](/quest/m1/audio-warmup.md) - keys its Opus pre-roll trim on the same signal

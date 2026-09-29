@@ -378,6 +378,7 @@ impl MoqSide {
 		found.extend(self.quic.deprecated());
 		found.extend(self.server.deprecated());
 		found.extend(self.cluster.deprecated());
+		found.extend(self.auth.deprecated());
 		if self.origin.is_some() {
 			found.flag("--origin", Some("MOQ_ORIGIN"), "--hop / MOQ_HOP");
 		}
@@ -464,6 +465,7 @@ impl MoqSide {
 		} else if self.auth.url.is_some() || self.auth_public() {
 			self.auth.validate()?;
 		}
+		self.auth.validate_client_ca(!self.server.tls.root.is_empty())?;
 		Ok(())
 	}
 
@@ -1128,6 +1130,21 @@ mod tests {
 			cli.moq.server_config().unix.bind.as_deref(),
 			Some(std::path::Path::new("/tmp/moq-cli.sock"))
 		);
+	}
+
+	/// Public rules grant a certificate what they grant anyone, so a client CA on
+	/// a public listener refuses to start, as it does on the relay.
+	#[test]
+	fn a_client_ca_needs_an_auth_server() {
+		let parse = |auth: [&str; 2]| {
+			let mut argv = vec!["moq", "--listen-tcp-bind", "127.0.0.1:0", "--listen-tls-root", "ca.pem"];
+			argv.extend(auth);
+			argv.extend(["import", "ts"]);
+			Invocation::try_parse_from(argv).expect("parse")
+		};
+		let err = parse(["--auth-public", "**"]).moq.validate().unwrap_err().to_string();
+		assert!(err.contains("--auth-public ignores"), "{err}");
+		assert!(parse(["--auth-url", "http://127.0.0.1:4440/"]).moq.validate().is_ok());
 	}
 
 	/// A listener for ordinary clients admits nobody without a decision, so it

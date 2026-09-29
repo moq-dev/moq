@@ -10,9 +10,7 @@
 #include <cstring>
 #include <string>
 
-extern "C" {
 #include "moq.h"
-}
 
 namespace {
 

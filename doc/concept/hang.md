@@ -105,8 +105,9 @@ document would silently discard everything but the last payload:
 
 The rest is descriptive: `compression` (`deflate`, the same group-scoped
 `deflate-raw` the catalog uses), `schema` on a JSON track, `mime` on a binary
-one, `bitrate` and `jitter` with the same meaning as for media, plus the
-optional `broadcast` reference. A
+one, `bitrate`, `jitter`, and `delay` with the same meaning as for media, plus
+the optional `broadcast` reference. A publisher measures `jitter` and `delay`
+only from payloads stamped with their capture time on the broadcast clock. A
 consumer that doesn't recognize a `mode` or `compression` ignores that track and
 round-trips it verbatim.
 

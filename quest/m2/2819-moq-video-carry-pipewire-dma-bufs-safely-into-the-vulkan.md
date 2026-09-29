@@ -1,73 +1,36 @@
-# [XL] moq-video: carry PipeWire DMA-BUFs safely into the Vulkan renderer
+# [M] moq-video: validate PipeWire DMA-BUFs into the Vulkan renderer
 
 ## Goal
 
-Implement and verify the behavior tracked in [#2819](https://github.com/moq-dev/moq/issues/2819)
-within the issue's stated scope and boundaries.
+The Linux zero-copy spine from [#2819](https://github.com/moq-dev/moq/issues/2819),
+`PipeWire DMA-BUF -> Surface::DmaBuf -> Vulkan import -> render shader`, is
+proven on real hardware, and a V4L2 camera feeds `Surface::DmaBuf` too.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+Built already: the `dmabuf` feature and `Surface::DmaBuf`, PipeWire DMA-BUF
+negotiation with the shared-memory fallback, the dequeued buffer retained
+until the last clone drops (#2839), packed RGB import in
+`rs/moq-video/src/render/dmabuf.rs`, and NV12 import (#3331), which aliases
+the buffer as an `R8` luma and an `RG8` chroma texture with no copy. VA-API
+encode takes a `Surface::DmaBuf` directly.
 
-### Issue context
+What remains:
 
-#### Goal
-
-Complete the Linux zero-copy surface spine from #2481 as one producer-to-consumer series:
-
-`PipeWire DMA-BUF -> moq_video::Surface::DmaBuf -> Vulkan import -> render shader`
-
-This is the first Linux producer and consumer for the public DMA-BUF surface contract. VAAPI encode/decode and V4L2 M2M can reuse the same contract afterward.
-
-#### Required lifetime invariant
-
-Duplicating a DMA-BUF fd preserves the allocation, not the pixels. Returning a dequeued PipeWire buffer lets the compositor overwrite that allocation while a queued frame or GPU import still reads it.
-
-The PipeWire producer must therefore retain the dequeued buffer until the last `DmaBuf` clone drops, then return it to the stream on the PipeWire loop thread. The renderer must retain its clone until the GPU submission completes. An fd-only wrapper is racy and is not acceptable.
-
-#### Phase 1: surface and producer
-
-- \[x] Add the non-default `dmabuf` feature, enabled by `pipewire`, `vaapi`, and `render`.
-- \[x] Add `Surface::DmaBuf` with a concrete public payload, typed DRM format, modifier, dimensions, plane offsets/strides, and mint-on-access `export() -> OwnedFd`.
-- \[x] Keep backend export/download behavior private so no public implementable trait freezes backend internals.
-- \[x] Negotiate DMA-BUF plus shared-memory fallback in PipeWire, preferring packed RGB for the first complete Vulkan path and retaining NV12 support.
-- \[x] Retain the dequeued PipeWire buffer through the surface lifetime and return it on the loop thread.
-- \[x] Keep the universal I420 fallback for linear NV12 and RGB DMA-BUFs. Reject non-linear CPU mapping instead of interpreting tiled memory as rows.
-- \[x] Add unit coverage for descriptors, NV12 stride removal, buffer negotiation, and return-on-last-drop.
-
-#### Phase 2: renderer consumer
-
-- \[x] Add a Linux Vulkan DMA-BUF importer behind the non-default render feature.
-- \[x] Import single-plane XRGB/ARGB/XBGR/ABGR through wgpu 30's `VULKAN_EXTERNAL_MEMORY_DMA_BUF` HAL path.
-- \[x] Retain the producer surface until the GPU submission completes, so PipeWire cannot overwrite in-flight pixels.
-- \[x] Preserve the renderer's CPU fallback and three-strike fast-path retirement.
-- \[x] Document the wgpu device feature required for DMA-BUF import. A custom device-creation helper is unnecessary with wgpu 30.
-- \[ ] Import multi-plane NV12 with explicit DRM modifier plane layouts.
-- \[ ] Copy imported NV12 Y/UV planes into wgpu-sampleable R8/RG8 textures without touching the CPU.
-- \[ ] Handle unsupported Intel tiling with a VAAPI VPP re-tile path. `Processor` blits exist (moq-vaapi 0.1.0); this item is the renderer using one when a modifier will not import.
-
-#### Validation gates
-
-- \[x] macOS `moq-video --all-features` compile and tests remain green.
-- \[x] The wgpu 30 packed DMA-BUF HAL import compiles in an isolated Vulkan-enabled API check.
-- \[x] Linux renderer-only cross-build (`x86_64-unknown-linux-gnu`, `--features render`).
-- \[ ] Native Linux `--features pipewire,render` compile and tests.
-- \[ ] Shared-memory PipeWire fallback still captures.
-- \[ ] Intel or AMD desktop: packed DMA-BUF capture renders with zero CPU download.
-- \[ ] Modifier mismatch exercises VPP re-tiling on hardware that needs it.
-- \[ ] Holding several frames cannot produce torn/reused content or exhaust the pool permanently.
-- \[ ] Hardware tests ship ignored with a reason where CI lacks the device.
-
-The first packed-RGB vertical slice is implemented locally. Native Linux validation is still required before opening a PR, and the zero-copy tracker item stays open until the real hardware gates pass.
+- Hardware gates, as ignored tests with a reason where CI lacks the device:
+  native Linux `--features pipewire,render` tests; the shared-memory fallback
+  still captures; packed and NV12 DMA-BUF capture renders with zero CPU
+  download on an Intel or AMD desktop; holding several frames never shows
+  reused content or exhausts the PipeWire pool for good.
+- Modifier mismatch: `render/dmabuf.rs` downloads a buffer whose modifier the
+  driver will not import, and re-tiles nothing. A VA-API VPP re-tile is only
+  worth adding if a measured capture source lands on such a modifier; record
+  the modifiers seen and decide.
+- V4L2 capture still converts to I420 on the CPU. Export its buffers with
+  `VIDIOC_EXPBUF` (the ioctl is in `moq-v4l`, unused) as a `Surface::DmaBuf`
+  so a camera reaches VA-API or NVENC without a copy.
 
 Refs #2481, #1837.
-
-This also covers the Linux zero-copy capture input gap: V4L2 and PipeWire
-convert to I420 on the CPU today (YUYV, BGRA), so V4L2 `VIDIOC_EXPBUF` export
-and PipeWire DMA-BUF negotiation are what feed a `Surface::DmaBuf` straight
-into VAAPI or NVENC.
 
 ## Closes
 
@@ -75,5 +38,5 @@ into VAAPI or NVENC.
 
 ## Related
 
-- [Capture multi-plane PipeWire cameras](/quest/m2/pipewire-camera-planes.md) - separate memory blocks from a camera, which is the capture offer rather than this renderer import
-- [#2893: video: validate PipeWire DMA-BUF capture on KDE hardware](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - related open work
+- [Capture multi-plane PipeWire cameras](/quest/m2/pipewire-camera-planes.md) - separate memory blocks from a camera, the capture offer rather than this import
+- [#2893: video: validate PipeWire DMA-BUF capture on KDE hardware](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - the KDE portal capture that timed out
