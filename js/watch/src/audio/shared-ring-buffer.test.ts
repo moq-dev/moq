@@ -500,6 +500,47 @@ describe("setLatency", () => {
 		expect(read(buffer, 1, 1)[0][0]).toBe(1.0);
 	});
 
+	it("silences a quantum already in flight when the floor rises", () => {
+		const init = allocSharedRingBuffer(1, 256, 1000);
+		const main = new SharedRingBuffer(init);
+		main.setLatency(100);
+		insert(main, 0, 100, { channels: 1, value: 1.0 });
+		const worklet = new SharedRingBuffer(init);
+		const out = [new Float32Array(50).fill(-1)];
+
+		// Raise the floor from inside the read's LATENCY load: past the STALLED check, before the
+		// copy and publish, which is where the worklet sits whenever the two threads overlap.
+		const LATENCY = 1;
+		let fired = false;
+		const realLoad = Atomics.load;
+		const atomics = Atomics as { load: unknown };
+		atomics.load = (arr: Int32Array | BigInt64Array, idx: number) => {
+			const value = realLoad(arr as Int32Array, idx);
+			if (!fired && arr instanceof Int32Array && idx === LATENCY) {
+				fired = true;
+				main.setLatency(110);
+			}
+			return value;
+		};
+
+		let result = -1;
+		try {
+			result = worklet.read(out);
+		} finally {
+			atomics.load = realLoad;
+		}
+		expect(fired).toBe(true);
+
+		// The quantum raced the park, so none of it renders and the playhead stays put.
+		expect(result).toBe(0);
+		expect(out[0]).toEqual(new Float32Array(50));
+		expect(Time.Milli.fromMicro(main.timestamp)).toBe(0 as Time.Milli);
+
+		insert(main, 100, 10, { channels: 1, value: 2.0 });
+		expect(main.stalled).toBe(false);
+		expect(read(worklet, 1, 1)[0][0]).toBe(1.0);
+	});
+
 	it("keeps playing through a shallower floor", () => {
 		const buffer = create({ rate: 1000, channels: 1, capacity: 256, latency: 100 });
 		insert(buffer, 0, 100, { channels: 1, value: 1.0 });

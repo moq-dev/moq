@@ -206,14 +206,14 @@ export class SharedRingBuffer {
 	}
 
 	/**
-	 * Step the epoch by one, leaving the playhead wherever the reader has taken it.
+	 * Step the epoch by `by`, leaving the playhead wherever the reader has taken it.
 	 *
 	 * Retries while the word changes under it: only the epoch half is the writer's to move.
 	 */
-	#step(): void {
+	#step(by: number): void {
 		for (;;) {
 			const state = Atomics.load(this.#state, 0);
-			const next = pack((epochOf(state) + 1) | 0, readOf(state));
+			const next = pack((epochOf(state) + by) | 0, readOf(state));
 			if (Atomics.compareExchange(this.#state, 0, state, next) === state) return;
 		}
 	}
@@ -380,7 +380,13 @@ export class SharedRingBuffer {
 	 */
 	setLatency(samples: number): void {
 		const previous = Atomics.exchange(this.#control, LATENCY, samples);
-		if (previous > 0 && samples > previous) Atomics.store(this.#control, STALLED, 1);
+		if (previous <= 0 || samples <= previous) return;
+
+		Atomics.store(this.#control, STALLED, 1);
+		// A reader already past the STALLED check would still publish its quantum. Moving the word
+		// fails its exchange, and one that snapshots after this sees STALLED. Two keeps the epoch
+		// even, since odd belongs to `truncate`.
+		this.#step(2);
 	}
 
 	/**
@@ -396,7 +402,7 @@ export class SharedRingBuffer {
 
 		// Bracket the retreat with epoch steps, so a reader is never left holding a WRITE this
 		// dropped the tail of. See `epochOf`.
-		this.#step();
+		this.#step(1);
 		for (;;) {
 			const write = Atomics.load(this.#control, WRITE);
 			// Never retreat past the playhead: those samples are already due. The worklet can still
@@ -408,7 +414,7 @@ export class SharedRingBuffer {
 			if (((write - clamped) | 0) <= 0) break;
 			if (Atomics.compareExchange(this.#control, WRITE, write, clamped) === write) break;
 		}
-		this.#step();
+		this.#step(1);
 	}
 
 	/**
