@@ -959,15 +959,18 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		loop {
-			// Past the decode the requester sends nothing until it has the answer, so a
-			// read error means it reset the stream and stopped waiting. Drop the lookup
-			// then, so the abandonment reaches our own upstream instead of pinning it
-			// for an answer nobody reads.
-			if !matches!(self.state, TrackInfoState::Decode) {
+			// While the lookup runs the requester sends nothing, so its send side closing,
+			// by FIN or reset, means it stopped waiting. Drop the lookup then, so the
+			// abandonment reaches our own upstream instead of pinning it for an answer
+			// nobody reads. (Once answered, its FIN is the normal end; `Finish` waits on it.)
+			if matches!(
+				self.state,
+				TrackInfoState::Hop { .. } | TrackInfoState::Request { .. } | TrackInfoState::Query { .. }
+			) {
 				let stream = self.stream.as_mut().expect("stream present");
 				let mut cx = Context::from_waker(waiter.waker());
-				if let Poll::Ready(Err(err)) = stream.reader.poll_closed(&mut cx) {
-					return Poll::Ready(Err(err));
+				if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
+					return Poll::Ready(Err(res.err().unwrap_or(Error::Cancel)));
 				}
 			}
 			match &mut self.state {
@@ -3712,5 +3715,60 @@ mod tests {
 		);
 		assert_eq!(probes[0].bitrate, Some(1_000_000));
 		assert_eq!(probes[1].bitrate, None);
+	}
+
+	/// A requester that FINs its TRACK request before the answer has terminated the
+	/// transaction (moq-lite: closing the send direction ends the stream), so the
+	/// lookup ends rather than pinning an upstream request nobody will read.
+	#[tokio::test]
+	async fn track_info_ends_when_the_requester_finishes() {
+		use crate::coding::Encode;
+		use crate::lite::test_transport::ScriptedSession;
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		// Held, never polled: the track request stays unanswered.
+		let _dynamic = broadcast.dynamic();
+		broadcast.announce(Default::default()).unwrap();
+
+		let peer_setup = crate::lite::PeerSetup::default();
+		peer_setup.set(crate::lite::Setup::default());
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let publisher = Publisher::new(PublisherConfig {
+			runtime: crate::time::Clock::tokio(),
+			session: ScriptedSession::new(Vec::new()),
+			origin: origin.consume(),
+			version: Version::Lite06,
+			peer_setup,
+			goaway,
+			peer_hop: None,
+		});
+
+		let mut request = Vec::new();
+		lite::Track {
+			broadcast: crate::Path::new("room"),
+			track: "video".into(),
+		}
+		.encode(&mut request, Version::Lite06)
+		.unwrap();
+
+		for (finished, session) in [
+			(false, ScriptedSession::new(request.clone())),
+			(true, ScriptedSession::eof(request.clone())),
+		] {
+			let mut session = session;
+			let (send, recv) = futures::future::poll_fn(|cx| {
+				<ScriptedSession as web_transport_trait::poll::Session>::poll_open_bi(&mut session, cx)
+			})
+			.await
+			.unwrap();
+			let stream = Stream::<ScriptedSession, Version> {
+				writer: Writer::new(send, Version::Lite06),
+				reader: crate::coding::Reader::new(recv, Version::Lite06),
+			};
+			let mut serve = TrackInfoServe::new(publisher.shared.clone(), stream).unwrap();
+			let ended = serve.poll(&kio::Waiter::noop()).is_ready();
+			assert_eq!(ended, finished, "finished={finished}");
+		}
 	}
 }

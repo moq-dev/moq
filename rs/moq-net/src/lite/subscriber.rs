@@ -1572,16 +1572,19 @@ mod tests {
 	}
 
 	/// A track still waiting on TRACK_INFO ends once nobody wants it, whether its TRACK
-	/// stream never opened (the peer's stream credit is spent) or its peer never answers.
+	/// stream never opened (the peer's stream credit is spent), its request is stuck in
+	/// send, or its peer never answers.
 	/// Otherwise every request a relay's front abandons (a failover, a reader leaving)
 	/// holds a task, a stream, and the track until the peer answers, which may be never.
 	#[tokio::test]
 	async fn an_unused_track_stops_waiting_for_info() {
-		// Held closed, so the read stage's stream opens but its peer never answers.
-		let gate = kio::Producer::new(false);
+		// A closed gate holds the TRACK request in its send; an open one sends it to a
+		// peer that never answers.
+		let (closed, open) = (kio::Producer::new(false), kio::Producer::new(true));
 		for (stage, session) in [
 			("open", SinkSession::default()),
-			("read", SinkSession::gated_bi(gate.consume())),
+			("send", SinkSession::gated_bi(closed.consume())),
+			("read", SinkSession::gated_bi(open.consume())),
 		] {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::Clock::tokio(),
@@ -3380,12 +3383,16 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 					// Nobody wants the track anymore (the origin failed over, the reader
 					// left): stop waiting on a peer that may never answer, which would
 					// otherwise hold this task, its TRACK stream, and the track for good.
-					// Dropping the fetch resets the stream. Demand returning in the gap
-					// wins inside `reject_unused`, and the wait goes on.
+					// Dropping the fetch resets the stream.
 					let pending = request.as_ref().expect("request pending");
-					if pending.poll_unused(waiter).is_ready() && pending.reject_unused(Error::Cancel) {
-						self.state = TrackRunState::Done;
-						return Poll::Ready(());
+					if pending.poll_unused(waiter).is_ready() {
+						if pending.reject_unused(Error::Cancel) {
+							self.state = TrackRunState::Done;
+							return Poll::Ready(());
+						}
+						// Demand returned in the gap and won inside `reject_unused`: poll
+						// again so the unused wait is armed for when it leaves.
+						continue;
 					}
 					let res = ready!(info.poll_fetch(&self.serve, waiter));
 					let request = request.take().expect("request pending");
