@@ -39,6 +39,11 @@ specs both. Nothing produces them yet.
   accepts any requested track name, reports zeros until a watched catalog
   claims it, refuses a second claim on a bound name, and caps unclaimed
   names. Validate with `just drafts check`.
+- Open, to settle before fixing the wire shape: a rendition may reference
+  another broadcast, so one track name can name two renditions and a
+  snapshot keyed by name collapses them. Candidates: key by the relative
+  broadcast path and track name, or cover only the tracks in the
+  publisher's own broadcast, where names are unique.
 - Docs: `doc/concept/hang.md`, and a media section in `doc/concept/stats.md`.
 - Tests:
   - fixtures round-trip in both languages;
