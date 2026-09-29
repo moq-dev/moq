@@ -84,14 +84,16 @@ both. A flow's treatment then depends on how its datagrams interleave with the o
 A paced hop, a Wi-Fi access point or a cellular scheduler bunches traffic: nothing moves for a while, then
 several datagrams arrive at once. A batch holds datagrams until `count` are waiting, or until `window`
 after the first arrived, then sends them all when the latest would have left. No delay or jitter produces
-that clump, and it is what a receiver's jitter estimate has to cope with.
+that clump, and it is what a receiver's jitter estimate has to cope with. A `count` below two is refused,
+since the datagram that fills a batch never waits.
 
 ## Steps
 
 A step changes a direction's delay, jitter, loss, reorder or rate limit once the run reaches `at`, counted
 from when forwarding started. It changes only what it names, so a later step puts one knob back. A rate
 step keeps the old bucket's credit, or its debt, clipped to the new one, and a limit that was not there
-starts full. A step can add or change a rate limit, never remove one. Steps come from a profile file.
+starts full. A step can add or change a rate limit, never remove one. A step that leaves the profile as
+it was is refused. Steps come from a profile file.
 A run that ends before its last step fails `verify`, since that traffic never saw the path change.
 
 ## Profiles

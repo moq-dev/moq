@@ -188,7 +188,8 @@ impl Options {
 	fn validate(&self, profile: &Profile) -> anyhow::Result<()> {
 		profile.validate(self.jitter_model)?;
 		if let Some(batch) = &self.batch {
-			anyhow::ensure!(batch.count > 0, "a batch of zero datagrams never closes");
+			// The datagram that fills a batch leaves at once, so one of one holds nothing.
+			anyhow::ensure!(batch.count > 1, "a batch of {} never holds anything", batch.count);
 			anyhow::ensure!(!batch.window.is_zero(), "a batch with no window never holds anything");
 		}
 
@@ -202,16 +203,10 @@ impl Options {
 				"the step at {:?} comes after the one at {previous:?}; steps go in order",
 				step.at
 			);
-			// A step naming nothing is a profile that thinks it changes and does not.
-			anyhow::ensure!(
-				Step {
-					at: step.at,
-					..Step::default()
-				} != *step,
-				"the step at {:?} changes nothing",
-				step.at
-			);
+			// A step that leaves the profile as it was thinks it changes and does not.
+			let before = profile.clone();
 			step.apply(&mut profile);
+			anyhow::ensure!(profile != before, "the step at {:?} changes nothing", step.at);
 			profile
 				.validate(self.jitter_model)
 				.with_context(|| format!("after the step at {:?}", step.at))?;
@@ -1612,8 +1607,9 @@ mod tests {
 			.unwrap_or_else(|| panic!("accepted a batch where {why}"));
 			assert!(format!("{err:#}").contains(why), "{err:#}");
 		};
-		refused(batched(0, Duration::from_millis(10)), "never closes").await;
-		refused(batched(7, Duration::ZERO), "never holds").await;
+		refused(batched(0, Duration::from_millis(10)), "a batch of 0 never holds").await;
+		refused(batched(1, Duration::from_millis(10)), "a batch of 1 never holds").await;
+		refused(batched(7, Duration::ZERO), "no window never holds").await;
 	}
 
 	#[test]
@@ -1877,6 +1873,19 @@ mod tests {
 				..Default::default()
 			}],
 			"changes nothing",
+		)
+		.await;
+		// Restating the value already in force changes nothing either.
+		refused(
+			vec![
+				at(30),
+				Step {
+					at: Duration::from_secs(60),
+					loss: Some(0.1),
+					..Default::default()
+				},
+			],
+			"the step at 60s changes nothing",
 		)
 		.await;
 		// Uniform jitter past the delay, reached by a step rather than at the start.
