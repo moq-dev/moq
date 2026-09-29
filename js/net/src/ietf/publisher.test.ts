@@ -1808,3 +1808,70 @@ test("draft-20: PUBLISH_DONE waits for a queued group and counts every stream", 
 		client.close();
 	}
 });
+
+for (const version of [Version.DRAFT_15, Version.DRAFT_19] as const) {
+	for (const declared of [false, true]) {
+		for (const solicited of [false, true]) {
+			for (const optIn of [false, true]) {
+				test(`hidden negotiation: ${version}, declared=${declared}, solicited=${solicited}, optIn=${optIn}`, async () => {
+					const pair = createMockTransportPair(ALPN.DRAFT_19);
+					const origin = new OriginProducer();
+					// Authorization heads must not replace the request's empty visibility prefix.
+					const scope = new Path.Patterns([
+						Path.Pattern.subtree(Path.from(".stats")),
+						Path.Pattern.subtree(Path.from("visible")),
+					]);
+					const pub = new Publisher({
+						quic: pair.server,
+						session: new NativeSession(pair.server, version, true),
+						publish: origin.scope(Path.empty(), scope).consume(),
+						requiresSolicitation: solicited,
+						hidden: declared,
+					});
+					publish(origin, Path.from(".stats/node"));
+					publish(origin, Path.from("visible"));
+					let subscription: Stream | undefined;
+					let run: Promise<void>;
+					if (solicited) {
+						subscription = await Stream.open(pair.client, { version: version });
+						const accepted = await Stream.accept(pair.server, version);
+						if (!accepted) throw new Error("missing subscription");
+						run = pub.runSubscribeNamespace(
+							new SubscribeNamespace({ requestId: 0n, namespace: Path.empty(), hidden: optIn }),
+							accepted,
+						);
+						expect(await subscription.reader.u53()).toBe(RequestOk.id);
+						await RequestOk.decode(subscription.reader, version);
+					} else {
+						run = pub.runPublishNamespaces();
+					}
+					const expected = !declared || (solicited && optIn) ? [".stats/node", "visible"] : ["visible"];
+					const advertisements: Stream[] = [];
+					for (const path of expected) {
+						if (subscription && version !== Version.DRAFT_15) {
+							expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+							expect((await SubscribeNamespaceEntry.decode(subscription.reader, version)).suffix).toBe(
+								Path.from(path),
+							);
+						} else {
+							const stream = await Stream.accept(pair.client, version);
+							if (!stream) throw new Error("missing advertisement");
+							advertisements.push(stream);
+							expect(await stream.reader.u53()).toBe(PublishNamespace.id);
+							const msg = await PublishNamespace.decode(stream.reader, version);
+							expect(msg.trackNamespace).toBe(Path.from(path));
+							await stream.writer.u53(RequestOk.id);
+							await new RequestOk({
+								requestId: version === Version.DRAFT_15 ? msg.requestId : undefined,
+							}).encode(stream.writer, version);
+						}
+					}
+					subscription?.close();
+					origin.close();
+					await run;
+					for (const stream of advertisements) stream.close();
+				});
+			}
+		}
+	}
+}
