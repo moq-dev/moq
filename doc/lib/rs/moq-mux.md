@@ -114,7 +114,7 @@ API: [docs.rs/moq-mux](https://docs.rs/moq-mux). Real-world usage:
 Container producers and consumers take a format configured from the track's audio
 or video catalog entry (`catalog::hang::Container::try_from(&config)`). For a raw
 track, supply `container::Kind` explicitly. `cut(Some(end))` flushes and closes the
-group immediately. Legacy video writes an empty timestamped frame at that end;
+group immediately. Legacy and LOC video write an empty timestamped frame at that end;
 audio and CMAF do not. With no explicit end, the producer uses a known sample
 duration or observed cadence, independently of batching and reorder jitter.
 Streaming consumers deliver frames immediately. The live fMP4 exporter receives

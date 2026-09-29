@@ -57,9 +57,14 @@ on external activity, `Ok(None)` only on external activity, and `Err` is the
 terminal error (`Error::Closed` for a clean finish): stop polling. Tests drive
 the same interface with explicitly advanced instants.
 
-Dropping the last session handle requests closure on the next poll. Dropping
-the driver cancels the session. `moq-tokio` and `moq-wasm` drive sessions for
-their callers.
+Dropping the last session handle requests closure on the next poll, and
+`session.abort(err)` closes with `err`'s code. Either discards stream data the
+peer has not acknowledged yet. `session.close().await` first waits, up to one
+second, for finished tracks to deliver their last groups and FIN, returning
+`Error::Timeout` if it gave up. Finish or abort live tracks before calling it.
+moq-transport (IETF) sessions close without waiting. Dropping the driver
+cancels the session. `moq-tokio` and `moq-wasm` drive sessions for their
+callers.
 
 `origin::Producer::new` returns a driver with the same `time::Driver`
 interface. It calls `cache::Pool::gc(now)` after each poll and folds the next

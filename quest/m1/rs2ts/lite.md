@@ -12,7 +12,7 @@ first-frame latency are no worse than the hand-written js/net.
 ## Plan
 
 - The `@moq/net` API may change where the generated shape is no worse to
-  use: disposable handles (`using`), `VarInt` for sequences and ids. Update
+  use: disposable handles (`using`), `U64` for sequences and ids. Update
   watch, publish, hang, room, and the demos in the same change, and the
   `doc/` pages for anything user-facing.
 - A forgotten `drop()` leaves a track open forever: add a debug-only
