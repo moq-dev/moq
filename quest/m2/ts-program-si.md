@@ -32,7 +32,8 @@ Settled decisions:
   (transport_stream_id, version_number, original_network_id), recompute
   `section_length`, and write a fresh CRC-32/MPEG-2 using the `crc` crate, which
   is already in `Cargo.lock`, as a direct moq-mux dependency rather than a
-  hand-written table.
+  hand-written table. [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md)
+  needs it too, and whichever change lands first adds it.
 - When the SDT has no entry for the selected service, carry no SDT actual rather
   than fabricating a table the source never gave for this service. A later
   version that lists it is captured normally.
