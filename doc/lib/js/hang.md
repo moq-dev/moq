@@ -41,6 +41,7 @@ of PTS zero in `timescale` units (microseconds by default) since 2020-01-01.
 ```ts
 for await (const root of Catalog.watch(broadcast)) {
 	if (!root.clock) continue; // the publisher exposes no clock
+	// `frame` comes from your own `Container.Legacy` consumer.
 	const captured = Catalog.wallClockTime(root.clock, frame.timestamp, 1_000_000);
 }
 ```
@@ -51,7 +52,9 @@ for await (const root of Catalog.watch(broadcast)) {
   no segment index, so a DVR view can label its timeline from it either way.
 - A `Date` holds whole milliseconds, so anything finer in the clock is
   truncated.
-- `wallClockTime` throws on a value it cannot represent rather than truncating.
+- `wallClockTime` throws on an invalid input or a clock total past the
+  safe-integer range, but a result past the `Date` range comes back as an
+  invalid `Date` rather than throwing.
 
 Two machines' wall times are only comparable when your application already
 knows their clocks are synchronized. The catalog says where PTS zero was on the
@@ -59,9 +62,11 @@ publisher's clock, never whether the viewer's clock agrees with it. If you do
 know, set `delay` to `target - (arrived - captured)`, where `arrived` is the
 viewer's `Date.now()` for the frame that arrived earliest relative to its
 timestamp, since `<moq-watch>` anchors playback on that frame. It adds the
-largest rendition jitter on top, so a frame renders at about `captured + target`
-plus that jitter: one video frame, or the codec frame plus the worklet quantum
-for audio, unless the catalog sets `jitter`.
+largest active rendition's buffer on top, so a frame renders at about
+`captured + target` plus that buffer: the rendition's catalog `delay` plus its
+`jitter` (one video frame or one codec frame when unset), and for audio the
+worklet quantum too. Viewers only line up when that buffer matches, and a
+negative result means the target is already missed.
 
 The library never does this for you. Playback stays arrival-based: it does not
 read the `clock`, estimate the viewer's clock from the session RTT, or
