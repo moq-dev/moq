@@ -1,12 +1,12 @@
 /**
- * Replays the recorded traces through the player's rings, and writes each row the way `driver.ts`
- * writes a browser row, so `analyze.ts` reduces both alike.
+ * Replays the recorded traces through the player's consumer and rings, and writes each row the way
+ * `driver.ts` writes a browser row, so `analyze.ts` reduces both alike.
  *
- * The player half is `js/watch/src/audio/replay.ts`: the real rings on a simulated clock, sized to
- * the delay a real `Sync` resolves for the recorded catalog and RTT. This half reads its quanta
- * through the same classifier the page's output tap runs, and samples the ring every 250 ms of
- * simulated time, as the probe samples a page. Every profile is the trace's name at the "auto"
- * delay a viewer gets by default.
+ * The player half is `js/watch/src/audio/replay.ts`: the real container consumer and rings on a
+ * simulated clock, at the delay a real `Sync` resolves for the recorded catalog and RTT. This half
+ * reads its quanta through the same classifier the page's output tap runs, and samples the ring
+ * every 250 ms of simulated time, as the probe samples a page. Every profile is the trace's name at
+ * the "auto" delay a viewer gets by default.
  *
  *     bun replay.ts --traces ../../traces --profiles relay-bbb --rings plain --codecs aac --list
  *     bun replay.ts --traces ../../traces --out <run dir>
@@ -55,8 +55,18 @@ const traces = readdirSync(dir)
 	.sort()
 	.map((f) => ({ profile: basename(f, ".json"), trace: JSON.parse(readFileSync(join(dir, f), "utf8")) as Trace }));
 const profiles = values.profiles === undefined ? undefined : split(values.profiles);
-const rings = split(values.rings) as Ring[];
+const rings = split(values.rings);
 const codecs = split(values.codecs);
+for (const [name, list, known] of [
+	["ring", rings, ["isolated", "plain"]],
+	["codec", codecs, ["opus", "aac"]],
+] as const) {
+	const unknown = list.find((v) => !(known as readonly string[]).includes(v));
+	if (unknown !== undefined) {
+		console.error(`unknown ${name} '${unknown}' (known: ${known.join(", ")})`);
+		process.exit(2);
+	}
+}
 
 const rows: { row: Row; trace: Trace }[] = [];
 for (const { profile, trace } of traces) {
@@ -64,7 +74,7 @@ for (const { profile, trace } of traces) {
 	const codec = traceCodec(trace);
 	if (profiles && !profiles.includes(profile)) continue;
 	if (!codecs.includes(codec)) continue;
-	for (const ring of rings) {
+	for (const ring of rings as Ring[]) {
 		rows.push({ row: { runtime: "replay", codec, rate: trace.config.sampleRate, profile, ring }, trace });
 	}
 }
@@ -94,8 +104,16 @@ for (const { row, trace } of rows) {
 	let frame = 0;
 	let next = SAMPLE_INTERVAL_MS;
 
-	const arrivals = trace.arrivals.map(([at, timestamp]) => ({ at, timestamp }));
-	for (const quantum of replay(arrivals, { ring: row.ring === "isolated" ? "shared" : "post", rate, delay })) {
+	// The consumer's warnings, as the page's probe keeps a browser row's console.
+	const notes: string[] = [];
+	const warn = console.warn;
+	console.warn = (...args: unknown[]) => {
+		if (notes.length < 200) notes.push(args.map(String).join(" ").slice(0, 200));
+	};
+
+	const arrivals = trace.arrivals.map(([at, timestamp, group]) => ({ at, timestamp, group }));
+	const quanta = replay(arrivals, { ring: row.ring === "isolated" ? "shared" : "post", rate, delay });
+	for await (const quantum of quanta) {
 		// The render clock is the simulated one: the trace's `at`, which starts at zero.
 		ledger.add(frame, quantum.output.length, classify([quantum.output]));
 		frame += quantum.output.length;
@@ -121,6 +139,7 @@ for (const { row, trace } of rows) {
 			stalls = [];
 		}
 	}
+	console.warn = warn;
 
 	const environment: Environment = {
 		crossOriginIsolated: row.ring === "isolated",
@@ -131,6 +150,6 @@ for (const { row, trace } of rows) {
 		contextRate: rate,
 	};
 	await Bun.write(join(out, `${tag}.ndjson`), `${samples.map((s) => JSON.stringify(s)).join("\n")}\n`);
-	await Bun.write(join(out, `${tag}.page.json`), JSON.stringify({ environment, notes: [], voids: [] }, null, 1));
+	await Bun.write(join(out, `${tag}.page.json`), JSON.stringify({ environment, notes, voids: [] }, null, 1));
 	console.log(`${tag}: ${samples.length} samples at a ${delay} ms target`);
 }

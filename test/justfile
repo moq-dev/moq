@@ -79,6 +79,7 @@ drill *args:
 # heard (underruns, skip-aheads, silence, the resolved delay) against
 # audio-quality/budgets.json. The full matrix is 16 rows at 60 s; nightly runs it with
 # --enforce. Narrow it with `--profiles mild --codecs opus --rings plain --duration 20`.
+# `--replays` grades only the recorded traces, in seconds, as PRs touching the player do.
 # See audio-quality/README.md.
 
 # Grade browser audio playout over an impaired path.

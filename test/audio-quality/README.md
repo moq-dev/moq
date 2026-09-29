@@ -12,7 +12,7 @@ just test audio-quality --profiles mild --codecs opus --duration 20
 just test audio-quality --rings plain                          # the production path only
 just test audio-quality --out ~/runs/after                     # keep the run directory
 just test audio-quality --enforce                              # fail on the budgets
-just test audio-quality --profiles relay-bbb,local-aac,relay-mic   # the replays only, in seconds
+just test audio-quality --replays                              # the replays only, in seconds
 ```
 
 The matrix is codec x profile x ring: 16 browser rows, about 20 minutes, plus 6 [replay
@@ -86,12 +86,14 @@ viewer's clock. `record.ts` stamps a frame as it comes off its group's stream, t
 over WebTransport. It stamps before the consumer's in-order delivery, whose waits and skips depend
 on the delay, so the replay decides those again.
 
-`replay.ts` plays a trace through the player's own rings on a simulated clock
-([`js/watch/src/audio/replay.ts`](../../js/watch/src/audio/replay.ts)), at the "auto" delay a real
-`Sync` resolves for the recorded catalog and round trip, and reads each quantum through the tap's
-classifier. It writes the same samples a page does, so `analyze.ts` reduces both alike, and the
-shaper, transport, and clock checks have nothing to void. Decoding is taken as instant. A replay is
-deterministic, so its budgets are exactly what it measured.
+`replay.ts` plays a trace through the player's own `Container.Consumer` and rings on a simulated
+clock ([`js/watch/src/audio/replay.ts`](../../js/watch/src/audio/replay.ts)), at the "auto" delay a
+real `Sync` resolves for the recorded catalog and round trip, and reads each quantum through the
+tap's classifier. The consumer makes the player's group ordering, max age skips, and discontinuity
+resets again at that delay; a group's stream is taken to finish with its last recorded frame. It
+writes the same samples a page does, so `analyze.ts` reduces both alike, and the shaper, transport,
+and clock checks have nothing to void. Decoding is taken as instant. A replay is deterministic, so
+its budgets are exactly what it measured.
 
 ```bash
 just test audio-quality-record                        # all three, 35 s each, needs the network
@@ -187,7 +189,10 @@ unmeasured, a void row, or a row with no budget. Tightening a ceiling is a visib
 one needs a reason in review. The file's `note` says how the current ceilings were measured.
 
 The nightly `Audio quality` job runs the matrix under `--enforce` and keeps a failing run directory
-for a week: each process's log, the shaper's counters, every row's raw samples and summary.
+for a week: each process's log, the shaper's counters, every row's raw samples and summary. The
+replays also run under `--enforce` on every PR that touches `js/watch`, `js/hang`, or the harness
+(`.github/workflows/audio-quality.yml`), so a change that moves them updates `budgets.json` in the
+same PR.
 
 ## Layout
 

@@ -231,12 +231,12 @@
 			"rate": 44100,
 			"profile": "local-aac",
 			"ring": "isolated",
-			"underruns_per_min": 101.7,
-			"underrun_ms_per_min": 287.3,
+			"underruns_per_min": 103.7,
+			"underrun_ms_per_min": 293.2,
 			"skip_aheads_per_min": 2,
 			"discarded_ms_per_min": 94.4,
 			"stalled_share": 0,
-			"silence_share": 0.004,
+			"silence_share": 0.005,
 			"target_ms_p95": 186
 		},
 		{
@@ -245,12 +245,12 @@
 			"rate": 44100,
 			"profile": "local-aac",
 			"ring": "plain",
-			"underruns_per_min": 101.7,
-			"underrun_ms_per_min": 287.3,
+			"underruns_per_min": 103.7,
+			"underrun_ms_per_min": 293.2,
 			"skip_aheads_per_min": 2,
 			"discarded_ms_per_min": 94.4,
 			"stalled_share": 0,
-			"silence_share": 0.004,
+			"silence_share": 0.005,
 			"target_ms_p95": 186
 		},
 		{

@@ -102,13 +102,16 @@ try {
 		return drained.length > 0 ? drained : undefined;
 	}).then((first) => arrivals.push(...first));
 
+	// Ends on the page's clock, not on the next arrival, so a publisher that goes quiet is recorded
+	// as the silence it is instead of holding the recording open.
 	const start = arrivals[0][0];
-	while ((arrivals.at(-1)?.[0] ?? start) < start + durationMs) {
+	while ((await page.evaluate(() => performance.now())) < start + durationMs) {
 		await sleep(1000);
 		const error = await page.evaluate(() => globalThis.recorder.error());
 		if (error) throw new Error(`recorder: ${error}`);
 		arrivals.push(...(await page.evaluate(() => globalThis.recorder.drain())));
 	}
+	arrivals.push(...(await page.evaluate(() => globalThis.recorder.drain())));
 	// The RTT is read last: the PROBE minimum only falls as the session runs.
 	const rtt = await page.evaluate(() => globalThis.recorder.info()?.rtt ?? null);
 
