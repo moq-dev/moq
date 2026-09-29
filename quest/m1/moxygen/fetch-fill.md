@@ -19,9 +19,15 @@ merged unanswered, and the maintainer ruled that each blocks the line:
   ([r4113942736](https://github.com/moq-dev/moq/pull/4276#discussion_r4113942736)).
   FETCH_OK names an `end_location`, but it never reaches the decoder. If the
   peer cleanly ends the stream early, the group is finished and cached short,
-  and later readers see a normal end. Check the last object received (or an
-  end marker) against what FETCH_OK promised before finishing the producer,
-  and abort the group otherwise.
+  and later readers see a normal end. Check the last object received against
+  what FETCH_OK promised before finishing the producer, and abort the group
+  otherwise. That only works when `end_location` names a concrete last
+  object: for a whole-group request our own `run_fetch_stream` answers with
+  the requested boundary (`(group + 1, 0)`), so a stream holding only object
+  0 looks like a valid one-object group. For that case, find the wire signal
+  that marks a complete group (an End of Group status object, or a concrete
+  `end_location` from the publisher, fixing ours to send one) and require it;
+  if the drafts we speak offer none, ask the maintainer rather than guess.
 - **A first object with no IDs is accepted**
   ([r4113942737](https://github.com/moq-dev/moq/pull/4276#discussion_r4113942737)).
   The `(false, None | Some(1))` arm treats omitted Group and Object IDs as
