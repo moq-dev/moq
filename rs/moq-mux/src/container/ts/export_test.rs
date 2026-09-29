@@ -4953,9 +4953,9 @@ async fn export_stuffing_keeps_the_fractional_remainder() {
 	assert!(clocked.nulls > 0, "no null stuffing was emitted");
 }
 
-// The decode clock follows the stream's reordering (quest/m1/ts-export-jitter.md): its reserve
-// comes from the catalog `jitter`, else the depth the SPS declares, else the reordering muxed so
-// far, and it keeps following all three after the program tables are written.
+// The decode clock follows the stream's reordering: its reserve comes from the catalog `jitter`,
+// else the depth the SPS declares, else the reordering muxed so far, and it keeps following all
+// three after the program tables are written.
 
 /// Display offsets within a group, in decode order: a closed GOP with one B-frame per reference.
 /// A B-frame lands one frame below the high-water mark.
