@@ -191,9 +191,6 @@ jobs:
     runs-on: ubuntu-latest
     # Sixteen rows at a minute each, plus the relay, CLI, and shaper built from source.
     timeout-minutes: 60
-    env:
-      # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
-      MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
@@ -221,6 +218,9 @@ jobs:
       - name: Audio quality
         run: nix develop --command just test audio-quality --enforce
         shell: bash -leo pipefail {0}
+        env:
+          # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
       # The run directory is the diagnosis: each process's log, the shaper's
       # counters, the raw samples, and every row's summary. The harness keeps it
       # on a failure without being asked.

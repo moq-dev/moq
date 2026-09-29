@@ -180,12 +180,14 @@ RELAY="${RELAY_BIN:-$TARGET_BASE/$PROFILE/moq-relay}"
 MOQ="$TARGET_BASE/$PROFILE/moq"
 SHAPER="$TARGET_BASE/$PROFILE/moq-shaper"
 
+# Into the run directory: vite empties its output first, so a shared dist/ would vanish under a
+# concurrent run's page loads.
 echo "building the page..."
 (
     cd "$CLIENT"
     bun install --frozen-lockfile
     bunx playwright install chromium
-    bunx vite build
+    bunx vite build --outDir "$HARNESS_RUN/page" --emptyOutDir
 )
 
 # ── relay ───────────────────────────────────────────────────────────────────
@@ -259,7 +261,7 @@ for tag in "${ROWS[@]}"; do
         --url "http://127.0.0.1:$SHAPER_PORT" \
         --fingerprint "$RELAY_URL/certificate.sha256" \
         --broadcast "tone-$codec.hang" \
-        --page "$CLIENT/dist" \
+        --page "$HARNESS_RUN/page" \
         --ring "$ring" \
         --delay "$(delay_of "$profile")" \
         --duration "$DURATION" \
