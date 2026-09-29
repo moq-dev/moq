@@ -39,3 +39,6 @@ Every other JS place with the same page-load gap follows the same rule.
   tests for a change to an owed prefix after the hold drops (folded ahead of
   `Live`), a retraction of one (cancelled, `Live` still follows), and a new
   prefix sorting ahead of an owed one (may precede `Live`).
+
+Public API: `@moq/net` changes when its announcement stream yields `Live`
+and how it orders and coalesces events, so it lands on `dev`. Wire: none.
