@@ -252,6 +252,11 @@ where
 		Poll::Ready(res)
 	}
 
+	/// Whether no stream still owes the peer data, for a draining close.
+	pub(crate) fn drained(&self) -> bool {
+		self.publisher.drained()
+	}
+
 	fn poll_protocol(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = Context::from_waker(waiter.waker());
 

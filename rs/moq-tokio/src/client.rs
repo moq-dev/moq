@@ -244,6 +244,9 @@ impl Client {
 	/// only queues the close, which nothing sends once the runtime stops: a process
 	/// that exits without this leaves each peer waiting out its idle timeout.
 	///
+	/// This closes at once, discarding stream data the peer has not acknowledged yet.
+	/// Call [`Connection::close`] on each connection first to deliver it.
+	///
 	/// Only the noq endpoint is closed. WebSocket, TCP, and UDS sessions end when their
 	/// [`Connection`] is dropped (the kernel closes the socket on exit), and an iroh
 	/// endpoint passed to `with_iroh` is closed by its owner.
