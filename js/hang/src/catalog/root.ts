@@ -84,8 +84,8 @@ export class EscapingBroadcast extends Error {
 	}
 }
 
-// Refuse an update with a `broadcast` reference that walks above the root from `base`.
-function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
+/** Refuse an update with a `broadcast` reference that walks above the root from `base`. */
+export function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
 	// Every section carrying a `broadcast` reference must be listed here; one left out
 	// silently exempts its tracks from the check.
 	const sections = [

@@ -30,7 +30,7 @@ Published API or wire breaks still land on dev; each quest's Plan says so.
 
 ## Required
 
-- [Skip unchanged announce updates](/quest/m0/announce-update-dedupe.md) - a publisher sends an announce update only when the wire route changed
+- [Packaged relay starts](/quest/m0/relay-systemd-unit.md) - the `.deb` and `.rpm` relay service starts instead of crash-looping on `--file`
 - [Wildcard](/quest/m0/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
 - [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - a browser playout latency regression fails a nightly run instead of arriving as a bug report, and its recorder supplies the jitter target's replay traces
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
