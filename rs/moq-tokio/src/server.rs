@@ -867,8 +867,8 @@ impl StreamBind {
 /// Bound by [`Server::bind`] (they need a runtime). [`Server::listen`] then starts
 /// each accept loop; a bind-only listener starts them on the first
 /// [`Listener::accept`] instead. Each loop feeds completed [`Request`]s back over
-/// a channel. The tasks own their listeners and are stopped when the [`Listener`]
-/// closes or drops, so bound sockets don't linger.
+/// a channel. The tasks own their listeners and in-flight handshakes, and are
+/// stopped when the [`Listener`] closes or drops, so no socket lingers.
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 struct StreamListeners {
 	binds: Vec<StreamBind>,
@@ -1024,11 +1024,17 @@ fn spawn_tcp_loop(
 ) -> tokio::task::JoinHandle<()> {
 	let local = listener.local_addr().ok();
 	tokio::spawn(async move {
+		// Owned by the loop so stopping it (listener close or drop) also aborts
+		// every in-flight handshake, releasing its socket.
+		let mut handshakes = tokio::task::JoinSet::new();
 		loop {
-			let pending = listener.accept_pending().await;
+			let pending = tokio::select! {
+				pending = listener.accept_pending() => pending,
+				Some(_) = handshakes.join_next() => continue,
+			};
 			let server = server.clone();
 			let tx = tx.clone();
-			tokio::spawn(async move {
+			handshakes.spawn(async move {
 				match pending.await {
 					Ok((session, remote)) => {
 						let link = Link {
@@ -1055,12 +1061,17 @@ fn spawn_unix_loop(
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) -> tokio::task::JoinHandle<()> {
 	tokio::spawn(async move {
+		// Owned by the loop, as in `spawn_tcp_loop`.
+		let mut handshakes = tokio::task::JoinSet::new();
 		loop {
-			let pending = listener.accept_pending().await;
+			let pending = tokio::select! {
+				pending = listener.accept_pending() => pending,
+				Some(_) = handshakes.join_next() => continue,
+			};
 			let server = server.clone();
 			let tx = tx.clone();
 			let allow = allow.clone();
-			tokio::spawn(async move {
+			handshakes.spawn(async move {
 				match pending.await {
 					Ok((session, cred)) => {
 						// Enforce the allowlist (if any) before reading SETUP bytes from the peer.
@@ -1554,6 +1565,52 @@ mod tests {
 		}
 		task.abort();
 		let _ = task.await;
+	}
+
+	/// Stopping the accept loop must drop a stalled handshake at once. Each
+	/// handshake task holds a `tx` clone, so the channel closes only when they are
+	/// all gone. Time pauses only once the socket I/O is done (a paused runtime
+	/// waiting on the kernel would skip ahead to qmux's own handshake timeout), so
+	/// a leaked task leaves the runtime idle and fires the 1s timeout first.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn tcp_stop_aborts_stalled_handshake() {
+		use tokio::io::AsyncReadExt;
+		let listener = crate::tcp::Listener::bind("127.0.0.1:0".parse().unwrap())
+			.await
+			.unwrap()
+			.with_protocols(["moq-lite-06"]);
+		let addr = listener.local_addr().unwrap();
+		let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+		let task = spawn_tcp_loop(listener, moq_net::Server::new(), tx);
+		let mut stalled = tokio::net::TcpStream::connect(addr).await.unwrap();
+		stalled.read_u8().await.expect("handshake started");
+		tokio::time::pause();
+		task.abort();
+		let _ = task.await;
+		let closed = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
+		assert!(matches!(closed, Ok(None)), "stalled handshake outlived its accept loop");
+	}
+
+	#[cfg(all(feature = "uds", unix))]
+	#[tokio::test]
+	async fn unix_stop_aborts_stalled_handshake() {
+		use tokio::io::AsyncReadExt;
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("listener.sock");
+		let listener = crate::unix::Listener::bind(&path)
+			.await
+			.unwrap()
+			.with_protocols(["moq-lite-06"]);
+		let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+		let task = spawn_unix_loop(listener, moq_net::Server::new(), None, tx);
+		let mut stalled = tokio::net::UnixStream::connect(&path).await.unwrap();
+		stalled.read_u8().await.expect("handshake started");
+		tokio::time::pause();
+		task.abort();
+		let _ = task.await;
+		let closed = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
+		assert!(matches!(closed, Ok(None)), "stalled handshake outlived its accept loop");
 	}
 
 	#[test]
