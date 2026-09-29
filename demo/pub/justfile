@@ -43,7 +43,7 @@ bbb url='http://localhost:4443' *args:
     ffmpeg -hide_banner -loglevel warning -copyts \
         -stream_loop -1 -re -i media/bbb.mp4 \
         -stream_loop -1 -re -i media/bbb-sd.mp4 \
-        -map 0 -map 1:v -c copy -f mpegts -pes_payload_size 0 - \
+        -map 0 -map 1:v -c copy -f mpegts -pes_payload_size 0 -muxdelay 0 - \
         | cargo run --bin moq -- {{ args }} --connect "{{ url }}" --broadcast bbb.hang import ts
 
 # Encode the video-only SD rendition, preserving source timestamps and loop duration.
@@ -259,10 +259,12 @@ ffmpeg-cmaf input output='-' *args:
     	-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer -frag_duration 1000 {{ args }} {{ output }}
 
 # Convert an h264 input file to MPEG-TS format to stdout, with one PES per audio frame.
+# -pes_payload_size 0 alone still queues audio frames under 170 bytes (silence) for up to
+# 0.35 s; -muxdelay 0 writes each one as soon as the next arrives.
 [private]
 ffmpeg-ts input output='-' *args:
     ffmpeg -hide_banner -v quiet \
     	-stream_loop -1 -re \
     	-i "{{ input }}" \
     	-c copy \
-    	-f mpegts -pes_payload_size 0 {{ args }} {{ output }}
+    	-f mpegts -pes_payload_size 0 -muxdelay 0 {{ args }} {{ output }}

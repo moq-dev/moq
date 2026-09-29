@@ -134,6 +134,7 @@ tempfile = { workspace = true }
 # `test-util` enables `tokio::time::pause` so the TS round-trip test simulates the
 # exporter drain timeouts instantly instead of waiting on the wall clock.
 tokio = { workspace = true, features = ["test-util"] }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
 
 [[bench]]
 name = "play_buffer"

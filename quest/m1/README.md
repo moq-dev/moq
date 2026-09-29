@@ -17,12 +17,10 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 
 ## Required
 
-- [Late joiner history](/quest/m1/relay-late-joiner-history.md) - a subscriber joining a relay's track from group 0 later still receives the cached finished group below the live one
 - [Cluster routing](/quest/m1/cluster-routing.md) - an announcement says where a broadcast originates, not how to reach it, and a relay hears only the prefixes its clients asked for
+- [Exact scope](/quest/m1/exact-scope.md) - a reader never sees an exact broadcast outside its scope, in Rust or JS; prefix routes above it still present as the empty path
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
-- [Worker socket count](/quest/m1/worker-socket-count.md) - the moq-tokio worker test counts only its own listener's sockets
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
-- [moq-binary folds into moq-flate](/quest/m1/flate-binary.md) - on dev, moq-flate and @moq/flate own the opaque snapshot and stream tracks and moq-binary is deleted
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
 - [Error messages](/quest/m1/error-display.md) - Python, Go, and Dart print `MoqError` with Rust's message, as Kotlin and Swift do
@@ -30,33 +28,34 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Graceful close in bindings](/quest/m1/bindings-graceful-close.md) - on dev, `shutdown` drains a session in moq-ffi and every wrapper like Rust, so the wrappers keep the tail of a publish
 - [Close codes](/quest/m1/close-codes.md) - a client sees the peer's application close code over WebSocket and raw QUIC, like WebTransport
 - [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
-- [Live in apps](/quest/m1/announce-live-apps.md) - the demo and `@moq/room` show "no broadcasts" from the `live` marker, which waits for the first session on page load
+- [WebTransport close upstream](/quest/m1/wt-close-upstream.md) - web-transport-moq delivers the close capsule itself, and moq-tokio's `CLOSE_LINGER` is deleted
 - [IETF hidden default](/quest/m1/ietf-hidden-default.md) - a moq-transport peer without the MoQ Hidden option is advertised hidden namespaces; one with it filters per subscription
 - [Watch refusal](/quest/m1/watch-refusal.md) - `<moq-watch>` shows an origin refusal as an error instead of sitting offline
-- [moqsink recoverable errors](/quest/m1/moqsink-keyframe-latch.md) - a leading delta or a timestamp rewind drops frames until a keyframe instead of invalidating a moqsink pad
 - [Splice edge cases](/quest/m1/splice-edges.md) - an unstamped successor, a pruned segment's boundary group, and a warm head during a takeover are each handled correctly
 - [Resumed groups](/quest/m1/resume-latest.md) - a half-delivered group ends once the new copy is past it, so a group-only reader never parks after a mid-group failover
 - [Track tail hardening](/quest/m1/track-tail-hardening.md) - Rust and JS wait out a track's tail by the same rules, with the known hang, count, truncation, grace, and memory holes closed
+- [JS close end](/quest/m1/js-track-close-end.md) - a JS track's clean close ends at its own last group, not a sibling producer's
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [FIN wait expiry](/quest/m1/fin-wait-expiry.md) - a group awaiting its FIN ack still expires and follows priority updates on lite and IETF
 - [Cross-relay bursts](/quest/m1/cross-relay-bursts.md) - bursty small-group tracks cross two relays without lost groups, unanswered FETCHes, or stalls
+- [Request stream cancel](/quest/m1/request-stream-serve.md) - a lite publisher stops resolving a SUBSCRIBE or FETCH once the requester FINs or resets, through one wrapper that owns every request stream's reader
+- [JS closed-track leak](/quest/m1/js-closed-track-leak.md) - on dev, a subscriber that joins a closed JS track with unlimited retention is released instead of cached forever
 - [Session death parity](/quest/m1/session-death.md) - a local close ends tracks cleanly in both languages, and JS group readers see the session's error on session death
 - [Watch video guards](/quest/m1/watch-video-guards.md) - promoting a video track holds the last picture, and an older group never reaches the codec between live deltas
 - [Watch decoder recovery](/quest/m1/watch-decoder-recovery.md) - one malformed packet rebuilds the audio or video decoder instead of ending playback
 - [Watch audio under CSP](/quest/m1/watch-worklet-file.md) - production builds ship the audio worklet as a file, so `script-src 'self'` pages play audio
 - [More tests under load](/quest/m1/test-flakes-2.md) - the second round of load-only failures, fixed at the cause
+- [Interop audio cold start](/quest/m1/interop-audio-cold-start.md) - the interop audio tone check stops failing on cold start, fixed at its cause
 - [Auth outage clock](/quest/m1/auth-outage-clock.md) - the relay and moq-auth outage tests run on a paused clock again and assert both bounds of `expires`
 - [Legacy end overshoot](/quest/m1/legacy-end-overshoot.md) - browser playback survives a group that starts inside the previous group's estimated end
-- [Slow group log](/quest/m1/slow-group-log.md) - a starved viewer reports skipped groups once per catch-up, not once per group
 - [UnknownSession log flood](/quest/m1/unknown-session-logs.md) - streams reset before their WebTransport header stop being reported as UnknownSession at WARN
 - [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
 - [Wire compatibility](/quest/m1/wire-compat.md) - a nightly run tests this checkout against the last published release for tokens, session wire, and catalog/container
-- [#2075](/quest/m1/2075-mirror-catalog-reservation-gating-in-moq-hang-js-hang.md) - @moq/publish gates the first catalog snapshot until every reserved track is described
 - [Full codec string](/quest/m1/publish-codec-string.md) - browser-published video carries the encoder's full RFC 6381 codec string, so native players decode it
 - [TS program selection](/quest/m1/ts-programs.md) - `import ts` refuses a multi-program stream unless `--program <n|all>` picks one or publishes each
 - [TS export jitter](/quest/m1/ts-export-jitter.md) - the video reorder bound follows later catalogs and the declared reorder depth, so a late B-frame never reorders TS output; an undeclared stream can reorder once per new maximum depth
 - [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - unflagged loop wraps move audio and video by one shift, so A/V sync holds across wraps
-- [ffmpeg muxdelay](/quest/m1/ts-publish-muxdelay.md) - the documented MPEG-TS publish line adds `-muxdelay 0`, so quiet audio is not clumped
+- [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md) - `import ts` reads a PAT or PMT that spans packets or follows a nonzero pointer_field instead of aborting
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - importers sharing a `--hop` and fed one stream publish identical groups and timestamps, so failover survives
 - [PipeWire duplicate cameras](/quest/m1/pipewire-dup-cameras.md) - a webcam lists once with PipeWire enabled
 - [Catalog wall clock](/quest/m1/catalog-wall-clock.md) - `Clock::wall_clock` keeps the catalog's full precision instead of truncating to milliseconds
@@ -71,17 +70,18 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Go and Dart doc samples](/quest/m1/doc-samples-go-dart.md) - Go and Dart doc samples compile against their wrappers
 - [Data capture in bindings](/quest/m1/data-capture-bindings.md) - moq-ffi and every wrapper pass a data frame's capture time, and the JSON window producer takes one
 - [Moxygen compatibility](/quest/m1/moxygen/README.md) - one subgroup per group, whole-group FETCH, and one datagram per group, never a full moxygen pass
-- [JS IETF reprice](/quest/m1/js-ietf-reprice.md) - `@moq/net`'s IETF publisher reprices a held namespace with REQUEST_UPDATE, like Rust, instead of withdraw-then-advertise
+- [JS IETF reprice](/quest/m1/js-ietf-reprice.md) - `@moq/net`'s IETF publisher reprices a held namespace in place, like Rust, instead of withdraw-then-advertise
+- [Cluster publisher in place](/quest/m1/cluster-publisher-in-place.md) - under the IETF cluster extension a publisher change updates an advertisement in place, like lite, and never splices across publishers
 - [JS IETF datagrams](/quest/m1/js-ietf-datagram.md) - `@moq/net` sends and receives datagram groups over moq-transport, like Rust
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic producer per track name in both languages, with the sequence namespace surviving a replacement
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - generic on-demand group serving and IETF FETCH for browser publishers
+- [JS fetch cancel](/quest/m1/js-fetch-cancel.md) - `FetchGroupOptions.signal` abandons one pending fetch without closing the track
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; the catalog entry and format may break in place, since no archives exist
 - [Tooling](/quest/m1/tooling/README.md) - justfiles become a one-line menu over `sh/`, one impact map scopes CI, and every workflow step runs a recipe
 - [Path patterns](/quest/m1/path-patterns.md) - one matcher for every predicate over broadcast paths: tokens, origins, interest
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [Dropped sources](/quest/m1/dropped-sources.md) - track consumers see the producer's real error on every end path, never `Dropped`
 - [Shaper virtual time](/quest/m1/shaper-virtual-time.md) - `moq-shaper` tests judge seeded decisions on paused time, not on wall-clock delivery under load
-- [Rust compressed gate test](/quest/m1/json-compressed-gate-rs.md) - `rs/moq-json` proves a snapshot delta is gated on its encoded size
 - [Shrink the JS overflow test](/quest/m1/json-rolls-snapshot-test.md) - the `js/json` roll-on-overflow test uses a small `maxGroupBytes` budget instead of megabytes of JSON
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - generated C++ over moq-ffi with futures and expected-style errors, shipped as a tarball, vcpkg, and Conan, and adopted by the OBS plugin
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
@@ -130,10 +130,12 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Plan: cache age-out](/quest/m1/cache-wall-eviction.md) - a swept benchmark decides whether the track cache ages groups out on wall time without a write
 - [Frame slot charge](/quest/m1/frame-slot-charge.md) - a group's frame slots past the first four count against the cache pool, including capacity a released group keeps
 - [Relay memory](/quest/m1/relay-memory.md) - remeasure what an announcement costs after prefix routes
+- [Front deadlines](/quest/m1/front-deadline-index.md) - a front's per-event cost stops growing with its track count: an expiry index and per-track wakes, proven by a churn benchmark
 - [Front parking](/quest/m1/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence
 - [JS abandonment](/quest/m1/js-subscribe-abandonment.md) - a viewer returning during IETF subscribe setup keeps its track across microtasks
 - [IETF stream types](/quest/m1/ietf-uni-stream-types.md) - padding streams are discarded stream-only and an unknown uni type closes the session, per draft-21
+- [Rust decode caps](/quest/m1/coding-reader-cap.md) - every Rust decode that allocates from a peer-supplied length is bounded
 - [Epoch primitive](/quest/m1/epoch.md) - one `Epoch` type in moq-net and @moq/net, carried as a trailing `@<uuidv7>` path segment, shared by e2ee and broadcast epochs
 - [E2EE](/quest/m1/e2ee/README.md) - TypeScript and Rust peers interoperate over encrypted broadcasts no relay can decrypt
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - each publish of a name gets a fresh `@<uuidv7>` epoch, viewers follow the newest live one at once, and bare names still resolve on every version
@@ -159,7 +161,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [#3021](/quest/m1/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - GStreamer maps every pad onto one continuous broadcast clock across source restarts
 - [Export linger](/quest/m1/export-linger.md) - every `moq export` waits `--linger` for a broadcast to return, and exits 0 on a clean end and 1 on a drop
 - [TS byte schedule](/quest/m1/ts-export-byte-schedule.md) - moq export ts places PCRs and padding on the byte grid `mpegts.muxRate` implies, so a receiver can clock off arrival
-- [#3489](/quest/m1/3489-ts-import-stream-liveness.md) - moq import ts: every elementary stream reports its access units and how long it has been quiet
 - [SRT import stats](/quest/m1/srt-import-stats.md) - the SRT gateway reports the same per-stream counters instead of nothing
 - [Text availability](/quest/m1/text-schema.md) - a text track publishes its own coverage index instead of copying the media timeline
 - [ID3 catalog section](/quest/m1/id3.md) - timed ID3 as a first-class container-neutral catalog section

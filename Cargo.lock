@@ -4315,6 +4315,7 @@ dependencies = [
  "tokio",
  "tower-http 0.7.1",
  "tracing",
+ "tracing-test",
  "url",
  "usage-rs",
  "winit",

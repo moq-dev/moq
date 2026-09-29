@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { Origin, Path, Track } from "@moq/net";
-import { Effect } from "@moq/signals";
+import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast.ts";
 
 // Effects and signal writes coalesce onto microtasks, so a chain of registration -> config -> catalog
@@ -145,6 +145,39 @@ test("serves the catalog through a shared static track", async () => {
 	subscriber.close();
 	await settle();
 	expect(broadcast.net.peek()).toBe(net);
+
+	broadcast.close();
+});
+
+// Regression: the catalog was served from the moment the origin existed, so the snapshots published
+// while renditions resolved stayed on the track and a subscriber could start from a partial one.
+test("serves no catalog until announced, so the first snapshot is the one at announce time", async () => {
+	const announce = new Signal(false);
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Origin.Producer(),
+		name: Path.from("test.hang"),
+		announce,
+	});
+	await settle();
+
+	// Renditions resolve in separate ticks while unannounced.
+	broadcast.video("video").config.set(videoConfig);
+	await settle();
+	broadcast.audio("audio").config.set(audioConfig);
+	await settle();
+
+	announce.set(true);
+	await settle();
+
+	const net = broadcast.net.peek();
+	if (!net) throw new Error("expected a network producer once connected");
+
+	const group = await net.track(Broadcast.CATALOG_TRACK).subscribe().ordered().nextGroup();
+	expect(group?.sequence).toBe(0);
+	const catalog = (await group?.readJson()) as Catalog.Root;
+	expect(Object.keys(catalog.video?.renditions ?? {})).toEqual(["video"]);
+	expect(Object.keys(catalog.audio?.renditions ?? {})).toEqual(["audio"]);
 
 	broadcast.close();
 });

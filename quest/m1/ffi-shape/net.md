@@ -14,6 +14,9 @@ are renamed.
   nested TLS, QUIC, and backoff records. Validate in `new`. Resolve defaults
   in Rust, since Go gets none; Option fields keep additions additive. This
   also retires Kotlin `Moq.connect`'s twelve named parameters.
+- The client config carries the protocol versions to offer, as libmoq's
+  `moq_client_config.versions` already does (`rs/libmoq/src/api.rs`), so every
+  binding can pin or restrict versions. moq-ffi has no version setter today.
 - Objects that are only getters become records (`AnnounceUpdate` today).
   Handles with verbs (`Request`, `TrackRequest`, `GroupRequest`) stay objects.
 - `TrackProducer` drops `name`/`is_used`/`used`/`unused` for `demand()`.

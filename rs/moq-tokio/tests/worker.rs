@@ -22,14 +22,14 @@ fn free_udp_port() -> u16 {
 	port
 }
 
-/// The socket inodes this process holds bound to `port`, of which there must be
+/// The socket inodes this process holds bound to `addr`, of which there must be
 /// at least one: every UDP socket, but only a TCP listener.
 ///
 /// Asked of this process's own descriptors, for two reasons. Rebinding the port
 /// races any concurrent process's ephemeral bind, which may take a freed port.
 /// And `/proc/net/udp` is served in chunks that skip entries while other
 /// processes churn sockets.
-fn bound(port: u16) -> std::collections::HashSet<u64> {
+fn bound(addr: std::net::SocketAddr) -> std::collections::HashSet<u64> {
 	use std::os::fd::FromRawFd;
 	use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
@@ -58,17 +58,12 @@ fn bound(port: u16) -> std::collections::HashSet<u64> {
 			Ok(socket2::Type::STREAM) => socket.is_listener().unwrap_or(false),
 			_ => false,
 		};
-		let on_port = socket
-			.local_addr()
-			.ok()
-			.and_then(|addr| addr.as_socket())
-			.map(|addr| addr.port())
-			== Some(port);
-		if owned && on_port {
+		let on_addr = socket.local_addr().ok().and_then(|local| local.as_socket()) == Some(addr);
+		if owned && on_addr {
 			bound.insert(meta.ino());
 		}
 	}
-	assert!(!bound.is_empty(), "this process holds no socket on port {port}");
+	assert!(!bound.is_empty(), "this process holds no socket on {addr}");
 	bound
 }
 
@@ -150,7 +145,7 @@ async fn dropping_the_workers_releases_the_port() {
 			std::future::pending::<()>().await;
 		});
 	}
-	let owned = bound(addr.port());
+	let owned = bound(addr);
 	group.shutdown().await;
 
 	assert!(owned.is_disjoint(&open_sockets()), "workers left the port bound");
@@ -292,7 +287,7 @@ async fn dropping_unserved_workers_releases_the_port() {
 	let workers =
 		bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS)).expect("bind workers");
 	let addr = workers.local_addr();
-	let owned = bound(addr.port());
+	let owned = bound(addr);
 	drop(workers);
 
 	assert!(owned.is_disjoint(&open_sockets()), "workers left the port bound");
@@ -313,7 +308,7 @@ async fn an_ephemeral_port_is_shared_by_the_group() {
 	assert_eq!(workers.len(), usize::from(WORKERS));
 
 	let addr = workers.local_addr();
-	let owned = bound(addr.port());
+	let owned = bound(addr);
 	assert_ne!(addr.port(), 0, "the group reports the port it bound");
 
 	// A plain bind refuses a port any socket holds, so this fails while the
@@ -485,9 +480,12 @@ async fn dropping_a_server_keeps_its_socket() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
-	let port = workers.local_addr().port();
+	let addr = workers.local_addr();
+	let port = addr.port();
+	// A stranger on the same port but another address must not be counted.
+	let _stranger = UdpSocket::bind(("127.0.0.2", port)).expect("bind stranger");
 	let mut group = workers.split();
-	let sockets = bound(port);
+	let sockets = bound(addr);
 	assert!(sockets.len() >= 2, "every member holds at least one socket");
 	assert_eq!(group.local_addr().port(), port);
 
@@ -499,7 +497,7 @@ async fn dropping_a_server_keeps_its_socket() {
 	drop(dropped);
 
 	assert_eq!(
-		bound(port),
+		bound(addr),
 		sockets,
 		"dropping a server must not lose its socket while the group lives"
 	);
@@ -510,7 +508,7 @@ async fn dropping_a_server_keeps_its_socket() {
 	let member = members.pop().expect("one member");
 	assert_eq!(member.index(), 0);
 	drop(member);
-	assert_eq!(bound(port), sockets, "the retainer outlives both handles");
+	assert_eq!(bound(addr), sockets, "the retainer outlives both handles");
 
 	group.shutdown().await;
 	assert!(
@@ -531,7 +529,7 @@ async fn completing_a_member_stops_its_siblings() {
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
 	let addr = workers.local_addr();
-	let owned = bound(addr.port());
+	let owned = bound(addr);
 	let mut group = workers.split();
 	let mut members = group.members();
 	assert_eq!(members.len(), 2);
@@ -581,7 +579,7 @@ async fn cancelling_a_member_stops_its_siblings() {
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
 	let addr = workers.local_addr();
-	let owned = bound(addr.port());
+	let owned = bound(addr);
 	let mut group = workers.split();
 	let mut members = group.members();
 
@@ -626,7 +624,7 @@ async fn a_panicking_member_stops_its_siblings() {
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
 	let addr = workers.local_addr();
-	let owned = bound(addr.port());
+	let owned = bound(addr);
 	let mut group = workers.split();
 	let mut members = group.members();
 
@@ -670,7 +668,7 @@ async fn shutdown_with_work_in_flight_joins() {
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
 	let addr = workers.local_addr();
-	let owned = bound(addr.port());
+	let owned = bound(addr);
 	let mut group = workers.split();
 	let mut tasks = Vec::new();
 	for member in group.members() {
@@ -700,7 +698,7 @@ async fn dropping_the_group_with_work_in_flight_stops() {
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(2)).expect("bind workers");
 	let addr = workers.local_addr();
-	let owned = bound(addr.port());
+	let owned = bound(addr);
 	let mut group = workers.split();
 	let mut tasks = Vec::new();
 	{

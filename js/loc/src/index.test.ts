@@ -133,3 +133,19 @@ test("Format decodes the draft-03 timestamp property", () => {
 	expect(decoded.timestamp).toBe(4242 as Time.Micro);
 	expect(decoded.payload).toEqual(payload);
 });
+
+test("Format skips an unknown property whose value needs all 62 bits", () => {
+	const props = concat(
+		Varint.encode(0x02),
+		Varint.encode(2n ** 62n - 1n),
+		Varint.encode(PROP_TIMESTAMP - 0x02),
+		Varint.encode(1_000),
+	);
+	const [decoded] = new Format().decode(buildFrame(props, new Uint8Array([1])));
+	expect(decoded.timestamp).toBe(1_000 as Time.Micro);
+});
+
+test("Format rejects a timestamp past 2^53 - 1 instead of rounding", () => {
+	const props = concat(Varint.encode(PROP_TIMESTAMP), Varint.encode(2n ** 53n));
+	expect(() => new Format().decode(buildFrame(props, new Uint8Array()))).toThrow(/larger than 53-bits/);
+});

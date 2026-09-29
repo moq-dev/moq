@@ -69,8 +69,10 @@ pub struct Import<E: catalog::Catalog = ()> {
 	pmt_pids: HashSet<Pid>,
 	/// Per elementary-stream-PID codec routing.
 	streams: HashMap<Pid, Stream<E>>,
-	/// Counters from audio routes a later PMT replaced, keyed by PID.
+	/// Counters from routes a later PMT replaced, keyed by PID.
 	retired_stats: BTreeMap<u16, StreamStats>,
+	/// Access units per elementary stream, timed on the program clock.
+	liveness: Liveness,
 	/// In-progress PES reassembly, keyed by elementary PID.
 	pending: HashMap<Pid, Pending>,
 	/// Per elementary-stream-PID TS continuity state.
@@ -161,6 +163,7 @@ impl<E: catalog::Catalog> Import<E> {
 			pmt_pids: HashSet::new(),
 			streams: HashMap::new(),
 			retired_stats: BTreeMap::new(),
+			liveness: Liveness::default(),
 			pending: HashMap::new(),
 			continuity: HashMap::new(),
 			pcr_pid: None,
@@ -289,15 +292,17 @@ impl<E: catalog::Catalog> Import<E> {
 			if self.pcr_pid.is_some_and(|p| p.as_u16() == pid) && pkt[1] & 0x80 == 0 {
 				if discontinuity_indicator(&pkt) {
 					self.timebase_break()?;
-				} else if self.supports_mpegts
-					&& let Some(pcr) = pcr(&pkt)
-					&& self.mux_rate.pcr(pcr)
-				{
-					self.record_mux_rate()?;
+				} else if let Some(pcr) = pcr(&pkt) {
+					self.liveness.pcr(pcr);
+					if self.supports_mpegts && self.mux_rate.pcr(pcr) {
+						self.record_mux_rate()?;
+					}
 				}
 			}
 			if let Some(section) = self.sections.get_mut(&pid) {
-				self.published |= section.packet(&pkt, self.last_pts)?;
+				let units = section.packet(&pkt, self.last_pts)?;
+				self.published |= units > 0;
+				self.liveness.delivered(pid, units);
 				continue;
 			}
 			// Intercept the standalone SI PIDs before the routing gate below drops them:
@@ -385,6 +390,7 @@ impl<E: catalog::Catalog> Import<E> {
 				if self.pcr_pid != pmt.pcr_pid {
 					self.pcr_pid = pmt.pcr_pid;
 					// A new clock: the intervals straddling the switch measure nothing.
+					self.liveness.discontinuity();
 					if self.mux_rate.discontinuity() {
 						self.record_mux_rate()?;
 					}
@@ -558,6 +564,9 @@ impl<E: catalog::Catalog> Import<E> {
 		if !matches!(stream, Stream::Ignored | Stream::Clock) {
 			self.initialized = true;
 		}
+		if !matches!(stream, Stream::Ignored) {
+			self.liveness.register(pid.as_u16());
+		}
 		self.streams.insert(pid, stream);
 		self.continuity.entry(pid).or_default();
 		Ok(())
@@ -617,6 +626,7 @@ impl<E: catalog::Catalog> Import<E> {
 			descriptors,
 		)?;
 		self.sections.insert(pid.as_u16(), stream);
+		self.liveness.register(pid.as_u16());
 		self.initialized = true;
 		tracing::debug!(
 			pid = pid.as_u16(),
@@ -693,6 +703,8 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 
 		if is_clock {
+			// Nothing is published, but each PES is a picture the source delivered.
+			self.liveness.delivered(pid.as_u16(), 1);
 			return Ok(());
 		}
 
@@ -737,7 +749,9 @@ impl<E: catalog::Catalog> Import<E> {
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
-		self.published |= stream.write(pending, batched, self.anchor.as_mut())?;
+		let units = stream.write(pending, batched, self.anchor.as_mut())?;
+		self.published |= units > 0;
+		self.liveness.delivered(pid.as_u16(), units);
 
 		// Record the decoded media track's PID + PMT descriptors (language, ...) once
 		// its lazily created track exists, so export can preserve them.
@@ -788,6 +802,7 @@ impl<E: catalog::Catalog> Import<E> {
 		self.media_unwrap.discontinuity();
 		self.last_pts = None;
 		self.published = false;
+		self.liveness.discontinuity();
 		if self.mux_rate.discontinuity() {
 			self.record_mux_rate()?;
 		}
@@ -889,8 +904,9 @@ impl<E: catalog::Catalog> Import<E> {
 		for pid in pids {
 			self.flush(pid)?;
 		}
-		for stream in self.streams.values_mut() {
-			stream.finish()?;
+		for (pid, stream) in &mut self.streams {
+			let units = stream.finish()?;
+			self.liveness.delivered(pid.as_u16(), units);
 		}
 		for section in self.sections.values_mut() {
 			section.finish()?;
@@ -899,20 +915,26 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
-	/// Snapshot the audio frame sync this importer has lost or could not verify.
+	/// Snapshot what every elementary stream has delivered, and the audio frame sync lost on
+	/// the way.
 	///
 	/// Cheap: it reads counters the demuxer already keeps, so a caller can poll it per
 	/// chunk and report the delta.
 	pub fn stats(&self) -> Stats {
 		let mut streams = self.retired_stats.clone();
-		for (pid, stream) in &self.streams {
-			let Some(current) = stream.stats() else {
-				continue;
-			};
+		let routes = self
+			.streams
+			.iter()
+			.filter_map(|(pid, stream)| Some((pid.as_u16(), stream.stats()?)))
+			.chain(self.sections.keys().map(|&pid| (pid, StreamStats::new(".ts"))));
+		for (pid, current) in routes {
 			streams
-				.entry(pid.as_u16())
+				.entry(pid)
 				.and_modify(|retired| retired.merge(&current))
 				.or_insert(current);
+		}
+		for (pid, stats) in &mut streams {
+			(stats.units, stats.quiet) = self.liveness.stream(*pid);
 		}
 		Stats { streams }
 	}
@@ -935,33 +957,44 @@ impl<E: catalog::Catalog> Import<E> {
 	}
 }
 
-/// Frame sync the demuxed audio streams lost or could not verify, keyed by elementary
-/// stream PID.
+/// What each demuxed elementary stream delivered, and the audio frame sync it lost or could
+/// not verify, keyed by elementary stream PID.
 ///
 /// Snapshot it with [`Import::stats`]. Every count is cumulative for the life of the
 /// importer, so what an operator alarms on is the rate: a feed that resyncs once an hour is
-/// healthy, one that resyncs every second is losing audio.
+/// healthy, one that resyncs every second is losing audio, and one whose access units stop
+/// advancing while the mux keeps flowing has lost that stream.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stats {
-	/// Counters per elementary stream PID, ordered by PID. A PID that has never lost frame
-	/// sync is absent, so an empty map means nothing has been lost.
+	/// One row per elementary stream PID the importer carries, ordered by PID. A PID the
+	/// importer drops (an undecoded stream without the `mpegts` catalog section) has none.
 	pub streams: BTreeMap<u16, StreamStats>,
 }
 
 impl Stats {
-	/// Whether no stream has lost frame sync.
+	/// Whether no elementary stream has been registered yet.
 	pub fn is_empty(&self) -> bool {
 		self.streams.is_empty()
 	}
 }
 
-/// What one elementary stream lost or could not verify. See [`Stats`].
+/// What one elementary stream delivered, lost, or could not verify. See [`Stats`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct StreamStats {
-	/// The current or most recent MoQ track suffix for this PID (`.mp2`, `.ac3`, `.aac`, ...).
+	/// The current or most recent MoQ track suffix for this PID (`.avc3`, `.mp2`, `.ts`, ...),
+	/// or empty for MPEG-1/2 video, which is read for its clock and not published.
 	pub track: &'static str,
+	/// Access units the stream delivered: frames published for decoded media, PES payloads or
+	/// sections carried verbatim, and PES read on MPEG-1/2 video.
+	pub units: u64,
+	/// Transport time since the stream last delivered an access unit, or since the PMT
+	/// declared it, measured on the program clock (PCR). `None` until the first PCR arrives.
+	///
+	/// No threshold applies: a sparse stream such as SCTE-35 is legitimately quiet for
+	/// seconds, so how long is too long is for whoever alarms to decide.
+	pub quiet: Option<std::time::Duration>,
 	/// Completed resyncs: the stream lost frame sync and locked onto a confirmed frame
 	/// again. Each one is a gap in the audio.
 	pub resyncs: u64,
@@ -976,7 +1009,15 @@ pub struct StreamStats {
 }
 
 impl StreamStats {
-	/// Add a newer route's counters while naming the route that is active now.
+	fn new(track: &'static str) -> Self {
+		Self {
+			track,
+			..Default::default()
+		}
+	}
+
+	/// Add a newer route's frame-sync counters while naming the route that is active now.
+	/// Delivery is kept per PID rather than per route, so it needs no merging.
 	fn merge(&mut self, current: &Self) {
 		self.track = current.track;
 		self.resyncs += current.resyncs;
@@ -1137,13 +1178,13 @@ impl<E: catalog::Catalog> SectionStream<E> {
 		})
 	}
 
-	/// Consume one 188-byte TS packet, publishing each completed section. `pts` is
-	/// the current media clock used to timestamp a section (its arrival on the
+	/// Consume one 188-byte TS packet, publishing each completed section and returning how
+	/// many. `pts` is the current media clock used to timestamp a section (its arrival on the
 	/// timeline; the splice time itself is inside the section bytes), if one is running.
-	fn packet(&mut self, pkt: &[u8], pts: Option<Timestamp>) -> anyhow::Result<bool> {
+	fn packet(&mut self, pkt: &[u8], pts: Option<Timestamp>) -> anyhow::Result<u64> {
 		let mut sections = Vec::new();
 		self.reassembler.push(pkt, &mut sections);
-		let published = !sections.is_empty();
+		let published = sections.len() as u64;
 		for section in sections {
 			self.emit(section, pts)?;
 		}
@@ -1239,7 +1280,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 
 	/// Publish one reassembled PES payload verbatim, in its own group, stamped with
 	/// its PTS (or the live edge when the PES carried none).
-	fn write(&mut self, pending: Pending, anchor: Option<&mut crate::clock::Anchor>) -> anyhow::Result<bool> {
+	fn write(&mut self, pending: Pending, anchor: Option<&mut crate::clock::Anchor>) -> anyhow::Result<u64> {
 		// Record the original PES stream_id once, from the first PES, so export
 		// re-emits the stream under its real id (e.g. 0xBD for teletext/DVB AC-3).
 		if !self.stream_id_recorded {
@@ -1266,7 +1307,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 		};
 		self.track.write(frame)?;
 		self.track.cut(None)?;
-		Ok(true)
+		Ok(1)
 	}
 
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
@@ -1419,6 +1460,73 @@ impl Continuity {
 	}
 }
 
+/// How long each elementary stream has gone without delivering an access unit.
+///
+/// Measured on the program clock, the PCR summed interval by interval, so it runs straight
+/// through the 33-bit wrap, a signalled time-base reset and a corrupt PCR instead of jumping
+/// with them. Not the media clock: that follows the video PTS, and stops with the very stream
+/// this catches.
+#[derive(Default)]
+struct Liveness {
+	/// The last PCR in 27 MHz ticks, forgotten at a reset so no interval spans one.
+	pcr: Option<u64>,
+	/// PCR ticks elapsed since the first PCR, if one has arrived.
+	elapsed: Option<u64>,
+	/// Per PID: access units delivered, and `elapsed` at the last one, or at registration.
+	/// Kept per PID rather than per route, so a PMT remap carries it like `retired_stats`.
+	streams: HashMap<u16, (u64, u64)>,
+}
+
+impl Liveness {
+	/// A PCR arrived on the program's clock PID.
+	fn pcr(&mut self, pcr: u64) {
+		let elapsed = self.elapsed.get_or_insert(0);
+		if let Some(last) = self.pcr.replace(pcr) {
+			let step = (pcr + super::mux_rate::PCR_WRAP - last) % super::mux_rate::PCR_WRAP;
+			// Stepped one interval at a time, so a corrupt PCR, or the clock stepping back
+			// without a flag, costs one interval rather than inventing hours of silence on
+			// every PID. The bound is the mux-rate meter's.
+			if step <= super::mux_rate::MAX_INTERVAL {
+				*elapsed += step;
+			}
+		}
+	}
+
+	/// The clock restarted or changed PID: the next interval measures nothing.
+	fn discontinuity(&mut self) {
+		self.pcr = None;
+	}
+
+	/// The PMT declared `pid`. Its silence counts from here until it delivers.
+	fn register(&mut self, pid: u16) {
+		let now = self.elapsed.unwrap_or(0);
+		self.streams.entry(pid).or_insert((0, now));
+	}
+
+	/// `pid` delivered `units` access units just now.
+	fn delivered(&mut self, pid: u16, units: u64) {
+		if units == 0 {
+			return;
+		}
+		let now = self.elapsed.unwrap_or(0);
+		if let Some((count, last)) = self.streams.get_mut(&pid) {
+			*count += units;
+			*last = now;
+		}
+	}
+
+	/// `pid`'s access units and how long it has been quiet. See [`StreamStats`].
+	fn stream(&self, pid: u16) -> (u64, Option<std::time::Duration>) {
+		let Some(&(units, last)) = self.streams.get(&pid) else {
+			return (0, None);
+		};
+		let quiet = self
+			.elapsed
+			.map(|now| std::time::Duration::from_nanos((now - last) * 1_000 / 27));
+		(units, quiet)
+	}
+}
+
 /// Byte-level reassembler for MPEG-TS private sections on one PID.
 ///
 /// Private sections (SCTE-35 table_id 0xFC and others) are not PES. This handles
@@ -1567,12 +1675,13 @@ enum Stream<E: catalog::Catalog = ()> {
 }
 
 impl<E: catalog::Catalog> Stream<E> {
+	/// Route one reassembled PES, returning how many access units it published.
 	fn write(
 		&mut self,
 		pending: Pending,
 		batched: bool,
 		anchor: Option<&mut crate::clock::Anchor>,
-	) -> anyhow::Result<bool> {
+	) -> anyhow::Result<u64> {
 		match self {
 			Stream::H264 {
 				split,
@@ -1585,10 +1694,10 @@ impl<E: catalog::Catalog> Stream<E> {
 				// Each PES is one access unit, so flush to emit it immediately.
 				let mut frames = split.decode(&pending.data, pts)?;
 				frames.extend(split.flush(pts)?);
-				let mut published = false;
+				let mut published = 0;
 				for mut frame in frames {
 					frame.timestamp = reanchor.apply(frame.timestamp, import.floor(frame.keyframe))?;
-					published |= skip_missing_keyframe(import.decode([frame]))?;
+					published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
 				}
 				// After decode, so the track (and its catalog rendition) exists.
 				if let Some(reorder) = reorder {
@@ -1607,10 +1716,10 @@ impl<E: catalog::Catalog> Stream<E> {
 				// Each PES is one access unit, so flush to emit it immediately.
 				let mut frames = split.decode(&pending.data, pts)?;
 				frames.extend(split.flush(pts)?);
-				let mut published = false;
+				let mut published = 0;
 				for mut frame in frames {
 					frame.timestamp = reanchor.apply(frame.timestamp, import.floor(frame.keyframe))?;
-					published |= skip_missing_keyframe(import.decode([frame]))?;
+					published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
 				}
 				if let Some(reorder) = reorder {
 					import.observe_reorder(reorder)?;
@@ -1621,7 +1730,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Opus(stream) => stream.write(pending, anchor),
 			Stream::Legacy(stream) => stream.write(pending, anchor),
 			Stream::Verbatim(stream) => stream.write(pending, anchor),
-			Stream::Clock | Stream::Ignored => Ok(false),
+			Stream::Clock | Stream::Ignored => Ok(0),
 		}
 	}
 
@@ -1727,16 +1836,19 @@ impl<E: catalog::Catalog> Stream<E> {
 		}
 	}
 
-	fn finish(&mut self) -> anyhow::Result<()> {
+	/// Finish the track, returning the access units a drained tail published.
+	fn finish(&mut self) -> anyhow::Result<u64> {
 		match self {
-			Stream::H264 { import, .. } => Ok(import.finish()?),
-			Stream::H265 { import, .. } => Ok(import.finish()?),
-			Stream::Aac(stream) => stream.finish(),
-			Stream::Opus(stream) => stream.finish(),
-			Stream::Legacy(stream) => stream.finish(),
-			Stream::Verbatim(stream) => stream.finish(),
-			Stream::Clock | Stream::Ignored => Ok(()),
+			// Only the self-describing audio holds a frame back for a successor to confirm.
+			Stream::Aac(stream) => return stream.finish(),
+			Stream::Legacy(stream) => return stream.finish(),
+			Stream::H264 { import, .. } => import.finish()?,
+			Stream::H265 { import, .. } => import.finish()?,
+			Stream::Opus(stream) => stream.finish()?,
+			Stream::Verbatim(stream) => stream.finish()?,
+			Stream::Clock | Stream::Ignored => {}
 		}
+		Ok(0)
 	}
 
 	fn abort(self, err: moq_net::Error) {
@@ -1751,22 +1863,19 @@ impl<E: catalog::Catalog> Stream<E> {
 		}
 	}
 
-	/// Frame sync this stream has lost, or `None` when it has lost none (or scans for none:
-	/// only the self-describing audio codecs do).
+	/// This route's track and the frame sync it has lost (only the self-describing audio
+	/// codecs scan for it), or `None` for a PID that is dropped rather than carried.
 	fn stats(&self) -> Option<StreamStats> {
-		let stats = match self {
+		Some(match self {
 			Stream::Aac(stream) => stream.resync.stats(),
 			Stream::Legacy(stream) => stream.resync.stats(),
-			Stream::H264 { .. }
-			| Stream::H265 { .. }
-			| Stream::Opus(_)
-			| Stream::Verbatim(_)
-			| Stream::Clock
-			| Stream::Ignored => return None,
-		};
-		// A healthy stream reports nothing, so an empty snapshot means an intact feed.
-		let lost = stats.resyncs > 0 || stats.discarded > 0 || stats.unconfirmed > 0;
-		lost.then_some(stats)
+			Stream::H264 { .. } => StreamStats::new(".avc3"),
+			Stream::H265 { .. } => StreamStats::new(".hev1"),
+			Stream::Opus(_) => StreamStats::new(".opus"),
+			Stream::Verbatim(_) => StreamStats::new(".ts"),
+			Stream::Clock => StreamStats::new(""),
+			Stream::Ignored => return None,
+		})
 	}
 
 	/// The MoQ track name of a decoded media stream, once its (lazily created) track
@@ -1836,10 +1945,7 @@ impl Resync {
 			// count from it for the life of the broadcast.
 			unconfirmed: true,
 			draining: false,
-			stats: StreamStats {
-				track,
-				..Default::default()
-			},
+			stats: StreamStats::new(track),
 		}
 	}
 
@@ -2035,7 +2141,7 @@ impl<E: CatalogExt> AacStream<E> {
 		pending: Pending,
 		batched: bool,
 		anchor: Option<&mut crate::clock::Anchor>,
-	) -> anyhow::Result<bool> {
+	) -> anyhow::Result<u64> {
 		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts, anchor)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
@@ -2061,6 +2167,7 @@ impl<E: CatalogExt> AacStream<E> {
 
 		// A single PES can carry several ADTS frames; split and feed each raw frame.
 		let mut burst = std::time::Duration::ZERO;
+		let mut published = 0;
 		let mut offset = 0;
 		// Earliest candidate passed over for declaring a frame longer than the buffer holds,
 		// carried only if nothing later in the buffer confirms.
@@ -2192,6 +2299,7 @@ impl<E: CatalogExt> AacStream<E> {
 			// so the relay forwards it without waiting for the next.
 			import.cut(None)?;
 			self.resync.published(unvouched);
+			published += 1;
 			// Offsets behind the published frame are spent; carrying one would republish it.
 			fallback = None;
 
@@ -2215,7 +2323,7 @@ impl<E: CatalogExt> AacStream<E> {
 			self.tail_pts = pts;
 		}
 
-		Ok(!burst.is_zero())
+		Ok(published)
 	}
 
 	/// The PES PTS on the published timeline. Resolved where each frame starts rather than
@@ -2253,17 +2361,18 @@ impl<E: CatalogExt> AacStream<E> {
 		self.resync.desynced();
 	}
 
-	fn finish(&mut self) -> anyhow::Result<()> {
+	fn finish(&mut self) -> anyhow::Result<u64> {
 		// Drain a frame held only for want of a successor to confirm it: at end of stream
 		// that successor is never coming. Only once this stream has published a frame,
 		// though. Before that nothing has vouched for any boundary, so accepting one here
 		// would hand a capture that joined mid-frame and ended immediately the same false
 		// frame that starting unconfirmed exists to reject, and build the track's config out
 		// of it.
+		let mut drained = 0;
 		if !self.tail.is_empty() && self.import.is_some() {
 			self.resync.drain();
 			// No PTS to translate, so no mapping needed.
-			self.write(Pending::empty(), true, None)?;
+			drained = self.write(Pending::empty(), true, None)?;
 		}
 		// A partial frame at end of stream isn't emissible; drop it, but leave a trace for
 		// diagnosing truncated captures.
@@ -2279,7 +2388,7 @@ impl<E: CatalogExt> AacStream<E> {
 		if let Some(import) = &mut self.import {
 			import.finish()?;
 		}
-		Ok(())
+		Ok(drained)
 	}
 
 	fn abort(mut self, err: moq_net::Error) {
@@ -2299,13 +2408,14 @@ struct OpusStream {
 }
 
 impl OpusStream {
-	fn write(&mut self, pending: Pending, anchor: Option<&mut crate::clock::Anchor>) -> anyhow::Result<bool> {
+	fn write(&mut self, pending: Pending, anchor: Option<&mut crate::clock::Anchor>) -> anyhow::Result<u64> {
 		let base = unwrap_pts(&mut self.unwrap, pending.pts, anchor)?;
 		let edge = self.import.live_edge();
 		let base = base.map(|base| self.reanchor.apply(base, edge)).transpose()?;
 
 		let data = &pending.data;
 		let mut offset = 0;
+		let mut published = 0;
 		// 48 kHz samples elapsed since this PES's PTS, advancing each packet after the first.
 		let mut elapsed: u64 = 0;
 		while offset < data.len() {
@@ -2333,8 +2443,9 @@ impl OpusStream {
 			// doesn't stall the timeline for the rest of the PES.
 			elapsed += opus::packet_samples(packet).unwrap_or(960) as u64;
 			offset = end;
+			published += 1;
 		}
-		Ok(offset > 0)
+		Ok(published)
 	}
 
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
@@ -2455,8 +2566,8 @@ struct LegacyStream<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> LegacyStream<E> {
-	fn write(&mut self, pending: Pending, anchor: Option<&mut crate::clock::Anchor>) -> anyhow::Result<bool> {
-		let mut published = false;
+	fn write(&mut self, pending: Pending, anchor: Option<&mut crate::clock::Anchor>) -> anyhow::Result<u64> {
+		let mut published = 0;
 		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts, anchor)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
@@ -2621,7 +2732,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 			// so the relay forwards it without waiting for the next.
 			import.cut(None)?;
 			self.resync.published(unvouched);
-			published = true;
+			published += 1;
 			// Offsets behind the published frame are spent; carrying one would republish it.
 			fallback = None;
 
@@ -2676,17 +2787,18 @@ impl<E: CatalogExt> LegacyStream<E> {
 		self.resync.desynced();
 	}
 
-	fn finish(&mut self) -> anyhow::Result<()> {
+	fn finish(&mut self) -> anyhow::Result<u64> {
 		// Drain a frame held only for want of a successor to confirm it: at end of stream
 		// that successor is never coming. Only once this stream has published a frame,
 		// though. Before that nothing has vouched for any boundary, so accepting one here
 		// would hand a capture that joined mid-frame and ended immediately the same false
 		// frame that starting unconfirmed exists to reject, and build the track's config out
 		// of it.
+		let mut drained = 0;
 		if !self.tail.is_empty() && self.import.is_some() {
 			self.resync.drain();
 			// No PTS to translate, so no mapping needed.
-			self.write(Pending::empty(), None)?;
+			drained = self.write(Pending::empty(), None)?;
 		}
 		// A partial frame at end of stream isn't emissible verbatim; drop it, but
 		// leave a trace for diagnosing truncated captures.
@@ -2706,7 +2818,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 		if let Some(import) = &mut self.import {
 			import.finish()?;
 		}
-		Ok(())
+		Ok(drained)
 	}
 
 	fn abort(mut self, err: moq_net::Error) {
@@ -2935,6 +3047,29 @@ mod test {
 		let stats = resync.stats();
 		assert_eq!(stats.discarded, 7, "the active scan must be visible before recovery");
 		assert_eq!(stats.resyncs, 0, "the stream has not regained sync yet");
+	}
+
+	#[test]
+	fn liveness_steps_over_a_corrupt_pcr_and_the_wrap() {
+		const MS: u64 = 27_000;
+		let mut liveness = super::Liveness::default();
+		liveness.register(0x100);
+		let mut pcr = super::super::mux_rate::PCR_WRAP - 100 * MS;
+		for _ in 0..10 {
+			liveness.pcr(pcr);
+			pcr = (pcr + 40 * MS) % super::super::mux_rate::PCR_WRAP;
+		}
+		assert_eq!(liveness.stream(0x100), (0, Some(Duration::from_millis(360))));
+
+		// A PCR hours ahead, then the clock carrying on where it was: neither step counts.
+		liveness.pcr(pcr + 23_861_000 * MS);
+		liveness.pcr(pcr);
+		assert_eq!(liveness.stream(0x100).1, Some(Duration::from_millis(360)));
+
+		liveness.pcr(pcr + 40 * MS);
+		liveness.delivered(0x100, 3);
+		liveness.pcr(pcr + 80 * MS);
+		assert_eq!(liveness.stream(0x100), (3, Some(Duration::from_millis(40))));
 	}
 
 	#[test]
@@ -3803,7 +3938,10 @@ mod test {
 		// scanned past, and the next PES starts a frame the one after it confirms. The
 		// counters exist for the shapes that don't get caught that early.
 		assert!(
-			looped_stats.is_empty(),
+			looped_stats
+				.streams
+				.values()
+				.all(|s| s.resyncs == 0 && s.discarded == 0 && s.unconfirmed == 0),
 			"a wrap the continuity check absorbs should cost no frame sync: {looped_stats:?}"
 		);
 	}
@@ -4027,6 +4165,8 @@ mod test {
 				AAC_PID,
 				super::StreamStats {
 					track: ".aac",
+					units: 4,
+					quiet: None,
 					resyncs: 1,
 					discarded: 47,
 					unconfirmed: 0,
@@ -4218,6 +4358,8 @@ mod test {
 				MP2_PID,
 				super::StreamStats {
 					track: ".mp2",
+					units: 4,
+					quiet: None,
 					resyncs: 1,
 					discarded: 72,
 					unconfirmed: 0,
@@ -4419,6 +4561,8 @@ mod test {
 				MP2_PID,
 				super::StreamStats {
 					track: ".mp2",
+					units: 2,
+					quiet: None,
 					resyncs: 0,
 					discarded: 0,
 					unconfirmed: 1,
