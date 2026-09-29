@@ -22,6 +22,10 @@ retry.
   [#4084](https://github.com/moq-dev/moq/pull/4084) removed from its sibling
   after [#4055](https://github.com/moq-dev/moq/pull/4055) papered over it with
   a retry.
+- moq-tokio
+  `subscription_end_integrity::a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean`
+  ends `Ok(None)` with 10 of 20 frames in 3 of 8 full-suite runs on a clean
+  tree, and passes alone (#4332).
 - `just test media` late join failed once after
   [#4181](https://github.com/moq-dev/moq/pull/4181): "joined at frame 111, 16
   frames behind 127", against a budget of one GOP (15).

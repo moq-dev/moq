@@ -532,6 +532,22 @@ impl MockSession {
 		}
 	}
 
+	/// Deliver the held uni streams newest first, and stop holding.
+	pub fn release_unis_reversed(&self) {
+		for stream in self
+			.side
+			.held
+			.lock()
+			.unwrap()
+			.take()
+			.unwrap_or_default()
+			.into_iter()
+			.rev()
+		{
+			let _ = self.side.peer_uni.try_push(stream);
+		}
+	}
+
 	/// Lose the held uni streams, as if each were reset before its header arrived, and
 	/// stop holding.
 	pub fn drop_unis(&self) {

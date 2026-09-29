@@ -219,14 +219,14 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			lite::AnnounceBroadcast::Ended { suffix, .. } => {
 				let path = prefix.join(&suffix);
 				tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
-				run.announced.retire(&path);
+				run.announced.withdraw(&path);
 			}
 			lite::AnnounceBroadcast::EndedId { id } => {
 				// Resolve and retire the id; an unknown or already-retired id is a
 				// protocol violation.
 				let path = prefix.join(&run.decoder.end(id)?);
 				tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
-				run.announced.retire(&path);
+				run.announced.withdraw(&path);
 			}
 			lite::AnnounceBroadcast::Restart { id, hops, cost } => {
 				// Resolve the id; it stays live (the replacement reuses it). An unknown
@@ -368,13 +368,9 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 
 	/// Handle a RESTART (an explicit restart status, or a duplicate ANNOUNCE on lite-05).
 	///
-	/// The first hop of the chain identifies the original publisher. When it matches
-	/// the prior advertisement and is a real identity, the broadcast is the same
-	/// content on a new path: this session's route metadata updates in place,
-	/// in-flight tracks keep flowing, and the origin only hands over if the winner
-	/// changed. Consumers observe nothing. When the first hop differs, or is
-	/// [`Hop::UNKNOWN`](crate::Hop::UNKNOWN), the old route detaches gracefully
-	/// and a fresh one attaches, so downstream sees a real Ended + Active.
+	/// A restart carries no content claim, so this session's route re-prices in
+	/// place whatever the new chain says: in-flight tracks keep flowing and the
+	/// origin only hands over if the winner changed.
 	/// The advertisement is already live, so this can attach a route even when the
 	/// original advertisement was declined locally.
 	///
@@ -2649,7 +2645,7 @@ mod tests {
 			.unwrap();
 		cursor.assert_next_active("room/host");
 		assert!(announced.contains(&path.clone()), "the announce was not recorded");
-		announced.retire(&path.clone());
+		announced.withdraw(&path);
 		cursor.assert_next_ended("room/host");
 	}
 }
@@ -2789,9 +2785,12 @@ impl Announced {
 		self.routes.get_mut(path)?.as_mut()
 	}
 
-	fn retire(&mut self, path: &PathOwned) {
-		// Dropping the route closes its sources.
-		self.routes.remove(path);
+	/// Retire this session's advertisement without invalidating another live
+	/// session from the same peer. Dropping its sources closes their requests.
+	fn withdraw(&mut self, path: &PathOwned) {
+		if let Some(Some(entry)) = self.routes.remove(path) {
+			entry.dynamic.withdrawn();
+		}
 	}
 
 	/// Serve queued requests on every ready route: mint a source per requested

@@ -97,6 +97,11 @@ rcgen = "0.14"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 
+# Which sockets the process still holds, so the embed tests can prove a stopped
+# relay closed its own without rebinding a port another test could take.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+socket2 = { workspace = true, features = ["all"] }
+
 # `raise(SIGINT)` at ourselves, so the shutdown test exercises the real signal
 # path rather than the trigger behind it.
 [target.'cfg(unix)'.dev-dependencies]
