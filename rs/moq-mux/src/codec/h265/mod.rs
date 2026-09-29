@@ -215,6 +215,36 @@ pub(crate) fn config_from_hvcc(hvcc: &[u8]) -> Result<hang::catalog::VideoConfig
 	Ok(config)
 }
 
+/// The reordering an SPS NAL unit declares for its highest sub-layer: `sps_max_num_reorder_pics`,
+/// and the picture period when the VUI's HRD parameters fix the picture rate within the CVS
+/// (ITU-T H.265 E.3.2).
+///
+/// `None` when the SPS fails to parse.
+pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
+	let sps = SpsNALUnit::parse(&mut &nal[..]).ok()?;
+	let highest = sps.rbsp.sps_max_sub_layers_minus1 as usize;
+	let reorder = &sps.rbsp.sub_layer_ordering_info.sps_max_num_reorder_pics;
+	let depth = *reorder.get(highest).or(reorder.last())?;
+	let period = sps
+		.rbsp
+		.vui_parameters
+		.as_ref()
+		.and_then(|vui| vui.vui_timing_info.as_ref())
+		.and_then(|timing| {
+			let sub_layers = &timing.hrd_parameters.as_ref()?.sub_layers;
+			let elemental = sub_layers
+				.get(highest)
+				.or(sub_layers.last())?
+				.elemental_duration_in_tc_minus1?;
+			let units = (elemental + 1) * u64::from(timing.num_units_in_tick.get());
+			Some((units, u64::from(timing.time_scale.get())))
+		});
+	Some(crate::codec::video::Reorder {
+		depth: u32::try_from(depth).ok()?,
+		period,
+	})
+}
+
 /// Annex-B → length-prefixed transmuxer; the H.265 analogue of
 /// [`crate::codec::h264::Avc1`].
 ///
@@ -477,6 +507,13 @@ pub(crate) mod fixtures {
 		0x02, 0x00, 0x00, 0x03, 0x00, 0x3c, 0x10,
 	];
 	pub(crate) const PPS: &[u8] = &[0x44, 0x01, 0xc1, 0x72, 0xb4, 0x62, 0x40];
+	/// SPS from a 64x64, 25 fps x265 encode with `bframes=3:b-pyramid=1` and HRD signalling
+	/// (`sps_max_num_reorder_pics` 2).
+	pub(crate) const SPS_PYRAMID: &[u8] = &[
+		0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x3c,
+		0xa0, 0x20, 0x81, 0x05, 0x96, 0x56, 0x59, 0x24, 0xca, 0xf0, 0x16, 0x80, 0x80, 0x00, 0x00, 0x03, 0x00, 0x80,
+		0x00, 0x00, 0x0c, 0xb0, 0x0a, 0x48, 0x2f, 0x00, 0x07, 0xa1, 0x20, 0x00, 0xf4, 0x24, 0x40,
+	];
 
 	/// An hvcC record built from the real parameter sets (4-byte NALU lengths).
 	pub(crate) fn hvcc() -> Bytes {
@@ -505,6 +542,14 @@ mod tests {
 
 	fn ts() -> moq_net::Timestamp {
 		moq_net::Timestamp::from_micros(0).unwrap()
+	}
+
+	#[test]
+	fn sps_reorder_reads_the_highest_sub_layer() {
+		let reorder = sps_reorder(fixtures::SPS_PYRAMID).unwrap();
+		assert_eq!(reorder.depth, 2);
+		assert_eq!(reorder.period, Some((1, 25)));
+		assert_eq!(sps_reorder(&fixtures::SPS[..8]), None);
 	}
 
 	/// hvc1: a length-prefixed access unit with an IDR slice wraps as one keyframe;
