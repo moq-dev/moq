@@ -39,19 +39,17 @@ jobs:
           # Full history so `just ci check` can diff against origin/$GITHUB_BASE_REF.
           fetch-depth: 0
 
-      # Quests, agent config, and root Markdown compile nothing, so a diff of only
-      # those skips the disk cleanup and Rust cache that exist for the build.
+      - uses: ./.github/actions/just
+
+      # sh/dispatch.sh's impact map decides. A diff that reaches only lints,
+      # such as a quest-only one, skips the disk cleanup and Rust cache that
+      # exist for the build.
       - name: Scope
         id: scope
-        run: |
-          base=$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)
-          files=$(git diff --name-only "$base")
-          if grep -qvE '^(quest/|\.claude/|[^/]+\.md$)' <<< "$files"; then
-            echo build=true >> "$GITHUB_OUTPUT"
-          fi
+        run: just ci-scope check >> "$GITHUB_OUTPUT"
 
       - name: Free disk space
-        if: steps.scope.outputs.build
+        if: steps.scope.outputs.build == 'true'
         uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
         with:
           tool-cache: false
@@ -75,7 +73,7 @@ jobs:
       # scope such an entry to the PR's own branch anyway, where no later PR
       # could read it while it ate the repository's 10 GB budget.
       - name: Rust cache
-        if: steps.scope.outputs.build
+        if: steps.scope.outputs.build == 'true'
         uses: ./.github/actions/rust-cache
 
       # The same recipe a developer runs locally. It diffs against
@@ -105,25 +103,22 @@ jobs:
           # Full history so `just ci test` can diff against origin/$GITHUB_BASE_REF.
           fetch-depth: 0
 
-      # Same scope as the `check` job. No test covers those files either, so the
-      # job skips everything and reports green instead of spending a minute of
+      - uses: ./.github/actions/just
+
+      # With no test in scope, the job skips everything and still reports
+      # green, so the required check passes instead of spending a minute of
       # setup to run nothing.
       - name: Scope
         id: scope
-        run: |
-          base=$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)
-          files=$(git diff --name-only "$base")
-          if grep -qvE '^(quest/|\.claude/|[^/]+\.md$)' <<< "$files"; then
-            echo build=true >> "$GITHUB_OUTPUT"
-          fi
+        run: just ci-scope test >> "$GITHUB_OUTPUT"
 
       - name: Free disk space
-        if: steps.scope.outputs.build
+        if: steps.scope.outputs.build == 'true'
         uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
         with:
           tool-cache: false
 
-      - if: steps.scope.outputs.build
+      - if: steps.scope.outputs.build == 'true'
         uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
@@ -139,13 +134,13 @@ jobs:
 
       # Restore only, same as the `check` job above.
       - name: Rust cache
-        if: steps.scope.outputs.build
+        if: steps.scope.outputs.build == 'true'
         uses: ./.github/actions/rust-cache
 
       # NEXTEST_PROFILE picks up the longer hang timeout in .config/nextest.toml;
       # without it a runner under load could trip the local one.
       - name: Test
-        if: steps.scope.outputs.build
+        if: steps.scope.outputs.build == 'true'
         run: nix develop --command just ci test
         env:
           MOQ_STRICT: 1

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Run `just check`, `just fix`, or `just ci check|test` over what the branch
-# changed.
+# changed, or tell CI whether a job needs its build setup (`just ci-scope`).
 #
-# Usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all]
+# Usage: sh/dispatch.sh check|fix|ci-check|ci-test|scope-check|scope-test [BASE|--all]
 #
 # The branch diff is resolved once and matched against the impact map below,
 # the one place that says which paths put which module in scope. `check` is
@@ -10,11 +10,11 @@
 # so there is no second definition of "checked".
 set -euo pipefail
 
-usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all]"
+usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test|scope-check|scope-test [BASE|--all]"
 action=${1:?$usage}
 base=${2:-}
 case "$action" in
-    check | fix | ci-check | ci-test) ;;
+    check | fix | ci-check | ci-test | scope-check | scope-test) ;;
     *)
         echo "$usage" >&2
         exit 2
@@ -24,8 +24,9 @@ esac
 # A host toolchain fails deep in a build instead: its gcc keeps the
 # _FORTIFY_SOURCE the dev shell disables, which breaks jemalloc's -Werror
 # configure probes. This flake's dev shell sets MOQ_DEV_SHELL. Windows has no
-# Nix, so it always runs on the host.
-if [[ -z "${MOQ_DEV_SHELL:-}" && -z "${MOQ_ALLOW_HOST:-}" && "$OSTYPE" != msys && "$OSTYPE" != cygwin ]]; then
+# Nix, so it always runs on the host. A scope query only reads git, and CI asks
+# it before installing Nix.
+if [[ "$action" != scope-* && -z "${MOQ_DEV_SHELL:-}" && -z "${MOQ_ALLOW_HOST:-}" && "$OSTYPE" != msys && "$OSTYPE" != cygwin ]]; then
     echo "error: run inside the Nix dev shell ('nix develop' or direnv) so tools match CI" >&2
     echo "       or set MOQ_ALLOW_HOST=1 to use the host toolchain anyway" >&2
     exit 1
@@ -139,19 +140,39 @@ declare -A tools=(
     [gh]='actionlint bun'
 )
 
+# Modules that lint without compiling. A CI job whose scope holds nothing else
+# skips its build setup: the disk cleanup, the Rust cache, and for `test`, Nix
+# itself. A new module gets the build setup until it is listed here.
+lint_only=(quest markdown shell toml nix justfile gh)
+
 case "$action" in
-    check | ci-check) modules=(js workers drafts rs bench quest drill py kt swift go dart obs_compile obs flake markdown shell toml nix justfile gh) ;;
+    check | ci-check | scope-check) modules=(js workers drafts rs bench quest drill py kt swift go dart obs_compile obs flake markdown shell toml nix justfile gh) ;;
     fix) modules=(js rs py dart obs markdown shell toml nix justfile) ;;
-    ci-test) modules=(js rs py) ;;
+    ci-test | scope-test) modules=(js rs py) ;;
 esac
+
+in_scope=()
+for module in "${modules[@]}"; do
+    pattern=${scope[$module]}
+    if [[ -n "$all" || -z "$pattern" ]] || grep -qE "$pattern" "$changed"; then
+        in_scope+=("$module")
+    fi
+done
+
+# key=value, which CI appends to $GITHUB_OUTPUT.
+if [[ "$action" == scope-* ]]; then
+    build=false
+    for module in "${in_scope[@]}"; do
+        [[ " ${lint_only[*]} " == *" $module "* ]] || build=true
+    done
+    echo "$action: in scope: ${in_scope[*]:-nothing}" >&2
+    echo "build=$build"
+    exit 0
+fi
 
 selected=()
 missing=()
-for module in "${modules[@]}"; do
-    pattern=${scope[$module]}
-    if [[ -z "$all" && -n "$pattern" ]] && ! grep -qE "$pattern" "$changed"; then
-        continue
-    fi
+for module in "${in_scope[@]}"; do
     absent=()
     for tool in ${tools[$module]}; do
         command -v "$tool" >/dev/null 2>&1 || absent+=("$tool")
