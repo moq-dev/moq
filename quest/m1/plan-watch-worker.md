@@ -35,9 +35,14 @@ Prototype both models on the same pipeline and measure them against each other:
 Settled constraints either way:
 
 - `AudioContext` and the render worklet stay on main. The worklet's ring
-  endpoint (the `SharedArrayBuffer` ring, or a `MessagePort` straight to the
-  worklet on the postMessage path) is handed to the worker so decoded PCM
-  never transits main, and the playhead reaches `Sync` the same way.
+  endpoint is handed to the worker so decoded PCM never transits main, and
+  the playhead reaches `Sync` the same way. With `SharedArrayBuffer` that is
+  the shared ring. Without it, main creates a `MessageChannel` and transfers
+  one port to the worker and the other to the worklet (over `node.port`); PCM
+  and playhead state then flow worker to worklet and back on that channel.
+  This keeps the non-isolated path immune to main-thread jank without
+  COOP/COEP. A transferred `ReadableStream` is not an alternative: it is
+  postMessage underneath, and the worklet would still drain it into its ring.
 - `Sync` lives in the worker. Main-thread readers (captions, UI) observe it
   through the bridge.
 - `IntersectionObserver`, `visibilitychange`, and the element's size stay on
@@ -61,7 +66,9 @@ The rewritten implementation quest names the chosen model, the public handle
 shape of `Player` and `<moq-watch>`, what happens to the composable classes,
 the worker bundling (the publish capture worker's `?worker&inline` is the
 precedent; note the CSP `worker-src blob:` consequence), and the follow-up
-quest for moving publish onto the same worker if the handle model wins.
+quest for moving publish onto the same worker if the handle model wins. That
+follow-up wires the capture worklet to the encoder worker with a
+`MessageChannel` too, so captured PCM also skips main.
 
 ## Related
 
