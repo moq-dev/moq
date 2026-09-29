@@ -51,6 +51,7 @@ mod activity;
 mod error;
 mod format;
 mod frame;
+mod jitter;
 mod layout;
 mod opus;
 mod pcm;

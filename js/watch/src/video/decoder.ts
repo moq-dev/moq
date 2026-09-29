@@ -96,6 +96,8 @@ export class Decoder {
 	// subscribed to. One value so a later source that reuses the track name still notifies:
 	// the name alone would compare equal, and the jitter effect would keep the previous catalog.
 	#pending = new Signal<{ track: string; catalog: Getter<Catalog.Root | undefined> } | undefined>(undefined);
+	// The active track's arrival estimate from its container consumer.
+	#spread = new Signal<Time.Milli | undefined>(undefined);
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
 
 	#signals = new Effect();
@@ -115,7 +117,19 @@ export class Decoder {
 
 		this.source = props.source;
 		this.sync = props.sync;
-		this.#signals.cleanup(this.sync.register(this.out.jitter));
+		// "auto" holds the arrival estimate plus the active rendition's catalog `delay`, floored at the
+		// catalog requirement. The estimate cancels any offset between tracks, so the delay is added
+		// back. The audio frame term has no video counterpart: the rendition jitter already covers a
+		// frame interval.
+		const target = this.#signals.computed((effect) => {
+			const jitter = effect.get(this.out.jitter);
+			const spread = effect.get(this.#spread);
+			if (spread === undefined) return jitter;
+			const active = effect.get(this.#active);
+			const delay = active && effect.get(active.catalog)?.video?.renditions?.[active.track]?.delay;
+			return Time.Milli.max(Time.Milli.add(spread, Time.Milli(delay ?? 0)), jitter ?? Time.Milli.zero);
+		});
+		this.#signals.cleanup(this.sync.register(target));
 		this.#identity = this.#signals.computed((effect) => {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
@@ -213,6 +227,7 @@ export class Decoder {
 		if (!active) {
 			// Clear stale data when disabled (e.g. paused or not visible).
 			this.#out.buffered.set([]);
+			this.#spread.set(undefined);
 			return;
 		}
 
@@ -229,6 +244,7 @@ export class Decoder {
 		});
 		effect.proxy(this.#out.timestamp, active.timestamp);
 		effect.proxy(this.#out.buffered, active.buffered);
+		effect.proxy(this.#spread, active.spread);
 	}
 
 	#runDisplay(effect: Effect): void {
@@ -302,6 +318,9 @@ class DecoderTrack {
 
 	// Network jitter + decode buffer.
 	buffered = new Signal<Container.BufferedRanges>([]);
+
+	// How late frames arrive relative to the earliest one, from the container consumer.
+	spread = new Signal<Time.Milli | undefined>(undefined);
 
 	// Decoded frames waiting to be rendered.
 	#buffered = new Signal<Container.BufferedRanges>([]);
@@ -417,6 +436,9 @@ class DecoderTrack {
 			this.buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
 
+		// Publish the arrival estimate for the "auto" target.
+		effect.run((inner) => this.spread.set(inner.get(consumer.spread)));
+
 		decoder.configure({
 			codec: this.config.codec,
 			description: this.config.description ? Util.Hex.toBytes(this.config.description) : undefined,
@@ -492,6 +514,9 @@ class DecoderTrack {
 			const decode = inner.get(this.#buffered);
 			this.buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
+
+		// Publish the arrival estimate for the "auto" target.
+		effect.run((inner) => this.spread.set(inner.get(consumer.spread)));
 
 		// Configure decoder with description from catalog
 		decoder.configure({

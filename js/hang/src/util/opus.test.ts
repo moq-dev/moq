@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { pickRate, preSkip, SAMPLE_RATES, supportsRate, toDOps } from "./opus";
+import { packetSamples, pickRate, preSkip, SAMPLE_RATES, supportsRate, toDOps } from "./opus";
 
 describe("pickRate", () => {
 	// Matches the pick_opus_rate tests in rs/moq-audio/src/codec.rs.
@@ -78,5 +78,26 @@ describe("preSkip", () => {
 		const dops = Uint8Array.from([0, 2, 1, 56, 0, 0, 187, 128, 0, 0, 0]);
 		expect(preSkip(head)).toBe(312);
 		expect(preSkip(dops)).toBe(312);
+	});
+});
+
+describe("packetSamples", () => {
+	// Matches packet_samples_reads_toc in rs/moq-mux/src/codec/opus/mod.rs.
+	it("reads the TOC byte", () => {
+		// config 16 (CELT NB 2.5 ms), code 0 (1 frame).
+		expect(packetSamples(new Uint8Array([16 << 3]))).toBe(120);
+		// config 3 (SILK NB 60 ms), code 0.
+		expect(packetSamples(new Uint8Array([3 << 3]))).toBe(2880);
+		// config 1 (SILK NB 20 ms), code 1 (2 frames).
+		expect(packetSamples(new Uint8Array([(1 << 3) | 1]))).toBe(1920);
+		// config 1, code 3 with 4 frames.
+		expect(packetSamples(new Uint8Array([(1 << 3) | 3, 4]))).toBe(3840);
+		// config 31 (CELT FB 20 ms), the libopus real-time default.
+		expect(packetSamples(new Uint8Array([31 << 3]))).toBe(960);
+	});
+
+	it("is undefined for a truncated packet", () => {
+		expect(packetSamples(new Uint8Array([]))).toBeUndefined();
+		expect(packetSamples(new Uint8Array([(1 << 3) | 3]))).toBeUndefined();
 	});
 });

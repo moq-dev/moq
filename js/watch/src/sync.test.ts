@@ -1,10 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import type * as Catalog from "@moq/hang/catalog";
 import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
-import { playbackJitter } from "./audio/config";
 import { type Delay, Sync } from "./sync";
-import { renditionJitter } from "./video/playhead";
 
 // Effects in @moq/signals flush on a microtask, so let pending updates drain before asserting.
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -65,54 +62,60 @@ describe("delay and buffer", () => {
 		expect(sync.out.maxAge.peek()).toBe(0 as Time.Milli);
 		sync.close();
 	});
+});
 
-	it("includes registered decoder jitter until the decoder unregisters", async () => {
-		const media = new Signal<Time.Milli | undefined>(20 as Time.Milli);
-		const sync = new Sync({ delay: 100 as Time.Milli });
-		const unregister = sync.register(media);
+describe("auto delay", () => {
+	it("holds nothing until a decoder registers", async () => {
+		const sync = new Sync();
+		await flush();
+		expect(sync.out.delay.peek()).toBe(0 as Time.Milli);
+		sync.close();
+	});
+
+	it("follows the deepest registered target until it unregisters", async () => {
+		const audio = new Signal<Time.Milli | undefined>(120 as Time.Milli);
+		const video = new Signal<Time.Milli | undefined>(40 as Time.Milli);
+		const sync = new Sync();
+		const unregisterAudio = sync.register(audio);
+		sync.register(video);
 		await flush();
 		expect(sync.out.delay.peek()).toBe(120 as Time.Milli);
+		expect(sync.out.jitter.peek()).toBe(120 as Time.Milli);
 
-		media.set(80 as Time.Milli);
+		// A publisher flushing 250ms at once needs 250ms of buffer, whatever the round trip is.
+		audio.set(270 as Time.Milli);
 		await flush();
-		expect(sync.out.delay.peek()).toBe(180 as Time.Milli);
+		expect(sync.out.delay.peek()).toBe(270 as Time.Milli);
 
-		unregister();
+		unregisterAudio();
 		await flush();
-		expect(sync.out.delay.peek()).toBe(100 as Time.Milli);
+		expect(sync.out.delay.peek()).toBe(40 as Time.Milli);
 		sync.close();
 	});
 
-	it("holds the largest delay plus jitter among subscribed renditions", async () => {
-		const audio = { codec: "opus", container: { kind: "legacy" }, sampleRate: 48000, numberOfChannels: 2 };
-		const video = { codec: "avc1.640028", container: { kind: "legacy" }, jitter: 34, delay: 200 };
-		const sync = new Sync({ delay: 100 as Time.Milli });
-		sync.register(new Signal(playbackJitter(audio as Catalog.AudioConfig)));
-		const unsubscribe = sync.register(new Signal(renditionJitter(video as Catalog.VideoConfig)));
-		await flush();
-		// 100 ms of network jitter over the video's 200 ms delay and 34 ms spread.
-		expect(sync.out.delay.peek()).toBe(334 as Time.Milli);
-
-		// Dropping the slow rendition lowers latency to the audio's own 20 ms frame and 3 ms quantum.
-		unsubscribe();
-		await flush();
-		expect(sync.out.delay.peek()).toBe(123 as Time.Milli);
-		sync.close();
-	});
-
-	it("unregisters duplicate jitter inputs independently", async () => {
+	it("unregisters duplicate targets independently", async () => {
 		const media = new Signal<Time.Milli | undefined>(20 as Time.Milli);
-		const sync = new Sync({ delay: 100 as Time.Milli });
+		const sync = new Sync();
 		const unregisterFirst = sync.register(media);
 		const unregisterSecond = sync.register(media);
 
 		unregisterFirst();
 		await flush();
-		expect(sync.out.delay.peek()).toBe(120 as Time.Milli);
+		expect(sync.out.delay.peek()).toBe(20 as Time.Milli);
 
 		unregisterSecond();
 		await flush();
+		expect(sync.out.delay.peek()).toBe(0 as Time.Milli);
+		sync.close();
+	});
+
+	it("takes a fixed delay literally, ignoring the measured targets", async () => {
+		const media = new Signal<Time.Milli | undefined>(250 as Time.Milli);
+		const sync = new Sync({ delay: 100 as Time.Milli });
+		sync.register(media);
+		await flush();
 		expect(sync.out.delay.peek()).toBe(100 as Time.Milli);
+		expect(sync.out.jitter.peek()).toBe(100 as Time.Milli);
 		sync.close();
 	});
 });

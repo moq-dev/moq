@@ -2,7 +2,7 @@ import type { Time } from "@moq/net";
 import type { SharedRingBufferInit } from "./shared-ring-buffer";
 
 /** Everything the main thread sends the render worklet over its port. */
-export type Message = InitShared | InitPost | Data | Latency | Reset | Truncate;
+export type Message = InitShared | InitPost | Data | Latency | Reset | Stall | Truncate;
 export type ToMain = State;
 
 /** Init message when SharedArrayBuffer is available. */
@@ -24,6 +24,14 @@ export interface InitPost {
 /** Flush the buffer and re-stall (fallback path only; shared path resets via Atomics). */
 export interface Reset {
 	type: "reset";
+}
+
+/**
+ * Hold playback until the buffer holds the target again, keeping what is buffered (fallback path
+ * only; the shared path stalls via Atomics).
+ */
+export interface Stall {
+	type: "stall";
 }
 
 /**
@@ -53,4 +61,6 @@ export interface State {
 	type: "state";
 	timestamp: Time.Micro;
 	stalled: boolean;
+	// How many times the ring has run dry mid-playback, cumulative.
+	underruns: number;
 }

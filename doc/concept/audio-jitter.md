@@ -37,7 +37,27 @@ frame:
 | Native | `container::Consumer::read()`, awaited by `moq-audio`'s decode consumer |
 
 Both sit below the decoder and above nothing: no reordering, no gap handling, no
-age budget. A frame dropped by the relay is never observed, which is correct.
+age budget.
+
+Natively that holds only as far as the caller lets it. The container consumer
+reads groups in sequence order and applies its age budget inside `read()`, so a
+group skipped for age is never observed, and a frame queued behind a stalled
+group is observed when the stall clears. A caller that estimates keeps the budget
+at least as long as the estimate's ceiling, which is why `moq play` waits 2 s on
+a stalled group under `--delay auto`. The observation is also only as honest as
+the caller is prompt: `read()` is timed when it resolves, so a player drains it
+as packets come and lets the playback buffer hold the target, rather than
+pacing reads to the speaker.
+
+A frame dropped by the relay is never observed, which is correct only while the
+drop is not the receiver's own doing. The subscription's max age drops groups
+before any container sees them, at the relay and in the receiver's own transport
+subscriber, so a subscription cut to the target hides every frame later than
+the target: the estimate creeps up one bucket at a time while the frames it
+should have measured go unplayed. In automatic mode both implementations
+subscribe with at least the ceiling, 2 s: `moq play --delay auto` through its
+age budget, and the browser through the audio subscription alone, since its
+container consumer observes each frame before applying the local budget.
 A frame the container will later discard *is* observed, which is also correct:
 it arrived, and when it arrived is the measurement.
 
@@ -218,10 +238,8 @@ carry a number the payload already states.
 
 ### What is not in the frame duration
 
-The browser's AudioWorklet renders in fixed 128-sample blocks, and
-`js/watch/src/audio/config.ts` currently adds that block to the per-codec frame
-duration, so 48 kHz Opus reads as 23 ms rather than 20 ms. **That block is not
-part of the target.** It is a property of the render backend, not of the
+The browser's AudioWorklet renders in fixed 128-sample blocks. **That block is
+not part of the target.** It is a property of the render backend, not of the
 network, and native has no worklet at all. If one language's step carried it and
 the other's did not, the two would produce different target series from the same
 trace and the corpus could not hold.
@@ -267,9 +285,6 @@ they are the same quantity measured at different points, and the receiver's
 point strictly contains the publisher's. The floor earns its place by being
 correct *immediately*, before the estimator has seen a full flush cycle, which
 is the one thing a measurement cannot be.
-
-Note that `js/watch` today adds the two rather than taking the maximum, which
-over-buffers a bursty publisher by its own flush span.
 
 ## Across renditions
 
