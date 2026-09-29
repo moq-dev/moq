@@ -26,6 +26,11 @@ maps everything else to "not supported" or a harmless equivalent. The
 [moq-lite page](/concept/moq-lite#what-moq-lite-leaves-out) lists the
 differences.
 
+Rust and JavaScript subscribers accept object extension blocks up to 64 KiB.
+This is an implementation limit, not a limit in the IETF draft. A larger
+declared block stops its subgroup stream with `MALFORMED_TRACK` before reading
+the block; other groups and the session stay open.
+
 An IETF publisher declares the track's default priority in `SUBSCRIBE_OK` or
 `PUBLISH` when that draft carries track properties. Groups without a priority
 flag inherit it. If the property is absent, the IETF wire default of 128 maps
