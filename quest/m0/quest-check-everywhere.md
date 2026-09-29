@@ -15,7 +15,8 @@
   Merging `main` into each active line bumps the pin; do that for the lines
   that fail today and fix what the new check reports.
 - `just ci check` runs `quest check` on pull requests only. Also run it on
-  push to `main` and `dev`, so a direct merge commit can't land a broken tree.
+  push to `main`, `dev`, and `quest/**`, so a direct merge commit (such as
+  `main` merged into a line) can't land a broken tree.
 
 Public API: none. Wire: none.
 

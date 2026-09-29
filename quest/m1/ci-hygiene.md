@@ -9,7 +9,9 @@ saves the Rust cache later runs restore.
 
 - Concurrency: `check.yml`, `obs.yml`, `android.yml`, `wasm.yml`, and
   `interop.yml` group by `${{ github.ref }}` only. Key them by event and PR
-  number the way `platform.yml` does (#4370).
+  number the way `platform.yml` does (#4370). A `pull_request` run's
+  `github.ref` is already `refs/pull/<n>/merge`, so first find which runs
+  actually shared a group, and confirm the new key separates them.
 - Cache: `interop.yml` and `swift.yml` set Swatinem's
   `cache-on-failure: true`; #4384's interop cache got saved broken that way
   (`failed to run custom build command for aws-lc-rs`). Drop it. Check

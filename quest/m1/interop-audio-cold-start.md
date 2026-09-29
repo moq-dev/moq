@@ -12,13 +12,14 @@ noise floor`, against a 90% agreement floor.
 - Reproduce it: run the interop media step in a loop on a loaded machine
   until the cold-start row fails, and capture which samples miss (the first
   ones, or scattered).
-- Find the cause before touching the check: the likely suspects are samples
-  taken before the decoder or the tone is warm, or a window that starts
-  before playback. [Publish channel count](/quest/m1/publish-audio-channel-count.md)
+- Find the cause before touching the check: the likely suspects are decoder
+  or playout warm-up after the context resumes. [Publish channel count](/quest/m1/publish-audio-channel-count.md)
   saw the same symptom, but `test/interop/clients/js/src/fixture.ts` already
   dropped the `channelCount` override, so that's not it.
-- Fix it at the source: if the window counts samples from before playback
-  started, start the window at the first decoded sample. Don't lower
+- Fix it at the source. The cold-start window deliberately starts once the
+  context runs, without waiting for a tone, so a slow start has to fail
+  there. Keep that window: if the misses are the first samples, find what
+  delays the first audible output instead of moving the window. Don't lower
   `AGREEMENT` (`test/interop/clients/js/media.ts`) without a measured reason.
 
 Public API: none. Wire: none.
