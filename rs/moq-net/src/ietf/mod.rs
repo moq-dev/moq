@@ -47,6 +47,8 @@ pub use parameters::*;
 pub use properties::Properties;
 pub use publish::*;
 pub use publish_namespace::*;
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) use publisher::walk_fetch;
 use publisher::*;
 pub use request::*;
 pub use session::*;

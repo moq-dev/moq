@@ -57,7 +57,7 @@ enum FetchPrior {
 
 /// One group of a FETCH answer, read out of the cache so a later eviction cannot
 /// truncate what FETCH_OK already promised.
-struct FetchedGroup {
+pub(crate) struct FetchedGroup {
 	sequence: u64,
 	/// The Object ID of the first frame.
 	first: u64,
@@ -85,8 +85,8 @@ impl FetchedGroup {
 }
 
 /// A FETCH range read out of a track.
-struct Walked {
-	groups: Vec<FetchedGroup>,
+pub(crate) struct Walked {
+	pub(crate) groups: Vec<FetchedGroup>,
 	/// Why the walk stopped before the end of the range, when it did.
 	stopped: Option<Error>,
 }
@@ -97,12 +97,22 @@ struct Walked {
 /// A group that does not exist below the newest one is a hole and is skipped; one at or
 /// past it is the end of the track, so the walk stops there. Any other failure answers
 /// the whole FETCH.
-async fn walk_fetch(track: &track::Consumer, start: Location, end: Location, priority: u8) -> Result<Walked, Error> {
+///
+/// With nothing upstream to ask, the cache is the whole track, so a hole skips straight
+/// to the next cached group: the walk costs the groups it returns, not the range's span.
+pub(crate) async fn walk_fetch(
+	track: &track::Consumer,
+	start: Location,
+	end: Location,
+	priority: u8,
+) -> Result<Walked, Error> {
 	let mut groups = Vec::new();
-	for sequence in start.group..=end.group {
-		if sequence == end.group && end.object == 0 {
+	let mut next = Some(start.group);
+	while let Some(sequence) = next {
+		if sequence > end.group || (sequence == end.group && end.object == 0) {
 			break;
 		}
+		next = sequence.checked_add(1);
 
 		let skip = match sequence == start.group {
 			true => start.object,
@@ -116,13 +126,22 @@ async fn walk_fetch(track: &track::Consumer, start: Location, end: Location, pri
 
 		let mut group = match track.fetch_group(sequence, fetch).await {
 			Ok(group) => group,
-			Err(Error::NotFound) if track.latest().is_some_and(|latest| sequence < latest) => continue,
-			Err(err @ Error::NotFound) => {
-				return Ok(Walked {
-					groups,
-					stopped: Some(err),
-				});
-			}
+			Err(err @ Error::NotFound) => match track.latest() {
+				Some(latest) if sequence < latest => {
+					// Capped at the newest group, whose own probe judges where the track ends.
+					if !track.fetches_misses() {
+						let cached = track.next_cached(sequence + 1);
+						next = Some(cached.map_or(latest, |cached| cached.min(latest)));
+					}
+					continue;
+				}
+				_ => {
+					return Ok(Walked {
+						groups,
+						stopped: Some(err),
+					});
+				}
+			},
 			Err(err) => return Err(err),
 		};
 
@@ -3901,6 +3920,44 @@ mod serve_tests {
 			let mut expected = pairs([1]);
 			expected.push((3, 0, "3-0".into()));
 			assert_eq!(objects, expected, "{version}");
+		}
+	}
+
+	/// With nothing upstream, a hole skips to the next cached group instead of stepping
+	/// through every missing sequence, which would never finish here.
+	#[tokio::test]
+	async fn a_standalone_fetch_skips_a_sparse_span() {
+		const FAR: u64 = 1 << 40;
+		for version in [Version::Draft16, Version::Draft18] {
+			let h = serve(version);
+			for sequence in [0, 5, FAR] {
+				let mut group = h.track.create_group(group::Info { sequence }).unwrap();
+				for object in 0..2 {
+					group
+						.write_frame(timestamp(), format!("{sequence}-{object}").into_bytes())
+						.unwrap();
+				}
+				group.finish().unwrap();
+			}
+			settle().await;
+
+			let buf = standalone_fetch(
+				&h,
+				Location { group: 0, object: 0 },
+				Location { group: FAR, object: 0 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			let (ok, objects) = fetch_answer(buf, version);
+			assert_eq!(
+				ok.end_location,
+				Location {
+					group: FAR + 1,
+					object: 0
+				},
+				"{version}"
+			);
+			assert_eq!(objects, pairs([0, 5, FAR]), "{version}");
 		}
 	}
 

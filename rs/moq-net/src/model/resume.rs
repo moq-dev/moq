@@ -738,6 +738,28 @@ impl Consumer {
 		self.peek_below(Some(sequence))
 	}
 
+	/// The lowest sequence at or above `from` any segment caches; see
+	/// [`track::Consumer::next_cached`].
+	///
+	/// Segment ranges are left to the fetch, so this is a superset of what
+	/// [`Self::cached_group`] serves and skipping to it never passes a servable group.
+	pub(crate) fn next_cached(&self, from: u64) -> Option<u64> {
+		let segments = self.state.read().segments.clone();
+		segments
+			.iter()
+			.filter_map(|segment| segment.track.next_cached(from))
+			.min()
+	}
+
+	/// Whether the newest segment, where fetches go, serves cache misses; see
+	/// [`track::Consumer::fetches_misses`]. With no segment yet, the first route to
+	/// serve the track may bring a handler.
+	pub(crate) fn fetches_misses(&self) -> bool {
+		// Copied out: the segment's track takes its own lock.
+		let track = self.state.read().segments.last().map(|segment| segment.track.clone());
+		track.is_none_or(|track| track.fetches_misses())
+	}
+
 	/// Walk the segments newest-first for the first one holding a group in range.
 	///
 	/// Every segment, not just the newest: a takeover splices in a fresh track with no

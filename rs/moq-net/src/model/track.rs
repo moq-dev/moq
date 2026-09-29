@@ -2579,6 +2579,31 @@ impl Consumer {
 		}
 	}
 
+	/// The lowest sequence at or above `from` holding a live cached group, crossing gaps
+	/// in the group numbering. A splice answers from whichever segment caches one first.
+	pub(crate) fn next_cached(&self, from: u64) -> Option<u64> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => state
+				.read()
+				.lookup
+				.range(from..)
+				.find(|(_, slot)| !slot.group.is_aborted())
+				.map(|(sequence, _)| *sequence),
+			ConsumerKind::Spliced(resume) => resume.next_cached(from),
+		}
+	}
+
+	/// Whether a group missing from the cache can still be fetched: a [`Dynamic`] (a
+	/// relay's upstream) serves misses. Without one, the cache is all the track has.
+	///
+	/// A spliced track answers for its newest segment, which is where fetches go.
+	pub(crate) fn fetches_misses(&self) -> bool {
+		match &self.inner {
+			ConsumerKind::Plain(state) => state.read().fetch.lock().has_handlers(),
+			ConsumerKind::Spliced(resume) => resume.fetches_misses(),
+		}
+	}
+
 	/// A cached group by sequence, under the same terms as [`Self::peek_latest`]. Unlike a
 	/// fetch, a peek does not refresh the group's cache standing, so it never keeps a
 	/// group alive over one a subscriber actually read; an aborted (evicted) group is a
