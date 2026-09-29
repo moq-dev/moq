@@ -1571,6 +1571,65 @@ mod tests {
 		);
 	}
 
+	/// A track still waiting on TRACK_INFO ends once nobody wants it, whether its TRACK
+	/// stream never opened (the peer's stream credit is spent), its request is stuck in
+	/// send, or its peer never answers.
+	/// Otherwise every request a relay's front abandons (a failover, a reader leaving)
+	/// holds a task, a stream, and the track until the peer answers, which may be never.
+	#[tokio::test]
+	async fn an_unused_track_stops_waiting_for_info() {
+		// A closed gate holds the TRACK request in its send; an open one sends it to a
+		// peer that never answers.
+		let (closed, open) = (kio::Producer::new(false), kio::Producer::new(true));
+		for (stage, session) in [
+			("open", SinkSession::default()),
+			("send", SinkSession::gated_bi(closed.consume())),
+			("read", SinkSession::gated_bi(open.consume())),
+		] {
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::Clock::tokio(),
+				session,
+				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version: VERSION,
+				peer_setup: Default::default(),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+			});
+
+			let broadcast = crate::broadcast::Info::new().produce();
+			let mut dynamic = broadcast.dynamic();
+			let consumer = broadcast.consume();
+			let mut waiting = Box::pin(consumer.track("video").unwrap().subscribe(None));
+			assert!(
+				futures::poll!(waiting.as_mut()).is_pending(),
+				"{stage}: waiting on the publisher"
+			);
+			let request = dynamic.requested_track().now_or_never().unwrap().expect("request");
+
+			let mut run = TrackServeRun::new(
+				TrackServe {
+					subscriber,
+					path: Path::new("room").to_owned(),
+					name: "video".to_string(),
+				},
+				request,
+			);
+			let waiter = kio::Waiter::noop();
+			assert!(
+				kio::Task::poll(&mut run, &waiter).is_pending(),
+				"{stage}: waits while the track is wanted"
+			);
+
+			drop(waiting);
+			assert!(
+				kio::Task::poll(&mut run, &waiter).is_ready(),
+				"{stage}: an unused track kept waiting on TRACK_INFO"
+			);
+		}
+	}
+
 	/// `establish` puts exactly one SUBSCRIBE on the wire, and the id is registered
 	/// before any of it reaches the transport.
 	///
@@ -3321,6 +3380,20 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 		loop {
 			match &mut self.state {
 				TrackRunState::Info { request, info } => {
+					// Nobody wants the track anymore (the origin failed over, the reader
+					// left): stop waiting on a peer that may never answer, which would
+					// otherwise hold this task, its TRACK stream, and the track for good.
+					// Dropping the fetch resets the stream.
+					let pending = request.as_ref().expect("request pending");
+					if pending.poll_unused(waiter).is_ready() {
+						if pending.reject_unused(Error::Cancel) {
+							self.state = TrackRunState::Done;
+							return Poll::Ready(());
+						}
+						// Demand returned in the gap and won inside `reject_unused`: poll
+						// again so the unused wait is armed for when it leaves.
+						continue;
+					}
 					let res = ready!(info.poll_fetch(&self.serve, waiter));
 					let request = request.take().expect("request pending");
 					match res {

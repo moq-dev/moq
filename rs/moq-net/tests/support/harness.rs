@@ -114,3 +114,15 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 		server_transport: transports.1,
 	}
 }
+
+/// Peer two relays the way `moq-relay`'s cluster does: one session, both directions.
+pub async fn peer(version: Version, a: &origin::Producer, b: &origin::Producer) -> MockPair {
+	let a = a.clone().peer();
+	let b = b.clone().peer();
+	let mut options = MockConnectOptions::new(version);
+	options.client_publish = Some(a.consume().with_hidden(true));
+	options.client_subscribe = Some(a);
+	options.server_publish = Some(b.consume().with_hidden(true));
+	options.server_subscribe = Some(b);
+	connect_mock(options).await
+}
