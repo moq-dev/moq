@@ -81,6 +81,33 @@ fn bench_announce(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Exact broadcasts above a reader's root never enter its announcement buffer.
+fn bench_announce_exact_above_scope(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/announce_exact_above_scope");
+	for (publishers, subscribers) in SHAPES {
+		let id = BenchmarkId::from_parameter(format!("{publishers}p_{subscribers}s"));
+		group.bench_function(id, |b| {
+			let fleet = fanout(publishers, 0);
+			let consumer = fleet
+				.consumer
+				.scope("room/incoming/child", &Patterns::from(Pattern::all()))
+				.unwrap();
+			let mut cursors: Vec<_> = (0..subscribers).map(|_| consumer.announced()).collect();
+			b.iter(|| {
+				let handle = fleet
+					.producer
+					.publish("room/incoming", origin::Route::default())
+					.unwrap();
+				drop(handle);
+				for cursor in &mut cursors {
+					assert!(cursor.next().now_or_never().is_none());
+				}
+			});
+		});
+	}
+	group.finish();
+}
+
 /// `bench_announce` read through mounts: `publishers` routes under the fleet-wide
 /// `.svc/p0`, watched by `subscribers` project sessions that each mount it at
 /// their own `<project>/.svc`. Every mount aliases the one target, the worst
@@ -426,6 +453,7 @@ fn bench_handoff(c: &mut Criterion) {
 criterion_group!(
 	benches,
 	bench_announce,
+	bench_announce_exact_above_scope,
 	bench_announce_mounted,
 	bench_announce_fleet,
 	bench_announce_duplicate,

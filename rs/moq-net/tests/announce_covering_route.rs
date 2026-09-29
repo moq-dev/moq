@@ -33,7 +33,8 @@ fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
 	seen
 }
 
-/// Announce `.dash`, then a path beneath the requested prefix, and record what a
+/// Announce an exact `.dash` broadcast, a prefix route, then a path beneath the
+/// requested prefix, and record what a
 /// cursor rooted at `.dash/nobody` sees, either on the publishing origin or on a
 /// subscriber whose announce interest is that prefix.
 async fn covering(version: Option<&str>) -> Vec<String> {
@@ -55,8 +56,12 @@ async fn covering(version: Option<&str>) -> Vec<String> {
 	let mut announced = observer.scope(REQUESTED, &everything).unwrap().announced();
 	let mut log = Vec::new();
 
-	let served = publisher.create_broadcast(SERVED).unwrap();
-	served.announce(Default::default()).unwrap();
+	let exact = publisher.create_broadcast(SERVED).unwrap();
+	exact.announce(Default::default()).unwrap();
+	tokio::time::sleep(SETTLE).await;
+	log.push(format!("exact: {:?}", drain(&mut announced)));
+
+	let _served = publisher.dynamic(SERVED, Default::default()).unwrap();
 	tokio::time::sleep(SETTLE).await;
 	log.push(format!("served: {:?}", drain(&mut announced)));
 
@@ -73,7 +78,7 @@ async fn covering(version: Option<&str>) -> Vec<String> {
 	log
 }
 
-const EXPECTED: &[&str] = &["served: [\"Announced \"]", "below: [\"Announced cam\"]"];
+const EXPECTED: &[&str] = &["exact: []", "served: [\"Announced \"]", "below: [\"Announced cam\"]"];
 
 #[tokio::test]
 async fn local_cursor_sees_the_covering_route_at_its_root() {

@@ -964,8 +964,11 @@ impl TableCursor {
 	fn visible(&self, entry: &RouteEntry) -> bool {
 		entry.live()
 			&& self.horizon.admits(entry)
-			&& entry.overlaps(&self.allowed)
-			&& self.discovers(&entry.prefix)
+			&& if entry.source.is_some() {
+				self.allowed.matches(entry.prefix.as_str())
+			} else {
+				entry.overlaps(&self.allowed)
+			} && self.discovers(&entry.prefix)
 			&& !self.holes.iter().any(|hole| entry.prefix.has_prefix(hole))
 			&& self.named.as_ref().is_none_or(|(mount, _)| mount.names(&entry.prefix))
 	}
@@ -4958,6 +4961,25 @@ mod tests {
 		let consumer = producer.consume().scope("", &scopes(&["room"])).unwrap();
 		let mut announced = consumer.announced();
 		announced.assert_next_active("");
+	}
+
+	#[tokio::test]
+	async fn cursor_hides_an_exact_broadcast_above_its_scope() {
+		let producer = origin(1).produce();
+		let _exact = producer.publish("a", Route::default()).unwrap();
+		for root in ["", "a/b"] {
+			let consumer = producer.consume().scope("", &scopes(&["a/b"])).unwrap();
+			let consumer = consumer.scope(root, &Patterns::from(Pattern::all())).unwrap();
+			let mut announced = consumer.announced();
+			announced.assert_next_wait();
+
+			let prefix = producer.announce("a", Route::default().with_cost(5)).unwrap();
+			let presented = if root.is_empty() { "a" } else { "" };
+			assert_eq!(announced.assert_next_active(presented).cost, Cost::new(5));
+			drop(prefix);
+			announced.assert_next_ended(presented);
+			announced.assert_next_wait();
+		}
 	}
 
 	#[tokio::test]

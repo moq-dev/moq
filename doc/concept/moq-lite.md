@@ -148,8 +148,11 @@ may publish and subscribe to, and a local filter a consumer applies to the
 prefixes it is told about.
 
 A subscriber watching under a root sees advertisements named relative to that
-root. The pattern scope filters which prefixes are visible without changing a
-route's prefix. When several routes advertise one prefix, each reader sees the
+root. An exact broadcast must match the reader's patterns: a broadcast at
+`a` is hidden from a reader scoped to `a/b`. A prefix route at `a` can still
+serve paths under `a/b`, so it remains visible and presents as the empty path
+when the reader is rooted at `a/b`. The pattern scope filters which prefixes
+are visible without changing a route's prefix. When several routes advertise one prefix, each reader sees the
 best route its scope can use, so a cheaper route scoped elsewhere never hides
 it. Announce events carry the covered path, captures, and what
 happened to it: Rust

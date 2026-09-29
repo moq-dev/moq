@@ -89,7 +89,7 @@ class Scope {
 	 * above the root presents as the empty path, most specific first, since that is the order
 	 * a request beneath the root resolves in.
 	 */
-	projectRoutes(values: Advertisements | undefined): Advertisements | undefined {
+	projectRoutes(values: Candidates | undefined): Advertisements | undefined {
 		if (!values || this === Scope.all) return values;
 		const out = new Map<Path.Valid, readonly Advertised[]>();
 		const covering: [Path.Valid, Advertised[]][] = [];
@@ -99,7 +99,11 @@ class Scope {
 			const above = relative === null || relative === Path.empty();
 			if (above && !Path.hasPrefix(path, this.root)) continue;
 			const visible = candidates
-				.filter((value) => !allowed || allowed.some((pattern) => advertOverlaps(value, path, pattern)))
+				.filter((value) =>
+					value.exact
+						? this.matches(path)
+						: !allowed || allowed.some((pattern) => advertOverlaps(value, path, pattern)),
+				)
 				// The claim moves with the key, so it compares against root-relative requests.
 				.map((value) => (value.claim ? { ...value, claim: value.claim.rebase(this.root) } : value));
 			if (visible.length === 0) continue;
@@ -203,6 +207,8 @@ export interface RouteEntry {
 }
 
 /** One advertisement at a prefix. `exact` marks an announced local broadcast, which is only its own path. */
+type Candidates = ReadonlyMap<Path.Valid, readonly Candidate[]>;
+
 interface Candidate extends Advertised {
 	readonly exact: boolean;
 }
@@ -436,7 +442,7 @@ class OriginState {
 	// Originated advertisements sessions should forward: exact-path announces plus
 	// originated dynamics. Identity is the local front or the route entry, so a
 	// republish diffs as retract-then-announce and a re-price as another active.
-	originated = new Signal<Advertisements | undefined>(new Map());
+	originated = new Signal<Candidates | undefined>(new Map());
 
 	// Broadcasts materialized from a served route, keyed by exact path. Shared by every
 	// request for the path so repeats reuse one accept; dropped (and closed) when the

@@ -1507,6 +1507,34 @@ test("a scoped dynamic is announced only to readers its scope can serve", () => 
 	origin.close();
 });
 
+test("scoped readers hide exact broadcasts above their scope but keep prefix routes", () => {
+	const origin = new Producer();
+	const exact = publish(origin, Path.from("a"));
+	for (const root of [Path.empty(), Path.from("a/b")]) {
+		const reader = origin
+			.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("a/b/**")]))
+			.scope(root, new Path.Patterns([Path.Pattern.all()]));
+		const wire = wireOf(reader.consume());
+		expect(reader.broadcasts().peek().size).toBe(0);
+		expect(wire.advertised.peek()?.size).toBe(0);
+
+		const prefix = origin.dynamic(Path.from("a"), { cost: 5n });
+		const presented = root === Path.empty() ? Path.from("a") : Path.empty();
+		expect([...reader.broadcasts().peek().keys()]).toEqual([presented]);
+		expect(
+			wire.advertised
+				.peek()
+				?.get(presented)
+				?.map((advert) => advert.route.cost.warm),
+		).toEqual([5n]);
+		prefix.close();
+		expect(reader.broadcasts().peek().size).toBe(0);
+		expect(wire.advertised.peek()?.size).toBe(0);
+	}
+	exact.close();
+	origin.close();
+});
+
 test("a rooted reader presents the most specific covering route", () => {
 	const origin = new Producer();
 	const narrow = origin.dynamic(Path.from("room/alice"), { cost: 9n });
