@@ -8,8 +8,11 @@ on:
   pull_request:
     paths:
       - "js/watch/**"
-      # The container consumer decides what a replay delivers, waits for, and skips.
+      # The container consumer decides what a replay delivers, waits for, and skips, on the
+      # groups, tracks, and signals underneath it.
       - "js/hang/**"
+      - "js/net/**"
+      - "js/signals/**"
       - "test/audio-quality/**"
       - "test/lib/**"
       - "test/justfile"

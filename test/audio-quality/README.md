@@ -190,9 +190,9 @@ one needs a reason in review. The file's `note` says how the current ceilings we
 
 The nightly `Audio quality` job runs the matrix under `--enforce` and keeps a failing run directory
 for a week: each process's log, the shaper's counters, every row's raw samples and summary. The
-replays also run under `--enforce` on every PR that touches `js/watch`, `js/hang`, or the harness
-(`.github/workflows/audio-quality.yml`), so a change that moves them updates `budgets.json` in the
-same PR.
+replays also run under `--enforce` on every PR that touches the player's packages (`js/watch`,
+`js/hang`, `js/net`, `js/signals`) or the harness (`.github/workflows/audio-quality.yml`), so a
+change that moves them updates `budgets.json` in the same PR.
 
 ## Layout
 

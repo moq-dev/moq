@@ -46,8 +46,8 @@ Nightly, not per-PR: the matrix is jitter profiles by runtime by codec and
 sample rate, which is more than a merge gate should carry, and `nightly.yml`
 already exists for exactly this trade. The recorded-trace replays are the
 exception: they run in seconds without a browser, so
-`.github/workflows/audio-quality.yml` gates every PR touching `js/watch`,
-`js/hang`, or the harness on them. Budgets are keyed by the full row, since
+`.github/workflows/audio-quality.yml` gates every PR touching the player's
+packages or the harness on them. Budgets are keyed by the full row, since
 each of those dimensions moves the expected floor.
 
 The budgets checked in with the browser lane (#4426) were recorded locally.

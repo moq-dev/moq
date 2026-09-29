@@ -32,8 +32,8 @@ const { values } = parseArgs({
 });
 
 const { page: pageDir, url, broadcast, source, description, out } = values;
-const durationMs = Number.parseFloat(values.duration) * 1000;
-if (!pageDir || !url || !broadcast || !source || !description || !out || !(durationMs > 0)) {
+const durationMs = Number(values.duration) * 1000;
+if (!pageDir || !url || !broadcast || !source || !description || !out || !Number.isFinite(durationMs) || durationMs <= 0) {
 	console.error(
 		"usage: record.ts --page DIR --url U --broadcast B --source S --description D --out FILE [--duration S] [--mic]",
 	);
