@@ -10,7 +10,7 @@ pub enum Error {
 	#[error("not found: {0}")]
 	NotFound(String),
 
-	/// The recording format version is not 1.
+	/// The recording format version is not the current one.
 	#[error("unknown version {0}")]
 	Version(u64),
 
@@ -38,9 +38,9 @@ pub enum Error {
 	#[error("group sequences are not strictly ascending")]
 	Sequence,
 
-	/// A group range is empty, reversed, or does not match an object's table.
-	#[error("invalid or mismatched group bounds {smallest}..={largest}")]
-	Bounds { smallest: u64, largest: u64 },
+	/// An object's table does not hold exactly the frames its record names.
+	#[error("object does not match its record")]
+	Span,
 
 	/// The binary table is truncated, overlapping, gapped, or out of range.
 	#[error("malformed table")]

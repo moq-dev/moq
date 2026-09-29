@@ -14,4 +14,4 @@ and check the records against Rust output in the interop suite.
 
 ## Required
 
-- [Rust per-track timelines](/quest/m1/archive/track-timeline/core.md) - the format this mirrors
+- [Timelines declare their segment duration](/quest/m1/archive/track-timeline/declared-duration.md) - the final `timelines` entry shape to port, so JS ports it once

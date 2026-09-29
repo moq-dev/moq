@@ -43,7 +43,3 @@ serve example.
 
 Cover a DVR recording whose catalog outlived its first video segment, and fail
 loudly on a recording with no catalog.
-
-## Required
-
-- [Rust per-track timelines](/quest/m1/archive/track-timeline/core.md) - a DVR keeps its catalog's newest group

@@ -4179,6 +4179,7 @@ version = "0.0.8"
 dependencies = [
  "async-trait",
  "bytes",
+ "criterion",
  "futures",
  "hang",
  "kio 0.6.1",

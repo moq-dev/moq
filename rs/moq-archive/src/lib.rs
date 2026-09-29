@@ -6,9 +6,9 @@
 //! broadcast. Callers that need runtime dispatch
 //! supply `Arc<dyn ObjectStore>`; the archive API itself stays generic.
 //!
-//! Group bounds are finite inclusive ranges in first-to-last order:
+//! Every object is keyed by its track and a record sequence:
 //! ```
-//! let key = moq_archive::Key::groups("video", 5..=7)?;
+//! let key = moq_archive::Key::segments("video", 7)?;
 //! assert_eq!(key.track(), "video");
 //! # Ok::<(), moq_archive::Error>(())
 //! ```
@@ -37,10 +37,10 @@ pub use store::Store;
 pub use writer::Writer;
 
 /// Recording format version written into `.info` and the binary envelope.
-pub const VERSION: u64 = 1;
+pub const VERSION: u64 = 2;
 
 /// Largest group, segment, or timestamp value the format allows (`2^53 - 1`).
 pub const ID_MAX: u64 = (1 << 53) - 1;
 
-/// Decimal width of group and segment ID filename fields.
+/// Decimal width of segment ID filename fields.
 pub(crate) const ID_WIDTH: usize = 19;

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 ///
 /// The base catalog carries the media sections (`video`, `audio`, `text`), the optional
-/// `archive` (the segment index and any durable recording), the optional `clock` (the
+/// `archive` (each track's timeline and any durable recording), the optional `clock` (the
 /// broadcast's one wall-clock mapping), and the data sections
 /// (`json`, `binary`) for application tracks that aren't media.
 /// Applications extend it with their own root sections (e.g. `scte35`) through `E`. The catalog
@@ -42,14 +42,14 @@ pub struct Catalog<E = ()> {
 	#[serde(default)]
 	pub audio: Audio,
 
-	/// The broadcast's segment index and any durable archive, if the publisher offers one.
+	/// Each track's timeline and any durable archive, if the publisher offers them.
 	/// See [`Archive`](crate::catalog::Archive) and the [`timeline`](crate::timeline) module.
 	pub archive: Option<crate::catalog::Archive>,
 
 	/// The broadcast's one continuous clock, if the publisher exposes one.
 	///
 	/// `wall` is the wall-clock time of PTS zero in `timescale` units since the moq epoch
-	/// (2020-01-01); every media track and the archive index refer to this mapping after
+	/// (2020-01-01); every media track and every timeline refer to this mapping after
 	/// timescale conversion. Independent of [`archive`](Self::archive): a live-only publisher
 	/// exposes its clock without creating a segment index. See
 	/// [`Clock`](crate::catalog::Clock).
@@ -685,7 +685,7 @@ mod test {
 		assert_eq!(clock.wall.scale().as_u64(), 1_000_000);
 
 		let archive = catalog.archive.expect("the fixture carries an archive");
-		assert_eq!(archive.track, "timeline.z");
+		assert_eq!(archive.timelines["video"], "video.timeline.z");
 		assert_eq!(archive.timescale, 1000);
 
 		// Archive PTS 2000 (ms) lands 2s after the wall epoch, whatever the track timescale.
@@ -701,7 +701,10 @@ mod test {
 
 	#[test]
 	fn archive_roundtrips_at_the_root() {
-		let mut archive = crate::catalog::Archive::new("timeline.z");
+		let mut archive = crate::catalog::Archive::new();
+		archive
+			.timelines
+			.insert("video".to_string(), "video.timeline.z".to_string());
 		archive.duration_max = Some(2000);
 		archive.replay = Some(moq_net::path::RelativeOwned::new("recordings/clip"));
 		archive.version = Some(crate::catalog::Archive::VERSION);
@@ -712,7 +715,10 @@ mod test {
 		};
 
 		let json = catalog.to_json().expect("failed to encode");
-		assert!(json.contains(r#""archive":{"track":"timeline.z""#), "{json}");
+		assert!(
+			json.contains(r#""archive":{"timelines":{"video":"video.timeline.z"}"#),
+			"{json}"
+		);
 		assert!(
 			!json.contains(r#""timeline":"#),
 			"the old root key must not appear: {json}"

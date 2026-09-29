@@ -31,6 +31,11 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 async-trait = "0.1"
+criterion = { workspace = true }
 object_store = { workspace = true, features = ["fs"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+
+[[bench]]
+name = "writer"
+harness = false
