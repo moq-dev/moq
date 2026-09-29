@@ -8,7 +8,10 @@ reliably, each fixed at its cause, never by raising a timeout or adding a
 retry.
 
 - moq-cli `fetch::tests::a_frame_read_times_out` asserts on a 500 ms wall
-  deadline ([#4084](https://github.com/moq-dev/moq/pull/4084)).
+  deadline ([#4084](https://github.com/moq-dev/moq/pull/4084)). The cause
+  (#4431): `rs/moq-cli/src/fetch.rs` wraps the whole run in one
+  `timeout_at(deadline, ...)`, so connect, TLS, announce, and subscribe share
+  the budget with the read, and under load setup alone can spend it.
 - moq-cli `complete::tests::a_stage_broadcast_picks_the_catalog_to_read`
   ([#4084](https://github.com/moq-dev/moq/pull/4084)) and
   `the_catalog_format_on_the_line_is_honored`
@@ -36,6 +39,13 @@ retry.
   subscribe tests already use `#[tokio::test(start_paused = true)]`), or
   assert on an event instead of a deadline. If a test is slow under load
   because the code under test is slow, fix that.
+- Fetch timeout: test on a paused clock (maintainer decision, 2026-09-28).
+  The fixture runs real sockets against an in-process relay, where a paused
+  clock fires QUIC timers while packets are in flight, so first make the
+  timers mockable: run the fixture over an in-memory transport, or drive
+  noq's timers from the test clock, whichever is smaller. Keep the one
+  absolute 30 s deadline, matching the relay's `/fetch`; on a paused clock
+  setup costs no time, so it can't spend the read's budget.
 - WARN counting: capture per test (a scoped subscriber or a filter on the
   test's own span) instead of a process-global count.
 - The race test shares one port only so both transports sit behind one URL.

@@ -90,6 +90,7 @@ impl Workers {
 		// hands out one member per slot in the order the kernel numbers them by.
 		let mut forming = moq_sock::shard::Group::acquire(requested, config.count).map_err(|err| match err {
 			moq_sock::shard::Error::Count { count, max } => Error::WorkerCount { count, max },
+			moq_sock::shard::Error::Resolve(err) => crate::noq::Error::BindSocket(err).into(),
 			// The port lock is the only other way to lose the address, and it is
 			// held by exactly one thing: another group of this UID.
 			_ => Error::WorkerOverlap { addr: requested },
@@ -124,8 +125,7 @@ impl Workers {
 			workers.push(worker);
 		}
 
-		// Whatever the first member bound, which is the requested address unless
-		// it asked for an ephemeral port.
+		// The requested address, with an ephemeral port resolved.
 		let addr = group.addr();
 		tracing::info!(workers = count, pinned = !cores.is_empty(), %addr, "bound QUIC workers");
 

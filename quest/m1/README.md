@@ -26,11 +26,12 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
 - [Error messages](/quest/m1/error-display.md) - Python, Go, and Dart print `MoqError` with Rust's message, as Kotlin and Swift do
 - [Session close](/quest/m1/session-close.md) - a graceful session end withdraws announces and waits one second for the ack
+- [Graceful close in bindings](/quest/m1/bindings-graceful-close.md) - on dev, `shutdown` drains a session in moq-ffi and every wrapper like Rust, so the wrappers keep the tail of a publish
 - [Close codes](/quest/m1/close-codes.md) - a client sees the peer's application close code over WebSocket and raw QUIC, like WebTransport
 - [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
 - [Live in apps](/quest/m1/announce-live-apps.md) - the demo and `@moq/room` show "no broadcasts" from the `live` marker, which waits for the first session on page load
+- [IETF hidden default](/quest/m1/ietf-hidden-default.md) - a moq-transport peer without the MoQ Hidden option is advertised hidden namespaces; one with it filters per subscription
 - [Watch refusal](/quest/m1/watch-refusal.md) - `<moq-watch>` shows an origin refusal as an error instead of sitting offline
-- [kio waiter overflow](/quest/m1/kio-waiter-lost.md) - a retained `Waiter` past 8 lists stops adding a duplicate entry to lists it already recorded
 - [moqsink recoverable errors](/quest/m1/moqsink-keyframe-latch.md) - a leading delta or a timestamp rewind drops frames until a keyframe instead of invalidating a moqsink pad
 - [Capture re-anchor](/quest/m1/capture-reanchor.md) - a repeating or restarting device clock never rewinds native capture during a fast backlog drain
 - [Splice edge cases](/quest/m1/splice-edges.md) - an unstamped successor, a pruned segment's boundary group, and a warm head during a takeover are each handled correctly
@@ -43,7 +44,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Watch video guards](/quest/m1/watch-video-guards.md) - promoting a video track holds the last picture, and an older group never reaches the codec between live deltas
 - [Watch decoder recovery](/quest/m1/watch-decoder-recovery.md) - one malformed packet rebuilds the audio or video decoder instead of ending playback
 - [Watch audio under CSP](/quest/m1/watch-worklet-file.md) - production builds ship the audio worklet as a file, so `script-src 'self'` pages play audio
-- [moqsrc stop](/quest/m1/moqsrc-stop.md) - moqsrc's stop blocks until its session ends, without deadlocking on a blocked pad push
 - [More tests under load](/quest/m1/test-flakes-2.md) - the second round of load-only failures, fixed at the cause
 - [Auth outage clock](/quest/m1/auth-outage-clock.md) - the relay and moq-auth outage tests run on a paused clock again and assert both bounds of `expires`
 - [Legacy end overshoot](/quest/m1/legacy-end-overshoot.md) - browser playback survives a group that starts inside the previous group's estimated end
@@ -88,6 +88,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [OBS native codecs](/quest/m1/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
 - [Opus concealment](/quest/m1/opus-conceal.md) - a lost Opus packet conceals the last packet's length, not 120 ms
 - [Audio codecs](/quest/m1/audio-codecs/README.md) - platform audio codecs, explicit unsupported cases, and channel layouts up to 7.1
+- [Opus mapping family](/quest/m1/opus-mapping-family.md) - on dev, the Opus head config keeps its mapping family only in `mapping`
 - [Opus catalog rate](/quest/m1/opus-catalog-rate.md) - MKV Opus import publishes the 48 kHz codec rate in the catalog, not the OpusHead input rate
 - [mp4-atom dOps mapping](/quest/m1/mp4-atom-dops-mapping.md) - a released mp4-atom reads and writes any `dOps` channel mapping family and table
 - [CMAF surround Opus](/quest/m1/cmaf-opus-surround.md) - fMP4 import and export carry an Opus channel mapping table

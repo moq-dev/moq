@@ -13,8 +13,8 @@ const WORKERS: u16 = 4;
 
 /// A UDP port nothing is bound to.
 ///
-/// Only for the port-lock tests: an ephemeral group takes no lock, so the first
-/// group has to name its port. Everything else binds `:0` and reads it back.
+/// Only for the port-lock tests, where the first group names its port.
+/// Everything else binds `:0` and reads it back.
 fn free_udp_port() -> u16 {
 	let probe = UdpSocket::bind("127.0.0.1:0").expect("bind probe");
 	let port = probe.local_addr().expect("local addr").port();
@@ -293,8 +293,8 @@ async fn dropping_unserved_workers_releases_the_port() {
 	assert!(owned.is_disjoint(&open_sockets()), "workers left the port bound");
 }
 
-/// The group holds one port, so an ephemeral bind is the port its first member
-/// drew and the rest join it. A member picking a port of its own would sit
+/// The group holds one port, so an ephemeral request resolves to one port that
+/// every member joins. A member picking a port of its own would sit
 /// unreachable behind an address that reads as bound.
 #[tokio::test]
 async fn an_ephemeral_port_is_shared_by_the_group() {

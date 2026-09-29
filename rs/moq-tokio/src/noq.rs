@@ -343,7 +343,11 @@ impl NoqClient {
 		let mut config = tls.clone();
 
 		let target = url.host().ok_or(Error::InvalidDnsName)?;
-		let host = target.to_string();
+		// URL brackets delimit IPv6 literals, but aren't part of the TLS server name.
+		let host = match &target {
+			url::Host::Ipv6(ip) => ip.to_string(),
+			_ => target.to_string(),
+		};
 		let port = url.port().unwrap_or(443);
 
 		// Resolve, adapted to the local socket's family; the dial below races the
@@ -982,6 +986,61 @@ impl noq::ConnectionIdGenerator for ServerIdGenerator {
 mod tests {
 	use super::*;
 	use url::Url;
+
+	#[tokio::test]
+	async fn pinned_ipv6_connection() {
+		pinned_connection("[::1]:0", None).await;
+	}
+
+	#[tokio::test]
+	async fn pinned_ipv4_connection() {
+		pinned_connection("127.0.0.1:0", None).await;
+	}
+
+	#[tokio::test]
+	async fn pinned_ipv6_connection_with_host_override() {
+		pinned_connection("[::1]:0", Some("localhost")).await;
+	}
+
+	async fn pinned_connection(bind: &str, host_name: Option<&str>) {
+		let quic = crate::quic::Config::default();
+		let server = NoqServer::new(
+			listen::Config {
+				bind: Some(bind.parse().unwrap()),
+				tls: crate::tls::Listen {
+					generate: vec!["localhost".into()],
+					..Default::default()
+				},
+				..Default::default()
+			},
+			&quic,
+			None,
+		)
+		.expect("server init");
+		let addr = server.local_addr().expect("local addr");
+		let mut tls_config = crate::tls::Connect::default();
+		tls_config.fingerprint = server.certificates().fingerprints();
+		assert!(!tls_config.fingerprint.is_empty());
+		tls_config.host_name = host_name.map(str::to_owned);
+		let config = connect::Config {
+			bind: Some(bind.parse().unwrap()),
+			tls: tls_config,
+			..Default::default()
+		};
+		let tls = config.tls.build().expect("tls config");
+		let client = NoqClient::new(&config, &quic).expect("client init");
+		let url: Url = format!("moqt://{addr}/.cluster/test").parse().unwrap();
+		let versions = moq_net::Versions::default();
+		let dial = client.connect(&tls, url.into(), &versions);
+		let accept = async {
+			let incoming = server.accept().await.expect("incoming connection");
+			super::accept(incoming, versions.alpns()).await
+		};
+		let result = tokio::time::timeout(Duration::from_secs(5), async { tokio::try_join!(dial, accept) })
+			.await
+			.expect("handshake timed out");
+		let (_client, _server) = result.expect("pinned connection failed");
+	}
 
 	/// noq exposes no getters for the flow-control windows, but its `Debug` prints
 	/// them, which is enough to prove each one reached the transport config and that
