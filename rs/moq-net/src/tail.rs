@@ -43,7 +43,8 @@ struct Run {
 pub(crate) struct Tail {
 	// Disjoint, sorted, non-adjacent runs of accounted sequences. A gap older than the grace
 	// can no longer be waited for, so it folds into the runs around it, which bounds this by
-	// the gaps opened within the grace rather than every gap in the subscription.
+	// the gaps opened within the grace rather than every gap in the subscription. A fold is
+	// final: a later, longer grace or a lowered floor cannot reopen it.
 	runs: Vec<Run>,
 	grace: Duration,
 	streams: u64,
