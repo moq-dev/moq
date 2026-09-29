@@ -38,6 +38,7 @@ use moq_net::Timestamp;
 use crate::catalog::hang::Catalog;
 use crate::catalog::{CatalogFormat, Stream};
 use crate::codec::annexb;
+use crate::codec::video::Reorder;
 use crate::container::{ExportSource, Frame};
 
 use super::adts;
@@ -222,10 +223,9 @@ struct Track {
 	/// High-water mark of the timestamps muxed within this rendition, independent of
 	/// cross-track skew. Bounds where its next frame can land ([`Track::shown`]).
 	timeline: Option<Timestamp>,
-	/// Decode-clock reserve (90 kHz ticks): how far ahead of its PTS each frame decodes. Taken
-	/// from the catalog `jitter` (the reorder depth) so it is large enough for `DTS <= PTS`,
-	/// or [`DEFAULT_DTS_RESERVE`] when the catalog declares none. Only video uses it.
-	dts_reserve: u64,
+	/// Decode-clock reserve: how far ahead of its PTS each frame decodes. Only video sizes it;
+	/// every other kind holds [`DEFAULT_DTS_RESERVE`].
+	reserve: Reserve,
 }
 
 impl Track {
@@ -246,11 +246,132 @@ impl Track {
 			return false;
 		};
 		let reorder = match self.kind {
-			Kind::Video(_) => u128::from(self.dts_reserve) * 1_000_000_000 / 90_000,
+			Kind::Video(_) => u128::from(self.reserve.ticks) * 1_000_000_000 / 90_000,
 			_ => 0,
 		};
 		let floor = timeline.as_nanos().saturating_sub(reorder);
 		(floor, self.pid) > (timestamp.as_nanos(), pid)
+	}
+}
+
+/// A video rendition's decode-clock reserve in 90 kHz ticks: how far each frame's DTS runs
+/// behind its PTS. It must exceed the rendition's reordering for `DTS <= PTS` to hold, and
+/// [`Export::pcr_at`] backs the clock off by the largest one.
+///
+/// The catalog `jitter` (the importer's max PTS - DTS) sizes it when published. Otherwise the
+/// reorder depth the SPS declares sizes it, at the SPS's fixed picture rate or the catalog
+/// `framerate`, so two exporters agree on it from their first keyframe. Otherwise it holds
+/// [`DEFAULT_DTS_RESERVE`]. Reordering deeper than all of those raises it further
+/// ([`Self::observe`]).
+///
+/// It never shrinks: that would step the decode clock forward past frames already muxed and
+/// the PCR ahead of DTS values already sent.
+struct Reserve {
+	/// The catalog `jitter`, in ticks.
+	jitter: Option<u64>,
+	/// The catalog `framerate`: the picture period for an SPS that declares no fixed rate.
+	framerate: Option<f64>,
+	/// The avcC/hvcC [`Self::declared`] was read from.
+	description: Option<Bytes>,
+	declared: Option<Reorder>,
+	/// The reserve covering the deepest reordering muxed so far.
+	observed: u64,
+	/// Frames muxed since the one that set the rendition's high-water mark.
+	since_peak: u64,
+	/// The reserve in effect.
+	ticks: u64,
+}
+
+impl Default for Reserve {
+	fn default() -> Self {
+		Self {
+			jitter: None,
+			framerate: None,
+			description: None,
+			declared: None,
+			observed: 0,
+			since_peak: 0,
+			ticks: DEFAULT_DTS_RESERVE,
+		}
+	}
+}
+
+impl Reserve {
+	/// Take the rendition's timing from a catalog snapshot, before or after the program
+	/// tables are written.
+	fn configure(&mut self, config: &VideoConfig, name: &str) {
+		self.jitter = config
+			.jitter
+			.map(|t| (t.as_micros() * 90_000 / 1_000_000) as u64)
+			.filter(|&ticks| ticks > 0);
+		self.framerate = config.framerate.filter(|fps| fps.is_finite() && *fps > 0.0);
+		self.settle(name, "catalog");
+	}
+
+	/// Read the reorder depth from the codec config a keyframe is carried with.
+	fn describe(&mut self, stream_type: StreamType, description: Option<&Bytes>, name: &str) {
+		if self.description.as_ref() == description {
+			return;
+		}
+		self.description = description.cloned();
+		self.declared = description.and_then(|d| declared_reorder(stream_type, d));
+		self.settle(name, "sps");
+	}
+
+	/// Account for a frame muxed `gap` ticks below the rendition's high-water mark.
+	///
+	/// This is the one path where the reserve depends on when an exporter joined rather than on
+	/// what the stream declares: a joiner adopts the depth only once it has muxed the deepest
+	/// reordering itself, and until then its DTS and PCR differ from an exporter that has. It
+	/// fires only when the catalog and the SPS both undercount the stream's reordering (or
+	/// declare none), and each growth is logged.
+	///
+	/// The decode clock steps at least one tick per frame, so a frame decoded `k` frames after
+	/// the one that set the high-water mark needs `k` ticks beyond its gap.
+	fn observe(&mut self, gap: u64, name: &str) {
+		self.since_peak += 1;
+		let covering = gap.saturating_add(self.since_peak).min(MAX_DTS_RESERVE);
+		if covering > self.observed {
+			self.observed = covering;
+			self.settle(name, "observed");
+		}
+	}
+
+	/// Account for a frame at or above the rendition's high-water mark.
+	fn peak(&mut self) {
+		self.since_peak = 0;
+	}
+
+	fn settle(&mut self, name: &str, source: &'static str) {
+		// As in [`Self::observe`], a reordered frame needs a tick for each frame decoded between
+		// it and the one above it; the declared depth stands in for that count.
+		let declared = self.declared.and_then(|reorder| {
+			let period = match reorder.period {
+				Some((units, scale)) => units.saturating_mul(90_000).div_ceil(scale),
+				None => (90_000.0 / self.framerate?).ceil() as u64,
+			};
+			let depth = u64::from(reorder.depth);
+			let ticks = depth.saturating_mul(period).saturating_add(depth.max(1));
+			Some(ticks.min(MAX_DTS_RESERVE))
+		});
+		let target = self
+			.jitter
+			.or(declared)
+			.unwrap_or(DEFAULT_DTS_RESERVE)
+			.max(self.observed);
+		if target > self.ticks {
+			if source == "observed" {
+				tracing::warn!(
+					track = %name,
+					from = self.ticks,
+					to = target,
+					"reordering deeper than the catalog or SPS declares; raising the video DTS reserve"
+				);
+			} else {
+				tracing::info!(track = %name, from = self.ticks, to = target, source, "raising the video DTS reserve");
+			}
+			self.ticks = target;
+		}
 	}
 }
 
@@ -724,6 +845,19 @@ impl<E: catalog::Catalog> Export<E> {
 			}
 			let frame = pending.frame;
 			let track = self.tracks.get_mut(&name).unwrap();
+			if let Kind::Video(stream_type) = track.kind {
+				if frame.keyframe {
+					track.reserve.describe(stream_type, track.source.description(), &name);
+				}
+				if let Some(timeline) = track.timeline
+					&& frame.timestamp < timeline
+				{
+					let gap = to_ticks(timeline) - to_ticks(frame.timestamp);
+					track.reserve.observe(gap, &name);
+				} else {
+					track.reserve.peak();
+				}
+			}
 			track.timeline = Some(track.timeline.map_or(frame.timestamp, |last| last.max(frame.timestamp)));
 			self.last_timestamp = Some(frame.timestamp);
 			self.advance(frame.timestamp)?;
@@ -948,6 +1082,13 @@ impl<E: catalog::Catalog> Export<E> {
 			}
 			let es_pids: Vec<u16> = self.tracks.values().map(|t| t.pid).collect();
 			reject_colliding_si_pids(&mpegts, self.pmt_pid(), &es_pids)?;
+			// The layout is locked but the timing is not: a `jitter` or `framerate` published
+			// after the tables still sizes the decode clock.
+			for (name, config) in catalog.video.renditions.iter() {
+				if let Some(track) = self.tracks.get_mut(name) {
+					track.reserve.configure(config, name);
+				}
+			}
 			return Ok(());
 		}
 
@@ -986,21 +1127,20 @@ impl<E: catalog::Catalog> Export<E> {
 			let kind = video_kind(config, name)?;
 			let descriptors = track_descriptors(&mpegts, name);
 			let pid = pids[name];
-			// The catalog `jitter` carries the reorder depth (max PTS - DTS), so use it as the
-			// decode-clock reserve; it may arrive in a later snapshot, so refresh it each time.
-			let reserve = dts_reserve(config);
 			match old.remove(name) {
 				Some(mut track) => {
 					track.pid = pid;
 					track.kind = kind;
 					track.descriptors = descriptors;
-					track.dts_reserve = reserve;
+					track.reserve.configure(config, name);
 					self.tracks.insert(name.clone(), track);
 				}
 				None => {
 					let Some(source) = ExportSource::for_video(&self.source, name, config, self.max_age)? else {
 						continue;
 					};
+					let mut reserve = Reserve::default();
+					reserve.configure(config, name);
 					self.insert_track(name, source, pid, kind, descriptors, reserve);
 				}
 			}
@@ -1020,7 +1160,7 @@ impl<E: catalog::Catalog> Export<E> {
 					let Some(source) = ExportSource::for_audio(&self.source, name, config, self.max_age)? else {
 						continue;
 					};
-					self.insert_track(name, source, pid, kind, descriptors, DEFAULT_DTS_RESERVE);
+					self.insert_track(name, source, pid, kind, descriptors, Reserve::default());
 				}
 			}
 		}
@@ -1044,7 +1184,7 @@ impl<E: catalog::Catalog> Export<E> {
 				}
 				None => {
 					let source = ExportSource::for_stream(&self.source, name, self.max_age)?;
-					self.insert_track(name, source, pid, kind, descriptors, DEFAULT_DTS_RESERVE);
+					self.insert_track(name, source, pid, kind, descriptors, Reserve::default());
 				}
 			}
 		}
@@ -1087,7 +1227,7 @@ impl<E: catalog::Catalog> Export<E> {
 		pid: u16,
 		kind: Kind,
 		descriptors: Vec<catalog::Descriptor>,
-		dts_reserve: u64,
+		reserve: Reserve,
 	) {
 		self.tracks.insert(
 			name.to_string(),
@@ -1102,7 +1242,7 @@ impl<E: catalog::Catalog> Export<E> {
 				descriptors,
 				last_dts: None,
 				timeline: None,
-				dts_reserve,
+				reserve,
 			},
 		);
 	}
@@ -1452,7 +1592,7 @@ impl<E: catalog::Catalog> Export<E> {
 		let dts = if is_video {
 			let pts = to_ticks(frame.timestamp);
 			let track = self.tracks.get_mut(name).context("missing track")?;
-			author_dts(pts, track.dts_reserve, &mut track.last_dts)
+			author_dts(pts, track.reserve.ticks, &mut track.last_dts)
 		} else {
 			None
 		};
@@ -1759,7 +1899,9 @@ impl<E: catalog::Catalog> Export<E> {
 	///
 	/// The value backs off by the largest reserve of any track, not just the PCR
 	/// track's: every rendition's PES must decode at or after the clock, and each
-	/// video track backs its DTS off by its own catalog jitter. Back off through the
+	/// video track backs its DTS off by its own [`Reserve`]. A reserve that grows steps
+	/// the clock back with it; the DTS already sent stay ahead of the clock values sent
+	/// with them, and [`author_dts`] keeps every later DTS above those. Back off through the
 	/// 33-bit wrap rather than saturating: a timeline that starts inside the reserve
 	/// would otherwise clamp its first slots to zero and break the uniform step. The
 	/// wire field is a circular clock, so the masked wrapped value is the correct
@@ -1769,7 +1911,7 @@ impl<E: catalog::Catalog> Export<E> {
 		let reserve = self
 			.tracks
 			.values()
-			.map(|t| t.dts_reserve)
+			.map(|t| t.reserve.ticks)
 			.max()
 			.unwrap_or(DEFAULT_DTS_RESERVE);
 		let ticks = slot_ticks(index, PCR_INTERVAL).wrapping_sub(reserve);
@@ -2004,13 +2146,16 @@ fn counter_before(bytes: &[u8], cut: usize, pid: u16, carried: Option<u8>) -> Op
 const PES_OPTIONAL_LEN: usize = 3 + 5;
 /// Extra bytes when the optional region also carries a DTS (5 DTS bytes).
 const PES_DTS_LEN: usize = 5;
-/// Fallback decode-clock reserve in 90 kHz ticks when the catalog declares no `jitter`. At
-/// 16 ticks (~0.18 ms) it is just a strict-monotonic nudge: it keeps DTS strictly increasing
-/// across reordered (B-frame) decode order (the `ffplay -fflags +igndts` fix) but does not
-/// keep `DTS <= PTS`. When the catalog carries `jitter` (the reorder depth, populated on
-/// import), the track uses that instead, which is large enough to keep `DTS <= PTS`. See
-/// [`author_dts`] and [`Track::dts_reserve`].
+/// Fallback decode-clock reserve in 90 kHz ticks when neither the catalog `jitter` nor the SPS
+/// sizes one. At 16 ticks (~0.18 ms) it is just a strict-monotonic nudge: it keeps DTS strictly
+/// increasing across reordered (B-frame) decode order (the `ffplay -fflags +igndts` fix) but
+/// does not keep `DTS <= PTS` until reordering raises it. See [`author_dts`] and [`Reserve`].
 const DEFAULT_DTS_RESERVE: u64 = 16;
+
+/// Largest reserve an SPS or observed reordering can raise a track to (2 s): far past any real
+/// reorder depth, so a corrupt SPS or a timestamp stepping back within a timeline cannot drag
+/// the PCR back without bound.
+const MAX_DTS_RESERVE: u64 = 2 * 90_000;
 
 /// Whether `timestamp` has crossed into a later repetition slot than `last`.
 ///
@@ -2271,16 +2416,15 @@ fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<(
 /// `ffplay -fflags +igndts` workaround).
 ///
 /// Since decode order is already the delivery order, the only job is to keep DTS strictly
-/// increasing. The clock runs [`DTS_RESERVE`] ticks behind the PTS and never goes backwards:
-/// a reordered frame whose PTS dips below the clock is nudged one tick past the last DTS. With
-/// the small reserve this keeps DTS monotonic but lets it sit above a B-frame's own PTS; a
-/// frame-scale reserve (or the faithful wire DTS) would be needed for `DTS <= PTS`.
+/// increasing. The clock runs `reserve` ticks behind the PTS and never goes backwards: a
+/// reordered frame whose PTS dips below the clock is nudged one tick past the last DTS. A
+/// reserve larger than the reordering keeps `DTS <= PTS`; the [`DEFAULT_DTS_RESERVE`] fallback
+/// keeps DTS monotonic but lets it sit above a B-frame's own PTS.
 ///
-/// `reserve` is how far behind the PTS to run the clock (the catalog reorder depth, or the
-/// fallback). `pts` and `last` are continuous (unwrapped) 90 kHz ticks, so the clock never
-/// wraps mid-stream; the 33-bit wire wrap happens once at emission in [`write_pes`]. `last` is
-/// the previous DTS, updated in place. Returns `None` when the DTS equals the PTS (PES stays
-/// PTS-only).
+/// `reserve` is the track's [`Reserve`]. `pts` and `last` are continuous (unwrapped) 90 kHz
+/// ticks, so the clock never wraps mid-stream; the 33-bit wire wrap happens once at emission.
+/// `last` is the previous DTS, updated in place. Returns `None` when the DTS equals the PTS
+/// (PES stays PTS-only).
 fn author_dts(pts: u64, reserve: u64, last: &mut Option<u64>) -> Option<u64> {
 	let mut dts = pts.saturating_sub(reserve);
 	if let Some(prev) = *last
@@ -2292,14 +2436,17 @@ fn author_dts(pts: u64, reserve: u64, last: &mut Option<u64>) -> Option<u64> {
 	(dts != pts).then_some(dts)
 }
 
-/// The decode-clock reserve for a video rendition: its catalog `jitter` (the reorder depth)
-/// in 90 kHz ticks, or [`DEFAULT_DTS_RESERVE`] when none is declared.
-fn dts_reserve(config: &VideoConfig) -> u64 {
-	config
-		.jitter
-		.map(|t| (t.as_micros() * 90_000 / 1_000_000) as u64)
-		.filter(|&ticks| ticks > 0)
-		.unwrap_or(DEFAULT_DTS_RESERVE)
+/// The reordering declared by the first SPS in a video rendition's avcC/hvcC.
+fn declared_reorder(stream_type: StreamType, description: &[u8]) -> Option<Reorder> {
+	match stream_type {
+		StreamType::H264 => {
+			crate::codec::h264::sps_reorder(crate::codec::h264::Avcc::parse(description).ok()?.sps.first()?)
+		}
+		StreamType::H265 => {
+			crate::codec::h265::sps_reorder(crate::codec::h265::Hvcc::parse(description).ok()?.sps.first()?)
+		}
+		_ => None,
+	}
 }
 
 #[cfg(test)]
