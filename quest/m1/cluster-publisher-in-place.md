@@ -31,6 +31,13 @@ qualifying once its route's first hop changes (`qualifies` in
 it, which stops new requests while its live copies play out. Draining needs
 no abort plumbing and no draft narrowing.
 
+Decided 2026-09-29 by the maintainer: one rule for both kinds of front. Any
+first-hop change on a front's route ends that front, anonymous or named:
+in-flight tracks drain, and new requests get a fresh front. Why: pinning an
+anonymous front to its route id rather than a publisher is an implementation
+detail, and it should not let a new publisher inherit the old broadcast's
+track info.
+
 Decided 2026-09-29: accept the compatibility break. Released moq-net (0.3.5
 and later) refuses a first-hop REQUEST_UPDATE with a retry interval of 0,
 which leaves a moved publisher withdrawn on that session during a rolling
@@ -51,11 +58,12 @@ withdraw fallback and no negotiation.
   refusing it: `run_publish_namespace_updates` in
   `rs/moq-net/src/ietf/subscriber.rs` and `runPublishNamespace` in
   `js/net/src/ietf/subscriber.ts` close the stream today.
-- Rust model: an anonymous front (first hop 0) is pinned to its route
-  (`Pin::Route`), so it keeps taking new requests when that route's first hop
-  changes to a named publisher, pairing the old broadcast's cached track
-  metadata with the new publisher. End it on a first-hop change like a named
-  front, so its copies drain and new requests get a fresh front.
+- Rust model: end an anonymous front on a first-hop change, removing an
+  accidental asymmetry. A named front is pinned by publisher
+  (`Pin::Publisher`), so a first-hop update disqualifies it. An anonymous
+  front (first hop 0) is pinned to a route id (`Pin::Route`), which an
+  in-place update keeps, so today it goes on serving new requests through the
+  new publisher with the old broadcast's cached track info.
 - JS lite `js/net/src/lite/subscriber.ts`: a different first hop calls
   `retract()` and announces again, so a forwarding relay withdraws the
   namespace. Emit an in-place update instead. In-flight subscriptions drain
