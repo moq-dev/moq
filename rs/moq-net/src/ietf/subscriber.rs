@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::{Message, Version, cluster, error::request, peer};
-use crate::tail::{self, Settle, Tail};
+use crate::tail::{Reading, Settle, Tail};
 
 use kio::Lock;
 
@@ -370,20 +370,6 @@ impl TrackState {
 			fetch_id: None,
 			joining,
 			tail: Default::default(),
-		}
-	}
-}
-
-/// Counts a data stream toward its subscription's [`Tail`] once its handler is done with it.
-///
-/// Counting at the end rather than at the header means a Stream Count that is reached never
-/// races the stream's own work, such as the END_OF_TRACK that declares where the track ends.
-struct Counted(kio::Producer<Tail>);
-
-impl Drop for Counted {
-	fn drop(&mut self) {
-		if let Ok(mut tail) = self.0.write() {
-			tail.stream();
 		}
 	}
 }
@@ -1840,10 +1826,10 @@ where
 								tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "subscribe complete");
 								// The publisher sends PUBLISH_DONE once every data stream it opened
 								// is closed, but QUIC does not order them, so some can still be on
-								// their way. Wait until Stream Count of them are read, or a bounded
-								// grace for any reset before its header (the draft says to use a
-								// timeout). The count is a hint: a published peer sends 0, which
-								// waits out the grace.
+								// their way. Wait until Stream Count of their headers arrived and
+								// each is read to its end, or a bounded grace for any reset before
+								// its header (the draft says to use a timeout). The count is a hint:
+								// a published peer sends 0, which waits out the grace.
 								let tail = self
 									.state
 									.lock()
@@ -1851,7 +1837,7 @@ where
 									.get(&request_id)
 									.map(|held| held.tail.consume());
 								if let Some(tail) = tail {
-									let mut settle = Settle::new(&self.runtime, tail, tail::GRACE);
+									let mut settle = Settle::new(&self.runtime, tail);
 									kio::wait(|waiter| {
 										if !fetch_done
 											&& let Some(fut) = fetching.as_mut()
@@ -2179,7 +2165,7 @@ where
 			}
 		};
 
-		let (mut track, timescale, fill, _counted) = {
+		let (mut track, timescale, fill, mut reading) = {
 			let state = self.state.lock();
 			let track = state.subscribes.get(&request_id).ok_or(Error::NotFound)?;
 			(
@@ -2187,8 +2173,8 @@ where
 				track.timescale,
 				track.fill.clone(),
 				// Every data stream counts toward PUBLISH_DONE's Stream Count, even one
-				// dropped below.
-				Counted(track.tail.clone()),
+				// dropped below, and the subscription's end waits until it is read.
+				Reading::open(&track.tail, Some(group.group_id), self.runtime.now()),
 			)
 		};
 
@@ -2225,14 +2211,25 @@ where
 		// Otherwise dropping the local subscriber cannot end this handler.
 		let opened = {
 			let mut opening = track.clone();
-			let mut open = std::pin::pin!(self.open_group(stream, &mut opening, &fill, &group));
+			let mut open = std::pin::pin!(self.open_group(stream, &mut opening, &fill, &group, &mut reading));
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
 				}
 				waiter.poll_future(open.as_mut())
 			})
-			.await?
+			.await
+		};
+		let opened = match opened {
+			// The group is at or past the end the publisher declared, which no later stream
+			// can repair.
+			Err(Error::Closed) => {
+				tracing::warn!(group = group.group_id, "group past the declared end of track");
+				let _ = track.abort(Error::ProtocolViolation);
+				return Err(Error::ProtocolViolation);
+			}
+			Err(err) => return Err(err),
+			Ok(opened) => opened,
 		};
 		let (producer, start) = match opened {
 			Opened::Group(producer, start) => (producer, start),
@@ -2388,15 +2385,34 @@ where
 		track: &mut track::Producer,
 		fill: &kio::Producer<Fill>,
 		header: &ietf::GroupHeader,
+		reading: &mut Reading,
 	) -> Result<Opened, Error> {
 		let sequence = header.group_id;
 		// Stats (groups/frames/bytes) are counted in the model as the group is written,
 		// through the tagged `track::Producer`.
 		let create = |track: &mut track::Producer| track.create_group(group::Info { sequence });
 
-		let first = match header.flags.has_extensions {
-			true => stream.decode_peek_maybe::<PeekFirst<true>>().await?.map(|peek| peek.0),
-			false => stream.decode_peek_maybe::<PeekFirst<false>>().await?.map(|peek| peek.0),
+		let peeked = match header.flags.has_extensions {
+			true => stream
+				.decode_peek_maybe::<PeekFirst<true>>()
+				.await
+				.map(|peek| peek.map(|peek| peek.0)),
+			false => stream
+				.decode_peek_maybe::<PeekFirst<false>>()
+				.await
+				.map(|peek| peek.map(|peek| peek.0)),
+		};
+		let first = match peeked {
+			Ok(first) => first,
+			// The header arrived, so the stream counts toward the track's end. Abort the
+			// group it named rather than let the track end clean without it. A fill that
+			// already holds the group reports it through its own producer.
+			Err(err) => {
+				if let Ok(group) = create(track) {
+					let _ = group.abort(err.clone());
+				}
+				return Err(err);
+			}
 		};
 		if first.is_some_and(|first| first.id == 0 && first.end_of_track) {
 			return Ok(Opened::EndOfTrack);
@@ -2427,7 +2443,7 @@ where
 
 			// A group starting partway through is the tail of one the fill began, and
 			// without that head it has a hole at the front.
-			Some(start) => match self.claim_fill(fill, track, sequence, Some(start)).await? {
+			Some(start) => match self.claim_fill(fill, track, sequence, Some(start), reading).await? {
 				Some(producer) => Ok(Opened::Group(producer, start)),
 				None => {
 					tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
@@ -2437,7 +2453,7 @@ where
 
 			// A stream that ends without an object: the group is over and had nothing
 			// outside the fill's range, so the head it delivered is the whole group.
-			None => match self.claim_fill(fill, track, sequence, None).await? {
+			None => match self.claim_fill(fill, track, sequence, None, reading).await? {
 				Some(producer) => Ok(Opened::Group(producer, 0)),
 				None => Ok(Opened::Group(create(track)?, 0)),
 			},
@@ -2454,15 +2470,19 @@ where
 	///
 	/// Waiting is what keeps the two streams from interleaving into one producer. It ends
 	/// with the subscription, so a publisher that promises a fill and never delivers one
-	/// costs this stream and nothing else.
+	/// costs this stream and nothing else. Meanwhile this stream stops holding the
+	/// subscription's end open: the fill's own stream holds it if its header arrived, and
+	/// the grace gives up on it if not.
 	async fn claim_fill(
 		&self,
 		fill: &kio::Producer<Fill>,
 		track: &track::Producer,
 		sequence: u64,
 		start: Option<u64>,
+		reading: &mut Reading,
 	) -> Result<Option<group::Producer>, Error> {
-		kio::wait(|waiter| {
+		reading.park();
+		let claimed = kio::wait(|waiter| {
 			if let Poll::Ready(err) = track.poll_closed(waiter) {
 				return Poll::Ready(Err(err));
 			}
@@ -2479,7 +2499,9 @@ where
 				Poll::Pending => Poll::Pending,
 			}
 		})
-		.await
+		.await;
+		reading.resume();
+		claimed
 	}
 }
 
@@ -2561,7 +2583,9 @@ where
 			let track = state.subscribes.get(&subscribe_id).ok_or(Error::NotFound)?;
 			// A fill is one of the subscription's own data streams, so PUBLISH_DONE counts
 			// it. A joining FETCH is a request of its own.
-			let counted = joined.is_none().then(|| Counted(track.tail.clone()));
+			let counted = joined
+				.is_none()
+				.then(|| Reading::open(&track.tail, None, self.runtime.now()));
 			(subscribe_id, track.fill.clone(), track.joining, track.largest, counted)
 		};
 
@@ -6100,6 +6124,24 @@ mod stitch_tests {
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"last");
 		assert!(group.read_frame().await.unwrap().is_none(), "the group is finished");
 		assert!(consumer.recv_group().await.unwrap().is_none(), "then the track ends");
+	}
+
+	/// A group at or past the end an END_OF_TRACK declared contradicts that end, which no
+	/// later stream can repair, so the whole track fails rather than ending clean without it.
+	#[tokio::test]
+	async fn a_group_past_the_declared_end_aborts_the_track() {
+		use futures::FutureExt;
+
+		let mut h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 0, &[b"late"])]);
+		h.track.finish_at(SEQUENCE).unwrap();
+		let mut stream = h.stream().await;
+
+		let res = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
+		assert!(matches!(
+			h.track.closed().now_or_never(),
+			Some(Error::ProtocolViolation)
+		));
 	}
 
 	/// END_OF_TRACK at object 0 says the group does not exist, so the track ends before it

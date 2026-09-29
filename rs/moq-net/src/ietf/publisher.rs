@@ -620,25 +620,39 @@ where
 				.await
 			};
 
-			// Every data stream this subscription opened is closed by now, which PUBLISH_DONE
-			// requires, so the count it reports is final.
 			let completed = served.is_some();
 			let (res, filled) = served.unwrap_or((Ok(()), false));
-			let mut streams = track_serve.opened() + u64::from(filled);
 
 			// Draft-14 on carries no end location in PUBLISH_DONE: an END_OF_TRACK object is
 			// what tells the subscriber where the track ended. A cancelled subscription is
-			// owed nothing more.
+			// owed nothing more, and one cancelled while the marker waits for stream credit
+			// abandons it.
 			if completed
 				&& res.is_ok()
 				&& let Some(end) = track_serve.end()
 			{
-				match track_serve.write_end_of_track(end, priority).await {
-					Ok(()) => streams += 1,
-					// A failure only costs the subscriber the early boundary.
-					Err(err) => tracing::debug!(%err, id = %request_id, "end of track failed"),
+				let mut marker = std::pin::pin!(track_serve.write_end_of_track(end, priority));
+				let mut closed_session = self.session.clone();
+				let written = kio::wait(|waiter| {
+					if let Poll::Ready(res) = waiter.poll_future(marker.as_mut()) {
+						return Poll::Ready(res);
+					}
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if stream.reader.poll_closed(&mut cx).is_ready() || closed_session.poll_closed(&mut cx).is_ready() {
+						return Poll::Ready(Err(Error::Cancel));
+					}
+					Poll::Pending
+				})
+				.await;
+				// A failure only costs the subscriber the early boundary.
+				if let Err(err) = written {
+					tracing::debug!(%err, id = %request_id, "end of track failed");
 				}
 			}
+
+			// Every data stream this subscription opened is closed by now, which PUBLISH_DONE
+			// requires, so the count it reports is final.
+			let streams = track_serve.opened() + u64::from(filled);
 
 			// Send PublishDone
 			let (status, reason) = match &res {
@@ -2015,11 +2029,13 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	/// the group that will never exist.
 	///
 	/// The last group's stream has usually finished before the track ends, so the marker
-	/// cannot ride on it. The stream counts toward PUBLISH_DONE once it is open.
+	/// cannot ride on it. Like a group stream, it counts toward PUBLISH_DONE once open,
+	/// since a reset can still deliver its header.
 	async fn write_end_of_track(&mut self, end: u64, priority: u8) -> Result<(), Error> {
 		let mut stream = std::future::poll_fn(|cx| self.session.poll_open_uni(cx))
 			.await
 			.map_err(Error::from_transport)?;
+		self.opened.fetch_add(1, Ordering::Relaxed);
 		stream.set_priority(priority);
 
 		let mut writer = Writer::new(stream, self.version);
