@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import type * as announce from "../announced.ts";
-import { ProtocolViolation } from "../error.ts";
+import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { type Hop, HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
@@ -1084,4 +1084,44 @@ test("local readers filter hidden unsolicited namespaces from a legacy peer", as
 	plain.close();
 	opted.close();
 	await Promise.all(handlers);
+});
+
+test("object extension limit accepts 64 KiB and stops one byte over before reading", async () => {
+	for (const size of [65536, 65537]) {
+		for (const first of [true, false]) {
+			const { subscriber, track } = await subscribeTrack();
+			const bytes = new Uint8Array((first ? 0 : 4) + 4 + (size === 65536 ? size + 2 : 0));
+			let offset = 0;
+			if (!first) {
+				bytes.set([0, 0, 1, 42]);
+				offset = 4;
+			}
+			// Object delta zero followed by a three-byte leading-ones varint length.
+			bytes.set([0, 0xc1, 0, size - 65536], offset);
+			if (size === 65536) bytes.set([1, 42], bytes.length - 2);
+			const reader = new Reader(undefined, bytes, VERSION);
+			const stop = spyOn(reader, "stop");
+			const header = new GroupMessage({
+				trackAlias: ALIAS,
+				groupId: 3,
+				subGroupId: 0,
+				publisherPriority: 0,
+				flags: { ...groupFlags(true), hasExtensions: true },
+			});
+			await subscriber.handleGroup(header, reader);
+			if (size === 65536) {
+				expect(stop.mock.calls).toEqual([]);
+				const group = await track.ordered().nextGroup();
+				expect(group?.frameCount).toBe(first ? 1 : 2);
+				expect(await group?.readString()).toBe("*");
+			} else {
+				expect(stop).toHaveBeenCalledTimes(1);
+				const err = stop.mock.calls[0][0];
+				expect(err).toBeInstanceOf(StreamError);
+				expect((err as StreamError).code).toBe(StreamCode.MalformedTrack);
+			}
+			stop.mockRestore();
+			track.close();
+		}
+	}
 });

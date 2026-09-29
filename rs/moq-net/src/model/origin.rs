@@ -2099,6 +2099,7 @@ fn warm_copy(source: &track::Consumer, head: Option<&WarmGroup>) -> Option<WarmC
 		.map(|(group, _)| group.sequence)
 		.max();
 	let mut edge = None;
+	let mut first = None;
 
 	// A spliced copy hides the group it continued (its halves sit in two segments), so
 	// carry the previous edge over when the copy has no version of it at all. First,
@@ -2109,11 +2110,13 @@ fn warm_copy(source: &track::Consumer, head: Option<&WarmGroup>) -> Option<WarmC
 		let is_latest = latest.is_none_or(|latest| head.sequence >= latest);
 		if head.is_finished() {
 			let _ = track.adopt_group(head.clone(), true);
+			first = Some(head.sequence);
 			if is_latest {
 				edge = Some(WarmGroup(head.clone()));
 			}
 		} else if is_latest {
 			edge = warm_rebuild(&track, head, None);
+			first = edge.as_ref().map(|_| head.sequence);
 		}
 	}
 
@@ -2135,10 +2138,17 @@ fn warm_copy(source: &track::Consumer, head: Option<&WarmGroup>) -> Option<WarmC
 			// Mid-transfer backlog, or a continuation with no head to complete it.
 			None
 		};
+		if visible && let Some(warm) = &warm {
+			first = Some(first.map_or(warm.0.sequence, |first: u64| first.min(warm.0.sequence)));
+		}
 		if is_latest {
 			edge = warm;
 		}
 	}
+	// Arrival order can put the live group before cached history. Declare the
+	// cache's oldest group so a new subscription cannot resolve its floor from
+	// whichever group arrived first and permanently skip that history.
+	track.start_at(first).ok()?;
 	let dynamic = track.dynamic();
 	Some(WarmCopy {
 		track,

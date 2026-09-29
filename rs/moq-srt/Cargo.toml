@@ -30,3 +30,4 @@ tracing = { workspace = true }
 # Builds the synthetic broadcasts the egress tests mux back to TS.
 hang = { path = "../hang" }
 srt-protocol = "0.4"
+tracing-test = { workspace = true, features = ["no-env-filter"] }

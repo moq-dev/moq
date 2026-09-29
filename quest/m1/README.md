@@ -17,7 +17,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 
 ## Required
 
-- [Late joiner history](/quest/m1/relay-late-joiner-history.md) - a subscriber joining a relay's track from group 0 later still receives the cached finished group below the live one
 - [Cluster routing](/quest/m1/cluster-routing.md) - an announcement says where a broadcast originates, not how to reach it, and a relay hears only the prefixes its clients asked for
 - [Exact scope](/quest/m1/exact-scope.md) - a reader never sees an exact broadcast outside its scope, in Rust or JS; prefix routes above it still present as the empty path
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
@@ -31,7 +30,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
 - [WebTransport close upstream](/quest/m1/wt-close-upstream.md) - web-transport-moq delivers the close capsule itself, and moq-tokio's `CLOSE_LINGER` is deleted
 - [Watch refusal](/quest/m1/watch-refusal.md) - `<moq-watch>` shows an origin refusal as an error instead of sitting offline
-- [moqsink recoverable errors](/quest/m1/moqsink-keyframe-latch.md) - a leading delta or a timestamp rewind drops frames until a keyframe instead of invalidating a moqsink pad
 - [Splice edge cases](/quest/m1/splice-edges.md) - an unstamped successor, a pruned segment's boundary group, and a warm head during a takeover are each handled correctly
 - [Resumed groups](/quest/m1/resume-latest.md) - a half-delivered group ends once the new copy is past it, so a group-only reader never parks after a mid-group failover
 - [Track tail hardening](/quest/m1/track-tail-hardening.md) - Rust and JS wait out a track's tail by the same rules, with the known hang, count, truncation, grace, and memory holes closed
@@ -51,21 +49,17 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Legacy end overshoot](/quest/m1/legacy-end-overshoot.md) - browser playback survives a group that starts inside the previous group's estimated end
 - [UnknownSession log flood](/quest/m1/unknown-session-logs.md) - streams reset before their WebTransport header stop being reported as UnknownSession at WARN
 - [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
-- [CI hygiene](/quest/m1/ci-hygiene.md) - a push to one PR never cancels another's run, and a failed run never saves the Rust cache
 - [Wire compatibility](/quest/m1/wire-compat.md) - a nightly run tests this checkout against the last published release for tokens, session wire, and catalog/container
 - [Full codec string](/quest/m1/publish-codec-string.md) - browser-published video carries the encoder's full RFC 6381 codec string, so native players decode it
 - [TS program selection](/quest/m1/ts-programs.md) - `import ts` refuses a multi-program stream unless `--program <n|all>` picks one or publishes each
-- [TS export jitter](/quest/m1/ts-export-jitter.md) - the video reorder bound follows later catalogs and the declared reorder depth, so a late B-frame never reorders TS output; an undeclared stream can reorder once per new maximum depth
 - [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - unflagged loop wraps move audio and video by one shift, so A/V sync holds across wraps
-- [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md) - `import ts` reads a PAT or PMT that spans packets or follows a nonzero pointer_field instead of aborting
+- [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md) - `import ts` reads a PAT or PMT that spans packets or follows a nonzero pointer_field instead of aborting, and one corrupted section costs a repetition and a counted `CRC_error`, not the import
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - importers sharing a `--hop` and fed one stream publish identical groups and timestamps, so failover survives
-- [PipeWire duplicate cameras](/quest/m1/pipewire-dup-cameras.md) - a webcam lists once with PipeWire enabled
 - [Catalog wall clock](/quest/m1/catalog-wall-clock.md) - `Clock::wall_clock` keeps the catalog's full precision instead of truncating to milliseconds
 - [Capture control](/quest/m1/capture-control.md) - on dev, `encode::Capture` replaces `CaptureOptions` without a `clock` field (it reads the catalog's), an unsupported `cut()` errors, and dropping the last `Control` cancels in-flight opens
 - [Video surface](/quest/m1/video-surface.md) - on dev, moq-ffi's `native` becomes `surface`, refused on platforms with no surface
 - [HLS discontinuity sequence](/quest/m1/hls-discontinuity-sequence.md) - on dev, `Segment::discontinuity` is the absolute sequence, so every cursor agrees
 - [Auth client CA](/quest/m1/relay-auth-client-ca.md) - on dev, `auth::Config::validate` and `init` take the client-CA flag, so no caller can skip the check
-- [RTMP TLS only](/quest/m1/rtmp-tls-only.md) - an RTMP listener configured for TLS can refuse plaintext instead of sniffing and serving it
 - [HLS linger](/quest/m1/hls-linger.md) - `moq_hls::Server` serves an ended broadcast for its playlist window plus grace, so the moq.pro edge drops its own pool
 - [Remove live()](/quest/m1/remove-live.md) - on dev, importers publish stream timestamps verbatim, the catalog clock maps them to wall time, and an encoder restart becomes a new epoch
 - [iroh versions](/quest/m1/iroh-lite-wip.md) - `iroh://` negotiates the configured versions, so `moq-lite-07-wip` can be opted into
@@ -84,7 +78,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [Dropped sources](/quest/m1/dropped-sources.md) - track consumers see the producer's real error on every end path, never `Dropped`
 - [Shaper virtual time](/quest/m1/shaper-virtual-time.md) - `moq-shaper` tests judge seeded decisions on paused time, not on wall-clock delivery under load
-- [Rust compressed gate test](/quest/m1/json-compressed-gate-rs.md) - `rs/moq-json` proves a snapshot delta is gated on its encoded size
 - [Shrink the JS overflow test](/quest/m1/json-rolls-snapshot-test.md) - the `js/json` roll-on-overflow test uses a small `maxGroupBytes` budget instead of megabytes of JSON
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - generated C++ over moq-ffi with futures and expected-style errors, shipped as a tarball, vcpkg, and Conan, and adopted by the OBS plugin
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
@@ -99,7 +92,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [GPU CI](/quest/m1/gpu-ci.md) - NVIDIA tests run nightly on a self-hosted GPU runner, and `just rs nvidia` runs them locally instead of skipping
 - [JS rendition ranking](/quest/m1/js-ranked.md) - `@moq/hang` ranks video renditions like Rust, and `@moq/watch`'s fallback uses it
 - [Audio rendition pick](/quest/m1/audio-ranked.md) - single-track FLV/RTMP and WHEP serve the best audio rendition, not the first by name
-- [FLV rebind before header](/quest/m1/flv-rebind.md) - single-track FLV switches to a better rendition announced before the header
 - [FLV catalog stream](/quest/m1/flv-catalog-stream.md) - on dev, `flv::Export` takes a catalog stream like fmp4, replacing `with_select`
 - [Own the QUIC stack](/quest/m1/quic/README.md) - the moq-noq fork carries ACK progress, reliable reset, hierarchical scheduling, deadlines, peer limits, and qmux
 - [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms, and client stats broadcasts from publishers and viewers, on dev
@@ -147,7 +139,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [#933](/quest/m1/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - the catalog rotation follows the live camera's orientation
 - [#2848](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the Opus producer follows its bandwidth grant through the settled `moq_mux::rate::Control`
 - [Ladder](/quest/m1/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
-- [LOC duration marker](/quest/m1/loc-duration-marker.md) - LOC producers write the marker once released consumers skip it
 - [#2278](/quest/m1/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md) - hang: document reading the catalog-root clock and converting PTS to wall time, without synchronizing library playback to wall time
 - [Time stretch](/quest/m1/watch-audio-time-stretch.md) - js/watch: the audio ring converges by time-stretching instead of skipping or going silent
 - [Native audio quality](/quest/m1/audio-quality-native.md) - the browser lane's profiles, budgets, and metric schema run against `moq play` on a dummy device
@@ -164,7 +155,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [#3021](/quest/m1/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - GStreamer maps every pad onto one continuous broadcast clock across source restarts
 - [Export linger](/quest/m1/export-linger.md) - every `moq export` waits `--linger` for a broadcast to return, and exits 0 on a clean end and 1 on a drop
 - [TS byte schedule](/quest/m1/ts-export-byte-schedule.md) - moq export ts places PCRs and padding on the byte grid `mpegts.muxRate` implies, so a receiver can clock off arrival
-- [SRT import stats](/quest/m1/srt-import-stats.md) - the SRT gateway reports the same per-stream counters instead of nothing
 - [Text availability](/quest/m1/text-schema.md) - a text track publishes its own coverage index instead of copying the media timeline
 - [ID3 catalog section](/quest/m1/id3.md) - timed ID3 as a first-class container-neutral catalog section
 - [FLV script tags](/quest/m1/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
