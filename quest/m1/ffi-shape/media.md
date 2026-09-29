@@ -25,7 +25,3 @@ once the shape is in front of you, and prefer one path. Go's
 through `demand()` only.
 
 Public API: breaking in every binding. Wire: none.
-
-## Required
-
-- [JSON](/quest/m1/ffi-shape/json.md) - sets the per-language namespace pattern

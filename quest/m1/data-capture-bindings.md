@@ -34,8 +34,10 @@ not moq-c.
   past capture time is accepted and a future one refused.
 - Go (`go/wrapper/moq`) and Python (`py/moq-rs`) wrap only the JSON
   producers; [#4137](https://github.com/moq-dev/moq/pull/4137) added
-  `publish_binary_snapshot` / `publish_binary_stream` (now
-  `publish_flate_*`) to moq-ffi without them. Add hand-written flate wrappers there, capture time included, so
+  `publish_binary_snapshot` / `publish_binary_stream` (now the
+  `MoqFlateSnapshotProducer` / `MoqFlateStreamProducer` constructors) to
+  moq-ffi without them. Put them in a `flate` namespace beside each wrapper's
+  `json` one (see `rs/moq-ffi/AGENTS.md`). Add hand-written flate wrappers there, capture time included, so
   the capture tests cover binary too. The maintainer asked for this. Update
   `doc/lib/{py,swift,kt,go,dart}`.
 
@@ -45,10 +47,6 @@ no optional arguments), and a `_with_x` twin is ruled out. The broadcast clock
 `now()` and the Go and Python binary producers are additive;
 `window::Producer::push` accepts `Timed`, source-compatible.
 Wire: none.
-
-## Required
-
-- [JSON and flate namespaces](/quest/m1/ffi-shape/json.md) - moves the data producers this changes, so the two breaks land in order rather than colliding
 
 ## Related
 

@@ -4357,14 +4357,6 @@ abstract class MoqBroadcastConsumerInterface {
     required String name,
     required MoqSubscription? subscription,
   });
-  Future<MoqJsonSnapshotConsumer> subscribeJsonSnapshot({
-    required String name,
-    required MoqJsonSnapshotConfig config,
-  });
-  Future<MoqJsonStreamConsumer> subscribeJsonStream({
-    required String name,
-    required MoqJsonStreamConfig config,
-  });
 }
 
 final _MoqBroadcastConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -4504,47 +4496,6 @@ class MoqBroadcastConsumer implements MoqBroadcastConsumerInterface {
       ffi_moq_ffi_rust_future_free_u64,
       (ptr) =>
           FfiConverterMoqTrackConsumer.lift(Pointer<Void>.fromAddress(ptr)),
-      moqExceptionErrorHandler,
-    );
-  }
-
-  Future<MoqJsonSnapshotConsumer> subscribeJsonSnapshot({
-    required String name,
-    required MoqJsonSnapshotConfig config,
-  }) {
-    return uniffiRustCallAsync(
-      () =>
-          uniffi_moq_ffi_fn_method_moqbroadcastconsumer_subscribe_json_snapshot(
-            uniffiClonePointer(),
-            FfiConverterString.lower(name),
-            FfiConverterMoqJsonSnapshotConfig.lower(config),
-          ),
-      ffi_moq_ffi_rust_future_poll_u64,
-      ffi_moq_ffi_rust_future_complete_u64,
-      ffi_moq_ffi_rust_future_free_u64,
-      (ptr) => FfiConverterMoqJsonSnapshotConsumer.lift(
-        Pointer<Void>.fromAddress(ptr),
-      ),
-      moqExceptionErrorHandler,
-    );
-  }
-
-  Future<MoqJsonStreamConsumer> subscribeJsonStream({
-    required String name,
-    required MoqJsonStreamConfig config,
-  }) {
-    return uniffiRustCallAsync(
-      () => uniffi_moq_ffi_fn_method_moqbroadcastconsumer_subscribe_json_stream(
-        uniffiClonePointer(),
-        FfiConverterString.lower(name),
-        FfiConverterMoqJsonStreamConfig.lower(config),
-      ),
-      ffi_moq_ffi_rust_future_poll_u64,
-      ffi_moq_ffi_rust_future_complete_u64,
-      ffi_moq_ffi_rust_future_free_u64,
-      (ptr) => FfiConverterMoqJsonStreamConsumer.lift(
-        Pointer<Void>.fromAddress(ptr),
-      ),
       moqExceptionErrorHandler,
     );
   }
@@ -5173,6 +5124,21 @@ class MoqFlateSnapshotProducer implements MoqFlateSnapshotProducerInterface {
   MoqFlateSnapshotProducer._(this._ptr) {
     _MoqFlateSnapshotProducerFinalizer.attach(this, _ptr, detach: this);
   }
+  MoqFlateSnapshotProducer({
+    required MoqBroadcastProducer broadcast,
+    required MoqTrackProducer track,
+    required MoqFlateConfig config,
+  }) : _ptr = rustCall(
+         (status) => uniffi_moq_ffi_fn_constructor_moqflatesnapshotproducer_new(
+           FfiConverterMoqBroadcastProducer.lower(broadcast),
+           FfiConverterMoqTrackProducer.lower(track),
+           FfiConverterMoqFlateConfig.lower(config),
+           status,
+         ),
+         moqExceptionErrorHandler,
+       ) {
+    _MoqFlateSnapshotProducerFinalizer.attach(this, _ptr, detach: this);
+  }
   factory MoqFlateSnapshotProducer.lift(Pointer<Void> ptr) {
     return MoqFlateSnapshotProducer._(ptr);
   }
@@ -5252,6 +5218,21 @@ class MoqFlateStreamProducer implements MoqFlateStreamProducerInterface {
   MoqFlateStreamProducer._(this._ptr) {
     _MoqFlateStreamProducerFinalizer.attach(this, _ptr, detach: this);
   }
+  MoqFlateStreamProducer({
+    required MoqBroadcastProducer broadcast,
+    required MoqTrackProducer track,
+    required MoqFlateConfig config,
+  }) : _ptr = rustCall(
+         (status) => uniffi_moq_ffi_fn_constructor_moqflatestreamproducer_new(
+           FfiConverterMoqBroadcastProducer.lower(broadcast),
+           FfiConverterMoqTrackProducer.lower(track),
+           FfiConverterMoqFlateConfig.lower(config),
+           status,
+         ),
+         moqExceptionErrorHandler,
+       ) {
+    _MoqFlateStreamProducerFinalizer.attach(this, _ptr, detach: this);
+  }
   factory MoqFlateStreamProducer.lift(Pointer<Void> ptr) {
     return MoqFlateStreamProducer._(ptr);
   }
@@ -5328,6 +5309,19 @@ final _MoqJsonSnapshotConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 class MoqJsonSnapshotConsumer implements MoqJsonSnapshotConsumerInterface {
   late final Pointer<Void> _ptr;
   MoqJsonSnapshotConsumer._(this._ptr) {
+    _MoqJsonSnapshotConsumerFinalizer.attach(this, _ptr, detach: this);
+  }
+  MoqJsonSnapshotConsumer({
+    required MoqTrackConsumer track,
+    required MoqJsonSnapshotConfig config,
+  }) : _ptr = rustCall(
+         (status) => uniffi_moq_ffi_fn_constructor_moqjsonsnapshotconsumer_new(
+           FfiConverterMoqTrackConsumer.lower(track),
+           FfiConverterMoqJsonSnapshotConfig.lower(config),
+           status,
+         ),
+         moqExceptionErrorHandler,
+       ) {
     _MoqJsonSnapshotConsumerFinalizer.attach(this, _ptr, detach: this);
   }
   factory MoqJsonSnapshotConsumer.lift(Pointer<Void> ptr) {
@@ -5410,6 +5404,21 @@ final _MoqJsonSnapshotProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 class MoqJsonSnapshotProducer implements MoqJsonSnapshotProducerInterface {
   late final Pointer<Void> _ptr;
   MoqJsonSnapshotProducer._(this._ptr) {
+    _MoqJsonSnapshotProducerFinalizer.attach(this, _ptr, detach: this);
+  }
+  MoqJsonSnapshotProducer({
+    required MoqBroadcastProducer broadcast,
+    required MoqTrackProducer track,
+    required MoqJsonSnapshotConfig config,
+  }) : _ptr = rustCall(
+         (status) => uniffi_moq_ffi_fn_constructor_moqjsonsnapshotproducer_new(
+           FfiConverterMoqBroadcastProducer.lower(broadcast),
+           FfiConverterMoqTrackProducer.lower(track),
+           FfiConverterMoqJsonSnapshotConfig.lower(config),
+           status,
+         ),
+         moqExceptionErrorHandler,
+       ) {
     _MoqJsonSnapshotProducerFinalizer.attach(this, _ptr, detach: this);
   }
   factory MoqJsonSnapshotProducer.lift(Pointer<Void> ptr) {
@@ -5501,6 +5510,19 @@ class MoqJsonStreamConsumer implements MoqJsonStreamConsumerInterface {
   MoqJsonStreamConsumer._(this._ptr) {
     _MoqJsonStreamConsumerFinalizer.attach(this, _ptr, detach: this);
   }
+  MoqJsonStreamConsumer({
+    required MoqTrackConsumer track,
+    required MoqJsonStreamConfig config,
+  }) : _ptr = rustCall(
+         (status) => uniffi_moq_ffi_fn_constructor_moqjsonstreamconsumer_new(
+           FfiConverterMoqTrackConsumer.lower(track),
+           FfiConverterMoqJsonStreamConfig.lower(config),
+           status,
+         ),
+         moqExceptionErrorHandler,
+       ) {
+    _MoqJsonStreamConsumerFinalizer.attach(this, _ptr, detach: this);
+  }
   factory MoqJsonStreamConsumer.lift(Pointer<Void> ptr) {
     return MoqJsonStreamConsumer._(ptr);
   }
@@ -5581,6 +5603,21 @@ final _MoqJsonStreamProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 class MoqJsonStreamProducer implements MoqJsonStreamProducerInterface {
   late final Pointer<Void> _ptr;
   MoqJsonStreamProducer._(this._ptr) {
+    _MoqJsonStreamProducerFinalizer.attach(this, _ptr, detach: this);
+  }
+  MoqJsonStreamProducer({
+    required MoqBroadcastProducer broadcast,
+    required MoqTrackProducer track,
+    required MoqJsonStreamConfig config,
+  }) : _ptr = rustCall(
+         (status) => uniffi_moq_ffi_fn_constructor_moqjsonstreamproducer_new(
+           FfiConverterMoqBroadcastProducer.lower(broadcast),
+           FfiConverterMoqTrackProducer.lower(track),
+           FfiConverterMoqJsonStreamConfig.lower(config),
+           status,
+         ),
+         moqExceptionErrorHandler,
+       ) {
     _MoqJsonStreamProducerFinalizer.attach(this, _ptr, detach: this);
   }
   factory MoqJsonStreamProducer.lift(Pointer<Void> ptr) {
@@ -6277,22 +6314,6 @@ class FfiConverterMoqBroadcastDynamic {
 }
 
 abstract class MoqBroadcastProducerInterface {
-  MoqFlateSnapshotProducer publishFlateSnapshot({
-    required String name,
-    required MoqFlateConfig config,
-  });
-  MoqFlateStreamProducer publishFlateStream({
-    required String name,
-    required MoqFlateConfig config,
-  });
-  MoqJsonSnapshotProducer publishJsonSnapshot({
-    required String name,
-    required MoqJsonSnapshotConfig config,
-  });
-  MoqJsonStreamProducer publishJsonStream({
-    required String name,
-    required MoqJsonStreamConfig config,
-  });
   void announce({required MoqRoute route});
   void close();
   MoqBroadcastConsumer consume();
@@ -6354,74 +6375,6 @@ class MoqBroadcastProducer implements MoqBroadcastProducerInterface {
     _MoqBroadcastProducerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqbroadcastproducer(_ptr, status),
-    );
-  }
-
-  MoqFlateSnapshotProducer publishFlateSnapshot({
-    required String name,
-    required MoqFlateConfig config,
-  }) {
-    return rustCallWithLifter(
-      (status) =>
-          uniffi_moq_ffi_fn_method_moqbroadcastproducer_publish_flate_snapshot(
-            uniffiClonePointer(),
-            FfiConverterString.lower(name),
-            FfiConverterMoqFlateConfig.lower(config),
-            status,
-          ),
-      FfiConverterMoqFlateSnapshotProducer.lift,
-      moqExceptionErrorHandler,
-    );
-  }
-
-  MoqFlateStreamProducer publishFlateStream({
-    required String name,
-    required MoqFlateConfig config,
-  }) {
-    return rustCallWithLifter(
-      (status) =>
-          uniffi_moq_ffi_fn_method_moqbroadcastproducer_publish_flate_stream(
-            uniffiClonePointer(),
-            FfiConverterString.lower(name),
-            FfiConverterMoqFlateConfig.lower(config),
-            status,
-          ),
-      FfiConverterMoqFlateStreamProducer.lift,
-      moqExceptionErrorHandler,
-    );
-  }
-
-  MoqJsonSnapshotProducer publishJsonSnapshot({
-    required String name,
-    required MoqJsonSnapshotConfig config,
-  }) {
-    return rustCallWithLifter(
-      (status) =>
-          uniffi_moq_ffi_fn_method_moqbroadcastproducer_publish_json_snapshot(
-            uniffiClonePointer(),
-            FfiConverterString.lower(name),
-            FfiConverterMoqJsonSnapshotConfig.lower(config),
-            status,
-          ),
-      FfiConverterMoqJsonSnapshotProducer.lift,
-      moqExceptionErrorHandler,
-    );
-  }
-
-  MoqJsonStreamProducer publishJsonStream({
-    required String name,
-    required MoqJsonStreamConfig config,
-  }) {
-    return rustCallWithLifter(
-      (status) =>
-          uniffi_moq_ffi_fn_method_moqbroadcastproducer_publish_json_stream(
-            uniffiClonePointer(),
-            FfiConverterString.lower(name),
-            FfiConverterMoqJsonStreamConfig.lower(config),
-            status,
-          ),
-      FfiConverterMoqJsonStreamProducer.lift,
-      moqExceptionErrorHandler,
     );
   }
 
@@ -9836,26 +9789,6 @@ uniffi_moq_ffi_fn_method_moqbroadcastconsumer_subscribe_track(
   RustBuffer subscription,
 );
 
-@Native<Pointer<Void> Function(Pointer<Void>, RustBuffer, RustBuffer)>(
-  assetId: _uniffiAssetId,
-)
-external Pointer<Void>
-uniffi_moq_ffi_fn_method_moqbroadcastconsumer_subscribe_json_snapshot(
-  Pointer<Void> ptr,
-  RustBuffer name,
-  RustBuffer config,
-);
-
-@Native<Pointer<Void> Function(Pointer<Void>, RustBuffer, RustBuffer)>(
-  assetId: _uniffiAssetId,
-)
-external Pointer<Void>
-uniffi_moq_ffi_fn_method_moqbroadcastconsumer_subscribe_json_stream(
-  Pointer<Void> ptr,
-  RustBuffer name,
-  RustBuffer config,
-);
-
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -10107,6 +10040,22 @@ external void uniffi_moq_ffi_fn_free_moqflatesnapshotproducer(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<
+  Pointer<Void> Function(
+    Pointer<Void>,
+    Pointer<Void>,
+    RustBuffer,
+    Pointer<RustCallStatus>,
+  )
+>(assetId: _uniffiAssetId)
+external Pointer<Void>
+uniffi_moq_ffi_fn_constructor_moqflatesnapshotproducer_new(
+  Pointer<Void> broadcast,
+  Pointer<Void> track,
+  RustBuffer config,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -10137,6 +10086,21 @@ external Pointer<Void> uniffi_moq_ffi_fn_clone_moqflatestreamproducer(
 )
 external void uniffi_moq_ffi_fn_free_moqflatestreamproducer(
   Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<
+  Pointer<Void> Function(
+    Pointer<Void>,
+    Pointer<Void>,
+    RustBuffer,
+    Pointer<RustCallStatus>,
+  )
+>(assetId: _uniffiAssetId)
+external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqflatestreamproducer_new(
+  Pointer<Void> broadcast,
+  Pointer<Void> track,
+  RustBuffer config,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -10173,6 +10137,16 @@ external void uniffi_moq_ffi_fn_free_moqjsonsnapshotconsumer(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<
+  Pointer<Void> Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)
+>(assetId: _uniffiAssetId)
+external Pointer<Void>
+uniffi_moq_ffi_fn_constructor_moqjsonsnapshotconsumer_new(
+  Pointer<Void> track,
+  RustBuffer config,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -10199,6 +10173,22 @@ external Pointer<Void> uniffi_moq_ffi_fn_clone_moqjsonsnapshotproducer(
 )
 external void uniffi_moq_ffi_fn_free_moqjsonsnapshotproducer(
   Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<
+  Pointer<Void> Function(
+    Pointer<Void>,
+    Pointer<Void>,
+    RustBuffer,
+    Pointer<RustCallStatus>,
+  )
+>(assetId: _uniffiAssetId)
+external Pointer<Void>
+uniffi_moq_ffi_fn_constructor_moqjsonsnapshotproducer_new(
+  Pointer<Void> broadcast,
+  Pointer<Void> track,
+  RustBuffer config,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -10243,6 +10233,15 @@ external void uniffi_moq_ffi_fn_free_moqjsonstreamconsumer(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<
+  Pointer<Void> Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)
+>(assetId: _uniffiAssetId)
+external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqjsonstreamconsumer_new(
+  Pointer<Void> track,
+  RustBuffer config,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -10269,6 +10268,21 @@ external Pointer<Void> uniffi_moq_ffi_fn_clone_moqjsonstreamproducer(
 )
 external void uniffi_moq_ffi_fn_free_moqjsonstreamproducer(
   Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<
+  Pointer<Void> Function(
+    Pointer<Void>,
+    Pointer<Void>,
+    RustBuffer,
+    Pointer<RustCallStatus>,
+  )
+>(assetId: _uniffiAssetId)
+external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqjsonstreamproducer_new(
+  Pointer<Void> broadcast,
+  Pointer<Void> track,
+  RustBuffer config,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -10585,70 +10599,6 @@ external void uniffi_moq_ffi_fn_free_moqbroadcastproducer(
   assetId: _uniffiAssetId,
 )
 external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqbroadcastproducer_new(
-  Pointer<RustCallStatus> uniffiStatus,
-);
-
-@Native<
-  Pointer<Void> Function(
-    Pointer<Void>,
-    RustBuffer,
-    RustBuffer,
-    Pointer<RustCallStatus>,
-  )
->(assetId: _uniffiAssetId)
-external Pointer<Void>
-uniffi_moq_ffi_fn_method_moqbroadcastproducer_publish_flate_snapshot(
-  Pointer<Void> ptr,
-  RustBuffer name,
-  RustBuffer config,
-  Pointer<RustCallStatus> uniffiStatus,
-);
-
-@Native<
-  Pointer<Void> Function(
-    Pointer<Void>,
-    RustBuffer,
-    RustBuffer,
-    Pointer<RustCallStatus>,
-  )
->(assetId: _uniffiAssetId)
-external Pointer<Void>
-uniffi_moq_ffi_fn_method_moqbroadcastproducer_publish_flate_stream(
-  Pointer<Void> ptr,
-  RustBuffer name,
-  RustBuffer config,
-  Pointer<RustCallStatus> uniffiStatus,
-);
-
-@Native<
-  Pointer<Void> Function(
-    Pointer<Void>,
-    RustBuffer,
-    RustBuffer,
-    Pointer<RustCallStatus>,
-  )
->(assetId: _uniffiAssetId)
-external Pointer<Void>
-uniffi_moq_ffi_fn_method_moqbroadcastproducer_publish_json_snapshot(
-  Pointer<Void> ptr,
-  RustBuffer name,
-  RustBuffer config,
-  Pointer<RustCallStatus> uniffiStatus,
-);
-
-@Native<
-  Pointer<Void> Function(
-    Pointer<Void>,
-    RustBuffer,
-    RustBuffer,
-    Pointer<RustCallStatus>,
-  )
->(assetId: _uniffiAssetId)
-external Pointer<Void>
-uniffi_moq_ffi_fn_method_moqbroadcastproducer_publish_json_stream(
-  Pointer<Void> ptr,
-  RustBuffer name,
-  RustBuffer config,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -12139,14 +12089,6 @@ external int
 uniffi_moq_ffi_checksum_method_moqbroadcastconsumer_subscribe_track();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int
-uniffi_moq_ffi_checksum_method_moqbroadcastconsumer_subscribe_json_snapshot();
-
-@Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int
-uniffi_moq_ffi_checksum_method_moqbroadcastconsumer_subscribe_json_stream();
-
-@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqcatalogconsumer_cancel();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -12309,22 +12251,6 @@ external int uniffi_moq_ffi_checksum_method_moqbroadcastdynamic_cancel();
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int
 uniffi_moq_ffi_checksum_method_moqbroadcastdynamic_requested_track();
-
-@Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int
-uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_flate_snapshot();
-
-@Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int
-uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_flate_stream();
-
-@Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int
-uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_json_snapshot();
-
-@Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int
-uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_json_stream();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_announce();
@@ -12656,6 +12582,24 @@ external int uniffi_moq_ffi_checksum_method_moqsession_stats();
 external int uniffi_moq_ffi_checksum_method_moqsession_status();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_constructor_moqflatesnapshotproducer_new();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_constructor_moqflatestreamproducer_new();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_constructor_moqjsonsnapshotconsumer_new();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_constructor_moqjsonsnapshotproducer_new();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_constructor_moqjsonstreamconsumer_new();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_constructor_moqjsonstreamproducer_new();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_constructor_moqoriginproducer_new();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -12714,14 +12658,6 @@ void _checkApiChecksums() {
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastconsumer_subscribe_track() !=
       2348) {
-    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
-  }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastconsumer_subscribe_json_snapshot() !=
-      46473) {
-    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
-  }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastconsumer_subscribe_json_stream() !=
-      3028) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqcatalogconsumer_cancel() != 65421) {
@@ -12895,22 +12831,6 @@ void _checkApiChecksums() {
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastdynamic_requested_track() !=
       24118) {
-    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
-  }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_flate_snapshot() !=
-      8575) {
-    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
-  }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_flate_stream() !=
-      56158) {
-    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
-  }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_json_snapshot() !=
-      64276) {
-    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
-  }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_json_stream() !=
-      54975) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_announce() != 13700) {
@@ -13250,6 +13170,29 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_status() != 49725) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_constructor_moqflatesnapshotproducer_new() !=
+      47430) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_constructor_moqflatestreamproducer_new() != 469) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_constructor_moqjsonsnapshotconsumer_new() !=
+      62847) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_constructor_moqjsonsnapshotproducer_new() !=
+      2801) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_constructor_moqjsonstreamconsumer_new() !=
+      44851) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_constructor_moqjsonstreamproducer_new() !=
+      10341) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqoriginproducer_new() != 48126) {

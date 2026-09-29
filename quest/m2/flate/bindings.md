@@ -9,19 +9,17 @@ decodes in the browser with `@moq/flate` and vice versa.
 
 ## Plan
 
-moq-ffi publishes opaque tracks today (`publish_flate_snapshot` and
-`publish_flate_stream`). Only the generated bindings reach them; no wrapper does. This quest binds the existing
+moq-ffi publishes opaque tracks today (`MoqFlateSnapshotProducer` and
+`MoqFlateStreamProducer`, constructed from a broadcast and a track). Only the generated bindings reach them; no wrapper does. This quest binds the existing
 track modes, not the bare codec: a `frame()` call across the FFI boundary
 invites the window desync the track modes exist to prevent.
 
 - moq-ffi has no consume side for these tracks. Add it next to the JSON
   consumers so each wrapper can read what it writes.
-- Wrappers per the Cross-Package Sync table: `go/wrapper/json.go`,
-  `py/moq-rs/moq/{publish,subscribe}.py`, `swift/Sources/Moq/Json.swift`,
-  `kt/moq`'s `Json.kt` with its `Aliases.kt` re-exports, and
-  `dart/moq/lib/src/aliases.dart` each gain a flate sibling. If
-  [FFI shape](/quest/m1/ffi-shape/README.md) has landed, follow its `flate`
-  namespace instead.
+- Wrappers per the Cross-Package Sync table: each gains a `flate` namespace
+  beside its `json` one (`py/moq-rs/moq/json.py`, `go/wrapper/json/`,
+  `swift/Sources/Moq/Json.swift`, `kt/moq`'s `dev.moq.json`, and
+  `dart/moq/lib/json.dart`), per `rs/moq-ffi/AGENTS.md`.
 - Document in `doc/lib/{py,swift,kt,go,dart}` beside the JSON entry.
 - Tests: a round trip in each wrapper that has tests, and one cross-language
   check that a wrapper-published group decodes with `@moq/flate`. Run

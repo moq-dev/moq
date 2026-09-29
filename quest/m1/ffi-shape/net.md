@@ -44,7 +44,3 @@ are renamed.
   #3959).
 
 Public API: breaking in every binding. Wire: none.
-
-## Required
-
-- [JSON](/quest/m1/ffi-shape/json.md) - sets the per-language namespace pattern

@@ -122,24 +122,6 @@ typedef MediaGroupConsumer = MoqMediaGroupConsumer;
 /// The read side of a broadcast's catalog: yields updates as the set of tracks changes.
 typedef CatalogConsumer = MoqCatalogConsumer;
 
-/// Publishes lossy latest-value JSON snapshots.
-typedef JsonSnapshotProducer = MoqJsonSnapshotProducer;
-
-/// Consumes reconstructed latest-value JSON snapshots.
-typedef JsonSnapshotConsumer = MoqJsonSnapshotConsumer;
-
-/// Configures a lossy latest-value JSON track.
-typedef JsonSnapshotConfig = MoqJsonSnapshotConfig;
-
-/// Publishes a lossless stream of JSON records.
-typedef JsonStreamProducer = MoqJsonStreamProducer;
-
-/// Consumes a lossless stream of JSON records.
-typedef JsonStreamConsumer = MoqJsonStreamConsumer;
-
-/// Configures a lossless JSON stream track.
-typedef JsonStreamConfig = MoqJsonStreamConfig;
-
 /// A broadcast's catalog: its tracks and their properties, plus any application sections.
 typedef Catalog = MoqCatalog;
 

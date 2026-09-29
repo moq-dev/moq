@@ -30,5 +30,4 @@ Public API: breaking in every binding. Wire: none.
 
 ## Required
 
-- [JSON](/quest/m1/ffi-shape/json.md) - sets the per-language namespace pattern
 - [Media](/quest/m1/ffi-shape/media.md) - the catalog handle the encoders register into

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:moq/json.dart' as moq_json;
 import 'package:moq/moq.dart';
 import 'package:test/test.dart';
 
@@ -248,5 +249,30 @@ void main() {
     dynamic.cancel();
     dynamic.dispose();
     served.dispose();
+  });
+
+  test('JSON tracks take over a raw track', () async {
+    final broadcast = MoqBroadcastProducer();
+    final producer = moq_json.SnapshotProducer(
+      broadcast: broadcast,
+      track: broadcast.publishTrack(name: 'status', info: null),
+      config: moq_json.SnapshotConfig(),
+    );
+    final track = await broadcast
+        .consume()
+        .subscribeTrack(name: 'status', subscription: null)
+        .timeout(timeout);
+    final consumer = moq_json.SnapshotConsumer(
+      track: track,
+      config: moq_json.SnapshotConfig(),
+    );
+
+    producer.update(value: jsonEncode({'state': 'live'}));
+    final value = await consumer.next().timeout(timeout);
+    expect(jsonDecode(value!), {'state': 'live'});
+
+    consumer.cancel();
+    producer.finish();
+    broadcast.close();
   });
 }

@@ -27,10 +27,16 @@ These land with the next breaking release, not the 2026-09-23 train.
   now carries `moq_net::Error`, so it is no longer `PartialEq`. moq-mux's
   `Error::Binary` is `Error::Flate`. In TypeScript, import `Snapshot` and
   `Stream` from `@moq/flate`.
-- **moq-ffi flate tracks.** `publish_binary_snapshot` / `publish_binary_stream`
-  are `publish_flate_snapshot` / `publish_flate_stream`, taking
-  `MoqFlateConfig` and returning `MoqFlateSnapshotProducer` /
-  `MoqFlateStreamProducer`. The C `moq_publish_binary_*` calls are unchanged.
+- **moq-ffi data tracks wrap a track.** The broadcast's
+  `publish_binary_*`, `publish_json_*`, and `subscribe_json_*` are gone.
+  Create the track with `publish_track` or `subscribe_track`, then construct
+  `MoqFlateSnapshotProducer` / `MoqFlateStreamProducer` (taking
+  `MoqFlateConfig`) or `MoqJsonSnapshotProducer` / `MoqJsonStreamProducer`
+  from the broadcast and the track, or `MoqJsonSnapshotConsumer` /
+  `MoqJsonStreamConsumer` from the track. The wrappers keep JSON under its own
+  namespace: `moq.json` in Python, `moq.dev/moq/json` in Go, `dev.moq.json` in
+  Kotlin, `package:moq/json.dart` in Dart, and `Json` in Swift. The C
+  `moq_publish_binary_*` calls are unchanged.
 
 ## Wire
 

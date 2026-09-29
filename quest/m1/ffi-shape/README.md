@@ -19,13 +19,14 @@ Settled shape:
   origin, broadcast, track, group); `media` merges hang and moq-mux, since a
   binding never sees that split (catalog, import producers, container
   consumers); `json`, `flate`, `audio`, and `video` own their producers and
-  consumers. `flate` holds the opaque snapshot and stream tracks moq-ffi
-  publishes as `publish_flate_*` today, named after the `moq-flate` crate.
+  consumers. `flate` holds the opaque snapshot and stream tracks, named after
+  the `moq-flate` crate.
 - A layer's type is constructed from the handles its Rust constructor takes,
   not reached through an accessor on the broadcast: JSON wraps a track
   (`moq_json::snapshot::Producer::new(track, config)`), so it also works on a
   track accepted from a request; the codecs take the broadcast and its
-  catalog. Sketch, not a contract: `json.SnapshotProducer(track, config)`,
+  catalog. JSON and flate producers take the broadcast too, whose catalog
+  advertises the track, as `moq_mux::catalog::Producer::json_snapshot` does. Sketch, not a contract: `json.SnapshotProducer(track, config)`,
   `video.Encoder(broadcast, catalog, config)`.
 - UniFFI 0.32 allows one namespace per crate, so moq-ffi groups by type and
   the wrappers supply real namespaces in each language's idiom: Python
@@ -38,6 +39,8 @@ Settled shape:
   [generated C](/quest/m1/c/README.md) and [C++](/quest/m1/cpp/README.md)
   bindings inherit this shape from moq-ffi, so reshaping the hand-written C
   ABI would break C users twice.
+- `rs/moq-ffi/AGENTS.md` records the per-language namespace pattern `json`
+  set.
 
 Each child reshapes one group end to end: moq-ffi, all five wrappers, and the
 `doc/lib` samples, per the cross-package table. This README owns the
@@ -51,7 +54,6 @@ work no child does:
 
 ## Required
 
-- [JSON](/quest/m1/ffi-shape/json.md) - the pilot: json and flate become their own namespaces wrapping a track in every binding and set the per-language pattern
 - [Net](/quest/m1/ffi-shape/net.md) - client and server take config records, snapshots are records, and the verbs match moq-net
 - [Media](/quest/m1/ffi-shape/media.md) - catalog, import, and container consume move under `media`
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video encoders and decoders move under their own namespaces with one constructor shape
