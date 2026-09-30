@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Encode media/NAME.mp4 into a looping HLS stream under media/NAME/ and serve
-# it over HTTP on PORT, for testing HLS import.
+# Encode media/NAME.mp4 into a looping HLS stream (720p + 144p + audio)
+# under media/NAME/ and serve it over HTTP on PORT, for testing HLS import.
 #
 # Usage: sh/demo/serve-hls.sh NAME PORT, from demo/pub.
 set -euo pipefail
@@ -21,8 +21,8 @@ echo ">>> Master playlist: http://localhost:$port/master.m3u8"
 ffmpeg -loglevel warning -re -stream_loop -1 -i "$input" \
     -map 0:v:0 -map 0:v:0 -map 0:a:0 \
     -r 25 -preset veryfast -g 50 -keyint_min 50 -sc_threshold 0 \
-    -c:v:0 libx264 -profile:v:0 high -level:v:0 4.1 -pix_fmt:v:0 yuv420p -tag:v:0 avc1 -bsf:v:0 dump_extra -b:v:0 4M -vf:0 "scale=1920:-2" \
-    -c:v:1 libx264 -profile:v:1 high -level:v:1 4.1 -pix_fmt:v:1 yuv420p -tag:v:1 avc1 -bsf:v:1 dump_extra -b:v:1 300k -vf:1 "scale=256:-2" \
+    -c:v:0 libx264 -profile:v:0 high -level:v:0 4.1 -pix_fmt:v:0 yuv420p -tag:v:0 avc1 -bsf:v:0 dump_extra -b:v:0 4M -filter:v:0 "scale=-2:720" \
+    -c:v:1 libx264 -profile:v:1 high -level:v:1 4.1 -pix_fmt:v:1 yuv420p -tag:v:1 avc1 -bsf:v:1 dump_extra -b:v:1 300k -filter:v:1 "scale=-2:144" \
     -c:a aac -b:a 128k \
     -f hls \
     -hls_time 2 -hls_list_size 12 \
