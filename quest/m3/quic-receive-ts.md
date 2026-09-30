@@ -30,6 +30,10 @@ Both ends must be ours, so this is native-only and serves native peers or
 relay-to-relay sessions. Decided in the 2026-09-30 audit: parked in m3 with
 GCC until such a consumer exists.
 
+## Required
+
+- A native-to-native consumer of receive timestamps (browsers never see them)
+
 ## Related
 
 - [QUIC GCC](/quest/m3/quic-gcc.md) - the controller that consumes it

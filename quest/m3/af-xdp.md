@@ -22,3 +22,7 @@ closed until hardware changes.
 Decided in the 2026-09-30 audit: moved to m3. The relay packages don't ship
 io_uring yet, so a bypass that competes with it has no deployment to
 improve.
+
+## Required
+
+- [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - the io_uring path this is compared against ships first

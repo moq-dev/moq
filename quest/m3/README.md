@@ -8,9 +8,9 @@ Nothing here should start by opening an editor.
 
 ## Plan
 
-A quest lands here when its gate is the outside world, not its priority. Each
-states the condition in prose or as a plain-text `Required` bullet. When the
-condition clears, move the quest to the milestone its work belongs in. A
+A quest lands here when its gate is the outside world, not its priority. Its gate
+is a plain-text `Required` bullet, re-checked as the root
+[questline](/quest/README.md) describes. A
 speculative feature with no consumer parks here rather than in m2, and is
 deleted when it goes stale; git history keeps it.
 

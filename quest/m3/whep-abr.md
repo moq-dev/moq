@@ -17,3 +17,7 @@ the new rendition and splice at its next group, as the JS decoder does), and
 whether offering the renditions as WebRTC simulcast layers (RIDs) buys
 anything for a receive-only browser. Keep the best rendition
 (`hang::catalog::Video::ranked`) as the starting rendition.
+
+## Required
+
+- A WHEP viewer that needs rendition switching

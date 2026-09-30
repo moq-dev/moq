@@ -7,9 +7,8 @@ so it is not forgotten.
 
 ## Plan
 
-Each quest states its gate as a plain-text `Required` bullet. Re-check the
-gates periodically; when one clears, remove the bullet and promote the quest to
-the milestone its priority belongs in.
+Each quest states its gate as a plain-text `Required` bullet, re-checked as the
+root [questline](/quest/README.md) describes.
 
 ## Required
 

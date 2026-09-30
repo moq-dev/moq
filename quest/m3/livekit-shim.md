@@ -34,3 +34,7 @@ new rooms directly.
 - Mint tokens with `@moq/room`'s `claims(room, identity)`, which scopes the
   `publish` claim to the identity's subtree so participants cannot publish at
   each other's paths.
+
+## Required
+
+- A LiveKit user asks for a drop-in client

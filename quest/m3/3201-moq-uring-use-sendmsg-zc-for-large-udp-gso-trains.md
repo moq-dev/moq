@@ -39,6 +39,10 @@ Decided in the 2026-09-30 audit: moved to m3. The #3224 prototype was 6 to
 9% slower, the win needs a physical-NIC sweep nobody has run, and io_uring
 ships in no package.
 
+## Required
+
+- A physical-NIC remote peer to measure zero-copy sends against
+
 ## Closes
 
 - [#3201](https://github.com/moq-dev/moq/issues/3201) - close this issue when the quest finishes

@@ -16,6 +16,11 @@ offer. m4 waits on an upstream release. Priority is
 separate from branch targeting: published API and wire breaks still land on dev
 under the repository rules.
 
+A quest waiting on the outside world, in any milestone, states that condition
+as a plain-text `Required` bullet, so `quest ready` reports it blocked.
+`/quest-audit` re-checks those gates; when one clears, remove the bullet and
+move the quest to the milestone its priority belongs in.
+
 ## Required
 
 - [m0: immediate priorities](/quest/m0/README.md) - everything in flight now: relay hardening and IETF interop for Seattle, wildcard routing, and audio playout
