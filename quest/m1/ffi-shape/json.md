@@ -29,7 +29,7 @@ the root must not import it back.
 `flate` is the same shape over opaque bytes: moq-ffi's `binary.rs`
 (`publish_binary_snapshot`, `publish_binary_stream`, #4137) moves under it,
 mirroring `moq_flate::{snapshot, stream}` once
-[moq-binary folds into moq-flate](/quest/m1/flate-binary.md). If that fold has
+moq-binary's fold into moq-flate ([#4425](https://github.com/moq-dev/moq/pull/4425), on `dev`). If that fold has
 not landed, name the namespace `flate` anyway rather than `binary`.
 
 Public API: breaking in every binding. Wire: none.

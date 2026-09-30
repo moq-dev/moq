@@ -332,8 +332,9 @@ fn derive_from_codec_config(track: &moq_msf::Track, codec: &AudioCodec, init: by
 			if buf.has_remaining() {
 				return Err(Error::OpusTrailingBytes(track.name.clone()).into());
 			}
+			// Opus decodes at 48 kHz; the OpusHead rate is informational.
 			Ok(DerivedAudio {
-				sample_rate: cfg.sample_rate,
+				sample_rate: 48_000,
 				channel_count: cfg.channel_count,
 			})
 		}
@@ -654,7 +655,7 @@ mod test {
 
 		let catalog = from_msf::<()>(&msf).expect("Opus OpusHead should parse");
 		let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
-		assert_eq!(audio.sample_rate, 24_000);
+		assert_eq!(audio.sample_rate, 48_000, "OpusHead rate is informational");
 		assert_eq!(audio.channel_count, 6);
 	}
 

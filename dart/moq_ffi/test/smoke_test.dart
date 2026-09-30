@@ -28,6 +28,11 @@ void main() {
     );
   });
 
+  test('an exception prints the Rust error message', () {
+    expect(ClosedMoqException().toString(), 'closed');
+    expect(TransportMoqException('reset').toString(), 'transport: reset');
+  });
+
   test('raw track round trips a frame', () async {
     final broadcast = MoqBroadcastProducer();
     final track = broadcast.publishTrack(name: 'events', info: null);

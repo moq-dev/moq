@@ -348,21 +348,26 @@ impl Listener {
 	///
 	/// As in [`crate::tcp`], the `Option` has no `None` case left to report.
 	pub async fn accept(&self) -> Option<Result<(qmux::Session, PeerCred)>> {
+		Some(self.accept_pending().await.await)
+	}
+
+	/// Accept a socket and return its independently driven qmux handshake.
+	pub(crate) async fn accept_pending(&self) -> impl Future<Output = Result<(qmux::Session, PeerCred)>> + use<> {
 		let stream = self.accept_socket().await;
-		let cred = match stream.peer_cred() {
-			Ok(cred) => PeerCred {
+		let config = qmux::uds::Config::new(WIRE_VERSION).protocols(self.protocols.iter().map(String::as_str));
+		async move {
+			let cred = stream.peer_cred()?;
+			let cred = PeerCred {
 				uid: cred.uid(),
 				gid: cred.gid(),
 				pid: cred.pid(),
-			},
-			Err(err) => return Some(Err(err.into())),
-		};
-		let session = qmux::uds::Config::new(WIRE_VERSION)
-			.protocols(self.protocols.iter().map(String::as_str))
-			.accept(stream)
-			.await
-			.map_err(|err| Error::Accept(crate::error::message(err)));
-		Some(session.map(|session| (session, cred)))
+			};
+			let session = config
+				.accept(stream)
+				.await
+				.map_err(|err| Error::Accept(crate::error::message(err)))?;
+			Ok((session, cred))
+		}
 	}
 
 	/// The `accept(2)` half: keep asking until a connection comes back.

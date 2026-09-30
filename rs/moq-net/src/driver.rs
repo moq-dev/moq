@@ -77,6 +77,15 @@ impl<S: crate::transport::poll::Session> Protocol<S> {
 			Self::Ietf(driver) => waiter.poll_future(driver.as_mut()),
 		}
 	}
+
+	/// Whether the protocol owes the peer no queued data, so a draining close can
+	/// proceed. The IETF driver does not track this and closes at once.
+	fn drained(&self) -> bool {
+		match self {
+			Self::Lite(driver) => driver.drained(),
+			Self::Ietf(_) => true,
+		}
+	}
 }
 
 impl<S: crate::transport::poll::Session> State<S> {
@@ -87,13 +96,22 @@ impl<S: crate::transport::poll::Session> State<S> {
 			self.supervisor = None;
 		}
 
-		if self.result.is_none()
-			&& let Poll::Ready(result) = self.protocol.poll(waiter)
-		{
-			self.result = Some(result);
-			// The protocol's last act was closing the transport, which wakes the
-			// supervisor's close watch; poll it now instead of waiting a turn.
-			if let Some(supervisor) = &mut self.supervisor
+		if self.result.is_none() {
+			// The protocol's last act is closing the transport, and so is a drain
+			// once the protocol that just ran owes the peer nothing. Either wakes
+			// the supervisor's close watch; poll it now instead of waiting a turn.
+			let closed = match self.protocol.poll(waiter) {
+				Poll::Ready(result) => {
+					self.result = Some(result);
+					true
+				}
+				Poll::Pending => self
+					.supervisor
+					.as_mut()
+					.is_some_and(|supervisor| supervisor.poll_drain(self.protocol.drained(), waiter)),
+			};
+			if closed
+				&& let Some(supervisor) = &mut self.supervisor
 				&& supervisor.poll(waiter).is_ready()
 			{
 				self.supervisor = None;

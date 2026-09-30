@@ -408,6 +408,9 @@ This is the only loop defense moq-lite requires, and it catches loops of any len
 A conforming sender never sends one (see below), so a receiver MAY instead close the session with a protocol violation; discarding is what keeps a mesh working when one member does not conform.
 A Hop ID of 0 means unknown and never matches anything; withholding an ID trades loop detection for privacy.
 A receiver MAY assign an identity of its own to a peer that declared 0, as local selection state for filtering that session; it MUST NOT forward that identity as a Hop ID.
+A relay that records an announcement whose reconstructed path starts with 0 MUST insert a random non-zero Hop ID in front of it, picked once for the session it arrived on; an empty path becomes that stamp followed by 0.
+Nothing on the wire says whether an unnamed publisher that reconnects is the same one, so its reconnect reads downstream as a new first hop, while an ANNOUNCE_UPDATE on the same session keeps the stamp.
+The 0 behind the stamp keeps the path ranked below fully identified ones.
 
 A publisher MUST NOT advertise a path whose entries contain the Hop ID the subscriber declared in its SETUP (see [Hop Parameter](#hop-parameter)).
 The receiver can only discard it, and acting on it would form a loop, so sending one is never useful.
@@ -718,6 +721,8 @@ Setup Parameter {
 }
 ~~~
 
+The Message Length MUST NOT exceed 65,536 bytes; a receiver MUST treat a longer SETUP as a protocol violation and MAY reject it based on the length prefix alone.
+
 **Parameter Count**:
 The number of Setup Parameters that follow.
 
@@ -910,8 +915,8 @@ The responding publisher's own Hop ID is NOT included in the resolved list; it i
 When forwarding an announcement received from an upstream peer, a relay MUST append the upstream peer's ANNOUNCE_OK `Hop ID` to the resolved list, since that ID is no longer implicit downstream.
 The first entry of the reconstructed path identifies the endpoint that originated the route.
 A Hop ID value of 0 means the hop is unknown: either it was never assigned or a relay deliberately withholds it (see [Routing](#routing)).
-A received 0 is forwarded unchanged.
-When bridging an announcement from an upstream that sent no hop list, a relay writes 0 for that hop.
+A received 0 is forwarded unchanged, behind a stamp when it is the first entry (see [Routing](#routing)).
+When bridging an announcement from an upstream that sent no hop list, a relay writes its stamp followed by 0 for that hop.
 An identity a receiver assigned that upstream is local selection state and MUST NOT be forwarded as a Hop ID.
 
 A receiver MUST close the session with a PROTOCOL_VIOLATION if a non-zero Hop ID appears twice in the resolved list.
@@ -1340,6 +1345,8 @@ The `Message Length` describes the payload size on the wire.
 - Removed SUBSCRIBE_DROP and its type 0x2; a group without a Group Stream is not counted.
 - The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
+- Capped the SETUP Message Length at 65,536 bytes.
+- A relay puts a random Hop ID, picked per session, in front of an announcement whose reconstructed path starts with 0, and writes that stamp followed by 0 for an empty path.
 
 ## moq-lite-06
 

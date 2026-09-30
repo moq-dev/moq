@@ -7,7 +7,7 @@
 Exact path patterns for [Media over QUIC](https://moq.dev): grammar, matching, and set algebra.
 
 A pattern describes a set of broadcast paths. This crate provides a shared grammar
-for tokens, origin scopes, announce interests, and wildcard advertisements. Integrating
+for tokens, origin scopes, and announce interests. Integrating
 patterns into those consumers is separate work.
 Literal paths stay coordinates; `moq-net`'s `Path` and `@moq/net`'s path module keep
 construction, joins, and prefix operations.

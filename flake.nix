@@ -272,8 +272,8 @@
         # check` skips itself, which reads as a pass in CI.
         #
         # The tag pairs the generator's own version with the uniffi release it
-        # targets (v0.9.0+v0.32.0 -> uniffi 0.32), and it only understands
-        # metadata emitted by that uniffi, so it moves with the `uniffi`
+        # targets (v0.10.0-kixelated.1+v0.32.0 -> uniffi 0.32), and it only
+        # understands metadata emitted by that uniffi, so it moves with the `uniffi`
         # dependency in rs/moq-ffi/Cargo.toml. Five other places name the same
         # generator version and must be bumped together: the repo and revision
         # in release-go-ffi.yml, and the `cargo install` line in
@@ -284,20 +284,21 @@
         # uniffi 0.32 generator: the metadata encoding changed in 0.32 even
         # though the contract version did not, so v0.7.1+v0.31.0 fails to read a
         # 0.32-built cdylib at all. The fork carries the port, tracked upstream
-        # as NordSecurity/uniffi-bindgen-go#96. Move back to NordSecurity once
-        # they tag a 0.32 release.
+        # as NordSecurity/uniffi-bindgen-go#96, and renders an enum error's
+        # exported Display as its Error(). Move back to NordSecurity once they
+        # tag a 0.32 release carrying both.
         uniffi-bindgen-go = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-go";
-          version = "0.9.0+v0.32.0";
+          version = "0.10.0-kixelated.1+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-go";
             rev = "v${version}";
-            hash = "sha256-7Hli9SmLknZe5p7iGYsRNxmUL6ovKL2jhX62Z/79K4o=";
+            hash = "sha256-0DCIgHt4R5ndtLkeXw/KF500HidB13L2HeuS4eLvLHU=";
           };
 
-          cargoHash = "sha256-ecpo/Z9hc3oPt/pF9Y+EB6SZANR8TDOJR6f/xSzJ9Uw=";
+          cargoHash = "sha256-wD+5Ghd4WFFQWAY2PXedXVPG+oPGozG9HbOhXB0fWco=";
 
           # The tag is a virtual workspace whose other members are uniffi test
           # fixtures. Building from the root would compile all of them, and CI
@@ -323,13 +324,13 @@
         # `-kixelated.N` pre-release so they never collide with upstream's.
         uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-dart";
-          version = "0.3.1-kixelated.4+v0.32.0";
+          version = "0.3.1-kixelated.5+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-dart";
             rev = "v${version}";
-            hash = "sha256-BCIooajAp0Wqt7LeanFSdmS/GT0uYo+d8Qv2jGWCJD8=";
+            hash = "sha256-MobLv4aov+ySk3X8bd6Sr5MLiXxCprkoFqEFt5xOerw=";
           };
 
           # The upstream repository ignores Cargo.lock so cargo installs test

@@ -71,4 +71,3 @@ Regression tests, on a paused clock (`#[tokio::test(start_paused = true)]`):
 ## Related
 
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - tells a resumed latest group when the new copy dropped it
-- [Splice edge cases](/quest/m1/splice-edges.md) - the same splice code and test harness

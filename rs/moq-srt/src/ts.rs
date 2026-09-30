@@ -15,67 +15,143 @@ use moq_net::origin;
 
 use crate::Result;
 
-/// Publishes an MPEG-TS source into the origin as a single broadcast.
+/// Which programs of a multi-program MPEG-TS an ingest publishes.
+///
+/// Without one, an ingest whose PAT lists more than one program fails with
+/// [`ts::MultipleProgramsError`] rather than merging unrelated clocks onto one broadcast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Program {
+	/// Only the program with this PAT program number, on the ingest's path.
+	One(u16),
+	/// Every program the first PAT lists, each as its own broadcast under the ingest's path:
+	/// `live/cam0` publishes `live/cam0/1`, `live/cam0/2`, ... (`event.hang` publishes
+	/// `event/1.hang`, keeping the catalog suffix last).
+	All,
+}
+
+/// Publishes an MPEG-TS source into the origin: one broadcast, or one per program.
 ///
 /// Each chunk is handed straight to the TS importer, which consumes whole
 /// transport packets and retains any partial trailing packet internally for the
 /// next call (the same pattern `moq-cli import ... stdin ts` uses against stdin).
-/// Either [`Self::finish`] or dropping the publisher ends the broadcast and
-/// unannounces the path.
+/// Either [`Self::finish`] or dropping the publisher ends the broadcasts and
+/// unannounces their paths.
 pub struct Publisher {
-	// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
-	// verbatim, so the importer uses the `mpegts` catalog extension rather than the
-	// media-only `()`, which would route those PIDs to `Stream::Ignored` and drop them.
-	importer: ts::Import<ts::Ext>,
-	// A clone of the importer's producer, so an end can close the broadcast
-	// (prompt unannounce) even though the importer owns it.
-	broadcast: moq_net::broadcast::Producer,
+	importer: Importer,
+	// The importer's per-stream counters, logged as `moq import ts` logs them, under a
+	// span naming the path, since one server carries many ingests.
+	log: ts::stats::Log,
+	sampled: tokio::time::Instant,
+	span: tracing::Span,
+}
+
+enum Importer {
+	One {
+		// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
+		// verbatim, so the importer uses the `mpegts` catalog extension rather than the
+		// media-only `()`, which would route those PIDs to `Stream::Ignored` and drop them.
+		import: Box<ts::Import<ts::Ext>>,
+		// A clone of the importer's producer, so an end can close the broadcast
+		// (prompt unannounce) even though the importer owns it.
+		broadcast: moq_net::broadcast::Producer,
+	},
+	/// Each program's broadcast is created and announced once the first PAT names it.
+	All(Box<ts::Programs>),
 }
 
 impl Publisher {
-	/// Create the broadcast on `origin` at `path` and wire up the TS importer +
-	/// catalog.
+	/// Wire up the TS importer and catalog for `path` on `origin`, announcing the broadcast
+	/// now, or each program's once the PAT lists it for [`Program::All`].
 	///
 	/// `config` is the catalog the importer publishes into: retention
 	/// (`with_max_age`) and the connection allocator passthrough tracks claim on
 	/// (`with_bandwidth`).
-	pub fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> Result<Self> {
-		let mut broadcast = origin.publish(path, moq_net::origin::Route::default())?;
-		let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
-		let handle = broadcast.clone();
-		let importer = ts::Import::new(broadcast, catalog.reserve());
-		tracing::info!(%path, "publishing ingest broadcast");
+	pub fn new(
+		origin: &origin::Producer,
+		path: &str,
+		config: moq_mux::catalog::Config,
+		program: Option<Program>,
+	) -> Result<Self> {
+		let importer = match program {
+			Some(Program::All) => Importer::All(Box::new(ts::Programs::new(origin.clone(), path, config))),
+			Some(Program::One(_)) | None => {
+				let mut broadcast = origin.publish(path, moq_net::origin::Route::default())?;
+				let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
+				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
+				let mut import = ts::Import::new(broadcast.clone(), catalog.reserve());
+				if let Some(Program::One(program)) = program {
+					import = import.with_program(program);
+				}
+				Importer::One {
+					import: Box::new(import),
+					broadcast,
+				}
+			}
+		};
+		tracing::info!(%path, ?program, "publishing ingest broadcast");
 
 		Ok(Self {
 			importer,
-			broadcast: handle,
+			log: ts::stats::Log::default(),
+			sampled: tokio::time::Instant::now(),
+			span: tracing::info_span!("srt", %path),
 		})
 	}
 
 	/// Feed a chunk of MPEG-TS bytes (one SRT payload) into the importer.
 	///
 	/// `decode` drains `data` fully, buffering any partial trailing packet in
-	/// its own internal scratch, so there's nothing to retain here.
+	/// its own internal scratch, so there's nothing to retain here. Once every
+	/// [`ts::stats::Log::INTERVAL`] it also logs what moved in the importer's
+	/// per-stream counters.
 	pub fn feed(&mut self, data: Bytes) -> Result<()> {
-		Ok(self.importer.decode(&data).map_err(moq_mux::Error::from)?)
+		match &mut self.importer {
+			Importer::One { import, .. } => import.decode(&data),
+			Importer::All(programs) => programs.decode(&data),
+		}
+		.map_err(moq_mux::Error::from)?;
+		if self.sampled.elapsed() >= ts::stats::Log::INTERVAL {
+			self.sampled = tokio::time::Instant::now();
+			let _span = self.span.enter();
+			self.log.sample(self.stats());
+		}
+		Ok(())
+	}
+
+	fn stats(&self) -> ts::Stats {
+		match &self.importer {
+			Importer::One { import, .. } => import.stats(),
+			Importer::All(programs) => programs.stats(),
+		}
 	}
 
 	/// Flush any buffered media, close out the broadcast's open groups, and end
 	/// the broadcast so the origin unannounces it immediately.
 	pub fn finish(&mut self) -> Result<()> {
-		self.importer.finish().map_err(moq_mux::Error::from)?;
-		self.broadcast.close();
+		match &mut self.importer {
+			Importer::One { import, broadcast } => {
+				import.finish().map_err(moq_mux::Error::from)?;
+				broadcast.close();
+			}
+			Importer::All(programs) => programs.finish().map_err(moq_mux::Error::from)?,
+		}
+		// The drain at end of input can publish a frame nothing vouched for.
+		self.span.in_scope(|| self.log.finish(&self.stats()));
 		Ok(())
 	}
 
 	/// Abort the published tracks with `err` so subscribers see the real cause
 	/// (the SRT caller dropped, a demux error) rather than a generic `Error::Dropped`.
 	///
-	/// Consumes the publisher and closes the broadcast.
+	/// Consumes the publisher and closes the broadcasts.
 	pub fn abort(self, err: moq_net::Error) {
-		self.importer.abort(err);
-		self.broadcast.close();
+		match self.importer {
+			Importer::One { import, broadcast } => {
+				import.abort(err);
+				broadcast.close();
+			}
+			Importer::All(programs) => programs.abort(err),
+		}
 	}
 }
 
@@ -162,6 +238,94 @@ mod tests {
 	/// moq-mux's export tests replay.
 	const BBB5S: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/scte35/bbb5s.ts");
 
+	/// The PCR a packet's adaptation field carries, in 27 MHz ticks.
+	fn pcr(pkt: &[u8]) -> Option<u64> {
+		if pkt[3] & 0x20 == 0 || pkt[4] < 7 || pkt[5] & 0x10 == 0 {
+			return None;
+		}
+		let base = (u64::from(pkt[6]) << 25)
+			| (u64::from(pkt[7]) << 17)
+			| (u64::from(pkt[8]) << 9)
+			| (u64::from(pkt[9]) << 1)
+			| (u64::from(pkt[10]) >> 7);
+		Some(base * 300 + ((u64::from(pkt[10] & 0x01) << 8) | u64::from(pkt[11])))
+	}
+
+	/// Each packet of `ts` with the program clock it arrives at, counted from the first PCR.
+	fn timed(ts: &[u8]) -> impl Iterator<Item = (Duration, &[u8; 188])> {
+		let mut first = None;
+		let mut now = Duration::ZERO;
+		ts.as_chunks::<188>().0.iter().map(move |pkt| {
+			if let Some(pcr) = pcr(pkt) {
+				let first = *first.get_or_insert(pcr);
+				now = Duration::from_nanos((pcr - first) * 1_000 / 27);
+			}
+			(now, pkt)
+		})
+	}
+
+	/// `ts` with the PES on `pid` suppressed from its first PES start at or after `from` to
+	/// its first at or after `to`, as an encoder whose one input died behind a running mux
+	/// emits it: the PCR kept in adaptation-only packets, everything else null stuffing, and
+	/// the counters after the gap renumbered so continuity stays legal. The stimulus the
+	/// moq-mux TS import tests check is legal.
+	fn suppress(ts: &[u8], pid: u16, from: Duration, to: Duration) -> Vec<u8> {
+		let mut null = [0xff; 188];
+		null[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+
+		let mut out = Vec::with_capacity(ts.len());
+		let (mut active, mut done) = (false, false);
+		let (mut last_cc, mut dropped) = (0, 0u8);
+		for (now, pkt) in timed(ts) {
+			let mut pkt = *pkt;
+			if (u16::from(pkt[1] & 0x1f) << 8) | u16::from(pkt[2]) == pid {
+				if pkt[1] & 0x40 != 0 {
+					if !active && !done && now >= from {
+						active = true;
+					} else if active && now >= to {
+						(active, done) = (false, true);
+					}
+				}
+				let payload = pkt[3] & 0x10 != 0;
+				if active {
+					dropped = (dropped + u8::from(payload)) & 0x0f;
+					pkt = match pcr(&pkt) {
+						Some(_) => {
+							let mut clock = [0xff; 188];
+							clock[..6].copy_from_slice(&[0x47, pkt[1] & 0x1f, pkt[2], 0x20 | last_cc, 183, 0x10]);
+							clock[6..12].copy_from_slice(&pkt[6..12]);
+							clock
+						}
+						None => null,
+					};
+				} else {
+					pkt[3] = (pkt[3] & 0xf0) | (pkt[3].wrapping_sub(dropped) & 0x0f);
+					if payload {
+						last_cc = pkt[3] & 0x0f;
+					}
+				}
+			}
+			out.extend_from_slice(&pkt);
+		}
+		assert!(done, "the fixture must resume the PID before it ends");
+		out
+	}
+
+	/// Publish `ts` on `path` one SRT payload (7 packets) at a time, each delivered when the
+	/// program clock says it is due.
+	async fn ingest(origin: &moq_net::origin::Producer, path: &str, ts: &[u8]) {
+		let mut publisher = Publisher::new(origin, path, Default::default(), None).unwrap();
+		let mut clock = Duration::ZERO;
+		for payload in timed(ts).collect::<Vec<_>>().chunks(7) {
+			let (due, _) = payload[0];
+			tokio::time::advance(due.saturating_sub(clock)).await;
+			clock = clock.max(due);
+			let bytes: Vec<u8> = payload.iter().flat_map(|(_, pkt)| pkt.iter().copied()).collect();
+			publisher.feed(bytes.into()).unwrap();
+		}
+		publisher.finish().unwrap();
+	}
+
 	/// One payload-only TS packet carrying a complete PSI section (PUSI + pointer_field
 	/// 0), padded to 188 with stuffing.
 	fn psi_packet(pid: u16, section: &[u8]) -> Vec<u8> {
@@ -189,21 +353,99 @@ mod tests {
 		section
 	}
 
-	/// A PAT with one program (number 1) whose PMT lives on `pmt_pid`.
-	fn pat(pmt_pid: u16) -> Vec<u8> {
-		let mut s = vec![0x00, 0xb0, 0x0d, 0x00, 0x01, 0xc1, 0x00, 0x00];
-		s.extend_from_slice(&[0x00, 0x01]);
-		s.extend_from_slice(&[0xe0 | (pmt_pid >> 8) as u8, pmt_pid as u8]);
+	/// A PAT listing each `(program_number, pmt_pid)`.
+	fn pat(programs: &[(u16, u16)]) -> Vec<u8> {
+		let len = 9 + 4 * programs.len();
+		let mut s = vec![0x00, 0xb0, len as u8, 0x00, 0x01, 0xc1, 0x00, 0x00];
+		for &(program, pmt_pid) in programs {
+			s.extend_from_slice(&program.to_be_bytes());
+			s.extend_from_slice(&[0xe0 | (pmt_pid >> 8) as u8, pmt_pid as u8]);
+		}
 		seal(s)
 	}
 
-	/// A PMT for program 1 declaring a single H.264 elementary stream on `es_pid`.
-	fn pmt(es_pid: u16) -> Vec<u8> {
-		let mut s = vec![0x02, 0xb0, 0x12, 0x00, 0x01, 0xc1, 0x00, 0x00];
+	/// A PMT for `program` declaring a single elementary stream of `stream_type` on `es_pid`.
+	fn pmt(program: u16, stream_type: u8, es_pid: u16) -> Vec<u8> {
+		let mut s = vec![0x02, 0xb0, 0x12];
+		s.extend_from_slice(&program.to_be_bytes());
+		s.extend_from_slice(&[0xc1, 0x00, 0x00]);
 		s.extend_from_slice(&[0xe0 | (es_pid >> 8) as u8, es_pid as u8]);
 		s.extend_from_slice(&[0xf0, 0x00]);
-		s.extend_from_slice(&[0x1b, 0xe0 | (es_pid >> 8) as u8, es_pid as u8, 0xf0, 0x00]);
+		s.extend_from_slice(&[stream_type, 0xe0 | (es_pid >> 8) as u8, es_pid as u8, 0xf0, 0x00]);
 		seal(s)
+	}
+
+	/// The PSI of a two-program multiplex, each program carrying one private PES stream
+	/// (carried verbatim, so the catalog lists it without waiting on media): program 1's on
+	/// PID 0x101, program 2's on 0x201.
+	fn two_programs() -> Bytes {
+		let mut ts = psi_packet(0x0000, &pat(&[(1, 0x0100), (2, 0x0200)]));
+		ts.extend_from_slice(&psi_packet(0x0100, &pmt(1, 0x06, 0x0101)));
+		ts.extend_from_slice(&psi_packet(0x0200, &pmt(2, 0x06, 0x0201)));
+		ts.into()
+	}
+
+	/// The PAT program number and the stream PIDs the catalog at `path` records, once it is
+	/// announced.
+	async fn program(origin: &moq_net::origin::Producer, path: &str) -> (u16, Vec<u16>) {
+		let consumer = origin.consume();
+		timeout(Duration::from_secs(5), consumer.routed(path))
+			.await
+			.expect("announce timed out")
+			.expect("the broadcast is announced");
+		let broadcast = consumer.request_broadcast(path).await.unwrap();
+		let mut catalog = moq_mux::catalog::Consumer::<ts::Ext>::new(&broadcast, CatalogFormat::Hang)
+			.await
+			.unwrap();
+		let snapshot = timeout(Duration::from_secs(5), catalog.next())
+			.await
+			.expect("catalog timed out")
+			.unwrap()
+			.expect("a catalog");
+		let program = snapshot.ext.mpegts.program.as_ref().expect("the PAT identity");
+		let pids = snapshot.ext.mpegts.tracks.values().map(|track| track.pid).collect();
+		(program.program_number, pids)
+	}
+
+	/// Without a selection, a multiplex is refused rather than merged onto one broadcast.
+	#[tokio::test(start_paused = true)]
+	async fn publisher_refuses_a_multiplex() {
+		let origin = produce_origin();
+		let mut publisher = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
+		let err = publisher.feed(two_programs()).unwrap_err();
+		let crate::Error::Mux(moq_mux::Error::Other(inner)) = &err else {
+			panic!("a demux error: {err}");
+		};
+		assert_eq!(
+			inner.downcast_ref::<ts::MultipleProgramsError>(),
+			Some(&ts::MultipleProgramsError { programs: vec![1, 2] })
+		);
+	}
+
+	/// `Program::One` publishes the chosen program alone on the ingest's path.
+	#[tokio::test(start_paused = true)]
+	async fn publisher_imports_one_program() {
+		let origin = produce_origin();
+		let mut publisher = Publisher::new(&origin, "ingest", Default::default(), Some(Program::One(2))).unwrap();
+		publisher.feed(two_programs()).unwrap();
+		assert_eq!(program(&origin, "ingest").await, (2, vec![0x0201]));
+	}
+
+	/// `Program::All` publishes each program as its own broadcast under the ingest's path.
+	#[tokio::test(start_paused = true)]
+	async fn publisher_imports_every_program() {
+		let origin = produce_origin();
+		let mut publisher = Publisher::new(&origin, "ingest", Default::default(), Some(Program::All)).unwrap();
+		publisher.feed(two_programs()).unwrap();
+		assert_eq!(program(&origin, "ingest/1").await, (1, vec![0x0101]));
+		assert_eq!(program(&origin, "ingest/2").await, (2, vec![0x0201]));
+		assert!(
+			timeout(Duration::from_secs(1), origin.consume().routed("ingest"))
+				.await
+				.is_err(),
+			"nothing is published on the bare path"
+		);
+		publisher.finish().unwrap();
 	}
 
 	/// The retention the caller configured has to reach the media tracks the TS importer
@@ -215,11 +457,12 @@ mod tests {
 			&origin,
 			"live/cam0",
 			moq_mux::catalog::Config::default().with_max_age(Duration::from_secs(3)),
+			None,
 		)
 		.unwrap();
 
-		let mut ts = psi_packet(0x0000, &pat(0x0100));
-		ts.extend_from_slice(&psi_packet(0x0100, &pmt(0x0101)));
+		let mut ts = psi_packet(0x0000, &pat(&[(1, 0x0100)]));
+		ts.extend_from_slice(&psi_packet(0x0100, &pmt(1, 0x1b, 0x0101)));
 		publisher.feed(Bytes::from(ts)).unwrap();
 
 		let consumer = origin.consume();
@@ -229,11 +472,45 @@ mod tests {
 		assert_eq!(info.max_age, Duration::from_secs(3));
 	}
 
+	/// A video PID that goes silent behind a running mux is logged against its ingest path,
+	/// and neither the same feed intact nor the audio that kept delivering is.
+	#[tokio::test(start_paused = true)]
+	#[tracing_test::traced_test]
+	async fn publisher_reports_a_silent_pid() {
+		const VIDEO: u16 = 0x100;
+		let origin = produce_origin();
+		ingest(&origin, "intact", BBB5S).await;
+		let stimulus = suppress(BBB5S, VIDEO, Duration::from_millis(1500), Duration::from_millis(3500));
+		ingest(&origin, "silent", &stimulus).await;
+
+		logs_assert(|lines: &[&str]| {
+			let stopped: Vec<_> = lines
+				.iter()
+				.filter(|line| line.contains("stopped delivering access units"))
+				.collect();
+			let reported = |path: &str, pid: u16| {
+				stopped
+					.iter()
+					.any(|line| line.contains(&format!("path={path}")) && line.contains(&format!("pid={pid} ")))
+			};
+			if !reported("silent", VIDEO) {
+				return Err(format!("the silent video PID was not reported: {stopped:?}"));
+			}
+			if reported("intact", VIDEO) {
+				return Err(format!("the intact feed's video was reported: {stopped:?}"));
+			}
+			if reported("silent", 0x101) || reported("intact", 0x101) {
+				return Err(format!("the audio kept delivering: {stopped:?}"));
+			}
+			Ok(())
+		});
+	}
+
 	/// SRT is a contribution protocol, so SCTE-35 cues survive ingest and egress.
 	#[tokio::test(start_paused = true)]
 	async fn publisher_preserves_scte35_cues() {
 		let origin = produce_origin();
-		let mut publisher = Publisher::new(&origin, "ingest", Default::default()).unwrap();
+		let mut publisher = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
 
 		let consumer = origin.consume();
 		timeout(Duration::from_secs(5), consumer.routed("ingest"))

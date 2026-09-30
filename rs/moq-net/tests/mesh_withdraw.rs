@@ -9,8 +9,10 @@ mod support;
 
 use std::{collections::HashMap, time::Duration};
 
+use tokio::sync::mpsc;
+
 use moq_net::{Hop, Version, announce, broadcast, origin};
-use support::harness::{MockConnectOptions, MockPair, connect_mock};
+use support::harness::{MockPair, peer};
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
@@ -18,33 +20,38 @@ fn produce_origin(hop: u64) -> origin::Producer {
 	producer
 }
 
-/// Peer two relays the way `moq-relay`'s cluster does: one session, both directions.
-async fn peer(version: Version, a: &origin::Producer, b: &origin::Producer) -> MockPair {
-	let a = a.clone().peer();
-	let b = b.clone().peer();
-	let mut options = MockConnectOptions::new(version);
-	options.client_publish = Some(a.consume().with_hidden(true));
-	options.client_subscribe = Some(a);
-	options.server_publish = Some(b.consume().with_hidden(true));
-	options.server_subscribe = Some(b);
-	connect_mock(options).await
-}
-
-/// Every update per prefix until the cursor goes quiet. Time is paused, so the
+/// Every update per prefix until the watcher goes quiet. Time is paused, so the
 /// timeout fires only once every task is idle.
-async fn drain(announced: &mut announce::Consumer) -> HashMap<String, Vec<announce::Kind>> {
+async fn drain(
+	watched: &mut mpsc::UnboundedReceiver<(String, announce::Kind)>,
+) -> HashMap<String, Vec<announce::Kind>> {
 	let mut updates = HashMap::<String, Vec<announce::Kind>>::new();
-	while let Ok(Some(update)) = tokio::time::timeout(Duration::from_secs(1), announced.next()).await {
-		updates.entry(update.prefix.to_string()).or_default().push(update.kind);
+	while let Ok(Some((prefix, kind))) = tokio::time::timeout(Duration::from_secs(1), watched.recv()).await {
+		updates.entry(prefix).or_default().push(kind);
 	}
 	updates
+}
+
+/// Watch `announced` from its own task, the way a session's announce writer does:
+/// it runs when woken, between the relays' own tasks, rather than only once the
+/// test task is polled again, which would coalesce every intermediate update.
+fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, announce::Kind)> {
+	let (tx, rx) = mpsc::unbounded_channel();
+	tokio::spawn(async move {
+		while let Some(update) = announced.next().await {
+			if tx.send((update.prefix.to_string(), update.kind)).is_err() {
+				break;
+			}
+		}
+	});
+	rx
 }
 
 /// `n` relays meshed over `edges`, watched from the last one.
 struct Mesh {
 	nodes: Vec<origin::Producer>,
 	_pairs: Vec<MockPair>,
-	announced: announce::Consumer,
+	watched: mpsc::UnboundedReceiver<(String, announce::Kind)>,
 }
 
 impl Mesh {
@@ -55,11 +62,11 @@ impl Mesh {
 		for &(a, b) in edges {
 			pairs.push(peer(version, &nodes[a], &nodes[b]).await);
 		}
-		let announced = nodes.last().unwrap().consume().announced();
+		let watched = watch(nodes.last().unwrap().consume().announced());
 		Self {
 			nodes,
 			_pairs: pairs,
-			announced,
+			watched,
 		}
 	}
 
@@ -76,7 +83,7 @@ impl Mesh {
 				broadcast
 			})
 			.collect();
-		let updates = drain(&mut self.announced).await;
+		let updates = drain(&mut self.watched).await;
 		assert_eq!(updates.len(), count);
 		for (prefix, kinds) in updates {
 			assert_eq!(kinds[0], announce::Kind::Announced, "{prefix}: {kinds:?}");
@@ -112,7 +119,7 @@ async fn full_mesh_withdraw_retracts_once(version: &str) {
 	let mut mesh = Mesh::new(version, 8, &full_mesh(8)).await;
 	let broadcasts = mesh.publish(100, 0).await;
 	drop(broadcasts);
-	let updates = drain(&mut mesh.announced).await;
+	let updates = drain(&mut mesh.watched).await;
 	assert_eq!(updates.len(), 100);
 	for (prefix, kinds) in updates {
 		assert_eq!(kinds, [announce::Kind::Retracted], "{prefix}");
@@ -130,7 +137,7 @@ async fn partial_mesh_withdraw_then_republish() {
 	let mut mesh = Mesh::new("moq-lite-06", 12, &ring_with_chords(12)).await;
 	let broadcasts = mesh.publish(100, 0).await;
 	drop(broadcasts);
-	let updates = drain(&mut mesh.announced).await;
+	let updates = drain(&mut mesh.watched).await;
 	assert_eq!(updates.len(), 100);
 	for (prefix, kinds) in updates {
 		assert!(!kinds.last().unwrap().is_active(), "{prefix}: {kinds:?}");

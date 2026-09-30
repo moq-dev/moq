@@ -7,48 +7,6 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
 
 import { toHang } from "./msf";
 
-/**
- * The name of the first rendition whose `broadcast` reference walks above the root, if any.
- *
- * The root is the consumer's authorized subtree, so such a reference names content this
- * consumer cannot reach. It rejects the whole catalog rather than the one rendition: a
- * publisher that emits one has a bug, and quietly serving the rest hides that while the
- * missing rendition resurfaces later as a track that never fills.
- */
-function broadcastRefs(
-	section: Record<string, { broadcast?: Path.Relative }> | undefined,
-): [string, Path.Relative | undefined][] {
-	return Object.entries(section ?? {}).map(([name, config]) => [name, config.broadcast]);
-}
-
-function findEscaping(base: Moq.Path.Valid, catalog: Catalog.Root): string | undefined {
-	// Every section carrying a `broadcast` reference must be listed here, including data
-	// tracks. One left out silently exempts its tracks from the containment check.
-	const refs = [
-		...broadcastRefs(catalog.video?.renditions),
-		...broadcastRefs(catalog.audio?.renditions),
-		...broadcastRefs(catalog.text?.renditions),
-		...broadcastRefs(catalog.json?.tracks),
-		...broadcastRefs(catalog.binary?.tracks),
-	];
-
-	for (const [name, rel] of refs) {
-		if (rel && Path.tryResolve(base, rel) === undefined) return name;
-	}
-
-	return undefined;
-}
-
-/** Throw if any rendition's `broadcast` reference escapes the root. */
-function assertResolvable(base: Moq.Path.Valid, catalog: Catalog.Root): Catalog.Root {
-	Catalog.checkRenditions(catalog);
-	const escaping = findEscaping(base, catalog);
-	if (escaping !== undefined) {
-		throw new Error(`rendition ${JSON.stringify(escaping)}: broadcast reference escapes the root ${base}`);
-	}
-	return catalog;
-}
-
 type ReferencedRendition = {
 	broadcast?: Path.Relative;
 };
@@ -63,7 +21,7 @@ function filterRenditions<T extends ReferencedRendition>(
 	return Object.fromEntries(Object.entries(renditions).filter(([, config]) => usable(config.broadcast)));
 }
 
-// Every section carrying a `broadcast` reference must be listed here, same as `findEscaping`;
+// Every section carrying a `broadcast` reference must be listed here, same as `Catalog.checkResolvable`;
 // one left out silently exempts its tracks from the reachability filter.
 function filterCatalog(catalog: Catalog.Root, usable: (rel: Path.Relative | undefined) => boolean): Catalog.Root {
 	return {
@@ -294,7 +252,7 @@ export class Broadcast {
 			const catalog = effect.get(this.in.catalog);
 			let accepted: Catalog.Root | undefined;
 			try {
-				accepted = catalog && assertResolvable(name, catalog);
+				accepted = catalog && Catalog.checkResolvable(Catalog.checkRenditions(catalog), name);
 			} catch (err) {
 				console.error("rejecting catalog", name, err);
 			}
@@ -340,7 +298,7 @@ export class Broadcast {
 
 					console.debug("received catalog", format, this.in.name.peek(), update);
 
-					this.#raw.set(assertResolvable(name, update), true);
+					this.#raw.set(Catalog.checkResolvable(Catalog.checkRenditions(update), name), true);
 					this.#out.status.set("live");
 				}
 			} catch (err) {

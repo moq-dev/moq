@@ -23,7 +23,7 @@ use super::{Config, Mode, Rate, Stream};
 use crate::frame::{I420, Surface};
 use crate::{Error, Size};
 
-/// List V4L2 capture nodes using paths that [`open_device`] accepts.
+/// List V4L2 capture nodes that [`open`] can negotiate, by the paths [`open_device`] accepts.
 pub(super) fn cameras() -> Result<Vec<super::Camera>, Error> {
 	let mut nodes = moq_v4l::context::enum_devices();
 	nodes.sort_by_key(moq_v4l::context::Node::index);
@@ -51,12 +51,57 @@ pub(super) fn cameras() -> Result<Vec<super::Camera>, Error> {
 			{
 				return None;
 			}
+			// A device with no YUYV or MJPEG would list an id `open` refuses, and
+			// hide the PipeWire entry for the same path that could still open it.
+			match convertible(&device) {
+				Ok(true) => {}
+				Ok(false) => {
+					tracing::debug!(device = %path, "V4L2 node offers no YUYV or MJPEG");
+					return None;
+				}
+				Err(err) => {
+					tracing::debug!(device = %path, error = %err, "could not list V4L2 formats");
+					return None;
+				}
+			}
 
 			let name = node.name().filter(|name| !name.is_empty()).unwrap_or(capabilities.card);
 			Some(super::Camera { id: path, name })
 		})
 		.collect();
 	Ok(cameras)
+}
+
+/// Whether the device offers a capture format [`Source`] converts.
+fn convertible(device: &Device) -> Result<bool, Error> {
+	convertible_with(|index| {
+		// All fields are integers or byte arrays; reserved fields must be zero.
+		let mut entry: moq_v4l::sys::v4l2_fmtdesc = unsafe { std::mem::zeroed() };
+		entry.index = index;
+		entry.type_ = BufType::VideoCapture as u32;
+		// The request matches the initialized argument's type and size.
+		let result = unsafe {
+			moq_v4l::v4l2::ioctl(
+				device.handle().fd(),
+				moq_v4l::v4l2::vidioc::VIDIOC_ENUM_FMT,
+				&mut entry as *mut _ as *mut std::ffi::c_void,
+			)
+		};
+		Ok(enumeration(result)?.map(|()| FourCC::from(entry.pixelformat)))
+	})
+}
+
+// Read one entry at a time, like `frame_sizes`: moq-v4l's `enum_formats` treats
+// every error as end-of-list.
+fn convertible_with(mut format: impl FnMut(u32) -> Result<Option<FourCC>, Error>) -> Result<bool, Error> {
+	for index in 0..=u32::MAX {
+		match format(index)? {
+			Some(fourcc) if Source::from_fourcc(fourcc).is_some() => return Ok(true),
+			Some(_) => {}
+			None => return Ok(false),
+		}
+	}
+	Err(Error::Codec(anyhow::anyhow!("V4L2 format index overflow")))
 }
 
 /// List the modes a V4L2 camera reports, for the formats this backend converts.
@@ -719,6 +764,19 @@ mod tests {
 	fn no_usable_reply_is_none() {
 		let replies = [reply(0, 720, Source::Yuyv), reply(1279, 719, Source::Mjpeg)];
 		assert!(closest(replies, request(1280, 720)).is_none());
+	}
+
+	#[test]
+	fn only_devices_offering_a_converted_format_are_cameras() {
+		let formats = |list: &'static [&'static [u8; 4]]| {
+			move |index: u32| Ok(list.get(index as usize).map(|fourcc| FourCC::new(fourcc)))
+		};
+		assert!(!convertible_with(formats(&[])).unwrap());
+		assert!(!convertible_with(formats(&[b"NV12", b"RGB3"])).unwrap());
+		assert!(convertible_with(formats(&[b"NV12", b"MJPG"])).unwrap());
+		assert!(convertible_with(formats(&[b"YUYV"])).unwrap());
+		let failed = convertible_with(|_| Err(Error::SourceUnavailable("ENUM_FMT".into())));
+		assert!(failed.is_err());
 	}
 
 	/// Every format we advertise round-trips through its fourcc, which is what

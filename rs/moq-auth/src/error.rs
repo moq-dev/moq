@@ -178,8 +178,12 @@ from_message! {
 }
 
 #[cfg(feature = "client")]
-from_message! {
-	reqwest::Error => Unavailable,
+impl From<reqwest::Error> for Error {
+	fn from(err: reqwest::Error) -> Self {
+		// reqwest prints the full URL in its error, and a dialed URL can carry
+		// credentials in its query or userinfo.
+		Self::Unavailable(message(err.without_url()))
+	}
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

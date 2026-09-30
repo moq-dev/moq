@@ -110,8 +110,11 @@ impl Decoder {
 
 	/// Decode one packet into interleaved `f32` PCM and report its codec activity.
 	///
-	/// Empty Opus packets invoke packet-loss concealment. Loss during DTX remains
-	/// classified as DTX, while loss during active audio remains active.
+	/// An empty Opus packet marks one lost packet and conceals as much audio as the
+	/// last packet that decoded held, so a lost 20 ms packet yields 20 ms. It is
+	/// refused with [`Error::Decode`] before any packet has decoded, since there is
+	/// no length to conceal. Loss during DTX remains classified as DTX, while loss
+	/// during active audio remains active.
 	pub fn decode(&mut self, packet: &[u8]) -> Result<Decoded, Error> {
 		let mut decoded = self.backend.decode(packet)?;
 		let channels = self.backend.layout().channels() as usize;
@@ -258,6 +261,29 @@ pub(crate) mod tests {
 			assert_eq!(decoder.decode(&packets[0]).unwrap().samples.len(), 960 - 312);
 			assert_eq!(decoder.decode(&packets[1]).unwrap().samples.len(), 960);
 		}
+	}
+
+	/// One lost packet conceals one packet's worth of audio, not the 120 ms
+	/// libopus would fill given the whole buffer.
+	#[test]
+	fn opus_conceals_the_length_of_the_last_packet() {
+		let packets = opus_packets(3);
+		let mut decoder = Decoder::new(
+			&opus_catalog(moq_mux::codec::opus::Config::new(48_000, 1)),
+			&Config::default(),
+		)
+		.unwrap();
+
+		// Nothing decoded yet, so there is no length to conceal.
+		assert!(matches!(decoder.decode(&[]), Err(Error::Decode(_))));
+
+		for packet in &packets {
+			decoder.decode(packet).unwrap();
+		}
+		assert_eq!(decoder.decode(&[]).unwrap().samples.len(), 960);
+
+		// Concealment doesn't change the length: the next loss is the same size.
+		assert_eq!(decoder.decode(&[]).unwrap().samples.len(), 960);
 	}
 
 	#[test]

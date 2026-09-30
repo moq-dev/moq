@@ -74,6 +74,10 @@ let mut broadcast = origin.publish("my-stream.hang", Default::default())?;
 // each requested path for the application to accept or reject.
 ```
 
+Before exiting, `session.close().await` delivers what was already queued, such as
+the tracks you just finished, within one second. Then `Client::close` (on a clone of
+the client) sends the QUIC close before the runtime stops.
+
 The examples run the session and the origin work concurrently (`tokio::select!` or
 `spawn`), since the announcement loop is live. Runnable examples:
 [`rs/hang/examples/video.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs)

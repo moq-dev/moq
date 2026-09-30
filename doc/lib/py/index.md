@@ -106,7 +106,7 @@ and a producer's `demand()`, a `TrackDemand` whose
 `used()`/`unused()` let capture idle when nobody is subscribed. `request.set_publish`/`set_consume` raise if the request is already
 answered, cancelled, or currently accepting. `session.bandwidth()` divides the connection's send estimate;
 pass it to `encode_video` / `encode_audio` or `reserve` a share for an
-app-owned track. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors. `moq.protocol_error(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one. Catch `moq.Error.Busy` when a setter races an in-flight connect, listen, or accept.
+app-owned track. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors. `moq.protocol_error(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one. `str(err)` is the Rust error message. Catch `moq.Error.Busy` when a setter races an in-flight connect, listen, or accept.
 Each server request reports a `moq.Transport` enum, including QUIC, Iroh,
 WebSocket, TCP, and Unix sockets.
 

@@ -91,8 +91,8 @@ connection's send estimate; pass it to `encodeVideo` / `encodeAudio` or
 `reserve` a share for an app-owned track. `MoqException.isAuth` and
 `isShutdown` classify errors. Microsecond fields read back as a
 `kotlin.time.Duration`: `stats.rtt`, `backoff.initial`, `frame.timestamp`. `protocolError` is the structured protocol failure
-(scope, verbatim code, kind) when the peer sent one. Cancelling the collecting coroutine cancels the
-native side.
+(scope, verbatim code, kind) when the peer sent one. An exception's `toString()` is the Rust error message.
+Cancelling the collecting coroutine cancels the native side.
 
 `encodeAudio` encodes raw PCM inside the binding. Its codec is an object,
 `AudioCodec.opus()` or `AudioCodec.aac()`, and

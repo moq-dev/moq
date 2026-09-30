@@ -30,6 +30,9 @@ pub(super) struct Libopus {
 	streams: u8,
 	pre_skip: usize,
 	max_frame_size: usize,
+	/// Frames per channel in the last packet that decoded, which is what a lost
+	/// packet most likely carried. `None` until one has.
+	last_frame_size: Option<usize>,
 	in_dtx: bool,
 }
 
@@ -96,6 +99,7 @@ impl Libopus {
 			streams: streams as u8,
 			pre_skip: head.pre_skip as usize,
 			max_frame_size: (opus::DECODE_RATE as usize * MAX_FRAME_MS) / 1000,
+			last_frame_size: None,
 			in_dtx: false,
 		};
 
@@ -143,11 +147,22 @@ fn vorbis(channels: u32) -> Result<(Layout, Option<&'static [usize]>), Error> {
 }
 
 impl Backend for Libopus {
-	/// Empty packets invoke packet-loss concealment. Loss during DTX remains
-	/// classified as DTX, while loss during active audio remains active.
+	/// An empty packet conceals as much audio as the last packet that decoded
+	/// held, and is refused before any has. Loss during DTX remains classified
+	/// as DTX, while loss during active audio remains active.
 	fn decode(&mut self, packet: &[u8]) -> Result<Decoded, Error> {
 		let channels = self.layout.channels() as usize;
-		let mut out = vec![0.0f32; self.max_frame_size * channels];
+		// libopus conceals exactly `frame_size` samples for a lost packet, and
+		// the decoder can't know how long it was, so assume the last one's length.
+		// A real packet decodes into the most it can hold.
+		let frame_size = if packet.is_empty() {
+			self.last_frame_size.ok_or_else(|| {
+				Error::Decode("opus packet lost before any packet decoded, so no length to conceal".into())
+			})?
+		} else {
+			self.max_frame_size
+		};
+		let mut out = vec![0.0f32; frame_size * channels];
 		// SAFETY: `inner` owns a live OpusMSDecoder; packet/out slices are bounded by
 		// the lengths we pass.
 		let samples = unsafe {
@@ -156,12 +171,15 @@ impl Backend for Libopus {
 				packet.as_ptr(),
 				packet.len() as i32,
 				out.as_mut_ptr(),
-				self.max_frame_size as i32,
+				frame_size as i32,
 				0,
 			)
 		};
 		if samples < 0 {
 			return Err(opus::decode_error(samples));
+		}
+		if !packet.is_empty() {
+			self.last_frame_size = Some(samples as usize);
 		}
 		out.truncate(samples as usize * channels);
 

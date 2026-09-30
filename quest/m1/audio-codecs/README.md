@@ -43,10 +43,9 @@ Platform backends and the small refusal fixes found along the way are
 standalone quests (split out on 2026-09-30), so the line does not wait on a
 macOS host or on `dev`.
 
-Remaining work: merge main in, port
-[#4442](https://github.com/moq-dev/moq/pull/4442)'s one-frame Opus
-concealment from `decode/decoder.rs` into `decode/backend/libopus.rs`, taking
-the concealed duration from the multistream packet, and get CI green.
+Remaining work: keep main merged in and get CI green. The one-frame Opus
+concealment from [#4442](https://github.com/moq-dev/moq/pull/4442) lives in
+`decode/backend/libopus.rs` on this line.
 
 ## Related
 
