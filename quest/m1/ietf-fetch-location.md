@@ -20,7 +20,3 @@ Update the draft-20 note in `doc/concept/standard.md`.
 ## Required
 
 - [Legal IETF input](/quest/m0/ietf-legal-input.md) - decodes the draft-20 FETCH this serves
-
-## Related
-
-- [Moxygen compatibility](/quest/m1/moxygen/README.md) - served whole-group FETCH on drafts 14 to 19

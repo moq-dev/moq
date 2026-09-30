@@ -51,6 +51,5 @@ range apart from one dropped for any other reason.
 
 ## Related
 
-- [Moxygen compatibility](/quest/m1/moxygen/README.md) - says it carries one datagram per group live; this keeps them out of FETCH
 - [JS IETF datagrams](/quest/m1/js-ietf-datagram.md) - JS datagram send and receive over moq-transport
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - datagram groups stay best effort there too

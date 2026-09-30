@@ -26,5 +26,4 @@ demand.
 
 ## Related
 
-- [Moxygen compatibility](/quest/m1/moxygen/README.md) - the line whose FETCH cases this steadies
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - the browser publisher answers these fetches
