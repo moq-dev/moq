@@ -289,8 +289,10 @@ mod test {
 
 	#[test]
 	fn plain_frames_obey_the_budget_before_parsing() {
-		let mut config = ConsumerConfig::default();
-		config.max_size = Some(2);
+		let config = ConsumerConfig {
+			max_size: Some(2),
+			..Default::default()
+		};
 		let mut decoder = Decoder::<Value>::new(config);
 		assert!(matches!(decoder.snapshot(b"not json"), Err(Error::TooLarge(2))));
 		decoder.snapshot(b"{}").unwrap();
