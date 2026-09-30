@@ -25,5 +25,5 @@ state, so Warm has no job.
   JS mirror, and delete what computes Warm from cache state.
 - The moq-transport cluster extension already carries one cost.
 
-Public API: `Cost` changes shape (a break, so the line's `dev`). Wire: the
+Public API: `Cost` changes shape (a break, so it lands on `dev`). Wire: the
 wip version drops a field; lite-06 is unchanged.

@@ -3,7 +3,8 @@
 ## Goal
 
 A broadcast under overlapping announcements routes to one origin chosen
-deterministically, and every relay forwards toward that origin by topology.
+deterministically, and an edge spreads paths over its region's cores so
+every edge sends a given path the same way.
 Origins that announce the same epoch-qualified concrete path are one source,
 so a subscriber moves between them at a group boundary when the incumbent
 ends or becomes unreachable.
@@ -26,45 +27,34 @@ Decided:
   announce the same epoch-qualified path and must not pool. This extends
   Wildcard's resume rule to concrete same-epoch origins.
 
-Candidate mechanics:
+Candidate mechanics (re-scoped to path vector by the 2026-09-30 tiers
+decision; there is no topology to forward by):
 
-- A relay picks the origin with the lowest shortest-path distance plus origin
-  cost, ties broken by rendezvous hashing (HRW) of the requested path and the
-  origin id, and forwards along its shortest path. That is a shortest path to
-  a virtual node linked to every origin, so it is loop-free whenever relays
-  agree on the topology.
-- The first relay's choice rides the SUBSCRIBE and FETCH, and transit relays
-  forward toward that origin by topology alone, never re-selecting.
-  Re-selection against another existence view loops: a relay that lost a
-  specific claim falls back to a broader one through a relay still routing to
-  the specific one
-  ([RFC 8966 section 3.5.4](https://www.rfc-editor.org/rfc/rfc8966#section-3.5.4)).
-  A refusal follows Wildcard's refusal rule: every refusal is terminal, and an
-  origin sheds load by withdrawing or re-pricing its route instead.
-- SUBSCRIBE and FETCH carry a visited-relay list end to end. It catches loops
-  while liveness views disagree and names the path for stats. The serving
-  origin's identity rides the Origin field of the reply, per Wildcard's resume
-  rule.
+- Route selection stays `route_order` over the routes a relay holds: longest
+  prefix, then cost, then a rendezvous hash (HRW) of the requested path and
+  the route's origin. At an edge that spreads paths over the region's cores
+  and makes every edge pick the same core for a path; failover moves only the
+  paths the lost core won.
+- A refusal follows Wildcard's refusal rule: every refusal is terminal, and
+  an origin sheds load by withdrawing or re-pricing its route instead.
+- The serving origin's identity rides the Origin field of the reply, per
+  Wildcard's resume rule.
 
 Open:
 
-- Whether equal-cost next hops should spread by a hash of the path. A fixed
-  tie-break sends every path through the same neighbour, and its failure
-  takes them all.
 - How a relay tells claim output from a redundant pair. One candidate: a
   concrete path an origin announces under its own claim keeps per-origin
   identity, since a redundant publisher claims nothing.
 
-Wire: SUBSCRIBE and FETCH fields in the current wip lite version, with the
-draft updated in the same PR. Tests cover an HRW split across an equal-cost
+Wire: none expected; if one is needed it goes in the current wip lite
+version with the draft. Tests cover an HRW split across an equal-cost
 pool, refusal and reselection, a same-epoch pair failing over mid-track
 with no timestamp rewind, and a concrete double claim whose loser's
 subscribers end and resubscribe rather than splice.
 
 ## Required
 
-- [Topology](/quest/m1/cluster-routing/topology.md) - distance to each origin
-- [Propagation](/quest/m1/cluster-routing/propagation.md) - the record shape that names each origin
+- [Edge and core](/quest/m1/cluster-routing/roles.md) - the edges and cores this spreads over
 - [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity this builds on
 
 ## Related

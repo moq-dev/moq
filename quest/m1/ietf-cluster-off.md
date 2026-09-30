@@ -36,5 +36,5 @@ negotiating an optional extension.
 
 ## Related
 
-- [Topology](/quest/m1/cluster-routing/topology.md) - cluster links are lite-only there too
+- [Edge and core](/quest/m1/cluster-routing/roles.md) - cluster links are lite-only
 - [Wildcard](/quest/m0/wildcard/README.md) - the pool spread that makes a Hop ID label unsafe to splice on
