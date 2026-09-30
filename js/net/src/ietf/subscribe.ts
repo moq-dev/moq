@@ -38,6 +38,12 @@ export class Subscribe {
 	/** Whether the subscriber wants Track Properties on the response (INCLUDE_PROPERTIES). */
 	propertiesWanted: boolean;
 
+	/** Whether Objects are forwarded (FORWARD). We only serve forwarding subscriptions. */
+	forward: boolean;
+
+	/** Whether the request carried a Range Filter, which we refuse. Never encoded. */
+	rangeFilters: boolean;
+
 	constructor({
 		requestId,
 		trackNamespace,
@@ -46,6 +52,8 @@ export class Subscribe {
 		filter,
 		fill,
 		propertiesWanted,
+		forward,
+		rangeFilters,
 	}: {
 		requestId: bigint;
 		trackNamespace: Path.Valid;
@@ -54,6 +62,8 @@ export class Subscribe {
 		filter?: Filter.Filter;
 		fill?: Filter.Fill;
 		propertiesWanted?: boolean;
+		forward?: boolean;
+		rangeFilters?: boolean;
 	}) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
@@ -62,6 +72,8 @@ export class Subscribe {
 		this.filter = filter ?? { kind: "unfiltered" };
 		this.fill = fill;
 		this.propertiesWanted = propertiesWanted ?? true;
+		this.forward = forward ?? true;
+		this.rangeFilters = rangeFilters ?? false;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -75,7 +87,7 @@ export class Subscribe {
 		if (version === Version.DRAFT_14) {
 			await w.u8(this.subscriberPriority);
 			await w.u8(GROUP_ORDER);
-			await w.bool(true); // forward = true
+			await w.bool(this.forward);
 			await w.write(Filter.encode(this.filter, version));
 			await w.u53(0); // no parameters
 		} else {
@@ -83,7 +95,7 @@ export class Subscribe {
 			const params = new Parameters();
 			params.subscriberPriority = this.subscriberPriority;
 			params.groupOrder = GROUP_ORDER;
-			params.forward = true;
+			params.forward = this.forward;
 			params.subscriptionFilter = Filter.encode(this.filter, version);
 
 			// FILL_PARAMETERS and INCLUDE_PROPERTIES arrived in draft-20. An older peer reads
@@ -131,15 +143,11 @@ export class Subscribe {
 			}
 
 			const forward = await r.bool();
-			if (!forward) {
-				throw new Error(`unsupported forward value: ${forward}`);
-			}
-
 			const filter = await Filter.decodeInline(r);
 
 			await Parameters.decode(r, version); // ignore parameters
 
-			return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority, filter });
+			return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority, filter, forward });
 		}
 		// v15+: fields are in parameters
 		const params = await Parameters.decode(r, version);
@@ -152,17 +160,16 @@ export class Subscribe {
 			groupOrder = GROUP_ORDER; // default to descending
 		}
 
-		const forward = params.forward ?? true;
-		if (!forward) {
-			throw new Error(`unsupported forward value: ${forward}`);
-		}
-
-		// FILL_PARAMETERS and INCLUDE_PROPERTIES are draft-20 additions. An unknown message
-		// parameter is a protocol violation, so they stay rejected on the drafts that predate
-		// them rather than being quietly tolerated.
+		// FILL_PARAMETERS and INCLUDE_PROPERTIES are draft-20 additions, and the Range
+		// Filters draft-19 ones. An unknown message parameter is a protocol violation, so
+		// they stay rejected on the drafts that predate them rather than being quietly
+		// tolerated.
 		const draft20 = Filter.isDraft20(version);
 		if ((params.fillParameters !== undefined || params.includeProperties !== undefined) && !draft20) {
 			throw new Error("FILL_PARAMETERS and INCLUDE_PROPERTIES need draft-20");
+		}
+		if (params.rangeFilters && !Filter.hasRangeFilters(version)) {
+			throw new Error("Range Filters need draft-19");
 		}
 
 		// An absent LOCATION_FILTER means the subscription is unfiltered.
@@ -180,6 +187,8 @@ export class Subscribe {
 			fill,
 			// Defaults to 1, so an absent parameter means the subscriber wants them.
 			propertiesWanted: params.includeProperties ?? true,
+			forward: params.forward ?? true,
+			rangeFilters: params.rangeFilters,
 		});
 	}
 }

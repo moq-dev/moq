@@ -53,8 +53,8 @@ mod tests {
 	use super::*;
 	use crate::coding::Encode;
 	use crate::ietf::{
-		Fetch, FetchType, Fill, Filter, GroupFlags, GroupHeader, GroupOrder, Location, Message, Properties, Publish,
-		RequestId, Subscribe, SubscribeOk,
+		EndLocation, Fetch, FetchType, Fill, Filter, GroupFlags, GroupHeader, GroupOrder, Location, Message,
+		Properties, Publish, RequestId, Subscribe, SubscribeOk,
 	};
 	use crate::{Path, Timescale};
 
@@ -94,6 +94,8 @@ mod tests {
 				range_filters: false,
 			}),
 			properties_wanted: false,
+			forward: true,
+			range_filters: false,
 		};
 
 		let subscribe_ok = SubscribeOk {
@@ -118,12 +120,18 @@ mod tests {
 			request_id: RequestId(3),
 			subscriber_priority: 64,
 			group_order: GroupOrder::Ascending,
-			fetch_type: FetchType::Standalone {
+			fetch_type: FetchType::Filtered {
 				namespace: Path::new("broadcast"),
 				track: "video".into(),
-				start: Location { group: 1, object: 0 },
-				end: Location { group: 2, object: 0 },
+				filter: Filter::Absolute {
+					start: Location { group: 1, object: 0 },
+					end: Some(EndLocation {
+						group: 2,
+						object: Some(0),
+					}),
+				},
 			},
+			range_filters: false,
 		};
 
 		let group = GroupHeader {

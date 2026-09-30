@@ -194,6 +194,10 @@ export class SetupOptions {
 
 // Varint parameter IDs (even)
 const MSG_PARAM_DELIVERY_TIMEOUT = 0x02n;
+/// FILL_TIMEOUT, on a FETCH. Ignored: a refusal doesn't wait.
+const MSG_PARAM_FILL_TIMEOUT = 0x0an;
+/// NEW_GROUP_REQUEST. Ignored, as the draft lets a publisher without dynamic groups do.
+const MSG_PARAM_NEW_GROUP_REQUEST = 0x32n;
 /// SUBGROUP_DELIVERY_TIMEOUT, alongside the per-object one above.
 const MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT = 0x06n;
 const MSG_PARAM_MAX_CACHE_DURATION = 0x04n;
@@ -202,21 +206,29 @@ const MSG_PARAM_PUBLISHER_PRIORITY = 0x0en;
 const MSG_PARAM_FORWARD = 0x10n;
 const MSG_PARAM_SUBSCRIBER_PRIORITY = 0x20n;
 const MSG_PARAM_GROUP_ORDER = 0x22n;
+/// INCLUDE_PROPERTIES, draft-20's opt-out from Track Properties.
+const MSG_PARAM_INCLUDE_PROPERTIES = 0x35n;
 /// ROUTE_COST, from the MoQ Cluster extension. See `cluster.ts`.
 const MSG_PARAM_ROUTE_COST = 0x40b58n;
 /// HIDDEN, from the MoQ Hidden extension. See `hidden.ts`.
 const MSG_PARAM_HIDDEN = 0x40b5en;
 
 // Bytes parameter IDs (odd)
+/// AUTHORIZATION TOKEN. Ignored: the session's grant is what authorizes a request.
+const MSG_PARAM_AUTHORIZATION_TOKEN = 0x03n;
 const MSG_PARAM_LARGEST_OBJECT = 0x09n;
 const MSG_PARAM_SUBSCRIPTION_FILTER = 0x21n;
 /// FILL_PARAMETERS, draft-20's request for a backfill.
 const MSG_PARAM_FILL_PARAMETERS = 0x23n;
-/// INCLUDE_PROPERTIES, draft-20's opt-out from Track Properties. Its own section calls the
-/// value a uint8, but 0x35 is odd, so the Key-Value-Pair rule length prefixes it.
-const MSG_PARAM_INCLUDE_PROPERTIES = 0x35n;
 /// HOP_PATH, from the MoQ Cluster extension. See `cluster.ts`.
 const MSG_PARAM_HOP_PATH = 0x40b57n;
+
+/// The Range Filters (draft-19): SUBGROUP, OBJECTID, PRIORITY, OBJECT_PROPERTY and
+/// TRACK_PROPERTY. Each is length prefixed whatever the parity of its id.
+const MSG_PARAM_RANGE_FILTERS: readonly bigint[] = [0x25n, 0x26n, 0x27n, 0x28n, 0x29n];
+
+/// The parameters whose definitions let them repeat within one message.
+const MSG_PARAM_REPEATABLE: readonly bigint[] = [MSG_PARAM_AUTHORIZATION_TOKEN, ...MSG_PARAM_RANGE_FILTERS];
 
 type MessageParamKind = "varint" | "uint8" | "bool" | "location" | "bytes";
 /** A `{Group, Object}` pair carried by a message parameter, such as LARGEST_OBJECT. */
@@ -225,6 +237,8 @@ export type MessageLocation = { groupId: bigint; objectId: bigint };
 function getMessageParamKind(id: bigint): MessageParamKind {
 	switch (id) {
 		case MSG_PARAM_DELIVERY_TIMEOUT:
+		case MSG_PARAM_FILL_TIMEOUT:
+		case MSG_PARAM_NEW_GROUP_REQUEST:
 		case MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT:
 		case MSG_PARAM_MAX_CACHE_DURATION:
 		case MSG_PARAM_EXPIRES:
@@ -234,17 +248,19 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_PUBLISHER_PRIORITY:
 		case MSG_PARAM_SUBSCRIBER_PRIORITY:
 		case MSG_PARAM_GROUP_ORDER:
+		case MSG_PARAM_INCLUDE_PROPERTIES:
 			return "uint8";
 		case MSG_PARAM_FORWARD:
 			return "bool";
 		case MSG_PARAM_LARGEST_OBJECT:
 			return "location";
+		case MSG_PARAM_AUTHORIZATION_TOKEN:
 		case MSG_PARAM_SUBSCRIPTION_FILTER:
 		case MSG_PARAM_FILL_PARAMETERS:
-		case MSG_PARAM_INCLUDE_PROPERTIES:
 		case MSG_PARAM_HOP_PATH:
 			return "bytes";
 		default:
+			if (MSG_PARAM_RANGE_FILTERS.includes(id)) return "bytes";
 			throw new Error(`unknown message parameter id: ${id.toString()}`);
 	}
 }
@@ -277,11 +293,28 @@ export class Parameters {
 	vars: Map<bigint, bigint>;
 	bytes: Map<bigint, Uint8Array>;
 	#locations: Map<bigint, MessageLocation>;
+	/** Every instance of a parameter that may repeat, decoded only; we never send one. */
+	#repeated: Map<bigint, Uint8Array[]>;
 
 	constructor() {
 		this.vars = new Map();
 		this.bytes = new Map();
 		this.#locations = new Map();
+		this.#repeated = new Map();
+	}
+
+	#repeat(id: bigint, value: Uint8Array) {
+		const values = this.#repeated.get(id) ?? [];
+		values.push(value);
+		this.#repeated.set(id, values);
+	}
+
+	/**
+	 * Whether the message carried a Range Filter. We advertise no MAX_FILTER_RANGES, so a
+	 * request with one is refused rather than served unfiltered.
+	 */
+	get rangeFilters(): boolean {
+		return MSG_PARAM_RANGE_FILTERS.some((id) => this.#repeated.has(id));
 	}
 
 	// --- Numeric accessors ---
@@ -395,17 +428,15 @@ export class Parameters {
 
 	/** INCLUDE_PROPERTIES: whether the peer wants Track Properties on the response. */
 	get includeProperties(): boolean | undefined {
-		const data = this.bytes.get(MSG_PARAM_INCLUDE_PROPERTIES);
-		if (!data) return undefined;
+		const v = this.vars.get(MSG_PARAM_INCLUDE_PROPERTIES);
+		if (v === undefined) return undefined;
 		// The draft allows exactly 0 or 1; anything else is a protocol violation.
-		if (data.length !== 1 || data[0] > 1) {
-			throw new Error(`invalid INCLUDE_PROPERTIES value: ${data.join(",")}`);
-		}
-		return data[0] === 1;
+		if (v > 1n) throw new Error(`invalid INCLUDE_PROPERTIES value: ${v}`);
+		return v === 1n;
 	}
 
 	set includeProperties(v: boolean) {
-		this.bytes.set(MSG_PARAM_INCLUDE_PROPERTIES, new Uint8Array([v ? 1 : 0]));
+		this.vars.set(MSG_PARAM_INCLUDE_PROPERTIES, v ? 1n : 0n);
 	}
 
 	/** HOP_PATH: the hop chain an advertisement traversed, as its raw parameter value. */
@@ -552,7 +583,9 @@ export class Parameters {
 				} else {
 					const size = await r.u53();
 					const bytes = await r.read(size);
-					if (id === MSG_PARAM_LARGEST_OBJECT) {
+					if (MSG_PARAM_REPEATABLE.includes(id)) {
+						params.#repeat(id, bytes);
+					} else if (id === MSG_PARAM_LARGEST_OBJECT) {
 						if (params.#locations.has(id)) {
 							throw new Error(`duplicate message parameter id: ${id.toString()}`);
 						}
@@ -564,6 +597,12 @@ export class Parameters {
 						params.bytes.set(id, bytes);
 					}
 				}
+				continue;
+			}
+
+			if (MSG_PARAM_REPEATABLE.includes(id)) {
+				const size = await r.u53();
+				params.#repeat(id, await r.read(size));
 				continue;
 			}
 

@@ -41,7 +41,6 @@ Published API or wire breaks still land on dev; each quest's Plan says so.
 
 ## Required
 
-- [Legal IETF input](/quest/m0/ietf-legal-input.md) - draft-20+ FETCH, allowed parameters, INCLUDE_PROPERTIES and FORWARD=0 decode and are refused per request, not session-fatal
 - [IETF FIN semantics](/quest/m0/ietf-fin-not-cancel.md) - a request stream FIN stops updates without cancelling, and REQUEST_UPDATE on a subscribe is parsed
 - [Subgroup refusal](/quest/m0/ietf-subgroup-refusal.md) - a non-zero moq-transport subgroup costs that one stream, never the session
 - [IETF stream types](/quest/m0/ietf-uni-stream-types.md) - padding streams are discarded stream-only and an unknown uni type closes the session, per draft-21

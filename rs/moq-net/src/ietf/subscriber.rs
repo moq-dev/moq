@@ -1953,6 +1953,8 @@ where
 				filter: join.filter,
 				fill: join.fill,
 				properties_wanted: true,
+				forward: true,
+				range_filters: false,
 			})
 			.await?;
 		Ok(())
@@ -2021,6 +2023,7 @@ where
 					),
 					group_order: GroupOrder::Ascending,
 					fetch_type,
+					range_filters: false,
 				})
 				.await?;
 			Ok::<(), Error>(())

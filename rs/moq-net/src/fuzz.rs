@@ -693,18 +693,29 @@ pub fn seeds() -> Vec<Seed> {
 	// FETCH is the one arm the sweep above cannot reach: its body ends in a parameter
 	// count, and a uniform fill never lands a zero there. Build it from the encoder
 	// instead, which also means a field change breaks the build rather than the seed.
+	// Draft-20 dropped the joining forms, so each draft gets whichever layout it has.
 	for (index, version) in IETF_VERSIONS.iter().enumerate() {
-		let fetch = ietf::Fetch {
-			request_id: ietf::RequestId(0),
-			subscriber_priority: 128,
-			group_order: ietf::GroupOrder::Ascending,
-			fetch_type: ietf::FetchType::AbsoluteJoining {
+		let fetch_types = [
+			ietf::FetchType::AbsoluteJoining {
 				subscriber_request_id: ietf::RequestId(0),
 				group_id: 0,
 			},
-		};
-
-		let Ok(encoded) = fetch.encode_bytes(*version) else {
+			ietf::FetchType::Filtered {
+				namespace: crate::Path::new("a"),
+				track: "b".into(),
+				filter: ietf::Filter::Relative(1),
+			},
+		];
+		let Some(encoded) = fetch_types.into_iter().find_map(|fetch_type| {
+			let fetch = ietf::Fetch {
+				request_id: ietf::RequestId(0),
+				subscriber_priority: 128,
+				group_order: ietf::GroupOrder::Ascending,
+				fetch_type,
+				range_filters: false,
+			};
+			fetch.encode_bytes(*version).ok()
+		}) else {
 			continue;
 		};
 

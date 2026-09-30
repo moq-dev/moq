@@ -12,7 +12,8 @@ subscriber sees.
 
 Standalone FETCH and a non-zero joining FETCH are refused today with
 "not supported". Those forms exist only before draft-20; on draft-20+ the
-range comes from LOCATION_FILTER. Walk `track::Consumer::fetch_group`, one group, then the
+range comes from LOCATION_FILTER, which decodes to `FetchType::Filtered` and
+is refused today. A FETCH carrying Range Filters stays refused. Walk `track::Consumer::fetch_group`, one group, then the
 next. Do not add an archive.
 
 A joining FETCH is the same walk for the groups it names. A form the walk
@@ -20,10 +21,6 @@ cannot express is still an explicit refusal, not a hang.
 
 The moxygen FETCH cases that ask for whole groups are the check. The rest of
 that suite is not.
-
-## Required
-
-- [Legal IETF input](/quest/m0/ietf-legal-input.md) - decodes the draft-20+ FETCH layout this serves
 
 ## Related
 
