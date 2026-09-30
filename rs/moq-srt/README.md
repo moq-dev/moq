@@ -68,6 +68,11 @@ Each connection's broadcast path and direction come from its SRT stream id:
 a path wins; a second publish of the same path is rejected. Requests don't claim
 a path, so any number of players can pull the same broadcast.
 
+A multi-program feed is refused unless `Config::program` picks one program
+(`Program::One(n)`) or every program (`Program::All`), which publishes each on
+its own broadcast under the path: `live/cam0/1`, `live/cam0/2`, and so on. To
+choose per connection, drive `Server` and call `Publish::with_program`.
+
 ## Auth
 
 `run` is unauthenticated: anyone who can reach the UDP port can publish or

@@ -1000,7 +1000,8 @@ impl<E: catalog::Catalog> Import<E> {
 /// A PAT listed more than one program, and the [`Import`] was not told which one to take.
 ///
 /// Importing them all onto one broadcast would put unrelated clocks on one timeline, so the
-/// import stops instead. Pick one with [`Import::with_program`].
+/// import stops instead. Pick one with [`Import::with_program`], or import each as its own
+/// broadcast with [`Programs`](super::Programs).
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("transport stream carries {} programs ({})", .programs.len(), list_programs(.programs))]
 pub struct MultipleProgramsError {
@@ -1010,36 +1011,6 @@ pub struct MultipleProgramsError {
 
 fn list_programs(programs: &[u16]) -> String {
 	programs.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
-}
-
-/// The program numbers listed by the first whole PAT in `data`, in PAT order, or `None` if
-/// there is none yet.
-///
-/// For choosing importers before any exists: each [`Import`] reads the PAT itself.
-pub fn programs(data: &[u8]) -> Option<Vec<u16>> {
-	let mut off = 0;
-	while let Some(rel) = memchr::memchr(0x47, &data[off..]) {
-		off += rel;
-		let packet = data.get(off..off + TsPacket::SIZE)?;
-		// PID 0 opening a section. The section CRC rejects a sync byte found in payload.
-		if packet[1] & 0x5f == 0x40
-			&& packet[2] == 0
-			&& let Ok(Some(TsPacket {
-				payload: Some(TsPayload::Pat(pat)),
-				..
-			})) = TsPacketReader::new(packet).read_ts_packet()
-		{
-			return Some(
-				pat.table
-					.iter()
-					.map(|entry| entry.program_num)
-					.filter(|&program| program != 0)
-					.collect(),
-			);
-		}
-		off += 1;
-	}
-	None
 }
 
 /// What each demuxed elementary stream delivered, and the audio frame sync it lost or could
@@ -3097,7 +3068,7 @@ impl Read for Feed {
 }
 
 #[cfg(test)]
-mod test {
+pub(super) mod test {
 	use std::collections::BTreeMap;
 	use std::time::Duration;
 
@@ -5424,7 +5395,7 @@ mod test {
 
 	/// A two-program multiplex whose clocks sit an hour apart: program 1's MP2 on
 	/// `0x0061` starts at 1 s, program 2's on `0x0071` at 3601 s.
-	fn two_programs() -> Vec<u8> {
+	pub(in crate::container::ts) fn two_programs() -> Vec<u8> {
 		let mut data = synth_programs(
 			&[
 				(1, 0x0100, &[(StreamType::Mpeg1Audio, 0x0061)]),
@@ -5502,17 +5473,6 @@ mod test {
 
 		let err = import.decode(&two_programs()).unwrap_err().to_string();
 		assert!(err.contains("no program 3") && err.contains("1, 2"), "{err}");
-	}
-
-	#[test]
-	fn programs_reads_the_first_whole_pat() {
-		let data = two_programs();
-		assert_eq!(super::programs(&data), Some(vec![1, 2]));
-		// A sync byte in leading junk is skipped; a truncated PAT is not a PAT yet.
-		let mut shifted = vec![0x47, 0x40, 0x00, 0x10];
-		shifted.extend_from_slice(&data);
-		assert_eq!(super::programs(&shifted), Some(vec![1, 2]));
-		assert_eq!(super::programs(&data[..100]), None);
 	}
 
 	/// Two MP2 renditions, the first of which the PMT designates as the PCR PID.

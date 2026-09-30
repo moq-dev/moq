@@ -747,7 +747,7 @@ pub enum ImportSource {
 	/// RTMP: pull a remote play (`--connect`) or accept incoming publishes (`--listen`).
 	Rtmp(crate::rtmp::Args),
 	/// SRT: pull a remote stream (`--connect`) or accept incoming publishes (`--listen`).
-	Srt(crate::srt::Args),
+	Srt(crate::srt::ImportArgs),
 	/// WebRTC: WHEP client pulling a remote (`--connect`) or WHIP server accepting publishes (`--listen`).
 	Rtc(crate::rtc::Args),
 	/// Capture a local source (camera, display, window, app, microphone) and
@@ -782,7 +782,7 @@ pub struct TsImport {
 	pub program: Option<TsProgram>,
 }
 
-/// An `import ts --program` value.
+/// An `import ts --program` or `import srt --program` value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TsProgram {
 	/// The program with this PAT program number.
@@ -1056,6 +1056,25 @@ mod tests {
 		assert_eq!(program("all"), Some(Some(TsProgram::All)));
 		assert_eq!(program("0"), None, "0 is the network PID");
 		assert_eq!(program("two"), None);
+	}
+
+	/// `import srt` takes the same `--program` as `import ts`; `export srt` has no program to pick.
+	#[test]
+	fn import_srt_takes_a_program() {
+		let cli =
+			Invocation::try_parse_from(["moq", "import", "srt", "--listen", "[::]:9000", "--program", "all"]).unwrap();
+		let Command::Import(import) = &cli.stages[0] else {
+			panic!("an import stage");
+		};
+		let ImportSource::Srt(args) = &import.source else {
+			panic!("an import srt stage");
+		};
+		assert_eq!(args.program(), Some(moq_srt::Program::All));
+		assert!(args.endpoint.listen.is_some());
+
+		assert!(
+			Invocation::try_parse_from(["moq", "export", "srt", "--listen", "[::]:9000", "--program", "2"]).is_err()
+		);
 	}
 
 	/// A released spelling is refused, and the error names what to write instead.

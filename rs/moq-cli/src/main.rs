@@ -661,11 +661,13 @@ fn spawn_import(
 				}
 			}
 			ImportSource::Srt(srt) => {
+				let program = srt.program();
+				let srt = srt.endpoint;
 				if let Some(addr) = srt.listen {
 					let name = require_broadcast(name, "import srt --listen")?;
-					tasks.spawn(srt::listen_import(target(name), addr, srt.latency.into_std()));
+					tasks.spawn(srt::listen_import(target(name), addr, srt.latency.into_std(), program));
 				} else if let Some(url) = srt.connect {
-					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std()));
+					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std(), program));
 				}
 			}
 			ImportSource::Rtc(rtc) => {
