@@ -412,8 +412,8 @@ where
 		};
 
 		match &res {
-			Err(Error::Transport(_)) => {
-				tracing::info!("session terminated");
+			Err(err @ Error::Transport(_)) => {
+				tracing::info!(%err, "session terminated");
 				session.close(SessionError::Internal.to_code(), "");
 			}
 			Err(err) => {
@@ -644,6 +644,12 @@ where
 		// the peer wrote to. Failing the loop here would tear down the whole session
 		// over a single stream the peer had already given up on. Only death is
 		// tolerated: bytes that arrive and do not parse stay session-fatal.
+		//
+		// A transport error counts as death too. A reset whose code the transport cannot
+		// place in the stream registry surfaces as one: over raw QUIC a moq-transport
+		// peer resets with its own codes (moxygen's CANCELLED is 0x1), which the
+		// WebTransport code mapping rejects. If the connection itself died, the next
+		// accept reports it.
 		let kind: u64 = match tasks
 			.drive(|waiter| {
 				let mut cx = std::task::Context::from_waker(waiter.waker());
@@ -652,7 +658,13 @@ where
 			.await
 		{
 			Ok(kind) => kind,
-			Err(err @ (Error::Cancel | Error::Stream(_) | Error::Remote(_) | Error::Decode(DecodeError::Short))) => {
+			Err(
+				err @ (Error::Cancel
+				| Error::Stream(_)
+				| Error::Remote(_)
+				| Error::Transport(_)
+				| Error::Decode(DecodeError::Short)),
+			) => {
 				tracing::debug!(%err, "dropping uni stream that died before its type");
 				continue;
 			}
@@ -805,7 +817,13 @@ where
 		// header that does not parse included, still fails the session.
 		let (id, data) = match header {
 			Ok(header) => header,
-			Err(err @ (Error::Cancel | Error::Stream(_) | Error::Remote(_) | Error::Decode(DecodeError::Short))) => {
+			Err(
+				err @ (Error::Cancel
+				| Error::Stream(_)
+				| Error::Remote(_)
+				| Error::Transport(_)
+				| Error::Decode(DecodeError::Short)),
+			) => {
 				tracing::debug!(%err, "dropping bidi stream that died before its header");
 				continue;
 			}
@@ -1244,10 +1262,23 @@ mod tests {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::bis(1)).await;
 	}
 
+	/// moxygen resets a subgroup stream it opened but never wrote with its own CANCELLED
+	/// (0x1). Over raw QUIC our transport reads that code through the WebTransport space
+	/// and cannot map it, which used to end the session.
+	#[tokio::test]
+	async fn a_uni_stream_reset_with_an_unmapped_code_does_not_end_the_session() {
+		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::unis(1).unmapped()).await;
+	}
+
+	#[tokio::test]
+	async fn a_bidi_stream_reset_with_an_unmapped_code_does_not_end_the_session() {
+		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::bis(1).unmapped()).await;
+	}
+
 	/// The bytes a publisher writes at the head of a group's unidirectional stream. Built
 	/// with the crate's own encoder so the framing can't drift from the decoder the
 	/// dispatch loop runs.
-	async fn subgroup_header(version: Version, track_alias: u64) -> Vec<u8> {
+	async fn subgroup_header(version: Version, track_alias: u64, sub_group_id: u64) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 
@@ -1255,9 +1286,12 @@ mod tests {
 			.encode(&ietf::GroupHeader {
 				track_alias,
 				group_id: 0,
-				sub_group_id: 0,
+				sub_group_id,
 				publisher_priority: 128,
-				flags: ietf::GroupFlags::default(),
+				flags: ietf::GroupFlags {
+					has_subgroup: sub_group_id != 0,
+					..Default::default()
+				},
 			})
 			.await
 			.unwrap();
@@ -1316,7 +1350,7 @@ mod tests {
 	/// A late group must reach the dispatch loop and stop with CANCELLED.
 	#[tokio::test(start_paused = true)]
 	async fn a_group_for_a_retired_alias_is_stopped_with_cancelled() {
-		let log = dispatch_uni(subgroup_header(Version::Draft19, 7).await, Some(7)).await;
+		let log = dispatch_uni(subgroup_header(Version::Draft19, 7, 0).await, Some(7)).await;
 
 		assert_eq!(
 			log.stops(),
@@ -1324,6 +1358,15 @@ mod tests {
 			"the group stream must be stopped with the cancelled code",
 		);
 		assert_eq!(log.closes(), vec![], "one dropped group may not close the session");
+	}
+
+	/// A non-zero subgroup is refused on its own stream, never by closing the session.
+	#[tokio::test(start_paused = true)]
+	async fn a_non_zero_subgroup_is_stopped_without_closing_the_session() {
+		let log = dispatch_uni(subgroup_header(Version::Draft19, 7, 1).await, None).await;
+
+		assert_eq!(log.stops(), vec![crate::ietf::error::INTERNAL_ERROR]);
+		assert_eq!(log.closes(), vec![], "one refused subgroup may not close the session");
 	}
 
 	#[tokio::test(start_paused = true)]

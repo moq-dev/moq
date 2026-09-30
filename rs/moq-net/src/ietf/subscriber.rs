@@ -6078,6 +6078,40 @@ mod stitch_tests {
 		settled.await;
 	}
 
+	/// A subgroup 1 stream costs only itself: the track's subgroup 0 stream still arrives.
+	#[tokio::test]
+	async fn a_non_zero_subgroup_leaves_the_track_flowing() {
+		let mut refused = Vec::new();
+		ietf::GroupHeader {
+			track_alias: ALIAS,
+			group_id: SEQUENCE,
+			sub_group_id: 1,
+			publisher_priority: 0,
+			flags: ietf::GroupFlags {
+				has_subgroup: true,
+				first_object: true,
+				..Default::default()
+			},
+		}
+		.encode(&mut refused, VERSION)
+		.unwrap();
+
+		let h = Harness::new(Fill::Done, vec![refused, tail_stream(SEQUENCE, 0, &[b"ok"])]);
+		let mut consumer = h.track.subscribe(None);
+
+		let mut stream = h.stream().await;
+		let result = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(matches!(result, Err(Error::Unsupported)), "{result:?}");
+
+		let mut stream = h.stream().await;
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		let (sequence, frames) = read_group(&mut consumer).await;
+		assert_eq!(sequence, SEQUENCE);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].1, b"ok");
+		assert!(h.session.log.closes().is_empty());
+	}
+
 	#[tokio::test]
 	async fn object_extension_limit() {
 		for size in [65536usize, 65537] {
