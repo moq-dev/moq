@@ -4915,6 +4915,7 @@ dependencies = [
  "block2 0.6.2",
  "bytemuck",
  "bytes",
+ "cfg_aliases",
  "cudarc",
  "dispatch2",
  "fast_image_resize",

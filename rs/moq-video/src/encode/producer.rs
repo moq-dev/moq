@@ -515,12 +515,12 @@ pub async fn publish_capture<E: CatalogExt>(
 	driver.run().await
 }
 
-/// Off macOS, [`publish_capture`]'s future must stay `Send` so a server can
+/// Off macOS and iOS, [`publish_capture`]'s future must stay `Send` so a server can
 /// `tokio::spawn` it: the encoder runs on its own thread and the capture guard
 /// is `Send` there. This is never called; it exists only to fail compilation if
-/// the future ever regains a `!Send` component. macOS is exempt (the objc
-/// capture session is `!Send`).
-#[cfg(all(feature = "capture", not(target_os = "macos")))]
+/// the future ever regains a `!Send` component. Apple platforms are exempt (the inline encoder and objc
+/// capture session are `!Send`).
+#[cfg(all(feature = "capture", not(apple)))]
 #[allow(dead_code)]
 fn assert_publish_capture_send(
 	broadcast: moq_net::broadcast::Producer,
@@ -729,7 +729,7 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		encoder_config.codec = encode.codec;
 		encoder_config.kind = encode.kind.clone();
 		encoder_config.color = camera.color();
-		// Off macOS this opens the encoder on a dedicated thread; see `sink`.
+		// Off macOS and iOS this opens the encoder on a dedicated thread; see `sink`.
 		// No cut on reopen: a fresh encoder opens with a keyframe on every backend,
 		// so the viewer whose subscription reopened the camera can decode from the
 		// first frame regardless, and a backend that cannot cut still captures.
@@ -1078,7 +1078,7 @@ mod tests {
 
 	/// H.265 has no software encoder, so this only runs where a hardware one
 	/// exists (VideoToolbox on macOS, the only hardware backend on this target).
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[tokio::test]
 	async fn h265_roundtrip_publishes_hev1() {
 		let (name, config) = roundtrip_rendition(Codec::H265, encoder::Kind::Hardware).await;

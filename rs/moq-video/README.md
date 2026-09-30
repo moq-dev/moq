@@ -167,7 +167,7 @@ on the GPU: feeding it back to a compatible hardware `encode::Encoder` on the
 same device keeps it there (the transcode path), while `into_i420()` downloads
 it. An encoder that can't take that surface (openh264, or a different device)
 downloads it through I420 for you. Every frame carries a `Surface`, a
-`#[non_exhaustive]` enum naming where the pixels live (`PixelBuffer` on macOS,
+`#[non_exhaustive]` enum naming where the pixels live (`PixelBuffer` on macOS and iOS,
 `Texture` on Windows, `Vulkan` and `Cuda` on Linux, `HardwareBuffer` on Android,
 or CPU `I420`). Match
 it to take a GPU path for a representation you recognize, and fall back to
@@ -191,7 +191,7 @@ Backends are tried hardware-first, like encode:
 | H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
 | AV1 | none | none | none | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, when the device provides it) |
 
-On macOS VideoToolbox decodes H.264 and H.265 on hardware, pulling the parameter
+On macOS and iOS VideoToolbox decodes H.264 and H.265 on hardware, pulling the parameter
 sets (SPS/PPS, plus VPS for H.265) out of each keyframe to build the format
 description. On Windows the Microsoft decoder MFT runs synchronously with a
 Direct3D11 device bound to it, so the decode happens on the GPU through DXVA

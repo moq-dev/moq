@@ -3,7 +3,7 @@
 //! Sibling to [`audio`](crate::audio)'s producer, and the video counterpart to
 //! [`producer::MoqMediaProducer`](crate::producer::MoqMediaProducer): that one
 //! takes already-encoded frames, this one takes raw pictures and runs the H.264
-//! / H.265 encode inside the FFI boundary (VideoToolbox on macOS, Media
+//! / H.265 encode inside the FFI boundary (VideoToolbox on macOS and iOS, Media
 //! Foundation on Windows, openh264 as the software fallback; no ffmpeg).
 //!
 //! Pixel format, resolution, and framerate are fixed at publish time via
@@ -56,7 +56,7 @@ impl From<MoqVideoCodec> for moq_video::encode::Codec {
 
 /// Which encoder implementation to use.
 ///
-/// These bindings compile VideoToolbox (macOS), Media Foundation (Windows),
+/// These bindings compile VideoToolbox (macOS, iOS), Media Foundation (Windows),
 /// openh264 (software, everywhere), and on Linux NVENC and VAAPI, which dlopen
 /// their driver at runtime and drop out of `Auto` when it is absent.
 #[derive(Clone, uniffi::Enum)]
@@ -67,7 +67,7 @@ pub enum MoqVideoEncoderKind {
 	Hardware,
 	/// Software only (openh264, H.264 only).
 	Software,
-	/// A specific backend that moq-ffi compiles: `"videotoolbox"` (macOS),
+	/// A specific backend that moq-ffi compiles: `"videotoolbox"` (macOS, iOS),
 	/// `"mediafoundation"` (Windows), `"nvenc"` / `"vaapi"` (Linux), or
 	/// `"openh264"` (software, everywhere).
 	/// Naming one this build lacks fails with a no-encoder error, so reach for
@@ -589,7 +589,7 @@ pub struct MoqVideoDecoderOutput {
 	/// frame to CPU memory as it is decoded, so
 	/// [`MoqVideoDecodedFrame::pixels`] never meets a surface it cannot read.
 	///
-	/// Only a platform with a [`MoqVideoSurface`] variant accepts it (macOS
+	/// Only a platform with a [`MoqVideoSurface`] variant accepts it (macOS and iOS
 	/// today); [`decode_video`](MoqBroadcastConsumer::decode_video) fails with
 	/// [`MoqError::Unsupported`] elsewhere.
 	#[uniffi(default = false)]
@@ -605,7 +605,7 @@ pub struct MoqVideoDecoderOutput {
 /// lets the decoder reuse it.
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqVideoSurface {
-	/// A macOS `CVPixelBufferRef` from VideoToolbox, IOSurface-backed NV12.
+	/// An Apple `CVPixelBufferRef` from VideoToolbox, IOSurface-backed NV12.
 	PixelBuffer { pointer: u64 },
 }
 
@@ -662,7 +662,7 @@ impl MoqVideoDecodedFrame {
 	/// Only a [`surface`](MoqVideoDecoderOutput::surface) decode produces one.
 	pub fn surface(&self) -> Option<MoqVideoSurface> {
 		match &self.frame.surface {
-			#[cfg(target_os = "macos")]
+			#[cfg(any(target_os = "macos", target_os = "ios"))]
 			moq_video::Surface::PixelBuffer(pixels) => Some(MoqVideoSurface::PixelBuffer {
 				pointer: std::ptr::from_ref(pixels.buffer()).addr() as u64,
 			}),
@@ -736,7 +736,7 @@ fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::
 }
 
 /// Whether [`MoqVideoSurface`] has a variant on this platform, so a frame can retain its surface.
-const HAS_SURFACE: bool = cfg!(target_os = "macos");
+const HAS_SURFACE: bool = cfg!(any(target_os = "macos", target_os = "ios"));
 
 /// Where the decoder puts each picture. A caller that did not ask for the surface reads CPU
 /// pixels, so let a backend that can decode straight to system memory do that rather than hand

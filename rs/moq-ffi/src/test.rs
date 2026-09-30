@@ -2121,7 +2121,7 @@ async fn video_decode_frame_ownership() {
 		.await;
 	// A platform with no surface variant refuses the opt-in up front, rather than
 	// decoding to a surface the caller can neither view nor always download.
-	let retaining = if cfg!(target_os = "macos") {
+	let retaining = if cfg!(any(target_os = "macos", target_os = "ios")) {
 		Some(retaining.unwrap())
 	} else {
 		assert!(matches!(retaining, Err(MoqError::Unsupported)));

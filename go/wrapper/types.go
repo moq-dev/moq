@@ -72,9 +72,9 @@ type (
 	VideoHint = ffi.MoqVideoHint
 	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max age, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
-	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS.
+	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
 	VideoSurface = ffi.MoqVideoSurface
-	// VideoSurfacePixelBuffer is a macOS CVPixelBufferRef (IOSurface-backed NV12), as the address in Pointer.
+	// VideoSurfacePixelBuffer is an Apple CVPixelBufferRef (IOSurface-backed NV12), as the address in Pointer.
 	VideoSurfacePixelBuffer = ffi.MoqVideoSurfacePixelBuffer
 	// AudioFormat is a single audio codec an importer can parse.
 	AudioFormat = ffi.MoqAudioFormat
@@ -237,7 +237,7 @@ func SoftwareEncoder() VideoEncoderKind {
 }
 
 // NamedEncoder selects a specific backend these bindings compile:
-// "videotoolbox" (macOS), "mediafoundation" (Windows), or "openh264"
+// "videotoolbox" (macOS, iOS), "mediafoundation" (Windows), or "openh264"
 // (software, everywhere). Naming one this build lacks fails with a no-encoder
 // error.
 func NamedEncoder(name string) VideoEncoderKind {

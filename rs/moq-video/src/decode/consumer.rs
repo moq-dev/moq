@@ -643,7 +643,7 @@ mod tests {
 	/// Cancellation while a threaded flush is in flight leaves the sink poisoned.
 	/// The next read surfaces that error rather than reporting a clean end and
 	/// silently discarding the tail.
-	#[cfg(not(target_os = "macos"))]
+	#[cfg(not(apple))]
 	#[tokio::test]
 	async fn cancelled_track_end_flush_is_not_reported_as_drained() {
 		probe::prepare_blocking_flush();

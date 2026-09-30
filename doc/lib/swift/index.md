@@ -10,7 +10,7 @@ description: Async sequences for iOS and macOS via the Moq package
 The `Moq` Swift package: de-prefixed types, `AsyncSequence` on every
 consumer, `Sendable` handles, and `Task` cancellation that reaches the native
 side. It depends on `MoqFFI`, which ships a prebuilt XCFramework with arm64
-slices for iOS 15+, the iOS Simulator, and macOS 12.3+.
+slices for iOS 16+, the iOS Simulator, and macOS 12.3+.
 
 ```swift ignore
 dependencies: [

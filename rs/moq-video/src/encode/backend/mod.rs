@@ -27,7 +27,7 @@ mod openh264;
 #[cfg(test)]
 pub(crate) mod probe;
 
-#[cfg(target_os = "macos")]
+#[cfg(apple)]
 mod videotoolbox;
 
 #[cfg(target_os = "windows")]
@@ -99,7 +99,7 @@ pub(crate) trait Backend {
 /// Whether one NAL unit (header first, no start code) is a keyframe slice: an
 /// H.264 IDR (type 5), or an H.265 IRAP picture (BLA/IDR/CRA, types 16..=23).
 #[cfg(any(
-	target_os = "macos",
+	apple,
 	target_os = "windows",
 	all(target_os = "linux", any(feature = "nvidia", feature = "vaapi", feature = "v4l2")),
 	test
@@ -168,7 +168,7 @@ struct Candidate {
 /// Hardware backends, in priority order. Platform-gated so only the ones that
 /// could plausibly work on this target are even listed.
 const HARDWARE: &[Candidate] = &[
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	Candidate {
 		name: videotoolbox::NAME,
 		codecs: &[Codec::H264, Codec::H265],
