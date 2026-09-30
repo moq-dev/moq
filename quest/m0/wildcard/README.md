@@ -192,7 +192,6 @@ distinguish recording generations reads the catalog's archive entry
 ## Required
 
 - [JS origin granularity](/quest/m0/wildcard/js-origin.md) - `@moq/net` tracks a reply's origin at the same granularity as Rust
-- [Pool resolution benchmark](/quest/m0/wildcard/pool-bench.md) - route resolution is benchmarked over pool size and requested paths
 
 ## Related
 
