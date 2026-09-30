@@ -51,6 +51,28 @@ Settled in the 2026-09-30 `/quest-plan`:
 - Between clusters, announcements stay path vector with cluster ids as hops,
   in the last child.
 
+Settled in the 2026-09-30 wildcard audit (cache tiers):
+
+- A cluster has two roles, edge and core. Where a region has one edge, that
+  edge is also its core. A region may have several cores, which do not link
+  to each other. An edge dials every core in its region, over TLS since
+  intra-region links are not congested, and picks one per path by rendezvous
+  hashing, so a broadcast crosses into a region once. An edge never
+  re-advertises one core's routes to another, so it is never transit. Cores
+  dial the cores of the regions they link to, only those with lower names,
+  so each pair has one connection. Cores are hidden from end users, which is
+  the DDoS shield. See [Edge and core](/quest/m1/cluster-routing/roles.md).
+- Core links are configured and static, and may skip PoPs when the RTT is
+  short: Seattle pulls from San Jose directly rather than via Oregon. There
+  is no cache-aware route switching, so Warm and Cold collapse to one route
+  cost ([One route cost](/quest/m1/cluster-routing/route-cost.md)), and the
+  wildcard line's `front-upgrade.md` is deleted. Edges acting as each
+  other's intermediates (what Warm made possible) is out of scope: it makes
+  edges a bigger DDoS target.
+- Whether cores need link-state topology at all, rather than configured
+  adjacency plus path vector, is being investigated; the findings rewrite
+  [Topology](/quest/m1/cluster-routing/topology.md).
+
 ### Why not path vector or Babel
 
 Today every relay advertises its best route to every peer not already in the
@@ -172,12 +194,14 @@ Once every child has landed:
 - An end-to-end test: a multi-relay cluster in `rs/moq-relay/tests` where a
   publish, an end, a relay restart, and a redundant-pair failover each reach
   a subscriber on a far relay, with time mocked.
-- Rewrite `doc/bin/relay/cluster.md` into the operator's view (topology,
-  link costs, idle timeout, redundant pairs), and add a routing page under
-  `doc/concept`.
+- Rewrite `doc/bin/relay/cluster.md` into the operator's view (edge and core
+  layout, dial rules, TLS edge links, link costs, idle timeout, redundant
+  pairs), and add a routing page under `doc/concept`.
 
 ## Required
 
+- [Edge and core](/quest/m1/cluster-routing/roles.md) - relays take an explicit edge or core role; edges spread paths over their region's cores and are never transit
+- [One route cost](/quest/m1/cluster-routing/route-cost.md) - Warm and Cold collapse to one static route cost in the next wip version
 - [Topology](/quest/m1/cluster-routing/topology.md) - relays learn the relay graph once from a cluster message, apart from routes
 - [Propagation](/quest/m1/cluster-routing/propagation.md) - decides how each announcement reaches every relay once, and writes the implementation children
 - [Selection](/quest/m1/cluster-routing/selection.md) - a broadcast under overlapping prefixes routes to one origin deterministically, and same-epoch origins are one source

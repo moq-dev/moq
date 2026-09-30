@@ -10,6 +10,12 @@ relay K exists or how to reach it.
 
 ## Plan
 
+Under review since the 2026-09-30 cache tiers decision (see the line
+README): with edges as leaves of their region's cores and static core links,
+it is open whether cores need link-state at all, or configured adjacency plus
+path vector is enough, and whether edges need any topology. An investigation
+of that rewrites or deletes this quest.
+
 Decided: the topology is configured. `--cluster-connect` or the connect API
 gives the relay graph and link costs, and LAN mDNS dials peers that then count
 as configured links. Gossip discovery is already gone.
@@ -49,6 +55,10 @@ draft updated in the same PR. Tests drive topologies in process with mocked
 time, including restart, a link flapping, and a digest racing a link that
 just came up. Expose the computed graph where operators already look
 (`/nodes` in `rs/moq-relay/src/internal.rs`).
+
+## Required
+
+- The tiers investigation settles whether cores need link-state (started 2026-09-30 on the topology branch)
 
 ## Related
 
