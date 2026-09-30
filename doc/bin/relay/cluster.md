@@ -43,7 +43,9 @@ connection stays in place, and the 0 keeps it ranked as anonymous.
 
 ## Topology
 
-List the peers each relay dials. That's the whole topology.
+List the peers each relay dials. That's the whole topology: a relay dials only
+peers from `connect`, [`connect_api`](#dynamic-peer-lists), or
+[LAN discovery](#lan-discovery), never a URL learned from an announcement.
 
 ```toml
 # us-west.toml
@@ -53,6 +55,10 @@ connect = ["https://us-east.example.com/"]
 
 A chain (`eu-west <- us-east <- us-west`) dedupes fetches through the middle;
 a full mesh trades that for one fewer hop. Mix shapes as your traffic demands.
+
+For a full mesh, list every other relay, or serve the list from `connect_api`.
+A session carries both directions, so one dial per pair is enough; listing a
+pair on both sides opens a redundant second session.
 
 ## Link costs
 
@@ -112,35 +118,12 @@ the warm side while the cold price still says who sits closest to the publisher.
 moq-transport has nowhere to carry the cold price, so a route learned from it
 ranks with an unknown (worst-case) one.
 
-## Discovery
+## LAN discovery
 
-Instead of listing every peer, tell each relay its own URL and turn on gossip.
-Connected relays learn about each other and dial back; between any two
-gossiping nodes, only the one with the smaller URL dials.
-
-```toml
-[cluster]
-connect = ["https://us-east.example.com/"]
-node = "https://us-west.example.com/"
-mesh = true
-```
-
-A relay with `node` and `mesh` but no `connect` is a passive rendezvous.
-
-Gossip trusts every node advertised under `.internal/origins/` and dials it
-with `cluster.token`, unless the advertised URL carries its own `?jwt=`. Keep
-client grants off `.internal/`: a client that can publish there can add a peer
-that receives the token.
-
-Give `node` an authenticated TLS scheme (`https://`, `wss://`, `moqt://`, or
-`moql://`). Peers dial that URL with the token, so `ws://` and `tcp://` send it
-in cleartext, and `http://` pins a fingerprint fetched over plain HTTP and
-may fall back to `ws://`.
-
-On a LAN there may be no seed peer to gossip through. `[cluster.lan]` advertises
-this relay over mDNS and dials the peers that advertise back, so a rack or a
-home lab meshes with no seed list. A `moq --cluster-lan` process on the same
-network joins the same mesh:
+On a LAN there may be no one to list. `[cluster.lan]` advertises this relay
+over mDNS and dials the peers that advertise back, so a rack or a home lab
+meshes with no seed list. A `moq --cluster-lan` process on the same network
+joins the same mesh:
 
 ```toml
 [cluster]
@@ -155,10 +138,10 @@ enabled = true
 ```
 
 A LAN peer authenticates with its mDNS credential on `/.cluster/<credential>`
-and is never handed `cluster.token`; that token is for static and gossip peers
-only. The advertisement carries the listener fingerprint when the certificate
-was generated or supplied in-memory, the `node` URL when one is configured,
-and at least one of them. `secret` is optional. Without it, anyone who can
+and is never handed `cluster.token`; that token is for `connect` and
+`connect_api` peers only. The advertisement carries the listener fingerprint
+when the certificate was generated or supplied in-memory, the `node` URL when
+one is configured, and at least one of them. `secret` is optional. Without it, anyone who can
 reach the listener joins, so leave it unset only on networks you trust. With
 it, only peers that prove they hold the same key are discovered or accepted.
 mDNS is still an open channel: the secret authenticates the record, it does
@@ -213,8 +196,8 @@ timeout; WebSocket links keep their own 30s deadline.
 
 Peers dial with **mTLS** (recommended: `listen.tls.root` on the listener,
 `connect.tls.cert`/`key` on the dialer) or a **JWT** (inline `?jwt=` on a peer
-URL, `token` on a peer object, or a shared `cluster.token` file for static and
-gossip peers). The
+URL, `token` on a peer object, or a shared `cluster.token` file for every
+listed peer). The
 accepting relay admits a peer through the same lease as any client: its
 certificate is reported to the auth server, which grants it, so a mesh needs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server of
@@ -233,5 +216,5 @@ accepted peer counts only when its grant sets `peer: true`; otherwise it looks
 like a client ingesting here. An embedder reads this as `Route::source()` and
 filters with `origin::Consumer::local()`.
 
-The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) shows the cluster
-as this relay sees it.
+The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) lists the peers
+this relay dialed and holds a session with.

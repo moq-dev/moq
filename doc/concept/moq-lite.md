@@ -104,8 +104,8 @@ through the new one.
 
 A path segment starting with `.` hides a route from discovery, the way a
 dotfile hides from `ls`. A platform publishes its own broadcasts there (relay
-stats under `.stats/`, cluster gossip under `.internal/`) without them turning
-up in an app that lists everything and plays what it finds. Only segments
+stats under `.stats/`) without them turning up in an app that lists
+everything and plays what it finds. Only segments
 below the requested prefix count: listing the root skips `.stats/node`, but
 listing `.stats` shows `node`. A `.` elsewhere in a segment (`catalog.pro`) is
 part of the name.

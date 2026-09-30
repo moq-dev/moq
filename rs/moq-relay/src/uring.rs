@@ -762,7 +762,6 @@ async fn serve_connection(
 		}
 	};
 
-	let peer_hop = request.peer_hop();
 	let lease = lease.with_stats(grants.stats.clone());
 	let mut request = request.with_stats(grants.stats);
 	if let Some(subscribe) = grants.subscribe {
@@ -779,7 +778,6 @@ async fn serve_connection(
 			err => tracing::debug!(%err, "session driver ended"),
 		}
 	});
-	let node_connection = peer_hop.map(|origin| serve.cluster.nodes.connect_inbound(id, origin));
 
 	tracing::info!(id, version = %session.version(), transport = %moq_tokio::server::Transport::Quic, "negotiated");
 
@@ -788,7 +786,6 @@ async fn serve_connection(
 	// and the shutdown broadcast on the shared runtime.
 	let shutdown = serve.shutdown.clone();
 	serve.tokio.spawn(async move {
-		let _node_connection = node_connection;
 		if let Err(err) = crate::connection::supervise(session, lease, shutdown, registration).await {
 			tracing::warn!(id, %err, "connection closed");
 		}

@@ -12,8 +12,7 @@ relay K exists or how to reach it.
 
 Decided: the topology is configured. `--cluster-connect` or the connect API
 gives the relay graph and link costs, and LAN mDNS dials peers that then count
-as configured links. Gossip discovery is gone first, by
-[Remove gossip](/quest/m0/remove-gossip.md).
+as configured links. Gossip discovery is already gone.
 
 Candidate mechanics, from the simulator (see the questline README's
 findings):
@@ -50,10 +49,6 @@ draft updated in the same PR. Tests drive topologies in process with mocked
 time, including restart, a link flapping, and a digest racing a link that
 just came up. Expose the computed graph where operators already look
 (`/nodes` in `rs/moq-relay/src/internal.rs`).
-
-## Required
-
-- [Remove gossip](/quest/m0/remove-gossip.md) - configured links are the only topology source
 
 ## Related
 
