@@ -3968,6 +3968,35 @@ async fn rewind_keeps_a_held_frame_waiting_time() {
 	assert_eq!(export.discontinuity(), 1, "the held audio waited a second budget");
 }
 
+/// A rewind part way through a hold neither ends it nor renews it: the new generation
+/// waits out only what is left of the budget.
+#[tokio::test(start_paused = true)]
+async fn rewind_keeps_a_partial_stall() {
+	let max_age = Duration::from_millis(500);
+	let mut rig = Interleave::new();
+	let mut export = rig.export(max_age).await;
+	let mut out = Vec::new();
+
+	rig.video(0);
+	rig.audio_until(1, &mut export, &mut out);
+	for tick in 1..=5 {
+		rig.video(tick);
+	}
+	assert!(poll_frames(&mut export).is_empty(), "video waits for the quiet audio");
+	tokio::time::advance(max_age / 2).await;
+	assert!(poll_frames(&mut export).is_empty(), "the hold lapsed early");
+
+	rig.video.discontinuity().unwrap();
+	for tick in 0..=5 {
+		rig.video(GOP + tick);
+	}
+	assert!(poll_frames(&mut export).is_empty(), "the rewind ended the hold");
+
+	tokio::time::advance(max_age / 2).await;
+	assert!(!poll_frames(&mut export).is_empty(), "the rewind renewed the hold");
+	assert_eq!(export.discontinuity(), 1);
+}
+
 /// Under loss every source skip is a rewind. However many arrive while a sparse
 /// track stays quiet, the interleave holds for one budget, not one per rewind:
 /// renewing it at each would delay every source by the budget they skip on,
@@ -5618,6 +5647,66 @@ async fn resume_after(finish: bool) {
 	assert_eq!(count_discontinuity(&after), 1, "the break is flagged once");
 	assert!(count_pid(&after, 0x0000) >= 1, "PAT re-emitted after the return");
 	assert_eq!(pes_count(&after), 10, "the returned broadcast's frames all went out");
+}
+
+/// A replacement broadcast gets a fresh interleave budget: a hold that expired on the
+/// broadcast before it doesn't let the new one go around a track still within its own.
+#[tokio::test(start_paused = true)]
+async fn resume_does_not_inherit_an_expired_stall() {
+	let max_age = Duration::from_secs(2);
+	let origin = crate::source::produce_origin();
+	let source = crate::Source::new(origin.consume(), "live");
+	let publish = || {
+		let mut broadcast = origin.publish("live", Default::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		(broadcast, catalog)
+	};
+	// Output that needs no more than a tenth of the budget to pass.
+	async fn quick(export: &mut Export, max_age: Duration) -> Vec<Frame> {
+		let mut out = Vec::new();
+		while let Ok(frame) = tokio::time::timeout(max_age / 10, export.next()).await {
+			out.extend(frame.expect("exporter error"));
+		}
+		out
+	}
+
+	let (mut broadcast, mut catalog) = publish();
+	let mut leading = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let mut quiet = aac_rendition(&mut broadcast, &mut catalog, "b.aac");
+	let ended = source.broadcast().await.unwrap();
+	let mut export = Export::new(source.clone()).await.unwrap().with_max_age(max_age);
+	write_aac(&mut quiet, 0);
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut leading, ms);
+	}
+	quick(&mut export, max_age).await;
+	tokio::time::advance(max_age).await;
+	assert!(
+		!quick(&mut export, max_age).await.is_empty(),
+		"the leading track went around the quiet one"
+	);
+	drop((broadcast, catalog, leading, quiet));
+	let (_, end) = drain_to_end(&mut export).await;
+	assert!(end.is_err(), "a drop fails the export");
+
+	let (mut broadcast, mut catalog) = publish();
+	let mut leading = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let mut quiet = aac_rendition(&mut broadcast, &mut catalog, "b.aac");
+	source.returned(&ended).await.unwrap();
+	export.resume().await.unwrap();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut leading, ms);
+	}
+	assert_eq!(
+		pes_count(&quick(&mut export, max_age).await),
+		0,
+		"the replacement went around its quiet track on the old broadcast's budget"
+	);
+	write_aac(&mut quiet, 200);
+	assert!(
+		!quick(&mut export, max_age).await.is_empty(),
+		"the replacement went out once both tracks showed"
+	);
 }
 
 #[tokio::test(start_paused = true)]

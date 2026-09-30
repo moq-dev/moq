@@ -174,8 +174,8 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// high-water mark rather than on every frame.
 	watermark: Option<Timestamp>,
 	/// When the interleave started waiting on a lagging track: the arrival of the
-	/// first leading frame it held. Cleared once every track has caught up, and not
-	/// by a rewind ([`Self::pick_next_track`]).
+	/// first leading frame it held. Cleared once every track has caught up, or by
+	/// [`Self::resume`], but not by a rewind ([`Self::pick_next_track`]).
 	stall: Option<web_async::time::Instant>,
 	/// Wakes [`Self::pick_next_track`] once the stall has lasted `max_age`.
 	hold: Option<Pin<Box<web_async::time::Sleep>>>,
@@ -1284,6 +1284,10 @@ impl<E: catalog::Catalog> Export<E> {
 			track.discontinuity = 0;
 			self.stale.insert(name.clone());
 		}
+		// A replacement broadcast gets its own budget: only a rewind within one broadcast
+		// carries a stall across.
+		self.stall = None;
+		self.hold = None;
 		self.rewind();
 		Ok(())
 	}
@@ -1517,8 +1521,9 @@ impl<E: catalog::Catalog> Export<E> {
 	/// out, so a per-frame wait would release one frame per `max_age`. A rewind does
 	/// not restart it either: a source's latency skip is a rewind, and a hold renewed
 	/// at each one delays every source by the budget they skip on, so under loss the
-	/// feed collapses into alternating holds and skips. No track is fenced, so a boundary does not
-	/// jump the queue.
+	/// feed collapses into alternating holds and skips. [`Self::resume`] does, since a
+	/// replacement broadcast owes nothing to the one it replaced. No track is fenced,
+	/// so a boundary does not jump the queue.
 	fn pick_next_track(&mut self, waiter: &kio::Waiter) -> Option<String> {
 		let (timestamp, pid, name, arrived) = self
 			.tracks
