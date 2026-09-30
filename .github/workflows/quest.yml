@@ -27,7 +27,9 @@ on:
 
 jobs:
   check:
-    name: Check
+    # Not `Check`: that is check.yml's required status, and a second job with
+    # the same name would make it ambiguous on a head that runs both.
+    name: Quest
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
 
