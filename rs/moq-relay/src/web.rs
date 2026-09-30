@@ -947,7 +947,7 @@ async fn serve_fetch(
 	let result = tokio::time::timeout_at(deadline, async {
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until a route covers the broadcast (within the fetch deadline) so
-		// freshly-connected subscribers don't get a spurious 404 before gossip arrives.
+		// freshly-connected subscribers don't get a spurious 404 before the announce arrives.
 		let consumer = origin.consume();
 		let broadcast = consumer.routed_broadcast("").await.map_err(|_| StatusCode::NOT_FOUND)?;
 		let sequence = match params.group {
