@@ -101,6 +101,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench varint
 
+      # Bytes and time for lite-06 against lite-07 frames, groups, and requests. No
+      # threshold: it only has to keep running.
+      - name: JS lite varint benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js bench lite-varint
+
       # Fails if publishing a group costs more as the track retains more groups,
       # which means the latency guard or the cache went back to scanning them all.
       - name: JS track retention benchmark

@@ -16,7 +16,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 ignored = ["getrandom"]
 
 [features]
-# Exposes the wire codecs to the `fuzz/` harness and the announce bench through the
+# Exposes the wire codecs to the `fuzz/` harness and the announce and varint benches through the
 # hidden `fuzz` module. Off by default and hidden from the docs.
 fuzz = []
 
@@ -72,6 +72,12 @@ harness = false
 # Reaches the private announce codec through the hidden `fuzz` module.
 [[bench]]
 name = "announce"
+harness = false
+required-features = ["fuzz"]
+
+# Reaches the private lite codec through the hidden `fuzz` module.
+[[bench]]
+name = "varint"
 harness = false
 required-features = ["fuzz"]
 

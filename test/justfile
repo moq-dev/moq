@@ -32,7 +32,8 @@ harness:
 # browser publish; everyone subscribes (incl. native node/bun JS, the C libmoq
 # client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
-# Both runs first check js/net's varints against moq-net's encoder at every size boundary.
+# Both runs first check js/net's varints against moq-net's encoder at every size boundary,
+# and on lite-06/07 messages (the filter also matches `lite_varint_interop`).
 [positional-arguments]
 interop *args:
     just rs test -p moq-net --lib varint_interop --run-ignored all

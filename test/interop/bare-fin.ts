@@ -21,14 +21,6 @@ import type { Subscriber as TrackSubscriber } from "../../js/net/src/track.ts";
 console.debug = console.error;
 const input: { version: string; started: boolean; clean: boolean; responses: number[] } = JSON.parse(process.argv[2]);
 const pair = createMockTransportPair(input.version);
-const bytes: number[] = [];
-const output = new Writer(
-	new WritableStream<Uint8Array>({
-		write: (chunk) => {
-			bytes.push(...chunk);
-		},
-	}),
-);
 const path = Path.from("room");
 const lite: Record<string, LiteVersion> = {
 	"moq-lite-05": LiteVersion.DRAFT_05,
@@ -36,18 +28,27 @@ const lite: Record<string, LiteVersion> = {
 	"moq-lite-07-wip": LiteVersion.DRAFT_07,
 };
 const version = lite[input.version];
+const bytes: number[] = [];
+const output = new Writer(
+	new WritableStream<Uint8Array>({
+		write: (chunk) => {
+			bytes.push(...chunk);
+		},
+	}),
+	version ?? IetfVersion.DRAFT_19,
+);
 let reader: TrackSubscriber;
 let peer: Stream | undefined;
 if (version !== undefined) {
 	const subscriber = new LiteSubscriber(pair.client, version, randomHop());
 	reader = subscriber.consume(path).track("video").subscribe();
-	const info = await Stream.accept(pair.server);
+	const info = await Stream.accept(pair.server, version);
 	assert(info);
 	assert.equal(await info.reader.u53(), StreamId.Track);
 	await Track.decode(info.reader, version);
 	await new TrackInfo({}).encode(info.writer, version);
 	info.close();
-	peer = await Stream.accept(pair.server);
+	peer = await Stream.accept(pair.server, version);
 	assert(peer);
 	assert.equal(await peer.reader.u53(), StreamId.Subscribe);
 	await Subscribe.decode(peer.reader, version);
