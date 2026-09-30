@@ -279,8 +279,7 @@ under. Peers using a different name never discover this one. It defaults to
 configuration. An application built on the library picks its own name.
 
 The WAN flags (`--cluster-connect`, `--cluster-connect-api`, `--cluster-node`,
-`--cluster-mesh`, `--cluster-token`, `--cluster-id`, `--cluster-tier`,
-`--cluster-idle-timeout`) match
+`--cluster-mesh`, `--cluster-token`, `--cluster-id`, `--cluster-tier`) match
 the relay. `--cluster-connect` and `--cluster-connect-api` are a MoQ side on
 their own, so `moq --cluster-connect https://relay.example import ts` needs
 no `--connect`. See [Clustering](/bin/relay/cluster).

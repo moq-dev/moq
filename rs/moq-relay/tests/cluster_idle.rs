@@ -1,18 +1,16 @@
-//! A cluster notices a silent peer within `--cluster-idle-timeout`, not the 30s
-//! `--quic-idle-timeout` its shared client was built with.
+//! A cluster drops a silent peer's routes within the default `--quic-idle-timeout`.
+//!
+//! A crashed or partitioned peer sends no close, so the idle timeout is the whole
+//! outage window for subscribes routed through it.
 #![cfg(feature = "noq")]
 
 use std::time::{Duration, Instant};
 
 use moq_relay::cluster::{self, Peer};
 
-/// The cluster setting under test, far below the client's 30s QUIC default.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(1);
-
-/// How long the cluster may take to drop the dead peer's route. Generous over
-/// [`IDLE_TIMEOUT`] for a slow runner, and well under 30s, so a dial that ignored
-/// the cluster setting fails here.
-const DETECT: Duration = Duration::from_secs(10);
+/// How long the cluster may take to drop the dead peer's route: the 10s default
+/// plus slack for a slow runner, well short of 30s so a longer default fails here.
+const DETECT: Duration = Duration::from_secs(20);
 
 /// Multi-transport client and session types make the test future large; give it a
 /// big stack, as `goaway_cluster.rs` does.
@@ -80,7 +78,7 @@ async fn spawn_peer() -> (u16, tokio::runtime::Runtime) {
 }
 
 #[test]
-fn silent_peer_detected_within_cluster_idle_timeout() {
+fn silent_peer_detected_within_idle_timeout() {
 	run_cluster_test(silent_peer_detected());
 }
 
@@ -89,7 +87,7 @@ async fn silent_peer_detected() {
 
 	let (port, peer) = spawn_peer().await;
 
-	// The client keeps the 30s `--quic-*` default; only the cluster setting is short.
+	// Both ends keep the `--quic-*` defaults.
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	connect.tls.insecure = Some(true);
@@ -101,7 +99,6 @@ async fn silent_peer_detected() {
 
 	let mut config = cluster::Config::default();
 	config.connect = vec![Peer::new(format!("https://127.0.0.1:{port}/"))];
-	config.idle_timeout = Some(IDLE_TIMEOUT);
 	let cluster = cluster::Cluster::new(cluster::Options::new(config))
 		.expect("cluster init")
 		.with_client(client);
@@ -133,7 +130,7 @@ async fn silent_peer_detected() {
 		}
 	})
 	.await
-	.expect("the silent peer's route outlived the cluster idle timeout");
+	.expect("the silent peer's route outlived the idle timeout");
 	println!("silent peer dropped after {:?}", silenced.elapsed());
 
 	run.abort();

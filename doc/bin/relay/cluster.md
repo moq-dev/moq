@@ -198,21 +198,16 @@ clients decode it.
 ## Failure detection
 
 A peer that crashes or drops off the network sends no goodbye, so a relay only
-learns it is gone when the link goes quiet. Its routes stay in place until then,
-and subscribes through them go nowhere. Cluster links therefore use their own
-QUIC idle timeout, far shorter than the 30s `quic.idle_timeout` viewers get:
+learns it is gone when the link goes quiet for [`quic.idle_timeout`](/bin/relay/config#quic)
+(10s by default). Until then its routes stay in place and subscribes through
+them go nowhere. Lower it to fail over faster; raise it if a lossy long-haul
+link drops while the peer is still alive, and keep `quic.keep_alive` well under
+it.
 
-```toml
-[cluster]
-idle_timeout = "5s"   # Default. Keep-alives go out at a quarter of it.
-```
-
-QUIC uses the smaller of both ends' idle timeouts, and the accepting relay only
-learns a session is a peer after the handshake has fixed its own, so the
-dialing relay's value bounds both sides of the link. Set it on the relays that
-dial. Lower it to fail over faster; raise it if a lossy long-haul link drops
-while the peer is still alive. The setting covers QUIC dials; iroh and
-WebSocket links keep their transport's own timeouts.
+QUIC uses the smaller of the two endpoints' idle timeouts
+([RFC 9000 section 10.1](https://www.rfc-editor.org/rfc/rfc9000#section-10.1)),
+so either relay on a link can shorten it for both. iroh links use the same
+timeout; WebSocket links keep their own 30s deadline.
 
 ## Authentication
 

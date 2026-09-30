@@ -22,12 +22,6 @@ use crate::{auth, nodes::MESH_PREFIX};
 /// than an ordinary publisher or viewer on the same listener.
 pub(crate) const CLUSTER_PATH: &str = "/.cluster";
 
-/// Default [`Config::idle_timeout`]. Keep-alives at a quarter of it plus QUIC's
-/// probe retransmits make several round trips that must all be lost before a
-/// live peer is dropped, even on a lossy intercontinental path, while a dead one
-/// is noticed six times sooner than the 30s `--quic-idle-timeout`.
-const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// How often the discovery loop scans for stale entries.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -781,25 +775,6 @@ pub struct Config {
 		setting = "cluster.tier"
 	)]
 	pub tier: Option<String>,
-
-	/// Drop a peer link after this long with nothing heard from the peer, so its
-	/// routes fail over within seconds instead of after `--quic-idle-timeout`.
-	/// Keep-alives go out at a quarter of it. QUIC uses the smaller of both ends'
-	/// timeouts, so the dialing relay's value bounds both sides of the link. Applies
-	/// to QUIC dials; iroh and WebSocket links keep their own. Defaults to 5s.
-	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_option")]
-	pub idle_timeout: Option<Duration>,
-
-	#[usage(
-		name = "cluster-idle-timeout",
-		long = "cluster-idle-timeout",
-		env = "MOQ_CLUSTER_IDLE_TIMEOUT",
-		setting = "cluster.idle_timeout"
-	)]
-	#[serde(default, rename = "__cli_idle_timeout", skip_serializing_if = "Option::is_none")]
-	idle_timeout_arg: Option<crate::duration::Duration>,
-
 	/// Released spelling, kept so [`Self::deprecated`] can name that linger is gone.
 	#[doc(hidden)]
 	#[usage(skip)]
@@ -818,14 +793,6 @@ pub struct Config {
 }
 
 impl Config {
-	/// [`Self::idle_timeout`], with the command line winning and the default filled in.
-	fn resolved_idle_timeout(&self) -> Duration {
-		self.idle_timeout_arg
-			.map(crate::duration::Duration::into_std)
-			.or(self.idle_timeout)
-			.unwrap_or(DEFAULT_IDLE_TIMEOUT)
-	}
-
 	/// Released spellings this config was parsed from, each paired with what replaced it.
 	pub fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut found = moq_tokio::cli::Deprecated::default();
@@ -1135,11 +1102,6 @@ impl Cluster {
 		};
 		let deprecated = config.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
-		// Zero would mean "never time out" to QUIC, the opposite of what this is for.
-		anyhow::ensure!(
-			!config.resolved_idle_timeout().is_zero(),
-			"--cluster-idle-timeout must be non-zero"
-		);
 		// Reject a repeated static identity with conflicting policy up front,
 		// matching the `--cluster-connect-api` validation, instead of silently
 		// keeping the first entry when dials spawn.
@@ -1982,13 +1944,6 @@ impl Cluster {
 				.clone()
 				.context("internal: cluster peer dial without an attached QUIC client")?
 		};
-		// Tuned per dial because the caller shares this client with its own dials, which
-		// keep `--quic-*`. The accepting side can't tell this is a peer until after the
-		// handshake has fixed its idle timeout, so the dialer's value bounds the link.
-		let idle_timeout = self.config.resolved_idle_timeout();
-		let client = client
-			.with_idle_timeout(idle_timeout)
-			.with_keep_alive(Some(idle_timeout / 4));
 
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
 		// root, so presence is keyed under the empty root within the cluster tier.
@@ -2421,30 +2376,6 @@ mod tests {
 		})
 		.expect("cluster");
 		assert_eq!(cluster.cluster_tier(), Tier::new("region/sjc"));
-	}
-
-	/// The idle timeout defaults, loads from the file, yields to the command line,
-	/// and refuses zero, which QUIC would read as "never".
-	#[tokio::test]
-	async fn idle_timeout_resolves() {
-		let _env = crate::test_env::EnvGuard::clear(&["MOQ_CLUSTER_IDLE_TIMEOUT"]);
-
-		assert_eq!(Config::default().resolved_idle_timeout(), DEFAULT_IDLE_TIMEOUT);
-
-		let file: Config = toml::from_str(r#"idle_timeout = "2s""#).expect("parse");
-		assert_eq!(file.resolved_idle_timeout(), Duration::from_secs(2));
-
-		let cli = RelayConfig::parse_and_merge(["moq-relay", "--cluster-idle-timeout", "750ms"]).expect("parse");
-		assert_eq!(cli.cluster.resolved_idle_timeout(), Duration::from_millis(750));
-
-		let err = new_cluster(Config {
-			idle_timeout: Some(Duration::ZERO),
-			..Default::default()
-		})
-		.err()
-		.expect("zero refused")
-		.to_string();
-		assert!(err.contains("--cluster-idle-timeout"), "{err}");
 	}
 
 	/// Stand-in dial task: never makes progress, exposes an AbortHandle.

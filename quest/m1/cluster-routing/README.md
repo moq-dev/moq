@@ -43,7 +43,7 @@ Settled in the 2026-09-30 `/quest-plan`:
   rollout, the remaining children move to the next wip version; finalizing
   never waits on this line.
 - The before/after memory figure is a committed benchmark, measured first.
-- Failure detection is `cluster.idle_timeout`, outside this line; every
+- Failure detection is the QUIC idle timeout, outside this line; every
   routing design inherits its outage window.
 - Reduced flooding ([RFC 9667](https://www.rfc-editor.org/rfc/rfc9667)) and
   registries are m2 unless Propagation pulls registries in; Propagation writes
@@ -144,7 +144,7 @@ registry.
 - Unbatched, one relay restart at 340 relays sent half a million liveness
   messages; batched for 50 ms, 27k.
 - Failure detection, not routing, sets every outage window: a silent link or
-  relay loss is noticed after the 30 s QUIC idle timeout in every candidate,
+  relay loss is noticed only after the QUIC idle timeout in every candidate,
   and subscribes through it go nowhere until then.
 - The simulator saw no loop while views agreed, and HRW split an equal-cost
   pool 63/49 where today's hash of the announced prefix sends all of it to one

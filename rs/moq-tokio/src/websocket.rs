@@ -351,7 +351,7 @@ pub(crate) async fn connect(
 			qmux::ws::Client::new()
 				.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
 				.with_connector(connector)
-				.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline, parity with QUIC
+				.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline; TCP backs off retransmits too far for QUIC's 10s
 				.connect(url.as_str())
 				.await
 				.map_err(Error::connect)?
