@@ -23,7 +23,7 @@ has no close-code scenario yet.
   capsule sent from a task that doesn't keep the H3 control streams alive.
   `web-transport-iroh` 0.7 sends no capsule at all, only a QUIC close; decide
   there whether iroh's WebTransport path should send one.
-- Fix upstream, release, and bump the pins, as the wt-close quest did.
+- Fix upstream, release, and bump the pins, once wt-close finishes.
 
 Decided with the maintainer: the browser case and the backend audit ship
 together, since the case is what proves each backend.
