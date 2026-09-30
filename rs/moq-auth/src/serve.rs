@@ -159,11 +159,7 @@ impl Policy {
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
 		grant.expires = match (expires, self.expires) {
 			(Some(expires), _) => Some(expires),
-			(None, Some(bound)) => Some(
-				SystemTime::now()
-					.checked_add(bound)
-					.ok_or(Refusal::ExpiresOutOfRange)?,
-			),
+			(None, Some(bound)) => Some(SystemTime::now().checked_add(bound).ok_or(Refusal::ExpiresOutOfRange)?),
 			(None, None) => None,
 		};
 		grant.revalidate = self.revalidate;
