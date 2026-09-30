@@ -22,5 +22,6 @@ that suite is not.
 
 ## Related
 
+- [Legal IETF input](/quest/m0/ietf-legal-input.md) - decodes the draft-20+ FETCH layout this serves
 - [Moxygen compatibility](/quest/m1/moxygen/README.md) - the line this belongs to
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - the browser publisher that fills an upstream miss

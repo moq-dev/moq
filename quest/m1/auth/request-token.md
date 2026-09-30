@@ -11,8 +11,9 @@ does not cover it, by the token on the request; with neither it is refused
 `UNAUTHORIZED`. The token's grant covers only the request it rode on and
 lives exactly as long as that request, and a REQUEST_UPDATE carrying a new
 token replaces it, which is how a peer refreshes. It scopes by path, never
-by method. Today the strict decoder on newer drafts fails the whole message
-on the unknown key, and the legacy drafts silently ignore it.
+by method. [Legal IETF input](/quest/m0/ietf-legal-input.md) decodes and
+ignores the key first, so a token no longer fails the session; this quest
+gives it meaning.
 
 ## Plan
 
