@@ -24,7 +24,8 @@ Decided in the 2026-09-30 wildcard audit (cache tiers):
   rule.
 - Edge links run qmux over TLS on TCP, not WebSocket and not QUIC:
   intra-region links are not congested. qmux over TCP exists today only in
-  plaintext (`tcp://`), so add the TLS scheme.
+  plaintext (`tcp://`); add `tls://`, wired to qmux's existing `tls` module.
+  (Scheme name decided 2026-09-30.)
 - An edge never re-advertises a route learned from one core to another core:
   its cluster dials publish only what entered locally
   (`origin::Consumer::local()`), so no core routes through an edge.
