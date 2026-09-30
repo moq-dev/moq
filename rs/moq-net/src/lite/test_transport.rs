@@ -45,6 +45,7 @@ pub struct Log {
 	closes: Arc<Mutex<Vec<(u32, String)>>>,
 	bi_opens: Arc<AtomicUsize>,
 	priorities: Arc<Mutex<Vec<u8>>>,
+	datagrams: Arc<Mutex<Vec<(usize, bytes::Bytes)>>>,
 }
 
 impl Log {
@@ -79,6 +80,20 @@ impl Log {
 	/// requests were sent and not just what they said.
 	pub fn bi_opens(&self) -> usize {
 		self.bi_opens.load(Ordering::Relaxed)
+	}
+
+	/// The datagrams sent, each with how many stream bytes had been written before it, so a
+	/// test can tell what reached the transport ahead of it.
+	pub fn datagrams(&self) -> Vec<(usize, bytes::Bytes)> {
+		self.datagrams.lock().unwrap().clone()
+	}
+
+	fn send_datagram(&self, payload: &[u8]) {
+		let written = self.writes.lock().unwrap().len();
+		self.datagrams
+			.lock()
+			.unwrap()
+			.push((written, bytes::Bytes::copy_from_slice(payload)));
 	}
 }
 
@@ -344,6 +359,8 @@ pub struct SinkSession {
 	/// with no congestion controller exposed. Shared and mutable so a test can
 	/// change it mid-session, the way a real transport's figures move.
 	stats: Arc<Mutex<SinkStats>>,
+	/// Set by [`Self::with_datagrams`]. Zero, a transport without datagrams, by default.
+	max_datagram_size: usize,
 }
 
 impl SinkSession {
@@ -370,6 +387,12 @@ impl SinkSession {
 	/// Change what the transport reports, mid-session.
 	pub fn set_stats(&self, stats: SinkStats) {
 		*self.stats.lock().unwrap() = stats;
+	}
+
+	/// Carry datagrams up to `max` bytes, recording each one sent in the [`Log`].
+	pub fn with_datagrams(mut self, max: usize) -> Self {
+		self.max_datagram_size = max;
+		self
 	}
 
 	/// Report `protocol` as the negotiated ALPN.
@@ -475,7 +498,8 @@ impl poll::Session for SinkSession {
 		Poll::Ready(Ok(send))
 	}
 
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		self.log.send_datagram(payload);
 		Poll::Ready(Ok(()))
 	}
 
@@ -484,7 +508,7 @@ impl poll::Session for SinkSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		0
+		self.max_datagram_size
 	}
 
 	fn protocol(&self) -> Option<&str> {
@@ -604,6 +628,8 @@ pub struct ScriptedSession {
 	/// Scripts the peer pushes at us on unidirectional streams, popped by `accept_uni`
 	/// in order. See [`Self::with_incoming_unis`].
 	incoming_unis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
+	/// Set by [`Self::with_datagrams`]. Zero, a transport without datagrams, by default.
+	max_datagram_size: usize,
 }
 
 impl ScriptedSession {
@@ -616,7 +642,14 @@ impl ScriptedSession {
 			open_gate: None,
 			park: kio::Park::default(),
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+			max_datagram_size: 0,
 		}
+	}
+
+	/// Carry datagrams up to `max` bytes, recording each one sent in the [`Log`].
+	pub fn with_datagrams(mut self, max: usize) -> Self {
+		self.max_datagram_size = max;
+		self
 	}
 
 	/// Have the peer open one unidirectional stream per script, in order, each replaying
@@ -729,7 +762,8 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
 	}
 
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		self.log.send_datagram(payload);
 		Poll::Ready(Ok(()))
 	}
 
@@ -738,7 +772,7 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		0
+		self.max_datagram_size
 	}
 
 	fn protocol(&self) -> Option<&str> {

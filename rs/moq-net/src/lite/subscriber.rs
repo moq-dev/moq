@@ -461,8 +461,10 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		};
 
 		// A datagram cannot wait for its subscription's SUBSCRIBE_OK like a group stream
-		// does, so until the origin it names is admitted, the datagram is dropped.
-		if self.version.has_origin() && !entry.producer.provenance().is_admitted() {
+		// does, so until that reply named an origin the front admits, the datagram is
+		// dropped. The track's provenance alone is not enough: a FETCH_OK on the same
+		// track can admit it while this subscription's own reply may still name another.
+		if self.version.has_origin() && !(*entry.started.read() && entry.producer.provenance().is_admitted()) {
 			return Ok(());
 		}
 
@@ -1777,9 +1779,10 @@ mod tests {
 	}
 
 	/// On lite-07 a datagram carries no origin of its own, so until its subscription's
-	/// origin is admitted it is dropped rather than risk splicing another origin's content.
+	/// SUBSCRIBE_OK named an origin the front admits, it is dropped rather than risk
+	/// splicing another origin's content.
 	#[test]
-	fn datagram_waits_for_the_admitted_origin() {
+	fn datagram_waits_for_its_start_and_the_admitted_origin() {
 		let version = Version::Lite07;
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
@@ -1798,13 +1801,14 @@ mod tests {
 		let producer = broadcast.create_track("datagrams", None).unwrap();
 		let provenance = producer.provenance();
 		let mut received = producer.subscribe(None);
+		let started = kio::Shared::new(false);
 		subscriber.subscribes.lock().insert(
 			7,
 			TrackEntry {
 				producer,
 				timescale: Some(Timescale::default()),
 				tail: Default::default(),
-				started: kio::Shared::new(false),
+				started: started.clone(),
 			},
 		);
 
@@ -1823,16 +1827,27 @@ mod tests {
 		let named = crate::Hop::new(42).unwrap();
 		provenance.name(named).unwrap();
 		provenance.admit(crate::Hop::new(43).unwrap());
+		*started.lock() = true;
 		subscriber.route_datagram(payload(1)).unwrap();
 		assert!(
 			received.recv_datagram().now_or_never().is_none(),
 			"delivered before admission"
 		);
 
+		// Admitted, as a FETCH_OK on the same track would leave it, but this
+		// subscription's own SUBSCRIBE_OK has not arrived.
+		*started.lock() = false;
 		provenance.admit(named);
 		subscriber.route_datagram(payload(2)).unwrap();
+		assert!(
+			received.recv_datagram().now_or_never().is_none(),
+			"delivered before its own SUBSCRIBE_OK"
+		);
+
+		*started.lock() = true;
+		subscriber.route_datagram(payload(3)).unwrap();
 		let datagram = received.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(datagram.sequence, 2);
+		assert_eq!(datagram.sequence, 3);
 	}
 
 	/// A lite-05 subscribe still waiting on TRACK_INFO is not in the subscribe map.

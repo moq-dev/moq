@@ -585,6 +585,9 @@ async function servedSubscription(
 			group.close();
 			track.writeGroup(group);
 		},
+		datagram(sequence: number, bytes = 1) {
+			track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array(bytes));
+		},
 		// The next group stream the publisher opened, drained, or undefined once it has gone
 		// idle. A group the publisher dropped then fails an assertion instead of hanging the
 		// test on a stream that will never arrive.
@@ -663,6 +666,58 @@ test("lite draft-05: a straggler below the announced start group is not served",
 		expect(await sub.servedSequence()).toBe(3);
 	} finally {
 		await sub.close();
+	}
+});
+
+// A datagram too large for the transport is never sent, so it must not resolve the start:
+// that would drop an older group below it for nothing.
+test("lite draft-05: a dropped datagram does not resolve the start", async () => {
+	const debug = spyOn(console, "debug");
+	const sub = await servedSubscription();
+	try {
+		sub.datagram(10, 2000);
+		while (!debug.mock.calls.some(([msg]) => String(msg).startsWith("dropping oversize datagram"))) await flush();
+
+		sub.serve(5);
+		expect(await sub.servedSequence()).toBe(5);
+		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
+		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
+		expect(resp.start.group).toBe(5);
+	} finally {
+		debug.mockRestore();
+		await sub.close();
+	}
+});
+
+// The datagram and group loops race to claim SUBSCRIBE_START, and the START write runs a few
+// turns after the claim. Whichever loop wins, no group goes out below the start it announced,
+// even one popped before that write ran. Sweeping the group's arrival across those turns
+// covers the window without depending on how many microtasks each loop takes.
+test("lite draft-05: no group goes out below a datagram's start", async () => {
+	const debug = spyOn(console, "debug");
+	try {
+		for (let turns = 0; turns < 16; turns++) {
+			debug.mockClear();
+			const sub = await servedSubscription();
+			try {
+				// Both loops are parked, so the datagram and the groups race from here.
+				while (!debug.mock.calls.some(([msg]) => String(msg).startsWith("publish ok"))) await flush();
+				await flush();
+
+				sub.datagram(10);
+				for (let i = 0; i < turns; i++) await Promise.resolve();
+				sub.serve(5);
+				sub.serve(11);
+
+				const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
+				if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
+				expect(await sub.servedSequence()).toBeGreaterThanOrEqual(resp.start.group);
+			} finally {
+				await sub.close();
+			}
+		}
+	} finally {
+		debug.mockRestore();
 	}
 });
 

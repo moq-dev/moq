@@ -267,18 +267,24 @@ class SubscriptionControls {
  */
 class SubscribeResponses {
 	#controls: SubscriptionControls;
-	#start: (sequence: number) => Promise<void>;
+	#start: (sequence: number) => () => Promise<void>;
 	#writes: Promise<boolean> = Promise.resolve(true);
 	#started?: Promise<boolean>;
 
-	constructor(controls: SubscriptionControls, start: (sequence: number) => Promise<void>) {
+	/** `start` claims the start synchronously and returns the SUBSCRIBE_START write. */
+	constructor(controls: SubscriptionControls, start: (sequence: number) => () => Promise<void>) {
 		this.#controls = controls;
 		this.#start = start;
 	}
 
-	/** Sends SUBSCRIBE_START at `sequence`, once; false when peer departure superseded it. */
+	/**
+	 * Sends SUBSCRIBE_START at `sequence`, once; false when peer departure superseded it.
+	 *
+	 * The first call claims the start in the same turn, so whatever either serving loop pops
+	 * next already sees it, even while the write waits its turn.
+	 */
 	start(sequence: number): Promise<boolean> {
-		this.#started ??= this.#write(() => this.#start(sequence));
+		this.#started ??= this.#write(this.#start(sequence));
 		return this.#started;
 	}
 
@@ -662,18 +668,21 @@ export class Publisher {
 				endGroup: msg.endGroup,
 				endFrame: msg.endFrame,
 			};
-			const responses = new SubscribeResponses(controls, async (sequence) => {
+			const responses = new SubscribeResponses(controls, (sequence) => {
 				// SUBSCRIBE_START promises nothing below this sequence will be delivered.
-				// Arrival-order serving could later surface a straggler below the first
-				// group, so pin the floor to what was announced.
+				// Arrival-order serving could later surface a straggler below it, so pin the
+				// floor to what is announced now, not when the write runs: a group popped in
+				// between would otherwise go out below it.
 				hooks.replaceGroups(track, {
 					start: { included: sequence },
 					end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
 				});
-				// Read once content flowed: an upstream's SUBSCRIBE_START named the origin
-				// before any of its content did.
-				const start = new SubscribeStart(sequence, wireOf(front).origin());
-				await encodeSubscribeResponse(stream.writer, { start }, this.version);
+				return async () => {
+					// Read once content flowed: an upstream's SUBSCRIBE_START named the origin
+					// before any of its content did.
+					const start = new SubscribeStart(sequence, wireOf(front).origin());
+					await encodeSubscribeResponse(stream.writer, { start }, this.version);
+				};
 			});
 
 			// Serve datagrams concurrently with groups whenever the transport carries them
@@ -1011,18 +1020,19 @@ export class Publisher {
 			for (;;) {
 				const datagram = await track.recvDatagram();
 				if (!datagram) return; // Track finished; #runTrack tears the subscription down.
-				if (!(await responses.start(datagram.sequence))) return;
 
 				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
 				const ts = Math.round(datagram.timestamp.as(timescale));
 				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode();
 
-				// No group fallback: drop anything that doesn't fit a single datagram.
+				// No group fallback: drop anything that doesn't fit a single datagram. It is never
+				// sent, so it must not resolve the start either.
 				if (body.byteLength > maxSize) {
 					console.debug(`dropping oversize datagram: sub=${sub} size=${body.byteLength} max=${maxSize}`);
 					continue;
 				}
 
+				if (!(await responses.start(datagram.sequence))) return;
 				await writer.ready;
 				await writer.write(body);
 			}

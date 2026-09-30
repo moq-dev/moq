@@ -2292,35 +2292,39 @@ struct Opens {
 }
 
 impl<S: crate::transport::poll::Session> Subscription<S> {
-	/// Send one datagram best-effort over a QUIC datagram (lite-05 §6.4).
+	/// Encode one datagram for a QUIC datagram (lite-05 §6.4), or `None` when it is dropped.
 	///
-	/// The datagram is dropped (there is no group fallback) if the encoded body doesn't fit the
-	/// transport's datagram limit or the send fails (congestion / no capacity right now).
-	fn serve_datagram(&mut self, datagram: crate::Datagram) {
+	/// There is no group fallback: a body that doesn't fit the transport's datagram limit
+	/// is never sent, so it resolves nothing either.
+	fn encode_datagram(&self, datagram: crate::Datagram) -> Option<bytes::Bytes> {
+		let sequence = datagram.sequence;
 		let body = lite::Datagram {
 			subscribe: self.id,
-			sequence: datagram.sequence,
+			sequence,
 			// Already at the track timescale (normalized by the model producer).
 			timestamp: datagram.timestamp.value(),
 			payload: datagram.payload,
 		};
 		// has_datagrams is checked before this runs, so encoding never hits the version guard.
-		let Ok(body) = body.encode_bytes(self.version) else {
-			return;
-		};
+		let body = body.encode_bytes(self.version).ok()?;
 
 		let max = self.session.max_datagram_size();
 		if body.len() > max {
 			tracing::debug!(
-				sequence = datagram.sequence,
+				sequence,
 				size = body.len(),
 				max,
 				"dropping datagram larger than the transport limit"
 			);
-			return;
+			return None;
 		}
+		Some(body)
+	}
 
-		let _ = self.session.send_datagram(&body);
+	/// Send an encoded datagram best-effort: a failed send (congestion, no capacity right
+	/// now) drops it.
+	fn send_datagram(&mut self, body: &[u8]) {
+		let _ = self.session.send_datagram(body);
 	}
 
 	/// Read the latest SUBSCRIBE_UPDATE track priority, marking it seen.
@@ -2354,6 +2358,28 @@ enum TrackEnd {
 	Finished,
 }
 
+/// The first thing a subscription serves, which resolves its SUBSCRIBE_START.
+// Held once per subscription, in the slot that held the bare group before, so the big
+// variant costs nothing boxing would save.
+#[allow(clippy::large_enum_variant)]
+enum First {
+	Group(group::Consumer),
+	/// An encoded datagram that fits the transport.
+	Datagram {
+		sequence: u64,
+		body: bytes::Bytes,
+	},
+}
+
+impl First {
+	fn sequence(&self) -> u64 {
+		match self {
+			Self::Group(group) => group.sequence,
+			Self::Datagram { sequence, .. } => *sequence,
+		}
+	}
+}
+
 /// A subscription's run loop: one subscriber cursor serving groups, datagrams,
 /// and SUBSCRIBE_UPDATE messages, with an in-flight group machine per group.
 struct TrackRun<S: crate::transport::poll::Session> {
@@ -2366,12 +2392,15 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	start_frame: Option<(u64, u64)>,
 	end_frame: Option<(u64, u64)>,
 	// Lite05+ resolves the range on the Subscribe Stream itself: SUBSCRIBE_START
-	// once the first group is known, SUBSCRIBE_END as soon as the track declares its
+	// once the first group or datagram is known, SUBSCRIBE_END as soon as the track declares its
 	// exclusive final sequence (which may be ahead of the live edge).
 	emit_range: bool,
 	start_sent: bool,
-	// The first servable group, held until the source resolves where its feed starts.
-	first: Option<group::Consumer>,
+	// The first servable group or datagram, held until the source resolves where its feed
+	// starts.
+	first: Option<First>,
+	// A datagram that resolved the start, sent once its SUBSCRIBE_START is flushed.
+	after_start: Option<bytes::Bytes>,
 	// Groups skipped for a missing head before the start resolved, which it must not name.
 	skipped: BTreeSet<u64>,
 	end_sent: bool,
@@ -2411,6 +2440,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			emit_range,
 			start_sent: false,
 			first: None,
+			after_start: None,
 			skipped: BTreeSet::new(),
 			end_sent: false,
 			count_streams,
@@ -2429,6 +2459,9 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		loop {
 			// Deliver the buffered range messages before selecting more work.
 			ready!(stream.writer.poll_flush(&mut cx))?;
+			if let Some(body) = self.after_start.take() {
+				self.ctx.send_datagram(&body);
+			}
 
 			// Drive the in-flight group machines; completions just retire.
 			let _ = self.children.poll(waiter);
@@ -2462,22 +2495,16 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				continue;
 			}
 
-			// The first group waits for the source to resolve where its feed starts; datagrams
-			// keep flowing meanwhile.
-			if let Some(group) = self.first.take() {
+			// The first group or datagram waits for the source to resolve where its feed
+			// starts. Nothing else is served meanwhile: it would go out ahead of the start.
+			if let Some(first) = self.first.take() {
 				match self.track.poll_start(waiter) {
 					Poll::Ready(source) => {
-						self.start(group, source, stream)?;
+						self.start(first, source, stream)?;
 						continue;
 					}
 					Poll::Pending => {
-						self.first = Some(group);
-						if self.datagrams
-							&& let Poll::Ready(Some(datagram)) = self.track.poll_recv_datagram(waiter)?
-						{
-							self.ctx.serve_datagram(datagram);
-							continue;
-						}
+						self.first = Some(first);
 						return Poll::Pending;
 					}
 				}
@@ -2502,15 +2529,19 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 							continue;
 						}
 						match self.emit_range && !self.start_sent {
-							true => self.first = Some(group),
+							true => self.first = Some(First::Group(group)),
 							false => self.serve(group),
 						}
 					}
 					Recv::Datagram(datagram) => {
-						if self.emit_range && !self.start_sent {
-							self.send_start(stream, datagram.sequence)?;
+						let sequence = datagram.sequence;
+						// A dropped datagram is never sent, so it cannot resolve the start.
+						if let Some(body) = self.ctx.encode_datagram(datagram) {
+							match self.emit_range && !self.start_sent {
+								true => self.first = Some(First::Datagram { sequence, body }),
+								false => self.ctx.send_datagram(&body),
+							}
 						}
-						self.ctx.serve_datagram(datagram);
 					}
 					Recv::Boundary(group) => {
 						// The track declared its exclusive final sequence. Forward it now,
@@ -2547,27 +2578,26 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 }
 
 impl<S: crate::transport::poll::Session> TrackRun<S> {
-	/// Send SUBSCRIBE_START for the first servable group, then serve it.
+	/// Send SUBSCRIBE_START for the first servable group or datagram, then serve it.
 	///
 	/// A relay caches groups in upstream arrival order, and a newer group's stream can
-	/// beat an older one, so the first group here need not be the oldest the source
+	/// beat an older one, so the first thing here need not be the oldest the source
 	/// serves. `source` is where the source's feed starts, raised to this cursor's floor,
-	/// so the resolved start is the lower of the two: resolving from the later group would
-	/// drop the older one for good.
-	fn start(
-		&mut self,
-		group: group::Consumer,
-		source: Option<u64>,
-		stream: &mut Stream<S, Version>,
-	) -> Result<(), Error> {
-		let mut start = source.map_or(group.sequence, |source| source.min(group.sequence));
-		// A skipped group is never served, so it cannot be where the feed starts. This stops
-		// at the held group at the latest, since it was not skipped.
-		while self.skipped.contains(&start) {
+	/// so the resolved start is the lower of the two: resolving from the later sequence
+	/// would drop the older group for good.
+	fn start(&mut self, first: First, source: Option<u64>, stream: &mut Stream<S, Version>) -> Result<(), Error> {
+		let sequence = first.sequence();
+		let mut start = source.map_or(sequence, |source| source.min(sequence));
+		// A skipped group is never served, so it cannot be where the feed starts. The held
+		// one is served, so the start stops there at the latest.
+		while start < sequence && self.skipped.contains(&start) {
 			start += 1;
 		}
 		self.send_start(stream, start)?;
-		self.serve(group);
+		match first {
+			First::Group(group) => self.serve(group),
+			First::Datagram { body, .. } => self.after_start = Some(body),
+		}
 		Ok(())
 	}
 
@@ -3465,7 +3495,7 @@ mod serve_group_test {
 				.with_max_age(Duration::from_secs(30));
 			let subscriber = track.subscribe(subscription);
 
-			let mut session = ScriptedSession::new(Vec::new());
+			let mut session = ScriptedSession::new(Vec::new()).with_datagrams(MAX_DATAGRAM);
 			let (send, recv) = futures::future::poll_fn(|cx| {
 				<ScriptedSession as web_transport_trait::poll::Session>::poll_open_bi(&mut session, cx)
 			})
@@ -3524,6 +3554,99 @@ mod serve_group_test {
 			let start = start.encode_bytes(Version::Lite07).unwrap();
 			self.session.log.writes.lock().unwrap().starts_with(&start)
 		}
+
+		/// For each datagram sent, how many stream bytes had reached the transport first.
+		fn datagrams(&self) -> Vec<usize> {
+			self.session
+				.log
+				.datagrams()
+				.into_iter()
+				.map(|(written, _)| written)
+				.collect()
+		}
+	}
+
+	/// Large enough for a one-byte datagram, too small for [`big_datagram`].
+	const MAX_DATAGRAM: usize = 64;
+
+	fn big_datagram() -> bytes::Bytes {
+		bytes::Bytes::from(vec![0u8; MAX_DATAGRAM])
+	}
+
+	fn write_datagram(track: &mut track::Producer, sequence: u64, payload: bytes::Bytes) {
+		track
+			.insert_datagram(sequence, Timestamp::from_millis(sequence).unwrap(), payload)
+			.unwrap();
+	}
+
+	/// A datagram too large for the transport is never sent, so it must not resolve the
+	/// start: that would drop an older group below it for nothing.
+	#[tokio::test]
+	async fn dropped_datagram_does_not_resolve_the_start() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscriber = track.subscribe(None);
+		let session = Log::default();
+		let (mut run, mut stream, log) = lite07_run(
+			SinkSession::new(session.clone()).with_datagrams(MAX_DATAGRAM),
+			subscriber,
+		);
+		let mut run = std::pin::pin!(kio::wait(move |waiter| run.poll(&mut stream, waiter)));
+
+		write_datagram(&mut track, 10, big_datagram());
+		assert!(futures::poll!(run.as_mut()).is_pending());
+		write_group(&mut track, 5, 5);
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		// SUBSCRIBE_START at 5 from origin 9.
+		assert!(
+			log.writes.lock().unwrap().starts_with(&[0, 2, 5, 9]),
+			"resolved the start from the dropped datagram"
+		);
+		assert!(session.datagrams().is_empty());
+	}
+
+	/// A datagram that goes first resolves the start the way a group does, under the
+	/// source's start, and follows its SUBSCRIBE_START onto the transport.
+	#[tokio::test]
+	async fn first_datagram_resolves_the_start_under_the_source() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut relay = RelayRun::new(&mut track, 0).await;
+
+		write_datagram(&mut track, 10, bytes::Bytes::from_static(b"x"));
+		relay.settle();
+		assert!(
+			relay.session.log.writes.lock().unwrap().is_empty(),
+			"started before the source"
+		);
+		assert!(relay.datagrams().is_empty(), "sent a datagram ahead of the start");
+
+		track.start_at(3).unwrap();
+		relay.settle();
+		assert!(relay.started_at(3), "resolved the start from the datagram alone");
+		let start = relay.session.log.writes.lock().unwrap().len();
+		assert_eq!(relay.datagrams(), [start]);
+	}
+
+	/// While the first group waits on the source, a datagram must not go out ahead of the
+	/// SUBSCRIBE_START it follows.
+	#[tokio::test]
+	async fn held_first_group_holds_datagrams_back() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut relay = RelayRun::new(&mut track, 0).await;
+
+		write_group(&mut track, 5, 5);
+		relay.settle();
+		write_datagram(&mut track, 6, bytes::Bytes::from_static(b"x"));
+		relay.settle();
+		assert!(relay.datagrams().is_empty(), "sent a datagram ahead of the start");
+
+		track.start_at(0).unwrap();
+		relay.settle();
+		assert!(relay.started_at(0));
+		let [written] = relay.datagrams()[..] else {
+			panic!("the datagram was not sent");
+		};
+		assert!(written > 0, "sent a datagram ahead of the start");
 	}
 
 	/// A SUBSCRIBE_UPDATE landing while the first group waits on the source's start keeps
