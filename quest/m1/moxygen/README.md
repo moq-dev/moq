@@ -1,4 +1,4 @@
-# Moxygen compatibility
+# [S] Moxygen compatibility
 
 ## Goal
 
@@ -41,10 +41,6 @@ Decided in the review of
   ([r4114051032](https://github.com/moq-dev/moq/pull/4276#discussion_r4114051032)).
 
 Docs stay inline in the change that makes them stale. No new guide.
-
-## Required
-
-- [Sparse FETCH ranges](/quest/m1/moxygen/fetch-span.md) - a FETCH costs the groups it returns, not the span of its range
 
 ## Related
 

@@ -7,6 +7,8 @@
 //! here also lets the tests below replay them on stable, which is what turns a crash
 //! the fuzzer found into a regression `just check` runs.
 //!
+//! The announce and fetch benches borrow a few `pub` helpers here for the same reason.
+//!
 //! Compiled only under `cfg(test)` or the `fuzz` feature, so none of this is part of
 //! the published API. See `fuzz/README.md` for the workflow.
 
@@ -250,6 +252,17 @@ pub fn decode_announces(mut data: &[u8], compress: bool) -> Vec<Announced> {
 		resolved.push(announced);
 	}
 	resolved
+}
+
+/// Walk the whole groups `start..end` out of `track` as a standalone FETCH does,
+/// returning how many it read. The fetch bench's way into the private walk.
+pub async fn walk_fetch(track: &crate::track::Consumer, start: u64, end: u64) -> Result<usize, crate::Error> {
+	let start = ietf::Location {
+		group: start,
+		object: 0,
+	};
+	let end = ietf::Location { group: end, object: 0 };
+	Ok(ietf::walk_fetch(track, start, end, 0).await?.groups.len())
 }
 
 /// Feed a lite-07 announce stream through the stateful decoder, then check that our
