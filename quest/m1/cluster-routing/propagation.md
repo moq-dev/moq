@@ -60,8 +60,11 @@ between peers and per-hop path-vector announcements, drop `Hop Base` and
 `Hop Keep` from the current wip lite version, and report the memory
 benchmark's after figures.
 
-## Related
+## Required
 
 - [Memory benchmark](/quest/m1/cluster-routing/memory.md) - the before figures the choice is weighed against
+
+## Related
+
 - [Cross-relay delivery under bursts](/quest/m1/cross-relay-bursts.md) - its report of closed broadcasts announced for minutes is evidence for per-origin seqnos
 - [Announcement shapes](/quest/m2/announce-shapes.md) - announcements between relays must keep their shape

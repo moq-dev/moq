@@ -43,7 +43,7 @@ Candidate mechanics:
   selects again.
 - SUBSCRIBE and FETCH carry a visited-relay list end to end. It catches loops
   while liveness views disagree and names the path for stats. The serving
-  origin's identity rides the reply, per Wildcard's reply-identity rule.
+  origin's identity rides the reply, per Wildcard's first-hop resume rule.
 
 Open:
 
