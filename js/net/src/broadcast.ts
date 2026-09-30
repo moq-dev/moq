@@ -6,7 +6,7 @@
 import { type GetPromise, Once, Signal } from "@moq/signals";
 import { NotFound } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import { type Hop, Route, randomHop } from "./hop.ts";
+import { type Hop, Route } from "./hop.ts";
 import { hooks, namedOrigin, type TrackSequence } from "./internal.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
@@ -34,18 +34,11 @@ class BroadcastState {
 	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast
 	// closes once the last one closes, so a shared consumer can be handed to several callers.
 	consumers = 0;
-	// The origin named for content no upstream reply named, generated on first use.
-	origin?: Hop;
 }
 
-// The origin a peer is told serves `content`: the one an upstream reply named for that track
-// copy or fetched group, or else a random one for content originating here, stable for the
-// broadcast's life and shared by every session serving it.
-function origin(state: BroadcastState, content: track.Subscriber | GroupConsumer): Hop {
-	const named = content instanceof track.Subscriber ? hooks.trackOrigin(content) : namedOrigin(content);
-	if (named !== undefined) return named;
-	state.origin ??= randomHop();
-	return state.origin;
+// The origin an upstream reply named for `content`, a served track copy or a fetched group.
+function origin(content: track.Subscriber | GroupConsumer): Hop | undefined {
+	return content instanceof track.Subscriber ? hooks.trackOrigin(content) : namedOrigin(content);
 }
 
 function dequeueRequest(state: BroadcastState): track.Request | undefined {
@@ -259,7 +252,7 @@ export class Producer {
 			resolveTrackInfo: (name) => resolveTrackInfo(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => this.#requested(),
-			origin: (content) => origin(this.#state, content),
+			origin,
 		};
 	}
 
@@ -333,7 +326,7 @@ export class Consumer {
 			resolveTrackInfo: (name) => resolveTrackInfo(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => this.#requested(),
-			origin: (content) => origin(this.#state, content),
+			origin,
 		});
 	}
 

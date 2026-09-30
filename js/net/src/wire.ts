@@ -22,11 +22,10 @@ export interface Broadcast {
 	fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;
 	/**
-	 * The origin serving `content` (a served subscription or a fetched group), named in
-	 * SUBSCRIBE_START and FETCH_OK: the one an upstream reply named for it, or else a random
-	 * one generated once for the broadcast.
+	 * The origin an upstream reply named for `content` (a served subscription or a fetched
+	 * group), if any. Content nobody upstream named originates on the serving session.
 	 */
-	origin(content: track.Subscriber | GroupConsumer): Hop;
+	origin(content: track.Subscriber | GroupConsumer): Hop | undefined;
 }
 
 /** The protocol-facing operations behind an origin producer. */

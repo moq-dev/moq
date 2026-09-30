@@ -1,14 +1,17 @@
 import { expect, test } from "bun:test";
 import * as broadcast from "../broadcast.ts";
-import { type Hop, HopSchema, randomHop, UNKNOWN_HOP } from "../hop.ts";
+import { Producer as GroupProducer } from "../group.ts";
+import { type Hop, HopSchema, randomHop } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { wireOf } from "../wire.ts";
 import { Fetch, FetchOk } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
+import { Publisher } from "./publisher.ts";
 import { StreamId } from "./stream.ts";
-import { encodeSubscribeResponse, Subscribe, SubscribeStart } from "./subscribe.ts";
+import { decodeSubscribeResponse, encodeSubscribeResponse, Subscribe, SubscribeStart } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { ALPN_07_WIP, Version } from "./version.ts";
@@ -28,26 +31,56 @@ async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boo
 	}
 }
 
-// The origin a republishing session names for the track it serves off `from`.
-function served(from: broadcast.Producer | broadcast.Consumer, name: string): Hop {
+// The origin upstream named for the track a republishing session serves off `from`.
+function served(from: broadcast.Producer | broadcast.Consumer, name: string): Hop | undefined {
 	return wireOf(from).origin(wireOf(from).subscribe(name));
 }
 
-test("a broadcast originating here names one random origin for its life", () => {
+// Nobody upstream named content that originates here: the serving session names its own hop.
+test("a broadcast originating here carries no upstream origin", () => {
 	const producer = new broadcast.Producer();
 	producer.createTrack("video");
-	producer.createTrack("audio");
+	expect(served(producer, "video")).toBeUndefined();
+	expect(served(producer.consume(), "video")).toBeUndefined();
+});
 
-	const origin = served(producer, "video");
-	expect(origin).not.toBe(UNKNOWN_HOP);
-	expect(served(producer, "video")).toBe(origin);
-	// Every track and every handle, and so every session serving it, names the same one.
-	expect(served(producer, "audio")).toBe(origin);
-	expect(served(producer.consume(), "video")).toBe(origin);
+// A session names its own hop, as Rust names its origin's, for content nobody upstream named.
+test("a draft-07 publisher names its own hop for content originating here", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const hop = randomHop();
+	const publisher = new Publisher(pair.server, VERSION, hop, origin.consume());
+	const produced = origin.createBroadcast(Path.from("room"));
+	produced.announce();
+	const track = produced.createTrack("video");
+	const group = new GroupProducer(0);
+	group.writeString("x");
+	group.close();
+	track.writeGroup(group);
 
-	const other = new broadcast.Producer();
-	other.createTrack("video");
-	expect(served(other, "video")).not.toBe(origin);
+	const sub = await Stream.open(pair.client);
+	const serving = await Stream.accept(pair.server);
+	if (!serving) throw new Error("the publisher never accepted the subscribe stream");
+	void publisher.runSubscribe(
+		new Subscribe({ id: 0n, broadcast: Path.from("room"), track: "video", priority: 0 }),
+		serving,
+	);
+	const start = await decodeSubscribeResponse(sub.reader, VERSION);
+	if (!("start" in start)) throw new Error("expected SUBSCRIBE_START");
+	expect(start.start.origin).toBe(hop);
+
+	const fetch = await Stream.open(pair.client);
+	const fetching = await Stream.accept(pair.server);
+	if (!fetching) throw new Error("the publisher never accepted the fetch stream");
+	void publisher.runFetch(
+		new Fetch({ broadcast: Path.from("room"), track: "video", priority: 0, group: 0 }),
+		fetching,
+	);
+	expect((await FetchOk.decode(fetch.reader, VERSION)).origin).toBe(hop);
+
+	publisher.close();
+	sub.close();
+	fetch.close();
 });
 
 // Plays the upstream publisher on a mock draft-07 session, answering the subscriber's streams.
