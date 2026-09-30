@@ -1,0 +1,33 @@
+# [M] Routing between clusters
+
+## Goal
+
+Announcements crossing a cluster boundary stay path vector with cluster ids
+as the hops, like BGP between autonomous systems. A customer's on-prem
+cluster is one hop, and an announcement naming the receiving cluster is
+dropped. Inside a cluster nothing carries a hop list.
+
+## Plan
+
+- A boundary is a configured link to a relay of another cluster; decide how
+  a relay knows its own cluster id and its peer's.
+- What crosses a boundary is what the chosen
+  [Propagation](/quest/m1/cluster-routing/propagation.md) design holds, with
+  the cluster-id list added on export and stripped on import.
+- Cluster-id lists are short, so they need no `Hop Base`/`Hop Keep`
+  compression.
+- Cost across the boundary is plain configured link cost; business policy
+  and incomparable costs are
+  [Routing cost domains](/quest/m3/routing-cost-domains.md)'s.
+
+Wire: the boundary announcement in the current wip lite version, with the
+draft updated in the same PR. Tests: two clusters with two boundary links,
+where an announcement neither loops nor re-enters its origin cluster.
+
+## Required
+
+- [Propagation](/quest/m1/cluster-routing/propagation.md) - the record shape a boundary exports
+
+## Related
+
+- [Routing cost domains](/quest/m3/routing-cost-domains.md) - designs policy on this path vector
