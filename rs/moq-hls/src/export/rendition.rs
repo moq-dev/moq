@@ -192,9 +192,9 @@ fn normalize_video(config: &VideoConfig) -> VideoConfig {
 	config.delay = None;
 	config.label = None;
 	config.stalled = None;
-	// The muxer ignores a non-finite framerate, and NaN never equals itself, so a catalog
-	// carrying one would otherwise look different from itself on every republish.
-	config.framerate = config.framerate.filter(|fps| fps.is_finite());
+	// Publishers estimate it and republish once it settles. The rendition keeps the framerate,
+	// and the fMP4 timescale derived from it, that it was built with: the media is unchanged.
+	config.framerate = None;
 	config
 }
 
@@ -250,8 +250,8 @@ pub struct Rendition {
 impl Rendition {
 	/// Whether `config` describes the same media this rendition is already serving, i.e. whether
 	/// it decodes and muxes identically. Fields the publisher revises without touching the media
-	/// (its bitrate and jitter estimates, a label) are ignored here and picked up by
-	/// [`refresh`](Self::refresh) instead.
+	/// (its bitrate, jitter, and framerate estimates, a label) are ignored here, and the bitrate
+	/// is picked up by [`refresh`](Self::refresh) instead.
 	pub(crate) fn matches_video(&self, config: &VideoConfig) -> bool {
 		let Config::Video(current) = &self.config else {
 			return false;

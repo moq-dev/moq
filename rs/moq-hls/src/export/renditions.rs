@@ -352,7 +352,7 @@ impl Producer {
 	/// "Reconfigured" means the media itself changed (see [`Rendition::matches_video`]). A
 	/// rendition whose entry only carries a revised estimate is kept as-is and just takes the
 	/// new advertised bitrate, since the publisher republishes the catalog every time its
-	/// measured bitrate or jitter moves.
+	/// measured bitrate, jitter, or framerate moves.
 	///
 	/// Renditions are only servable when the catalog advertises the broadcast's timeline (its
 	/// root `archive` entry): without one there is nothing to render playlists from, so the
