@@ -150,6 +150,9 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// Generation of the last returned frame, updated only at the output boundary.
 	emitted_epoch: u64,
 	pcr_discontinuity: bool,
+	/// Back-off of the last PCR emitted ([`Self::pcr_at`]), so a reserve that grows past it
+	/// flags the next one as a new time base.
+	pcr_reserve: Option<u64>,
 	/// TS packets muxed into the span that is still open.
 	pending: Vec<u8>,
 	/// Offsets into [`pending`](Self::pending) where a keyframe's packets begin, so
@@ -682,6 +685,7 @@ impl<E: catalog::Catalog> Export<E> {
 			epoch: 0,
 			emitted_epoch: 0,
 			pcr_discontinuity: false,
+			pcr_reserve: None,
 			pending: Vec::new(),
 			keyframes: Vec::new(),
 			queue: VecDeque::new(),
@@ -1900,12 +1904,13 @@ impl<E: catalog::Catalog> Export<E> {
 	/// The value backs off by the largest reserve of any track, not just the PCR
 	/// track's: every rendition's PES must decode at or after the clock, and each
 	/// video track backs its DTS off by its own [`Reserve`]. A reserve that grows steps
-	/// the clock back with it; the DTS already sent stay ahead of the clock values sent
-	/// with them, and [`author_dts`] keeps every later DTS above those. Back off through the
-	/// 33-bit wrap rather than saturating: a timeline that starts inside the reserve
-	/// would otherwise clamp its first slots to zero and break the uniform step. The
-	/// wire field is a circular clock, so the masked wrapped value is the correct
-	/// mod-2^33 back-off.
+	/// the clock back with it, which only a new time base allows (ISO 13818-1 2.4.3.4),
+	/// so that PCR sets `discontinuity_indicator`. The DTS already sent stay ahead of
+	/// the clock values sent with them, and [`author_dts`] keeps every later DTS above
+	/// those. Back off through the 33-bit wrap rather than saturating: a timeline that
+	/// starts inside the reserve would otherwise clamp its first slots to zero and break
+	/// the uniform step. The wire field is a circular clock, so the masked wrapped value
+	/// is the correct mod-2^33 back-off.
 	fn pcr_at(&mut self, index: u128, before: Option<u8>) -> anyhow::Result<Vec<u8>> {
 		let pcr_pid = self.psi.as_ref().context("PSI not built")?.pcr_pid;
 		let reserve = self
@@ -1915,6 +1920,9 @@ impl<E: catalog::Catalog> Export<E> {
 			.max()
 			.unwrap_or(DEFAULT_DTS_RESERVE);
 		let ticks = slot_ticks(index, PCR_INTERVAL).wrapping_sub(reserve);
+		if self.pcr_reserve.replace(reserve).is_some_and(|last| reserve > last) {
+			self.pcr_discontinuity = true;
+		}
 		// Nothing has gone out on this PID yet, so there is no counter to repeat and
 		// any value starts a valid run; take the one before the next to be used.
 		let cc = match before {

@@ -2560,7 +2560,13 @@ async fn reordered_video_keeps_the_table_cadence() {
 	assert_eq!(export.discontinuity(), 0, "a reorder is not a rewind");
 	assert_eq!(count_pid(&out, 0x0000), 10, "PAT once per 500ms slot, not per reorder");
 	assert_eq!(count_pid(&out, 0x0011), 3, "SDT once per 2s slot, not per reorder");
-	assert_eq!(count_discontinuity(&out), 0, "a reorder is not a discontinuity");
+	// The SPS declares no reorder depth, so the first B-frame grows the reserve once, after
+	// the first PCR: that one step back is a new time base, the reorders after it are not.
+	assert_eq!(
+		count_discontinuity(&out),
+		1,
+		"only the reserve's growth restarts the clock"
+	);
 }
 
 /// A program with more than one track marks the break once, not once per track. A
@@ -5170,14 +5176,24 @@ fn assert_decodes_before_presenting(timing: &[(u64, Option<u64>)]) {
 	}
 }
 
-/// In transport order, every PES unit decodes at or after the last PCR preceding it.
+/// In transport order, every PES unit decodes at or after the last PCR preceding it, and the
+/// clock only steps back where a PCR signals a new time base.
 fn assert_decodes_after_the_clock(frames: &[Frame]) {
 	let bytes: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
 	let mut reader = TsPacketReader::new(Cursor::new(bytes));
 	let mut last_pcr = None;
 	while let Some(packet) = reader.read_ts_packet().unwrap() {
-		if let Some(pcr) = packet.adaptation_field.as_ref().and_then(|af| af.pcr) {
-			last_pcr = Some(pcr.as_u64() / 300);
+		if let Some(af) = packet.adaptation_field.as_ref()
+			&& let Some(pcr) = af.pcr
+		{
+			let pcr = pcr.as_u64() / 300;
+			if let Some(last) = last_pcr {
+				assert!(
+					pcr > last || af.discontinuity_indicator,
+					"the clock steps back from {last} to {pcr} without a discontinuity"
+				);
+			}
+			last_pcr = Some(pcr);
 		}
 		if let Some(TsPayload::PesStart(pes)) = packet.payload
 			&& let Some(pcr) = last_pcr
