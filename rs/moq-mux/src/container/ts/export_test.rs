@@ -5317,6 +5317,121 @@ async fn export_burst_beyond_max_age_overruns_the_rate() {
 	assert_eq!(video, 125, "every access unit is carried");
 }
 
+/// A dropped malformed section still opens a span, one that carries no packets. If it
+/// is the last thing muxed before a marker, the boundary queues it behind everything
+/// the flush sends, and a backlog waited on until it empties would never empty: the
+/// export spins inside `poll_next` without yielding, which no async timeout can
+/// interrupt, so the export runs on its own thread against a wall-clock deadline.
+#[test]
+fn export_marker_after_a_dropped_section_does_not_spin() {
+	let (done, finished) = std::sync::mpsc::channel();
+	std::thread::spawn(move || {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.start_paused(true)
+			.build()
+			.unwrap();
+		done.send(runtime.block_on(marker_after_a_dropped_section())).unwrap();
+	});
+	let (discontinuity, frames) = finished
+		.recv_timeout(Duration::from_secs(30))
+		.expect("the export hung at the marker");
+	assert_eq!(discontinuity, 1, "the marker was observed");
+	assert!(
+		frames.iter().any(|f| f.timestamp.as_micros() >= 11_000_000),
+		"media after the marker went out"
+	);
+}
+
+async fn marker_after_a_dropped_section() -> (u64, Vec<Frame>) {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".h264"),
+			hang::container::track_info(hang::catalog::PRIORITY.video),
+		)
+		.unwrap();
+	let mut cfg = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: true,
+	});
+	cfg.container = Container::Legacy;
+	let scte = broadcast
+		.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	{
+		let mut guard = catalog.modify().unwrap();
+		guard.video.renditions.insert(track.name().to_string(), cfg);
+		guard.ext.mpegts.tracks.insert(
+			scte.name().to_string(),
+			tscat::Track {
+				pid: 0x102,
+				descriptors: Vec::new(),
+				verbatim: Some(tscat::Verbatim::new(0x86, tscat::Framing::Section)),
+			},
+		);
+	}
+	let mut video = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	let mut cues = Producer::new(scte, HangContainer::Legacy(crate::container::Kind::Data));
+
+	let mut export = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap()
+		.with_max_age(Duration::from_millis(500))
+		.with_mux_rate(BURSTY_RATE);
+	let mut out = drain_frames(&mut export).await;
+
+	// A keyframe several slots long, so the schedule holds a delay and still has
+	// packets queued when the marker arrives.
+	let frame = |i: u64, at: u64| {
+		let key = i == 0;
+		let mut nal = vec![if key { 0x65u8 } else { 0x41 }];
+		nal.resize(if key { 20_000 } else { 1_500 }, 0xAB);
+		Frame {
+			timestamp: Timestamp::from_micros(at).unwrap(),
+			duration: None,
+			payload: if key {
+				annexb(&[SPS, PPS, &nal])
+			} else {
+				annexb(&[&nal])
+			},
+			keyframe: key,
+		}
+	};
+	// Few enough frames that the keyframe is still queued at the marker.
+	for i in 0..4u64 {
+		video.write(frame(i, 10_000_000 + i * 40_000)).unwrap();
+	}
+	// After the last frame, so it opens the span the marker closes. Its
+	// section_length promises 32 bytes and one follows.
+	cues.write(Frame {
+		timestamp: Timestamp::from_micros(10_140_000).unwrap(),
+		duration: None,
+		payload: Bytes::from_static(&[0xfc, 0x30, 0x20, 0x00]),
+		keyframe: true,
+	})
+	.unwrap();
+	out.extend(drain_frames(&mut export).await);
+
+	video.discontinuity().unwrap();
+	for i in 0..10u64 {
+		video.write(frame(i, 11_000_000 + i * 40_000)).unwrap();
+	}
+	video.finish().unwrap();
+	cues.finish().unwrap();
+	out.extend(drain_frames(&mut export).await);
+	(export.discontinuity(), out)
+}
+
 // The decode clock follows the stream's reordering: its reserve comes from the catalog `jitter`,
 // else the depth the SPS declares, else the reordering muxed so far, and it keeps following all
 // three after the program tables are written.
