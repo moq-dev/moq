@@ -42,9 +42,7 @@ retransmitted past their deadline (must be zero), spurious resets under
 reordering, and probe overhead versus the default PTO. A proactive probe that
 raises loss or latency under any profile stays off by default.
 
-Decided in the 2026-09-30 audit: moved to m2. No m1 quest consumes it, and
-[Upstream the fork](/quest/m1/quic/upstream.md) offers it when it lands
-rather than waiting on it.
+Decided in the 2026-09-30 audit: moved to m2. No m1 quest consumes it.
 
 ## Required
 

@@ -34,7 +34,3 @@ no `Controller` or wire change.
 Decided in the 2026-09-30 audit: moved to m2. The seven correctness fixes
 already shipped, and this remaining gap has no observed impact on MoQ
 traffic yet.
-
-## Related
-
-- [Upstream the fork](/quest/m1/quic/upstream.md) - offers this fix alongside the seven

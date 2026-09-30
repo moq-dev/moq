@@ -102,6 +102,10 @@ scheduler completion must not wait for that dependent integration. Preserve
 working behavior on backends not yet migrated, and remove queue code only
 where the new implementation makes it redundant.
 
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic` on `dev`, not the frozen fork
+
 ## Closes
 
 - [#699](https://github.com/moq-dev/moq/issues/699) - close this issue when the

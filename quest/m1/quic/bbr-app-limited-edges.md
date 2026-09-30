@@ -32,6 +32,10 @@ drains, a sender blocked only by `send_window`, and a stream blocked by
 receiver credit. Builds on the seven fixes released in moq-noq 1.3.1. No public API or wire
 change is intended.
 
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic` on `dev`, not the frozen fork
+
 ## Related
 
 - [BBR idle burst](/quest/m1/quic/bbr-app-limited.md) - the first app-limited fix this extends

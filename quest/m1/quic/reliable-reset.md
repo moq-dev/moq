@@ -64,6 +64,10 @@ Track the unversioned draft during implementation. The planning baseline is
 draft 10, with transport parameter `0x1d` and frame type `0x24`; do not freeze
 provisional codepoints if the document changes before release.
 
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic` on `dev`, not the frozen fork
+
 ## Related
 
 - moq-net (`rs/moq-net/src/tail.rs`) and `@moq/net` (`js/net/src/tail.ts`) wait

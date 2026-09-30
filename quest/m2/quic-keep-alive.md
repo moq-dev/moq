@@ -24,7 +24,6 @@ timeout by hand. Replace it in the fork:
 - Keep `keep_alive_interval` as a maximum: `None` means "as late as
   possible"; a value means "no later than this", for a NAT binding with a
   shorter life than the idle timeout. That is the only knob.
-- The multipath per-path keep-alive follows the same rule per path.
 
 moq-tokio's `quic.keep_alive` (`rs/moq-tokio/src/quic.rs`) in the `[quic]`
 sections, CLI flags, and env vars becomes that optional maximum, default none,

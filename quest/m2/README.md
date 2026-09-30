@@ -88,7 +88,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [vcpkg registry](/quest/m2/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
 - [Binary delta stats](/quest/m2/stats-delta.md) - an on-demand varint delta flavor of every stats track, if relay encode CPU still matters after the JSON fixes
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
-- [Multipath spike](/quest/m2/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends
+- [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - moq-uring receives from the buffer ring and transmits into registered buffers with no copy, once a profile says where
 - [BBR media study](/quest/m2/quic-bbr-natural-drain.md) - whether bounded drain credit avoids ProbeRTT deadline interference, and where our BBR differs from Google's
 - [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [L4S on the backbone](/quest/m2/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
