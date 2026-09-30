@@ -40,8 +40,8 @@ Candidate mechanics:
   the specific one
   ([RFC 8966 section 3.5.4](https://www.rfc-editor.org/rfc/rfc8966#section-3.5.4)).
   A refusal follows Wildcard's refusal rule: only a capacity refusal lets the
-  first relay select once more, excluding the refusing origin, and any other
-  refusal is terminal.
+  first relay select once more within the same longest-prefix tier, excluding
+  the refusing origin, and any other refusal is terminal.
 - SUBSCRIBE and FETCH carry a visited-relay list end to end. It catches loops
   while liveness views disagree and names the path for stats. The serving
   origin's identity rides the reply, per Wildcard's first-hop resume rule.

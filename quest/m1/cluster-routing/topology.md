@@ -38,6 +38,13 @@ Reduced flooding ([RFC 9667](https://www.rfc-editor.org/rfc/rfc9667)) is
 out of scope; [Propagation](/quest/m1/cluster-routing/propagation.md) writes
 it as an m2 quest if it stays deferred.
 
+Open: moq-transport cluster peers. Cluster links accept moq-transport 17+
+today via the cluster extension (`drafts/draft-lcurley-moq-cluster.md`),
+which these messages do not reach.
+Either extend that draft, or refuse a cluster session that does not negotiate
+the wip lite version, per the README's "the cluster switches versions as a
+whole". Never accept a peer that cannot carry the topology.
+
 Wire: new cluster-session messages in the current wip lite version, with the
 draft updated in the same PR. Tests drive topologies in process with mocked
 time, including restart, a link flapping, and a digest racing a link that
