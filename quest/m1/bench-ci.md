@@ -43,11 +43,7 @@ a GitHub App:
 - Document the comment, the trend, and local reproduction in
   `bench/README.md`.
 
-## Required
-
-- [Tooling](/quest/m1/tooling/README.md) - owns the diff-to-crate impact map the PR job reuses
-
 ## Related
 
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - extends the same `bench/run.sh` with repeated paired rounds
-- [Bench coverage](/quest/m1/bench-coverage.md) - more targets for this job to track
+- [Bench coverage](/quest/m2/bench-coverage.md) - more targets for this job to track

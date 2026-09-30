@@ -16,7 +16,7 @@ release and its shape has stopped moving, split it into an upstream PR with
 the tests it landed with.
 
 Offer the seven BBR correctness fixes (moq-noq 1.3.1, #4206) and
-their [loss](/quest/m1/quic/bbr-loss-parity.md) and
+their [loss](/quest/m2/quic-bbr-loss-parity.md) and
 [starvation](/quest/m1/quic/bbr-app-limited-edges.md) follow-ups with their
 regressions before promoting BBR as the default. Reuse existing
 upstream work, particularly [PR #802](https://github.com/n0-computer/noq/pull/802),
@@ -34,42 +34,39 @@ Then the feature proposal order, each linked to its producing quest:
    since it adopted noq): a one-line change whose point is that every noq
    and iroh user, the maintainers included, runs the controller MoQ depends
    on, so its regressions are found upstream and not only here;
-1. per-stream acknowledgment progress ([ACK progress](/quest/m1/quic/ack-progress.md));
+1. per-stream acknowledgment progress ([ACK progress](/quest/m2/quic-ack-progress.md));
 2. `RESET_STREAM_AT` ([reliable reset](/quest/m1/quic/reliable-reset.md));
 3. hierarchical send groups ([scheduler](/quest/m1/quic/scheduler.md));
-4. per-stream deadlines ([deadlines](/quest/m1/quic/deadline.md));
-5. the qmux crate over the shared stream state machine ([qmux](/quest/m1/quic/qmux.md)).
+4. per-stream deadlines ([deadlines](/quest/m2/quic-deadline.md));
+5. the qmux crate over the shared stream state machine ([qmux](/quest/m2/quic-qmux.md)).
 
-The m2 features (keep-alive by deadline, careful resume as a `Controller`
+Items 1, 4, and 5 moved to m2 in the 2026-09-30 audit; like the other m2
+features they are offered when they land and do not gate this quest. The
+other m2 features (keep-alive by deadline, careful resume as a `Controller`
 wrapper, ECT(1) marking, the media-headroom mechanism) are offered when they
 land, but do not gate this quest: an m1 quest must not wait on m2 work. The
-next experiments (receive timestamps, GCC, FEC, kernel pacing, send
-batching, buffer pools, the natural-drain check) join the list only with a
+next experiments (receive timestamps, GCC, the egress profile, the
+natural-drain check) join the list only with a
 positive verdict.
 
 Record in this quest what upstream accepted, what it asked to see as an
 extension crate, and what it declined; a declined change stays in the fork
-with the link beside it. The quest completes when the list above has been
-offered and answered.
+with the link beside it. The quest completes when the m1 items above have
+been offered and answered.
 
 ## Required
 
-- [Align BBR loss handling with draft-06](/quest/m1/quic/bbr-loss-parity.md)
 - [Mark BBR starvation wherever the source runs dry](/quest/m1/quic/bbr-app-limited-edges.md)
-
-- [Per-stream ACK progress](/quest/m1/quic/ack-progress.md)
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md)
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md)
-- [Per-stream deadlines](/quest/m1/quic/deadline.md)
-- [qmux on the QUIC stream state machine](/quest/m1/quic/qmux.md)
 
 ## Related
 
-- [Receive timestamps](/quest/m2/quic-receive-ts.md), [GCC](/quest/m2/quic-gcc.md),
-  [FEC](/quest/m2/quic-fec.md), [Natural media drains](/quest/m2/quic-bbr-natural-drain.md) -
-  experiments that join the list with a positive verdict
 - [Keep-alive by deadline](/quest/m2/quic-keep-alive.md),
   [Careful resume on reconnect](/quest/m2/quic-careful-resume.md),
   [L4S on the backbone](/quest/m2/quic-ecn.md),
   [Discover media headroom](/quest/m2/quic-probe.md) - m2 features offered
   upstream when they land
+- [BBR media study](/quest/m2/quic-bbr-natural-drain.md),
+  [Receive timestamps](/quest/m3/quic-receive-ts.md), [GCC](/quest/m3/quic-gcc.md) -
+  experiments that join the list with a positive verdict

@@ -45,7 +45,7 @@ Shared decisions:
   `moq-tokio`, `websocketWon` in `js/net`) forgets the URL: QUIC works on this
   network, so the head start comes back. Otherwise a network where WebSocket
   narrowly beats QUIC would open two connections on every reconnect.
-- The old session gets `Goaway::same()` with the configured handover cap before
+- The old session gets `Goaway::new()` with the configured handover cap before
   it enters draining. The relay refuses new requests on it from then on; the
   splice ends its subscriptions at the boundary.
 - One-shot `connect()` returns one session and never upgrades; every

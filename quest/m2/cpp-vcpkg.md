@@ -30,4 +30,4 @@ CI on Windows, macOS, and Linux.
 
 ## Related
 
-- [Conan remote](/quest/m2/cpp-conan.md) - the same tarball through Conan
+- [Conan remote](/quest/m3/cpp-conan.md) - the same tarball through Conan

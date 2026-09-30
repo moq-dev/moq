@@ -81,7 +81,7 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
 - **No opaque whole-mux lane**:
   [#1861](https://github.com/moq-dev/moq/issues/1861) is closed not planned
   and verbatim TS is a non-goal in
-  [MSFTS convergence](/quest/m4/msfts-convergence.md). P3 is out of this set;
+  [MSFTS convergence](/quest/m2/msfts-convergence.md). P3 is out of this set;
   `CAT_error` too, since the lane carries no scrambled service. A scrambled
   PAT or PMT still counts under its own check.
 

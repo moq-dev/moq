@@ -24,4 +24,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [qmux on noq-proto](/quest/m1/quic/qmux.md) - replaces these stream maps entirely, later
+- [qmux on noq-proto](/quest/m2/quic-qmux.md) - replaces these stream maps entirely, later

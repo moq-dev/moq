@@ -35,7 +35,7 @@ Where the reads are:
   `close` (rs/moq-uring/src/quic/noq/connection.rs:239), `handle_timeout`
   (:671), and `poll_transmit` (:786). The last one runs once per GSO train,
   since `flush` stages one train per turn (see
-  [Egress requeue](/quest/m1/perf/egress-requeue.md)).
+  [Run to quiescence](/quest/m1/perf/uring-quiescence.md)).
 
 The same profile shows the timer heap at ~1.6%:
 `<moq_uring::timer::Timer as moq_net::runtime::Timer>::set` 0.92% plus
