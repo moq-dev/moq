@@ -125,6 +125,8 @@ const ticker = setInterval(() => {
 /** Which relay delivered each group: the generation of the broadcast it was read from. */
 const seen = new Map<number, Set<number>>();
 let generation = -1;
+/** A group whose payload is not its sequence number: fails the run however the swap goes. */
+let corrupt: string | undefined;
 
 const watched = new Moq.Origin.Producer();
 const viewer = new Moq.Connection({
@@ -140,7 +142,10 @@ async function read(sub: Moq.Track.Subscriber, gen: number): Promise<void> {
 			const group = await sub.recvGroup();
 			if (!group) return;
 			const text = await group.readString();
-			if (text !== String(group.sequence)) throw new Error(`group ${group.sequence} carried ${text}`);
+			if (text !== String(group.sequence)) {
+				corrupt ??= `generation ${gen}: group ${group.sequence} carried ${text}`;
+				return;
+			}
 			let gens = seen.get(group.sequence);
 			if (!gens) {
 				gens = new Set();
@@ -212,6 +217,7 @@ try {
 	const both = sequences.filter((seq) => seen.get(seq)?.size === 2).length;
 	log(`read groups ${first}..${last} (published up to ${lastPublished}); ${both} arrived from both relays`);
 	if (missing.length > 0) throw new Error(`dropped groups across the migration: ${missing.join(", ")}`);
+	if (corrupt) throw new Error(`corrupt group from ${corrupt}`);
 	log("migrated without a dropped group");
 } catch (err) {
 	failure = err instanceof Error ? err : new Error(String(err));

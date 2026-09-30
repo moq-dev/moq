@@ -2092,8 +2092,7 @@ mod tests {
 	/// A stream-only server on a free loopback port, publishing `origin`.
 	///
 	/// Returns its address, a receiver yielding each accepted session (so the test
-	/// can drain it), and the listener task. Probing for a free port races other
-	/// tests between the probe closing and the real bind, so this retries.
+	/// can drain it), and the listener task.
 	#[cfg(feature = "tcp")]
 	async fn serve(
 		origin: moq_net::origin::Producer,
@@ -2102,28 +2101,20 @@ mod tests {
 		tokio::sync::mpsc::UnboundedReceiver<moq_net::Session>,
 		tokio::task::JoinHandle<()>,
 	) {
-		for _ in 0..20 {
-			let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-			let addr = probe.local_addr().unwrap();
-			drop(probe);
+		let mut config = crate::listen::Config::default();
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut server = config.init(Default::default()).unwrap().listen().await.unwrap();
+		let addr = server.tcp_local_addr().expect("tcp listener bound");
 
-			let mut config = crate::listen::Config::default();
-			config.tcp.bind = Some(addr);
-			let Ok(mut server) = config.init(Default::default()).unwrap().listen().await else {
-				continue;
-			};
-
-			let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
-			let task = tokio::spawn(async move {
-				while let Some(request) = server.accept().await {
-					if let Ok(session) = request.with_publisher(&origin).ok().await {
-						let _ = accepted.send(session);
-					}
+		let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
+		let task = tokio::spawn(async move {
+			while let Some(request) = server.accept().await {
+				if let Ok(session) = request.with_publisher(&origin).ok().await {
+					let _ = accepted.send(session);
 				}
-			});
-			return (addr, sessions, task);
-		}
-		panic!("could not bind a free TCP port after 20 attempts");
+			}
+		});
+		(addr, sessions, task)
 	}
 
 	/// The fleet drain: a relay withdrawn from DNS sends an empty-URI GOAWAY with a
