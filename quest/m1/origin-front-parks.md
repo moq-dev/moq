@@ -28,3 +28,11 @@ show the replacement is cheaper.
 Public API: no signature change expected. `routed_broadcast` and
 `request_broadcast` keep their contracts; only where the waiting happens
 changes.
+
+Decided in the 2026-09-30 audit: this lands after shared fronts, which
+reworks the same `model/origin.rs` fronts, and may move to m2 if shared
+fronts' benchmark shows the retry loop's re-mint is noise.
+
+## Required
+
+- [Shared fronts](/quest/m0/shared-fronts.md) - reworks the same fronts, and its benchmark decides whether this stays in m1

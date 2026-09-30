@@ -82,6 +82,28 @@ The framing is where the guarantee lives, not the subscription flags:
   roughly 100 ms of a 130 ms glass-to-glass total, so we would mostly be
   measuring somebody's webcam.
 
+### Cross-track correlation
+
+Decided in the 2026-09-30 audit: correlation folds in here rather than being
+its own quest. A command, the telemetry sample it produced, and the video frame
+showing the result share one timebase, so a recording is usable as training
+data and an operator sees what the machine actually saw.
+
+The bridge is each broadcast's fixed catalog-root `clock: { wall, timescale }`,
+documented in `doc/concept/hang.md` (#4461). Media and command tracks keep
+their own timescales; convert PTS explicitly into the broadcast clock before
+joining samples. The robot's video and telemetry share a clock; the operator's
+command broadcast supplies its own mapping.
+
+The clock assumption: the two hosts' wall clocks are synchronized by the
+deployment, not by the library. State this beside the API, since a join across
+unsynchronized hosts looks valid while being wrong. Report whether a mapping is
+present, but never infer synchronization from its presence. No per-record
+anchors or clock-sync mechanism; see
+[#2278](https://github.com/moq-dev/moq/issues/2278).
+
+### Port
+
 Port `moq-boy` onto the crate in the same change, as the no-arbitration case.
 It is the only existing consumer, and if the abstraction cannot express crowd
 control then it is the wrong abstraction.

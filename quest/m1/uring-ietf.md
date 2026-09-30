@@ -31,5 +31,5 @@ ring requires the release carrying it.
 
 ## Related
 
-- [Stream sessions](/quest/m1/uring-tcp/README.md) - the other protocol gap
-  on the ring, WebSocket and HTTP
+- [Stream sessions](/quest/m2/uring-tcp/README.md) - the other protocol gap
+  on the ring, WebSocket and HTTP, deferred to m2

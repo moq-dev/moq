@@ -24,7 +24,7 @@ same everywhere.
 
 ## Required
 
-- [Ownership boundary](/quest/m2/mobile-ownership.md) - decides whether Rust owns capture on mobile at all
+- [Ownership boundary](/quest/m1/mobile-ownership.md) - decides whether Rust owns capture on mobile at all
 
 ## Related
 

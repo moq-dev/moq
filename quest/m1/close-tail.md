@@ -38,7 +38,7 @@ Decided (maintainer, 2026-09-30):
   so close keeps today's ack-based drain rather than time out every close.
   #4508's repro is on lite-05, and that path stays as it is: this quest closes
   the issue by fixing the close on the version that can carry the FIN rule.
-  IETF sessions stay with [IETF drain before close](/quest/m2/ietf-drain-before-close.md).
+  IETF sessions stay with [IETF drain before close](/quest/m1/ietf-drain-before-close.md).
 - Both subscribers change: moq-net and `@moq/net`.
 
 Update `drafts/draft-lcurley-moq-lite.md`: the Subscribe section gains the
@@ -63,6 +63,5 @@ after reading the track's end, and a publisher closing gracefully waits for it.
 
 ## Related
 
-- [Session close](/quest/m1/session-close.md) - extends the same drain phase to withdraw announces
-- [Graceful close in bindings](/quest/m1/bindings-graceful-close.md) - `shutdown` inherits this drain
+- [IETF drain before close](/quest/m1/ietf-drain-before-close.md) - the same drain for moq-transport sessions
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - replaces the lite-07 tail accounting the FIN rule waits on

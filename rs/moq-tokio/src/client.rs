@@ -368,8 +368,12 @@ impl Client {
 		// SETUP instead; `setup_path` returns `None` for the ones that carry a URI, where
 		// sending it again is a protocol violation. An iroh-only build reads none of this:
 		// that dial waits for the negotiated binding and builds its own.
-		#[allow(unused_variables)]
 		let moq = self.moq_with_path(setup_path(&url));
+		#[allow(unused_variables)]
+		let moq = match setup_authority(&url) {
+			Some(authority) => moq.with_authority(authority),
+			None => moq,
+		};
 
 		// Plain TCP (qmux, no TLS). Explicit opt-in scheme; never raced against
 		// QUIC, which can't speak it. Use only on a trusted network.
@@ -546,6 +550,30 @@ fn setup_path(url: &Url) -> Option<String> {
 		"moqt" | "moql" | "tcp" => request_target(url),
 		_ => None,
 	}
+}
+
+/// The URI authority to advertise in the SETUP, chosen by the dial URL's scheme.
+///
+/// A raw-QUIC `moqt://` client MUST send it (draft-ietf-moq-transport-21, 9.1.1). Built
+/// from the host and port so URL userinfo never goes on the wire. `None` for every other
+/// scheme, and when the URL has no host, since an empty authority is meaningless.
+#[cfg(any(
+	feature = "noq",
+	feature = "iroh",
+	feature = "websocket",
+	feature = "tcp",
+	feature = "uds"
+))]
+fn setup_authority(url: &Url) -> Option<String> {
+	if url.scheme() != "moqt" {
+		return None;
+	}
+
+	let host = url.host_str().filter(|host| !host.is_empty())?;
+	Some(match url.port() {
+		Some(port) => format!("{host}:{port}"),
+		None => host.to_owned(),
+	})
 }
 
 #[cfg(all(feature = "websocket", feature = "noq"))]
@@ -781,6 +809,43 @@ mod tests {
 		for (url, want) in cases {
 			let url = Url::parse(url).unwrap();
 			let got = setup_path(&url);
+			assert_eq!(got.as_deref(), want, "{url}");
+		}
+	}
+
+	#[cfg(any(
+		feature = "noq",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
+	#[test]
+	fn setup_authority_is_only_for_raw_quic_moqt() {
+		let cases = [
+			("moqt://relay.example.com", Some("relay.example.com")),
+			("moqt://relay.example.com/anon?jwt=abc", Some("relay.example.com")),
+			("moqt://relay.example.com:4443/anon", Some("relay.example.com:4443")),
+			("moqt://[::1]:4443", Some("[::1]:4443")),
+			// Userinfo is a credential, and never goes on the wire.
+			(
+				"moqt://user:pass@relay.example.com:4443",
+				Some("relay.example.com:4443"),
+			),
+			// A hostless URL has no authority to send.
+			("moqt:///anon", None),
+			// Only the draft's `moqt://` scheme is required to send it.
+			("moql://relay.example.com", None),
+			("tcp://relay.example.com:4443", None),
+			("https://relay.example.com", None),
+			("wss://relay.example.com", None),
+			("unix:///run/moq.sock", None),
+			("iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa", None),
+		];
+
+		for (url, want) in cases {
+			let url = Url::parse(url).unwrap();
+			let got = setup_authority(&url);
 			assert_eq!(got.as_deref(), want, "{url}");
 		}
 	}
