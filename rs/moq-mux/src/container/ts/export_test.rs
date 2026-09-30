@@ -3912,10 +3912,10 @@ async fn tune_in_does_not_wait_on_dropped_audio() {
 	assert!(!out.is_empty(), "the tune-in waited on audio it had dropped");
 }
 
-/// A rewind taken while going around a quiet track gives the new generation a
-/// fresh hold rather than the one that already expired.
+/// A rewind taken while going around a quiet track keeps going around it: the
+/// expired hold carries into the new generation rather than starting afresh.
 #[tokio::test(start_paused = true)]
-async fn rewind_restarts_the_stall() {
+async fn rewind_keeps_an_expired_stall() {
 	let max_age = Duration::from_millis(500);
 	let mut rig = Interleave::new();
 	let mut export = rig.export(max_age).await;
@@ -3935,33 +3935,18 @@ async fn rewind_restarts_the_stall() {
 	for tick in 0..=5 {
 		rig.video(GOP + tick);
 	}
-	// Well inside `max_age`: the new generation must still be waiting on the audio.
-	while let Ok(frame) = tokio::time::timeout(max_age / 5, export.next()).await {
-		out.extend(frame.expect("exporter error"));
-	}
-	let after = |out: &[Frame]| {
-		pes_pts_in_order(out)
-			.into_iter()
-			.filter(|&pts| pts > GOP * VIDEO_US * 90 / 1_000)
-			.count()
-	};
-	assert_eq!(
-		after(&out),
-		0,
-		"the new generation went around the audio without waiting"
-	);
-
-	// Once its own wait lapses, it goes around the audio too.
-	tokio::time::advance(max_age).await;
 	out.extend(poll_frames(&mut export));
-	assert!(after(&out) > 0, "the new generation never went out");
+	let after = pes_pts_in_order(&out)
+		.into_iter()
+		.filter(|&pts| pts >= GOP * VIDEO_US * 90 / 1_000)
+		.count();
+	assert!(after > 0, "the new generation waited on the audio again");
 	assert_eq!(export.discontinuity(), 1);
 }
 
-/// A frame held across a rewind starts the new generation's hold afresh rather than
-/// from when it first arrived.
+/// A frame held across a rewind keeps the wait it has already served.
 #[tokio::test(start_paused = true)]
-async fn rewind_restarts_a_held_frame() {
+async fn rewind_keeps_a_held_frame_waiting_time() {
 	let max_age = Duration::from_millis(500);
 	let mut rig = Interleave::new();
 	let mut export = rig.export(max_age).await;
@@ -3980,15 +3965,41 @@ async fn rewind_restarts_a_held_frame() {
 	rig.video.discontinuity().unwrap();
 	rig.video(GOP);
 	out.extend(poll_frames(&mut export));
-	assert_eq!(
-		export.discontinuity(),
-		0,
-		"the held audio went around the video at once"
-	);
+	assert_eq!(export.discontinuity(), 1, "the held audio waited a second budget");
+}
 
+/// Under loss every source skip is a rewind. However many arrive while a sparse
+/// track stays quiet, the interleave holds for one budget, not one per rewind:
+/// renewing it at each would delay every source by the budget they skip on,
+/// and the feed would collapse into alternating holds and skips.
+#[tokio::test(start_paused = true)]
+async fn repeated_rewinds_hold_once() {
+	let max_age = Duration::from_millis(500);
+	let mut rig = Interleave::new();
+	let mut export = rig.export(max_age).await;
+	let mut out = Vec::new();
+
+	rig.video(0);
+	rig.audio_until(1, &mut export, &mut out);
+	for tick in 1..=5 {
+		rig.video(tick);
+	}
+	assert!(poll_frames(&mut export).is_empty(), "video waits for the quiet audio");
 	tokio::time::advance(max_age).await;
 	out.extend(poll_frames(&mut export));
-	assert_eq!(export.discontinuity(), 1, "the new generation never went out");
+
+	for generation in 1..=8 {
+		rig.video.discontinuity().unwrap();
+		for tick in 0..=5 {
+			rig.video(generation * GOP + tick);
+		}
+		out.extend(poll_frames(&mut export));
+		assert_eq!(
+			export.discontinuity(),
+			generation,
+			"rewind {generation} held the feed for a fresh budget"
+		);
+	}
 }
 
 /// A section lost before the cycle wraps commits an observed subset; the next

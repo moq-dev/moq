@@ -174,8 +174,8 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// high-water mark rather than on every frame.
 	watermark: Option<Timestamp>,
 	/// When the interleave started waiting on a lagging track: the arrival of the
-	/// first leading frame it held. Cleared once every track has caught up
-	/// ([`Self::pick_next_track`]).
+	/// first leading frame it held. Cleared once every track has caught up, and not
+	/// by a rewind ([`Self::pick_next_track`]).
 	stall: Option<web_async::time::Instant>,
 	/// Wakes [`Self::pick_next_track`] once the stall has lasted `max_age`.
 	hold: Option<Pin<Box<web_async::time::Sleep>>>,
@@ -1299,9 +1299,8 @@ impl<E: catalog::Catalog> Export<E> {
 		self.keyframes.clear();
 		self.queue.clear();
 		self.watermark = None;
-		// The new generation waits for every track again, with a fresh budget: a
-		// frame held across the break restarts its `arrived` below.
-		self.stall = None;
+		// The stall carries across with its budget, and so does a held frame's
+		// `arrived` ([`Self::pick_next_track`]).
 		self.clock = None;
 		self.low = None;
 		self.last_pcr = None;
@@ -1319,8 +1318,7 @@ impl<E: catalog::Catalog> Export<E> {
 			if let Some(pending) = track.pending.as_ref() {
 				track.discontinuity = pending.discontinuity;
 			}
-			if let Some(mut pending) = track.pending.take() {
-				pending.arrived = web_async::time::Instant::now();
+			if let Some(pending) = track.pending.take() {
 				track.pending = track.admit(pending, self.epoch);
 			}
 		}
@@ -1516,8 +1514,11 @@ impl<E: catalog::Catalog> Export<E> {
 	/// sources give a stalled group, output goes around the lagging track until it
 	/// catches up; zero keeps arrival order. The stall is timed from its first held
 	/// frame rather than per frame: a frame's successor is only pulled once it goes
-	/// out, so a per-frame wait would release one frame per `max_age`. No track is
-	/// fenced, so a boundary does not jump the queue.
+	/// out, so a per-frame wait would release one frame per `max_age`. A rewind does
+	/// not restart it either: a source's latency skip is a rewind, and a hold renewed
+	/// at each one delays every source by the budget they skip on, so under loss the
+	/// feed collapses into alternating holds and skips. No track is fenced, so a boundary does not
+	/// jump the queue.
 	fn pick_next_track(&mut self, waiter: &kio::Waiter) -> Option<String> {
 		let (timestamp, pid, name, arrived) = self
 			.tracks
