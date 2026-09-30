@@ -9,6 +9,7 @@ mod parameters;
 mod adapter;
 pub mod cluster;
 mod control;
+mod datagram;
 pub(crate) mod error;
 mod fetch;
 mod filter;
@@ -35,6 +36,7 @@ mod track;
 mod version;
 
 use control::Control;
+pub use datagram::*;
 pub use fetch::*;
 pub use filter::*;
 pub use goaway::*;

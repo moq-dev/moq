@@ -20,7 +20,3 @@ is the check.
 Moved from the moxygen line to m0 in the 2026-09-30 audit: a non-zero
 subgroup ending the upstream session is exactly m0's "legal input never fails
 a session", and moxygen will send it at Seattle interop on 2026-10-12.
-
-## Related
-
-- [Moxygen compatibility](/quest/m1/moxygen/README.md) - subgroups stay out of scope; only the blast radius is in
