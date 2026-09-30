@@ -1001,6 +1001,50 @@ impl TableCursor {
 			&& self.named.as_ref().is_none_or(|(mount, _)| mount.names(&entry.prefix))
 	}
 
+	/// Deliver a changed winner at this presented prefix.
+	fn update(&mut self, presented: &PathOwned, best: Option<&RouteEntry>) {
+		match best {
+			Some(entry) => {
+				let meta = (entry.hops.clone(), entry.cost, entry.entered());
+				let served = entry.server.is_some();
+				let captures = self.captures(&entry.prefix);
+				let previous = self
+					.current
+					.insert(presented.clone(), (entry.id, meta.clone(), served, captures.clone()));
+				match previous {
+					// Unchanged metadata and servability: nothing the consumer could
+					// act on, even if the winning entry itself changed (a reconnect
+					// under an identical route is invisible, which is the point). A
+					// servability flip is delivered: a request that failed Unroutable
+					// under an advertise-only route retries on the update, and hiding
+					// it would park that waiter forever.
+					Some((_, prev, prev_served, prev_captures))
+						if prev == meta && prev_served == served && prev_captures == captures => {}
+					// Captures are consumer identity, not route metadata. Replace the
+					// old identity explicitly so capture-keyed consumers can remove it.
+					Some((_, prev, _, prev_captures)) if prev_captures != captures => {
+						if let Ok(mut state) = self.state.write() {
+							state.apply_unannounce(self.under.join(presented), prev, prev_captures);
+							state.apply_announce(self.under.join(presented), meta, captures);
+						}
+					}
+					_ => {
+						if let Ok(mut state) = self.state.write() {
+							state.apply_announce(self.under.join(presented), meta, captures);
+						}
+					}
+				}
+			}
+			None => {
+				if let Some((_, last, _, captures)) = self.current.remove(presented)
+					&& let Ok(mut state) = self.state.write()
+				{
+					state.apply_unannounce(self.under.join(presented), last, captures);
+				}
+			}
+		}
+	}
+
 	/// Whether the hidden rule lets this cursor discover a route at `prefix`.
 	fn discovers(&self, prefix: &Path) -> bool {
 		self.hidden.discovers(&self.heads, prefix)
@@ -3206,12 +3250,32 @@ impl OriginState {
 	fn sync_route(&mut self, prefix: &Path, claim: &Pattern) {
 		// Split borrows: the recompute reads `routes` while mutating a cursor.
 		let routes = &self.routes;
+		let mut candidates = None;
 		for id in routes.cursors_touching(prefix) {
 			let Some(cursor) = self.cursors.get_mut(&id) else {
 				continue;
 			};
 			if let Some(presented) = cursor.presented(prefix, claim) {
-				Self::sync_cursor(routes, cursor, &presented);
+				if presented.is_empty() {
+					// A cursor root can collapse several covering prefixes into one.
+					Self::sync_cursor(routes, cursor, &presented);
+				} else {
+					// Every non-root presentation refers to this exact prefix. Rank
+					// its routes once, then take each cursor's first visible entry.
+					let candidates = candidates.get_or_insert_with(|| {
+						let mut entries: Vec<_> = routes
+							.at(prefix)
+							.map(|entry| (route_order(prefix, entry), entry))
+							.collect();
+						entries.sort_unstable_by_key(|(order, _)| *order);
+						entries
+					});
+					let best = candidates
+						.iter()
+						.map(|(_, entry)| *entry)
+						.find(|entry| cursor.visible(entry));
+					cursor.update(&presented, best);
+				}
 			}
 		}
 		// The fronts and requesters under the prefix re-select from the table.
@@ -3257,46 +3321,7 @@ impl OriginState {
 				.min_by_key(|entry| route_order(&entry.prefix, entry))
 		});
 
-		match best {
-			Some(entry) => {
-				let meta = (entry.hops.clone(), entry.cost, entry.entered());
-				let served = entry.server.is_some();
-				let captures = cursor.captures(&entry.prefix);
-				let previous = cursor
-					.current
-					.insert(presented.clone(), (entry.id, meta.clone(), served, captures.clone()));
-				match previous {
-					// Unchanged metadata and servability: nothing the consumer could
-					// act on, even if the winning entry itself changed (a reconnect
-					// under an identical route is invisible, which is the point). A
-					// servability flip is delivered: a request that failed Unroutable
-					// under an advertise-only route retries on the update, and hiding
-					// it would park that waiter forever.
-					Some((_, prev, prev_served, prev_captures))
-						if prev == meta && prev_served == served && prev_captures == captures => {}
-					// Captures are consumer identity, not route metadata. Replace the
-					// old identity explicitly so capture-keyed consumers can remove it.
-					Some((_, prev, _, prev_captures)) if prev_captures != captures => {
-						if let Ok(mut state) = cursor.state.write() {
-							state.apply_unannounce(cursor.under.join(presented), prev, prev_captures);
-							state.apply_announce(cursor.under.join(presented), meta, captures);
-						}
-					}
-					_ => {
-						if let Ok(mut state) = cursor.state.write() {
-							state.apply_announce(cursor.under.join(presented), meta, captures);
-						}
-					}
-				}
-			}
-			None => {
-				if let Some((_, last, _, captures)) = cursor.current.remove(presented)
-					&& let Ok(mut state) = cursor.state.write()
-				{
-					state.apply_unannounce(cursor.under.join(presented), last, captures);
-				}
-			}
-		}
+		cursor.update(presented, best);
 	}
 
 	/// Register a cursor and replay the current best route per presented prefix.
@@ -6102,6 +6127,76 @@ mod tests {
 			.unwrap()
 			.announced();
 		assert_eq!(video.assert_next_active("").cost, Cost::new(5));
+	}
+
+	#[tokio::test]
+	async fn route_changes_preserve_each_cursors_visible_winner() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let mut all = consumer.clone().announced();
+		let mut excluded = consumer.clone().excluding(origin(7)).announced();
+		let mut video = consumer
+			.clone()
+			.scope("", &scopes(&["room/live/video"]))
+			.unwrap()
+			.announced();
+		let mut rooted = consumer
+			.scope("room/live", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.announced();
+
+		let chat = producer
+			.scope("", &scopes(&["room/live/chat"]))
+			.unwrap()
+			.dynamic("room/live", Route::default().with_hops(hops(&[7])).with_cost(1))
+			.unwrap();
+		assert_eq!(all.assert_next_active("room/live").cost, Cost::new(1));
+		assert_eq!(rooted.assert_next_active("").cost, Cost::new(1));
+		excluded.assert_next_wait();
+		video.assert_next_wait();
+
+		let video_route = producer
+			.scope("", &scopes(&["room/live/video"]))
+			.unwrap()
+			.dynamic("room/live", Route::default().with_hops(hops(&[8])).with_cost(5))
+			.unwrap();
+		all.assert_next_wait();
+		rooted.assert_next_wait();
+		assert_eq!(excluded.assert_next_active("room/live").cost, Cost::new(5));
+		assert_eq!(video.assert_next_active("room/live").cost, Cost::new(5));
+
+		chat.update(Route::default().with_hops(hops(&[7])).with_cost(9))
+			.unwrap();
+		assert_eq!(all.assert_next_active("room/live").cost, Cost::new(5));
+		assert_eq!(rooted.assert_next_active("").cost, Cost::new(5));
+		excluded.assert_next_wait();
+		video.assert_next_wait();
+
+		drop(video_route);
+		assert_eq!(all.assert_next_active("room/live").cost, Cost::new(9));
+		assert_eq!(rooted.assert_next_active("").cost, Cost::new(9));
+		excluded.assert_next_ended("room/live");
+		video.assert_next_ended("room/live");
+	}
+
+	#[tokio::test]
+	async fn root_cursor_keeps_the_more_specific_covering_route() {
+		let producer = origin(1).produce();
+		let broad = producer.dynamic("room", Route::default().with_cost(1)).unwrap();
+		let narrow = producer.dynamic("room/live", Route::default().with_cost(9)).unwrap();
+		let mut announced = producer
+			.consume()
+			.scope("room/live/video", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.announced();
+		assert_eq!(announced.assert_next_active("").cost, Cost::new(9));
+
+		broad.update(Route::default().with_cost(0)).unwrap();
+		announced.assert_next_wait();
+		narrow.update(Route::default().with_cost(8)).unwrap();
+		assert_eq!(announced.assert_next_active("").cost, Cost::new(8));
+		drop(narrow);
+		assert_eq!(announced.assert_next_active("").cost, Cost::new(0));
 	}
 
 	#[tokio::test]
