@@ -34,8 +34,9 @@ Facts from the wildcard line (`rs/moq-net/src/model/origin.rs` there):
   member's hop. So on a join the fronts that can act are the `Any` ones,
   `Publisher` ones on the new route's first hop, and `Local` ones for a
   local route. On a leave, the fronts served by or requesting through that
-  route. A deeper prefix appearing shadows shallower routes for the same
-  fronts.
+  route, plus those same pin sets: a deeper prefix appearing shadows
+  shallower routes for them, and one leaving can unshadow a broader route
+  for a waiter it never served.
 
 Decisions:
 
