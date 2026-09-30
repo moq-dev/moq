@@ -84,13 +84,15 @@ pub struct Invocation {
 	/// The MoQ attachment, shared by every stage.
 	pub moq: MoqSide,
 
-	/// The same attachment, built without consulting the environment.
+	/// The MoQ-side flags the command line typed, each once, in order.
 	///
-	/// Only [`MoqSide::reject`] reads it. A local verb refuses a MoQ side the user
-	/// asked for, and an exported `MOQ_CONNECT` is not an ask: it is a standing
-	/// setting for the publishing this shell usually does, and it would otherwise
-	/// make `moq auth` and `moq completion` fail for everyone who has one.
-	pub typed: MoqSide,
+	/// Only [`Self::reject`] and [`Self::dial_only`] read it. A verb refuses a MoQ
+	/// side the user asked for, and an exported `MOQ_CONNECT` is not an ask: it is a
+	/// standing setting for the publishing this shell usually does, and it would
+	/// otherwise make `moq auth` and `moq completion` fail for everyone who has one.
+	/// Read from the parse itself rather than from the built fields, so a flag added
+	/// to any flattened config is refused without anyone listing it here.
+	given: Vec<&'static usage::Flag<'static>>,
 
 	/// The stages, in the order given. Never empty.
 	pub stages: Vec<Command>,
@@ -173,18 +175,50 @@ impl Invocation {
 		}
 	}
 
-	/// Refuse a MoQ side on a verb that runs locally and takes none.
+	/// Refuse every MoQ-side flag on a verb that runs locally and takes none, rather
+	/// than silently ignoring it.
 	///
-	/// Answered from what the command line said, never from the environment; see
-	/// [`Self::typed`] and `MoqSide::reject`.
+	/// `--broadcast` counts: a local verb has no content, and next to `auth generate`
+	/// it reads like it scopes the key, which `--root` does. Answered from what the
+	/// command line said, never from the environment; see [`Self::given`].
 	pub fn reject(&self, command: &str) -> anyhow::Result<()> {
-		self.typed.reject(command)
+		if let Some(flags) = Self::names(self.given.iter()) {
+			anyhow::bail!("`{command}` runs locally and takes no MoQ side; drop {flags}");
+		}
+		Ok(())
 	}
 
-	/// Refuse every MoQ-side flag but `--connect` and `--broadcast`, on a verb that
-	/// only reads from a relay. Answered from the command line, like [`Self::reject`].
+	/// Refuse every MoQ-side flag but the dial, on a verb that only reads from a
+	/// relay: a listener, cluster, or auth policy it would never serve is not
+	/// silently ignored. The dial is `--connect*`, the `--quic-*` and `--iroh-*`
+	/// settings it dials with, and `--broadcast`. Answered from the command line,
+	/// like [`Self::reject`].
 	pub fn dial_only(&self, command: &str) -> anyhow::Result<()> {
-		self.typed.dial_only(command)
+		use usage::spec::CommandArgs;
+
+		fn owns<T: CommandArgs>(flag: &usage::Flag<'_>) -> bool {
+			T::COMMAND.flags.iter().any(|own| own.key == flag.key)
+		}
+		let dials = |flag: &&&usage::Flag<'_>| {
+			#[cfg(feature = "iroh")]
+			if owns::<moq_tokio::iroh::Config>(flag) {
+				return true;
+			}
+			owns::<moq_tokio::connect::Config>(flag)
+				|| owns::<moq_tokio::quic::Config>(flag)
+				|| flag.longs.contains(&"broadcast")
+		};
+
+		if let Some(flags) = Self::names(self.given.iter().filter(|flag| !dials(flag))) {
+			anyhow::bail!("`{command}` only dials a relay with --connect; drop {flags}");
+		}
+		Ok(())
+	}
+
+	/// `--a, --b` for the flags given, or `None` when there are none.
+	fn names<'a>(flags: impl Iterator<Item = &'a &'static usage::Flag<'static>>) -> Option<String> {
+		let names: Vec<String> = flags.map(|flag| format!("--{}", flag.longs[0])).collect();
+		(!names.is_empty()).then(|| names.join(", "))
 	}
 
 	/// Split `argv` on `--` and run each chunk through a real parser.
@@ -201,7 +235,7 @@ impl Invocation {
 		let first = chunks.next().unwrap_or_default();
 		let first = first.iter().skip(1).map(OsString::as_os_str).collect::<Vec<_>>();
 		let cli = Cli::parse_from(&first).map_err(|err| parse_error(Cli::spec(), Cli::command(), &first, err))?;
-		let typed = MoqSide::from_argv(&first, Environment::Ignore).unwrap_or_else(|| cli.moq.clone());
+		let given = MoqSide::given(&first);
 
 		let mut deprecated = cli.moq.deprecated();
 		deprecated.extend(cli.command.deprecated());
@@ -238,7 +272,7 @@ impl Invocation {
 		Ok(Self {
 			log: cli.log,
 			moq: cli.moq,
-			typed,
+			given,
 			stages,
 		})
 	}
@@ -248,6 +282,17 @@ impl Invocation {
 	/// Called before anything binds a port or dials out, so a refused invocation has
 	/// no side effects to unwind.
 	pub fn validate(&self) -> anyhow::Result<()> {
+		for command in &self.stages {
+			if let Command::Export(export) = command
+				&& let Some(stdout) = export.sink.stdout()
+			{
+				anyhow::ensure!(
+					stdout.linger.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
+					"--linger needs an output that can mark a restart, and only `export ts` can"
+				);
+			}
+		}
+
 		// One stage is what the CLI has always run, so nothing below can bite.
 		if self.stages.len() == 1 {
 			return Ok(());
@@ -476,10 +521,9 @@ impl MoqSide {
 
 	/// Build a [`MoqSide`] from one chunk of a command line, leniently.
 	///
-	/// Stops at the first thing the grammar cannot take, because the two callers are
-	/// both looking at an incomplete line: a half-typed one being completed, and (via
-	/// [`Environment::Ignore`]) a real one whose typed values are being separated from
-	/// its ambient ones. Whatever was understood before that point is the answer.
+	/// Stops at the first thing the grammar cannot take, because the caller is looking
+	/// at a half-typed line being completed. Whatever was understood before that point
+	/// is the answer.
 	pub(crate) fn from_argv(argv: &[&OsStr], environment: Environment) -> Option<Self> {
 		use usage::spec::CommandArgs;
 
@@ -501,85 +545,28 @@ impl MoqSide {
 		<Self as CommandArgs>::build(partial).ok()
 	}
 
-	/// Reject the MoQ flags on a verb that never touches the network, rather than
-	/// silently ignoring them. `--broadcast` counts: a local verb has no content, and
-	/// next to `auth generate` it reads like it scopes the key, which `--root` does.
+	/// The MoQ-side flags one chunk of a command line typed, each once, in order.
 	///
-	/// Private, and reached only through [`Invocation::reject`], so it cannot be asked
-	/// of the resolved side: every one of these flags has a `MOQ_*` variable, and a
-	/// shell that exports one for the publishing it usually does has not asked this
-	/// verb for anything. A call site that picked the wrong view would read correctly
-	/// and be wrong, so there is only one view to pick. `--hop` is in the list for
-	/// the same reason it used to be out of it -- an ambient `MOQ_HOP` no longer
-	/// reaches here, so a typed one can be refused like the rest.
-	fn reject(&self, command: &str) -> anyhow::Result<()> {
-		if let Some(flag) = self.given().next() {
-			anyhow::bail!("`{command}` runs locally and takes no MoQ side; drop {flag}");
+	/// A flattened config's flags sit in this struct's table under the keys that
+	/// config minted, so the table is the complete list. The chunk already parsed,
+	/// so nothing stops the walk early.
+	fn given(argv: &[&OsStr]) -> Vec<&'static usage::Flag<'static>> {
+		use usage::spec::CommandArgs;
+
+		let mut given: Vec<&'static usage::Flag<'static>> = Vec::new();
+		let mut parser = usage::Parser::new(Cli::command(), argv);
+		while let Some(Ok(event)) = parser.next_event() {
+			if let usage::Event::Flag { flag, .. } = event
+				&& <Self as CommandArgs>::COMMAND
+					.flags
+					.iter()
+					.any(|own| own.key == flag.key)
+				&& !given.iter().any(|seen| seen.key == flag.key)
+			{
+				given.push(flag);
+			}
 		}
-		Ok(())
-	}
-
-	/// Refuse every MoQ-side flag except the dial, on a verb that only reads from a
-	/// relay: a listener or cluster it would never serve is not silently ignored.
-	/// Private for the same reason as [`Self::reject`], and reached through
-	/// [`Invocation::dial_only`].
-	fn dial_only(&self, command: &str) -> anyhow::Result<()> {
-		if let Some(flag) = self.given().find(|flag| !matches!(*flag, "--connect" | "--broadcast")) {
-			anyhow::bail!("`{command}` only dials a relay with --connect; drop {flag}");
-		}
-		Ok(())
-	}
-
-	/// The MoQ-side flags this side was given.
-	fn given(&self) -> impl Iterator<Item = &'static str> {
-		#[cfg(feature = "cluster-lan")]
-		let cluster_secret = self.cluster.lan.secret.is_some();
-		#[cfg(not(feature = "cluster-lan"))]
-		let cluster_secret = false;
-		#[cfg(feature = "cluster-lan")]
-		let cluster_app = self.cluster.lan.app.is_some();
-		#[cfg(not(feature = "cluster-lan"))]
-		let cluster_app = false;
-
-		// A legacy `--client-connect` must be rejected here too; the fold has already
-		// landed it in `url`.
-		let flags = [
-			("--connect", self.client.url.is_some()),
-			("--listen", self.server.bind.is_some()),
-			("--listen-tcp-bind", self.server.tcp.bind.is_some()),
-			("--cluster-lan", self.lan()),
-			("--cluster-lan-secret", cluster_secret),
-			("--cluster-lan-app", cluster_app),
-			("--cluster-connect", !self.cluster.connect.is_empty()),
-			("--cluster-connect-api", self.cluster.connect_api.is_some()),
-			("--cluster-node", self.cluster.node.is_some()),
-			("--cluster-mesh", self.cluster.mesh.is_some()),
-			("--cluster-token", self.cluster.token.is_some()),
-			("--cluster-id", self.cluster.id.is_some()),
-			("--cluster-tier", self.cluster.tier.is_some()),
-			("--auth-url", self.auth.url.is_some()),
-			("--auth-public", self.auth_public()),
-			("--broadcast", self.broadcast.is_some()),
-			("--hop", self.hop.is_some()),
-		];
-		#[cfg(unix)]
-		let unix = {
-			let allow = &self.server.unix.allow;
-			[
-				("--listen-unix-bind", self.server.unix.bind.is_some()),
-				("--listen-unix-allow-uid", !allow.uid.is_empty()),
-				("--listen-unix-allow-gid", !allow.gid.is_empty()),
-				("--listen-unix-allow-pid", !allow.pid.is_empty()),
-			]
-		};
-		#[cfg(not(unix))]
-		let unix = [];
-
-		flags
-			.into_iter()
-			.chain(unix)
-			.filter(|(_, given)| *given)
-			.map(|(flag, _)| flag)
+		given
 	}
 }
 
@@ -752,7 +739,7 @@ pub enum ImportSource {
 	/// Fragmented MP4 / CMAF from stdin.
 	Fmp4,
 	/// MPEG-TS from stdin.
-	Ts,
+	Ts(TsImport),
 	/// FLV / RTMP container from stdin.
 	Flv,
 	/// Pull a remote HLS / LL-HLS playlist (http/https URL or local file) into MoQ.
@@ -760,7 +747,7 @@ pub enum ImportSource {
 	/// RTMP: pull a remote play (`--connect`) or accept incoming publishes (`--listen`).
 	Rtmp(crate::rtmp::Args),
 	/// SRT: pull a remote stream (`--connect`) or accept incoming publishes (`--listen`).
-	Srt(crate::srt::Args),
+	Srt(crate::srt::ImportArgs),
 	/// WebRTC: WHEP client pulling a remote (`--connect`) or WHIP server accepting publishes (`--listen`).
 	Rtc(crate::rtc::Args),
 	/// Capture a local source (camera, display, window, app, microphone) and
@@ -775,10 +762,57 @@ impl ImportSource {
 		Some(match self {
 			Self::Avc3 => PublishFormat::Avc3,
 			Self::Fmp4 => PublishFormat::Fmp4,
-			Self::Ts => PublishFormat::Ts,
+			Self::Ts(args) => PublishFormat::Ts {
+				program: args.program.and_then(TsProgram::number),
+			},
 			Self::Flv => PublishFormat::Flv,
 			_ => return None,
 		})
+	}
+}
+
+/// The MPEG-TS stdin container: which programs of a multiplex to publish.
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct TsImport {
+	/// Import one program of a multi-program stream, by its PAT program number, or `all` to
+	/// publish each program as its own broadcast (`event.hang` becomes `event/1.hang`,
+	/// `event/2.hang`, ...). Without it, a stream carrying more than one program is refused.
+	#[usage(long)]
+	pub program: Option<TsProgram>,
+}
+
+/// An `import ts --program` or `import srt --program` value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TsProgram {
+	/// The program with this PAT program number.
+	One(u16),
+	/// Every program, each as its own broadcast.
+	All,
+}
+
+impl TsProgram {
+	/// The single program selected, `None` for `all`.
+	fn number(self) -> Option<u16> {
+		match self {
+			Self::One(program) => Some(program),
+			Self::All => None,
+		}
+	}
+}
+
+impl std::str::FromStr for TsProgram {
+	type Err = String;
+
+	fn from_str(arg: &str) -> Result<Self, Self::Err> {
+		match arg {
+			"all" => Ok(Self::All),
+			_ => match arg.parse() {
+				Ok(0) => Err("program 0 is the network PID, not a program".to_string()),
+				Ok(program) => Ok(Self::One(program)),
+				Err(_) => Err(format!("expected a program number or `all`, got `{arg}`")),
+			},
+		}
 	}
 }
 
@@ -870,6 +904,7 @@ impl ExportSink {
 		let container = |format, container: &Container| Stdout {
 			format,
 			max_age: container.max_age.into_std(),
+			linger: container.linger.into_std(),
 			fragment_duration: None,
 			mux_rate: None,
 		};
@@ -898,6 +933,7 @@ impl ExportSink {
 pub struct Stdout {
 	pub format: SubscribeFormat,
 	pub max_age: Duration,
+	pub linger: Duration,
 	pub fragment_duration: Option<Duration>,
 	pub mux_rate: Option<u64>,
 }
@@ -909,6 +945,11 @@ pub struct Container {
 	/// How stale a group may get before it is skipped (e.g. `500ms`, `1s`).
 	#[usage(long, default = "500ms")]
 	pub max_age: crate::duration::Duration,
+
+	/// How long to wait for the broadcast to come back once it ends (e.g. `10s`).
+	/// `ts` only; the output stops while it is gone and resumes flagged as a break.
+	#[usage(long, default = "0s")]
+	pub linger: crate::duration::Duration,
 
 	/// The released spelling of [`Self::max_age`].
 	#[usage(long = "latency-max", hide = true)]
@@ -978,6 +1019,62 @@ mod tests {
 		assert_eq!(cli.stages.len(), 1);
 		assert_eq!(cli.stages[0].name(), "import");
 		assert!(cli.validate().is_ok());
+	}
+
+	/// Only TS can mark where a returned broadcast restarts, so only `export ts` may linger.
+	#[test]
+	fn linger_is_ts_only() {
+		let parse = |format: &str, linger: &str| {
+			Invocation::try_parse_from(["moq", "--connect", "http://relay", "export", format, "--linger", linger])
+				.unwrap()
+		};
+		assert!(parse("ts", "10s").validate().is_ok());
+		for format in ["fmp4", "mkv", "flv", "h264", "h265"] {
+			let err = parse(format, "10s").validate().unwrap_err().to_string();
+			assert!(err.contains("--linger"), "{format}: {err}");
+			assert!(
+				parse(format, "0s").validate().is_ok(),
+				"{format}: no linger is always fine"
+			);
+		}
+	}
+
+	#[test]
+	fn import_ts_takes_a_program_number_or_all() {
+		// `None` when the command line is refused.
+		let program = |value: &str| {
+			let cli = Invocation::try_parse_from(["moq", "import", "ts", "--program", value]).ok()?;
+			let Command::Import(import) = &cli.stages[0] else {
+				panic!("an import stage");
+			};
+			let ImportSource::Ts(args) = &import.source else {
+				panic!("an import ts stage");
+			};
+			Some(args.program)
+		};
+		assert_eq!(program("2"), Some(Some(TsProgram::One(2))));
+		assert_eq!(program("all"), Some(Some(TsProgram::All)));
+		assert_eq!(program("0"), None, "0 is the network PID");
+		assert_eq!(program("two"), None);
+	}
+
+	/// `import srt` takes the same `--program` as `import ts`; `export srt` has no program to pick.
+	#[test]
+	fn import_srt_takes_a_program() {
+		let cli =
+			Invocation::try_parse_from(["moq", "import", "srt", "--listen", "[::]:9000", "--program", "all"]).unwrap();
+		let Command::Import(import) = &cli.stages[0] else {
+			panic!("an import stage");
+		};
+		let ImportSource::Srt(args) = &import.source else {
+			panic!("an import srt stage");
+		};
+		assert_eq!(args.program(), Some(moq_srt::Program::All));
+		assert!(args.endpoint.listen.is_some());
+
+		assert!(
+			Invocation::try_parse_from(["moq", "export", "srt", "--listen", "[::]:9000", "--program", "2"]).is_err()
+		);
 	}
 
 	/// A released spelling is refused, and the error names what to write instead.
@@ -1184,13 +1281,7 @@ mod tests {
 
 		// A local verb refuses the flag like every other MoQ-side flag.
 		let cli = Invocation::try_parse_from(["moq", "--auth-public", "**", "auth", "generate"]).expect("parse");
-		assert!(
-			cli.moq
-				.reject("auth")
-				.unwrap_err()
-				.to_string()
-				.contains("--auth-public")
-		);
+		assert!(cli.reject("auth").unwrap_err().to_string().contains("--auth-public"));
 	}
 
 	/// The grammar Usage can't express: one connection, several endpoints.
@@ -1488,7 +1579,7 @@ mod tests {
 		assert!(matches!(cli.stages[0], Command::Auth(_)));
 		// Local verb: it needs no MoQ side, so what every other verb demands...
 		assert!(cli.moq.validate().is_err());
-		assert!(cli.moq.reject("auth").is_ok());
+		assert!(cli.reject("auth").is_ok());
 
 		// ...these it refuses, rather than accepting the flag and ignoring it.
 		for (flag, value, reported) in [
@@ -1507,12 +1598,12 @@ mod tests {
 			("--cluster-tier", "internal", "--cluster-tier"),
 		] {
 			let cli = Invocation::try_parse_from(["moq", flag, value, "auth", "generate"]).unwrap();
-			let err = cli.moq.reject("auth").unwrap_err().to_string();
+			let err = cli.reject("auth").unwrap_err().to_string();
 			assert!(err.contains(reported), "{err}");
 		}
 
 		let cli = Invocation::try_parse_from(["moq", "--cluster-mesh", "auth", "generate"]).unwrap();
-		let err = cli.moq.reject("auth").unwrap_err().to_string();
+		let err = cli.reject("auth").unwrap_err().to_string();
 		assert!(err.contains("--cluster-mesh"), "{err}");
 
 		#[cfg(unix)]
@@ -1524,7 +1615,7 @@ mod tests {
 				("--listen-unix-allow-pid", "1000", "--listen-unix-allow-pid"),
 			] {
 				let cli = Invocation::try_parse_from(["moq", flag, value, "auth", "generate"]).unwrap();
-				let err = cli.moq.reject("auth").unwrap_err().to_string();
+				let err = cli.reject("auth").unwrap_err().to_string();
 				assert!(err.contains(reported), "{err}");
 			}
 		}
@@ -1532,7 +1623,7 @@ mod tests {
 		#[cfg(feature = "cluster-lan")]
 		{
 			let cli = Invocation::try_parse_from(["moq", "--cluster-lan", "auth", "generate"]).unwrap();
-			let err = cli.moq.reject("auth").unwrap_err().to_string();
+			let err = cli.reject("auth").unwrap_err().to_string();
 			assert!(err.contains("--cluster-lan"), "{err}");
 
 			// The parser considers the secret's `requires` satisfied when the boolean flag
@@ -1547,7 +1638,7 @@ mod tests {
 				"generate",
 			])
 			.unwrap();
-			let err = cli.moq.reject("auth").unwrap_err().to_string();
+			let err = cli.reject("auth").unwrap_err().to_string();
 			assert!(err.contains("--cluster-lan-secret"), "{err}");
 
 			let cli = Invocation::try_parse_from([
@@ -1559,8 +1650,59 @@ mod tests {
 				"generate",
 			])
 			.unwrap();
-			let err = cli.moq.reject("auth").unwrap_err().to_string();
+			let err = cli.reject("auth").unwrap_err().to_string();
 			assert!(err.contains("--cluster-lan-app"), "{err}");
+		}
+	}
+
+	/// Each verb refuses a flag from every MoQ-side family it never reads, naming it.
+	/// The listener and dial families had members the old hand-written list missed.
+	#[test]
+	fn every_unused_family_is_refused() {
+		let accept: &[&[&str]] = &[
+			&["--listen", "[::]:0"],
+			&["--listen-version", "moq-lite-02"],
+			&["--listen-tls-generate", "localhost"],
+			&["--listen-preferred-v4", "127.0.0.1:443"],
+			&["--listen-quic-lb-id", "01"],
+			&["--listen-tcp-bind", "127.0.0.1:0"],
+			&["--cluster-node", "https://self.example"],
+			&["--auth-public", "**"],
+			&["--hop", "1"],
+		];
+		let dial: &[&[&str]] = &[
+			&["--connect", "https://relay.example"],
+			&["--connect-tls-insecure"],
+			&["--backoff-initial", "2s"],
+			&["--quic-idle-timeout", "10s"],
+			#[cfg(feature = "iroh")]
+			&["--iroh-enabled"],
+			&["--broadcast", "room"],
+		];
+
+		let parse = |flag: &[&str], verb: &[&str]| {
+			let argv = ["moq"].iter().chain(flag).chain(verb).copied();
+			Invocation::try_parse_from(argv).unwrap_or_else(|err| panic!("{flag:?}: {err}"))
+		};
+
+		for verb in [&["auth", "generate"][..], &["completion", "bash"]] {
+			for flag in accept.iter().chain(dial) {
+				let err = parse(flag, verb).reject(verb[0]).unwrap_err().to_string();
+				assert!(err.contains(flag[0]), "{verb:?} {flag:?}: {err}");
+			}
+		}
+
+		for flag in accept {
+			let err = parse(flag, &["fetch", "data"])
+				.dial_only("fetch")
+				.unwrap_err()
+				.to_string();
+			assert!(err.contains(flag[0]), "{flag:?}: {err}");
+		}
+		for flag in dial {
+			parse(flag, &["fetch", "data"])
+				.dial_only("fetch")
+				.unwrap_or_else(|err| panic!("{flag:?}: {err}"));
 		}
 	}
 

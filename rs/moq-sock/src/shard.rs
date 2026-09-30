@@ -129,6 +129,10 @@ pub enum Error {
 		/// The port both groups asked for.
 		port: u16,
 	},
+
+	/// No port could be resolved for an ephemeral request.
+	#[error("failed to resolve an ephemeral port")]
+	Resolve(#[source] io::Error),
 }
 
 /// A `SO_REUSEPORT` group being formed.
@@ -173,20 +177,29 @@ impl Group {
 	/// the callers that size a group from a worker count would otherwise each
 	/// clamp it themselves.
 	///
-	/// An ephemeral port (`0`) is bound by the first member and shared by the
-	/// rest, so a group can take whatever port the kernel hands out. Nothing is
-	/// locked in that case: no second group can be aiming at a port that cannot
-	/// be named in advance.
+	/// An ephemeral port (`0`) is resolved here, with a plain bind that is
+	/// dropped again, and the group then takes that port like a named one.
+	/// Never a reuseport bind of port `0`: Linux counts a port held only by
+	/// same-UID reuseport sockets as free for one, so the kernel could hand
+	/// back a port another group holds and this one would silently join it. A
+	/// plain bind conflicts with every holder. Another socket taking the port
+	/// before the first member binds fails that bind with
+	/// [`io::ErrorKind::AddrInUse`].
 	pub fn acquire(addr: SocketAddr, count: u16) -> Result<Self, Error> {
 		let count = count.max(1);
 		if count > MAX_SHARDS {
 			return Err(Error::Count { count, max: MAX_SHARDS });
 		}
 
-		let lock = match addr.port() {
-			0 => None,
-			port => Lock::acquire(port).map_err(|_| Error::Overlap { port })?,
+		let addr = match addr.port() {
+			0 => crate::bind::udp(crate::bind::Udp::new(addr))
+				.and_then(|socket| socket.local_addr())
+				.map_err(Error::Resolve)?,
+			_ => addr,
 		};
+
+		let port = addr.port();
+		let lock = Lock::acquire(port).map_err(|_| Error::Overlap { port })?;
 
 		Ok(Self {
 			count,
@@ -200,10 +213,9 @@ impl Group {
 		self.count
 	}
 
-	/// The address the group holds: what was asked for until the first member
-	/// binds, and what it actually bound from there on.
+	/// The address the group holds, with an ephemeral port already resolved.
 	pub fn addr(&self) -> SocketAddr {
-		self.state.progress().addr
+		self.state.addr
 	}
 
 	/// The next slot to bind, or `None` once every slot has been handed out.
@@ -259,8 +271,7 @@ impl Group {
 /// One member's claim on a slot in a [`Group`], which binding spends.
 ///
 /// Send it wherever the socket is served, a worker's own thread included. It
-/// carries the group's address, so every member holds one port whatever the
-/// caller thought it asked for, and its share of the group's port lock, so a
+/// carries the group's address and its share of the group's port lock, so a
 /// member still waiting to bind cannot be raced by a second group even if its
 /// group is dropped first.
 #[derive(Debug)]
@@ -285,25 +296,19 @@ impl Member {
 	/// The claim exposes no socket. Pass every claim to [`Group::complete`],
 	/// which attaches the filter before releasing serving handles.
 	pub fn bind(self) -> io::Result<Claim> {
-		let mut progress = self.state.progress();
-		if progress.bound != self.shard.index() {
+		let mut bound = self.state.bound();
+		if *bound != self.shard.index() {
 			return Err(io::Error::other(format!(
 				"reuseport member {} cannot bind while {} of {} are in: the kernel numbers a group by bind order",
 				self.shard.index(),
-				progress.bound,
+				*bound,
 				self.shard.count(),
 			)));
 		}
 
-		let socket = bind(progress.addr, self.shard)?;
-
-		// An ephemeral request gives each member a port of its own, so the rest
-		// of the group joins the port the first member actually got.
-		if self.shard.index() == 0 {
-			progress.addr = socket.local_addr()?;
-		}
-		progress.bound += 1;
-		drop(progress);
+		let socket = bind(self.state.addr, self.shard)?;
+		*bound += 1;
+		drop(bound);
 
 		Ok(Claim {
 			shard: self.shard,
@@ -347,7 +352,7 @@ impl Bound {
 
 	/// The address every member holds.
 	pub fn addr(&self) -> SocketAddr {
-		self.state.progress().addr
+		self.state.addr
 	}
 
 	/// The next socket to serve, or `None` once every member was handed out.
@@ -383,8 +388,8 @@ impl Socket {
 	}
 }
 
-/// What the members of a forming group share: the port it holds, how far the
-/// group has been bound, and the address it holds.
+/// What the members of a forming group share: the address and port lock it
+/// holds, and how far the group has been bound.
 ///
 /// Shared rather than owned by the [`Group`] because a member is bound wherever
 /// its socket is served, which is usually not where the group lives. The lock
@@ -393,36 +398,31 @@ impl Socket {
 /// is gone.
 #[derive(Debug)]
 struct State {
-	progress: Mutex<Progress>,
+	addr: SocketAddr,
 
-	/// Held until the group and its members are all dropped, and released by the
-	/// kernel with the process. `None` for an ephemeral port, which cannot be
-	/// named in advance, and on a host with no lock directory.
-	_lock: Option<Lock>,
-}
-
-/// How far a group has been bound, and the address its members hold.
-#[derive(Debug)]
-struct Progress {
 	/// How many members have bound, which is also the only index allowed to bind
 	/// next.
-	bound: u16,
-	addr: SocketAddr,
+	bound: Mutex<u16>,
+
+	/// Held until the group and its members are all dropped, and released by the
+	/// kernel with the process. `None` on a host with no lock directory.
+	_lock: Option<Lock>,
 }
 
 impl State {
 	fn new(addr: SocketAddr, lock: Option<Lock>) -> Self {
 		Self {
-			progress: Mutex::new(Progress { bound: 0, addr }),
+			addr,
+			bound: Mutex::new(0),
 			_lock: lock,
 		}
 	}
 
-	/// The progress, whatever a panicking member left behind: a failed bind is
-	/// reported by the count it did not advance, so there is no torn state a
+	/// The bound count, whatever a panicking member left behind: a failed bind
+	/// is reported by the count it did not advance, so there is no torn state a
 	/// poisoned lock would be protecting.
-	fn progress(&self) -> MutexGuard<'_, Progress> {
-		self.progress.lock().unwrap_or_else(PoisonError::into_inner)
+	fn bound(&self) -> MutexGuard<'_, u16> {
+		self.bound.lock().unwrap_or_else(PoisonError::into_inner)
 	}
 }
 
@@ -444,7 +444,9 @@ fn bind(addr: SocketAddr, shard: Shard) -> io::Result<UdpSocket> {
 	// The probe only sees a group that is already bound. Two processes
 	// *constructing* concurrently could each probe while the other holds
 	// nothing yet, which is what [`Lock`] excludes; the probe's job is the
-	// holder the lock cannot see, one that predates it or never took it.
+	// holder the lock cannot see, one that predates it or never took it, or
+	// one that took an ephemeral group's port after [`Group::acquire`]
+	// resolved it.
 	if shard.index() == 0 {
 		drop(crate::bind::udp(crate::bind::Udp::new(addr))?);
 	}
@@ -1027,6 +1029,35 @@ mod tests {
 		// The lock dies with the group, so the port is takeable again.
 		drop(first);
 		Group::acquire(addr, 1).expect("the released port must be takeable again");
+	}
+
+	/// An ephemeral request is resolved to a concrete port and locked before any
+	/// member binds. A reuseport bind of port `0` could land on a port another
+	/// same-UID group holds, and join it.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn an_ephemeral_group_takes_its_port_up_front() {
+		let group = Group::acquire("127.0.0.1:0".parse().unwrap(), 1).unwrap();
+		let addr = group.addr();
+		assert_ne!(addr.port(), 0, "the port is resolved before any member binds");
+
+		assert!(
+			matches!(Group::acquire(addr, 1), Err(Error::Overlap { .. })),
+			"a second group took an ephemeral group's port"
+		);
+	}
+
+	/// A same-UID reuseport socket that takes an ephemeral group's port between
+	/// its resolution and the first member's bind must fail that bind, not be
+	/// joined by it.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn an_ephemeral_port_taken_before_binding_is_refused() {
+		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), 1).unwrap();
+		let _intruder = crate::bind::udp(crate::bind::Udp::new(group.addr()).with_reuse_port(true)).unwrap();
+
+		let err = group.member().unwrap().bind().expect_err("joined the intruder's group");
+		assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
 	}
 
 	/// A member outlives the group that handed it out and can still bind, so the

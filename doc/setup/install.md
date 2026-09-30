@@ -64,7 +64,7 @@ sudo apt install moq-relay moq gstreamer1.0-moq
 Fedora 39+, RHEL 9, Rocky 9, AlmaLinux 9. On openSUSE use `zypper addrepo`.
 
 ```bash
-sudo dnf config-manager --add-repo https://rpm.moq.dev/moq.repo
+sudo curl -fsSL https://rpm.moq.dev/moq.repo -o /etc/yum.repos.d/moq.repo
 sudo dnf install moq-relay moq gstreamer1-moq
 ```
 

@@ -26,7 +26,7 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 if ! command -v uniffi-bindgen-go >/dev/null 2>&1; then
     echo "go check: uniffi-bindgen-go not on PATH, skipping" >&2
-    echo "  install: cargo install uniffi-bindgen-go --git https://github.com/kixelated/uniffi-bindgen-go --rev v0.9.0+v0.32.0 --locked" >&2
+    echo "  install: cargo install uniffi-bindgen-go --git https://github.com/kixelated/uniffi-bindgen-go --rev v0.10.0-kixelated.1+v0.32.0 --locked" >&2
     exit 0
 fi
 

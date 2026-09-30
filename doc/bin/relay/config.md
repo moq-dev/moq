@@ -77,8 +77,8 @@ io_uring = false                     # Drive them with io_uring instead of tokio
 ```
 
 Packets are steered by connection ID, so a client that migrates stays with its
-worker. The group shares one port, including an ephemeral (zero) port: the
-first worker binds it and the rest join that port. Use an explicit port unless
+worker. The group shares one port, including an ephemeral (zero) port, which is
+resolved once and joined by every worker. Use an explicit port unless
 something reads the bound address at startup. `workers` needs the `noq`
 feature and real certificate files rather than `tls.generate`. A build without
 QUIC rejects `workers` instead of

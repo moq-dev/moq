@@ -421,18 +421,20 @@ async function announcedUntil(announced: { next(): Promise<{ prefix: Path.Valid 
 
 // A `.`-named broadcast is left out of discovery unless the request opts in or names the
 // dot segment. lite-06 cannot carry the opt-in, so its peer never lists the hidden path.
-for (const [protocol, carriesOptIn] of [
+for (const [protocol, carriesOptIn, version] of [
 	[Lite.ALPN_07_WIP, true],
 	[Lite.ALPN_06, false],
 	[Ietf.ALPN.DRAFT_19, true],
 	[Ietf.ALPN.DRAFT_16, true],
+	["", true, Ietf.Version.DRAFT_14],
+	[Ietf.ALPN.DRAFT_15, true],
 ] as const) {
 	test(`integration: ${protocol} hides dot paths from discovery`, async () => {
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const [client, server] = await Promise.all([
 			connect(url, { transport: pair.client }),
-			accept(pair.server, url, { publish: origin.consume() }),
+			accept(pair.server, url, { publish: origin.consume(), version }),
 		]);
 
 		// Published first, so a reader that may see it lists it before `visible`.

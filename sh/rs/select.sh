@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Run `just rs check|check-test|fix|test` on the crates a diff touches, plus
-# their dependents.
+# their dependents. `platform` is the Windows and macOS compile.
 #
-# Usage: sh/rs/select.sh check|check-test|fix|test LISTFILE|--all
+# Usage: sh/rs/select.sh check|check-test|fix|test|platform LISTFILE|--all
 #
 # LISTFILE holds the changed paths, one per line. `--all` is the whole
 # workspace, as is a change to anything every crate is built or tested by.
 set -euo pipefail
 
-usage="usage: sh/rs/select.sh check|check-test|fix|test LISTFILE|--all"
+usage="usage: sh/rs/select.sh check|check-test|fix|test|platform LISTFILE|--all"
 action=${1:?$usage}
 list=${2:?$usage}
 
@@ -16,7 +16,7 @@ cd "$(git rev-parse --show-toplevel)"
 
 # Print `ALL`, nothing (no crate affected), or cargo package ids.
 select_packages() {
-    if [[ "$list" == --all ]] || grep -qE '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/select\.sh|\.config/nextest\.toml)$' "$list"; then
+    if [[ "$list" == --all ]] || grep -qE '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform)\.sh|\.config/nextest\.toml)$' "$list"; then
         echo ALL
         return
     fi
@@ -50,8 +50,10 @@ select_packages() {
     # backwards until the selection stops growing. Test the value, not the key:
     # awk creates a key on every `want[dep[i]]` read. The id lookup below drops
     # names that are not workspace crates, such as a seed from `rs/AGENTS.md`.
-    selected=$(awk -v seeds="$seeds" '
-		BEGIN { split(seeds, s, "\n"); for (i in s) want[s[i]] = 1 }
+    # The seeds go through the environment because BSD awk (macOS) rejects a
+    # newline in a `-v` value.
+    selected=$(SEEDS="$seeds" awk '
+		BEGIN { split(ENVIRON["SEEDS"], s, "\n"); for (i in s) want[s[i]] = 1 }
 		{ pkg[NR] = $1; dep[NR] = $2 }
 		END {
 			do {
@@ -147,6 +149,27 @@ case "$action" in
         # Tests behind the off-by-default `capture` and `play` features.
         if wants '(moq-video|moq-audio)'; then just rs capture-test; fi
         if wants moq-cli; then just rs play; fi
+        ;;
+    platform)
+        # moq-gst links GStreamer via pkg-config, which the runners don't have.
+        if [[ "$packages" == ALL ]]; then
+            flags+=(--exclude moq-gst)
+        else
+            flags=()
+            for id in $packages; do
+                [[ "$id" == --package || "$id" == */moq-gst#* ]] || flags+=(--package "$id")
+            done
+            if ((${#flags[@]} == 0)); then
+                echo "rs: no crates affected; skipping."
+                exit 0
+            fi
+        fi
+        # `play` and `capture` are off by default and turn on the device and
+        # render code in moq-video, moq-audio, and the cli. Only when moq-cli is
+        # selected, since cargo rejects a feature of a package outside the
+        # selection; a change to anything they reach selects moq-cli anyway.
+        if wants moq-cli; then flags+=(--features moq-cli/play,moq-cli/capture); fi
+        cargo check --locked "${flags[@]}" --all-targets
         ;;
     *)
         echo "$usage" >&2

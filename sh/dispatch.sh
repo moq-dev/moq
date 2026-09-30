@@ -40,34 +40,11 @@ all=
 if [[ "$base" == --all ]]; then
     all=1
 else
-    # BASE: the argument, then $GITHUB_BASE_REF (a PR checkout has no
-    # upstream), then the upstream, then origin/main. `git push -u` points the
-    # upstream at the branch's own remote copy, which would diff HEAD against
-    # itself, so that case falls through to origin/main.
-    if [[ -z "$base" && -n "${GITHUB_BASE_REF:-}" ]]; then
-        base="origin/$GITHUB_BASE_REF"
-    fi
-    if [[ -z "$base" ]]; then
-        base=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
-        if [[ -z "$base" || "$base" == */"$(git branch --show-current)" ]]; then
-            base=origin/main
-        fi
-    fi
-    merge_base=$(git merge-base "$base" HEAD) || {
-        echo "error: cannot resolve merge-base against $base (is full history fetched?)" >&2
-        exit 1
-    }
-    echo "$action: base $base" >&2
-
-    # Untracked files count too: a brand new crate or module is the whole change.
-    {
-        git diff --name-only "$merge_base"
-        git ls-files --others --exclude-standard
-    } | sort -u >"$changed"
+    sh/changed.sh "$base" >"$changed"
 
     # These files hold the map and the recipes that call it, and match no
     # module, so a change to them would otherwise validate none of it.
-    if grep -qE '^(justfile|sh/dispatch\.sh)$' "$changed"; then
+    if grep -qE '^(justfile|sh/(dispatch|changed)\.sh)$' "$changed"; then
         echo "$action: root orchestration changed; running everything." >&2
         all=1
     fi

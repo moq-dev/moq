@@ -32,8 +32,10 @@ harness:
 # browser publish; everyone subscribes (incl. native node/bun JS, the C libmoq
 # client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
+# Both runs first check js/net's varints against moq-net's encoder at every size boundary.
 [positional-arguments]
 interop *args:
+    just rs test -p moq-net --lib varint_interop --run-ignored all
     ./interop/interop.sh "$@"
 
 # Negative control: no publisher, every subscriber must time out (proves the
@@ -78,7 +80,8 @@ drill-sensitivity *args:
 # burstiness, instantaneous bitrate, T-STD). Flags: `--analyze-only file.ts`
 # (skip the round-trip), `--strict` (fail on shape warnings), `--source file.ts`
 # (use a real capture), `--live` (grade PCR release timing and byte position off
-# the pipe instead, which a capture cannot carry; nightly runs this arm). See
+# the pipe instead, which a capture cannot carry; nightly runs this arm),
+# `--open-gop` (an open-GOP clip whose leading pictures must survive). See
 # ts/README.md.
 
 # Check the subscriber's MPEG-TS output for IRD compliance.

@@ -1,8 +1,8 @@
 use super::PublishMode;
+use crate::rml::amf0::Amf0Value;
 use crate::rml::sessions::StreamMetadata;
 use crate::rml::time::RtmpTimestamp;
 use bytes::Bytes;
-use rml_amf0::Amf0Value;
 
 /// The enhanced-RTMP FourCCs a peer advertised for one media kind.
 #[derive(Debug, PartialEq, Clone, Default)]

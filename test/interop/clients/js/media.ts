@@ -178,7 +178,7 @@ function traceLine(sample: PlayerState, start: number): string {
 	return (
 		`    +${((sample.at - start) / 1000).toFixed(2)}s frame=${sample.frameId ?? "-"} ` +
 		`step=${sample.toneStep ?? "-"}/${step} tone=${margin.toFixed(0)}dB ${sample.toneHz?.toFixed(0) ?? "-"}Hz ` +
-		`paused=${sample.paused} audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}`
+		`paused=${sample.paused} delay=${sample.delay}ms audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}`
 	);
 }
 

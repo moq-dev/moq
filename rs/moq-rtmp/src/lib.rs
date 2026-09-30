@@ -48,10 +48,12 @@
 //!
 //! RTMPS (RTMP over TLS) is supported two ways:
 //!
-//! - **Let the gateway terminate TLS**: set [`Config::tls`] (or call
-//!   [`Server::with_tls`]) with a [`rustls::ServerConfig`], and the listener
-//!   serves `rtmps://` alongside `rtmp://` on the same port, telling them apart
-//!   by the client's first byte.
+//! - **Let the gateway terminate TLS** (the default `tls` feature): set
+//!   `Config::tls` (or call `Server::with_tls`) with a `rustls::ServerConfig`,
+//!   and the listener serves `rtmps://` alongside `rtmp://` on the same port,
+//!   telling them apart by the client's first byte. Set [`Config::plaintext`] to `false` (or call
+//!   [`Server::with_plaintext`]) to refuse the plaintext clients and serve
+//!   `rtmps://` only.
 //! - **Bring your own transport**: accept the connection and complete the TLS
 //!   handshake yourself (any [`Stream`]: a `tokio_rustls` stream, a custom
 //!   socket, a test pipe), then hand the established stream to [`accept_stream`].
@@ -61,7 +63,7 @@
 //!   reaps a play session whose viewer vanished without closing.
 //!
 //! Pure Rust: the RTMP handshake, chunk codec, and session state machine live in
-//! the vendored `rml` module (a fork of `rml_rtmp`), with no librtmp or ffmpeg
+//! the vendored `rml` module (forks of `rml_rtmp` and `rml_amf0`), with no librtmp or ffmpeg
 //! dependency.
 
 #![warn(missing_docs)]
@@ -72,7 +74,7 @@ mod dial;
 mod error;
 mod flv;
 mod listen;
-// Vendored fork of rml_rtmp; see the module docs.
+// Vendored forks of rml_rtmp and rml_amf0; see the module docs.
 mod rml;
 mod server;
 

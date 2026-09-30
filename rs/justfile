@@ -81,15 +81,13 @@ tokio-features:
     sh/rs/tokio-features.sh
 
 # Runs the `#[cfg(windows)]` code past the compiler, which the Linux gate
-# skips; platform.yml runs it on a Windows runner for every pull request.
-# Default features, since jemalloc doesn't build on MSVC, and moq-gst is
-# excluded because the runner has no GStreamer. `moq-cli/play` and
-# `moq-cli/capture` turn on the device and render code.
+# skips; platform.yml runs it on a Windows runner, scoped like `check-changed`
+# so a one-crate PR compiles one crate on these slow runners too. Default
+# features, since jemalloc doesn't build on MSVC.
 
-# Compile the whole workspace on a Windows host. Must run ON Windows.
-[positional-arguments]
-windows *args:
-    cargo check --locked --workspace --exclude moq-gst {{ no_fuzz }} --all-targets --features "moq-cli/play moq-cli/capture" "$@"
+# Compile what the branch changed since BASE on a Windows host, or everything with `--all`.
+windows $BASE="":
+    sh/rs/platform.sh "$BASE"
 
 # Compile and test the io_uring relay path, which is off the default feature set.
 # Linux-only, and the tests below the 6.12 kernel floor skip themselves.
@@ -108,10 +106,9 @@ uring-check *args:
 # The Apple-gated code in moq-video, moq-audio, and moq-sock, which
 # platform.yml compiles on a Mac runner alongside `windows`.
 
-# Compile the whole workspace on a macOS host. Must run ON macOS.
-[positional-arguments]
-macos *args:
-    cargo check --locked --workspace --exclude moq-gst {{ no_fuzz }} --all-targets --features "moq-cli/play moq-cli/capture" "$@"
+# Compile what the branch changed since BASE on a macOS host, or everything with `--all`.
+macos $BASE="":
+    sh/rs/platform.sh "$BASE"
 
 # Compile and lint the capture feature, which the default check skips.
 [positional-arguments]
