@@ -42,7 +42,6 @@ Settled in the 2026-09-30 `/quest-plan`:
   before they publish). If lite-07 is finalized first for the Wildcard
   rollout, the remaining children move to the next wip version; finalizing
   never waits on this line.
-- The before/after memory figure is a committed benchmark, measured first.
 - A short idle timeout for cluster sessions is its own m1 quest,
   [Cluster idle timeout](/quest/m1/cluster-idle-timeout.md), since it helps
   today's path vector too.
@@ -179,7 +178,6 @@ Once every child has landed:
 
 ## Required
 
-- [Memory benchmark](/quest/m1/cluster-routing/memory.md) - a committed benchmark states per-announcement, per-route, and per-peer relay memory, before anything changes
 - [Topology](/quest/m1/cluster-routing/topology.md) - relays learn the relay graph once from a cluster message, apart from routes
 - [Propagation](/quest/m1/cluster-routing/propagation.md) - decides how each announcement reaches every relay once, and writes the implementation children
 - [Selection](/quest/m1/cluster-routing/selection.md) - a broadcast under overlapping prefixes routes to one origin deterministically, and same-epoch origins are one source

@@ -46,7 +46,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Starvation at frame granularity](/quest/m2/starvation-frames.md) - the
   acknowledged frontier moves at every frame boundary through `poll_acked`,
   with a delivery-delay histogram for jitter
-- [Per-stream ACK progress](/quest/m2/quic-ack-progress.md) - the fork reports
+- [Per-stream ACK progress](/quest/m2/quic-ack-progress.md) - `moq-quic` reports
   how far a send stream has been acknowledged and when
 - [poll_acked in web-transport](/quest/m2/quic-ack-hook.md) - the
   backend-neutral hook that awaits an acknowledged stream offset, implemented
@@ -88,13 +88,13 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [vcpkg registry](/quest/m2/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
 - [Binary delta stats](/quest/m2/stats-delta.md) - an on-demand varint delta flavor of every stats track, if relay encode CPU still matters after the JSON fixes
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
-- [Multipath spike](/quest/m2/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends
+- [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - moq-uring receives from the buffer ring and transmits into registered buffers with no copy, once a profile says where
 - [BBR media study](/quest/m2/quic-bbr-natural-drain.md) - whether bounded drain credit avoids ProbeRTT deadline interference, and where our BBR differs from Google's
 - [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [L4S on the backbone](/quest/m2/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive by deadline](/quest/m2/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer
-- [noq socket close](/quest/m2/noq-socket-close.md) - noq releases an endpoint's socket on close, so moq-tokio drops its wrapper
+- [Socket close](/quest/m2/noq-socket-close.md) - `moq-quic` releases an endpoint's socket on close, so moq-tokio drops its wrapper
 - [GOP overhead](/quest/m2/gop-overhead.md) - price the I-frames a short GOP pays for, deciding whether a long GOP plus a keyframe request is worth designing
 - [Per-program SI](/quest/m2/ts-program-si.md) - a selected TS program's broadcast carries only its own service's SDT and EIT
 - [TS import health](/quest/m2/ts-import-health.md) - `moq import ts` counts the TR 101 290 errors of the feed it receives, PCR and PTS graded on its own values

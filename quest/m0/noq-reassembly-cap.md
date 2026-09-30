@@ -20,7 +20,8 @@ the crates are renamed.
   and #22: fold the port into those releases or take the next patch numbers,
   then bump the pins here.
 - Open the same port as a PR on n0-computer/noq (approved 2026-09-29; the
-  advisory is public). iroh builds stay on the unfixed upstream crate until
+  advisory is public; opened as
+  [noq#828](https://github.com/n0-computer/noq/pull/828)). iroh builds stay on the unfixed upstream crate until
   n0 releases it; bump when they do.
 - Give `moq-tokio` a finite default connection `receive_window` instead of
   the backend's `VarInt::MAX` (`rs/moq-tokio/src/noq.rs` `apply_windows`,
@@ -31,6 +32,10 @@ the crates are renamed.
   [Peer limits](/quest/m1/quic/peer-limits.md).
 - `rs/moq-uring` depends on `moq-noq-proto` too, so the same pin bump
   covers the io_uring workers.
+
+The in-tree [fork](/quest/m1/quic/fork/README.md) inherits the cap from
+quinn main, so after it lands only the receive-window default and iroh's noq
+pin remain relevant on `dev`.
 
 Public API: none. Wire: a peer that exceeds the chunk cap is closed.
 
