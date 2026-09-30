@@ -645,8 +645,8 @@ impl Server {
 							// (like the stream bindings).
 							let Accepted { session, url, identity, authority, mut link } = within(deadline, super::noq::accept(_conn, alpns)).await?;
 							link.local = local;
-							let request = setup.accept(session, deadline).await?;
-							Ok(Request { transport: Transport::Quic, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)) })
+							let (request, deadline) = setup.accept(session, deadline).await?;
+							Ok(Request { transport: Transport::Quic, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)), deadline })
 						}.boxed());
 					}
 				}
@@ -657,8 +657,8 @@ impl Server {
 						let deadline = setup.deadline();
 						self.accept.push(async move {
 							let Accepted { session, url, identity, authority, link } = within(deadline, super::iroh::accept(_conn, alpns)).await?;
-							let request = setup.accept(session, deadline).await?;
-							Ok(Request { transport: Transport::Iroh, url, identity, authority, link, kind: RequestKind::Iroh(Box::new(request)) })
+							let (request, deadline) = setup.accept(session, deadline).await?;
+							Ok(Request { transport: Transport::Iroh, url, identity, authority, link, kind: RequestKind::Iroh(Box::new(request)), deadline })
 						}.boxed());
 					}
 				}
@@ -673,10 +673,10 @@ impl Server {
 						let deadline = setup.deadline();
 						self.accept.push(async move {
 							let (session, url, accepted) = within(deadline, _pending).await?;
-							let request = setup.accept(session, deadline).await?;
+							let (request, deadline) = setup.accept(session, deadline).await?;
 							let authority = url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 							let link = Link { remote: Some(accepted.remote), local, alpn: accepted.protocol, ..Default::default() };
-							Ok(Request { transport: Transport::WebSocket, url: Some(url), authority, identity: None, link, kind: RequestKind::Qmux(Box::new(request)) })
+							Ok(Request { transport: Transport::WebSocket, url: Some(url), authority, identity: None, link, kind: RequestKind::Qmux(Box::new(request)), deadline })
 						}.boxed());
 					}
 				}
@@ -865,12 +865,13 @@ impl Setup {
 	}
 
 	/// Read the peer's MoQ SETUP by `deadline`, closing the session with a timeout
-	/// code if it hasn't arrived.
+	/// code if it hasn't arrived. The deadline comes back too, since answering the
+	/// SETUP is part of the handshake it bounds.
 	async fn accept<S>(
 		&self,
 		session: S,
 		deadline: Option<tokio::time::Instant>,
-	) -> crate::Result<PendingRequest<crate::transport::Session<S>>>
+	) -> crate::Result<(PendingRequest<crate::transport::Session<S>>, Option<Deadline>)>
 	where
 		S: web_transport_trait::Session,
 		crate::transport::Session<S>: moq_net::transport::poll::Boxable,
@@ -879,22 +880,62 @@ impl Setup {
 		<crate::transport::Session<S> as web_transport_trait::poll::Session>::RecvStream:
 			web_transport_trait::MaybeSync,
 	{
-		use web_transport_trait::poll::Session as _;
-
 		let session = crate::transport::Session::new(session);
-		let mut refused = session.clone();
-		let accept = self
-			.server
-			.accept_request(tokio::time::Instant::now().into_std(), session);
-		let Some(deadline) = deadline else {
-			return Ok(accept.await?);
+		let deadline = deadline.map(|at| Deadline::new(at, session.clone()));
+		let accept = async {
+			Ok(self
+				.server
+				.accept_request(tokio::time::Instant::now().into_std(), session)
+				.await?)
 		};
-		match tokio::time::timeout_at(deadline, accept).await {
-			Ok(request) => Ok(request?),
+		let request = Deadline::bound(deadline.as_ref(), accept).await?;
+		Ok((request, deadline))
+	}
+}
+
+/// When an accepted connection's handshake must be done, and how to tell the peer
+/// it wasn't.
+struct Deadline {
+	at: tokio::time::Instant,
+	/// Closes the session with the timeout code.
+	close: Box<dyn Fn() + Send + Sync>,
+}
+
+impl Deadline {
+	#[cfg(any(
+		feature = "noq",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		all(feature = "uds", unix)
+	))]
+	fn new<S>(at: tokio::time::Instant, session: S) -> Self
+	where
+		S: web_transport_trait::poll::Session + Clone + Send + Sync + 'static,
+	{
+		let close = move || {
+			let err = moq_net::Error::Timeout;
+			session
+				.clone()
+				.close(moq_net::SessionError::from(&err).to_code(), &err.to_string());
+		};
+		Self {
+			at,
+			close: Box::new(close),
+		}
+	}
+
+	/// Finish `handshake` before the deadline, or close the session with the
+	/// timeout code. Without a deadline, wait forever.
+	async fn bound<T>(deadline: Option<&Self>, handshake: impl Future<Output = crate::Result<T>>) -> crate::Result<T> {
+		let Some(deadline) = deadline else {
+			return handshake.await;
+		};
+		match tokio::time::timeout_at(deadline.at, handshake).await {
+			Ok(res) => res,
 			Err(_) => {
-				let err = moq_net::Error::Timeout;
-				refused.close(moq_net::SessionError::from(&err).to_code(), &err.to_string());
-				Err(err.into())
+				(deadline.close)();
+				Err(moq_net::Error::Timeout.into())
 			}
 		}
 	}
@@ -1223,7 +1264,7 @@ async fn stream_request(
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) {
 	match setup.accept(session, deadline).await {
-		Ok(request) => {
+		Ok((request, deadline)) => {
 			let request = Request {
 				transport,
 				url: None,
@@ -1231,6 +1272,7 @@ async fn stream_request(
 				identity: None,
 				link,
 				kind: RequestKind::Qmux(Box::new(request)),
+				deadline,
 			};
 			let _ = tx.send(request).await;
 		}
@@ -1342,6 +1384,8 @@ pub struct Request {
 	/// The link facts the transport could see.
 	link: Link,
 	kind: RequestKind,
+	/// What remains of the handshake deadline, which also bounds [`Request::ok`].
+	deadline: Option<Deadline>,
 }
 
 /// Why an incoming session was rejected.
@@ -1412,99 +1456,47 @@ impl Request {
 	}
 
 	/// Publish the given origin to the session.
-	pub fn with_publisher(self, publish: impl moq_net::Consume<moq_net::origin::Consumer>) -> Self {
-		let Request {
-			transport,
-			url,
-			authority,
-			identity,
-			link,
-			kind,
-		} = self;
-		let kind = request_map!(kind, request => request.with_publisher(publish));
-		Request {
-			transport,
-			url,
-			authority,
-			identity,
-			link,
-			kind,
-		}
+	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::origin::Consumer>) -> Self {
+		self.kind = request_map!(self.kind, request => request.with_publisher(publish));
+		self
 	}
 
 	/// Subscribe to the given origin from the session.
-	pub fn with_subscriber(self, subscribe: moq_net::origin::Producer) -> Self {
-		let Request {
-			transport,
-			url,
-			authority,
-			identity,
-			link,
-			kind,
-		} = self;
-		let kind = request_map!(kind, request => request.with_subscriber(subscribe));
-		Request {
-			transport,
-			url,
-			authority,
-			identity,
-			link,
-			kind,
-		}
+	pub fn with_subscriber(mut self, subscribe: moq_net::origin::Producer) -> Self {
+		self.kind = request_map!(self.kind, request => request.with_subscriber(subscribe));
+		self
 	}
 
 	/// Assign the identity this peer's routes are attributed to; see
 	/// [`moq_net::server::Handshake::with_peer_hop`]. Derive it from [`Self::peer_identity`],
 	/// never from something coarser.
-	pub fn with_peer_hop(self, hop: moq_net::Hop) -> Self {
-		let Request {
-			transport,
-			url,
-			authority,
-			identity,
-			link,
-			kind,
-		} = self;
-		let kind = request_map!(kind, request => request.with_peer_hop(hop));
-		Request {
-			transport,
-			url,
-			authority,
-			identity,
-			link,
-			kind,
-		}
+	pub fn with_peer_hop(mut self, hop: moq_net::Hop) -> Self {
+		self.kind = request_map!(self.kind, request => request.with_peer_hop(hop));
+		self
 	}
 
 	/// Attach a per-connection [`moq_net::stats::Session`] context to this session.
-	pub fn with_stats(self, stats: moq_net::stats::Session) -> Self {
-		let Request {
-			transport,
-			url,
-			authority,
-			identity,
-			link,
-			kind,
-		} = self;
-		let kind = request_map!(kind, request => request.with_stats(stats));
-		Request {
-			transport,
-			url,
-			authority,
-			identity,
-			link,
-			kind,
-		}
+	pub fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {
+		self.kind = request_map!(self.kind, request => request.with_stats(stats));
+		self
 	}
 
 	/// Accept the session, starting the MoQ session loops.
+	///
+	/// Bounded by what remains of the handshake deadline: answering SETUP can wait
+	/// on a peer that withholds flow-control credit, which keep-alives would
+	/// otherwise hold open.
 	pub async fn ok(self) -> crate::Result<Session> {
-		Ok(request_into!(self.kind, request => {
-			let (session, driver) = request.ok().await?;
-			use tracing::Instrument;
-			tokio::spawn(moq_net::time::run(driver).instrument(tracing::Span::current()));
-			session
-		}))
+		let Request { kind, deadline, .. } = self;
+		let ok = async {
+			Ok(request_into!(kind, request => {
+				let (session, driver) = request.ok().await?;
+				use tracing::Instrument;
+				tokio::spawn(moq_net::time::run(driver).instrument(tracing::Span::current()));
+				session
+			}))
+		};
+		Deadline::bound(deadline.as_ref(), ok).await
 	}
 
 	/// Returns the network transport carrying this session.
@@ -1775,18 +1767,95 @@ mod tests {
 		)
 	}
 
-	/// A peer that connected and then never speaks, recording the code it was
-	/// closed with. The stream types are qmux's only to name some; none is opened.
+	/// A scripted peer, recording the code it was closed with.
+	///
+	/// With `setup` it is a moq-transport peer whose bidi SETUP stream delivers those
+	/// bytes and then never grants credit for the reply. Without it, it never opens
+	/// anything, while a bidi stream it opens itself records what is written.
 	#[cfg(feature = "websocket")]
-	#[derive(Clone, Default)]
-	struct Silent {
+	#[derive(Clone)]
+	struct Scripted {
+		alpn: &'static str,
+		setup: Option<bytes::Bytes>,
+		written: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 		closed: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
 	}
 
 	#[cfg(feature = "websocket")]
-	impl web_transport_trait::Session for Silent {
-		type SendStream = qmux::SendStream;
-		type RecvStream = qmux::RecvStream;
+	impl Scripted {
+		fn new(alpn: &'static str) -> Self {
+			Self {
+				alpn,
+				setup: None,
+				written: Default::default(),
+				closed: Default::default(),
+			}
+		}
+	}
+
+	/// Records every write, or accepts none at all when `stalled`.
+	#[cfg(feature = "websocket")]
+	struct ScriptedSend {
+		written: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+		stalled: bool,
+	}
+
+	#[cfg(feature = "websocket")]
+	impl web_transport_trait::SendStream for ScriptedSend {
+		type Error = qmux::Error;
+
+		async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+			if self.stalled {
+				std::future::pending::<()>().await;
+			}
+			self.written.lock().unwrap().extend_from_slice(buf);
+			Ok(buf.len())
+		}
+
+		fn set_priority(&mut self, _order: u8) {}
+
+		fn finish(&mut self) -> Result<(), Self::Error> {
+			Ok(())
+		}
+
+		fn reset(&mut self, _code: u32) {}
+
+		async fn closed(&mut self) -> Result<(), Self::Error> {
+			std::future::pending().await
+		}
+	}
+
+	/// Delivers `data` once, then nothing more.
+	#[cfg(feature = "websocket")]
+	struct ScriptedRecv {
+		data: Option<bytes::Bytes>,
+	}
+
+	#[cfg(feature = "websocket")]
+	impl web_transport_trait::RecvStream for ScriptedRecv {
+		type Error = qmux::Error;
+
+		async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+			let Some(mut data) = self.data.take() else {
+				return std::future::pending().await;
+			};
+			let n = dst.len().min(data.len());
+			dst[..n].copy_from_slice(&data.split_to(n));
+			self.data = (!data.is_empty()).then_some(data);
+			Ok(Some(n))
+		}
+
+		fn stop(&mut self, _code: u32) {}
+
+		async fn closed(&mut self) -> Result<(), Self::Error> {
+			std::future::pending().await
+		}
+	}
+
+	#[cfg(feature = "websocket")]
+	impl web_transport_trait::Session for Scripted {
+		type SendStream = ScriptedSend;
+		type RecvStream = ScriptedRecv;
 		type Error = qmux::Error;
 
 		async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
@@ -1794,11 +1863,22 @@ mod tests {
 		}
 
 		async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			std::future::pending().await
+			let Some(setup) = self.setup.clone() else {
+				return std::future::pending().await;
+			};
+			let send = ScriptedSend {
+				written: Default::default(),
+				stalled: true,
+			};
+			Ok((send, ScriptedRecv { data: Some(setup) }))
 		}
 
 		async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			std::future::pending().await
+			let send = ScriptedSend {
+				written: self.written.clone(),
+				stalled: false,
+			};
+			Ok((send, ScriptedRecv { data: None }))
 		}
 
 		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
@@ -1818,7 +1898,7 @@ mod tests {
 		}
 
 		fn protocol(&self) -> Option<&str> {
-			Some("moq-lite-06")
+			Some(self.alpn)
 		}
 
 		fn close(&self, code: u32, _reason: &str) {
@@ -1834,7 +1914,7 @@ mod tests {
 	#[cfg(feature = "websocket")]
 	#[tokio::test(start_paused = true)]
 	async fn stalled_setup_is_closed_at_the_deadline() {
-		let peer = Silent::default();
+		let peer = Scripted::new("moq-lite-06");
 		let timeout = std::time::Duration::from_secs(10);
 		let setup = Setup {
 			server: moq_net::Server::new(),
@@ -1844,6 +1924,53 @@ mod tests {
 		let Err(err) = setup.accept(peer.clone(), setup.deadline()).await else {
 			panic!("a peer that never sent SETUP was accepted");
 		};
+		assert!(matches!(err, Error::MoqNet(moq_net::Error::Timeout)), "{err}");
+		assert_eq!(start.elapsed(), timeout);
+		assert_eq!(
+			*peer.closed.lock().unwrap(),
+			Some(moq_net::SessionError::Timeout.to_code())
+		);
+	}
+
+	/// Answering SETUP is part of the handshake: a moq-transport peer that sends
+	/// its SETUP but never grants credit for the reply is refused at the same
+	/// deadline, rather than held open by keep-alives.
+	#[cfg(feature = "websocket")]
+	#[tokio::test(start_paused = true)]
+	async fn stalled_setup_reply_is_closed_at_the_deadline() {
+		// Record a real moq-transport-14 CLIENT_SETUP. The client then waits on a
+		// reply that never comes.
+		let recorder = Scripted::new("moq-00");
+		let client = tokio::spawn({
+			let recorder = crate::transport::Session::new(recorder.clone());
+			async move {
+				let _ = moq_net::Client::new()
+					.connect(tokio::time::Instant::now().into_std(), recorder)
+					.await;
+			}
+		});
+		tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+		client.abort();
+		let bytes = std::mem::take(&mut *recorder.written.lock().unwrap());
+		assert!(!bytes.is_empty(), "the client never wrote its SETUP");
+
+		let mut peer = Scripted::new("moq-00");
+		peer.setup = Some(bytes.into());
+		let timeout = std::time::Duration::from_secs(10);
+		let setup = Setup {
+			server: moq_net::Server::new(),
+			timeout: Some(timeout),
+		};
+		let start = tokio::time::Instant::now();
+		let Ok((request, deadline)) = setup.accept(peer.clone(), setup.deadline()).await else {
+			panic!("a readable SETUP was refused");
+		};
+		assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+
+		let ok = async { Ok(request.ok().await.map(drop)?) };
+		let err = Deadline::bound(deadline.as_ref(), ok)
+			.await
+			.expect_err("a reply the peer never took completed");
 		assert!(matches!(err, Error::MoqNet(moq_net::Error::Timeout)), "{err}");
 		assert_eq!(start.elapsed(), timeout);
 		assert_eq!(
@@ -1877,7 +2004,7 @@ mod tests {
 			session
 		});
 
-		let Ok(request) = setup.accept(server, deadline).await else {
+		let Ok((request, _)) = setup.accept(server, deadline).await else {
 			panic!("a prompt SETUP was refused");
 		};
 		let (_session, driver) = request.ok().await.expect("server handshake");
