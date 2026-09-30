@@ -38,7 +38,8 @@ harness:
 # client, and the GStreamer moqsrc plugin). --timeout 30 gives headless Chromium
 # cold-start headroom. Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
-# Both runs first check js/net's varints against moq-net's encoder at every size boundary.
+# Both runs first check js/net's varints against moq-net's encoder at every size boundary,
+# and on lite-06/07 messages (the filter also matches `lite_varint_interop`).
 interop *args:
     #!/usr/bin/env bash
     set -euo pipefail
