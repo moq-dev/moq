@@ -7,7 +7,9 @@
 //! each [`Frame`] is one slot's clock packet plus the bytes belonging to it,
 //! stamped at the slot boundary, so the clock a receiver recovers from byte
 //! position agrees with the values, and a pacing caller releases each slot at
-//! the instant it asserts. Video is carried as Annex-B, audio as ADTS AAC.
+//! the instant it asserts. With a multiplex rate every slot carries exactly the
+//! bytes that rate implies, media first and null stuffing after
+//! ([`Export::transmit`]). Video is carried as Annex-B, audio as ADTS AAC.
 //!
 //! Video flows through [`ExportSource`], which normalizes every H.264/H.265
 //! source to length-prefixed NALU plus a resolved avcC/hvcC (parsing in-band
@@ -179,12 +181,12 @@ pub struct Export<E: catalog::Catalog = ()> {
 	stall: Option<web_async::time::Instant>,
 	/// Wakes [`Self::pick_next_track`] once the stall has lasted `max_age`.
 	hold: Option<Pin<Box<web_async::time::Sleep>>>,
-	/// The rate to pad the output to with null packets, in bits per second: the
-	/// builder override when set, else the catalog's recorded multiplex rate, else
-	/// none and the output is unpadded ([`Self::stuff`]).
+	/// The constant rate to transmit the output at, in bits per second: the builder
+	/// override when set, else the catalog's recorded multiplex rate, else none and
+	/// the output is VBR and unpadded ([`Self::emit`]).
 	mux_rate: Option<u64>,
 	mux_rate_override: Option<u64>,
-	stuffing: Stuffing,
+	schedule: Schedule,
 	/// Tune-in point: the first video keyframe's timestamp, captured when the program
 	/// tables are built. Non-video frames before it are dropped so the keyframe leads
 	/// the stream.
@@ -408,16 +410,95 @@ enum Kind {
 	},
 }
 
-/// The null stuffing owed to the multiplex rate ([`Export::stuff`]).
+/// The constant-rate transmission of an export with a multiplex rate
+/// ([`Export::schedule`]): closed spans queue here and go out a grid slot at a
+/// time, each slot carrying the rate's allowance.
 #[derive(Default)]
-struct Stuffing {
+struct Schedule {
+	/// Closed spans not yet transmitted, oldest first.
+	backlog: VecDeque<Chunk>,
+	/// Untransmitted packets across the backlog.
+	packets: usize,
+	/// The grid slot the next output frame opens, once the clock has started.
+	next: Option<u128>,
+	/// How far the transmitted clock trails the media, in nanoseconds: a slot goes
+	/// out once the media has run this far past its end. It grows to fit the
+	/// largest burst seen, up to `max_age`, and never shrinks.
+	delay: u128,
+	/// The media time the slots are transmitted against, in nanoseconds.
+	horizon: u128,
+	/// The largest delay a burst has asked for beyond `max_age`, so each new worst
+	/// is reported once rather than on every keyframe.
+	refused: u128,
 	/// Packets the rate has allowed minus packets sent, in [`STUFFING_UNIT`]s.
-	/// Negative while the media alone exceeds the rate.
+	/// Negative while a span sent above the rate is being repaid.
 	balance: i64,
-	/// Packets sent since the last clock packet, that packet included.
-	since_pcr: u64,
 	/// Whether the debt cap has been hit and reported in the current overrun.
 	overrun: bool,
+}
+
+impl Schedule {
+	/// Drop the backlog and stop the clock, keeping the delay the stream has shown
+	/// it needs.
+	fn restart(&mut self) {
+		self.backlog.clear();
+		self.packets = 0;
+		self.next = None;
+		self.horizon = 0;
+		self.balance = 0;
+		self.overrun = false;
+	}
+
+	/// Queue a closed span; `keyframes` are byte offsets into it.
+	fn push(&mut self, bytes: Vec<u8>, keyframes: Vec<usize>, deadline: u128) {
+		self.packets += bytes.len() / TsPacket::SIZE;
+		self.backlog.push_back(Chunk {
+			bytes,
+			sent: 0,
+			keyframes: keyframes.into_iter().map(|at| at / TsPacket::SIZE).collect(),
+			deadline,
+			queued: self.horizon.max(deadline),
+		});
+	}
+
+	/// The delay under which a span decoding at `deadline` and queued behind the
+	/// backlog would reach a receiver in time at `rate`.
+	///
+	/// A queue drained at a constant rate finishes a span at the latest of, for each
+	/// span ahead of it, when that one was queued plus the time to send it and
+	/// everything after. The clock runs the delay behind the media, so that finish
+	/// has to be no later than the deadline plus the delay; the slot the last byte
+	/// lands in has to end by then too.
+	fn needs(&self, deadline: u128, rate: u64) -> u128 {
+		let mut packets = 0;
+		let mut delay = 0;
+		for chunk in self.backlog.iter().rev() {
+			packets += chunk.remaining();
+			let finish = chunk.queued + transmit_time(packets, rate) + PCR_INTERVAL.as_nanos();
+			delay = delay.max(finish.saturating_sub(deadline));
+		}
+		delay
+	}
+}
+
+/// One closed span waiting in the [`Schedule`] backlog.
+struct Chunk {
+	bytes: Vec<u8>,
+	/// Packets already transmitted from the front.
+	sent: usize,
+	/// Packet indices into `bytes` where a keyframe begins.
+	keyframes: Vec<usize>,
+	/// The span's earliest media timestamp, in nanoseconds: every byte of it has
+	/// to be transmitted by then.
+	deadline: u128,
+	/// The media time it was queued at, in nanoseconds.
+	queued: u128,
+}
+
+impl Chunk {
+	fn remaining(&self) -> usize {
+		self.bytes.len() / TsPacket::SIZE - self.sent
+	}
 }
 
 /// The program tables plus the resolved PID layout.
@@ -697,13 +778,13 @@ impl<E: catalog::Catalog> Export<E> {
 			video_start: None,
 			mux_rate: None,
 			mux_rate_override: None,
-			stuffing: Stuffing::default(),
+			schedule: Schedule::default(),
 		})
 	}
 
-	/// Pad the output with null packets to `mux_rate` bits per second, whatever the
-	/// catalog records. Without this the catalog's `mpegts.muxRate` decides, and a
-	/// catalog without one leaves the output unpadded.
+	/// Transmit the output at a constant `mux_rate` bits per second, padded with null
+	/// packets, whatever the catalog records. Without this the catalog's
+	/// `mpegts.muxRate` decides, and a catalog without one leaves the output VBR.
 	///
 	/// Zero and absurd rates are refused with a warning, leaving the output
 	/// unpadded rather than allocating unbounded nulls.
@@ -717,7 +798,8 @@ impl<E: catalog::Catalog> Export<E> {
 	}
 
 	/// Set the max age for each per-track source, which also bounds how long the
-	/// interleave holds a leading track for a lagging one.
+	/// interleave holds a leading track for a lagging one, and how far a
+	/// constant-rate output may trail the media to spread a burst.
 	///
 	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
 	/// Frames are muxed in media-time order across every track, waiting up to this
@@ -831,7 +913,7 @@ impl<E: catalog::Catalog> Export<E> {
 			if changed {
 				let joined = self.tracks[&name].epoch == self.epoch;
 				if joined {
-					if !self.pending.is_empty() {
+					if !self.pending.is_empty() || !self.schedule.backlog.is_empty() {
 						// A boundary ends valid media rather than reneging it.
 						// Return that tail under the old generation before adopting the new one.
 						self.emit(None)?;
@@ -1001,8 +1083,13 @@ impl<E: catalog::Catalog> Export<E> {
 			}),
 		};
 		if self.mux_rate != mux_rate {
+			// The backlog was laid out for the old rate, so it goes out at that rate
+			// and the new one takes over from where it ends.
+			if let Some(rate) = self.mux_rate {
+				self.flush(rate)?;
+			}
 			self.mux_rate = mux_rate;
-			self.stuffing = Stuffing::default();
+			self.schedule.restart();
 		}
 
 		// Reconcile the SI subscriptions with the catalog's map. Entries may appear
@@ -1311,7 +1398,7 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 		self.video_start = None;
 		self.pcr_discontinuity = true;
-		self.stuffing = Stuffing::default();
+		self.schedule.restart();
 		for track in self.tracks.values_mut() {
 			track.last_dts = None;
 			track.timeline = None;
@@ -1704,7 +1791,8 @@ impl<E: catalog::Catalog> Export<E> {
 	/// grid slots *preceding* the span, which are only known once the span has
 	/// closed. That is the mux buffer: the exporter runs two spans behind the media
 	/// clock, by a constant amount, so a caller pacing on the stamps still releases
-	/// every slot at the interval its own PCR value asserts.
+	/// every slot at the interval its own PCR value asserts. A constant-rate output
+	/// runs further behind, by the delay its bursts need ([`Self::schedule`]).
 	fn advance(&mut self, ts: Timestamp) -> anyhow::Result<()> {
 		let Some(watermark) = self.watermark else {
 			self.watermark = Some(ts);
@@ -1720,7 +1808,8 @@ impl<E: catalog::Catalog> Export<E> {
 
 	/// Lay the open span's bytes across the grid slots that run up to its decode
 	/// time, one [`Frame`] per slot. `span` is how long the span ran, or `None` at
-	/// end of stream, where nothing measured it.
+	/// end of stream, where nothing measured it. With a multiplex rate the span
+	/// joins the constant-rate schedule instead ([`Self::schedule`]).
 	///
 	/// Each frame opens with the clock packets whose slot boundary it starts at,
 	/// then carries the share of the bytes its slice of the interval earns. Three
@@ -1743,6 +1832,9 @@ impl<E: catalog::Catalog> Export<E> {
 	/// decode-clock reserve of any track so every PES unit, whichever rendition it
 	/// belongs to, decodes at or after the clock that precedes it.
 	fn emit(&mut self, span: Option<u128>) -> anyhow::Result<()> {
+		if let Some(rate) = self.mux_rate {
+			return self.schedule(rate, span.is_none());
+		}
 		self.span_counters = None;
 		let bytes = std::mem::take(&mut self.pending);
 		let keyframes = std::mem::take(&mut self.keyframes);
@@ -1788,10 +1880,9 @@ impl<E: catalog::Catalog> Export<E> {
 		let pcr_pid = self.psi.as_ref().context("PSI not built")?.pcr_pid;
 		let mut payload = Vec::new();
 		for index in first..=open {
-			self.stuff(index, &mut payload);
 			let before = counter_before(&bytes, 0, pcr_pid, self.pcr_cc);
 			let clock = self.pcr_at(index, before)?;
-			self.send(&mut payload, &clock);
+			payload.extend_from_slice(&clock);
 		}
 		let mut cut = 0;
 		let mut at = from;
@@ -1806,18 +1897,16 @@ impl<E: catalog::Catalog> Export<E> {
 			} else {
 				packets
 			};
-			self.send(&mut payload, &bytes[cut * TsPacket::SIZE..next * TsPacket::SIZE]);
-			self.stuff(index, &mut payload);
+			payload.extend_from_slice(&bytes[cut * TsPacket::SIZE..next * TsPacket::SIZE]);
 			self.push(at, payload, &keyframes, cut, next);
 			cut = next;
 			at = boundary;
 			let before = counter_before(&bytes, cut * TsPacket::SIZE, pcr_pid, self.pcr_cc);
 			let clock = self.pcr_at(index, before)?;
-			payload = Vec::new();
-			self.send(&mut payload, &clock);
+			payload = clock;
 		}
 
-		self.send(&mut payload, &bytes[cut * TsPacket::SIZE..]);
+		payload.extend_from_slice(&bytes[cut * TsPacket::SIZE..]);
 		self.push(at, payload, &keyframes, cut, packets);
 		if let Some(cc) = counter_before(&bytes, bytes.len(), pcr_pid, None) {
 			self.pcr_cc = Some(cc);
@@ -1825,63 +1914,213 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(())
 	}
 
-	/// Append packets to the open output frame, counting them against the rate.
-	fn send(&mut self, payload: &mut Vec<u8>, packets: &[u8]) {
-		payload.extend_from_slice(packets);
-		self.stuffing.since_pcr += (packets.len() / TsPacket::SIZE) as u64;
+	/// Queue the open span on the constant-rate schedule, then transmit every slot
+	/// the media has run [`Schedule::delay`] past, or the whole backlog when
+	/// `flush`ing (end of stream, a boundary).
+	///
+	/// The rate fixes how many bytes each slot carries, so the byte position of a
+	/// clock packet agrees with its value at the mux rate and a receiver can recover
+	/// the clock from arrival. What the rate cannot do is carry a keyframe in the
+	/// slot before it decodes: at 10 Mb/s a 25 ms slot holds 31 kB, and a keyframe
+	/// is several times that. So the transmitted clock trails the media by a delay,
+	/// and a burst goes out across the slots before its decode time instead of
+	/// heaped between two clock packets. The delay grows to fit the largest burst
+	/// seen, which only holds the output back and so needs no new time base; it is
+	/// capped by `max_age`, the latency the caller has already said it will hold. A
+	/// burst the cap cannot fit is not delayed past its decode time or dropped: it
+	/// goes out above the rate ([`Self::transmit`]), with a warning.
+	fn schedule(&mut self, rate: u64, flush: bool) -> anyhow::Result<()> {
+		self.span_counters = None;
+		let bytes = std::mem::take(&mut self.pending);
+		let keyframes = std::mem::take(&mut self.keyframes);
+		let horizon = self.watermark.map_or(0, Timestamp::as_nanos);
+		self.schedule.horizon = self.schedule.horizon.max(horizon);
+		if let Some(low) = self.low.take() {
+			self.enqueue(rate, bytes, keyframes, low.as_nanos());
+		}
+		if flush {
+			return self.flush(rate);
+		}
+		let Some(mut next) = self.schedule.next else {
+			return Ok(());
+		};
+		// Slots before this one have ended at least the delay before the media did.
+		let due = horizon.saturating_sub(self.schedule.delay) / PCR_INTERVAL.as_nanos();
+		while next < due {
+			// As in [`Self::emit`]: past the backfill cap the media gapped, and a dense
+			// clock history for a span that carried no bytes only stalls a pacer.
+			if self.schedule.packets == 0 && due - next > PCR_BACKFILL {
+				next = due - PCR_BACKFILL;
+			}
+			self.transmit(next, rate, false)?;
+			next += 1;
+		}
+		Ok(())
 	}
 
-	/// Settle the interval that closes at grid slot `index`, the one the clock packet
-	/// about to be written for it ends, appending the null packets that bring it up
-	/// to the multiplex rate. Nothing without a rate.
+	/// Transmit the whole backlog at `rate`.
+	fn flush(&mut self, rate: u64) -> anyhow::Result<()> {
+		while self.schedule.packets > 0 {
+			let next = self.schedule.next.context("backlog without a clock")?;
+			self.transmit(next, rate, true)?;
+		}
+		Ok(())
+	}
+
+	/// Add a closed span to the backlog, raising the delay if it would reach its
+	/// `deadline` late.
+	fn enqueue(&mut self, rate: u64, bytes: Vec<u8>, keyframes: Vec<usize>, deadline: u128) {
+		let interval = PCR_INTERVAL.as_nanos();
+		let cap = self.max_age.as_nanos();
+		let schedule = &mut self.schedule;
+		schedule.push(bytes, keyframes, deadline);
+		let backlog = transmit_time(schedule.packets, rate);
+		// The last byte lands inside the slot the backlog ends in, and that slot has to
+		// end by the deadline.
+		let lead = backlog + interval;
+		let next = match schedule.next {
+			Some(next) => next,
+			// Carry on from the last clock packet (a VBR stretch before the rate was
+			// known), or start early enough to carry this span in by its deadline.
+			None => {
+				let next = match self.last_pcr {
+					Some(last) => last + 1,
+					None => deadline.saturating_sub(lead.min(cap)) / interval,
+				};
+				schedule.next = Some(next);
+				schedule.delay = schedule.delay.max(deadline.saturating_sub(next * interval).min(cap));
+				next
+			}
+		};
+		if next * interval + lead <= deadline {
+			return;
+		}
+		// Measured from when the backlog was queued rather than added to the delay in
+		// effect, which the clock may not have fallen back to yet.
+		let want = schedule.needs(deadline, rate);
+		if want <= schedule.delay {
+			return;
+		}
+		let delay = want.min(cap);
+		if delay > schedule.delay {
+			tracing::info!(
+				from = ?Duration::from_nanos(schedule.delay as u64),
+				to = ?Duration::from_nanos(delay as u64),
+				"raising the MPEG-TS mux buffer delay"
+			);
+			schedule.delay = delay;
+		}
+		if want > cap && want > schedule.refused {
+			tracing::warn!(
+				needs = ?Duration::from_nanos(want as u64),
+				max_age = ?self.max_age,
+				mux_rate = rate,
+				"burst needs more mux buffer than max_age; sending it above the multiplex rate"
+			);
+			schedule.refused = want;
+		}
+	}
+
+	/// Transmit grid slot `index` as one [`Frame`]: its clock packet, then the
+	/// backlog's share of the rate, then null stuffing up to the rate.
 	///
 	/// The rate credits each slot its exact fractional allowance and every packet
 	/// sent debits one, so the remainder carries across slots and the long-run count
-	/// is exact. Media is never delayed or dropped to fit: a slot that already
-	/// exceeds its allowance gets no nulls and carries the debt forward, and a source
-	/// that sustains more than the rate simply overruns it. The debt is capped at one
-	/// second of packets and reported once per overrun, or the rate would never
-	/// recover after a long burst. Credit is capped the same way, matching the clock
-	/// backfill: past it the media gapped, and a second of stuffing marks that without
-	/// filling the whole gap.
-	fn stuff(&mut self, index: u128, payload: &mut Vec<u8>) {
-		let since = std::mem::take(&mut self.stuffing.since_pcr);
-		let (Some(rate), Some(last)) = (self.mux_rate, self.last_pcr) else {
-			return;
-		};
+	/// is exact. Media is never delayed past its decode time or dropped to fit: a
+	/// span due before the next slot ends goes out whole in this one, above the
+	/// allowance if it has to, and a source that sustains more than the rate simply
+	/// overruns it. The excess is repaid from later stuffing rather than from later
+	/// media, which would only make more of it late. The debt is capped at one second
+	/// of packets and reported once per overrun, or the rate would never recover
+	/// after a long burst. A `flush` sends at least one packet per slot, so a rate
+	/// below two packets a slot still drains.
+	fn transmit(&mut self, index: u128, rate: u64, flush: bool) -> anyhow::Result<()> {
+		let pcr_pid = self.psi.as_ref().context("PSI not built")?.pcr_pid;
 		// The rate is sanitized where it enters (the builder and the catalog), so
-		// this holds; refuse to pad rather than wrap if it ever does not.
-		let Ok(rate) = i64::try_from(rate) else {
-			return;
-		};
-		let slots = index.saturating_sub(last).min(PCR_BACKFILL) as i64;
-		let stuffing = &mut self.stuffing;
-		stuffing.balance = stuffing
-			.balance
-			.saturating_add(slots.saturating_mul(rate))
-			.saturating_sub((since as i64).saturating_mul(STUFFING_UNIT));
+		// this holds.
+		let rate = i64::try_from(rate).context("multiplex rate out of range")?;
+		// Nothing on the clock PID has gone out yet: repeat the counter one behind
+		// the first packet queued on it.
+		let before = self.pcr_cc.or_else(|| {
+			self.schedule
+				.backlog
+				.iter()
+				.find_map(|chunk| counter_before(&chunk.bytes[chunk.sent * TsPacket::SIZE..], 0, pcr_pid, None))
+		});
+		let mut payload = self.pcr_at(index, before)?;
+
+		let schedule = &mut self.schedule;
+		let budget = schedule.balance.max(0).saturating_add(rate);
+		schedule.balance = schedule.balance.saturating_add(rate);
+		// Everything up to the last span that would miss its deadline in the next slot.
+		let deadline = (index + 2) * PCR_INTERVAL.as_nanos();
+		let mut due = 0;
+		let mut queued = 0;
+		for chunk in &schedule.backlog {
+			queued += chunk.remaining();
+			if chunk.deadline < deadline {
+				due = queued;
+			}
+		}
+		let allowance = usize::try_from(budget / STUFFING_UNIT - 1).unwrap_or(0);
+		let mut take = allowance.min(schedule.packets).max(due);
+		if flush {
+			take = take.max(1).min(schedule.packets);
+		}
+
+		let mut keyframe = false;
+		let mut left = take;
+		while left > 0 {
+			let Some(chunk) = schedule.backlog.front_mut() else {
+				break;
+			};
+			let n = left.min(chunk.remaining());
+			let (from, to) = (chunk.sent, chunk.sent + n);
+			keyframe |= chunk.keyframes.iter().any(|&at| at >= from && at < to);
+			let packets = &chunk.bytes[from * TsPacket::SIZE..to * TsPacket::SIZE];
+			if let Some(cc) = counter_before(packets, packets.len(), pcr_pid, None) {
+				self.pcr_cc = Some(cc);
+			}
+			payload.extend_from_slice(packets);
+			chunk.sent = to;
+			schedule.packets -= n;
+			left -= n;
+			if chunk.remaining() == 0 {
+				schedule.backlog.pop_front();
+			}
+		}
+
+		let sent = 1 + take as i64;
+		schedule.balance = schedule.balance.saturating_sub(sent.saturating_mul(STUFFING_UNIT));
 		let floor = rate.saturating_mul(-SLOTS_PER_SECOND);
-		if stuffing.balance < floor {
-			if !std::mem::replace(&mut stuffing.overrun, true) {
+		if schedule.balance < floor {
+			if !std::mem::replace(&mut schedule.overrun, true) {
 				tracing::warn!(mux_rate = rate, "MPEG-TS output exceeds the multiplex rate");
 			}
-			stuffing.balance = floor;
-		} else if stuffing.balance >= 0 {
-			stuffing.overrun = false;
+			schedule.balance = floor;
+		} else if schedule.balance >= 0 {
+			schedule.overrun = false;
 		}
-		let nulls = (stuffing.balance / STUFFING_UNIT).max(0);
-		// Never emit more than the slots just credited could allow: a bound on one
-		// call's allocation whatever the balance holds. A no-op on a rate that came
-		// through [`sanitize_mux_rate`], whose balance carries less than one packet.
-		// (A manual `div_ceil`: all terms are non-negative, and the toolchain's
-		// signed `div_ceil` is still unstable.)
-		let ceiling = slots.saturating_mul(rate).saturating_add(STUFFING_UNIT - 1) / STUFFING_UNIT;
-		let nulls = nulls.min(ceiling);
-		stuffing.balance -= nulls * STUFFING_UNIT;
+		// Never more than one slot's credit, a bound on the allocation whatever the
+		// balance holds. (A manual `div_ceil`: all terms are non-negative, and the
+		// toolchain's signed `div_ceil` is still unstable.)
+		let ceiling = rate.saturating_add(STUFFING_UNIT - 1) / STUFFING_UNIT;
+		let nulls = (schedule.balance / STUFFING_UNIT).clamp(0, ceiling);
+		schedule.balance -= nulls * STUFFING_UNIT;
 		payload.reserve(nulls as usize * TsPacket::SIZE);
 		for _ in 0..nulls {
 			payload.extend_from_slice(&NULL_PACKET);
 		}
+
+		schedule.next = Some(index + 1);
+		self.clock = Some(slot_stamp(index + 1)?);
+		self.queue.push_back(Frame {
+			timestamp: slot_stamp(index)?,
+			duration: None,
+			payload: Bytes::from(payload),
+			keyframe,
+		});
+		Ok(())
 	}
 
 	/// Queue one output frame, unless it would be empty. `from`..`to` are the packet
@@ -2247,6 +2486,14 @@ fn stamp(nanos: u128) -> anyhow::Result<Timestamp> {
 /// A repetition slot's boundary (`index * interval`) in 90 kHz ticks.
 fn slot_ticks(index: u128, interval: Duration) -> u64 {
 	(index * interval.as_nanos() * 90_000 / 1_000_000_000) as u64
+}
+
+/// How long `packets` of media take to transmit at `rate` bits per second, in
+/// nanoseconds, given that every grid slot also carries its clock packet.
+fn transmit_time(packets: usize, rate: u64) -> u128 {
+	let unit = STUFFING_UNIT as u128;
+	let media = u128::from(rate).saturating_sub(unit).max(1);
+	(packets as u128 * unit * PCR_INTERVAL.as_nanos()).div_ceil(media)
 }
 
 /// External byte size of an adaptation field (manual mirror of the crate's

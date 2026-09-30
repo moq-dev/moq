@@ -973,9 +973,10 @@ pub struct Transport {
 	#[usage(flatten)]
 	pub container: Container,
 
-	/// Pad the output with null packets to this constant rate, in bits per second.
+	/// Transmit the output at this constant rate, in bits per second, padding with
+	/// null packets and trailing the media by up to `--max-age` to spread keyframes.
 	/// Defaults to the multiplex rate the catalog recorded from a constant-rate
-	/// source (`mpegts.muxRate`); without either the output is unpadded.
+	/// source (`mpegts.muxRate`); without either the output is VBR and unpadded.
 	#[usage(long)]
 	pub mux_rate: Option<u64>,
 }

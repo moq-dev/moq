@@ -248,12 +248,16 @@ else
     # recovery-point SEI. Fixed B placement in a 24-frame GOP puts three B pictures
     # right after each one in decode order, presented before it: leading pictures.
     [[ -n "$OPEN_GOP" ]] && X264="keyint=24:min-keyint=24:scenecut=0:open-gop=1:bframes=3:b-adapt=0"
+    # Detailed, slowly moving content under a VBV, so each keyframe is several PCR
+    # slots of bytes at the mux rate (~110-140 kB against ~31 kB per 25 ms at 10 Mb/s)
+    # while the average frame fits one, the shape of a broadcast feed. A flat test
+    # pattern compresses to almost nothing, pads, and keeps any schedule.
     ffmpeg -y -hide_banner -loglevel error \
-        -f lavfi -i "testsrc=size=1280x720:rate=25" \
+        -f lavfi -i "mandelbrot=size=1280x720:rate=25" \
         -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
         -t "$DURATION" \
         -c:v libx264 -profile:v high -preset veryfast -pix_fmt yuv420p \
-        -x264-params "$X264" -b:v 8M \
+        -x264-params "$X264" -b:v 6M -maxrate 8M -bufsize 2M \
         -c:a aac -b:a 128k \
         -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
 fi
@@ -521,9 +525,16 @@ fi
 # compliance.py grades rate in aggregate and over fixed windows, neither of which says
 # whether the bytes between consecutive PCRs are the ones the mux rate implies, so the
 # capture goes through pcr-timing.py as well. Its hard checks gate here as they do under
-# --live; pcr-schedule is a shape check, so it reports without gating unless --strict.
+# --live. pcr-schedule gates on the generated clip, whose keyframes outgrow a PCR slot
+# and whose rate is known. The exporter is VBR for the ~2 s the importer takes to
+# measure that rate, so the gate allows 4 s off schedule: 80 % over the default 20 s,
+# where the scheduled output holds ~92 % and VBR held 34 %. A --source capture
+# reports without gating unless --strict.
+GATE=()
+[[ -z "$SOURCE" ]] && GATE=(--schedule-pct-min $((DURATION > 4 ? 100 * (DURATION - 4) / DURATION : 0)))
 echo
-if ! python3 "$DIR/pcr-timing.py" "$SUB_TS" ${SCHEDULE[@]+"${SCHEDULE[@]}"} $STRICT; then
+if ! python3 "$DIR/pcr-timing.py" "$SUB_TS" ${SCHEDULE[@]+"${SCHEDULE[@]}"} \
+    ${GATE[@]+"${GATE[@]}"} $STRICT; then
     echo >&2
     echo "error: PCR timing analysis failed (see round-trip logs below)" >&2
     dump_logs

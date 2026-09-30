@@ -7,7 +7,7 @@ runs [TSDuck](https://tsduck.io) plus a custom analyzer over it.
 
 This is a diagnostic gate, not just a pass/fail: the exporter
 ([`rs/moq-mux/src/container/ts/export.rs`](../../rs/moq-mux/src/container/ts/export.rs))
-is VBR, inserts no null packets, and paces PCR once per media frame, so several
+is VBR and inserts no null packets unless the catalog declares a mux rate, so several
 broadcast-shape checks are expected to flag. The report quantifies exactly where
 and by how much.
 
@@ -41,8 +41,8 @@ runs (see [CI](#ci)).
 The default arm runs `pcr-timing.py` over its capture too, after `compliance.py`,
 for the one thing the IRD model does not grade: whether the bytes between
 consecutive PCRs are the ones the mux rate implies
-([`pcr-schedule`](#byte-schedule)). It is a shape check, so it reports without
-gating unless `--strict`.
+([`pcr-schedule`](#byte-schedule)). It gates on the generated clip and reports
+without gating on a `--source` capture unless `--strict`.
 
 The live arm passes only when the grader's verdict *and* the publisher's exit status
 are clean. The grader can only speak for what reached it, and the sample floor
@@ -223,15 +223,18 @@ the exporter's unpadded first half-second pulled it ~3 % low and read every padd
 interval after it as off schedule. `run.sh` passes the generated clip's rate
 (`--bitrate`), and lets the grader estimate for `--source`.
 
-The generated clip is a weak fixture for this check. It compresses to almost
-nothing, so padding dominates and no keyframe outgrows its slot: measured against
-the exporter this check was written for, 92-97 % of intervals were on schedule
-over three 20 s runs, the misses being near-empty intervals from the unpadded
-start. A real constant-rate capture is the case that
-discriminates. A 60 s cut of a 9.95 Mb/s broadcast clip round-tripped through the
-same harness came back with a median of 1,316 B between PCRs against 31,081 B
-nominal and 3.1 % of intervals within tolerance, while its aggregate rate was
-within 16 b/s of nominal:
+The generated clip is detailed enough that each keyframe is 110-140 kB, several
+25 ms slots at 10 Mb/s, while the average frame fits one. An exporter that pads
+without scheduling heaps each keyframe between two PCRs, and scored 34 % on it; the
+scheduled exporter keeps ~92 %, the misses being the ~2 s before the importer has
+measured the rate, when the output is still VBR. `run.sh` gates on it with
+`--schedule-pct-min`, allowing those 4 s off schedule (80 % over the default 20 s).
+
+A real constant-rate capture is graded without a gate, since its rate is estimated.
+A 60 s cut of a 9.95 Mb/s broadcast clip round-tripped through the same harness
+came back, before the exporter scheduled its bytes, with a median of 1,316 B
+between PCRs against 31,081 B nominal and 3.1 % of intervals within tolerance,
+while its aggregate rate was within 16 b/s of nominal:
 
 ```bash
 just test ts --source cap.ts --duration 60 # reports the schedule, estimating the rate

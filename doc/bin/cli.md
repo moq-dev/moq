@@ -104,11 +104,22 @@ profile or channel layout ADTS cannot label is refused rather than mislabeled.
 
 A constant-rate MPEG-TS source records its multiplex rate in the catalog
 (`mpegts.muxRate`, measured off the PCR clock, null stuffing included), and
-`export ts` pads its output with null packets back to that rate so an IRD or
-groomer receives a constant-rate stream. `--mux-rate 5000000` pads to an explicit
-rate instead, including for a broadcast that recorded none. Media is never delayed
-or dropped to fit: a source that sustains more than the rate overruns it, and a
-VBR source records nothing, so export without either stays unpadded.
+`export ts` transmits its output at that rate: every 25 ms between clock packets
+carries the bytes the rate implies, media first and null packets after, so an IRD
+or groomer recovering the clock from packet arrival can lock. `--mux-rate 5000000`
+sets an explicit rate instead, including for a broadcast that recorded none. A VBR
+source records nothing, so export without either stays VBR and unpadded. The
+importer measures the rate over its first 2 s, and an export that starts with the
+broadcast is VBR until then.
+
+A keyframe is usually several intervals' worth of bytes, so it is spread over the
+intervals before it decodes, and the output trails the media by a buffer delay.
+The delay grows to fit the largest burst seen, up to `--max-age`, and is latency
+on top of the export's own. A burst that needs more goes out above the rate before
+it decodes, with a warning, and later intervals repay it from their padding: media
+is never delayed past its decode time or dropped. A 60 s cut of a 9.95 Mb/s news
+channel reaches the 500 ms default and has 75 % of intervals on the rate;
+`--max-age 1s` settles at a 710 ms delay with 99 % on it.
 
 fMP4 export writes one fragment per publisher group on each track. Audio follows
 the publisher's cuts; video normally follows GOPs. Closing a group flushes it
@@ -328,7 +339,9 @@ For `export ts`, `--max-age` also bounds how long the muxer holds a leading
 track for a lagging one. Frames go out in media-time order across all tracks,
 not arrival order, so two exporters of one broadcast emit them in one order. A
 track quiet for longer is muxed around until it catches up; a sparse track
-(SCTE-35) costs that wait once per cue. `--max-age 0` keeps arrival order.
+(SCTE-35) costs that wait once per cue. `--max-age 0` keeps arrival order. With
+a mux rate it is also how far the output may trail the media to spread a keyframe
+over the rate.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the broadcast to come back instead: a publisher that restarts within

@@ -5103,6 +5103,220 @@ async fn export_stuffing_keeps_the_fractional_remainder() {
 	assert!(clocked.nulls > 0, "no null stuffing was emitted");
 }
 
+/// The multiplex rate of the [`export_bursty`] fixture: 16.6 packets per 25 ms slot.
+const BURSTY_RATE: u64 = 1_000_000;
+
+/// A live H.264 feed at 25 fps whose keyframes outgrow a PCR slot many times over,
+/// the shape of a broadcast contribution feed (#3925): `keyframe(n)` bytes on the
+/// `n`th keyframe, one a second, and 1.5 kB frames between, about 0.6 Mb/s in all
+/// against the 1 Mb/s the export is padded to. Written a frame at a time with the
+/// export polled after each, so a small `max_age` sees a live edge rather than a
+/// recording to skip through.
+async fn export_bursty(max_age: Duration, keyframe: impl Fn(u64) -> usize) -> Vec<Frame> {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".h264"),
+			hang::container::track_info(hang::catalog::PRIORITY.video),
+		)
+		.unwrap();
+	let mut cfg = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: true,
+	});
+	cfg.container = Container::Legacy;
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert(track.name().to_string(), cfg);
+	let mut video = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+
+	let mut export = Export::new(crate::source::announced(&consumer))
+		.await
+		.unwrap()
+		.with_max_age(max_age)
+		.with_mux_rate(BURSTY_RATE);
+	assert!(drain_frames(&mut export).await.is_empty());
+
+	let mut out = Vec::new();
+	for i in 0..125u64 {
+		let key = i.is_multiple_of(25);
+		let mut nal = vec![if key { 0x65u8 } else { 0x41 }];
+		nal.resize(if key { keyframe(i / 25) } else { 1_500 }, 0xAB);
+		if key && i > 0 {
+			video.cut(None).unwrap();
+		}
+		video
+			.write(Frame {
+				// Clear of the start, so the clock the schedule starts ahead of the first
+				// keyframe does not wrap below zero.
+				timestamp: Timestamp::from_micros(10_000_000 + i * 40_000).unwrap(),
+				duration: None,
+				payload: if key {
+					annexb(&[SPS, PPS, &nal])
+				} else {
+					annexb(&[&nal])
+				},
+				keyframe: key,
+			})
+			.unwrap();
+		out.extend(poll_frames(&mut export));
+	}
+	video.finish().unwrap();
+	out.extend(drain_frames(&mut export).await);
+	out
+}
+
+/// A packet index paired with a 90 kHz time.
+type Mark = (usize, u64);
+
+/// What a receiver clocking off arrival sees of `frames`: every PCR as (packet index,
+/// 90 kHz value), and every video access unit as (the index of its last packet, the
+/// 90 kHz time it decodes at).
+fn arrivals(frames: &[Frame]) -> (Vec<Mark>, Vec<Mark>) {
+	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	assert_packet_aligned(&ts);
+	let stamp = |b: &[u8]| {
+		(u64::from(b[0] & 0x0e) << 29)
+			| (u64::from(b[1]) << 22)
+			| (u64::from(b[2] & 0xfe) << 14)
+			| (u64::from(b[3]) << 7)
+			| (u64::from(b[4]) >> 1)
+	};
+	let mut pcrs = Vec::new();
+	let mut units: Vec<Mark> = Vec::new();
+	let mut video = None;
+	for (index, packet) in ts.chunks(188).enumerate() {
+		let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
+		let adaptation = packet[3] & 0x20 != 0;
+		if adaptation && packet[4] >= 7 && packet[5] & 0x10 != 0 {
+			assert_eq!(packet[5] & 0x80, 0, "a signalled discontinuity at packet {index}");
+			pcrs.push((index, pcr_base(packet)));
+		}
+		if packet[3] & 0x10 == 0 {
+			continue;
+		}
+		let start = if adaptation { 5 + usize::from(packet[4]) } else { 4 };
+		let pes = &packet[start..];
+		if packet[1] & 0x40 != 0 && pes.starts_with(&[0, 0, 1, 0xe0]) {
+			video = Some(pid);
+			// PTS_DTS_flags: 0b10 is PTS only, 0b11 is PTS then DTS.
+			let decode = if pes[7] >> 6 == 0b11 { &pes[14..19] } else { &pes[9..14] };
+			units.push((index, stamp(decode)));
+		} else if video == Some(pid)
+			&& let Some(unit) = units.last_mut()
+		{
+			unit.0 = index;
+		}
+	}
+	(pcrs, units)
+}
+
+/// The 33-bit PCR base of a clock packet.
+fn pcr_base(packet: &[u8]) -> u64 {
+	(u64::from(packet[6]) << 25)
+		| (u64::from(packet[7]) << 17)
+		| (u64::from(packet[8]) << 9)
+		| (u64::from(packet[9]) << 1)
+		| u64::from(packet[10] >> 7)
+}
+
+/// Assert every access unit's last byte reaches a receiver clocking off arrival by
+/// the time it decodes, the T-STD's condition on a constant-rate stream.
+fn assert_arrives_before_decode(pcrs: &[Mark], units: &[Mark]) {
+	let mut checked = 0;
+	for &(last, decode) in units {
+		let Some(pair) = pcrs.windows(2).find(|w| w[0].0 <= last && last < w[1].0) else {
+			continue;
+		};
+		let ((a, va), (b, vb)) = (pair[0], pair[1]);
+		let arrival = va + (last + 1 - a) as u64 * (vb - va) / (b - a) as u64;
+		assert!(
+			arrival <= decode,
+			"an access unit ending at packet {last} arrives at {arrival}, after it decodes at {decode}"
+		);
+		checked += 1;
+	}
+	assert!(checked > 100, "only {checked} access units were checked");
+}
+
+/// #3925: with a multiplex rate, every PCR interval carries the bytes the rate implies,
+/// keyframes included. Padding each slot up to the rate got the average right, but a
+/// keyframe landed whole between the two clock packets before its decode time: 40 kB
+/// against a 3 kB slot here, 870 kB against 31 kB on a broadcast capture.
+#[tokio::test(start_paused = true)]
+async fn export_spreads_keyframes_over_the_mux_rate() {
+	let frames = export_bursty(Duration::from_secs(1), |_| 40_000).await;
+	let (pcrs, units) = arrivals(&frames);
+	assert!(pcrs.len() > 150, "expected the full feed, got {} PCRs", pcrs.len());
+
+	let nominal = BURSTY_RATE as f64 * PCR_INTERVAL.as_secs_f64() / (188.0 * 8.0);
+	for (i, w) in pcrs.windows(2).enumerate() {
+		assert_eq!(w[1].1 - w[0].1, 2_250, "value step at {i}");
+		let packets = (w[1].0 - w[0].0) as f64;
+		assert!(
+			(packets - nominal).abs() <= 1.0,
+			"interval {i} carries {packets} packets, not the {nominal:.2} the rate implies"
+		);
+	}
+	assert_arrives_before_decode(&pcrs, &units);
+}
+
+/// The delay grows to fit the largest burst seen: a keyframe twice any before it
+/// goes out above the rate once, and every later one of that size is on schedule.
+#[tokio::test(start_paused = true)]
+async fn export_mux_delay_grows_to_the_largest_burst() {
+	let frames = export_bursty(Duration::from_secs(1), |n| if n == 0 { 20_000 } else { 40_000 }).await;
+	let (pcrs, units) = arrivals(&frames);
+	assert_arrives_before_decode(&pcrs, &units);
+
+	let nominal = BURSTY_RATE as f64 * PCR_INTERVAL.as_secs_f64() / (188.0 * 8.0);
+	let over: Vec<usize> = pcrs
+		.windows(2)
+		.enumerate()
+		.filter(|(_, w)| (w[1].0 - w[0].0) as f64 > nominal + 1.0)
+		.map(|(i, _)| i)
+		.collect();
+	assert!(
+		!over.is_empty(),
+		"the first larger keyframe had no room and must overrun"
+	);
+	// The second keyframe decodes 1 s (40 slots) after the first; everything past the
+	// slots carrying it keeps the rate.
+	let settled = over[0] + 40;
+	assert!(
+		over.iter().all(|&i| i < settled),
+		"intervals {over:?} overran after the delay grew"
+	);
+}
+
+/// A burst that needs more delay than `max_age` allows is neither late nor dropped: it
+/// goes out above the rate, in the slots before it decodes.
+#[tokio::test(start_paused = true)]
+async fn export_burst_beyond_max_age_overruns_the_rate() {
+	let frames = export_bursty(Duration::from_millis(100), |_| 40_000).await;
+	let (pcrs, units) = arrivals(&frames);
+	assert_arrives_before_decode(&pcrs, &units);
+
+	let nominal = BURSTY_RATE as f64 * PCR_INTERVAL.as_secs_f64() / (188.0 * 8.0);
+	let over = pcrs
+		.windows(2)
+		.filter(|w| (w[1].0 - w[0].0) as f64 > nominal + 1.0)
+		.count();
+	assert!(
+		over >= 5,
+		"every keyframe must overrun a 100 ms delay, {over} intervals did"
+	);
+	let video: usize = units.len();
+	assert_eq!(video, 125, "every access unit is carried");
+}
+
 // The decode clock follows the stream's reordering: its reserve comes from the catalog `jitter`,
 // else the depth the SPS declares, else the reordering muxed so far, and it keeps following all
 // three after the program tables are written.
