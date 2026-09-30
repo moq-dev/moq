@@ -1,4 +1,4 @@
-# [S] WebTransport close delivers its capsule upstream
+# [XS] WebTransport close delivers its capsule upstream
 
 ## Goal
 
@@ -20,26 +20,37 @@ detached task until `closed()` resolves, capped at a 10s `CLOSE_LINGER`.
 
 Decided 2026-09-29: fix it at the source and remove the timeout workaround.
 
-- In moq-dev/noq, the close path keeps whatever the capsule needs alive until
-  it is delivered, without the caller's help. Its regression test drops the
-  session right after `close()` and asserts the peer reads the capsule
-  before the H3 control stream ends; it must fail on 1.3.2. A Rust peer
-  alone proves nothing: `session_close_surfaces_a_rejection_code` in
-  `rs/moq-tokio/tests/broadcast.rs` passed on 1.3.2 without the linger,
-  because only Chromium treats the control stream's end as fatal. Add a
-  browser check too if the playwright harness makes it cheap.
-- Release `web-transport-moq` 1.3.x and bump the pin on `main` (2.x on `dev`
-  if it has moved).
+The upstream fix makes the close task own a clone of the whole session:
+[moq-dev/noq#23](https://github.com/moq-dev/noq/pull/23) for 2.x (`dev`) and
+its backport [moq-dev/noq#24](https://github.com/moq-dev/noq/pull/24) for
+1.3.x (`main`). Their `web-transport-moq/tests/close_capsule.rs` drops the
+session right after `close()` against a hand-rolled HTTP/3 peer and fails on
+1.3.2 and 2.0.0.
+
+Remaining, once the releases carrying them are published:
+
+- Bump the `web-transport-moq` pin on `main` (and on `dev` if 2.0.x lands
+  first).
 - Delete `CLOSE_LINGER`, its task, and its mock-session tests from
-  moq-tokio.
+  moq-tokio. They are exactly what #4429 added, so reverting it is enough.
+
+A browser check is left to
+[Browser close code](/quest/m1/browser-close-code.md): the playwright harness
+has no close-code scenario, so it is not cheap to add here.
 
 Public API: none. Wire: none.
 
 Decided in the 2026-09-30 audit: the UnknownSession log flood quest merged
-here, since the same noq 1.3.3 release (moq-dev/noq#21) carries its fix.
+here, since the same `web-transport-moq` release carries its fix.
 `decode_uni` and `decode_bi` mapped a stream reset before its WebTransport
 header to `UnknownSession`, flooding relay logs with WARNs; the fork now
-keeps the read's cause and logs a reset at debug. Remaining steps: release
-`web-transport-moq` 1.3.3, bump the pin, delete `CLOSE_LINGER`
-(`rs/moq-tokio/src/transport.rs:24`), and confirm on a moq.pro relay that the
-flood stops.
+keeps the read's cause and logs a reset at debug. After the bump, confirm on
+a moq.pro relay that the flood stops.
+
+## Required
+
+- A `web-transport-moq` 1.3.x release that carries moq-dev/noq#24
+
+## Related
+
+- [Browser close code](/quest/m1/browser-close-code.md) - the playwright case that proves Chromium reads the code this quest unblocks
