@@ -24,6 +24,7 @@ QUIC studies there on that rule.
 
 - [Cluster idle timeout](/quest/m1/cluster-idle-timeout.md) - a relay notices a silent peer relay within seconds, not after the shared 30 s QUIC idle timeout
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - a relay learns the relay graph once and each announcement once, not once per neighbour, and redundant publishers share an epoch instead of `--hop`
+- [Delete removed cluster flags](/quest/m1/cluster-shims.md) - on `dev`, once a release has carried their refusals, `mesh` and `linger` leave `cluster::Config`
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
 - [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
@@ -115,7 +116,10 @@ QUIC studies there on that rule.
 - [Plan: cache age-out](/quest/m1/cache-wall-eviction.md) - a swept benchmark decides whether the track cache ages groups out on wall time without a write
 - [Frame slot charge](/quest/m1/frame-slot-charge.md) - a group's frame slots past the first four count against the cache pool, including capacity a released group keeps
 - [Front deadlines](/quest/m1/front-deadline-index.md) - a front's per-event cost stops growing with its track count: an expiry index and per-track wakes, proven by a churn benchmark
+- [Listener deadlines](/quest/m1/listener-deadlines.md) - io_uring, HTTP/2, and the internal listener bound slow handshakes and headers, and iroh honors `quic.keep_alive`
+- [Papercuts](/quest/m1/papercuts.md) - JS refuses to serve a broadcast it did not produce, `just` skips `.scratch/`, and a uring test stops sleeping
 - [Front parking](/quest/m1/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
+- [Admission bench](/quest/m1/admission-bench.md) - the driver's per-event admission walk is benchmarked over tracks and copies
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence
 - [JS abandonment](/quest/m1/js-subscribe-abandonment.md) - a viewer returning during IETF subscribe setup keeps its track across microtasks
 - [Epoch primitive](/quest/m1/epoch.md) - one `Epoch` type in moq-net and @moq/net, carried as a trailing `@<uuidv7>` path segment, shared by e2ee and broadcast epochs

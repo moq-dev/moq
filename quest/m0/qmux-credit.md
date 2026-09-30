@@ -1,0 +1,52 @@
+# [M] qmux returns every byte's credit and sends its close frame
+
+## Goal
+
+A qmux session returns connection-level credit for every byte it receives,
+whether the app reads it, drops the stream unread, or it arrives after
+STOP_SENDING, so a long-lived session never stalls on MAX_DATA. `close()`
+delivers its APPLICATION_CLOSE frame before the transport drops, so a TCP or
+WebSocket peer always sees the close code. Both hold on the 0.5 line that
+`main` pins and the 0.6 line `dev` uses.
+
+## Plan
+
+Facts from moq-dev/web-transport `rs/qmux/src/session.rs` (0.5.1 and main):
+
+- Credit returns only through `RecvStream::report_consumed` on reads.
+  `Drop for RecvStream` sends STOP_SENDING and returns stream-count credit,
+  but never consumes bytes still buffered or queued in `inbound_data`.
+- On STOP_SENDING the writer removes the recv entry, so later STREAM data is
+  dropped before the connection-credit check, and a later RESET_STREAM
+  returns early, so its final-size gap is never consumed. The peer counts all
+  of it against MAX_DATA.
+- A new stream's entry is inserted only after `accept_uni`/`accept_bi` hands
+  it over, so a stream dropped in that window leaves a stale entry that keeps
+  charging the connection window.
+- `close()` queues APPLICATION_CLOSE and marks the session closed at once. A
+  writer that is mid-write treats that as interrupted and drops the frame.
+  0.6 made `close()` idempotent and keeps the first reason, but not the order.
+
+Work:
+
+- Consume credit for unread bytes on drop, for STREAM data and the RESET
+  final-size gap after STOP_SENDING (keep enough of a retired stream's state
+  to account for its final size), and close the accept gap.
+- Mark the session closed only once the writer has sent the close frame, with
+  a bound so a stalled transport still drops.
+- Tests in `rs/qmux`: a session that drops many unread streams keeps
+  delivering past its initial window, and a peer reads the close code after a
+  close issued mid-write.
+- Release on both lines (0.5.x after 0.5.2 from
+  [qmux reset race](/quest/m0/qmux-reset-race.md), and 0.6.x), then bump
+  `main`'s pin. `dev` picks up 0.6.x.
+
+Why m0: the WebSocket fallback and the planned edge-to-core `tls://` links
+both run on qmux, and MoQ drops streams constantly.
+
+Public API: none. Wire: none.
+
+## Related
+
+- [qmux reset race](/quest/m0/qmux-reset-race.md) - same file and release train; lands first
+- [qmux on noq-proto](/quest/m2/quic-qmux.md) - replaces these stream maps later
