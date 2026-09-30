@@ -37,8 +37,10 @@ QUIC studies there on that rule.
 - [Browser close code](/quest/m1/browser-close-code.md) - a playwright case proves the page reads a relay's close code and reason, on every web-transport backend
 - [Resumed groups](/quest/m1/resume-latest.md) - a half-delivered group ends once the new copy is past it, so a group-only reader never parks after a mid-group failover
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
+- [Late lower groups](/quest/m1/lite-late-lower-group.md) - a moq-lite subscriber with a floor receives a group created below the first served one, as moq-transport does
 - [Parked reads wake](/quest/m1/parked-read-wakes.md) - a read parked on an evicted or aborted group wakes and re-judges, for resume successors and plain tracks alike
 - [Reader end parity](/quest/m1/reader-end-parity.md) - JS readers see a track's end once the newest group reaches the declared end, as Rust readers do
+- [JS cache window](/quest/m1/js-prune-cache-window.md) - js/net ages idle groups on a cache window and keeps max_age as media-time staleness, as Rust does
 - [Cross-relay bursts](/quest/m1/cross-relay-bursts.md) - bursty small-group tracks cross two relays without lost groups, unanswered FETCHes, or stalls
 - [Request stream cancel](/quest/m1/request-stream-serve.md) - a lite publisher stops resolving a SUBSCRIBE or FETCH once the requester FINs or resets, through one wrapper that owns every request stream's reader
 - [Session death parity](/quest/m1/session-death.md) - a local close ends tracks cleanly in both languages, and JS group readers see the session's error on session death
@@ -59,9 +61,17 @@ QUIC studies there on that rule.
 - [Auth client CA](/quest/m1/relay-auth-client-ca.md) - on dev, `auth::Config::validate` and `init` take the client-CA flag, so no caller can skip the check
 - [Data track clock](/quest/m1/data-track-clock.md) - JSON and binary data tracks stamp on the catalog's clock at write time, matching the media's anchored clock
 - [Go and Dart doc samples](/quest/m1/doc-samples-go-dart.md) - Go and Dart doc samples compile against their wrappers
-- [Data capture in bindings](/quest/m1/data-capture-bindings.md) - moq-ffi and every wrapper pass a data frame's capture time, and the JSON window producer takes one
+- [Publishing requires a timestamp](/quest/m1/publish-timestamp.md) - every Rust and binding publish API takes a timestamp; nothing fills in now for the caller
+- [JS publishing requires a timestamp](/quest/m1/js-publish-timestamp.md) - the same in @moq/json, @moq/binary, and @moq/net
+- [Plan: untimed peer objects](/quest/m1/plan-untimed-objects.md) - decide what a frame's timestamp is when a moq-transport or pre-lite-05 peer sends none
+- [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding
+- [Nested data configs](/quest/m1/data-config-nesting.md) - docs nest `BinaryConfig`/`JsonConfig` in an application section instead of flattening it
+- [Omit empty catalog sections](/quest/m1/catalog-omit-empty.md) - a Rust catalog with no video or audio leaves those keys out, as JS does
+- [Public clock anchor](/quest/m1/clock-anchor-public.md) - an application demuxer shares one source offset across its tracks through `Anchor` and `Lane`
+- [Delete SourceMap](/quest/m1/source-map-removal.md) - on dev, `Anchor` with its `Lane`s is the one way onto the broadcast clock
 - [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - a draft-20+ FETCH within one group is served from its LOCATION_FILTER, as older drafts are
 - [Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md) - a relay fetches from an IETF upstream without subscribing, finished tracks included, with End of Track always reported
+- [IETF timestamp units](/quest/m1/ietf-timestamp-units.md) - drafts 14-16 stop sending Timestamp properties they can't give units for
 - [JS IETF datagrams](/quest/m1/js-ietf-datagram.md) - `@moq/net` sends and receives datagram groups over moq-transport, like Rust
 - [Datagrams are live-only](/quest/m1/datagram-unfetchable.md) - no FETCH, replay to a new subscriber, or cache fill ever returns a datagram group
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic producer per track name in both languages, with the sequence namespace surviving a replacement
