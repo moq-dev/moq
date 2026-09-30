@@ -1,4 +1,4 @@
-# Moxygen compatibility
+# [S] Moxygen compatibility
 
 ## Goal
 
