@@ -84,7 +84,8 @@ pub struct Policy {
 	pub revalidate: Option<Duration>,
 	/// How long a grant with no bound of its own lasts: an anonymous session, a token
 	/// without `exp`, a certificate without one. `None` leaves those unbounded.
-	/// [`Server::new`] refuses a bound past the system clock's range.
+	/// A bound past the system clock's range is refused by [`Server::new`], and by
+	/// [`decide`](Self::decide) for each session it would bound.
 	pub expires: Option<Duration>,
 	/// Live session caps.
 	pub limits: Limits,
@@ -120,6 +121,8 @@ pub enum Refusal {
 	UnsupportedToken(u64),
 	#[error("both a JWT and a client certificate were presented; present one")]
 	TokenAndCertificate,
+	#[error("the policy's grant bound reaches past the system clock's range")]
+	ExpiresOutOfRange,
 }
 
 impl Policy {
@@ -154,8 +157,15 @@ impl Policy {
 		};
 
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
-		// `Server::new` refuses a bound past the clock's range; here it reads as none.
-		grant.expires = expires.or_else(|| SystemTime::now().checked_add(self.expires?));
+		grant.expires = match (expires, self.expires) {
+			(Some(expires), _) => Some(expires),
+			(None, Some(bound)) => Some(
+				SystemTime::now()
+					.checked_add(bound)
+					.ok_or(Refusal::ExpiresOutOfRange)?,
+			),
+			(None, None) => None,
+		};
 		grant.revalidate = self.revalidate;
 		grant.tier = self.tier.clone();
 		Ok(grant)
@@ -895,7 +905,8 @@ mod tests {
 	}
 
 	/// Regression: `--expires` past the system clock's range panicked every answer.
-	/// The server refuses it up front; the policy alone reads it as no bound.
+	/// The server refuses it up front, and the policy alone refuses the session
+	/// rather than grant it no bound.
 	#[tokio::test]
 	async fn a_bound_past_the_clock_is_refused() {
 		let endless = Policy {
@@ -903,8 +914,10 @@ mod tests {
 			expires: Some(Duration::MAX),
 			..Default::default()
 		};
-		let grant = endless.decide(&request("/")).await.unwrap();
-		assert_eq!(grant.expires, None);
+		assert_eq!(
+			endless.decide(&request("/")).await.unwrap_err(),
+			Refusal::ExpiresOutOfRange
+		);
 		assert!(matches!(Server::new(endless), Err(Error::ExpiresOutOfRange)));
 	}
 
