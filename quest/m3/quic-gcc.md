@@ -33,5 +33,6 @@ exists.
 
 ## Required
 
+- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
 - [Receive timestamps](/quest/m3/quic-receive-ts.md) - the per-packet
   arrival times the delay filter runs on

@@ -46,6 +46,7 @@ Decided in the 2026-09-30 audit: moved to m2. No m1 quest consumes it.
 
 ## Required
 
+- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - the
   scheduler decides which stream's data a probe carries
 

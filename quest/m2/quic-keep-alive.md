@@ -33,3 +33,7 @@ documented in `doc/bin/relay/config.md` for NAT-sensitive deployments. The qmux 
 Tests: an idle connection survives an idle timeout with exactly one PING per
 period; a busy connection sends none; a lost PING is probed before the
 deadline; the maximum knob shortens the period.
+
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork

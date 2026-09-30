@@ -44,6 +44,10 @@ is not proof of full path capacity. Persist regressions in CI and broader
 network scenarios at least nightly. A measured no-go is a valid outcome;
 retain the baseline and record why before exposing an ineffective option.
 
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
+
 ## Related
 
 - [Natural media drains](/quest/m2/quic-bbr-natural-drain.md) - separate ProbeRTT policy experiment
