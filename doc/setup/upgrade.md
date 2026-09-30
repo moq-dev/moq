@@ -102,7 +102,9 @@ Other changes to a deployment:
 - **Gossip discovery is removed.** A relay dials only the peers it lists or
   finds on the LAN, never a URL learned from an announcement, and no longer
   announces `.internal/origins`. The `/nodes` endpoint lists only peers this
-  relay dialed.
+  relay dialed. Until every relay that ran `--cluster-mesh` is upgraded, keep
+  client grants off `.internal/`: an older relay still dials any URL announced
+  there with `cluster.token`, and an upgraded peer still forwards it.
 - **Other 0.14 auth differences kept.** Peers identify by certificate or LAN
   path. An auth server's `root` alias may have any depth.
   A path in `--cluster-connect` is not refused, although it shifts the mesh
