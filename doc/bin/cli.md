@@ -260,8 +260,8 @@ and publishes on the cluster origin. A `moq --cluster-lan` process and a
 `--cluster-lan` advertises this process on the LAN over mDNS and meshes with
 every other participating MoQ process. It reuses `--listen`, filling in an
 ephemeral port and a generated certificate when those are unset. A LAN peer
-authenticates with its mDNS credential; `cluster.token` is for static and
-gossip peers only.
+authenticates with its mDNS credential; `cluster.token` is for
+`--cluster-connect` and `--cluster-connect-api` peers only.
 
 ```bash
 moq --cluster-lan import capture
@@ -279,8 +279,7 @@ under. Peers using a different name never discover this one. It defaults to
 configuration. An application built on the library picks its own name.
 
 The WAN flags (`--cluster-connect`, `--cluster-connect-api`, `--cluster-node`,
-`--cluster-mesh`, `--cluster-token`, `--cluster-id`, `--cluster-tier`) match
-the relay. `--cluster-connect` and `--cluster-connect-api` are a MoQ side on
+`--cluster-token`, `--cluster-id`, `--cluster-tier`) match the relay. `--cluster-connect` and `--cluster-connect-api` are a MoQ side on
 their own, so `moq --cluster-connect https://relay.example import ts` needs
 no `--connect`. See [Clustering](/bin/relay/cluster).
 
