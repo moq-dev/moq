@@ -569,6 +569,13 @@ mod tests {
 		out
 	}
 
+	/// The published `Encoder` was unwind safe before it boxed a backend; keep it so.
+	#[test]
+	fn encoder_is_unwind_safe() {
+		fn assert_unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+		assert_unwind_safe::<Encoder>();
+	}
+
 	#[test]
 	fn opus_encode_then_decode_keeps_signal_close() {
 		let mut enc = Encoder::new(&Settings {

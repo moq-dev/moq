@@ -34,7 +34,9 @@ pub(crate) mod stub;
 /// counting frames. A codec that pipelines output (MediaCodec) needs a `flush`
 /// and a zero-or-more return, which changes `Encoder::encode` too, so that lands
 /// with the first backend that needs it rather than as an always-empty method.
-pub(crate) trait Backend: Send {
+///
+/// Unwind safe because the published `Encoder` that boxes it is.
+pub(crate) trait Backend: Send + std::panic::UnwindSafe + std::panic::RefUnwindSafe {
 	/// Encode exactly one frame of the codec's frame size.
 	fn encode(&mut self, pcm: &[f32]) -> Result<Encoded, Error>;
 

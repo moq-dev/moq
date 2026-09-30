@@ -23,7 +23,9 @@ mod pcm;
 mod symphonia;
 
 /// An opened decoder: packets in, interleaved `f32` PCM out.
-pub(crate) trait Backend: Send {
+///
+/// Unwind safe because the published `Decoder` that boxes it is.
+pub(crate) trait Backend: Send + std::panic::UnwindSafe + std::panic::RefUnwindSafe {
 	/// Decode one packet into interleaved samples at [`sample_rate`](Self::sample_rate)
 	/// and [`layout`](Self::layout), untrimmed.
 	fn decode(&mut self, packet: &[u8]) -> Result<Decoded, Error>;
