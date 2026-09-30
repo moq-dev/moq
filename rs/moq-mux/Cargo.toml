@@ -16,6 +16,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 anyhow = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
+crc = "3.4"
 h264-parser = { version = "0.4.2" }
 hang = { workspace = true }
 kio = { workspace = true }

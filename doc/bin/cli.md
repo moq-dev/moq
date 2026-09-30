@@ -87,6 +87,9 @@ the first PAT lists as its own broadcast, with its own clock and catalog, keepin
 the catalog suffix last: `--broadcast event.hang` publishes `event/1.hang`,
 `event/2.hang`, and so on. `export ts` writes one program per broadcast.
 `import srt` takes the same `--program`.
+A selected program's SI describes that service alone: its SDT lists only the
+selected service, and other services' EIT is dropped. Network-wide tables (NIT,
+BAT, TDT/TOT, and the SDT and EIT of other transport streams) pass through.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast event.hang import ts --program all < mux.ts

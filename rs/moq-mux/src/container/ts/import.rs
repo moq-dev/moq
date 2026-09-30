@@ -194,9 +194,11 @@ impl<E: catalog::Catalog> Import<E> {
 	///
 	/// Without this, a PAT that lists more than one program fails the import with
 	/// [`MultipleProgramsError`] rather than merging them onto one clock. A PAT that does not
-	/// list `program` fails it too.
+	/// list `program` fails it too. The SI describes only this program's service: other
+	/// services' EIT actual is dropped and the SDT actual lists this service alone.
 	pub fn with_program(mut self, program: u16) -> Self {
 		self.program = Some(program);
+		self.si.select(program);
 		self
 	}
 
@@ -914,10 +916,11 @@ impl<E: catalog::Catalog> Import<E> {
 	///
 	/// Every section is captured, whatever its `table_id`: the SDT PID also carries
 	/// the BAT, the EIT PID carries now/next and the schedule, and a table we don't
-	/// recognize is exactly as worth preserving as one we do. The store buffers each
-	/// sub-table to a complete generation and commits it atomically, so a plain
-	/// repetition (SI repeats every couple of seconds) publishes nothing and a torn
-	/// multi-section transition is never visible.
+	/// recognize is exactly as worth preserving as one we do. A selected program is the
+	/// exception: its SI describes that service alone ([`with_program`](Self::with_program)).
+	/// The store buffers each sub-table to a complete generation and commits it atomically,
+	/// so a plain repetition (SI repeats every couple of seconds) publishes nothing and a
+	/// torn multi-section transition is never visible.
 	fn si_section(&mut self, pid: u16, pkt: &[u8]) -> anyhow::Result<()> {
 		let mut sections = Vec::new();
 		self.si_sections.entry(pid).or_default().push(pkt, &mut sections);
