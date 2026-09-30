@@ -1343,6 +1343,27 @@ impl Request {
 		}
 	}
 
+	/// Make this session a cluster link; see [`moq_net::server::Handshake::with_topology`].
+	pub fn with_topology(self, topology: moq_net::topology::Database) -> Self {
+		let Request {
+			transport,
+			url,
+			authority,
+			identity,
+			link,
+			kind,
+		} = self;
+		let kind = request_map!(kind, request => request.with_topology(topology));
+		Request {
+			transport,
+			url,
+			authority,
+			identity,
+			link,
+			kind,
+		}
+	}
+
 	/// Attach a per-connection [`moq_net::stats::Session`] context to this session.
 	pub fn with_stats(self, stats: moq_net::stats::Session) -> Self {
 		let Request {

@@ -1055,6 +1055,10 @@ pub struct Cluster {
 	/// (filtered by their auth token) and remote dials both read and write here.
 	pub origin: origin::Producer,
 
+	/// The relay graph, flooded over every cluster link on a version that
+	/// carries it, under this relay's origin id.
+	pub(crate) topology: moq_net::topology::Database,
+
 	/// Stats registry. One instance per relay; sessions pick a billing tier via
 	/// [`stats::Registry::tier`](moq_net::stats::Registry::tier) at acceptance time
 	/// (the default tier unless configured otherwise, or any label the auth API
@@ -1081,6 +1085,9 @@ pub struct Admitted {
 	pub subscriber: Option<origin::Consumer>,
 	/// The session's root and tier attribution.
 	pub stats: moq_net::stats::Session,
+	/// The relay graph to flood when the grant names a cluster peer, making the
+	/// session a cluster link; see [`moq_net::server::Handshake::with_topology`].
+	pub topology: Option<moq_net::topology::Database>,
 }
 
 impl Cluster {
@@ -1125,7 +1132,13 @@ impl Cluster {
 			origin_config.cache_duration = cache.duration;
 		}
 		let origin = moq_tokio::origin::spawn_config(origin_config);
-		let nodes = crate::nodes::Nodes::new(origin.clone());
+		// The start time orders this run after the last one under a configured id.
+		let incarnation = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.context("system clock is before the Unix epoch")?
+			.as_millis() as u64;
+		let topology = moq_net::topology::Database::new(id, incarnation);
+		let nodes = crate::nodes::Nodes::new(origin.clone()).with_topology(topology.clone());
 		tracing::info!(hop_id = %origin.hop(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
 			config,
@@ -1139,6 +1152,7 @@ impl Cluster {
 			connection_ids: Arc::default(),
 			client_tls: None,
 			origin,
+			topology,
 			stats: moq_net::stats::Registry::disabled(),
 			_stats_publisher: None,
 		})
@@ -1195,11 +1209,13 @@ impl Cluster {
 			Some(moq_auth::Role::Publisher) => None,
 			_ => subscriber.map(|origin| origin.consume().with_hidden(cluster_peer).with_stats(stats.clone())),
 		};
+		let topology = token.peer.then(|| self.topology.clone());
 		Ok(Admitted {
 			lease: lease.with_stats(stats.clone()),
 			publisher,
 			subscriber,
 			stats,
+			topology,
 		})
 	}
 
@@ -2030,7 +2046,8 @@ impl Cluster {
 		let mut client = client
 			.with_publisher(origin.consume().with_hidden(true))
 			.with_subscriber(origin)
-			.with_stats(self.stats.tier(self.cluster_tier()).session(""));
+			.with_stats(self.stats.tier(self.cluster_tier()).session(""))
+			.with_topology(self.topology.clone());
 		if let Some(cost) = cost {
 			client = client.with_cost(cost);
 		}
@@ -2094,7 +2111,8 @@ impl Cluster {
 		let addrs = moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")?;
 		let mut client = self
 			.lan_client(target.fingerprint.as_deref())?
-			.with_origin(self.origin.clone().peer());
+			.with_origin(self.origin.clone().peer())
+			.with_topology(self.topology.clone());
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
 		}
@@ -3708,14 +3726,14 @@ mod tests {
 	}
 
 	/// Two in-process origins share broadcasts both ways over one
-	/// fingerprint-pinned `/.cluster/<credential>` session. Wires accept to dial
-	/// directly, so the test needs no multicast and stays CI-safe. It does not
-	/// exercise `run_mdns`, `Peer::urls()` order, or `discovery.should_dial`;
-	/// the names "node" and "fingerprint" are the two origins, not two
-	/// advertising modes.
+	/// fingerprint-pinned `/.cluster/<credential>` session, which is a cluster
+	/// link each relay's graph learns. Wires accept to dial directly, so the test
+	/// needs no multicast and stays CI-safe. It does not exercise `run_mdns`,
+	/// `Peer::urls()` order, or `discovery.should_dial`; the names "node" and
+	/// "fingerprint" are the two origins, not two advertising modes.
 	#[cfg(feature = "cluster-lan")]
 	#[tokio::test]
-	async fn lan_cluster_path_carries_broadcasts_both_ways() {
+	async fn lan_cluster_link_carries_broadcasts_and_the_graph() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 		let _ = moq_tokio::crypto::install_default();
 
@@ -3728,6 +3746,12 @@ mod tests {
 		let mut listen = moq_tokio::listen::Config::default();
 		listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		listen.tls.generate = vec!["moq-cluster-lan".to_string()];
+		// What `Relay::load` accepts by default, so the link negotiates the graph.
+		listen.version = moq_net::Versions::topology()
+			.iter()
+			.chain(moq_net::Versions::all().iter())
+			.copied()
+			.collect();
 		let server = listen.init(Default::default()).expect("bind");
 		let port = server.local_addr().expect("local addr").port();
 		let fp = server
@@ -3801,6 +3825,24 @@ mod tests {
 			try_next_announced(&mut local).is_none(),
 			"a peer's broadcast is not local"
 		);
+
+		// Both ends learn the link. Real sockets, so poll the wall clock.
+		let linked = |from: &Cluster, to: &Cluster| {
+			let graph = from.topology.graph();
+			graph
+				.get(to.origin.hop())
+				.and_then(|node| node.distance)
+				.map(|distance| (distance.cost, distance.hops))
+		};
+		tokio::time::timeout(TIMEOUT, async {
+			while linked(&node, &fingerprint).is_none() || linked(&fingerprint, &node).is_none() {
+				tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("timed out waiting for the link in both graphs");
+		assert_eq!(linked(&node, &fingerprint), Some((1, 1)));
+		assert_eq!(linked(&fingerprint, &node), Some((1, 1)));
 	}
 
 	/// A grant naming a cluster peer marks the session's routes as a peer's, so the

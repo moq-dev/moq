@@ -14,6 +14,8 @@ pub enum ControlType {
 	Probe = 4,
 	Goaway = 5,
 	Track = 6,
+	/// Cluster sessions flood per-link liveness (lite-07+).
+	Topology = 7,
 }
 
 impl Decode<Version> for ControlType {

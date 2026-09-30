@@ -39,6 +39,17 @@ impl Version {
 		}
 	}
 
+	/// Whether cluster sessions flood per-link liveness on the Topology stream
+	/// (0x7). Added in lite-07.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_topology(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether the version has lite-05's dedicated TRACK stream and related stream
 	/// layout changes.
 	///

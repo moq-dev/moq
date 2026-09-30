@@ -8,7 +8,8 @@ use crate::{
 use std::task::{Context, Poll, ready};
 
 use super::{
-	DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, SubscriberDriver, Version,
+	DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, SubscriberDriver, Topology,
+	Version,
 };
 
 pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
@@ -86,6 +87,13 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
 	/// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
 	pub peer_setup: Option<Setup>,
+
+	/// The relay graph this session floods, when it is a cluster link. Ignored on
+	/// versions without the Topology stream.
+	pub topology: Option<crate::topology::Database>,
+
+	/// Whether we dialed, which makes us the side that opens the Topology stream.
+	pub client: bool,
 }
 
 /// Start a lite session.
@@ -105,7 +113,10 @@ where
 		version,
 		mut our_setup,
 		peer_setup,
+		topology,
+		client,
 	} = config;
+	let topology = topology.filter(|_| version.has_topology());
 
 	let recv_bw = bandwidth::Producer::new();
 
@@ -164,6 +175,23 @@ where
 	// Read out before the setup machine takes ownership below.
 	let our_cost = our_setup.cost;
 
+	// The dialing side opens the Topology stream; the accepting side serves it
+	// from the publisher's control loop, like every other peer-opened stream.
+	let (open_topology, accept_topology) = match client {
+		true => (topology, None),
+		false => (None, topology),
+	};
+	let open_topology = open_topology.map(|database| {
+		Topology::open(
+			database,
+			session.clone(),
+			version,
+			runtime.clone(),
+			peer_setup.clone(),
+			our_cost,
+		)
+	});
+
 	let publisher = Publisher::new(PublisherConfig {
 		runtime: runtime.clone(),
 		session: session.clone(),
@@ -172,6 +200,8 @@ where
 		peer_setup: peer_setup.clone(),
 		goaway: goaway.clone(),
 		peer_hop,
+		topology: accept_topology,
+		cost: our_cost,
 	});
 	let subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),
@@ -193,6 +223,7 @@ where
 			.has_setup_stream()
 			.then(|| SendSetup::new(session.clone(), our_setup, version)),
 		goaway: Some(SendGoaway::new(runtime, session.clone(), goaway, version)),
+		topology: open_topology,
 		session_stream: setup_stream,
 		publisher,
 		subscriber: SubscriberDriver::new(subscriber),
@@ -214,6 +245,9 @@ pub(crate) struct Driver<S: crate::transport::poll::Session> {
 	setup: Option<SendSetup<S>>,
 	/// Sending our single GOAWAY if the drain trigger fires, or `None` once done.
 	goaway: Option<SendGoaway<S>>,
+	/// The Topology stream we opened as the dialing side of a cluster link, or
+	/// `None` once the link is gone (or was never one).
+	topology: Option<Topology<S>>,
 	/// The legacy session stream (pre-lite-03). Only its *error* ends the race, so
 	/// the publisher and subscriber keep running while it sits idle.
 	session_stream: Option<Stream<S, Version>>,
@@ -275,6 +309,12 @@ where
 			&& goaway.poll(waiter).is_ready()
 		{
 			self.goaway = None;
+		}
+		if let Some(topology) = &mut self.topology
+			&& let Poll::Ready(res) = topology.poll(waiter)
+		{
+			self.topology = None;
+			res?;
 		}
 
 		if let Some(stream) = &mut self.session_stream

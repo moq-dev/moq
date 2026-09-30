@@ -20,6 +20,7 @@ pub struct Server {
 	subscribe: Option<origin::Producer>,
 	stats: stats::Session,
 	versions: Versions,
+	topology: Option<crate::topology::Database>,
 }
 
 impl Server {
@@ -62,6 +63,13 @@ impl Server {
 	/// Defaults to every version this crate supports.
 	pub fn with_versions(mut self, versions: Versions) -> Self {
 		self.versions = versions;
+		self
+	}
+
+	/// Make accepted sessions cluster links that flood the relay graph in
+	/// `topology`; see [`Client::with_topology`](crate::Client::with_topology).
+	pub fn with_topology(mut self, topology: crate::topology::Database) -> Self {
+		self.topology = Some(topology);
 		self
 	}
 
@@ -119,6 +127,8 @@ impl Server {
 			version,
 			our_setup,
 			peer_setup: client_setup,
+			topology: self.topology.clone(),
+			client: false,
 		})?;
 
 		Ok(Session::new(
@@ -617,6 +627,8 @@ where
 						version: v,
 						our_setup: lite::Setup::default(),
 						peer_setup: None,
+						topology: None,
+						client: false,
 					})?;
 					(
 						start.recv_bandwidth,
@@ -736,6 +748,13 @@ where
 	/// [`Server`] builder.
 	pub fn with_stats(mut self, stats: stats::Session) -> Self {
 		self.inner_mut().server.stats = stats;
+		self
+	}
+
+	/// Make this session a cluster link; see [`Server::with_topology`]. Set it only
+	/// once the peer is authorized as another relay.
+	pub fn with_topology(mut self, topology: crate::topology::Database) -> Self {
+		self.inner_mut().server.topology = Some(topology);
 		self
 	}
 

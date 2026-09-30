@@ -101,3 +101,9 @@ logs use). A route is priced twice: `cost` as the cluster stands, which reads 0
 through a relay already carrying the broadcast, and `cold_cost` with those
 discounts removed, which is what tells two warm relays apart. It is best-effort
 correlation, not authenticated identity.
+
+`topology` is the relay graph learned over [cluster links](/bin/relay/cluster#relay-graph):
+every relay that reported its links (`id`, the `incarnation` its reports come
+from, and each link's `peer` and `cost`, `null` once down), with this relay's
+shortest `distance` to it (`cost`, then `hops`; `null` while unreachable) and
+the `next` neighbour on that path. Ids are strings, like the Hop ID above.

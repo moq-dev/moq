@@ -212,6 +212,31 @@ impl Client {
 		self
 	}
 
+	/// Make every session this client opens a cluster link flooding `topology`;
+	/// see [`moq_net::Client::with_topology`].
+	///
+	/// Also offers the versions that carry the Topology stream, preferred ahead of
+	/// the configured ones, since the default set leaves the wip version out.
+	pub fn with_topology(mut self, topology: moq_net::topology::Database) -> Self {
+		#[cfg(any(feature = "noq", feature = "websocket", feature = "tcp", feature = "uds"))]
+		let configured = self.versions.clone();
+		#[cfg(not(any(feature = "noq", feature = "websocket", feature = "tcp", feature = "uds")))]
+		let configured = moq_net::Versions::all();
+		let mut versions: Vec<moq_net::Version> = moq_net::Versions::topology().iter().copied().collect();
+		for version in configured.iter() {
+			if !versions.contains(version) {
+				versions.push(*version);
+			}
+		}
+		let versions = moq_net::Versions::from(versions);
+		self.moq = self.moq.with_versions(versions.clone()).with_topology(topology);
+		#[cfg(any(feature = "noq", feature = "websocket", feature = "tcp", feature = "uds"))]
+		{
+			self.versions = versions;
+		}
+		self
+	}
+
 	/// Override whether this client redials after a session drop.
 	///
 	/// Defaults to true, unless [`crate::connect::Config::once`] turned it off.

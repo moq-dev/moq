@@ -464,6 +464,15 @@ impl MoqSide {
 				config.tls.generate = vec!["moq-cluster-lan".to_string()];
 			}
 		}
+		// A cluster peer dials in on the version carrying the relay graph, which the
+		// default set leaves out; clients never offer it unless they opt in.
+		if config.version.is_empty() && (self.lan() || self.cluster_dials()) {
+			config.version = hang::moq_net::Versions::topology()
+				.iter()
+				.chain(hang::moq_net::Versions::all().iter())
+				.copied()
+				.collect();
+		}
 		config
 	}
 

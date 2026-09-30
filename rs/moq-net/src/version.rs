@@ -310,6 +310,17 @@ impl Versions {
 		)
 	}
 
+	/// Every supported version whose sessions can be cluster links, flooding the
+	/// relay graph on the Topology stream, most preferred first.
+	pub fn topology() -> Self {
+		Self(
+			ALL.iter()
+				.filter(|version| matches!(version, Version::Lite(lite) if lite.has_topology()))
+				.copied()
+				.collect(),
+		)
+	}
+
 	/// Compute the unique ALPN strings needed for these versions.
 	pub fn alpns(&self) -> Vec<&'static str> {
 		let mut alpns = Vec::new();

@@ -755,6 +755,7 @@ async fn serve_connection(
 		publisher,
 		subscriber,
 		stats,
+		topology,
 	} = admitted;
 
 	let peer_hop = request.peer_hop();
@@ -764,6 +765,9 @@ async fn serve_connection(
 	}
 	if let Some(publisher) = publisher {
 		request = request.with_subscriber(publisher);
+	}
+	if let Some(topology) = topology {
+		request = request.with_topology(topology);
 	}
 	let (session, driver) = request.ok().await?;
 	let driver_handle = handle.clone();

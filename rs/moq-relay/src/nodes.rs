@@ -20,6 +20,7 @@ pub(crate) const MESH_PREFIX: &str = ".internal/origins";
 pub(crate) struct Nodes {
 	origin: origin::Producer,
 	connections: Arc<Connections>,
+	topology: Option<moq_net::topology::Database>,
 }
 
 #[derive(Default)]
@@ -44,6 +45,79 @@ enum ConnectionTarget {
 pub(crate) struct Snapshot {
 	/// Announced or directly connected cluster nodes.
 	pub nodes: Vec<Node>,
+	/// The relay graph learned over cluster links, and this relay's shortest path
+	/// to each relay in it.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub topology: Option<Topology>,
+}
+
+/// The relay graph as this relay computed it.
+#[derive(Debug, Serialize)]
+pub(crate) struct Topology {
+	/// This relay's id.
+	pub node: String,
+	/// Every relay that reported its links, this one included.
+	pub nodes: Vec<TopologyNode>,
+}
+
+/// One relay in the graph.
+#[derive(Debug, Serialize)]
+pub(crate) struct TopologyNode {
+	/// The relay's id, its cluster (hop) id.
+	pub id: String,
+	/// The run its reports come from: the start time in milliseconds.
+	pub incarnation: u64,
+	/// The shortest path to the relay, `null` while it is unreachable.
+	pub distance: Option<Distance>,
+	/// The neighbour that path leaves through; `null` for this relay.
+	pub next: Option<String>,
+	/// Every link the relay reported.
+	pub links: Vec<TopologyLink>,
+}
+
+/// The length of a shortest path: summed link cost, then hop count.
+#[derive(Debug, Serialize)]
+pub(crate) struct Distance {
+	pub cost: u64,
+	pub hops: u64,
+}
+
+/// A link as the relay at its near end reported it.
+#[derive(Debug, Serialize)]
+pub(crate) struct TopologyLink {
+	/// The relay at the far end.
+	pub peer: String,
+	/// The link's cost, `null` once it is down.
+	pub cost: Option<u64>,
+}
+
+impl From<moq_net::topology::Graph> for Topology {
+	fn from(graph: moq_net::topology::Graph) -> Self {
+		Self {
+			node: graph.node.to_string(),
+			nodes: graph
+				.nodes
+				.into_iter()
+				.map(|node| TopologyNode {
+					id: node.id.to_string(),
+					incarnation: node.incarnation,
+					distance: node.distance.map(|distance| Distance {
+						cost: distance.cost,
+						hops: distance.hops,
+					}),
+					next: node.next.map(|next| next.to_string()),
+					links: node
+						.links
+						.into_iter()
+						.map(|link| TopologyLink {
+							peer: link.peer.to_string(),
+							cost: link.cost,
+						})
+						.collect(),
+				})
+				.collect(),
+		}
+	}
 }
 
 /// One known cluster node in the local topology view.
@@ -120,7 +194,14 @@ impl Nodes {
 		Self {
 			origin,
 			connections: Arc::default(),
+			topology: None,
 		}
+	}
+
+	/// Report the relay graph this database holds alongside the connections.
+	pub(crate) fn with_topology(mut self, topology: moq_net::topology::Database) -> Self {
+		self.topology = Some(topology);
+		self
 	}
 
 	/// Record a dial this relay initiated, keyed by the URL it dialed.
@@ -250,6 +331,7 @@ impl Nodes {
 					connections: node.connections,
 				})
 				.collect(),
+			topology: self.topology.as_ref().map(|topology| topology.graph().into()),
 		}
 	}
 }
@@ -411,5 +493,31 @@ mod tests {
 		let snapshot = nodes.snapshot();
 		assert_eq!(snapshot.nodes.len(), 2);
 		assert!(snapshot.nodes.iter().all(|node| node.connections.is_empty()));
+	}
+
+	/// The relay graph rides along with the connections, ids as strings like
+	/// `origin_id` so a JSON reader keeps all 62 bits.
+	#[tokio::test]
+	async fn snapshot_reports_the_relay_graph() {
+		let hop = Hop::new(9_007_199_254_740_993).unwrap();
+		let origin = moq_tokio::origin::spawn_config(moq_net::origin::Config::new(hop));
+		let nodes = Nodes::new(origin).with_topology(moq_net::topology::Database::new(hop, 7));
+
+		assert_eq!(
+			serde_json::to_value(nodes.snapshot()).unwrap(),
+			serde_json::json!({
+				"nodes": [],
+				"topology": {
+					"node": "9007199254740993",
+					"nodes": [{
+						"id": "9007199254740993",
+						"incarnation": 7,
+						"distance": { "cost": 0, "hops": 0 },
+						"next": null,
+						"links": []
+					}]
+				}
+			}),
+		);
 	}
 }

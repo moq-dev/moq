@@ -23,6 +23,7 @@ mod subscribe;
 mod subscriber;
 #[cfg(test)]
 pub(crate) mod test_transport;
+mod topology;
 mod track;
 mod version;
 
@@ -46,6 +47,7 @@ pub use setup::*;
 pub use stream::*;
 pub use subscribe::*;
 use subscriber::*;
+pub(crate) use topology::*;
 #[allow(unused_imports)]
 pub use track::*;
 pub use version::Version;

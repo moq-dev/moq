@@ -355,6 +355,8 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 | ------- | ------------- | ----------- |
 |    0x6  | Track        | Subscriber  |
 | ------- | ------------- | ----------- |
+|    0x7  | Topology     | Client      |
+| ------- | ------------- | ----------- |
 
 ### Announce
 A subscriber can open an Announce Stream to discover routes matching a prefix.
@@ -513,6 +515,30 @@ The peer MUST NOT open new streams on the current session after receiving a GOAW
 
 The sender closes the stream (FIN) when it is ready to terminate the session.
 The peer SHOULD close all streams and the session after migrating or when it no longer needs the session.
+
+### Topology {#topology}
+Relays in one cluster flood the liveness of their links on a Topology Stream (0x7), so each learns the relay graph once, apart from routes, and computes its shortest path to every other relay.
+Only a session between two relays of one cluster carries one.
+The client opens it; a server that does not treat the client as a cluster peer resets it, and the session continues without being a link.
+An endpoint MUST close the session with a PROTOCOL_VIOLATION if it receives a second Topology Stream.
+
+A relay's id is the non-zero Hop ID it declares in SETUP (see [Hop Parameter](#hop-parameter)).
+Its incarnation MUST grow each time it restarts under the same id; the start time in milliseconds suffices.
+
+A relay reports each of its links with a sequence number, starting at 1 and growing with every change to that link, and the link's cost while it is up (see [Cost Parameter](#cost-parameter)).
+One report is newer than another from the same relay when its incarnation is greater, or equal with a greater sequence.
+A receiver keeps only the newest report per link, and one from a greater incarnation replaces every link held for that relay.
+A relay never sends a peer the peer's own reports, and never applies a report carrying its own id.
+If such a report's incarnation is greater than the relay's own, a previous run's clock was ahead, and the relay SHOULD move its incarnation past it and report every link again.
+
+Each side sends one TOPOLOGY_DIGEST, then any number of TOPOLOGY_REPORT messages.
+On receiving the peer's digest, a relay reports the link up with a new sequence, then sends every report it holds that the digest lacks, leaving out the peer's own.
+Reporting the link first keeps the relay's report of the link's last failure from reaching the peer.
+From then on it sends every report it newly applies from another link, and every change to its own links, including this link going down when the session ends.
+A relay SHOULD hold what it sends on each stream for a short time (50 ms is RECOMMENDED), sending only the newest report per link.
+
+A link is usable once both ends report it up.
+A path's distance is the sum of its link costs, each as reported by the relay the link leaves, then its number of links, so every link lengthens a path even at cost 0.
 
 # Delivery
 The most important concept in moq-lite is how to deliver a subscription.
@@ -1280,6 +1306,74 @@ A peer that reconnects to a provided URI SHOULD keep using that URI for subseque
 A relay that receives a GOAWAY SHOULD treat the announcements that arrived on that session as the most expensive routes available, so a subscription it can serve from another session moves at the next Group boundary rather than when the draining session finally closes.
 The routes stay usable: a broadcast reachable only over the draining session MUST keep being served until the session ends, which is what makes the sender's deadline a handover window rather than a cutoff.
 
+## TOPOLOGY_DIGEST {#topology-digest}
+The first message on each side of a [Topology Stream](#topology): each relay the sender holds reports from, and the sequence of each link reported.
+
+~~~
+TOPOLOGY_DIGEST Message {
+  Message Length (i)
+  Node ID (i)
+  Reporter Count (i)
+  Digest Reporter (..) ...
+}
+
+Digest Reporter {
+  Node ID (i)
+  Incarnation (i)
+  Link Count (i)
+  Digest Link (..) ...
+}
+
+Digest Link {
+  Peer ID (i)
+  Sequence (i)
+}
+~~~
+
+**Node ID**:
+In the message, the sender's id, which MUST equal the Hop ID it declared in SETUP.
+In a Digest Reporter, the reporting relay's id.
+
+**Peer ID**:
+The id of the relay at the far end of the link.
+
+A receiver MUST close the session with a PROTOCOL_VIOLATION if any id is 0, a Node ID repeats among the reporters, a Peer ID repeats within one reporter, or a Peer ID equals its reporter's Node ID.
+
+## TOPOLOGY_REPORT {#topology-report}
+Every later message on each side of a [Topology Stream](#topology): a batch of link reports.
+
+~~~
+TOPOLOGY_REPORT Message {
+  Message Length (i)
+  Reporter Count (i)
+  Report Reporter (..) ...
+}
+
+Report Reporter {
+  Node ID (i)
+  Incarnation (i)
+  Link Count (i)
+  Report Link (..) ...
+}
+
+Report Link {
+  Peer ID (i)
+  Sequence (i)
+  Up (i)
+  Cost (i)
+}
+~~~
+
+**Up**:
+1 while the link is up, 0 once it is down.
+Any other value is a PROTOCOL_VIOLATION.
+
+**Cost**:
+The link's cost while it is up, in the units of the [Cost Parameter](#cost-parameter).
+Ignored when `Up` is 0.
+
+The id rules of [TOPOLOGY_DIGEST](#topology-digest) apply.
+
 ## GROUP
 The GROUP message contains information about a Group, as well as a reference to the subscription being served.
 
@@ -1346,6 +1440,7 @@ The `Message Length` describes the payload size on the wire.
 - Removed SUBSCRIBE_DROP and its type 0x2; a group without a Group Stream is not counted.
 - The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
+- Added the Topology Stream (0x7), TOPOLOGY_DIGEST, and TOPOLOGY_REPORT: relays in one cluster flood per-link liveness and cost, scoped to each relay's incarnation, and compute shortest paths from it.
 
 ## moq-lite-06
 

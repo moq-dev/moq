@@ -165,6 +165,24 @@ connect_api = "https://api.example.com/cluster/peers"
 node = "https://us-west.example.com/"
 ```
 
+## Relay graph
+
+Relays also learn the graph of links between them, apart from any route. Each
+relay reports whether each of its links is up and what it costs, and cluster
+sessions flood those reports, so every relay knows every link and its shortest
+path (by cost, then hop count) to every other relay without an announcement.
+A link counts once both ends report it up; a report is batched for 50 ms.
+
+Only sessions on `moq-lite-07-wip` carry the graph, so cluster dials offer it
+first and the listener accepts it by default. An accepted session joins only
+when its grant names a cluster peer (`peer: true`, or an accepted LAN peer).
+A peer on an older version, or on moq-transport, still carries broadcasts but
+is no link in the graph.
+
+A restarted relay reports under a new incarnation (its start time), which
+replaces whatever its last run reported. With a random Hop ID a restart is a
+new node instead, so pin `cluster.id` for a stable graph.
+
 ## Identity
 
 Each relay has a Hop ID: the value it adds to a route's hop list for loop

@@ -99,6 +99,7 @@ impl Connection {
 			publisher,
 			subscriber,
 			stats,
+			topology,
 		} = admitted;
 
 		// Accept the connection.
@@ -114,6 +115,9 @@ impl Connection {
 		}
 		if let Some(publisher) = publisher {
 			request = request.with_subscriber(publisher);
+		}
+		if let Some(topology) = topology {
+			request = request.with_topology(topology);
 		}
 		let session = request.ok().await?;
 		let _node_connection = peer_hop.map(|origin| self.cluster.nodes.connect_inbound(self.id, origin));

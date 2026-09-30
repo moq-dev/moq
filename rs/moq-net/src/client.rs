@@ -19,6 +19,7 @@ pub struct Client {
 	setup_path: Option<String>,
 	cost: Option<u64>,
 	peer_hop: Option<crate::Hop>,
+	topology: Option<crate::topology::Database>,
 }
 
 impl Client {
@@ -125,6 +126,17 @@ impl Client {
 		self
 	}
 
+	/// Make this session a cluster link that floods the relay graph in `topology`.
+	///
+	/// Only moq-lite-07 and newer carry the Topology stream; on any other version
+	/// the session runs as usual and takes no part. The accepting side must
+	/// attach its own database too ([`Server::with_topology`](crate::Server::with_topology)),
+	/// or the session is not a link.
+	pub fn with_topology(mut self, topology: crate::topology::Database) -> Self {
+		self.topology = Some(topology);
+		self
+	}
+
 	/// The origin pair a session attaches, tagged and filtered.
 	///
 	/// Reads through the publish (egress) consumer and writes through the
@@ -189,6 +201,8 @@ impl Client {
 			version,
 			our_setup,
 			peer_setup: None,
+			topology: self.topology.clone(),
+			client: true,
 		})?;
 
 		Ok(Session::new(
@@ -376,6 +390,8 @@ impl Client {
 					// (pre-lite-05), which have no Setup Stream.
 					our_setup: lite::Setup::default(),
 					peer_setup: None,
+					topology: None,
+					client: true,
 				})?;
 
 				(

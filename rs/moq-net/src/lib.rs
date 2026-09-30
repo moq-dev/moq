@@ -97,6 +97,7 @@ pub mod server;
 pub mod session;
 pub mod stats;
 pub mod time;
+pub mod topology;
 pub mod transport;
 
 pub use client::*;

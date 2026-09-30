@@ -113,6 +113,16 @@ impl Relay {
 	/// admitted until [`Self::run`] drives it.
 	pub async fn load(mut config: Config) -> anyhow::Result<Self> {
 		config.resolve()?;
+		// Accept the versions that carry the relay graph even though the default set
+		// leaves the wip version out, or no peer could dial this relay as a cluster
+		// link. A client never offers it unless it opts in, so nothing else changes.
+		if config.listen.version.is_empty() {
+			config.listen.version = moq_net::Versions::topology()
+				.iter()
+				.chain(moq_net::Versions::all().iter())
+				.copied()
+				.collect();
+		}
 		let resolved_config = config.clone();
 		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,

@@ -40,6 +40,11 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
 	/// declare one itself. See `Client::with_peer_hop`.
 	pub peer_hop: Option<Hop>,
+	/// The relay graph to flood when the peer opens a Topology stream, set only on
+	/// an accepted cluster link.
+	pub topology: Option<crate::topology::Database>,
+	/// What we charge for this link, when we priced it ourselves.
+	pub cost: Option<u64>,
 }
 
 /// Context shared by every control-stream child.
@@ -65,6 +70,10 @@ struct Shared<S: crate::transport::poll::Session> {
 	goaway: crate::goaway::Protocol,
 	// Control streams still serving the peer data, which a draining close waits for.
 	owed: AtomicUsize,
+	topology: Option<crate::topology::Database>,
+	cost: Option<u64>,
+	// Set once the peer opens its Topology stream; a second is a protocol violation.
+	topology_opened: std::sync::atomic::AtomicBool,
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
@@ -165,6 +174,9 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				version: config.version,
 				goaway: config.goaway,
 				owed: AtomicUsize::new(0),
+				topology: config.topology,
+				cost: config.cost,
+				topology_opened: Default::default(),
 			}),
 			runtime: config.runtime,
 			accept,
@@ -251,6 +263,8 @@ enum ControlState<S: crate::transport::poll::Session> {
 	Goaway {
 		stream: Stream<S, Version>,
 	},
+	/// Flooding the relay graph with a cluster peer that dialed us.
+	Topology(Box<lite::Topology<S>>),
 	Done,
 }
 
@@ -281,6 +295,31 @@ impl<S: crate::transport::poll::Session> kio::Task for Control<S> {
 }
 
 impl<S: crate::transport::poll::Session> Control<S> {
+	/// Serve a Topology stream the peer opened. Refused unless this session is a
+	/// cluster link on a version that carries one, and only once per session.
+	fn topology(&self, stream: Stream<S, Version>) -> Result<lite::Topology<S>, Error> {
+		let shared = &self.shared;
+		let Some(database) = shared.topology.clone().filter(|_| shared.version.has_topology()) else {
+			tracing::warn!("peer opened a topology stream, but this session is not a cluster link");
+			return Err(Error::UnexpectedStream);
+		};
+		if shared.topology_opened.swap(true, Ordering::Relaxed) {
+			shared
+				.session
+				.clone()
+				.close(SessionError::ProtocolViolation.to_code(), "duplicate topology stream");
+			return Err(Error::ProtocolViolation);
+		}
+		Ok(lite::Topology::accept(
+			database,
+			stream,
+			shared.version,
+			self.runtime.clone(),
+			shared.peer_setup.clone(),
+			shared.cost,
+		))
+	}
+
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		loop {
 			match &mut self.state {
@@ -306,6 +345,7 @@ impl<S: crate::transport::poll::Session> Control<S> {
 							ControlState::Probe(ProbeServe::new(self.shared.clone(), self.runtime.clone(), stream))
 						}
 						lite::ControlType::Goaway => ControlState::Goaway { stream },
+						lite::ControlType::Topology => ControlState::Topology(Box::new(self.topology(stream)?)),
 						lite::ControlType::Session => return Poll::Ready(Err(Error::UnexpectedStream)),
 					};
 					if self.state.owes() {
@@ -317,6 +357,18 @@ impl<S: crate::transport::poll::Session> Control<S> {
 				ControlState::Fetch(serve) => return serve.poll(waiter),
 				ControlState::TrackInfo(serve) => return serve.poll(waiter),
 				ControlState::Probe(serve) => return serve.poll(waiter),
+				ControlState::Topology(topology) => {
+					let res = ready!(topology.poll(waiter));
+					// Control errors are only logged, but a peer breaking the topology
+					// protocol ends the session, as it does on the dialing side.
+					if let Err(err) = &res {
+						self.shared
+							.session
+							.clone()
+							.close(SessionError::from(err).to_code(), &err.to_string());
+					}
+					return Poll::Ready(res);
+				}
 				ControlState::Goaway { stream } => {
 					// A decode error propagates to the caller, which logs and continues: a
 					// malformed GOAWAY must not tear down the session it is trying to drain.
@@ -3542,6 +3594,8 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: Some(assigned),
+			topology: None,
+			cost: None,
 		});
 
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
@@ -3703,6 +3757,8 @@ mod tests {
 			peer_setup: crate::lite::PeerSetup::default(),
 			goaway,
 			peer_hop: None,
+			topology: None,
+			cost: None,
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
 	}
