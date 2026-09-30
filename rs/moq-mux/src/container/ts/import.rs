@@ -1020,11 +1020,16 @@ fn list_programs(programs: &[u16]) -> String {
 /// importer, so what an operator alarms on is the rate: a feed that resyncs once an hour is
 /// healthy, one that resyncs every second is losing audio, and one whose access units stop
 /// advancing while the mux keeps flowing has lost that stream.
+///
+/// [`Export::stats`](super::Export::stats) returns the same rows for the streams it writes,
+/// so one schema reads both edges. Only `units` and `quiet` move there: the exporter builds
+/// every frame header itself, so it has no frame sync to lose.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stats {
-	/// One row per elementary stream PID the importer carries, ordered by PID. A PID the
-	/// importer drops (an undecoded stream without the `mpegts` catalog section) has none.
+	/// One row per elementary stream PID the importer carries or the exporter writes, ordered
+	/// by PID. A PID the importer drops (an undecoded stream without the `mpegts` catalog
+	/// section) has none.
 	pub streams: BTreeMap<u16, StreamStats>,
 }
 
@@ -1040,13 +1045,16 @@ impl Stats {
 #[non_exhaustive]
 pub struct StreamStats {
 	/// The current or most recent MoQ track suffix for this PID (`.avc3`, `.mp2`, `.ts`, ...),
-	/// or empty for MPEG-1/2 video, which is read for its clock and not published.
+	/// or empty for MPEG-1/2 video, which is read for its clock and not published. At export,
+	/// the suffix an import of the output would give the PID.
 	pub track: &'static str,
 	/// Access units the stream delivered: frames published for decoded media, PES payloads or
-	/// sections carried verbatim, and PES read on MPEG-1/2 video.
+	/// sections carried verbatim, and PES read on MPEG-1/2 video. At export, the PES or
+	/// sections written for each frame.
 	pub units: u64,
 	/// Transport time since the stream last delivered an access unit, or since the PMT
-	/// declared it, measured on the program clock (PCR). `None` until the first PCR arrives.
+	/// declared it, measured on the program clock (PCR): the one read at import, the one
+	/// written at export. `None` until the first PCR.
 	///
 	/// No threshold applies: a sparse stream such as SCTE-35 is legitimately quiet for
 	/// seconds, so how long is too long is for whoever alarms to decide.
@@ -1521,9 +1529,9 @@ impl Continuity {
 /// Measured on the program clock, the PCR summed interval by interval, so it runs straight
 /// through the 33-bit wrap, a signalled time-base reset and a corrupt PCR instead of jumping
 /// with them. Not the media clock: that follows the video PTS, and stops with the very stream
-/// this catches.
+/// this catches. [`Export`](super::Export) runs the same meter on the PCR it writes.
 #[derive(Default)]
-struct Liveness {
+pub(super) struct Liveness {
 	/// The last PCR in 27 MHz ticks, forgotten at a reset so no interval spans one.
 	pcr: Option<u64>,
 	/// PCR ticks elapsed since the first PCR, if one has arrived.
@@ -1535,7 +1543,7 @@ struct Liveness {
 
 impl Liveness {
 	/// A PCR arrived on the program's clock PID.
-	fn pcr(&mut self, pcr: u64) {
+	pub(super) fn pcr(&mut self, pcr: u64) {
 		let elapsed = self.elapsed.get_or_insert(0);
 		if let Some(last) = self.pcr.replace(pcr) {
 			let step = (pcr + super::mux_rate::PCR_WRAP - last) % super::mux_rate::PCR_WRAP;
@@ -1549,18 +1557,18 @@ impl Liveness {
 	}
 
 	/// The clock restarted or changed PID: the next interval measures nothing.
-	fn discontinuity(&mut self) {
+	pub(super) fn discontinuity(&mut self) {
 		self.pcr = None;
 	}
 
 	/// The PMT declared `pid`. Its silence counts from here until it delivers.
-	fn register(&mut self, pid: u16) {
+	pub(super) fn register(&mut self, pid: u16) {
 		let now = self.elapsed.unwrap_or(0);
 		self.streams.entry(pid).or_insert((0, now));
 	}
 
 	/// `pid` delivered `units` access units just now.
-	fn delivered(&mut self, pid: u16, units: u64) {
+	pub(super) fn delivered(&mut self, pid: u16, units: u64) {
 		if units == 0 {
 			return;
 		}
@@ -1572,7 +1580,7 @@ impl Liveness {
 	}
 
 	/// `pid`'s access units and how long it has been quiet. See [`StreamStats`].
-	fn stream(&self, pid: u16) -> (u64, Option<std::time::Duration>) {
+	pub(super) fn stream(&self, pid: u16) -> (u64, Option<std::time::Duration>) {
 		let Some(&(units, last)) = self.streams.get(&pid) else {
 			return (0, None);
 		};

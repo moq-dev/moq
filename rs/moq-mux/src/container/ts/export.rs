@@ -58,7 +58,7 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 /// table asking for faster repetition than this still gets it.
 const SI_REVISION_INTERVAL: Duration = Duration::from_secs(1);
 /// Emit a PCR on every crossing of this media-time grid ([`Export::emit`]).
-/// TR 101 290 flags a gap over 40 ms; broadcast muxes emit every 25-40 ms.
+/// TR 101 290 V1.4.1 flags a gap over 100 ms; broadcast muxes emit every 25-40 ms.
 pub(super) const PCR_INTERVAL: Duration = Duration::from_millis(25);
 /// How many missed PCR slots to backfill at most: one second's worth. Frames
 /// coarser than the grid cross several slots at a time and every one is filled so
@@ -197,6 +197,11 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// up before it ever configures video. `None` until the tables are built, and for
 	/// programs with no video track (nothing to align to).
 	video_start: Option<Timestamp>,
+	/// Access units per PID muxed into the open span, counted once it goes out, since a
+	/// rewind discards it unwritten.
+	span_units: BTreeMap<u16, u64>,
+	/// Each elementary stream's access units and silence on the PCR written ([`Self::stats`]).
+	liveness: super::import::Liveness,
 }
 
 struct Pending {
@@ -407,6 +412,23 @@ enum Kind {
 		framing: catalog::Framing,
 		stream_id: Option<u8>,
 	},
+}
+
+impl Kind {
+	/// The track suffix [`Import`](super::Import) gives a PID carrying this kind, so a stream's
+	/// row is named alike at both edges.
+	fn suffix(&self) -> &'static str {
+		match self {
+			Kind::Video(StreamType::H265) => ".hev1",
+			Kind::Video(_) => ".avc3",
+			Kind::Aac { .. } => ".aac",
+			Kind::Opus { .. } => ".opus",
+			Kind::Mp2 { .. } => ".mp2",
+			Kind::Ac3 => ".ac3",
+			Kind::Eac3 => ".eac3",
+			Kind::Verbatim { .. } => ".ts",
+		}
+	}
 }
 
 /// The null stuffing owed to the multiplex rate ([`Export::stuff`]).
@@ -699,6 +721,8 @@ impl<E: catalog::Catalog> Export<E> {
 			mux_rate: None,
 			mux_rate_override: None,
 			stuffing: Stuffing::default(),
+			span_units: BTreeMap::new(),
+			liveness: Default::default(),
 		})
 	}
 
@@ -1258,6 +1282,30 @@ impl<E: catalog::Catalog> Export<E> {
 		self.emitted_epoch
 	}
 
+	/// Snapshot the access units each elementary stream has written, and how long each has
+	/// been quiet on the PCR the output carries.
+	///
+	/// A track stalled upstream stops advancing its row while the PSI and the other PIDs
+	/// keep flowing, which nothing graded on the output bytes alone can see. Empty until the
+	/// program tables are built. Cheap enough to poll per frame.
+	pub fn stats(&self) -> super::Stats {
+		let mut stats = super::Stats::default();
+		if self.psi.is_none() {
+			return stats;
+		}
+		for track in self.tracks.values() {
+			let (units, quiet) = self.liveness.stream(track.pid);
+			let row = super::StreamStats {
+				track: track.kind.suffix(),
+				units,
+				quiet,
+				..Default::default()
+			};
+			stats.streams.insert(track.pid, row);
+		}
+		stats
+	}
+
 	/// Carry on with the broadcast that replaced the one this export was reading.
 	///
 	/// Call it once [`Source::returned`](crate::Source::returned) has resolved, after
@@ -1298,6 +1346,7 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 		self.pending.clear();
 		self.keyframes.clear();
+		self.span_units.clear();
 		self.queue.clear();
 		self.watermark = None;
 		// The new generation waits for every track again, with a fresh budget: a
@@ -1498,6 +1547,9 @@ impl<E: catalog::Catalog> Export<E> {
 			es_info,
 		};
 
+		for track in &tracks {
+			self.liveness.register(track.pid);
+		}
 		self.psi = Some(Psi {
 			pat,
 			pmt,
@@ -1657,6 +1709,8 @@ impl<E: catalog::Catalog> Export<E> {
 			}
 		}
 
+		// A malformed section writes nothing, so the unit counts only if bytes went in.
+		let written = out.len();
 		match es_payload {
 			// Section-framed verbatim (SCTE-35, ...) rides in private sections, not PES;
 			// carry the bytes verbatim.
@@ -1681,6 +1735,9 @@ impl<E: catalog::Catalog> Export<E> {
 				};
 				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
+		}
+		if out.len() > written {
+			*self.span_units.entry(pid).or_default() += 1;
 		}
 		if keyframe {
 			self.keyframes.push(self.pending.len());
@@ -1821,6 +1878,9 @@ impl<E: catalog::Catalog> Export<E> {
 		if let Some(cc) = counter_before(&bytes, bytes.len(), pcr_pid, None) {
 			self.pcr_cc = Some(cc);
 		}
+		for (pid, units) in std::mem::take(&mut self.span_units) {
+			self.liveness.delivered(pid, units);
+		}
 		Ok(())
 	}
 
@@ -1933,7 +1993,9 @@ impl<E: catalog::Catalog> Export<E> {
 		let mut packet = pcr_packet(pcr_pid, ticks, cc)?;
 		if std::mem::take(&mut self.pcr_discontinuity) {
 			packet[5] |= 0x80;
+			self.liveness.discontinuity();
 		}
+		self.liveness.pcr((ticks & TS_TIMESTAMP_MASK) * 300);
 		Ok(packet)
 	}
 

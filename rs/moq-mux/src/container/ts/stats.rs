@@ -1,11 +1,12 @@
-//! Reporting on the per-stream counters [`Import::stats`](super::Import::stats) returns.
+//! Reporting on the per-stream counters [`Import::stats`](super::Import::stats) and
+//! [`Export::stats`](super::Export::stats) return.
 
 use std::collections::BTreeSet;
 
 use super::{Stats, StreamStats};
 
-/// Logs what moved in an importer's [`Stats`] from one sample to the next, so every front
-/// door that runs a TS importer reports the same lines.
+/// Logs what moved in an importer's or exporter's [`Stats`] from one sample to the next, so
+/// every front door that runs one reports the same lines.
 ///
 /// Feed it a snapshot every [`INTERVAL`](Self::INTERVAL) of wall time. The caller owns the
 /// timer, since what counts as "now" differs between a CLI, a server, and a test.
