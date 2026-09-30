@@ -1231,6 +1231,10 @@ impl Group {
 		track: &track::Consumer,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<group::Consumer>>> {
+		// A route is reused whatever `start` asks for, since the reader's position only
+		// moves forward and the segments are disjoint: keeping the earlier floor asks for
+		// a superset of what a later read needs, and re-subscribing to narrow it would
+		// drop the demand in between.
 		if self.waiting.as_ref().is_none_or(|w| w.segment != segment) {
 			self.waiting = Some(Waiting::new(segment, start, track));
 		}
@@ -1402,7 +1406,12 @@ impl Group {
 					self.waiting = None;
 					return Poll::Ready(Ok(None));
 				}
-				Err(err) if latency_expired => return Poll::Ready(Err(err)),
+				// Terminal, and the reader may be retained past the error, so the
+				// demand outliving the group would pin upstream demand for good.
+				Err(err) if latency_expired => {
+					self.waiting = None;
+					return Poll::Ready(Err(err));
+				}
 				Err(err) => self.bury(err),
 			}
 		}
@@ -1434,7 +1443,12 @@ impl Group {
 					self.waiting = None;
 					return Poll::Ready(Ok(None));
 				}
-				Err(err) if latency_expired => return Poll::Ready(Err(err)),
+				// Terminal, and the reader may be retained past the error, so the
+				// demand outliving the group would pin upstream demand for good.
+				Err(err) if latency_expired => {
+					self.waiting = None;
+					return Poll::Ready(Err(err));
+				}
 				Err(err) => self.bury(err),
 			}
 		}
