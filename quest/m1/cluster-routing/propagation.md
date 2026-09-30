@@ -36,8 +36,7 @@ Candidates to choose between or combine:
   prefix-shared paths, instead of per-event messages.
 
 Measure the choice with the simulator's scenarios (messages and bytes per
-event, convergence, stale revival, restart, failover) and the
-[Memory benchmark](/quest/m1/cluster-routing/memory.md)'s figures.
+event, convergence, stale revival, restart, failover).
 
 Open questions the chosen design must answer:
 
@@ -57,15 +56,10 @@ Open questions the chosen design must answer:
 
 The implementation quests it writes replace the empty-prefix ANNOUNCE_REQUEST
 between peers and per-hop path-vector announcements, drop `Hop Base` and
-`Hop Keep` from the current wip lite version, and report the memory
-benchmark's after figures. Add each one to the Required of
+`Hop Keep` from the current wip lite version. Add each one to the Required of
 [Selection](/quest/m1/cluster-routing/selection.md) and
 [Routing between clusters](/quest/m1/cluster-routing/inter-cluster.md), so
 neither starts on a record shape that is not implemented yet.
-
-## Required
-
-- [Memory benchmark](/quest/m1/cluster-routing/memory.md) - the before figures the choice is weighed against
 
 ## Related
 

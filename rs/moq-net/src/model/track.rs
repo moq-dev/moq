@@ -2109,13 +2109,20 @@ fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Op
 /// Register a subscription if the track is live: clone the shared list out of the
 /// state, release the track lock, then push under the list's own lock. A closed
 /// track skips the push; nothing aggregates the preferences anymore.
+///
+/// Departed subscribers are pruned here too. The aggregate poll only prunes when the
+/// aggregate changes, so churning subscribers with the same preferences as a steady
+/// one would otherwise pile up and be walked on every wake. Pruning on push bounds the
+/// list by its peak live count, and the push already wakes the pollers.
 fn register_subscription(state: kio::Ref<'_, TrackState>, subscription: &kio::Producer<Subscription>) {
 	if state.is_closed() {
 		return;
 	}
 	let subs = state.subscriptions.clone();
 	drop(state);
-	subs.lock().push(subscription.consume());
+	let mut subs = subs.lock();
+	subs.retain(|sub| !sub.is_closed());
+	subs.push(subscription.consume());
 }
 
 /// A weak reference to a track that doesn't prevent auto-close.
@@ -5561,6 +5568,28 @@ mod test {
 		let _b = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)));
 
 		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_secs(2));
+	}
+
+	#[test]
+	fn churned_subscribers_do_not_accumulate() {
+		let mut producer = track_producer("test", None);
+		let consumer = producer.consume();
+		let waiter = kio::Waiter::noop();
+
+		let _steady = producer.subscribe(None);
+		assert!(producer.poll_subscription_changed(&waiter).is_ready());
+
+		// Identical preferences leave the aggregate unchanged, so the poll never
+		// reaches its own prune; registration has to drop the departed entries.
+		for _ in 0..100 {
+			drop(producer.subscribe(None));
+			drop(consumer.subscribe(None));
+			assert!(producer.poll_subscription_changed(&waiter).is_pending());
+		}
+
+		let subs = producer.state.read().subscriptions.clone();
+		let len = subs.read().len();
+		assert!(len <= 2, "departed subscribers accumulated: {len}");
 	}
 
 	/// Append a finished group presenting at `millis`, so the track carries a media
