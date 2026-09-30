@@ -14,7 +14,7 @@ Each of these closes the session today with `PROTOCOL_VIOLATION`:
 - FETCH on drafts 20+ still decodes the removed Fetch Type field
   (`ietf/fetch.rs`). Decode the draft-20 layout: namespace, name and params,
   with the range in LOCATION_FILTER. Refuse it `NOT_SUPPORTED` until
-  [moxygen FETCH](/quest/m1/moxygen/fetch.md) serves it. Fix the encoder and
+  [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) serves it. Fix the encoder and
   the pinned test in `version.rs`.
 - Request parameters the draft allows on a message fail `decode_params!`:
   AUTHORIZATION TOKEN (0x03) anywhere, NEW_GROUP_REQUEST (0x32) and the

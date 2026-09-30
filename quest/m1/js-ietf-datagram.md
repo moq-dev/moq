@@ -1,29 +1,21 @@
-# [M] @moq/net datagrams over moq-transport
+# [M] JavaScript moq-transport datagrams
 
 ## Goal
 
-A `@moq/net` session on moq-transport sends and receives datagram groups as
-`OBJECT_DATAGRAM`, one object per group with its sequence kept, as Rust does.
-A datagram track crosses IETF between Rust and JS in both directions in
-`just test interop`.
+`@moq/net` sends and receives datagrams over moq-transport as
+`OBJECT_DATAGRAM`, matching Rust: one Object at ID 0 is a single-frame group
+whose Group ID is the sequence. A JavaScript publisher's datagrams reach a Rust
+subscriber, and a Rust publisher's reach a JavaScript one.
 
 ## Plan
 
-- JS routes datagrams on moq-lite only (`js/net/src/lite/datagram.ts`,
-  `runDatagrams` from lite-05); `js/net/src/ietf/` reads and writes none.
-  Mirror the lite path on the IETF session and the Rust mapping from #4274:
-  receive decodes `OBJECT_DATAGRAM` and inserts on the aliased subscription's
-  track; send writes object 0 with END_OF_GROUP, the explicit publisher
-  priority, and the timestamp property when the track has a timescale.
-- Keep Rust's edges: an Object ID other than 0, a non-Normal status, or an
-  unbound alias is dropped; a malformed Type closes the session. Rust covers
-  drafts 14 and later, whose Type flags differ between 14 and 15+; decide
-  what draft 07, which JS also speaks, does.
-- Add IETF datagram cases beside the lite ones in the interop harness.
+Port `rs/moq-net/src/ietf/datagram.rs` and the session's send and receive
+loops. Decode every draft's Type flags, drop what the model cannot carry the
+same way Rust does, and close the session on a malformed Type.
 
-Public API: none expected. Wire: `@moq/net` moq-transport sessions send and
-accept `OBJECT_DATAGRAM` as the drafts define; no project draft changes.
+The integration test `ietf does not deliver datagrams` flips to delivery on
+every supported draft, and `just test interop --all` covers both directions.
 
-## Required
+## Related
 
-- [moxygen interop](/quest/m1/moxygen/README.md) - its datagram groups quest (done on the line) is the Rust side this mirrors and interops with
+- [Datagrams are live-only](/quest/m1/datagram-unfetchable.md) - the subscribe range for datagrams, settled on both protocols
