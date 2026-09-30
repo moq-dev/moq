@@ -3049,7 +3049,12 @@ where
 		// The publisher knows where the track ends, which a range FETCH downstream needs.
 		if ok.end_of_track {
 			let end = ok.end_location;
-			request.finish_track_at(end.group + u64::from(end.object > 0));
+			let Some(final_sequence) = end.group.checked_add(u64::from(end.object > 0)) else {
+				request.reject(Error::ProtocolViolation);
+				let _ = stream.writer.close().await;
+				return;
+			};
+			request.finish_track_at(final_sequence);
 		}
 
 		// An empty answer opens no fetch stream at all.
@@ -3093,13 +3098,33 @@ where
 		}
 
 		// Hold the request open until its fetch stream is done: closing our side first is
-		// what a draft-14-16 adapter reads as cancelling the FETCH.
-		let _ = slot
-			.wait(|state| match &**state {
+		// what a draft-14-16 adapter reads as cancelling the FETCH. A publisher that fails
+		// after FETCH_OK resets the request instead and owes no fetch stream, so the group
+		// it left waiting is aborted. A FIN is not that: the fetch stream can trail it.
+		let mut open = true;
+		let reset = kio::wait(|waiter| {
+			if open {
+				let mut cx = std::task::Context::from_waker(waiter.waker());
+				match stream.reader.poll_closed(&mut cx) {
+					Poll::Ready(Err(err)) => return Poll::Ready(Some(err)),
+					Poll::Ready(Ok(())) => open = false,
+					Poll::Pending => {}
+				}
+			}
+			slot.poll(waiter, |state| match &**state {
 				GroupFetch::Done => Poll::Ready(()),
 				_ => Poll::Pending,
 			})
-			.await;
+			.map(|_| None)
+		})
+		.await;
+		if let Some(err) = reset
+			&& let Ok(mut state) = slot.write()
+			&& matches!(*state, GroupFetch::Ready { .. })
+			&& let GroupFetch::Ready { producer, .. } = std::mem::replace(&mut *state, GroupFetch::Done)
+		{
+			let _ = producer.abort(err);
+		}
 		let _ = stream.writer.close().await;
 	}
 
@@ -7578,6 +7603,63 @@ mod joining_fetch_tests {
 
 		let writes = log.writes.lock().unwrap().clone();
 		assert!(writes.is_empty(), "a refused join must not write SUBSCRIBE");
+	}
+
+	/// A publisher that resets the request after FETCH_OK owes no fetch stream, so the
+	/// group it accepted is aborted instead of left open for every reader to wait on.
+	/// Without that, `run_group_fetch` never returns.
+	#[tokio::test(start_paused = true)]
+	async fn a_group_fetch_reset_after_fetch_ok_aborts_the_group() {
+		const VERSION: Version = Version::Draft19;
+		const GROUP: u64 = 4;
+
+		let ok = message_bytes(
+			ietf::FetchOk::ID,
+			&ietf::FetchOk {
+				request_id: None,
+				group_order: GroupOrder::Ascending,
+				end_of_track: false,
+				end_location: ietf::Location {
+					group: GROUP + 1,
+					object: 0,
+				},
+			},
+			VERSION,
+		);
+
+		let session = ScriptedSession::per_stream_reset(vec![ok]);
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let subscriber = Subscriber::new(
+			crate::time::Clock::tokio(),
+			session.clone(),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		);
+
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			track::Info::default(),
+		);
+		let dynamic = track.dynamic();
+		let consumer = track.consume();
+		let mut fetch = std::pin::pin!(consumer.fetch_group(GROUP, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		let request = dynamic.requested_group().await.expect("no group requested");
+
+		subscriber
+			.clone()
+			.run_group_fetch(Path::new("broadcast").to_owned(), "video".into(), request, None)
+			.await;
+
+		assert!(fetch.await.is_err(), "the accepted group was aborted");
 	}
 
 	/// A cache miss for a group's tail asks upstream from the frame the reader wants and

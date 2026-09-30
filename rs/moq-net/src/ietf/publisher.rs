@@ -60,8 +60,7 @@ struct FetchedGroup {
 	/// The Object ID of the first frame.
 	first: u64,
 	frames: Vec<frame::Frame>,
-	/// No frame past the last one read exists: the group ended there, or nothing was
-	/// written past the cap.
+	/// The group ended within the range, so every frame it will ever hold was read.
 	complete: bool,
 }
 
@@ -103,17 +102,16 @@ async fn read_fetch(
 	// longer holds it.
 	let first = group.index();
 	let mut frames = Vec::new();
-	let complete = loop {
-		if let Some(until) = until
-			&& first + frames.len() as u64 >= until
-		{
-			break group.frame_count() as u64 <= until;
-		}
+	let mut complete = false;
+	while until.is_none_or(|until| first + (frames.len() as u64) < until) {
 		match group.read_frame().await? {
 			Some(frame) => frames.push(frame),
-			None => break true,
+			None => {
+				complete = true;
+				break;
+			}
 		}
-	};
+	}
 
 	Ok(FetchedGroup {
 		sequence,
