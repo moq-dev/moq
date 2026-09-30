@@ -35,6 +35,10 @@ use std::{
 /// Default [`Info::max_age`] when the publisher doesn't set one.
 pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(5);
 
+// The higher-first midpoint. IETF flips priority (lower first), so this goes out as 128, the
+// draft's usual publisher priority, while moq-lite carries 127 as written: one urgency on both.
+const DEFAULT_PRIORITY: u8 = 127;
+
 /// Maximum number of datagrams retained in the per-track send buffer.
 ///
 /// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
@@ -106,6 +110,7 @@ pub struct Info {
 	pub max_age: Duration,
 	/// The publisher's priority for this track, used only to break ties between
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
+	/// Higher is more urgent. Defaults to 127, the midpoint.
 	pub priority: u8,
 }
 
@@ -114,7 +119,7 @@ impl Default for Info {
 		Self {
 			timescale: Timescale::default(),
 			max_age: DEFAULT_MAX_AGE,
-			priority: 0,
+			priority: DEFAULT_PRIORITY,
 		}
 	}
 }
@@ -1374,9 +1379,8 @@ impl Producer {
 	/// track's groups but drawing from the same sequence namespace (so interleaving with
 	/// [`Self::append_group`] never reuses a number). There is no group fallback: each
 	/// session drops (with a debug log) any datagram whose encoded body exceeds the
-	/// transport's datagram size, and sessions that can't carry datagrams at all (IETF
-	/// moq-transport, moq-lite before 05, or stream-only transports like WebSocket) never
-	/// deliver them. Keep payloads well under the 1200-byte minimum path MTU. An origin
+	/// transport's datagram size, and sessions that can't carry datagrams at all (moq-lite
+	/// before 05, or stream-only transports like WebSocket) never deliver them. Keep payloads well under the 1200-byte minimum path MTU. An origin
 	/// publisher uses this; a relay preserving upstream numbering uses
 	/// [`Self::insert_datagram`].
 	pub fn append_datagram<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, payload: B) -> Result<u64> {
@@ -2229,7 +2233,11 @@ impl Demand {
 	/// The publisher's tie-break priority, as set in [`Info::priority`].
 	pub(crate) fn priority(&self) -> u8 {
 		// Always Some once the track exists; a closed one reads its last value.
-		self.state.read().info.as_ref().map_or(0, |info| info.priority)
+		self.state
+			.read()
+			.info
+			.as_ref()
+			.map_or(DEFAULT_PRIORITY, |info| info.priority)
 	}
 
 	/// Whether anyone is subscribed right now, without waiting.
@@ -2788,6 +2796,16 @@ impl Consumer {
 		}
 	}
 
+	/// The declared exclusive final sequence, or `None` while the track is open ended.
+	///
+	/// A spliced track answers for its newest segment, which is where fetches go.
+	pub(crate) fn final_sequence(&self) -> Option<u64> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => state.read().final_sequence,
+			ConsumerKind::Spliced(resume) => resume.final_sequence(),
+		}
+	}
+
 	/// The frame-precise point a replacement route should resume from: one past the
 	/// last frame this copy produced. `None` if it produced nothing.
 	///
@@ -2980,6 +2998,16 @@ impl group::Request {
 			.and_then(|mut state| state.insert_group_request(self.sequence, self.frame_start, info.into()));
 		self.remove();
 		res
+	}
+
+	/// Declare the track's exclusive final sequence, as the publisher answering this
+	/// fetch reported it. A no-op once the track declared one, or holds a later group.
+	pub(crate) fn finish_track_at(&self, final_sequence: u64) {
+		if let Ok(mut state) = TrackState::modify(&self.state)
+			&& state.final_sequence.is_none()
+		{
+			let _ = state.set_final(final_sequence);
+		}
 	}
 
 	/// Reject the fetch, resolving every joined [`Consumer::fetch_group`] with `err`.

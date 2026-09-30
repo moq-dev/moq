@@ -546,6 +546,8 @@ pub struct ScriptedRecv {
 	/// Report EOF once the script is exhausted rather than parking, so a test can drive
 	/// a read loop all the way through its exit path. See [`ScriptedSession::eof`].
 	eof: bool,
+	/// Report a reset once the script is exhausted. See [`ScriptedSession::per_stream_reset`].
+	reset: bool,
 	log: Log,
 }
 
@@ -566,6 +568,7 @@ impl poll::RecvStream for ScriptedRecv {
 		};
 
 		match take {
+			0 if self.reset => Poll::Ready(Err(SinkError)),
 			0 if self.eof => Poll::Ready(Ok(None)),
 			0 => Poll::Pending,
 			take => Poll::Ready(Ok(Some(take))),
@@ -592,6 +595,8 @@ pub struct ScriptedSession {
 	pub log: Log,
 	/// Whether an exhausted script reports EOF instead of parking.
 	eof: bool,
+	/// Whether an exhausted script reports a reset instead of parking.
+	reset: bool,
 	script: Arc<Mutex<Vec<u8>>>,
 	/// Per-stream scripts popped by `open_bi` in order; `None` shares `script`
 	/// across every stream.
@@ -611,6 +616,7 @@ impl ScriptedSession {
 		Self {
 			log: Log::default(),
 			eof: false,
+			reset: false,
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
 			open_gate: None,
@@ -661,6 +667,15 @@ impl ScriptedSession {
 		}
 	}
 
+	/// Like [`Self::per_stream`], but an exhausted script resets the stream, as a peer
+	/// that fails after replying would.
+	pub fn per_stream_reset(scripts: Vec<Vec<u8>>) -> Self {
+		Self {
+			reset: true,
+			..Self::per_stream(scripts)
+		}
+	}
+
 	/// Append to the shared script: the peer sending more on a stream it already opened.
 	/// Nothing is woken, so the test re-polls the reader itself.
 	pub fn push(&self, bytes: &[u8]) {
@@ -689,6 +704,7 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok(ScriptedRecv {
 			script: Arc::new(Mutex::new(script)),
 			eof: self.eof,
+			reset: self.reset,
 			log: self.log.clone(),
 		}))
 	}
@@ -720,6 +736,7 @@ impl poll::Session for ScriptedSession {
 			ScriptedRecv {
 				script,
 				eof: self.eof,
+				reset: self.reset,
 				log: self.log.clone(),
 			},
 		)))
