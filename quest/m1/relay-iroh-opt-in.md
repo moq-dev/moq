@@ -26,5 +26,5 @@ Guidance:
 
 ## Related
 
-- [`moq relay`](/quest/m1/moq-relay-subcommand.md) - forwards the relay's features from moq-cli's
-- [P2P](/quest/m1/p2p/README.md) - why moq-cli keeps iroh
+- [`moq relay`](/quest/m2/moq-relay-subcommand.md) - forwards the relay's features from moq-cli's
+- [P2P](/quest/m2/p2p/README.md) - why moq-cli keeps iroh

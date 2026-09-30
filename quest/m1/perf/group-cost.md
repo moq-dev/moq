@@ -25,6 +25,17 @@ keeps that waiter and skips re-registering on lists that still hold it
 the next largest source from there. A measured no-win abandons the quest,
 per this line's rules.
 
-## Related
+Decided in the 2026-09-30 audit: two suspected per-group costs merged here
+as candidates to measure with `SESSION_ALLOCS`, not separate quests.
 
-- [Owned decoding copies](/quest/m1/perf/coding-decode.md) - decode-side copies are part of the same per-group cost
+- Egress cache refresh: `group::Consumer::keep_alive` takes a state read
+  guard and calls `Charge::refresh` between completed frame writes on both
+  the lite and IETF publishers. It protects a drain longer than
+  `latency_max`, so keep per-frame liveness and
+  `slow_prefetch_reader_survives_expiry` (rs/moq-net/src/model/track.rs);
+  fewer refresh calls alone are not a win.
+- Owned decode copies: `rs/moq-net/src/coding/decode.rs` decodes `Vec<u8>`
+  through `Buf::copy_to_bytes` then `to_vec`, and `String` consumes that
+  vector. Measure on the real reader input types (contiguous and chained)
+  before assuming a copy; keep the owned return types, bounds checks, and
+  UTF-8 validation.

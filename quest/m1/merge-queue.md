@@ -17,9 +17,9 @@ and there is no merge queue, so nothing re-runs them on the combined tree.
   queue tests the combination once, at merge time.
 - Make the workflows ready: every workflow providing a required check
   (today `Check` and `Test` in `.github/workflows/check.yml`) also runs on
-  `merge_group`. `just ci check|test` runs `sh/dispatch.sh`, which scopes
-  by diffing against its `BASE` argument, else `origin/$GITHUB_BASE_REF`. A
-  merge group sets no `GITHUB_BASE_REF`, so pass the group's base
+  `merge_group`. `just ci $JOB $BASE` (`justfile`) scopes by diffing
+  against its `BASE` argument, else `origin/$GITHUB_BASE_REF`. A merge group
+  sets no `GITHUB_BASE_REF`, so pass the group's base
   (`github.event.merge_group.base_sha`) as `BASE`. Check the concurrency
   group and the `closed`-only skip still behave for queue refs.
 - Document it in `CONTRIBUTING.md`: PRs merge through the queue, a
@@ -29,8 +29,11 @@ and there is no merge queue, so nothing re-runs them on the combined tree.
   act, after the workflow change lands on `main`. Hand it over with the
   settings to use rather than changing it.
 
+Decided in the 2026-09-30 audit: no longer waits on the tooling line; the
+queue needs only `just ci $JOB $BASE`, which `main` already has.
+
 Public API: none. Wire: none.
 
-## Required
+## Related
 
-- [Tooling](/quest/m1/tooling/README.md) - `just ci` and `sh/dispatch.sh`, the entry point the queue runs
+- [Tooling](/quest/m1/tooling/README.md) - later changes to the `just ci` entry point the queue runs

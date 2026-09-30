@@ -40,6 +40,13 @@ has no close-code scenario, so it is not cheap to add here.
 
 Public API: none. Wire: none.
 
+Decided in the 2026-09-30 audit: the UnknownSession log flood quest merged
+here, since the same `web-transport-moq` release carries its fix.
+`decode_uni` and `decode_bi` mapped a stream reset before its WebTransport
+header to `UnknownSession`, flooding relay logs with WARNs; the fork now
+keeps the read's cause and logs a reset at debug. After the bump, confirm on
+a moq.pro relay that the flood stops.
+
 ## Required
 
 - A `web-transport-moq` 1.3.x release that carries moq-dev/noq#24
@@ -47,5 +54,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Browser close code](/quest/m1/browser-close-code.md) - the playwright case that proves Chromium reads the code this quest unblocks
-- [Close codes on every transport](/quest/m1/close-codes.md) - the same symptom over qmux and raw QUIC
-- [UnknownSession log flood](/quest/m1/unknown-session-logs.md) - another `web-transport-moq` release and pin bump

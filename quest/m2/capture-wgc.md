@@ -93,5 +93,5 @@ the Cargo feature comment, and the `frame.rs` docs on which producers make a
 ## Related
 
 - [Windows capture parity](/quest/m2/capture-windows.md) - app capture and system audio, which WGC does not answer
-- [Capture frame buffers](/quest/m2/capture-frame-buffers.md) - its GDI half disappears with `window.rs`
+- [X11 capture transport](/quest/m2/x11-capture-shm.md) - owns the X11 frame-buffer reuse; the GDI half disappears with `window.rs`
 - [Direct3D11 render import](/quest/m2/render-d3d11.md) - the other end of keeping Windows frames on the GPU

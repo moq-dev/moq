@@ -23,4 +23,5 @@ behind the `mediacodec` feature and the encode seam.
 
 ## Required
 
+- [Mobile ownership](/quest/m1/mobile-ownership.md) - if Kotlin owns platform codecs, this backend is moot
 - [MediaCodec decode](/quest/m2/audio-decode-mediacodec.md) - the round-trip regression decodes through it

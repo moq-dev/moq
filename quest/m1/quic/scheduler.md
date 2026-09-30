@@ -96,7 +96,7 @@ prove byte fairness over a bounded window, strict preemption by a higher
 priority, newest-first backlog shedding, dynamic priority updates,
 blocked-stream handling, sequence wrap and sparse sequence values, and cleanup
 on reset. This quest owns native QUIC proof and
-reusable scheduling fixtures. [qmux](/quest/m1/quic/qmux.md) owns running those
+reusable scheduling fixtures. [qmux](/quest/m2/quic-qmux.md) owns running those
 fixtures through its record writer after adopting the scheduler; native
 scheduler completion must not wait for that dependent integration. Preserve
 working behavior on backends not yet migrated, and remove queue code only
@@ -112,8 +112,10 @@ where the new implementation makes it redundant.
 - [moq#3320](https://github.com/moq-dev/moq/pull/3320) - removes the current
   dense-rank queue from the wide scalar path and records why a scalar cannot
   provide this fairness level
-- [Ladder controller](/quest/m1/ladder/controller.md) - rendition priority is
+- [Ladder controller](/quest/m2/ladder/controller.md) - rendition priority is
   a policy consumer of the same hierarchy
 - [Scope track priority](/quest/m1/track-priority-scope.md) - owns the
   priority semantics this mechanism realizes, including the scheduling-domain
   scope
+- [Signed priority](/quest/m2/signed-priority.md) - changes the priority type
+  this orders on; keep the ordering, not just the type

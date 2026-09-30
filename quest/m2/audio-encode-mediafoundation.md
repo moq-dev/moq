@@ -21,7 +21,3 @@ behind the encode seam on Windows.
 ## Required
 
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - the round-trip regression decodes through it
-
-## Related
-
-- [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - where the Windows run happens
