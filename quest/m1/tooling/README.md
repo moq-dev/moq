@@ -1,4 +1,4 @@
-# Tooling: thin justfiles and CI that calls them
+# [S] Tooling: thin justfiles and CI that calls them
 
 ## Goal
 
@@ -20,7 +20,3 @@ self-inflicted: logic inside recipes.
 
 A recipe that runs a short fixed sequence of commands is thin and stays
 inline; line count is not the test.
-
-## Required
-
-- [Demo scripts](/quest/m1/tooling/demo-scripts.md) - the demo justfiles' inline bash moves into scripts, the last logic left inside recipes
