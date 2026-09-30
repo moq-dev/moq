@@ -159,13 +159,21 @@ pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
 /// The frame rate an SPS NAL unit fixes with `fixed_frame_rate_flag`.
 ///
 /// Without the flag the VUI tick only bounds the rate from above, so it is left to measurement.
+/// A field-capable SPS is left out too: `pic_struct` in the slice header then decides whether a
+/// tick counts a field or a frame (ITU-T H.264 E.2.1, Table E-6), and only measurement settles it.
 pub(crate) fn sps_framerate(nal: &[u8]) -> Option<f64> {
-	let (units, scale) = sps_vui(nal)?.period?;
+	let vui = sps_vui(nal)?;
+	if !vui.frame_only {
+		return None;
+	}
+	let (units, scale) = vui.period?;
 	Some(scale as f64 / units as f64)
 }
 
 /// What an SPS VUI declares about picture timing.
 struct Vui {
+	/// `frame_mbs_only_flag`: every picture is a frame, so two ticks are one frame.
+	frame_only: bool,
 	/// One frame's duration as `(units, scale)` when `fixed_frame_rate_flag` is set.
 	period: Option<(u64, u64)>,
 	/// `max_num_reorder_frames`, when the bitstream restriction is present.
@@ -244,7 +252,8 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 	r.skip_bits(1)?; // gaps_in_frame_num_value_allowed_flag
 	read_ue(&mut r)?; // pic_width_in_mbs_minus1
 	read_ue(&mut r)?; // pic_height_in_map_units_minus1
-	if !r.read_flag()? {
+	let frame_only = r.read_flag()?; // frame_mbs_only_flag
+	if !frame_only {
 		r.skip_bits(1)?; // mb_adaptive_frame_field_flag
 	}
 	r.skip_bits(1)?; // direct_8x8_inference_flag
@@ -296,7 +305,11 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 	}
 	r.skip_bits(1)?; // pic_struct_present_flag
 	if !r.read_flag()? {
-		return Ok(Some(Vui { period, depth: None }));
+		return Ok(Some(Vui {
+			frame_only,
+			period,
+			depth: None,
+		}));
 	}
 	r.skip_bits(1)?; // motion_vectors_over_pic_boundaries_flag
 	for _ in 0..4 {
@@ -304,6 +317,7 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 	}
 	let depth = read_ue(&mut r)?; // max_num_reorder_frames
 	Ok(Some(Vui {
+		frame_only,
 		period,
 		depth: Some(depth),
 	}))
@@ -672,6 +686,12 @@ pub(crate) mod fixtures {
 		0x67, 0x64, 0x00, 0x0a, 0xac, 0xe4, 0x10, 0x9b, 0x01, 0x10, 0x00, 0x00, 0x03, 0x00, 0x10, 0x00, 0x00, 0x03,
 		0x03, 0x20, 0xf1, 0x22, 0x51, 0x20,
 	];
+	/// `interlaced=1:tff=1:bframes=0` at 320x240, with `fixed_frame_rate_flag` forced on: the same
+	/// 50 Hz tick, but `frame_mbs_only_flag` 0 leaves `pic_struct` to the slice header.
+	pub(crate) const SPS_FIELD: &[u8] = &[
+		0x67, 0xf4, 0x00, 0x15, 0x91, 0x9d, 0x02, 0x82, 0x1f, 0x89, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00,
+		0x00, 0x03, 0x00, 0xca, 0x7c, 0x50, 0xaa, 0x80,
+	];
 	pub(crate) const PPS: &[u8] = &[0x68, 0xeb, 0xe3, 0xcb, 0x22, 0xc0];
 }
 
@@ -704,6 +724,15 @@ mod tests {
 			sps_reorder(fixtures::SPS_IPB_VARIABLE),
 			Some(Reorder { depth: 1, period: None })
 		);
+		// The field-capable SPS still declares its depth and tick; only the frame rate needs
+		// `pic_struct` to read it.
+		assert_eq!(
+			sps_reorder(fixtures::SPS_FIELD),
+			Some(Reorder {
+				depth: 0,
+				period: Some((2, 50))
+			})
+		);
 		// Baseline with no VUI declares nothing.
 		assert_eq!(sps_reorder(&[0x67, 0x42, 0xc0, 0x1f, 0xde]), None);
 		// A VUI cut short is no declaration rather than a wrong one.
@@ -715,6 +744,8 @@ mod tests {
 		assert_eq!(sps_framerate(fixtures::SPS_IPB), Some(25.0));
 		// The same 50 Hz tick without `fixed_frame_rate_flag` is only a ceiling.
 		assert_eq!(sps_framerate(fixtures::SPS_IPB_VARIABLE), None);
+		// A field-capable SPS makes the tick a field or a frame depending on `pic_struct`.
+		assert_eq!(sps_framerate(fixtures::SPS_FIELD), None);
 		assert_eq!(sps_framerate(&[0x67, 0x42, 0xc0, 0x1f, 0xde]), None);
 	}
 
