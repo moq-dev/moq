@@ -82,4 +82,25 @@ impl Container for Wire {
 	fn end(&self, frame: &Frame) -> Option<moq_net::Timestamp> {
 		(self.0 != Kind::Data && frame.payload.is_empty()).then_some(frame.timestamp)
 	}
+
+	fn finish_group(
+		&self,
+		group: &mut moq_net::group::Producer,
+		end: Option<moq_net::Timestamp>,
+	) -> Result<(), Self::Error> {
+		if self.0 == Kind::Video
+			&& let Some(timestamp) = end
+		{
+			self.write(
+				group,
+				&[Frame {
+					timestamp,
+					payload: bytes::Bytes::new(),
+					keyframe: false,
+					duration: None,
+				}],
+			)?;
+		}
+		Ok(())
+	}
 }

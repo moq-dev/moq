@@ -959,6 +959,20 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		loop {
+			// While the lookup runs the requester sends nothing, so its send side closing,
+			// by FIN or reset, means it stopped waiting. Drop the lookup then, so the
+			// abandonment reaches our own upstream instead of pinning it for an answer
+			// nobody reads. (Once answered, its FIN is the normal end; `Finish` waits on it.)
+			if matches!(
+				self.state,
+				TrackInfoState::Hop { .. } | TrackInfoState::Request { .. } | TrackInfoState::Query { .. }
+			) {
+				let stream = self.stream.as_mut().expect("stream present");
+				let mut cx = Context::from_waker(waiter.waker());
+				if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
+					return Poll::Ready(Err(res.err().unwrap_or(Error::Cancel)));
+				}
+			}
 			match &mut self.state {
 				TrackInfoState::Decode => {
 					let stream = self.stream.as_mut().expect("stream present");
@@ -2552,7 +2566,7 @@ enum GroupState<S: crate::transport::poll::Session> {
 		batch_pos: usize,
 	},
 	/// Every frame is written and the FIN sent: wait for the acknowledgement so a
-	/// late cancel can still reset the stream.
+	/// late cancel or expiry can still reset the stream.
 	Closed {
 		writer: Writer<S::SendStream, Version>,
 	},
@@ -2593,6 +2607,29 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 	/// every failure as Cancel.
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		loop {
+			// Queue and SUBSCRIBE_UPDATE priority changes apply on every pass, whatever
+			// the stream is blocked on, including a FIN awaiting its acknowledgement
+			// (the transport still schedules its retransmissions). The rank is re-read
+			// as a send order when handled, since the two conventions are inverted.
+			if let GroupState::Serve { writer, .. } | GroupState::Closed { writer } = &mut self.state {
+				while let Poll::Ready(rank) = self.priority.poll_next(waiter) {
+					writer.set_priority(PriorityHandle::send_order_of(rank));
+				}
+				let seen = self.ctx.track_priority_seen;
+				// A dropped producer just disables this arm, like the queue arm above.
+				if let Poll::Ready(Ok(value)) = self.ctx.track_priority.poll(waiter, |value| {
+					if **value != seen {
+						Poll::Ready(**value)
+					} else {
+						Poll::Pending
+					}
+				}) {
+					self.ctx.track_priority_seen = value;
+					let rank = self.priority.set_track(value);
+					writer.set_priority(PriorityHandle::send_order_of(rank));
+				}
+			}
+
 			match &mut self.state {
 				GroupState::Open => {
 					if self.group.poll_expired(waiter) {
@@ -2639,26 +2676,6 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					batch_pos,
 				} => {
 					let mut cx = Context::from_waker(waiter.waker());
-
-					// Queue and SUBSCRIBE_UPDATE priority changes apply on every pass,
-					// whatever the write pipeline is blocked on. The rank is re-read as
-					// a send order when handled, since the two conventions are inverted.
-					while let Poll::Ready(rank) = self.priority.poll_next(waiter) {
-						writer.set_priority(PriorityHandle::send_order_of(rank));
-					}
-					let seen = self.ctx.track_priority_seen;
-					// A dropped producer just disables this arm, like the queue arm above.
-					if let Poll::Ready(Ok(value)) = self.ctx.track_priority.poll(waiter, |value| {
-						if **value != seen {
-							Poll::Ready(**value)
-						} else {
-							Poll::Pending
-						}
-					}) {
-						self.ctx.track_priority_seen = value;
-						let rank = self.priority.set_track(value);
-						writer.set_priority(PriorityHandle::send_order_of(rank));
-					}
 
 					let outcome = 'serve: {
 						// The peer closing first cancels the group.
@@ -2783,7 +2800,20 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					// poll_close releases the stream on completion: the peer acknowledged
 					// everything, so the Drop fallback must not reset the stream and
 					// discard bytes still retransmitting.
-					let res = ready!(writer.poll_close(&mut cx));
+					let res = match writer.poll_close(&mut cx) {
+						Poll::Ready(res) => res,
+						// Those bytes still hold the connection until acknowledged, so a
+						// group gone stale meanwhile releases them like one still serving.
+						Poll::Pending if self.group.poll_expired_while_pending(waiter, true) => {
+							let GroupState::Closed { writer } = std::mem::replace(&mut self.state, GroupState::Done)
+							else {
+								unreachable!()
+							};
+							writer.abort(&Error::Old);
+							return Poll::Ready(Err(Error::Old));
+						}
+						Poll::Pending => return Poll::Pending,
+					};
 					self.state = GroupState::Done;
 					return Poll::Ready(res.map(|()| {
 						tracing::debug!(sequence = self.sequence, "finished group");
@@ -3180,6 +3210,92 @@ mod serve_group_test {
 			priorities.iter().all(|&p| p == 255),
 			"rank 0 must reach the transport as send order 255: {priorities:?}",
 		);
+	}
+
+	/// A FIN holds the group's bytes until the peer acknowledges it, so a group that
+	/// goes stale while waiting still expires instead of pinning them.
+	#[tokio::test]
+	async fn unacknowledged_fin_expires_with_the_group() {
+		tokio::time::pause();
+
+		let session = SinkSession::new(Log::default()).with_unacked_fin();
+		let log = session.log.clone();
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			version: Version::Lite06,
+			timescale: Some(crate::Timescale::default()),
+			opens: Default::default(),
+		};
+
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut subscriber = track.subscribe(None);
+		let mut old = track.append_group().unwrap();
+		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		old.finish().unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("old group");
+
+		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group));
+		assert!(futures::poll!(serve.as_mut()).is_pending(), "the FIN is unacknowledged");
+		assert!(log.resets().is_empty());
+
+		tokio::time::advance(Duration::from_secs(1)).await;
+		let mut edge = track.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
+			.unwrap();
+		edge.finish().unwrap();
+
+		assert!(matches!(futures::poll!(serve.as_mut()), Poll::Ready(Err(Error::Old))));
+		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
+	}
+
+	/// The transport keeps scheduling a finished stream's retransmissions until the
+	/// FIN is acknowledged, so queue and SUBSCRIBE_UPDATE reorders still reach it.
+	#[tokio::test]
+	async fn unacknowledged_fin_follows_priority_changes() {
+		let session = SinkSession::new(Log::default()).with_unacked_fin();
+		let log = session.log.clone();
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			version: Version::Lite06,
+			timescale: Some(crate::Timescale::default()),
+			opens: Default::default(),
+		};
+
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"hello".as_slice()).unwrap();
+		let consumer = group.consume();
+		group.finish().unwrap();
+
+		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+		let queue = subscription.priority.clone();
+		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, consumer));
+		assert!(futures::poll!(serve.as_mut()).is_pending(), "the FIN is unacknowledged");
+		assert_eq!(log.priorities().last(), Some(&255));
+
+		// A newer group of the same subscription goes first.
+		let _newer = queue.insert(Priority::new(0, 0, 1));
+		assert!(futures::poll!(serve.as_mut()).is_pending());
+		assert_eq!(log.priorities().last(), Some(&254));
+
+		// A SUBSCRIBE_UPDATE raising this track reranks it above the newer group.
+		*track_priority.write().ok().expect("the group watches the priority") = 1;
+		assert!(futures::poll!(serve.as_mut()).is_pending());
+		assert_eq!(log.priorities().last(), Some(&255));
+		assert!(log.resets().is_empty());
 	}
 
 	/// A lite-07 subscription's run loop, from group 0, and the log of its subscribe stream.
@@ -3701,5 +3817,60 @@ mod tests {
 		);
 		assert_eq!(probes[0].bitrate, Some(1_000_000));
 		assert_eq!(probes[1].bitrate, None);
+	}
+
+	/// A requester that FINs its TRACK request before the answer has terminated the
+	/// transaction (moq-lite: closing the send direction ends the stream), so the
+	/// lookup ends rather than pinning an upstream request nobody will read.
+	#[tokio::test]
+	async fn track_info_ends_when_the_requester_finishes() {
+		use crate::coding::Encode;
+		use crate::lite::test_transport::ScriptedSession;
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		// Held, never polled: the track request stays unanswered.
+		let _dynamic = broadcast.dynamic();
+		broadcast.announce(Default::default()).unwrap();
+
+		let peer_setup = crate::lite::PeerSetup::default();
+		peer_setup.set(crate::lite::Setup::default());
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let publisher = Publisher::new(PublisherConfig {
+			runtime: crate::time::Clock::tokio(),
+			session: ScriptedSession::new(Vec::new()),
+			origin: origin.consume(),
+			version: Version::Lite06,
+			peer_setup,
+			goaway,
+			peer_hop: None,
+		});
+
+		let mut request = Vec::new();
+		lite::Track {
+			broadcast: crate::Path::new("room"),
+			track: "video".into(),
+		}
+		.encode(&mut request, Version::Lite06)
+		.unwrap();
+
+		for (finished, session) in [
+			(false, ScriptedSession::new(request.clone())),
+			(true, ScriptedSession::eof(request.clone())),
+		] {
+			let mut session = session;
+			let (send, recv) = futures::future::poll_fn(|cx| {
+				<ScriptedSession as web_transport_trait::poll::Session>::poll_open_bi(&mut session, cx)
+			})
+			.await
+			.unwrap();
+			let stream = Stream::<ScriptedSession, Version> {
+				writer: Writer::new(send, Version::Lite06),
+				reader: crate::coding::Reader::new(recv, Version::Lite06),
+			};
+			let mut serve = TrackInfoServe::new(publisher.shared.clone(), stream).unwrap();
+			let ended = serve.poll(&kio::Waiter::noop()).is_ready();
+			assert_eq!(ended, finished, "finished={finished}");
+		}
 	}
 }

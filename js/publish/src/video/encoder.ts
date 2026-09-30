@@ -134,8 +134,13 @@ export class Encoder {
 	// The output dimensions of the video in pixels.
 	#dimensions = new Signal<{ width: number; height: number } | undefined>(undefined);
 
-	// The codec the browser will actually encode with, tagged with the inputs it was probed against.
+	// The config the browser accepted and encoded a probe frame with, and the codec string it reported.
+	// Kept through a re-probe, so the rendition stays in the catalog until the new probe replaces it.
 	#codec = new Signal<Detected | undefined>(undefined);
+
+	// The probed config capped by the bandwidth grant, and the codec string to advertise for it. One
+	// signal, so the catalog never pairs a new probe's string with the previous config.
+	#live = new Signal<{ config: VideoEncoderConfig; reported: string } | undefined>(undefined);
 
 	// Uncapped target bitrate (pixels, maxBitrate), the reservation's ceiling.
 	#ceiling = new Signal<number | undefined>(undefined);
@@ -143,9 +148,9 @@ export class Encoder {
 	// This rendition's claim on the connection, held while a track is live.
 	#reservation = new Signal<Moq.Bandwidth.Reservation | undefined>(undefined);
 
-	// Only the codec prefix the user asked for, narrowed out of `config` so tuning any other knob
-	// doesn't re-probe the hardware.
-	#codecFilter: Computed<string>;
+	// Only the knobs the probe encodes with, narrowed out of `config` and the source so tuning any
+	// other knob, or a bandwidth grant, doesn't re-probe the hardware.
+	#target: Computed<Target | undefined>;
 
 	// How many resolution runs threw for their current inputs (no supported codec, an invalid knob),
 	// so no config is coming until one reruns.
@@ -174,7 +179,23 @@ export class Encoder {
 			bandwidth: getter(props?.bandwidth),
 		};
 		this.config = Signal.from(props?.config);
-		this.#codecFilter = this.#signals.computed((effect) => effect.get(this.config)?.codec ?? "");
+		this.#target = this.#signals.computed((effect): Target | undefined => {
+			const capture = effect.get(this.in.capture);
+			if (!capture) return;
+
+			const source = effect.get(capture.in.source);
+			if (!source) return;
+
+			const user = effect.get(this.config) ?? {};
+			return {
+				required: user.codec ?? "",
+				// Prefer the explicitly requested rate; the encode loop drops frames to enforce it.
+				framerate: user.frameRate ?? sourceFrameRate(source) ?? 30,
+				maxPixels: user.maxPixels,
+				bitrateScale: user.bitrateScale ?? 0.07,
+				maxBitrate: user.maxBitrate,
+			};
+		});
 		this.settled = this.#signals.computed(
 			(effect) => effect.get(this.#out.catalog) !== undefined || effect.get(this.#failures) > 0,
 		);
@@ -407,14 +428,17 @@ export class Encoder {
 	// Returns the catalog for the configured settings, or undefined while disabled / unresolved.
 	#runCatalog(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
-		const config = effect.get(this.out.resolved);
-		if (!enabled || !config) {
+		const live = effect.get(this.#live);
+		if (!enabled || !live) {
 			effect.set(this.#out.catalog, undefined);
 			return;
 		}
 
+		// Advertise the codec string the probe's encoder reported rather than the one we configured,
+		// so it names the profile and level the bitstream actually carries.
+		const { config, reported } = live;
 		const catalog: Catalog.VideoConfig = {
-			codec: config.codec,
+			codec: reported,
 			bitrate: config.bitrate ? Catalog.u53(config.bitrate) : undefined,
 			framerate: config.framerate,
 			codedWidth: Catalog.u53(config.width),
@@ -428,95 +452,49 @@ export class Encoder {
 		effect.set(this.#out.catalog, catalog);
 	}
 
-	// Probe the hardware for the best codec. Deliberately depends on as little as possible: every
-	// rerun blanks the codec (and with it the resolved config and the catalog entry) for however long
-	// the probe takes, which on a busy GPU process is a long time.
+	// Probe the hardware for the best codec. Deliberately depends on as little as possible, since a
+	// probe on a busy GPU process takes a long time. The previous result stays in place meanwhile, so
+	// a re-probe swaps the catalog entry in one update, or not at all when nothing changed.
 	#runCodec(effect: Effect): void {
-		if (!effect.get(this.in.enabled)) return;
-
+		const enabled = effect.get(this.in.enabled);
 		const dimensions = effect.get(this.#dimensions);
-		if (!dimensions) return;
+		const target = effect.get(this.#target);
+		if (!enabled || !dimensions || !target) {
+			this.#codec.set(undefined);
+			return;
+		}
 
-		const required = effect.get(this.#codecFilter) ?? "";
-
+		// Captured now: the run's signal is replaced once a rerun starts.
+		const superseded = effect.abort;
 		effect.spawn(async () => {
 			try {
-				const detected = await this.#bestCodec(required, dimensions);
-				if (!detected) return;
-
-				effect.set(this.#codec, { ...detected, required, ...dimensions });
+				const detected = await this.#bestCodec(dimensions, target);
+				if (!superseded.aborted) this.#codec.set(detected);
 			} catch (err) {
+				// A newer probe reports its own outcome.
+				if (superseded.aborted) return;
+
+				this.#codec.set(undefined);
 				this.#fail(effect);
 				throw err;
 			}
 		});
 	}
 
-	// Size the bitrate for the detected codec. Synchronous, so a new bandwidth estimate updates the
-	// config within the same microtask instead of leaving it blank while something re-derives it.
+	// Cap the probed config's bitrate by the bandwidth grant. Synchronous, so a new bandwidth estimate
+	// updates the config within the same microtask instead of leaving it blank while something
+	// re-derives it. Everything else comes from the probe as-is, so the resolved config is always one
+	// the hardware accepted.
 	#runResolved(effect: Effect): void {
-		// NOTE: dimensions already factors in user provided maxPixels.
-		// It's a separate effect in order to deduplicate.
 		if (!effect.get(this.in.enabled)) return;
-
-		const capture = effect.get(this.in.capture);
-		if (!capture) return;
-
-		const source = effect.get(capture.in.source);
-		if (!source) return;
-
-		const dimensions = effect.get(this.#dimensions);
-		if (!dimensions) return;
 
 		const detected = effect.get(this.#codec);
 		if (!detected) return;
 
-		// A probe only speaks for the inputs it ran against. Changing them reruns the probe, which
-		// clears the stale result, but a bandwidth sample landing in the same batch schedules this
-		// effect independently: it then runs against dimensions that are already written while the
-		// probe hasn't been torn down yet. Wait for a probe that matches rather than publishing a
-		// pairing the hardware never accepted.
-		const required = effect.get(this.#codecFilter) ?? "";
-		if (detected.required !== required) return;
-		if (detected.width !== dimensions.width || detected.height !== dimensions.height) return;
-
-		const { codec, hardwareAcceleration } = detected;
-		// Get the user provided config.
-		const user = effect.get(this.config) ?? {};
-
-		// Prefer the explicitly requested rate; the encode loop drops frames to enforce it.
-		const framerate = user.frameRate ?? sourceFrameRate(source) ?? 30;
-
-		const maxPixels = user.maxPixels ?? dimensions.width * dimensions.height;
-		const bitrateScale = user.bitrateScale ?? 0.07;
-
-		// TARGET BITRATE CALCULATION (h264)
-		// 480p@30 = 1.0mbps
-		// 480p@60 = 1.5mbps
-		// 720p@30 = 2.5mbps
-		// 720p@60 = 3.5mpbs
-		// 1080p@30 = 4.5mbps
-		// 1080p@60 = 6.0mbps
-
-		// 30fps is the baseline, applying a multiplier for higher framerates.
-		// Framerate does not cause a multiplicative increase in bitrate because of delta encoding.
-		// TODO Make this better.
-		const framerateFactor = 30.0 + (framerate - 30) / 2;
-
-		// ACTUAL BITRATE CALCULATION
-		// 480p@30 = 409920 * 30 * 0.07 = 0.9 Mb/s
-		// 480p@60 = 409920 * 45 * 0.07 = 1.3 Mb/s
-		// 720p@30 = 921600 * 30 * 0.07 = 1.9 Mb/s
-		// 720p@60 = 921600 * 45 * 0.07 = 2.9 Mb/s
-		// 1080p@30 = 2073600 * 30 * 0.07 = 4.4 Mb/s
-		// 1080p@60 = 2073600 * 45 * 0.07 = 6.5 Mb/s
-		let bitrate = Math.round(maxPixels * bitrateScale * framerateFactor * codecBitrateScale(codec));
-
-		bitrate = Math.round(Math.min(bitrate, user.maxBitrate || bitrate));
-
 		// The reservation's ceiling is what we can ever send, not the grant: a
 		// grant that followed our own output would hand the room away on a still
 		// picture and not have it back when the picture moved.
+		let bitrate = detected.config.bitrate;
 		effect.set(this.#ceiling, bitrate);
 
 		const reservation = effect.get(this.#reservation);
@@ -526,20 +504,9 @@ export class Encoder {
 			if (grant != null) bitrate = Math.min(bitrate, grant);
 		}
 
-		const config: VideoEncoderConfig = {
-			codec,
-			width: dimensions.width,
-			height: dimensions.height,
-			framerate,
-			bitrate,
-			avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
-			// @ts-expect-error Typescript needs to be updated.
-			hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
-			latencyMode: "realtime",
-			hardwareAcceleration,
-		};
-
+		const config = { ...detected.config, bitrate };
 		effect.set(this.#out.resolved, config);
+		effect.set(this.#live, { config, reported: detected.reported });
 	}
 
 	#runDimensions(effect: Effect): void {
@@ -582,40 +549,28 @@ export class Encoder {
 	}
 
 	// Try to determine the best config for the given settings.
-	async #bestCodec(
-		required: string,
-		dimensions: { width: number; height: number },
-	): Promise<
-		| {
-				codec: string;
-				hardwareAcceleration: HardwareAcceleration;
-		  }
-		| undefined
-	> {
-		// A list of codecs to try, in order of preference.
+	async #bestCodec(dimensions: { width: number; height: number }, target: Target): Promise<Detected> {
+		// A list of codecs to try, in order of preference. Only full RFC 6381 strings: Chrome, Firefox,
+		// and Safari all refuse a bare `avc1` or `vp09`, and native players can't decode without the profile.
 		const HARDWARE_CODECS = [
 			// VP9
 			// More likely to have hardware decoding, but hardware encoding is less likely.
 			"vp09.00.10.08",
-			"vp09", // Browser's choice
 
 			// H.264
 			// Almost always has hardware encoding and decoding.
 			"avc1.640028",
 			"avc1.4D401F",
 			"avc1.42E01E",
-			"avc1",
 
 			// AV1
 			// One day will get moved higher up the list, but hardware decoding is rare.
 			"av01.0.08M.08",
-			"av01",
 
 			// HEVC (aka h.265)
 			// More likely to have hardware encoding, but less likely to be supported (licensing issues).
 			// Unfortunately, Firefox doesn't support decoding so it's down here at the bottom.
 			"hev1.1.6.L93.B0",
-			"hev1", // Browser's choice
 
 			// VP8
 			// A terrible codec but it's easy.
@@ -628,7 +583,6 @@ export class Encoder {
 			"avc1.640028", // High
 			"avc1.4D401F", // Main
 			"avc1.42E01E", // Baseline
-			"avc1",
 
 			// VP8
 			"vp8",
@@ -636,12 +590,10 @@ export class Encoder {
 			// VP9
 			// It's a bit more expensive to encode so we shy away from it.
 			"vp09.00.10.08",
-			"vp09",
 
 			// HEVC (aka h.265)
 			// This likely won't work because of licensing issues.
 			"hev1.1.6.L93.B0",
-			"hev1", // Browser's choice
 		];
 
 		// Try hardware encoding first.
@@ -649,38 +601,25 @@ export class Encoder {
 		// VideoToolbox only hardware-encodes H.264 and HEVC. Skip the hardware pass and let it fall
 		// through to the software pass, which is H.264 first, since Safari routes that through
 		// VideoToolbox anyway regardless of the hint.
-		if (hardwareReliable()) {
-			for (const codec of HARDWARE_CODECS) {
-				if (!codec.startsWith(required)) continue;
+		const candidates: [string, HardwareAcceleration][] = [
+			...(hardwareReliable()
+				? HARDWARE_CODECS.map((codec) => [codec, "prefer-hardware"] as [string, HardwareAcceleration])
+				: []),
+			...SOFTWARE_CODECS.map((codec) => [codec, "prefer-software"] as [string, HardwareAcceleration]),
+		];
 
-				const hardwareAcceleration: HardwareAcceleration = "prefer-hardware";
+		for (const [codec, hardwareAcceleration] of candidates) {
+			if (!codec.startsWith(target.required)) continue;
 
-				const hardware: VideoEncoderConfig = {
-					codec,
-					width: dimensions.width,
-					height: dimensions.height,
-					latencyMode: "realtime",
-					hardwareAcceleration,
-					avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
-					// @ts-expect-error Typescript needs to be updated.
-					hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
-				};
-
-				const { supported } = await VideoEncoder.isConfigSupported(hardware);
-				if (supported) return { codec, hardwareAcceleration };
-			}
-		}
-
-		// Try software encoding.
-		for (const codec of SOFTWARE_CODECS) {
-			if (!codec.startsWith(required)) continue;
-
-			const hardwareAcceleration: HardwareAcceleration = "prefer-software";
-
-			const software: VideoEncoderConfig = {
+			// The full config, like moq-video's probe: an encoder may pick its level from the frame rate
+			// or bitrate. The bitrate is the ceiling rather than the grant, so a bandwidth estimate never
+			// re-probes.
+			const config: Detected["config"] = {
 				codec,
 				width: dimensions.width,
 				height: dimensions.height,
+				framerate: target.framerate,
+				bitrate: ceiling(codec, dimensions, target),
 				latencyMode: "realtime",
 				hardwareAcceleration,
 				avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
@@ -688,8 +627,8 @@ export class Encoder {
 				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
 			};
 
-			const { supported } = await VideoEncoder.isConfigSupported(software);
-			if (supported) return { codec, hardwareAcceleration };
+			const { supported } = await VideoEncoder.isConfigSupported(config);
+			if (supported) return { config, reported: await reportedCodec(config) };
 		}
 
 		throw new Error("no supported codec");
@@ -706,16 +645,98 @@ function sourceFrameRate(source: Source): number | undefined {
 	return "frames" in source ? source.frameRate : normalizeSource(source).track.getSettings().frameRate;
 }
 
-// A hardware probe result, carrying the inputs it ran against so a consumer can tell whether it
-// still applies.
-type Detected = {
-	codec: string;
-	hardwareAcceleration: HardwareAcceleration;
-	// The codec prefix the user required at probe time.
+// The knobs a probe encodes with, besides the dimensions.
+type Target = {
+	// The codec prefix the user required.
 	required: string;
-	width: number;
-	height: number;
+	framerate: number;
+	maxPixels?: number;
+	bitrateScale: number;
+	maxBitrate?: number;
 };
+
+// A hardware probe result.
+type Detected = {
+	// The config the browser accepted and encoded a probe frame with. Its bitrate is the ceiling,
+	// before any bandwidth grant.
+	config: VideoEncoderConfig & { framerate: number; bitrate: number };
+	// The codec string the encoder reported for it, which the catalog advertises.
+	reported: string;
+};
+
+// The most this rendition ever sends with `codec`, before a bandwidth grant caps it.
+function ceiling(codec: string, dimensions: { width: number; height: number }, target: Target): number {
+	// NOTE: dimensions already factors in user provided maxPixels.
+	const maxPixels = target.maxPixels ?? dimensions.width * dimensions.height;
+
+	// TARGET BITRATE CALCULATION (h264)
+	// 480p@30 = 1.0mbps
+	// 480p@60 = 1.5mbps
+	// 720p@30 = 2.5mbps
+	// 720p@60 = 3.5mpbs
+	// 1080p@30 = 4.5mbps
+	// 1080p@60 = 6.0mbps
+
+	// 30fps is the baseline, applying a multiplier for higher framerates.
+	// Framerate does not cause a multiplicative increase in bitrate because of delta encoding.
+	// TODO Make this better.
+	const framerateFactor = 30.0 + (target.framerate - 30) / 2;
+
+	// ACTUAL BITRATE CALCULATION
+	// 480p@30 = 409920 * 30 * 0.07 = 0.9 Mb/s
+	// 480p@60 = 409920 * 45 * 0.07 = 1.3 Mb/s
+	// 720p@30 = 921600 * 30 * 0.07 = 1.9 Mb/s
+	// 720p@60 = 921600 * 45 * 0.07 = 2.9 Mb/s
+	// 1080p@30 = 2073600 * 30 * 0.07 = 4.4 Mb/s
+	// 1080p@60 = 2073600 * 45 * 0.07 = 6.5 Mb/s
+	const bitrate = Math.round(maxPixels * target.bitrateScale * framerateFactor * codecBitrateScale(codec));
+	const capped = Math.round(Math.min(bitrate, target.maxBitrate || bitrate));
+
+	// Refuse a bad knob here, before the browser coerces it into an unsigned bitrate.
+	if (!(capped > 0)) throw new Error(`bitrate must be positive: ${capped}`);
+	return capped;
+}
+
+// Encode one frame with a throwaway encoder and return the codec string it reports, like
+// moq-video's `Config::probe`. The encoder picks the profile and level it actually writes, so reading
+// them back lets the rendition be advertised before a subscriber starts the real encoder, without a
+// claim the first keyframe would contradict. It closes before the config resolves, so it never
+// overlaps the first real encoder; only a re-probe while serving briefly holds two sessions.
+async function reportedCodec(config: VideoEncoderConfig): Promise<string> {
+	let reported: string | undefined;
+	const encoder = new VideoEncoder({
+		output: (_chunk, metadata) => {
+			reported ??= metadata?.decoderConfig?.codec;
+		},
+		// flush() rejects with the same error.
+		error: () => {},
+	});
+
+	try {
+		encoder.configure(config);
+
+		// Mid-gray, since the picture only has to make the encoder emit its config.
+		const { width, height } = config;
+		const frame = new VideoFrame(new Uint8Array((width * height * 3) / 2).fill(0x80), {
+			format: "I420",
+			codedWidth: width,
+			codedHeight: height,
+			timestamp: 0,
+		});
+		try {
+			encoder.encode(frame, { keyFrame: true });
+		} finally {
+			frame.close();
+		}
+
+		await encoder.flush();
+	} finally {
+		if (encoder.state !== "closed") encoder.close();
+	}
+
+	if (!reported) throw new Error(`${config.codec} encoder reported no codec string`);
+	return reported;
+}
 
 // Scale the bitrate for more efficient codecs, relative to H.264.
 // TODO This shouldn't be linear, as the efficiency is very similar at low bitrates.

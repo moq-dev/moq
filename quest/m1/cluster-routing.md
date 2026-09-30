@@ -58,8 +58,9 @@ but does not end it; see the findings below.
   relay graph and link costs. Relays flood per-link liveness among themselves
   with a per-link seqno. The seqno is scoped to the relay's incarnation, so a
   restarted relay's links supersede its stale ones instead of looking older.
-  Gossip discovery (`cluster.mesh`) stays for zero-config self-hosting and
-  derives the topology from what it discovers; it need not scale.
+  Configured links are the only source: gossip discovery is removed by
+  [Remove gossip](/quest/m0/remove-gossip.md), and LAN mDNS dials peers
+  that then count as configured links.
   - A relay batches the liveness reports it sends, its own and those it
     forwards, for a short hold-down (50 ms in the simulator), and recomputes
     its trees after a matching delay, as OSPF's SPF delay does. Unbatched, one

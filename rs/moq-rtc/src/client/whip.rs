@@ -71,7 +71,8 @@ pub(crate) async fn dial(
 	let answer = SdpAnswer::from_sdp_string(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
 
 	rtc.sdp_api().accept_answer(pending, answer).map_err(Error::rtc)?;
-	tracing::info!(%url, "whip client connected");
+	// The URL routinely carries the auth token in its query, or userinfo.
+	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), "whip client connected");
 
 	// 1:1 socket (no demux on the client): pump its datagrams into the session.
 	// The session tags each datagram with the advertised candidate matching its
