@@ -33,7 +33,8 @@ the block; other groups and the session stay open.
 
 Rust and JavaScript cancel an incoming padding stream (draft-18 and later)
 without reading it. A unidirectional stream type the negotiated draft does not
-define closes the session, as the draft requires.
+define, or a SUBGROUP_HEADER type it marks invalid, closes the session with
+PROTOCOL_VIOLATION, as the draft requires.
 
 An IETF publisher declares the track's default priority in `SUBSCRIBE_OK` or
 `PUBLISH` when that draft carries track properties. Groups without a priority

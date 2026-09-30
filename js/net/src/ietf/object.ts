@@ -1,4 +1,4 @@
-import { StreamCode, Stream as StreamError } from "../error.ts";
+import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { asIetf, type Cursor, type Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { type IetfVersion, Version } from "./version.ts";
@@ -223,17 +223,16 @@ export class Group {
 		const firstObject = legacy || (raw & FIRST_OBJECT_BIT) !== 0;
 		const id = legacy ? raw : raw & ~FIRST_OBJECT_BIT;
 
-		let hasPriority: boolean;
-		let baseId: number;
-		if (id >= 0x10 && id <= 0x1f) {
-			hasPriority = true;
-			baseId = id;
-		} else if (id >= 0x30 && id <= 0x3f) {
-			hasPriority = false;
-			baseId = id - (0x30 - 0x10);
-		} else {
-			throw new Error(`Unsupported group type: ${id}`);
+		// An invalid type MUST close the session, including the reserved SUBGROUP_ID_MODE
+		// 0b11 (draft-21 section 11.3.1).
+		const known = (id >= 0x10 && id <= 0x1f) || (id >= 0x30 && id <= 0x3f);
+		if (!known || (id & 0x06) === 0x06) {
+			throw new ProtocolViolation(`Unsupported group type: ${raw}`);
 		}
+
+		// 0x30-0x3F omit the priority and inherit it from the control message.
+		const hasPriority = id < 0x30;
+		const baseId = hasPriority ? id : id - (0x30 - 0x10);
 
 		const flags: GroupFlags = {
 			hasExtensions: (baseId & 0x01) !== 0,

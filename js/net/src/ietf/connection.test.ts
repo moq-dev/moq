@@ -1,20 +1,17 @@
 import { expect, spyOn, test } from "bun:test";
-import { StreamCode, Stream as StreamError } from "../error.ts";
+import { SessionCode, StreamCode, Stream as StreamError } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Connection } from "./connection.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
-const PADDING = 0x132b3e28;
-
-/** How long a session gets to react before we call it unmoved. */
-const WAIT = 500;
+const PADDING = 0x132b3e28n;
 
 /** A server-side session over `version`, and a client uni stream that sends only `type`. */
 async function openUni(
 	version: IetfVersion,
 	alpn: string,
-	type: number,
+	type: bigint,
 ): Promise<{ pair: ReturnType<typeof createMockTransportPair>; connection: Connection; writer: Writer }> {
 	const pair = createMockTransportPair(alpn);
 	const control = await Stream.open(pair.server, { version });
@@ -28,13 +25,9 @@ async function openUni(
 	});
 
 	const writer = new Writer(await pair.client.createUnidirectionalStream(), version);
-	await writer.u53(type);
+	await writer.u62(type);
 
 	return { pair, connection, writer };
-}
-
-function timeout(message: string): Promise<never> {
-	return new Promise((_resolve, reject) => setTimeout(() => reject(new Error(message)), WAIT));
 }
 
 /** The draft lets the receiver cancel padding at any time without affecting the session. */
@@ -46,13 +39,10 @@ test("a padding stream is cancelled", async () => {
 	});
 
 	try {
-		const err = await Promise.race([
-			writer.closed.then(
-				() => undefined,
-				(err: unknown) => err,
-			),
-			timeout("not stopped"),
-		]);
+		const err = await writer.closed.then(
+			() => undefined,
+			(err: unknown) => err,
+		);
 		expect(err).toBeInstanceOf(StreamError);
 		expect((err as StreamError).code).toBe(StreamCode.Cancel);
 
@@ -64,17 +54,23 @@ test("a padding stream is cancelled", async () => {
 	}
 });
 
-/** An unknown stream type MUST close the session, including padding before draft-18 defined it. */
+/** An unknown or invalid stream type MUST close the session with PROTOCOL_VIOLATION. */
 test("an unknown uni stream type closes the session", async () => {
 	for (const [version, alpn, type] of [
-		[Version.DRAFT_19, ALPN.DRAFT_19, 0],
+		[Version.DRAFT_19, ALPN.DRAFT_19, 0n],
+		// Past 2^53, so it cannot be read as a number.
+		[Version.DRAFT_19, ALPN.DRAFT_19, 2n ** 53n],
+		// Padding arrived in draft-18.
 		[Version.DRAFT_17, ALPN.DRAFT_17, PADDING],
+		// A SUBGROUP_HEADER with the reserved SUBGROUP_ID_MODE (0b11).
+		[Version.DRAFT_19, ALPN.DRAFT_19, 0x56n],
 	] as const) {
 		const logged = spyOn(console, "error").mockImplementation(() => void 0);
 		const { pair, connection } = await openUni(version, alpn, type);
 
 		try {
-			await Promise.race([pair.server.closed, timeout("session stayed up")]);
+			const info = await pair.client.closed;
+			expect(info.closeCode).toBe(SessionCode.ProtocolViolation);
 		} finally {
 			logged.mockRestore();
 			connection.close();

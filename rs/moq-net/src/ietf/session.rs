@@ -633,12 +633,11 @@ impl UniType {
 	/// `None` is a type the draft does not define, which MUST close the session
 	/// (draft-21 section 6.4.1, and its equivalent in every draft we negotiate).
 	fn classify(kind: u64, version: Version) -> Option<Self> {
-		// SUBGROUP_HEADER type bytes match the form 0b0XX1XXXX (spec §11.4.2):
-		// draft-14-17 use 0x10-0x1D and 0x30-0x3D, draft-18 adds 0x40 (FIRST_OBJECT)
-		// extending the form to also cover 0x50-0x5D and 0x70-0x7D. Per-version and
-		// per-bit validation (e.g., FIRST_OBJECT must be 0 on draft-17) is done in
-		// `GroupFlags::decode`, and fails only that stream.
-		if kind <= 0xff && (kind & 0x90) == 0x10 {
+		// Draft-14-17 use SUBGROUP_HEADER types 0x10-0x1D and 0x30-0x3D; draft-18 adds
+		// 0x40 (FIRST_OBJECT), also covering 0x50-0x5D and 0x70-0x7D. A reserved
+		// SUBGROUP_ID_MODE (0b11) or a bit the draft lacks is invalid, which MUST close the
+		// session too (draft-21 section 11.3.1).
+		if ietf::GroupFlags::decode(kind, version).is_ok() {
 			return Some(Self::Subgroup);
 		}
 
@@ -1427,7 +1426,7 @@ mod tests {
 		}
 	}
 
-	/// An unknown stream type MUST close the session, so it stops nothing on its own:
+	/// An unknown or invalid stream type MUST close the session, so it stops nothing on its own:
 	/// the session close takes the stream with it.
 	#[tokio::test(start_paused = true)]
 	async fn an_unknown_uni_type_closes_the_session() {
@@ -1436,6 +1435,11 @@ mod tests {
 			// Padding and uni SETUP arrived in later drafts, so earlier ones do not know them.
 			(Version::Draft17, PADDING),
 			(Version::Draft16, setup::SETUP_V17),
+			// SUBGROUP_HEADER types with the reserved SUBGROUP_ID_MODE (0b11).
+			(Version::Draft19, 0x56),
+			(Version::Draft14, 0x16),
+			// FIRST_OBJECT (0x40) arrived in draft-18.
+			(Version::Draft17, 0x50),
 		] {
 			let (log, result) = dispatch_uni(version, uni_stream(version, kind), None).await;
 

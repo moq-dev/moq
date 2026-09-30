@@ -3,7 +3,7 @@ import type * as announce from "../announced.ts";
 import type { Established } from "../connection/established.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { error, fromClose, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
+import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
@@ -23,7 +23,7 @@ import { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
 
 // The PADDING stream type (draft-18+): bytes a peer sends to probe for bandwidth.
-const PADDING = 0x132b3e28;
+const PADDING = 0x132b3e28n;
 
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
@@ -161,17 +161,29 @@ export class Connection implements Established {
 	 * Closes the connection.
 	 */
 	close() {
+		this.#close();
+	}
+
+	// Close with the session code the peer should see, a clean close by default.
+	#close(info?: WebTransportCloseInfo) {
 		if (this.#closed) return;
 
 		this.#closed = true;
 
-		this.#session.close();
-
+		// Before the session, whose own close would send a clean code first.
 		try {
-			this.#quic.close();
+			this.#quic.close(info);
 		} catch {
 			// ignore
 		}
+
+		this.#session.close();
+	}
+
+	// The peer broke the protocol, so losing the stream is not enough: nothing stops it
+	// repeating the violation on the next one.
+	#violated(err: ProtocolViolation) {
+		this.#close({ closeCode: SessionCode.ProtocolViolation, reason: err.message });
 	}
 
 	async #run(): Promise<void> {
@@ -202,10 +214,7 @@ export class Connection implements Established {
 			void this.#runBidi(stream).catch((err: unknown) => {
 				console.error("error processing bidi stream", err);
 				stream.abort(new Error("bidi stream error"));
-
-				// The peer broke the protocol, so losing the stream is not enough: nothing
-				// stops it repeating the violation on the next one.
-				if (err instanceof ProtocolViolation) this.close();
+				if (err instanceof ProtocolViolation) this.#violated(err);
 			});
 		}
 	}
@@ -312,19 +321,20 @@ export class Connection implements Established {
 					console.error("error processing object stream", err);
 					stream.stop(err);
 
-					// An unknown stream type MUST close the session, not just the stream.
-					if (err instanceof ProtocolViolation) this.close();
+					// An unknown or invalid stream type MUST close the session, not just the stream.
+					if (err instanceof ProtocolViolation) this.#violated(err);
 				});
 		}
 	}
 
 	async #runUni(stream: Reader) {
 		const version = this.#session.version;
-		const type = await stream.u53();
+		// Full width, so an unknown type past 2^53 is still classified rather than thrown.
+		const type = await stream.u62();
 
 		// SUBGROUP_HEADER types match 0b0XX1XXXX; Group.decode validates the bits per draft.
-		if (type <= 0xff && (type & 0x90) === 0x10) {
-			const header = await Group.decode(stream, version, type);
+		if (type <= 0xffn && (type & 0x90n) === 0x10n) {
+			const header = await Group.decode(stream, version, Number(type));
 			await this.#subscriber.handleGroup(header, stream);
 			return;
 		}
@@ -333,7 +343,7 @@ export class Connection implements Established {
 		if (type === PADDING && version >= Version.DRAFT_18) return;
 
 		// We never FETCH, so a fetch response answers nothing of ours.
-		if (type === FetchHeader.type) throw new Error("unexpected fetch stream");
+		if (type === BigInt(FetchHeader.type)) throw new Error("unexpected fetch stream");
 
 		// Anything else is unknown, and a second SETUP is a violation too.
 		throw new ProtocolViolation(`unknown uni stream type: 0x${type.toString(16)}`);
