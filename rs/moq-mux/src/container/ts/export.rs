@@ -451,7 +451,11 @@ impl Schedule {
 
 	/// Queue a closed span; `keyframes` are byte offsets into it.
 	fn push(&mut self, bytes: Vec<u8>, keyframes: Vec<usize>, deadline: u128) {
-		self.packets += bytes.len() / TsPacket::SIZE;
+		let packets = bytes.len() / TsPacket::SIZE;
+		if packets == 0 {
+			return;
+		}
+		self.packets += packets;
 		self.backlog.push_back(Chunk {
 			bytes,
 			sent: 0,
@@ -913,7 +917,7 @@ impl<E: catalog::Catalog> Export<E> {
 			if changed {
 				let joined = self.tracks[&name].epoch == self.epoch;
 				if joined {
-					if !self.pending.is_empty() || !self.schedule.backlog.is_empty() {
+					if !self.pending.is_empty() || self.schedule.packets > 0 {
 						// A boundary ends valid media rather than reneging it.
 						// Return that tail under the old generation before adopting the new one.
 						self.emit(None)?;
