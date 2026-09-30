@@ -35,16 +35,15 @@ ffmpeg -hide_banner -loglevel warning -re -stream_loop -1 -i "$input" \
     "$out/v%v/stream.m3u8" &
 ffmpeg=$!
 
-cleaned=false
 cleanup() {
-    if [ "$cleaned" = true ]; then return; fi
-    cleaned=true
     echo "Shutting down..."
     kill "$ffmpeg" 2>/dev/null || true
     sleep 0.5
     kill -9 "$ffmpeg" 2>/dev/null || true
 }
-trap cleanup INT TERM EXIT
+trap cleanup EXIT
+# A signal exits, so the EXIT trap cleans up instead of the script resuming its waits.
+trap 'exit 130' INT TERM
 
 echo ">>> Waiting for HLS playlist generation..."
 for _ in {1..30}; do
