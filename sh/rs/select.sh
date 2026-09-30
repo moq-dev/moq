@@ -168,7 +168,7 @@ case "$action" in
         # render code in moq-video, moq-audio, and the cli. Only when moq-cli is
         # selected, since cargo rejects a feature of a package outside the
         # selection; a change to anything they reach selects moq-cli anyway.
-        if wants moq-cli; then flags+=(--features moq-cli/play,moq-cli/capture); fi
+        if wants moq-cli; then flags+=(--features "moq-cli/play moq-cli/capture"); fi
         cargo check --locked "${flags[@]}" --all-targets
         ;;
     *)

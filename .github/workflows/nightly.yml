@@ -99,7 +99,7 @@ jobs:
       # has to keep running, and its numbers are the baseline for the generated codec.
       - name: JS varint benchmark
         if: ${{ !cancelled() }}
-        run: nix develop --command bun js/net/bench/varint.ts
+        run: nix develop --command just js bench varint
 
       # Fails if publishing a group costs more as the track retains more groups,
       # which means the latency guard or the cache went back to scanning them all.
