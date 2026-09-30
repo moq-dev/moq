@@ -148,17 +148,18 @@
 	color: #22c55e;
 }
 
-.language-icon {
+.vp-doc .language-icon {
 	width: 2rem;
 	height: 2rem;
 	object-fit: contain;
 	display: inline-block;
 	vertical-align: middle;
-	margin-right: 0.5rem;
+	margin-right: 1rem;
 }
 
 .vp-doc td:has(.language-icon) {
 	white-space: nowrap;
+	min-width: 10rem;
 }
 
 /* Feature layout - emoji in top right corner */
