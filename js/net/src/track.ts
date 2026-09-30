@@ -10,6 +10,7 @@ import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer }
 import {
 	groupBounds,
 	hooks,
+	namedOrigin,
 	type Recv,
 	type TrackRequestOptions,
 	type TrackSequence,
@@ -1088,6 +1089,10 @@ export class Subscriber {
 			subscriber.#enforceLatency = false;
 		};
 		hooks.replaceGroups = (subscriber, groups) => subscriber.#replaceGroups(groups);
+		hooks.trackOrigin = (subscriber) => {
+			const producer = subscriber.#state.producer;
+			return producer && namedOrigin(producer);
+		};
 		// The sequence cursor lives here (it shares the buffer and the drift anchor with
 		// the arrival cursor); `Ordered` is the handle that reaches it.
 		ordered_ = {

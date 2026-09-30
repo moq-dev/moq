@@ -670,9 +670,9 @@ export class Publisher {
 					start: { included: sequence },
 					end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
 				});
-				// Read once content flowed: an upstream's SUBSCRIBE_START named the origin
-				// before any of its content did.
-				const start = new SubscribeStart(sequence, wireOf(front).origin());
+				// Read once content flowed: an upstream's SUBSCRIBE_START named the track
+				// copy's origin before any of its content did.
+				const start = new SubscribeStart(sequence, wireOf(front).origin(track));
 				await encodeSubscribeResponse(stream.writer, { start }, this.version);
 			});
 
@@ -742,7 +742,7 @@ export class Publisher {
 			const info = await this.#resolveTrackInfo(front, msg.track);
 			group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
 			if (hasOrigin(this.version)) {
-				await new FetchOk(wireOf(front).origin()).encode(stream.writer, this.version);
+				await new FetchOk(wireOf(front).origin(group)).encode(stream.writer, this.version);
 			}
 			await this.#runFetchGroup(group, stream.writer, {
 				timescale: Timescale(info.timescale),

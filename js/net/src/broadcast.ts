@@ -7,7 +7,7 @@ import { type GetPromise, Once, Signal } from "@moq/signals";
 import { NotFound } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import { type Hop, Route, randomHop } from "./hop.ts";
-import { hooks, type TrackSequence } from "./internal.ts";
+import { hooks, namedOrigin, type TrackSequence } from "./internal.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
@@ -34,15 +34,16 @@ class BroadcastState {
 	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast
 	// closes once the last one closes, so a shared consumer can be handed to several callers.
 	consumers = 0;
-	// The origin serving this broadcast (see the wire's `origin`): named by an upstream
-	// reply, or generated on first use for content nobody named.
+	// The origin named for content no upstream reply named, generated on first use.
 	origin?: Hop;
 }
 
-// The origin a peer is told serves this broadcast: proxied from upstream, or a random
-// one for content originating here, stable for the broadcast's life and shared by every
-// session serving it.
-function origin(state: BroadcastState): Hop {
+// The origin a peer is told serves `content`: the one an upstream reply named for that track
+// copy or fetched group, or else a random one for content originating here, stable for the
+// broadcast's life and shared by every session serving it.
+function origin(state: BroadcastState, content: track.Subscriber | GroupConsumer): Hop {
+	const named = content instanceof track.Subscriber ? hooks.trackOrigin(content) : namedOrigin(content);
+	if (named !== undefined) return named;
 	state.origin ??= randomHop();
 	return state.origin;
 }
@@ -258,10 +259,7 @@ export class Producer {
 			resolveTrackInfo: (name) => resolveTrackInfo(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => this.#requested(),
-			origin: () => origin(this.#state),
-			name: (named) => {
-				this.#state.origin = named;
-			},
+			origin: (content) => origin(this.#state, content),
 		};
 	}
 
@@ -335,10 +333,7 @@ export class Consumer {
 			resolveTrackInfo: (name) => resolveTrackInfo(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => this.#requested(),
-			origin: () => origin(this.#state),
-			name: (named) => {
-				this.#state.origin = named;
-			},
+			origin: (content) => origin(this.#state, content),
 		});
 	}
 

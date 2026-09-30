@@ -7,8 +7,8 @@
  */
 import type { Dispose, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import type { Frame, Consumer as GroupConsumer } from "./group.ts";
-import type { Route } from "./hop.ts";
+import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
+import type { Hop, Route } from "./hop.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Groups, Producer, Request, Subscriber } from "./track.ts";
@@ -160,6 +160,8 @@ export const hooks: {
 	 * `setGroups`, which never rewinds.
 	 */
 	replaceGroups: (subscriber: Subscriber, groups: Groups) => void;
+	/** The origin an upstream reply named for the track copy a subscriber reads, if any. */
+	trackOrigin: (subscriber: Subscriber) => Hop | undefined;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
@@ -200,6 +202,9 @@ export const hooks: {
 	replaceGroups: () => {
 		throw new Error("track.ts not loaded");
 	},
+	trackOrigin: () => {
+		throw new Error("track.ts not loaded");
+	},
 	groupTimestamp: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -225,6 +230,25 @@ export const hooks: {
 		throw new Error("broadcast.ts not loaded");
 	},
 };
+
+// Weak, so a label lives exactly as long as the content it names.
+const origins = new WeakMap<Producer | GroupProducer | GroupConsumer, Hop>();
+
+/**
+ * Record the origin an upstream reply named for `content`: a track copy's producer, or a
+ * fetched group. Content has one origin for its whole life, so a reply naming another means
+ * upstream is serving something else. That throws, and the caller drops the content.
+ */
+export function nameOrigin(content: Producer | GroupProducer | GroupConsumer, origin: Hop): void {
+	const named = origins.get(content);
+	if (named === undefined) origins.set(content, origin);
+	else if (named !== origin) throw new Error(`origin changed: ${named} to ${origin}`);
+}
+
+/** The origin an upstream reply named for `content`, if any. */
+export function namedOrigin(content: Producer | GroupProducer | GroupConsumer): Hop | undefined {
+	return origins.get(content);
+}
 
 /**
  * Spreads equal routes across paths: FNV-1a 64 of `path` then each hop, oldest first, as 8
