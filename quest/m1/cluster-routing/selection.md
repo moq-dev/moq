@@ -18,10 +18,13 @@ Decided:
 - An epoch-qualified concrete path (`foo/@<uuidv7>`) is a source's identity:
   every origin announcing it is interchangeable, which is how a redundant
   pair works without `--hop`. The first relay fails over between them at a
-  group boundary. A path with no epoch, or one served through a claim, keeps
+  group boundary. A path with no epoch, or one a claim produces, keeps
   Wildcard's per-origin identity (the origin SUBSCRIBE_OK names), since two
-  workers' groups differ. This extends Wildcard's resume rule to concrete
-  same-epoch origins.
+  workers' groups differ. That includes a claim worker's derived output once
+  it is announced concretely: it mirrors the input's epoch
+  (`.pro/transcode/<pid>/foo.hang/@e`), so after a double claim two workers
+  announce the same epoch-qualified path and must not pool. This extends
+  Wildcard's resume rule to concrete same-epoch origins.
 
 Candidate mechanics:
 
@@ -40,16 +43,22 @@ Candidate mechanics:
   selects again.
 - SUBSCRIBE and FETCH carry a visited-relay list end to end. It catches loops
   while liveness views disagree and names the path for stats. The serving
-  origin's identity rides the reply, per Wildcard's Spread quest.
+  origin's identity rides the reply, per Wildcard's reply-identity rule.
 
-Open: whether equal-cost next hops should spread by a hash of the path. A
-fixed tie-break sends every path through the same neighbour, and its failure
-takes them all.
+Open:
+
+- Whether equal-cost next hops should spread by a hash of the path. A fixed
+  tie-break sends every path through the same neighbour, and its failure
+  takes them all.
+- How a relay tells claim output from a redundant pair. One candidate: a
+  concrete path an origin announces under its own claim keeps per-origin
+  identity, since a redundant publisher claims nothing.
 
 Wire: SUBSCRIBE and FETCH fields in the current wip lite version, with the
 draft updated in the same PR. Tests cover an HRW split across an equal-cost
-pool, refusal and reselection, and a same-epoch pair failing over mid-track
-with no timestamp rewind.
+pool, refusal and reselection, a same-epoch pair failing over mid-track
+with no timestamp rewind, and a concrete double claim whose loser's
+subscribers end and resubscribe rather than splice.
 
 ## Required
 

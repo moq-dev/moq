@@ -33,9 +33,9 @@ Settled in the 2026-09-30 `/quest-plan`:
   identity of a source: origins that announce the same one are
   interchangeable, which is how a redundant pair is expressed. It is strictly
   better than a Hop ID, which is per session, so a connection could not
-  publish several broadcasts with different identities. A path served through
-  a claim keeps Wildcard's per-origin identity, since each worker's output is
-  its own.
+  publish several broadcasts with different identities. A path a claim
+  produces keeps Wildcard's per-origin identity, even once announced
+  concretely, since each worker's output is its own.
 - The line lands on `dev`: deleting `--hop` and the publisher's Hop setup
   parameter breaks a published CLI and wire. Wire changes go in the current
   wip version (`moq-lite-07-wip` today, dropping `Hop Base` and `Hop Keep`

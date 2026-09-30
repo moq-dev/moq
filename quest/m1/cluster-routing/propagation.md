@@ -64,4 +64,4 @@ benchmark's after figures.
 
 - [Memory benchmark](/quest/m1/cluster-routing/memory.md) - the before figures the choice is weighed against
 - [Cross-relay delivery under bursts](/quest/m1/cross-relay-bursts.md) - its report of closed broadcasts announced for minutes is evidence for per-origin seqnos
-- [Announce shapes](/quest/m2/announce-shapes.md) - announcements between relays must keep their shape
+- [Announcement shapes](/quest/m2/announce-shapes.md) - announcements between relays must keep their shape
