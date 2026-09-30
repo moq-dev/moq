@@ -10,6 +10,7 @@ import { type Reader, Readers, type Stream } from "../stream.ts";
 import { registerWire } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
+import { FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
 import { Group } from "./object.ts";
 import { Publish } from "./publish.ts";
@@ -20,6 +21,9 @@ import { SubscribeNamespace, SubscribeNamespaceLegacy } from "./subscribe_namesp
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
+
+// The PADDING stream type (draft-18+): bytes a peer sends to probe for bandwidth.
+const PADDING = 0x132b3e28;
 
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
@@ -307,13 +311,32 @@ export class Connection implements Established {
 				.catch((err: unknown) => {
 					console.error("error processing object stream", err);
 					stream.stop(err);
+
+					// An unknown stream type MUST close the session, not just the stream.
+					if (err instanceof ProtocolViolation) this.close();
 				});
 		}
 	}
 
 	async #runUni(stream: Reader) {
-		const header = await Group.decode(stream, this.#session.version);
-		await this.#subscriber.handleGroup(header, stream);
+		const version = this.#session.version;
+		const type = await stream.u53();
+
+		// SUBGROUP_HEADER types match 0b0XX1XXXX; Group.decode validates the bits per draft.
+		if (type <= 0xff && (type & 0x90) === 0x10) {
+			const header = await Group.decode(stream, version, type);
+			await this.#subscriber.handleGroup(header, stream);
+			return;
+		}
+
+		// Either side may cancel padding at any time, which discards the rest unread.
+		if (type === PADDING && version >= Version.DRAFT_18) return;
+
+		// We never FETCH, so a fetch response answers nothing of ours.
+		if (type === FetchHeader.type) throw new Error("unexpected fetch stream");
+
+		// Anything else is unknown, and a second SETUP is a violation too.
+		throw new ProtocolViolation(`unknown uni stream type: 0x${type.toString(16)}`);
 	}
 
 	/**

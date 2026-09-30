@@ -31,6 +31,10 @@ This is an implementation limit, not a limit in the IETF draft. A larger
 declared block stops its subgroup stream with `MALFORMED_TRACK` before reading
 the block; other groups and the session stay open.
 
+Rust and JavaScript cancel an incoming padding stream (draft-18 and later)
+without reading it. A unidirectional stream type the negotiated draft does not
+define closes the session, as the draft requires.
+
 An IETF publisher declares the track's default priority in `SUBSCRIBE_OK` or
 `PUBLISH` when that draft carries track properties. Groups without a priority
 flag inherit it. If the property is absent, the IETF wire default of 128 maps

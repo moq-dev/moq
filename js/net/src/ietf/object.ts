@@ -213,8 +213,9 @@ export class Group {
 		}
 	}
 
-	static async decode(r: Reader, version: IetfVersion): Promise<Group> {
-		const raw = await r.u53();
+	/** Decode a SUBGROUP_HEADER. Pass `type` when the caller already read it to classify the stream. */
+	static async decode(r: Reader, version: IetfVersion, type?: number): Promise<Group> {
+		const raw = type ?? (await r.u53());
 		// Strip the draft-18 FIRST_OBJECT bit before the range check, but keep the value:
 		// it is the only signal that a subgroup starts partway through. Drafts that predate
 		// it carry no such signal, so they are taken at their word.
