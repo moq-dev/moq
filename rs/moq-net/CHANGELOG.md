@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8](https://github.com/moq-dev/moq/compare/moq-net-v0.3.7...moq-net-v0.3.8) - 2026-09-30
+
+### Added
+
+- *(lite)* moq-lite-07 switches to 64-bit leading-ones varints ([#4455](https://github.com/moq-dev/moq/pull/4455))
+- *(net)* BigInt-free varint codec, internal U64, and checked Varint.decode ([#4454](https://github.com/moq-dev/moq/pull/4454))
+- *(net)* drain queued stream data before a graceful close ([#4430](https://github.com/moq-dev/moq/pull/4430))
+- *(net)* read a subtree through an origin mount ([#4271](https://github.com/moq-dev/moq/pull/4271))
+
+### Fixed
+
+- *(net)* send the AUTHORITY setup option from moqt:// clients ([#4578](https://github.com/moq-dev/moq/pull/4578))
+- *(net)* re-resolve a splice successor on every judgment
+- *(net)* preserve cached history for late relay subscribers ([#4472](https://github.com/moq-dev/moq/pull/4472))
+- *(net)* align IETF object extension limits ([#4475](https://github.com/moq-dev/moq/pull/4475))
+- *(net)* cancel an unwanted lite track still waiting on TRACK_INFO ([#4494](https://github.com/moq-dev/moq/pull/4494))
+- *(net)* skip announce updates the peer cannot tell apart ([#4423](https://github.com/moq-dev/moq/pull/4423))
+- *(net)* an origin::Dynamic keeps its origin alive ([#4417](https://github.com/moq-dev/moq/pull/4417))
+- *(net)* resolve a relayed subscription's start from its source ([#4387](https://github.com/moq-dev/moq/pull/4387))
+- *(moq-net)* hide routes through a peer that withdrew the prefix ([#4399](https://github.com/moq-dev/moq/pull/4399))
+- *(net)* forget spliced tracks unread for the linger, finished ones included ([#4361](https://github.com/moq-dev/moq/pull/4361))
+- *(net)* select scoped routes after filtering, not before ([#4363](https://github.com/moq-dev/moq/pull/4363))
+- *(net)* refuse chained and wildcard origin mounts in any order ([#4362](https://github.com/moq-dev/moq/pull/4362))
+- *(net)* keep an aborted track's finished groups, expire ended tracks ([#4378](https://github.com/moq-dev/moq/pull/4378))
+- *(net)* keep a settled track's groups when it is aborted ([#4351](https://github.com/moq-dev/moq/pull/4351))
+
+### Other
+
+- *(moq-net)* watch mesh_withdraw's cursor from its own task ([#4564](https://github.com/moq-dev/moq/pull/4564))
+- Merge pull request #4561 from moq-dev/quest/m1/cluster-publisher-in-place
+- Merge pull request #4484 from moq-dev/quest/m1/splice-edges
+- Merge remote-tracking branch 'origin/main' into quest/m1/splice-edges
+- *(quest)* drop suffix-based routing from the plans ([#4382](https://github.com/moq-dev/moq/pull/4382))
+
 ## [0.3.7](https://github.com/moq-dev/moq/compare/moq-net-v0.3.6...moq-net-v0.3.7) - 2026-09-27
 
 ### Added

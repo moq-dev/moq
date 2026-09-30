@@ -1068,7 +1068,7 @@ test("TrackStatusRequest v17: round trip with requiredRequestIdDelta", async () 
 // Helper to encode a namespace to raw bytes
 async function encodeNamespace(namespace: Path.Valid): Promise<Uint8Array> {
 	const { stream, written } = createTestWritableStream();
-	const writer = new Writer(stream);
+	const writer = new Writer(stream, Version.DRAFT_14);
 	await Namespace.encode(writer, namespace);
 	writer.close();
 	await writer.closed;
@@ -1077,14 +1077,14 @@ async function encodeNamespace(namespace: Path.Valid): Promise<Uint8Array> {
 
 // Helper to decode a namespace from raw bytes
 async function decodeNamespace(bytes: Uint8Array): Promise<Path.Valid> {
-	const reader = new Reader(undefined, bytes);
+	const reader = new Reader(undefined, bytes, Version.DRAFT_14);
 	return await Namespace.decode(reader);
 }
 
 // Helper to encode raw IETF namespace tuple fields
 async function encodeNamespaceTuple(parts: string[]): Promise<Uint8Array> {
 	const { stream, written } = createTestWritableStream();
-	const writer = new Writer(stream);
+	const writer = new Writer(stream, Version.DRAFT_14);
 	await writer.u53(parts.length);
 	for (const part of parts) await writer.string(part);
 	writer.close();

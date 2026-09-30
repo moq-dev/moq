@@ -36,7 +36,7 @@ use crate::{
 /// on the wire, names nobody, and marks the chain anonymous for route selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Hop {
-	/// 62-bit identifier. Encoded as a QUIC varint on the wire.
+	/// 62-bit identifier, so it fits a varint on every wire version.
 	id: u64,
 }
 
@@ -384,7 +384,8 @@ where
 ///
 /// The ceiling is the wire's, not the model's: lite-06 carries each cost as a QUIC
 /// varint, which tops out at 2^62-1, so a larger value could be selected on but
-/// never forwarded.
+/// never forwarded. It applies on every version, lite-07's 64-bit varints included,
+/// so a cost stays forwardable to a QUIC-varint version.
 const MAX_COST: u64 = (1 << 62) - 1;
 
 /// What pulling content via a route costs, in two magnitudes that accumulate

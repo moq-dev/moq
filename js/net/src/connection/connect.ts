@@ -297,7 +297,7 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 		throw new Error(`unsupported WebTransport protocol: ${protocol}`);
 	}
 
-	const stream = await Stream.open(session);
+	const stream = await Stream.open(session, { version: setupVersion });
 	await stream.writer.u53(Lite.StreamId.ClientCompat);
 
 	const encoder = new TextEncoder();

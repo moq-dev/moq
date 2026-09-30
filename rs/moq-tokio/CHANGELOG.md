@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.20](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.19...moq-tokio-v0.19.20) - 2026-09-30
+
+### Added
+
+- *(net)* drain queued stream data before a graceful close ([#4430](https://github.com/moq-dev/moq/pull/4430))
+
+### Fixed
+
+- *(net)* send the AUTHORITY setup option from moqt:// clients ([#4578](https://github.com/moq-dev/moq/pull/4578))
+- *(moq-net)* a group awaiting its FIN ack still expires and follows priority ([#4534](https://github.com/moq-dev/moq/pull/4534))
+- *(tokio)* drive raw stream handshakes per connection ([#4474](https://github.com/moq-dev/moq/pull/4474))
+- *(moq-tokio)* iroh honors the configured versions ([#4448](https://github.com/moq-dev/moq/pull/4448))
+- *(tokio)* keep a WebTransport session's H3 streams open while it closes ([#4429](https://github.com/moq-dev/moq/pull/4429))
+- *(tokio)* drain a GOAWAY predecessor on Connection::close ([#4436](https://github.com/moq-dev/moq/pull/4436))
+- *(sock)* resolve an ephemeral reuseport group's port with a plain bind ([#4409](https://github.com/moq-dev/moq/pull/4409))
+- *(tokio)* handle IPv6 literals in TLS server names ([#4322](https://github.com/moq-dev/moq/pull/4322))
+- *(tokio)* accept a bare IPv6 TLS host name override on WebSocket ([#4405](https://github.com/moq-dev/moq/pull/4405))
+
+### Other
+
+- *(tokio)* isolate TLS root reload tests from shared /tmp ([#4537](https://github.com/moq-dev/moq/pull/4537))
+- *(tokio)* match a worker group's full address when counting its sockets ([#4404](https://github.com/moq-dev/moq/pull/4404))
+- prove stopped relays and worker groups closed their sockets instead of racing a rebind ([#4408](https://github.com/moq-dev/moq/pull/4408))
+
 ## [0.19.19](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.18...moq-tokio-v0.19.19) - 2026-09-27
 
 ### Added

@@ -23,10 +23,11 @@ function concat(chunks: Uint8Array[]): Uint8Array {
 	return out;
 }
 
-async function bytes(f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
+async function bytes(f: (w: Writer) => Promise<void>, version: Version): Promise<Uint8Array> {
 	const written: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
+		version,
 	);
 	await f(writer);
 	writer.close();
@@ -35,7 +36,11 @@ async function bytes(f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
 }
 
 async function roundTrip(msg: Setup): Promise<Setup> {
-	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_05)));
+	const reader = new Reader(
+		undefined,
+		await bytes((w) => msg.encode(w, Version.DRAFT_05), Version.DRAFT_05),
+		Version.DRAFT_05,
+	);
 	const got = await Setup.decode(reader, Version.DRAFT_05);
 	expect(await reader.done()).toBe(true);
 	return got;
@@ -49,14 +54,14 @@ async function decodeParam(id: bigint, value: Uint8Array): Promise<Setup> {
 		await w.u62(id);
 		await w.u53(value.byteLength);
 		if (value.byteLength > 0) await w.write(value);
-	});
+	}, Version.DRAFT_05);
 
 	const framed = await bytes(async (w) => {
 		await w.u53(body.byteLength); // Message size prefix
 		await w.write(body);
-	});
+	}, Version.DRAFT_05);
 
-	return await Setup.decode(new Reader(undefined, framed), Version.DRAFT_05);
+	return await Setup.decode(new Reader(undefined, framed, Version.DRAFT_05), Version.DRAFT_05);
 }
 
 test("empty SETUP round-trips on draft-05", async () => {
@@ -98,15 +103,18 @@ test("Both is the wire default, so it is omitted rather than encoded", async () 
 	// Both must be the absence of the parameter, so a server that predates it decodes a
 	// Both client back to Both. Assert the empty bag directly: comparing against another
 	// default-constructed Setup would agree with itself even if we encoded Both.
-	const both = await bytes((w) => new Setup({ role: Role.Both }).encode(w, Version.DRAFT_05));
+	const both = await bytes((w) => new Setup({ role: Role.Both }).encode(w, Version.DRAFT_05), Version.DRAFT_05);
 	const emptyBag = await bytes(async (w) => {
 		await w.u53(1); // Message size prefix: one byte of body follows
 		await w.u53(0); // parameter count
-	});
+	}, Version.DRAFT_05);
 	expect(both).toEqual(emptyBag);
 
 	// A directional role is still encoded, so the check above can actually fail.
-	const publisher = await bytes((w) => new Setup({ role: Role.Publisher }).encode(w, Version.DRAFT_05));
+	const publisher = await bytes(
+		(w) => new Setup({ role: Role.Publisher }).encode(w, Version.DRAFT_05),
+		Version.DRAFT_05,
+	);
 	expect(publisher.byteLength).toBeGreaterThan(both.byteLength);
 });
 
@@ -140,12 +148,12 @@ test("hop 0 decodes as absent", async () => {
 });
 
 test("SETUP is rejected before draft-05", async () => {
-	await expect(bytes((w) => new Setup().encode(w, Version.DRAFT_04))).rejects.toThrow();
+	await expect(bytes((w) => new Setup().encode(w, Version.DRAFT_04), Version.DRAFT_04)).rejects.toThrow();
 });
 
 test("SETUP decode is rejected before draft-05", async () => {
-	const framed = await bytes((w) => new Setup().encode(w, Version.DRAFT_05));
-	await expect(Setup.decode(new Reader(undefined, framed), Version.DRAFT_04)).rejects.toThrow();
+	const framed = await bytes((w) => new Setup().encode(w, Version.DRAFT_05), Version.DRAFT_05);
+	await expect(Setup.decode(new Reader(undefined, framed, Version.DRAFT_04), Version.DRAFT_04)).rejects.toThrow();
 });
 
 test("empty path decodes as the root", async () => {
@@ -165,11 +173,13 @@ test("SETUP encode stops at the 64 KiB receive limit", async () => {
 	expect((await roundTrip(msg)).path).toBe(msg.path);
 
 	const over = new Setup({ path: "a".repeat(atLimit + 1) });
-	await expect(bytes((w) => over.encode(w, Version.DRAFT_05))).rejects.toThrow("too large");
+	await expect(bytes((w) => over.encode(w, Version.DRAFT_05), Version.DRAFT_05)).rejects.toThrow("too large");
 });
 
 test("SETUP decode refuses an oversized length before reading the body", async () => {
 	// Only the prefix is present, so reading the body would fail with a different error.
-	const prefix = await bytes((w) => w.u53(64 * 1024 + 1));
-	await expect(Setup.decode(new Reader(undefined, prefix), Version.DRAFT_05)).rejects.toThrow("too large");
+	const prefix = await bytes((w) => w.u53(64 * 1024 + 1), Version.DRAFT_05);
+	await expect(Setup.decode(new Reader(undefined, prefix, Version.DRAFT_05), Version.DRAFT_05)).rejects.toThrow(
+		"too large",
+	);
 });

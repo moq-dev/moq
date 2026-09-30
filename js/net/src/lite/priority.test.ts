@@ -3,6 +3,7 @@ import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { type SendStream, Writer } from "../stream.ts";
 
 import { Priority, sendOrder } from "./priority.ts";
+import { Version } from "./version.ts";
 
 // The last position that still fits below the track priority.
 const MAX_POSITION = 2 ** 44 - 1;
@@ -64,7 +65,7 @@ function ranking(options: { priority?: number; ordered?: boolean } = {}) {
 	const open = () => {
 		const stream = new WritableStream<Uint8Array>() as SendStream;
 		streams.push(stream);
-		return new Writer(stream);
+		return new Writer(stream, Version.DRAFT_06);
 	};
 
 	return { priority: new Priority(subscriber), open, streams, broadcast };

@@ -34,60 +34,17 @@ leaf1: (cert "leaf1")
 
 # Generate a self-signed CA
 ca:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    umask 077
-
-    [ -f ca.pem ] && [ -f ca.key ] && exit 0
-    rm -f ca.pem ca.key
-    printf '[req]\ndistinguished_name = req_dn\n[req_dn]\n' > ca.cnf
-    export OPENSSL_CONF="ca.cnf"
-    openssl req -x509 -sha256 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-    	-days 365 -subj "/CN=moq cluster CA" \
-    	-keyout ca.key -out ca.pem
+    ../../sh/demo/ca.sh
 
 # Generate a self-signed certificate using the root CA.
-
-# Chrome requires a <=14 day validity for self-signed certs.
+[positional-arguments]
 cert name: ca
-    #!/usr/bin/env bash
-    set -euo pipefail
-    umask 077
-
-    export OPENSSL_CONF="ca.cnf"
-    openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-    	-subj "/CN={{ name }}" \
-    	-keyout "{{ name }}.key" -out "{{ name }}.csr"
-    openssl x509 -req -sha256 -in "{{ name }}.csr" \
-    	-CA ca.pem -CAkey ca.key -CAcreateserial \
-    	-days 14 -extfile <(printf "subjectAltName=DNS:localhost\n") \
-    	-out "{{ name }}.crt"
-    rm "{{ name }}.csr"
+    ../../sh/demo/cert.sh "$@"
 
 # Generate a random secret key for authentication.
 key:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    umask 077
-
-    [ -f root.jwk ] && exit 0
-    rm -f *.jwt
-    cargo run --bin moq -- auth generate --out root.jwk
+    ../../sh/demo/key.sh
 
 # Generate authentication tokens for local development.
 token: key
-    #!/usr/bin/env bash
-    set -euo pipefail
-    umask 077
-
-    if [ ! -f demo-web.jwt ]; then
-        cargo run --quiet --bin moq -- auth sign --key root.jwk \
-    		--root demo --subscribe '**' --publish 'me/**' \
-    		> demo-web.jwt
-    fi
-
-    if [ ! -f demo-cli.jwt ]; then
-        cargo run --quiet --bin moq -- auth sign --key root.jwk \
-    		--root demo --publish '**' \
-    		> demo-cli.jwt
-    fi
+    ../../sh/demo/token.sh

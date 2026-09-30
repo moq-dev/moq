@@ -24,7 +24,7 @@ is the catch-all `**`, a claim about every path at once.
 The cost of enumerating is real even though its last measurement is stale.
 One announcement measured 8.8 KB per relay plus 4.3 KB per additional route
 before prefix routes made a standby route a table entry;
-[Cluster routing](/quest/m1/cluster-routing/README.md) owns remeasuring it. Whatever the current
+[Cluster routing's memory benchmark](/quest/m1/cluster-routing/memory.md) remeasures it. Whatever the current
 number, every relay that hears an announcement pays it whether or not anything
 there subscribes, so "workers times broadcasts" is that number multiplied
 across the fleet in resident memory.

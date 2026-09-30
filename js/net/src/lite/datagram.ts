@@ -3,8 +3,8 @@
  *
  * @module
  */
-import { Reader } from "../stream.ts";
-import * as Varint from "../varint.ts";
+import { encodeVarint, Reader } from "../stream.ts";
+import type { Version } from "./version.ts";
 
 /**
  * A QUIC datagram body: `subscribe (i) | sequence (i) | timestamp (i) | payload (b)`.
@@ -31,10 +31,10 @@ export class Datagram {
 	}
 
 	/** Encode the body to a single `Uint8Array` (no length prefix; the datagram boundary delimits it). */
-	encode(): Uint8Array {
-		const subscribe = Varint.encodeTo(new ArrayBuffer(8), this.subscribe);
-		const sequence = Varint.encodeTo(new ArrayBuffer(8), this.sequence);
-		const timestamp = Varint.encodeTo(new ArrayBuffer(8), this.timestamp);
+	encode(version: Version): Uint8Array {
+		const subscribe = encodeVarint(this.subscribe, version);
+		const sequence = encodeVarint(this.sequence, version);
+		const timestamp = encodeVarint(this.timestamp, version);
 
 		const out = new Uint8Array(
 			subscribe.byteLength + sequence.byteLength + timestamp.byteLength + this.payload.byteLength,
@@ -51,8 +51,8 @@ export class Datagram {
 	}
 
 	/** Decode a datagram body from the raw bytes of one QUIC datagram. */
-	static async decode(data: Uint8Array): Promise<Datagram> {
-		const r = new Reader(undefined, data);
+	static async decode(data: Uint8Array, version: Version): Promise<Datagram> {
+		const r = new Reader(undefined, data, version);
 		const subscribe = await r.u62();
 		const sequence = await r.u53();
 		const timestamp = await r.u53();

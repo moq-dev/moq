@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/moq-dev/moq/compare/moq-binary-v0.1.7...moq-binary-v0.1.8) - 2026-09-30
+
+### Other
+
+- updated the following local packages: kio, moq-net
+
 ## [0.1.7](https://github.com/moq-dev/moq/compare/moq-binary-v0.1.6...moq-binary-v0.1.7) - 2026-09-27
 
 ### Added
