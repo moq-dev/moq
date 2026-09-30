@@ -157,6 +157,10 @@
 	margin-right: 0.5rem;
 }
 
+.vp-doc td:has(.language-icon) {
+	white-space: nowrap;
+}
+
 /* Feature layout - emoji in top right corner */
 .VPFeature {
 	position: relative;
