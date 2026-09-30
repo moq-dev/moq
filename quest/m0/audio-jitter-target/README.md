@@ -15,7 +15,7 @@ Boundaries: convergence still uses skip-ahead and silence, so playing slightly
 faster or slower to converge stays [Time
 stretch](/quest/m1/watch-audio-time-stretch.md). No packet loss concealment.
 Video keeps its own target; making the audio playhead the clock is [Plan: A/V
-clock](/quest/m0/plan-av-clock.md).
+clock](/quest/m1/av-clock.md).
 
 ## Plan
 
@@ -87,4 +87,3 @@ buffer against uneven arrivals.
 
 - [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - the automated proof, and the recorder of the traces the watch quest replays
 - [Time stretch](/quest/m1/watch-audio-time-stretch.md) - inaudible convergence, on top of this
-- [Plan: A/V clock](/quest/m0/plan-av-clock.md) - the clock this target eventually feeds

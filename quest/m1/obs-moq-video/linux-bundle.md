@@ -16,7 +16,3 @@ Every `obs-moq-v*` release attaches a Linux x86_64 tarball that loads into a sto
 
 - [Video source replacement](/quest/m1/obs-moq-video/source.md) - removes the FFmpeg video linkage that makes a Linux binary non-portable
 - [Audio playback](/quest/m1/obs-moq-video/audio-playback.md) - removes the FFmpeg audio linkage
-
-## Related
-
-- [Linux decoded frames](/quest/m1/obs-moq-video/decode-linux.md) - native surface delivery lands on top of the portable CPU path this bundle ships

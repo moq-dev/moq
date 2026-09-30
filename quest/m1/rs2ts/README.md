@@ -59,7 +59,6 @@ js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-ben
 - [Sans-IO moq-net](/quest/m1/rs2ts/sans-io/README.md) - moq-net builds and runs without a runtime; async helpers sit behind an `async` feature
 - [Mock-clock tests](/quest/m1/rs2ts/mock-clock.md) - moq-net's tests run on the sans-IO clock instead of tokio, so they translate with the code
 - [Generated lite](/quest/m1/rs2ts/lite.md) - @moq/net's lite session and model layer are generated from moq-net
-- [Generated IETF](/quest/m1/rs2ts/ietf.md) - @moq/net's moq-transport session is generated too
 - [Remove moq-wasm](/quest/m1/rs2ts/remove-wasm.md) - the WASM experiment is deleted once generated lite ships
 
 ## Closes

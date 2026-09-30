@@ -140,7 +140,7 @@ field.
   refused. A prefix wider than the grant is accepted, but it only routes
   requests for paths the grant covers. Fleet-wide services use the cluster
   identity; a customer service serves only what its own v1 grant contains.
-  Until [Advertise-only authorization](/quest/m1/processor/advertise-auth.md)
+  Until [Advertise-only authorization](/quest/m2/processor/advertise-auth.md)
   lands, the publish scope stands in for advertising; a credential with its own
   advertise scope is checked against that instead.
 - **Claims are visible to subscribers.** A subscriber sees every advertised
@@ -219,13 +219,7 @@ distinguish recording generations reads the catalog's archive entry
 
 ## Related
 
-- [path-patterns](/quest/m1/path-patterns.md) - owns the pattern dialect
-  and the shared matcher tokens and filters reuse
 - [archive](/quest/m1/archive/README.md) - an archive claims the root, and its
   catalog names the generations a claim cannot
-- [Cluster routing](/quest/m1/cluster-routing.md) - origin selection by cost
-  with an HRW tie-break, built on this line's longest-prefix rule
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - derived output
   mirrors the source path, `@<epoch>` segment included
-- [Announcement shapes](/quest/m3/announce-shapes.md) - moq-lite-only exact,
-  suffix, and prefix+suffix claims that survive relay hops

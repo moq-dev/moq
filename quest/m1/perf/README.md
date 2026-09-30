@@ -45,30 +45,11 @@ row per io_uring worker.
 
 ## Required
 
-- [Open contract](/quest/m1/perf/uring-open-contract.md) - plan concurrent WebTransport opening and cancellation
-
 - [Announce replay](/quest/m1/perf/announce-replay.md) - the initial announce set replays in linear time, so joins don't slow with the route count
 - [Group cost](/quest/m1/perf/group-cost.md) - count and cut the allocations and time spent relaying one small group to one viewer
 - [One enter per turn](/quest/m1/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter
 - [Run to quiescence](/quest/m1/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass budget that keeps the fairness rule
 - [Lock wait](/quest/m1/perf/lock-wait.md) - each worker reports time blocked on cross-worker locks, deciding whether the shared model needs work
 - [Ingest batch](/quest/m1/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per chunk burst instead of per chunk
-- [Egress cache refresh](/quest/m1/perf/egress-keepalive.md) - measure refresh costs while preserving slow-reader retention
-- [Owned decoding copies](/quest/m1/perf/coding-decode.md) - measure and reduce owned decode allocations and copies
 - [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - moq-uring: ~2.5% of relay CPU is vdso clock reads; the drive loop and its callers each re-read Instant::now()
-- [Cache shard](/quest/m1/perf/cache-shard.md) - stop hammering one process-global cache line from every worker
 - [#3199](/quest/m1/perf/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup
-- [#3200](/quest/m1/perf/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) - moq-uring: batch completion wakeups with MIN_TIMEOUT
-- [#3129](/quest/m1/perf/3129-moq-uring-write-the-webtransport-stream-header-at-open.md) - moq-uring: write the WebTransport stream header at open time, so finish() never owes one
-- [Egress requeue](/quest/m1/perf/egress-requeue.md) - trains per turn on the egress driver becomes a measured budget instead of a hardcoded one
-- [#3201](/quest/m1/perf/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - moq-uring: use SENDMSG_ZC for large UDP GSO trains
-- [#3202](/quest/m1/perf/3202-moq-uring-use-fixed-file-slots-for-worker-udp-sockets.md) - moq-uring: use fixed-file slots for worker UDP sockets
-- [#3204](/quest/m1/perf/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md) - moq-uring: register TX-pool buffers for zero-copy sends
-- [Priority set_track wakes](/quest/m1/perf/priority-set-track-wakes.md) - a track priority change stops waking groups that end up where they started
-- [#3203](/quest/m1/perf/3203-moq-uring-add-opt-in-napi-busy-polling.md) - moq-uring: add opt-in NAPI busy polling
-- [#3205](/quest/m1/perf/3205-moq-uring-register-reusable-io-uring-enter-wait-arguments.md) - moq-uring: register reusable io_uring_enter wait arguments
-
-## Related
-
-- [Send buffer pools](/quest/m2/quic-buffer-pool.md) - the stream-send
-  allocation question, measured on the same shapes

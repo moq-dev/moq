@@ -55,6 +55,5 @@ is needed.
 
 ## Related
 
-- [Loss sampling](/quest/m1/quic/bbr-loss-parity.md) - preserve packet metadata needed by the separate loss-sample repair; both edit `bbr3/mod.rs`, so sequence them
 - [BBR starvation edges](/quest/m1/quic/bbr-app-limited-edges.md) - also edits `bbr3/mod.rs`; one owner there at a time
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - reusable measurement guidance, not a prerequisite for this fix

@@ -28,8 +28,3 @@ gap is in the worker's accept path, not in moq-net.
 
 Additive, so it lands on main. moq.pro's fleet deploy of the
 ring requires the release carrying it.
-
-## Related
-
-- [Stream sessions](/quest/m1/uring-tcp/README.md) - the other protocol gap
-  on the ring, WebSocket and HTTP

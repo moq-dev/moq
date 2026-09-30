@@ -47,5 +47,3 @@ retain the baseline and record why before exposing an ineffective option.
 ## Related
 
 - [Natural media drains](/quest/m2/quic-bbr-natural-drain.md) - separate ProbeRTT policy experiment
-- [FEC experiment](/quest/m2/quic-fec.md) - repetition competes for the redundancy budget
-- [GCC egress experiment](/quest/m2/quic-gcc.md) - delay control changes what headroom means

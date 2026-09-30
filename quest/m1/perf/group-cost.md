@@ -24,7 +24,3 @@ keeps that waiter and skips re-registering on lists that still hold it
 (2026-09: 228 to 122 allocations per viewer-group, 352 to 118 paced). Find
 the next largest source from there. A measured no-win abandons the quest,
 per this line's rules.
-
-## Related
-
-- [Owned decoding copies](/quest/m1/perf/coding-decode.md) - decode-side copies are part of the same per-group cost

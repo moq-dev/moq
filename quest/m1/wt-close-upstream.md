@@ -34,8 +34,3 @@ Decided 2026-09-29: fix it at the source and remove the timeout workaround.
   moq-tokio.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Close codes on every transport](/quest/m1/close-codes.md) - the same symptom over qmux and raw QUIC
-- [UnknownSession log flood](/quest/m1/unknown-session-logs.md) - another `web-transport-moq` release and pin bump

@@ -97,7 +97,7 @@ kind.
   `doc/concept/stats.md` gains a media section beside the relay's, and
   `drafts/draft-lcurley-moq-hang.md` specs the wire.
 
-Open, to settle before [encoder feedback](/quest/m1/stats/encoder-feedback.md)
+Open, to settle before [encoder feedback](/quest/m2/stats-encoder-feedback.md)
 starts:
 
 - **Referenced-rendition feedback.** A derivative catalog (a `moq-transcode`
@@ -124,8 +124,6 @@ starts:
   moq-mux remuxes publish stats and feedback
 - [Browser reporters](/quest/m1/stats/js.md) - `<moq-publish>` publishes
   stats and `<moq-watch>` publishes feedback
-- [Encoder feedback](/quest/m1/stats/encoder-feedback.md) - a Rust encoder
-  reads its viewers' feedback and adapts its bitrate
 
 ## Related
 

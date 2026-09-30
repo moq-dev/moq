@@ -55,7 +55,3 @@ by the stop deadline and encoder reconnect.
   migrates on GOAWAY with a handover and the guarded redirect the Rust client
   already has, and the Rust drain path gets its regression test
 - [JS GOAWAY requests](/quest/m1/drain/js-goaway-requests.md) - after GOAWAY the JS client opens no new request on the old session, like Rust
-
-## Related
-
-- [Cluster routing](/quest/m1/cluster-routing.md) - the configured topology and link costs a second relay per PoP joins

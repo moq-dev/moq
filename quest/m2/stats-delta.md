@@ -109,4 +109,3 @@ impact: new on-demand tracks; existing tracks unchanged.
 ## Related
 
 - [Stats format page](/doc/concept/stats.md) - where the new flavor is documented
-- [Compressed tracks](/quest/m2/flate/README.md) - group-scoped DEFLATE tracks, whose group-window discipline this flavor repeats

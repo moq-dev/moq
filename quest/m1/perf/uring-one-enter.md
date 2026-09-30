@@ -42,7 +42,5 @@ fails without the flag. Latency must not regress.
 
 ## Related
 
-- [#3200](/quest/m1/perf/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) -
-  the wait side of the same enter
 - [Run to quiescence](/quest/m1/perf/uring-quiescence.md) - fewer turns per
   packet, which multiplies this saving

@@ -28,5 +28,4 @@ Public API: none. Wire: conformance fix; no draft change.
 
 ## Related
 
-- [Legal IETF input](/quest/m0/ietf-legal-input.md) - the other interop blocker
 - [Lite request streams](/quest/m1/request-stream-serve.md) - lite deliberately treats a FIN as ending the request; don't unify the two

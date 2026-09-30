@@ -20,22 +20,16 @@ The quests separate portable decoding, platform GPU delivery, audio, and publish
 
 - [Video source replacement](/quest/m1/obs-moq-video/source.md) - remove the FFmpeg video decode and attempt macOS GPU delivery immediately, with a working CPU fallback on other platforms
 - [Audio playback](/quest/m1/obs-moq-video/audio-playback.md) - replace the FFmpeg audio decode with moq-audio
-- [Windows decoded frames](/quest/m1/obs-moq-video/decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
-- [Linux decoded frames](/quest/m1/obs-moq-video/decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Linux bundle](/quest/m1/obs-moq-video/linux-bundle.md) - attach a portable Linux x86_64 tarball to every obs-moq release once FFmpeg is gone
 - [Encoder presets](/quest/m1/obs-moq-video/presets.md) - define and measure shared low-latency, balanced, and quality policies
 - [Preset parity](/quest/m1/obs-moq-video/preset-parity.md) - audio stores and reports its preset like video, defaults to Balanced, and the preset claims hold
 - [Audio publishing](/quest/m1/obs-moq-video/audio-publish.md) - back an internal OBS Opus encoder with moq-audio
 - [Video publishing](/quest/m1/obs-moq-video/adapter.md) - back an internal OBS video encoder with moq-video and expose the combined opt-in mode
 - [Rate control](/quest/m1/obs-moq-video/rate-control.md) - the plugin reserves its bitrate and retunes the OBS encoder to the grant
-- [macOS GPU input](/quest/m1/obs-moq-video/macos.md) - feed the encoder from the OBS compositor without CPU readback
-- [Windows GPU input](/quest/m1/obs-moq-video/windows.md) - import or blit OBS D3D11 textures with explicit synchronization
 - [VP8/VP9 decoding](/quest/m1/obs-moq-video/vpx.md) - restore those playback codecs without an FFmpeg ABI dependency
 
 ## Related
 
 - [OBS migration](/quest/m1/cpp/obs.md) - every quest here starts from the plugin on the generated C++, so codec surface is designed in moq-ffi and reaches libmoq and the other wrappers through the Cross-Package Sync table, not as OBS-only C symbols
-- [Linux GPU input](/quest/m2/obs-linux-gpu.md) - allocation-export feasibility and its dependent implementation are deferred
-- [VAAPI encode and decode](/quest/m4/video-vaapi.md) - owns Linux backend decode/import capabilities; reconcile its older dependency assumptions against current code
 - [Video hardware validation](/quest/m3/video-hardware.md) - physical hardware evidence is required for each claimed GPU path
 - [Audio codecs](/quest/m1/audio-codecs/README.md) - HE-AAC, multichannel, and native AAC encode reach the OBS source and encoder adapters through moq-ffi

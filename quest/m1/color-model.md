@@ -52,8 +52,3 @@ Test each source of truth in isolation, a source that signals nothing, a
 conflict between VUI and container resolving to the bitstream, a container box
 that fills a gap the bitstream left unspecified, and an SDR round trip that
 stays byte-identical.
-
-## Related
-
-- [SEI sidecars](/quest/m2/sei/README.md) - moves SEI out of the video track;
-  the display metadata inside it needs the home this quest builds

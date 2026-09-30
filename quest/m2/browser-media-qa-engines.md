@@ -31,7 +31,3 @@ which is the path a real Firefox viewer takes today.
   a measurement of that engine, not of the player.
 - Playwright WebKit is not Safari. Say so in the report; a Safari defect such
   as #2812 still needs a manual run.
-
-## Related
-
-- [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - where an engine that will not run on the CI image runs

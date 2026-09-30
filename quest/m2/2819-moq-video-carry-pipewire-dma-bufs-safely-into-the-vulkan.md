@@ -39,4 +39,3 @@ Refs #2481, #1837.
 ## Related
 
 - [Capture multi-plane PipeWire cameras](/quest/m2/pipewire-camera-planes.md) - separate memory blocks from a camera, the capture offer rather than this import
-- [#2893: video: validate PipeWire DMA-BUF capture on KDE hardware](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - the KDE portal capture that timed out

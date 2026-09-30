@@ -24,7 +24,7 @@ need the fork.
   default (today's behavior on tokio), and `doc/bin/relay/config.md`
   documents it in the same PR.
 - Measure on the netem bottleneck from the
-  [ECN study](/quest/m1/quic/ecn-measure.md) with `dualpi2` marking against
+  [ECN study](/quest/m2/quic-ecn-measure.md) with `dualpi2` marking against
   the same bottleneck dropping: queueing delay, goodput, loss. The study's
   provider verdict decides whether the result matters outside the lab;
   if neither Linode nor OVH preserves the marks, L4S stays off and the
@@ -32,8 +32,3 @@ need the fork.
 - ECN visibility stays on the wire: the study observes marks with tcpdump,
   and exposing per-path ECN state in stats is a later quest if operators
   need it.
-
-## Required
-
-- [Measure ECN on the backbone](/quest/m1/quic/ecn-measure.md) - the
-  provider verdict this quest acts on

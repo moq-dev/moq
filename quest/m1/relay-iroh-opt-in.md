@@ -23,8 +23,3 @@ Guidance:
   ignored, whether it comes as a flag, an environment variable, or TOML.
 - Update `doc/bin/relay/` and any example that relies on the relay's iroh
   listener. Report the binary size difference in the PR.
-
-## Related
-
-- [`moq relay`](/quest/m1/moq-relay-subcommand.md) - forwards the relay's features from moq-cli's
-- [P2P](/quest/m1/p2p/README.md) - why moq-cli keeps iroh

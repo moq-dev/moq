@@ -31,7 +31,6 @@ Gate on the plan's jank harness and N-player sweep, both nightly.
 ## Required
 
 - [Plan: watch worker](/quest/m1/plan-watch-worker.md) - picks the worker model and rewrites this quest
-- [A/V clock](/quest/m0/plan-av-clock.md) - reshapes `Sync` and the worklet playhead, so the move to the worker happens once
 
 ## Related
 

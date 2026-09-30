@@ -21,7 +21,3 @@ no-op, not a panic.
   here. Moving to 0.6 is not part of this quest.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [qmux on noq-proto](/quest/m1/quic/qmux.md) - replaces these stream maps entirely, later

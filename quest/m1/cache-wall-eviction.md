@@ -42,4 +42,3 @@ Public API: none from the plan. Wire: none.
 ## Related
 
 - [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - relay memory past the expiry window, in the same cache
-- [Cache shard](/quest/m1/perf/cache-shard.md) - the pool's shared counters under many workers

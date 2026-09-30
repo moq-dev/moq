@@ -41,8 +41,3 @@ choice, since honoring them would change what existing peers receive.
 - Mirror the decode in `js/net`.
 
 Public API: none. Wire: fixes conformance; no draft change.
-
-## Related
-
-- [IETF FIN semantics](/quest/m0/ietf-fin-not-cancel.md) - the other interop blocker
-- [IETF stream types](/quest/m1/ietf-uni-stream-types.md) - same stream-scoped-before-fatal rule for uni streams

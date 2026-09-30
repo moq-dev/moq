@@ -47,7 +47,3 @@ Found by CodeRabbit on #3523, which fixed the one-frame-per-group undercount
 that was OOM-killing relays serving chat, and deliberately left out of it.
 
 Public API: none, unless `MAX_CACHE_BYTES` is restated. Wire: none.
-
-## Related
-
-- [Relay memory](/quest/m1/relay-memory.md) - the per-announcement half of the same question, whose figures also predate the current accounting

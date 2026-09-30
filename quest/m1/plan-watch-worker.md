@@ -75,4 +75,3 @@ follow-up wires the capture worklet to the encoder worker with a
 
 - [Watch worker](/quest/m1/watch-worker.md) - the implementation this rewrites
 - [Browser benchmarks](/quest/m1/browser-benchmarks.md) - artifact conventions; may absorb the harness later
-- [A/V clock](/quest/m0/plan-av-clock.md) - the `Sync` shape the implementation moves; the prototype can pace against today's

@@ -49,7 +49,7 @@ The split is a framing decision, not a subscription flag, and `moq-json` and
 modes. What that
 means for the primitive is in [robot](/quest/m2/teleop/robot.md), and what it
 means for a protocol multiplexing many message rates onto one link is in
-[mavlink](/quest/m2/teleop/mavlink.md).
+[mavlink](/quest/m3/teleop-mavlink.md).
 
 ### Who is already here
 
@@ -86,31 +86,12 @@ stating plainly because it is what a builder is comparing against.
 - [Operator arbitration](/quest/m2/teleop/arbitration.md) - exactly one
   controller commands a vehicle at a time, with explicit handoff and a stated
   authorization boundary
-- [MAVLink bridge](/quest/m2/teleop/mavlink.md) - a `moq-mavlink` gateway
-  replacing the VPN plus two unmanaged UDP flows, with QGroundControl and
-  friends unchanged
-- [Browser teleoperation package](/quest/m2/teleop/browser-package.md) - `@moq/robot`
-  mirrors the Rust crate, so browser clients consume the catalog and delivery
-  classes
-- [SITL proof and browser ground station](/quest/m2/teleop/proof.md) - ArduPilot
-  SITL and a synthetic camera flown from a browser ground station, reproducible
-  in five minutes
-- [V4L2-M2M encoding](/quest/m2/teleop/v4l2-encode.md) - a released `moq-cli`
-  reaches `moq-video`'s hardware encoder on the boards that fly, and the boards
-  worth buying are written down
 - [Teleoperation use-case docs](/quest/m2/teleop/docs.md) - `doc/concept/use-case/`
   gains a teleoperation page, with a runnable non-media example beside it
-- [ROS 2 bridge](/quest/m2/teleop/ros2.md) - a ROS 2 bridge sibling to the
-  MAVLink one, carrying topics over the same two delivery classes
-- [Cross-track correlation](/quest/m2/teleop/correlation.md) - a command, the
-  telemetry it produced, and the video frame showing the result share one
-  timebase
 
 ## Related
 
 - [e2ee](/quest/m1/e2ee/README.md) - the answer for a protected control link
-- [Text schema](/quest/m1/text-schema.md) - non-media tracks in a catalog,
-  arrived at from the media side
 - [Media stats](/quest/m1/stats/schema.md) - publisher-reported stats
   on a catalog-announced track (moq#2734); teleop's latency instrumentation
   extends those types rather than adding a second stats surface

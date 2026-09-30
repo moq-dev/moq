@@ -43,4 +43,3 @@ separate implementation quest; this study does not silently change defaults.
 ## Related
 
 - [Discover media headroom](/quest/m2/quic-probe.md) - preserving an estimate and discovering spare capacity are separate problems
-- [Google BBR comparison](/quest/m2/quic-bbr-google.md) - separate growth and precautionary-probing decisions

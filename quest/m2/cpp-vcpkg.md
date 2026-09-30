@@ -27,7 +27,3 @@ CI on Windows, macOS, and Linux.
 ## Required
 
 - [Package](/quest/m1/cpp/package.md) - the release tarballs the port fetches
-
-## Related
-
-- [Conan remote](/quest/m2/cpp-conan.md) - the same tarball through Conan

@@ -31,7 +31,3 @@ through `--cluster-connect-api` and never enables gossip.
 
 Public API: removes a relay config field and flag. Wire: relays stop
 announcing `.internal/origins`.
-
-## Related
-
-- [Cluster routing](/quest/m1/cluster-routing.md) - takes its topology from configured links only

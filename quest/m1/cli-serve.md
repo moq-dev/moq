@@ -29,7 +29,3 @@ relay.
   `moq import --listen`; an unscoped one is refused when a key is
   configured; the unauthenticated import-to-export smoke keeps passing with
   `--auth-public`.
-
-## Required
-
-- [`moq relay`](/quest/m1/moq-relay-subcommand.md) - the CLI hosts the relay library, which `serve` comes from

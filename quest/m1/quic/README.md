@@ -52,17 +52,9 @@ This is a transport API change, not a MoQ wire change.
 ## Required
 
 - [BBR idle burst](/quest/m1/quic/bbr-app-limited.md) - a fork regression proves a burst after a long idle is paced at the learned bandwidth, closing #4219
-- [Align BBR loss handling with draft-06](/quest/m1/quic/bbr-loss-parity.md) - losses use their own sample and undo re-enters ProbeUp through Refill
 - [Mark BBR starvation wherever the source runs dry](/quest/m1/quic/bbr-app-limited-edges.md) - partial polls count, local send caps do not, receiver credit is pinned
 - [Deliver the application close before io_uring teardown](/quest/m1/quic/uring-close.md) -
   the peer receives the final close when the client immediately stops its worker
-- [Measure ECN on the backbone](/quest/m1/quic/ecn-measure.md) - a written
-  verdict on marking versus dropping, and whether Linode and OVH keep marks
-- [Per-stream ACK progress](/quest/m1/quic/ack-progress.md) - the fork reports
-  how far a send stream has been acknowledged and when
-- [poll_acked in web-transport](/quest/m1/quic/ack-hook.md) - the
-  backend-neutral hook that awaits an acknowledged stream offset, implemented
-  for noq and released
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - `RESET_STREAM_AT`,
   so a reset WebTransport stream still delivers its header
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - strict
@@ -70,12 +62,6 @@ This is a transport API change, not a MoQ wire change.
   the lossy scalar; retransmits follow the same order
 - [Relay peers get wider limits](/quest/m1/quic/peer-limits.md) - MAX_STREAMS
   and MAX_DATA are raised after SETUP identifies a cluster peer
-- [Per-stream deadlines](/quest/m1/quic/deadline.md) - hopeless retransmits
-  become resets, and a tail loss probe fires early while there is still time
-- [qmux on the QUIC stream state machine](/quest/m1/quic/qmux.md) - qmux is a
-  first-class crate in the fork over the shared stream state machine
-- [Release the stack](/quest/m1/quic/release.md) - publish immutable,
-  consumable versions of the fork and its adapters
 - [Upstream the fork](/quest/m1/quic/upstream.md) - every general carried
   change is offered to n0-computer/noq once its shape has settled
 
@@ -85,15 +71,6 @@ This is a transport API change, not a MoQ wire change.
   per-broadcast fairness policy on cluster sessions
 - [Starvation](/quest/m1/qos/starvation.md) - the first consumer of ACK
   progress: how far behind viewers are, from the relay's point of view
-- [Receive timestamps](/quest/m2/quic-receive-ts.md) - per-packet arrival
-  times for GCC and deadlines
-- [GCC egress experiment](/quest/m2/quic-gcc.md) - a measured verdict on
-  WebRTC-style delay control
-- [FEC experiment](/quest/m2/quic-fec.md) - a measured verdict on transport
-  redundancy
-- [Kernel pacing](/quest/m2/quic-kernel-pacing.md), [Send batching](/quest/m2/quic-send-batching.md),
-  [Send buffer pools](/quest/m2/quic-buffer-pool.md), [Natural media drains](/quest/m2/quic-bbr-natural-drain.md) -
-  the syscall, allocation, and controller spikes
 - [Multipath spike](/quest/m2/multipath-spike.md) - a noq capability that
   MoQ does not use yet
 - [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic

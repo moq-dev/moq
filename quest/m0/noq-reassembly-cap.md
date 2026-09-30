@@ -31,5 +31,4 @@ Public API: none. Wire: a peer that exceeds the chunk cap is closed.
 
 ## Related
 
-- [QUIC release](/quest/m1/quic/release.md) - owns the fork's security-update procedure this gap shows is missing
 - [Peer limits](/quest/m1/quic/peer-limits.md) - per-peer windows and stream limits

@@ -45,8 +45,3 @@ meaning with a budget of 1 and gains a sibling proving the budget bound.
 
 - [One enter per turn](/quest/m1/perf/uring-one-enter.md) - the metrics and
   the submit placement this sweep is measured with
-
-## Related
-
-- [Egress requeue](/quest/m1/perf/egress-requeue.md) - the train budget
-  measured in the same sweep

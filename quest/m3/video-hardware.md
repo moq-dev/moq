@@ -32,8 +32,3 @@ come from plain `cuMemAlloc`. That is not a bug any amount of review finds.
 - Someone with the hardware runs it: an Intel GPU exposing the VAAPI low-power
   entrypoint, a second render node, a V4L2 capture device with DMA-BUF export,
   a Windows machine with MJPEG and YUY2 cameras, and a live camera per platform
-
-## Related
-
-- [Validate PipeWire cameras on a portal and a Pi](/quest/m3/pipewire-camera-hardware.md) - the camera portal and a Pi CSI node, which are a different machine from this list
-- [PipeWire DMA-BUF on KDE](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - the same kind of gate, for screen capture

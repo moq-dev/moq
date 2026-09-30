@@ -73,6 +73,5 @@ to) and on `moq_auth::Client` (the per-request lease). Wire: none new; the param
 
 ## Required
 
-- [Legal IETF input](/quest/m0/ietf-legal-input.md) - decodes the parameter everywhere the draft allows it
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the lease
   revalidation the per-request lease reuses

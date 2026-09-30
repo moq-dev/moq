@@ -24,7 +24,3 @@ cluster-routing evidence, not this quest's scope.
 ## Closes
 
 - [#4349](https://github.com/moq-dev/moq/issues/4349) - close this issue when the quest finishes
-
-## Related
-
-- [Cluster routing](/quest/m1/cluster-routing.md) - owns the stale and flapping announcements from the same report

@@ -26,7 +26,3 @@ there to be consumed and the round trip dropped.
 
 Both changes are contained to the one backend and are verifiable on a Linux
 host with a real X session; CI compiles the file but cannot run it.
-
-## Related
-
-- [Capture frame buffers](/quest/m2/capture-frame-buffers.md) - the per-frame allocations in the same read path

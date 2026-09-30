@@ -13,7 +13,3 @@ maps its timestamps to a different clock than the media.
 Have data tracks read the catalog's clock when they stamp, not a copy made
 when they were created. Keep it crate-private if possible. Test: a data track
 created before an importer's first frame stamps on the anchored clock.
-
-## Required
-
-- [Remove live()](/quest/m1/remove-live.md) - introduces the first-frame clock anchor

@@ -120,7 +120,5 @@ existing lite-06 ALPN.
 
 ## Related
 
-- [Pattern interest](/quest/m1/path-patterns.md) - moves AUTH's legacy grant prefixes to patterns; ANNOUNCE_REQUEST stays a prefix
-- [Expiring media grants](/quest/m1/processor/grant-lease.md) - a worker's
+- [Expiring media grants](/quest/m2/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token
-- [P2P](/quest/m1/p2p/README.md) - the first consumer of hop-bound peer grants

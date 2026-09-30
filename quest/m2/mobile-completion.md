@@ -24,7 +24,6 @@ Do not close #700 merely because its next subset or a design decision finished.
 
 - [Dart on iOS](/quest/m1/dart-ios.md) - the Dart iOS asset proof
 - [Dart codec parity](/quest/m1/dart-codecs.md) - codec-enabled artifacts and Dart video consumer integration
-- [Mobile ownership](/quest/m2/mobile-ownership.md) - select and scope the mobile media architecture
 - [iOS capture](/quest/m2/mobile-capture-ios.md) - deliver the selected iOS capture path
 - [Android capture](/quest/m2/mobile-capture-android.md) - deliver the selected Android capture and codec path
 
