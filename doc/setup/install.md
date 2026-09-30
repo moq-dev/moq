@@ -62,6 +62,7 @@ sudo apt install moq-relay moq gstreamer1.0-moq
 ## Fedora, RHEL, and openSUSE
 
 Fedora 39+, RHEL 9, Rocky 9, AlmaLinux 9. On openSUSE use `zypper addrepo`.
+On minimal DNF4 installs, `sudo dnf install dnf-plugins-core` first to get `config-manager`.
 
 ```bash
 # DNF5 (Fedora 41+)
