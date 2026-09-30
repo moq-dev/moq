@@ -28,8 +28,8 @@ Facts from the wildcard line (`rs/moq-net/src/model/origin.rs` there):
 - A front's `Pin` limits which routes it can take. `Stay` (an origin-named
   front while serving) keeps its route while it serves; `Route` qualifies
   only its own route; `Publisher` only routes whose first hop matches;
-  `Local` only local routes; `Any` (waiting, no live source or an upstream
-  request in flight) every route. Pool fronts in `origin/pool_churn` never
+  `Local` only local routes; `Any` (identity not yet known, or origin-named
+  and not serving) every route. Pool fronts in `origin/pool_churn` never
   get an origin-naming reply, so they are `Publisher`, each on a different
   member's hop. So on a join the fronts that can act are the `Any` ones,
   `Publisher` ones on the new route's first hop, and `Local` ones for a
@@ -45,15 +45,26 @@ Decisions:
 - An index, not a payload filter on the watch: each route records the
   fronts it serves, and each prefix node records only its non-Stay watches
   (waiting fronts, publisher- and local-pinned fronts, `routed_broadcast`
-  waiters). A change wakes those plus the changed route's own fronts. A
+  waiters). A change wakes the ones it qualifies for (next decision) plus
+  the changed route's own fronts. A
   payload filter would still walk every watch under the prefix, which stays
   linear in paths. (2026-09-30)
 - The prefix node keys its watches by what they qualify for: `Any` and
   `routed_broadcast` waiters in one set, `Publisher` by hop, `Local` in its
-  own set. `Route` fronts hang off their route only. A join wakes the `Any`
-  set, its first hop's `Publisher` set, and the `Local` set if local, so an
-  unrelated publisher joining wakes no serving pool front. A withdrawal
-  takes the route's served set before dropping the record. (2026-09-30)
+  own set. `Route` fronts hang off their route only. A front moves its
+  entries when it selects, and drops them when it closes. A route gaining
+  standing (join, cheaper re-price, restale to live) wakes the `Any` set,
+  its first hop's `Publisher` set, and the `Local` set if local, so an
+  unrelated publisher joining wakes no serving pool front. A route losing
+  standing (leave, dearer re-price, going stale) wakes only the fronts it
+  serves or is requesting for; a withdrawal takes that set before dropping
+  the record. Fronts sit at paths below the changed prefix, so the lookup
+  walks descendants but skips subtrees whose matching set is empty, keeping
+  cost in woken fronts rather than served paths. (2026-09-30)
+- A same-publisher join still wakes that hop's whole `Publisher` set, even
+  where the new route cannot win. Narrowing it to the paths the route wins
+  is the same set `front-upgrade.md` needs (below), so it lands with that.
+  (2026-09-30)
 - Builds on shared-fronts' keying, so the index hangs off the final front
   identity. `origin-front-parks.md` replaces the `routed_broadcast` retry
   loop, one of the watch consumers here; whichever lands second adapts it.
