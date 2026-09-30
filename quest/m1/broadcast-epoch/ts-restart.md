@@ -38,8 +38,7 @@ Decided (maintainer, 2026-09-30):
 
 Tests: a fixture with a flagged rewind publishes two broadcasts, the second
 starting at the rewound PTS; the same rewind unflagged still errors; one SRT
-connection carries both epochs. Update `doc/bin/cli.md` and the SRT page under
-`doc/bin/relay/`.
+connection carries both epochs. Update `doc/bin/cli.md` and `doc/bin/srt.md`.
 
 Public API: breaking in moq-mux on dev, `ts::Import::decode` reports a restart
 and `restart` is new. Wire: none.
