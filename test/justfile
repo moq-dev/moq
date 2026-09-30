@@ -3,9 +3,6 @@
 # Tests that span more than one language or need a live relay. Unit tests run
 # in the root `just check`.
 #
-# Shebang recipes read their arguments as $1..$n.
-set positional-arguments
-
 # Two cross-language interop tests exist:
 #   - https://github.com/moq-dev/smoke installs each client from its PUBLIC
 #     package registry to catch packaging breakage in a release.
@@ -15,8 +12,6 @@ set positional-arguments
 
 set fallback
 set working-directory := '.'
-# `interop` reads its args as `$1`/`$@`; the `positional-arguments` setting above
-# is what lets a shebang recipe see them.
 
 # List the cross-language suites.
 default:
@@ -35,27 +30,21 @@ harness:
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
 # sanity check). `interop --all` runs the full matrix: rust + python + go +
 # browser publish; everyone subscribes (incl. native node/bun JS, the C libmoq
-# client, and the GStreamer moqsrc plugin). --timeout 30 gives headless Chromium
-# cold-start headroom. Other flags pass through, e.g.
+# client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
 # Both runs first check js/net's varints against moq-net's encoder at every size boundary,
 # and on lite-06/07 messages (the filter also matches `lite_varint_interop`).
+[positional-arguments]
 interop *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
     just rs test -p moq-net --lib varint_interop --run-ignored all
-    if [[ "${1:-}" == --all ]]; then
-        shift
-        ./interop/interop.sh --publishers rust,python,go,js --subscribers rust,python,go,js,js-native-node,js-native-bun,c,gst --timeout 30 "$@"
-    else
-        ./interop/interop.sh "$@"
-    fi
+    ./interop/interop.sh "$@"
 
 # Negative control: no publisher, every subscriber must time out (proves the
 
 # harness can actually report failure).
+[positional-arguments]
 interop-negative *args:
-    ./interop/interop.sh --negative {{ args }}
+    ./interop/interop.sh --negative "$@"
 
 # Browser-to-browser media QA against a deterministic fixture: presented frame progress, audible
 # tone, audio/video skew, and the publication lifecycle (cold start, pause, rejoin, detach,
@@ -63,8 +52,9 @@ interop-negative *args:
 # shifted tone, and a leaked session; each must fail the assertion it names. --timeout 30 gives
 
 # headless Chromium cold-start headroom.
+[positional-arguments]
 media *args:
-    ./interop/interop.sh --media --timeout 30 {{ args }}
+    ./interop/interop.sh --media --timeout 30 "$@"
 
 # Disrupts a real relay over real QUIC three ways: cancel a stalled reader, kill
 # the relay mid-group, and republish an interrupted publisher's name. Ordinary
@@ -73,16 +63,18 @@ media *args:
 # no-publisher negative control. See drill/README.md.
 
 # Transport and lifecycle failure drills.
+[positional-arguments]
 drill *args:
-    just rs test -p moq-relay --test drills {{ args }}
+    just rs test -p moq-relay --test drills "$@"
 
 # Removes one recovery behavior at a time in a disposable copy of the tree and
 # requires the drill covering it to fail, for the reason the mutation names. The
 # checkout is never modified. `--list` shows the mutations.
 
 # Prove the drills fail without the fixes they cover.
+[positional-arguments]
 drill-sensitivity *args:
-    ./drill/sensitivity.sh {{ args }}
+    ./drill/sensitivity.sh "$@"
 
 # Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
 # ts` output with TSDuck plus a custom analyzer (PCR jitter/repetition,
@@ -94,21 +86,24 @@ drill-sensitivity *args:
 # ts/README.md.
 
 # Check the subscriber's MPEG-TS output for IRD compliance.
+[positional-arguments]
 ts *args:
-    ./ts/run.sh {{ args }}
+    ./ts/run.sh "$@"
 
 # Round-trip the EIT fixtures: the sparse schedule must survive and
 # pending-version sections must be dropped at import.
+[positional-arguments]
 ts-eit *args:
-    ./ts/eit-roundtrip.sh {{ args }}
+    ./ts/eit-roundtrip.sh "$@"
 
 # Runs the @moq/wasm bindings in headless Chromium against a real relay, one per
 # protocol flavour. The crate is `#![cfg(target_arch = "wasm32")]`, so nothing in
 # `just check` or `just rs wasm` gets past compiling it. See wasm/README.md.
 
 # Browser coverage for the @moq/wasm bindings.
+[positional-arguments]
 wasm *args:
-    ./wasm/run.sh {{ args }}
+    ./wasm/run.sh "$@"
 
 # Cross-language subscription termination over in-memory transports.
 bare-fin:

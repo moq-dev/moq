@@ -13,7 +13,11 @@ exits (#4354).
 ## Plan
 
 Decided: same-hop publishers MUST publish the same broadcasts and tracks.
-Keep `--hop`, and make every container importer (ts, fmp4, flv, mkv, and the
+Keep `--hop` for now: the users' bugs are on one relay today. Cluster
+routing replaces it with a shared explicit epoch on `dev` (decided
+2026-09-30), and its [`--hop` removal](/quest/m1/cluster-routing/hop-removal.md)
+re-keys this quest's docs and tests. The importer work holds under either
+key. Make every container importer (ts, fmp4, flv, mkv, and the
 SRT, RTMP, and HLS gateways that reuse them) meet the contract when fed one
 encoded stream. Capture is out: two encoders never align.
 
@@ -40,5 +44,5 @@ survives the standby joining and the incumbent stopping.
 
 ## Related
 
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - drops hop lists inside a cluster and must say whether same-hop failover survives; it also owns splicing across first hops and two encoders, which this does not attempt
+- [Remove `--hop`](/quest/m1/cluster-routing/hop-removal.md) - on dev, a redundant pair shares an explicit epoch instead, and this quest's docs and tests are re-keyed to it
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - a redundant pair shares one epoch

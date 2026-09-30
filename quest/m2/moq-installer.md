@@ -17,6 +17,8 @@ service setup, Windows support, or new release targets.
 Deferred to m2 in the 2026-09-30 audit: no named consumer; `cargo install`,
 Nix, Docker, and winget already install `moq`.
 
+- Download the archives `.github/workflows/release-binary.yml` already
+  publishes; the installer needs no workflow change.
 - Default to the latest stable `moq-cli` release, with an explicit version
   option. Resolve that product's tags, not the repository-wide latest
   release: this repository publishes multiple independently versioned crates.
@@ -46,7 +48,5 @@ Nix, Docker, and winget already install `moq`.
 
 ## Related
 
-- [Binary release workflow](/quest/m1/tooling/release-binary.md) - reuse its
-  artifacts without requiring workflow consolidation
 - [`moq relay`](/quest/m2/moq-relay-subcommand.md) - relay functionality joins
   the same executable independently of its installation method

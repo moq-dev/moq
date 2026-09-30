@@ -89,7 +89,6 @@ kt/
     src/
       jvmAndAndroidMain/kotlin/dev/moq/ Wrapper sources (Moq, Server, Aliases, Flows, Durations, Errors)
       jvmAndAndroidTest/                Facade smoke test
-  scripts/                  check.sh, package.sh
 ```
 
 The native/UniFFI layer stays in a single `dev.moq:moq-ffi` artifact because uniffi-linked libraries can't be split across separately packaged artifacts (the Python `moq-rs` wheel is one umbrella for the same reason). That constraint is about the *native* layer; the pure-Kotlin `dev.moq:moq` wrapper sits cleanly on top of it as its own artifact because it ships no native code.

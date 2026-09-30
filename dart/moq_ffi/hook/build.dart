@@ -7,7 +7,7 @@ import 'package:http/http.dart' as http;
 
 /// The moq-ffi release whose native assets this package downloads.
 ///
-/// dart/scripts/package.sh rewrites this when staging a release. The sentinel
+/// sh/dart/package.sh rewrites this when staging a release. The sentinel
 /// is never used to download: a checkout builds from source instead, and a
 /// package built without the injection fails loudly rather than fetching a
 /// library that does not match these bindings.

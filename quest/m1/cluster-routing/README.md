@@ -1,29 +1,63 @@
-# [XL] Cluster routing
+# Cluster routing
 
 ## Goal
 
-A broadcast event reaches each relay at most once, and a relay learns only the
-prefixes its own clients asked for. An announcement says a path exists at an
-origin relay, at a cost; how to reach that origin comes from a shared relay
-topology, so no announcement inside a cluster carries a hop list. A relay's
-memory scales with what it serves, not with what the mesh knows. This
-questline records the design; its wire and implementation quests are planned
-from the simulator's report.
+Cut cluster gossip. A relay learns how to reach each other relay once, from
+a topology shared across the cluster rather than repeated in every route,
+and learns each announcement once rather than once per neighbour. Every relay
+still holds the ledger of live announcements that ANNOUNCE_REQUEST and a cold
+SUBSCRIBE need, and a broadcast under overlapping prefixes routes to one
+origin deterministically. Redundancy an operator configures may deliver more
+than one copy.
 
 Non-goals: warm re-origination (a warm relay would be one more origin with a
 cost, so leave room for it), and a permanently mixed-version cluster.
 
 ## Plan
 
-This is a questline with no children yet. Its children (wire and
-implementation) are planned next in a separate `/quest-plan` session, from
-the decisions and open questions below.
+### Decisions
+
+Settled in the 2026-09-30 `/quest-plan`:
+
+- The goal stays wide. The design below is the current candidate, not a
+  decision; [Propagation](/quest/m1/cluster-routing/propagation.md) settles
+  how announcements move and writes the implementation children that follow.
+- Topology is a cluster message kept apart from routes, built from configured
+  links only (`--cluster-connect`, the connect API, LAN mDNS). Gossip
+  discovery goes first, but only the topology child waits on it.
+- Every relay holds a record for every live announcement, since
+  ANNOUNCE_REQUEST and a SUBSCRIBE with no prior announce both need one.
+  Scoping that knowledge by demand needs registries, which Propagation may
+  defer to m2.
+- `--hop` goes. An epoch-qualified concrete path (`foo/@<uuidv7>`) is the
+  identity of a source: origins that announce the same one are
+  interchangeable, which is how a redundant pair is expressed. It is strictly
+  better than a Hop ID, which is per session, so a connection could not
+  publish several broadcasts with different identities. A path a claim
+  produces keeps Wildcard's per-origin identity, even once announced
+  concretely, since each worker's output is its own.
+- The line lands on `dev`: deleting `--hop` and the publisher's Hop setup
+  parameter breaks a published CLI and wire. Wire changes go in the current
+  wip version (`moq-lite-07-wip` today, dropping `Hop Base` and `Hop Keep`
+  before they publish). If lite-07 is finalized first for the Wildcard
+  rollout, the remaining children move to the next wip version; finalizing
+  never waits on this line.
+- The before/after memory figure is a committed benchmark, measured first.
+- A short idle timeout for cluster sessions is its own m1 quest,
+  [Cluster idle timeout](/quest/m1/cluster-idle-timeout.md), since it helps
+  today's path vector too.
+- Reduced flooding ([RFC 9667](https://www.rfc-editor.org/rfc/rfc9667)) and
+  registries are m2 unless Propagation pulls registries in; Propagation writes
+  whichever it defers.
+- Between clusters, announcements stay path vector with cluster ids as hops,
+  in the last child.
 
 ### Why not path vector or Babel
 
 Today every relay advertises its best route to every peer not already in the
-hop chain. One publish costs about R·(d-1) announces for R relays of mesh
-degree d, every relay learns every broadcast (`.stats` and `.internal`
+hop chain, and pulls every peer's full table with an empty-prefix
+ANNOUNCE_REQUEST. One publish costs about R·(d-1) announces for R relays of
+mesh degree d, every relay learns every broadcast (`.stats` and `.internal`
 included), and a link change rewrites every route crossing it. On moq.pro's
 live fleet (26 PoPs, average degree about 5) each relay receives every event
 about five times. Babel ([RFC 8966](https://www.rfc-editor.org/rfc/rfc8966))
@@ -42,7 +76,12 @@ the loops. Hiding the routes through a peer that withdrew the path
 ([#4399](https://github.com/moq-dev/moq/pull/4399)) reduces that path hunting
 but does not end it; see the findings below.
 
-### Decisions
+### Candidate design
+
+The children own their parts: topology in
+[Topology](/quest/m1/cluster-routing/topology.md), existence and registries
+in [Propagation](/quest/m1/cluster-routing/propagation.md), origin choice in
+[Selection](/quest/m1/cluster-routing/selection.md).
 
 - Existence is split from reachability. An announcement carries the path, its
   origin relay, and the origin's cost, and nothing about the path to it.
@@ -59,76 +98,28 @@ but does not end it; see the findings below.
   dropped. Purging on a liveness report instead drops a restarted origin's
   broadcasts until their re-announce lands, which the simulator showed as live
   broadcasts reported offline.
-- The topology is configured: `--cluster-connect` or the connect API gives the
-  relay graph and link costs. Relays flood per-link liveness among themselves
-  with a per-link seqno. The seqno is scoped to the relay's incarnation, so a
-  restarted relay's links supersede its stale ones instead of looking older.
-  Configured links are the only source: gossip discovery is removed by
-  [Remove gossip](/quest/m0/remove-gossip.md), and LAN mDNS dials peers
-  that then count as configured links.
-  - A relay batches the liveness reports it sends, its own and those it
-    forwards, for a short hold-down (50 ms in the simulator), and recomputes
-    its trees after a matching delay, as OSPF's SPF delay does. Unbatched, one
-    relay restart at 340 relays sent half a million messages; batched, 27k.
-  - On session up, relays exchange a digest (each reporter's incarnation and
-    its seqno per link) and send only what the other lacks. A reporter's
-    reports flood separately, so its newest seqno alone would hide a missing
-    older one. The digest already counts the fresh report of the link that
-    just came up; sending the database first replays the relay's own report
-    from when the link went down, and the peer drops the link it is using.
+- Relays flood per-link liveness among themselves with a per-link seqno scoped
+  to the relay's incarnation, batched for a short hold-down, with a digest
+  exchange on session up.
 - A relay picks the origin with the lowest shortest-path distance plus origin
   cost, ties broken by rendezvous hashing (HRW) of the requested path and the
-  origin id, and forwards along its shortest path. Distance compares cost,
-  then hop count, so every hop strictly shortens it even across `?cost=0`
-  links. That is a shortest path to a virtual node linked to every origin, so
-  it is loop-free whenever relays agree on the topology. The longest covering
+  origin id, and forwards along its shortest path. The longest covering
   prefix still ranks first, per [Wildcard](/quest/m0/wildcard/README.md). The
-  simulator saw no loop while views agreed, and HRW split an equal-cost pool
-  63/49 where today's hash of the announced prefix sends all of it to one
-  sibling.
-- The first relay's choice rides the SUBSCRIBE, and transit relays forward
-  toward that origin by topology alone, never re-selecting. Re-selection
-  against another existence view loops: a relay that lost a specific claim
-  falls back to a broader one through a relay still routing to the specific
-  one ([RFC 8966 section 3.5.4](https://www.rfc-editor.org/rfc/rfc8966#section-3.5.4)).
-  If the origin no longer serves the path, it refuses, and the first relay
-  selects again.
-- SUBSCRIBE and FETCH carry a visited-relay list end to end. It catches loops
-  while liveness views disagree and names the path for stats. Narrowing it to
-  cluster hops is later work. The serving origin's identity rides the reply,
-  per Wildcard's Spread quest. On live's graph no disagreement looped across
-  20 seeds of link, cost, and relay churn; the list is a safety net.
-- Announcements are on demand. A relay forwards only the union of its clients'
-  ANNOUNCE_REQUEST prefixes, never the empty prefix. A wide prefix that many
-  edges' viewers request is that customer's cost. `.stats` becomes ordinary
-  demand.
+  first relay's choice rides the SUBSCRIBE, and transit relays forward toward
+  that origin by topology alone. SUBSCRIBE and FETCH carry a visited-relay
+  list as a loop safety net.
+- Announcements to clients are on demand: a relay forwards only the union of
+  its clients' ANNOUNCE_REQUEST prefixes. `.stats` becomes ordinary demand.
 - Registries are an optional, configured tier: moq-relay in a registry mode,
-  one or more per region.
-  - An ingest relay registers its broadcasts with its nearest registry, and an
-    edge sends its ANNOUNCE_REQUEST there.
-  - Registries form a small full mesh and flood existence among themselves, so
-    an event crosses an ocean once per remote registry, not once per relay.
-    Announce latency is about one round trip to the nearest registry,
-    whatever the path length.
-  - A relay fails over to the next-nearest registry and reconciles its view
-    instead of treating the lost session as ends, so a registry failure never
-    reports a live broadcast offline.
-  - The reconcile is the relay's full live set at its current seqno, which
-    ends whatever it leaves out. The registry's snapshot carries each
-    relevant origin's last reconcile seqno, and the relay names the origins it
-    already holds, so a view kept through a freeze ends what ended meanwhile.
-  - With no registry reachable, a relay freezes: it keeps its view, learns
-    nothing new, and alerts. Falling back to flooding would cascade the
-    failure.
-- Without registries (self-hosting), existence floods along the shortest-path
-  tree, one copy per relay. A relay forwards an event only when it changes its
-  view, so a duplicate copy, from trees built on disagreeing liveness, stops
-  there. A relay that gains a child in its tree (a view change or a new
-  session) pushes that origin's reset and records to it; without the push a
-  relay misses events while views disagree.
-- Between clusters, announcements stay path vector with cluster ids as the
-  hops, like BGP between autonomous systems. A customer's on-prem cluster is
-  one hop, and an announcement naming the receiving cluster is dropped.
+  one or more per region. Registries form a small full mesh and flood
+  existence among themselves, so an event crosses an ocean once per remote
+  registry. A relay fails over to the next-nearest registry and reconciles;
+  with none reachable it freezes its view and alerts rather than falling back
+  to flooding.
+- Without registries, existence floods along the shortest-path tree, one copy
+  per relay. A relay forwards an event only when it changes its view, and a
+  relay that gains a child in its tree pushes that origin's reset and records
+  to it.
 - The cluster switches versions as a whole; older lite and IETF sessions stay
   at its edges.
 
@@ -138,7 +129,7 @@ The report is moq.pro's `just rs sim` (every scenario on live's graph) and
 `just rs sim sweep` (synthetic regional graphs of 34, 340, and 1020 relays).
 It carries messages and bytes by kind, per relay and cross-region,
 convergence, loop, stall, and failover windows, and state per relay and per
-registry. What decides the wire:
+registry.
 
 - Existence costs about one message per relay per event flooded, and one per
   interested relay plus one per remote registry with registries. On live, a
@@ -150,13 +141,16 @@ registry. What decides the wire:
   loss and restore plus a relay loss and restart cost about 290 MiB of
   liveness flooding and 54 MiB of session-up digests against under 1 MiB of
   existence for twenty publishes, while a publish costs exactly one message
-  per relay. A reduced flooding topology
-  ([RFC 9667](https://www.rfc-editor.org/rfc/rfc9667)) is the known fix for
-  the flooding.
+  per relay.
+- Unbatched, one relay restart at 340 relays sent half a million liveness
+  messages; batched for 50 ms, 27k.
 - Failure detection, not routing, sets every outage window: a silent link or
   relay loss is noticed after the 30 s QUIC idle timeout in every candidate,
-  and subscribes through it go nowhere until then. Cluster sessions need a
-  short idle timeout; a keepalive only keeps a quiet session open.
+  and subscribes through it go nowhere until then.
+- The simulator saw no loop while views agreed, and HRW split an equal-cost
+  pool 63/49 where today's hash of the announced prefix sends all of it to one
+  sibling. On live's graph no disagreement looped across 20 seeds of link,
+  cost, and relay churn.
 - One registry per region and two cost about the same; two halves the
   busiest registry's load. A registration sent on a dead registry session
   that nobody has noticed yet waits for the failover.
@@ -172,76 +166,31 @@ registry. What decides the wire:
   the same scenario costs 18.6M messages instead of 189k. Per-origin seqnos,
   above, end both.
 
-### Memory before and after
+### Remaining work
 
-On-demand announcements bound the route table by demand; measure that saving
-before and after the implementation lands. Keep two costs apart: the route
-table and per-announcement state (`RouteEntry` plus `ServeState`) scale with
-announcements and routes, while the served-content cache a `ServeState`
-materializes scales with demand.
+Once every child has landed:
 
-Every published figure is stale. The old baseline was 8.8 KB per announced
-broadcast plus 4.3 KB per extra route on `adad52b`, measured with two
-throwaway `moq-net` examples driving an origin under a counting allocator and
-reading `/proc/self/statm`. Since then
-[moq#2989](https://github.com/moq-dev/moq/pull/2989) cut `kio`'s inline waiter
-slots from 32 to 4 (a `kio::State<()>` went from 896 B to about 200 B, and
-`kio`'s `tests/waiter_allocs.rs` pins that lever as spent), and
-[moq#3225](https://github.com/moq-dev/moq/pull/3225) made a standby route a
-table entry rather than an object graph. Neither example is committed, since
-they need `#[doc(hidden)]` size probes on private types. Rebuild them and
-restate the per-broadcast and per-route cost, the per-peer session
-bookkeeping (`announce_ids`, `held`, `watched`), and the shed threshold on a
-degree-5, 1 GB node. Chat-shaped traffic (one broadcast per channel or per
-chatter) depends on the answer.
-
-### Open questions
-
-- Sharding registries by HRW over a prefix key once one registry cannot hold
-  everything, and what that key is.
-- A mixed-version bridge, if a fleet cannot switch at once.
-- How long a relay keeps an ended path's seqno. A new origin incarnation
-  clears it; within one, it must outlive every delayed copy of the start.
-- How a push to a new tree child ends what the child missed within the same
-  incarnation. Its reset only marks a new incarnation, so the push may need a
-  watermark like the registry reconcile's: it ends only what the child holds
-  at or below it, and a delayed push cannot erase newer records.
-- How long a relay keeps the records of an origin that never comes back. They
-  stop being reported once it is unreachable, but nothing removes them.
-- How an edge routes a SUBSCRIBE for a path none of its clients asked to
-  announce. It holds no route for it, and asking a registry first adds a round
-  trip before the first byte.
-- What a cold ANNOUNCE_REQUEST reports as live. Answering from the local view
-  keeps a relay from waiting on peers but reports an empty set until the
-  registry's replay lands, on every new prefix rather than in a rare race.
-- What remains of announce compression's hop-tail half (`Hop Base` and
-  `Hop Keep` in the lite draft) once only cluster boundaries carry hops.
-- What replaces `--hop` first-hop failover. Today two publishers sharing a Hop
-  ID are one source that relays fail over between at a group boundary
-  (`doc/bin/cli.md` "Redundant publishers",
-  `doc/concept/use-case/contribution.md`). Inside a cluster no announcement
-  carries a hop list, so two encoders on different ingest relays become two
-  origins. Keep the documented behavior or change the docs in the same PR.
-  Say whether same-hop semantics survive, or
-  [Same-hop importers](/quest/m1/hop-aligned-import.md)' work is thrown
-  away. The redundant ingest study folded in here: whether the pair claims one
-  `@<uuidv7>` epoch, what enforces the aligned groups and matching catalog the
-  docs only ask for, and who declares the incumbent dead early (a failover
-  service that retracts it, or active-active delivery to the relay). Weigh it
-  against the moq-transport rule that each publisher of a namespace must be
-  asked (#3697). The answer may be a no-go.
-- Whether equal-cost next hops should spread by a hash of the path. A fixed
-  tie-break sends every path through the same neighbour and its failure takes
-  them all.
+- An end-to-end test: a multi-relay cluster in `rs/moq-relay/tests` where a
+  publish, an end, a relay restart, and a redundant-pair failover each reach
+  a subscriber on a far relay, with time mocked.
+- Rewrite `doc/bin/relay/cluster.md` into the operator's view (topology,
+  link costs, idle timeout, redundant pairs), and add a routing page under
+  `doc/concept`.
 
 ## Required
 
-- [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity this selection builds on
+- [Memory benchmark](/quest/m1/cluster-routing/memory.md) - a committed benchmark states per-announcement, per-route, and per-peer relay memory, before anything changes
+- [Topology](/quest/m1/cluster-routing/topology.md) - relays learn the relay graph once from a cluster message, apart from routes
+- [Propagation](/quest/m1/cluster-routing/propagation.md) - decides how each announcement reaches every relay once, and writes the implementation children
+- [Selection](/quest/m1/cluster-routing/selection.md) - a broadcast under overlapping prefixes routes to one origin deterministically, and same-epoch origins are one source
+- [Remove `--hop`](/quest/m1/cluster-routing/hop-removal.md) - redundant publishers share an explicit `@<epoch>`, and `--hop` and the publisher's Hop ID are gone
+- [Between clusters](/quest/m1/cluster-routing/inter-cluster.md) - announcements crossing a cluster boundary stay path vector with cluster ids as hops
 
 ## Related
 
-- [Same-hop importers](/quest/m1/hop-aligned-import.md) - builds on `--hop` failover, which this line must keep or replace
-- [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - a redundant pair would share one epoch
-
+- [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity Selection builds on
+- [Cluster idle timeout](/quest/m1/cluster-idle-timeout.md) - failure detection sets every outage window, today and after this line
+- [Same-hop importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair; `--hop` removal re-keys it to a shared epoch
+- [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - a redundant pair shares one epoch
 - [Cross-relay delivery under bursts](/quest/m1/cross-relay-bursts.md) - its #4349 report also shows closed broadcasts announced for up to 229 s and flapping between Retracted and Announced across nodes, evidence for per-incarnation seqnos
 - [Routing cost domains](/quest/m3/routing-cost-domains.md) - cost across the cluster boundaries this keeps path vector
