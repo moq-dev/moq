@@ -50,5 +50,5 @@ The viewer subscribes with a 1 s latency budget, as the interop subscribers do.
 After the swap, B has to subscribe upstream afresh once A drops its pull, and the
 budget is what reaches back to a group in flight across the swap. With no budget,
 a group boundary that lands inside the swap loses that group.
-[JS group-boundary handover](/quest/m1/drain/js-group-handover.md) removes the
+[JS group-boundary handover](/quest/m1/js-group-handover.md) removes the
 budget by carrying the subscription across the swap.

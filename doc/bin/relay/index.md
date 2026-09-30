@@ -90,7 +90,9 @@ example to withdraw the node from DNS and wait out the TTL before draining,
 calls `with_signals(false)` and fires the trigger itself. Build routes from `web().routes()` (or
 `internal().routes()`): `with_web` replaces the router, so `Router::new()`
 drops the built-in routes. Extra listeners (RTMP, SRT, ...) sit beside `run`
-in the application's `select!`. `runtime.workers` and `runtime.io_uring` stay
+in the application's `select!`. The drain reaches only MoQ sessions: an
+extra listener has no GOAWAY, so the application stops it on its own deadline
+and leaves the encoder to reconnect. `runtime.workers` and `runtime.io_uring` stay
 inside the owner; do not split the worker group yourself. An application that
 decides admissions itself leaves `[auth]` empty and answers
 `relay.admissions()`; see [Authentication](/bin/relay/auth#in-process). See

@@ -39,8 +39,8 @@ Firefox 155 shipped five WebTransport features; decided 2026-09-26:
 - **`draining`** is not used. Drain stays at the MoQ layer: GOAWAY carries a
   redirect URI (and a timeout on moq-transport draft-17+; elsewhere the
   deadline is sender-local) and works over qmux and WebSocket, while
-  `WT_DRAIN_SESSION` is advisory and carries neither (see
-  [drain](/quest/m1/drain/README.md)).
+  `WT_DRAIN_SESSION` is advisory and carries neither (decided
+  2026-09-26 in the drain line, moq-dev/moq#4132).
 - **`exportKeyingMaterial()`** has no consumer: the exporter is per hop, so it
   cannot key e2ee, which is end to end. Binding auth tokens to the TLS session
   is the plausible future use; moq-noq already exposes the exporter, but
