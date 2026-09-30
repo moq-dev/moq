@@ -439,7 +439,10 @@ export class Parameters {
 
 	/** INCLUDE_PROPERTIES: whether the peer wants Track Properties on the response. */
 	get includeProperties(): boolean | undefined {
-		const v = this.vars.get(MSG_PARAM_INCLUDE_PROPERTIES);
+		// Draft-16 and earlier frame every parameter as a Key-Value-Pair, so an odd id lands
+		// in `bytes`. It still has to read as present, so the draft-20 gate can refuse it.
+		const legacy = this.bytes.get(MSG_PARAM_INCLUDE_PROPERTIES);
+		const v = legacy ? (legacy.length === 1 ? BigInt(legacy[0]) : 2n) : this.vars.get(MSG_PARAM_INCLUDE_PROPERTIES);
 		if (v === undefined) return undefined;
 		// The draft allows exactly 0 or 1; anything else is a protocol violation.
 		if (v > 1n) throw new Error(`invalid INCLUDE_PROPERTIES value: ${v}`);

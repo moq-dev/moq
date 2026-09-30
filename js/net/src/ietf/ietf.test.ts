@@ -1910,3 +1910,11 @@ test("TRACK_PROPERTY_FILTER is rejected on SUBSCRIBE and FETCH", async () => {
 	await expect(decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_20)).rejects.toThrow();
 	await expect(decodeVersioned(body, Fetch.decode, Version.DRAFT_20)).rejects.toThrow();
 });
+
+// INCLUDE_PROPERTIES postdates draft-16, where it arrives as a Key-Value-Pair; it must
+// still read as present so the draft gate refuses it.
+test("Subscribe v16: rejects INCLUDE_PROPERTIES", async () => {
+	// One parameter: INCLUDE_PROPERTIES (0x35), length 1, value 0.
+	const body = framed([...TRACK_HEAD, 0x01, 0x35, 0x01, 0x00]);
+	await expect(decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_16)).rejects.toThrow();
+});
