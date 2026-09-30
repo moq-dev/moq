@@ -149,6 +149,31 @@ impl Sps {
 ///
 /// `None` when the SPS carries no VUI or no bitstream restriction, or fails to parse.
 pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
+	let vui = sps_vui(nal)?;
+	Some(crate::codec::video::Reorder {
+		depth: vui.depth?,
+		period: vui.period,
+	})
+}
+
+/// The frame rate an SPS NAL unit fixes with `fixed_frame_rate_flag`.
+///
+/// Without the flag the VUI tick only bounds the rate from above, so it is left to measurement.
+pub(crate) fn sps_framerate(nal: &[u8]) -> Option<f64> {
+	let (units, scale) = sps_vui(nal)?.period?;
+	Some(scale as f64 / units as f64)
+}
+
+/// What an SPS VUI declares about picture timing.
+struct Vui {
+	/// One frame's duration as `(units, scale)` when `fixed_frame_rate_flag` is set.
+	period: Option<(u64, u64)>,
+	/// `max_num_reorder_frames`, when the bitstream restriction is present.
+	depth: Option<u32>,
+}
+
+/// `None` when the SPS carries no VUI or fails to parse.
+fn sps_vui(nal: &[u8]) -> Option<Vui> {
 	if nal.len() < 4 {
 		return None;
 	}
@@ -157,13 +182,13 @@ pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
 	if !sps.vui_parameters_present_flag {
 		return None;
 	}
-	vui_reorder(&rbsp).ok().flatten()
+	vui(&rbsp).ok().flatten()
 }
 
 /// Walk an SPS RBSP to its VUI (ITU-T H.264 7.3.2.1.1, E.1.1). `h264_parser` stops at
 /// `vui_parameters_present_flag` without exposing its position, so this re-reads the fields
 /// before it.
-fn vui_reorder(rbsp: &[u8]) -> h264_parser::Result<Option<crate::codec::video::Reorder>> {
+fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 	use h264_parser::bitreader::BitReader;
 	use h264_parser::eg::{read_se, read_ue};
 
@@ -271,14 +296,17 @@ fn vui_reorder(rbsp: &[u8]) -> h264_parser::Result<Option<crate::codec::video::R
 	}
 	r.skip_bits(1)?; // pic_struct_present_flag
 	if !r.read_flag()? {
-		return Ok(None);
+		return Ok(Some(Vui { period, depth: None }));
 	}
 	r.skip_bits(1)?; // motion_vectors_over_pic_boundaries_flag
 	for _ in 0..4 {
 		read_ue(&mut r)?; // max_bytes_per_pic_denom .. log2_max_mv_length_vertical
 	}
 	let depth = read_ue(&mut r)?; // max_num_reorder_frames
-	Ok(Some(crate::codec::video::Reorder { depth, period }))
+	Ok(Some(Vui {
+		period,
+		depth: Some(depth),
+	}))
 }
 
 /// Skip `hrd_parameters()` (ITU-T H.264 E.1.2).
@@ -680,6 +708,14 @@ mod tests {
 		assert_eq!(sps_reorder(&[0x67, 0x42, 0xc0, 0x1f, 0xde]), None);
 		// A VUI cut short is no declaration rather than a wrong one.
 		assert_eq!(sps_reorder(&fixtures::SPS_IPB[..fixtures::SPS_IPB.len() - 3]), None);
+	}
+
+	#[test]
+	fn sps_framerate_needs_a_fixed_rate() {
+		assert_eq!(sps_framerate(fixtures::SPS_IPB), Some(25.0));
+		// The same 50 Hz tick without `fixed_frame_rate_flag` is only a ceiling.
+		assert_eq!(sps_framerate(fixtures::SPS_IPB_VARIABLE), None);
+		assert_eq!(sps_framerate(&[0x67, 0x42, 0xc0, 0x1f, 0xde]), None);
 	}
 
 	fn annexb_frame(nals: &[&[u8]]) -> Bytes {

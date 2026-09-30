@@ -4,8 +4,29 @@ use std::time::{Duration, Instant};
 
 use moq_net::Timestamp;
 
-/// The window over which bitrate is averaged before it is reported.
-const BITRATE_WINDOW: Duration = Duration::from_secs(1);
+/// The window over which bitrate and framerate are averaged before they are reported.
+const RATE_WINDOW: Duration = Duration::from_secs(1);
+
+/// The frame rates a measurement snaps to. Anything else (a variable-rate source's average)
+/// publishes nothing, since consumers size clocks from the value (an fMP4 timescale of
+/// `framerate * 1000`).
+const FRAMERATES: [f64; 11] = [
+	24_000.0 / 1001.0,
+	24.0,
+	25.0,
+	30_000.0 / 1001.0,
+	30.0,
+	48.0,
+	50.0,
+	60_000.0 / 1001.0,
+	60.0,
+	100.0,
+	120.0,
+];
+
+/// How far a measurement may sit from the rate it snaps to: half the 0.1% gap between an NTSC
+/// rate and its integer neighbour, so no measurement is ambiguous between them.
+const FRAMERATE_TOLERANCE: f64 = 0.0005;
 const JITTER_WINDOW: Duration = Duration::from_secs(10);
 
 /// The catalog fields an [`Estimator`] can measure from the frames fed to it.
@@ -22,6 +43,8 @@ pub struct Estimate {
 	pub bitrate: Option<u64>,
 	/// The most this track's minimum flush lateness has trailed the broadcast's earliest track.
 	pub delay: Option<Duration>,
+	/// The maximum frame rate in frames per second, when it is a standard one.
+	pub framerate: Option<f64>,
 }
 
 impl Estimate {
@@ -42,9 +65,15 @@ impl Estimate {
 		self.delay = delay.into();
 		self
 	}
+
+	/// Set the frame rate in frames per second (or clear it with `None`).
+	pub fn with_framerate(mut self, framerate: impl Into<Option<f64>>) -> Self {
+		self.framerate = framerate.into();
+		self
+	}
 }
 
-/// Measures the catalog jitter and bitrate of one track from the frames written to it.
+/// Measures the catalog jitter, bitrate, and framerate of one track from the frames written to it.
 ///
 /// A [`container::Producer`](crate::container::Producer) created through the catalog owns one,
 /// feeds it as you write, and publishes the result automatically. Local encoders also call
@@ -85,6 +114,7 @@ impl Estimate {
 pub struct Estimator {
 	jitter: Jitter,
 	bitrate: Bitrate,
+	framerate: Framerate,
 	/// This track's recent minimum flush lateness.
 	baseline: Window,
 	/// The recent minimum across every track sharing it. A standalone estimator's is its own, so
@@ -113,6 +143,7 @@ impl Estimator {
 	pub fn write(&mut self, timestamp: Timestamp, bytes: usize) {
 		let timestamp = nanos(timestamp);
 		self.bitrate.write(timestamp, bytes);
+		self.framerate.write(timestamp);
 	}
 
 	/// Measure when an encoder handed a frame to the transport. Only locally encoded frames should
@@ -134,6 +165,7 @@ impl Estimator {
 	/// frame) leaves the span open to fold into the next one, so nothing is lost by cutting often.
 	pub fn cut(&mut self, end: Option<Timestamp>) {
 		self.bitrate.cut(end.map(nanos));
+		self.framerate.cut();
 	}
 
 	/// Discard the open bitrate span and the flush baselines, so nothing is measured across a break
@@ -143,6 +175,7 @@ impl Estimator {
 	/// pre-pause minimum would otherwise read as a delay until it left the window.
 	pub fn discontinuity(&mut self) {
 		self.bitrate.discontinuity();
+		self.framerate.discontinuity();
 		self.baseline = Window::default();
 		self.broadcast.discontinuity();
 	}
@@ -168,6 +201,7 @@ impl Estimator {
 			jitter: self.jitter.current(),
 			bitrate: self.bitrate.current(),
 			delay: (!self.delay.is_zero()).then_some(self.delay),
+			framerate: self.framerate.max,
 		}
 	}
 }
@@ -195,7 +229,7 @@ fn elapsed(start: u128, end: u128) -> Option<Duration> {
 /// Tracks the maximum bitrate in bits per second, averaged over whole spans.
 ///
 /// A span's bytes are only counted once it is closed, and the average is taken over at least
-/// [`BITRATE_WINDOW`] of media so a lone keyframe doesn't spike the reported value.
+/// [`RATE_WINDOW`] of media so a lone keyframe doesn't spike the reported value.
 #[derive(Default)]
 struct Bitrate {
 	span: Option<Span>,
@@ -237,7 +271,7 @@ impl Bitrate {
 		self.window_bytes = self.window_bytes.saturating_add(span.bytes);
 		self.window_duration += duration;
 
-		if self.window_duration < BITRATE_WINDOW {
+		if self.window_duration < RATE_WINDOW {
 			return;
 		}
 
@@ -256,6 +290,69 @@ impl Bitrate {
 
 	fn current(&self) -> Option<u64> {
 		self.max
+	}
+}
+
+/// Tracks the maximum framerate: frames written per second of advance in the highest timestamp,
+/// snapped to one of [`FRAMERATES`].
+///
+/// Not per span like [`Bitrate`]: a reordered group spans more than its own frames (an open GOP's
+/// leading pictures present before its keyframe), while the highest timestamp advances one period
+/// per frame whatever the order. Sampled at cuts, so every window starts and ends at the same point
+/// of the group structure.
+#[derive(Default)]
+struct Framerate {
+	/// The highest timestamp written, in scale-free nanoseconds.
+	high: Option<u128>,
+	/// The highest timestamp when the window opened.
+	open: Option<u128>,
+	/// Frames written since the window opened.
+	frames: u64,
+	max: Option<f64>,
+}
+
+impl Framerate {
+	fn write(&mut self, ts: u128) {
+		self.high = Some(self.high.map_or(ts, |high| high.max(ts)));
+		self.frames += 1;
+	}
+
+	fn cut(&mut self) {
+		let Some(high) = self.high else {
+			return;
+		};
+		// The first window opens at a cut too, not at the first frame, which may be a join that
+		// starts partway into the group structure.
+		let Some(open) = self.open else {
+			self.open = Some(high);
+			self.frames = 0;
+			return;
+		};
+		let Some(duration) = elapsed(open, high).filter(|duration| *duration >= RATE_WINDOW) else {
+			return;
+		};
+		let measured = self.frames as f64 / duration.as_secs_f64();
+		let snapped = FRAMERATES
+			.into_iter()
+			.map(|rate| (rate, (measured - rate).abs() / rate))
+			.filter(|(_, error)| *error <= FRAMERATE_TOLERANCE)
+			.min_by(|a, b| a.1.total_cmp(&b.1))
+			.map(|(rate, _)| rate);
+		if let Some(framerate) = snapped
+			&& self.max.is_none_or(|max| framerate > max)
+		{
+			self.max = Some(framerate);
+		}
+		self.open = Some(high);
+		self.frames = 0;
+	}
+
+	/// Time nothing across a break in the timeline.
+	fn discontinuity(&mut self) {
+		*self = Self {
+			max: self.max,
+			..Self::default()
+		};
 	}
 }
 
@@ -562,6 +659,107 @@ mod tests {
 		assert_eq!(estimate.jitter, None);
 	}
 
+	/// Write groups `groups` of `order.len()` frames at 25 fps, in decode order with `order` giving
+	/// each frame's display offset from its keyframe, cutting at every keyframe like
+	/// `container::Producer::write`. Group 0 starts a second in, so leading pictures stay positive.
+	fn feed_groups(estimator: &mut Estimator, groups: std::ops::Range<u64>, order: &[i64]) {
+		for group in groups {
+			let keyframe = 25 + (group * order.len() as u64) as i64;
+			for (i, &offset) in order.iter().enumerate() {
+				let ts = micros(((keyframe + offset) as u64) * 40_000);
+				if i == 0 {
+					estimator.cut(Some(ts));
+				}
+				estimator.write(ts, 1_000);
+			}
+		}
+	}
+
+	#[test]
+	fn framerate_waits_for_the_window() {
+		let mut estimator = Estimator::new();
+		// Half a second of 25 fps.
+		let order: Vec<i64> = (0..12).collect();
+		feed_groups(&mut estimator, 0..1, &order);
+		estimator.cut(None);
+		assert_eq!(estimator.estimate().framerate, None);
+
+		feed_groups(&mut estimator, 1..5, &order);
+		assert_eq!(estimator.estimate().framerate, Some(25.0));
+	}
+
+	/// B-frames in decode order: every group presents a frame below the one written before it.
+	#[test]
+	fn framerate_counts_reordered_groups() {
+		let mut estimator = Estimator::new();
+		// IPBB in a 24-frame closed GOP.
+		let mut order = vec![0];
+		for quad in 0..(23 / 3) {
+			let base = quad * 3;
+			order.extend([base + 3, base + 1, base + 2]);
+		}
+		order.extend(22..24);
+		assert_eq!(order.len(), 24);
+		feed_groups(&mut estimator, 0..5, &order);
+		assert_eq!(estimator.estimate().framerate, Some(25.0));
+	}
+
+	/// An open GOP's leading pictures present before their keyframe, so a group spans more than
+	/// its own frames: timing groups by their span would read 24 frames over 27 periods.
+	#[test]
+	fn framerate_counts_leading_pictures() {
+		let mut estimator = Estimator::new();
+		// Keyframe, then three leading B-frames presented before it, then the rest.
+		let mut order = vec![0, -3, -2, -1];
+		order.extend(1..21);
+		assert_eq!(order.len(), 24);
+		feed_groups(&mut estimator, 0..5, &order);
+		assert_eq!(estimator.estimate().framerate, Some(25.0));
+	}
+
+	/// 30000/1001 fps on a 90 kHz clock: no period is a whole number of nanoseconds, and the
+	/// measurement is 0.1% from 30 fps.
+	#[test]
+	fn framerate_snaps_to_ntsc() {
+		let mut estimator = Estimator::new();
+		for i in 0..300u64 {
+			let ts = Timestamp::from_scale(i * 3003, 90_000).unwrap();
+			estimator.cut(Some(ts));
+			estimator.write(ts, 1_000);
+			estimator.cut(None);
+		}
+		assert_eq!(estimator.estimate().framerate, Some(30_000.0 / 1001.0));
+	}
+
+	/// A variable-rate source whose windows average no standard rate publishes nothing.
+	#[test]
+	fn framerate_skips_nonstandard_rates() {
+		let mut estimator = Estimator::new();
+		// 27 fps: 37 ms apart, give or take.
+		for i in 0..100u64 {
+			let ts = micros(i * 37_037);
+			estimator.cut(Some(ts));
+			estimator.write(ts, 1_000);
+		}
+		assert_eq!(estimator.estimate().framerate, None);
+	}
+
+	/// The highest rate over any window is reported, and a slower one doesn't lower it.
+	#[test]
+	fn framerate_reports_the_maximum() {
+		let mut estimator = Estimator::new();
+		let order: Vec<i64> = (0..25).collect();
+		feed_groups(&mut estimator, 0..3, &order);
+		assert_eq!(estimator.estimate().framerate, Some(25.0));
+
+		for i in 0..40u64 {
+			let ts = micros(4_000_000 + i * 41_667);
+			estimator.cut(Some(ts));
+			estimator.write(ts, 1_000);
+		}
+		assert_eq!(estimator.estimate().framerate, Some(25.0), "24 fps doesn't lower it");
+	}
+
 	/// A break in the timeline discards the open span rather than timing it across the gap, and
 	/// resets the frame spacing so the gap is never mistaken for a frame duration.
 	#[test]
@@ -581,5 +779,23 @@ mod tests {
 			"only the post-break span counts"
 		);
 		assert_eq!(estimator.estimate().jitter, None, "the gap is not a frame duration");
+	}
+
+	/// Frames on either side of a break are never timed across it.
+	#[test]
+	fn discontinuity_resets_the_framerate_window() {
+		let mut estimator = Estimator::new();
+		for i in 0..10u64 {
+			estimator.write(micros(i * 40_000), 1_000);
+		}
+		estimator.discontinuity();
+
+		// Resumed 40 minutes later at 25 fps. Timed across the gap it would read ~0 fps.
+		for i in 0..60u64 {
+			let ts = micros(2_400_000_000 + i * 40_000);
+			estimator.cut(Some(ts));
+			estimator.write(ts, 1_000);
+		}
+		assert_eq!(estimator.estimate().framerate, Some(25.0));
 	}
 }
